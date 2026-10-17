@@ -687,6 +687,7 @@ download "$REPO_RAW_BASE/api/scan/report_rebuild.py" "$INSTALL_DIR/api/scan/repo
 download "$REPO_RAW_BASE/api/scan/surface_manifest.py" "$INSTALL_DIR/api/scan/surface_manifest.py"
 download "$REPO_RAW_BASE/api/scan/known_endpoints.py" "$INSTALL_DIR/api/scan/known_endpoints.py"
 download "$REPO_RAW_BASE/api/scan/work_manifests.py" "$INSTALL_DIR/api/scan/work_manifests.py"
+download "$REPO_RAW_BASE/api/scan/verify_templates.py" "$INSTALL_DIR/api/scan/verify_templates.py"
 download "$REPO_RAW_BASE/api/scan/contracts.py" "$INSTALL_DIR/api/scan/contracts.py"
 download "$REPO_RAW_BASE/api/runtime/__init__.py" "$INSTALL_DIR/api/runtime/__init__.py"
 download "$REPO_RAW_BASE/api/runtime/budget_reservations.py" "$INSTALL_DIR/api/runtime/budget_reservations.py"

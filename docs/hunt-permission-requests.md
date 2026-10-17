@@ -160,8 +160,12 @@ approval time, or proved it when setting pre-authorization.
 | `budget.raise` | `budget_exhausted:<dim>`, `budget_insufficient_for_action:<dim>` (`interaction_router.py:1923, 2209, 2245`) | One amendment: `expected_revision` read under lock, key `permission:<request id>`, `resume=true` | `budget.raise:<N>x` or `budget.raise:<dim>=<max>` | Never |
 | `ssh.exec` | the selected SSH profile lacks `ssh.exec` (`ssh_commands.py:49-56`) | This exact argv (by digest) on this host, for this Hunt | Not pre-authorizable in v1 | Add `ssh.exec` to the profile (existing receipt rule) |
 | `ssh.host_trust` | unpinned host key with first-contact trust off | Pins the presented fingerprint for this Hunt | `ssh.host_trust:first-contact` | Save to Hunt authority `ssh_host_keys` |
+| `secret.try` (2.11) | `http.request` binds `secret://<id>` of another target that is not granted to this one (`secret_other_target`), or every attempt allowed was used (`secret_try_attempts_exhausted`) | This secret on exactly this login (origin, path, method), up to 3 attempts (the person chooses 1-10), at most 3 per 15 minutes per host across Hunts; every attempt is recorded with the login's answer | Never pre-authorizable | Never (grant the secret to the target instead: `shakerscan secrets grant`) |
 
 **Hard limits are never requests and no bound covers them:**
+- a login that never receives a discovered secret (`secret_try_destination_denied`: the shared
+  `honey.shakerscan.com/hub` login and any `SHAKERSCAN_SECRET_TRY_DENY` entry), and the per-host
+  try rate (`secret_try_rate_limited`);
 - loopback, private, link-local, metadata and reserved destinations, including an IPv6 spelling
   that carries one (NAT64 `64:ff9b::/96` and `64:ff9b:1::/48`, IPv4-mapped, 6to4, Teredo);
 - the Enterprise "private network targets: refuse" setting;

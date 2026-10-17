@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState } from 'react'
 import Link from '@/components/WorkspaceLink'
-import { getServiceIntelligence, type ServicePage, type ServiceRecord, type ServiceTarget } from '@/lib/serviceIntelligence'
+import { getServiceIntelligence, submitVerifyScan, type ListenerGroup, type ServiceCandidate, type ServicePage, type ServiceRecord, type ServiceTarget } from '@/lib/serviceIntelligence'
 import { useUrlFilters } from '@/lib/useUrlFilters'
 import { Button, Card, EmptyState, ErrorState } from '@/components/ui'
 
@@ -33,19 +33,88 @@ function ago(value: string | null) {
   if (hours < 48) return `${hours}h ago`
   return `${Math.round(hours / 24)}d ago`
 }
-// Rows an operator should look at first: linked findings, then candidate weaknesses, then
-// a stable listener order. Sorting by consequence is what makes the table worth scanning.
-function byConsequence(a: ServiceRecord, b: ServiceRecord) {
-  return b.findings.length - a.findings.length
-    || b.cve_candidates.length - a.cve_candidates.length
-    || a.transport.localeCompare(b.transport)
-    || a.port - b.port
-}
 const STATUS: Record<string, string> = {
   review_in_hunt: 'Review in Hunt', manual_review: 'Manual review', unsupported: 'Not implemented',
   refresh_evidence_first: 'Refresh evidence first', no_match_in_snapshot: 'No match in curated snapshot',
   snapshot_unavailable: 'Intelligence unavailable', identity_unknown: 'Product identity needed',
   candidates_found: 'Candidates require validation',
+}
+
+const VERIFY_STATUS: Record<string, string> = {
+  check_matched: 'Check matched', check_not_matched: 'Not affected per this check', pending: 'Verify Scan running',
+  inconclusive: 'Verify Scan inconclusive', available: 'Check available', unavailable: 'Check exists; not verifiable here',
+  no_check: 'No check in this release',
+}
+const UNAVAILABLE: Record<string, string> = {
+  listener_is_not_the_target_origin: 'A Scan runs against the target origin; this listener is on another port or host.',
+  device_services_verify_in_the_device_workflow: 'Device services are verified from the device workflow.',
+  refresh_evidence_first: 'Refresh the service evidence first.',
+  exploit_class_needs_exploit_tier: 'This check sends attack payloads (rce, lfi, sqli, …); it runs only in a Scan with state-changing authority, started from the Scan form or API.',
+}
+const INCONCLUSIVE: Record<string, string> = {
+  needs_oob_interaction: 'the check needs an out-of-band callback, which Scans do not enable',
+  needs_redirects: 'the check follows redirects, which Scans disable, so a non-match is not reliable',
+  exploit_class_needs_exploit_tier: 'the check is exploit-class and the Scan had no state-changing authority',
+  needs_state_changing_http: 'the check sends non-GET requests and the Scan had no state-changing authority',
+  intrusive: 'the check is intrusive and never runs in a Scan',
+  not_in_template_bundle: 'the check is not in this release’s template bundle',
+  not_every_check_requested: 'the Scan did not request every check for this CVE',
+}
+const SEVERITY_STYLE: Record<string, string> = {
+  critical: 'bg-red-500/15 text-red-200', high: 'bg-orange-500/15 text-orange-200',
+  medium: 'bg-amber-500/10 text-amber-200', low: 'bg-gray-800 text-gray-300',
+}
+
+// Verify runs exactly the check the intelligence names for this CVE, as an ordinary authorized Scan
+// against the target's origin. A version match stays a candidate until a check settles it.
+function CandidateVerification({ candidate }: { candidate: ServiceCandidate }) {
+  const verification = candidate.verification
+  const [confirming, setConfirming] = useState(false)
+  const [busy, setBusy] = useState(false)
+  const [started, setStarted] = useState<string | null>(null)
+  const [failure, setFailure] = useState<string | null>(null)
+  if (!verification) return null
+  const label = VERIFY_STATUS[verification.status] || readable(verification.status)
+  const start = async () => {
+    if (!verification.request) return
+    setBusy(true)
+    setFailure(null)
+    try {
+      const result = await submitVerifyScan(verification.request)
+      setStarted(result.scan_id || result.id || 'queued')
+    } catch (cause) {
+      setFailure(cause instanceof Error ? cause.message : 'Failed to start the verify Scan')
+    } finally {
+      setBusy(false)
+      setConfirming(false)
+    }
+  }
+  return <div className="mt-2 rounded-sm border border-gray-800 bg-gray-900/40 p-2 text-xs" data-testid="candidate-verification">
+    <p className={verification.status === 'check_matched' ? 'font-medium text-red-200' : 'text-gray-300'}>{label}{verification.template_ids.length > 0 && <span className="text-gray-500"> · {verification.template_ids.join(', ')}</span>}</p>
+    {verification.status === 'check_matched' && verification.finding_id && <p className="mt-1 text-gray-400">The check matched: <Link href={`/findings/${encodeURIComponent(verification.finding_id)}`} className="text-blue-300 hover:underline">open the finding</Link> (proof: {verification.proof_state || 'not supplied'}).</p>}
+    {verification.status === 'check_not_matched' && <p className="mt-1 text-gray-400">The check ran and did not match. This is evidence about this check only, not a clean assessment of the service.</p>}
+    {verification.status === 'inconclusive' && <p className="mt-1 text-amber-200">The checks did not settle this candidate ({(verification.reason || 'reason not recorded').split(', ').map((item) => INCONCLUSIVE[item] || readable(item)).join('; ')}); the candidate is unchanged.</p>}
+    {verification.scan_id && <Link href={`/scans/${encodeURIComponent(verification.scan_id)}`} className="mt-1 inline-block text-blue-300 hover:underline">Open the verify Scan</Link>}
+    {verification.status === 'unavailable' && <p className="mt-1 text-gray-500">{UNAVAILABLE[verification.unavailable_reason || ''] || readable(verification.unavailable_reason || 'unavailable')}</p>}
+    {verification.request && !['pending', 'check_matched'].includes(verification.status) && !started && (confirming
+      ? <div className="mt-2 space-y-2"><p className="text-amber-200">This starts an active Scan that runs only {verification.template_ids.join(', ')} against {String(verification.request.target)}, under the target&apos;s standing authorization and budgets.</p><div className="flex gap-2"><Button disabled={busy} onClick={start}>{busy ? 'Starting…' : 'Start verify Scan'}</Button><Button onClick={() => setConfirming(false)}>Cancel</Button></div></div>
+      : <Button className="mt-2" onClick={() => setConfirming(true)}>{verification.status === 'available' ? 'Verify with this check' : 'Verify again'}</Button>)}
+    {started && <p role="status" className="mt-2 text-teal-200">Verify Scan queued{started !== 'queued' && <> · <Link href={`/scans/${encodeURIComponent(started)}`} className="text-blue-300 hover:underline">open it</Link></>}. Refresh this page when it completes.</p>}
+    {failure && <p role="alert" className="mt-2 text-red-300">{failure}</p>}
+  </div>
+}
+
+// Older engines return no groups: one row per observation keeps the page usable.
+function groupsFor(target: ServiceTarget): ListenerGroup[] {
+  if (target.listener_groups) return target.listener_groups
+  return target.services.map((service) => ({
+    key: service.id, transport: service.transport, port: service.port, service: service.service,
+    product: service.product, version: service.version, service_ids: [service.id], primary_service_id: service.id,
+    max_severity: null, known_exploited: service.cve_candidates.filter((candidate) => candidate.known_exploited).length,
+    candidate_count: service.cve_candidates.length, finding_count: service.findings.length, checks_available: 0,
+    check_matched: 0, identity_stale: service.identity_stale, last_seen_at: service.last_seen_at,
+    quiet: ['inconclusive', 'not_observed'].includes(service.presence) && service.findings.length === 0 && service.cve_candidates.length === 0,
+  }))
 }
 
 function ServiceDetails({ service, target, onClose }: { service: ServiceRecord; target: ServiceTarget; onClose: () => void }) {
@@ -100,6 +169,7 @@ function ServiceDetails({ service, target, onClose }: { service: ServiceRecord; 
             <p className="mt-2 text-gray-400">Prerequisites: {candidate.prerequisites.join('; ')}.</p>
             {candidate.identity_stale && <p className="text-amber-300">Product evidence is stale or undated.</p>}
             {(candidate.checks || []).length > 0 && <p className="mt-2 text-xs text-gray-400">Checks for this CVE in this release: {(candidate.checks || []).map((check) => check.id).join(', ')} (they run only as part of an authorized Scan).</p>}
+            <CandidateVerification candidate={candidate} />
             {candidate.exploit_references.length === 0 ? <p className="mt-2 text-xs text-gray-500">No exploit reference in this snapshot. This is not evidence that none exists.</p> : <div className="mt-2 space-y-1">{candidate.exploit_references.map((ref) => <p key={ref.url}><a href={ref.url} target="_blank" rel="noopener noreferrer" className="text-blue-300 hover:underline">{ref.source} · {readable(ref.kind)}</a><span className="ml-2 text-xs text-gray-500">Reference only; never executed here</span></p>)}</div>}
           </div>)}
           <h4 className="pt-2 font-medium text-white">Exactly linked active findings</h4>
@@ -179,34 +249,34 @@ export function ServicesView({ rootDomain, revision, onBusyChange }: { rootDomai
       {error && <ErrorState message={error} onRetry={() => setRetry((value) => value + 1)} />}
       {data && <>
         <p className="text-sm text-gray-400">{data.total_targets} matching targets · {data.targets.reduce((sum, target) => sum + target.services.length, 0)} service observations on this page. Counts are separate from web vulnerability scores.</p>
-        <details className="rounded-sm border border-gray-800 p-3 text-xs text-gray-400"><summary className="cursor-pointer">Intelligence: {data.intelligence.status} · {data.intelligence.record_count} curated records · snapshot {when(data.intelligence.generated_at)}</summary><div className="mt-2 space-y-1">{[...data.intelligence.limitations, ...data.limitations].map((item) => <p key={item}>{item}</p>)}</div></details>
+        <details className="rounded-sm border border-gray-800 p-3 text-xs text-gray-400"><summary className="cursor-pointer">Intelligence: {data.intelligence.status} · {data.intelligence.record_count} records · {data.intelligence.source === 'external_bundle' ? `signed bundle v${data.intelligence.bundle?.bundle_version ?? '?'}` : data.intelligence.source === 'operator_pinned' ? 'operator-pinned snapshot' : 'built-in snapshot'} · generated {when(data.intelligence.generated_at)}</summary><div className="mt-2 space-y-1">{data.intelligence.bundle && !['absent', 'verified'].includes(data.intelligence.bundle.status) && <p className="text-amber-200">An installed intelligence bundle is not in use: {readable(data.intelligence.bundle.status)}.</p>}{[...data.intelligence.limitations, ...data.limitations].map((item) => <p key={item}>{item}</p>)}</div></details>
         {data.intelligence.status !== 'available' && <p role="status" className="text-sm text-amber-200">Intelligence is unavailable or failed integrity checks. Empty candidate lists must not be read as a clean result.</p>}
         {data.targets.length === 0 && <EmptyState message="No targets on this page" hint="Clear a filter or return to the first page. Missing service evidence is not a clean scan." />}
         {data.targets.map((target) => <Card key={`${target.kind}:${target.id}`} className="overflow-hidden">
           <div className="border-b border-gray-800 p-4"><h3 className="wrap-break-word font-medium text-white">{target.root_domain ? `${target.root_domain} → ` : ''}{target.label}</h3><p className="mt-1 break-all text-xs text-gray-500">{target.kind} · {target.locator} · {target.source_count} evidence sources</p>{target.warnings.map((warning) => <p key={warning} className="mt-2 text-xs text-amber-200">{warning}</p>)}{target.unlinked_findings_count > 0 && <p role="status" className="mt-2 rounded-sm border border-amber-500/30 bg-amber-500/5 p-2 text-xs text-amber-200"><strong className="font-semibold">{target.unlinked_findings_count} active findings are not shown below.</strong> They are scoped to this target but could not be tied to one listener, so the table understates what is known. Open Findings for this target to see them.</p>}{target.findings_truncated && <p className="mt-2 text-xs text-amber-200">Active-finding association window is truncated.</p>}</div>
           {target.services.length === 0 ? <p className="p-4 text-sm text-gray-500">No positive service evidence retained in this window. Run an authorized Scan or Hunt with the relevant discovery policy to collect evidence.</p> : (() => {
-            const all = [...target.services].sort(byConsequence)
-            const isQuiet = (service: typeof all[number]) => ['inconclusive', 'not_observed'].includes(service.presence)
-              && service.findings.length === 0 && service.cve_candidates.length === 0 && service.id !== selectedId
+            const byId = new Map(target.services.map((service) => [service.id, service]))
+            const all = groupsFor(target)
+            const isQuiet = (group: ListenerGroup) => group.quiet && !group.service_ids.includes(selectedId)
             const quietCount = all.filter(isQuiet).length
             const showingQuiet = showQuiet.has(target.id)
-            const services = showingQuiet ? all : all.filter((service) => !isQuiet(service))
-            const notable = services.filter((service) => service.findings.length > 0 || service.cve_candidates.length > 0).length
-            const addressed = services.filter((service) => service.address).length
+            const groups = showingQuiet ? all : all.filter((group) => !isQuiet(group))
+            const notable = groups.filter((group) => group.finding_count > 0 || group.candidate_count > 0).length
+            const addressed = target.services.filter((service) => service.address).length
             return <>
-              <p className="border-b border-gray-800 px-4 py-2 text-xs text-gray-400">{services.length} listeners{notable > 0 ? <> · <span className="text-amber-200">{notable} with linked findings or candidates</span></> : ' · nothing linked to any of them'}{addressed === 0 && ' · no network address retained for this target'}{quietCount > 0 && <> · <button type="button" onClick={() => setShowQuiet((current) => { const next = new Set(current); if (next.has(target.id)) next.delete(target.id); else next.add(target.id); return next })} className="text-blue-300 hover:underline">{showingQuiet ? `hide ${quietCount} inconclusive` : `show ${quietCount} inconclusive`}</button></>}</p>
-              <div className="overflow-x-auto"><table className="w-full min-w-[740px] text-left text-sm"><thead className="border-b border-gray-800 text-xs text-gray-500"><tr>{['Listener', 'Identity', 'Linked', 'Last seen', ''].map((label, index) => <th key={index} scope="col" className="px-4 py-3">{label || 'Details'}</th>)}</tr></thead><tbody className="divide-y divide-gray-800">{services.map((service) => {
-                const linked = service.findings.length
-                const candidates = service.cve_candidates.length
-                const knownExploited = service.cve_candidates.filter((candidate) => candidate.known_exploited).length
-                const quiet = linked === 0 && candidates === 0
-                const seen = ago(service.last_seen_at)
-                return <tr key={service.id} className={service.id === selectedId ? 'bg-teal-500/10' : 'hover:bg-gray-800/40'}>
-                  <td className="px-4 py-3"><p className={quiet ? 'text-gray-400' : 'font-medium text-gray-100'}>{listener(service)} · {service.service}</p><p className="mt-1 text-xs text-gray-500">{readable(service.presence)}{service.address && <> · {service.address}</>}</p></td>
-                  <td className="px-4 py-3 text-gray-300">{service.product ? <>{service.product}{service.version && <> {service.version}</>}</> : <span className="text-gray-600">&mdash;</span>}<p className="mt-1 text-xs text-gray-500">{readable(service.identity_basis)}{service.identity_stale && <> · <span className="text-gray-400">identity stale</span></>}</p></td>
-                  <td className="px-4 py-3">{linked > 0 ? <span className="font-medium text-amber-200">{linked} finding{linked === 1 ? '' : 's'}</span> : <span className="text-gray-600">&mdash;</span>}<p className="mt-1 text-xs text-gray-500">{candidates > 0 ? `${candidates} CVE candidate${candidates === 1 ? '' : 's'}` : ''}{knownExploited > 0 && <span className="text-red-300"> · {knownExploited} known exploited</span>}</p></td>
-                  <td className="px-4 py-3 text-gray-400">{seen || readable(service.freshness)}<p className="mt-1 text-xs text-gray-500">{readable(service.observation_status)}</p></td>
-                  <td className="px-4 py-3"><button type="button" aria-label={`Inspect ${service.transport}/${service.port} on ${target.label}`} aria-expanded={selectedId === service.id} onClick={() => setFilters({ service_id: selectedId === service.id ? undefined : service.id })} className="rounded-sm px-2 py-1 text-blue-300 hover:bg-gray-700 focus-visible:outline-solid focus-visible:outline-2">Inspect</button></td>
+              <p className="border-b border-gray-800 px-4 py-2 text-xs text-gray-400">{groups.length} listeners{notable > 0 ? <> · <span className="text-amber-200">{notable} with linked findings or candidates</span></> : ' · nothing linked to any of them'}{addressed === 0 && ' · no network address retained for this target'}{quietCount > 0 && <> · <button type="button" onClick={() => setShowQuiet((current) => { const next = new Set(current); if (next.has(target.id)) next.delete(target.id); else next.add(target.id); return next })} className="text-blue-300 hover:underline">{showingQuiet ? `hide ${quietCount} inconclusive` : `show ${quietCount} inconclusive`}</button></>}</p>
+              <div className="overflow-x-auto"><table className="w-full min-w-[740px] text-left text-sm"><thead className="border-b border-gray-800 text-xs text-gray-500"><tr>{['Listener', 'Identity', 'Severity', 'Linked', 'Last seen', ''].map((label, index) => <th key={index} scope="col" className="px-4 py-3">{label || 'Details'}</th>)}</tr></thead><tbody className="divide-y divide-gray-800">{groups.map((group) => {
+                const primary = byId.get(group.primary_service_id)
+                const quiet = group.finding_count === 0 && group.candidate_count === 0
+                const seen = ago(group.last_seen_at)
+                const selectedHere = group.service_ids.includes(selectedId)
+                return <tr key={group.key} className={selectedHere ? 'bg-teal-500/10' : 'hover:bg-gray-800/40'} data-testid="listener-row">
+                  <td className="px-4 py-3"><p className={quiet ? 'text-gray-400' : 'font-medium text-gray-100'}>{group.transport.toUpperCase()}/{group.port} · {group.service}</p><p className="mt-1 text-xs text-gray-500">{primary ? readable(primary.presence) : ''}{primary?.address && <> · {primary.address}</>}{group.service_ids.length > 1 && <> · {group.service_ids.length} observations</>}</p></td>
+                  <td className="px-4 py-3 text-gray-300">{group.product ? <>{group.product}{group.version && <> {group.version}</>}</> : <span className="text-gray-600">&mdash;</span>}<p className="mt-1 text-xs text-gray-500">{primary ? readable(primary.identity_basis) : ''}{group.identity_stale && <> · <span className="text-gray-400">identity stale</span></>}</p></td>
+                  <td className="px-4 py-3">{group.max_severity ? <span className={`rounded-sm px-2 py-1 text-xs ${SEVERITY_STYLE[group.max_severity] || ''}`}>{group.max_severity}</span> : <span className="text-gray-600">&mdash;</span>}</td>
+                  <td className="px-4 py-3">{group.finding_count > 0 ? <span className="font-medium text-amber-200">{group.finding_count} finding{group.finding_count === 1 ? '' : 's'}</span> : <span className="text-gray-600">&mdash;</span>}<p className="mt-1 text-xs text-gray-500">{group.candidate_count > 0 ? `${group.candidate_count} CVE candidate${group.candidate_count === 1 ? '' : 's'}` : ''}{group.known_exploited > 0 && <span className="text-red-300"> · {group.known_exploited} known exploited</span>}{group.checks_available > 0 && <span> · {group.checks_available} with a check</span>}{group.check_matched > 0 && <span className="text-red-300"> · {group.check_matched} check matched</span>}</p></td>
+                  <td className="px-4 py-3 text-gray-400">{seen || (primary ? readable(primary.freshness) : '')}<p className="mt-1 text-xs text-gray-500">{primary ? readable(primary.observation_status) : ''}</p></td>
+                  <td className="px-4 py-3"><button type="button" aria-label={`Inspect ${group.transport}/${group.port} on ${target.label}`} aria-expanded={selectedHere} onClick={() => setFilters({ service_id: selectedHere ? undefined : group.primary_service_id })} className="rounded-sm px-2 py-1 text-blue-300 hover:bg-gray-700 focus-visible:outline-solid focus-visible:outline-2">Inspect</button></td>
                 </tr>
               })}</tbody></table></div>
             </>

@@ -19,6 +19,9 @@ BUNDLED_SNAPSHOT_PATH = os.path.join(
     "device_advisories.json",
 )
 BUNDLED_SNAPSHOT_SHA256 = "bdab781f78f07ab87e27e3e0bcc8d6d4c7131e84f131d37a465d1bfbeeeb191e"
+# The built-in snapshot's own generated_at: an external bundle older than this is refused, so a
+# stale bundle left on the host cannot replace newer data shipped in a later image.
+BUNDLED_SNAPSHOT_GENERATED_AT = "2026-10-13T13:29:01Z"
 
 # A network banner, Nmap guess, or unauthenticated protocol response can produce a
 # syntactically exact CPE without proving which firmware is installed. Only authenticated or
@@ -175,15 +178,60 @@ def identity_evidence_tier(service: Any) -> dict[str, Any]:
 _SNAPSHOT_CACHE: dict[tuple[Any, ...], dict[str, Any]] = {}
 
 
+def _bundle_module():
+    # Relative: the same module object whether this package is imported as scanner_tools or
+    # scanner.scanner_tools, so trusted keys configured on one are the keys the loader uses.
+    from . import intel_bundle
+    return intel_bundle
+
+
 def load_verified_snapshot(
+    path: Any, expected_sha256: Any, *, max_bytes: int = MAX_SNAPSHOT_BYTES,
+) -> dict[str, Any]:
+    """Load the advisory snapshot in force, verified before use.
+
+    An operator pin (``DEVICE_INTEL_DB_PATH``/``DEVICE_INTEL_DB_SHA256`` set at all, even to the
+    built-in file) is used as given and freezes the intelligence: no bundle replaces it. The image sets
+    neither. Otherwise a signed external bundle (``intel_bundle``) that verifies, and is not below the
+    recorded high-water ``bundle_version``, is preferred, and the snapshot built into the image is the
+    fallback; ``source`` and ``bundle`` say which was used and why.
+    """
+    location = str(path or "").strip()
+    expected = str(expected_sha256 or "").strip().lower()
+    if location or expected:
+        return _labelled(_load_pinned_snapshot(location, expected, max_bytes=max_bytes), "operator_pinned", None)
+    intel_bundle = _bundle_module()
+    bundle = intel_bundle.bundle_status(
+        not_older_than=BUNDLED_SNAPSHOT_GENERATED_AT, minimum_version=intel_bundle.read_high_water(),
+    )
+    if bundle.get("status") == "verified":
+        loaded = _load_pinned_snapshot(bundle["snapshot_path"], bundle["snapshot_sha256"], max_bytes=max_bytes)
+        public = {key: bundle.get(key) for key in ("status", "bundle_version", "generated_at", "key_id")}
+        if loaded.get("status") == "available":
+            intel_bundle.note_version_in_force(bundle["bundle_version"])
+            return _labelled(loaded, "external_bundle", public)
+        # The signed manifest named content the file does not hold: refuse it, keep the built-in data.
+        bundle = {"status": f"snapshot_{loaded.get('status') or 'unavailable'}"}
+    builtin = _load_pinned_snapshot(BUNDLED_SNAPSHOT_PATH, BUNDLED_SNAPSHOT_SHA256, max_bytes=max_bytes)
+    return _labelled(builtin, "builtin", {"status": str(bundle.get("status") or "absent")})
+
+
+def _labelled(result: dict[str, Any], source: str, bundle: dict[str, Any] | None) -> dict[str, Any]:
+    # Labelled in place: a cached snapshot is returned as the same object, not a copy per page.
+    result["source"] = source
+    if bundle is not None:
+        result["bundle"] = bundle
+    else:
+        result.pop("bundle", None)
+    return result
+
+
+def _load_pinned_snapshot(
     path: Any, expected_sha256: Any, *, max_bytes: int = MAX_SNAPSHOT_BYTES,
 ) -> dict[str, Any]:
     """Load a regular, no-symlink advisory snapshot only when its pinned digest matches."""
     location = str(path or "").strip()
     expected = str(expected_sha256 or "").strip().lower()
-    if not location and not expected:
-        location = BUNDLED_SNAPSHOT_PATH
-        expected = BUNDLED_SNAPSHOT_SHA256
     if not location:
         return {"status": "not_configured", "advisories": []}
     if not re.fullmatch(r"[0-9a-f]{64}", expected):

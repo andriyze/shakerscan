@@ -176,12 +176,44 @@ def test_device_agent_uses_bundled_intel_when_env_is_unset(monkeypatch):
         product=None,
         version=None,
     )
-    assert result["status"] == "available"
-    assert result["snapshot_sha256"] == device_agent.BUNDLED_SNAPSHOT_SHA256
+    assert result["status"] == "available" and result["source"] in {"builtin", "external_bundle"}
+    if result["source"] == "builtin":
+        assert result["snapshot_sha256"] == device_agent.device_advisories.BUNDLED_SNAPSHOT_SHA256
     assert result["candidates"][0]["advisory_id"] == "CVE-2017-17562"
     assert result["candidates"][0]["advisory_match_complete"] is True
     assert result["candidates"][0]["promotable"] is False
     assert result["candidates"][0]["identity_evidence_tier"] == "network_service_fingerprint"
+
+
+def test_device_agent_uses_an_installed_verified_bundle_like_exposure(tmp_path, monkeypatch):
+    import base64
+    from tests.test_intel_bundle import _seed, _write_bundle
+
+    advisories = device_agent.device_advisories
+    intel_bundle = advisories._bundle_module()   # the module object the loader uses
+    seed = _seed()
+    public = intel_bundle.public_key_for(seed)
+    monkeypatch.setitem(intel_bundle.TRUSTED_BUNDLE_KEYS, intel_bundle.key_id_for(public),
+                        base64.b64encode(public).decode())
+    monkeypatch.delenv(intel_bundle.TRUSTED_KEYS_ENV, raising=False)
+    monkeypatch.setenv(intel_bundle.BUNDLE_DIR_ENV, str(tmp_path / "intel"))
+    monkeypatch.delenv("DEVICE_INTEL_DB_PATH", raising=False)
+    monkeypatch.delenv("DEVICE_INTEL_DB_SHA256", raising=False)
+    monkeypatch.setattr(intel_bundle, "_PROCESS_HIGH_WATER", {})
+    monkeypatch.setattr(advisories, "_SNAPSHOT_CACHE", {})
+    _write_bundle(str(tmp_path / "intel"), seed, version=3)
+    result = device_agent.resolve_local_intel(
+        cpe="cpe:2.3:a:apache:http_server:2.4.50:*:*:*:*:*:*:*", product=None, version=None)
+    assert (result["status"], result["source"]) == ("available", "external_bundle")
+    assert [row["advisory_id"] for row in result["candidates"]] == ["CVE-2099-0001"]   # bundle-only
+    # An operator pin still freezes the intelligence: the bundle never replaces it.
+    store = tmp_path / "pinned.json"
+    store.write_text(json.dumps({"advisories": []}))
+    monkeypatch.setenv("DEVICE_INTEL_DB_PATH", str(store))
+    monkeypatch.setenv("DEVICE_INTEL_DB_SHA256", hashlib.sha256(store.read_bytes()).hexdigest())
+    pinned = device_agent.resolve_local_intel(
+        cpe="cpe:2.3:a:apache:http_server:2.4.50:*:*:*:*:*:*:*", product=None, version=None)
+    assert (pinned["source"], pinned["candidates"]) == ("operator_pinned", [])
 
 
 def test_protocol_playbook_never_infers_unknown_service_from_port_alone():

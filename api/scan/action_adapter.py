@@ -993,7 +993,8 @@ class DatabaseNeutralScanActionDispatcher:
             errors=errors,
         )
 
-    def _skip(self, action: ScanAction, reason: str) -> CapabilityReceipt:
+    def _skip(self, action: ScanAction, reason: str, *,
+              verify_selection: Mapping[str, Any] | None = None) -> CapabilityReceipt:
         now = datetime.now(timezone.utc).isoformat()
         return self._receipt(
             action,
@@ -1004,6 +1005,7 @@ class DatabaseNeutralScanActionDispatcher:
             redacted_execution={
                 "action_id": action.action_id,
                 "execution_started": False,
+                **({"verify_selection": dict(verify_selection)} if verify_selection else {}),
             },
         )
 
@@ -3754,20 +3756,26 @@ class DatabaseNeutralScanActionDispatcher:
         # declared inputs). Default both to the manifest options for passive runs.
         worker_template_options = dict(template_options)
         args_template_options = dict(template_options)
+        verify_selection = None
         if tool == "nuclei" and action.capability_name == "templates.active_batch":
+            mutation_tier = bool(
+                self.policy.allow_state_changing_http
+                and action.requested_budget.get("state_changing_requests", 0) > 0
+            )
+            # A verify Scan's exploit-class checks (rce, lfi, sqli, ...) need the same
+            # state-changing tier that admits mutating requests; plain active testing does not.
             resolved = resolve_active_scan_nuclei_options(
                 template_options,
                 templates_dir=nuclei_templates_directory(),
-                allow_state_changing_http=bool(
-                    self.policy.allow_state_changing_http
-                    and action.requested_budget.get("state_changing_requests", 0) > 0
-                ),
+                allow_state_changing_http=mutation_tier,
+                allow_exploit_classes=mutation_tier,
             )
+            verify_selection = resolved.verify_selection
             if resolved.skip_reason:
                 # Fail closed: the active selection could not be resolved (index
                 # unavailable, or no permitted template once intrusive/non-GET
                 # exclusions apply). Record a coverage gap, never a clean result.
-                return self._skip(action, resolved.skip_reason)
+                return self._skip(action, resolved.skip_reason, verify_selection=verify_selection)
             worker_template_options = dict(resolved.worker_options)
             args_template_options = dict(resolved.capability_args)
         load_attempts = getattr(self.backend, "load_batch_attempts", None)
@@ -4746,6 +4754,7 @@ class DatabaseNeutralScanActionDispatcher:
                 }} if request_gate is not None else {}),
                 **({"carried_from_admission": admission_source} if admission_source else {}),
                 **({"carried_count": carried_count} if extends or admission_source else {}),
+                **({"verify_selection": dict(verify_selection)} if verify_selection else {}),
             },
         )
 

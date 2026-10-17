@@ -333,6 +333,14 @@ class _ScanRequestBase(BaseModel):
     browser_login_profile_ids: list[str] = Field(default_factory=list, max_length=2, description="Operator-saved browser login and read-only QA profiles; does not authenticate other Scan actions.")
     advanced: Optional[ScanAdvancedLimits] = None
     approval_receipt_id: Optional[str] = None
+    verify_templates: list[str] = Field(
+        default_factory=list, max_length=10,
+        description=(
+            "Verify an Exposure candidate: run exactly these Nuclei checks (ids the vulnerability "
+            "intelligence names for a CVE) as the Scan's active templates. Needs "
+            "policy.active_testing and the nuclei_active family."
+        ),
+    )
     options: ScanPublicCompatibilityOptions = Field(
         default_factory=ScanPublicCompatibilityOptions,
         description=(

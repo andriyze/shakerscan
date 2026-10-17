@@ -389,6 +389,8 @@ EXPECTED_SECRET_USE = {
     "ref": f"secret://{_SECRET_ID}", "kind": "password", "label": "DB_PASSWORD",
     "action_id": str(_USE_ACTION), "destination_host": "app.example.test",
     "granted": True, "used_at": "2026-10-07T00:00:00+00:00",
+    # 2.11: a try on another target's login names its grant and the answer; an agent view is flagged.
+    "permission_grant_id": None, "outcome": None, "disclosed_to_agent": False,
     "secret_values_visible": False,
 }
 

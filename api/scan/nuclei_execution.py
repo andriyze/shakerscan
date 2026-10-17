@@ -13,6 +13,7 @@ class ActiveScanNucleiOptions:
     capability_args: Mapping[str, Any]
     worker_options: Mapping[str, Any]
     skip_reason: str | None = None
+    verify_selection: Mapping[str, Any] | None = None
 
 
 def resolve_active_scan_nuclei_options(
@@ -20,6 +21,7 @@ def resolve_active_scan_nuclei_options(
     *,
     templates_dir: str,
     allow_state_changing_http: bool,
+    allow_exploit_classes: bool = False,
 ) -> ActiveScanNucleiOptions:
     """Resolve exact template IDs without putting a large allowlist in API args."""
     selection = resolve_active_nuclei_selection(
@@ -27,10 +29,13 @@ def resolve_active_scan_nuclei_options(
         severities=template_options.get("severity"),
         tags=template_options.get("tags"),
         allow_state_changing_http=allow_state_changing_http,
+        only_template_ids=template_options.get("verify_template_ids"),
+        allow_exploit_classes=allow_exploit_classes,
     )
     if selection.skip:
         return ActiveScanNucleiOptions(
             {}, {}, selection.skip_reason or "not_applicable",
+            verify_selection=selection.verify_selection,
         )
     worker_options = {
         "severity": template_options.get("severity", "high,critical"),
@@ -47,4 +52,4 @@ def resolve_active_scan_nuclei_options(
         for key in ("severity", "template_pack_digest")
         if key in template_options
     }
-    return ActiveScanNucleiOptions(capability_args, worker_options)
+    return ActiveScanNucleiOptions(capability_args, worker_options, verify_selection=selection.verify_selection)

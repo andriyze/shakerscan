@@ -249,8 +249,9 @@ COPY scanner/wordlists /app/wordlists
 COPY scanner/payloads /app/payloads
 COPY scanner/data /app/data
 COPY LICENSE NOTICE THIRD_PARTY_NOTICES.md /usr/share/doc/shakerscan/
-ENV DEVICE_INTEL_DB_PATH=/app/data/device_advisories.json
-ENV DEVICE_INTEL_DB_SHA256=bdab781f78f07ab87e27e3e0bcc8d6d4c7131e84f131d37a465d1bfbeeeb191e
+# DEVICE_INTEL_DB_PATH/DEVICE_INTEL_DB_SHA256 are deliberately unset: the loader falls back to the
+# built-in snapshot (digest pinned in scanner_tools/device_advisories.py) or a verified signed bundle,
+# and an operator who sets them pins and freezes the intelligence.
 
 # Copy API/worker files used by prebuilt images.
 # Globbed (like the scanner modules above) so the image can't drift from the

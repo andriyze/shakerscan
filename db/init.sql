@@ -1099,7 +1099,7 @@ CREATE INDEX IF NOT EXISTS idx_hunt_preauthorizations_run
 CREATE TABLE IF NOT EXISTS hunt_permission_requests (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     hunt_run_id UUID NOT NULL REFERENCES hunt_runs(id) ON DELETE CASCADE,
-    kind TEXT NOT NULL CHECK (kind IN ('target.authorize','credential.use','capability.enable','budget.raise','ssh.exec','ssh.host_trust','preauthorization')),
+    kind TEXT NOT NULL CHECK (kind IN ('target.authorize','credential.use','capability.enable','budget.raise','ssh.exec','ssh.host_trust','preauthorization','secret.try')),
     reason_code TEXT NOT NULL CHECK (reason_code ~ '^[a-z][a-z_]{2,63}$'),
     subject_json JSONB NOT NULL,
     subject_digest TEXT NOT NULL CHECK (subject_digest ~ '^[0-9a-f]{64}$'),
@@ -1144,7 +1144,7 @@ CREATE TABLE IF NOT EXISTS hunt_permission_grants (
     hunt_run_id UUID NOT NULL REFERENCES hunt_runs(id) ON DELETE CASCADE,
     request_id UUID NOT NULL REFERENCES hunt_permission_requests(id) ON DELETE CASCADE,
     preauthorization_id UUID REFERENCES hunt_preauthorizations(id) ON DELETE SET NULL,
-    kind TEXT NOT NULL CHECK (kind IN ('target.authorize','credential.use','capability.enable','budget.raise','ssh.exec','ssh.host_trust','preauthorization')),
+    kind TEXT NOT NULL CHECK (kind IN ('target.authorize','credential.use','capability.enable','budget.raise','ssh.exec','ssh.host_trust','preauthorization','secret.try')),
     subject_json JSONB NOT NULL,
     subject_digest TEXT NOT NULL CHECK (subject_digest ~ '^[0-9a-f]{64}$'),
     scope TEXT NOT NULL CHECK (scope IN ('hunt','target')),
@@ -2781,6 +2781,14 @@ END
 $continue_events_index$;
 
 -- Discovered secrets (2.10): api/hunt/discovered_secrets.py, installed by the startup migration too.
+-- The highest signed intelligence bundle_version ever put in force; the loader refuses a lower one.
+CREATE TABLE IF NOT EXISTS intel_bundle_high_water (
+    singleton BOOLEAN PRIMARY KEY DEFAULT true CHECK (singleton),
+    bundle_version BIGINT NOT NULL CHECK (bundle_version > 0),
+    key_id TEXT,
+    recorded_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
 CREATE TABLE IF NOT EXISTS discovered_secrets (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     target_id UUID NOT NULL REFERENCES targets(id) ON DELETE CASCADE,
@@ -2851,6 +2859,28 @@ BEGIN
     END IF;
 END
 $i_discovered_secret_uses_run$;
+DO $ds_uses_try$
+BEGIN
+    -- 2.11 (hunt/secret_try.py): the person's grant an attempt on another target's login used,
+    -- and what the login answered. Checked first: ALTER TABLE takes an exclusive lock even when
+    -- the column exists. Nullable, no default, no foreign key: no rewrite, no lock on another table.
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_schema = current_schema() AND table_name = 'discovered_secret_uses'
+          AND column_name = 'permission_grant_id'
+    ) THEN
+        ALTER TABLE discovered_secret_uses ADD COLUMN permission_grant_id UUID;
+    END IF;
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_schema = current_schema() AND table_name = 'discovered_secret_uses'
+          AND column_name = 'outcome'
+    ) THEN
+        ALTER TABLE discovered_secret_uses ADD COLUMN outcome TEXT
+            CHECK (outcome IS NULL OR length(outcome) <= 80);
+    END IF;
+END
+$ds_uses_try$;
 CREATE TABLE IF NOT EXISTS discovered_secret_grants (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     secret_id UUID NOT NULL REFERENCES discovered_secrets(id) ON DELETE CASCADE,
