@@ -50,6 +50,10 @@ class CapabilityResultReason(str, Enum):
     # confirmed nor found revoked. Work stops fail-closed without claiming a revoke.
     AUTHORIZATION_UNVERIFIED = "authorization_unverified"
     AUTHENTICATION_UNCERTAIN = "authentication_uncertain"
+    # The target refused the verifier's unauthenticated baseline (401/403/407, or a redirect to
+    # a login page), so its payloads never reached the code under test. Not a negative: the
+    # candidate stays unverified until the Scan carries a credential profile for it.
+    AUTHENTICATION_REQUIRED = "authentication_required"
     SCOPE_INVALID = "scope_invalid"
     CANCELLED = "cancelled"
     TIMED_OUT = "timed_out"

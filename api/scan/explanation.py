@@ -54,6 +54,14 @@ _REASON_LABELS = {
     "authorization_revoked": "Testing approval was revoked",
     "authorization_unverified": "Testing approval could not be confirmed because the database was unreachable; the action stopped without treating the approval as revoked",
     "authentication_uncertain": "Credential authority could not be confirmed; review the identity and approval before starting new work",
+    "authentication_required": (
+        "The target refused the unauthenticated requests (401/403 or a redirect to sign-in), "
+        "so those candidates were not tested; add a credential profile to verify them"
+    ),
+    "insufficient_budget_for_stage": (
+        "A continuation could not fund a single verification stage, so its candidates were "
+        "left unverified"
+    ),
     "scope_invalid": "Target scope no longer matched the approved scope",
     "cancelled": "The scan was cancelled",
     "timed_out": "The action, or one of its attempts, reached its wall-clock time limit",

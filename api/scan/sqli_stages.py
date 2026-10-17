@@ -26,8 +26,9 @@ settled technique is a checkpoint a later extension never re-sends. A stage that
 injection ends the candidate, so time-based blind -- the most expensive and the slowest to
 prove -- runs only when UNION, boolean and error-based were all inconclusive. Once an attempt
 has settled a stage, it does not start a stage whose negative verdict cannot fit the wall left at
-the response time just measured: that stage would be killed part-way and re-sent from its first
-payload, so the candidate stops as wall-stopped and the unspent wall returns to its slice. Every stage is
+the candidate's measured rate (a rate sample, never a run too short to measure one): that stage
+would be killed part-way and re-sent from its first payload, so the candidate stops as
+wall-stopped and the unspent wall returns to its slice. Every stage is
 paced and bounded exactly like the attempt it is part of; a stage holds whatever the
 candidate's sub-budget has left, so no ceiling grows. A stage the wall interrupted is not a
 verdict and the candidate stays unproven-incomplete; a stage that already ran out of wall
@@ -75,6 +76,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from .external_process import BATCH_ATTEMPT_REQUEST_HEADROOM, paced_request_delay
+from .verifier_refusal import is_refusal_error
 
 # Requests a negative verdict costs per technique and tested field (soak host, 2026-10-07):
 # the stage order. Cheapest first was kept over sqlmap's own B, E, U, T order and over B, U, E, T
@@ -249,6 +251,9 @@ class PriorStages:
     killed_sent: dict[str, int] = field(default_factory=dict)
     # The candidate's own qualifying rate measurements (``rate_sample``), every action.
     rate_samples: list[RateSample] = field(default_factory=list)
+    # The error of a unit the target refused (``authentication_required:401``): every unit of
+    # the candidate would meet the same refusal, so none is run again.
+    refusal: str | None = None
 
     @property
     def seconds_per_request(self) -> float | None:
@@ -309,6 +314,12 @@ def prior_stages(
             sample = rate_sample(status=item.get("status"), timed_out=killed, sent=sent, wall=wall)
             if sample is not None:
                 prior.rate_samples.append((key, sample))
+            refusal = next((
+                str(error) for error in item.get("errors") or () if is_refusal_error(error)
+            ), None)
+            if refusal is not None:
+                prior.refusal = prior.refusal or refusal
+                continue
             if _status(item.get("status")) in _SUCCESS and not item.get("timed_out"):
                 prior.finished.setdefault(key, (source, item))
             elif killed:
@@ -641,6 +652,8 @@ class StagedAttempt:
     resume_unconfirmed: bool = False
     remaining_requests: int | None = None
     last_chance_wall_seconds: int | None = None
+    # The target refused the candidate's unauthenticated baseline: inconclusive, never resumed.
+    refusal: str | None = None
 
 
 RunStage = Callable[..., Awaitable[Any]]
@@ -704,7 +717,12 @@ async def run_staged_sqli_attempt(
     killed_sent = dict(prior.killed_sent)
     samples = list(prior.rate_samples)
     carried_techniques: set[str] = set()
-    for technique, field_name in stage_units(fields):
+    refusal = prior.refusal
+    if refusal is not None:
+        # An earlier unit was refused (401/403, a redirect to sign-in): every unit would be,
+        # so nothing is sent again and no technique reads as settled by it.
+        errors.append(refusal)
+    for technique, field_name in stage_units(fields) if refusal is None else ():
         key = unit_key(technique, field_name)
         label = {"technique": technique, **({"field": field_name} if field_name else {})}
         finished = prior.finished.get(key) or prior.finished.get(technique)
@@ -794,7 +812,15 @@ async def run_staged_sqli_attempt(
         # Never predicted faster than the candidate has been observed to answer.
         observed = robust_rate(samples, key)
         per_request = max(latency + delay, observed or 0.0)
-        if ran_here and (latency > 0 or observed) and not probing and (
+        # Only a rate sample (``MINIMUM_RATE_SAMPLE_REQUESTS`` or more requests) can stop a
+        # unit before it starts. A unit that sent one request in sqlmap's one-second start-up
+        # measured start-up, not the target: lab Scan 13bd3497 (2.11.0) settled U, B and E of
+        # ``/hub/api/tickets/1*`` with one request each (the unauthenticated replay answered
+        # 401), read that as ~1 s per response and refused T as 189 s against 177 s left, so
+        # the required verify.sqli.r01 reported timed_out after 11 s with 1,585 requests unused.
+        # An unmeasured unit runs inside its wall; if the wall kills it, its checkpoint is a
+        # rate sample and a continuation resumes it like any other wall-killed unit.
+        if ran_here and observed and not probing and (
             _unit_requests(technique, field_name, count) * per_request > wall
         ):
             # This attempt already settled a unit, and the next one cannot reach its verdict
@@ -858,6 +884,14 @@ async def run_staged_sqli_attempt(
             })
         observations.extend(stage_observations)
         errors.extend(stage_errors)
+        refusal = next((item for item in stage_errors if is_refusal_error(item)), None)
+        if refusal is not None:
+            # The target refused this unit's baseline: the technique tested nothing, and the
+            # candidate's other units would meet the same refusal. It is inconclusive for
+            # authentication, never a settled negative, and no continuation resumes it.
+            stages.append({**label, "outcome": "authentication_required"})
+            complete = False
+            break
         stages.append({**label, "outcome": status, "timed_out": stage_killed})
         if status in _SUCCESS and not stage_killed:
             settled.add(key)
@@ -876,12 +910,14 @@ async def run_staged_sqli_attempt(
             break
     if was_cancelled:
         outcome = "cancelled"
+    elif refusal is not None and not proven:
+        outcome = "partial"
     elif proven or complete:
         outcome = "success"
     else:
         outcome = "partial"
     resume = (
-        Resume(None) if outcome in {"success", "cancelled"} else resume_plan(
+        Resume(None) if outcome in {"success", "cancelled"} or refusal is not None else resume_plan(
             settled, wall_killed, fields=fields, field_count=count, rate_samples=samples,
             killed_sent=killed_sent, round_wall_ceiling=round_wall_ceiling,
             scan_wall_share=scan_wall_share,
@@ -918,6 +954,7 @@ async def run_staged_sqli_attempt(
         resume_unconfirmed=resume.unconfirmed,
         remaining_requests=resume.remaining_requests,
         last_chance_wall_seconds=resume.last_chance_wall,
+        refusal=refusal if not proven else None,
     )
 
 
