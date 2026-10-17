@@ -9,6 +9,11 @@ import {
   findingLocation,
   findingSubject,
   groupFindings,
+  groupSize,
+  groupedCountSummary,
+  groupsFromServer,
+  isGroupingTooBroadError,
+  isServerGroupsPage,
   retestSignal,
   statusViewParam,
 } from './findingGroups.ts'
@@ -89,4 +94,62 @@ test('the count line never presents a partial load as complete', () => {
     '2,117 findings · showing 1–500 in 180 groups (groups cover the loaded rows only)',
   )
   assert.equal(findingCountSummary({ total: 120, loaded: 50, offset: 50, groups: null, statusLabel: 'open' }), '120 open findings · showing 51–100')
+})
+
+const serverGroup = (lead, memberIds, extra = {}) => ({
+  title_key: 'sensitive exposure: cloud credential material', severity: 'critical', subject: 't-honey',
+  proof_state: 'verified', status: 'active', count: memberIds.length, first_seen_at: null,
+  last_seen_at: '2026-09-30T04:28:45Z', lead, member_ids: memberIds, member_ids_truncated: false,
+  members: memberIds.map((id) => ({ id, url: `${honey}/${id}`, last_seen_at: '2026-09-29T10:00:00Z', latest_retest_verdict: id === 'c' ? 'likely_fixed' : null })),
+  ...extra,
+})
+
+test('server groups keep the server order, list members by location, and count the whole group', () => {
+  const lead = exposure('a', '/.aws/credentials')
+  const groups = groupsFromServer([
+    serverGroup(lead, ['a', 'c', 'd'], { count: 80, member_ids_truncated: true }),
+    serverGroup(exposure('b', '/id_rsa'), ['b']),
+  ])
+  assert.deepEqual(groups.map((group) => group.lead.id), ['a', 'b'])
+  const [first, second] = groups
+  assert.equal(first.lead, lead)
+  assert.deepEqual(first.members.map((member) => member.id), ['a', 'c', 'd'])
+  // A listed member is its own location, retest and sighting; the rest is the group's.
+  assert.equal(first.members[1].url, `${honey}/c`)
+  assert.equal(first.members[1].latest_retest_verdict, 'likely_fixed')
+  assert.equal(first.members[1].title, lead.title)
+  assert.equal(first.lastSeenAt, '2026-09-30T04:28:45Z')
+  assert.equal(groupSize(first), 80)
+  assert.equal(groupSize(second), 1)
+  // A browser group has no server count: its size is its members.
+  assert.equal(groupSize(groupFindings([lead, exposure('e', '/x')])[0]), 2)
+  assert.notEqual(first.key, second.key)
+})
+
+test('only a page of groups is taken for server grouping; rows mean the engine cannot group', () => {
+  const page = { items: [serverGroup(exposure('a', '/'), ['a'])], next_cursor: null, has_more: false, total: 1, total_kind: 'exact', generated_at: 'x' }
+  assert.equal(isServerGroupsPage(page), true)
+  assert.equal(isServerGroupsPage({ ...page, items: [] }), true)
+  // An older engine: the legacy shape, or list/v1 rows (no count, member ids or lead).
+  assert.equal(isServerGroupsPage({ findings: [exposure('a', '/')], total: 1 }), false)
+  assert.equal(isServerGroupsPage({ ...page, items: [exposure('a', '/')] }), false)
+  assert.equal(isServerGroupsPage(null), false)
+})
+
+test('the count line for server groups states complete groups and the groups shown', () => {
+  assert.equal(groupedCountSummary({ findings: 428572, groups: 10000, start: 1, shown: 50, statusLabel: 'open' }),
+    '428,572 open findings in 10,000 groups · showing groups 1–50')
+  assert.equal(groupedCountSummary({ findings: 3, groups: 2, start: 1, shown: 2, statusLabel: '' }), '3 findings in 2 groups')
+  assert.equal(groupedCountSummary({ findings: 1, groups: 1, start: 1, shown: 1, statusLabel: 'open' }), '1 open finding in 1 group')
+  assert.equal(groupedCountSummary({ findings: 120, groups: 75, start: 51, shown: 25, statusLabel: '' }),
+    '120 findings in 75 groups · showing groups 51–75')
+})
+
+test('only the engine refusing these filters as too broad falls back for one request', () => {
+  const tooBroad = { status: 422, detail: { error: 'proof_filter_too_broad', message: 'more than 10000 …' } }
+  assert.equal(isGroupingTooBroadError(tooBroad), true)
+  assert.equal(isGroupingTooBroadError({ ...tooBroad, status: 400 }), false)
+  assert.equal(isGroupingTooBroadError({ status: 422, detail: { error: 'invalid_group_by' } }), false)
+  assert.equal(isGroupingTooBroadError({ status: 422, detail: 'proof_filter_too_broad' }), false)
+  assert.equal(isGroupingTooBroadError(null), false)
 })

@@ -348,6 +348,13 @@ async def run_unified_startup(pool: Any, baseline: Any, *, redis_provider: Any =
                 except ModuleNotFoundError:
                     from api.scan.list_v1 import install_scan_updated_at
                 await install_scan_updated_at(conn)
+                # The assessment fields of scans.result as columns (2.11), kept by a trigger; a
+                # catalog check on every later start. Existing rows are projected in the background.
+                try:
+                    from scan.assessment_columns import install_scan_assessment_columns
+                except ModuleNotFoundError:
+                    from api.scan.assessment_columns import install_scan_assessment_columns
+                await install_scan_assessment_columns(conn)
             # After the schema commits, still under the startup lock: Hunts granted something by
             # 2.8.0 have no recorded baseline, so their authority is rebuilt from their live
             # grants once (R1), each Hunt in its own short transaction. A Hunt that cannot be
@@ -383,6 +390,12 @@ async def run_unified_startup(pool: Any, baseline: Any, *, redis_provider: Any =
             except ModuleNotFoundError:
                 from api.finding_routes.list_schema import finish_findings_list_schema
             await finish_findings_list_schema(conn)
+            # Same for the Scan assessment columns: complete at once only with no Scans.
+            try:
+                from scan.assessment_columns import finish_scan_assessment_columns
+            except ModuleNotFoundError:
+                from api.scan.assessment_columns import finish_scan_assessment_columns
+            await finish_scan_assessment_columns(conn)
         finally:
             await conn.execute("SELECT pg_advisory_unlock(8675309)")
         # Redis only after the lock is released, off the event loop and bounded: an unreachable

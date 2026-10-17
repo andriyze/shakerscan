@@ -154,6 +154,10 @@ ON CONFLICT (name) DO NOTHING;
 
 # All target kinds use the canonical inventory. Kind compatibility makes a grant
 # selectable; only an exact, active consumer grant permits credential resolution.
+#: A profile's share count: active grants to targets other than its home.
+SHARED_TARGET_COUNT_SQL = """(SELECT count(*) FROM credential_profile_bindings g
+    WHERE g.profile_id=p.id AND g.binding_kind='target'
+      AND g.binding_id<>p.target_id::text AND g.revoked_at IS NULL)"""
 _KIND_COMPATIBLE_SQL = "(p.target_kind IN ('web','api','network','device') AND {kind} IN ('web','api','network','device'))"
 
 
@@ -1010,26 +1014,28 @@ class PostgresCredentialProfileStore:
         limit: int = 100,
         offset: int = 0,
     ) -> tuple[list[tuple[CredentialProfileMetadata, int]], int]:
-        """Every profile with the number of other targets it is shared with, and the total."""
+        """Every profile with the number of other targets it is shared with, and the total.
+
+        The page is chosen before the share counts are taken, and the total is its own count, so
+        neither grows with the rows an offset skips (list/v1 pages: runtime/credential_list.py)."""
         pattern = f"%{str(search).strip()}%" if search and str(search).strip() else None
+        where = ("($1::boolean OR p.is_active=true) "
+                 "AND ($2::text IS NULL OR p.name ILIKE $2 OR COALESCE(p.principal_label,'') ILIKE $2)")
         rows = await conn.fetch(
-            """SELECT p.*, hb.allowed_capabilities,
-                      (SELECT count(*) FROM credential_profile_bindings g
-                        WHERE g.profile_id=p.id AND g.binding_kind='target'
-                          AND g.binding_id<>p.target_id::text AND g.revoked_at IS NULL)
-                        AS shared_target_count,
-                      COUNT(*) OVER() AS total_count
-               FROM credential_profiles p
+            f"""SELECT p.*, hb.allowed_capabilities, {SHARED_TARGET_COUNT_SQL} AS shared_target_count
+               FROM (SELECT p.id, p.is_active, lower(p.name) AS name_key FROM credential_profiles p
+                     WHERE {where}
+                     ORDER BY p.is_active DESC, lower(p.name), p.id LIMIT $3 OFFSET $4) page
+               JOIN credential_profiles p ON p.id = page.id
                LEFT JOIN credential_profile_bindings hb
                  ON hb.profile_id=p.id AND hb.binding_kind='target'
                 AND hb.binding_id=p.target_id::text
-               WHERE ($1::boolean OR p.is_active=true)
-                 AND ($2::text IS NULL OR p.name ILIKE $2 OR COALESCE(p.principal_label,'') ILIKE $2)
-               ORDER BY p.is_active DESC, lower(p.name), p.id
-               LIMIT $3 OFFSET $4""",
+               ORDER BY page.is_active DESC, page.name_key, page.id""",
             bool(include_inactive), pattern, max(1, min(int(limit), 500)), max(0, int(offset)),
         )
-        total = int(rows[0]["total_count"]) if rows else 0
+        total = int(await conn.fetchval(
+            f"SELECT count(*) FROM credential_profiles p WHERE {where}", bool(include_inactive), pattern,
+        ) or 0)
         return [
             (CredentialProfileMetadata.from_row(item), int(item["shared_target_count"] or 0))
             for item in rows

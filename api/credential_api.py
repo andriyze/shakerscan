@@ -7,7 +7,7 @@ import json
 from typing import Any, Literal, Mapping
 import uuid
 
-from fastapi import APIRouter, HTTPException, Query, Request, status
+from fastapi import APIRouter, HTTPException, Query, Request, Response, status
 from pydantic import BaseModel, ConfigDict, Field, SecretStr
 
 try:
@@ -49,6 +49,14 @@ try:
     from secret_store import SecretStoreUnavailable, encrypt_secret, encryption_enabled
 except ModuleNotFoundError:
     from api.secret_store import SecretStoreUnavailable, encrypt_secret, encryption_enabled
+try:
+    from list_compat import mark_deprecated, v1_page, wants_list_v1
+    from list_contract import CURSOR_MAX_LENGTH
+    from runtime.credential_list import library_page, page_items, target_page
+except ModuleNotFoundError:
+    from api.list_compat import mark_deprecated, v1_page, wants_list_v1
+    from api.list_contract import CURSOR_MAX_LENGTH
+    from api.runtime.credential_list import library_page, page_items, target_page
 
 
 router = APIRouter(prefix="/credential-profiles", tags=["credentials"])
@@ -731,20 +739,50 @@ async def create_credential_profile(request: Request, payload: CredentialProfile
 @router.get("")
 async def list_credential_profiles(
     request: Request,
+    response: Response = None,
     target_kind: Literal["web", "api", "network", "device"] | None = None,
     target_id: uuid.UUID | None = None,
     include_inactive: bool = Query(default=False),
     search: str | None = Query(default=None, max_length=120),
-    limit: int = Query(default=100, ge=1, le=500),
+    limit: int | None = Query(default=None, ge=1, le=500),
     offset: int = Query(default=0, ge=0),
+    cursor: str | None = Query(default=None, max_length=CURSOR_MAX_LENGTH),
+    count: Literal["none", "estimate", "exact"] | None = None,
 ):
     """With a target: every profile that target can use (its own and those shared with it).
-    Without one: the library of all profiles, with how many other targets each is shared with."""
+    Without one: the library of all profiles, with how many other targets each is shared with.
+
+    list/v1 (``cursor``/``count``; runtime/credential_list.py): keyset pages of at most 200 rows,
+    in the same order and row shape, for both lists. Otherwise the deprecated responses.
+    """
     if (target_kind is None) != (target_id is None):
         raise HTTPException(status_code=422, detail="target_kind and target_id go together")
+    v1 = wants_list_v1(cursor=cursor, count=count, fields=None, since=None)
+    if v1 and target_id is not None and search:
+        raise HTTPException(status_code=400, detail={
+            "error": "search_unsupported", "message": "search applies to the library list only"})
     pool = _pool(request)
     try:
         async with pool.acquire() as conn:
+            if v1:
+                page = v1_page(limit=limit, cursor=cursor, sort=None, fields=None, count=count, since=None)
+                if target_id is not None:
+                    await _require_target(conn, target_kind=target_kind, target_id=target_id)
+                    body, rows = await target_page(conn, page, target_kind=target_kind,
+                                                   target_uuid=target_id, include_inactive=include_inactive)
+                else:
+                    body, rows = await library_page(conn, page, include_inactive=include_inactive, search=search)
+                profiles = {key: CredentialProfileMetadata.from_row(row) for key, row in rows.items()}
+                labels = await _target_labels(conn, {
+                    p.target_id for p in profiles.values() if target_id is None or p.shared})
+
+                def render(row: Any) -> dict[str, Any]:
+                    item = _with_home_label(_public(profiles[row["id"]]), labels)
+                    if target_id is None:
+                        item["shared_target_count"] = int(row["shared_target_count"] or 0)
+                    return item
+
+                return page_items(body, rows, render)
             if target_id is not None:
                 await _require_target(conn, target_kind=target_kind, target_id=target_id)
                 profiles = await _store.list_profiles(
@@ -755,18 +793,21 @@ async def list_credential_profiles(
                 )
                 labels = await _target_labels(conn, {p.target_id for p in profiles if p.shared})
                 items = [_with_home_label(_public(profile), labels) for profile in profiles]
+                mark_deprecated(response)
                 return {
                     "target_kind": target_kind,
                     "target_id": str(target_id),
                     "profiles": items,
                     "count": len(items),
                 }
+            limit = 100 if limit is None else limit
             library, total = await _store.list_library(
                 conn, include_inactive=include_inactive, search=search, limit=limit, offset=offset,
             )
             labels = await _target_labels(conn, {profile.target_id for profile, _ in library})
     except CredentialStoreError as exc:
         raise _store_error(exc) from exc
+    mark_deprecated(response)
     items = []
     for profile, shared_count in library:
         item = _with_home_label(_public(profile), labels)
