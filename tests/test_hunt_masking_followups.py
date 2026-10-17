@@ -173,6 +173,9 @@ ALLOWED_PLAIN_DIGESTS = {
     ("api/scan/action_adapter.py", "_external"): "canonical",
     ("api/scan/action_adapter.py", "_external_batch"): "canonical",
     ("api/scan/action_adapter.py", "_nosqli_verify_batch"): "canonical",
+    # _external_batch's attempt id (manifest digest, family, candidate id), recomputed to tell
+    # which slice entries will be carried rather than funded.
+    ("api/scan/action_adapter.py", "needs_hold"): "canonical",
     # The batch attempt id: the manifest digest and the probe's canonical attempt key.
     ("api/scan/action_adapter.py", "_redirect_verify_batch"): "canonical",
     ("api/scan/action_adapter.py", "_request_mutation_batch"): "canonical",
