@@ -244,3 +244,8 @@ def test_certification_requires_the_seeded_upgrade_path_sweep():
     assert script.index("unset " + " ".join(LAUNCHER_IMAGE_OVERRIDES)) < script.index("== 1. install")
     # The candidate goes in through this tree's real installer, not a file copy.
     assert 'SHAKERSCAN_RAW_BASE="file://$ROOT"' in script and 'sh "$SMOKE_ROOT/candidate-index.sh"' in script
+    # Every locked image must be present, except the Model Intake images of an install that turned
+    # the module off: the launcher never pulls those.
+    assert "locked_pattern='^[A-Z_]*_IMAGE='" in script
+    assert "! grep -qx 'SHAKERSCAN_MODEL_INTAKE_ENABLED=false' \"$RUNTIME/.env\" || " \
+        "locked_pattern='^(SCANNER|API|UI)_IMAGE='" in script
