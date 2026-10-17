@@ -14,7 +14,10 @@ test('scan result fetches durable finding history for its exact target: one boun
   assert.match(detail, /limit: HISTORY_PAGE_SIZE, sort: '-severity', count: 'exact'/)
   // The card is told the history is partial and shows its count as a lower bound.
   assert.equal((detail.match(/partial=\{targetFindingsPartial\}/g) || []).length, 3)
-  assert.match(detail, /existingLowerBound \? 'at least ' : ''/)
+  // N is the exact total minus rows linked on one page, so it can only overstate: "up to N".
+  assert.match(detail, /const existingUpperBound = !serverCount && partial/)
+  assert.match(detail, /\{existingUpperBound \? 'up to ' : ''\}\{existingTotal\} not observed in this scan/)
+  assert.doesNotMatch(detail, /'at least ' : ''\}\{existingTotal\}/)
   assert.match(detail, /const HISTORY_PAGE_SIZE = 200/)
   // No loop over every active row any more.
   assert.doesNotMatch(detail, /HISTORY_ROW_CAP/)
