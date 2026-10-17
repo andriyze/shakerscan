@@ -5,12 +5,14 @@
     "SameHostCorsMiddleware",
     "CORSMiddleware",
     "UnsafeOriginGuardMiddleware",
+    "RequestGuardMiddleware",
     "PublicV2BodyLimitMiddleware",
     "PublicV2IdempotencyMiddleware",
     "LegacyHuntIsolationMiddleware"
   ],
   "exception_handlers": [
     "HTTPException",
+    "QueryCanceledError",
     "RequestValidationError",
     "ValueError",
     "WebSocketRequestValidationError"

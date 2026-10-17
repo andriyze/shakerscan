@@ -1,4 +1,5 @@
 import { API_URL, getApiErrorMessage } from './apiConfig'
+import { fetchHeavyRead } from './busyRetry.mjs'
 
 export interface ServiceEvidence {
   ref: string
@@ -124,7 +125,7 @@ export async function getServiceIntelligence(options: {
   if (options.search) params.set('search', options.search)
   params.set('limit', String(options.limit ?? 10))
   params.set('offset', String(options.offset ?? 0))
-  const response = await fetch(`${API_URL}/exposure/services?${params}`, { signal: options.signal, cache: 'no-store' })
+  const response = await fetchHeavyRead(`${API_URL}/exposure/services?${params}`, { signal: options.signal, cache: 'no-store' })
   if (!response.ok) throw new Error(await getApiErrorMessage(response, 'Failed to load service evidence'))
   return response.json()
 }

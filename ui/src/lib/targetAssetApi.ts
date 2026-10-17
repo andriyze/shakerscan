@@ -1,4 +1,5 @@
 import { API_URL, getApiErrorMessage } from './apiConfig'
+import { fetchHeavyRead } from './busyRetry.mjs'
 import type { CredentialProfile } from './credentialApi'
 import type { SharedServiceKnowledge } from '@/components/targets/SharedServicePorts'
 
@@ -110,8 +111,10 @@ export interface AssetDetail {
   authorization?: {approval_receipt_id: string; approved_by: string; inherited?: boolean; authority_target_id?: string} | null
 }
 
-async function request<T>(path: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(`${API_URL}${path}`, { cache: 'no-store', ...init })
+async function request<T>(path: string, init?: RequestInit, heavy = false): Promise<T> {
+  const options: RequestInit = { cache: 'no-store', ...init }
+  // A heavy read waits out admission (429/503 + Retry-After) instead of failing.
+  const response = heavy ? await fetchHeavyRead(`${API_URL}${path}`, options) : await fetch(`${API_URL}${path}`, options)
   if (!response.ok) throw new Error(await getApiErrorMessage(response, 'Target request failed'))
   return response.json() as Promise<T>
 }
@@ -135,7 +138,7 @@ export interface InventoryPage {
 export function getTargetAssets(params: InventoryQuery = {}, signal?: AbortSignal): Promise<InventoryPage> {
   const search = new URLSearchParams()
   for (const [key, value] of Object.entries(params)) if (value !== undefined && value !== '') search.set(key, String(value))
-  return request(`/targets/inventory?${search}`, { signal })
+  return request(`/targets/inventory?${search}`, { signal }, true)
 }
 export const getTargetAsset = (id: string, signal?: AbortSignal) => request<AssetDetail>(`/targets/${encodeURIComponent(id)}/asset`, { signal })
 export const getTargetAssetHistory = (id: string, kind: AssetHistoryKind, offset = 0, signal?: AbortSignal) => request<AssetHistory>(`/targets/${encodeURIComponent(id)}/history?${new URLSearchParams({kind,offset:String(offset),limit:'25'})}`, { signal })
