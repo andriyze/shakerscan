@@ -2,17 +2,23 @@
 
 import { useState } from 'react'
 import type { FindingRemediation } from '@/lib/api'
+import type { BriefCommand } from '@/lib/findingBrief'
 import { CopyButton } from './CopyButton'
 import { Section } from './Section'
 
 // Fix guidance: why it matters, the steps, a configuration example, and how to check the fix.
 // Guidance matched by title is labelled general: the knowledge base guessed the kind of issue.
 // Guidance from the check itself (no knowledge-base entry) is labelled as coming from the check.
-export function HowToFix({ remediation, toolSteps }: { remediation?: FindingRemediation | null; toolSteps: string[] }) {
-  const examples = remediation?.code_examples || []
+// Steps written for this finding's observed facts (the brief) lead; the knowledge base follows.
+export function HowToFix({ remediation, toolSteps, specificSteps = [], specificExamples = [], specificVerify = null }: {
+  remediation?: FindingRemediation | null; toolSteps: string[]
+  specificSteps?: string[]; specificExamples?: Array<{ label: string; code: string }>; specificVerify?: BriefCommand | null
+}) {
+  const examples = specificExamples.length ? specificExamples : remediation?.code_examples || []
   const [exampleIndex, setExampleIndex] = useState(0)
   const steps = remediation?.steps?.length ? remediation.steps : toolSteps
-  if (steps.length === 0) return null
+  const verification = specificVerify?.command || remediation?.verification || ''
+  if (steps.length === 0 && specificSteps.length === 0) return null
   const example = examples[Math.min(exampleIndex, examples.length - 1)]
   return (
     <Section
@@ -30,7 +36,21 @@ export function HowToFix({ remediation, toolSteps }: { remediation?: FindingReme
         </span>
       ) : undefined}
     >
+      {specificSteps.length > 0 && (
+        <div className="mb-4" data-testid="finding-fix-specific">
+          <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-gray-400">For this finding</p>
+          <ol className="space-y-2">
+            {specificSteps.map((step, i) => (
+              <li key={i} className="flex items-start gap-3 text-sm">
+                <span className="mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-sm border border-blue-700 text-xs text-blue-300">{i + 1}</span>
+                <span className="min-w-0 text-gray-100 wrap-break-word">{step}</span>
+              </li>
+            ))}
+          </ol>
+        </div>
+      )}
       {remediation?.impact && <p className="mb-3 text-sm text-gray-300">{remediation.impact}</p>}
+      {specificSteps.length > 0 && steps.length > 0 && <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-gray-400">General guidance</p>}
       <ol className="space-y-2">
         {steps.map((step, i) => (
           <li key={i} className="flex items-start gap-3 text-sm">
@@ -60,13 +80,14 @@ export function HowToFix({ remediation, toolSteps }: { remediation?: FindingReme
           <pre className="mt-2 overflow-x-auto rounded-md bg-gray-950 p-3 font-mono text-xs leading-5 text-gray-200">{example.code}</pre>
         </div>
       )}
-      {remediation?.verification && (
-        <div className="mt-4">
+      {verification && (
+        <div className="mt-4" data-testid="finding-fix-verify">
           <p className="text-xs font-medium text-gray-400">Check the fix</p>
           <div className="mt-1 flex items-start gap-2">
-            <code className="min-w-0 flex-1 overflow-x-auto whitespace-pre rounded-md bg-gray-950 px-3 py-2 font-mono text-xs text-gray-200">{remediation.verification}</code>
-            <CopyButton text={remediation.verification} label="Copy check command" />
+            <code className="min-w-0 flex-1 overflow-x-auto whitespace-pre-wrap break-all rounded-md bg-gray-950 px-3 py-2 font-mono text-xs text-gray-200">{verification}</code>
+            <CopyButton text={verification} label="Copy check command" />
           </div>
+          {specificVerify?.expect && <p className="mt-1 text-xs text-gray-400">Expect: <span className="text-gray-200">{specificVerify.expect}</span></p>}
         </div>
       )}
       {(remediation?.references?.length || 0) > 0 && (

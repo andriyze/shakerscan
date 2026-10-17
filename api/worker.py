@@ -203,6 +203,7 @@ from scan.capability_execution import (
     scan_sqli_verification_capability_allocation,
     scan_template_capability_allocation,
     scan_tls_capability_allocation,
+    tls_legacy_probes_affordable,
     scan_web_crawl_capability_allocation,
     scan_web_probe_capability_allocation,
     scan_xss_verification_capability_allocation,
@@ -457,11 +458,13 @@ except ImportError:
 try:
     from scan.finding_identity import canonical_finding_fingerprint
     from scan.finding_reconciliation import reconcile_legacy_finding_row
+    from scan.retired_findings import retire_after_scan
 except ModuleNotFoundError as exc:
     if exc.name not in {"findings", "scan"}:
         raise
     from api.scan.finding_identity import canonical_finding_fingerprint
     from api.scan.finding_reconciliation import reconcile_legacy_finding_row
+    from api.scan.retired_findings import retire_after_scan
 
 # Configuration
 REDIS_URL = os.environ.get('REDIS_URL', 'redis://localhost:6379')
@@ -10119,6 +10122,7 @@ async def _execute_scan_tls_capability(
     )
     if allocation is None:
         return _skipped_scan_tls_summary("insufficient_stage_budget")
+    legacy_probes = tls_legacy_probes_affordable(allocation, len(https_origins) * len(target.allowed_addresses))
     stored, idempotent_redelivery = await _execute_reserved_scan_capability(
         admission=admission,
         execution=execution,
@@ -10138,6 +10142,7 @@ async def _execute_scan_tls_capability(
         inline_operation=lambda: inspect_tls_binding(
             target=target,
             timeout_seconds_per_target=15,
+            legacy_probes=legacy_probes,
         ),
         canonical_action=canonical_action,
     )
@@ -13755,6 +13760,10 @@ async def process_scan_job(job_data: dict):
                 )
             except Exception as e:
                 print(f"[{job_id[:8]}] save_device_findings error: {e}", flush=True)
+
+        if target_id and not error:
+            await retire_after_scan(db_pool, scan_id=scan_id, target_id=target_id, report=result, findings=findings,
+                                    refresh_active_count=_refresh_target_active_finding_count, log_prefix=f"[{job_id[:8]}] ")
 
         if device_target_id and not error and (options or {}).get("run_kind") == "device_posture":
             try:

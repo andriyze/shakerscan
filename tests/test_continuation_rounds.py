@@ -153,6 +153,26 @@ def test_selection_keeps_admitted_work_and_reports_an_empty_round():
     ) is None
 
 
+def test_an_allocation_frozen_before_a_capability_existed_omits_its_optional_work():
+    # A Scan admitted before 2.11 holds an allocation without redirect.verify_batch. Its next
+    # round leaves the optional redirect batches out instead of failing the merge's
+    # "outside its allocation" guard; with the capability allocated they are kept.
+    _parent, continuation, _allocation = _plans()
+    assert any(a.capability_name == "redirect.verify_batch" and not a.required for a in continuation.actions)
+    everything = {a.capability_name for a in continuation.actions}
+    frozen = select_continuation_actions(
+        continuation, parent_action_count=10, include_finalizer=False, finalize_only=False,
+        allowed_capabilities=everything - {"redirect.verify_batch"},
+    )
+    assert frozen is not None
+    assert "redirect.verify_batch" not in {a.capability_name for a in frozen.actions}
+    current = select_continuation_actions(
+        continuation, parent_action_count=10, include_finalizer=False, finalize_only=False,
+        allowed_capabilities=everything,
+    )
+    assert "redirect.verify_batch" in {a.capability_name for a in current.actions}
+
+
 def test_inferred_origin_selection_is_reused_across_continuation():
     from api.runtime.models import TargetBinding
     from api.scan.capability_result import CapabilityResultStatus

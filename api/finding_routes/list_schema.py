@@ -137,6 +137,11 @@ FINDINGS_LIST_SCHEMA_STATEMENTS += (f"""
         END IF;
     END $$""",)
 
+#: The keys the finding page's related-findings query (finding_detail.RELATED_SQL) filters by: a
+#: URL's lower-cased scheme and authority, and the certificate fingerprint a TLS finding names.
+FINDING_ORIGIN_SQL = "lower(substring(url from '^[^:/?#]+://[^/?#]*'))"
+FINDING_CERTIFICATE_SQL = "COALESCE(evidence->>'certificate_sha256', evidence->'certificate'->>'sha256')"
+
 #: (name, definition after ``ON``), built by runtime/loop_scale_indexes.py.
 FINDINGS_LIST_INDEXES: tuple[tuple[str, str], ...] = (
     # Keyset for the default list order: severity, then last seen, then id.
@@ -159,6 +164,13 @@ FINDINGS_LIST_INDEXES: tuple[tuple[str, str], ...] = (
     ("idx_findings_proof_candidates", f"findings (target_id) WHERE {PROOF_CANDIDATE_PREDICATE}"),
     # The few rows whose proof the SQL projection cannot decide (proof_sql.triage_string_sql).
     ("idx_findings_triage_string", "findings (id) WHERE jsonb_typeof(evidence -> 'triage') = 'string'"),
+    # The finding page's related findings (finding_detail.RELATED_SQL): a target's active rows on
+    # one origin, and the few that name a certificate. The expressions are that query's exact text.
+    ("idx_findings_active_target_origin",
+     f"findings (target_id, ({FINDING_ORIGIN_SQL})) WHERE status = 'active'"),
+    ("idx_findings_active_target_certificate",
+     f"findings (target_id, ({FINDING_CERTIFICATE_SQL}))"
+     f" WHERE status = 'active' AND {FINDING_CERTIFICATE_SQL} IS NOT NULL"),
 )
 
 #: Trigram indexes for the list's ILIKE search; skipped (with a warning) without pg_trgm.

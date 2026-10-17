@@ -5,6 +5,8 @@ import hashlib
 import json
 import uuid
 
+import pytest
+
 from api.runtime.observation_manifests import ObservationManifest
 from api.scan.action_plan import ScanActionPlan
 from api.scan.capability_result import (
@@ -455,7 +457,7 @@ def test_finalizer_names_the_specific_header_reported_by_nuclei():
         "name": "HTTP Missing Security Headers",
         "severity": "info",
         "matched_at": "https://app.example.test/",
-        "matcher_name": "x-permitted-cross-domain-policies",
+        "matcher_name": "x-content-type-options",
     },)}
 
     report = finalize_scan_report(
@@ -468,10 +470,10 @@ def test_finalizer_names_the_specific_header_reported_by_nuclei():
     assert len(report["findings"]) == 1
     finding = report["findings"][0]
     assert finding["title"] == (
-        "Missing HTTP response header: X-Permitted-Cross-Domain-Policies"
+        "Missing HTTP response header: X-Content-Type-Options"
     )
     assert finding["evidence"]["header_name"] == (
-        "x-permitted-cross-domain-policies"
+        "x-content-type-options"
     )
 
 
@@ -580,9 +582,13 @@ def _baseline_and_header_matches(security_headers, matchers):
         plan=plan, target_url="https://app.example.test",
         action_results=results, observations=observations,
     )
+    # A header the baseline itself proves absent is reported once, by the baseline finding
+    # (the template's duplicate is folded into it); the others remain template findings.
     return {
-        item["evidence"]["header_name"]: item for item in report["findings"]
+        (item["evidence"].get("header_name") or item["evidence"].get("header")): item
+        for item in report["findings"]
         if item["evidence"].get("template_id") == "http-missing-security-headers"
+        or str(item["evidence"].get("check") or "").startswith("missing_header_")
     }
 
 
@@ -592,7 +598,7 @@ def test_a_missing_header_finding_carries_the_recorded_response_that_lacks_it():
     response headers, so the finding carries that request line, status and header set."""
     by_header = _baseline_and_header_matches(
         {"x-frame-options": "DENY", "server": "nginx"},
-        ["permissions-policy", "x-frame-options", "x-permitted-cross-domain-policies"],
+        ["permissions-policy", "x-frame-options", "x-xss-protection"],
     )
     observed = by_header["permissions-policy"]["evidence"]["observed_response"]
     assert observed == {
@@ -606,7 +612,7 @@ def test_a_missing_header_finding_carries_the_recorded_response_that_lacks_it():
     # A header the baseline saw contradicts the match there: no contradicting response is attached.
     assert "observed_response" not in by_header["x-frame-options"]["evidence"]
     # A header the baseline never records cannot be claimed absent from it.
-    assert "observed_response" not in by_header["x-permitted-cross-domain-policies"]["evidence"]
+    assert "observed_response" not in by_header["x-xss-protection"]["evidence"]
 
 
 def test_the_recorded_header_set_matches_what_the_http_capability_records():
@@ -1382,13 +1388,13 @@ def test_a_missing_header_the_baseline_application_response_lacks_is_verified():
     baseline saw, or one it never records, stays a candidate."""
     by_header = _baseline_and_header_matches(
         {"x-frame-options": "DENY", "server": "nginx"},
-        ["permissions-policy", "x-frame-options", "x-permitted-cross-domain-policies"],
+        ["permissions-policy", "x-frame-options", "x-xss-protection"],
     )
     proven = by_header["permissions-policy"]
     assert proven["proof_state"] == "verified" and proven["verified"] is True
     assert proven["proof_contract_v2"]["predicate"]["satisfied"] is True
     assert proven["proof_contract_v2"]["contract_id"] == "scan.http.request.http_observation"
-    for header in ("x-frame-options", "x-permitted-cross-domain-policies"):
+    for header in ("x-frame-options", "x-xss-protection"):
         assert by_header[header]["proof_state"] == "candidate", header
         assert by_header[header]["verified"] is False
 
@@ -1401,6 +1407,9 @@ def test_a_redirect_baseline_does_not_verify_a_missing_header(monkeypatch):
                 for origin, row in original(observations).items()}
 
     monkeypatch.setattr(finalizer_module, "_baseline_header_responses", as_redirect)
+    # Isolate the template-attachment rule: keep the template finding instead of folding it.
+    monkeypatch.setattr(finalizer_module, "_fold_duplicate_header_findings", lambda findings: [
+        item for item in findings if item.get("tool") != "http_baseline"])
     by_header = _baseline_and_header_matches({"server": "nginx"}, ["permissions-policy"])
     finding = by_header["permissions-policy"]
     assert finding["evidence"]["observed_response"]["response_status"] == 302
@@ -1479,9 +1488,9 @@ def test_a_stored_baseline_observation_still_proves_a_session_cookie_flag():
     ]
 
 
-def _redirecting_origin_header_matches(
+def _redirecting_origin_report(
     landing_url: str, *, origin: str = "http://dvwa.example.test",
-    root_principal: str | None = None,
+    root_principal: str | None = None, matcher: str = "x-frame-options",
 ):
     baseline = _action("baseline.http", 0, capability_name="http.request")
     landing = _action("baseline.http_redirect", 1, dependencies=(baseline.action_id,),
@@ -1516,13 +1525,38 @@ def _redirecting_origin_header_matches(
         templates.action_id: ({
             "kind": "template_match", "template_id": "http-missing-security-headers",
             "name": "HTTP Missing Security Headers", "severity": "info",
-            "matched_at": f"{origin}/", "matcher_name": "x-frame-options",
+            "matched_at": f"{origin}/", "matcher_name": matcher,
         },),
     }
-    report = finalize_scan_report(plan=plan, target_url=origin, action_results=results,
-                                  observations=observations)
+    return finalize_scan_report(plan=plan, target_url=origin, action_results=results,
+                                observations=observations)
+
+
+def _redirecting_origin_header_matches(landing_url: str, **kwargs):
+    report = _redirecting_origin_report(landing_url, **kwargs)
     return [item for item in report["findings"]
             if item["evidence"].get("template_id") == "http-missing-security-headers"]
+
+
+@pytest.mark.parametrize("origin,landing", [
+    ("http://dvwa.example.test", "http://dvwa.example.test/login.php"),
+    ("https://app.example.test", "https://app.example.test/login"),
+])
+def test_a_redirected_origin_reports_a_missing_baseline_header_once(origin, landing):
+    # The root answers 302 without CSP, so the baseline proves the header missing; the passive
+    # template reports the same header and the redirect landing would verify it too. The origin
+    # gets ONE CSP finding -- the baseline's, carrying the template's matched pages -- never a
+    # baseline finding beside a separately verified nuclei twin.
+    report = _redirecting_origin_report(landing, origin=origin, matcher="content-security-policy")
+    csp = [
+        item for item in report["findings"]
+        if item["evidence"].get("header_name") == "content-security-policy"
+        or item["evidence"].get("check") == "missing_header_content-security-policy"
+    ]
+    assert len(csp) == 1
+    [finding] = csp
+    assert finding["tool"] == "http_baseline"
+    assert finding["evidence"]["also_reported_by"] == "nuclei:http-missing-security-headers"
 
 
 def test_a_root_redirect_is_proven_from_the_same_origin_landing_page():

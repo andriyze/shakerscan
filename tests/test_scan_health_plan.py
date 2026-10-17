@@ -26,7 +26,14 @@ def compile_plan(**kwargs):
 def test_health_samples_share_action_authority_budget_and_dependencies():
     plan = compile_plan()
     samples = [row for row in plan.actions if "authentication_profile_ref" in row.capability_args]
-    assert len(samples) == 6  # Before/after each of the three HTTP baseline actions.
+    # Before/after each of the five HTTP baseline actions: the root, its redirect landing,
+    # security.txt, and the two CORS preflight probes (2.11) -- every credentialed action is wrapped.
+    assert len(samples) == 10
+    assert {row.action_id.removeprefix("health.before.primary.") for row in samples
+            if row.action_id.startswith("health.before.")} == {
+        "baseline.http", "baseline.http_redirect", "baseline.security_txt", "baseline.cors",
+        "baseline.cors_null",
+    }
     assert all(row.capability_name == "http.request" and row.required and row.supporting for row in samples)
     assert all(dict(row.requested_budget) == {"http_requests": 1, "tool_wall_seconds": 15} for row in samples)
     assert all(tuple(row.placement["eligible_backends"]) == ("local",) for row in plan.actions)

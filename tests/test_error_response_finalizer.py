@@ -33,7 +33,9 @@ def report_for(item):
 def test_stack_disclosure_becomes_a_finding_with_its_observed_500_and_v2_contract():
     report = report_for(observation())
     finding, = report['findings']
-    assert finding['verified'] is True and finding['severity'] == 'medium'
+    # Calibrated: a stack trace without a proven secret is low; the producer's medium is kept.
+    assert finding['verified'] is True and finding['severity'] == 'low'
+    assert finding['evidence']['severity_basis']['producer_severity'] == 'medium'
     assert finding['evidence']['proof_contract'] == 'verbose_error_exposure/v2'
     assert finding['evidence']['response_status'] == 500
     assert 'content withheld' in finding['evidence']['redacted_excerpt']

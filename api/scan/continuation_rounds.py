@@ -16,7 +16,7 @@ from __future__ import annotations
 import json
 import uuid
 from dataclasses import dataclass, replace
-from typing import Any, Awaitable, Callable, Mapping
+from typing import Any, Awaitable, Callable, Iterable, Mapping
 
 from .action_plan import (
     ScanAction,
@@ -131,13 +131,21 @@ def select_continuation_actions(
     parent_action_count: int,
     include_finalizer: bool,
     finalize_only: bool,
+    allowed_capabilities: Iterable[str] | None = None,
 ) -> ScanActionPlan | None:
     """Keep only the admitted work of one round as an independently valid plan.
 
     Optional actions whose dependencies were skipped are omitted rather than appended as
     terminal noise. Returns ``None`` when a work round admitted nothing, which is the
     round loop's stop signal.
+
+    ``allowed_capabilities`` is the scan's continuation allocation. An optional action of a
+    capability it does not grant -- one a newer release added to a family after this Scan's
+    allocation was frozen, such as ``redirect.verify_batch`` on a Scan admitted before 2.11 --
+    is omitted rather than appended, so an in-flight Scan keeps running after an upgrade. A
+    required action is kept and still meets the merge's "outside its allocation" guard.
     """
+    allowed = None if allowed_capabilities is None else frozenset(allowed_capabilities)
     selected: list[ScanAction] = []
     selected_ids: set[str] = set()
     append_slots = max(0, _PLAN_ACTION_BOUND - parent_action_count)
@@ -155,6 +163,8 @@ def select_continuation_actions(
         if action.action_id == "finalize.report":
             continue
         lane = str(action.capability_args.get("continuation_work_key") or "")
+        if allowed is not None and not action.required and action.capability_name not in allowed:
+            continue
         if (
             finalize_only or action.admission_status != "planned"
             or lane in interrupted_lanes
@@ -434,6 +444,7 @@ def compile_continuation_round(
         parent_action_count=len(parent_plan.actions),
         include_finalizer=include_finalizer,
         finalize_only=finalize_only,
+        allowed_capabilities=allocation.allowed_capabilities,
     )
     if continuation_plan is None:
         return None

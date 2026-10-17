@@ -39,6 +39,11 @@ def reference_url(value: Any) -> str | None:
     return value
 
 
+# The index built for the snapshot object last loaded. The loader returns the same verified object
+# until the file changes, so an unchanged snapshot is indexed once per process, not per request.
+_INDEXED: dict[str, tuple[dict[str, Any], Callable[..., Any]]] = {}
+
+
 def load_service_intelligence() -> tuple[dict[str, Any], Callable[..., Any]]:
     """Reuse the device intelligence trust boundary; never fetch a live feed."""
     try:
@@ -48,11 +53,9 @@ def load_service_intelligence() -> tuple[dict[str, Any], Callable[..., Any]]:
     snapshot = device_advisories.load_verified_snapshot(
         os.environ.get("DEVICE_INTEL_DB_PATH"), os.environ.get("DEVICE_INTEL_DB_SHA256"),
     )
-    # The loader returns the same verified object while the file is unchanged; its index is built
-    # once per object (about 0.25 s for the bundled 23k advisories), not once per request.
-    cached = _INDEX_CACHE.get("built")
+    cached = _INDEXED.get("current")
     if cached is not None and cached[0] is snapshot:
-        return cached[0], cached[1]
+        return cached
     # Build a request-local candidate index once. Matching the entire custom
     # snapshot for every visible listener would turn one page into O(S * CVEs).
     records = [row for row in snapshot.get("advisories", []) if isinstance(row, Mapping)]
@@ -83,12 +86,9 @@ def load_service_intelligence() -> tuple[dict[str, Any], Callable[..., Any]]:
     def indexed_matcher(_records, *, cpe, product, version, identity_evidence_tier=None, limit=50):
         return lookup(cpe, product, version, limit)
 
-    _INDEX_CACHE["built"] = (snapshot, indexed_matcher)
+    if snapshot.get("status") == "available":
+        _INDEXED["current"] = (snapshot, indexed_matcher)
     return snapshot, indexed_matcher
-
-
-#: The last snapshot object and its matcher (an uncached "not configured" result is rebuilt).
-_INDEX_CACHE: dict[str, tuple[dict[str, Any], Callable[..., Any]]] = {}
 
 
 def snapshot_summary(snapshot: Mapping[str, Any]) -> dict[str, Any]:
