@@ -6,6 +6,7 @@ import { SEVERITY_RAIL_CLASSES, type FindingSourceType, type SeverityLevel } fro
 import { cn } from '@/lib/cn'
 import { formatRelativeTime } from '@/lib/format'
 import { findingHost, findingLocation, findingSubject, retestSignal } from '@/lib/findingGroups'
+import { retirementBadge, retirementLabel } from '@/lib/findingFreshness'
 import {
   FindingStatusBadge,
   ProofStateBadge,
@@ -144,7 +145,15 @@ export function FindingRow({
         <span className="flex min-w-0 items-center gap-3 sm:max-w-[48%]">
           <FindingWhere finding={finding} sourceType={sourceType} />
           <RetestNote finding={finding} />
-          {showStatus && <FindingStatusBadge status={finding.status} />}
+          {/* Retired by a release is not a fix: said even where the status column is hidden. */}
+          {retirementBadge(finding) ? (
+            <span
+              className="shrink-0 rounded-sm bg-gray-800 px-1.5 py-0.5 text-xs font-medium text-gray-300"
+              title={retirementLabel(finding) || undefined}
+            >
+              {retirementBadge(finding)}
+            </span>
+          ) : showStatus && <FindingStatusBadge status={finding.status} />}
           <LastSeen value={finding.last_seen_at} />
         </span>
       </Link>

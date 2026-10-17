@@ -37,6 +37,7 @@ except ModuleNotFoundError:  # package import in host-side tests
     )
 
 from .hunt_scope import finding_hunt_predicate
+from .retirement import not_retired_sql, resolution_reason_sql, retirement_record, retirement_sql
 from .list_filters import host_in_domain_sql
 from .list_schema import (
     FIRST_SEEN_SORT_SQL,
@@ -93,6 +94,9 @@ ROW_EXTRA_COLUMNS: dict[str, str] = {
     "latest_retest_confidence": "COALESCE(latest_retest.confidence, f.last_verification_confidence)",
     "latest_retest_completed_at": "COALESCE(latest_retest.completed_at, f.last_verified_at)",
     "latest_retest_mode": LATEST_RETEST_MODE_SQL,
+    # A resolved row a release retired is not a fix (finding_routes.retirement).
+    "resolution_reason": resolution_reason_sql("f"),
+    "retirement": retirement_sql("f"),
 }
 
 # The proof projection for a fetched row (latest retest from the LATERAL) ...
@@ -276,8 +280,10 @@ class FindingFilters:
             where.append(
                 f"f.first_seen_at >= NOW() - INTERVAL '1 day' * {params.add(self.first_seen_within_days)}")
         if self.resolved_within_days:
+            # Resolved recently means fixed or triaged recently; a release's retirement is neither.
             where.append(
-                f"f.resolved_at >= NOW() - INTERVAL '1 day' * {params.add(self.resolved_within_days)}")
+                f"f.resolved_at >= NOW() - INTERVAL '1 day' * {params.add(self.resolved_within_days)}"
+                f" AND {not_retired_sql('f')}")
         return where
 
 
@@ -380,6 +386,13 @@ def apply_proof(row: Mapping[str, Any], project: Callable[[dict[str, Any]], dict
         fields = {"is_verified": state == "verified", "is_suspected": state == "suspected",
                   "proof_state": state}
     item.update(fields)
+    return _with_retirement(item)
+
+
+def _with_retirement(item: dict[str, Any]) -> dict[str, Any]:
+    """The row's stored retirement record as the labelled one the detail view shows."""
+    if "retirement" in item:
+        item["retirement"] = retirement_record(item["retirement"])
     return item
 
 
@@ -505,7 +518,7 @@ def finish_v1_row(row: Mapping[str, Any], project: Callable[[dict[str, Any]], di
         for name in ("proof_state", "is_verified", "is_suspected"):
             if name in item:
                 item[name] = fields[name]
-    return item
+    return _with_retirement(item)
 
 
 async def v1_page(

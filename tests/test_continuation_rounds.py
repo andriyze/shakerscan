@@ -351,3 +351,79 @@ def test_a_cancelled_scan_gets_no_more_work_but_a_finalize_only_revision_for_its
     appended = prepared.plan.actions[len(parent.actions):]
     assert [action.action_id for action in appended] == ["finalize.report"]
     assert prepared.revision.parent_plan_digest == parent.plan_digest
+
+
+def test_ungranted_optional_work_is_filtered_before_admission_and_recorded():
+    """A Scan frozen before redirect.verify_batch existed: the batches are left out before the
+    residual is allocated (they never hold budget), and the option patch names the capability so
+    the report states ``capability_not_in_allocation:redirect.verify_batch``."""
+    import api.scan.continuation_rounds as rounds
+    from api.scan.continuation_rounds import (
+        OMITTED_CAPABILITIES_OPTION, compile_continuation_round, without_unallocated_optional_actions,
+    )
+
+    _parent, continuation, _allocation = _plans()
+    everything = {a.capability_name for a in continuation.actions}
+    filtered, omitted = without_unallocated_optional_actions(continuation, everything - {"redirect.verify_batch"})
+    assert omitted == {"redirect.verify_batch"}
+    assert "redirect.verify_batch" not in {a.capability_name for a in filtered.actions}
+    assert [a.ordinal for a in filtered.actions] == list(range(len(filtered.actions)))
+    finalizer = next(a for a in filtered.actions if a.action_id == "finalize.report")
+    assert set(finalizer.dependencies) <= {a.action_id for a in filtered.actions}
+    # Nothing to leave out: the very same plan, so an ordinary round's digests are unchanged.
+    assert without_unallocated_optional_actions(continuation, everything) == (continuation, frozenset())
+    assert without_unallocated_optional_actions(continuation, None) == (continuation, frozenset())
+
+    fixture = _shared_round_fixture()
+    _settle_round_fixture(fixture)
+    current = compile_continuation_round(**fixture, revision_number=1, include_finalizer=False, finalize_only=False)
+    assert OMITTED_CAPABILITIES_OPTION not in current.options
+    granted = set(fixture["allocation"].allowed_capabilities)
+    assert "redirect.verify_batch" in {a.capability_name for a in current.plan.actions}
+
+    fixture["allocation"] = replace(
+        fixture["allocation"], allowed_capabilities=tuple(sorted(granted - {"redirect.verify_batch"})),
+        allocation_digest=None,
+    )
+    admitted = []
+    real_allocate = rounds.allocate_scan_action_plan
+
+    def spy(plan, *args, **kwargs):
+        admitted.append({a.capability_name for a in plan.actions})
+        return real_allocate(plan, *args, **kwargs)
+
+    rounds.allocate_scan_action_plan = spy
+    try:
+        frozen = compile_continuation_round(
+            **fixture, revision_number=1, include_finalizer=False, finalize_only=False,
+        )
+    finally:
+        rounds.allocate_scan_action_plan = real_allocate
+    assert admitted and "redirect.verify_batch" not in admitted[0], "never admitted against the residual"
+    assert "redirect.verify_batch" not in {a.capability_name for a in frozen.plan.actions}
+    assert frozen.options[OMITTED_CAPABILITIES_OPTION] == ["redirect.verify_batch"]
+    # A later round keeps what an earlier one recorded.
+    fixture["options"] = {**fixture["options"], OMITTED_CAPABILITIES_OPTION: ["older.capability"]}
+    later = compile_continuation_round(**fixture, revision_number=1, include_finalizer=False, finalize_only=False)
+    assert later.options[OMITTED_CAPABILITIES_OPTION] == ["older.capability", "redirect.verify_batch"]
+
+
+def test_the_report_states_each_capability_left_out_without_degrading_coverage():
+    from api.scan.capability_result import CapabilityResultStatus
+    from api.scan.finalizer import finalize_scan_report
+    from tests.test_scan_orchestrator import _result
+
+    _parent, continuation, _allocation = _plans()
+    finalizer = next(a for a in continuation.actions if a.action_id == "finalize.report")
+    results = {
+        a.action_id: _result(a, status=CapabilityResultStatus.SUCCESS)
+        for a in continuation.actions if a.action_id != finalizer.action_id
+    }
+    kwargs = dict(plan=continuation, target_url="https://app.example.test", action_results=results,
+                  observations={action_id: () for action_id in results})
+    plain = finalize_scan_report(**kwargs)
+    stated = finalize_scan_report(**kwargs, omitted_capabilities=("redirect.verify_batch",))
+    assert "capability_not_in_allocation:redirect.verify_batch" in stated["coverage"]["reasons"]
+    assert not any(r.startswith("capability_not_in_allocation") for r in plain["coverage"]["reasons"])
+    assert stated["coverage"]["status"] == plain["coverage"]["status"]
+    assert stated["report_digest"] != plain["report_digest"], "the reason is part of the digest-bound report"
