@@ -927,7 +927,7 @@ jobs:
 
       - name: Download digests
         if: needs.meta.outputs.prebuilt_run_id == ''
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
         with:
           path: /tmp/digests
           pattern: "*-digests-*"
@@ -1287,19 +1287,19 @@ jobs:
           fetch-depth: 0
 
       - name: Download immutable manifest receipt
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
         with:
           name: release-candidate-uncertified-${{ needs.meta.outputs.version }}-${{ needs.meta.outputs.candidate_sha }}
           path: artifacts/uncertified
 
       - name: Download exact-source Python contract report
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
         with:
           name: source-contracts-${{ needs.meta.outputs.candidate_sha }}
           path: artifacts/certification
 
       - name: Download the exact-source database-backed report
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
         with:
           name: source-postgres-${{ needs.meta.outputs.candidate_sha }}
           path: artifacts/certification
