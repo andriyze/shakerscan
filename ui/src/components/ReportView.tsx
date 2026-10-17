@@ -3593,7 +3593,7 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
               const canTrackFinding = Boolean(persistedFinding)
               return (
                 <div key={idx}>
-                  <FindingCard finding={observedReportFinding(finding, persistedFinding, scan.completed_at || scan.updated_at) as typeof finding} />
+                  <FindingCard finding={observedReportFinding(finding, persistedFinding, scan.completed_at || scan.updated_at) as typeof finding} findingId={persistedFinding?.id ? String(persistedFinding.id) : null} />
                   {enableRemediationTracking && canTrackFinding && (
                     <div className="mt-2 ml-4 pl-4 border-l-2 border-gray-700">
                       <FindingActions

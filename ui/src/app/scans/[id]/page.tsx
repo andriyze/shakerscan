@@ -1,5 +1,6 @@
 'use client'
 
+import { CopyButton } from '@/components/CopyButton'
 import { useEffect, useMemo, useState, Suspense, useRef } from 'react'
 import { usePoll } from '@/lib/usePoll'
 import { isAbortError } from '@/lib/fetchLayer.mjs'
@@ -2169,13 +2170,6 @@ function ScanDetailContent() {
       { value: 'warnings', label: 'Warnings & errors' },
       { value: 'findings', label: 'Finding signals' },
     ]
-    const copyVisibleLogs = async () => {
-      try {
-        await navigator.clipboard.writeText(filteredLogs.map((entry: any) => entry.raw).join('\n'))
-      } catch {
-        setLogsError('Could not copy logs to the clipboard.')
-      }
-    }
     return (
       <Card className="overflow-hidden p-0">
         <div className="border-b border-gray-800 p-4">
@@ -2194,14 +2188,19 @@ function ScanDetailContent() {
             </div>
             <div className="flex items-center gap-2 text-xs text-gray-500">
               <span>{filteredLogs.length} shown · {logs.length} total</span>
-              <button
-                type="button"
-                onClick={copyVisibleLogs}
-                disabled={filteredLogs.length === 0}
-                className="rounded-sm border border-gray-700 px-2 py-1 text-gray-300 hover:border-gray-600 hover:text-white disabled:cursor-not-allowed disabled:opacity-40"
-              >
-                Copy shown
-              </button>
+              {filteredLogs.length > 0 ? (
+                <CopyButton
+                  text={() => filteredLogs.map((entry: any) => entry.raw).join('\n')}
+                  label="Copy shown logs"
+                  className="inline-flex items-center gap-1 rounded-sm border border-gray-700 px-2 py-1 text-gray-300 hover:border-gray-600 hover:text-white"
+                >
+                  Copy shown
+                </CopyButton>
+              ) : (
+                <button type="button" disabled className="rounded-sm border border-gray-700 px-2 py-1 text-gray-300 disabled:cursor-not-allowed disabled:opacity-40">
+                  Copy shown
+                </button>
+              )}
             </div>
           </div>
           <div className="mt-3 flex flex-wrap items-center gap-2">

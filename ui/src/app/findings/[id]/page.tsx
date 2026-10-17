@@ -47,6 +47,7 @@ import {
   useToast,
 } from '@/components/ui'
 import { CopyButton } from '@/components/findings/detail/CopyButton'
+import { findingLink } from '@/lib/copyText'
 import { HowToFix } from '@/components/findings/detail/HowToFix'
 import { EvidenceObjectsList } from '@/components/findings/detail/EvidenceObjectsList'
 import { ExceptionDialog, type ExceptionFormValues } from '@/components/findings/detail/ExceptionDialog'
@@ -741,6 +742,9 @@ function FindingDetailContent() {
           </div>
 
           <div className="flex flex-wrap items-center gap-2 lg:max-w-md lg:justify-end">
+            <CopyButton text={() => findingLink(finding.id)} label="Copy link to this finding" testId="finding-copy-link">
+              Copy link
+            </CopyButton>
             <label className="flex items-center gap-2 text-xs text-gray-500">
               Status
               <select

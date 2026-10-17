@@ -1,8 +1,9 @@
 'use client'
 
+import { CopyButton } from '@/components/CopyButton'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import Link from '@/components/WorkspaceLink'
-import { Activity, Bot, CheckCircle2, Clipboard, Download, FileText, LockKeyhole, RefreshCw, Server, ShieldAlert } from 'lucide-react'
+import { Activity, Bot, CheckCircle2, Download, FileText, LockKeyhole, RefreshCw, Server, ShieldAlert } from 'lucide-react'
 import { Card, useToast } from '@/components/ui'
 import { DeleteRecordsButton } from '@/components/lifecycle/DeleteRecordsButton'
 import { createRandomUUID } from '@/lib/clientRandom'
@@ -1172,7 +1173,7 @@ export function ControlledModelIntakeWorkflow({
             <button type="button" className={buttonClass} disabled={!plannerSessionId || !plannerReply.trim() || busy === 'planner-reply'} onClick={submitPlannerReply}>Submit bounded turn</button>
           </div>
           <div className="min-w-0">
-            <div className="mb-2 flex items-center justify-between text-xs text-gray-400"><span>Controller observation</span>{plannerObservation && <button type="button" className={buttonClass} onClick={() => void navigator.clipboard.writeText(plannerObservation)}><Clipboard className="h-3 w-3" /> Copy</button>}</div>
+            <div className="mb-2 flex items-center justify-between text-xs text-gray-400"><span>Controller observation</span>{plannerObservation && <CopyButton text={plannerObservation} label="Copy controller observation" className={buttonClass}>Copy</CopyButton>}</div>
             <pre className="min-h-64 max-h-136 overflow-auto whitespace-pre-wrap wrap-break-word rounded-sm border border-gray-800 bg-gray-900 p-3 text-[11px] text-gray-300">{plannerObservation || 'Start a session to receive the self-describing planner contract.'}</pre>
           </div>
         </div>
