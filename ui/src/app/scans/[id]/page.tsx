@@ -801,8 +801,10 @@ function ScanFindingContextCard({
   const existingTotal = serverCount
     ? carriedCount
     : Math.max(0, targetFindingsTotal - persistedCurrentCount)
-  // Without the release gate's count, a partial history makes this number a lower bound.
-  const existingLowerBound = !serverCount && partial
+  // Without the release gate's count, a partial history makes this number an upper bound: it is
+  // the exact total minus only the rows linked on the page read, so linked rows beyond it are
+  // still counted.
+  const existingUpperBound = !serverCount && partial
   const provenCount = current.filter(isProvenFinding).length
   const targetFindingsHref = `/findings?target_id=${scan.target_id}&status=active&freshness=all`
 
@@ -815,7 +817,7 @@ function ScanFindingContextCard({
           {scan?.target_id && (
             <Link href={targetFindingsHref} className="rounded-sm bg-gray-800 px-2 py-1 text-gray-300 hover:text-white"
               title="Open findings on this target that earlier scans found and this run did not observe; they count toward the release decision">
-              {existingLowerBound ? 'at least ' : ''}{existingTotal} not observed in this scan
+              {existingUpperBound ? 'up to ' : ''}{existingTotal} not observed in this scan
             </Link>
           )}
           {current.length > 0 && (
@@ -834,7 +836,7 @@ function ScanFindingContextCard({
         <p role="alert" className="px-4 py-3 text-sm text-amber-300">{error}</p>
       ) : current.length === 0 ? (
         <p className="px-4 py-3 text-sm text-gray-500">
-          No findings were reported by this scan.{existingTotal > 0 ? ` The target has ${existingLowerBound ? 'at least ' : ''}${existingTotal} earlier saved findings; use the link above to review them.` : ''}
+          No findings were reported by this scan.{existingTotal > 0 ? ` The target has ${existingUpperBound ? 'up to ' : ''}${existingTotal} earlier saved findings; use the link above to review them.` : ''}
         </p>
       ) : (
         // Only this run's observations are listed; earlier findings on the target stay a count and
