@@ -1,5 +1,6 @@
 'use client'
 
+import { pathSegment } from '@/lib/apiPath.mjs'
 import { useState } from 'react'
 import { Archive } from 'lucide-react'
 import { API_URL, getApiErrorMessage } from '@/lib/apiConfig'
@@ -20,7 +21,7 @@ export function RetireDeviceButton({ deviceId, name, onRetired }: {
     setBusy(true)
     setError(null)
     try {
-      const response = await fetch(`${API_URL}/devices/${encodeURIComponent(deviceId)}`, { method: 'DELETE' })
+      const response = await fetch(`${API_URL}/devices/${pathSegment(deviceId)}`, { method: 'DELETE' })
       if (!response.ok) throw new Error(await getApiErrorMessage(response, 'Could not retire device'))
       setOpen(false)
       toast.success('Device retired')

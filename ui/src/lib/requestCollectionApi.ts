@@ -1,3 +1,4 @@
+import { pathSegment } from './apiPath.mjs'
 import { API_URL, getApiErrorMessage } from './apiConfig'
 import type {
   RequestCollectionBindingUpsert as GeneratedRequestCollectionBindingUpsert,
@@ -129,7 +130,7 @@ export async function listRequestCollectionLibrary(params: { search?: string; li
 
 export async function getRequestCollection(collectionId: string): Promise<RequestCollectionDetail> {
   const response = await fetch(
-    `${API_URL}/request-collections/${encodeURIComponent(collectionId)}`,
+    `${API_URL}/request-collections/${pathSegment(collectionId)}`,
     { cache: 'no-store' },
   )
   if (!response.ok) throw new Error(await getApiErrorMessage(response, 'Failed to load request collection'))
@@ -153,7 +154,7 @@ export async function listRequestCollectionInventory(
     offset: String(params.offset ?? 0),
   })
   const response = await fetch(
-    `${API_URL}/request-collections/${encodeURIComponent(collectionId)}/requests?${search}`,
+    `${API_URL}/request-collections/${pathSegment(collectionId)}/requests?${search}`,
     { cache: 'no-store' },
   )
   if (!response.ok) throw new Error(await getApiErrorMessage(response, 'Failed to load request inventory'))
@@ -181,7 +182,7 @@ export async function upsertRequestCollectionEnvironment(
   payload: GeneratedRequestCollectionEnvironmentCreate,
 ): Promise<{ environment: RequestCollectionEnvironment }> {
   const response = await fetch(
-    `${API_URL}/request-collections/${encodeURIComponent(collectionId)}/environments`,
+    `${API_URL}/request-collections/${pathSegment(collectionId)}/environments`,
     {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -197,7 +198,7 @@ export async function upsertRequestCollectionBinding(
   payload: GeneratedRequestCollectionBindingUpsert,
 ): Promise<{ binding: RequestCollectionBinding }> {
   const response = await fetch(
-    `${API_URL}/request-collections/${encodeURIComponent(collectionId)}/bindings`,
+    `${API_URL}/request-collections/${pathSegment(collectionId)}/bindings`,
     {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -221,7 +222,7 @@ export async function upsertRequestCollectionSelection(
   }
 }> {
   const response = await fetch(
-    `${API_URL}/request-collections/${encodeURIComponent(collectionId)}/selections`,
+    `${API_URL}/request-collections/${pathSegment(collectionId)}/selections`,
     {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -235,7 +236,7 @@ export async function upsertRequestCollectionSelection(
 export async function deactivateRequestCollection(
   collectionId: string,
 ): Promise<{ status: 'deactivated'; collection: SharedRequestCollection; revoked_selections: number }> {
-  const response = await fetch(`${API_URL}/request-collections/${encodeURIComponent(collectionId)}`, { method: 'DELETE' })
+  const response = await fetch(`${API_URL}/request-collections/${pathSegment(collectionId)}`, { method: 'DELETE' })
   if (!response.ok) throw new Error(await getApiErrorMessage(response, 'Failed to delete request collection'))
   return response.json()
 }
@@ -245,7 +246,7 @@ export async function deactivateRequestCollectionSelection(
   selectionId: string,
 ): Promise<{ status: 'deactivated'; selection: RequestCollectionSelection }> {
   const response = await fetch(
-    `${API_URL}/request-collections/${encodeURIComponent(collectionId)}/selections/${encodeURIComponent(selectionId)}`,
+    `${API_URL}/request-collections/${pathSegment(collectionId)}/selections/${pathSegment(selectionId)}`,
     { method: 'DELETE' },
   )
   if (!response.ok) throw new Error(await getApiErrorMessage(response, 'Failed to deactivate request selection'))

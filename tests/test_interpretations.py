@@ -98,6 +98,8 @@ def test_secret_like_text_and_labels_are_refused():
     "password_hash=present in profile JSON (bcrypt)",
     "password_hash test: hash algorithm bcrypt, field hidden",
     "token: none on the anonymous route",
+    "password_hash: hidden.",
+    "token=absent for scan 0b6c4d55-7d0e-4a8e-9a43-1f0e5b7a9c21 on /api/v2/users",
 ])
 def test_b19_a_title_that_describes_a_credential_test_is_accepted(title):
     assert _entry(title=title).title == title
@@ -107,6 +109,14 @@ def test_b19_a_title_that_describes_a_credential_test_is_accepted(title):
     "password_hash: $2b$10$abcdefghijklmnopqrstuv",
     "DB_PASSWORD=Winter2023!",
     "password: none; token: Zx81kq0Pz91a",
+    # Review sweep M1: a descriptive word joined to the value it introduces, or followed by a
+    # clause carrying one, no longer hides the value from the key rules.
+    "password: md5:5f4dcc3b5aa765d61d8327deb882cf99",
+    "password_hash: bcrypt$2b$12$R9h/cIPz0gi.URNNX3kh2OPST9/PgBkqquzi.Ss7KIUgO2t0jWMUW",
+    "secret=present:AKIAIOSFODNN7EXAMPLE",
+    "password: none, it is Tr0ub4dor&3xyz",
+    "password: none Tr0ub4dor&3xyz",
+    "password: hashed 5f4dcc3b5aa765d61d8327deb882cf99",
 ])
 def test_b19_a_title_that_carries_a_value_is_still_refused(title):
     with pytest.raises(ValidationError):

@@ -1,5 +1,6 @@
 'use client'
 
+import { pathSegment } from '@/lib/apiPath.mjs'
 import { useEffect, useState } from 'react'
 import { API_URL } from '@/lib/apiConfig'
 
@@ -18,7 +19,7 @@ function Receipt({ requestId }: { requestId: string }) {
     if (!open) return
     const controller = new AbortController()
     setFailed(false); setValue(null)
-    void fetch(`${API_URL}/authenticated-scan-profiles/validations/${encodeURIComponent(requestId)}`, { signal: controller.signal, cache: 'no-store' })
+    void fetch(`${API_URL}/authenticated-scan-profiles/validations/${pathSegment(requestId)}`, { signal: controller.signal, cache: 'no-store' })
       .then(async response => {
         if (!response.ok) throw new Error()
         const data = await response.json()
@@ -53,7 +54,7 @@ export default function AuthenticationHistory({ profileId }: { profileId: string
     const controller = new AbortController()
     setLoading(true); setError('')
     const suffix = page ? `?before=${encodeURIComponent(page)}` : ''
-    void fetch(`${API_URL}/authenticated-scan-profiles/${encodeURIComponent(profileId)}/history${suffix}`, { signal: controller.signal, cache: 'no-store' })
+    void fetch(`${API_URL}/authenticated-scan-profiles/${pathSegment(profileId)}/history${suffix}`, { signal: controller.signal, cache: 'no-store' })
       .then(async response => {
         if (!response.ok) throw new Error()
         const data = await response.json()

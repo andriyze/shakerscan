@@ -189,10 +189,13 @@ registered_install_dirs() {
 
 # Image refs every install on this host keeps (its current release and its kept rollback releases).
 host_kept_release_refs() {
-    local dir
+    local dir file
     registered_install_dirs | while IFS= read -r dir; do
-        # shellcheck disable=SC2046
-        release_state_refs $(release_kept_files "$dir")
+        # One record at a time, read line by line: an install path may contain spaces, and
+        # release_state_refs with no file would read this loop's own input.
+        release_kept_files "$dir" | while IFS= read -r file; do
+            [ -n "$file" ] && release_state_refs "$file"
+        done
     done
 }
 
@@ -342,13 +345,15 @@ push_kept_release() {
     local record="$1" version slots index file kept=() tmp
     version="$(release_record_version "$record")"
     slots=$((RELEASE_KEEP - 1))
-    for file in $(kept_rollback_files); do
+    # Read line by line, never word-split: the install path may contain spaces.
+    while IFS= read -r file; do
+        [ -n "$file" ] || continue
         if [ -n "$version" ] && [ "$(release_record_version "$file")" = "$version" ]; then
             supersede_release_record "$file"
         else
             kept+=("$file")
         fi
-    done
+    done < <(kept_rollback_files)
     # Move into place from the end, through temporary names (a slot may be the next one's source).
     index=0
     for file in "$record" ${kept[@]+"${kept[@]}"}; do
@@ -404,12 +409,13 @@ record_started_release() {
         rm -f "$running_record"
     fi
     # A lowered SHAKERSCAN_KEEP_RELEASES releases the records beyond it.
-    for tmp in $(kept_rollback_files); do
+    while IFS= read -r tmp; do
         case "$tmp" in
+            "") ;;
             "$RELEASE_STATE_PREVIOUS") [ "$RELEASE_KEEP" -ge 2 ] || supersede_release_record "$tmp" ;;
             *) [ "${tmp##*.}" -lt "$RELEASE_KEEP" ] || supersede_release_record "$tmp" ;;
         esac
-    done
+    done < <(kept_rollback_files)
     tmp="$RELEASE_STATE_CURRENT.tmp.$$"
     { printf '# release %s\n' "${SCANNER_VERSION:-unknown}"; printf '%s\n' "$current"; } > "$tmp"
     mv "$tmp" "$RELEASE_STATE_CURRENT"
@@ -500,9 +506,11 @@ ensure_pre_upgrade_backup() {
     fi
     # Names start with the time: the newest two are kept, never the one just made, and never the
     # pending upgrade's first one.
-    for old in $(ls -1d "$SCRIPT_DIR"/backups/pre-upgrade-* 2>/dev/null | sort -r | tail -n +3); do
+    # Line by line, never word-split: the install path may contain spaces.
+    while IFS= read -r old; do
+        [ -n "$old" ] || continue
         [ "$old" = "$dir" ] || [ "$(basename "$old")" = "$pending" ] || rm -rf -- "$old"
-    done
+    done < <(ls -1d "$SCRIPT_DIR"/backups/pre-upgrade-* 2>/dev/null | sort -r | tail -n +3)
 }
 
 # healthy, starting, unhealthy, exited, missing, or unknown (Docker could not be asked).
@@ -760,13 +768,18 @@ service_container() {
 }
 
 # Whether a service's data directory is a Docker volume (not the container's own writable layer,
-# which is lost when the container is recreated).
+# which is lost when the container is recreated). Any of the given destinations counts: a release
+# replaced by this start may use an older layout.
 service_data_on_volume() {
-    local container
-    container="$(service_container "$1")"
+    local container mounts destination service="$1"
+    shift
+    container="$(service_container "$service")"
     [ -n "$container" ] || return 1
-    docker_cli inspect --format '{{range .Mounts}}{{.Type}} {{.Destination}}{{println}}{{end}}' "$container" 2>/dev/null \
-        | grep -qxF "volume $2"
+    mounts="$(docker_cli inspect --format '{{range .Mounts}}{{.Type}} {{.Destination}}{{println}}{{end}}' "$container" 2>/dev/null)"
+    for destination in "$@"; do
+        printf '%s\n' "$mounts" | grep -qxF "volume $destination" && return 0
+    done
+    return 1
 }
 
 # Problems that would lose data when the running release is replaced, one per line; nothing when
@@ -774,8 +787,11 @@ service_data_on_volume() {
 datastore_persistence_problems() {
     local info
     if [ -n "$(service_container postgres)" ]; then
-        service_data_on_volume postgres /var/lib/postgresql \
-            || echo "PostgreSQL's data is not on its Docker volume (${COMPOSE_PROJECT_NAME:-shakerscan}_postgres-cluster)."
+        # 2.6 and later mount the postgres-cluster volume at /var/lib/postgresql; a release before
+        # 2.6 mounts postgres-data at /var/lib/postgresql/data (scripts/postgres_upgrade.sh moves
+        # it on this start). Either is a volume that survives the switch.
+        service_data_on_volume postgres /var/lib/postgresql /var/lib/postgresql/data \
+            || echo "PostgreSQL's data is not on its Docker volume (${COMPOSE_PROJECT_NAME:-shakerscan}_postgres-cluster at /var/lib/postgresql, or ${COMPOSE_PROJECT_NAME:-shakerscan}_postgres-data at /var/lib/postgresql/data before 2.6)."
     fi
     if [ "$(redis_container_state)" = running ]; then
         service_data_on_volume redis /data \
@@ -876,12 +892,15 @@ images_cmd() {
 
 # "<id> <reason>" for every protected image id, first reason wins.
 image_keep_reasons() {
-    local ref dir file version container id
+    local ref dir file version container id files
     for ref in $(release_image_refs_all); do
         id="$(docker_cli image inspect --format '{{.Id}}' "$ref" 2>/dev/null)" && echo "$id this-release"
     done
     while IFS= read -r dir; do
-        for file in $(release_kept_files "$dir"); do
+        # The record paths one per line, never word-split: an install path may contain spaces.
+        files=()
+        while IFS= read -r file; do [ -n "$file" ] && files+=("$file"); done < <(release_kept_files "$dir")
+        for file in ${files[@]+"${files[@]}"}; do
             version="$(release_record_version "$file")"
             case "$file" in
                 */.release-images.current) version="release ${version:-?} (current)" ;;

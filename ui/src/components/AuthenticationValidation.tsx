@@ -1,5 +1,6 @@
 'use client'
 
+import { pathSegment } from '@/lib/apiPath.mjs'
 import { useEffect, useState } from 'react'
 import { API_URL } from '@/lib/apiConfig'
 import { createTargetPolicyApprovalReceipt } from '@/lib/api'
@@ -24,7 +25,7 @@ export default function AuthenticationValidation({ profileId, revision, targetId
     let timer: ReturnType<typeof setTimeout>
     const check = async () => {
       try {
-        const response = await fetch(`${API_URL}/authenticated-scan-profiles/validations/${requestId}`, { signal: controller.signal, cache: 'no-store' })
+        const response = await fetch(`${API_URL}/authenticated-scan-profiles/validations/${pathSegment(requestId)}`, { signal: controller.signal, cache: 'no-store' })
         if (!response.ok) throw new Error()
         const status = await response.json()
         if (cancelled) return
@@ -55,7 +56,7 @@ export default function AuthenticationValidation({ profileId, revision, targetId
       const approval = await createTargetPolicyApprovalReceipt({ targetId, targetUrl: origin,
         actionName: 'authentication.validate', riskTier: 'credential', ttlMinutes: 5,
         environment: lab ? 'lab' : 'production' })
-      const response = await fetch(`${API_URL}/authenticated-scan-profiles/${profileId}/validate`, {
+      const response = await fetch(`${API_URL}/authenticated-scan-profiles/${pathSegment(profileId)}/validate`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ expected_revision: revision, approval_receipt_id: approval.approvalReceiptId,
           reviewed: true, allow_insecure_transport: insecure }),
@@ -74,9 +75,10 @@ export default function AuthenticationValidation({ profileId, revision, targetId
   }
 
   async function cancel() {
+    if (!requestId) return
     setError('')
     try {
-      const response = await fetch(`${API_URL}/authenticated-scan-profiles/validations/${requestId}/cancel`, { method: 'POST' })
+      const response = await fetch(`${API_URL}/authenticated-scan-profiles/validations/${pathSegment(requestId)}/cancel`, { method: 'POST' })
       if (!response.ok) throw new Error()
       setMessage('Cancellation requested. A request already sent cannot be undone.')
     } catch { setError('Cancellation could not be confirmed. The check remains bounded by its timeout.') }

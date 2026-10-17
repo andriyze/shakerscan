@@ -74,7 +74,9 @@ try:
     from scan.collection_replay import EXECUTABLE_REPLAY_POLICIES, ScanCollectionReplayContractError, narrow_replay_plan_to_request_manifest, scan_replay_authorization, scan_replay_selector
     from scan.continuation import ContinuationBudgetCeiling, reconciled_continuation_ceiling, ScanContinuationError, amended_scan_plan_revision, build_discovery_continuation_manifests, merge_scan_action_continuation
     from scan.continuation_rounds import compile_continuation_round, compile_next_continuation
-    from scan.scan_deadline import lease_time_limit, load_scan_deadline, scan_time_limits
+    from scan.scan_deadline import (
+        TIME_LIMIT_STOP_GRACE_SECONDS, lease_time_limit, load_scan_deadline, scan_time_limits,
+    )
     from scan.verification_extension import resume_observation_action_ids
     from scan.contracts import SCAN_AUTHENTICATION_KEYS, scan_authentication_value_present
     from scan.execution_backend import ActionAlreadyTerminal, ActionLease, ActionLeaseLost, PostgresScanExecutionBackend, ScanExecutionBackendError
@@ -130,7 +132,9 @@ except ModuleNotFoundError:  # package import in host-side tests
     from ..scan.collection_replay import EXECUTABLE_REPLAY_POLICIES, ScanCollectionReplayContractError, narrow_replay_plan_to_request_manifest, scan_replay_authorization, scan_replay_selector
     from ..scan.continuation import ContinuationBudgetCeiling, ScanContinuationError, amended_scan_plan_revision, build_discovery_continuation_manifests, merge_scan_action_continuation
     from ..scan.continuation_rounds import compile_continuation_round, compile_next_continuation
-    from ..scan.scan_deadline import lease_time_limit, load_scan_deadline, scan_time_limits
+    from ..scan.scan_deadline import (
+        TIME_LIMIT_STOP_GRACE_SECONDS, lease_time_limit, load_scan_deadline, scan_time_limits,
+    )
     from ..scan.verification_extension import resume_observation_action_ids
     from ..scan.contracts import SCAN_AUTHENTICATION_KEYS, scan_authentication_value_present
     from ..scan.execution_backend import ActionAlreadyTerminal, ActionLease, ActionLeaseLost, PostgresScanExecutionBackend, ScanExecutionBackendError
@@ -1695,10 +1699,19 @@ async def continue_broker_scan_action_plan(
             if target_active is not True:
                 raise HTTPException(status_code=409, detail="broker Scan target is inactive")
             # The Scan's time limit is kept here too: past it no work round is compiled, only
-            # the finalizer, whether the node asked for that (``finalize_only``) or not.
-            time_limit_reached = bool(body.finalize_only) or await _broker_scan_time_limit_reached(
+            # the finalizer, whether the node asked for that (``finalize_only``) or not. A node's
+            # ``finalize_only`` on a Scan that is not cancelled is honoured only when the control
+            # plane's own limit has passed (within the stop grace, for the time a request takes):
+            # a node cannot end a running Scan's work early.
+            time_limit_reached = await _broker_scan_time_limit_reached(
                 conn, scan_id=scan_id, canonical_job=canonical_job,
+                tolerance_seconds=TIME_LIMIT_STOP_GRACE_SECONDS if body.finalize_only else 0.0,
             )
+            if body.finalize_only and not time_limit_reached:
+                raise HTTPException(
+                    status_code=409,
+                    detail="broker finalize-only revision is only for a cancelled Scan or one past its time limit",
+                )
             amended, revision, continuation_options = await _materialize_broker_scan_continuation(
                 conn, parent_plan=current_plan, canonical_job=canonical_job, options=options,
                 allocation=allocation, worker_id=body.worker_id, revision_number=revision.revision + 1,
@@ -3227,8 +3240,11 @@ def _broker_blocked_receipt(action: Any, lease: Any, *, canonical_job: Any, scan
     )
 
 
-async def _broker_scan_time_limit_reached(conn: Any, *, scan_id: str, canonical_job: Any) -> bool:
-    """Whether a broker Scan is past its time limit, measured from its (parent's) start."""
+async def _broker_scan_time_limit_reached(
+    conn: Any, *, scan_id: str, canonical_job: Any, tolerance_seconds: float = 0.0,
+) -> bool:
+    """Whether a broker Scan is past its time limit, measured from its (parent's) start, or
+    within ``tolerance_seconds`` of it."""
     budget = getattr(canonical_job.execution_plan, "budget", None)
     shard = getattr(canonical_job, "shard", None)
     sub_budget = getattr(shard, "sub_budget", None)
@@ -3246,7 +3262,9 @@ async def _broker_scan_time_limit_reached(conn: Any, *, scan_id: str, canonical_
         _pool(), scan_id=scan_id, options=options,
         max_duration_seconds=scan_limit or own_limit, own_max_duration_seconds=own_limit,
     )
-    return deadline is not None and deadline.reached()
+    if deadline is None:
+        return False
+    return deadline.reached() or deadline.remaining_seconds() <= max(0.0, float(tolerance_seconds))
 
 
 async def _materialize_broker_scan_continuation(

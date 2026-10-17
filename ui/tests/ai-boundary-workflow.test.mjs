@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { copyFileSync, mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -13,6 +13,8 @@ execFileSync('npx', [
   'tsc', 'src/lib/aiBoundary.ts', 'src/lib/apiConfig.ts', '--module', 'commonjs',
   '--target', 'es2022', '--outDir', outDir, '--skipLibCheck', '--ignoreConfig',
 ], { cwd: uiRoot, stdio: 'pipe' })
+// aiBoundary builds its API paths with pathSegment (src/lib/apiPath.mjs), an ES module beside it.
+copyFileSync(path.join(uiRoot, 'src/lib/apiPath.mjs'), path.join(outDir, 'apiPath.mjs'))
 const require = createRequire(import.meta.url)
 const boundary = require(path.join(outDir, 'aiBoundary.js'))
 test.after(() => rmSync(outDir, { recursive: true, force: true }))
