@@ -4746,6 +4746,40 @@ def test_ffuf_worker_materializes_exact_owner_only_wordlist(tmp_path, monkeypatc
     assert materialized.stat().st_mode & 0o777 == 0o600
 
 
+def test_ffuf_corporate_list_keeps_its_tail_beside_the_negative_controls(tmp_path, monkeypatch):
+    # The control slots are reserved before the list is filled: the corporate entries read after
+    # the common ones are never displaced by the controls.
+    common = tmp_path / "common.txt"
+    common.write_text("".join(f"c{i}\n" for i in range(10)), encoding="utf-8")
+    corporate = tmp_path / "corporate.txt"
+    corporate.write_text("".join(f"owa{i}\n" for i in range(5)), encoding="utf-8")
+    monkeypatch.setitem(worker.agent_tools._AGENT_FFUF_WORDLIST_SOURCES, "corporate",
+                        (str(common), str(corporate)))
+    scratch = tmp_path / "scratch"
+    scratch.mkdir(mode=0o700)
+    limit = 30
+    path, count = worker._materialize_bounded_ffuf_wordlist(
+        options={"wordlist": "corporate"}, reservation={"http_requests": limit},
+        scratch_dir=str(scratch),
+    )
+    entries = Path(path).read_text(encoding="utf-8").splitlines()
+    controls = worker.control_slot_count(limit)
+    assert controls > 0 and count == len(entries) == 15 + controls <= limit
+    assert entries[:15] == [f"c{i}" for i in range(10)] + [f"owa{i}" for i in range(5)]
+
+
+def test_ffuf_selection_reads_every_source_and_renders_the_first_unmaterialized():
+    sources = worker.agent_tools.scanner_ffuf_wordlist_sources({"wordlist": "corporate"})
+    assert sources == (worker.agent_tools._AGENT_FFUF_WORDLISTS["common"],
+                       worker.agent_tools._AGENT_FFUF_WORDLISTS["corporate"])
+    # The compatibility renderer never reads the corporate tail alone.
+    argv = worker.agent_tools._tmpl_ffuf("https://www.example.test/", {"wordlist": "corporate"})
+    assert argv[argv.index("-w") + 1] == worker.agent_tools._AGENT_FFUF_WORDLISTS["common"]
+    assert worker.agent_tools.scanner_ffuf_wordlist_source({"wordlist": "corporate"}) == sources[0]
+    assert worker.agent_tools.scanner_ffuf_wordlist_sources({"wordlist": "/etc/passwd"}) == (
+        worker.agent_tools._AGENT_FFUF_WORDLISTS["common"],)
+
+
 def test_nuclei_request_accounting_uses_stderr_stats_without_exposing_them():
     stats = b'noise\n{"duration":"0:01:35","requests":"1369","templates":"1183"}\n'
     settlement = worker._agent_scanner_request_settlement("nuclei", "", stats)

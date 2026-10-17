@@ -308,7 +308,7 @@ def test_storing_inserts_the_canonical_name_and_root_it_validated():
     asyncio.run(target_resolution.store_discovered_targets(
         Conn(), {"scannable": ["API.Example.com.", "api.example.com"]}, "Example.COM.",
     ))
-    assert inserted == [("https://api.example.com", "example.com", "subfinder")]
+    assert [args[:3] for args in inserted] == [("https://api.example.com", "example.com", "subfinder")]
 
 
 # ----------------------------------------------------------- public-suffix apexes (registrants)

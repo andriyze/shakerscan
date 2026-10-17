@@ -38,9 +38,10 @@ except ModuleNotFoundError:  # package-native import layout
     from api import action_scope, target_authorization
 
 try:
+    import discovery_provenance
     import discovery_wildcards
 except ModuleNotFoundError:  # package-native import layout
-    from api import discovery_wildcards
+    from api import discovery_provenance, discovery_wildcards
 
 try:
     from scanner_tools.discovered_names import canonical_name, filter_subdomains, subdomain_of
@@ -487,11 +488,22 @@ async def store_discovered_targets(
     *,
     source: str = "subfinder",
     target_limit: int = DISCOVERY_TARGET_LIMIT,
+    evidence: Mapping[str, Iterable[str]] | None = None,
+    discovery_id: str | None = None,
+    observed_at: str | None = None,
+    source_by_name: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
     """Insert the plan's scannable names; return the run's content-free DNS outcome.
 
     The last gate before a row exists: a name that is not strictly below ``root_domain`` on a
     label boundary is never inserted, whichever planner produced the plan.
+
+    A new row carries its provenance in ``metadata_json.discovery`` (``discovery_provenance``):
+    the sources that named it, whether only a certificate did (historical issuance, not
+    ownership), its DNS status, and that no service was checked. A name that is already a
+    target is reported as already known; when that row was itself recorded by discovery its
+    ``last_observed_at`` moves, and nothing else about it changes. ``source_by_name`` names a
+    row's ``discovery_source`` when it differs from ``source`` (a Scan's own DNS enumeration).
     """
     planned = list(plan.get("scannable") or [])
     # Insert exactly the canonical name and root this gate validated, never the plan's spelling.
@@ -504,22 +516,44 @@ async def store_discovered_targets(
     suppressed = list(plan.get("wildcard_suppressed") or [])
     added = 0
     failed = 0
+    already_known: list[str] = []
     for name in scannable[: max(0, int(target_limit))]:
+        provenance = discovery_provenance.name_provenance(
+            name, evidence=evidence, dns_status=discovery_provenance.dns_status_of(name, plan),
+            discovery_id=discovery_id, observed_at=observed_at,
+        )
         try:
             tag = await conn.execute(
                 """
-                INSERT INTO targets (url, root_domain, is_root, discovery_source)
-                VALUES ($1, $2, false, $3)
+                INSERT INTO targets (url, root_domain, is_root, discovery_source, metadata_json)
+                VALUES ($1, $2, false, $3, jsonb_build_object('discovery', $4::jsonb))
                 ON CONFLICT (canonical_key) DO NOTHING
                 """,
-                f"https://{name}", root, source,
+                f"https://{name}", root, (source_by_name or {}).get(name) or source,
+                json.dumps(provenance),
             )
         except Exception:  # noqa: BLE001 -- one refused row must not drop the rest of the run
             failed += 1
-            tag = ""
+            continue
         if str(tag or "").strip().endswith(" 1"):
             added += 1
+            continue
+        already_known.append(name)
+        if observed_at:
+            try:
+                await conn.execute(
+                    """UPDATE targets SET metadata_json = jsonb_set(metadata_json,
+                           '{discovery,last_observed_at}', to_jsonb($2::text), true)
+                       WHERE canonical_key = $1 AND jsonb_typeof(metadata_json->'discovery') = 'object'""",
+                    f"web:{name}", observed_at,
+                )
+            except Exception:  # noqa: BLE001 -- a refresh never fails the run
+                pass
     return {
+        "provenance": discovery_provenance.run_provenance(
+            found=[*planned, *unresolved, *suppressed], plan=plan,
+            already_known=already_known, evidence=evidence,
+        ),
         "checked": len(scannable) + len(unresolved) + len(suppressed),
         "scannable": len(scannable),
         "added": added,
@@ -568,4 +602,6 @@ def public_discovery_run(row: Mapping[str, Any]) -> dict[str, Any]:
                       and v.get("error") != "No certificates found in CT logs"}
         public["sources_used"] = sources
     public["source_errors"] = errors
+    # A completed run with a failed source listed only what the other sources returned.
+    public["partial"] = bool(errors) and str(public.get("status") or "") == "completed"
     return public

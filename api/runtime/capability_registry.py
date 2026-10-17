@@ -751,7 +751,7 @@ CAPABILITY_REGISTRY = CapabilityRegistry(
             {"network_reachability": True, "binary": "ffuf"},
             _http_principal_schema({
                 "wordlist": {
-                    "type": "string", "enum": ["common", "api", "admin"],
+                    "type": "string", "enum": ["common", "api", "admin", "corporate"],
                 },
             }),
             "ffuf-json/v1", ("content_discovery_observation",), "ffuf", "ffuf", 75_000,
@@ -1250,6 +1250,61 @@ CAPABILITY_REGISTRY = CapabilityRegistry(
             _schema({"discovery_ref": {"type": "string", "pattern": "^discover\\.subdomains(\\.r[0-9]{2})?$"}}),
             "takeover-check/v1",
             ("takeover_check_observation", "tool_receipt"),
+            planner_visible=False,
+            credential_transport="not_used", credential_interruption="not_needed",
+        ),
+        # Opt-in ``recon_active`` family (outside every preset): fixed authored lists, a
+        # measured baseline before any lead, bounded reservations, cancellation between
+        # batches. Leads only; see capabilities/recon_active.py.
+        CapabilitySpec(
+            "dns.enumerate",
+            "Active DNS name enumeration under the bound root domains from a bundled authored "
+            "label list, with a random-label wildcard baseline. Names are leads recorded like "
+            "passive discovery; nothing is connected to.",
+            "internal", "active", _NETWORK_TARGETS, "scanner.dns_enumeration", "1",
+            "active_testing", {"hosts_attempted": 64, "tool_wall_seconds": 120},
+            {
+                "network_reachability": True,
+                "runtime_target_binding": True,
+                "query_names_derived_from_binding": True,
+                "http_destinations": "none",
+            },
+            _schema(), "dns-enumeration/v1",
+            ("dns_enumeration_observation", "tool_receipt"),
+            planner_visible=False,
+            credential_transport="not_used", credential_interruption="not_needed",
+        ),
+        CapabilitySpec(
+            "vhost.discover",
+            "Virtual-host discovery on the Scan's own frozen origin and address: GET / under "
+            "bundled names below the bound root, against the bound name and random-name "
+            "controls. Leads only; never a route or a target.",
+            "http", "active", _HTTP_TARGETS, "scanner.vhost_discovery", "1",
+            "active_testing", {"http_requests": 140, "tool_wall_seconds": 120},
+            {
+                "network_reachability": True,
+                "runtime_target_binding": True,
+                "http_destinations": "bound_origins_only",
+            },
+            _schema(), "vhost-discovery/v1",
+            ("virtual_host_observation", "tool_receipt"),
+            planner_visible=False,
+            credential_transport="not_used", credential_interruption="not_needed",
+        ),
+        CapabilitySpec(
+            "web.param_discover",
+            "Parameter discovery on observed GET routes of the Scan's own origin: bundled "
+            "authored names with random marker values, after a random-name control per route. "
+            "Confirmed names feed the existing candidate pipeline for that route.",
+            "http", "active", _HTTP_TARGETS, "scanner.parameter_discovery", "1",
+            "active_testing", {"http_requests": 600, "tool_wall_seconds": 180},
+            {
+                "network_reachability": True,
+                "runtime_target_binding": True,
+                "http_destinations": "bound_origins_only",
+            },
+            _schema(), "parameter-discovery/v1",
+            ("discovered_parameter_observation", "tool_receipt"),
             planner_visible=False,
             credential_transport="not_used", credential_interruption="not_needed",
         ),

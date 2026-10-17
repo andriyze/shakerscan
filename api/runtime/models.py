@@ -10,9 +10,9 @@ from typing import Any, Mapping
 import urllib.parse
 
 try:
-    from scope.psl import spans_public_suffix
+    from scope.psl import registrable_domain, spans_public_suffix
 except ModuleNotFoundError:  # package import
-    from ..scope.psl import spans_public_suffix
+    from ..scope.psl import registrable_domain, spans_public_suffix
 
 
 WEB_ASSET_KINDS = frozenset({"web", "api", "network"})
@@ -133,6 +133,22 @@ class TargetBinding:
         if kind in {"web", "api", "device"} and not host:
             raise ValueError("web, API, and device bindings require a canonical host")
 
+    def declared_apex_roots(self) -> tuple[str, ...]:
+        """Bound roots the operator declared as an apex: the bound host is the root itself or
+        its ``www`` twin (the same rule as ``targets.is_root``), and the root is a registrable
+        domain (eTLD+1) that covers one registrant.
+
+        A root derived from a host below it is only that host's registrable domain:
+        ``acme.zendesk.com`` binds ``zendesk.com``, which names a provider's other tenants and
+        edge, not the operator's estate. Such a binding carries no authority to guess names
+        under the root (DNS enumeration, virtual-host discovery).
+        """
+        host = self.canonical_host or ""
+        return tuple(
+            root for root in self.allowed_root_domains
+            if registrable_domain(root) == root and host in {root, f"www.{root}"}
+        )
+
     def canonical_dict(self) -> dict[str, Any]:
         result = {
             "target_id": self.target_id,
@@ -157,6 +173,18 @@ class TargetBinding:
             ensure_ascii=True,
         ).encode("utf-8")
         return hashlib.sha256(encoded).hexdigest()
+
+
+def apex_recon_roots(policy: Any, target: TargetBinding) -> tuple[str, ...]:
+    """Roots a Scan may guess names under (``dns.enumerate``, ``vhost.discover``).
+
+    Both the policy's subdomain discovery (the operator's authority to discover names under the
+    apex) and an operator-declared apex (``TargetBinding.declared_apex_roots``) are required;
+    the registrable domain of a host bound below it is never enough.
+    """
+    if not bool(getattr(policy, "subdomain_discovery", False)):
+        return ()
+    return target.declared_apex_roots()
 
 
 @dataclass(frozen=True)

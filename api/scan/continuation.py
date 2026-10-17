@@ -1169,6 +1169,7 @@ def discovery_shard_endpoint_worklist(
         browser=summary("discover.browser_crawl"),
         content=summary("discover.web_content"),
         spec=summary("discover.spec"),
+        parameters=summary("discover.parameters"),
         max_endpoints=max(1, int(max_endpoints)),
     )
     manifest = build_endpoint_manifest(
@@ -1268,6 +1269,7 @@ def build_discovery_continuation_manifests(
         browser=summary(("discover.browser_crawl",)),
         content=summary(("discover.web_content",)),
         spec=summary(("discover.spec",)),
+        parameters=summary(("discover.parameters",)),
         max_endpoints=allocation.max_endpoint_entries,
     )
     request_refs_by_route: dict[str, list[str]] = {}

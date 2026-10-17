@@ -403,6 +403,17 @@ async def _services(conn: Any, target: uuid.UUID, at: datetime) -> dict[str, Any
                     "interpretation recorded."}
 
 
+def _name_provenance(value: Any) -> dict[str, Any]:
+    """What discovery knew about a name: a certificate is historical issuance, never ownership,
+    and a resolving name is not a reachable service (``discovery_provenance``)."""
+    data = _json(value, {}) or {}
+    if not isinstance(data, dict) or not data.get("schema"):
+        return {}
+    return {"observed_as": data.get("observed_as"), "certificate_observed": data.get("certificate_observed") is True,
+            "dns_status": data.get("dns_status"), "reachability": data.get("reachability"),
+            "sources": list(data.get("sources") or [])[:8]}
+
+
 async def _subdomains(conn: Any, target: uuid.UUID, at: datetime, *, names_allowed: bool) -> dict[str, Any]:
     """New names under the target's apex, only when a person added a target under that apex. Other
     targets' host names go to operators only; a Hunt bound to one target gets the count."""
@@ -420,9 +431,9 @@ async def _subdomains(conn: Any, target: uuid.UUID, at: datetime, *, names_allow
         apex = None
     if not apex or not await _declared(conn, apex):
         return {"checked": False, "note": "Subdomains are reported for an apex a person added on the Targets page."}
-    names = await conn.fetch("""SELECT url, discovery_source, created_at FROM targets
+    names = await conn.fetch("""SELECT url, discovery_source, created_at, metadata_json->'discovery' AS provenance FROM targets
         WHERE root_domain=$1 AND created_at > $2 AND COALESCE(discovery_source,'manual') = ANY($3::text[])
-        ORDER BY created_at DESC LIMIT $4""", apex, at, ["subfinder", "gungnir-monitor"], MAX_LISTED + 1)
+        ORDER BY created_at DESC LIMIT $4""", apex, at, ["subfinder", "dns-enumeration", "gungnir-monitor"], MAX_LISTED + 1)
     runs = await conn.fetch("""SELECT id, status, new_subdomains, completed_at FROM discovery_runs
         WHERE root_domain=$1 AND completed_at > $2 ORDER BY completed_at DESC LIMIT 5""", apex, at)
     if not names_allowed:
@@ -431,7 +442,8 @@ async def _subdomains(conn: Any, target: uuid.UUID, at: datetime, *, names_allow
                 "note": "Other targets' host names are shown to operators (GET /targets/{id}/knowledge/changes)."}
     return {"checked": True, "apex": apex, "new_targets_count": min(len(names), MAX_LISTED),
             "at_least": len(names) > MAX_LISTED,
-            "new_targets": [{"host": _host(r["url"]), "source": r["discovery_source"], "created_at": _iso(r["created_at"])}
+            "new_targets": [{"host": _host(r["url"]), "source": r["discovery_source"], "created_at": _iso(r["created_at"]),
+                             **_name_provenance(r.get("provenance") if hasattr(r, "get") else None)}
                             for r in names[:MAX_LISTED]],
             "truncated": len(names) > MAX_LISTED,
             "discovery_runs": [{"id": str(r["id"]), "status": r["status"], "new_subdomains": r["new_subdomains"],

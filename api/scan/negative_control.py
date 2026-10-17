@@ -62,12 +62,14 @@ def with_negative_controls(
     """Spend a few of an exact request reservation on paths that cannot exist.
 
     Taken from inside the ceiling, never added to it, so the wire count and the
-    reservation stay exactly as reconciled.
+    reservation stay exactly as reconciled. A caller that reserved the control slots
+    (``control_slot_count``) loses no entry; otherwise the controls replace the tail.
     """
     controls = negative_control_entries(control_slot_count(request_limit), seed=seed)
     if not controls or len(entries) <= len(controls):
         return list(entries)
-    return list(entries[:len(entries) - len(controls)]) + list(controls)
+    keep = min(len(entries), max(0, int(request_limit) - len(controls)))
+    return list(entries[:keep]) + list(controls)
 
 
 def is_negative_control_url(url: Any) -> bool:

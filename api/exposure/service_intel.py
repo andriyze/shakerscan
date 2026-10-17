@@ -13,6 +13,11 @@ from urllib.parse import urlsplit
 
 from .service_inventory import text, timestamp
 
+try:
+    from scanner_tools.corporate_identity import derived_cpes as corporate_cpes, product_for_label
+except ModuleNotFoundError:  # package import
+    from scanner.scanner_tools.corporate_identity import derived_cpes as corporate_cpes, product_for_label
+
 CVE_ID = re.compile(r"CVE-[0-9]{4}-[0-9]{4,19}\Z")
 MAX_CANDIDATES = 30
 
@@ -208,6 +213,10 @@ _VERSION_TEXT = re.compile(r"^[0-9][0-9A-Za-z._+~-]{0,40}$")
 
 def derived_cpes(product: Any, version: Any) -> list[str]:
     """CPEs for a fingerprint that names a known product and a version but carries no CPE."""
+    corporate = product_for_label(product)
+    if corporate is not None:
+        # Catalogue products map an exact version onto their NVD names (or onto none).
+        return corporate_cpes(corporate, version)
     name = str(product or "").strip().lower()
     version_text = str(version or "").strip().split()[0] if str(version or "").strip() else ""
     if name not in PRODUCT_CPE_ALIASES or not _VERSION_TEXT.fullmatch(version_text):

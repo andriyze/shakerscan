@@ -222,7 +222,14 @@ def test_discovery_skips_names_without_an_address_record():
     assert inserted == [
         "https://api.example.net", "https://flaky.example.net", "https://old.example.net",
     ]
-    assert all(args[1:] == ("example.net", "subfinder") for args in conn.inserted)
+    assert all(args[1:3] == ("example.net", "subfinder") for args in conn.inserted)
+    provenance = json.loads(conn.inserted[0][3])
+    assert provenance["observed_as"] == "dns_name" and provenance["reachability"] == "not_checked"
+    assert provenance["dns_status"] == "resolves"
+    assert json.loads(conn.inserted[1][3])["dns_status"] == "not_judged"  # the resolver fault
+    run = outcome.pop("provenance")
+    assert run["already_known"] == ["old.example.net"] and run["already_known_count"] == 1
+    assert run["observation_classes"]["reachable_service"] == "not_checked"
     assert outcome == {
         "checked": 5,
         "scannable": 3,
@@ -401,7 +408,8 @@ def test_the_discovery_job_inserts_only_resolving_names_and_records_the_rest(mon
     }))
 
     inserts = [args for query, args in executed if query.startswith("INSERT INTO targets")]
-    assert inserts == [("https://shop.example.net", "example.net", "subfinder")]
+    assert [args[:3] for args in inserts] == [("https://shop.example.net", "example.net", "subfinder")]
+    assert json.loads(inserts[0][3])["discovery_id"] == discovery_id
     completed = [args for query, args in executed if "status = 'completed'" in query]
     assert len(completed) == 1
     found, added, result_json, sources_json = completed[0][:4]
