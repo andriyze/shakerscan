@@ -363,6 +363,10 @@ shakerscan hunt permissions wait 8f0c…  # JSON: granted, denied, expired, with
   polling while it waits, and SIGTERM or a closed terminal ends it like Ctrl-C (terminal
   restored, Enterprise approver session revoked, also during the step-up), with exit status
   128 + the signal number.
+  On an engine from 2.11 it reads one feed of every open Hunt's requests (only what changed since
+  the previous read); an older engine, or a gateway that does not pass that route, is read Hunt by
+  Hunt. It reads every 3 s after a request was shown and waits longer (up to 15 s) while nothing
+  new arrives.
   The engine has no accounts: anyone who can reach its API could decide, and the command says so.
 - Neither runs without an interactive terminal, so an agent cannot run it in its own shell. Never
   type a code into an agent's chat.
