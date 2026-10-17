@@ -67,8 +67,9 @@ SETTINGS = rg.GuardSettings(
     ("GET", "/targets/abc/asm/coverage", "", "heavy", "asm"),
     ("GET", "/arsenal/campaigns", "", "heavy", "arsenal"),
     ("GET", "/arsenal/refuter-reviews/summary", "", "heavy", "arsenal"),
-    ("GET", "/queue/stats", "", "heavy", "queue"),
-    ("GET", "/results", "", "heavy", "results"),
+    # Bounded in 2.11 (bounded reads; ~0.5 s at 100k job hashes / 0.3 s at 10k result files).
+    ("GET", "/queue/stats", "", "interactive", None),
+    ("GET", "/results", "", "interactive", None),
     ("GET", "/findings/abc", "", "interactive", None),
     ("GET", "/scans", "limit=50", "interactive", None),
     ("GET", "/results/folder/latest", "", "interactive", None),
