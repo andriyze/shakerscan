@@ -2,11 +2,14 @@
 from copy import deepcopy
 import hashlib
 import json
+from pathlib import Path
+import re
 import subprocess
 import unittest
 from unittest.mock import patch
 
 from scripts import release_sbom as sbom
+from scripts import release_sbom_coverage as coverage
 from scripts import release_sbom_stage2 as stage2
 
 
@@ -139,3 +142,45 @@ class MirrorRecoveryTests(unittest.TestCase):
         before = deepcopy(subject)
         self.assertEqual(stage2.validate_retrieval_reference(subject), original)
         self.assertEqual(subject, before)
+
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+class ComposeMirrorPinTests(unittest.TestCase):
+    """Compose names the mirrors directly (#218); the bytes stay the reviewed upstream bytes."""
+
+    def compose_minio_references(self, filename):
+        text = (ROOT / filename).read_text(encoding='utf-8')
+        return set(re.findall(r'^\s+image:\s*(\S*minio\S*)\s*$', text, flags=re.MULTILINE))
+
+    def test_compose_files_pull_minio_only_from_reviewed_mirror_digests(self):
+        for filename in ('docker-compose.yml', 'docker-compose.release.yml'):
+            with self.subTest(filename=filename):
+                self.assertEqual(self.compose_minio_references(filename), set(coverage.REVIEWED_MIRROR_REFERENCES))
+
+    def test_every_reviewed_mirror_is_the_upstream_digest(self):
+        self.assertEqual(set(stage2.SUPPORTING_MIRRORS.values()), set(coverage.REVIEWED_MIRROR_REFERENCES))
+        for original, mirror in stage2.SUPPORTING_MIRRORS.items():
+            self.assertTrue(original.startswith('quay.io/minio/'))
+            self.assertEqual(original.rsplit('@', 1)[1], mirror.rsplit('@', 1)[1])
+
+    def test_mirror_named_by_compose_verifies_raw_manifest_bytes(self):
+        digest = MIRROR.rsplit('@', 1)[1]
+        service = {'image_reference': MIRROR}
+        with patch.object(sbom, 'run_json', return_value=index_document()) as run:
+            self.assertEqual(set(stage2.supporting_service_platforms(service)), {'linux/amd64', 'linux/arm64'})
+        run.assert_called_once_with(command(MIRROR), expected_digest=digest)
+        self.assertEqual(service, {'image_reference': MIRROR})
+        self.assertEqual(stage2.validate_retrieval_reference(service), MIRROR)
+
+    def test_mirror_repository_at_another_digest_is_refused(self):
+        repository = MIRROR.split('@', 1)[0]
+        with self.assertRaisesRegex(ValueError, 'unreviewed mirror'):
+            coverage.canonical_image(repository + '@sha256:' + 'd' * 64)
+
+    def test_other_repositories_on_the_mirror_registry_are_refused(self):
+        for reference in (MIRROR.replace('teableio', 'another-owner'), 'ghcr.io/teableio/postgres@' + DIGEST):
+            with self.subTest(reference=reference):
+                with self.assertRaisesRegex(ValueError, 'unexpected image registry'):
+                    coverage.canonical_image(reference)
