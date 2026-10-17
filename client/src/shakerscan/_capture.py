@@ -8,7 +8,9 @@ Everything here is pure (no browser, no network) so it is tested without either:
   asked, static assets. Dropped flows are counted, never sent; the server checks scope again.
 * ``Batcher`` groups flows by count, age and encoded size; ``CaptureUploader`` sends batches in
   ``seq`` order and retries one with backoff until the server acknowledges it, so a retry is
-  idempotent and a batch is neither lost nor applied twice.
+  idempotent and a batch is neither lost nor applied twice. Both measure a batch with
+  ``encode_json``, the one serializer whose bytes are sent, and a batch the server still finds
+  too large (413) is split and sent again, never dropped.
 
 Flows hold live cookies, tokens and form values. They go only to the capture routes, over the
 connection the client already uses; nothing here prints or logs them.
@@ -18,6 +20,7 @@ from __future__ import annotations
 
 import base64
 import json
+import re
 import time
 import urllib.parse
 from collections import OrderedDict
@@ -405,8 +408,38 @@ class CdpFlowRecorder:
         return flow
 
 
+_LONE_SURROGATE = re.compile("[\ud800-\udfff]")
+
+
+def valid_text(value: Any) -> Any:
+    """``value`` with every lone UTF-16 surrogate (a page or CDP can hand one over) replaced by
+    U+FFFD: such text cannot be sent as UTF-8, and the server refuses it."""
+    if isinstance(value, str):
+        try:
+            value.encode("utf-8")
+        except UnicodeEncodeError:
+            return _LONE_SURROGATE.sub("\ufffd", value)
+        return value
+    if isinstance(value, Mapping):
+        return {valid_text(key): valid_text(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [valid_text(item) for item in value]
+    return value
+
+
+def encode_json(value: Any) -> bytes:
+    """The request body bytes for ``value``: compact UTF-8 JSON. Batch sizes are measured with
+    this and these bytes are what is sent, so a measured batch is the batch on the wire."""
+    return json.dumps(valid_text(value), separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+
+
 def encoded_size(value: Any) -> int:
-    return len(json.dumps(value, separators=(",", ":"), ensure_ascii=False).encode("utf-8"))
+    return len(encode_json(value))
+
+
+def _batch_room(max_bytes: int) -> int:
+    """The bytes of flows a batch may hold under a body cap of ``max_bytes``."""
+    return max(1024, max_bytes - BATCH_ENVELOPE_BYTES)
 
 
 class Batcher:
@@ -416,13 +449,14 @@ class Batcher:
                  max_bytes: int = DEFAULT_LIMITS["max_batch_bytes"]) -> None:
         self.max_flows = max_flows
         self.max_seconds = max_seconds
-        self.max_bytes = max(1024, max_bytes - BATCH_ENVELOPE_BYTES)
+        self.max_bytes = _batch_room(max_bytes)
         self.flows: list[dict[str, Any]] = []
         self.bytes = 0
         self.since: float | None = None
         self.ready: list[list[dict[str, Any]]] = []
 
     def add(self, flow: dict[str, Any], now: float) -> None:
+        flow = valid_text(flow)
         size = encoded_size(flow) + 1
         if self.flows and self.bytes + size > self.max_bytes:
             # Flush before the encoded body would pass the server's cap.
@@ -460,11 +494,21 @@ class UploadError(Exception):
 
     @property
     def retryable(self) -> bool:
+        """Worth sending the same bytes again: no answer, a timeout, a rate limit or a server
+        error. Any other 4xx is an answer about the request itself and is not retried."""
         return self.status is None or self.status in {408, 425, 429} or self.status >= 500
+
+    @property
+    def too_large(self) -> bool:
+        return self.status == 413
 
 
 class CaptureStopped(Exception):
     """The server will take no more batches (the capture is closed, or a batch was refused)."""
+
+
+class _TooLarge(Exception):
+    """The server answered 413 for a batch: it is split, not retried as it is."""
 
 
 @dataclass
@@ -475,17 +519,42 @@ class UploadTotals:
     refused_over_limit: int = 0
     bodies_dropped: int = 0
     retries: int = 0
+    splits: int = 0
+    # Flows sent without their bodies, or (larger than any body cap even so) not sent at all;
+    # both are reported in the summary, never dropped silently.
+    bodies_withheld: int = 0
+    too_large: int = 0
+
+
+def _without_bodies(flow: Mapping[str, Any]) -> dict[str, Any]:
+    """A flow whose bodies and frames cannot fit any batch: its request line, status and headers."""
+    slim = {key: value for key, value in flow.items() if key not in {
+        "request_body", "request_body_encoding", "response_body", "response_body_encoding", "websocket_frames",
+    }}
+    if flow.get("request_body") is not None:
+        slim["request_body_truncated"] = True
+    if flow.get("response_body") is not None:
+        slim["response_body_truncated"] = True
+    return slim
 
 
 class CaptureUploader:
     """Send batches in ``seq`` order. A batch keeps its ``seq`` until the server acknowledges it
     (``applied`` or ``duplicate``), so retrying after a lost answer never applies it twice and a
-    later batch never overtakes an unacknowledged one."""
+    later batch never overtakes an unacknowledged one.
 
-    def __init__(self, post: Callable[[str, Mapping[str, Any]], Mapping[str, Any]], capture_id: str, *,
+    ``post(path, payload, body=...)`` sends ``body``, the exact bytes of ``payload`` from
+    ``encode_json``. A batch over ``max_bytes``, or one the server answers 413 (a gateway may cap
+    lower), is split in two under the same and the next ``seq`` (the server applied neither, so
+    renumbering what is queued is safe); a single flow that is still too large is sent without
+    its bodies, and only a flow too large even then is left out, counted in ``totals``."""
+
+    def __init__(self, post: Callable[..., Mapping[str, Any]], capture_id: str, *,
                  sleep: Callable[[float], None] = time.sleep, attempts: int = 6,
-                 backoff: Sequence[float] = (0.5, 1, 2, 4, 8, 10)) -> None:
+                 backoff: Sequence[float] = (0.5, 1, 2, 4, 8, 10),
+                 max_bytes: int = DEFAULT_LIMITS["max_batch_bytes"]) -> None:
         self.post = post
+        self.max_bytes = max_bytes
         self.path = f"/request-collections/{urllib.parse.quote(capture_id, safe='')}/capture-batches"
         self.sleep = sleep
         self.attempts = attempts
@@ -509,7 +578,15 @@ class CaptureUploader:
             payload: dict[str, Any] = {"seq": seq, "flows": flows}
             if client_dropped:
                 payload["client_dropped"] = dict(client_dropped)
-            answer = self._post_with_retry(payload, attempts or self.attempts)
+            body = encode_json(payload)
+            if len(body) > self.max_bytes and self._shrink_head():
+                continue
+            try:
+                answer = self._post_with_retry(payload, body, attempts or self.attempts)
+            except _TooLarge:
+                if self._shrink_head():
+                    continue
+                raise CaptureStopped("the server refuses even an empty batch as too large") from None
             if answer is None:
                 return False
             self.queue.pop(0)
@@ -520,11 +597,36 @@ class CaptureUploader:
                 self.last_capture = answer["capture"]
         return True
 
-    def _post_with_retry(self, payload: Mapping[str, Any], attempts: int) -> Mapping[str, Any] | None:
+    def _shrink_head(self) -> bool:
+        """Make the first queued batch smaller; False when it is already empty."""
+        seq, flows = self.queue[0]
+        if len(flows) > 1:
+            half = len(flows) // 2
+            self.queue[0:1] = [(seq, flows[:half]), (seq + 1, flows[half:])]
+            for index in range(2, len(self.queue)):
+                later_seq, later_flows = self.queue[index]
+                self.queue[index] = (later_seq + 1, later_flows)
+            self.next_seq += 1
+            self.totals.splits += 1
+            return True
+        if len(flows) == 1:
+            slim = _without_bodies(flows[0])
+            if slim != flows[0]:
+                self.queue[0] = (seq, [slim])
+                self.totals.bodies_withheld += 1
+            else:
+                self.queue[0] = (seq, [])
+                self.totals.too_large += 1
+            return True
+        return False
+
+    def _post_with_retry(self, payload: Mapping[str, Any], body: bytes, attempts: int) -> Mapping[str, Any] | None:
         for attempt in range(attempts):
             try:
-                return self.post(self.path, payload)
+                return self.post(self.path, payload, body=body)
             except UploadError as exc:
+                if exc.too_large:
+                    raise _TooLarge() from exc
                 if not exc.retryable:
                     raise CaptureStopped(_refusal(exc)) from exc
                 if attempt + 1 < attempts:
@@ -541,6 +643,9 @@ def _refusal(exc: UploadError) -> str:
         error = detail.get("error")
         if error == "capture_closed":
             return f"the server closed this capture ({detail.get('closed_reason') or 'closed'})"
+        if error == "capture_seq_gap":
+            return (f"the server expects batch {detail.get('expected_seq')}, not the next one this "
+                    "client holds; batches it acknowledged earlier are missing on the server")
         return str(detail.get("message") or error or exc)
     return f"{exc} ({exc.status})" if exc.status else str(exc)
 
@@ -560,8 +665,10 @@ __all__ = [
     "cap_body",
     "classify",
     "effective_limits",
+    "encode_json",
     "encoded_size",
     "endpoint_key",
     "is_asset",
     "origin_of",
+    "valid_text",
 ]

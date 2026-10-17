@@ -166,7 +166,9 @@ class FakeCaptureServer:
         self.calls: list[int] = []
         self.closed = False
 
-    def post(self, path, payload):
+    def post(self, path, payload, *, body=None):
+        if body is not None:
+            assert json.loads(body) == payload  # the bytes sent are the payload
         seq = payload["seq"]
         self.calls.append(seq)
         failure = self.failures.pop(0) if self.failures else None
@@ -219,9 +221,9 @@ class FakeApi:
         self.server = FakeCaptureServer()
         self.payloads = []
 
-    def post(self, path, payload):
+    def post(self, path, payload, *, body=None):
         self.payloads.append((path, payload))
-        return self.server.post(path, payload)
+        return self.server.post(path, payload, body=body)
 
 
 CAPTURE = {"id": "c-1", "name": "Walk", "target_id": "t-1", "target_url": "https://app.example.test/",
@@ -253,6 +255,11 @@ def test_recording_filters_batches_keeps_alive_and_reports(monkeypatch):
     assert result["next"]["scan"] == "shakerscan scan https://app.example.test/ --collection-selection c-1"
     text = record.render(result)
     assert "1 requests uploaded" in text and "never become a credential" in text
+    # Not closed: no Scan or Hunt is suggested before the close that makes the capture usable.
+    still_open = record.summary(CAPTURE, recording, None, complete=True, reason="browser closed")
+    assert set(still_open["next"]) == {"close", "read"}
+    assert still_open["next"]["close"] == "shakerscan api POST '/request-collections/c-1/capture-close'"
+    assert "close it before a Scan or Hunt" in record.render(still_open)
 
 
 def test_the_api_client_never_sends_a_token_over_plain_http_to_another_host():
@@ -433,3 +440,105 @@ def test_an_engine_without_captures_is_named(status, detail):
 
     with pytest.raises(record.RecordError, match="older than 2.11"):
         record.create_capture(OldEngine(), "https://app.example.test", None)
+
+
+def test_a_batch_is_measured_as_the_bytes_that_are_sent():
+    """Non-ASCII bodies: ensure_ascii would send 2-6x the bytes measured; the uploader sends the
+    measured UTF-8 bytes themselves."""
+    sent = []
+
+    class Wire:
+        def post(self, path, payload, *, body=None):
+            sent.append(body)
+            return {"status": "applied", "accepted": len(payload["flows"])}
+
+    cap = _capture.BATCH_ENVELOPE_BYTES + 20_000
+    batcher = Batcher(max_flows=50, max_bytes=cap)
+    for _ in range(6):
+        batcher.add({"url": "https://a/", "response_body": "ж€😀" * 1_000}, now=0.0)
+    uploader = CaptureUploader(Wire().post, "c-1", sleep=lambda _s: None, max_bytes=cap)
+    for flows in batcher.take(0.0, force=True):
+        uploader.enqueue(flows)
+    assert uploader.send() is True
+    assert len(sent) > 1 and all(len(body) <= cap for body in sent)
+    assert all(body == _capture.encode_json(json.loads(body)) for body in sent)
+    assert "ж€😀".encode() in sent[0]  # UTF-8, not \u escapes
+
+
+def test_a_413_splits_the_batch_and_keeps_every_flow_in_order():
+    applied = {}
+
+    class GatewayCap:
+        limit = 1_500
+
+        def post(self, path, payload, *, body=None):
+            if len(body) > self.limit:
+                raise UploadError("too large", status=413)
+            assert payload["seq"] == len(applied) + 1
+            applied[payload["seq"]] = [flow["url"] for flow in payload["flows"]]
+            return {"status": "applied", "accepted": len(payload["flows"])}
+
+    uploader = CaptureUploader(GatewayCap().post, "c-1", sleep=lambda _s: None)
+    uploader.enqueue([{"url": f"https://a/{n}", "response_body": "x" * 300} for n in range(8)])
+    uploader.enqueue([{"url": "https://a/last"}])
+    huge = {"url": "https://a/huge", "response_body": "y" * 5_000}
+    uploader.enqueue([huge])
+    assert uploader.send() is True and uploader.totals.splits >= 1
+    urls = [url for seq in sorted(applied) for url in applied[seq]]
+    assert urls == [f"https://a/{n}" for n in range(8)] + ["https://a/last", "https://a/huge"]
+    assert uploader.totals.bodies_withheld == 1 and uploader.totals.too_large == 0
+    assert uploader.next_seq == max(applied) + 1
+
+
+def test_a_flow_too_large_even_without_bodies_is_counted_not_lost_silently():
+    class Tiny:
+        def post(self, path, payload, *, body=None):
+            if payload["flows"]:
+                raise UploadError("too large", status=413)
+            return {"status": "applied", "accepted": 0}
+
+    uploader = CaptureUploader(Tiny().post, "c-1", sleep=lambda _s: None)
+    uploader.enqueue([{"url": "https://a/" + "p" * 100}])
+    assert uploader.send() is True
+    assert uploader.totals.too_large == 1
+
+
+def test_lone_surrogates_are_replaced_before_measuring_and_sending():
+    flow = {"url": "https://a/", "response_body": "ok\ud800end", "request_headers": [{"name": "X", "value": "\udfff"}]}
+    body = _capture.encode_json({"seq": 1, "flows": [flow]})
+    decoded = json.loads(body.decode("utf-8"))
+    assert decoded["flows"][0]["response_body"] == "ok\ufffdend"
+    batcher = Batcher()
+    batcher.add(flow, now=0.0)
+    (batch,) = batcher.take(0.0, force=True)
+    assert batch[0]["request_headers"][0]["value"] == "\ufffd"
+
+
+@pytest.mark.parametrize("status", [400, 403, 404, 409, 422])
+def test_a_4xx_answer_is_not_retried(status):
+    calls = []
+
+    def post(path, payload, *, body=None):
+        calls.append(payload["seq"])
+        raise UploadError("refused", status=status, detail={"detail": {"error": "capture_seq_gap", "expected_seq": 4}})
+
+    uploader = CaptureUploader(post, "c-1", sleep=lambda _s: None)
+    uploader.enqueue([])
+    with pytest.raises(CaptureStopped):
+        uploader.send()
+    assert calls == [1]
+
+
+def test_stale_profile_directories_are_removed(tmp_path):
+    old = tmp_path / "shakerscan-record-old"
+    old.mkdir()
+    (old / "Cookies").write_text("sid=secret")
+    fresh = tmp_path / "shakerscan-record-fresh"
+    fresh.mkdir()
+    other = tmp_path / "unrelated"
+    other.mkdir()
+    import os
+    os.utime(old, (1_000, 1_000))
+    assert record.remove_stale_profiles(str(tmp_path), now=1_000 + record.STALE_PROFILE_SECONDS + 1) == 1
+    assert not old.exists() and other.exists()
+    assert record.remove_stale_profiles(str(tmp_path)) == 0 and fresh.exists()

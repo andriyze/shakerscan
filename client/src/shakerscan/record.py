@@ -1,6 +1,7 @@
 """``shakerscan record``: browse a target in a recorded browser; the server keeps what you did.
 
-The client opens Chromium with a fresh profile, records the page's traffic through the Chrome
+The client opens Chromium with a fresh in-memory profile (nothing of the session is written to
+disk: no profile directory, no disk cache), records the page's traffic through the Chrome
 DevTools Protocol (no proxy, no certificate), keeps the requests of the capture's allowed origins
 and uploads them in batches to a browser capture on the connected instance. The capture is a
 request collection: Scans and Hunts use it like an imported HAR, and an agent can read it while
@@ -19,6 +20,7 @@ import json
 import os
 import runpy
 import shlex
+import shutil
 import sys
 import tempfile
 import time
@@ -37,6 +39,7 @@ from ._capture import (
     UploadError,
     classify,
     effective_limits,
+    encode_json,
     endpoint_key,
 )
 
@@ -44,6 +47,11 @@ TEST_HOOKS_ENV = "SHAKERSCAN_RECORD_TEST_HOOKS"
 KEEPALIVE_SECONDS = 300.0
 TICK_MS = 250
 FINAL_ATTEMPTS = 8
+# Earlier clients kept the browser profile in a temporary directory with this prefix; one left by
+# a crash (cookies, cache) is removed on the next start once it is this old.
+STALE_PROFILE_PREFIX = "shakerscan-record-"
+STALE_PROFILE_SECONDS = 3600.0
+BROWSER_ARGS = ["--disable-quic", "--no-first-run", "--no-default-browser-check", "--disk-cache-size=0"]
 
 
 class RecordError(Exception):
@@ -93,8 +101,9 @@ class ApiClient:
         self.opener = opener or urllib.request.build_opener()
 
     def request(self, method: str, path: str, payload: Mapping[str, Any] | None = None, *,
-                headers: Mapping[str, str] | None = None) -> dict[str, Any]:
-        data = None if payload is None else json.dumps(payload, separators=(",", ":")).encode("utf-8")
+                headers: Mapping[str, str] | None = None, body: bytes | None = None) -> dict[str, Any]:
+        """``body``, when given, is sent as it is (the bytes ``encode_json(payload)`` measured)."""
+        data = body if body is not None else (None if payload is None else encode_json(payload))
         request = urllib.request.Request(self.base_url + path, data=data, method=method, headers={
             "Accept": "application/json",
             **({"Content-Type": "application/json"} if data is not None else {}),
@@ -120,8 +129,8 @@ class ApiClient:
             raise UploadError(f"{method} {path} answered with something that is not JSON", status=502) from None
         return answer if isinstance(answer, dict) else {}
 
-    def post(self, path: str, payload: Mapping[str, Any]) -> dict[str, Any]:
-        return self.request("POST", path, payload)
+    def post(self, path: str, payload: Mapping[str, Any], *, body: bytes | None = None) -> dict[str, Any]:
+        return self.request("POST", path, payload, body=body)
 
 
 def _message(exc: UploadError) -> str:
@@ -162,7 +171,8 @@ class Recording:
         self.include_assets = include_assets
         self.batcher = Batcher(max_flows=min(50, self.limits["max_flows_per_batch"]),
                                max_bytes=self.limits["max_batch_bytes"])
-        self.uploader = CaptureUploader(api.post, self.capture_id, sleep=sleep, attempts=1)
+        self.uploader = CaptureUploader(api.post, self.capture_id, sleep=sleep, attempts=1,
+                                        max_bytes=self.limits["max_batch_bytes"])
         self.dropped = {"out_of_scope": 0, "assets": 0}
         self.endpoints: set[str] = set()
         self.unfinished = 0
@@ -258,18 +268,47 @@ def _process(sessions: list[tuple[Any, CdpFlowRecorder, list]], recording: Recor
                                                   post_data=post_data), time.monotonic())
 
 
+def remove_stale_profiles(directory: str | None = None, *, now: float | None = None) -> int:
+    """Remove profile directories an earlier ``record`` left behind (a crash or a kill), once they
+    are an hour old and belong to this user. The number removed."""
+    root = directory or tempfile.gettempdir()
+    now = time.time() if now is None else now
+    removed = 0
+    try:
+        names = os.listdir(root)
+    except OSError:
+        return 0
+    for name in names:
+        if not name.startswith(STALE_PROFILE_PREFIX):
+            continue
+        path = os.path.join(root, name)
+        try:
+            info = os.lstat(path)
+            if (not os.path.isdir(path) or os.path.islink(path)
+                    or (hasattr(os, "getuid") and info.st_uid != os.getuid())
+                    or now - info.st_mtime < STALE_PROFILE_SECONDS):
+                continue
+            shutil.rmtree(path)
+            removed += 1
+        except OSError:
+            continue
+    return removed
+
+
 def run_browser(recording: Recording, start_url: str, *, headless: bool, script: str | None) -> str:
-    """Record until the browser closes, Ctrl-C, or the test script returns; the reason it ended."""
+    """Record until the browser closes, Ctrl-C, or the test script returns; the reason it ended.
+
+    The context is an in-memory (incognito) one with the disk cache off: the session's cookies
+    and cached responses are never written to a profile on disk."""
     from playwright.sync_api import sync_playwright
 
     sessions: list[tuple[Any, CdpFlowRecorder, list]] = []
     reason = "browser closed"
-    with tempfile.TemporaryDirectory(prefix="shakerscan-record-") as profile, sync_playwright() as playwright:
-        context = playwright.chromium.launch_persistent_context(
-            profile, headless=headless, args=["--disable-quic", "--no-first-run", "--no-default-browser-check"],
-        )
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(headless=headless, args=BROWSER_ARGS)
+        context = browser.new_context()
         try:
-            page = context.pages[0] if context.pages else context.new_page()
+            page = context.new_page()
             _attach(context, page, sessions, recording.limits)
             context.on("page", lambda new_page: _attach(context, new_page, sessions, recording.limits))
             page.goto(start_url, wait_until="commit")
@@ -295,16 +334,18 @@ def run_browser(recording: Recording, start_url: str, *, headless: bool, script:
                 for flow in recorder.drain():
                     recording.offer(flow, time.monotonic())
                 recording.unfinished += recorder.dropped_unfinished
-            try:
-                context.close()
-            except Exception:
-                pass
+            for closable in (context, browser):
+                try:
+                    closable.close()
+                except Exception:
+                    pass
     return reason
 
 
 def summary(capture: Mapping[str, Any], recording: Recording, closed: Mapping[str, Any] | None,
             *, complete: bool, reason: str) -> dict[str, Any]:
     state = (closed or {}).get("capture") or recording.uploader.last_capture or {}
+    quoted_id = urllib.parse.quote(recording.capture_id, safe="")
     target_id = str(capture.get("target_id") or "")
     target_url = str(capture.get("target_url") or "")
     totals = recording.uploader.totals
@@ -325,14 +366,20 @@ def summary(capture: Mapping[str, Any], recording: Recording, closed: Mapping[st
             "bodies_dropped": int(state.get("bodies_dropped") or totals.bodies_dropped),
             "unfinished": recording.unfinished,
             "not_uploaded": sum(len(flows) for _seq, flows in recording.uploader.queue),
+            "bodies_withheld_too_large": totals.bodies_withheld,
+            "too_large": totals.too_large,
         },
         "endpoints": int(state.get("endpoint_count") or len(recording.endpoints)),
         "stopped": recording.stopped,
-        "next": {
+        # A Scan or Hunt uses a capture once it is closed (the server refuses an open one).
+        "next": ({
             "scan": f"shakerscan scan {shlex.quote(target_url)} --collection-selection {recording.capture_id}",
             "hunt": f"shakerscan hunt start --target-id {target_id} --collection-id {recording.capture_id}",
-            "read": f"shakerscan api GET '/request-collections/{recording.capture_id}/requests?since_seq=0'",
-        },
+            "read": f"shakerscan api GET '/request-collections/{quoted_id}/requests?since_seq=0'",
+        } if closed else {
+            "close": f"shakerscan api POST '/request-collections/{quoted_id}/capture-close'",
+            "read": f"shakerscan api GET '/request-collections/{quoted_id}/requests?since_seq=0'",
+        }),
     }
 
 
@@ -351,17 +398,31 @@ def render(result: Mapping[str, Any]) -> str:
         lines.append(f"  {flows['bodies_dropped']} requests kept without bodies: the capture document reached its size limit")
     if flows["unfinished"]:
         lines.append(f"  {flows['unfinished']} requests never finished and were not kept")
+    if flows.get("bodies_withheld_too_large"):
+        lines.append(f"  {flows['bodies_withheld_too_large']} requests uploaded without bodies: too large for one batch")
+    if flows.get("too_large"):
+        lines.append(f"  {flows['too_large']} requests NOT uploaded: too large for one batch even without bodies")
     if flows["not_uploaded"] or not result["complete"]:
         lines.append(f"  NOT uploaded: {flows['not_uploaded']} requests (the server did not answer)"
                      + (f"; {result['stopped']}" if result.get("stopped") else ""))
     lines += [
         "  Cookie, authorization and password values stay in the encrypted capture; every view is masked,",
         "  and they never become a credential: Scans and Hunts sign in with the target's credential profiles.",
-        "Next:",
-        f"  scan:  {result['next']['scan']}",
-        f"  hunt:  {result['next']['hunt']}",
-        f"  read:  {result['next']['read']}",
     ]
+    if "scan" in result["next"]:
+        lines += [
+            "Next:",
+            f"  scan:  {result['next']['scan']}",
+            f"  hunt:  {result['next']['hunt']}",
+            f"  read:  {result['next']['read']}",
+        ]
+    else:
+        lines += [
+            "The capture is still open: close it before a Scan or Hunt uses it (the server closes it after",
+            "30 idle minutes):",
+            f"  close: {result['next']['close']}",
+            f"  read:  {result['next']['read']}",
+        ]
     return "\n".join(lines)
 
 
@@ -371,6 +432,7 @@ def cmd_record(args: argparse.Namespace, *, base_url: str, token: str | None) ->
         raise RecordError("--script is a test hook; it needs SHAKERSCAN_RECORD_TEST_HOOKS=1")
     if importlib.util.find_spec("playwright") is None:
         raise RecordError(playwright_missing_message())
+    remove_stale_profiles()
     api = ApiClient(base_url, token, timeout=float(args.timeout or 60.0))
     capture = create_capture(api, args.target, args.name)
     recording = Recording(capture, api, include_assets=args.include_assets)
