@@ -6,8 +6,10 @@ import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'rea
 import { useUrlFilters } from '@/lib/useUrlFilters'
 import { UploadAttempt } from '@/lib/uploadAttempt'
 import { Braces, ChevronLeft, ChevronRight, Copy, Pencil, Plus, RefreshCw, Trash2 } from 'lucide-react'
-import { getAllTargetAssets, getTargetAsset, type TargetAsset, type AssetOrigin } from '@/lib/targetAssetApi'
-import { targetOptions } from '@/lib/pickerOptions'
+import { getTargetAsset, type AssetOrigin } from '@/lib/targetAssetApi'
+import { targetOptions, targetSearchNote } from '@/lib/pickerOptions'
+import { targetSearchProvesEmpty } from '@/lib/targetSearchModel.mjs'
+import { useTargetSearch } from '@/lib/useTargetSearch'
 import { CollectionLibrary } from '@/components/collections/CollectionLibrary'
 import {
   createRequestCollection,
@@ -92,7 +94,6 @@ export default function RequestCollectionsPage() {
 
 function RequestCollectionsContent() {
   const toast = useToast()
-  const [assets, setAssets] = useState<TargetAsset[]>([])
   // The collection owner lives in the URL, so reload, Back and links keep it.
   // collection preselects a document and upload=1 opens the uploader, so other pages can deep-link here.
   const { filters, setFilters } = useUrlFilters<{ target_kind?: string; target_id?: string; collection?: string; upload?: string }>()
@@ -111,7 +112,6 @@ function RequestCollectionsContent() {
   const [inventory, setInventory] = useState<RequestCollectionInventoryItem[]>([])
   const [inventoryTotal, setInventoryTotal] = useState(0)
   const [inventoryOffset, setInventoryOffset] = useState(0)
-  const [loading, setLoading] = useState(true)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [uploaderOpen, setUploaderOpen] = useState(false)
@@ -144,17 +144,16 @@ function RequestCollectionsContent() {
   const [safeMethodsOnly, setSafeMethodsOnly] = useState(true)
   const [maxRequests, setMaxRequests] = useState('500')
 
-  useEffect(() => {
-    let cancelled = false
-    getAllTargetAssets().then((items) => {
-      if (!cancelled) setAssets(items)
-    })
-      .catch((cause) => {
-        if (!cancelled) setError(cause instanceof Error ? cause.message : 'Failed to load targets')
-      })
-      .finally(() => { if (!cancelled) setLoading(false) })
-    return () => { cancelled = true }
-  }, [])
+  // The owner picker searches the inventory on the server (one bounded page per query); a linked
+  // owner is read on its own below.
+  const targetSearch = useTargetSearch()
+  const { remember } = targetSearch
+  const selectedAsset = targetId ? targetSearch.byId(targetId) : undefined
+  // The matches, plus the selection (read on its own below) so it stays a choice while the
+  // operator searches for something else.
+  const assets = useMemo(() => selectedAsset && !targetSearch.assets.some((asset) => asset.id === selectedAsset.id)
+    ? [...targetSearch.assets, selectedAsset] : targetSearch.assets, [selectedAsset, targetSearch.assets])
+  const loading = !targetSearch.ready
 
   const choices = useMemo<Choice[]>(() => assets.map((asset) => ({
     id:asset.id,label:(asset.name || asset.locator).slice(0, 240),detail:asset.locator,locator:asset.url,ownerKind:'network',
@@ -174,16 +173,16 @@ function RequestCollectionsContent() {
   const executionKind: RequestCollectionTargetKind = executionOrigin ? 'web' : 'network'
   const availableBindingTargets = useMemo(() => new Set([targetId,...assetOrigins.map((origin) => origin.id)]),[targetId,assetOrigins])
   useEffect(() => {
-    if (loading || !targetId || assets.some((asset) => asset.id === targetId)) return
+    if (loading || !targetId || selectedAsset) return
     let cancelled = false
     getTargetAsset(targetId).then((result) => {
       if (cancelled) return
       if (!result.target.is_active) {setError('The linked target is retired');return}
-      setAssets((current) => current.some((asset) => asset.id === result.target.id) ? current : [...current,result.target])
+      remember(result.target)
       setTargetId(result.target.id)
     }).catch((cause) => {if (!cancelled) setError(cause instanceof Error ? cause.message : 'Target not found')})
     return () => {cancelled = true}
-  },[assets,loading,setTargetId,targetId])
+  },[loading,remember,selectedAsset,setTargetId,targetId])
 
   const loadCollections = useCallback(async () => {
     // Only the latest request may fill the list, so a slow answer never shows another target's collections.
@@ -438,7 +437,7 @@ function RequestCollectionsContent() {
   }
 
   if (loading) return <div className="p-6 text-sm text-gray-400">Loading collection targets…</div>
-  if (error && !assets.length) return <ErrorState message={error} />
+  if ((error || targetSearch.error) && !assets.length && !targetSearch.query.trim()) return <ErrorState message={error || targetSearch.error || 'Failed to load targets'} />
 
   return (
     <div className="mx-auto max-w-7xl space-y-6 p-6">
@@ -467,7 +466,8 @@ function RequestCollectionsContent() {
         </Field>
         <Field label="Collection owner">
           <Combobox value={targetId} onChange={setTargetId} options={ownerOptions} noneLabel="All collections"
-            placeholder={choices.length ? 'All collections' : 'No active targets'} searchPlaceholder="Search targets by name, host or environment…" />
+            onQueryChange={targetSearch.setQuery} loading={targetSearch.loading} optionsQuery={targetSearch.answeredQuery} footerNote={targetSearchNote(targetSearch)}
+            placeholder={targetSearchProvesEmpty({ ...targetSearch, assets: choices }) ? 'No active targets' : 'All collections'} searchPlaceholder="Search targets by name, host or environment…" />
         </Field>
       </Card>
 

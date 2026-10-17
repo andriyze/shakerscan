@@ -6,10 +6,14 @@ import {
   AlertCircle, ArrowRight, Braces, Check, ChevronDown, Clock3,
   FileCheck2, FlaskConical, Info, Plus, Route, ShieldCheck, Sparkles, Target, Trash2,
 } from 'lucide-react'
-import { executeArsenalCommand, getTargets, type ArsenalExecuteResult } from '@/lib/api'
+import { executeArsenalCommand, type ArsenalExecuteResult } from '@/lib/api'
 import { Badge, Button, Card, ErrorState } from '@/components/ui'
 import { InvestigatorTabs } from '@/components/hunt/InvestigatorTabs'
-import { boundedTargetDisplay, usableWebTargets } from '@/lib/targetChoices'
+import { usableWebTargets } from '@/lib/targetChoices'
+import { TargetSearchCombobox } from '@/components/targets/TargetSearchCombobox'
+import type { TargetAsset } from '@/lib/targetAssetApi'
+
+const webTargetChoice = (asset: TargetAsset) => usableWebTargets([asset]).length === 1
 
 interface TargetLite { id: string; url: string; name?: string | null; discovery_source?: string | null }
 type StepRole = 'control' | 'mutation' | 'verify'
@@ -141,7 +145,7 @@ function StepEditor({ step, index, steps, update, remove }: {
 }
 
 export default function ExperimentBuilderPage() {
-  const [targets, setTargets] = useState<TargetLite[]>([])
+  const [selectedTarget, setSelectedTarget] = useState<TargetLite | undefined>(undefined)
   const [targetId, setTargetId] = useState('')
   const [objective, setObjective] = useState('')
   const [expected, setExpected] = useState('')
@@ -160,10 +164,6 @@ export default function ExperimentBuilderPage() {
     setExpected(params.get('expected') || '')
     setFalsifier(params.get('falsifier') || '')
     if (initialPath !== '/') setSteps([blankStep(0, initialPath), blankStep(1, initialPath)])
-    getTargets().then((data) => {
-      const list = usableWebTargets((data?.targets || data || []) as TargetLite[])
-      setTargets(list)
-    }).catch(() => undefined)
   }, [])
 
   const issues = useMemo(() => {
@@ -204,7 +204,6 @@ export default function ExperimentBuilderPage() {
     finally { setBusy(false) }
   }, [issues, payload])
 
-  const selectedTarget = targets.find((target) => target.id === targetId)
 
   return (
     <div>
@@ -225,13 +224,14 @@ export default function ExperimentBuilderPage() {
           <Card className="p-5">
             <div className="mb-4 flex items-center gap-3"><div className="flex h-8 w-8 items-center justify-center rounded-full bg-blue-500/15 text-sm font-semibold text-blue-300">1</div><div><h2 className="font-semibold text-white">Target and decision rule</h2><p className="text-xs text-gray-500">Be explicit about what this experiment can prove or disprove.</p></div></div>
             <div className="grid gap-4">
-              <label className="text-xs font-medium text-gray-400">Registered target
-                <select value={targetId} onChange={(e) => setTargetId(e.target.value)} className="mt-1.5 w-full rounded-lg border border-gray-700 bg-gray-950 px-3 py-2.5 text-sm text-gray-200">
-                  <option value="">Choose a target…</option>
-                  {!targets.length ? <option value="">No registered targets</option> : null}
-                  {targets.map((target) => <option key={target.id} value={target.id}>{boundedTargetDisplay(target)}</option>)}
-                </select>
-              </label>
+              <div className="text-xs font-medium text-gray-400">
+                <label htmlFor="experiment-target">Registered target</label>
+                {/* Searched on the server: the first 100 targets used to be the only choices. */}
+                <div className="mt-1.5">
+                  <TargetSearchCombobox id="experiment-target" value={targetId} onChange={setTargetId}
+                    accept={webTargetChoice} placeholder="Choose a target…" onSelectedAsset={setSelectedTarget} />
+                </div>
+              </div>
               <label className="text-xs font-medium text-gray-400">What are you trying to learn?
                 <textarea value={objective} onChange={(e) => setObjective(e.target.value)} rows={2} placeholder="Can a second user read an object they do not own?" className="mt-1.5 w-full rounded-lg border border-gray-700 bg-gray-950 px-3 py-2.5 text-sm text-gray-200 placeholder:text-gray-700" />
               </label>

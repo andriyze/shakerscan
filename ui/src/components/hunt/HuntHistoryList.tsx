@@ -7,12 +7,15 @@ import { Card, EmptyState, ErrorState, Field, Input, Select, TableSkeleton, butt
 import { huntStatusLabel } from '@/lib/labels'
 import { listHuntsV2, type HuntSortField, type HuntV2 } from '@/lib/huntV2'
 import { huntTargetTitle } from '@/lib/huntListModel.mjs'
+import { huntIsLive } from '@/lib/huntRunModel.mjs'
+import { usePoll } from '@/lib/usePoll'
 import { useUrlFilters } from '@/lib/useUrlFilters'
 import { HuntRunList } from './HuntRunList'
 
 const PAGE_SIZE = 50
 const SEARCH_DEBOUNCE_MS = 300
 const REFRESH_MS = 10_000
+const IDLE_REFRESH_MS = 60_000
 
 const STATUSES = [
   'active', 'awaiting_planner', 'completed', 'cancelled', 'failed', 'budget_exhausted',
@@ -87,16 +90,24 @@ export function HuntHistoryList() {
       // A background refresh must not wipe rows the operator is reading; only a
       // foreground load surfaces the failure.
       if (!isPolling) setLoadError(error instanceof Error ? error.message : 'Failed to load Hunts')
+      // A failed background refresh keeps the rows and tells the poll loop to back off.
+      else throw error
     } finally {
       if (!isPolling) setLoading(false)
     }
   }, [status, kind, targetId, search, sort, order, page])
 
-  useEffect(() => {
-    load()
-    const timer = setInterval(() => load(true), REFRESH_MS)
-    return () => clearInterval(timer)
-  }, [load])
+  // Foreground load whenever the filters or page change; the background refresh runs every
+  // REFRESH_MS while a listed Hunt is live and every IDLE_REFRESH_MS otherwise (a Hunt started from
+  // the client or another tab still appears), paused while the tab is hidden, backing off on errors.
+  useEffect(() => { void load() }, [load])
+  const anyLive = hunts.some((hunt) => huntIsLive(hunt))
+  // The loop's immediate tick after a (re)start duplicates the foreground load above: skip it.
+  const polledLoad = useRef<typeof load | null>(null)
+  usePoll(async () => {
+    if (polledLoad.current !== load) { polledLoad.current = load; return }
+    await load(true)
+  }, { intervalMs: REFRESH_MS, idleIntervalMs: IDLE_REFRESH_MS, live: anyLive, deps: [load] })
 
   const maxPage = Math.max(1, Math.ceil(total / PAGE_SIZE))
   const filtered = Boolean(status || kind || targetId || search)

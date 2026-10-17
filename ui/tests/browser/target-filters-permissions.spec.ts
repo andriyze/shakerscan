@@ -56,6 +56,7 @@ test('TARGET-PERMISSIONS-001 metadata defaults on, instruction edits off; operat
   await pinMockApiOrigin(page)
   let submitted:Record<string,unknown>|undefined
   let grants=0
+  const searches:string[]=[]
   await page.route(`${MOCK_API_ORIGIN}/**`,async route => {
     const request=route.request(),path=new URL(request.url()).pathname
     if(path.includes('/grants') || path.includes('/capabilities/')) grants++
@@ -64,7 +65,12 @@ test('TARGET-PERMISSIONS-001 metadata defaults on, instruction edits off; operat
       return route.fulfill({json:permission})
     }
     if(path===`/targets/${id}/asset`) return route.fulfill({json:{target:targets[0],origins:[],services:[],credentials:[],request_collections:[],active_findings:{},history:{items:[],total:0}}})
-    if(path==='/targets/inventory') return route.fulfill({json:{targets,total:targets.length}})
+    if(path==='/targets/inventory') {
+      const query=new URL(request.url()).searchParams
+      // Only the picker's bounded list/v1 search (count=none) is recorded.
+      if(query.get('count')==='none') searches.push(query.get('search') || '')
+      return route.fulfill({json:{targets,total:targets.length}})
+    }
     if(path==='/credential-profiles') return route.fulfill({json:{profiles:[{id:profile,name:'TV SSH identity'}]}})
     if(path==='/request-collections') return route.fulfill({json:{collections:[{id:collection,name:'TV API collection'}]}})
     return route.fulfill({json:{skill:null,revision:0,max_characters:12000,items:[],total:0}})
@@ -79,7 +85,13 @@ test('TARGET-PERMISSIONS-001 metadata defaults on, instruction edits off; operat
   const instructions=dialog.getByRole('checkbox',{name:/Let Hunt edit these instructions/})
   await expect(instructions).not.toBeChecked()
   await instructions.check()
-  await dialog.getByLabel('Source target').selectOption(source)
+  // The source target is a server-searched picker: the typed text goes to the inventory as a
+  // bounded list/v1 search, then the operator chooses the match.
+  await dialog.getByLabel('Source target').click()
+  await page.getByRole('combobox',{name:/Search targets/}).fill('Home')
+  await expect.poll(()=>searches).toContain('Home')
+  await page.getByRole('option',{name:/Home TV/}).click()
+  await expect(dialog.getByLabel('Source target')).toHaveAttribute('data-value',source)
   await dialog.getByRole('checkbox',{name:'TV SSH identity',exact:true}).check()
   await dialog.getByRole('checkbox',{name:'TV API collection',exact:true}).check()
   await dialog.getByRole('button',{name:'Add SSH host key',exact:true}).click()
