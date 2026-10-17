@@ -413,6 +413,8 @@ def empty_capture_document() -> dict[str, Any]:
             "log": {
                 "version": "1.2",
                 "creator": {"name": "ShakerScan browser capture", "version": CAPTURE_SCHEMA},
+                # Survives a relabelled payload: resolve_imported_requests strips any log with it.
+                "_shakerscanCapture": CAPTURE_SCHEMA,
                 "entries": [],
             },
         },

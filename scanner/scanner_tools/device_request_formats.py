@@ -49,7 +49,10 @@ CAPTURE_CREDENTIAL_HEADER_NAMES = frozenset({
     "cookie", "authorization", "proxy-authorization", "x-api-key", "api-key", "x-auth-token",
     "x-csrf-token", "x-xsrf-token", "csrf-token", "xsrf-token", "x-csrftoken",
 })
-_CAPTURE_CREDENTIAL_NAME_RE = re.compile(r"(?:auth|csrf|xsrf|bearer)", re.I)
+_CAPTURE_CREDENTIAL_NAME_RE = re.compile(r"(?:auth|csrf|xsrf|bearer|signature)", re.I)
+# The marker a capture document's log carries (api/capture/flows.py): a capture stays a capture
+# even if its row were relabelled, because re-validation keeps the log.
+CAPTURE_LOG_SCHEMA = "browser-capture/v1"
 
 
 class RequestImportError(ValueError):
@@ -175,18 +178,27 @@ def resolve_imported_requests(
             {"collection": payload.get("document"), "environment": payload.get("environment")},
             max_requests=max_requests,
         )
-    if format_name == "har":
-        return _resolve_har(payload.get("document"), max_requests=max_requests)
-    if format_name == CAPTURE_FORMAT:
+    if format_name == CAPTURE_FORMAT or (format_name == "har" and is_capture_document(payload.get("document"))):
         return strip_captured_credentials(
             _resolve_har(payload.get("document"), max_requests=max_requests)
         )
+    if format_name == "har":
+        return _resolve_har(payload.get("document"), max_requests=max_requests)
     if format_name == "openapi":
         requests, _metadata = _openapi_requests(
             payload.get("document"), base_url=payload.get("base_url"), max_requests=max_requests
         )
         return requests
     raise RequestImportError("Encrypted request payload has an unsupported format")
+
+
+def is_capture_document(document: Any) -> bool:
+    """A HAR log written by a browser capture, whatever format its payload is labelled with."""
+    log = document.get("log") if isinstance(document, dict) else None
+    if not isinstance(log, dict):
+        return False
+    creator = log.get("creator") if isinstance(log.get("creator"), dict) else {}
+    return log.get("_shakerscanCapture") == CAPTURE_LOG_SCHEMA or creator.get("version") == CAPTURE_LOG_SCHEMA
 
 
 def is_captured_credential_header(name: str) -> bool:
@@ -213,6 +225,8 @@ def is_captured_secret_query(name: str, value: str) -> bool:
         or bool(_CAPTURE_SECRET_FIELD_RE.search(text))
         or bool(_CAPTURE_SECRET_QUERY_RE.search(text))
         or token_like_segment(urllib.parse.unquote(str(value or "")))
+        # A bare parameter (``?<token>``) is its own value.
+        or token_like_segment(urllib.parse.unquote(text))
     )
 
 
@@ -244,18 +258,45 @@ def _replayable_capture_url(url: str) -> tuple[str, list[str]]:
 
 
 _CAPTURE_SECRET_FIELD_RE = re.compile(
-    r"(?:password|passwd|passcode|secret|token|api[-_]?key|credential|private[-_]?key|otp|csrf|xsrf)",
+    r"(?:password|passwd|passcode|passphrase|secret|token|api[-_]?key|credential|private[-_]?key|otp|csrf|xsrf)",
     re.I,
+)
+# Short secret names, matched as a whole word of the field name (``pass``, ``new_pwd``,
+# ``user-pin``) so that ``spinner`` or ``compass`` stay.
+_CAPTURE_SECRET_WORDS = frozenset({"pass", "pwd", "pin", "passphrase", "secret", "otp", "pw", "mfa", "totp"})
+_FIELD_WORD_RE = re.compile(r"[^a-z0-9]+")
+# A body that names one of these anywhere, but cannot be parsed confidently, is not replayed.
+_BODY_SECRET_HINT_RE = re.compile(
+    r"(?:pass(?:word|wd|code|phrase)?|pwd|secret|token|otp|pin|api[-_]?key|credential)", re.I,
 )
 
 
+def is_captured_secret_field(name: str) -> bool:
+    """A body field whose recorded value is a credential: ``password``, ``pass``, ``pwd``,
+    ``pin``, ``otp``, ``passphrase``, token and secret names (by its last path component)."""
+    text = str(name or "")
+    last = re.split(r"[.\[\]]+", text.strip("[]."))[-1] if text else ""
+    words = {word for word in _FIELD_WORD_RE.split(last.lower()) if word}
+    return bool(_CAPTURE_SECRET_FIELD_RE.search(last) or words & _CAPTURE_SECRET_WORDS)
+
+
+def _blank_all(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {key: _blank_all(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_blank_all(item) for item in value]
+    return "" if value is not None else None
+
+
 def _blank_secret_fields(value: Any, withheld: set[str]) -> Any:
+    """``value`` with everything under a secret-named key emptied: a scalar, every element of a
+    list, every leaf of an object."""
     if isinstance(value, dict):
         blanked = {}
         for key, item in value.items():
-            if _CAPTURE_SECRET_FIELD_RE.search(str(key)) and isinstance(item, (str, int, float)):
+            if is_captured_secret_field(str(key)) and item is not None:
                 withheld.add(str(key)[:160])
-                blanked[key] = ""
+                blanked[key] = _blank_all(item)
             else:
                 blanked[key] = _blank_secret_fields(item, withheld)
         return blanked
@@ -264,42 +305,82 @@ def _blank_secret_fields(value: Any, withheld: set[str]) -> Any:
     return value
 
 
+_MULTIPART_NAME_RE = re.compile(rb'(?i)content-disposition:[^\r\n]*?\bname="([^"]*)"')
+
+
+def _without_secret_multipart_fields(body: bytes, content_type: str, withheld: set[str]) -> bytes | None:
+    """A multipart/form-data body with the content of secret-named parts emptied, or None when it
+    cannot be parsed confidently."""
+    match = re.search(r'boundary="?([^";]+)"?', content_type, re.I)
+    if not match:
+        return None
+    delimiter = b"--" + match.group(1).strip().encode("latin-1")
+    pieces = body.split(delimiter)
+    if len(pieces) < 3 or not pieces[-1].startswith(b"--"):
+        return None
+    rebuilt = [pieces[0]]
+    for piece in pieces[1:-1]:
+        head, separator, content = piece.partition(b"\r\n\r\n")
+        if not separator:
+            return None
+        name = _MULTIPART_NAME_RE.search(head)
+        if name is None:
+            return None
+        field = name.group(1).decode("utf-8", "replace")
+        if is_captured_secret_field(field):
+            withheld.add(field[:160])
+            content = b"\r\n" if content.endswith(b"\r\n") else b""
+        rebuilt.append(head + separator + content)
+    rebuilt.append(pieces[-1])
+    return delimiter.join(rebuilt)
+
+
 def _without_secret_body_fields(request: dict[str, Any]) -> tuple[bytes, list[str]]:
-    """A captured JSON or form body with every password-, token- or secret-named field emptied:
-    the password typed into a recorded login form is never sent again."""
+    """A captured body with every password-, token- or secret-named field emptied (JSON, form,
+    multipart): the password typed into a recorded login form is never sent again. A body that
+    cannot be parsed confidently but names a secret field anywhere is withheld whole (``*``)."""
     body = request.get("body") if isinstance(request.get("body"), bytes) else b""
     if not body:
         return body, []
-    content_type = next(
-        (str(value).lower() for name, value in dict(request.get("headers") or {}).items()
+    raw_content_type = next(
+        (str(value) for name, value in dict(request.get("headers") or {}).items()
          if str(name).lower() == "content-type"),
-        str(request.get("body_mode") or "").lower(),
+        str(request.get("body_mode") or ""),
     )
+    content_type = raw_content_type.lower()
     withheld: set[str] = set()
+    hinted = bool(_BODY_SECRET_HINT_RE.search(body.decode("utf-8", "replace")))
+    if "multipart/form-data" in content_type:
+        rebuilt = _without_secret_multipart_fields(body, raw_content_type, withheld)
+        if rebuilt is None:
+            return (b"", ["*"]) if hinted else (body, [])
+        return (rebuilt, sorted(withheld)) if withheld else (body, [])
     try:
         text = body.decode("utf-8")
     except UnicodeDecodeError:
-        return body, []
+        return (b"", ["*"]) if hinted else (body, [])
     if "json" in content_type or text.lstrip()[:1] in {"{", "["}:
         try:
             parsed = json.loads(text)
         except ValueError:
-            return body, []
+            return (b"", ["*"]) if hinted else (body, [])
         blanked = _blank_secret_fields(parsed, withheld)
         if not withheld:
             return body, []
         return json.dumps(blanked, separators=(",", ":"), ensure_ascii=False).encode("utf-8"), sorted(withheld)
-    if "x-www-form-urlencoded" in content_type:
-        pairs = urllib.parse.parse_qsl(text, keep_blank_values=True)
+    if "x-www-form-urlencoded" in content_type or (
+        "=" in text and re.fullmatch(r"[^\s&=]+=[^\s&]*(?:&[^\s&=]+=[^\s&]*)*", text.strip())
+    ):
         kept = []
-        for name, item in pairs:
-            if _CAPTURE_SECRET_FIELD_RE.search(name):
+        for name, item in urllib.parse.parse_qsl(text, keep_blank_values=True):
+            if is_captured_secret_field(name):
                 withheld.add(name[:160])
                 item = ""
             kept.append((name, item))
         if withheld:
             return urllib.parse.urlencode(kept).encode("utf-8"), sorted(withheld)
-    return body, []
+        return body, []
+    return (b"", ["*"]) if hinted else (body, [])
 
 
 def strip_captured_credentials(requests: list[dict[str, Any]]) -> list[dict[str, Any]]:

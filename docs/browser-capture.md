@@ -114,9 +114,14 @@ The library labels it **Browser capture**, with Recording or Closed and its coun
   authenticated session, and replay does not reuse them: Scans and Hunts sign in with the target's
   own credential profiles. Every replay of a capture (Scan, Hunt `collections.replay_*`) leaves out
   the recorded Cookie, Authorization, Proxy-Authorization, API-key, CSRF/XSRF and other token or
-  session headers and `;jsessionid`-style path parameters, and empties password-, token- and
-  secret-named fields in JSON and form bodies (a recorded login form is replayed without the
-  password you typed). To test as the account you used, add it as a credential profile.
+  session headers (signature headers included), `;jsessionid`-style path parameters and query
+  parameters named like a credential or holding a token-like value, and empties password-, pass-,
+  pwd-, PIN-, OTP-, token- and secret-named fields in JSON (nested objects and lists included),
+  form and multipart bodies; a body it cannot parse that names such a field is not replayed at
+  all. A recorded login form is replayed without the password you typed, and each replay request
+  names what was left out (`captured_withheld`). A capture cannot be edited, relabelled or
+  replaced through the collection or device routes. To test as the account you used, add it as a
+  credential profile.
 - Only the target's exact origin is captured; an application that calls an API on another origin
   needs that API as its own target and its own capture.
 - Only Chromium is supported, and only browser traffic: applications that are not web pages are
