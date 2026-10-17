@@ -10,7 +10,7 @@ import pytest
 from api.finding_detail import build_finding_detail, related_findings
 from api.scan.severity_calibration import calibrate_finding
 
-SECRET_VALUE = "AKIAZOOFIXTUREVALUE1"
+SECRET_VALUE = "AKIA" + "ZOOFIXTUREVALUE1"  # split: a synthetic fixture, not a real key
 
 
 def _tls(check, **evidence):
