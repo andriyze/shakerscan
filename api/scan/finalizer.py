@@ -1624,6 +1624,9 @@ def _exposure_location(url: Any) -> str | None:
 # class (``exposure_probe._CLASS_SEVERITY``) that the probe proved at the same URL. Any other
 # template matching that URL -- a CVE at /console, GraphQL batching at /graphql -- reports
 # something else and stays a finding of its own.
+#: Coverage reason for optional work a frozen continuation allocation did not grant.
+OMITTED_CAPABILITY_REASON = "capability_not_in_allocation"
+
 _TEMPLATE_EXPOSURE_CLASSES: Mapping[str, frozenset[str]] = MappingProxyType({
     "git-config": frozenset({"version_control_exposure"}),
     "git-credentials-disclosure": frozenset({"configuration_secret_file"}),
@@ -2386,8 +2389,14 @@ def finalize_scan_report(
     plan_revision: ScanPlanRevision | Mapping[str, Any] | None = None,
     origin_evidence: Sequence[Mapping[str, Any]] = (),
     resolved_families: Sequence[str] | None = None,
+    omitted_capabilities: Sequence[str] = (),
 ) -> dict[str, Any]:
     """Build the final report without network, process, filesystem, or clock access.
+
+    ``omitted_capabilities`` are the capabilities a continuation round compiled but left out
+    because the Scan's frozen allocation does not grant them (an in-flight Scan across an upgrade
+    that added a capability to a family). Each is stated in ``coverage.reasons`` as
+    ``capability_not_in_allocation:<capability>``; it is optional work, so the status is unchanged.
 
     ``resolved_families`` is the execution plan's resolved family set when the caller has it
     (the worker does). An empty set means the Scan selected no check family at all.
@@ -2945,6 +2954,7 @@ def finalize_scan_report(
         | ({"placement_unavailable"} if placement_gaps else set())
         | ({"bound_origin_redirects_off_origin"}
            if application_forwarded_off_origin else set())
+        | {f"{OMITTED_CAPABILITY_REASON}:{str(name)[:80]}" for name in omitted_capabilities or () if str(name).strip()}
     )
     coverage_action_rows = [
         row for row in action_rows

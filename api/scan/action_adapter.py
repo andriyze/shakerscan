@@ -5030,6 +5030,8 @@ class DatabaseNeutralScanActionDispatcher:
                     if isinstance(row, Mapping)
                 )
         execution_plan = self.options.get("scan_execution_plan")
+        # Capabilities a continuation round left out (continuation_rounds.OMITTED_CAPABILITIES_OPTION).
+        omitted = self.options.get("continuation_omitted_capabilities")
         report = finalize_scan_report(
             plan=plan,
             plan_revision=plan_revision,
@@ -5047,6 +5049,7 @@ class DatabaseNeutralScanActionDispatcher:
             work_manifest_references=unique_work_manifest_reference_dicts(
                 planned.capability_args for planned in plan.actions
             ),
+            omitted_capabilities=tuple(omitted) if isinstance(omitted, (list, tuple)) else (),
         )
         return report
 

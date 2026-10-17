@@ -125,6 +125,56 @@ async def load_continuation_request_manifests(
     return tuple(manifests)
 
 
+#: Scan option naming the capabilities a continuation compiled but left out because the Scan's
+#: frozen allocation does not grant them; the report's coverage states each one
+#: (``capability_not_in_allocation:<capability>``, finalizer.finalize_scan_report).
+OMITTED_CAPABILITIES_OPTION = "continuation_omitted_capabilities"
+
+
+def without_unallocated_optional_actions(
+    plan: ScanActionPlan, allowed_capabilities: Iterable[str] | None,
+) -> tuple[ScanActionPlan, frozenset[str]]:
+    """``plan`` without optional actions of capabilities the allocation does not grant.
+
+    Filtered before the residual is allocated, so a slice that can never be appended does not
+    hold budget the round's other work could have used. An action depending on one left out goes
+    too, as ``select_continuation_actions`` would drop it; a required action of an ungranted
+    capability is kept and still meets the merge's "outside its allocation" guard. The finalizer
+    only loses those dependencies. Returns the plan (``plan`` itself when nothing was left out)
+    and the capabilities left out.
+    """
+    if allowed_capabilities is None:
+        return plan, frozenset()
+    allowed = frozenset(allowed_capabilities)
+    dropped: set[str] = set()
+    omitted: set[str] = set()
+    kept: list[ScanAction] = []
+    for action in plan.actions:
+        if action.action_id == "finalize.report" or action.action_id.startswith(_INPUT_ACTION_PREFIXES):
+            kept.append(action)
+        elif (not action.required and action.capability_name not in allowed) or dropped.intersection(
+            action.dependencies,
+        ):
+            dropped.add(action.action_id)
+            omitted.add(action.capability_name)
+        else:
+            kept.append(action)
+    if not dropped:
+        return plan, frozenset()
+    actions = tuple(
+        replace(
+            action, ordinal=index, action_digest=None,
+            dependencies=tuple(item for item in action.dependencies if item not in dropped),
+        )
+        for index, action in enumerate(kept)
+    )
+    filtered = ScanActionPlan(
+        scan_id=plan.scan_id, execution_plan_digest=plan.execution_plan_digest,
+        target_binding_digest=plan.target_binding_digest, actions=actions,
+    )
+    return filtered, frozenset(omitted)
+
+
 def select_continuation_actions(
     allocated_plan: ScanActionPlan,
     *,
@@ -225,8 +275,12 @@ def _continuation_option_patch(
     request_candidates: ScanWorkManifest | None,
     amended: ScanActionPlan,
     revision: ScanPlanRevision,
+    omitted_capabilities: Iterable[str] = (),
 ) -> dict[str, Any]:
+    omitted = sorted(set(omitted_capabilities))
     return {
+        # Only when a round left something out, so an ordinary Scan's options are unchanged.
+        **({OMITTED_CAPABILITIES_OPTION: omitted} if omitted else {}),
         "endpoint_manifest_id": str(endpoints.manifest_id),
         "endpoint_manifest_ref": endpoints.reference().canonical_dict(),
         "candidate_manifest_ref": candidates.reference().canonical_dict(),
@@ -436,6 +490,11 @@ def compile_continuation_round(
         # slice of query candidates.
         body_positions=body_candidate_positions(candidates),
     )
+    # Optional work the frozen allocation does not grant is left out before admission, so it
+    # never holds residual budget; the Scan's report states each capability left out.
+    continuation_raw, omitted = without_unallocated_optional_actions(
+        continuation_raw, allocation.allowed_capabilities,
+    )
     allocated_plan = allocate_scan_action_plan(
         continuation_raw, ContinuationBudgetCeiling(residual),
     ).plan
@@ -468,8 +527,13 @@ def compile_continuation_round(
         ),
         revision=revision_number,
     )
+    previously_omitted = options.get(OMITTED_CAPABILITIES_OPTION)
     option_patch = _continuation_option_patch(
         endpoints, candidates, request_candidates, amended, revision,
+        omitted_capabilities={
+            *omitted,
+            *(str(item) for item in previously_omitted if str(item).strip()),
+        } if isinstance(previously_omitted, (list, tuple)) else omitted,
     )
     return PreparedContinuation(
         plan=amended, revision=revision,
@@ -647,6 +711,7 @@ async def run_continuation_rounds(
 
 
 __all__ = [
+    "OMITTED_CAPABILITIES_OPTION",
     "ContinuationRuntime",
     "PreparedContinuation",
     "compile_continuation_round",
@@ -657,4 +722,5 @@ __all__ = [
     "round_progress_window",
     "run_continuation_rounds",
     "select_continuation_actions",
+    "without_unallocated_optional_actions",
 ]
