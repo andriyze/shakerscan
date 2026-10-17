@@ -8,7 +8,7 @@
     "grade_reliable_recorded": true,
     "max_unverified_high_ratio": false,
     "min_expected_recall": false,
-    "min_verified_high_critical": false,
+    "min_verified_high_critical": true,
     "no_undeclared_expectation_misses": false,
     "report_invariants_clean": true,
     "report_not_degraded": true,
