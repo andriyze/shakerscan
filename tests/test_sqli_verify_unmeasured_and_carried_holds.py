@@ -166,3 +166,55 @@ def test_an_extension_funds_its_unfinished_candidate_not_the_ones_it_carries(mon
     assert extension.redacted_execution["carried_count"] == 3
     assert extension.status == "success", (extension.status, extension.errors)
 
+
+def test_nosqli_records_a_path_segment_slice_as_inapplicable_not_unattempted(monkeypatch):
+    # 13bd3497's verify.nosqli.r01: four /hub/api/<name>/1* path candidates, all skipped,
+    # reported partial (output_truncated) and failed the required nosqli family.
+    scan_id = str(uuid.uuid4())
+    endpoints = build_endpoint_manifest(
+        scan_id=scan_id, target_binding_digest=TARGET.digest,
+        surface_manifest={
+            "schema_version": "endpoint-manifest/v2", "status": "complete", "reason": None,
+            "endpoints": [
+                {"method": "GET", "scheme": "https", "host": "app.example.test", "port": 443,
+                 "normalized_path": f"/api/{name}/{{int}}", "concrete_path": f"/api/{name}/1",
+                 "query_keys": [], "source": "web.spec_ingest"}
+                for name in ("tickets", "users", "baskets", "orders")
+            ],
+        },
+        source_action_ids=("discover.spec",),
+    )
+    candidates = build_candidate_manifest(
+        endpoints, source_action_ids=("discover.spec",), maximum=10,
+    )
+    assert {item.get("parameter_location") for item in candidates.entries} == {"path"}
+    action = plan_action(
+        "verify.nosqli.r01", "nosqli.verify_batch", 0,
+        capability_args={
+            "candidate_manifest_ref": candidates.reference().canonical_dict(),
+            "endpoint_manifest_ref": endpoints.reference().canonical_dict(),
+            "slice": {"start": 0, "count": len(candidates.entries)},
+        },
+    )
+    plan = ScanActionPlan(
+        scan_id=scan_id, execution_plan_digest="a" * 64,
+        target_binding_digest=TARGET.digest, actions=(action,),
+    )
+
+    async def execute(_self, _context, _adapter, **_kwargs):
+        raise AssertionError("the NoSQL differential must not run against a path segment")
+
+    monkeypatch.setattr(action_adapter_module.CapabilityExecutor, "execute", execute)
+    backend = Backend(manifests={endpoints.manifest_id: endpoints, candidates.manifest_id: candidates})
+    dispatcher = _dispatcher(
+        plan, backend, policy=ScanPolicy(active_testing=True, approval_receipt_id="approval-1"),
+    )
+
+    result = asyncio.run(dispatcher(action, _lease(plan, action), _noop))
+
+    assert result.status == "success", result.errors
+    assert result.redacted_execution["unattempted_count"] == 0
+    assert result.redacted_execution["inapplicable_count"] == len(candidates.entries)
+    assert [item["reason"] for item in result.observations] == (
+        ["path_segment_candidate"] * len(candidates.entries)
+    )

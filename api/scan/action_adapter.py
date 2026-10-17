@@ -3342,17 +3342,40 @@ class DatabaseNeutralScanActionDispatcher:
         primary = resolve_scan_http_principal(
             self.options, lane="primary", capability_name=action.capability_name,
         )
-        for offset, (manifest_index, candidate) in enumerate(rows):
-            candidate_id = str(candidate.get("candidate_id") or "")
+
+        def inapplicable_reason(candidate: Mapping[str, Any]) -> str | None:
             # A fragment-located candidate (family_hints: ["xss"]) never reaches the
             # server, so its parameter is absent from the server query/body and the
             # NoSQL differential would search for a parameter that does not exist and
-            # block. It belongs to the browser XSS proof; skip it here.
+            # block. It belongs to the browser XSS proof.
             if candidate.get("browser_fragment_path"):
-                continue
+                return "browser_fragment_candidate"
             # A path segment is not a NoSQL operator-injection site (no field to replace with an
-            # operator object); skip it here, it belongs to the SQLi verifier.
+            # operator object); it belongs to the SQLi verifier.
             if candidate.get("parameter_location") == "path":
+                return "path_segment_candidate"
+            return None
+
+        # Recorded as inapplicable, never as unattempted: lab Scan 13bd3497 (2.11.0) handed
+        # this verifier a slice of four ``/hub/api/<name>/1*`` path candidates, skipped all
+        # four, and reported the required nosqli family partial (output_truncated) for work
+        # no budget could have made testable -- the false gap the SQLi batch already avoids.
+        inapplicable = [
+            (manifest_index, reason) for manifest_index, candidate in rows
+            if (reason := inapplicable_reason(candidate)) is not None
+        ]
+        skipped = {manifest_index for manifest_index, _reason in inapplicable}
+        observations.extend(
+            {
+                "kind": "candidate_inapplicable", "family": "nosqli",
+                "candidate_id": str(dict(rows)[manifest_index].get("candidate_id") or ""),
+                "reason": reason,
+            }
+            for manifest_index, reason in inapplicable
+        )
+        for offset, (manifest_index, candidate) in enumerate(rows):
+            candidate_id = str(candidate.get("candidate_id") or "")
+            if manifest_index in skipped:
                 continue
             attempt_id = hashlib.sha256(
                 f"{manifest_digest}:nosqli:{candidate_id}".encode()
@@ -3469,7 +3492,7 @@ class DatabaseNeutralScanActionDispatcher:
                     int(action.requested_budget.get(name, 0)),
                     consumed.get(name, 0) + int(amount),
                 )
-        unattempted = max(0, len(rows) - attempted)
+        unattempted = max(0, len(rows) - len(skipped) - attempted)
         _batch_status, _batch_partial, _batch_timed_out = batch_outcome(
             attempt_statuses, unattempted,
         )
@@ -3484,6 +3507,7 @@ class DatabaseNeutralScanActionDispatcher:
                 "slice": {"start": start, "count": count},
                 "candidate_count": len(rows), "attempted_count": attempted,
                 "resumed_count": resumed, "unattempted_count": unattempted,
+                "inapplicable_count": len(skipped),
                 "checkpoint_mode": "after_each_candidate",
                 "secret_values_visible": False,
             },
