@@ -46,6 +46,32 @@ _NON_SECRET_HEADER_VALUES = {
     "auth_state": frozenset({"anonymous", "user1", "user2"}),
     "auth_states": frozenset({"anonymous", "user1", "user2"}),
 }
+# ``set_cookie_metadata`` is what the HTTP capability records of each Set-Cookie header: the
+# cookie's name and its flags, never its value. The word ``cookie`` masked the whole list to
+# "***" in every stored observation, so the finalizer's session-cookie flag proof (HttpOnly /
+# Secure) never saw a cookie on a real Scan. It stays exempt only while it has exactly that
+# value-free shape; anything else under the key is still masked.
+_COOKIE_NAME_RE = re.compile(r"^[A-Za-z0-9!#$%&'*+.^_`|~-]{1,128}$")
+_COOKIE_METADATA_FIELDS = frozenset({"name", "secure", "httponly", "samesite"})
+
+
+def _value_free_cookie_metadata(item: Any) -> bool:
+    if not isinstance(item, (list, tuple)) or len(item) > 50:
+        return False
+    for cookie in item:
+        if not isinstance(cookie, Mapping) or not set(cookie) <= _COOKIE_METADATA_FIELDS:
+            return False
+        name = cookie.get("name")
+        if name is not None and (not isinstance(name, str) or not _COOKIE_NAME_RE.match(name)):
+            return False
+        if any(cookie.get(flag) is not None and not isinstance(cookie.get(flag), bool)
+               for flag in ("secure", "httponly")):
+            return False
+        if cookie.get("samesite") not in (None, "strict", "lax", "none"):
+            return False
+    return True
+
+
 _EXACT_SENSITIVE_KEYS = frozenset({
     "access_key", "access_key_id", "access_token", "api_key", "apikey",
     "aws_access_key_id", "client_secret", "key", "private_key", "refresh_token",
@@ -132,6 +158,8 @@ def key_is_sensitive(value: Any, *, item: Any = _UNSET) -> bool:
     # Canonical credential revisions are bounded integers, never secret material.
     # Strings, booleans, and arbitrary numbers under these names remain masked.
     if joined in {"credential_version", "credential_record_version"} and type(item) is int and 0 < item <= 2_147_483_647:
+        return False
+    if joined == "set_cookie_metadata" and item is not _UNSET and _value_free_cookie_metadata(item):
         return False
     allowed_header_values = _NON_SECRET_HEADER_VALUES.get(joined)
     if allowed_header_values is not None:

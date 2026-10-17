@@ -216,3 +216,21 @@ def test_the_http_capability_records_cookie_names_only():
     assert _cookie_name("connect.sid=s%3Aabc; Path=/") == "connect.sid"
     assert _cookie_name("=novalue") is None
     assert _cookie_name("bad name=1") is None
+
+
+def test_the_http_capability_reads_cookie_flags_as_attributes_not_substrings():
+    from api.capabilities.http import _set_cookie_metadata
+
+    # A value, name or Path containing "secure"/"httponly" sets neither flag.
+    assert _set_cookie_metadata("session=securehttponly; Path=/secure/httponly") == {
+        "name": "session", "secure": False, "httponly": False, "samesite": None,
+    }
+    assert _set_cookie_metadata("secure_sid=abc; path=/; samesite=Laxish") == {
+        "name": "secure_sid", "secure": False, "httponly": False, "samesite": None,
+    }
+    # Attribute names compare case-insensitively, with or without surrounding space.
+    assert _set_cookie_metadata("PHPSESSID=abc; path=/;SECURE ; HttpOnly; SameSite=Strict") == {
+        "name": "PHPSESSID", "secure": True, "httponly": True, "samesite": "strict",
+    }
+    assert _set_cookie_metadata("sid=1; Secure=; samesite=None")["samesite"] == "none"
+    assert _set_cookie_metadata("sid=1; Secure=")["secure"] is True

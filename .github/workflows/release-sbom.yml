@@ -7,6 +7,7 @@ on:
       - '.github/workflows/release.yml'
       - '.github/workflows/publish-client.yml'
       - '.github/actions/sbom-tools/**'
+      - '.github/requirements/sbom-tools.*'
       - 'scripts/release_sbom*.py'
       - 'scripts/build-model-intake-guest-rootfs.sh'
       - 'tests/test_release_sbom*.py'
