@@ -55,6 +55,7 @@ try:
     )
     from model_intake_authority import _invalidate_model_intake_authority_change
     from api_utils import _short_url_label, extract_root_domain
+    from targets.insert_race import fetch_target_upsert
     from job_queue import enqueue_job
     from worker_queue_policy import (
         MODEL_INTAKE_WORKER_BUILD_REGISTRY_KEY,
@@ -89,6 +90,7 @@ except ModuleNotFoundError:  # package import in host-side tests
     )
     from ..model_intake_authority import _invalidate_model_intake_authority_change
     from ..api_utils import _short_url_label, extract_root_domain
+    from ..targets.insert_race import fetch_target_upsert
     from ..job_queue import enqueue_job
     from ..worker_queue_policy import (
         MODEL_INTAKE_WORKER_BUILD_REGISTRY_KEY,
@@ -3086,12 +3088,12 @@ async def scan_model_intake(request: ModelIntakeScanRequest):
         if target:
             target_id = target["id"]
         else:
-            target_id = await conn.fetchval("""
+            target_id = await fetch_target_upsert(conn, """
                 INSERT INTO targets (url, name, root_domain, discovery_source)
                 VALUES ($1, $2, $3, 'model-intake')
                 ON CONFLICT (canonical_key) DO UPDATE SET url = targets.url
                 RETURNING id
-            """, artifact_ref, target_name, extract_root_domain(artifact_ref))
+            """, artifact_ref, target_name, extract_root_domain(artifact_ref), method="fetchval")
 
         approval_context = await _validate_approval_receipt_for_action(
             conn,
