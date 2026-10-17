@@ -53,6 +53,7 @@ import exposure.router as exposure_router  # noqa: E402
 from exposure.proof_rollup import active_finding_proof_counts  # noqa: E402
 import finding_routes.router as findings_router  # noqa: E402
 from finding_routes import list_query, list_schema  # noqa: E402
+from finding_routes.retirement import retirement_fields  # noqa: E402
 import list_contract  # noqa: E402
 from runtime import loop_scale_indexes  # noqa: E402
 
@@ -167,6 +168,8 @@ async def old_list(conn, *, proof_state=None, sort_by=None, sort_order="desc", l
         item.pop("total_count")
         item.pop("severity_rank")
         item.update(findings_router.finding_proof_fields(dict(item)))
+        # Added in 2.11 beside the previous fields: a resolved row says whether a release retired it.
+        item.update(retirement_fields(item))
         if proof_state and item["proof_state"] not in proof_state.split(","):
             continue
         for key in DETAIL:
