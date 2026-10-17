@@ -39,7 +39,7 @@ export interface TargetSearch {
  */
 export function useTargetSearch({
   selectedIds = [], includeServices = false, includeInactive = false, enabled = true,
-  limit = TARGET_SEARCH_LIMIT, accept,
+  limit = TARGET_SEARCH_LIMIT, accept, webOnly = false,
 }: {
   selectedIds?: ReadonlyArray<string | null | undefined>
   includeServices?: boolean
@@ -48,6 +48,8 @@ export function useTargetSearch({
   limit?: number
   /** Narrow the matches the picker offers (active web targets only, ...). */
   accept?: (asset: TargetAsset) => boolean
+  /** Ask the server for active http(s) web targets only, so `accept` rarely rejects a row. */
+  webOnly?: boolean
 } = {}): TargetSearch {
   const [query, setQuery] = useState('')
   const [debounced, setDebounced] = useState('')
@@ -91,7 +93,7 @@ export function useTargetSearch({
     // rows, so a page of rejected rows never reads as "no targets".
     collectAcceptedTargets({
       fetchPage: (position: string | number | null) => searchTargetAssets(
-        { search: debounced, limit, includeServices, includeInactive, position }, controller.signal),
+        { search: debounced, limit, includeServices, includeInactive, webOnly, position }, controller.signal),
       accept: acceptRef.current,
       limit,
     })
@@ -126,7 +128,7 @@ export function useTargetSearch({
       // next run, if any, sets it again.
       setLoading(false)
     }
-  }, [debounced, enabled, includeInactive, includeServices, limit])
+  }, [debounced, enabled, includeInactive, includeServices, limit, webOnly])
 
   // A selection the current matches do not hold (a link, a saved choice): read just that asset.
   const missing = useMemo(

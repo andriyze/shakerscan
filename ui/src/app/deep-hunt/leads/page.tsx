@@ -319,7 +319,7 @@ export default function InvestigationWorkspacePage() {
             {/* Searched on the server: the first 100 targets used to be the only choices. */}
             <div className="mt-1.5">
               <TargetSearchCombobox id="leads-target" value={targetId} onChange={setTargetId}
-                accept={webTargetChoice} placeholder="Choose a target…" onSelectedAsset={setSelectedTarget} />
+                accept={webTargetChoice} webOnly placeholder="Choose a target…" onSelectedAsset={setSelectedTarget} />
             </div>
           </div>
           <Button variant="secondary" onClick={() => load().catch(() => undefined)} disabled={loading || busy}><RefreshCw className="h-4 w-4" />Refresh</Button>

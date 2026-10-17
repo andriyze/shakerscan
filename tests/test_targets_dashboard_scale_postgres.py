@@ -448,7 +448,10 @@ def test_dashboard_numbers_equal_the_full_table_queries():
         assert metrics["total_scans"] > 2000 and metrics["active_findings"] > 5000
 
         old_scans = [dict(r) for r in await conn.fetch(ref.DASHBOARD_RECENT_SCANS)]
-        assert await dd.recent_latest_scans(conn, limit=10) == old_scans
+        recent = await dd.recent_latest_scans(conn, limit=10)
+        # 2.11 labels each row with its subject's cohort; the rows are the 2.10 ones.
+        assert all("target_cohort" in row for row in recent)
+        assert [{k: v for k, v in row.items() if k != "target_cohort"} for row in recent] == old_scans
         old_findings = [dict(r) for r in await conn.fetch(ref.DASHBOARD_RECENT_FINDINGS)]
         assert await dd.recent_blocker_findings(conn, limit=10) == old_findings
 
@@ -480,6 +483,10 @@ def test_dashboard_reads_are_bounded_by_buckets_not_rows(monkeypatch):
     _compose_routers()
 
     async def check(conn):
+        # The host-class cache (target_cohort_sql.py) is filled once per URL, on first read; the
+        # bound is about every later computation.
+        import target_cohort_sql
+        await target_cohort_sql.fill_url_classes(conn)
         spy = Spy(conn)
 
         class Pool:

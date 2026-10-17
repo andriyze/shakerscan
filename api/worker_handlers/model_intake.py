@@ -43,11 +43,14 @@ class ModelIntakeWorkerHandler(ProductWorkerHandler):
                 return
 
             def write_log_line() -> None:
-                redis_client = self.services.get_redis()
-                log_key = f"scan:{scan_id}:logs"
-                redis_client.rpush(log_key, line)
-                redis_client.ltrim(log_key, -self.services.scan_log_tail, -1)
-                redis_client.expire(log_key, self.services.scan_log_ttl_seconds)
+                try:
+                    from scan.live_log import append_scan_log_lines
+                except ModuleNotFoundError:  # package import layout
+                    from ..scan.live_log import append_scan_log_lines
+                append_scan_log_lines(
+                    self.services.get_redis(), scan_id, [line],
+                    tail=self.services.scan_log_tail, ttl_seconds=self.services.scan_log_ttl_seconds,
+                )
 
             try:
                 await asyncio.to_thread(write_log_line)

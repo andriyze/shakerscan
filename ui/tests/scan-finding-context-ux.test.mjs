@@ -37,7 +37,7 @@ test('scan detail polls through usePoll: 5 s while live, stopped when terminal, 
   assert.match(detail, /logSkipRef\.current\.every = Math\.min\(LOG_MAX_SKIP, logSkipRef\.current\.every \* 2\)/)
   assert.match(detail, /live: scanLive, enabled: scan !== null/)
   // One final tail read on the live -> terminal transition.
-  assert.match(detail, /scanTerminal && \(before === 'running' \|\| before === 'pending'\)/)
+  assert.match(detail, /scanTerminal && \['running', 'pending', 'queued'\]\.includes\(before \?\? ''\)/)
   assert.match(detail, /\[content-visibility:auto\]/)
 })
 
