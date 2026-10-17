@@ -50,16 +50,9 @@ except ModuleNotFoundError:  # package import in host-side tests
     from ..finding_routes.proof_sql import latest_retest_mode_sql, verified_sql
 
 INVESTIGATOR_TOOLS = ("autonomous_workflow", "bola")
-_NEEDS_VERDICTS = ("inconclusive", "error", "likely_vulnerable", "exploited")
-_NEEDS_ANALYST = ("needs_review", "retest_needed")
+from .scale_indexes import NEEDS_ANALYST as _NEEDS_ANALYST, NEEDS_VERDICTS as _NEEDS_VERDICTS, needs_verification_sql
 
-#: ``active_finding_proof_counts``' "needs verification" test before the proof (a verified row is
-#: not counted; the SQL subtracts those).
-NEEDS_VERIFICATION_SQL = (
-    "(f.last_verification_verdict IS NULL"
-    f" OR f.last_verification_verdict IN {tuple(_NEEDS_VERDICTS)!r}"
-    f" OR f.analyst_verdict IN {tuple(_NEEDS_ANALYST)!r})"
-)
+NEEDS_VERIFICATION_SQL = needs_verification_sql()
 _VERIFIED_SQL = verified_sql(
     evidence="f.evidence", verdict="f.last_verification_verdict",
     retest_mode=latest_retest_mode_sql(finding_id="f.id", verdict="f.last_verification_verdict"),
@@ -92,7 +85,13 @@ def asset_finding_counts_sql(asset_column: str, *, proof_scope: str) -> str:
             WHERE f.status = 'active' AND f.{asset_column} IS NOT NULL
             GROUP BY f.{asset_column}
         ) c
-        LEFT JOIN (
+        LEFT JOIN ({proof_counts_sql(asset_column, proof_scope=proof_scope)}) p ON p.asset_id = c.asset_id"""
+
+
+def proof_counts_sql(asset_column: str, *, proof_scope: str) -> str:
+    """Verified, investigator-verified and verified-but-flagged counts per asset, projected only for
+    rows that could be proven (idx_findings_proof_candidates); undetermined rows are left out."""
+    return f"""
             SELECT asset_id,
                    count(*) FILTER (WHERE verified) AS verified,
                    count(*) FILTER (WHERE verified AND tool IN {INVESTIGATOR_TOOLS!r}) AS investigator_verified,
@@ -104,8 +103,7 @@ def asset_finding_counts_sql(asset_column: str, *, proof_scope: str) -> str:
                 WHERE f.status = 'active' AND f.{asset_column} IS NOT NULL AND {proof_scope}
                   AND {VERIFIED_CANDIDATE_SQL} AND NOT {UNDETERMINED_SQL}
             ) x
-            GROUP BY asset_id
-        ) p ON p.asset_id = c.asset_id"""
+            GROUP BY asset_id"""
 
 
 def undetermined_rows_sql() -> str:

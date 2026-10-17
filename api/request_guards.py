@@ -209,7 +209,10 @@ def _rule(pattern: str, kind: str, group: str | None = None, when=None) -> Route
 #: contract, summary tables), delete its row here so it returns to the 5 s interactive budget.
 ROUTE_CLASSES: tuple[RouteRule, ...] = (
     _rule(r"^/dashboard$", HEAVY, "dashboard"),
-    _rule(r"^/exposure/.+$", HEAVY, "exposure"),
+    # The asset list ranks in SQL over per-asset summaries (2.11): its list/v1 pages are bounded;
+    # the deprecated limit/offset shape (up to 2,000 rows, ~1.5 MB at 1,000) keeps its slot.
+    _rule(r"^/exposure/assets$", HEAVY, "exposure", _legacy_list_shape),
+    _rule(r"^/exposure/(?!assets$).+$", HEAVY, "exposure"),
     _rule(r"^/targets/grouped$", HEAVY, "inventory"),
     _rule(r"^/targets/inventory$", HEAVY, "inventory", _inventory_is_heavy),
     # Unbounded today, measured or suspected over 5 s at scale. Interim rows until each
