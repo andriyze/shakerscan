@@ -13,6 +13,10 @@ export class Budget {
     parent?.addEventListener('abort', this.onCancel, { once: true });
     if (parent?.aborted) this.controller.abort();
   }
+  // A timer derived from the deadline can fire before this budget's own timer (both are
+  // scheduled against the event loop's cached clock, the deadline against Date.now()),
+  // so whichever deadline-bound timer fires first expires the whole budget.
+  expire() { this.controller.abort(); }
   assert() { if (this.signal.aborted || Date.now() >= this.deadline) throw new PublicError('timeout'); }
   reserve() {
     this.assert();

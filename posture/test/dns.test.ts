@@ -74,6 +74,17 @@ test('deadline aborts hung fetch and refuses new operations', async () => {
     assert.equal(result.state, 'timeout'); assert.equal(signal?.aborted, true); assert.throws(() => budget.reserve());
   } finally { budget.close(); }
 });
+test('a query timer bound by the deadline expires the budget even when it fires first', async () => {
+  // Spend part of the budget synchronously: the query then schedules its timer for the
+  // remaining milliseconds against the same cached loop clock as the budget's own timer,
+  // so it fires first. That timeout must still refuse every later operation.
+  const budget = new Budget(30); const started = Date.now();
+  while (Date.now() - started < 10) { /* hold the event loop */ }
+  try {
+    const result = await query('example.com', 'A', budget, async () => new Promise(() => {}));
+    assert.equal(result.state, 'timeout'); assert.equal(budget.signal.aborted, true); assert.throws(() => budget.reserve(), { code: 'timeout' });
+  } finally { budget.close(); }
+});
 test('SERVFAIL in either address family prevents a success; NXDOMAIN remains distinct', async () => {
   const budget = new Budget();
   try {
