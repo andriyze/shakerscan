@@ -47,6 +47,7 @@ try:
     from schedules.router import SCHEDULE_HEALTH_LOOKBACK_DAYS, _schedule_health_map_for_schedules
     from scan.compatibility import record_compatibility_call
     from serialization import _decode_json_value, _json_object, _str_list, row_to_dict
+    from request_guards import reraise_statement_timeout
     from operations.discovery import (
         DiscoveryRefused, admit_discovery, discovery_domain, requester,
     )
@@ -64,6 +65,7 @@ except ModuleNotFoundError:  # package import in host-side tests
     from ..schedules.router import SCHEDULE_HEALTH_LOOKBACK_DAYS, _schedule_health_map_for_schedules
     from ..scan.compatibility import record_compatibility_call
     from ..serialization import _decode_json_value, _json_object, _str_list, row_to_dict
+    from ..request_guards import reraise_statement_timeout
     from .discovery import (
         DiscoveryRefused, admit_discovery, discovery_domain, requester,
     )
@@ -1567,7 +1569,8 @@ async def _build_dashboard_product_status(conn, *, worker_snapshot: dict[str, An
             actions=dast_actions,
             metadata={"active_findings": active_findings, "recent_failed_scans": recent_failed},
         ))
-    except Exception:
+    except Exception as exc:
+        reraise_statement_timeout(exc)  # a cancelled query answers 504, not "unavailable"
         items.append(_dashboard_product_status_item(
             item_id="dast",
             label="DAST",
@@ -1632,7 +1635,8 @@ async def _build_dashboard_product_status(conn, *, worker_snapshot: dict[str, An
             ],
             metadata={"enabled_targets": enabled},
         ))
-    except Exception:
+    except Exception as exc:
+        reraise_statement_timeout(exc)  # a cancelled query answers 504, not "unavailable"
         items.append(_dashboard_product_status_item(
             item_id="asm",
             label="Continuous ASM",
@@ -1705,7 +1709,8 @@ async def _build_dashboard_product_status(conn, *, worker_snapshot: dict[str, An
             actions=ai_actions,
             metadata={"active_targets": active_targets},
         ))
-    except Exception:
+    except Exception as exc:
+        reraise_statement_timeout(exc)  # a cancelled query answers 504, not "unavailable"
         items.append(_dashboard_product_status_item(
             item_id="ai_gate",
             label="AI Gate",
@@ -1761,7 +1766,8 @@ async def _build_dashboard_product_status(conn, *, worker_snapshot: dict[str, An
                 {"label": "Model findings", "href": "/findings?source_type=model_intake&status=active", "variant": "secondary"},
             ],
         ))
-    except Exception:
+    except Exception as exc:
+        reraise_statement_timeout(exc)  # a cancelled query answers 504, not "unavailable"
         items.append(_dashboard_product_status_item(
             item_id="model_intake",
             label="Model Intake",
@@ -1809,7 +1815,8 @@ async def _build_dashboard_product_status(conn, *, worker_snapshot: dict[str, An
             ],
             metadata={"blockers": blockers},
         ))
-    except Exception:
+    except Exception as exc:
+        reraise_statement_timeout(exc)  # a cancelled query answers 504, not "unavailable"
         items.append(_dashboard_product_status_item(
             item_id="deployment",
             label="Deployment Gates",
@@ -1864,7 +1871,8 @@ async def _build_dashboard_product_status(conn, *, worker_snapshot: dict[str, An
                 summary="Worker freshness is unavailable.",
                 href="/",
             ))
-    except Exception:
+    except Exception as exc:
+        reraise_statement_timeout(exc)  # a cancelled query answers 504, not "unavailable"
         items.append(_dashboard_product_status_item(
             item_id="workers",
             label="Workers",
@@ -1943,7 +1951,8 @@ async def _build_dashboard_action_center(conn, *, worker_snapshot: dict[str, Any
                 ],
                 count=critical + high,
             ))
-    except Exception:
+    except Exception as exc:
+        reraise_statement_timeout(exc)  # a cancelled query answers 504, not "unavailable"
         pass
 
     try:
@@ -1982,7 +1991,8 @@ async def _build_dashboard_action_center(conn, *, worker_snapshot: dict[str, Any
                 count=len(failed_scans),
                 samples=samples,
             ))
-    except Exception:
+    except Exception as exc:
+        reraise_statement_timeout(exc)  # a cancelled query answers 504, not "unavailable"
         pass
 
     try:
@@ -2041,7 +2051,8 @@ async def _build_dashboard_action_center(conn, *, worker_snapshot: dict[str, Any
                     "schedule_ids": [str(schedule.get("id")) for schedule in unhealthy[:10]],
                 },
             ))
-    except Exception:
+    except Exception as exc:
+        reraise_statement_timeout(exc)  # a cancelled query answers 504, not "unavailable"
         pass
 
     try:
@@ -2092,7 +2103,8 @@ async def _build_dashboard_action_center(conn, *, worker_snapshot: dict[str, Any
                 ],
                 count=no_inventory + targets_with_gaps,
             ))
-    except Exception:
+    except Exception as exc:
+        reraise_statement_timeout(exc)  # a cancelled query answers 504, not "unavailable"
         pass
 
     try:
@@ -2146,7 +2158,8 @@ async def _build_dashboard_action_center(conn, *, worker_snapshot: dict[str, Any
                     "blocked_statuses": ["auth_missing", "auth_failed"],
                 },
             ))
-    except Exception:
+    except Exception as exc:
+        reraise_statement_timeout(exc)  # a cancelled query answers 504, not "unavailable"
         pass
 
     try:
@@ -2205,7 +2218,8 @@ async def _build_dashboard_action_center(conn, *, worker_snapshot: dict[str, Any
                     ],
                 },
             ))
-    except Exception:
+    except Exception as exc:
+        reraise_statement_timeout(exc)  # a cancelled query answers 504, not "unavailable"
         pass
 
     try:
@@ -2240,7 +2254,8 @@ async def _build_dashboard_action_center(conn, *, worker_snapshot: dict[str, Any
                 ],
                 count=1,
             ))
-    except Exception:
+    except Exception as exc:
+        reraise_statement_timeout(exc)  # a cancelled query answers 504, not "unavailable"
         pass
 
     try:
@@ -2283,7 +2298,8 @@ async def _build_dashboard_action_center(conn, *, worker_snapshot: dict[str, Any
                 count=len(model_rows),
                 samples=samples,
             ))
-    except Exception:
+    except Exception as exc:
+        reraise_statement_timeout(exc)  # a cancelled query answers 504, not "unavailable"
         pass
 
     try:
@@ -2334,7 +2350,8 @@ async def _build_dashboard_action_center(conn, *, worker_snapshot: dict[str, Any
                 count=len(missing_targets),
                 samples=samples,
             ))
-    except Exception:
+    except Exception as exc:
+        reraise_statement_timeout(exc)  # a cancelled query answers 504, not "unavailable"
         pass
 
     try:
@@ -2380,7 +2397,8 @@ async def _build_dashboard_action_center(conn, *, worker_snapshot: dict[str, Any
                     "integrity_signal_count": integrity,
                 },
             ))
-    except Exception:
+    except Exception as exc:
+        reraise_statement_timeout(exc)  # a cancelled query answers 504, not "unavailable"
         pass
 
     items.sort(key=lambda item: (

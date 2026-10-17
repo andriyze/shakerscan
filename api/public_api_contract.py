@@ -40,6 +40,20 @@ PUBLIC_V2_WRITE_BODY_LIMITS: dict[str, int] = {
 }
 
 SAFE_HTTP_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
+
+# List responses. ``list/v1`` (api/list_contract.py: limit<=200, opaque keyset ``cursor``,
+# ``count=none|estimate|exact``, ``{items, next_cursor, has_more, total?, total_kind,
+# generated_at}``) is the contract for list endpoints from 2.11.0. The earlier per-endpoint
+# ``limit``/``offset`` responses keep their current shape for this minor line only.
+LIST_CONTRACT = "list/v1"
+LEGACY_LIST_CONTRACT: dict[str, Any] = {
+    "parameters": ("limit", "offset"),
+    "status": "deprecated",
+    "deprecated_in": "2.11.0",
+    "supported_through": "2.11.x",
+    "replacement": LIST_CONTRACT,
+}
+
 PUBLIC_V2_IDEMPOTENCY_HEADER = "idempotency-key"
 _IDEMPOTENCY_KEY_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{7,199}$")
 _MAX_IDEMPOTENT_RESPONSE_BYTES = 4 * 1024 * 1024
@@ -661,6 +675,8 @@ class UnsafeOriginGuardMiddleware:
 
 
 __all__ = [
+    "LEGACY_LIST_CONTRACT",
+    "LIST_CONTRACT",
     "PUBLIC_V2_IDEMPOTENCY_HEADER",
     "PUBLIC_V2_SURFACE_PREFIXES",
     "PUBLIC_V2_WRITE_BODY_LIMITS",
