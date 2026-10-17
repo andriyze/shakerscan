@@ -491,7 +491,7 @@ jobs:
 
       - name: Upload this shard's E2E scorecard, browser and image results
         if: always() && steps.changes.outputs.ui == 'true'
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
           name: e2e-smoke-shard-${{ matrix.shard }}-${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha }}
           path: |
@@ -603,7 +603,7 @@ jobs:
 
       - name: Upload E2E scorecard and browser results
         if: always() && steps.changes.outputs.ui == 'true'
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
           name: e2e-smoke-${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha }}
           path: |

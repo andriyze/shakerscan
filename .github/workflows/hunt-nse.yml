@@ -46,7 +46,7 @@ jobs:
           PYTHONPATH: .:api:scanner
           SHAKERSCAN_REQUIRE_NATIVE_NSE: '1'
         run: python -m pytest -q tests/integration/test_hunt_nse_native.py tests/test_hunt_nse_http.py tests/test_hunt_nse_capability.py --junitxml=/tmp/hunt-nse.xml
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         if: always()
         with:
           name: hunt-native-nse-results

@@ -147,7 +147,7 @@ jobs:
             tests/test_finding_service_identity.py
       - name: Retain the test result for this exact revision
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
           name: hunt-record-integrity-${{ github.sha }}
           path: |
