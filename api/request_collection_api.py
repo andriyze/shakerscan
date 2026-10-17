@@ -15,7 +15,7 @@ from typing import Any, Callable, Literal, Mapping, Optional, Sequence
 import urllib.parse
 import uuid
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Response
 from pydantic import BaseModel, ConfigDict, Field
 
 try:
@@ -52,6 +52,19 @@ try:
     from secret_store import encrypt_secret
 except ModuleNotFoundError:
     from api.secret_store import encrypt_secret
+
+try:
+    from capture.flows import CAPTURE_FORMAT, public_capture_state
+    from capture.store import close_on_deactivate, refuse_open_capture
+    from list_compat import direct, mark_deprecated, v1_page, wants_list_v1
+    from list_contract import CURSOR_MAX_LENGTH, ListSpec, SortKey, SqlParams, count_total, snapshot_time
+except ModuleNotFoundError:
+    from api.capture.flows import CAPTURE_FORMAT, public_capture_state
+    from api.capture.store import close_on_deactivate, refuse_open_capture
+    from api.list_compat import direct, mark_deprecated, v1_page, wants_list_v1
+    from api.list_contract import (
+        CURSOR_MAX_LENGTH, ListSpec, SortKey, SqlParams, count_total, snapshot_time,
+    )
 
 
 router = APIRouter(tags=["request-collections"])
@@ -175,6 +188,9 @@ def _public_request_collection(row: Any) -> dict[str, Any]:
     item["device_target_id"] = (
         str(item.get("device_target_id")) if item.get("device_target_id") else None
     )
+    if item.get("format") == CAPTURE_FORMAT:
+        # A browser capture: its state and counts, never a value it recorded.
+        item["capture"] = public_capture_state(_decode_json_value(item.get("metadata_json")))
     item["storage_encrypted"] = True
     item["secret_values_visible"] = False
     return item
@@ -410,7 +426,7 @@ async def create_request_collection(request: RequestCollectionCreate):
         async with conn.transaction():
             collection_name = summary.get("name") or request.name or "Request collection"
             existing = await conn.fetchrow(
-                """SELECT id, payload_sha256 FROM request_collections
+                """SELECT id, payload_sha256, format FROM request_collections
                    WHERE name=$1 AND (($2::uuid IS NOT NULL AND target_id=$2) OR
                                       ($3::uuid IS NOT NULL AND device_target_id=$3))
                    FOR UPDATE""",
@@ -418,6 +434,12 @@ async def create_request_collection(request: RequestCollectionCreate):
                 owner_uuid,
                 None,
             )
+            if existing and existing["format"] == CAPTURE_FORMAT:
+                # An import never replaces a browser capture (open or closed) of the same name.
+                raise HTTPException(status_code=409, detail={
+                    "error": "name_in_use",
+                    "message": "A browser capture on this target has this name; import under another name",
+                })
             collection_id = existing["id"] if existing else uuid.uuid4()
             row = await conn.fetchrow(
                 """INSERT INTO request_collections (
@@ -584,8 +606,14 @@ async def list_request_collections(
     search: str = Query("", max_length=200),
     limit: int = Query(100, ge=1, le=500),
     offset: int = Query(0, ge=0),
+    source_format: Optional[Literal["postman_collection", "har", "openapi", "capture"]] = Query(
+        None, description="only collections of this format (capture: browser captures)",
+    ),
 ):
     """Collections visible to one target, or, without a target, the whole library."""
+    search, limit, offset, source_format = (
+        direct(value) for value in (search, limit, offset, source_format)
+    )
     pattern = f"%{search.strip()}%" if search.strip() else None
     if target_id:
         target_uuid = _uuid_or_400(target_id, "target id")
@@ -594,8 +622,9 @@ async def list_request_collections(
                 """SELECT * FROM request_collections
                    WHERE is_active=true AND target_collection_visible(id,$1)
                      AND ($4::text IS NULL OR name ILIKE $4 OR format ILIKE $4)
+                     AND ($5::text IS NULL OR format=$5)
                    ORDER BY updated_at DESC LIMIT $2 OFFSET $3""",
-                target_uuid, limit, offset, pattern,
+                target_uuid, limit, offset, pattern, source_format,
             )
         return {
             "collections": [_public_request_collection(row) for row in rows],
@@ -616,8 +645,9 @@ async def list_request_collections(
                WHERE c.is_active=true
                  AND ($1::text IS NULL OR c.name ILIKE $1 OR c.format ILIKE $1
                       OR owner.name ILIKE $1 OR owner.url ILIKE $1)
+                 AND ($4::text IS NULL OR c.format=$4)
                ORDER BY c.updated_at DESC, c.id LIMIT $2 OFFSET $3""",
-            pattern, limit, offset,
+            pattern, limit, offset, source_format,
         )
     collections = []
     for row in rows:
@@ -633,13 +663,94 @@ async def list_request_collections(
     }
 
 
+# list/v1 over one collection's redacted index, in the order its requests were recorded or
+# imported. ``seq`` is a request's 1-based position (ordinal + 1), so ``since_seq`` follows a
+# browser capture live: pass the last ``seq`` you read and get only what was added after it.
+REQUEST_INDEX_LIST = ListSpec(
+    scope="request_collection_requests",
+    sorts={"seq": SortKey("r.ordinal", "int")},
+    default_sort="seq",
+    fields={
+        "seq": "(r.ordinal + 1)", "request_id": "r.request_id", "ordinal": "r.ordinal",
+        "folder": "r.folder", "name": "r.name", "method": "r.method",
+        "redacted_url": "r.redacted_url", "normalized_path": "r.normalized_path",
+        "body_mode": "r.body_mode", "auth_type": "r.auth_type", "tags_json": "r.tags_json",
+        "safe_method": "r.safe_method", "supported": "r.supported",
+        "content_type": "r.content_type", "body_field_names_json": "r.body_field_names_json",
+    },
+    id_expr="r.request_id",
+    id_kind="text",
+)
+
+
 @router.get("/request-collections/{collection_id}/requests")
 async def list_request_collection_requests(
     collection_id: str,
-    limit: int = Query(100, ge=1, le=500),
+    response: Response = None,
+    limit: Optional[int] = Query(None, ge=1, le=500),
     offset: int = Query(0, ge=0),
+    since_seq: Optional[int] = Query(None, ge=0, le=1_000_000),
+    cursor: Optional[str] = Query(None, max_length=CURSOR_MAX_LENGTH),
+    count: Optional[Literal["none", "estimate", "exact"]] = None,
 ):
+    """The collection's redacted request index (no header, body or query value).
+
+    list/v1 (any of ``cursor``, ``count`` or ``since_seq``): pages of ``limit`` (1..200, default
+    50) in recorded order, each row with its ``seq``; ``since_seq`` returns only rows after that
+    ``seq``, and ``last_seq`` is the highest ``seq`` the page reached (pass it back to follow a
+    capture). Otherwise the deprecated limit/offset response (limit up to 500, default 100)."""
+    limit, offset, since_seq, cursor, count = (
+        direct(value) for value in (limit, offset, since_seq, cursor, count)
+    )
     collection_uuid = _uuid_or_400(collection_id, "request collection id")
+    if wants_list_v1(cursor=cursor, count=count, fields=None, since=None) or since_seq is not None:
+        page = v1_page(limit=limit, cursor=cursor, sort=None, fields=None, count=count, since=None)
+        plan = REQUEST_INDEX_LIST.plan(
+            page, filters={"collection_id": str(collection_uuid), "since_seq": since_seq},
+        )
+        params = SqlParams()
+        where = [f"r.collection_id = {params.add(collection_uuid)}"]
+        if since_seq is not None:
+            where.append(f"r.ordinal >= {params.add(int(since_seq))}")
+        count_values = params.snapshot()
+        page_where = where + plan.keyset_clauses(params)
+        async with _pool().acquire() as conn:
+            collection = await conn.fetchrow(
+                """SELECT format, request_count, metadata_json FROM request_collections
+                   WHERE id=$1 AND is_active=true""",
+                collection_uuid,
+            )
+            if not collection:
+                raise HTTPException(status_code=404, detail="Request collection not found")
+            generated_at = await snapshot_time(conn)
+            rows = await conn.fetch(
+                f"SELECT {plan.select_list} FROM request_collection_requests r "
+                f"WHERE {' AND '.join(page_where)} ORDER BY {plan.order_by} LIMIT {plan.fetch_limit}",
+                *params.values,
+            )
+            total, total_kind = await count_total(
+                conn, page.count, from_sql="request_collection_requests r", where=where,
+                values=count_values,
+            )
+        body = plan.envelope(
+            rows, total=total, total_kind=total_kind, generated_at=generated_at,
+            transform=_request_collection_index_item,
+        )
+        seqs = [int(item["seq"]) for item in body["items"]]
+        body.update({
+            "collection_id": str(collection_uuid),
+            "since_seq": since_seq,
+            "last_seq": max(seqs) if seqs else since_seq,
+            "request_count": int(collection["request_count"] or 0),
+            "capture": (
+                public_capture_state(_decode_json_value(collection["metadata_json"]))
+                if collection["format"] == CAPTURE_FORMAT else None
+            ),
+            "secret_values_visible": False,
+        })
+        return body
+    limit = 100 if limit is None else limit
+    mark_deprecated(response)
     async with _pool().acquire() as conn:
         exists = await conn.fetchval(
             "SELECT EXISTS(SELECT 1 FROM request_collections WHERE id=$1 AND is_active=true)",
@@ -660,7 +771,10 @@ async def list_request_collection_requests(
             collection_uuid,
         ) or 0)
     return {
-        "requests": [_request_collection_index_item(row) for row in rows],
+        "requests": [
+            {**_request_collection_index_item(row), "seq": int(row["ordinal"]) + 1}
+            for row in rows
+        ],
         "count": len(rows), "total": total, "offset": offset, "limit": limit,
         "next_offset": (
             offset + len(rows) if offset + len(rows) < total else None
@@ -746,6 +860,8 @@ async def deactivate_request_collection(collection_id: str):
     collection_uuid = _uuid_or_400(collection_id, "request collection id")
     async with _pool().acquire() as conn:
         async with conn.transaction():
+            # An open browser capture closes first: its batches become its document.
+            await close_on_deactivate(conn, collection_uuid)
             row = await conn.fetchrow(
                 """UPDATE request_collections SET is_active=false, updated_at=NOW()
                    WHERE id=$1 AND is_active=true RETURNING *""",
@@ -980,6 +1096,8 @@ async def upsert_request_collection_selection(
         )
     async with _pool().acquire() as conn:
         collection = await _request_collection_owner(conn, collection_uuid)
+        # An open browser capture has no document yet: a selection waits for its close.
+        refuse_open_capture(collection)
         binding = await conn.fetchrow(
             """SELECT b.*, e.payload_sha256 AS environment_sha256
                FROM request_collection_bindings b

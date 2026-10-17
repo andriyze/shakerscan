@@ -23,10 +23,28 @@ export interface SharedRequestCollection {
   safe_request_count: number
   potentially_mutating_request_count: number
   metadata_json?: Record<string, unknown>
+  /** Set for a browser capture (format `capture`, recorded with `shakerscan record`): counts only. */
+  capture?: BrowserCaptureState | null
   is_active: boolean
   created_at: string
   updated_at: string
   storage_encrypted: true
+}
+
+export interface BrowserCaptureState {
+  state: 'open' | 'closed'
+  last_seq: number
+  flow_count: number
+  endpoint_count: number
+  refused_out_of_scope: number
+  refused_over_limit: number
+  bodies_dropped: number
+  limit_reached: boolean
+  allowed_origins: string[]
+  opened_at?: string | null
+  last_batch_at?: string | null
+  closed_at?: string | null
+  closed_reason?: 'client' | 'idle' | null
 }
 
 export interface RequestCollectionEnvironment {

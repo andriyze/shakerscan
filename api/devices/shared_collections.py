@@ -11,6 +11,20 @@ try:
     from scanner_tools.request_collections import redacted_index
 except ModuleNotFoundError:
     from scanner.scanner_tools.request_collections import redacted_index
+try:
+    from capture.store import close_on_deactivate
+except ModuleNotFoundError:
+    from api.capture.store import close_on_deactivate
+
+
+def refuse_capture(row: Any) -> None:
+    """A browser capture is written only by its capture routes: a device save never replaces
+    it, relabels it or reuses its id (its state and batches live with it)."""
+    if row and row['format'] == 'capture':
+        raise HTTPException(409, {
+            'error': 'capture_not_editable',
+            'message': 'A browser capture cannot be edited or replaced here; import under another name',
+        })
 
 
 async def require_collection_owner(conn: Any, collection_id: Any, device_id: Any) -> dict[str, Any]:
@@ -52,6 +66,7 @@ async def save_device_collection(
     async with conn.transaction():
         if collection_id is not None:
             current = await require_collection_owner(conn, collection_id, device_uuid)
+            refuse_capture(current)
             if expected_digest is not None and current['payload_sha256'] != expected_digest:
                 raise HTTPException(409, 'Request collection changed while being edited; refresh before saving')
             owner = current['target_id']
@@ -60,6 +75,7 @@ async def save_device_collection(
             owner = device_uuid
             current = await conn.fetchrow('SELECT * FROM request_collections WHERE target_id=$1 AND name=$2 FOR UPDATE',
                                          owner, str(summary['name']))
+            refuse_capture(current)
             if current and current['is_active']:
                 raise HTTPException(409, 'This target already has an active request collection with that name')
             collection_uuid = current['id'] if current else uuid.uuid4()
@@ -100,6 +116,7 @@ async def save_device_collection(
 async def deactivate_device_collection(conn: Any, device_id: Any, collection_id: Any) -> dict[str, Any]:
     async with conn.transaction():
         current = await require_collection_owner(conn, collection_id, device_id)
+        await close_on_deactivate(conn, current['id'])
         await conn.execute('UPDATE request_collections SET is_active=false,updated_at=NOW() WHERE id=$1', current['id'])
         await conn.execute('''UPDATE request_collection_selections SET is_active=false,
             revoked_at=COALESCE(revoked_at,NOW()),updated_at=NOW() WHERE collection_id=$1''',current['id'])

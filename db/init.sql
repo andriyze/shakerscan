@@ -875,6 +875,20 @@ CREATE UNIQUE INDEX idx_request_collection_selections_current_name
 ON request_collection_selections(binding_id, lower(name))
 WHERE is_active=true AND revoked_at IS NULL;
 
+-- Browser-capture batches (2.11): api/capture/schema.py, installed by the startup migration too.
+CREATE TABLE request_collection_capture_batches (
+    collection_id UUID NOT NULL REFERENCES request_collections(id) ON DELETE CASCADE,
+    seq INTEGER NOT NULL CHECK (seq >= 1),
+    batch_sha256 TEXT NOT NULL CHECK (batch_sha256 ~ '^[0-9a-f]{64}$'),
+    first_ordinal INTEGER NOT NULL CHECK (first_ordinal >= 0),
+    entry_count INTEGER NOT NULL DEFAULT 0 CHECK (entry_count >= 0),
+    stored_bytes BIGINT NOT NULL DEFAULT 0 CHECK (stored_bytes >= 0),
+    encrypted_entries TEXT
+        CHECK (encrypted_entries IS NULL OR encrypted_entries LIKE 'enc:fernet:%'),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (collection_id, seq)
+);
+
 CREATE TABLE device_credential_attempts (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     device_target_id UUID NOT NULL REFERENCES device_targets(id) ON DELETE CASCADE,

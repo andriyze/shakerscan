@@ -3,7 +3,7 @@
     "title": "ShakerScan API",
     "version": "1.0.0"
   },
-  "component_schema_count": 215,
+  "component_schema_count": 222,
   "component_schema_sha256": {
     "AIBoundaryHypothesisCompileRequest": "9fc66853c38cd5c7986bffcadb1d610d7d24551ee7560ed819e6ea24c29b2e62",
     "AIBoundaryMaterializeRequest": "53e02c19ac64c4a42b004a4030ae13c198b427419a1e30842e692522a726d39b",
@@ -58,6 +58,13 @@
     "BulkFindingUpdateRequest": "ab9b1e432ad383a93762b41a99a3c797962628406130be954a356b0b95edfa1d",
     "CampaignActionLinkRequest": "38c2784e4d2458c9257889d4316b5bab7dec9dbdabf05bd1e22bf85cee2304ed",
     "CampaignRequest": "d93684ab216e4304f708123ee41f543627384361a55b28a9b5e3c5f33a876591",
+    "CaptureBatch": "5029587cf794e00937f586e19ccb0243e854614003d4489c578f1672c3732696",
+    "CaptureClose": "0f6153093539403d06230d1d10407d916ecbc444ac95561bcd2aea0b6dbb3a6f",
+    "CaptureCreate": "f76be3b28082d575714bc1c71e3ad63e204f4072b540b920580cee90d69c4fde",
+    "CaptureDropCounts": "de86ddcf1a7cc567b1c8140e91d922703b7bcc3a4cdcf68d7224252836587f3b",
+    "CaptureFlow": "c7531fadd8b2686f6d2a0712d25dda22014b74340a4ab492979642fb4172970a",
+    "CaptureHeader": "bd6aa5db22640fa012d033aaea794d90c7227a534ea2dd79dc4b4594dd0f2815",
+    "CaptureWebSocketFrame": "9f6b6cd0ccb6edd6d1e893d82736c223baf1aee4e787b3f38bdb3e012896de17",
     "ConfirmedTargetSkillResponse": "92db68f7933cea7263a1a0f1b801e4f46fb8f9d05d609ce5c75e9c590c7f2511",
     "CredentialGrantCreate": "3e5a611bf478571c2b71e44f2e1221e4d086d03751d11c57469a90d436ecd2e2",
     "CredentialProfileCreate": "e126e6b782f64c10eeb4544e2bc0f6719234992b16c69520d41847fdc8567738",
@@ -221,9 +228,9 @@
     "ValidationRequest": "cb81c65a5c80da74a19c6bd92e9c6a68f5cdb22fafeb94270481d463450f893e",
     "WorkerScaleRequest": "52e7ac017dfa1d92efa8e4071026b9bf24c0cf2a17f5d9e742349df3f08f6c62"
   },
-  "contract_sha256": "863502e9c0b0efd9615062009984d0f3549e8bd4f74d6809bd17bbe3c05c9217",
+  "contract_sha256": "89e3380b4b009e4ab3401bdaf2c3b0e1b217db02f75cff2db0e09553f819d012",
   "openapi": "3.1.0",
-  "operation_count": 493,
+  "operation_count": 496,
   "operations": {
     "DELETE /ai/scans/{scan_id}/transcript": {
       "deprecated": false,
@@ -2571,7 +2578,7 @@
     "GET /request-collections": {
       "deprecated": false,
       "operation_id": "list_request_collections_request_collections_get",
-      "parameters_sha256": "7b2a41020a5d1e8a3c739a11781bf38ad7a7620610662e8ba98587f4fbf8326a",
+      "parameters_sha256": "54348c7efe2e52164a7df23ed7cbf3a6b2615c70631d0468a28e20056159a452",
       "request_schema_sha256": null,
       "response_schema_sha256": {
         "200": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
@@ -2601,7 +2608,7 @@
     "GET /request-collections/{collection_id}/requests": {
       "deprecated": false,
       "operation_id": "list_request_collection_requests_request_collections__collection_id__requests_get",
-      "parameters_sha256": "7753b35c2e7efa8f39ff8ebc2e32fae3ae298996c2bb71744bf18b62442363e8",
+      "parameters_sha256": "5529cd78e76885c3d802ccdc5bf6150d4fd7f3540f57579d882cbd79f07145ce",
       "request_schema_sha256": null,
       "response_schema_sha256": {
         "200": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
@@ -5775,11 +5782,56 @@
         "request-collections"
       ]
     },
+    "POST /request-collections/captures": {
+      "deprecated": false,
+      "operation_id": "create_browser_capture_request_collections_captures_post",
+      "parameters_sha256": "ddaf7d03a5e33d1d0116950a13b7b4a7fd3db89282553bec193c97867ef72115",
+      "request_schema_sha256": "39129c184196b92669e6386b25a68724460151b1d5c291ada41b39280dc27f9e",
+      "response_schema_sha256": {
+        "200": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "422": "e1fe533ef371cc6965d4015e800b2b5ca90e470f4aae3d57c2754a32b61e8c2d"
+      },
+      "security_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "surface": "collections",
+      "tags": [
+        "request-collections"
+      ]
+    },
     "POST /request-collections/{collection_id}/bindings": {
       "deprecated": false,
       "operation_id": "upsert_request_collection_binding_request_collections__collection_id__bindings_post",
       "parameters_sha256": "2d41452c5c7c5a461f6ac146d1c10af0a0066ed5780477410508fd6803a3b19e",
       "request_schema_sha256": "cbbd8a074a28a9924abc437e9af5d686f44252d37198e1a2be2640c8ae44576d",
+      "response_schema_sha256": {
+        "200": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "422": "e1fe533ef371cc6965d4015e800b2b5ca90e470f4aae3d57c2754a32b61e8c2d"
+      },
+      "security_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "surface": "collections",
+      "tags": [
+        "request-collections"
+      ]
+    },
+    "POST /request-collections/{collection_id}/capture-batches": {
+      "deprecated": false,
+      "operation_id": "append_capture_batch_request_collections__collection_id__capture_batches_post",
+      "parameters_sha256": "2d41452c5c7c5a461f6ac146d1c10af0a0066ed5780477410508fd6803a3b19e",
+      "request_schema_sha256": "cdd1253202accd6366430078baf47473ad1b096f6428a9da5c74f68223df4de4",
+      "response_schema_sha256": {
+        "200": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "422": "e1fe533ef371cc6965d4015e800b2b5ca90e470f4aae3d57c2754a32b61e8c2d"
+      },
+      "security_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "surface": "collections",
+      "tags": [
+        "request-collections"
+      ]
+    },
+    "POST /request-collections/{collection_id}/capture-close": {
+      "deprecated": false,
+      "operation_id": "close_browser_capture_request_collections__collection_id__capture_close_post",
+      "parameters_sha256": "2d41452c5c7c5a461f6ac146d1c10af0a0066ed5780477410508fd6803a3b19e",
+      "request_schema_sha256": "37cf74a9160e9c07203995fc2e24cb59e4e2993cc655ad90f48c2c66ddcf7820",
       "response_schema_sha256": {
         "200": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
         "422": "e1fe533ef371cc6965d4015e800b2b5ca90e470f4aae3d57c2754a32b61e8c2d"
@@ -6832,7 +6884,10 @@
       "GET /request-collections/{collection_id}",
       "GET /request-collections/{collection_id}/requests",
       "POST /request-collections",
+      "POST /request-collections/captures",
       "POST /request-collections/{collection_id}/bindings",
+      "POST /request-collections/{collection_id}/capture-batches",
+      "POST /request-collections/{collection_id}/capture-close",
       "POST /request-collections/{collection_id}/environments",
       "POST /request-collections/{collection_id}/select",
       "POST /request-collections/{collection_id}/selections"

@@ -1602,6 +1602,17 @@ response. This makes installed Scan, Hunt start, credential create/rotate, and c
 safe to retry after a lost response. A key reused with different input returns `409`; an in-flight
 duplicate returns a bounded `idempotency_request_in_progress` response instead of executing twice.
 
+**Browser captures** (`shakerscan record`, [browser-capture.md](browser-capture.md)):
+`POST /request-collections/captures` (`{target_id | target_url, name?}` → `{id, allowed_origins,
+limits}`) · `POST /request-collections/{id}/capture-batches` (`{seq, flows[], client_dropped?}`,
+idempotent per `seq`, at most 100 flows and 16 MiB) · `POST /request-collections/{id}/capture-close` ·
+`GET /request-collections?source_format=capture` · `GET /request-collections/{id}/requests?since_seq=`
+(list/v1: `seq`, `last_seq`, `cursor`). A capture is a request collection of format `capture` whose
+encrypted document is HAR; the server re-checks each flow's origin against the binding, caps bodies
+(request 256 KiB, response 1 MiB, scripts 256 KiB), the document (25 MiB, then metadata-only flows)
+and 20,000 requests, and closes a capture idle for 30 minutes. Views are the redacted index only;
+captured credentials are never promoted. MCP: `shakerscan_captures` (list, read with `since_seq`).
+
 Legacy device SSH, header, cookie, and form profiles are backfilled to same-ID generic profiles.
 Their older encrypted JSON envelopes are canonicalized without returning or logging plaintext;
 new and compatibility mutations remain transactional in both stores until device execution stops
@@ -1908,14 +1919,14 @@ for the profile contract, invocation, limits and acceptance gates.
 
 | Surface | Count | Source |
 |---|---|---|
-| Public REST operations | 503 | `api/**/*.py` FastAPI decorators |
-| Unique REST paths | 420 | `api/**/*.py` |
+| Public REST operations | 506 | `api/**/*.py` FastAPI decorators |
+| Unique REST paths | 423 | `api/**/*.py` |
 | Check families | 20 | `api/check_registry.py` |
 | Command Arsenal commands | 85 | `api/command_arsenal.py` |
 | Tool adapters | 0 | `api/command_arsenal.py` |
 | Local-agent adapters | 4 | `api/command_arsenal.py` |
 | Internal compatibility scanner flags | 161 | `scanner/scanner.py` |
-| Canonical scanner wrapper commands | 41 | `scanner.sh` |
+| Canonical scanner wrapper commands | 42 | `scanner.sh` |
 | Deprecated wrapper aliases | 0 | `scanner.sh` |
 | Make targets | 20 | `Makefile` |
 | Release gates | 17 | `scripts/release_gates.py` |
@@ -1926,7 +1937,7 @@ for the profile contract, invocation, limits and acceptance gates.
 | Canonical slash commands | 14 | `.claude/commands/` |
 | Deprecated Scan-name slash shims | 0 | `.claude/commands/` |
 | Specialized subagents | 3 | `.claude/agents/` |
-| Durable tables | 118 | `db/init.sql` + migrations |
+| Durable tables | 119 | `db/init.sql` + migrations |
 
 ### Public REST Operations
 
@@ -2269,9 +2280,12 @@ for the profile contract, invocation, limits and acceptance gates.
 | `GET` | `/queue/stats` | `queue_stats` |
 | `GET` | `/request-collections` | `list_request_collections` |
 | `POST` | `/request-collections` | `create_request_collection` |
+| `POST` | `/request-collections/captures` | `create_browser_capture` |
 | `DELETE` | `/request-collections/{collection_id}` | `deactivate_request_collection` |
 | `GET` | `/request-collections/{collection_id}` | `get_request_collection` |
 | `POST` | `/request-collections/{collection_id}/bindings` | `upsert_request_collection_binding` |
+| `POST` | `/request-collections/{collection_id}/capture-batches` | `append_capture_batch` |
+| `POST` | `/request-collections/{collection_id}/capture-close` | `close_browser_capture` |
 | `POST` | `/request-collections/{collection_id}/environments` | `upsert_request_collection_environment` |
 | `DELETE` | `/request-collections/{collection_id}/environments/{environment_id}` | `deactivate_request_collection_environment` |
 | `GET` | `/request-collections/{collection_id}/requests` | `list_request_collection_requests` |
@@ -2738,7 +2752,7 @@ opaque profile, and collection-reference fields.
 
 | Surface | Names |
 |---|---|
-| Canonical `scanner.sh` commands | `agent`, `ai`, `api`, `approve`, `backup`, `build`, `collections`, `credentials`, `deny`, `devices`, `doctor`, `env`, `evidence`, `fleet`, `gungnir`, `help`, `hunt`, `images`, `install-deps`, `intel`, `join`, `knowledge`, `logs`, `mcp`, `model-intake`, `model-intake-runner`, `rebuild`, `redis`, `reload`, `report-rebuild`, `research`, `reset`, `restart`, `scale`, `scan`, `secrets`, `shell`, `start`, `status`, `stop`, `version` |
+| Canonical `scanner.sh` commands | `agent`, `ai`, `api`, `approve`, `backup`, `build`, `collections`, `credentials`, `deny`, `devices`, `doctor`, `env`, `evidence`, `fleet`, `gungnir`, `help`, `hunt`, `images`, `install-deps`, `intel`, `join`, `knowledge`, `logs`, `mcp`, `model-intake`, `model-intake-runner`, `rebuild`, `record`, `redis`, `reload`, `report-rebuild`, `research`, `reset`, `restart`, `scale`, `scan`, `secrets`, `shell`, `start`, `status`, `stop`, `version` |
 | Make targets | `dependency-audit`, `dependency-lock`, `e2e`, `e2e-ai-gate`, `e2e-api-overlay`, `e2e-dast`, `e2e-hunt`, `e2e-hunt-ssh`, `e2e-model-intake`, `e2e-model-intake-fixture`, `e2e-platform`, `e2e-scan-parity`, `e2e-wire`, `fleet-acceptance`, `installed-stack-smoke`, `installer-smoke`, `installer-upgrade-smoke`, `release-gates`, `test`, `upgrade-smoke` |
 | Release gates | `test:evidence-provenance`, `test:fleet-current`, `test:hypothesis-proof-promotion`, `test:mcp-read-only`, `test:no-ai-verified`, `test:no-benchmark-fitting`, `test:no-phantom-tools`, `test:planner-no-shell`, `test:planner-risk`, `test:planner-scope`, `test:scanner-auth-quality`, `test:scanner-bounds`, `test:scanner-proof-truth`, `test:scanner-registry-coverage`, `test:v2-detection-parity`, `test:v2-fault-injection`, `test:v2-security-invariants` |
 
@@ -3360,6 +3374,7 @@ Scan feature or a second orchestration engine.
 | `public_api_idempotency` | `db/init.sql` |
 | `refuter_reviews` | `api/retest_contract.py` |
 | `request_collection_bindings` | `db/init.sql` |
+| `request_collection_capture_batches` | `db/init.sql` |
 | `request_collection_environments` | `db/init.sql` |
 | `request_collection_requests` | `db/init.sql` |
 | `request_collection_selections` | `db/init.sql` |

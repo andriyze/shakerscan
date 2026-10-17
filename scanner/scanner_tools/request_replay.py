@@ -287,6 +287,9 @@ class ReplayRequest:
     body_mode: str
     auth_type: str
     has_sensitive_material: bool
+    # A browser capture's request: the recorded credentials left out of this replay
+    # (``header:cookie``, ``query:token``, ``body:password``), names only.
+    captured_withheld: tuple[str, ...] = ()
 
     def wire_dict(self) -> dict[str, Any]:
         """Worker-only exact request. Never return this object through a public API."""
@@ -342,6 +345,7 @@ class ReplayRequest:
             "safe_method": self.method in SAFE_METHODS,
             "state_changing": self.method in STATE_CHANGING_METHODS,
             "has_sensitive_material": self.has_sensitive_material,
+            **({"captured_withheld": list(self.captured_withheld)} if self.captured_withheld else {}),
         }
 
 
@@ -480,6 +484,7 @@ def build_replay_plan(
             body_mode=str(row.get("body_mode") or "none")[:100],
             auth_type=str(row.get("auth_type") or "none")[:200],
             has_sensitive_material=bool(row.get("has_sensitive_material")),
+            captured_withheld=tuple(str(item)[:200] for item in row.get("captured_withheld") or ())[:200],
         ))
     return ReplayPlan(
         requests=tuple(result),
