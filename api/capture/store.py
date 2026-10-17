@@ -530,7 +530,9 @@ def _assemble(encrypted_batches: list[str]) -> tuple[str, str]:
 
 # Assembling a full capture peaks at several hundred MiB (see _assemble), so one API process
 # assembles one capture at a time; other processes are serialized per capture by the row lock.
-ASSEMBLY_WAIT_SECONDS = 60.0
+# The wait stays below the Enterprise gateway's default 30 s upstream timeout, so a busy close
+# reaches the client as this 503 with Retry-After rather than as a gateway timeout.
+ASSEMBLY_WAIT_SECONDS = 20.0
 ASSEMBLY_RETRY_AFTER_SECONDS = 10
 _assembly_slots: "weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, asyncio.Semaphore]" = (
     weakref.WeakKeyDictionary()
