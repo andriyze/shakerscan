@@ -244,6 +244,7 @@ from .sqli_stages import (
     prior_stages,
     run_staged_sqli_attempt,
 )
+from .verifier_refusal import is_refusal_error, mark_refused
 from .verification_extension import (
     EXTENDS_ARG,
     LAST_CHANCE_ARG,
@@ -741,6 +742,9 @@ def batch_stop_reason(
     if unattempted or CapabilityResultReason.INSUFFICIENT_PLAN_BUDGET.value in lowered:
         # A SQLi candidate closed for budget names it (soak N55).
         return CapabilityResultReason.INSUFFICIENT_PLAN_BUDGET.value
+    if any(is_refusal_error(item) for item in lowered):
+        # The target refused the unauthenticated baseline: nothing failed, nothing was tested.
+        return CapabilityResultReason.AUTHENTICATION_REQUIRED.value
     return CapabilityResultReason.ADAPTER_FAILED.value
 
 
@@ -3342,17 +3346,40 @@ class DatabaseNeutralScanActionDispatcher:
         primary = resolve_scan_http_principal(
             self.options, lane="primary", capability_name=action.capability_name,
         )
-        for offset, (manifest_index, candidate) in enumerate(rows):
-            candidate_id = str(candidate.get("candidate_id") or "")
+
+        def inapplicable_reason(candidate: Mapping[str, Any]) -> str | None:
             # A fragment-located candidate (family_hints: ["xss"]) never reaches the
             # server, so its parameter is absent from the server query/body and the
             # NoSQL differential would search for a parameter that does not exist and
-            # block. It belongs to the browser XSS proof; skip it here.
+            # block. It belongs to the browser XSS proof.
             if candidate.get("browser_fragment_path"):
-                continue
+                return "browser_fragment_candidate"
             # A path segment is not a NoSQL operator-injection site (no field to replace with an
-            # operator object); skip it here, it belongs to the SQLi verifier.
+            # operator object); it belongs to the SQLi verifier.
             if candidate.get("parameter_location") == "path":
+                return "path_segment_candidate"
+            return None
+
+        # Recorded as inapplicable, never as unattempted: lab Scan 13bd3497 (2.11.0) handed
+        # this verifier a slice of four ``/hub/api/<name>/1*`` path candidates, skipped all
+        # four, and reported the required nosqli family partial (output_truncated) for work
+        # no budget could have made testable -- the false gap the SQLi batch already avoids.
+        inapplicable = [
+            (manifest_index, reason) for manifest_index, candidate in rows
+            if (reason := inapplicable_reason(candidate)) is not None
+        ]
+        skipped = {manifest_index for manifest_index, _reason in inapplicable}
+        observations.extend(
+            {
+                "kind": "candidate_inapplicable", "family": "nosqli",
+                "candidate_id": str(dict(rows)[manifest_index].get("candidate_id") or ""),
+                "reason": reason,
+            }
+            for manifest_index, reason in inapplicable
+        )
+        for offset, (manifest_index, candidate) in enumerate(rows):
+            candidate_id = str(candidate.get("candidate_id") or "")
+            if manifest_index in skipped:
                 continue
             attempt_id = hashlib.sha256(
                 f"{manifest_digest}:nosqli:{candidate_id}".encode()
@@ -3469,7 +3496,7 @@ class DatabaseNeutralScanActionDispatcher:
                     int(action.requested_budget.get(name, 0)),
                     consumed.get(name, 0) + int(amount),
                 )
-        unattempted = max(0, len(rows) - attempted)
+        unattempted = max(0, len(rows) - len(skipped) - attempted)
         _batch_status, _batch_partial, _batch_timed_out = batch_outcome(
             attempt_statuses, unattempted,
         )
@@ -3484,6 +3511,7 @@ class DatabaseNeutralScanActionDispatcher:
                 "slice": {"start": start, "count": count},
                 "candidate_count": len(rows), "attempted_count": attempted,
                 "resumed_count": resumed, "unattempted_count": unattempted,
+                "inapplicable_count": len(skipped),
                 "checkpoint_mode": "after_each_candidate",
                 "secret_values_visible": False,
             },
@@ -4170,6 +4198,15 @@ class DatabaseNeutralScanActionDispatcher:
                         {"url": redact_url(execution_target),
                          "method": body_request.get("method", "GET"), **verdict},
                     )
+            if any(is_refusal_error(item) for item in result.errors or ()):
+                # The target refused the unauthenticated baseline: inconclusive for
+                # authentication, named on the candidate, and not resumed by an extension.
+                head = dict(attempt_observations[0])
+                head.update({
+                    "verdict": "inconclusive", "inconclusive_reason": "authentication_required",
+                })
+                head.pop("resume_wall_seconds", None)
+                attempt_observations = (head, *attempt_observations[1:])
             attempt = {
                 "attempt_id": attempt_id,
                 "candidate_id": candidate_id,
@@ -4278,6 +4315,31 @@ class DatabaseNeutralScanActionDispatcher:
             terminal_failure = True
             attempt_log.append((candidate_id, retry_round, False, False))
             errors.append(f"candidate_failed:{type(exc).__name__}")
+
+        def needs_hold(entry: tuple[int, Mapping[str, Any], int]) -> bool:
+            """Whether a work entry will be funded, not carried, resumed or skipped below.
+
+            The slice is split across the entries still to fund. Counting the ones the loop
+            carries from an extended action (or resumes from a checkpoint) diluted a
+            continuation's hold: lab Scan 13bd3497's verify.sqli.r01.ext.r02 held 480
+            requests for one unfinished candidate followed by three carried ones, gave it
+            480 // 4 = 120 -- less than the 189 its time-based unit needs -- and seven
+            extensions in a row stopped on the request ceiling without sending a request.
+            """
+            manifest_index, row, retry_round = entry
+            if row.get("parameter_location") == "path" and family != "sqli":
+                return False
+            candidate = _batch_candidate_id(row, manifest_index)
+            key = f"{manifest_digest}:{family}:{candidate}"
+            if retry_round:
+                key += f":retry:{retry_round}"
+            identity = hashlib.sha256(key.encode()).hexdigest()
+            if identity in completed:
+                return False
+            if retry_round:
+                return True
+            route = str(row.get("candidate_id") or row.get("route_id") or "")
+            return identity not in carried and not (route and route in admitted)
 
         try:
             while True:
@@ -4416,7 +4478,8 @@ class DatabaseNeutralScanActionDispatcher:
                         execution_target = execution_url_for_manifest_endpoint(
                             manifest, manifest_index,
                         )
-                    remaining_attempts = max(1, len(work) - position + 1)
+                    # This entry and every later one that will actually be funded.
+                    remaining_attempts = 1 + sum(1 for entry in work[position:] if needs_hold(entry))
                     # What the slice has neither consumed nor lent to a running candidate.
                     charge_wall()
                     remaining_budget = candidates.holds.available(consumed)
@@ -4670,6 +4733,7 @@ class DatabaseNeutralScanActionDispatcher:
                         args: Mapping[str, Any] = args,
                         socket_factory: FrozenTargetSocketFactory = socket_factory,
                         legacy_spec: Any = legacy_spec,
+                        refusal_exempt: bool = bool(body_request) or tool not in {"sqlmap", "dalfox"},
                     ) -> Any:
                         prepared = fit_prepared_scan_capability(
                             prepare_scan_external_capability(
@@ -4704,7 +4768,9 @@ class DatabaseNeutralScanActionDispatcher:
                             redacted_execution=prepared.redacted_execution,
                             archive_capability_name=action.capability_name,
                         )
-                        return await CapabilityExecutor().execute(
+                        # A run the target refused (401/403, a redirect to sign-in) tested
+                        # nothing: it is inconclusive, never a negative (verifier_refusal).
+                        return mark_refused(await CapabilityExecutor().execute(
                             CapabilityExecutionContext(
                                 specification=legacy_spec,
                                 target=self.target,
@@ -4714,7 +4780,7 @@ class DatabaseNeutralScanActionDispatcher:
                             adapter,
                             heartbeat=heartbeat,
                             cancelled=self.cancelled,
-                        )
+                        ), exempt=refusal_exempt)
 
                     if tool == "sqlmap":
                         # One candidate, verified technique by technique; every finished stage

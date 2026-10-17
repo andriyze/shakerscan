@@ -26,6 +26,7 @@ except ModuleNotFoundError:  # package import layout
 try:
     from capabilities.authentication_proof import successful_token_signals
     from hunt.capability_executor import CapabilityAdapterResult, Cancelled, Heartbeat
+    from runtime.auth_refusal import AUTHENTICATION_REQUIRED, refusal_error, refusal_status
     from runtime.capability_registry import CapabilitySpec
     from runtime.models import TargetBinding
     from runtime.request_shape import resolve_json_field_path
@@ -33,6 +34,7 @@ try:
 except ModuleNotFoundError:
     from .authentication_proof import successful_token_signals
     from ..hunt.capability_executor import CapabilityAdapterResult, Cancelled, Heartbeat
+    from ..runtime.auth_refusal import AUTHENTICATION_REQUIRED, refusal_error, refusal_status
     from ..runtime.capability_registry import CapabilitySpec
     from ..runtime.models import TargetBinding
     from ..runtime.request_shape import resolve_json_field_path
@@ -270,6 +272,7 @@ class NoSQLiVerifyAdapter:
         observations: list[Mapping[str, Any]] = []
         attempted_fields: list[str] = []
         verified = False
+        refused: int | None = None
         try:
             for field in self.fields:
                 if self.requested_budget["http_requests"] - attempted < 4:
@@ -307,6 +310,26 @@ class NoSQLiVerifyAdapter:
                     # literal" AND "ne diverges from it", so reflection can no longer
                     # masquerade as an interpreted operator.
                     r_literal = await send(self._literal(field, sentinel))
+                    refused = refusal_status(r_literal.status_code, r_literal.response_headers)
+                    if refused is not None:
+                        # The target refused the unauthenticated control: the operators would
+                        # meet the same wall, so nothing about this field (or the others of
+                        # this request) can be concluded. Inconclusive, never "not proven".
+                        observations.append({
+                            "kind": "nosqli_proof",
+                            "canonical_path": self.candidate.get("canonical_path"),
+                            "candidate_id": self.candidate.get("candidate_id"),
+                            "request_ref_id": self.candidate.get("request_ref_id"),
+                            "method": self.request.method,
+                            "field_path": field,
+                            "request_class": request_class,
+                            "proof_state": "not_proven",
+                            "finding_verdict": "inconclusive",
+                            "inconclusive_reason": AUTHENTICATION_REQUIRED,
+                            "control_status": r_literal.status_code,
+                            "secret_values_visible": False,
+                        })
+                        break
                     r_ne = await send(self._operator(field, "$ne", sentinel))
                     r_eq = await send(self._operator(field, "$eq", sentinel))
                     r_ne_again = await send(self._operator(field, "$ne", sentinel))
@@ -367,6 +390,8 @@ class NoSQLiVerifyAdapter:
             )
 
         errors = tuple(item.error_code for item in results if item.error_code)
+        if refused is not None:
+            errors = (refusal_error(refused), *errors)
         fields_exhausted = not verified and len(attempted_fields) < len(self.fields)
         return CapabilityAdapterResult(
             status="partial" if errors or fields_exhausted else "success",

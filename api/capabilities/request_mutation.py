@@ -16,6 +16,7 @@ except ModuleNotFoundError:  # package import layout
 try:
     from capabilities.sql_error_signatures import sql_error_signatures
     from hunt.capability_executor import CapabilityAdapterResult, Cancelled, Heartbeat
+    from runtime.auth_refusal import AUTHENTICATION_REQUIRED, refusal_error, refusal_status
     from runtime.capability_registry import CapabilitySpec
     from runtime.models import TargetBinding
     from runtime.request_shape import resolve_json_field_path
@@ -23,6 +24,7 @@ try:
 except ModuleNotFoundError:  # package imports in host-side tests
     from .sql_error_signatures import sql_error_signatures
     from ..hunt.capability_executor import CapabilityAdapterResult, Cancelled, Heartbeat
+    from ..runtime.auth_refusal import AUTHENTICATION_REQUIRED, refusal_error, refusal_status
     from ..runtime.capability_registry import CapabilitySpec
     from ..runtime.models import TargetBinding
     from ..runtime.request_shape import resolve_json_field_path
@@ -395,6 +397,41 @@ class RequestMutationVerificationAdapter:
             return CapabilityAdapterResult(
                 status="cancelled",
                 errors=("cancelled_after_control",),
+                actual_budget=self._actual_budget(
+                    attempted=1,
+                    wall_seconds=max(1, math.ceil(time.monotonic() - started)),
+                ),
+                partial=True,
+                execution_started=True,
+                parser_version=REQUEST_MUTATION_PARSER_VERSION,
+            )
+        refused = (
+            refusal_status(control.status_code, control.response_headers)
+            if self.request_class != "safe_authentication" else None
+        )
+        if refused is not None and not control.error_code:
+            # The target refused the replayed control (a captured request never keeps its
+            # credentials). The mutation would meet the same wall, so it is not sent and the
+            # candidate is inconclusive, not "not proven". A login form's 401 is its answer to a
+            # wrong password, so a safe_authentication request is still compared.
+            return CapabilityAdapterResult(
+                status="partial",
+                observations=({
+                    "kind": "request_body_verification",
+                    "origin": _content_free_origin(self.request.url),
+                    "family": self.family,
+                    "candidate_id": candidate_id,
+                    "request_ref_id": self.request.request_id,
+                    "method": self.request.method,
+                    "request_class": self.request_class,
+                    "field_path": field_path,
+                    "control_status": control.status_code,
+                    "proof_status": "not_proven",
+                    "finding_verdict": "inconclusive",
+                    "inconclusive_reason": AUTHENTICATION_REQUIRED,
+                    "secret_values_visible": False,
+                },),
+                errors=(refusal_error(refused),),
                 actual_budget=self._actual_budget(
                     attempted=1,
                     wall_seconds=max(1, math.ceil(time.monotonic() - started)),

@@ -27,6 +27,7 @@ import re
 import urllib.parse
 from typing import Any, Mapping, Optional
 
+from runtime.auth_refusal import BASELINE_RECORD_KIND, is_login_location
 from runtime.capability_registry import CAPABILITY_REGISTRY
 from runtime.request_shape import (
     json_field_leaf_name, nested_json_body, public_request_body_shape,
@@ -1667,6 +1668,50 @@ def sqlmap_traffic_request_count(text: str) -> int | None:
     return max(len(markers), max(markers))
 
 
+_SQLMAP_RESPONSE_MARKER = re.compile(
+    r"^HTTP response \[#\d{1,9}\] \((\d{3})[^\n]*\):[ \t]*\r?\n(?P<headers>(?:[^\r\n]+\r?\n)*)",
+    re.MULTILINE,
+)
+
+
+def _baseline(status: Any, location: Any) -> dict[str, Any] | None:
+    try:
+        code = int(status)
+    except (TypeError, ValueError):
+        return None
+    if not 100 <= code <= 599:
+        return None
+    return {"status": code, "login_redirect": bool(location) and is_login_location(location)}
+
+
+def sqlmap_traffic_baseline(text: str) -> dict[str, Any] | None:
+    """The first response of a sqlmap ``-t`` traffic log (its connection check), or None."""
+    match = _SQLMAP_RESPONSE_MARKER.search(str(text or ""))
+    if match is None:
+        return None
+    location = next((
+        line.split(":", 1)[1].strip()
+        for line in match.group("headers").splitlines()
+        if line.lower().startswith("location:")
+    ), None)
+    return _baseline(match.group(1), location)
+
+
+def har_baseline(text: str) -> dict[str, Any] | None:
+    """The first response of a HAR document (Dalfox's original-URL request), or None."""
+    try:
+        response = json.loads(str(text or ""))["log"]["entries"][0]["response"]
+    except (TypeError, ValueError, KeyError, IndexError, json.JSONDecodeError):
+        return None
+    if not isinstance(response, Mapping):
+        return None
+    location = response.get("redirectURL") or next((
+        item.get("value") for item in response.get("headers") or ()
+        if isinstance(item, Mapping) and str(item.get("name") or "").lower() == "location"
+    ), None)
+    return _baseline(response.get("status"), location)
+
+
 def har_request_count(text: str) -> int | None:
     """Exact request count from a HAR document, or None when it is not a HAR."""
     try:
@@ -1702,9 +1747,15 @@ def scanner_file_request_counter(name: str, scratch_dir: str | None) -> dict[str
     )
     if actual is None:
         return None
+    baseline = (
+        sqlmap_traffic_baseline(text) if scanner == "sqlmap" else har_baseline(text)
+    )
     return {
         "actual": actual,
         "source": "sqlmap_traffic_log" if scanner == "sqlmap" else "dalfox_har",
+        # The first response the tool received (its baseline), status and whether a redirect
+        # went to a sign-in page: no header value, body or URL is kept.
+        **({"baseline": baseline} if baseline is not None else {}),
     }
 
 
@@ -2048,12 +2099,22 @@ def _template_metadata(info: Mapping[str, Any], item: Mapping[str, Any]) -> dict
     return {key: value for key, value in metadata.items() if value not in (None, "", [])}
 
 
+# The verifiers whose baseline response is recorded (``parse_scanner_output``).
+BASELINE_RECORDING_TOOLS = frozenset({"sqlmap", "dalfox"})
+# sqlmap raises this on a 401 to its connection test and skips the target.
+_SQLMAP_NOT_AUTHORIZED = "not authorized, try to provide right HTTP authentication"
+
+
 def parse_scanner_output(
     name: str, stdout: str, *, allowed_host: str | None = None,
+    wire_log: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Parse bounded scanner output into records safe for hunt reasoning.
 
     Raw output remains receipt evidence; these records are observations, never finding proof.
+    ``wire_log`` is the tool's own wire-log summary (``scanner_file_request_counter``): its
+    baseline response is recorded so a verifier can tell a target that refused the request
+    (401/403, a redirect to sign-in) from one that answered it.
     """
     scanner = str(name or "").strip().lower()
     decoded: list[dict[str, Any]] = []
@@ -2273,6 +2334,17 @@ def parse_scanner_output(
                 "service": match.group(3)[:64],
                 "version": (match.group(4) or "")[:200] or None,
                 "proof_state": "candidate",
+            })
+    if scanner in BASELINE_RECORDING_TOOLS:
+        baseline = dict((wire_log or {}).get("baseline") or {})
+        if not baseline and scanner == "sqlmap" and _SQLMAP_NOT_AUTHORIZED in text:
+            # No traffic log: sqlmap's own connection-test refusal names the 401.
+            baseline = {"status": 401, "login_redirect": False}
+        if baseline.get("status"):
+            records.append({
+                "kind": BASELINE_RECORD_KIND,
+                "http_status": int(baseline["status"]),
+                "login_redirect": bool(baseline.get("login_redirect")),
             })
     records = [record for record in records if any(value not in (None, "", [], {}) for key, value in record.items() if key != "kind")]
     kept = min(len(records), MAX_TOOL_RECORDS)
