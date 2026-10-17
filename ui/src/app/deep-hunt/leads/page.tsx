@@ -1,6 +1,6 @@
 'use client'
 
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import Link from '@/components/WorkspaceLink'
 import {
   ArrowRight, Bot, CheckCircle2, ChevronRight, CircleDot,
@@ -251,29 +251,52 @@ export default function InvestigationWorkspacePage() {
   const [notice, setNotice] = useState<string | null>(null)
   const [transitionError, setTransitionError] = useState<string | null>(null)
 
-  useEffect(() => {
-    getFamilyProofContracts().then((proofData) => {
-      setContracts(proofData)
-    }).catch((e) => setError(e instanceof Error ? e.message : 'Failed to load investigation context'))
+  const [refreshing, setRefreshing] = useState(false)
+  // The last Refresh: when it succeeded, or that it failed (the page keeps the earlier data).
+  const [refreshed, setRefreshed] = useState<{ at: Date; ok: boolean } | null>(null)
+
+  // Each loader reports its own error and resolves to whether it succeeded.
+  const loadContracts = useCallback(async () => {
+    try {
+      setContracts(await getFamilyProofContracts())
+      return true
+    } catch (e) { setError(e instanceof Error ? e.message : 'Failed to load investigation context'); return false }
   }, [])
+
+  useEffect(() => { void loadContracts() }, [loadContracts])
 
   const load = useCallback(async () => {
     if (!targetId) {
       setData(null)
       setSelectedId('')
       setLoading(false)
-      return
+      return true
     }
     setLoading(true); setError(null)
     try {
       const next = await scheduleHypotheses({ targetId, remainingRequests: 12, limit: 50 })
       setData(next)
       setSelectedId((current) => current && next.scheduled.some((x) => x.hypothesis_id === current) ? current : (next.scheduled[0]?.hypothesis_id || ''))
-    } catch (e) { setError(e instanceof Error ? e.message : 'Failed to load investigation leads') }
+      return true
+    } catch (e) { setError(e instanceof Error ? e.message : 'Failed to load investigation leads'); return false }
     finally { setLoading(false) }
   }, [targetId])
 
   useEffect(() => { load().catch(() => undefined) }, [load])
+  // A Refresh time belongs to the target it re-read.
+  const currentTarget = useRef(targetId)
+  useEffect(() => { currentTarget.current = targetId; setRefreshed(null) }, [targetId])
+
+  // Refresh re-reads the proof contracts and, once a target is chosen, its ranked leads, then
+  // says when; it used to call a loader that returns at once without a target, so it looked dead.
+  // The time is shown only when every read succeeded; a failed read says so instead.
+  const refresh = useCallback(async () => {
+    setRefreshing(true); setNotice(null); setTransitionError(null)
+    try {
+      const results = await Promise.all([loadContracts(), load()])
+      if (currentTarget.current === targetId) setRefreshed({ at: new Date(), ok: results.every(Boolean) })
+    } finally { setRefreshing(false) }
+  }, [load, loadContracts, targetId])
 
   const selected = useMemo(() => data?.scheduled.find((x) => x.hypothesis_id === selectedId) || null, [data, selectedId])
   const visibleLeads = useMemo(() => data?.scheduled.slice(0, 5) || [], [data])
@@ -322,7 +345,15 @@ export default function InvestigationWorkspacePage() {
                 accept={webTargetChoice} webOnly placeholder="Choose a target…" onSelectedAsset={setSelectedTarget} />
             </div>
           </div>
-          <Button variant="secondary" onClick={() => load().catch(() => undefined)} disabled={loading || busy}><RefreshCw className="h-4 w-4" />Refresh</Button>
+          <div className="flex flex-col items-start gap-1 md:items-end">
+            <Button variant="secondary" onClick={() => { void refresh() }} loading={refreshing} disabled={(loading && Boolean(targetId)) || busy || refreshing}
+              title={targetId ? 'Re-rank this target’s leads' : 'Re-read the proof contracts; choose a target to rank its leads'}><RefreshCw className="h-4 w-4" />Refresh</Button>
+            {refreshed?.ok ? <span className="text-[11px] text-gray-500" role="status" data-testid="leads-refreshed">
+              {targetId ? 'Leads' : 'Proof contracts'} updated {refreshed.at.toLocaleTimeString()}
+            </span> : refreshed ? <span className="text-[11px] text-red-300" role="alert" data-testid="leads-refresh-failed">
+              Refresh failed at {refreshed.at.toLocaleTimeString()}
+            </span> : null}
+          </div>
         </div>
       </Card>
 

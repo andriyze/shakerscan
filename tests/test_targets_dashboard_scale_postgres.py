@@ -819,6 +819,13 @@ def test_inventory_v1_domain_groups_hold_the_legacy_groups_with_capped_members()
         capped = await ai.list_assets_v1(spy, _page(limit=10, sort="-risk", count="exact"), group_by="domain",
                                          member_limit=4, include_facets=True)
         assert capped["total"] == len(legacy_groups)
+        # The target total counts every filtered asset, not the facets' search scope.
+        assert (capped["target_total"], capped["target_total_kind"]) == (legacy["total"], "exact")
+        narrowed = await ai.list_assets_v1(conn, _page(limit=10, count="exact"), group_by="domain",
+                                           findings="none", include_facets=True)
+        expected = (await ai.list_assets(conn, group_by="domain", findings="none", limit=1))["total"]
+        assert narrowed["target_total"] == expected < narrowed["facets"]["total"]
+        assert "target_total" not in (await ai.list_assets_v1(conn, _page(limit=10), group_by="domain"))
         assert all(len(g["targets"]) <= 4 for g in capped["items"])
         assert sum(g["members_truncated"] for g in capped["items"]) >= 0
         assert spy.most <= 10 * 4 + 1, sorted(spy.rows, key=lambda item: -item[0])[:2]

@@ -21,10 +21,13 @@ test('single-target menus offer both the safe shortcut and full configuration', 
 
 test('domain-wide customization opens New Scan in prefilled batch mode', () => {
   assert.match(groups, /Customize batch…/)
-  assert.match(groups, /configureScanHref\(batch, true\)/)
+  // Up to one batch travels in the link; a larger (or partly loaded) domain goes by reference.
+  assert.match(groups, /domainBatchHref\(group\.root_domain, batch, group\.members_truncated\)/)
   assert.equal(configureScanHref(['https://a.example.test', 'b.example.test'], true),
     '/scan/new?targets=https%3A%2F%2Fa.example.test%0Ab.example.test')
   assert.match(newScan, /requestedParams\.get\('targets'\)/)
+  assert.match(newScan, /requestedParams\.get\('domain'\)/)
   assert.match(newScan, /setBatchMode\(true\)/)
-  assert.match(newScan, /setBatchTargets\(Array\.from\(new Set\(requestedTargets\)\)\.join\('\\n'\)\)/)
+  assert.match(newScan, /setBatchTargets\(capped\.targets\.join\('\\n'\)\)/)
+  assert.match(newScan, /setBatchTargets\(resolved\.targets\.join\('\\n'\)\)/)
 })

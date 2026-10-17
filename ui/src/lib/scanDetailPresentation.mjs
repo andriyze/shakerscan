@@ -483,28 +483,52 @@ export function carriedSourceText(carried) {
 // The release line states provenance only when the decision supplies it: a blocker the gate
 // marked as carried from the target's unresolved set, and not written by this scan, came from
 // an earlier scan. Proof state says nothing about when a finding was observed.
+const SEVERITY_ORDER = ['critical', 'high', 'medium', 'low', 'info']
+
+/**
+ * "critical or high " for blockers that all carry those severities, so the release line says
+ * which bar the count is against (the gate blocks at high by default, while the run headline
+ * counts medium too). '' when the blockers carry no severity.
+ */
+export function blockerSeverityPhrase(blockers) {
+  const present = new Set((Array.isArray(blockers) ? blockers : [])
+    .map((blocker) => String(record(blocker).severity || '').toLowerCase())
+    .filter((severity) => SEVERITY_ORDER.includes(severity)))
+  if (!present.size) return ''
+  const lowest = Math.max(...[...present].map((severity) => SEVERITY_ORDER.indexOf(severity)))
+  const names = SEVERITY_ORDER.slice(0, lowest + 1)
+  if (names.length === 1) return `${names[0]} `
+  return `${names.slice(0, -1).join(', ')} or ${names.at(-1)} `
+}
+
+function unresolvedPhrase(count, blockers) {
+  return `${count} unresolved ${blockerSeverityPhrase(blockers)}finding${count === 1 ? '' : 's'}`
+}
+
 export function releaseLine(decision, scanId, confirmedCount) {
   const item = record(decision)
   const verdict = String(item.decision || item.deploy_decision || '').toLowerCase()
   if (!verdict) return null
   const blockers = Array.isArray(item.blocking_findings) ? item.blocking_findings : []
+  // The list may be truncated; blocking_count is the gate's own total.
+  const blockerCount = Math.max(blockers.length, Number(item.blocking_count) || 0)
   const { hunts, earlierScans, other } = blockerProvenance(blockers, scanId)
   const rationale = String(item.rationale || item.reason || '').trim()
   if (verdict === 'block' || verdict === 'blocked') {
     if (blockers.length > 0 && hunts + earlierScans + other === blockers.length && confirmedCount === 0) {
       const sources = [earlierScans > 0 && 'earlier scans', hunts > 0 && (hunts === 1 ? 'a Hunt' : 'Hunts'), other > 0 && 'other records'].filter(Boolean)
       const source = sources.length > 1 ? `${sources.slice(0, -1).join(', ')} and ${sources.at(-1)}` : sources[0]
-      return { verdict, tone: 'block', text: `Release is blocked by ${blockers.length} unresolved finding${blockers.length === 1 ? '' : 's'} from ${source} that this run did not re-examine.` }
+      return { verdict, tone: 'block', text: `Release is blocked by ${unresolvedPhrase(blockerCount, blockers)} from ${source} that this run did not re-examine.` }
     }
-    return { verdict, tone: 'block', text: blockers.length > 0
-      ? `Release is blocked by ${blockers.length} unresolved finding${blockers.length === 1 ? '' : 's'} on this target.`
+    return { verdict, tone: 'block', text: blockerCount > 0
+      ? `Release is blocked by ${unresolvedPhrase(blockerCount, blockers)} on this target.`
       : 'Release is blocked by unresolved findings on this target.' }
   }
   if (verdict === 'allow') {
     return { verdict, tone: 'allow', text: 'Release policy allows this target on the findings currently unresolved.' }
   }
   return { verdict, tone: 'review', text: rationale
-    ? `${rationale}${blockers.length > 0 ? ` ${blockers.length} unresolved finding${blockers.length === 1 ? '' : 's'} on this target.` : ''}`
+    ? `${rationale}${blockerCount > 0 ? ` ${unresolvedPhrase(blockerCount, blockers)} on this target.` : ''}`
     : `Release decision: ${verdict.replace(/_/g, ' ')}.` }
 }
 
@@ -542,6 +566,29 @@ export function groupScanFindings(findings) {
       || (b.findings.length - a.findings.length))
   }
   return groups
+}
+
+/**
+ * The Findings tab's counts, from the same grouping that draws its sections, so the summary line
+ * and the section headings can never disagree. `provenMaterial` (medium or higher) is the number
+ * the run headline calls "confirmed material issues".
+ */
+export function scanFindingCounts(findings) {
+  const groups = groupScanFindings(findings)
+  const size = (clusters) => clusters.reduce((sum, cluster) => sum + cluster.findings.length, 0)
+  const provenMaterial = groups.proven.reduce((sum, cluster) => sum + (MATERIAL_SEVERITIES.has(cluster.severity) ? cluster.findings.length : 0), 0)
+  const proven = size(groups.proven)
+  const verify = size(groups.verify)
+  const informational = size(groups.informational)
+  return { total: proven + verify + informational, proven, provenMaterial, verify, informational }
+}
+
+/** "30 proven (24 medium or higher) · 2 need verification · 1 informational". */
+export function scanFindingCountsText(counts) {
+  const parts = [`${counts.proven} proven${counts.provenMaterial && counts.provenMaterial !== counts.proven ? ` (${counts.provenMaterial} medium or higher)` : ''}`]
+  if (counts.verify) parts.push(`${counts.verify} ${counts.verify === 1 ? 'needs' : 'need'} verification`)
+  if (counts.informational) parts.push(`${counts.informational} informational`)
+  return parts.join(' · ')
 }
 
 export function scanResultPresentation(scan, assurance) {

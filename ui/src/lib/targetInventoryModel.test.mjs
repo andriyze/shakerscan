@@ -124,3 +124,115 @@ test('a scan covers live web apps, else a bare domain, and New Scan opens prefil
   assert.equal(configureScanHref(['a.example.com', 'b.example.com', 'a.example.com']), '/scan/new?targets=a.example.com%0Ab.example.com')
   assert.equal(configureScanHref(['only.example.com'], true), '/scan/new?targets=only.example.com')
 })
+
+// UI audit 2.11 #2: at 10k targets a domain's "Customize batch" link listed every URL (450 KB) and
+// /scan/new answered HTTP 431. A large domain now travels by reference and New Scan reads it.
+test('a large domain group opens New Scan by reference, capped at one batch', async () => {
+  const { SCAN_BATCH_MAX, batchCapNotice, capBatchTargets, domainBatchHref, domainBatchTargets } = await import('./targetInventoryModel.mjs')
+  assert.equal(SCAN_BATCH_MAX, 50)
+  const small = ['https://a.example.com', 'https://b.example.com']
+  assert.equal(domainBatchHref('example.com', small), '/scan/new?targets=https%3A%2F%2Fa.example.com%0Ahttps%3A%2F%2Fb.example.com')
+  const many = Array.from({ length: 10_000 }, (_, i) => `https://app-${String(i).padStart(5, '0')}.scale-seed.invalid`)
+  const href = domainBatchHref('scale-seed.invalid', many)
+  assert.equal(href, '/scan/new?domain=scale-seed.invalid')
+  assert.ok(href.length < 100)
+  // At exactly one batch the URLs still travel in the link (well under any header limit).
+  assert.ok(domainBatchHref('scale-seed.invalid', many.slice(0, 50)).startsWith('/scan/new?targets='))
+
+  const page = { groups: [
+    { root_domain: 'other.invalid', targets: [{ is_active: true, locator: 'x.other.invalid', origins: [{ url: 'https://x.other.invalid', is_active: true }] }] },
+    { root_domain: 'Scale-Seed.invalid', targets: [
+      ...many.slice(0, 120).map(url => ({ is_active: true, locator: new URL(url).host, origins: [{ url, is_active: true }] })),
+      { is_active: false, locator: 'gone.scale-seed.invalid', origins: [{ url: 'https://gone.scale-seed.invalid', is_active: true }] },
+    ] },
+  ] }
+  const resolved = domainBatchTargets('scale-seed.invalid', page)
+  assert.equal(resolved.found, true)
+  assert.equal(resolved.total, 120)
+  assert.equal(resolved.targets.length, 50)
+  assert.ok(!resolved.targets.includes('https://gone.scale-seed.invalid'))
+  assert.deepEqual(domainBatchTargets('missing.invalid', page), { targets: [], total: 0, found: false, moreMembers: false })
+  assert.match(batchCapNotice(120, 'scale-seed.invalid'), /120 web apps; a batch scans at most 50 at once\. The first 50 are filled in/)
+  assert.equal(batchCapNotice(50, 'x'), null)
+  assert.deepEqual(capBatchTargets([...many.slice(0, 60), many[0]]), { targets: many.slice(0, 50), total: 60 })
+})
+
+// UI audit 2.11 #12: /targets took 4.1-4.5 s at 10k targets because the legacy grouping read every
+// asset and returned whole groups (one of 10,000 members). The page now reads list/v1 pages.
+test('the Targets page reads list/v1 group pages with a member cap, and still reads a legacy answer', async () => {
+  const { INVENTORY_MEMBER_LIMIT, inventoryPageFromBody, inventoryPageParams, filtersFromQuery } = await import('./targetInventoryModel.mjs')
+  const filters = filtersFromQuery(new URLSearchParams('search=api&sort=risk&archived=1&findings=critical_high'))
+  assert.deepEqual(inventoryPageParams(filters, null, 40), { group_by: 'domain', include_facets: true, limit: 40,
+    member_limit: INVENTORY_MEMBER_LIMIT, sort: '-risk', count: 'exact', search: 'api', findings: 'critical_high', include_inactive: true })
+  const next = inventoryPageParams(filtersFromQuery(new URLSearchParams('')), 'c2', 40)
+  assert.equal(next.cursor, 'c2')
+  assert.equal(next.count, undefined, 'a later page carries the cursor, not a recount')
+  assert.equal(next.sort, 'name')
+  assert.equal(next.offset, undefined)
+
+  const v1 = inventoryPageFromBody({ items: [{ root_domain: 'scale-seed.invalid', targets: [{ id: 'a' }], member_count: 10000, members_truncated: true }],
+    has_more: true, next_cursor: 'c2', total: 3, facets: { total: 10002 } })
+  assert.equal(v1.listV1, true)
+  assert.equal(v1.totalGroups, 3)
+  assert.equal(v1.nextCursor, 'c2')
+  assert.equal(v1.groups[0].member_count, 10000)
+  assert.equal(v1.facets.total, 10002)
+  assert.equal(inventoryPageFromBody({ items: [], has_more: false, next_cursor: 'stale' }).nextCursor, null)
+
+  const legacy = inventoryPageFromBody({ targets: [{ id: 'a', locator: 'a.example' }], groups: [{ root_domain: 'example', targets: [] }], total: 1, total_groups: 1 })
+  assert.deepEqual([legacy.listV1, legacy.totalGroups, legacy.hasMore, legacy.groups.length], [false, 1, false, 1])
+  const flat = inventoryPageFromBody({ targets: [{ id: 'a', locator: 'a.example' }], total: 1 })
+  assert.deepEqual(flat.groups, [{ root_domain: 'a.example', targets: [{ id: 'a', locator: 'a.example' }] }])
+})
+
+test('a domain group loaded in part always opens New Scan by reference', async () => {
+  const { domainBatchHref, domainBatchTargets, batchCapNotice } = await import('./targetInventoryModel.mjs')
+  assert.equal(domainBatchHref('scale-seed.invalid', ['https://a.scale-seed.invalid', 'https://b.scale-seed.invalid'], true), '/scan/new?domain=scale-seed.invalid')
+  const page = { items: [{ root_domain: 'scale-seed.invalid', member_count: 10000, members_truncated: true,
+    targets: Array.from({ length: 200 }, (_, i) => ({ is_active: true, locator: `app-${i}.scale-seed.invalid`, origins: [{ url: `https://app-${i}.scale-seed.invalid`, is_active: true }] })) }], has_more: false }
+  const resolved = domainBatchTargets('scale-seed.invalid', page)
+  assert.deepEqual([resolved.targets.length, resolved.total, resolved.moreMembers, resolved.memberCount], [50, 200, true, 10000])
+  assert.equal(batchCapNotice(resolved.total, 'scale-seed.invalid', resolved),
+    'scale-seed.invalid has 10,000 targets; a batch scans at most 50 at once. The first 50 are filled in below; queue the rest in further batches.')
+})
+
+// Review of the 2.11 audit fixes: the Targets count said "1,200 targets in 3 groups" under
+// authorization=unauthorized because it read the facets' total (the search scope only).
+test('the Targets count applies every filter, never the facets\' search-scope total', async () => {
+  const { inventoryPageFromBody, inventoryTargetTotal, targetTotalLabel } = await import('./targetInventoryModel.mjs')
+  const groups = [{ root_domain: 'a.invalid', targets: [{ id: '1' }], member_count: 2 }, { root_domain: 'b.invalid', targets: [{ id: '2' }], member_count: 1 }]
+  const served = inventoryPageFromBody({ items: groups, has_more: false, total: 2, target_total: 3, target_total_kind: 'exact', facets: { total: 1200 } })
+  assert.deepEqual(inventoryTargetTotal(served, true), { count: 3, kind: 'exact' })
+  assert.equal(targetTotalLabel(inventoryTargetTotal(served, true)), '3 targets')
+  const capped = inventoryPageFromBody({ items: groups, has_more: true, next_cursor: 'c', total: 2, target_total: 10000, target_total_kind: 'at_least' })
+  assert.equal(targetTotalLabel(inventoryTargetTotal(capped, false)), '10,000+ targets')
+  // An engine without target_total: the loaded groups' member counts, labelled when partial.
+  const older = inventoryPageFromBody({ items: groups, has_more: false, total: 2, facets: { total: 1200 } })
+  assert.equal(older.targetTotal, null)
+  assert.deepEqual(inventoryTargetTotal(older, true), { count: 3, kind: 'exact' })
+  assert.equal(targetTotalLabel(inventoryTargetTotal(older, false)), '3 targets on this page')
+  assert.equal(targetTotalLabel({ count: 1, kind: 'exact' }), '1 target')
+  // The legacy answer's total is already filtered.
+  assert.deepEqual(inventoryPageFromBody({ targets: [], groups: [], total: 7, total_groups: 2 }).targetTotal, { count: 7, kind: 'exact' })
+})
+
+// Review of the 2.11 audit fixes: New Scan read one page of a substring search, so groups such as
+// aapp.io filled it and app.io itself was "not found".
+test('New Scan finds a domain group by exact name across a bounded number of pages', async () => {
+  const { DOMAIN_LOOKUP_MAX_PAGES, findDomainGroup } = await import('./targetInventoryModel.mjs')
+  const member = host => ({ is_active: true, locator: host, origins: [{ url: `https://${host}`, is_active: true }] })
+  const pages = {
+    '': { items: Array.from({ length: 10 }, (_, i) => ({ root_domain: `a${i}app.io`, targets: [member(`a${i}app.io`)] })), has_more: true, next_cursor: 'p2' },
+    p2: { items: [{ root_domain: 'app.io', targets: [member('www.app.io')], member_count: 1 }, { root_domain: 'myapp.io', targets: [] }], has_more: false },
+  }
+  const asked = []
+  const fetchPage = async cursor => { asked.push(cursor); return pages[cursor || ''] }
+  const found = await findDomainGroup('app.io', fetchPage)
+  assert.deepEqual([found.found, found.targets, asked], [true, ['https://www.app.io'], [null, 'p2']])
+  const missing = await findDomainGroup('none.io', fetchPage)
+  assert.deepEqual([missing.found, missing.exhausted], [false, true])
+  // Never more than the bound, and "not found" then is not definitive.
+  let reads = 0
+  const endless = await findDomainGroup('app.io', async () => { reads += 1; return { items: [{ root_domain: 'xapp.io', targets: [] }], has_more: true, next_cursor: `c${reads}` } })
+  assert.deepEqual([endless.found, endless.exhausted, reads], [false, false, DOMAIN_LOOKUP_MAX_PAGES])
+})

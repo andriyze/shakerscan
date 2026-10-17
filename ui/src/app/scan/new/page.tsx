@@ -23,7 +23,8 @@ import { listCredentialProfiles, type CredentialProfile } from '@/lib/credential
 import { preferredCredentialId } from '@/lib/credentialDefaults'
 import { Button, Card, Combobox, Field, useToast, type ComboboxOption } from '@/components/ui'
 import { useTargetSearch } from '@/lib/useTargetSearch'
-import type { TargetAsset } from '@/lib/targetAssetApi'
+import { getTargetAssets, type TargetAsset } from '@/lib/targetAssetApi'
+import { DOMAIN_LOOKUP_MAX_PAGES, DOMAIN_LOOKUP_PAGE, INVENTORY_MEMBER_LIMIT, SCAN_BATCH_MAX, batchCapNotice, capBatchTargets, findDomainGroup } from '@/lib/targetInventoryModel.mjs'
 import { credentialDescription, credentialOptions } from '@/lib/pickerOptions'
 import {
   RequestCollectionPicker,
@@ -69,6 +70,9 @@ export default function NewScanPage() {
   const [target, setTarget] = useState('')
   const [batchMode, setBatchMode] = useState(false)
   const [batchTargets, setBatchTargets] = useState('')
+  // Why the batch holds fewer targets than were asked for, or that a domain is still being read.
+  const [batchNotice, setBatchNotice] = useState<string | null>(null)
+  const [batchResolving, setBatchResolving] = useState(false)
   const [targetKind, setTargetKind] = useState<'web' | 'api'>('web')
   const [budgetProfile, setBudgetProfile] = useState<ScanBudgetProfile>('balanced')
   const [activeTesting, setActiveTesting] = useState(false)
@@ -110,13 +114,43 @@ export default function NewScanPage() {
       .map((value) => value.trim())
       .filter(Boolean)
     const requestedTarget = requestedParams.get('target')?.trim()
-    if (requestedTargets.length > 0 && featureEnabled('batch_scan')) {
+    const requestedDomain = requestedParams.get('domain')?.trim()
+    let cancelled = false
+    if (requestedDomain && featureEnabled('batch_scan')) {
+      // A large domain group arrives by reference: read its web apps here (one batch's worth).
       setBatchMode(true)
-      setBatchTargets(Array.from(new Set(requestedTargets)).join('\n'))
+      setBatchResolving(true)
+      // list/v1 reads at most INVENTORY_MEMBER_LIMIT members of the group, never the whole install.
+      // The search is a substring match, so the exact group is looked for over a few pages.
+      findDomainGroup(requestedDomain, (cursor) => getTargetAssets({
+        group_by: 'domain', search: requestedDomain, count: 'none', limit: DOMAIN_LOOKUP_PAGE,
+        member_limit: INVENTORY_MEMBER_LIMIT, ...(cursor ? { cursor } : {}),
+      }))
+        .then((resolved) => {
+          if (cancelled) return
+          if (!resolved.found && !resolved.exhausted) {
+            setBatchNotice(`${requestedDomain} was not among the first ${(DOMAIN_LOOKUP_PAGE * DOMAIN_LOOKUP_MAX_PAGES).toLocaleString('en-US')} matching domain groups. Type its targets below.`)
+            return
+          }
+          if (!resolved.found || !resolved.targets.length) {
+            setBatchNotice(`No active web apps were found for ${requestedDomain}. Add targets, or type them below.`)
+            return
+          }
+          setBatchTargets(resolved.targets.join('\n'))
+          setBatchNotice(batchCapNotice(resolved.total, requestedDomain, { memberCount: resolved.memberCount, moreMembers: resolved.moreMembers }))
+        })
+        .catch((cause) => {
+          if (!cancelled) setBatchNotice(`Could not read the web apps of ${requestedDomain}: ${cause instanceof Error ? cause.message : 'inventory unavailable'}`)
+        })
+        .finally(() => { if (!cancelled) setBatchResolving(false) })
+    } else if (requestedTargets.length > 0 && featureEnabled('batch_scan')) {
+      const capped = capBatchTargets(requestedTargets)
+      setBatchMode(true)
+      setBatchTargets(capped.targets.join('\n'))
+      setBatchNotice(batchCapNotice(capped.total, 'This selection'))
     } else if (requestedTarget) {
       setTarget(requestedTarget)
     }
-    let cancelled = false
     getWorkers()
       .then((workers) => {
         if (!cancelled) {
@@ -354,8 +388,8 @@ export default function NewScanPage() {
       setError('Enter at least one target URL.')
       return
     }
-    if (submittedTargets.length > 50) {
-      setError('Batch submission supports at most 50 unique targets.')
+    if (submittedTargets.length > SCAN_BATCH_MAX) {
+      setError(`Batch submission supports at most ${SCAN_BATCH_MAX} unique targets.`)
       return
     }
     if (contractPreviewLoading || contractPreviewError || !contractPreview) {
@@ -570,11 +604,14 @@ export default function NewScanPage() {
               Multiple targets
             </label>}
           </div>
-          {batchMode ? (
+          {batchMode ? (<>
             <Field label="Target URLs (one per line)" required>
               <textarea value={batchTargets} onChange={(event) => setBatchTargets(event.target.value)} rows={6} placeholder={'https://app.example.com\nhttps://api.example.com'} className="w-full rounded-lg border border-gray-700 bg-gray-950 px-3 py-2 text-sm text-white placeholder:text-gray-600" />
             </Field>
-          ) : (
+            {batchResolving && <p className="mt-2 text-xs text-gray-400" role="status">Reading the domain&apos;s web apps…</p>}
+            {batchNotice && <p className="mt-2 text-xs text-amber-200" role="status" data-testid="batch-notice">{batchNotice}</p>}
+            {targets.length > SCAN_BATCH_MAX && <p className="mt-2 text-xs text-red-300" role="alert">{targets.length} targets listed; a batch scans at most {SCAN_BATCH_MAX}. Remove {targets.length - SCAN_BATCH_MAX} to continue.</p>}
+          </>) : (
             <Field label="Target URL or hostname" required>
               <input value={target} onChange={(event) => {
                 setTarget(event.target.value)
