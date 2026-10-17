@@ -93,6 +93,17 @@ def is_authentication_candidate(candidate: Mapping[str, Any]) -> bool:
     )
 
 
+def is_authentication_request(request_class: Any, url: Any, body: Any) -> bool:
+    """Whether a replayed request is an authentication form, whose 401/403 is its real answer.
+
+    A captured or seeded ``POST /hub/login`` keeps the ``confirmed_mutation`` class of every
+    replayed body, so the class alone misses it; its body and login path identify it.
+    """
+    return str(request_class or "") == "safe_authentication" or (
+        bool(body) and is_authentication_path(url)
+    )
+
+
 def _header(headers: Mapping[str, Any] | None, wanted: str) -> str | None:
     for name, value in dict(headers or {}).items():
         if str(name).lower() == wanted:

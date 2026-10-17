@@ -26,7 +26,9 @@ except ModuleNotFoundError:  # package import layout
 try:
     from capabilities.authentication_proof import successful_token_signals
     from hunt.capability_executor import CapabilityAdapterResult, Cancelled, Heartbeat
-    from runtime.auth_refusal import AUTHENTICATION_REQUIRED, refusal, refusal_error
+    from runtime.auth_refusal import (
+        AUTHENTICATION_REQUIRED, is_authentication_request, refusal, refusal_error,
+    )
     from runtime.capability_registry import CapabilitySpec
     from runtime.models import TargetBinding
     from runtime.request_shape import resolve_json_field_path
@@ -34,7 +36,9 @@ try:
 except ModuleNotFoundError:
     from .authentication_proof import successful_token_signals
     from ..hunt.capability_executor import CapabilityAdapterResult, Cancelled, Heartbeat
-    from ..runtime.auth_refusal import AUTHENTICATION_REQUIRED, refusal, refusal_error
+    from ..runtime.auth_refusal import (
+        AUTHENTICATION_REQUIRED, is_authentication_request, refusal, refusal_error,
+    )
     from ..runtime.capability_registry import CapabilitySpec
     from ..runtime.models import TargetBinding
     from ..runtime.request_shape import resolve_json_field_path
@@ -310,7 +314,10 @@ class NoSQLiVerifyAdapter:
                     # literal" AND "ne diverges from it", so reflection can no longer
                     # masquerade as an interpreted operator.
                     r_literal = await send(self._literal(field, sentinel))
-                    field_refused = refusal(r_literal.status_code, r_literal.response_headers)
+                    # A login form's 401/403 is its answer to a wrong password, not a refusal.
+                    field_refused = None if is_authentication_request(
+                        request_class, self.request.url, self.request.body,
+                    ) else refusal(r_literal.status_code, r_literal.response_headers)
                     if field_refused is not None:
                         # The target refused the control. The differential needs every sample
                         # answered, so no operator can verify this field against a refusal:

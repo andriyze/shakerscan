@@ -16,7 +16,9 @@ except ModuleNotFoundError:  # package import layout
 try:
     from capabilities.sql_error_signatures import sql_error_signatures
     from hunt.capability_executor import CapabilityAdapterResult, Cancelled, Heartbeat
-    from runtime.auth_refusal import AUTHENTICATION_REQUIRED, refusal, refusal_error
+    from runtime.auth_refusal import (
+        AUTHENTICATION_REQUIRED, is_authentication_request, refusal, refusal_error,
+    )
     from runtime.capability_registry import CapabilitySpec
     from runtime.models import TargetBinding
     from runtime.request_shape import resolve_json_field_path
@@ -24,7 +26,9 @@ try:
 except ModuleNotFoundError:  # package imports in host-side tests
     from .sql_error_signatures import sql_error_signatures
     from ..hunt.capability_executor import CapabilityAdapterResult, Cancelled, Heartbeat
-    from ..runtime.auth_refusal import AUTHENTICATION_REQUIRED, refusal, refusal_error
+    from ..runtime.auth_refusal import (
+        AUTHENTICATION_REQUIRED, is_authentication_request, refusal, refusal_error,
+    )
     from ..runtime.capability_registry import CapabilitySpec
     from ..runtime.models import TargetBinding
     from ..runtime.request_shape import resolve_json_field_path
@@ -407,13 +411,15 @@ class RequestMutationVerificationAdapter:
             )
         refused = (
             refusal(control.status_code, control.response_headers)
-            if self.request_class != "safe_authentication" and not control.error_code else None
+            if not control.error_code and not is_authentication_request(
+                self.request_class, self.request.url, self.request.body,
+            ) else None
         )
         if refused is not None and refused[1] == AUTHENTICATION_REQUIRED:
             # The target asked the replayed control for credentials (a captured request never
             # keeps them). The mutation would meet the same wall, so it is not sent and the
             # candidate is inconclusive, not "not proven". A login form's 401 is its answer to a
-            # wrong password, so a safe_authentication request is still compared.
+            # wrong password, so an authentication form is still compared.
             return CapabilityAdapterResult(
                 status="partial",
                 observations=({
