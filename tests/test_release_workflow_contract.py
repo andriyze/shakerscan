@@ -244,3 +244,18 @@ def test_certification_requires_the_seeded_upgrade_path_sweep():
     assert script.index("unset " + " ".join(LAUNCHER_IMAGE_OVERRIDES)) < script.index("== 1. install")
     # The candidate goes in through this tree's real installer, not a file copy.
     assert 'SHAKERSCAN_RAW_BASE="file://$ROOT"' in script and 'sh "$SMOKE_ROOT/candidate-index.sh"' in script
+
+
+def test_upgrade_gates_never_pair_a_tree_with_images_of_another_version():
+    """A pull request may only run the upgrade gates with main's images of the same version; the
+    release candidate's call always runs, and fails on a version mismatch instead of skipping."""
+    for name in ("upgrade-path.yml", "installed-upgrade.yml"):
+        text = (ROOT / ".github" / "workflows" / name).read_text()
+        step = text[text.index("- name: Require candidate images of this tree's version"):]
+        step = step[:step.index("\n      - name:", 1)]
+        assert "jq -r '.version' artifacts/candidate/release-candidate-receipt.json" in step
+        assert 'if [ "$CALLED_BY_RELEASE" = "true" ]; then' in step and "exit 1" in step
+        assert "CALLED_BY_RELEASE: ${{ inputs.receipt_artifact != '' }}" in step
+        assert text.index("Require candidate images") < text.index("- name: Write the candidate image lock")
+        run_step = text[text.index("bash scripts/") - 900:text.index("bash scripts/")]
+        assert "if: steps.consistent.outputs.run == 'true'" in run_step

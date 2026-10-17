@@ -103,7 +103,34 @@ jobs:
             --jq '[.artifacts[] | select(.name | startswith("release-candidate-uncertified-"))][0].name')"
           gh run download "$run_id" -R "$REPOSITORY" -n "$artifact" -D artifacts/candidate
 
+      # A pull request installs this tree with the newest images built on main, which only means
+      # something when they are the same version: a release-line pull request (VERSION ahead of
+      # main) has no such images, and pairing them failed the API's release identity check
+      # (image=2.10.0, deployment=2.11.0). The release candidate's call passes its own exact
+      # images and is never skipped; a mismatch there fails.
+      - name: Require candidate images of this tree's version
+        id: consistent
+        shell: bash
+        env:
+          CALLED_BY_RELEASE: ${{ inputs.receipt_artifact != '' }}
+        run: |
+          tree="$(tr -d '[:space:]' < VERSION)"
+          built="$(jq -r '.version' artifacts/candidate/release-candidate-receipt.json)"
+          if [ "$built" = "$tree" ]; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if [ "$CALLED_BY_RELEASE" = "true" ]; then
+            echo "::error::the candidate receipt is version $built but the candidate tree is $tree"
+            exit 1
+          fi
+          echo "run=false" >> "$GITHUB_OUTPUT"
+          message="Not run: the newest candidate built on main is $built, this tree is $tree. The release candidate runs this gate against its own $tree images before certifying."
+          echo "::notice::$message"
+          echo "$message" >> "$GITHUB_STEP_SUMMARY"
+
       - name: Write the candidate image lock
+        if: steps.consistent.outputs.run == 'true'
         shell: bash
         # Repository names for this step only: the launcher reads SCANNER_IMAGE and the rest as
         # operator overrides that win over the lock (see installed-upgrade.yml).
@@ -130,6 +157,7 @@ jobs:
       # for which the mirror served manifests but not every blob. It relies on the read-only login.
 
       - name: Free runner disk for two release image sets
+        if: steps.consistent.outputs.run == 'true'
         shell: bash
         run: |
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup /opt/hostedtoolcache/CodeQL
@@ -139,13 +167,14 @@ jobs:
       # Authenticated, read-only Docker Hub pulls avoid the anonymous pull rate limit (429
       # toomanyrequests). Skipped, so pulls stay anonymous, when the read secrets are absent.
       - name: Log in to Docker Hub for read-only pulls
-        if: env.HAS_DH_READ == 'true'
+        if: env.HAS_DH_READ == 'true' && steps.consistent.outputs.run == 'true'
         uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f
         with:
           username: ${{ secrets.DOCKERHUB_READ_USERNAME }}
           password: ${{ secrets.DOCKERHUB_READ_TOKEN }}
 
       - name: Install ${{ matrix.baseline }}, seed it, upgrade to the candidate and sweep the API
+        if: steps.consistent.outputs.run == 'true'
         env:
           BASELINE_VERSION: ${{ matrix.baseline }}
           CANDIDATE_IMAGE_LOCK: artifacts/candidate/release-image-lock.env
@@ -156,7 +185,7 @@ jobs:
         run: bash scripts/upgrade_path_smoke.sh
 
       - name: Keep the receipt and logs
-        if: always()
+        if: always() && steps.consistent.outputs.run == 'true'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: upgrade-path-${{ matrix.baseline }}-${{ inputs.candidate_sha || github.sha }}
