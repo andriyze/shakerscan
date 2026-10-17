@@ -12,3 +12,16 @@ export function pathSegment(value) {
   }
   return encodeURIComponent(text)
 }
+
+/**
+ * The query string of an API URL: "" for no parameters, otherwise "?" and the parameters as
+ * URLSearchParams encodes them. Only URLSearchParams is taken, so a query is never hand-built from
+ * raw values ("?target=" + target) that could add parameters or path text.
+ */
+export function queryString(params) {
+  if (!(params instanceof URLSearchParams)) {
+    throw new Error('An API query string must be built with URLSearchParams')
+  }
+  const text = params.toString()
+  return text ? `?${text}` : ''
+}

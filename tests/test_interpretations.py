@@ -99,6 +99,9 @@ def test_secret_like_text_and_labels_are_refused():
     "password_hash test: hash algorithm bcrypt, field hidden",
     "token: none on the anonymous route",
     "password_hash: hidden.",
+    "token: absent in the response body",
+    "password: plaintext when the form posts over HTTP",
+    "password: not stored",
     "token=absent for scan 0b6c4d55-7d0e-4a8e-9a43-1f0e5b7a9c21 on /api/v2/users",
 ])
 def test_b19_a_title_that_describes_a_credential_test_is_accepted(title):
@@ -117,6 +120,14 @@ def test_b19_a_title_that_describes_a_credential_test_is_accepted(title):
     "password: none, it is Tr0ub4dor&3xyz",
     "password: none Tr0ub4dor&3xyz",
     "password: hashed 5f4dcc3b5aa765d61d8327deb882cf99",
+    # Review sweep re-check: a short or simple password after a descriptive word.
+    "password: weak summer2024",
+    "password: default admin123",
+    "token: absent abc123def456",
+    "password: plaintext hunter2",
+    "password: shown (S3cr3t)",
+    "password: exposed qwerty",
+    "password: default Summer",
 ])
 def test_b19_a_title_that_carries_a_value_is_still_refused(title):
     with pytest.raises(ValidationError):

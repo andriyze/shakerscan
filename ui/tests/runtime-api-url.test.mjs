@@ -22,8 +22,11 @@ test('installed UI loads its launcher-published API origin before client code', 
 })
 
 test('AI Gate export links use the launcher runtime API origin', () => {
-  assert.match(aiGate, /getApiUrl/)
-  assert.match(aiGate, /setRuntimeApiUrl\(getApiUrl\(\)\)/)
+  // API_URL is read from the launcher-published origin when the module loads in the browser; the
+  // links render only once the page runs there.
+  assert.match(aiGate, /\bAPI_URL,/)
+  assert.match(aiGate, /setApiReady\(true\)/)
+  assert.match(aiGate, /apiReady \? `\$\{API_URL\}\/ai\/targets\/\$\{pathSegment\(target\.id\)\}/)
   assert.doesNotMatch(aiGate, /process\.env\.NEXT_PUBLIC_API_URL/)
   assert.doesNotMatch(aiGate, /http:\/\/localhost:8080/)
   assert.doesNotMatch(aiGate, /const API_URL/)

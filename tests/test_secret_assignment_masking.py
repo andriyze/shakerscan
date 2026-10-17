@@ -122,3 +122,42 @@ def test_a_secret_named_assignment_is_withheld_by_mask_credential_shaped_alone(t
 def test_name_aware_masking_keeps_locations_markers_and_plain_settings():
     text = "TOKEN_URL=https://idp.test/oauth/token PASSWORD=[withheld:2] TOKEN_TYPE=bearer MODE=prod"
     assert mask_credential_shaped(text) == text
+
+
+# Review sweep re-check (M2): any character joined to a reference that does not end it is a tail.
+@pytest.mark.parametrize("tail", ["<S3cretValue123", "`S3cretValue123", '"S3cretValue123', "'S3cretValue123",
+                                  "　S3cretValue123", ")S3cretValue123", ".,S3cretValue123"])
+def test_a_reference_followed_by_any_joined_value_masks_it(tail):
+    redacted = redact_text(f"stored as {REFERENCE}{tail} today")
+    assert "S3cretValue123" not in redacted, redacted
+    assert REFERENCE in redacted and redacted.endswith(" today")
+
+
+@pytest.mark.parametrize("text", [
+    f'{{"a":"{REFERENCE}","b":"{REFERENCE}"}}', f"['{REFERENCE}']", f'"{REFERENCE}".', f"<{REFERENCE}>",
+    f"`{REFERENCE}`", f'{{"ref": "{REFERENCE}"}}\n',
+])
+def test_a_reference_ending_in_structured_text_stays_readable(text):
+    assert redact_text(text) == text
+
+
+@pytest.mark.parametrize("text, key", [
+    ("%2F" + "sk_" + "live_" + "4eC39HqLyjWDarjtT1zdp7dc", "4eC39HqLyjWDarjtT1zdp7dc"),
+    ("%3D" + "ghp" + "_aBcDeFgHiJkLmNoPqRsTuVwXyZ0123456789", "aBcDeFgHiJkLmNoPqRsTuVwXyZ0123456789"),
+    ("token_" + "ghp" + "_aBcDeFgHiJkLmNoPqRsTuVwXyZ0123456789", "aBcDeFgHiJkLmNoPqRsTuVwXyZ0123456789"),
+    ("sk_" + "live_" + "4eC39HqLyj-WDarjtT1zdp7dc", "WDarjtT1zdp7dc"),
+    ("glpat" + "-xY12abCD34efGH56ijKL", "xY12abCD34efGH56ijKL"),
+    ("sk-" + "ant-" + "api03-AbCdEfGhIjKlMnOpQrStUvWxYz012345", "AbCdEfGhIjKlMnOpQrStUvWxYz012345"),
+])
+def test_provider_keys_after_encodings_underscores_and_newer_prefixes_are_masked(text, key):
+    redacted = redact_text(f"leaked {text} here")
+    assert key not in redacted, redacted
+    assert redacted.startswith("leaked ") and redacted.endswith(" here")
+
+
+def test_the_reference_and_provider_rules_stay_linear_on_hostile_input():
+    started = time.monotonic()
+    for text in ("%2F" * 200_000, ("_sk_" + "live_") * 60_000, ("AKIA_" * 80_000), "ghp_" + "a" * 400_000 + "_",
+                 (REFERENCE + "　") * 5_000, (REFERENCE + '","') * 5_000, ("sk-" + "ant-") * 80_000):
+        redact_text(text)
+    assert time.monotonic() - started < 10

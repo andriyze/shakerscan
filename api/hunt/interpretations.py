@@ -170,6 +170,34 @@ def _secret_shaped(word: str) -> bool:
     return any(ch.isupper() for ch in word) or any(not ch.isalnum() and ch not in "-_./" for ch in word)
 
 
+# What may follow a descriptive word for the text to read as prose: the end, closing punctuation,
+# or a function word (``none on the route``, ``present in profile JSON``, ``absent for scan``).
+# After a negation a plain lowercase word also reads as prose (``not returned``). Anything else
+# (``weak summer2024``, ``default admin123``, ``exposed qwerty``) may be the value itself.
+_PROSE_FOLLOWERS = frozenset("""
+    a an the this that these those its their our your his her it
+    in on at by for from to of with without via into onto over under after before during per
+    across through until since because when while if where which who whose what how why than
+    and or but nor so as then yet also only still even just never
+    is are was were be been being has have had does did do can could may might must should will
+    would not no
+""".split())
+_NEGATIONS = frozenset({"not", "no"})
+_NEXT_WORD = re.compile(r"\s+(\S+)")
+_PLAIN_WORD = re.compile(r"[a-z]+(?:-[a-z]+)*")
+
+
+def _prose_follows(text: str, match: re.Match[str]) -> bool:
+    following = _NEXT_WORD.match(text, match.end())
+    if following is None:
+        return True  # the end of the text, or closing punctuation only (the regex's lookahead)
+    word = following.group(1)
+    bare = word.rstrip(".,;:!?)]")
+    if bare.lower() in _PROSE_FOLLOWERS and bare.isalpha():
+        return True
+    return match.group(3).lower() in _NEGATIONS and bool(_PLAIN_WORD.fullmatch(bare))
+
+
 def _looks_secret(text: str) -> bool:
     try:
         from redaction import redact_text
@@ -177,7 +205,9 @@ def _looks_secret(text: str) -> bool:
         from scanner.redaction import redact_text
     if redact_text(text) == text:
         return False
-    prose = _DESCRIPTIVE_VALUE.sub(lambda match: f"{match.group(1)} {match.group(3)}", text)
+    prose = _DESCRIPTIVE_VALUE.sub(
+        lambda match: f"{match.group(1)} {match.group(3)}" if _prose_follows(text, match) else match.group(0),
+        text)
     if prose == text or redact_text(prose) != prose:
         return True
     # Read as prose only because of a descriptive word: the rest of the text must not carry a
