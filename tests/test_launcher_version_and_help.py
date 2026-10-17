@@ -81,3 +81,38 @@ def test_secrets_help_is_the_commands_own(install):
         capture_output=True, text=True, timeout=60,
     )
     assert result.stdout.rstrip().endswith("secrets --help"), result.stdout[-300:]
+
+
+def _record(install, python_stub, *args):
+    bin_dir = install / "bin"
+    bin_dir.mkdir(exist_ok=True)
+    (bin_dir / "python3").write_text(python_stub, encoding="utf-8")
+    (bin_dir / "python3").chmod(0o755)
+    return subprocess.run(
+        ["bash", str(install / "scanner.sh"), "record", *args],
+        cwd=install, env={"PATH": f"{bin_dir}:/usr/bin:/bin", "HOME": str(install)},
+        capture_output=True, text=True, timeout=60,
+    )
+
+
+def test_record_hands_off_to_an_installed_client_pointed_at_this_instance(install):
+    """`record` runs in the client (a browser on this machine); the launcher has none of its own."""
+    # The import probe (`-c 'import shakerscan.record, playwright'`) succeeds; `-m` echoes.
+    stub = '#!/bin/sh\nif [ "$1" = "-c" ]; then exit 0; fi\necho "python3 $*"\n'
+    result = _record(install, stub, "https://app.example.test", "--name", "Walk")
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "Unknown command" not in result.stdout + result.stderr
+    line = result.stdout.strip().splitlines()[-1]
+    assert line.startswith("python3 -m shakerscan record --url http")
+    assert line.endswith("https://app.example.test --name Walk")
+    assert "  record <target>  " in _run(install, "help").stdout
+
+
+def test_record_without_the_client_names_the_install_commands(install):
+    stub = '#!/bin/sh\nif [ "$1" = "-c" ]; then exit 1; fi\necho "python3 $*"\n'
+    result = _record(install, stub, "https://app.example.test")
+    assert result.returncode == 2
+    assert "pipx install --force 'shakerscan[record]'" in result.stderr
+    assert "python -m playwright install chromium" in result.stderr
+    assert "python3 -m shakerscan" not in result.stdout
+    assert "Unknown command" not in result.stdout + result.stderr
