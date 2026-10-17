@@ -42,6 +42,7 @@ from scan.continuation_rounds import round_progress_window
 from scan.continuation import ScanContinuationError, ScanPlanRevision
 from scan.authority_deadline import AUTHORITY_UNVERIFIED_AFTER_SECONDS
 from scan.scan_deadline import node_scan_deadline
+from scan.cancelled_report import build_cancelled_scan_report
 from scan.broker_backend import (
     BrokerActionAuthority,
     BrokerActionHTTPError,
@@ -639,7 +640,7 @@ async def _execute_broker_action_plan(
     authority = BrokerActionAuthority(lambda: backend, authority_request)
     # The Scan's time limit, kept by the node as by a local worker: work past it is stopped or
     # never started, and every later round's work settles at once until the finalizer runs.
-    deadline = node_scan_deadline(options)
+    deadline = node_scan_deadline(options, lease_limit=lease.get("scan_time_limit"))
     executor = ReceiptScanActionExecutor(
         scan_id=scan_id,
         target_id=target.target_id,
@@ -671,6 +672,52 @@ async def _execute_broker_action_plan(
 
         return record
 
+    async def cancelled_report() -> dict[str, Any]:
+        """The kept report of a cancelled broker Scan, built on the node (no target traffic).
+
+        A round that planned the finalizer reports over its own plan. A work round asks the
+        control plane for the finalize-only revision the Scan would have run; it is compiled
+        for this report and never stored. Anything missing keeps the cancellation error.
+        """
+        finalization = None
+        if not any(action.action_id == "finalize.report" for action in plan.actions):
+            try:
+                response = await request(
+                    "POST",
+                    f"{base_path}/continuation",
+                    {
+                        "job_lease_token": lease_token,
+                        "worker_id": worker_id,
+                        "plan_digest": plan.plan_digest,
+                        "allocation_digest": str(
+                            options.get("scan_continuation_allocation_digest") or ""
+                        ).strip(),
+                        "finalize_only": True,
+                    },
+                )
+                final_plan = ScanActionPlan.from_dict(response["plan"])
+                final_revision = ScanPlanRevision.from_dict(response.get("plan_revision"))
+            except Exception as exc:
+                raise BrokerWorkerError(
+                    "broker Scan was cancelled during execution"
+                ) from exc
+            if (
+                final_plan.scan_id != scan_id
+                or tuple(final_plan.actions[:len(plan.actions)]) != plan.actions
+                or final_plan.actions[-1].action_id != "finalize.report"
+                or final_revision.plan_digest != final_plan.plan_digest
+                or final_revision.parent_plan_digest != plan.plan_digest
+                or final_revision.revision != plan_revision.revision + 1
+            ):
+                raise BrokerWorkerError("broker finalize-only revision changed Scan authority")
+            finalization = (final_plan, final_revision)
+        try:
+            return await build_cancelled_scan_report(
+                dispatcher, scan_id=scan_id, finalization=finalization,
+            )
+        except ValueError as exc:
+            raise BrokerWorkerError("broker Scan was cancelled during execution") from exc
+
     initial_has_finalizer = any(
         action.action_id == "finalize.report" for action in plan.actions
     )
@@ -690,7 +737,7 @@ async def _execute_broker_action_plan(
             result.status.value == "cancelled"
             for result in orchestration.action_results.values()
         ):
-            raise BrokerWorkerError("broker Scan was cancelled during execution")
+            return await cancelled_report()
         allocation_digest = str(
             options.get("scan_continuation_allocation_digest") or ""
         ).strip()
@@ -701,6 +748,9 @@ async def _execute_broker_action_plan(
         parent_plan = plan
         parent_plan_digest = plan.plan_digest
         parent_revision_number = plan_revision.revision
+        # Past the Scan's time limit no work round is asked for: only the finalizer, and the
+        # report names the round that was not run (the control plane keeps the same limit).
+        past_time_limit = deadline is not None and deadline.reached()
         response = await request(
             "POST",
             f"{base_path}/continuation",
@@ -709,8 +759,14 @@ async def _execute_broker_action_plan(
                 "worker_id": worker_id,
                 "plan_digest": plan.plan_digest,
                 "allocation_digest": allocation_digest,
+                **({"finalize_only": True} if past_time_limit else {}),
             },
         )
+        if deadline is not None and (
+            past_time_limit
+            or (isinstance(response, Mapping) and response.get("time_limit_reached") is True)
+        ):
+            deadline.record_refused_round()
         if not isinstance(response, Mapping) or not isinstance(
             response.get("plan"), Mapping,
         ):
@@ -791,6 +847,8 @@ async def _execute_broker_action_plan(
             ),
         ).run(plan)
     final = orchestration.action_results.get("finalize.report")
+    if final is not None and final.status.value == "cancelled":
+        return await cancelled_report()
     if final is None or final.observation_manifest_ref is None:
         raise BrokerWorkerError("broker Scan finalizer produced no report")
     observations = await backend.load_observations("finalize.report")
