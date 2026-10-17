@@ -196,3 +196,41 @@ def test_cli_verifier_fails_closed_when_api_is_unavailable(monkeypatch):
         assert "unavailable or rejected" in str(exc)
     else:
         raise AssertionError("unavailable verifier must deny")
+
+
+def _verified_review():
+    return _review(annotations={
+        webhook.PACKAGE_ANNOTATION: _encoded({"package": 1}),
+        webhook.BUNDLE_ANNOTATION: _encoded({"bundle_sha256": "a" * 64, "target_environment": "production"}),
+    })
+
+
+def test_webhook_denial_does_not_return_unexpected_exception_text(monkeypatch, caplog):
+    # An unexpected failure (verifier unreachable, an HTTP error, a malformed answer) put its
+    # exception text into the AdmissionReview status the Kubernetes API shows to the caller.
+    detail = "connect to https://verifier.internal:8443/model-intake failed: Traceback (most recent call last)"
+
+    def explode(*_args):
+        raise OSError(detail)
+
+    monkeypatch.setattr(webhook, "_verify", explode)
+    with caplog.at_level("ERROR", logger=webhook.logger.name):
+        result = webhook.review_admission(_verified_review())
+    response = result["response"]
+    assert response["allowed"] is False
+    assert response["status"]["reason"] == "ModelAdmissionDenied"
+    assert response["status"]["message"] == webhook.VERIFIER_FAILURE_MESSAGE
+    assert "verifier.internal" not in json.dumps(result)
+    assert any(record.exc_info for record in caplog.records)
+
+
+def test_webhook_denial_keeps_its_own_reasons(monkeypatch):
+    result = webhook.review_admission(_review(annotations={webhook.PACKAGE_ANNOTATION: "not base64!"}))
+    assert result["response"]["status"]["message"] == "invalid admission package"
+
+    def not_admitted(*_args):
+        raise webhook.AdmissionDenied("exact bundle was not admitted")
+
+    monkeypatch.setattr(webhook, "_verify", not_admitted)
+    result = webhook.review_admission(_verified_review())
+    assert result["response"]["status"]["message"] == "exact bundle was not admitted"

@@ -59,6 +59,10 @@ env:
   MODEL_INTAKE_IMAGE: shakerscan/shakerscan-model-intake
   SOURCE_URL: https://github.com/andriyze/shakerscan
 
+# Every job declares what it needs; the workflow default is read-only.
+permissions:
+  contents: read
+
 jobs:
   # Build each architecture on a NATIVE runner (no QEMU emulation -- that is what blew past the 6h
   # job limit, and katana's CGO dep cannot cross-compile). Each job pushes by digest; the manifest

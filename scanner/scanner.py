@@ -78,6 +78,7 @@ from scanner_tools.discovery_policy import (
     passive_http_methods_for_scan,
 )
 from scanner_tools.coverage_tracker import CoverageTracker
+from scanner_tools.log_text import log_text
 from scanner_tools.completion_status import build_scan_completion_status
 from scanner_tools.cancellation import scanner_cancel_requested, wait_for_scanner_cancel
 from scanner_tools.attempt_telemetry import (
@@ -4682,7 +4683,10 @@ async def build_report(target: str,
             from scanner_tools.health_check import pre_scan_validation
             pre_scan_validation_result = await pre_scan_validation(target)
         if not pre_scan_validation_result["can_proceed"]:
-            logging.warning(f"Pre-scan validation failed for {target}: {pre_scan_validation_result['warnings']}")
+            logging.warning(
+                "Pre-scan validation failed for %s: %s",
+                log_text(target), log_text(pre_scan_validation_result['warnings']),
+            )
             pre_scan_issues = pre_scan_validation_result["warnings"]
 
             connectivity = pre_scan_validation_result.get("connectivity") or {}
@@ -4871,9 +4875,9 @@ async def build_report(target: str,
             emit_progress("pre_scan_failed", 100, "target unreachable")
             return report
         else:
-            logging.info(f"Pre-scan validation passed for {target}")
+            logging.info("Pre-scan validation passed for %s", log_text(target))
     except Exception as e:
-        logging.warning(f"Pre-scan validation error: {e}")
+        logging.warning("Pre-scan validation error: %s", log_text(e))
 
     emit_progress("pre_scan", 10, "validation passed")
 

@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import ipaddress
 import json
+import logging
 import os
 from typing import Any
 import urllib.error
@@ -19,6 +20,16 @@ PACKAGE_ANNOTATION = "shakerscan.dev/model-admission-package-b64"
 BUNDLE_ANNOTATION = "shakerscan.dev/model-deployment-bundle-b64"
 
 app = FastAPI(title="ShakerScan Model Admission Webhook")
+logger = logging.getLogger(__name__)
+
+
+class AdmissionDenied(RuntimeError):
+    """A denial whose message was written for the caller (no exception text, URL or body)."""
+
+
+# A failure the webhook did not name itself (verifier unreachable, HTTP error, malformed
+# verifier answer) is logged here and reported to the Kubernetes API with this fixed text.
+VERIFIER_FAILURE_MESSAGE = "model admission could not be verified"
 
 
 def _decode_annotation(value: Any, label: str) -> dict[str, Any]:
@@ -28,9 +39,9 @@ def _decode_annotation(value: Any, label: str) -> dict[str, Any]:
             raise ValueError("annotation too large")
         decoded = json.loads(raw)
     except (ValueError, json.JSONDecodeError) as exc:
-        raise ValueError(f"invalid {label}") from exc
+        raise AdmissionDenied(f"invalid {label}") from exc
     if not isinstance(decoded, dict):
-        raise ValueError(f"invalid {label}")
+        raise AdmissionDenied(f"invalid {label}")
     return decoded
 
 
@@ -58,7 +69,7 @@ def _verify(package: dict[str, Any], bundle: dict[str, Any]) -> dict[str, Any]:
     api_url = os.getenv("SHAKERSCAN_API_URL", "").rstrip("/")
     token = os.getenv("MODEL_INTAKE_DEPLOYMENT_VERIFIER_TOKEN", "")
     if not api_url or not _verifier_transport_allowed(api_url):
-        raise RuntimeError("verifier API must be HTTPS or loopback")
+        raise AdmissionDenied("verifier API must be HTTPS or loopback")
     payload = {
         "admission_package": package,
         "expected_bundle_sha256": bundle["bundle_sha256"],
@@ -77,8 +88,16 @@ def _verify(package: dict[str, Any], bundle: dict[str, Any]) -> dict[str, Any]:
     with urllib.request.build_opener(_NoVerifierRedirects()).open(request, timeout=10) as response:
         result = json.loads(response.read(2_000_000))
     if result.get("verified") is not True or result.get("side_effects") is not False:
-        raise RuntimeError("exact bundle was not admitted")
+        raise AdmissionDenied("exact bundle was not admitted")
     return result
+
+
+def _denied(uid: str, message: str) -> dict[str, Any]:
+    return {
+        "uid": uid,
+        "allowed": False,
+        "status": {"code": 403, "reason": "ModelAdmissionDenied", "message": message},
+    }
 
 
 def review_admission(review: dict[str, Any]) -> dict[str, Any]:
@@ -99,12 +118,13 @@ def review_admission(review: dict[str, Any]) -> dict[str, Any]:
             "shakerscan.dev/admission-id": str(verified.get("registry", {}).get("admission_id") or ""),
             "shakerscan.dev/bundle-sha256": str(bundle.get("bundle_sha256") or ""),
         }
-    except Exception as exc:
-        response = {
-            "uid": uid,
-            "allowed": False,
-            "status": {"code": 403, "reason": "ModelAdmissionDenied", "message": str(exc)[:1000]},
-        }
+    except AdmissionDenied as exc:
+        response = _denied(uid, str(exc)[:1000])
+    except Exception:
+        # Exception text can carry the verifier URL, an HTTP body or a traceback detail; it
+        # stays in the webhook log and the caller gets a fixed message. Still fail closed.
+        logger.exception("Model admission verification failed for request %s", "".join(ch for ch in uid[:64] if ch.isprintable()))
+        response = _denied(uid, VERIFIER_FAILURE_MESSAGE)
     return {"apiVersion": "admission.k8s.io/v1", "kind": "AdmissionReview", "response": response}
 
 
