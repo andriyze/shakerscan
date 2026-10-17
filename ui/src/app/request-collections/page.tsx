@@ -11,6 +11,7 @@ import { targetOptions, targetSearchNote } from '@/lib/pickerOptions'
 import { targetSearchProvesEmpty } from '@/lib/targetSearchModel.mjs'
 import { useTargetSearch } from '@/lib/useTargetSearch'
 import { CollectionLibrary } from '@/components/collections/CollectionLibrary'
+import { captureSummary, formatLabel } from '@/lib/collectionViewModel.mjs'
 import {
   createRequestCollection,
   deactivateRequestCollection,
@@ -504,7 +505,7 @@ function RequestCollectionsContent() {
               >
                 <span className="block truncate text-sm font-medium text-white">{collection.name}</span>
                 <span className="mt-1 block text-xs text-gray-500">
-                  {collection.format} · {collection.request_count} requests
+                  {formatLabel(collection)}{collection.format === 'capture' ? ` · ${captureSummary(collection)?.state ?? ''}` : ''} · {collection.request_count} requests
                 </span>
               </button>
             ))}

@@ -2457,6 +2457,8 @@ print_help() {
     echo "  knowledge review   Review proposed target-instruction changes (diff, keypress per proposal)"
     echo "  secrets <cmd>      Secrets found on a target: list, revoke, expiry, grant, promote, reveal"
     echo "  intel <cmd>        Vulnerability intelligence: status, install <bundle path or https URL>"
+    echo "  record <target>    Browse a target in a recorded browser; keep its traffic as a browser capture"
+    echo "                       (runs in the shakerscan client: pipx install 'shakerscan[record]')"
     echo "  credentials <cmd>  Create, rotate, or admission-test encrypted profiles"
     echo "  collections <cmd>  Upload, bind, or select request collections"
     echo "  evidence export    Export content-free evidence manifests or bundles"
@@ -3109,6 +3111,24 @@ run_v2_scan_cli() {
         return 1
     fi
     python3 "$SCRIPT_DIR/scripts/scan_cli.py" "${cli_args[@]}" "$@"
+}
+
+run_client_record() {
+    # `record` opens a browser on this machine and uploads what it records; that is the
+    # shakerscan client's job (with its optional Playwright extra), not the engine's. Hand the
+    # command to an installed client, pointed at this instance; otherwise say how to get one.
+    if python3 -c 'import shakerscan.record, playwright' > /dev/null 2>&1; then
+        exec python3 -m shakerscan record --url "$(api_probe_url)" "$@"
+    fi
+    {
+        echo "shakerscan record runs in the ShakerScan client, which opens the recorded browser on this machine."
+        echo "Install the client with its recording extra, then download its browser once:"
+        echo "  pipx install --force 'shakerscan[record]'"
+        echo "  python -m playwright install chromium     # with the client's Python, once"
+        echo "The client then owns the shakerscan command and hands engine commands to this install:"
+        echo "  shakerscan record <target-id-or-url>"
+    } >&2
+    return 2
 }
 
 run_v2_product_cli() {
@@ -4551,7 +4571,7 @@ done
 
 if [ "$COMMAND_HELP_ONLY" -eq 1 ]; then
     case "$COMMAND" in
-        scan|hunt|approve|deny|knowledge|secrets|credentials|collections|evidence|agent|ai|fleet|join|model-intake-runner|report-rebuild)
+        scan|hunt|approve|deny|knowledge|secrets|credentials|collections|evidence|agent|ai|fleet|join|model-intake-runner|report-rebuild|record)
             # Forward to the command's own help implementation below.
             ;;
         mcp)
@@ -4605,7 +4625,7 @@ fi
 configure_runtime_mode "$COMMAND"
 
 case $COMMAND in
-    help|--help|-h|install-deps|doctor|env|agent|ai)
+    help|--help|-h|install-deps|doctor|env|agent|ai|record)
         ;;
     *)
         if [ "$COMMAND_HELP_ONLY" -ne 1 ] && ! ensure_command_dependencies "$COMMAND" "${ARGS[0]}"; then
@@ -4653,6 +4673,9 @@ case $COMMAND in
     knowledge)
         # Instruction proposals are decided by the person at this terminal, like approve.
         run_v2_product_cli "knowledge" "${ARGS[@]}"
+        ;;
+    record)
+        run_client_record "${ARGS[@]}"
         ;;
     secrets)
         # A target's discovered secrets: listing never shows a value; reveal, grant and promote

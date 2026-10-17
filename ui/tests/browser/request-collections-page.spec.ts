@@ -94,3 +94,28 @@ test('request collections fit a phone viewport', async ({ page }) => {
   await visitAndAuditPage(page, `/request-collections?target_id=${targetId}`, 800)
   await expect(page.getByRole('heading', { name: 'Fixture orders API', level: 2 })).toBeVisible()
 })
+
+test('browser captures are labelled with their recording state and counts', async ({ page }) => {
+  const capture = (id: string, name: string, state: 'open' | 'closed', flows: number) => ({
+    ...collection, id, name, format: 'capture', request_count: flows, owner_name: 'Fixture API',
+    owner_locator: 'api.example.test', binding_count: 1, selection_count: 0,
+    capture: { state, flow_count: flows, endpoint_count: 4, refused_out_of_scope: 2, refused_over_limit: 0,
+      bodies_dropped: 0, last_seq: 3, limit_reached: false, allowed_origins: ['https://api.example.test'],
+      closed_reason: state === 'closed' ? 'client' : null },
+  })
+  const api = await mockPageApi(page, routes({ collections: [
+    capture('44444444-4444-4444-8444-444444444444', 'Checkout walk', 'open', 9),
+    capture('55555555-5555-4555-8555-555555555555', 'Login walk', 'closed', 6),
+  ] }))
+  await visitAndAuditPage(page, '/request-collections', 800)
+  const library = page.getByRole('list', { name: 'All request collections' })
+  const open = library.getByRole('listitem').filter({ hasText: 'Checkout walk' })
+  await expect(open).toContainText('Browser capture')
+  await expect(open).toContainText('Recording')
+  await expect(open).toContainText('9 requests · 4 endpoints · 2 refused')
+  const closed = library.getByRole('listitem').filter({ hasText: 'Login walk' })
+  await expect(closed).toContainText('Closed')
+  await expect(closed).not.toContainText('Recording')
+  await expect(library).not.toContainText('capture ·')
+  expect(api.unhandled).toEqual([])
+})

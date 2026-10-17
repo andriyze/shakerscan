@@ -71,10 +71,18 @@ def public_v2_surface(path: str) -> str | None:
     return None
 
 
+# A browser-capture batch is bounded far below a collection import: the recorder flushes before
+# a batch's JSON body reaches this, and the Enterprise gateway applies the same cap.
+CAPTURE_BATCH_BODY_LIMIT = 16 * 1024 * 1024
+_CAPTURE_BATCH_PATH = re.compile(r"^/request-collections/[^/]+/capture-batches$")
+
+
 def public_v2_write_body_limit(method: str, path: str) -> int | None:
     if str(method or "GET").upper() in SAFE_HTTP_METHODS:
         return None
     surface = public_v2_surface(path)
+    if surface == "collections" and _CAPTURE_BATCH_PATH.match(str(path or "")):
+        return CAPTURE_BATCH_BODY_LIMIT
     return PUBLIC_V2_WRITE_BODY_LIMITS.get(surface or "")
 
 
@@ -697,6 +705,7 @@ class UnsafeOriginGuardMiddleware:
 
 
 __all__ = [
+    "CAPTURE_BATCH_BODY_LIMIT",
     "LEGACY_LIST_CONTRACT",
     "LIST_CONTRACT",
     "PUBLIC_V2_IDEMPOTENCY_HEADER",

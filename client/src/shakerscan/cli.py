@@ -39,7 +39,7 @@ from ._vendored import kit_sources, load
 INSTALL_ONE_LINER = "curl -fsSL https://install.shakerscan.com | sh"
 CLIENT_COMMANDS = (
     "connect", "disconnect", "agent", "api", "scan", "check", "mcp", "hunt", "approve", "deny", "knowledge",
-    "secrets", "doctor", "version",
+    "secrets", "record", "doctor", "version",
 )
 AGENTS = ("codex", "claude", "opencode", "pi")
 CONNECT_PATH = "/_enterprise/connect/"
@@ -1296,6 +1296,17 @@ def _with_reason(exc: Exception) -> str:
     return f"{message}: {reason}" if reason else message
 
 
+def cmd_record(args: argparse.Namespace) -> int:
+    """``record``: a recorded browser on a target of the connected instance (``record.py``)."""
+    from . import record
+
+    url = apply_connection(args)
+    try:
+        return record.cmd_record(args, base_url=url, token=os.environ.get(ENV_TOKEN) or None)
+    except record.RecordError as exc:
+        raise ClientError(str(exc)) from None
+
+
 def cmd_doctor(args: argparse.Namespace) -> int:
     url = apply_connection(args)
     mcp = load("_mcp")
@@ -1357,6 +1368,7 @@ COMMANDS = {
     "api": cmd_api,
     "scan": cmd_scan,
     "check": cmd_check,
+    "record": cmd_record,
 }
 
 # Commands that forward their arguments to a runtime CLI after the connection options.
@@ -1558,6 +1570,9 @@ def build_parser() -> argparse.ArgumentParser:
     connection(secrets)
     secrets.add_argument("args", nargs=argparse.REMAINDER,
                          help="list | revoke | reactivate | expiry | grant | ungrant | promote | reveal ...")
+    from .record import add_parser as add_record_parser
+
+    add_record_parser(commands, connection)
     doctor = commands.add_parser(
         "doctor",
         help=(

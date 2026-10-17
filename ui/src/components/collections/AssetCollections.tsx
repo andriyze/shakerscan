@@ -7,6 +7,7 @@ import { Button, Card } from '@/components/ui'
 import { getRequestCollection, type RequestCollectionDetail } from '@/lib/requestCollectionApi'
 import type { AssetDetail, AssetOrigin } from '@/lib/targetAssetApi'
 import type { CollectionApi } from '@/lib/collectionViewModel.mjs'
+import { CollectionFormat } from './CollectionFormat'
 import { CollectionViewer, collectionManagerHref } from './CollectionViewer'
 
 type Summary = AssetDetail['request_collections'][number]
@@ -93,7 +94,7 @@ export function AssetCollections({ assetId, assetLocator, origins, collections, 
               <button type="button" onClick={() => setViewing(item.id)} className="block max-w-full truncate text-left text-sm font-medium text-gray-100 hover:text-blue-300">{item.name}</button>
               <code className="block select-all truncate font-mono text-[11px] text-gray-600" title="Opaque reference used by Scan and Hunt requests">{item.id}</code>
               <span className="mt-1 flex flex-wrap items-center gap-1.5 text-[11px] text-gray-500">
-                <span className="rounded bg-gray-800 px-1.5 py-0.5">{item.format}</span>
+                <CollectionFormat collection={item} />
                 <span>{item.request_count} request{item.request_count === 1 ? '' : 's'}</span>
                 {item.potentially_mutating_request_count > 0 && <span className="text-amber-300/80">· {item.potentially_mutating_request_count} may change state</span>}
                 {detail && <span>· {selections} selection{selections === 1 ? '' : 's'}</span>}
