@@ -17,6 +17,7 @@ import dataclasses
 import uuid
 from types import SimpleNamespace
 
+import pytest
 import scan.action_adapter as action_adapter_module
 from hunt.capability_executor import CapabilityAdapterResult
 from runtime.models import ScanPolicy
@@ -80,7 +81,10 @@ def test_a_measured_rate_still_stops_a_unit_that_cannot_fit():
     assert outcome.status == "partial" and outcome.timed_out is True
 
 
-def test_an_extension_funds_its_unfinished_candidate_not_the_ones_it_carries(monkeypatch):
+@pytest.mark.parametrize("others", ["finished", "refused"])
+def test_an_extension_funds_its_unfinished_candidate_not_the_ones_it_carries(monkeypatch, others):
+    # "refused": the three others were refused unauthenticated (401) in the slice; the
+    # extension re-runs them without traffic, so they need no hold either.
     scan_id = str(uuid.uuid4())
     paths = ("/api/tickets/1", "/api/users/1", "/api/baskets/1", "/api/orders/1")
     endpoints = build_endpoint_manifest(
@@ -137,6 +141,13 @@ def test_an_extension_funds_its_unfinished_candidate_not_the_ones_it_carries(mon
         held = dict(context.requested_budget)
         calls.append((path, technique, held))
         need = 189 if technique == "T" else 20
+        if others == "refused" and path != first["path"]:
+            return CapabilityAdapterResult(
+                status="success", actual_budget={"http_requests": 1, "tool_wall_seconds": 1},
+                observations=({"kind": "verifier_baseline_response", "http_status": 401,
+                               "login_redirect": False, "www_authenticate": False},),
+                execution_started=True, parser_version="sqlmap-output/v1",
+            )
         return CapabilityAdapterResult(
             status="success", actual_budget={
                 "http_requests": need,
@@ -163,6 +174,10 @@ def test_an_extension_funds_its_unfinished_candidate_not_the_ones_it_carries(mon
     assert resumed[-1][1] == "T"
     # The whole 480-request hold is the unfinished candidate's; the carried three need none.
     assert resumed[0][2]["http_requests"] == 480
+    if others == "refused":
+        assert extension.redacted_execution["carried_count"] == 0
+        assert extension.errors[0] == "authentication_required"
+        return
     assert extension.redacted_execution["carried_count"] == 3
     assert extension.status == "success", (extension.status, extension.errors)
 
