@@ -336,3 +336,71 @@ def test_scan_and_hunt_admission_refuses_an_open_capture(monkeypatch):
             conn, target_id=target, target_kind="web", bindings=[{"collection_id": capture_id}])
         assert [ref["collection_id"] for ref in refs] == [capture_id]
     run(monkeypatch, body)
+
+
+def test_a_device_save_never_relabels_or_reuses_a_capture(monkeypatch):
+    """Re-review P2-1/P3-3: PATCH /devices/{d}/request-collections/{capture} with format=har
+    re-validated the log and saved it as HAR, wiping the capture state."""
+    from devices.shared_collections import save_device_collection
+    from secret_store import encrypt_secret
+
+    async def body(conn, target):
+        capture_id = (await capture_router.create_browser_capture(
+            CaptureCreate(target_id=str(target), name="Walk")))["id"]
+        summary = {"name": "Walk", "format": "har", "document_sha256": "b" * 64, "requests": []}
+        encrypted = encrypt_secret(json.dumps({"format": "har", "document": {"log": {"entries": []}}}))
+        status, refused = await detail(save_device_collection(
+            conn, target, collection_id=capture_id, summary=summary, encrypted_payload=encrypted))
+        assert status == 409 and refused["error"] == "capture_not_editable"
+        await request_collection_api.deactivate_request_collection(capture_id)
+        status, refused = await detail(save_device_collection(
+            conn, target, summary=summary, encrypted_payload=encrypted))
+        assert status == 409 and refused["error"] == "capture_not_editable"
+        row = await conn.fetchrow("SELECT format, metadata_json FROM request_collections WHERE id=$1",
+                                  uuid.UUID(capture_id))
+        assert row["format"] == "capture" and json.loads(row["metadata_json"])["capture"]["schema"]
+    run(monkeypatch, body)
+
+
+def test_deactivating_an_open_capture_assembles_its_batches(monkeypatch):
+    async def body(conn, target):
+        capture_id = (await capture_router.create_browser_capture(CaptureCreate(target_id=str(target))))["id"]
+        await capture_router.append_capture_batch(capture_id, CaptureBatch.model_validate(
+            {"seq": 1, "flows": [flow("https://app.example.test/a"), flow("https://app.example.test/b")]}))
+        await request_collection_api.deactivate_request_collection(capture_id)
+        row = await conn.fetchrow("SELECT encrypted_payload, payload_sha256, metadata_json FROM request_collections WHERE id=$1",
+                                  uuid.UUID(capture_id))
+        assert json.loads(row["metadata_json"])["capture"]["closed_reason"] == "deactivated"
+        payload = capture_store._decrypt(row["encrypted_payload"])
+        assert len(payload["document"]["log"]["entries"]) == 2
+        assert capture_store._digest(payload) == row["payload_sha256"]
+        assert await conn.fetchval(
+            """SELECT count(*) FROM request_collection_capture_batches
+               WHERE collection_id=$1 AND encrypted_entries IS NOT NULL""", uuid.UUID(capture_id)) == 0
+    run(monkeypatch, body)
+
+
+def test_one_undecryptable_capture_does_not_stop_the_other_idle_closes(monkeypatch, capsys):
+    async def body(conn, target):
+        ids = []
+        for name in ("bad", "good"):
+            capture_id = (await capture_router.create_browser_capture(
+                CaptureCreate(target_id=str(target), name=name)))["id"]
+            await capture_router.append_capture_batch(capture_id, CaptureBatch.model_validate(
+                {"seq": 1, "flows": [flow(f"https://app.example.test/{name}?token={SECRETS[3]}")]}))
+            ids.append(uuid.UUID(capture_id))
+        await conn.execute("""UPDATE request_collection_capture_batches
+                              SET encrypted_entries='enc:fernet:not-a-token' WHERE collection_id=$1""", ids[0])
+        await conn.execute("UPDATE request_collections SET updated_at=NOW()-interval '31 minutes' WHERE id=ANY($1)", ids)
+        assert await capture_store.close_idle_captures(BoundConnectionPool(conn)) == 2
+        states = {row["id"]: json.loads(row["metadata_json"])["capture"] for row in await conn.fetch(
+            "SELECT id, metadata_json FROM request_collections WHERE id=ANY($1)", ids)}
+        assert states[ids[0]]["state"] == "closed" and states[ids[0]]["closed_reason"] == "assembly_failed"
+        assert states[ids[1]]["closed_reason"] == "idle"
+        good = capture_store._decrypt(await conn.fetchval(
+            "SELECT encrypted_payload FROM request_collections WHERE id=$1", ids[1]))
+        assert len(good["document"]["log"]["entries"]) == 1
+        assert await capture_store.close_idle_captures(BoundConnectionPool(conn)) == 0
+        out = capsys.readouterr().out
+        assert "assembly" in out and SECRETS[3] not in out and "not-a-token" not in out
+    run(monkeypatch, body)

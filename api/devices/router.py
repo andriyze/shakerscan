@@ -103,6 +103,10 @@ from .shared_credentials import (
     create_device_profile, rotate_device_profile, deactivate_device_profile, device_execution_capability,
 )
 from .shared_collections import save_device_collection, deactivate_device_collection, collection_view
+try:
+    from capture.store import refuse_open_capture
+except ModuleNotFoundError:
+    from api.capture.store import refuse_open_capture
 from .collection_environments import bind_environments
 from .network_authorization import network_authorization_snapshot
 from .destination_policy import (
@@ -574,6 +578,12 @@ async def _validate_device_request_collection_refs(
     by_id = {row["id"]: row for row in rows}
     if len(by_id) != len(ids):
         raise HTTPException(status_code=422, detail="One or more active request collections are unavailable for this device")
+    for capture in await conn.fetch(
+        """SELECT id, format, metadata_json->'capture'->>'state' AS capture_state
+           FROM request_collections WHERE id=ANY($1::uuid[]) AND format='capture'""",
+        ids,
+    ):
+        refuse_open_capture(capture)  # a capture still recording has no document yet
     refs = []
     for collection_id in ids:
         row = by_id[collection_id]

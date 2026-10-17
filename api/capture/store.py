@@ -94,8 +94,17 @@ def _digest(value: Any) -> str:
     ).encode("utf-8")).hexdigest()
 
 
+def _canonical(value: Any) -> str:
+    """The JSON text the digest is computed over (and every stored capture text uses)."""
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+
+
 def _encrypt(value: Any) -> str:
-    encrypted = encrypt_secret(json.dumps(value, separators=(",", ":"), ensure_ascii=False))
+    return _encrypt_text(json.dumps(value, separators=(",", ":"), ensure_ascii=False))
+
+
+def _encrypt_text(text: str) -> str:
+    encrypted = encrypt_secret(text)
     if not str(encrypted or "").startswith("enc:fernet:"):
         raise HTTPException(
             status_code=503, detail="Encrypted request-collection document storage is unavailable",
@@ -396,7 +405,7 @@ def _build_entries(batch: CaptureBatch, origins: list[str], *, flow_count: int,
         "entries": accepted, "index": index, "document_bytes": document_bytes,
         "refused_scope": refused_scope, "refused_limit": refused_limit,
         "bodies_dropped": bodies_dropped,
-        "encrypted": _encrypt(accepted) if accepted else None,
+        "encrypted": _encrypt_text(_canonical(accepted)) if accepted else None,
         "stored_bytes": stored_size(accepted) if accepted else 0,
     }
 
@@ -479,11 +488,22 @@ def _json_list(value: Any) -> list[Any]:
     return list(value) if isinstance(value, list) else []
 
 
-def _assemble(encrypted_batches: list[str]) -> tuple[dict[str, Any], str, str]:
-    """The capture's final document from its batches in ``seq`` order: ``(payload, encrypted,
-    digest)`` (CPU work: run in a thread)."""
-    payload = empty_capture_document()
-    entries = payload["document"]["log"]["entries"]
+_ENTRIES_SLOT = '"entries":[]'
+
+
+def _assemble(encrypted_batches: list[str]) -> tuple[str, str]:
+    """The capture's final encrypted document and its digest, from its batches in ``seq`` order
+    (CPU work: run in a thread).
+
+    Each batch holds its entries as canonical JSON (sorted keys, compact), so the document's
+    canonical text is the empty document's with the batches' array contents spliced into its
+    ``entries``: no batch is parsed and the document is never re-serialized. The digest is the
+    one every consumer recomputes (sorted keys over the parsed payload), hashed piece by piece.
+    Peak memory is the decrypted batch texts and the joined text plus Fernet's own copies while
+    encrypting (about 8.7x a 52 MiB, 20,000-flow document in total): see
+    tests/test_browser_capture.py::test_assembly_peak_memory_is_bounded."""
+    prefix, _slot, suffix = _canonical(empty_capture_document()).partition(_ENTRIES_SLOT)
+    parts: list[str] = []
     for encrypted in encrypted_batches:
         try:
             raw = decrypt_secret(encrypted)
@@ -491,13 +511,20 @@ def _assemble(encrypted_batches: list[str]) -> tuple[dict[str, Any], str, str]:
             raise HTTPException(
                 status_code=503, detail="Encrypted request-collection document storage is unavailable",
             ) from exc
-        if not isinstance(raw, str) or raw.startswith("enc:fernet:"):
+        if not isinstance(raw, str) or raw.startswith("enc:fernet:") or not (
+            raw.startswith("[") and raw.endswith("]")
+        ):
             raise HTTPException(status_code=503, detail="A capture batch could not be decrypted")
-        batch_entries = json.loads(raw)
-        if not isinstance(batch_entries, list):
-            raise HTTPException(status_code=409, detail="A capture batch is not a list of entries")
-        entries.extend(batch_entries)
-    return payload, _encrypt(payload), _digest(payload)
+        if len(raw) > 2:
+            parts.append(raw[1:-1])
+    # The digest is computed piece by piece, so the document's UTF-8 bytes are never held whole.
+    hasher = hashlib.sha256((prefix + '"entries":[').encode("utf-8"))
+    for index, part in enumerate(parts):
+        hasher.update((("," if index else "") + part).encode("utf-8"))
+    hasher.update(("]" + suffix).encode("utf-8"))
+    text = prefix + '"entries":[' + ",".join(parts) + "]" + suffix
+    parts.clear()
+    return _encrypt_text(text), hasher.hexdigest()
 
 
 async def _finalize(conn: Any, row: Mapping[str, Any], metadata: dict[str, Any],
@@ -509,9 +536,10 @@ async def _finalize(conn: Any, row: Mapping[str, Any], metadata: dict[str, Any],
            WHERE collection_id=$1 AND encrypted_entries IS NOT NULL ORDER BY seq""",
         row["id"],
     )
-    _payload, encrypted, digest = await asyncio.to_thread(
+    encrypted, digest = await asyncio.to_thread(
         _assemble, [str(item["encrypted_entries"]) for item in batches],
     )
+    del batches
     state.update(state="closed", closed_reason=reason, closed_at=_iso(row["db_now"]))
     updated = await conn.fetchrow(
         """UPDATE request_collections
@@ -594,9 +622,38 @@ async def _close_idle(pool: Any, *, idle_seconds: int, limit: int) -> int:
                 state = metadata.get("capture")
                 if not isinstance(state, dict) or state.get("schema") != CAPTURE_SCHEMA:
                     continue
-                await _finalize(conn, row, metadata, state, reason="idle")
+                try:
+                    async with conn.transaction():  # a savepoint: a failed assembly changes nothing
+                        await _finalize(conn, row, metadata, state, reason="idle")
+                except Exception as exc:  # noqa: BLE001 - one capture must not stop the others
+                    # Closed without a document so it is not retried every tick; its batches
+                    # stay encrypted for an operator to recover. Only the type is logged.
+                    print(f"[capture] idle close: assembly failed for {row['id']}: {type(exc).__name__}",
+                          flush=True)
+                    state.update(state="closed", closed_reason="assembly_failed",
+                                 closed_at=_iso(row["db_now"]))
+                    await conn.execute(
+                        "UPDATE request_collections SET metadata_json=$2, updated_at=NOW() WHERE id=$1",
+                        row["id"], json.dumps(metadata),
+                    )
                 closed += 1
     return closed
+
+
+async def close_on_deactivate(conn: Any, collection_id: uuid.UUID) -> None:
+    """Called inside a deactivation's transaction: an open capture is closed first, so its
+    batches become its document instead of ciphertext no close will ever assemble."""
+    row = await conn.fetchrow(
+        """SELECT *, NOW() AS db_now FROM request_collections
+           WHERE id=$1 AND format='capture' FOR UPDATE""",
+        collection_id,
+    )
+    if not row:
+        return
+    metadata = _json_object(row["metadata_json"])
+    state = metadata.get("capture")
+    if isinstance(state, dict) and state.get("schema") == CAPTURE_SCHEMA and state.get("state") == "open":
+        await _finalize(conn, row, metadata, state, reason="deactivated")
 
 
 def refuse_open_capture(row: Mapping[str, Any] | None) -> None:
@@ -622,6 +679,7 @@ __all__ = [
     "apply_batch",
     "close_capture",
     "close_idle_captures",
+    "close_on_deactivate",
     "create_capture",
     "public_collection",
     "refuse_open_capture",

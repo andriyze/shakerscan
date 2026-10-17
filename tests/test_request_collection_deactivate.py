@@ -36,6 +36,8 @@ class _Connection:
         return _Transaction()
 
     async def fetchrow(self, sql, *params):
+        if "format='capture'" in sql:
+            return None  # not a browser capture: nothing to close before retiring it
         self.statements.append(" ".join(sql.split()))
         assert "is_active=false" in sql and "RETURNING *" in sql
         return self.collection_row

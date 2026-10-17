@@ -347,3 +347,127 @@ def test_the_replay_plan_names_every_withheld_credential():
     assert set(public["captured_withheld"]) == {
         "header:cookie", "header:authorization", "query:access_token", "body:password"}
     assert SECRETS[3] not in json.dumps(plan.requests[0].wire_dict(), default=str)
+
+
+def _replayed_body(body, content_type):
+    from scanner.scanner_tools.device_request_formats import resolve_imported_requests
+
+    entry = har_entry(CaptureFlow.model_validate({
+        "method": "POST", "url": "https://app.example.test/login", "request_body": body,
+        "request_headers": [{"name": "Content-Type", "value": content_type}],
+    }))[0]
+    (request,) = resolve_imported_requests(_capture_payload([entry]))
+    return request["body"], request["captured_body_fields_withheld"]
+
+
+@pytest.mark.parametrize(("body", "content_type", "expected", "withheld"), [
+    ("user=alice&pass=hunter2&pwd=hunter3", "application/x-www-form-urlencoded",
+     b"user=alice&pass=&pwd=", ["pass", "pwd"]),
+    ("user=alice&new_pin=1234&compass=north", "application/x-www-form-urlencoded",
+     b"user=alice&new_pin=&compass=north", ["new_pin"]),
+    (json.dumps({"login": {"user": "alice", "pass": "hunter2"}}), "application/json",
+     {"login": {"user": "alice", "pass": ""}}, ["pass"]),
+    (json.dumps({"passwords": ["hunter2", "hunter3"], "otp": 123456, "spinner": "x"}), "application/json",
+     {"passwords": ["", ""], "otp": "", "spinner": "x"}, ["otp", "passwords"]),
+    (json.dumps({"credentials": {"secret": {"value": "hunter2"}}}), "application/json",
+     {"credentials": {"secret": {"value": ""}}}, ["credentials"]),
+    ("passphrase=correct horse", "text/plain", b"", ["*"]),        # unparsed, names a secret
+    ("{not json but password=hunter2", "application/json", b"", ["*"]),
+    ("hello world", "text/plain", b"hello world", []),
+])
+def test_a_capture_replay_empties_every_recorded_password_shape(body, content_type, expected, withheld):
+    replayed, names = _replayed_body(body, content_type)
+    assert names == withheld
+    assert (json.loads(replayed) if isinstance(expected, dict) else replayed) == expected
+    assert b"hunter2" not in replayed and b"hunter3" not in replayed
+
+
+def test_a_capture_replay_empties_secret_multipart_parts():
+    boundary = "----WebKitFormBoundaryX1"
+    body = (f"--{boundary}\r\nContent-Disposition: form-data; name=\"username\"\r\n\r\nalice\r\n"
+            f"--{boundary}\r\nContent-Disposition: form-data; name=\"password\"\r\n\r\nhunter2\r\n"
+            f"--{boundary}--\r\n")
+    replayed, names = _replayed_body(body, f"multipart/form-data; boundary={boundary}")
+    assert names == ["password"] and b"hunter2" not in replayed and b"alice" in replayed
+    assert replayed.count(boundary.encode()) == 3
+    broken, broken_names = _replayed_body("--x\r\nname=\"password\" hunter2", "multipart/form-data; boundary=x")
+    assert broken == b"" and broken_names == ["*"]
+
+
+def test_signature_headers_and_bare_token_parameters_are_withheld():
+    from scanner.scanner_tools.device_request_formats import resolve_imported_requests
+
+    entry = har_entry(CaptureFlow.model_validate({
+        "method": "GET",
+        "url": "https://app.example.test/hook?eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.c2lnbmF0dXJl&view=1",
+        "request_headers": [{"name": "X-Signature", "value": "sig-secret"},
+                            {"name": "X-Hub-Signature-256", "value": "sha256=hub-secret"},
+                            {"name": "Accept", "value": "*/*"}],
+    }))[0]
+    (request,) = resolve_imported_requests(_capture_payload([entry]))
+    assert set(request["headers"]) == {"Accept"}
+    assert request["url"] == "https://app.example.test/hook?view=1"
+
+
+def test_a_capture_relabelled_as_har_is_still_stripped():
+    """The log keeps its capture marker through re-validation as HAR."""
+    from api.capture.flows import empty_capture_document
+    from scanner.scanner_tools.device_request_formats import resolve_imported_requests
+
+    document = empty_capture_document()["document"]
+    document["log"]["entries"].append(har_entry(_secret_flow(websocket_frames=[]))[0])
+    (request,) = resolve_imported_requests({"format": "har", "document": document})
+    assert "Cookie" not in request["headers"] and "Authorization" not in request["headers"]
+    assert request["captured_withheld"]
+
+
+def test_device_scans_refuse_an_open_capture():
+    from fastapi import HTTPException
+
+    from api.devices import router as devices_router
+
+    class Conn:
+        def __init__(self, state):
+            self.state = state
+
+        async def fetch(self, sql, *args):
+            if "device_request_collections" in sql:
+                return [{"id": args[1][0], "name": "Walk", "format": "capture", "document_sha256": "a" * 64,
+                         "summary_json": {}}]
+            return [{"id": args[0][0], "format": "capture", "capture_state": self.state}]
+
+    collection = "8f0d1f60-49c2-4d39-9d7f-4b7a1b0e3c11"
+    device = "1f0d1f60-49c2-4d39-9d7f-4b7a1b0e3c11"
+    import uuid
+    with pytest.raises(HTTPException) as refused:
+        asyncio.run(devices_router._validate_device_request_collection_refs(Conn("open"), uuid.UUID(device), [collection]))
+    assert refused.value.status_code == 409 and refused.value.detail["error"] == "capture_open"
+    refs = asyncio.run(devices_router._validate_device_request_collection_refs(Conn("closed"), uuid.UUID(device), [collection]))
+    assert refs[0]["collection_id"] == collection
+
+
+def test_assembly_peak_memory_is_bounded(monkeypatch):
+    """Closing assembles the batches by splicing their canonical texts: no parse, one serialized
+    text, and the digest is hashed piece by piece. With identity crypto (here) the peak stays
+    under 4x the document. Measured with real Fernet for a 20,000-flow, 52 MiB document: peak
+    ~455 MiB traced (8.7x), most of it the copies Fernet makes inside encrypt_secret (encode,
+    padding, ciphertext, base64, decode), which this change does not touch."""
+    import tracemalloc
+
+    from api.capture import store
+
+    monkeypatch.setattr(store, "decrypt_secret", lambda value: value[len("enc:fernet:"):])
+    monkeypatch.setattr(store, "encrypt_secret", lambda text: "enc:fernet:" + text)
+    flows = [CaptureFlow.model_validate({"method": "GET", "url": f"https://app.example.test/p/{n}",
+                                         "response_body": "x" * 2_000}) for n in range(2_000)]
+    entries = [har_entry(flow)[0] for flow in flows]
+    batches = [store._encrypt_text(store._canonical(entries[i:i + 50])) for i in range(0, len(entries), 50)]
+    document_bytes = sum(len(batch) for batch in batches)
+    tracemalloc.start()
+    encrypted, digest = store._assemble(batches)
+    _current, peak = tracemalloc.get_traced_memory()
+    tracemalloc.stop()
+    payload = json.loads(encrypted[len("enc:fernet:"):])
+    assert len(payload["document"]["log"]["entries"]) == 2_000
+    assert digest == store._digest(payload)  # the digest every consumer recomputes
+    assert peak < 4 * document_bytes, (peak, document_bytes)

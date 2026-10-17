@@ -55,12 +55,12 @@ except ModuleNotFoundError:
 
 try:
     from capture.flows import CAPTURE_FORMAT, public_capture_state
-    from capture.store import refuse_open_capture
+    from capture.store import close_on_deactivate, refuse_open_capture
     from list_compat import direct, mark_deprecated, v1_page, wants_list_v1
     from list_contract import CURSOR_MAX_LENGTH, ListSpec, SortKey, SqlParams, count_total, snapshot_time
 except ModuleNotFoundError:
     from api.capture.flows import CAPTURE_FORMAT, public_capture_state
-    from api.capture.store import refuse_open_capture
+    from api.capture.store import close_on_deactivate, refuse_open_capture
     from api.list_compat import direct, mark_deprecated, v1_page, wants_list_v1
     from api.list_contract import (
         CURSOR_MAX_LENGTH, ListSpec, SortKey, SqlParams, count_total, snapshot_time,
@@ -860,6 +860,8 @@ async def deactivate_request_collection(collection_id: str):
     collection_uuid = _uuid_or_400(collection_id, "request collection id")
     async with _pool().acquire() as conn:
         async with conn.transaction():
+            # An open browser capture closes first: its batches become its document.
+            await close_on_deactivate(conn, collection_uuid)
             row = await conn.fetchrow(
                 """UPDATE request_collections SET is_active=false, updated_at=NOW()
                    WHERE id=$1 AND is_active=true RETURNING *""",
