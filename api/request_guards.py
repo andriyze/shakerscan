@@ -175,9 +175,12 @@ def _inventory_is_heavy(query: Mapping[str, list[str]]) -> bool:
 _LIST_CONTRACT_PARAMETERS = ("cursor", "sort", "fields", "count", "since")
 
 
-def _legacy_findings_proof_filter(query: Mapping[str, list[str]]) -> bool:
-    """GET /findings?proof_state=... in the limit/offset shape: its exact total projects proof
-    over every row the other filters leave (about a second at 500k findings)."""
+def _findings_is_heavy(query: Mapping[str, list[str]]) -> bool:
+    """GET /findings?group_by=... groups every match (the proof projection included) before it
+    pages, and GET /findings?proof_state=... in the limit/offset shape counts exactly by projecting
+    proof over every row the other filters leave (each about a second at 500k findings)."""
+    if "group_by" in query:
+        return True
     if any(name in query for name in _LIST_CONTRACT_PARAMETERS):
         return False
     return any(value.strip(" ,") for value in query.get("proof_state") or [])
@@ -217,8 +220,9 @@ ROUTE_CLASSES: tuple[RouteRule, ...] = (
     _rule(r"^/targets/inventory$", HEAVY, "inventory", _inventory_is_heavy),
     # Unbounded today, measured or suspected over 5 s at scale. Interim rows until each
     # endpoint's rework lands; then delete the row.
-    # The findings list is bounded (2.11) except the legacy shape's exact proof-filtered total.
-    _rule(r"^/findings$", HEAVY, "findings", _legacy_findings_proof_filter),
+    # The findings list is bounded (2.11) except its grouped read and the legacy shape's exact
+    # proof-filtered total.
+    _rule(r"^/findings$", HEAVY, "findings", _findings_is_heavy),
     # The graph's list/v1 pages are bounded; its deprecated whole-graph response is not.
     _rule(r"^/targets/[^/]+/graph$", HEAVY, "target_graph", _legacy_list_shape),
     # /asm/coverage is counted in SQL (one row); the other ASM reads are not reworked yet.

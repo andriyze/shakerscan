@@ -115,7 +115,7 @@ test('secondary filters fold behind a counted Filters button', async ({ page }) 
   await expect(page.getByRole('group', { name: 'Filter by source' })).toBeVisible()
 })
 
-test('open work is the default view and repeats group into one expandable row', async ({ page }) => {
+test('on an engine without server grouping, repeats group in the browser into one expandable row', async ({ page }) => {
   const requests: URL[] = []
   await pinMockApiOrigin(page)
   await page.route(`${MOCK_API_ORIGIN}/**`, async route => {
@@ -136,9 +136,12 @@ test('open work is the default view and repeats group into one expandable row', 
   })
   await page.goto('/findings')
   await expect(page.getByText('2 open findings in 1 group')).toBeVisible()
-  // Grouping loads the whole result set so no group is cut between pages.
-  expect(requests[0].searchParams.get('status')).toBe('active')
-  expect(requests[0].searchParams.get('limit')).toBe('500')
+  // The engine is asked to group first; it answers rows (an older engine), so the page loads the
+  // whole result set and groups it, so no group is cut between pages.
+  expect(requests[0].searchParams.get('group_by')).toBe('issue')
+  const rows = requests.find((url) => !url.searchParams.has('group_by'))!
+  expect(rows.searchParams.get('status')).toBe('active')
+  expect(rows.searchParams.get('limit')).toBe('500')
   const group = page.getByRole('button', { name: /Exposed secret/ })
   await expect(group).toHaveAttribute('aria-expanded', 'false')
   await group.click()
@@ -146,4 +149,54 @@ test('open work is the default view and repeats group into one expandable row', 
   await expect(page.getByRole('link', { name: /\/\.git\/config/ })).toHaveAttribute('href', new RegExp(betaId))
   await page.getByRole('button', { name: 'All', exact: true }).click()
   await expect.poll(() => requests.at(-1)?.searchParams.get('status')).toBeNull()
+})
+
+test('the engine groups every match: counts are whole groups and pages follow its cursor', async ({ page }) => {
+  const requests: URL[] = []
+  const lead = {
+    id: alphaId, title: 'Exposed secret', severity: 'critical', status: 'active', proof_state: 'verified',
+    target_id: 't-app', url: 'https://app.example.test/.env',
+    first_seen_at: '2026-01-01T00:00:00Z', last_seen_at: '2026-01-02T00:00:00Z',
+  }
+  const group = (overrides: Record<string, unknown> = {}) => ({
+    title_key: 'exposed secret', severity: 'critical', subject: 't-app', proof_state: 'verified', status: 'active',
+    count: 120, first_seen_at: '2026-01-01T00:00:00Z', last_seen_at: '2026-01-03T00:00:00Z', lead,
+    member_ids: [alphaId, betaId], member_ids_truncated: true,
+    members: [
+      { id: alphaId, url: lead.url, last_seen_at: lead.last_seen_at, latest_retest_verdict: null },
+      { id: betaId, url: 'https://app.example.test/.git/config', last_seen_at: '2026-01-03T00:00:00Z', latest_retest_verdict: null },
+    ],
+    ...overrides,
+  })
+  await pinMockApiOrigin(page)
+  await page.route(`${MOCK_API_ORIGIN}/**`, async route => {
+    const url = new URL(route.request().url())
+    if (url.pathname === '/findings' && url.searchParams.get('group_by') === 'issue') {
+      requests.push(url)
+      const second = url.searchParams.get('cursor') === 'page-2'
+      return route.fulfill({ json: {
+        items: second ? [group({ lead: { ...lead, id: 'ffffffff-ffff-4fff-8fff-ffffffffffff', title: 'Open redirect' }, count: 1, member_ids: ['ffffffff-ffff-4fff-8fff-ffffffffffff'], member_ids_truncated: false, members: [] })] : [group()],
+        next_cursor: second ? null : 'page-2', has_more: !second, total: 51, total_kind: 'exact',
+        findings_total: 170, generated_at: '2026-01-04T00:00:00Z',
+      } })
+    }
+    if (url.pathname === '/findings') return route.fulfill({ json: { total: 0, findings: [] } })
+    if (url.pathname === '/domains') return route.fulfill({ json: { domains: [] } })
+    return route.fulfill({ json: { status: 'healthy', workers: [], total: 0 } })
+  })
+  await page.goto('/findings')
+  await expect(page.getByText('170 open findings in 51 groups · showing groups 1–1')).toBeVisible()
+  expect(requests[0].searchParams.get('status')).toBe('active')
+  expect(requests[0].searchParams.get('count')).toBe('exact')
+  expect(requests[0].searchParams.get('sort')).toBe('-severity')
+  expect(requests[0].searchParams.has('offset')).toBe(false)
+  const row = page.getByRole('button', { name: /Exposed secret/ })
+  await expect(row).toContainText('×120')
+  await row.click()
+  await expect(page.getByRole('link', { name: /\/\.git\/config/ })).toHaveAttribute('href', new RegExp(betaId))
+  await expect(page.getByText('118 more not listed here. Narrow the filters to list them.')).toBeVisible()
+  // The next page continues from the engine's cursor.
+  await page.getByRole('button', { name: 'Next' }).first().click()
+  await expect(page.getByText('Open redirect')).toBeVisible()
+  expect(requests.at(-1)?.searchParams.get('cursor')).toBe('page-2')
 })

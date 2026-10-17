@@ -24,12 +24,20 @@ from datetime import datetime, timedelta, timezone
 import hashlib
 import json
 import re
-from typing import Any, Callable, Optional, Sequence
+from typing import Any, Callable, Literal, Optional, Sequence
 import uuid
 
 from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import Response
 from pydantic import BaseModel, ConfigDict, Field
+
+try:
+    from list_compat import mark_deprecated, v1_page, wants_list_v1
+    from list_contract import CURSOR_MAX_LENGTH, SqlParams
+except ModuleNotFoundError:  # package import in host-side tests
+    from ..list_compat import mark_deprecated, v1_page, wants_list_v1
+    from ..list_contract import CURSOR_MAX_LENGTH, SqlParams
+from .list_query import evidence_filters, evidence_page, legacy_evidence
 
 try:
     from action_scope import _decode_json_value
@@ -197,34 +205,42 @@ class EvidenceInstanceRequest(BaseModel):
 __all__ = ["configure_evidence_router", "router"]
 @router.get("/evidence/instances")
 async def list_evidence_instances(
+    response: Response = None,
     finding_id: Optional[str] = Query(None),
     tool_receipt_id: Optional[str] = Query(None),
     limit: int = Query(50, ge=1, le=200),
     summary_only: bool = Query(False),
+    cursor: Optional[str] = Query(None, max_length=CURSOR_MAX_LENGTH),
+    count: Optional[Literal["none", "estimate", "exact"]] = None,
 ):
-    """List concrete evidence instances split from canonical findings."""
+    """List concrete evidence instances split from canonical findings.
+
+    list/v1 (``cursor``/``count``; evidence_routes/list_query.py): keyset pages newest first that
+    reach every instance, rows in the summary shape. Otherwise the deprecated newest-``limit`` list.
+    """
+    finding_id, tool_receipt_id, limit, summary_only, cursor, count = (
+        _direct_query_value(value) for value in (finding_id, tool_receipt_id, limit, summary_only, cursor, count))
     try:
         finding_uuid = _optional_uuid(finding_id)
         tool_receipt_uuid = _optional_uuid(tool_receipt_id)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail="finding_id and tool_receipt_id must be UUIDs when provided") from exc
+    params = SqlParams()
+    where = evidence_filters(finding_id=finding_uuid, tool_receipt_id=tool_receipt_uuid, params=params)
     async with _pool().acquire() as conn:
-        rows = await conn.fetch(
-            """
-            SELECT *
-            FROM evidence_instances
-            WHERE ($2::uuid IS NULL OR finding_id = $2)
-              AND ($3::uuid IS NULL OR tool_receipt_id = $3)
-            ORDER BY created_at DESC
-            LIMIT $1
-            """,
-            limit,
-            finding_uuid,
-            tool_receipt_uuid,
-        )
+        if wants_list_v1(cursor=cursor, count=count, fields=None, since=None):
+            page = v1_page(limit=limit, cursor=cursor, sort=None, fields=None, count=count, since=None)
+            filters = {"finding_id": finding_uuid, "tool_receipt_id": tool_receipt_uuid}
+            body = await evidence_page(conn, page, where=where, params=params, filters=filters,
+                                       transform=_public_evidence_projected_summary)
+            body["execution_enabled"] = False
+            return body
+        rows = await legacy_evidence(conn, where=where, params=params, limit=limit,
+                                     summary_only=bool(summary_only))
+    mark_deprecated(response)
     return {
         "evidence_instances": [
-            _public_evidence_instance_summary(row) if summary_only else _public_evidence_instance_row(row)
+            _public_evidence_projected_summary(row) if summary_only else _public_evidence_instance_row(row)
             for row in rows
         ],
         "count": len(rows),
@@ -457,6 +473,16 @@ def _public_evidence_instance_summary(row: Any) -> dict[str, Any]:
     payload["request_response_refs"] = []
     payload["principal_pair"] = {}
     payload["metadata_json"] = {}
+    return payload
+
+
+def _public_evidence_projected_summary(row: Any) -> dict[str, Any]:
+    """The summary of a row whose observation was already reduced in SQL (list_query.py): the
+    same keys and redaction as ``_public_evidence_instance_summary`` of the full row."""
+    item = dict(row)
+    comparisons = int(item.pop("comparison_count", 0) or 0)
+    payload = _public_evidence_instance_summary(item)
+    payload["comparison_count"] = comparisons
     return payload
 
 

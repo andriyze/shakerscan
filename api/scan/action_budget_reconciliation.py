@@ -18,8 +18,8 @@ SELECT
         SELECT COUNT(*)
           FROM scan_capability_actions a
          CROSS JOIN cutover c
-         WHERE a.receipt_json->>'budget_reservation_id' IS NOT NULL
-           AND a.reservation_id IS NULL
+         WHERE a.reservation_id IS NULL
+           AND a.receipt_json->>'budget_reservation_id' IS NOT NULL
            AND a.updated_at >= c.applied_at
     ) AS receipt_link_missing,
     (
@@ -69,17 +69,18 @@ SELECT
            AND a.updated_at < now() - INTERVAL '30 seconds'
     ) AS stale_execution_without_hold,
     (
+        -- Driven from the few open actions (planned, leased or running: every status that is not
+        -- terminal) through the reservations' unique (owner_kind, owner_id, action_id) key, not
+        -- from every settled reservation in history through a text cast.
         SELECT COUNT(*)
-          FROM budget_reservations r
-          JOIN scan_capability_actions a
+          FROM scan_capability_actions a
+          JOIN budget_reservations r
             ON r.owner_kind='scan'
            AND r.owner_id=a.scan_id::text
            AND r.action_id=a.action_id
            AND r.action_digest=a.action_digest
-         WHERE r.status IN ('committed','released','failed')
-           AND a.status NOT IN (
-               'success','partial','skipped','blocked','failed','cancelled','timed_out'
-           )
+         WHERE a.status IN ('planned','leased','running')
+           AND r.status IN ('committed','released','failed')
            AND r.updated_at < now() - INTERVAL '5 minutes'
     ) AS stale_terminal_reservation_without_action,
     (

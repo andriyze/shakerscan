@@ -73,6 +73,8 @@ SETTINGS = rg.GuardSettings(
     ("GET", "/findings", "proof_state=%2C", "interactive", None),
     ("GET", "/findings", "proof_state=suspected&cursor=abc", "interactive", None),
     ("GET", "/findings", "proof_state=verified&count=exact", "interactive", None),
+    ("GET", "/findings", "group_by=issue&count=exact", "heavy", "findings"),
+    ("GET", "/findings", "group_by=issue&cursor=abc&sort=-last_seen", "heavy", "findings"),
     ("GET", "/targets/abc/graph", "", "heavy", "target_graph"),
     ("GET", "/targets/abc/asm/gaps", "", "heavy", "asm"),
     ("GET", "/targets/abc/asm/endpoints", "limit=1000", "heavy", "asm"),

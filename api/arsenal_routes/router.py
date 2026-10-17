@@ -7719,6 +7719,8 @@ async def _arsenal_dispatch_evidence_instance_list(p: dict[str, Any]) -> dict[st
         tool_receipt_id=p.get("tool_receipt_id"),
         limit=_int_or_none(p.get("limit")) or 50,
         summary_only=False,
+        cursor=None,
+        count=None,
     )
 
 

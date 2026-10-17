@@ -27,6 +27,76 @@ export interface FindingGroup<T extends GroupableFinding> {
   members: T[]
   /** The most recent last_seen_at among members (ISO string), or null when none parse. */
   lastSeenAt: string | null
+  /** Every member, when the server grouped them and listed only the first `members`. */
+  count?: number
+}
+
+/** A group as `GET /findings?group_by=issue` answers it (the fields the list renders). */
+export interface ServerFindingGroup<T extends GroupableFinding> {
+  count: number
+  last_seen_at: string | null
+  lead: T
+  member_ids: string[]
+  members: Array<Pick<GroupableFinding, 'id' | 'url' | 'last_seen_at' | 'latest_retest_verdict'>>
+}
+
+/**
+ * True for a page of server groups: a list/v1 envelope whose items carry a count, member ids and
+ * a lead. An engine without grouping answers rows (legacy `findings`, or list/v1 rows), and the
+ * caller groups in the browser instead.
+ */
+export function isServerGroupsPage<G = ServerFindingGroup<GroupableFinding>>(body: unknown): body is {
+  items: G[]; next_cursor: string | null; has_more: boolean; total?: number
+  total_kind: 'none' | 'estimate' | 'exact' | 'at_least'; generated_at: string; findings_total?: number
+} {
+  if (!body || typeof body !== 'object') return false
+  const page = body as { items?: unknown; has_more?: unknown }
+  if (!Array.isArray(page.items) || typeof page.has_more !== 'boolean') return false
+  return page.items.every((item) => Boolean(item) && typeof item === 'object'
+    && typeof (item as { count?: unknown }).count === 'number'
+    && Array.isArray((item as { member_ids?: unknown }).member_ids)
+    && Boolean((item as { lead?: unknown }).lead))
+}
+
+/**
+ * True for the 422 an engine gives when it cannot group these filters exactly (too many findings
+ * whose triage only it can read). The page then groups the loaded rows in the browser for this
+ * request only: the engine does group, just not this filter.
+ */
+export function isGroupingTooBroadError(error: unknown): boolean {
+  if (!error || typeof error !== 'object') return false
+  const { status, detail } = error as { status?: unknown; detail?: unknown }
+  return Number(status) === 422 && Boolean(detail) && typeof detail === 'object'
+    && (detail as { error?: unknown }).error === 'proof_filter_too_broad'
+}
+
+/** Members a group lists (all of them, unless the server listed only the first ones). */
+export function groupSize<T extends GroupableFinding>(group: FindingGroup<T>): number {
+  return Math.max(group.count ?? 0, group.members.length)
+}
+
+/**
+ * Groups the server formed over every match, in its order, shaped like browser groups. A member
+ * is listed by its location, retest and sighting; it shares the rest (title, severity, subject,
+ * proof, status) with its lead, since that is what makes it a member.
+ */
+export function groupsFromServer<T extends GroupableFinding>(items: readonly ServerFindingGroup<T>[]): FindingGroup<T>[] {
+  return items.map((item) => {
+    const listed = new Map(item.members.map((member) => [member.id, member]))
+    const members = item.member_ids.map((id) => {
+      if (id === item.lead.id) return item.lead
+      const member = listed.get(id)
+      return {
+        ...item.lead,
+        id,
+        url: member?.url ?? null,
+        last_seen_at: member?.last_seen_at ?? null,
+        latest_retest_verdict: member?.latest_retest_verdict ?? null,
+      } as T
+    })
+    if (!members.length) members.push(item.lead)
+    return { key: `server:${item.lead.id}`, lead: item.lead, members, lastSeenAt: item.last_seen_at, count: item.count }
+  })
 }
 
 /** Status partitions the list; `all` is a view, never sent to the API. */
@@ -195,4 +265,27 @@ export function findingCountSummary({
   return partial
     ? `${total.toLocaleString()} ${noun}${range}${grouped} (groups cover the loaded rows only)`
     : `${total.toLocaleString()} ${noun}${grouped}`
+}
+
+/**
+ * The count line for groups the server formed over every match: the findings, the groups, and
+ * which groups this page shows. The groups are complete, so nothing is qualified.
+ */
+export function groupedCountSummary({
+  findings,
+  groups,
+  start,
+  shown,
+  statusLabel,
+}: {
+  findings: number
+  groups: number
+  start: number
+  shown: number
+  statusLabel: string
+}): string {
+  const noun = `${statusLabel ? `${statusLabel} ` : ''}finding${findings === 1 ? '' : 's'}`
+  const grouped = `${findings.toLocaleString()} ${noun} in ${groups.toLocaleString()} group${groups === 1 ? '' : 's'}`
+  if (shown >= groups) return grouped
+  return `${grouped} · showing groups ${start.toLocaleString()}–${(start + shown - 1).toLocaleString()}`
 }

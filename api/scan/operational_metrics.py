@@ -18,6 +18,16 @@ OPERATIONAL_EVENTS = frozenset({
     "target_transport_block",
 })
 
+try:
+    from .assessment_columns import assessment_sql as _assessment_sql
+except ImportError:  # pragma: no cover - loaded as a top-level module
+    from scan.assessment_columns import assessment_sql as _assessment_sql
+
+# One pass over each large table (scans, scan_capability_actions) with FILTERed counts instead of
+# a pass per counter, and no report decompression: the grade-reliability fields are read from the
+# trigger-maintained columns (scan/assessment_columns.py; the JSON only for a row not projected
+# yet), and the empty-payload test looks at the stored size before comparing a payload (a large
+# payload is never '{}', so it is never decompressed).
 _CORE_SQL = r"""
 WITH cutover AS (
     SELECT COALESCE(
@@ -25,59 +35,65 @@ WITH cutover AS (
           WHERE name='v2_scan_capability_actions_v1'),
         'epoch'::timestamptz
     ) AS applied_at
+),
+scan_counts AS (
+    SELECT
+        COUNT(*) FILTER (WHERE s.scan_generation='v2' AND s.scan_action_plan_digest IS NOT NULL)
+            AS action_plans_compiled,
+        COUNT(*) FILTER (WHERE """ + _assessment_sql("grade_reliable") + r""" = false)
+            AS unreliable_grade_count,
+        COUNT(*) FILTER (WHERE s.run_kind='web_dast' AND s.created_at >= c.applied_at
+            AND (
+                s.scan_generation <> 'v2'
+                OR s.scan_job_digest IS NULL
+                OR (pg_column_size(s.scan_job_payload) <= 64 AND s.scan_job_payload='{}'::jsonb)
+            )) AS unexpected_legacy_execution
+    FROM scans s CROSS JOIN cutover c
+),
+action_counts AS (
+    SELECT
+        COUNT(*) FILTER (WHERE status IN ('leased','running')
+            AND lease_expires_at IS NOT NULL AND lease_expires_at <= NOW()) AS stale_action_leases,
+        COUNT(*) FILTER (WHERE required=true AND status IN ('failed','timed_out','blocked'))
+            AS required_action_failures,
+        COUNT(*) FILTER (WHERE required=true
+            AND status IN ('success','partial','skipped','blocked','failed','cancelled','timed_out')
+            AND result_json IS NULL) AS missing_required_results,
+        COUNT(*) FILTER (WHERE reason_code='manifest_unavailable') AS manifest_failures,
+        COUNT(*) FILTER (WHERE reason_code='scope_invalid') AS target_transport_blocks,
+        COUNT(*) FILTER (WHERE reason_code='authorization_revoked') AS approval_revocations
+    FROM scan_capability_actions
+),
+lease_counts AS (
+    SELECT
+        COUNT(*) FILTER (WHERE status='leased' AND lease_expires_at <= NOW()) AS stale_broker_leases,
+        COALESCE(MAX(EXTRACT(EPOCH FROM (NOW()-created_at))) FILTER (WHERE status='leased'), 0)::bigint
+            AS oldest_broker_lease_seconds,
+        COUNT(*) FILTER (WHERE delivery_attempts > 1) AS broker_redeliveries
+    FROM broker_job_leases
 )
 SELECT
-    (SELECT COUNT(*) FROM scans
-      WHERE scan_generation='v2' AND scan_action_plan_digest IS NOT NULL)
-        AS action_plans_compiled,
+    sc.action_plans_compiled,
     (SELECT COUNT(*) FROM scan_action_plan_revisions WHERE revision=1)
         AS continuations_compiled,
-    (SELECT COUNT(*) FROM scan_capability_actions
-      WHERE status IN ('leased','running')
-        AND lease_expires_at IS NOT NULL AND lease_expires_at <= NOW())
-        AS stale_action_leases,
+    ac.stale_action_leases,
     (SELECT COUNT(*) FROM budget_reservations WHERE execution_uncertain=true)
         AS uncertain_execution,
-    (SELECT COUNT(*) FROM broker_job_leases
-      WHERE status='leased' AND lease_expires_at <= NOW())
-        AS stale_broker_leases,
-    (SELECT COALESCE(MAX(EXTRACT(EPOCH FROM (NOW()-created_at))), 0)::bigint
-       FROM broker_job_leases WHERE status='leased')
-        AS oldest_broker_lease_seconds,
-    (SELECT COUNT(*) FROM broker_job_leases WHERE delivery_attempts > 1)
-        AS broker_redeliveries,
-    (SELECT COUNT(*) FROM scan_capability_actions
-      WHERE required=true AND status IN ('failed','timed_out','blocked'))
-        AS required_action_failures,
-    (SELECT COUNT(*) FROM scan_capability_actions
-      WHERE required=true
-        AND status IN ('success','partial','skipped','blocked','failed','cancelled','timed_out')
-        AND result_json IS NULL)
-        AS missing_required_results,
-    (SELECT COUNT(*) FROM scan_capability_actions
-      WHERE reason_code='manifest_unavailable')
-        AS manifest_failures,
+    lc.stale_broker_leases,
+    lc.oldest_broker_lease_seconds,
+    lc.broker_redeliveries,
+    ac.required_action_failures,
+    ac.missing_required_results,
+    ac.manifest_failures,
     (SELECT COUNT(*) FROM scan_artifacts WHERE status IN ('upload_failed','missing'))
         AS artifact_transfer_failures,
-    (SELECT COUNT(*) FROM scan_capability_actions
-      WHERE reason_code='scope_invalid')
-        AS target_transport_blocks,
-    (SELECT COUNT(*) FROM scan_capability_actions
-      WHERE reason_code='authorization_revoked')
-        AS approval_revocations,
+    ac.target_transport_blocks,
+    ac.approval_revocations,
     (SELECT COUNT(*) FROM evidence_objects
       WHERE redaction_profile IS NOT NULL AND created_at >= NOW()-INTERVAL '24 hours')
         AS secret_redaction_events_24h,
-    (SELECT COUNT(*) FROM scans
-      WHERE result #>> '{coverage,grade_reliability,reliable}'='false')
-        AS unreliable_grade_count,
-    (SELECT COUNT(*) FROM scans s CROSS JOIN cutover c
-      WHERE s.run_kind='web_dast' AND s.created_at >= c.applied_at
-        AND (
-            s.scan_generation <> 'v2'
-            OR s.scan_job_digest IS NULL
-            OR s.scan_job_payload='{}'::jsonb
-        )) AS unexpected_legacy_execution,
+    sc.unreliable_grade_count,
+    sc.unexpected_legacy_execution,
     (SELECT COUNT(*) FROM (VALUES
         ('v2_budget_reservations_v2'),
         ('v2_scan_capability_actions_v1'),
@@ -88,6 +104,7 @@ SELECT
       ) AS expected(name)
       LEFT JOIN app_schema_migrations m ON m.name=expected.name
       WHERE m.name IS NULL) AS missing_required_migrations
+FROM scan_counts sc, action_counts ac, lease_counts lc
 """
 
 _RESERVATION_STATES_SQL = r"""
@@ -97,16 +114,26 @@ GROUP BY status
 ORDER BY status
 """
 
+# Projected rows read the reasons column (only rows that have any); a row not projected yet reads
+# its report, exactly as before.
 _GRADE_REASONS_SQL = r"""
 SELECT reason, COUNT(*) AS count
-FROM scans
-CROSS JOIN LATERAL jsonb_array_elements_text(
-    CASE
-        WHEN jsonb_typeof(result #> '{coverage,grade_reliability,reasons}')='array'
-        THEN result #> '{coverage,grade_reliability,reasons}'
-        ELSE '[]'::jsonb
-    END
-) AS reason
+FROM (
+    SELECT unnest(s.grade_reliability_reasons) AS reason
+    FROM scans s
+    WHERE s.assessment_projected AND cardinality(s.grade_reliability_reasons) > 0
+    UNION ALL
+    SELECT reason
+    FROM scans s
+    CROSS JOIN LATERAL jsonb_array_elements_text(
+        CASE
+            WHEN jsonb_typeof(s.result #> '{coverage,grade_reliability,reasons}')='array'
+            THEN s.result #> '{coverage,grade_reliability,reasons}'
+            ELSE '[]'::jsonb
+        END
+    ) AS reason
+    WHERE s.assessment_projected IS NOT TRUE
+) reasons
 GROUP BY reason
 ORDER BY reason
 """

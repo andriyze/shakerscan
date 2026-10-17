@@ -628,10 +628,20 @@ async def get_ai_inventory(
         """
         ai_targets = [row_to_dict(row) for row in await conn.fetch(ai_query, include_inactive, root_domain)]
 
+        # The builder skips AI and Model Intake runs before reading a report and reads only the
+        # fixture markers of the options: those are the only report bodies and options transferred.
         scans_query = """
             SELECT
                 s.id, s.target_id, s.ai_target_id, s.target_url, s.status,
-                s.scan_type, s.run_kind, s.options, s.result, s.created_at, s.completed_at,
+                s.scan_type, s.run_kind,
+                (SELECT jsonb_object_agg(o.key, o.value)
+                   FROM jsonb_each(CASE WHEN jsonb_typeof(s.options) = 'object' THEN s.options
+                                        ELSE '{}'::jsonb END) o
+                  WHERE o.key IN ('calibration_run', 'safe_fixture')) AS options,
+                CASE WHEN COALESCE(s.run_kind, '') IN ('ai_api', 'ai_widget', 'ai_rag', 'ai_trace', 'ai_mcp',
+                                                       'model_intake')
+                     THEN NULL ELSE s.result END AS result,
+                s.created_at, s.completed_at,
                 t.root_domain, t.discovery_source
             FROM scans s
             LEFT JOIN targets t ON s.target_id = t.id
