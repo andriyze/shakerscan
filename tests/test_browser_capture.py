@@ -298,3 +298,52 @@ def test_an_open_capture_is_refused_for_selection_with_a_clear_409():
         assert refused.value.status_code == 409
         assert refused.value.detail["error"] == "capture_open"
         assert "close it first" in refused.value.detail["message"]
+
+
+@pytest.mark.parametrize(("query", "kept", "withheld"), [
+    ("token=t0k3nValue&page=2", "page=2", ["token"]),
+    ("access_token=abc&api_key=k&sig=s&session=x&code=c&auth=a&q=shoes",
+     "q=shoes", ["access_token", "api_key", "sig", "session", "code", "auth"]),
+    ("next=eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.c2lnbmF0dXJl&lang=en", "lang=en", ["next"]),
+    ("ref=Zx9Qp2Lm7Rt4Wv8Yb3Nc&sort=name", "sort=name", ["ref"]),
+    ("id=0123456789abcdef0123456789abcdef&view=full", "view=full", ["id"]),
+    ("page=2&sort=price", "page=2&sort=price", []),
+])
+def test_a_capture_replay_withholds_credential_query_parameters(query, kept, withheld):
+    from scanner.scanner_tools.device_request_formats import resolve_imported_requests
+    from scanner.scanner_tools.request_replay import build_selected_replay_plan
+    from scanner.scanner_tools.request_collections import RequestSelector
+
+    entry = har_entry(CaptureFlow.model_validate(
+        {"method": "GET", "url": f"https://app.example.test/api/items?{query}"}))[0]
+    payload = _capture_payload([entry])
+    (request,) = resolve_imported_requests(payload)
+    assert request["url"] == "https://app.example.test/api/items" + (f"?{kept}" if kept else "")
+    assert request["captured_query_parameters_withheld"] == withheld
+    assert request["captured_withheld"] == [f"query:{name}" for name in withheld]
+    plan = build_selected_replay_plan(
+        payload, RequestSelector(safe_methods_only=False), allowed_origins=["https://app.example.test"])
+    (public,) = plan.public_dict()["requests"]
+    if withheld:
+        assert public["captured_withheld"] == [f"query:{name}" for name in withheld]
+    else:
+        assert "captured_withheld" not in public
+    # An ordinary HAR import keeps its query exactly.
+    (har,) = resolve_imported_requests({"format": "har", "document": payload["document"]})
+    assert har["url"].endswith(f"?{query}")
+
+
+def test_the_replay_plan_names_every_withheld_credential():
+    from scanner.scanner_tools.request_collections import RequestSelector
+    from scanner.scanner_tools.request_replay import ReplayAuthorization, build_selected_replay_plan
+
+    entry = har_entry(_secret_flow(url=f"https://app.example.test/api/login?access_token={SECRETS[3]}",
+                                   websocket_frames=[]))[0]
+    plan = build_selected_replay_plan(
+        _capture_payload([entry]), RequestSelector(safe_methods_only=False),
+        allowed_origins=["https://app.example.test"],
+        authorization=ReplayAuthorization(safe_authentication_only=True))
+    (public,) = plan.public_dict()["requests"]
+    assert set(public["captured_withheld"]) == {
+        "header:cookie", "header:authorization", "query:access_token", "body:password"}
+    assert SECRETS[3] not in json.dumps(plan.requests[0].wire_dict(), default=str)

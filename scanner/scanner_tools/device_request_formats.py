@@ -16,6 +16,7 @@ import urllib.parse
 from collections import Counter
 from typing import Any
 
+from .url_redaction import is_sensitive_label, token_like_segment
 from .device_postman import (
     MAX_BODY_BYTES,
     MAX_COLLECTION_BYTES,
@@ -198,16 +199,48 @@ def is_captured_credential_header(name: str) -> bool:
     )
 
 
-def _without_matrix_parameters(url: str) -> str:
-    """``url`` with every path segment's ``;name=value`` parameters removed (``;jsessionid=``)."""
+_CAPTURE_SECRET_QUERY_RE = re.compile(r"(?:^|[-_.])(?:sig|code|auth|jwt|sid|key)(?:$|[-_.])", re.I)
+
+
+def is_captured_secret_query(name: str, value: str) -> bool:
+    """A query parameter a recorded session used as a credential: named like a token, secret,
+    session, signature, code or key (the index masking's names), or with a token-like value
+    (a JWT, a long hex or opaque string, a random-looking one)."""
+    text = str(name or "")
+    return (
+        is_sensitive_label(text)
+        or bool(_SENSITIVE_NAME_RE.search(text))
+        or bool(_CAPTURE_SECRET_FIELD_RE.search(text))
+        or bool(_CAPTURE_SECRET_QUERY_RE.search(text))
+        or token_like_segment(urllib.parse.unquote(str(value or "")))
+    )
+
+
+def _replayable_capture_url(url: str) -> tuple[str, list[str]]:
+    """``url`` without path ``;name=value`` parameters (``;jsessionid=``) and without its
+    credential-like query parameters; the names of the parameters left out."""
     try:
         parts = urllib.parse.urlsplit(url)
     except ValueError:
-        return url
-    if ";" not in parts.path:
-        return url
-    path = "/".join(segment.split(";", 1)[0] for segment in parts.path.split("/"))
-    return urllib.parse.urlunsplit((parts.scheme, parts.netloc, path, parts.query, parts.fragment))
+        return url, []
+    path = parts.path
+    if ";" in path:
+        path = "/".join(segment.split(";", 1)[0] for segment in path.split("/"))
+    withheld: list[str] = []
+    query = parts.query
+    if query:
+        kept = []
+        for name, value in urllib.parse.parse_qsl(query, keep_blank_values=True):
+            if is_captured_secret_query(name, value):
+                if name[:160] not in withheld:
+                    withheld.append(name[:160])
+            else:
+                kept.append((name, value))
+        if withheld:
+            query = urllib.parse.urlencode(kept)
+    if path == parts.path and not withheld:
+        return url, []
+    return urllib.parse.urlunsplit((parts.scheme, parts.netloc, path, query, parts.fragment)), withheld
 
 
 _CAPTURE_SECRET_FIELD_RE = re.compile(
@@ -276,9 +309,11 @@ def strip_captured_credentials(requests: list[dict[str, Any]]) -> list[dict[str,
     requests) resolves it through ``resolve_imported_requests``, so this is the one place a
     capture's cookies and tokens are removed; a replay that needs a session gets it from a
     credential profile. Path ``;matrix`` parameters (a ``;jsessionid=`` session) are dropped
-    from the replayed URL, and password-, token- and secret-named JSON and form body fields are
-    emptied. The header and field names removed are kept (``captured_credentials_withheld``,
-    ``captured_body_fields_withheld``), never their values."""
+    from the replayed URL, as are query parameters named like a credential or holding a
+    token-like value, and password-, token- and secret-named JSON and form body fields are
+    emptied. The names removed are kept (``captured_credentials_withheld``,
+    ``captured_query_parameters_withheld``, ``captured_body_fields_withheld``, and all of them in
+    ``captured_withheld`` for the replay plan), never their values."""
     stripped: list[dict[str, Any]] = []
     for request in requests:
         # Content-Length goes too: an emptied body field changes the length, and the replay
@@ -292,12 +327,20 @@ def strip_captured_credentials(requests: list[dict[str, Any]]) -> list[dict[str,
             if is_captured_credential_header(name)
         })
         body, body_fields = _without_secret_body_fields(request)
+        url, query_withheld = _replayable_capture_url(str(request.get("url") or ""))
+        template, _ = _replayable_capture_url(str(request.get("url_template") or ""))
         stripped.append({
             **request,
             "body": body,
             "captured_body_fields_withheld": body_fields,
-            "url": _without_matrix_parameters(str(request.get("url") or "")),
-            "url_template": _without_matrix_parameters(str(request.get("url_template") or "")),
+            "captured_query_parameters_withheld": query_withheld,
+            "captured_withheld": [
+                *(f"header:{name}" for name in withheld),
+                *(f"query:{name}" for name in query_withheld),
+                *(f"body:{name}" for name in body_fields),
+            ],
+            "url": url,
+            "url_template": template,
             "headers": {
                 name: value for name, value in dict(request.get("headers") or {}).items()
                 if not is_captured_credential_header(name) and str(name).lower() != "content-length"

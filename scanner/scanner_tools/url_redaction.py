@@ -31,6 +31,11 @@ def _label(value: str) -> str:
     return re.sub(r"[^a-z0-9]+", "-", value.strip().lower()).strip("-")
 
 
+def is_sensitive_label(name: str) -> bool:
+    """A parameter or path label that names a credential (``token``, ``code``, ``signature``...)."""
+    return _label(str(name or "")) in _SENSITIVE_LABELS
+
+
 def _looks_opaque_secret(value: str) -> bool:
     if _JWT_RE.fullmatch(value) or _HEX_SECRET_RE.fullmatch(value):
         return True
