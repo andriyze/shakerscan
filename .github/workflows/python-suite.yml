@@ -249,7 +249,7 @@ jobs:
           python-version: "3.12"
       - name: Collect the shard reports
         if: always() && steps.changes.outputs.python_mode == 'full'
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
         with:
           pattern: python-suite-shard-*
           path: artifacts
@@ -259,7 +259,7 @@ jobs:
         run: python scripts/run_complete_python_suite.py --artifacts-dir artifacts --merge-shards 4
       - name: Collect the database-backed report
         if: always() && steps.changes.outputs.python_mode == 'full'
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
         with:
           name: python-suite-postgres-${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha || github.sha }}
           path: artifacts
