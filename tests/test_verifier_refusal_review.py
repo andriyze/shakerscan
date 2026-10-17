@@ -57,6 +57,21 @@ def test_a_403_is_a_credential_request_only_when_it_asks_for_one():
     assert refusal(302, {"Location": "/static/login.css"}) is None
 
 
+def test_authentication_paths_are_whole_segments():
+    from runtime.auth_refusal import is_authentication_candidate, is_authentication_path
+
+    for path in ("/hub/login", "/users/sign_in", "/api/v1/auth", "/auth/login", "/session/new",
+                 "/oauth/token", "/api/authenticate", "/logon", "/sign-in"):
+        assert is_authentication_path(path), path
+        assert is_authentication_candidate({"canonical_path": path, "body_field_names": ["a"]})
+    for path in ("/api/authors", "/api/sessions/123/notes", "/api/loginhistory",
+                 "/api/users/authorization", "/auth/admin/users/1", "/session/1/notes/2"):
+        assert not is_authentication_path(path), path
+        assert not is_authentication_candidate({"canonical_path": path, "body_field_names": ["a"]})
+    # A query candidate is never an authentication endpoint by its path alone.
+    assert not is_authentication_candidate({"canonical_path": "/hub/login"})
+
+
 def test_only_an_authentication_endpoint_is_exempt_and_dalfox_never_is():
     orders = {"canonical_path": "/api/orders", "body_field_names": ["note"], "method": "POST"}
     login = {"canonical_path": "/hub/login", "body_field_names": ["username", "password"]}
@@ -274,3 +289,57 @@ def test_a_login_form_401_is_still_its_answer(monkeypatch):
     receipt, techniques = _body_batch(monkeypatch, "/hub/login")
     assert techniques == ["U", "B", "E", "T"]
     assert receipt.status == "success"
+
+
+def test_a_graphql_seed_that_asks_for_credentials_while_the_root_answers_is_inconclusive(monkeypatch):
+    import tests.test_graphql_verify_batch as graphql_batch
+
+    class Challenging(graphql_batch._Transport):
+        def __init__(self, answer, wall):
+            super().__init__(answer)
+            self.wall = wall
+
+        async def send(self, request, **kwargs):
+            result = await super().send(request, **kwargs)
+            path = urllib.parse.urlsplit(request.url).path
+            if path == "/graphql" or (self.wall and path == "/"):
+                return dataclasses.replace(
+                    result, status_code=401, response_headers={"WWW-Authenticate": "Bearer"},
+                )
+            return result
+
+    # run_graphql_batch builds its transport from _Transport: substitute ours for one run each.
+    original = graphql_batch._Transport
+    try:
+        graphql_batch._Transport = lambda answer: Challenging(answer, False)
+        protected = run_graphql_batch(monkeypatch, lambda _url: (200, b"<html>app</html>"), paths=("/app",))[0]
+        graphql_batch._Transport = lambda answer: Challenging(answer, True)
+        walled = run_graphql_batch(monkeypatch, lambda _url: (200, b"<html>app</html>"), paths=("/app",))[0]
+    finally:
+        graphql_batch._Transport = original
+    assert protected.status == "partial" and protected.errors[0] == "authentication_required"
+    assert walled.status == "success", "a site-wide wall keeps the seed 'not GraphQL'"
+
+
+def test_nosqli_keeps_testing_the_other_fields_after_a_plain_403():
+    from capabilities.nosqli_verify import NoSQLiVerifyAdapter
+
+    class PerField(_Transport):
+        async def send(self, request, **kwargs):
+            result = await super().send(request, **kwargs)
+            first = len(self.sent) == 1
+            return dataclasses.replace(result, status_code=403 if first else 200, response_headers={})
+
+    transport = PerField(200)
+    adapter = NoSQLiVerifyAdapter(
+        specification=CAPABILITY_REGISTRY.require("nosqli.verify_batch"), target=TARGET,
+        request=_request(url="https://app.example.test/api/orders?id=1&owner=2"),
+        transport=transport, requested_budget={"http_requests": 8},
+        candidate={"candidate_id": "f" * 64, "method": "GET", "parameter_name": "id",
+                   "body_field_names": ["id", "owner"]},
+    )
+    result = asyncio.run(adapter.execute(heartbeat=_noop_heartbeat, cancelled=lambda: False))
+    assert len(transport.sent) == 5, "the second field still gets its four-request differential"
+    assert result.observations[0]["inconclusive_reason"] == "target_refused"
+    assert "inconclusive_reason" not in result.observations[1]
+    assert result.status == "partial" and result.errors[0] == "target_refused:403"
