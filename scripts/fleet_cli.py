@@ -1297,13 +1297,21 @@ def run_init_preflight(paths: RuntimePaths, args: argparse.Namespace) -> dict[st
         success="resolved to an immutable digest",
         hint="Authenticate to the registry or provide repository@sha256:<digest>.",
     )
-    _run_check(
+    worker_count = _run_check(
         checks,
         "Worker count",
-        lambda: _validated_range(int(args.workers), "--workers", 1, 128),
+        lambda: _validated_range(int(args.workers), "--workers", 0, 128),
         success="within supported range",
-        hint="Choose between 1 and 128 initial workers.",
+        hint="Choose between 0 and 128 initial workers per node.",
     )
+    if worker_count == 0:
+        # As the launcher's WORKERS=0: allowed, but nothing scans until workers are added.
+        checks[-1] = PreflightCheck(
+            "Worker count",
+            "warn",
+            "0: joining nodes start with no scan workers, so no scan runs on them yet",
+            "Scale the fleet from the Fleet page or POST /fleet/scale once nodes have joined.",
+        )
     if env.get("FLEET_ALLOW_INSECURE_ENROLLMENT", "").lower() in {"1", "true", "yes", "on"}:
         checks.append(PreflightCheck(
             "Enrollment policy",
@@ -2736,7 +2744,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--worker-image",
         help="scanner image tag or digest (tags are resolved and persisted by immutable digest)",
     )
-    init.add_argument("--workers", type=int, default=1)
+    init.add_argument(
+        "--workers", type=int, default=1,
+        help="scan workers each joining node starts with, 0-128 (0: nodes join idle until the fleet is scaled)",
+    )
     init.add_argument(
         "--allow-running-work",
         action="store_true",

@@ -1,6 +1,10 @@
 # Sourced by the launcher. Capture the old schema before converting tables to views.
+
+# Tables whose rows are the operator's own (never seeded by db/init.sql).
+TARGET_UPGRADE_DATA_TABLES="'targets','device_targets','scans','findings','ai_targets','credential_profiles','request_collections','hunt_runs','schedules','discovery_runs'"
+
 ensure_target_upgrade_backup() {
-    local legacy_kind initialized attempt pid1_comm
+    local legacy_kind initialized attempt pid1_comm tables table query
     compose up --no-build -d postgres
     # On a fresh volume the image first runs a temporary server for its init scripts, then shuts
     # it down and execs the real one. That temporary server answers pg_isready too, so a dump
@@ -21,8 +25,15 @@ ensure_target_upgrade_backup() {
     legacy_kind="$(compose exec -T postgres psql -U scanner -d scanner -At -v ON_ERROR_STOP=1 \
         -c "SELECT relkind FROM pg_class WHERE oid=to_regclass('public.device_targets')")" || return 1
     [ "$legacy_kind" = r ] || return 0
-    initialized="$(compose exec -T postgres psql -U scanner -d scanner -At -v ON_ERROR_STOP=1 \
-        -c "SELECT to_regclass('public.app_schema_migrations') IS NOT NULL OR EXISTS(SELECT 1 FROM targets) OR EXISTS(SELECT 1 FROM device_targets)")" || return 1
+    # Only data an operator could lose needs saving. A brand-new database (db/init.sql, the first
+    # start, or every `reset`) has its tables and migration markers but no such row: no backup.
+    tables="$(compose exec -T postgres psql -U scanner -d scanner -At -v ON_ERROR_STOP=1 \
+        -c "SELECT string_agg(t, ' ') FROM unnest(ARRAY[${TARGET_UPGRADE_DATA_TABLES}]) t WHERE to_regclass('public.' || t) IS NOT NULL")" || return 1
+    query="SELECT false"
+    for table in $tables; do
+        query="$query OR EXISTS(SELECT 1 FROM public.$table)"
+    done
+    initialized="$(compose exec -T postgres psql -U scanner -d scanner -At -v ON_ERROR_STOP=1 -c "$query")" || return 1
     [ "$initialized" = t ] || return 0
     echo "Saving the pre-unification database and evidence before the target upgrade."
     create_backup || return 1

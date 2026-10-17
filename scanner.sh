@@ -1540,7 +1540,7 @@ install_dependencies() {
 
 command_needs_docker_runtime() {
     case "$1" in
-        start|stop|restart|status|scale|logs|gungnir|devices|build|rebuild|reset|shell|db-upgrade)
+        start|stop|restart|status|scale|logs|gungnir|devices|build|rebuild|reset|shell|db-upgrade|images|redis)
             return 0
             ;;
         *)
@@ -2508,6 +2508,11 @@ print_help() {
     echo "  backup list        List backups and whether each holds the encryption key"
     echo "  backup delete <name|all> [--yes]  Permanently delete a backup, or every backup"
     echo "  db-upgrade         Migrate older PostgreSQL data now (--status, --remigrate, --keep-current, --remove-legacy)"
+    echo "  images [prune]     List ShakerScan images and why each is kept; prune removes the ones nothing keeps"
+    echo "                     (SHAKERSCAN_KEEP_RELEASES=2 keeps this release and one to roll back to; never a volume)"
+    echo "  redis [status]     Redis health, persistence and volume"
+    echo "  redis reset        Redis lost or cannot start: recreate it empty (queues only; scans and findings are"
+    echo "                     in PostgreSQL), reconnect services; waiting scans are queued again automatically"
     echo "  reset              Reset database (WARNING: deletes all data)"
     echo "  shell              Open shell in scanner container"
     echo ""
@@ -2577,6 +2582,8 @@ start_services() {
         start_workers="$(resolve_start_workers)" || return 1
     fi
     set_build_env || return 1
+    # Backups and results are written to the install directory: an upgrade needs room there.
+    ensure_install_dir_space || return 1
     echo -e "${GREEN}Starting ShakerScan with $start_workers worker(s)...${NC}"
     if [ "$start_workers" -eq 0 ]; then
         echo -e "${YELLOW}Starting with no local scan workers: scans run only on connected broker nodes. Add local workers with '$(cli_hint) start --workers N'.${NC}"
@@ -2611,8 +2618,11 @@ start_services() {
         write_dotenv_value SHAKERSCAN_DOCKER_GID "$SHAKERSCAN_DOCKER_GID"
         record_api_sandbox_group
     fi
-    # The images are ready, so taking a stack down now cannot strand the host without a runnable
-    # release. Stop it completely the way `restart` does, keeping its worker count and opt-in lanes.
+    # The images are ready. Before an upgrade replaces the running release, its PostgreSQL and
+    # Redis must be saving their data to their volumes (nothing is stopped otherwise).
+    ensure_datastores_persisting || return 1
+    # Taking a stack down now cannot strand the host without a runnable release. Stop it
+    # completely the way `restart` does, keeping its worker count and opt-in lanes.
     clean_slate_reason="$(start_clean_slate_reason)"
     if [ -n "$clean_slate_reason" ]; then
         if [ -z "$requested_workers" ]; then
@@ -2627,10 +2637,18 @@ start_services() {
         echo -e "${YELLOW}Stopping the running stack first (${clean_slate_reason}); it restarts with $start_workers worker(s).${NC}"
         stop_services || return 1
     fi
+    # Never an empty database over a lost one.
+    ensure_database_volume_present || return 1
     source "$SCRIPT_DIR/scripts/target_upgrade_backup.sh" || return 1
     ensure_target_upgrade_backup || return 1
     compose_up -d postgres || return 1
-    ensure_pre_upgrade_backup || return 1
+    # An upgrade: a complete backup is offered first (the database dump below is always taken).
+    offer_upgrade_backup || return 1
+    if [ "${UPGRADE_FULL_BACKUP_TAKEN:-0}" = 1 ]; then
+        echo "The full backup holds the database; no separate pre-upgrade dump is needed."
+    else
+        ensure_pre_upgrade_backup || return 1
+    fi
     # Everything else waits for a healthy Redis; one that cannot start is repaired here.
     ensure_redis_ready || return 1
     compose_up -d --scale worker=$start_workers || return 1
@@ -2714,6 +2732,9 @@ restart_services() {
     restart_device_workers="$(running_device_worker_count)"
     restart_gungnir="$(running_compose_service_count gungnir-worker)"
     note_running_release
+    # A restart onto another release replaces the running one: its datastores must be saving first.
+    set_build_env || return 1
+    ensure_datastores_persisting || return 1
     stop_services
     start_services "$restart_workers" "$restart_device_workers" "$restart_gungnir"
 }
@@ -3600,7 +3621,7 @@ reset_database() {
         # Exactly as `start`: the build environment (release version and image identity), the
         # runtime files, Redis readiness and the health and identity checks. The database was just
         # emptied, so there is nothing to save before it.
-        SHAKERSCAN_PRE_UPGRADE_BACKUP=0 start_services "$start_workers" || return 1
+        SHAKERSCAN_PRE_UPGRADE_BACKUP=0 SHAKERSCAN_ALLOW_NEW_DATABASE=1 start_services "$start_workers" || return 1
         echo -e "${GREEN}Database reset complete${NC}"
     else
         echo "Cancelled"
@@ -4076,7 +4097,17 @@ doctor() {
                     echo -e "  ${YELLOW}warning${NC} $warning"
                 done
             else
-                echo -e "  ${GREEN}ok${NC} disk space for the next upgrade; database volume present"
+                echo -e "  ${GREEN}ok${NC} disk space for the next upgrade and in the install directory; database and Redis volumes present"
+            fi
+            if stack_is_running; then
+                safety="$(datastore_persistence_problems)"
+                if [ -n "$safety" ]; then
+                    printf '%s\n' "$safety" | while IFS= read -r warning; do
+                        echo -e "  ${YELLOW}warning${NC} $warning"
+                    done
+                else
+                    echo -e "  ${GREEN}ok${NC} PostgreSQL and Redis are saving their data to their volumes"
+                fi
             fi
         fi
     else
@@ -4747,6 +4778,13 @@ case $COMMAND in
         ;;
     db-upgrade)
         db_upgrade_cmd "${ARGS[@]}"
+        ;;
+    images)
+        set_build_env
+        images_cmd "${ARGS[@]}"
+        ;;
+    redis)
+        redis_cmd "${ARGS[@]}"
         ;;
     reset)
         reset_database
