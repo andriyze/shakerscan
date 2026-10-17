@@ -426,13 +426,17 @@ def test_broker_action_plan_requests_and_executes_control_plane_continuation(mon
             return result
 
         monkeypatch.setattr(Orchestrator, "run", cancel_second_round)
-        with pytest.raises(broker_worker.BrokerWorkerError, match="cancelled"):
+        # This fixture answers the finalize-only request with its next round (a work round, or
+        # a finalizer the fixture dispatcher cannot report over): the error stays.
+        with pytest.raises(broker_worker.BrokerWorkerError, match="cancelled|changed Scan authority"):
             asyncio.run(broker_worker._execute_broker_action_plan(
                 {"node_id": NODE_ID}, {"lease_id": "lease-1", "lease_token": "token-1"}, job,
                 plan=parent, plan_revision=root_scan_plan_revision(parent),
                 worker_id="broker:node-1:container-a",
             ))
-        assert len(calls) == 2
+        # The cancelled round asks once more, for the finalize-only revision its kept report
+        # would be built over (this fixture's dispatcher cannot build one: the error stays).
+        assert len(calls) == 3 and calls[-1][2]["finalize_only"] is True
         monkeypatch.setattr(Orchestrator, "run", original_run)
 
     def stale_revision_response(_state, _method, _path, _payload, **_kwargs):
@@ -708,3 +712,200 @@ def test_broker_heartbeat_honors_control_plane_cancel(tmp_path, monkeypatch):
     )
 
     assert cancelled == [str(tmp_path / "scan_cancel")]
+
+
+def _broker_continuation_fixture():
+    """A broker lease whose root plan has no finalizer, and its finalize-only successor."""
+    job, lease, parent = _canonical_broker_action_lease()
+    job.update({"target": "https://app.example.test", "job_id": "job-cancelled"})
+    job["options"].update({
+        "scan_continuation_allocation_digest": "d" * 64,
+        "scan_execution_plan": {
+            "budget": {"max_duration_seconds": 600},
+            "policy": {
+                "active_testing": True, "allow_state_changing_http": False,
+                "network_discovery": False, "subdomain_discovery": False,
+                "include_families": ["xss"], "exclude_families": [],
+                "scope_receipt_id": "scope-1", "approval_receipt_id": None,
+            },
+        },
+    })
+    finalizer = ScanAction(
+        action_id="finalize.report", stage="finalize_evidence", ordinal=1,
+        capability_name="scan.finalize", capability_args={"report_only": True},
+        target_binding_digest=parent.target_binding_digest, input_binding_digest="e" * 64,
+        requested_budget={"tool_wall_seconds": 1},
+        placement={
+            "schema_version": "scan-action-placement/v1", "eligible_backends": ["local", "broker"],
+            "requirements": {}, "adapter_name": "scanner.report", "adapter_version": "1",
+        },
+        dependencies=(parent.actions[0].action_id,), required=True, supporting=False,
+        output_schema="scan-report/v1",
+    )
+    final = ScanActionPlan(
+        scan_id=parent.scan_id, execution_plan_digest=parent.execution_plan_digest,
+        target_binding_digest=parent.target_binding_digest, actions=(*parent.actions, finalizer),
+    )
+    revision = ScanPlanRevision(
+        scan_id=final.scan_id, revision=1, plan_digest=final.plan_digest,
+        parent_plan_digest=parent.plan_digest, continuation_allocation_digest="d" * 64,
+        discovery_result_digest="e" * 64,
+        work_manifest_references=({
+            "schema_version": "scan-work-manifest-reference/v1",
+            "manifest_id": "44444444-4444-4444-8444-444444444444",
+            "kind": "candidate", "content_schema": "candidate-manifest/v1",
+            "manifest_digest": "f" * 64, "entry_count": 1, "status": "complete",
+        },),
+        continuation_plan_digest="c" * 64,
+    )
+    return job, lease, parent, final, revision
+
+
+def _fake_broker_runtime(monkeypatch, *, statuses, calls, final, revision, built):
+    """Fixture backend, dispatcher, executor and orchestrator; no target is contacted."""
+    def fake_api_request(_state, method, path, payload, **_kwargs):
+        calls.append((method, path, payload))
+        return {"plan": final.canonical_dict(), "plan_revision": revision.canonical_dict(),
+                "options": {}, "allocation_digest": "d" * 64}
+
+    class Backend:
+        def __init__(self, **kwargs):
+            self.plan = kwargs["plan"]
+
+        async def load_observations(self, action_id):
+            assert action_id == "finalize.report"
+            return ({"kind": "scan_report", "report": {
+                "findings": [{"title": "confirmed"}], "coverage": {"status": "complete"},
+                "canonical_action_execution": {"status_matrix": {"finalize.report": "success"}},
+            }},)
+
+    class Dispatcher:
+        def __init__(self, **kwargs):
+            self.policy = kwargs["policy"]
+            self.plan = kwargs["plan"]
+
+    class Executor:
+        def __init__(self, **_kwargs):
+            pass
+
+    class Orchestrator:
+        def __init__(self, **_kwargs):
+            pass
+
+        async def run(self, plan):
+            last = plan.actions[-1].action_id
+            return types.SimpleNamespace(action_results={last: types.SimpleNamespace(
+                status=types.SimpleNamespace(value=statuses.get(last, "success")),
+                observation_manifest_ref=object(),
+            )})
+
+    async def build(dispatcher, *, scan_id, finalization=None):
+        built.append(finalization)
+        from scan.cancelled_report import mark_cancelled_scan_report
+        return mark_cancelled_scan_report(
+            {"findings": [{"title": "confirmed before the cancel"}], "coverage": {"status": "partial"}})
+
+    monkeypatch.setattr(broker_worker, "api_request", fake_api_request)
+    monkeypatch.setattr(broker_worker, "BrokerScanExecutionBackend", Backend)
+    monkeypatch.setattr(broker_worker, "DatabaseNeutralScanActionDispatcher", Dispatcher)
+    monkeypatch.setattr(broker_worker, "ReceiptScanActionExecutor", Executor)
+    monkeypatch.setattr(broker_worker, "ScanOrchestrator", Orchestrator)
+    monkeypatch.setattr(broker_worker, "build_cancelled_scan_report", build)
+
+
+def test_a_broker_scan_cancelled_in_a_work_round_keeps_its_settled_findings(monkeypatch):
+    """B1: a Scan cancelled on a fleet node reports over the finalize-only revision it asks
+    the control plane to compile (never stored), and the node submits a kept report."""
+    from scan.cancelled_report import is_kept_cancelled_report
+
+    job, lease, parent, final, revision = _broker_continuation_fixture()
+    calls, built = [], []
+    work_action = parent.actions[0].action_id
+    _fake_broker_runtime(monkeypatch, statuses={work_action: "cancelled"}, calls=calls,
+                         final=final, revision=revision, built=built)
+    report = asyncio.run(broker_worker._execute_broker_action_plan(
+        {"node_id": NODE_ID}, {"lease_id": "lease-1", "lease_token": "token-1"}, job,
+        plan=parent, plan_revision=root_scan_plan_revision(parent),
+        worker_id="broker:node-1:container-a",
+    ))
+    assert len(calls) == 1 and calls[0][1].endswith("/continuation")
+    assert calls[0][2]["finalize_only"] is True and calls[0][2]["plan_digest"] == parent.plan_digest
+    assert built == [(final, revision)]
+    assert is_kept_cancelled_report(report)
+    assert report["findings"] == [{"title": "confirmed before the cancel"}]
+
+
+def test_a_broker_scan_cancelled_in_its_finalizer_round_reports_over_its_own_plan(monkeypatch):
+    from scan.cancelled_report import is_kept_cancelled_report
+
+    job, lease, _parent, final, revision = _broker_continuation_fixture()
+    calls, built = [], []
+    _fake_broker_runtime(monkeypatch, statuses={"finalize.report": "cancelled"}, calls=calls,
+                         final=final, revision=revision, built=built)
+    report = asyncio.run(broker_worker._execute_broker_action_plan(
+        {"node_id": NODE_ID}, {"lease_id": "lease-1", "lease_token": "token-1"}, job,
+        plan=final, plan_revision=revision, worker_id="broker:node-1:container-a",
+    ))
+    assert calls == [] and built == [None] and is_kept_cancelled_report(report)
+
+
+def test_a_broker_finalize_only_revision_that_adds_work_is_refused(monkeypatch):
+    job, lease, parent, final, revision = _broker_continuation_fixture()
+    calls, built = [], []
+    work = replace(final.actions[-1], action_id="work.r01", action_digest=None)
+    widened = ScanActionPlan(scan_id=final.scan_id, execution_plan_digest=final.execution_plan_digest,
+                             target_binding_digest=final.target_binding_digest,
+                             actions=(*parent.actions, work))
+    widened_revision = replace(revision, plan_digest=widened.plan_digest, revision_digest=None)
+    _fake_broker_runtime(monkeypatch, statuses={parent.actions[0].action_id: "cancelled"},
+                         calls=calls, final=widened, revision=widened_revision, built=built)
+    with pytest.raises(broker_worker.BrokerWorkerError, match="changed Scan authority"):
+        asyncio.run(broker_worker._execute_broker_action_plan(
+            {"node_id": NODE_ID}, {"lease_id": "lease-1", "lease_token": "token-1"}, job,
+            plan=parent, plan_revision=root_scan_plan_revision(parent),
+            worker_id="broker:node-1:container-a",
+        ))
+    assert built == []
+
+
+def test_a_fleet_node_past_its_scan_time_limit_asks_only_for_the_finalizer_and_reports_it(monkeypatch):
+    """B7: the lease carries the Scan's limit measured from the Scan's start; past it the node
+    asks for no work round, and the report names the round that was not run."""
+    job, lease, parent, final, revision = _broker_continuation_fixture()
+    calls, built = [], []
+    _fake_broker_runtime(monkeypatch, statuses={}, calls=calls, final=final, revision=revision,
+                         built=built)
+    report = asyncio.run(broker_worker._execute_broker_action_plan(
+        {"node_id": NODE_ID},
+        {"lease_id": "lease-1", "lease_token": "token-1",
+         # The Scan waited in the queue: its limit had already passed when the node leased it.
+         "scan_time_limit": {"max_duration_seconds": 600, "elapsed_seconds": 700}},
+        job, plan=parent, plan_revision=root_scan_plan_revision(parent),
+        worker_id="broker:node-1:container-a",
+    ))
+    assert calls[0][2]["finalize_only"] is True
+    stop = report["scan_metadata"]["time_limit_stop"]
+    assert stop["continuation_rounds_not_run"] == 1 and stop["max_duration_seconds"] == 600
+    assert report["coverage"]["status"] == "partial"
+
+
+def test_a_fleet_node_records_the_round_the_control_plane_refused_at_the_time_limit(monkeypatch):
+    job, lease, parent, final, revision = _broker_continuation_fixture()
+    calls, built = [], []
+    _fake_broker_runtime(monkeypatch, statuses={}, calls=calls, final=final, revision=revision,
+                         built=built)
+    answer = broker_worker.api_request
+
+    def refused(*args, **kwargs):
+        return {**answer(*args, **kwargs), "time_limit_reached": True}
+
+    monkeypatch.setattr(broker_worker, "api_request", refused)
+    report = asyncio.run(broker_worker._execute_broker_action_plan(
+        {"node_id": NODE_ID},
+        {"lease_id": "lease-1", "lease_token": "token-1",
+         "scan_time_limit": {"max_duration_seconds": 600, "elapsed_seconds": 10}},
+        job, plan=parent, plan_revision=root_scan_plan_revision(parent),
+        worker_id="broker:node-1:container-a",
+    ))
+    assert "finalize_only" not in calls[0][2]
+    assert report["scan_metadata"]["time_limit_stop"]["continuation_rounds_not_run"] == 1

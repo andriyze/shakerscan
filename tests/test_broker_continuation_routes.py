@@ -15,7 +15,7 @@ except ModuleNotFoundError:
     sys.modules.setdefault("asyncpg", SimpleNamespace(Pool=object))
 from api.fleet_routes import router as routes
 from api.scan.continuation import root_scan_plan_revision
-from api.scan.continuation_rounds import compile_next_continuation
+from api.scan.continuation_rounds import compile_continuation_round, compile_next_continuation
 from tests.test_continuation_rounds import _shared_round_fixture, _settle_round_fixture
 
 
@@ -66,13 +66,22 @@ def test_broker_retries_current_round_next_round_and_cancellation(monkeypatch):
                     "lease_expires_at": routes.utc_now() + timedelta(minutes=5)}
 
         # The shared compiler is real; only the persistence/lease boundaries are mocked.
-        async def materialize(_conn, *, parent_plan, revision_number, **_kwargs):
+        materialized = []
+
+        async def materialize(_conn, *, parent_plan, revision_number, finalize_only=False, persist=True,
+                              **_kwargs):
             assert lock.locked()
             state["calls"] += 1
+            materialized.append({"finalize_only": finalize_only, "persist": persist})
             fixture["parent_plan"] = parent_plan
             _settle_round_fixture(fixture)
-            result = compile_next_continuation(**fixture, revision_number=revision_number)
-            state.update(plan=result.plan, revision=result.revision)
+            if finalize_only:
+                result = compile_continuation_round(**fixture, revision_number=revision_number,
+                                                    include_finalizer=True, finalize_only=True)
+            else:
+                result = compile_next_continuation(**fixture, revision_number=revision_number)
+            if persist:
+                state.update(plan=result.plan, revision=result.revision)
             await asyncio.sleep(0)  # Exercise simultaneous parent retries at the lock.
             return result.plan, result.revision, result.options
 
@@ -112,5 +121,130 @@ def test_broker_retries_current_round_next_round_and_cancellation(monkeypatch):
             await request(state["plan"].plan_digest)
         assert cancelled.value.status_code == 409
         assert state["calls"] == 2
+        # A cancelled Scan's node asks for the finalize-only revision its kept report is built
+        # over: compiled, never stored, and the Scan's plan stays frozen.
+        frozen = state["plan"]
+        kept = await request(frozen.plan_digest, finalize_only=True)
+        assert materialized[-1] == {"finalize_only": True, "persist": False}
+        assert kept["plan"]["actions"][-1]["action_id"] == "finalize.report"
+        assert kept["plan_revision"]["parent_plan_digest"] == frozen.plan_digest
+        assert state["plan"] is frozen and kept["time_limit_reached"] is False
+        with pytest.raises(routes.HTTPException) as stale_kept:
+            await request(root.plan_digest, finalize_only=True)
+        assert stale_kept.value.status_code == 409
         assert all(lock_reads)
+
+        # B7: past the Scan's time limit the control plane compiles only the finalizer (stored),
+        # whether or not the node asked for it, and says so.
+        state["status"] = "running"
+        reached = {"value": True}
+
+        async def time_limit_reached(*_args, **_kwargs):
+            return reached["value"]
+
+        monkeypatch.setattr(routes, "_broker_scan_time_limit_reached", time_limit_reached)
+        terminal = await request(frozen.plan_digest)
+        assert materialized[-1] == {"finalize_only": True, "persist": True}
+        assert terminal["time_limit_reached"] is True
+        assert terminal["plan"]["actions"][-1]["action_id"] == "finalize.report"
     asyncio.run(scenario())
+
+
+def test_a_node_past_its_limit_asks_for_the_finalizer_and_gets_it_stored(monkeypatch):
+    """B7: a node's ``finalize_only`` on a running Scan stores the terminal revision."""
+    async def scenario():
+        fixture = _shared_round_fixture()
+        root = fixture["parent_plan"]
+        state = dict(plan=root, revision=root_scan_plan_revision(root))
+        seen = []
+
+        class Connection:
+            @asynccontextmanager
+            async def transaction(self):
+                yield self
+
+            async def fetchrow(self, *_args):
+                return {"status": "running", "target_id": "70000000-0000-4000-8000-000000000002",
+                        "target_url": fixture["target_url"], "options": {}, "scan_job_payload": {}}
+
+            async def fetchval(self, *_args):
+                return True
+
+        class Pool:
+            @asynccontextmanager
+            async def acquire(self):
+                yield Connection()
+
+        class ActionStore:
+            async def load_continuation_allocation(self, *_args, **_kwargs):
+                return fixture["allocation"]
+
+            async def load_plan(self, *_args, **_kwargs):
+                return state["plan"]
+
+            async def load_plan_revision(self, *_args, **_kwargs):
+                return state["revision"]
+
+        async def authenticated(*_args, **_kwargs):
+            return None
+
+        async def lease(*_args, **_kwargs):
+            return {"status": "leased", "worker_id": "node:container", "scan_id": root.scan_id,
+                    "lease_expires_at": routes.utc_now() + timedelta(minutes=5)}
+
+        async def materialize(_conn, *, parent_plan, revision_number, finalize_only=False, persist=True, **_kw):
+            seen.append((finalize_only, persist))
+            fixture["parent_plan"] = parent_plan
+            _settle_round_fixture(fixture)
+            result = compile_continuation_round(**fixture, revision_number=revision_number,
+                                                include_finalizer=True, finalize_only=True)
+            return result.plan, result.revision, result.options
+
+        async def not_reached(*_args, **_kwargs):
+            return False
+
+        monkeypatch.setattr(routes, "_pool", lambda: Pool())
+        monkeypatch.setattr(routes, "_broker_authenticated_node", authenticated)
+        monkeypatch.setattr(routes, "_broker_lease_row", lease)
+        monkeypatch.setattr(routes, "PostgresScanActionStore", ActionStore)
+        monkeypatch.setattr(routes, "_broker_scan_time_limit_reached", not_reached)
+        monkeypatch.setattr(routes, "CanonicalScanJob", SimpleNamespace(from_payload=lambda _raw: SimpleNamespace(
+            scan_id=root.scan_id, execution_plan=SimpleNamespace(digest=fixture["allocation"].execution_plan_digest),
+            target=SimpleNamespace(digest=fixture["target"].digest, target_id="70000000-0000-4000-8000-000000000002"),
+        )))
+        monkeypatch.setattr(routes, "_materialize_broker_scan_continuation", materialize)
+        response = await routes.continue_broker_scan_action_plan(
+            "node", "lease", routes.BrokerScanContinuationRequest(
+                job_lease_token="x" * 32, worker_id="broker:node:container", plan_digest=root.plan_digest,
+                allocation_digest=fixture["allocation"].allocation_digest, finalize_only=True), None)
+        assert seen == [(True, True)] and response["time_limit_reached"] is True
+    asyncio.run(scenario())
+
+
+def test_the_scan_time_limit_is_measured_from_the_scans_start(monkeypatch):
+    from datetime import datetime, timezone
+
+    started = datetime.now(timezone.utc) - timedelta(seconds=700)
+
+    class Connection:
+        async def fetchval(self, _sql, _scan_id):
+            return started
+
+    class Pool:
+        @asynccontextmanager
+        async def acquire(self):
+            yield Connection()
+
+    monkeypatch.setattr(routes, "_pool", lambda: Pool())
+    job = SimpleNamespace(execution_plan=SimpleNamespace(budget=SimpleNamespace(max_duration_seconds=600)),
+                          shard=None)
+    assert asyncio.run(routes._broker_scan_time_limit_reached(
+        None, scan_id="70000000-0000-4000-8000-000000000001", canonical_job=job)) is True
+    unlimited = SimpleNamespace(execution_plan=SimpleNamespace(budget=SimpleNamespace(max_duration_seconds=0)),
+                                shard=None)
+    assert asyncio.run(routes._broker_scan_time_limit_reached(
+        None, scan_id="70000000-0000-4000-8000-000000000001", canonical_job=unlimited)) is False
+    limit = asyncio.run(routes.lease_time_limit(
+        Pool(), scan_id="70000000-0000-4000-8000-000000000001",
+        options={"scan_execution_plan": {"budget": {"max_duration_seconds": 600}}}))
+    assert limit["max_duration_seconds"] == 600 and 695 <= limit["elapsed_seconds"] <= 710

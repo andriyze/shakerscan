@@ -212,6 +212,7 @@ from scan.worker_dispatch import (
     prepare_worker_dispatch,
 )
 from worker_handlers.retest_candidates import find_retest_candidate
+from worker_handlers.ai_gate import AI_SCAN_CHECKPOINT
 from worker_handlers.non_dast import (
     NonDastWorkerHandler,
     NonDastWorkerServices,
@@ -309,10 +310,12 @@ from scan.worker_action_executor import ReceiptScanActionExecutor
 from scan.action_authority_guard import ScanAuthorityGuard
 from scan.scan_deadline import load_scan_deadline
 from scan.cancelled_report import (
-    cancellation_error_result, cancelled_scan_report, is_kept_cancelled_report,
+    cancelled_parallel_parent_report, cancelled_scan_report, finalized_canonical_report,
+    is_kept_cancelled_report, keep_report_finalized_before_cancellation,
     persist_kept_cancelled_scan,
 )
 from scan.action_interruption import action_interrupted
+from scan.cancelled_parent import fold_cancelled_parent
 from scan.running_scan_authority import ScanAuthorityStopped, running_retest_authority, running_scan_authority
 from scan.retest_authority import (
     admit_retest,
@@ -13266,6 +13269,8 @@ async def process_scan_job(job_data: dict):
     # when the scan finishes. A broker result came from another node with its own record.
     capture_started = http_archive.start_scan_capture(scanner_http_capture, job_data.get("_broker_result_id"))
     domain_rate.mark_executing(str(scan_id))
+    # What an AI target scan's finished probes found, kept if its run is stopped hard.
+    ai_checkpoint: dict[str, Any] = {}
 
     try:
         try:
@@ -13295,9 +13300,13 @@ async def process_scan_job(job_data: dict):
                     ai_target_id=ai_target_id, record_event=lambda name: record_operational_event(get_redis(), name))
                 async with run_authority:
                     if not is_deterministic_dast(options):
-                        result = await run_scan(
-                            target, options, scan_id=scan_id, job_id=job_id,
-                        )
+                        checkpoint_token = AI_SCAN_CHECKPOINT.set(ai_checkpoint)
+                        try:
+                            result = await run_scan(
+                                target, options, scan_id=scan_id, job_id=job_id,
+                            )
+                        finally:
+                            AI_SCAN_CHECKPOINT.reset(checkpoint_token)
                     if device_target_id and (options or {}).get("run_kind") == "device_posture":
                         posture_result = result.get("device_posture") if isinstance(result, dict) and isinstance(result.get("device_posture"), dict) else {}
                         _append_device_activity(
@@ -13347,7 +13356,7 @@ async def process_scan_job(job_data: dict):
                             result["device_posture"] = posture_result
                 result = await run_authority.annotate(result, scan_id=scan_id)
         except ScanAuthorityStopped as e:  # the report names the authorization stop
-            result = {'target': target, **e.report}
+            result = authority_stopped_result(e, target, ai_checkpoint)
         except ValueError as e:
             # Validation errors (e.g., incompatible options like public+smart)
             result = {
@@ -13388,6 +13397,13 @@ async def process_scan_job(job_data: dict):
                     "status": "inconclusive",
                     "error": f"candidate_verifier_fault:{type(candidate_error).__name__}",
                 }
+
+        # A cancellation seen only after the report was finalized keeps its findings too.
+        if finalized_canonical_report(result) and not device_target_id:
+            async with db_pool.acquire() as conn:
+                result = keep_report_finalized_before_cancellation(result, await conn.fetchval(
+                    "SELECT status FROM scans WHERE id=$1", uuid.UUID(scan_id),
+                ))
 
         # Extract results (run_scan already strips NUL bytes from the whole result so
         # the scans.result write and findings rows can't crash on \x00; save_findings
@@ -16180,8 +16196,17 @@ async def process_scan_shard_job(job_data: dict):
         completed_at = utc_now()
         duration = int((completed_at - now).total_seconds())
 
+        kept_cancelled_shard = False
         async with db_pool.acquire() as conn:
             current = await conn.fetchrow("SELECT status FROM scans WHERE id = $1", uuid.UUID(scan_id))
+            if current and current['status'] == 'cancelled':
+                # A cancelled shard keeps what its settled actions confirmed: its row stays
+                # cancelled and the merge (or the cancelled parent's fold) reads the report.
+                kept = keep_report_finalized_before_cancellation(result, current['status'])
+                kept_cancelled_shard = is_kept_cancelled_report(kept)
+                if kept_cancelled_shard:
+                    result = kept
+                    findings = result.get('findings', []) or []
             if current and current['status'] in ('failed', 'cancelled'):
                 # Stale cleanup or user cancellation already finalized this
                 # shard. Do not overwrite it with late subprocess output.
@@ -16206,6 +16231,13 @@ async def process_scan_shard_job(job_data: dict):
                      completed_at, duration, 'partial' if partial else 'completed',
                      uuid.UUID(scan_id), shard_assurance)
 
+        if kept_cancelled_shard:
+            coverage = result.get('coverage') if isinstance(result.get('coverage'), dict) else {}
+            if await persist_kept_cancelled_scan(
+                db_pool, scan_id=scan_id, result=result, completed_at=completed_at,
+                duration=duration, coverage=coverage, budget_used=None,
+            ):
+                print(f"[{job_id[:8]}] Shard '{label}' cancelled; kept {len(findings)} confirmed finding(s)", flush=True)
         final_status = 'failed' if error else 'completed'
         final_phase = 'failed' if error else ('partial' if partial else 'completed')
         if current and current['status'] in ('failed', 'cancelled'):
@@ -16278,6 +16310,7 @@ async def process_scan_shard_job(job_data: dict):
                     print(f"[{job_id[:8]}] all shards terminal -> enqueued merge for {parent_id[:8]}", flush=True)
             except Exception as e:
                 print(f"[{job_id[:8]}] merge reconcile error: {e}", flush=True)
+            await _fold_cancelled_parallel_parent(parent_id, f"shard {job_id[:8]}")
 
 
 async def process_scan_merge_job(job_data: dict):
@@ -16297,25 +16330,29 @@ async def process_scan_merge_job(job_data: dict):
         if not parent:
             print(f"[merge {parent_id[:8]}] parent not found; aborting", flush=True)
             return
-        if parent['status'] == 'cancelled':
-            parent_job_id = parent['job_id'] or parent_id
-            r.hset(
-                f"job:{parent_job_id}",
-                mapping={'status': 'cancelled', 'progress': '100', 'current_phase': 'cancelled'},
-            )
-            r.expire(f"job:{parent_job_id}", 86400)
-            r.delete(parallel_scan.shards_remaining_key(parent_id))
-            print(f"[merge {parent_id[:8]}] parent cancelled; merge skipped", flush=True)
-            return
-        children = await conn.fetch("""
-            SELECT id, status, result, score, grade, findings_count, shard_index,
-                   options, started_at, completed_at, campaign_id, error_message,
-                   current_phase, executing_node_id, worker_id,
-                   scan_action_plan_digest, scan_action_plan_json
-            FROM scans
-            WHERE parent_scan_id = $1 AND scan_role='shard'
-            ORDER BY shard_index
-        """, uuid.UUID(parent_id))
+        cancelled_parent = parent['status'] == 'cancelled'
+        if not cancelled_parent:
+            children = await conn.fetch("""
+                SELECT id, status, result, score, grade, findings_count, shard_index,
+                       options, started_at, completed_at, campaign_id, error_message,
+                       current_phase, executing_node_id, worker_id,
+                       scan_action_plan_digest, scan_action_plan_json
+                FROM scans
+                WHERE parent_scan_id = $1 AND scan_role='shard'
+                ORDER BY shard_index
+            """, uuid.UUID(parent_id))
+    if cancelled_parent:
+        parent_job_id = parent['job_id'] or parent_id
+        r.hset(
+            f"job:{parent_job_id}",
+            mapping={'status': 'cancelled', 'progress': '100', 'current_phase': 'cancelled'},
+        )
+        r.expire(f"job:{parent_job_id}", 86400)
+        r.delete(parallel_scan.shards_remaining_key(parent_id))
+        print(f"[merge {parent_id[:8]}] parent cancelled; merge skipped", flush=True)
+        # Not merged, but the cancelled parent keeps the union of what its shards kept.
+        await _fold_cancelled_parallel_parent(parent_id, f"merge {parent_id[:8]}")
+        return
 
     target_id = str(parent['target_id']) if parent['target_id'] else None
     target_url = parent['target_url']
@@ -17074,6 +17111,34 @@ async def process_scan_merge_job(job_data: dict):
     )
 
 
+def authority_stopped_result(stopped: ScanAuthorityStopped, target: Any, checkpoint: Mapping[str, Any]) -> dict[str, Any]:
+    """The result of a run stopped on its authorization that did not return a report.
+
+    An AI target scan stopped hard (it did not return within its stop grace) keeps what its
+    finished probes had checkpointed: the report reads partial and names the stop, as the
+    report of one that returned after the stop does. Anything else records the stop error.
+    """
+    result = {'target': target, **stopped.report}
+    if stopped.before_start or not checkpoint.get("findings"):
+        return result
+    from ai_gate_scan import kept_checkpoint_findings
+    kept = kept_checkpoint_findings(checkpoint)
+    if not kept:
+        return result
+    result = {key: value for key, value in result.items() if key != 'error'}
+    result['findings'] = kept
+    result['ai_gate_stopped_hard'] = True
+    return result
+
+
+async def _fold_cancelled_parallel_parent(parent_id: str | None, log_prefix: str) -> int | None:
+    return await fold_cancelled_parent(
+        db_pool, parent_id, log_prefix, redis_provider=get_redis,
+        finding_merge_key=parallel_scan.finding_merge_key, fingerprint=generate_finding_fingerprint,
+        save_findings=save_findings,
+    )
+
+
 async def _reconcile_parallel_child_completion(parent_id: str | None, r, log_prefix: str) -> None:
     """Notify the parent barrier that one child reached a terminal state."""
     if not parent_id:
@@ -17091,6 +17156,7 @@ async def _reconcile_parallel_child_completion(parent_id: str | None, r, log_pre
             print(f"[{log_prefix}] all children terminal -> enqueued merge for {parent_id[:8]}", flush=True)
     except Exception as e:
         print(f"[{log_prefix}] merge reconcile error: {e}", flush=True)
+    await _fold_cancelled_parallel_parent(parent_id, log_prefix)
 
 
 async def process_exploit_batch_job(job_data: dict):
@@ -17706,12 +17772,16 @@ async def process_exploit_batch_job(job_data: dict):
             scan_opts = await _hydrate_generic_scan_credentials(scan_opts, scan_id)
             scan_opts = await _hydrate_managed_scan_credentials(scan_opts, scan_id)
             domain_rate.mark_executing(rate_entry)
-            result = cancellation_error_result(await _execute_reserved_deterministic_scan(
+            result = await _execute_reserved_deterministic_scan(
                 target, scan_opts, scan_id=scan_id, job_id=job_id,
-            ), target)  # an ASM batch keeps its cancellation outcome: no completion side effects
+            )
         except Exception as e:
             result = {'target': target, 'error': str(e), 'result': {'score': None, 'grade': None}, 'findings': []}
         domain_rate.annotate_result(result, reduction)
+        # A cancelled batch keeps what its settled actions confirmed, as a partial attempt
+        # (endpoints it did not finish go back to the inventory); the batch stays cancelled
+        # and its campaign is not completed by it.
+        batch_cancelled = is_kept_cancelled_report(result)
         findings = result.get('findings', []) or []
         error = result.get('error')
         meta = result.get('scan_metadata') if isinstance(result.get('scan_metadata'), dict) else {}
@@ -17896,7 +17966,7 @@ async def process_exploit_batch_job(job_data: dict):
                                 "completed_without_endpoint_telemetry": True,
                             },
                         )
-                    if finish_campaign_on_complete:
+                    if finish_campaign_on_complete and not batch_cancelled:
                         await asm_inventory.finish_campaign(conn, campaign_id, status='completed')
                     wl = (result.get('active_checks') or {}).get('active_worklist')
                     if wl:  # keep inventory fresh with anything new this run surfaced
@@ -17940,6 +18010,14 @@ async def process_exploit_batch_job(job_data: dict):
             if current and current['status'] in ('failed', 'cancelled'):
                 final_status = current['status']
                 terminal_phase = current['status']
+            elif batch_cancelled:
+                final_status = terminal_phase = 'cancelled'
+                await conn.execute(
+                    """UPDATE scans SET status='cancelled',
+                              error_message=COALESCE(error_message, 'Cancelled by user')
+                       WHERE id=$1 AND status NOT IN ('completed','failed','cancelled')""",
+                    uuid.UUID(scan_id),
+                )
             else:
                 # Stored beside the score so a list view can show that a clean grade came
                 # from a shallow scan without opening the report.
@@ -17953,6 +18031,13 @@ async def process_exploit_batch_job(job_data: dict):
                     (error if error else None),
                     int(assurance) if isinstance(assurance, int) else None,
                 )
+        if batch_cancelled and final_status == 'cancelled':
+            # The row stays cancelled; it stores the kept report the merge unions.
+            await persist_kept_cancelled_scan(
+                db_pool, scan_id=scan_id, result=result, completed_at=completed_at,
+                duration=duration, coverage=result.get('coverage') if isinstance(result.get('coverage'), dict) else {},
+                budget_used=None,
+            )
         r.hset(f"job:{job_id}", mapping={
             'status': final_status, 'result_path': filepath,
             'completed_at': completed_at.isoformat(), 'progress': '100',

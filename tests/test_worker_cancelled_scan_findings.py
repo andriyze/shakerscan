@@ -241,14 +241,69 @@ def test_a_kept_cancelled_report_names_the_cancelled_finalizer():
     assert execution["finalized_after_cancellation"] is True
 
 
-def test_an_asm_batch_keeps_its_cancellation_error():
-    from scan.cancelled_report import cancellation_error_result
+def test_a_report_finalized_before_the_cancellation_keeps_its_findings(monkeypatch):
+    """B1: the cancel arrived while the report was finalized (the finalizer had already run):
+    the Scan stays cancelled and keeps the report's findings."""
+    report = {
+        "target": "https://example.test",
+        "findings": [{"title": "Reflected XSS", "severity": "high", "url": "https://example.test/q"}],
+        "result": {"score": 40, "grade": "D"},
+        "coverage": {"status": "complete", "reasons": []},
+        "scan_metadata": {},
+        "canonical_action_execution": {
+            "status_matrix": {"baseline.http": "success", "finalize.report": "success"},
+            "finalization_action": {"action_id": "finalize.report", "status": "success"},
+        },
+    }
+    conn, redis, saved = _run(monkeypatch, status="cancelled", report=report)
+    assert saved and saved[0][2][0]["title"] == "Reflected XSS"
+    assert len(conn.kept_updates) == 1 and conn.kept_updates[0][5] == "cancelled"
+    assert not any("status = 'completed'" in query for query in conn.executions)
+    assert redis.hashes[-1][1]["status"] == "cancelled"
+    stored = __import__("json").loads(conn.kept_updates[0][1])
+    execution = stored["canonical_action_execution"]
+    # The finalizer did run: its status is kept and the record says it ran before the cancel.
+    assert execution["finalization_action"]["status"] == "success"
+    assert execution["finalized_before_cancellation"] is True
+    assert stored["scan_metadata"]["cancelled"] is True and stored["result"]["score"] == 40
 
-    kept = mark_cancelled_scan_report({"findings": [{"title": "x"}], "coverage": {}})
-    error = cancellation_error_result(kept, "https://example.test")
-    assert error["error"] == "Cancelled by user" and error["findings"] == []
-    ordinary = {"findings": [{"title": "x"}]}
-    assert cancellation_error_result(ordinary, "https://example.test") is ordinary
+
+def test_a_report_is_only_kept_for_a_cancelled_canonical_scan():
+    from scan.cancelled_report import keep_report_finalized_before_cancellation
+
+    canonical = {"findings": [], "canonical_action_execution": {}}
+    assert keep_report_finalized_before_cancellation(dict(canonical), "running") == canonical
+    assert keep_report_finalized_before_cancellation(dict(canonical), "failed") == canonical
+    legacy = {"findings": [{"title": "x"}]}
+    assert keep_report_finalized_before_cancellation(legacy, "cancelled") is legacy
+    errored = {"error": "boom", "canonical_action_execution": {}}
+    assert keep_report_finalized_before_cancellation(errored, "cancelled") is errored
+    kept = keep_report_finalized_before_cancellation(dict(canonical), "cancelling")
+    assert kept["scan_metadata"]["cancelled"] is True
+
+
+def test_a_cancelled_parallel_parent_report_is_the_union_of_what_its_shards_kept():
+    from scan.cancelled_report import cancelled_parallel_parent_report, is_kept_cancelled_report
+
+    shared = {"title": "shared", "url": "https://example.test/a"}
+    children = [
+        {"id": "s0", "status": "completed", "shard_index": 0,
+         "result": {"findings": [shared, {"title": "completed only"}]}},
+        {"id": "s1", "status": "cancelled", "shard_index": 1,
+         "result": mark_cancelled_scan_report({"findings": [shared, {"title": "kept"}], "coverage": {}})},
+        # Cancelled with the old error result, or before it ran: nothing is kept from them.
+        {"id": "s2", "status": "cancelled", "shard_index": 2,
+         "result": {"error": "Cancelled by user", "findings": [{"title": "not kept"}]}},
+        {"id": "s3", "status": "cancelled", "shard_index": 3, "result": None},
+        {"id": "s4", "status": "failed", "shard_index": 4, "result": {"findings": [{"title": "failed"}]}},
+    ]
+    report = cancelled_parallel_parent_report(
+        target_url="https://example.test", children=children,
+        merge_key=lambda finding: finding["title"], extra_findings=[{"title": "recon"}],
+    )
+    assert [item["title"] for item in report["findings"]] == ["shared", "completed only", "kept", "recon"]
+    assert is_kept_cancelled_report(report) and report["coverage"]["status"] == "cancelled"
+    assert report["parallel"]["shards_kept"] == 2 and report["parallel"]["shards_total"] == 5
 
 
 def test_a_work_round_cancelled_before_its_finalizer_reports_over_a_compiled_revision(monkeypatch):

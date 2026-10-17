@@ -6791,6 +6791,13 @@ async def cancel_scan(scan_id: str):
             await parallel_scan.reconcile_parallel_parent(
                 conn, parent_to_reconcile, r, QUEUE_NAME
             )
+    if scan['scan_role'] == 'parent' and requested_status == 'cancelled':
+        # The cancelled parent keeps what its finished shards confirmed; shards still
+        # running add theirs when they settle.
+        try:
+            parallel_scan.enqueue_cancelled_parent_fold(r, scan_id, QUEUE_NAME)
+        except Exception as exc:
+            print(f"[cancel {scan_id[:8]}] cancelled parent fold enqueue failed: {type(exc).__name__}", flush=True)
 
     return {
         "status": requested_status,

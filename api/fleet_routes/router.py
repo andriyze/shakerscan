@@ -72,7 +72,8 @@ try:
     from scan.budget_allocator import ScanBudgetAllocationError, allocate_scan_action_plan
     from scan.collection_replay import EXECUTABLE_REPLAY_POLICIES, ScanCollectionReplayContractError, narrow_replay_plan_to_request_manifest, scan_replay_authorization, scan_replay_selector
     from scan.continuation import ContinuationBudgetCeiling, reconciled_continuation_ceiling, ScanContinuationError, amended_scan_plan_revision, build_discovery_continuation_manifests, merge_scan_action_continuation
-    from scan.continuation_rounds import compile_next_continuation
+    from scan.continuation_rounds import compile_continuation_round, compile_next_continuation
+    from scan.scan_deadline import lease_time_limit, load_scan_deadline, scan_time_limits
     from scan.verification_extension import resume_observation_action_ids
     from scan.contracts import SCAN_AUTHENTICATION_KEYS, scan_authentication_value_present
     from scan.execution_backend import ActionAlreadyTerminal, ActionLease, ActionLeaseLost, PostgresScanExecutionBackend, ScanExecutionBackendError
@@ -126,7 +127,8 @@ except ModuleNotFoundError:  # package import in host-side tests
     from ..scan.budget_allocator import ScanBudgetAllocationError, allocate_scan_action_plan
     from ..scan.collection_replay import EXECUTABLE_REPLAY_POLICIES, ScanCollectionReplayContractError, narrow_replay_plan_to_request_manifest, scan_replay_authorization, scan_replay_selector
     from ..scan.continuation import ContinuationBudgetCeiling, ScanContinuationError, amended_scan_plan_revision, build_discovery_continuation_manifests, merge_scan_action_continuation
-    from ..scan.continuation_rounds import compile_next_continuation
+    from ..scan.continuation_rounds import compile_continuation_round, compile_next_continuation
+    from ..scan.scan_deadline import lease_time_limit, load_scan_deadline, scan_time_limits
     from ..scan.verification_extension import resume_observation_action_ids
     from ..scan.contracts import SCAN_AUTHENTICATION_KEYS, scan_authentication_value_present
     from ..scan.execution_backend import ActionAlreadyTerminal, ActionLease, ActionLeaseLost, PostgresScanExecutionBackend, ScanExecutionBackendError
@@ -1177,6 +1179,16 @@ async def lease_broker_job(node_id: str, body: BrokerLeaseRequest, request: Requ
             },
         )
         redis_client.expire(f"job:{payload['job_id']}", 86400)
+    scan_time_limit = None
+    if scan_action_plan_payload is not None and payload.get("scan_id"):
+        try:
+            scan_time_limit = await lease_time_limit(
+                _pool(), scan_id=str(payload["scan_id"]),
+                options=payload.get("options") if isinstance(payload.get("options"), Mapping) else {},
+            )
+        except Exception as exc:
+            # The node then measures the limit from its own start, as before.
+            print(f"[broker] scan time limit unavailable ({type(exc).__name__})", flush=True)
     return JSONResponse(
         content={
             "lease_id": str(row["id"]),
@@ -1189,6 +1201,9 @@ async def lease_broker_job(node_id: str, body: BrokerLeaseRequest, request: Requ
             "scan_action_plan_revision": scan_action_plan_revision_payload,
             "action_worker_id": action_worker_id,
             "private_scan_inputs": private_scan_inputs,
+            # Measured from the Scan's start: the node stops its work when the Scan's limit
+            # ends, not its own lease's start plus the limit.
+            "scan_time_limit": scan_time_limit,
         },
         headers={"Cache-Control": "no-store"},
     )
@@ -1592,9 +1607,10 @@ async def continue_broker_scan_action_plan(
             raise HTTPException(
                 status_code=409, detail="broker Scan action plan is unavailable",
             )
-        if not scan_row or str(scan_row.get("status") or "") in {
+        scan_cancelled = not scan_row or str(scan_row.get("status") or "") in {
             "cancelled", "cancelling",
-        }:
+        }
+        if not scan_row or (scan_cancelled and not body.finalize_only):
             raise HTTPException(status_code=409, detail="broker Scan is cancelled")
         raw_job = parse_json_field(scan_row.get("scan_job_payload")) or {}
         try:
@@ -1635,7 +1651,20 @@ async def continue_broker_scan_action_plan(
                 "request_candidate_manifest_ref", "scan_continuation_plan_digest", "scan_plan_revision",
             ) if key in options
         }
-        if body.plan_digest != current_plan.plan_digest:
+        time_limit_reached = False
+        if body.finalize_only and scan_cancelled:
+            if body.plan_digest != current_plan.plan_digest:
+                raise HTTPException(status_code=409, detail="broker continuation input revision is stale")
+            if any(action.action_id == "finalize.report" for action in current_plan.actions):
+                amended = current_plan
+            else:
+                # No traffic follows: the node builds the kept report from settled receipts.
+                amended, revision, continuation_options = await _materialize_broker_scan_continuation(
+                    conn, parent_plan=current_plan, canonical_job=canonical_job, options=options,
+                    allocation=allocation, worker_id=body.worker_id,
+                    revision_number=revision.revision + 1, finalize_only=True, persist=False,
+                )
+        elif body.plan_digest != current_plan.plan_digest:
             # A lost response retries the parent digest. Do not append another round,
             # even if the returned successor has already finished in the meantime.
             if (revision.parent_plan_digest != body.plan_digest
@@ -1650,15 +1679,22 @@ async def continue_broker_scan_action_plan(
             )
             if target_active is not True:
                 raise HTTPException(status_code=409, detail="broker Scan target is inactive")
+            # The Scan's time limit is kept here too: past it no work round is compiled, only
+            # the finalizer, whether the node asked for that (``finalize_only``) or not.
+            time_limit_reached = bool(body.finalize_only) or await _broker_scan_time_limit_reached(
+                conn, scan_id=scan_id, canonical_job=canonical_job,
+            )
             amended, revision, continuation_options = await _materialize_broker_scan_continuation(
                 conn, parent_plan=current_plan, canonical_job=canonical_job, options=options,
                 allocation=allocation, worker_id=body.worker_id, revision_number=revision.revision + 1,
+                finalize_only=time_limit_reached,
             )
     return {
         "plan": amended.canonical_dict(),
         "options": continuation_options,
         "allocation_digest": allocation.allocation_digest,
         "plan_revision": revision.canonical_dict(),
+        "time_limit_reached": time_limit_reached,
     }
 
 
@@ -2299,6 +2335,9 @@ class BrokerActionCancelStatusRequest(BaseModel):
 
 class BrokerScanContinuationRequest(BrokerActionCancelStatusRequest):
     allocation_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
+    # A cancelled Scan asks for the finalize-only revision its kept report is built over;
+    # it is compiled, never stored, and refused for a Scan that is not cancelled.
+    finalize_only: bool = False
 
 
 def _broker_action_work_manifest_references(
@@ -3137,6 +3176,28 @@ async def _revalidate_broker_action_authority(
         )
 
 
+async def _broker_scan_time_limit_reached(conn: Any, *, scan_id: str, canonical_job: Any) -> bool:
+    """Whether a broker Scan is past its time limit, measured from its (parent's) start."""
+    budget = getattr(canonical_job.execution_plan, "budget", None)
+    shard = getattr(canonical_job, "shard", None)
+    sub_budget = getattr(shard, "sub_budget", None)
+    options: dict[str, Any] = {"scan_execution_plan": {"budget": {
+        "max_duration_seconds": getattr(budget, "max_duration_seconds", None)}}}
+    if shard is not None:
+        options["canonical_shard_authority"] = {
+            "parent_scan_id": getattr(shard, "parent_scan_id", None),
+            "sub_budget": {"max_duration_seconds": getattr(sub_budget, "max_duration_seconds", None)},
+        }
+    scan_limit, own_limit = scan_time_limits(options)
+    if scan_limit is None and own_limit is None:
+        return False
+    deadline = await load_scan_deadline(
+        _pool(), scan_id=scan_id, options=options,
+        max_duration_seconds=scan_limit or own_limit, own_max_duration_seconds=own_limit,
+    )
+    return deadline is not None and deadline.reached()
+
+
 async def _materialize_broker_scan_continuation(
     conn: Any,
     *,
@@ -3146,8 +3207,16 @@ async def _materialize_broker_scan_continuation(
     allocation: ScanContinuationAllocation,
     worker_id: str,
     revision_number: int = 1,
+    finalize_only: bool = False,
+    persist: bool = True,
 ) -> tuple[ScanActionPlan, ScanPlanRevision, dict[str, Any]]:
-    """Compile the broker continuation only from control-plane receipts."""
+    """Compile the broker continuation only from control-plane receipts.
+
+    ``finalize_only`` compiles the terminal finalize-only revision instead of a work round: for
+    a Scan past its time limit (persisted, as the local worker's), or with ``persist=False``
+    for a cancelled Scan's kept report, whose frozen plan is never amended (the local worker
+    does the same, see ``scan.cancelled_report``).
+    """
     backend = PostgresScanExecutionBackend(
         pool=_pool(),
         plan=parent_plan,
@@ -3233,7 +3302,7 @@ async def _materialize_broker_scan_continuation(
             request_manifests.append(manifest)
 
     try:
-        prepared = compile_next_continuation(
+        compile_kwargs = dict(
             parent_plan=parent_plan, allocation=allocation, parent_results=results,
             execution_plan=canonical_job.execution_plan, target=canonical_job.target,
             target_url=str(options.get("_continuation_target_url") or "")
@@ -3241,6 +3310,14 @@ async def _materialize_broker_scan_continuation(
             options=options, observations=observations,
             request_manifests=tuple(request_manifests), revision_number=revision_number,
         )
+        if finalize_only:
+            prepared = compile_continuation_round(
+                **compile_kwargs, include_finalizer=True, finalize_only=True,
+            )
+            if prepared is None:
+                raise ScanContinuationError("Scan produced no finalize-only revision")
+        else:
+            prepared = compile_next_continuation(**compile_kwargs)
     except (
         ScanActionPlanError,
         ScanBudgetAllocationError,
@@ -3250,6 +3327,8 @@ async def _materialize_broker_scan_continuation(
         record_operational_event(get_redis(), "continuation_rejected")
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
+    if not persist:
+        return prepared.plan, prepared.revision, {}
     manifest_store = PostgresScanManifestStore()
     for manifest in prepared.manifests:
         await manifest_store.persist(conn, manifest=manifest)
