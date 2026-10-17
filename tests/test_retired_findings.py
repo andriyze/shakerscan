@@ -327,6 +327,23 @@ def test_the_worker_step_retires_nothing_unless_every_finding_saved_and_coverage
         assert run(findings=[finding], saved_count=1, coverage_status=status) == (0, 0), status
 
 
+def test_readers_label_a_retired_row_and_never_call_it_resolved():
+    from api.finding_routes.retirement import not_retired_sql, resolution_reason_sql, retirement_fields
+    record = {"kind": "nuclei_opt_in_header_absent", "scan_id": "s",
+              "reason": "An opt-in header whose absence is the browser default; not a finding (2.11)."}
+    fields = retirement_fields({"status": "resolved", "evidence": json.dumps({"retired": record})})
+    assert fields["resolution_reason"] == "retired_by_release"
+    assert fields["retirement"]["release"] == "2.11"
+    assert fields["retirement"]["label"] == (
+        "Retired by release 2.11: An opt-in header whose absence is the browser default; not a finding")
+    assert retirement_fields({"status": "resolved", "evidence": {}}) == {
+        "resolution_reason": "resolved", "retirement": None}
+    assert retirement_fields({"status": "active", "evidence": {"retired": record}}) == {
+        "resolution_reason": None, "retirement": None}
+    assert not_retired_sql("f") == "NOT (COALESCE(f.evidence, '{}'::jsonb) ? 'retired')"
+    assert "'retired_by_release'" in resolution_reason_sql("f")
+
+
 def test_the_worker_saves_without_superseded_duplicates_and_gates_retirement_on_the_save():
     """The save path: a failed save is passed as None, and the worker's final coverage gates."""
     from pathlib import Path
