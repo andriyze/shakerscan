@@ -12,7 +12,7 @@ import uuid
 
 from fastapi import APIRouter, Body, HTTPException, Request
 
-from .flows import CaptureBatch, CaptureClose, CaptureCreate
+from .flows import LOCAL_OPERATOR, CaptureBatch, CaptureClose, CaptureCreate
 from .store import apply_batch, close_capture, close_idle_captures, create_capture
 
 try:
@@ -38,6 +38,11 @@ def _pool() -> Any:
     return pool
 
 
+def _actor(http_request: Request | None) -> str:
+    """The gateway-asserted operator, or ``local-operator`` (the open-source engine)."""
+    return (operator_identity(http_request) if http_request is not None else None) or LOCAL_OPERATOR
+
+
 def _collection_uuid(value: str) -> uuid.UUID:
     try:
         return uuid.UUID(str(value))
@@ -51,29 +56,32 @@ async def create_browser_capture(request: CaptureCreate, http_request: Request =
 
     Returns ``{id, allowed_origins, limits, ...}``: the recorder uploads only flows of those
     origins, and the server checks every flow again."""
-    created_by = (operator_identity(http_request) if http_request is not None else None) or "local-operator"
     async with _pool().acquire() as conn:
-        return await create_capture(conn, request, created_by=created_by)
+        return await create_capture(conn, request, created_by=_actor(http_request))
 
 
 @router.post("/request-collections/{collection_id}/capture-batches")
-async def append_capture_batch(collection_id: str, batch: CaptureBatch):
-    """Append one batch of recorded flows. Idempotent per ``(id, seq)``: an applied ``seq`` is
-    acknowledged unchanged, the next ``seq`` is applied, any other is a 409 naming the next.
-    Out-of-scope flows are counted and never stored; a closed capture refuses new batches."""
+async def append_capture_batch(collection_id: str, batch: CaptureBatch, http_request: Request = None):
+    """Append one batch of recorded flows. Idempotent per ``(id, seq)``: an applied ``seq`` sent
+    again with the same flows is acknowledged unchanged (with other flows: 409
+    ``capture_seq_conflict``), the next ``seq`` is applied, any other is a 409 naming the next.
+    Out-of-scope flows are counted and never stored; a closed capture refuses new batches; only
+    the operator who opened the capture may add to it (403 ``capture_owner_mismatch``)."""
     async with _pool().acquire() as conn:
-        return await apply_batch(conn, _collection_uuid(collection_id), batch)
+        return await apply_batch(conn, _collection_uuid(collection_id), batch, actor=_actor(http_request))
 
 
 @router.post("/request-collections/{collection_id}/capture-close")
-async def close_browser_capture(collection_id: str, request: CaptureClose = Body(default_factory=CaptureClose)):
-    """Close a capture; closing a closed capture answers ``already_closed``. Closing only ends
-    intake, so it is accepted whatever else the capture refuses."""
+async def close_browser_capture(collection_id: str, request: CaptureClose = Body(default_factory=CaptureClose),
+                                http_request: Request = None):
+    """Close a capture: its batches become the collection's document, which a Scan or Hunt can
+    then select. Closing a closed capture answers ``already_closed``; only the operator who
+    opened it may close it."""
     if not isinstance(request, CaptureClose):  # called in-process without a body
         request = CaptureClose()
     async with _pool().acquire() as conn:
         return await close_capture(
-            conn, _collection_uuid(collection_id), request.client_dropped,
+            conn, _collection_uuid(collection_id), request.client_dropped, actor=_actor(http_request),
         )
 
 

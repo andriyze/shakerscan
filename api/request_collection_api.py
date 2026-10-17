@@ -55,10 +55,12 @@ except ModuleNotFoundError:
 
 try:
     from capture.flows import CAPTURE_FORMAT, public_capture_state
+    from capture.store import refuse_open_capture
     from list_compat import direct, mark_deprecated, v1_page, wants_list_v1
     from list_contract import CURSOR_MAX_LENGTH, ListSpec, SortKey, SqlParams, count_total, snapshot_time
 except ModuleNotFoundError:
     from api.capture.flows import CAPTURE_FORMAT, public_capture_state
+    from api.capture.store import refuse_open_capture
     from api.list_compat import direct, mark_deprecated, v1_page, wants_list_v1
     from api.list_contract import (
         CURSOR_MAX_LENGTH, ListSpec, SortKey, SqlParams, count_total, snapshot_time,
@@ -424,7 +426,7 @@ async def create_request_collection(request: RequestCollectionCreate):
         async with conn.transaction():
             collection_name = summary.get("name") or request.name or "Request collection"
             existing = await conn.fetchrow(
-                """SELECT id, payload_sha256 FROM request_collections
+                """SELECT id, payload_sha256, format FROM request_collections
                    WHERE name=$1 AND (($2::uuid IS NOT NULL AND target_id=$2) OR
                                       ($3::uuid IS NOT NULL AND device_target_id=$3))
                    FOR UPDATE""",
@@ -432,6 +434,12 @@ async def create_request_collection(request: RequestCollectionCreate):
                 owner_uuid,
                 None,
             )
+            if existing and existing["format"] == CAPTURE_FORMAT:
+                # An import never replaces a browser capture (open or closed) of the same name.
+                raise HTTPException(status_code=409, detail={
+                    "error": "name_in_use",
+                    "message": "A browser capture on this target has this name; import under another name",
+                })
             collection_id = existing["id"] if existing else uuid.uuid4()
             row = await conn.fetchrow(
                 """INSERT INTO request_collections (
@@ -1086,6 +1094,8 @@ async def upsert_request_collection_selection(
         )
     async with _pool().acquire() as conn:
         collection = await _request_collection_owner(conn, collection_uuid)
+        # An open browser capture has no document yet: a selection waits for its close.
+        refuse_open_capture(collection)
         binding = await conn.fetchrow(
             """SELECT b.*, e.payload_sha256 AS environment_sha256
                FROM request_collection_bindings b

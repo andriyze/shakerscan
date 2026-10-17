@@ -1,18 +1,25 @@
 """Browser-capture persistence: create, append a batch, close, and close idle captures.
 
-A capture is one ``request_collections`` row (``format = 'capture'``) with its encrypted HAR
+A capture is one ``request_collections`` row (``format = 'capture'``) with its encrypted
 document, its redacted ``request_collection_requests`` index and one exact-origin binding to the
-target it was created for. Its bookkeeping (open/closed, the last applied batch ``seq``, counts)
-lives in ``metadata_json.capture``, so a capture needs no table or column of its own.
+target it was created for. Its bookkeeping (open/closed, the last applied batch ``seq``, counts,
+who opened it) lives in ``metadata_json.capture``.
 
-Every batch is applied under the collection row's lock: the server re-checks each flow's origin
-against the binding, appends the in-scope flows to the document, re-encrypts it and indexes the
-new rows. ``seq`` makes a retry idempotent: a batch whose ``seq`` was already applied is
-acknowledged without change, and only the next ``seq`` is applied.
+Batches are stored append-only: each applied batch is one ``request_collection_capture_batches``
+row holding that batch's HAR entries, encrypted on their own, and the digest of what was sent. A
+batch never decrypts or rewrites what came before it. Closing the capture (the recorder, or the
+idle close) assembles the batches into the collection's encrypted document once; until then the
+document is empty and the capture cannot be selected for a Scan or Hunt (``refuse_open_capture``),
+so every consumer reads a complete, final document exactly as it reads an imported HAR.
+
+``seq`` makes a retry idempotent: a batch whose ``seq`` was applied with the same content is
+acknowledged without change, the same ``seq`` with other content is refused, and only the next
+``seq`` is applied. Encryption and JSON work runs in a worker thread, off the event loop.
 """
 
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timedelta, timezone
 import hashlib
 import json
@@ -28,6 +35,7 @@ from .flows import (
     IDLE_CLOSE_SECONDS,
     MAX_CAPTURE_FLOWS,
     MAX_DOCUMENT_BYTES,
+    LOCAL_OPERATOR,
     CaptureBatch,
     CaptureCreate,
     CaptureDropCounts,
@@ -39,6 +47,7 @@ from .flows import (
     in_scope,
     new_capture_state,
     public_capture_state,
+    stored_size,
 )
 
 try:
@@ -105,8 +114,8 @@ def _decrypt(value: Any) -> dict[str, Any]:
         raise HTTPException(status_code=503, detail="The capture document could not be decrypted")
     payload = json.loads(raw)
     entries = (((payload or {}).get("document") or {}).get("log") or {}).get("entries")
-    if payload.get("format") != "har" or not isinstance(entries, list):
-        raise HTTPException(status_code=409, detail="The capture document is not a HAR log")
+    if payload.get("format") != CAPTURE_FORMAT or not isinstance(entries, list):
+        raise HTTPException(status_code=409, detail="The capture document is not a capture HAR log")
     return payload
 
 
@@ -128,6 +137,15 @@ def public_collection(row: Mapping[str, Any]) -> dict[str, Any]:
     return item
 
 
+_TARGET_MATCH_LIMIT = 50
+
+
+def _like_prefix(value: str) -> str:
+    """``value`` as a literal LIKE prefix: ``%``, ``_`` and the escape character match only
+    themselves (the query says ``ESCAPE '\\'``)."""
+    return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+
+
 async def _resolve_target(conn: Any, request: CaptureCreate) -> Mapping[str, Any]:
     """The one active web target a capture is for: by id, or by a URL whose origin names it."""
     if request.target_id:
@@ -145,13 +163,20 @@ async def _resolve_target(conn: Any, request: CaptureCreate) -> Mapping[str, Any
     if origin is None:
         raise HTTPException(status_code=422, detail="target_url must be an absolute http(s) URL")
     parsed = urllib.parse.urlsplit(origin)
-    # A bounded prefix lookup, then the exact canonical origin in Python (default ports, case).
+    # A bounded literal prefix lookup, then the exact canonical origin in Python (default ports,
+    # case). One row past the bound says the lookup was cut short, which is refused, never guessed.
     rows = await conn.fetch(
         """SELECT id, url, name FROM targets
-           WHERE is_active=true AND lower(url) LIKE $1
-           ORDER BY created_at, id LIMIT 50""",
-        f"{parsed.scheme}://{parsed.hostname}%",
+           WHERE is_active=true AND lower(url) LIKE $1 ESCAPE '\\'
+           ORDER BY created_at, id LIMIT $2""",
+        _like_prefix(f"{parsed.scheme}://{parsed.hostname}"), _TARGET_MATCH_LIMIT + 1,
     )
+    if len(rows) > _TARGET_MATCH_LIMIT:
+        raise _conflict(
+            "ambiguous_target",
+            f"More than {_TARGET_MATCH_LIMIT} targets start with {parsed.scheme}://{parsed.hostname}; "
+            "name the target by id",
+        )
     matches = [row for row in rows if flow_origin(str(row["url"] or "")) == origin]
     if not matches:
         raise HTTPException(status_code=404, detail=f"No active target has the origin {origin}")
@@ -172,6 +197,7 @@ async def create_capture(conn: Any, request: CaptureCreate, *, created_by: str) 
     now = await conn.fetchval("SELECT NOW()")
     name = (request.name or "").strip() or f"Browser capture {now.astimezone(timezone.utc):%Y-%m-%d %H:%M:%S} UTC"
     payload = empty_capture_document()
+    encrypted = await asyncio.to_thread(_encrypt, payload)
     async with conn.transaction():
         if await conn.fetchval(
             "SELECT EXISTS(SELECT 1 FROM request_collections WHERE target_id=$1 AND name=$2)",
@@ -193,7 +219,7 @@ async def create_capture(conn: Any, request: CaptureCreate, *, created_by: str) 
                    safe_request_count, potentially_mutating_request_count, metadata_json
                ) VALUES ($1,$2,$3,$4,$5,0,0,0,$6)
                RETURNING *""",
-            target["id"], name, CAPTURE_FORMAT, _encrypt(payload), _digest(payload),
+            target["id"], name, CAPTURE_FORMAT, encrypted, _digest(payload),
             json.dumps(metadata),
         )
         origins = await asset_collection_binding(
@@ -249,6 +275,17 @@ async def _locked_capture(conn: Any, collection_id: uuid.UUID) -> tuple[Mapping[
     return row, metadata, state
 
 
+def _require_owner(state: Mapping[str, Any], actor: str) -> None:
+    """Only the operator who opened a capture adds to it or closes it. Without a gateway identity
+    (the open-source engine) every request is ``local-operator``, so this always holds there."""
+    owner = str(state.get("created_by") or LOCAL_OPERATOR)
+    if owner != LOCAL_OPERATOR and actor != owner:
+        raise HTTPException(status_code=403, detail={
+            "error": "capture_owner_mismatch",
+            "message": "Only the operator who opened this capture can add to it or close it",
+        })
+
+
 def _idle(row: Mapping[str, Any]) -> bool:
     return row["db_now"] - row["updated_at"] > timedelta(seconds=IDLE_CLOSE_SECONDS)
 
@@ -278,53 +315,62 @@ def _ack(collection_id: uuid.UUID, state: Mapping[str, Any], *, seq: int, status
     }
 
 
-async def apply_batch(conn: Any, collection_id: uuid.UUID, batch: CaptureBatch) -> dict[str, Any]:
-    idle_closed: dict[str, Any] | None = None
+async def apply_batch(conn: Any, collection_id: uuid.UUID, batch: CaptureBatch, *,
+                      actor: str = LOCAL_OPERATOR) -> dict[str, Any]:
+    digest = await asyncio.to_thread(batch.digest)
     async with conn.transaction():
         row, metadata, state = await _locked_capture(conn, collection_id)
+        _require_owner(state, actor)
         last_seq = int(state.get("last_seq") or 0)
         if batch.seq <= last_seq:
+            stored = await conn.fetchval(
+                """SELECT batch_sha256 FROM request_collection_capture_batches
+                   WHERE collection_id=$1 AND seq=$2""",
+                collection_id, batch.seq,
+            )
+            if stored is not None and str(stored) != digest:
+                raise _conflict(
+                    "capture_seq_conflict",
+                    f"Batch seq {batch.seq} was already applied with different flows",
+                    seq=batch.seq, last_seq=last_seq,
+                )
             # A retry of a batch that was applied: acknowledge it, change nothing.
             return _ack(collection_id, state, seq=batch.seq, status="duplicate")
         if state.get("state") != "open":
             raise _closed(state)
-        if _idle(row):
-            state.update(state="closed", closed_reason="idle", closed_at=_iso(row["db_now"]))
-            await conn.execute(
-                "UPDATE request_collections SET metadata_json=$2, updated_at=NOW() WHERE id=$1",
-                collection_id, json.dumps(metadata),
-            )
-            idle_closed = state
-        elif batch.seq != last_seq + 1:
-            raise _conflict(
-                "capture_seq_gap", f"The next batch of this capture is seq {last_seq + 1}",
-                expected_seq=last_seq + 1, last_seq=last_seq,
-            )
-        else:
-            applied = await _append(conn, row, metadata, state, batch)
+        if not _idle(row):
+            if batch.seq != last_seq + 1:
+                raise _conflict(
+                    "capture_seq_gap", f"The next batch of this capture is seq {last_seq + 1}",
+                    expected_seq=last_seq + 1, last_seq=last_seq,
+                )
+            applied = await _append(conn, row, metadata, state, batch, digest)
             return _ack(collection_id, state, seq=batch.seq, status="applied", applied=applied)
-    raise _closed(idle_closed or state)
+        # Idle past the limit: the batch is late; the capture closes as the idle close would.
+        await _finalize(conn, row, metadata, state, reason="idle")
+    raise _closed(state)
 
 
-async def _append(conn: Any, row: Mapping[str, Any], metadata: dict[str, Any],
-                  state: dict[str, Any], batch: CaptureBatch) -> dict[str, int]:
-    binding_origins: set[str] = set()
+async def _binding_origins(conn: Any, row: Mapping[str, Any]) -> list[str]:
+    origins: set[str] = set()
     for binding in await conn.fetch(
         """SELECT allowed_origins FROM request_collection_bindings
            WHERE collection_id=$1 AND target_id=$2 AND is_active=true""",
         row["id"], row["target_id"],
     ):
-        binding_origins.update(str(item) for item in (_json_list(binding["allowed_origins"])))
-    if not binding_origins:
+        origins.update(str(item) for item in _json_list(binding["allowed_origins"]))
+    if not origins:
         raise _conflict("capture_unbound", "This capture has no active binding to its target")
-    payload: dict[str, Any] | None = None
-    entries: list[Any] = []
-    flow_count = int(state.get("flow_count") or 0)
-    document_bytes = int(state.get("document_bytes") or 0)
+    return sorted(origins)
+
+
+def _build_entries(batch: CaptureBatch, origins: list[str], *, flow_count: int,
+                   document_bytes: int) -> dict[str, Any]:
+    """The batch's in-scope flows as stored HAR entries, sized in stored bytes (pure, CPU work:
+    run in a thread)."""
     accepted: list[dict[str, Any]] = []
     tags: list[list[str]] = []
     refused_scope = refused_limit = bodies_dropped = 0
-    origins = sorted(binding_origins)
     for flow in batch.flows:
         # The recorder filters too, but scope is decided here, for every flow.
         if not in_scope(flow.url, origins):
@@ -345,15 +391,37 @@ async def _append(conn: Any, row: Mapping[str, Any], metadata: dict[str, Any],
         accepted.append(entry)
         tags.append(flow_tags(flow))
         document_bytes += size
+    index = index_appended_har_entries(accepted, start_index=flow_count, tags=tags) if accepted else []
+    return {
+        "entries": accepted, "index": index, "document_bytes": document_bytes,
+        "refused_scope": refused_scope, "refused_limit": refused_limit,
+        "bodies_dropped": bodies_dropped,
+        "encrypted": _encrypt(accepted) if accepted else None,
+        "stored_bytes": stored_size(accepted) if accepted else 0,
+    }
+
+
+async def _append(conn: Any, row: Mapping[str, Any], metadata: dict[str, Any],
+                  state: dict[str, Any], batch: CaptureBatch, digest: str) -> dict[str, int]:
+    origins = await _binding_origins(conn, row)
+    flow_count = int(state.get("flow_count") or 0)
+    built = await asyncio.to_thread(
+        _build_entries, batch, origins, flow_count=flow_count,
+        document_bytes=int(state.get("document_bytes") or 0),
+    )
+    accepted, index = built["entries"], built["index"]
+    await conn.execute(
+        """INSERT INTO request_collection_capture_batches (
+               collection_id, seq, batch_sha256, first_ordinal, entry_count, stored_bytes,
+               encrypted_entries
+           ) VALUES ($1,$2,$3,$4,$5,$6,$7)""",
+        row["id"], batch.seq, digest, flow_count, len(accepted), built["stored_bytes"],
+        built["encrypted"],
+    )
     first = last = None
     columns = ""
     values: list[Any] = []
     if accepted:
-        payload = _decrypt(row["encrypted_payload"])
-        entries = payload["document"]["log"]["entries"]
-        start = len(entries)
-        entries.extend(accepted)
-        index = index_appended_har_entries(accepted, start_index=start, tags=tags)
         await conn.executemany(
             """INSERT INTO request_collection_requests (
                    collection_id, request_id, ordinal, folder, name, method, redacted_url,
@@ -368,35 +436,27 @@ async def _append(conn: Any, row: Mapping[str, Any], metadata: dict[str, Any],
                 bool(item.get("safe_method")), bool(item.get("supported", True)),
             ) for item in index],
         )
-        flow_count = len(entries)
-        first, last = start + 1, flow_count
+        first, last = flow_count + 1, flow_count + len(accepted)
+        flow_count = last
         safe = sum(1 for item in index if item.get("safe_method"))
         state["endpoint_count"] = int(await conn.fetchval(
             """SELECT count(DISTINCT (method, normalized_path)) FROM request_collection_requests
                WHERE collection_id=$1""",
             row["id"],
         ) or 0)
-        # A changed document retires the selections saved over the previous one, exactly as a
-        # re-imported collection does; Scan and Hunt bind selections to the document digest.
-        await conn.execute(
-            """UPDATE request_collection_selections SET is_active=false, updated_at=NOW()
-               WHERE collection_id=$1 AND is_active=true""",
-            row["id"],
-        )
-        columns = (", encrypted_payload=$3, payload_sha256=$4, request_count=$5, "
-                   "safe_request_count=safe_request_count+$6, "
-                   "potentially_mutating_request_count=potentially_mutating_request_count+$7")
-        values = [_encrypt(payload), _digest(payload), flow_count, safe, len(index) - safe]
+        columns = (", request_count=$3, safe_request_count=safe_request_count+$4, "
+                   "potentially_mutating_request_count=potentially_mutating_request_count+$5")
+        values = [flow_count, safe, len(index) - safe]
     state.update(
         last_seq=batch.seq,
         flow_count=flow_count,
-        document_bytes=document_bytes,
-        refused_out_of_scope=int(state.get("refused_out_of_scope") or 0) + refused_scope,
-        refused_over_limit=int(state.get("refused_over_limit") or 0) + refused_limit,
-        bodies_dropped=int(state.get("bodies_dropped") or 0) + bodies_dropped,
+        document_bytes=built["document_bytes"],
+        refused_out_of_scope=int(state.get("refused_out_of_scope") or 0) + built["refused_scope"],
+        refused_over_limit=int(state.get("refused_over_limit") or 0) + built["refused_limit"],
+        bodies_dropped=int(state.get("bodies_dropped") or 0) + built["bodies_dropped"],
         last_batch_at=_iso(row["db_now"]),
     )
-    if refused_limit:
+    if built["refused_limit"]:
         state["limit_reached"] = True
     _merge_drops(state, batch.client_dropped)
     await conn.execute(
@@ -404,8 +464,8 @@ async def _append(conn: Any, row: Mapping[str, Any], metadata: dict[str, Any],
         row["id"], json.dumps(metadata), *values,
     )
     return {
-        "accepted": len(accepted), "refused_out_of_scope": refused_scope,
-        "refused_over_limit": refused_limit, "bodies_dropped": bodies_dropped,
+        "accepted": len(accepted), "refused_out_of_scope": built["refused_scope"],
+        "refused_over_limit": built["refused_limit"], "bodies_dropped": built["bodies_dropped"],
         "first_flow_seq": first, "last_flow_seq": last,
     }
 
@@ -419,20 +479,73 @@ def _json_list(value: Any) -> list[Any]:
     return list(value) if isinstance(value, list) else []
 
 
-async def close_capture(conn: Any, collection_id: uuid.UUID, drops: CaptureDropCounts | None) -> dict[str, Any]:
+def _assemble(encrypted_batches: list[str]) -> tuple[dict[str, Any], str, str]:
+    """The capture's final document from its batches in ``seq`` order: ``(payload, encrypted,
+    digest)`` (CPU work: run in a thread)."""
+    payload = empty_capture_document()
+    entries = payload["document"]["log"]["entries"]
+    for encrypted in encrypted_batches:
+        try:
+            raw = decrypt_secret(encrypted)
+        except SecretStoreUnavailable as exc:
+            raise HTTPException(
+                status_code=503, detail="Encrypted request-collection document storage is unavailable",
+            ) from exc
+        if not isinstance(raw, str) or raw.startswith("enc:fernet:"):
+            raise HTTPException(status_code=503, detail="A capture batch could not be decrypted")
+        batch_entries = json.loads(raw)
+        if not isinstance(batch_entries, list):
+            raise HTTPException(status_code=409, detail="A capture batch is not a list of entries")
+        entries.extend(batch_entries)
+    return payload, _encrypt(payload), _digest(payload)
+
+
+async def _finalize(conn: Any, row: Mapping[str, Any], metadata: dict[str, Any],
+                    state: dict[str, Any], *, reason: str) -> Mapping[str, Any]:
+    """Close a locked open capture: assemble its batches into the encrypted document (once),
+    clear the per-batch copies (their digests stay) and record why it closed."""
+    batches = await conn.fetch(
+        """SELECT encrypted_entries FROM request_collection_capture_batches
+           WHERE collection_id=$1 AND encrypted_entries IS NOT NULL ORDER BY seq""",
+        row["id"],
+    )
+    _payload, encrypted, digest = await asyncio.to_thread(
+        _assemble, [str(item["encrypted_entries"]) for item in batches],
+    )
+    state.update(state="closed", closed_reason=reason, closed_at=_iso(row["db_now"]))
+    updated = await conn.fetchrow(
+        """UPDATE request_collections
+           SET metadata_json=$2, encrypted_payload=$3, payload_sha256=$4, updated_at=NOW()
+           WHERE id=$1 RETURNING *""",
+        row["id"], json.dumps(metadata), encrypted, digest,
+    )
+    await conn.execute(
+        """UPDATE request_collection_capture_batches SET encrypted_entries=NULL
+           WHERE collection_id=$1 AND encrypted_entries IS NOT NULL""",
+        row["id"],
+    )
+    # No selection can exist over an open capture (refuse_open_capture); any that does is over
+    # a document that no longer exists, so it is revoked, never left admissible.
+    await conn.execute(
+        """UPDATE request_collection_selections
+           SET is_active=false, revoked_at=COALESCE(revoked_at, NOW()), updated_at=NOW()
+           WHERE collection_id=$1 AND revoked_at IS NULL""",
+        row["id"],
+    )
+    return updated
+
+
+async def close_capture(conn: Any, collection_id: uuid.UUID, drops: CaptureDropCounts | None, *,
+                        actor: str = LOCAL_OPERATOR) -> dict[str, Any]:
     async with conn.transaction():
         row, metadata, state = await _locked_capture(conn, collection_id)
+        _require_owner(state, actor)
         if state.get("state") == "closed":
             status = "already_closed"
         else:
             status = "closed"
-            state.update(state="closed", closed_reason="client", closed_at=_iso(row["db_now"]))
             _merge_drops(state, drops)
-            row = await conn.fetchrow(
-                """UPDATE request_collections SET metadata_json=$2, updated_at=NOW()
-                   WHERE id=$1 RETURNING *""",
-                collection_id, json.dumps(metadata),
-            )
+            row = await _finalize(conn, row, metadata, state, reason="client")
     collection = public_collection(row)
     return {
         "id": str(collection_id), "status": status, "state": "closed",
@@ -454,28 +567,55 @@ async def close_idle_captures(pool: Any, *, idle_seconds: int = IDLE_CLOSE_SECON
 
 
 async def _close_idle(pool: Any, *, idle_seconds: int, limit: int) -> int:
+    closed = 0
     async with pool.acquire() as conn:
-        rows = await conn.fetch(
-            """WITH idle AS (
-                   SELECT id FROM request_collections
-                   WHERE is_active=true AND format='capture'
-                     AND metadata_json->'capture'->>'state'='open'
-                     AND updated_at < NOW() - make_interval(secs => $1)
-                   ORDER BY updated_at LIMIT $2
-                   FOR UPDATE SKIP LOCKED
-               )
-               UPDATE request_collections c
-               SET metadata_json = jsonb_set(c.metadata_json, '{capture}',
-                       (c.metadata_json->'capture') || jsonb_build_object(
-                           'state', 'closed', 'closed_reason', 'idle',
-                           'closed_at', to_char(NOW() AT TIME ZONE 'UTC',
-                                                'YYYY-MM-DD"T"HH24:MI:SS.US"+00:00"'))),
-                   updated_at = NOW()
-               FROM idle WHERE c.id = idle.id
-               RETURNING c.id""",
+        candidates = await conn.fetch(
+            """SELECT id FROM request_collections
+               WHERE is_active=true AND format='capture'
+                 AND metadata_json->'capture'->>'state'='open'
+                 AND updated_at < NOW() - make_interval(secs => $1)
+               ORDER BY updated_at LIMIT $2""",
             float(idle_seconds), int(limit),
         )
-    return len(rows)
+        for candidate in candidates:
+            async with conn.transaction():
+                # Re-checked under the row lock; a capture a batch holds is left for next time.
+                row = await conn.fetchrow(
+                    """SELECT *, NOW() AS db_now FROM request_collections
+                       WHERE id=$1 AND is_active=true AND format='capture'
+                         AND metadata_json->'capture'->>'state'='open'
+                         AND updated_at < NOW() - make_interval(secs => $2)
+                       FOR UPDATE SKIP LOCKED""",
+                    candidate["id"], float(idle_seconds),
+                )
+                if not row:
+                    continue
+                metadata = _json_object(row["metadata_json"])
+                state = metadata.get("capture")
+                if not isinstance(state, dict) or state.get("schema") != CAPTURE_SCHEMA:
+                    continue
+                await _finalize(conn, row, metadata, state, reason="idle")
+                closed += 1
+    return closed
+
+
+def refuse_open_capture(row: Mapping[str, Any] | None) -> None:
+    """A capture still recording has no document to select yet: it is refused for a selection,
+    a Scan and a Hunt with a 409 that says what to do. ``row`` has the collection's ``format``
+    and either its ``metadata_json`` or a ``capture_state`` column."""
+    if not row or row.get("format") != CAPTURE_FORMAT:
+        return
+    state = row.get("capture_state")
+    if state is None:
+        capture = _json_object(row.get("metadata_json")).get("capture")
+        state = capture.get("state") if isinstance(capture, Mapping) else None
+    if state == "open":
+        raise _conflict(
+            "capture_open",
+            "This browser capture is still recording; close it first (finish `shakerscan record`, "
+            f"or POST /request-collections/{row.get('id')}/capture-close), then select or scan it",
+            collection_id=str(row.get("id") or ""),
+        )
 
 
 __all__ = [
@@ -484,4 +624,5 @@ __all__ = [
     "close_idle_captures",
     "create_capture",
     "public_collection",
+    "refuse_open_capture",
 ]

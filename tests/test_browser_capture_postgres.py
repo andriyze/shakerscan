@@ -1,5 +1,6 @@
 """Browser capture against real PostgreSQL: create, scoped idempotent batches, live paging,
-close, idle close, caps and masking (TARGET_ASSET_TEST_DATABASE_URL)."""
+close, idle close, caps, masking, append-only batch storage, owner binding and the open-capture
+refusals (TARGET_ASSET_TEST_DATABASE_URL)."""
 import asyncio
 import json
 import uuid
@@ -123,18 +124,39 @@ def test_capture_lifecycle_scope_idempotency_paging_and_masking(monkeypatch):
         assert (await request_collection_api.list_request_collections(
             target_id=str(target), search="", limit=100, offset=0, source_format="har"))["collections"] == []
 
-        # The encrypted document is an ordinary HAR payload: the worker's selection over it
-        # resolves the same request ids as the index, and it holds the raw values.
-        stored = await conn.fetchval("SELECT encrypted_payload FROM request_collections WHERE id=$1",
-                                     uuid.UUID(capture_id))
-        assert stored.startswith("enc:fernet:") and SECRETS[0] not in stored
-        payload = capture_store._decrypt(stored)
-        resolved = select_requests(payload, RequestSelector(safe_methods_only=False))
-        assert [item["id"] for item in resolved] == [item["request_id"] for item in legacy["requests"]]
-        assert SECRETS[0] in json.dumps(payload)
+        # Batches are stored append-only, one encrypted row each; the document stays empty
+        # (and its digest unchanged) while the capture is open.
+        batches = await conn.fetch(
+            """SELECT seq, first_ordinal, entry_count, stored_bytes, encrypted_entries
+               FROM request_collection_capture_batches WHERE collection_id=$1 ORDER BY seq""",
+            uuid.UUID(capture_id))
+        assert [(row["seq"], row["first_ordinal"], row["entry_count"]) for row in batches] == [(1, 0, 1), (2, 1, 3)]
+        assert all(row["encrypted_entries"].startswith("enc:fernet:") and row["stored_bytes"] > 0 for row in batches)
+        open_digest = await conn.fetchval("SELECT payload_sha256 FROM request_collections WHERE id=$1",
+                                          uuid.UUID(capture_id))
+        assert capture_store._decrypt(await conn.fetchval(
+            "SELECT encrypted_payload FROM request_collections WHERE id=$1", uuid.UUID(capture_id),
+        ))["document"]["log"]["entries"] == []
 
         closed = await capture_router.close_browser_capture(capture_id)
         assert closed["status"] == "closed" and closed["capture"]["closed_reason"] == "client"
+        # Closing assembled the batches into the document once and cleared the per-batch copies.
+        stored = await conn.fetchval("SELECT encrypted_payload FROM request_collections WHERE id=$1",
+                                     uuid.UUID(capture_id))
+        assert stored.startswith("enc:fernet:") and SECRETS[0] not in stored
+        assert await conn.fetchval("SELECT payload_sha256 FROM request_collections WHERE id=$1",
+                                   uuid.UUID(capture_id)) != open_digest
+        assert await conn.fetchval(
+            """SELECT count(*) FROM request_collection_capture_batches
+               WHERE collection_id=$1 AND encrypted_entries IS NOT NULL""", uuid.UUID(capture_id)) == 0
+        payload = capture_store._decrypt(stored)
+        assert payload["format"] == "capture" and SECRETS[0] in json.dumps(payload)
+        # The worker's selection resolves the same request ids as the index, and replays none of
+        # the recorded cookies or tokens.
+        resolved = select_requests(payload, RequestSelector(safe_methods_only=False))
+        assert [item["id"] for item in resolved] == [item["request_id"] for item in legacy["requests"]]
+        replayed = json.dumps([{k: v for k, v in item.items() if k != "body"} for item in resolved])
+        assert SECRETS[0] not in replayed and SECRETS[1] not in replayed
         status, refused = await detail(capture_router.append_capture_batch(
             capture_id, CaptureBatch(seq=3, flows=[])))
         assert status == 409 and refused["error"] == "capture_closed"
@@ -188,7 +210,7 @@ def test_idle_captures_close_and_refuse_batches(monkeypatch):
 def test_caps_keep_metadata_after_the_document_fills_and_refuse_past_the_request_cap(monkeypatch):
     async def body(conn, target):
         capture_id = (await capture_router.create_browser_capture(CaptureCreate(target_id=str(target))))["id"]
-        monkeypatch.setattr(capture_store, "MAX_DOCUMENT_BYTES", 4_000)
+        monkeypatch.setattr(capture_store, "MAX_DOCUMENT_BYTES", 5_000)
         monkeypatch.setattr(capture_store, "MAX_CAPTURE_FLOWS", 3)
         big = flow("https://app.example.test/page")
         big["response_body"] = "x" * 3_000
@@ -196,13 +218,121 @@ def test_caps_keep_metadata_after_the_document_fills_and_refuse_past_the_request
             {"seq": 1, "flows": [big, big, big, big]}))
         assert (ack["accepted"], ack["bodies_dropped"], ack["refused_over_limit"]) == (3, 2, 1)
         assert ack["capture"]["limit_reached"] is True and ack["capture"]["bodies_dropped"] == 2
+        closed = await capture_router.close_browser_capture(capture_id, CaptureClose(client_dropped=CaptureDropCounts(assets=2)))
+        assert closed["capture"]["bodies_dropped"] == 2 and closed["capture"]["client_dropped"]["assets"] == 2
         entries = capture_store._decrypt(await conn.fetchval(
             "SELECT encrypted_payload FROM request_collections WHERE id=$1", uuid.UUID(capture_id)))["document"]["log"]["entries"]
         assert "text" in entries[0]["response"]["content"]
         assert entries[1]["_bodiesDropped"] and "text" not in entries[1]["response"]["content"]
         headers = {header["name"]: header["value"] for header in entries[1]["request"]["headers"]}
         assert headers["Cookie"] == "***" and headers["Authorization"] == "***"
-        closed = await capture_router.close_browser_capture(capture_id, CaptureClose(client_dropped=CaptureDropCounts(assets=2)))
-        assert closed["capture"]["bodies_dropped"] == 2 and closed["capture"]["client_dropped"]["assets"] == 2
     run(monkeypatch, body)
 
+
+
+async def _binding(conn, capture_id):
+    return str(await conn.fetchval(
+        "SELECT id FROM request_collection_bindings WHERE collection_id=$1", uuid.UUID(capture_id)))
+
+
+def test_an_open_capture_cannot_be_selected_until_it_is_closed(monkeypatch):
+    async def body(conn, target):
+        capture_id = (await capture_router.create_browser_capture(CaptureCreate(target_id=str(target))))["id"]
+        await capture_router.append_capture_batch(capture_id, CaptureBatch.model_validate(
+            {"seq": 1, "flows": [flow("https://app.example.test/api/items")]}))
+        selection = request_collection_api.RequestCollectionSelectionUpsert(
+            binding_id=await _binding(conn, capture_id), name="items", replay_policy="safe_reads")
+        status, refused = await detail(request_collection_api.upsert_request_collection_selection(capture_id, selection))
+        assert status == 409 and refused["error"] == "capture_open" and "close it first" in refused["message"]
+        await capture_router.close_browser_capture(capture_id)
+        made = await request_collection_api.upsert_request_collection_selection(capture_id, selection)
+        assert made["selection"]["selected_request_count"] == 1
+        selection_row = await conn.fetchrow(
+            "SELECT is_active, revoked_at FROM request_collection_selections WHERE id=$1",
+            uuid.UUID(made["selection"]["id"]))
+        assert selection_row["is_active"] and selection_row["revoked_at"] is None
+    run(monkeypatch, body)
+
+
+def test_a_same_seq_with_other_flows_is_refused(monkeypatch):
+    async def body(conn, target):
+        capture_id = (await capture_router.create_browser_capture(CaptureCreate(target_id=str(target))))["id"]
+        sent = {"seq": 1, "flows": [flow("https://app.example.test/a")], "client_dropped": {"assets": 1}}
+        await capture_router.append_capture_batch(capture_id, CaptureBatch.model_validate(sent))
+        # The same flows with newer drop counts are a retry.
+        retry = await capture_router.append_capture_batch(
+            capture_id, CaptureBatch.model_validate({**sent, "client_dropped": {"assets": 5}}))
+        assert retry["status"] == "duplicate"
+        status, conflict = await detail(capture_router.append_capture_batch(
+            capture_id, CaptureBatch.model_validate({"seq": 1, "flows": [flow("https://app.example.test/b")]})))
+        assert status == 409 and conflict["error"] == "capture_seq_conflict"
+    run(monkeypatch, body)
+
+
+def test_only_the_operator_who_opened_a_capture_adds_to_it(monkeypatch):
+    async def body(conn, target):
+        identity = {"value": "alice@example.test"}
+        monkeypatch.setattr(capture_router, "operator_identity", lambda _request: identity["value"])
+        capture_id = (await capture_router.create_browser_capture(
+            CaptureCreate(target_id=str(target)), http_request=object()))["id"]
+        batch = CaptureBatch.model_validate({"seq": 1, "flows": [flow("https://app.example.test/a")]})
+        identity["value"] = "mallory@example.test"
+        status, refused = await detail(capture_router.append_capture_batch(capture_id, batch, http_request=object()))
+        assert status == 403 and refused["error"] == "capture_owner_mismatch"
+        identity["value"] = None  # a request with no gateway identity is local-operator
+        status, _ = await detail(capture_router.close_browser_capture(capture_id, http_request=object()))
+        assert status == 403
+        identity["value"] = "alice@example.test"
+        assert (await capture_router.append_capture_batch(capture_id, batch, http_request=object()))["status"] == "applied"
+        assert (await capture_router.close_browser_capture(capture_id, http_request=object()))["status"] == "closed"
+        # Without a gateway (open-source engine) every request is local-operator.
+        local = (await capture_router.create_browser_capture(CaptureCreate(target_id=str(target), name="local")))["id"]
+        assert (await capture_router.append_capture_batch(local, batch))["status"] == "applied"
+    run(monkeypatch, body)
+
+
+def test_an_import_never_overwrites_a_capture_of_the_same_name(monkeypatch):
+    async def body(conn, target):
+        capture_id = (await capture_router.create_browser_capture(
+            CaptureCreate(target_id=str(target), name="Walk")))["id"]
+        har = {"log": {"version": "1.2", "entries": [
+            {"request": {"method": "GET", "url": "https://app.example.test/x", "headers": []}}]}}
+        status, refused = await detail(request_collection_api.create_request_collection(
+            request_collection_api.RequestCollectionCreate(target_id=str(target), name="Walk", document=har)))
+        assert status == 409 and refused["error"] == "name_in_use"
+        row = await conn.fetchrow("SELECT format, metadata_json FROM request_collections WHERE id=$1",
+                                  uuid.UUID(capture_id))
+        assert row["format"] == "capture" and json.loads(row["metadata_json"])["capture"]["state"] == "open"
+    run(monkeypatch, body)
+
+
+def test_target_url_lookup_treats_like_wildcards_literally(monkeypatch):
+    async def body(conn, target):
+        await conn.execute("UPDATE targets SET url='https://app_1.example.test' WHERE id=$1", target)
+        await conn.execute("INSERT INTO targets(url,name) VALUES('https://appx1.example.test','Other')")
+        created = await capture_router.create_browser_capture(CaptureCreate(target_url="https://app_1.example.test/"))
+        assert created["target_id"] == str(target)
+        status, _ = await detail(capture_router.create_browser_capture(CaptureCreate(target_url="https://app%1.example.test/")))
+        assert status in {404, 422}
+        monkeypatch.setattr(capture_store, "_TARGET_MATCH_LIMIT", 1)
+        await conn.execute("INSERT INTO targets(url,name) VALUES('https://app_1.example.test.other.test','Twin')")
+        status, cut = await detail(capture_router.create_browser_capture(CaptureCreate(target_url="https://app_1.example.test/")))
+        assert status == 409 and cut["error"] == "ambiguous_target" and "by id" in cut["message"]
+    run(monkeypatch, body)
+
+
+def test_scan_and_hunt_admission_refuses_an_open_capture(monkeypatch):
+    api_module = pytest.importorskip("api.api")
+
+    async def body(conn, target):
+        capture_id = (await capture_router.create_browser_capture(CaptureCreate(target_id=str(target))))["id"]
+        await capture_router.append_capture_batch(capture_id, CaptureBatch.model_validate(
+            {"seq": 1, "flows": [flow("https://app.example.test/api/items")]}))
+        status, refused = await detail(api_module._generic_collection_refs(
+            conn, target_id=target, target_kind="web", bindings=[{"collection_id": capture_id}]))
+        assert status == 409 and refused["error"] == "capture_open"
+        await capture_router.close_browser_capture(capture_id)
+        refs, _endpoints, _manifest = await api_module._generic_collection_refs(
+            conn, target_id=target, target_kind="web", bindings=[{"collection_id": capture_id}])
+        assert [ref["collection_id"] for ref in refs] == [capture_id]
+    run(monkeypatch, body)

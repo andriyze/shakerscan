@@ -33,7 +33,10 @@ ORIGINS = ["https://app.example.test"]
 
 @pytest.mark.parametrize(("url", "origin"), [
     ("https://APP.example.test:443/a?b=c", "https://app.example.test"),
-    ("https://user:pw@app.example.test/", "https://app.example.test"),
+    ("https://user:pw@app.example.test/", None),           # userinfo: refused, not stripped
+    ("https://app.example.test\\@evil.example/", None),     # backslash in the authority
+    ("https://app.example.test\\.evil.example/", None),
+    ("https://app.example.test/a\\b", "https://app.example.test"),  # in the path: fine
     ("wss://app.example.test/socket", "https://app.example.test"),
     ("http://app.example.test:8080/", "http://app.example.test:8080"),
     ("data:text/plain,hi", None),
@@ -194,3 +197,93 @@ def test_a_failed_idle_close_does_not_stop_the_maintenance_tick(capsys):
     assert asyncio.run(close_idle_captures(BrokenPool())) == 0
     out = capsys.readouterr().out
     assert "idle close failed: RuntimeError" in out and "secret-ish" not in out
+
+
+def _capture_payload(entries):
+    return {"format": "capture", "document": {"log": {"version": "1.2", "entries": entries}}}
+
+
+def test_a_capture_replay_never_carries_a_recorded_credential():
+    """Every replay consumer resolves through resolve_imported_requests: a capture's cookies,
+    authorization, API-key and CSRF headers (and a ;jsessionid path parameter) never leave it."""
+    from scanner.scanner_tools.device_request_formats import resolve_imported_requests
+    from scanner.scanner_tools.request_collections import RequestSelector, select_requests
+
+    flow = _secret_flow(
+        url="https://app.example.test/app;jsessionid=JSESSION-SECRET/items",
+        request_headers=[
+            {"name": "Cookie", "value": f"sid={SECRETS[0]}"},
+            {"name": "Authorization", "value": f"Bearer {SECRETS[1]}"},
+            {"name": "Proxy-Authorization", "value": "Basic cHJveHktc2VjcmV0"},
+            {"name": "X-API-Key", "value": "api-key-secret"},
+            {"name": "X-CSRF-Token", "value": "csrf-secret"},
+            {"name": "X-XSRF-TOKEN", "value": "xsrf-secret"},
+            {"name": "Accept", "value": "application/json"},
+        ],
+    )
+    entry, _size = har_entry(flow)
+    entry["request"]["cookies"] = [{"name": "other", "value": "cookie-array-secret"}]
+    payload = _capture_payload([entry])
+    recorded = ("JSESSION-SECRET", SECRETS[0], SECRETS[1], "cHJveHktc2VjcmV0", "api-key-secret",
+                "csrf-secret", "xsrf-secret", "cookie-array-secret")
+    for requests in (resolve_imported_requests(payload),
+                     select_requests(payload, RequestSelector(safe_methods_only=False))):
+        (request,) = requests
+        text = json.dumps({key: value for key, value in request.items() if key != "body"})
+        assert not [value for value in recorded if value in text]
+        assert set(request["headers"]) == {"Accept", "Content-Type"}
+        assert request["auth_type"] == "none" and request["has_sensitive_material"] is False
+        assert request["url"] == "https://app.example.test/app/items"
+        assert set(request["captured_credentials_withheld"]) >= {
+            "cookie", "authorization", "proxy-authorization", "x-api-key", "x-csrf-token", "x-xsrf-token",
+        }
+    # The same document imported as an ordinary HAR is replayed as the operator supplied it.
+    har = resolve_imported_requests({"format": "har", "document": payload["document"]})
+    assert har[0]["headers"]["Cookie"] == f"sid={SECRETS[0]}"
+
+
+def test_the_document_cap_counts_stored_bytes_not_characters():
+    small = har_entry(_secret_flow(request_body=None, websocket_frames=[]))[1]
+    nul_heavy = har_entry(_secret_flow(request_body="\x00" * 10_000, websocket_frames=[]))[1]
+    # A NUL is one character but six bytes (\u0000) in the stored JSON.
+    assert nul_heavy - small >= 60_000
+    entry, size = har_entry(_secret_flow(request_body="é" * 1_000, websocket_frames=[]))
+    from api.capture.flows import stored_size
+    assert size == stored_size(entry) + 1
+
+
+def test_a_lone_surrogate_is_a_validation_error_not_a_server_error():
+    with pytest.raises(ValidationError):
+        CaptureBatch.model_validate({"seq": 1, "flows": [{"method": "GET", "url": "https://app.example.test/\ud800"}]})
+    with pytest.raises(ValidationError):
+        CaptureBatch.model_validate({"seq": 1, "flows": [{
+            "method": "GET", "url": "https://app.example.test/",
+            "request_headers": [{"name": "X", "value": "\udfff"}]}]})
+    with pytest.raises(ValidationError):
+        CaptureCreate.model_validate({"target_url": "https://app.example.test/", "name": "a\ud83d"})
+    assert CaptureBatch.model_validate({"seq": 1, "flows": [{"method": "GET", "url": "https://app.example.test/\U0001F600"}]})
+
+
+def test_a_batch_digest_ignores_drop_counts_and_follows_the_flows():
+    flows = [{"method": "GET", "url": "https://app.example.test/a"}]
+    first = CaptureBatch.model_validate({"seq": 3, "flows": flows, "client_dropped": {"assets": 1}})
+    retry = CaptureBatch.model_validate({"seq": 3, "flows": flows, "client_dropped": {"assets": 9}})
+    other = CaptureBatch.model_validate({"seq": 3, "flows": [{"method": "GET", "url": "https://app.example.test/b"}]})
+    assert first.digest() == retry.digest() != other.digest()
+
+
+def test_an_open_capture_is_refused_for_selection_with_a_clear_409():
+    from fastapi import HTTPException
+
+    from api.capture.store import refuse_open_capture
+
+    refuse_open_capture(None)
+    refuse_open_capture({"format": "har", "metadata_json": {}})
+    refuse_open_capture({"format": "capture", "capture_state": "closed"})
+    for row in ({"id": "c1", "format": "capture", "capture_state": "open"},
+                {"id": "c1", "format": "capture", "metadata_json": json.dumps({"capture": {"state": "open"}})}):
+        with pytest.raises(HTTPException) as refused:
+            refuse_open_capture(row)
+        assert refused.value.status_code == 409
+        assert refused.value.detail["error"] == "capture_open"
+        assert "close it first" in refused.value.detail["message"]

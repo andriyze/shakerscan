@@ -40,6 +40,15 @@ _SENSITIVE_NAME_RE = re.compile(
     re.I,
 )
 _SERVER_VARIABLE_RE = re.compile(r"\{([^{}]+)\}")
+# A browser capture (``format = "capture"``) is a HAR document the recorder wrote from a live
+# session. Its cookies, authorization and token headers are what the browser held, and they are
+# never replayed: authentication comes only from the target's credential profiles.
+CAPTURE_FORMAT = "capture"
+CAPTURE_CREDENTIAL_HEADER_NAMES = frozenset({
+    "cookie", "authorization", "proxy-authorization", "x-api-key", "api-key", "x-auth-token",
+    "x-csrf-token", "x-xsrf-token", "csrf-token", "xsrf-token", "x-csrftoken",
+})
+_CAPTURE_CREDENTIAL_NAME_RE = re.compile(r"(?:auth|csrf|xsrf|bearer)", re.I)
 
 
 class RequestImportError(ValueError):
@@ -167,12 +176,74 @@ def resolve_imported_requests(
         )
     if format_name == "har":
         return _resolve_har(payload.get("document"), max_requests=max_requests)
+    if format_name == CAPTURE_FORMAT:
+        return strip_captured_credentials(
+            _resolve_har(payload.get("document"), max_requests=max_requests)
+        )
     if format_name == "openapi":
         requests, _metadata = _openapi_requests(
             payload.get("document"), base_url=payload.get("base_url"), max_requests=max_requests
         )
         return requests
     raise RequestImportError("Encrypted request payload has an unsupported format")
+
+
+def is_captured_credential_header(name: str) -> bool:
+    """A header whose recorded value authenticated the browser: never replayed from a capture."""
+    lowered = str(name or "").strip().lower()
+    return (
+        lowered in CAPTURE_CREDENTIAL_HEADER_NAMES
+        or bool(_SENSITIVE_NAME_RE.search(lowered))
+        or bool(_CAPTURE_CREDENTIAL_NAME_RE.search(lowered))
+    )
+
+
+def _without_matrix_parameters(url: str) -> str:
+    """``url`` with every path segment's ``;name=value`` parameters removed (``;jsessionid=``)."""
+    try:
+        parts = urllib.parse.urlsplit(url)
+    except ValueError:
+        return url
+    if ";" not in parts.path:
+        return url
+    path = "/".join(segment.split(";", 1)[0] for segment in parts.path.split("/"))
+    return urllib.parse.urlunsplit((parts.scheme, parts.netloc, path, parts.query, parts.fragment))
+
+
+def strip_captured_credentials(requests: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Resolved capture requests without a single recorded credential header.
+
+    Every consumer that replays a collection (Scan replay, Hunt ``collections.replay_*``, device
+    requests) resolves it through ``resolve_imported_requests``, so this is the one place a
+    capture's cookies and tokens are removed; a replay that needs a session gets it from a
+    credential profile. Path ``;matrix`` parameters (a ``;jsessionid=`` session) are dropped
+    from the replayed URL too. The header names removed are kept
+    (``captured_credentials_withheld``), never their values."""
+    stripped: list[dict[str, Any]] = []
+    for request in requests:
+        items = [
+            (name, value) for name, value in request.get("header_items") or []
+            if not is_captured_credential_header(name)
+        ]
+        withheld = sorted({
+            str(name).lower() for name in dict(request.get("headers") or {})
+            if is_captured_credential_header(name)
+        })
+        stripped.append({
+            **request,
+            "url": _without_matrix_parameters(str(request.get("url") or "")),
+            "url_template": _without_matrix_parameters(str(request.get("url_template") or "")),
+            "headers": {
+                name: value for name, value in dict(request.get("headers") or {}).items()
+                if not is_captured_credential_header(name)
+            },
+            "header_items": items,
+            "sensitive_header_names": [],
+            "auth_type": "none",
+            "has_sensitive_material": False,
+            "captured_credentials_withheld": withheld,
+        })
+    return stripped
 
 
 def _validate_har(

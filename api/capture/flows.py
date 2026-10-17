@@ -12,6 +12,9 @@ from __future__ import annotations
 
 import base64
 import binascii
+import hashlib
+import json
+import re
 from datetime import datetime, timezone
 from typing import Any, Literal, Mapping, Optional, Sequence
 import urllib.parse
@@ -50,12 +53,38 @@ MAX_HEADER_BYTES = 64 * 1024
 MAX_URL_CHARS = 16 * 1024
 MAX_SEQ = 1_000_000
 IDLE_CLOSE_SECONDS = 30 * 60
+# Who acted when no gateway asserts an identity (the open-source engine has one operator).
+LOCAL_OPERATOR = "local-operator"
 
 # A body arrives as text, or base64 for binary: allow the base64 expansion of the byte cap; the
 # decoded bytes are cut to the cap below.
 _REQUEST_BODY_CHARS = MAX_REQUEST_BODY_BYTES * 4 // 3 + 8
 _RESPONSE_BODY_CHARS = MAX_RESPONSE_BODY_BYTES * 4 // 3 + 8
 _WEBSOCKET_SCHEMES = {"ws": "http", "wss": "https"}
+
+
+def _no_lone_surrogates(value: Any) -> Any:
+    """Refuse text that is not valid Unicode (a lone UTF-16 surrogate, as ``"\\ud800"`` decodes):
+    it cannot be stored as UTF-8, so it is a 422 here rather than a failure after admission."""
+    if isinstance(value, str):
+        try:
+            value.encode("utf-8")
+        except UnicodeEncodeError:
+            raise ValueError("text must be valid Unicode (no lone surrogate)") from None
+    elif isinstance(value, Mapping):
+        for key, item in value.items():
+            _no_lone_surrogates(key)
+            _no_lone_surrogates(item)
+    elif isinstance(value, (list, tuple)):
+        for item in value:
+            _no_lone_surrogates(item)
+    return value
+
+
+def stored_size(value: Any) -> int:
+    """The bytes ``value`` takes in the stored (UTF-8 JSON) document, escapes included: a NUL is
+    six bytes there, whatever its length as text."""
+    return len(json.dumps(value, separators=(",", ":"), ensure_ascii=False).encode("utf-8"))
 
 
 def capture_limits() -> dict[str, int]:
@@ -129,6 +158,11 @@ class CaptureCreate(BaseModel):
     target_url: Optional[str] = Field(default=None, max_length=2048)
     name: Optional[str] = Field(default=None, max_length=160)
 
+    @model_validator(mode="before")
+    @classmethod
+    def _valid_text(cls, value: Any) -> Any:
+        return _no_lone_surrogates(value)
+
     @model_validator(mode="after")
     def _one_target(self) -> "CaptureCreate":
         if bool(self.target_id) == bool(self.target_url):
@@ -141,6 +175,19 @@ class CaptureBatch(BaseModel):
     seq: int = Field(ge=1, le=MAX_SEQ)
     flows: list[CaptureFlow] = Field(default_factory=list, max_length=MAX_FLOWS_PER_BATCH)
     client_dropped: Optional[CaptureDropCounts] = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def _valid_text(cls, value: Any) -> Any:
+        return _no_lone_surrogates(value)
+
+    def digest(self) -> str:
+        """What the recorder sent for this ``seq`` (its drop counts aside, which a retry may
+        update): a retry must send exactly this again."""
+        material = {"seq": self.seq, "flows": [flow.model_dump(mode="json") for flow in self.flows]}
+        return hashlib.sha256(json.dumps(
+            material, sort_keys=True, separators=(",", ":"), ensure_ascii=False,
+        ).encode("utf-8")).hexdigest()
 
 
 class CaptureClose(BaseModel):
@@ -158,13 +205,21 @@ def http_url(url: str) -> str:
 
 def flow_origin(url: str) -> str | None:
     """The canonical origin of a flow URL, or None when it has none (data:, blob:, malformed)."""
+    text = str(url or "")
+    _scheme, separator, rest = text.partition("://")
+    authority = re.split(r"[/?#]", rest, maxsplit=1)[0] if separator else ""
+    if "\\" in authority or any(ord(ch) < 0x21 or ord(ch) == 0x7F for ch in authority):
+        # A backslash or a control character in the authority: parsers (and browsers) disagree
+        # about where it ends, so the origin is not decided from it.
+        return None
     try:
-        parsed = urllib.parse.urlsplit(http_url(url))
+        parsed = urllib.parse.urlsplit(http_url(text))
         if parsed.scheme.lower() not in {"http", "https"} or not parsed.hostname:
             return None
-        # The origin ignores userinfo; the canonical form lowercases and drops a default port.
-        authority = parsed.netloc.rsplit("@", 1)[-1]
-        return canonical_collection_origin(f"{parsed.scheme}://{authority}")
+        if "@" in parsed.netloc:
+            # Userinfo in the authority: refused, not stripped (``https://target@other/``).
+            return None
+        return canonical_collection_origin(f"{parsed.scheme}://{parsed.netloc}")
     except (ValueError, RequestCollectionContractError):
         return None
 
@@ -259,7 +314,8 @@ def response_body_cap(flow: CaptureFlow) -> int:
 
 
 def har_entry(flow: CaptureFlow, *, metadata_only: bool = False) -> tuple[dict[str, Any], int]:
-    """The HAR 1.2 entry kept in the encrypted document, and its approximate stored size.
+    """The HAR 1.2 entry kept in the encrypted document, and its stored size in bytes (the UTF-8
+    JSON the document holds, so escapes count as what they cost).
 
     ``metadata_only`` (the document is full): method, URL, status and headers, with every
     credential header value withheld and no body. Only the encrypted document holds what this
@@ -343,19 +399,16 @@ def har_entry(flow: CaptureFlow, *, metadata_only: bool = False) -> tuple[dict[s
             }
             for frame in flow.websocket_frames[:MAX_WEBSOCKET_FRAMES]
         ]
-    size = (
-        len(url) + sum(len(h["name"]) + len(h["value"]) + 32 for h in request_headers)
-        + sum(len(h["name"]) + len(h["value"]) + 32 for h in response_headers)
-        + len(request_text or "") + len(response_text or "")
-        + (0 if metadata_only else sum(len(frame.preview) + 64 for frame in flow.websocket_frames)) + 640
-    )
-    return entry, size
+    # One separator in the entries array.
+    return entry, stored_size(entry) + 1
 
 
 def empty_capture_document() -> dict[str, Any]:
-    """The encrypted payload a new capture starts with: an empty HAR log."""
+    """The encrypted payload of a capture: a HAR log under ``format = "capture"``, which
+    ``resolve_imported_requests`` reads as HAR with every recorded credential header removed.
+    It holds no entries while the capture is open; closing it assembles the batches here."""
     return {
-        "format": "har",
+        "format": CAPTURE_FORMAT,
         "document": {
             "log": {
                 "version": "1.2",
@@ -416,6 +469,7 @@ __all__ = [
     "CaptureDropCounts",
     "CaptureFlow",
     "IDLE_CLOSE_SECONDS",
+    "LOCAL_OPERATOR",
     "MAX_BATCH_BYTES",
     "MAX_CAPTURE_FLOWS",
     "MAX_DOCUMENT_BYTES",
@@ -429,6 +483,7 @@ __all__ = [
     "is_script",
     "is_secret_header",
     "response_body_cap",
+    "stored_size",
     "http_url",
     "in_scope",
     "new_capture_state",
