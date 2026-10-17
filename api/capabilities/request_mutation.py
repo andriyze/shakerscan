@@ -17,7 +17,7 @@ try:
     from capabilities.sql_error_signatures import sql_error_signatures
     from hunt.capability_executor import CapabilityAdapterResult, Cancelled, Heartbeat
     from runtime.auth_refusal import (
-        AUTHENTICATION_REQUIRED, is_authentication_request, refusal, refusal_error,
+        AUTHENTICATION_REQUIRED, refusal_error, request_refusal,
     )
     from runtime.capability_registry import CapabilitySpec
     from runtime.models import TargetBinding
@@ -27,7 +27,7 @@ except ModuleNotFoundError:  # package imports in host-side tests
     from .sql_error_signatures import sql_error_signatures
     from ..hunt.capability_executor import CapabilityAdapterResult, Cancelled, Heartbeat
     from ..runtime.auth_refusal import (
-        AUTHENTICATION_REQUIRED, is_authentication_request, refusal, refusal_error,
+        AUTHENTICATION_REQUIRED, refusal_error, request_refusal,
     )
     from ..runtime.capability_registry import CapabilitySpec
     from ..runtime.models import TargetBinding
@@ -410,10 +410,10 @@ class RequestMutationVerificationAdapter:
                 parser_version=REQUEST_MUTATION_PARSER_VERSION,
             )
         refused = (
-            refusal(control.status_code, control.response_headers)
-            if not control.error_code and not is_authentication_request(
-                self.request_class, self.request.url, self.request.body,
-            ) else None
+            request_refusal(
+                control.status_code, control.response_headers, request_class=self.request_class,
+                url=self.request.url, body=self.request.body,
+            ) if not control.error_code else None
         )
         if refused is not None and refused[1] == AUTHENTICATION_REQUIRED:
             # The target asked the replayed control for credentials (a captured request never

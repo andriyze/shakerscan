@@ -358,3 +358,42 @@ def test_sqlite_error_constants_are_recognised_signatures():
         "no database words here",
     ):
         assert not matched(benign), benign
+
+
+class RefusingTransport:
+    """Every request answered with one status: a login form's 401 or a session-less refusal."""
+
+    def __init__(self, status):
+        self.status = status
+
+    async def send(self, request, **_kwargs):
+        return ReplayTransportResult(
+            status_code=self.status, connected_address="192.0.2.10", final_url="",
+            response_headers={"Content-Type": "application/json"},
+            response_body=b'{"error":"invalid credentials"}', elapsed_ms=10,
+        )
+
+
+@pytest.mark.parametrize(("path", "status", "refused"), [
+    ("/hub/login", 401, False),                  # its answer to a wrong password
+    ("/hub/login", 403, True),                   # a stale CSRF token or a firewall
+    ("/api/auth/change-password", 401, True),    # replayed without the captured session
+    ("/api/users/1/token", 401, True),
+])
+def test_a_captured_login_form_401_is_its_answer_and_other_refusals_stay_inconclusive(path, status, refused):
+    # Lab Scan 9487605c (2.11.0 candidate 8dcd692b): a capture replays POST /hub/login as
+    # confirmed_mutation.
+    result = _run(
+        _request(
+            method="POST", url=f"https://app.example.test{path}",
+            body='{"username":"x","password":"y"}', content_type="application/json",
+        ),
+        {
+            "candidate_id": "c" * 64, "request_ref_id": "exact-request",
+            "method": "POST", "field_path": "username", "request_class": "confirmed_mutation",
+        },
+        RefusingTransport(status),
+    )
+    proof = result.observations[0]
+    assert (proof.get("finding_verdict") == "inconclusive") is refused
+    assert any(str(item).startswith(("authentication_required", "target_refused")) for item in result.errors) is refused

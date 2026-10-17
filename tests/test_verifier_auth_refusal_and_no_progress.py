@@ -273,8 +273,9 @@ def test_a_captured_login_form_is_compared_although_it_is_a_confirmed_mutation()
 
     transport, result = mutation("https://app.example.test/hub/login")
     assert len(transport.sent) == 2 and result.status == "success"
-    transport, result = mutation("https://app.example.test/hub/api/users/1")
-    assert len(transport.sent) == 1 and result.errors == ("authentication_required:401",)
+    for refused in ("/hub/api/users/1", "/api/auth/change-password", "/api/users/1/token"):
+        transport, result = mutation(f"https://app.example.test{refused}")
+        assert len(transport.sent) == 1 and result.errors == ("authentication_required:401",)
 
     def nosqli(url):
         transport = _Transport(401)

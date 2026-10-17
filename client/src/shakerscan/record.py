@@ -358,7 +358,10 @@ def run_browser(recording: Recording, start_url: str, *, headless: bool, script:
                 except PlaywrightError:
                     # Closing the window ends the recording: the wait on the page that closed
                     # fails (TargetClosedError), and the next pass sees which pages are left.
-                    if not live[0].is_closed() and browser.is_connected():
+                    # A browser that is gone has no pages left, whether or not each was marked.
+                    if not browser.is_connected():
+                        break
+                    if not live[0].is_closed():
                         raise
                 _process(sessions, recording)
                 recording.pump(time.monotonic())

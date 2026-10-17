@@ -93,15 +93,40 @@ def is_authentication_candidate(candidate: Mapping[str, Any]) -> bool:
     )
 
 
-def is_authentication_request(request_class: Any, url: Any, body: Any) -> bool:
-    """Whether a replayed request is an authentication form, whose 401/403 is its real answer.
+def is_login_form_request(url: Any, body: Any) -> bool:
+    """Whether a replayed body request posts to a sign-in endpoint (its last segment is one).
 
-    A captured or seeded ``POST /hub/login`` keeps the ``confirmed_mutation`` class of every
-    replayed body, so the class alone misses it; its body and login path identify it.
+    Stricter than ``is_authentication_path``: ``/api/auth/change-password`` or
+    ``/api/users/1/token`` replayed without the captured session is refused, not answering a
+    wrong password.
     """
-    return str(request_class or "") == "safe_authentication" or (
-        bool(body) and is_authentication_path(url)
-    )
+    if not body:
+        return False
+    try:
+        path = urllib.parse.urlsplit(str(url or "")).path
+    except ValueError:
+        return False
+    segments = [item for item in path.split("/") if item]
+    return bool(segments) and bool(_LOGIN_LEAF.match(segments[-1]))
+
+
+def request_refusal(
+    status: Any, headers: Mapping[str, Any] | None, *,
+    request_class: Any, url: Any, body: Any,
+) -> tuple[int, str] | None:
+    """``refusal`` for a replayed request, less a sign-in form's answer to a wrong password.
+
+    A ``safe_authentication`` request is a login form by its class. A captured or seeded
+    ``POST /hub/login`` keeps the ``confirmed_mutation`` class of every replayed body, so its
+    path identifies it, and only its 401 (``authentication_required``) is its answer: a plain
+    403 (a stale CSRF token, a firewall) is still a refusal.
+    """
+    if str(request_class or "") == "safe_authentication":
+        return None
+    refused = refusal(status, headers)
+    if refused is not None and refused[1] == AUTHENTICATION_REQUIRED and is_login_form_request(url, body):
+        return None
+    return refused
 
 
 def _header(headers: Mapping[str, Any] | None, wanted: str) -> str | None:

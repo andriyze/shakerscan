@@ -432,7 +432,8 @@ def test_record_a_local_app_headless_and_upload_it(tmp_path, monkeypatch, capsys
 
 
 
-def test_closing_the_browser_window_ends_the_recording(monkeypatch):
+@pytest.mark.parametrize("connected", [True, False])
+def test_closing_the_browser_window_ends_the_recording(monkeypatch, connected):
     # Lab 2.11.0 candidate 8dcd692b, headed: closing the window raised TargetClosedError out of
     # the wait, so no summary was printed and the capture stayed open until the idle close.
     import types
@@ -460,7 +461,7 @@ def test_closing_the_browser_window_ends_the_recording(monkeypatch):
         pages=[page], new_page=lambda: page, on=lambda *_args: None, close=lambda: closed.append("context"),
     )
     browser = types.SimpleNamespace(
-        new_context=lambda: context, is_connected=lambda: False, close=lambda: closed.append("browser"),
+        new_context=lambda: context, is_connected=lambda: connected, close=lambda: closed.append("browser"),
     )
 
     class Playwright:

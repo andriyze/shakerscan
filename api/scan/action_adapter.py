@@ -104,7 +104,8 @@ try:
     from runtime.scan_credentials import (
         bind_scan_session_headers,
         resolve_scan_http_principal,
-        resolve_scan_interactive_credential,        scan_credential_allows_capability,
+        resolve_scan_interactive_credential,
+        scan_credential_allows_capability,
     )
     from runtime.target_bound_socket import FrozenTargetSocketFactory
     from scan.private_state import (
@@ -196,7 +197,8 @@ except (ImportError, ModuleNotFoundError):
     from ..runtime.scan_credentials import (
         bind_scan_session_headers,
         resolve_scan_http_principal,
-        resolve_scan_interactive_credential,        scan_credential_allows_capability,
+        resolve_scan_interactive_credential,
+        scan_credential_allows_capability,
     )
     from ..runtime.target_bound_socket import FrozenTargetSocketFactory
     from .private_state import (
