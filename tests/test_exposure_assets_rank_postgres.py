@@ -276,9 +276,16 @@ async def assets(pool, monkeypatch, **params):
     return await exposure_router.exposure_assets(**params), recording.queries
 
 
+# Fields the bounded legacy response added after the previous implementation (the oracle).
+_BOUNDED_LEGACY_FIELDS = ("limit", "classification_pending", "list_v1_hint")
+
+
 def _comparable(body: dict) -> dict:
-    """``scan_age_days`` follows the request's clock; everything else must match exactly."""
+    """``scan_age_days`` follows the request's clock; everything else must match exactly. The
+    bounded response's own markers are checked where they matter, not against the oracle."""
     copy = json.loads(json.dumps(body, default=str))
+    for key in _BOUNDED_LEGACY_FIELDS:
+        copy.pop(key, None)
     return copy
 
 
@@ -558,3 +565,68 @@ def test_a_cold_inventory_is_refreshed_in_bounded_batches_without_omitting_asset
         assert await asset_rank.refresh_facts(conn, include_ai=False) == 0
 
     run(scenario, targets=17, ai_targets=0, findings=0)
+
+
+def test_a_cold_read_classifies_a_bounded_batch_and_ranks_the_rest_provisionally(monkeypatch):
+    """A backlog larger than a read's budget (bulk load, upgrade) is never classified inside the
+    request: the read ranks every asset (none omitted), says classification is pending, and hands
+    the rest to the background; the compactor's tick or the background task finishes it."""
+    monkeypatch.setattr(asset_rank, "FACTS_BATCH", 3)
+    monkeypatch.setattr(exposure_router, "FACTS_READ_BUDGET", 6)
+    started = []
+    monkeypatch.setattr(exposure_router, "complete_facts_in_background", lambda pool: started.append(pool))
+
+    async def scenario(conn, pool, ids):
+        active = await conn.fetchval("SELECT count(*) FROM targets WHERE is_active")
+        assert active > 20
+        body, _ = await assets(pool, monkeypatch, limit=2000)
+        written = await conn.fetchval("SELECT count(*) FROM exposure_target_facts WHERE state = $1",
+                                      asset_rank.FRESH_STATE)
+        assert written <= 6 + 3 and body["classification_pending"] is True and len(started) == 1
+        # Every asset is ranked; an unclassified one carries the provisional facts.
+        assert body["total"] == active == len(body["assets"])
+        assert {a["cohort"] for a in body["assets"]} >= {asset_rank.PROVISIONAL_COHORT}
+        v1, _ = await assets(pool, monkeypatch, limit=5, count="none")
+        assert v1["summary"]["classification_pending"] is True and len(started) == 2
+        # The compactor's tick works off the backlog; reads then match the oracle and are settled.
+        from targets import scale_summary
+        await scale_summary.compact_tick(pool)
+        assert not await asset_rank.facts_pending(conn)
+        body, _ = await assets(pool, monkeypatch, limit=2000)
+        assert body["classification_pending"] is False and len(started) == 2  # nothing left to start
+        assert _comparable(body) == _comparable(await reference_exposure_assets(pool))
+
+    run(scenario, targets=17, ai_targets=0, findings=0)
+
+
+def test_the_background_completion_runs_once_per_process(monkeypatch):
+    monkeypatch.setattr(asset_rank, "FACTS_BATCH", 4)
+
+    async def scenario(conn, pool, ids):
+        assert await asset_rank.facts_pending(conn)
+        assert asset_rank.complete_facts_in_background(pool) is True
+        assert asset_rank.complete_facts_in_background(pool) is False  # one already runs
+        await asset_rank._BACKGROUND["task"]
+        assert not await asset_rank.facts_pending(conn)
+        assert await conn.fetchval("SELECT count(*) FROM exposure_target_facts WHERE state = $1",
+                                   asset_rank.FRESH_STATE) == await conn.fetchval(
+            "SELECT count(*) FROM targets WHERE is_active")
+
+    run(scenario, targets=9, ai_targets=1, findings=0)
+
+
+def test_the_legacy_page_is_bounded_and_says_so(monkeypatch):
+    monkeypatch.setattr(exposure_router, "LEGACY_ASSETS_LIMIT", 5)
+
+    async def scenario(conn, pool, ids):
+        body, _ = await assets(pool, monkeypatch, limit=2000)
+        assert len(body["assets"]) == body["count"] == body["limit"] == 5
+        assert body["truncated"] is True and body["total"] > 5 and "list/v1" in body["list_v1_hint"]
+        default, _ = await assets(pool, monkeypatch)
+        assert default["limit"] == 5
+        # Within the bound the page is the previous implementation's.
+        expected = await reference_exposure_assets(pool, limit=5, offset=3)
+        page, _ = await assets(pool, monkeypatch, limit=5, offset=3)
+        assert _comparable(page) == _comparable(expected)
+
+    run(scenario)

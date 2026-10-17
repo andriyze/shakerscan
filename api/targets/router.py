@@ -467,8 +467,8 @@ async def list_targets_grouped(
     """List all targets grouped by root domain for hierarchical display.
 
     list/v1 (any of ``cursor``/``count``/``fields``/``since``): a keyset page of groups with at
-    most ``member_limit`` subdomains each. Without them, the deprecated legacy response with every
-    group and every target."""
+    most ``member_limit`` subdomains each. Without them, the deprecated legacy envelope over that
+    first page (at most 50 groups of 20 subdomains), with ``has_more``/``next_cursor``/``truncated``."""
     # The targets page reads this grouped shape, not the flat list. Without the flag every row
     # rendered "Authorize for active testing (once)" forever: the click recorded a real
     # authorization and said so, then the row was unchanged on the next load, so an operator had
@@ -504,130 +504,22 @@ async def list_targets_grouped(
             "error": "list_v1_required",
             "message": "cohort, has_inventory and summary need the list/v1 page (send count=none)"})
     mark_deprecated(response)
-    async with _pool().acquire() as conn:
-        query = f"""
-            SELECT
-                {target_columns}
-            FROM targets t
-            WHERE 1=1
-        """
-        params = []
-        param_idx = 1
-
-        if not include_inactive:
-            query += " AND t.is_active = true"
-
-        # Model Intake subjects have their own workflow and must not appear as
-        # web targets. Keep the explicit legacy source filter for API clients
-        # that need to inspect historical rows during migration.
-        if discovery_source != "model-intake":
-            query += " AND COALESCE(t.discovery_source, 'manual') NOT IN ('model-intake','host')"
-
-        if search:
-            query += f" AND (t.url ILIKE '%' || ${param_idx} || '%' OR t.name ILIKE '%' || ${param_idx} || '%' OR t.root_domain ILIKE '%' || ${param_idx} || '%')"
-            params.append(search)
-            param_idx += 1
-
-        if discovery_source:
-            query += f" AND t.discovery_source = ${param_idx}"
-            params.append(discovery_source)
-            param_idx += 1
-
-        if grade:
-            query += f" AND UPPER(t.last_grade) = UPPER(${param_idx})"
-            params.append(grade)
-            param_idx += 1
-
-        if has_findings is not None:
-            if has_findings:
-                query += " AND t.active_findings_count > 0"
-            else:
-                query += " AND t.active_findings_count = 0"
-
-        query += " ORDER BY t.root_domain, t.is_root DESC, t.url"
-
-        rows = await conn.fetch(query, *params)
-        # Collapse scheme/trailing-slash duplicate target rows so the grouped view
-        # doesn't expose the same origin multiple times.
-        rows = _dedupe_canonical_target_rows(rows)
-
-        # Per-target ASM coverage and exact AI Investigator trust-tier counts.
-        target_ids = [row['id'] for row in rows]
-        investigator_findings_by_target = await grouped_list.investigator_counts(conn, target_ids)
-        asm_by_target = await grouped_list.asm_coverage_by_target(conn, target_ids)
-
-    def _attach_asm(target_data):
-        if target_data:
-            target_data['asm_coverage'] = asm_by_target.get(str(target_data['id']))
-            target_data.update(investigator_findings_by_target.get(str(target_data['id']), {
-                'investigator_verified_count': 0,
-                'investigator_suspected_count': 0,
-            }))
-        return target_data
-
-    # Group by root_domain
-    grouped = {}
-    for row in rows:
-        rd = row['root_domain'] or 'unknown'
-        if rd not in grouped:
-            grouped[rd] = {
-                'root_domain': rd,
-                'root_target': None,
-                'subdomains': []
-            }
-
-        target_data = _attach_asm(_public_target_row(row))
-        if row['is_root']:
-            grouped[rd]['root_target'] = target_data
-        else:
-            grouped[rd]['subdomains'].append(target_data)
-
-    # Convert to list and add summary stats
-    result = []
-    for rd, data in grouped.items():
-        data['subdomain_count'] = len(data['subdomains'])
-        data['total_count'] = data['subdomain_count'] + (1 if data['root_target'] else 0)
-        # Add aggregate stats for sorting
-        root_findings = data['root_target']['active_findings_count'] if data['root_target'] else 0
-        subdomain_findings = sum(s['active_findings_count'] for s in data['subdomains'])
-        data['total_findings'] = root_findings + subdomain_findings
-        data['best_score'] = data['root_target']['last_score'] if data['root_target'] and data['root_target']['last_score'] is not None else None
-        data['latest_scan'] = data['root_target']['last_scanned_at'] if data['root_target'] else None
-        data['earliest_created'] = data['root_target']['created_at'] if data['root_target'] else (
-            min((s['created_at'] for s in data['subdomains']), default=None)
-        )
-        # Domain-level ASM coverage rollup across root + subdomains.
-        cov_targets = ([data['root_target']] if data['root_target'] else []) + data['subdomains']
-        data['asm_coverage'] = grouped_list.group_asm_rollup([t.get('asm_coverage') for t in cov_targets])
-        result.append(data)
-
-    # Sort based on sort_by and sort_order
-    reverse = sort_order == 'desc'
-
-    def sort_key(x):
-        if sort_by == 'root_domain':
-            return x['root_domain'].lower()
-        elif sort_by == 'last_scanned_at':
-            return x['latest_scan'] or ''
-        elif sort_by == 'active_findings_count':
-            return x['total_findings']
-        elif sort_by == 'last_score':
-            # None values should sort last in ascending, first in descending
-            score = x['best_score']
-            if score is None:
-                return -1 if reverse else 101
-            return score
-        elif sort_by == 'created_at':
-            return x['earliest_created'] or ''
-        return x['root_domain'].lower()
-
-    result.sort(key=sort_key, reverse=reverse)
-
-    return {
-        'domains': result,
-        'total_root_domains': len(result),
-        'total_targets': sum(d['total_count'] for d in result)
+    # The legacy shape over the first list/v1 page (bounded; grouped_list.legacy_grouped). The
+    # filters are the list/v1 ones, so its next_cursor continues there.
+    legacy_sort = ("-" if sort_order == "desc" else "") + str(sort_by or "root_domain")
+    legacy_limit = min(int(limit or grouped_list.LEGACY_MAX_GROUPS), grouped_list.LEGACY_MAX_GROUPS)
+    member_limit = min(int(member_limit), grouped_list.LEGACY_MAX_MEMBERS)
+    page = v1_page(limit=legacy_limit, cursor=None, sort=legacy_sort, fields=None, count="none", since=None)
+    filters = {
+        "include_inactive": include_inactive, "search": search, "discovery_source": discovery_source,
+        "grade": grade, "has_findings": has_findings, "member_limit": member_limit,
+        "cohort": "all", "has_inventory": False,
     }
+    async with _pool().acquire() as conn:
+        return await grouped_list.legacy_grouped(
+            conn, page, filters=filters, member_limit=member_limit,
+            member_columns=target_columns, public_row=_public_target_row,
+        )
 
 
 @router.get("/domains")
