@@ -51,7 +51,7 @@ export async function pinnedHead(host: string, ip: string, secure: boolean, budg
   if (secure && isIP(host)) options.checkServerIdentity = (name, cert) => { identityMatched = !checkServerIdentity(name, cert); return undefined; };
   budget.reserve();
   return new Promise((resolve, reject) => {
-    const signal = AbortSignal.any([budget.signal, AbortSignal.timeout(Math.max(1, Math.min(3000, budget.deadline - Date.now())))]);
+    const signal = budget.operationSignal(3000);
     const req = (secure ? https : http).request({ ...options, signal }, res => {
       try {
         const raw = [`HTTP/1.1 ${res.statusCode}`];
@@ -119,7 +119,7 @@ export async function pinnedText(host: string, ip: string, path: string, budget:
   if (isIP(host)) options.checkServerIdentity = () => undefined;
   budget.reserve();
   return new Promise((resolve, reject) => {
-    const signal = AbortSignal.any([budget.signal, AbortSignal.timeout(Math.max(1, Math.min(1500, budget.deadline - Date.now())))]);
+    const signal = budget.operationSignal(1500);
     const req = https.request({ ...options, signal }, res => {
       const chunks: Buffer[] = []; let size = 0;
       res.on('data', (chunk: Buffer) => {

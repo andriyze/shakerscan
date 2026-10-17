@@ -20,7 +20,7 @@ export async function checkCallerCountry(ip: string, identity: string, token: st
   if (!country) {
     try {
       budget.reserve();
-      const signal = AbortSignal.any([budget.signal, AbortSignal.timeout(Math.max(1, Math.min(1500, budget.deadline - Date.now())))]);
+      const signal = budget.operationSignal(1500);
       const response = await fetcher(`https://api.ipinfo.io/lite/${encodeURIComponent(ip)}`, {
         method: 'GET', redirect: 'manual', signal,
         headers: { Authorization: `Bearer ${token}`, Accept: 'application/json' }

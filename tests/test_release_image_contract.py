@@ -120,7 +120,7 @@ def test_release_images_remove_fixable_runtime_vulnerabilities():
     assert "golang:1.27.2-bookworm@sha256:" in scanner
     assert "github.com/projectdiscovery/nuclei/v3/cmd/nuclei v3.11.1" in scanner
     for dependency in (
-        "github.com/getkin/kin-openapi@v0.144.0",
+        "github.com/getkin/kin-openapi@v0.149.0",
         "github.com/go-git/go-git/v5@v5.19.2",
         "github.com/labstack/echo/v4@v4.15.3",
         "golang.org/x/mod@v0.41.0",
