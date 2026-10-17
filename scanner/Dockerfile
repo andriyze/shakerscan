@@ -52,7 +52,7 @@ RUN --mount=type=cache,target=/go/pkg/mod,sharing=locked \
       go mod init "shakerscan.local/${tool_name}" >/dev/null || return 1; \
       go get "${tool_package}@${tool_version}" || return 1; \
       go get \
-        github.com/getkin/kin-openapi@v0.144.0 \
+        github.com/getkin/kin-openapi@v0.149.0 \
         github.com/go-git/go-git/v5@v5.19.2 \
         github.com/labstack/echo/v4@v4.15.3 \
         golang.org/x/crypto@v0.57.0 \
