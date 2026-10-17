@@ -70,7 +70,7 @@ batch sent again with the same sequence number but other requests is refused.
 
 Each batch is stored on its own, encrypted, as it arrives: a batch never rewrites the ones before
 it. Closing the capture (or the server's idle close) assembles them into the capture's document. An API process
-assembles one capture at a time; a close that would wait more than a minute answers 503 with
+assembles one capture at a time; a close that would wait more than 20 seconds answers 503 with
 `Retry-After`, and `shakerscan record` retries it.
 
 ## Masking and storage
