@@ -622,6 +622,7 @@ try:
     from runtime.receipts import CapabilityReceipt
     from runtime.observation_store import PostgresObservationManifestStore
     from scan.manifest_store import PostgresScanManifestStore, ScanManifestStoreError
+    from scan.verify_admission import admit_verify_templates, compile_scan_template_manifest
     from scan.work_manifests import (
         ScanWorkManifest,
         ScanWorkManifestError,
@@ -748,6 +749,7 @@ except ModuleNotFoundError:
     from api.runtime.receipts import CapabilityReceipt
     from api.runtime.observation_store import PostgresObservationManifestStore
     from api.scan.manifest_store import PostgresScanManifestStore, ScanManifestStoreError
+    from api.scan.verify_admission import admit_verify_templates, compile_scan_template_manifest
     from api.scan.work_manifests import (
         ScanWorkManifest,
         ScanWorkManifestError,
@@ -10885,19 +10887,12 @@ def _compile_scan_template_work_manifest(
     scan_id: str,
     scan_contract: ResolvedScanContract,
     target_binding: TargetBinding,
+    verify_template_ids: Sequence[str] = (),
 ) -> ScanWorkManifest | None:
-    """Freeze passive templates and the active pack allowed by policy."""
-    policy = scan_contract.execution_plan.policy
-    include = set(policy.include_families)
-    exclude = set(policy.exclude_families)
-    passive_enabled = "nuclei_passive" in include and "nuclei_passive" not in exclude
-    active_enabled = "nuclei_active" in include and "nuclei_active" not in exclude
-    if not passive_enabled and not active_enabled:
-        return None
-    return build_canonical_scan_nuclei_template_manifest(
-        scan_id=scan_id,
-        target_binding_digest=target_binding.digest,
-        include_active=policy.active_testing and active_enabled,
+    """Freeze passive templates and the active pack allowed by policy (or the verify set)."""
+    return compile_scan_template_manifest(
+        scan_id=scan_id, policy=scan_contract.execution_plan.policy, target_binding_digest=target_binding.digest,
+        verify_template_ids=verify_template_ids, builder=build_canonical_scan_nuclei_template_manifest,
     )
 
 
@@ -11063,6 +11058,7 @@ async def _submit_scan(
     # This is target provenance, not a caller-granted option. The stored-target
     # route supplies its original input shape through stored_scheme_inferred.
     options_payload.pop("target_scheme_inferred", None)
+    options_payload.update(await admit_verify_templates(request.verify_templates, scan_contract.execution_plan))
     inline_option_authentication = {
         key: options_payload.get(key)
         for key in SCAN_AUTHENTICATION_KEYS
@@ -11423,6 +11419,7 @@ async def _submit_scan(
             scan_id=scan_id,
             scan_contract=scan_contract,
             target_binding=target_binding,
+            verify_template_ids=options_payload.get("verify_templates") or (),
         )
         if template_work_manifest is not None:
             options_payload["template_manifest_ref"] = (

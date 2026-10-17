@@ -2108,6 +2108,14 @@ async def _execute_hunt_capability_lifecycle(
                                 "Hunt approval scope no longer matches its admitted policy",
                             )
                         validated_scope_receipt_id = current_scope_receipt_id
+                    if name == "http.request" and request.input.get("request_bindings"):
+                        # A secret found on another target goes only to a login a person allowed
+                        # (secret.try); refused here, before anything is reserved.
+                        try:
+                            from hunt.secret_try import admit_secret_references
+                        except ModuleNotFoundError:
+                            from api.hunt.secret_try import admit_secret_references
+                        await admit_secret_references(conn, run=run, values=request.input)
                     used = _hunt_json(run["budget_used_json"], {})
                     budget = _hunt_json(run["budget_json"], {})
                     if name in {"candidate.verify", "authz.verify"}:
@@ -2738,13 +2746,21 @@ async def _execute_hunt_capability_lifecycle(
                     from hunt.discovered_secrets import planner_view
                 except ModuleNotFoundError:
                     from api.hunt.discovered_secrets import planner_view
+                try:
+                    from hunt.secret_try import related_secrets
+                except ModuleNotFoundError:
+                    from api.hunt.secret_try import related_secrets
                 async with _pool().acquire() as conn:
                     listed = [planner_view(row, run.get("target_id")) for row in
                               await list_for_target(conn, run.get("target_id"), usable_only=True)]
+                    # Secrets of related targets (same root domain or host asset), metadata only:
+                    # a person decides each try on this Hunt's login (secret.try).
+                    related = await related_secrets(conn, run["target_id"]) if run.get("target_id") else []
                 return {
                     "ok": True,
                     "secrets": listed,
                     "count": len(listed),
+                    "related_target_secrets": related,
                     "secret_values_visible": False,
                     "observation": {
                         "kind": "discovered_secret_observation",
@@ -3771,6 +3787,23 @@ async def _execute_hunt_capability_lifecycle(
             ),
         ).public_dict()
     )
+    if name == "secrets.inspect" and status == "completed" and policy.get("secret_values_visible") is True:
+        # The starting person let this Hunt's agent see the values: added to this live answer
+        # only, after the action, receipt and ledger were stored without them.
+        try:
+            from hunt.discovered_secrets import values_for_agent
+        except ModuleNotFoundError:
+            from api.hunt.discovered_secrets import values_for_agent
+        async with _pool().acquire() as conn:
+            shown = await values_for_agent(
+                conn, hunt_run_id=run["id"], target_id=run.get("target_id"), action_id=action_id,
+                refs=[str(item.get("ref")) for item in result.get("secrets") or () if isinstance(item, Mapping)],
+            )
+        result = {
+            **result, "secret_values_visible": True, "values_in_this_answer_only": True,
+            "secrets": [{**item, "value": shown[item["ref"]]} if item.get("ref") in shown else dict(item)
+                        for item in result.get("secrets") or () if isinstance(item, Mapping)],
+        }
     return {
         "hunt_id": hunt_id,
         "capability": name,

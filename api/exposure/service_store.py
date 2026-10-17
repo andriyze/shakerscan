@@ -7,6 +7,7 @@ import uuid
 from .hunt_service_sources import hunt_service_sources
 from .service_actions import hunt_handoff, service_activities
 from .service_intel import enrich_service, snapshot_summary
+from .service_rows import attach_verification, listener_groups, severity_counts, verification_records
 from .service_inventory import SCHEMA_VERSION, attach_findings, build_inventory, object_value, origin, text
 
 MAX_SOURCES = 12
@@ -157,6 +158,8 @@ async def target_inventory(conn: Any, target: dict[str, Any], snapshot: dict[str
         enrich_service(service, snapshot, matcher)
         service["activities"] = service_activities(target, service, registry)
         service["hunt_href"] = hunt_handoff(target, service)
+    attach_verification(target, services, await verification_records(conn, target, services))
+    groups = listener_groups(services)
     return {
         "id": str(target_id), "kind": target["kind"], "label": text(target["label"], 300),
         "locator": origin(target["locator"]) if target["kind"] == "web" else text(target["locator"], 253),
@@ -164,6 +167,9 @@ async def target_inventory(conn: Any, target: dict[str, Any], snapshot: dict[str
         "services": services, "source_count": len(sources), "sources_truncated": source_truncated,
         "warnings": warnings, "unlinked_findings_count": unlinked,
         "findings_truncated": len(finding_rows) > MAX_FINDINGS,
+        # Noise control: one row per listener product/version, ordered by consequence; members
+        # stay in "services" for inspection, and quiet (inconclusive, unlinked) rows are flagged.
+        "listener_groups": groups, "severity_counts": severity_counts(groups),
     }
 
 

@@ -182,8 +182,9 @@ def test_bundled_snapshot_hash_and_release_image_defaults_cannot_drift():
     assert actual == device_advisories.BUNDLED_SNAPSHOT_SHA256
     dockerfile_path = os.path.join(os.path.dirname(__file__), "..", "scanner", "Dockerfile")
     dockerfile = open(dockerfile_path, encoding="utf-8").read()
-    assert "ENV DEVICE_INTEL_DB_PATH=/app/data/device_advisories.json" in dockerfile
-    assert f"ENV DEVICE_INTEL_DB_SHA256={actual}" in dockerfile
+    # The image sets no pin: setting one is the operator's freeze, so a bundle cannot override it.
+    assert "ENV DEVICE_INTEL_DB_PATH" not in dockerfile
+    assert "ENV DEVICE_INTEL_DB_SHA256" not in dockerfile
 
 
 def test_bundled_snapshot_loads_through_the_real_loader_with_a_real_dataset():

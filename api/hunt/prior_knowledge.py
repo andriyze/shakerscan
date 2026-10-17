@@ -45,7 +45,9 @@ _GUIDANCE = (
     "matters, or an attack-chain hypothesis needs it. Query kind='service_intelligence' before "
     "repeating port/service discovery; "
     "it exposes retained service evidence for the same target and may reveal protocol-specific "
-    "methodology signals. Narrow with the filter object: endpoints and endpoint_groups accept id, test_status, "
+    "methodology signals; filter view='candidates' lists one row per listener and CVE candidate, known "
+    "exploited first, with the check that exists and its verify state. Narrow with the filter object: "
+    "endpoints and endpoint_groups accept id, test_status, "
     "auth_state, method and path_contains; findings accept status, severity and verified_only."
 )
 

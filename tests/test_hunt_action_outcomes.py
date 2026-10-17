@@ -250,6 +250,11 @@ def test_unified_startup_installs_the_candidate_schema_on_converted_instances(mo
             executed.append(" ".join(str(statement).split()))
             return []
 
+        async def fetchval(self, statement, *args):
+            # Fixture: no intelligence bundle high-water mark recorded yet.
+            executed.append(" ".join(str(statement).split()))
+            return None
+
         def transaction(self):
             @asynccontextmanager
             async def scope():

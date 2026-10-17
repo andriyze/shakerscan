@@ -70,6 +70,8 @@ class HttpWorkflowExchange:
     capture_error: str | None = None
     # Withheld values this request sends (worker-private): scrubbed from the planner's view.
     bound_values: list[str] = field(default_factory=list, repr=False)
+    # discovered_secret_uses rows this request recorded: their outcome is noted after the answer.
+    secret_use_ids: list[Any] = field(default_factory=list, repr=False)
 
     def __repr__(self) -> str:
         return f"HttpWorkflowExchange(action_id={self.action_id!r}, secret_values_visible=False)"
@@ -596,14 +598,26 @@ async def prepare_http_exchange(
         elif "secret_ref" in binding:
             try:
                 from hunt.discovered_secrets import DiscoveredSecretError, resolve_for_hunt
+                from hunt.secret_try import denied_destination_resolved, destination_of
             except ModuleNotFoundError:  # package import layout
                 from api.hunt.discovered_secrets import DiscoveredSecretError, resolve_for_hunt
+                from api.hunt.secret_try import denied_destination_resolved, destination_of
             if not _hunt_is_live(run):
                 raise ValueError("secret reference belongs to a Hunt that is no longer live")
+            # Where this request goes (the origin it names; a secret never goes to a default
+            # origin): a secret of another target is sent only to the login a person allowed, and
+            # no secret goes where the destination cannot be named exactly or to a denied login
+            # (by name or by the address the request is pinned to).
+            destination = destination_of(values)
+            if destination is None:
+                raise ValueError("secret_reference_invalid: a request carrying a secret must name its origin and one exact path")
+            if await denied_destination_resolved(destination["host"], destination["path"], target.allowed_addresses):
+                raise ValueError("secret_try_destination_denied: this login never receives a discovered secret")
             try:
                 value = await resolve_for_hunt(conn, reference=binding["secret_ref"],
                     target_id=target.target_id, hunt_run_id=run_id, action_id=action_id,
-                    destination_host=str(target.canonical_host or ""))
+                    destination_host=str((destination or {}).get("host") or target.canonical_host or ""),
+                    destination=destination, use_ids=exchange.secret_use_ids)
             except DiscoveredSecretError as exc:
                 raise ValueError(f"{exc.reason}: {exc}") from None
             exchange.bound_values.append(str(value))

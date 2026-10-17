@@ -264,6 +264,13 @@ async def run_unified_startup(pool: Any, baseline: Any, *, redis_provider: Any =
                 except ModuleNotFoundError:
                     from api.hunt.discovered_secrets import DISCOVERED_SECRETS_SCHEMA_SQL
                 await conn.execute(DISCOVERED_SECRETS_SCHEMA_SQL)
+                # The highest intelligence bundle ever in force (2.11): the loader refuses a lower one.
+                try:
+                    from scanner_tools import intel_bundle
+                except ModuleNotFoundError:
+                    from scanner.scanner_tools import intel_bundle
+                await conn.execute(intel_bundle.HIGH_WATER_SCHEMA_SQL)
+                await intel_bundle.sync_high_water_from_database(conn)
                 # Stored severity rank behind the bounded findings list (2.11). Cheap DDL only;
                 # the backfill and the concurrent index builds run after this transaction.
                 try:

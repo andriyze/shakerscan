@@ -11,6 +11,7 @@ import uuid
 from .service_actions import canonical_registry
 from .service_intel import load_service_intelligence
 from .asset_service_page import service_page
+from .service_rows import hunt_candidate_rows
 
 
 async def query_service_knowledge(conn: Any, *, target_id: Any, device: bool,
@@ -21,11 +22,14 @@ async def query_service_knowledge(conn: Any, *, target_id: Any, device: bool,
     if filters is not None and not isinstance(filters, Mapping):
         raise ValueError("service query filters must be an object")
     values = dict(filters or {})
-    if set(values) - {"id"}:
-        raise ValueError("service query supports only the id filter")
+    if set(values) - {"id", "view"}:
+        raise ValueError("service query supports only the id and view filters")
+    view = values.get("view") or "services"
+    if view not in {"services", "candidates"}:
+        raise ValueError("service query view must be services or candidates")
     selected = str(uuid.UUID(str(values["id"]))) if values.get("id") is not None else None
     owner = uuid.UUID(str(target_id))
-    scope = f"{'device' if device else 'web'}:{owner}:{selected or '*'}"
+    scope = f"{'device' if device else 'web'}:{owner}:{selected or '*'}:{view}"
     position = None
     if cursor is not None:
         try:
@@ -48,6 +52,10 @@ async def query_service_knowledge(conn: Any, *, target_id: Any, device: bool,
     rows = sorted((target or {}).get("services", []), key=lambda row: row["id"])
     if selected:
         rows = [row for row in rows if row["id"] == selected]
+    if view == "candidates":
+        # One compact row per (listener, CVE), known-exploited and likely first: what to look at
+        # next, with the check that exists and whether a verify Scan already settled it.
+        rows = hunt_candidate_rows(rows)
     digest = hashlib.sha256(json.dumps(rows, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
     if position is not None and position["snapshot"] != digest:
         raise ValueError("Service evidence changed; restart query without cursor")

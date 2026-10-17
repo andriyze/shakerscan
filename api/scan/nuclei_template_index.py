@@ -64,6 +64,16 @@ class _TemplateRecord:
     tags: frozenset[str]
     methods: frozenset[str]
     intrusive: bool
+    # Needs an out-of-band interaction (``{{interactsh-url}}``). Scan runs Nuclei with
+    # ``-no-interactsh``, so such a template can never match: a verify Scan must not read its
+    # silence as "not affected".
+    oob: bool = False
+    # Follows redirects (``redirects``/``host-redirects``). Scan runs ``-disable-redirects``, so its
+    # silence is not a reliable "not matched".
+    redirects: bool = False
+    # Exploit-class check (rce, lfi, sqli, deserialization, ssti, xxe, code/command injection,
+    # ssrf, or a code/javascript/flow step): a verify Scan runs it only with the exploit tier.
+    exploit_class: bool = False
 
     @property
     def state_changing(self) -> bool:
@@ -92,6 +102,10 @@ class ActiveNucleiSelection:
     get_only_count: int
     state_changing_count: int
     intrusive_excluded: int
+    oob_excluded: int = 0
+    # Verify Scans only: which requested checks ran, which did not and why, and which ran but
+    # cannot give a reliable "not matched". Recorded on the step's receipt.
+    verify_selection: Mapping[str, Any] | None = None
 
 
 _INDEX_CACHE: dict[tuple[str, int], NucleiMethodIndex] = {}
@@ -139,6 +153,19 @@ def _template_methods(document: Mapping[str, Any]) -> frozenset[str]:
             # A bare request with neither an explicit method nor a raw block is a GET.
             methods.add("GET")
     return frozenset(methods)
+
+
+EXPLOIT_CLASS_TAGS = frozenset({
+    "rce", "lfi", "sqli", "deserialization", "ssti", "xxe", "code-injection", "cmdi", "ssrf",
+})
+
+
+def _follows_redirects(document: Mapping[str, Any]) -> bool:
+    requests = document.get("http") or document.get("requests") or []
+    return isinstance(requests, list) and any(
+        isinstance(request, Mapping) and (request.get("redirects") or request.get("host-redirects"))
+        for request in requests
+    )
 
 
 def _is_fuzzing(document: Mapping[str, Any]) -> bool:
@@ -195,8 +222,9 @@ def build_nuclei_method_index(templates_dir: str) -> NucleiMethodIndex:
                 continue
             try:
                 with open(full, "r", encoding="utf-8") as handle:
-                    document = yaml.safe_load(handle)
-            except (OSError, yaml.YAMLError):
+                    source = handle.read()
+                document = yaml.safe_load(source)
+            except (OSError, UnicodeError, yaml.YAMLError):
                 parse_errors += 1
                 continue
             if not isinstance(document, Mapping) or "info" not in document:
@@ -222,6 +250,10 @@ def build_nuclei_method_index(templates_dir: str) -> NucleiMethodIndex:
                 tags=tags,
                 methods=methods,
                 intrusive="intrusive" in tags,
+                oob="interactsh" in source,
+                redirects=_follows_redirects(document),
+                exploit_class=bool(tags & EXPLOIT_CLASS_TAGS) or any(
+                    key in document for key in ("code", "javascript", "flow")),
             )
             prior = records.get(template_id)
             if prior is not None:
@@ -233,6 +265,9 @@ def build_nuclei_method_index(templates_dir: str) -> NucleiMethodIndex:
                     tags=prior.tags | record.tags,
                     methods=prior.methods | record.methods,
                     intrusive=prior.intrusive or record.intrusive,
+                    oob=prior.oob or record.oob,
+                    redirects=prior.redirects or record.redirects,
+                    exploit_class=prior.exploit_class or record.exploit_class,
                 )
             records[template_id] = record
     return NucleiMethodIndex(
@@ -268,12 +303,17 @@ def resolve_active_nuclei_selection(
     severities: Any = None,
     tags: Any = None,
     allow_state_changing_http: bool,
+    only_template_ids: Any = None,
+    allow_exploit_classes: bool = False,
 ) -> ActiveNucleiSelection:
     """Resolve the authorization-aware active Nuclei template allowlist.
 
     ``skip`` is set (fail closed) when the index cannot be built or no permitted
     template remains; the caller then records a coverage gap, not a clean result.
+    ``only_template_ids`` (a verify Scan) selects exactly those templates instead of the
+    severity/tag filter; intrusive and unauthorized non-GET templates are still dropped.
     """
+    exact_ids = _as_tag_set(only_template_ids)
     want_sev = _normalize_filter(severities, _DEFAULT_SEVERITIES)
     want_tags = _normalize_filter(tags, _DEFAULT_TAGS)
     try:
@@ -291,6 +331,11 @@ def resolve_active_nuclei_selection(
             skip_reason="nuclei_template_index_unavailable",
             total_matched=0, get_only_count=0, state_changing_count=0,
             intrusive_excluded=0,
+        )
+    if exact_ids:
+        return _exact_selection(
+            index, exact_ids, allow_state_changing_http=allow_state_changing_http,
+            allow_exploit_classes=allow_exploit_classes,
         )
     matched = [
         record for record in index.templates
@@ -332,4 +377,48 @@ def resolve_active_nuclei_selection(
         total_matched=len(matched), get_only_count=len(get_only),
         state_changing_count=len(state_changing),
         intrusive_excluded=intrusive_excluded,
+    )
+
+
+def _exact_selection(index: NucleiMethodIndex, exact_ids: frozenset[str], *,
+                     allow_state_changing_http: bool, allow_exploit_classes: bool) -> ActiveNucleiSelection:
+    """A verify Scan's selection: exactly the requested checks, each either run or excluded with a
+    reason, so a non-match is reported as "not affected" only for checks that actually ran."""
+    by_id = {record.template_id: record for record in index.templates if record.template_id in exact_ids}
+    excluded: dict[str, str] = {}
+    ran: list[str] = []
+    unreliable: list[str] = []
+    state_changing = 0
+    for template_id in sorted(exact_ids):
+        record = by_id.get(template_id)
+        if record is None or not _TEMPLATE_ID_RE.match(template_id):
+            excluded[template_id] = "not_in_template_bundle"
+        elif record.oob:
+            # Scan runs -no-interactsh: such a check can never match.
+            excluded[template_id] = "needs_oob_interaction"
+        elif record.intrusive:
+            excluded[template_id] = "intrusive"
+        elif record.exploit_class and not allow_exploit_classes:
+            excluded[template_id] = "exploit_class_needs_exploit_tier"
+        elif record.state_changing and not allow_state_changing_http:
+            excluded[template_id] = "needs_state_changing_http"
+        else:
+            ran.append(template_id)
+            state_changing += int(record.state_changing)
+            if record.redirects:
+                unreliable.append(template_id)
+    selection = {"requested": sorted(exact_ids), "ran": ran, "excluded": excluded,
+                 "negative_unreliable": {item: "needs_redirects" for item in unreliable}}
+    reasons = sorted(set(excluded.values()))
+    return ActiveNucleiSelection(
+        template_ids=tuple(ran), includes_state_changing=bool(state_changing),
+        skip=not ran,
+        skip_reason=None if ran else (
+            "verify_checks_need_oob_interaction" if reasons == ["needs_oob_interaction"]
+            else "verify_checks_excluded"),
+        total_matched=len(by_id), get_only_count=len(ran) - state_changing,
+        state_changing_count=state_changing,
+        intrusive_excluded=sum(1 for reason in excluded.values() if reason == "intrusive"),
+        oob_excluded=sum(1 for reason in excluded.values() if reason == "needs_oob_interaction"),
+        verify_selection=selection,
     )
