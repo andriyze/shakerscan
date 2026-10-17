@@ -30,7 +30,7 @@ test('unified Hunt renders and explicitly confirms immutable SSH command plans',
   assert.match(runView, /plan_digest/)
   // A proposed plan is a decision the operator makes at the top of the run, not in a details tab.
   assert.match(runView, /kind === 'ssh_plan'/)
-  assert.match(huntClient, /hunts\/\$\{encodeURIComponent\(huntId\)\}\/shell-plans/)
+  assert.match(huntClient, /hunts\/\$\{pathSegment\(huntId\)\}\/shell-plans/)
   assert.match(huntClient, /confirm_exact_commands: true/)
   assert.match(huntClient, /confirm_remote_device_effects: true/)
   assert.doesNotMatch(api, /export async function confirmHuntShellPlan/)

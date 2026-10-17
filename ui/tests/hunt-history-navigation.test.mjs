@@ -46,7 +46,7 @@ test('canonical Hunt history has durable exact-run links and audit details', () 
   assert.match(runView, /href=\{`\/findings\/\$\{findingId\}`\}/)
   assert.match(runView, /Audit identifiers/)
   // Each call shows what it was called with and why it failed, from the server's record export.
-  assert.match(runView, /\/hunts\/\$\{encodeURIComponent\(hunt\.hunt_id\)\}\/record/)
+  assert.match(runView, /\/hunts\/\$\{pathSegment\(hunt\.hunt_id\)\}\/record/)
   assert.match(runView, /aria-label="Called with"/)
   assert.match(runView, /outcome\.errors\.map/)
 })

@@ -382,13 +382,13 @@ _SECRET_ID = uuid.UUID("5d2c1e0a-6f3b-4c8e-9a71-2b4d6e8f0a13")
 SECRET_USE_ROW = {
     "id": uuid.UUID(int=904), "secret_id": _SECRET_ID, "action_id": _USE_ACTION,
     "destination_host": "app.example.test", "used_at": datetime(2026, 10, 7, tzinfo=timezone.utc),
-    "kind": "password", "label": "DB_PASSWORD", "target_id": _USE_HOME,
+    "kind": "password", "label": "DB_PASSWORD", "own": False,
 }
 EXPECTED_SECRET_USE = {
     "schema_version": "hunt-discovered-secret-use/v1", "id": str(uuid.UUID(int=904)),
     "ref": f"secret://{_SECRET_ID}", "kind": "password", "label": "DB_PASSWORD",
     "action_id": str(_USE_ACTION), "destination_host": "app.example.test",
-    "found_on": str(_USE_HOME), "used_at": "2026-10-07T00:00:00+00:00",
+    "granted": True, "used_at": "2026-10-07T00:00:00+00:00",
     "secret_values_visible": False,
 }
 

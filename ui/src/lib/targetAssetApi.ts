@@ -1,3 +1,4 @@
+import { pathSegment } from './apiPath.mjs'
 import { API_URL, getApiErrorMessage } from './apiConfig'
 import { fetchHeavyRead } from './busyRetry.mjs'
 import { getJson } from './fetchLayer.mjs'
@@ -142,12 +143,12 @@ export function getTargetAssets(params: InventoryQuery = {}, signal?: AbortSigna
   for (const [key, value] of Object.entries(params)) if (value !== undefined && value !== '') search.set(key, String(value))
   return request(`/targets/inventory?${search}`, { signal }, true)
 }
-export const getTargetAsset = (id: string, signal?: AbortSignal) => request<AssetDetail>(`/targets/${encodeURIComponent(id)}/asset`, { signal })
-export const getTargetAssetHistory = (id: string, kind: AssetHistoryKind, offset = 0, signal?: AbortSignal) => request<AssetHistory>(`/targets/${encodeURIComponent(id)}/history?${new URLSearchParams({kind,offset:String(offset),limit:'25'})}`, { signal })
-export const enableTargetNetworkView = (id: string, deviceClass = 'generic') => request<{asset_id: string; device_id: string}>(`/targets/${encodeURIComponent(id)}/device-profile`, json('POST', {device_class: deviceClass}))
-export const renameTargetAsset = (id: string, name: string) => request(`/targets/${encodeURIComponent(id)}`, json('PATCH', {name}))
-export const authorizeTargetAsset = (id: string, approvedBy: string, environment?: string) => request(`/targets/${encodeURIComponent(id)}/authorization`, json('POST', {approved_by: approvedBy, environment, risk_tier:'active'}))
-export const revokeTargetAsset = (id: string, revokedBy: string, reason: string) => request<{revoked: number}>(`/targets/${encodeURIComponent(id)}/authorization`, json('DELETE', {revoked_by: revokedBy, reason}))
+export const getTargetAsset = (id: string, signal?: AbortSignal) => request<AssetDetail>(`/targets/${pathSegment(id)}/asset`, { signal })
+export const getTargetAssetHistory = (id: string, kind: AssetHistoryKind, offset = 0, signal?: AbortSignal) => request<AssetHistory>(`/targets/${pathSegment(id)}/history?${new URLSearchParams({kind,offset:String(offset),limit:'25'})}`, { signal })
+export const enableTargetNetworkView = (id: string, deviceClass = 'generic') => request<{asset_id: string; device_id: string}>(`/targets/${pathSegment(id)}/device-profile`, json('POST', {device_class: deviceClass}))
+export const renameTargetAsset = (id: string, name: string) => request(`/targets/${pathSegment(id)}`, json('PATCH', {name}))
+export const authorizeTargetAsset = (id: string, approvedBy: string, environment?: string) => request(`/targets/${pathSegment(id)}/authorization`, json('POST', {approved_by: approvedBy, environment, risk_tier:'active'}))
+export const revokeTargetAsset = (id: string, revokedBy: string, reason: string) => request<{revoked: number}>(`/targets/${pathSegment(id)}/authorization`, json('DELETE', {revoked_by: revokedBy, reason}))
 
 /** Register a host-level target; port hints guide its network scans. */
 export const createHostTarget = (input: {locator: string; name?: string; environment: string; approvedBy?: string; portHints?: number[]}) =>
@@ -162,7 +163,7 @@ export const createWebTarget = (url: string, environment: string, name?: string)
 
 /** Discover open ports and web services; discovered web apps link to the host automatically. */
 export const startTargetDiscovery = (id: string, portHints: number[] = []) =>
-  request<{scan_id?: string; id?: string}>(`/targets/${encodeURIComponent(id)}/network-scans`, json('POST', {
+  request<{scan_id?: string; id?: string}>(`/targets/${pathSegment(id)}/network-scans`, json('POST', {
     profile: 'inventory', include_web_dast: false, confirm_authorized: true, port_hints: portHints,
   }))
 

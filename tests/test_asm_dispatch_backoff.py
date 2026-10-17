@@ -18,9 +18,32 @@ from datetime import datetime, timedelta, timezone
 import pytest
 from fastapi import HTTPException
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "api"))
+API_DIR = os.path.join(os.path.dirname(__file__), "..", "api")
+sys.path.insert(0, API_DIR)
 
-import api as api_module  # noqa: E402
+
+def _compatibility_api():
+    """The installed-runtime ``api`` module (api/api.py) these tests drive. Run in one
+    interpreter after a package-layout test, ``import api`` returns the ``api`` package
+    (api/__init__.py), which has no dispatcher: every test here then errored in its fixture. The
+    module is then loaded from its file under its own name, leaving the package in place."""
+    import importlib
+    import importlib.util
+
+    module = importlib.import_module("api")
+    if hasattr(module, "run_asm_dispatch"):
+        return module
+    name = "shakerscan_compat_api_for_asm_dispatch"
+    if name in sys.modules:
+        return sys.modules[name]
+    spec = importlib.util.spec_from_file_location(name, os.path.join(API_DIR, "api.py"))
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+api_module = _compatibility_api()
 
 
 class _FakeAcquire:
@@ -96,6 +119,13 @@ def _dns_failure(*_args, **_kwargs):
 
 async def _async_dns_failure(*_args, **_kwargs):
     _dns_failure()
+
+
+@pytest.fixture(autouse=True)
+def fresh_due_schedule(monkeypatch):
+    """Each test starts from an empty dispatcher schedule, whatever an earlier test (here or in
+    another module of the same interpreter) left in the module-level one."""
+    monkeypatch.setattr(api_module, "_ASM_DUE", type(api_module._ASM_DUE)())
 
 
 @pytest.fixture
@@ -297,3 +327,19 @@ def test_a_target_another_tick_already_claimed_is_left_alone(monkeypatch, quiet_
     assert "already dispatched by another tick" in capsys.readouterr().out
     claims = [args for query, args in conn.executed if "IS NOT DISTINCT FROM" in query]
     assert len(claims) == 1 and claims[0][1] is None  # compared with the value this tick read
+
+
+@pytest.mark.skipif(os.environ.get("ASM_BACKOFF_ISOLATION_CHILD") == "1", reason="the child run itself")
+def test_the_module_runs_after_the_api_package_was_imported():
+    """Review sweep: run after a package-layout test in one interpreter (``api`` already the
+    package), every test here errored in its fixture (``api`` has no ``get_redis``)."""
+    import subprocess
+
+    root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+    env = {**os.environ, "ASM_BACKOFF_ISOLATION_CHILD": "1",
+           "PYTHONPATH": os.pathsep.join([root, os.path.join(root, "api"), os.path.join(root, "scanner")])}
+    code = ("import api, sys, pytest; assert hasattr(api, '__path__'), api; "
+            "sys.exit(pytest.main(['-q', '-p', 'no:cacheprovider', 'tests/test_asm_dispatch_backoff.py']))")
+    result = subprocess.run([sys.executable, "-c", code], cwd=root, env=env, capture_output=True, text=True,
+                            timeout=300, check=False)
+    assert result.returncode == 0, result.stdout[-3000:] + result.stderr[-3000:]

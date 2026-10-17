@@ -1,5 +1,6 @@
 'use client'
 
+import { pathSegment } from '@/lib/apiPath.mjs'
 import { CopyButton } from '@/components/CopyButton'
 import { useEffect, useMemo, useState, Suspense, useRef } from 'react'
 import { usePoll } from '@/lib/usePoll'
@@ -966,8 +967,8 @@ function AiGateCampaignReviewCard({ scan }: { scan: any }) {
   if (!review.available) return null
 
   const coveragePct = review.planned > 0 ? Math.round((review.executed / review.planned) * 100) : 0
-  const transcriptUrl = `${API_URL}/ai/scans/${scan.id}/transcript`
-  const reportUrl = `${API_URL}/scans/${scan.id}/ai-redteam-report`
+  const transcriptUrl = `${API_URL}/ai/scans/${pathSegment(scan.id)}/transcript`
+  const reportUrl = `${API_URL}/scans/${pathSegment(scan.id)}/ai-redteam-report`
   const isProduction = review.environment === 'production'
   const decisionClass =
     review.decision === 'block'
@@ -1786,7 +1787,7 @@ function ExecutionPlanCard({ scan }: { scan: any }) {
   const scanTerminal = ['completed', 'failed', 'cancelled'].includes(String(scan?.status || ''))
   const hasFinalGrade = scan?.status === 'completed' && Boolean(scan?.grade || scan?.result?.grade)
   const hasGap = Number(matrix.partial || 0) + Number(matrix.blocked || 0) + Number(matrix.failed || 0) + Number(matrix.skipped || 0) + Number(matrix.pending || 0) > 0
-  const apiRecordUrl = `${API_URL}/scans/${scan.id}/actions`
+  const apiRecordUrl = `${API_URL}/scans/${pathSegment(scan.id)}/actions`
 
   return (
     <Card className="mb-6 p-4">

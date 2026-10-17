@@ -480,7 +480,29 @@ def test_a_hunts_record_lists_each_reference_it_sent_and_never_a_reveal_or_value
         uses = await store.read_hunt_uses(conn, hunt)
         assert [(use["ref"], use["kind"], use["label"], use["action_id"], use["destination_host"])
                 for use in uses] == [(ref, "password", "DB_PASSWORD", str(action), "app.example.invalid")]
-        assert uses[0]["found_on"] == str(target) and uses[0]["secret_values_visible"] is False
+        assert uses[0]["granted"] is False and uses[0]["secret_values_visible"] is False
+        assert "found_on" not in uses[0] and str(target) not in str(uses)
+        assert SYNTHETIC not in str(uses)
+    run(scenario)
+
+
+def test_a_hunts_record_never_names_the_target_a_granted_secret_was_found_on():
+    """Review sweep L1: the record is model-facing (shakerscan_hunt_get view=full); like the
+    planner view it says a secret was granted, never which other target holds it."""
+    async def scenario(conn):
+        owner, other = await _target(conn), await _target(conn)
+        await store.record_discovered(
+            conn, target_id=owner, values=[(SYNTHETIC, "DB_PASSWORD")],
+            source={"kind": "scan_finding", "id": str(uuid4())})
+        ref = (await store.list_for_target(conn, owner))[0]["ref"]
+        assert await store.grant(conn, target_id=owner, secret_id=ref.removeprefix("secret://"),
+                                 to_target_id=other, actor="operator:test")
+        hunt, action = await _hunt(conn, other)
+        await store.resolve_for_hunt(conn, reference=ref, target_id=other, hunt_run_id=hunt,
+                                     action_id=action, destination_host="other.example.invalid")
+        uses = await store.read_hunt_uses(conn, hunt)
+        assert [use["ref"] for use in uses] == [ref] and uses[0]["granted"] is True
+        assert "found_on" not in uses[0] and str(owner) not in str(uses)
         assert SYNTHETIC not in str(uses)
     run(scenario)
 

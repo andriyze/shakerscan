@@ -928,3 +928,65 @@ def test_status_warns_when_redis_volume_is_missing(tmp_path):
     assert "Redis's volume is missing" in result.stdout
     (tmp_path / "volume_shakerscan_redis-data").write_text("")
     assert "Redis's volume is missing" not in run(tmp_path, "upgrade_safety_warnings").stdout
+
+
+# --- review sweep L4: an install path with spaces; L5: the pre-2.6 PostgreSQL volume layout ---
+
+
+def _spaced_install(tmp_path: Path) -> tuple[Path, Path]:
+    """An install directory whose path contains spaces, and a canary file named like the first
+    word-split fragment of that path (an unquoted ``rm -f`` of the fragments would remove it)."""
+    work = tmp_path / "Shaker Scan install"
+    work.mkdir()
+    canary = tmp_path / "Shaker"
+    canary.write_text("not ShakerScan's\n")
+    return work, canary
+
+
+def test_an_install_path_with_spaces_keeps_its_rollback_chain_and_images(tmp_path):
+    work, canary = _spaced_install(tmp_path)
+    body = _THREE + """
+    for n in 1 2 3 4; do REFS="ghcr.io/x/shakerscan-api@sha256:r$n"; SCANNER_VERSION=2.$((7 + n)).0; record_started_release prune; done
+    head -1 "$WORK/.release-images.current" "$WORK/.release-images.previous" "$WORK/.release-images.previous.2"
+    echo "kept-refs:" $(host_kept_release_refs | sort -u)
+    echo "low-disk=$(prune_unused_release_images)"
+    """
+    result = run(work, body, SHAKERSCAN_KEEP_RELEASES="3")
+    assert _removed(work) == ["ghcr.io/x/shakerscan-api@sha256:r1"], result.stdout + result.stderr
+    for version in ("2.11.0", "2.10.0", "2.9.0"):
+        assert f"# release {version}" in result.stdout, result.stdout + result.stderr
+    kept = result.stdout.split("kept-refs:", 1)[1].splitlines()[0].split()
+    assert kept == [f"ghcr.io/x/shakerscan-api@sha256:r{n}" for n in (2, 3, 4)], result.stdout
+    assert "low-disk=0" in result.stdout
+    assert canary.exists()
+    assert not list(work.glob(".release-images.keep.*")) and not (work / ".release-images.superseded").exists()
+
+
+def test_an_install_path_with_spaces_rotates_its_backups_and_nothing_outside_them(tmp_path):
+    work, canary = _spaced_install(tmp_path)
+    backups = work / "backups"
+    for name in ("pre-upgrade-20261001T000000Z-2.7.0-to-2.8.0", "pre-upgrade-20261003T000000Z-2.8.0-to-2.9.0",
+                 "pre-upgrade-20261005T000000Z-2.9.0-to-2.10.0"):
+        (backups / name).mkdir(parents=True)
+    result = _backup(work, "2.10.0", "t", SCANNER_VERSION="2.11.0")
+    kept = sorted(path.name for path in backups.glob("pre-upgrade-*"))
+    assert len(kept) == 2 and kept[0] == "pre-upgrade-20261005T000000Z-2.9.0-to-2.10.0", (kept, result.stderr)
+    assert kept[1].endswith("-2.10.0-to-2.11.0")
+    assert canary.exists()
+
+
+def test_a_running_release_before_2_6_keeps_its_database_on_the_postgres_data_volume(tmp_path):
+    """Review sweep L5: a release before 2.6 mounts postgres-data at /var/lib/postgresql/data;
+    the persistence check refused every upgrade from it as data outside its volume."""
+    result = _persistence(tmp_path, '"volume /var/lib/postgresql/data" "volume /data"',
+                          '"loading:0" "rdb_last_bgsave_status:ok" "aof_last_write_status:ok"',
+                          running="2.5.6")
+    assert "rc=0" in result.stdout, result.stdout + result.stderr
+
+
+def test_data_outside_either_postgres_layout_names_both_volumes(tmp_path):
+    result = _persistence(tmp_path, '"bind /var/lib/postgresql/data" "volume /data"',
+                          '"loading:0" "rdb_last_bgsave_status:ok"')
+    assert "rc=1" in result.stdout
+    assert "shakerscan_postgres-cluster at /var/lib/postgresql" in result.stderr
+    assert "shakerscan_postgres-data at /var/lib/postgresql/data before 2.6" in result.stderr

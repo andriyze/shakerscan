@@ -1,5 +1,6 @@
 'use client'
 
+import { pathSegment } from '@/lib/apiPath.mjs'
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { ArrowUpDown, ChevronDown, ChevronRight, Search, X } from 'lucide-react'
 import { API_URL } from '@/lib/api'
@@ -120,7 +121,7 @@ export function useHuntTransactions(huntId: string, version: number): HuntArchiv
   // URL and could confirm a value the redacted view masks.
   const fetchPage = useCallback(async (offset: number, limit: number, signal: AbortSignal) => {
     const params = new URLSearchParams({ format: 'transactions', redaction: 'redacted', limit: String(limit), offset: String(offset) })
-    const response = await fetchRetryingBusy(`${API_URL}/hunts/${encodeURIComponent(huntId)}/http-transactions?${params}`, { cache: 'no-store', signal },
+    const response = await fetchRetryingBusy(`${API_URL}/hunts/${pathSegment(huntId)}/http-transactions?${params}`, { cache: 'no-store', signal },
       { onBusy: seconds => { if (!signal.aborted) setBusy(busyNotice(seconds)) } })
     if (!response.ok) {
       const detail = await response.json().catch(() => null)

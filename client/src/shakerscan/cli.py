@@ -135,6 +135,19 @@ def _client_dir(kind: str, environ: Mapping[str, str] | None = None) -> Path:
     return Path.home().joinpath(*fallback) / "shakerscan"
 
 
+def _shared_xdg_dir(kind: str, environ: Mapping[str, str] | None = None) -> Path | None:
+    """For an isolated profile (``SHAKERSCAN_CONFIG_DIR``) with no explicit state/data directory:
+    the ``$XDG_STATE_HOME/shakerscan`` / ``$XDG_DATA_HOME/shakerscan`` directory it used before
+    the profile won over XDG (shared by every profile of the session), when that variable is set
+    and absolute; otherwise None."""
+    environ = os.environ if environ is None else environ
+    explicit, xdg = {"state": (ENV_STATE_DIR, "XDG_STATE_HOME"), "data": (ENV_DATA_DIR, "XDG_DATA_HOME")}[kind]
+    value = environ.get(xdg) or ""
+    if environ.get(explicit) or not environ.get(ENV_CONFIG_DIR) or not value or not Path(value).is_absolute():
+        return None
+    return Path(value) / "shakerscan"
+
+
 def ensure_client_dir(kind: str, environ: Mapping[str, str] | None = None, child: str = "") -> Path:
     """The client's ``state`` or ``data`` directory (or ``child`` inside it), created
     (owner-only) if needed; one that cannot be created or written is a ClientError naming the
@@ -844,6 +857,13 @@ def cmd_agent(args: argparse.Namespace) -> int:
     else:
         workspace = ensure_client_dir("data") / "agent"
         notes += _workspace.migrate_default_workspace(config_dir() / "agent", workspace, records)
+        shared_data = _shared_xdg_dir("data")
+        if shared_data is not None:
+            notes += _workspace.note_shared_default_workspace(shared_data / "agent", workspace)
+    shared_state = _shared_xdg_dir("state")
+    if shared_state is not None:
+        # Before the profile won over XDG, its records were in the session's shared directory.
+        notes += _workspace.adopt_shared_record(shared_state / "workspaces", records, workspace)
     executable = client_executable()
     written = prepare_workspace(workspace, url, who, executable, authenticated=authenticated, mcp_env=allowed,
                                 notes=notes)

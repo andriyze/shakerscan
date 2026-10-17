@@ -53,12 +53,16 @@ async def finding_owner(conn: Any, finding_ids: list[UUID]) -> UUID:
 
 
 async def exception_owner(conn: Any, *, target_id: Any = None, finding_id: Any = None) -> UUID:
-    """The target a finding exception's receipt belongs to: its target, else its finding's."""
+    """The target a finding exception's receipt belongs to: its target, else its finding's. A
+    ``target_id`` the client names must be its finding's target: the receipt is filed and revertible
+    under that target, so a finding on another target cannot be triaged under this one."""
+    named = None
     if target_id:
         try:
-            return UUID(str(target_id))
+            named = UUID(str(target_id))
         except ValueError as exc:
             raise HTTPException(422, 'target_id must be a UUID') from exc
+    owner = None
     if finding_id:
         try:
             identifier = UUID(str(finding_id))
@@ -67,8 +71,12 @@ async def exception_owner(conn: Any, *, target_id: Any = None, finding_id: Any =
         if identifier is not None:
             owner = await conn.fetchval('SELECT COALESCE(target_id, device_target_id) FROM findings WHERE id=$1',
                                         identifier)
-            if owner is not None:
-                return owner
+    if named is not None:
+        if owner is not None and owner != named:
+            raise HTTPException(409, 'The named finding is not on this target')
+        return named
+    if owner is not None:
+        return owner
     raise HTTPException(422, 'A reversible exception decision needs a target: name target_id, or a finding_id of a '
                              'finding on a target')
 

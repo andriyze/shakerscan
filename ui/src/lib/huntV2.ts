@@ -1,3 +1,4 @@
+import { pathSegment } from './apiPath.mjs'
 import type { DeviceAgentShellPlan } from './api'
 import { API_URL, getApiErrorMessage } from './apiConfig'
 import {
@@ -198,7 +199,7 @@ export async function startHuntV2Native(request: HuntStartV2Request): Promise<Hu
 }
 
 export async function getHuntV2(huntId: string): Promise<HuntV2> {
-  const response = await fetch(`${API_URL}/hunts/${encodeURIComponent(huntId)}`)
+  const response = await fetch(`${API_URL}/hunts/${pathSegment(huntId)}`)
   if (!response.ok) throw new Error(await getApiErrorMessage(response, `Failed to load Hunt (${response.status})`))
   return response.json()
 }
@@ -208,7 +209,7 @@ export async function suggestHuntSkills(
   signals: string[] = [],
 ): Promise<HuntSkillSuggestions> {
   const response = await fetch(
-    `${API_URL}/hunts/${encodeURIComponent(huntId)}/skills/suggestions`,
+    `${API_URL}/hunts/${pathSegment(huntId)}/skills/suggestions`,
     {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -227,7 +228,7 @@ export async function bindHuntSkill(
   reason: string,
 ): Promise<HuntV2> {
   const response = await fetch(
-    `${API_URL}/hunts/${encodeURIComponent(huntId)}/skills/${encodeURIComponent(skillId)}/bind`,
+    `${API_URL}/hunts/${pathSegment(huntId)}/skills/${pathSegment(skillId)}/bind`,
     {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -242,7 +243,7 @@ export async function bindHuntSkill(
 
 export async function unbindHuntSkill(huntId: string, skillId: string): Promise<HuntV2> {
   const response = await fetch(
-    `${API_URL}/hunts/${encodeURIComponent(huntId)}/skills/${encodeURIComponent(skillId)}`,
+    `${API_URL}/hunts/${pathSegment(huntId)}/skills/${pathSegment(skillId)}`,
     { method: 'DELETE' },
   )
   if (!response.ok) {
@@ -304,13 +305,13 @@ export async function listHuntsV2(params: HuntListParams = {}): Promise<HuntList
 }
 
 export async function cancelHuntV2(huntId: string): Promise<HuntV2> {
-  const response = await fetch(`${API_URL}/hunts/${encodeURIComponent(huntId)}/cancel`, { method: 'POST' })
+  const response = await fetch(`${API_URL}/hunts/${pathSegment(huntId)}/cancel`, { method: 'POST' })
   if (!response.ok) throw new Error(await getApiErrorMessage(response, `Failed to cancel Hunt (${response.status})`))
   return response.json()
 }
 
 export async function resumeHuntV2(huntId: string): Promise<HuntV2> {
-  const response = await fetch(`${API_URL}/hunts/${encodeURIComponent(huntId)}/resume`, { method: 'POST' })
+  const response = await fetch(`${API_URL}/hunts/${pathSegment(huntId)}/resume`, { method: 'POST' })
   if (!response.ok) throw new Error(await getApiErrorMessage(response, `Failed to resume Hunt (${response.status})`))
   return response.json()
 }
@@ -327,7 +328,7 @@ export interface HuntBudgetAmendmentInput {
 export async function amendHuntBudget(huntId: string, request: HuntBudgetAmendmentInput): Promise<{
   budget_revision: number; status: HuntV2['status']; replayed: boolean; device_traffic_frozen: boolean
 }> {
-  const response = await fetch(`${API_URL}/hunts/${encodeURIComponent(huntId)}/budget-amendments`, {
+  const response = await fetch(`${API_URL}/hunts/${pathSegment(huntId)}/budget-amendments`, {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ schema_version: 'hunt-budget-amendment/v1', ...request }),
   })
@@ -337,7 +338,7 @@ export async function amendHuntBudget(huntId: string, request: HuntBudgetAmendme
 
 export async function confirmHuntShellPlan(huntId: string, plan: DeviceAgentShellPlan): Promise<HuntV2> {
   const response = await fetch(
-    `${API_URL}/hunts/${encodeURIComponent(huntId)}/shell-plans/${encodeURIComponent(plan.plan_id)}/confirm`,
+    `${API_URL}/hunts/${pathSegment(huntId)}/shell-plans/${pathSegment(plan.plan_id)}/confirm`,
     {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },

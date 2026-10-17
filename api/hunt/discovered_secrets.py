@@ -334,11 +334,14 @@ HUNT_USE_SCHEMA = "hunt-discovered-secret-use/v1"
 async def read_hunt_uses(conn: Any, hunt_run_id: Any, *, limit: int = 2000) -> list[dict[str, Any]]:
     """Every ``secret://`` resolution of a Hunt, oldest first, for its record: the reference,
     kind, label, action and destination host. Metadata only, never a value; operator reveals
-    (no Hunt) are not Hunt uses."""
+    (no Hunt) are not Hunt uses. The record is read by the Hunt's model (``shakerscan_hunt_get
+    view=full``), so, as in :func:`planner_view`, a secret granted from another target says only
+    that it was granted, never which target it was found on."""
     rows = await conn.fetch(
         """SELECT u.id, u.secret_id, u.action_id, u.destination_host, u.used_at,
-            s.kind, s.label, s.target_id
+            s.kind, s.label, (s.target_id IS NOT DISTINCT FROM h.target_id) AS own
         FROM discovered_secret_uses u JOIN discovered_secrets s ON s.id=u.secret_id
+        JOIN hunt_runs h ON h.id=u.hunt_run_id
         WHERE u.hunt_run_id=$1 AND u.revealed_by IS NULL
         ORDER BY u.used_at ASC, u.id ASC LIMIT $2""",
         uuid.UUID(str(hunt_run_id)), max(1, int(limit)),
@@ -351,7 +354,7 @@ async def read_hunt_uses(conn: Any, hunt_run_id: Any, *, limit: int = 2000) -> l
         "label": row["label"],
         "action_id": str(row["action_id"]) if row["action_id"] else None,
         "destination_host": row["destination_host"] or None,
-        "found_on": str(row["target_id"]),
+        "granted": not row["own"],
         "used_at": row["used_at"].isoformat() if hasattr(row["used_at"], "isoformat") else row["used_at"],
         "secret_values_visible": False,
     } for row in rows]

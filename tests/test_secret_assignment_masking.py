@@ -6,6 +6,8 @@ from __future__ import annotations
 
 import time
 
+import pytest
+
 from api.runtime.archive_body_masking import mask_credential_shaped
 from scanner.redaction import redact_text
 
@@ -58,3 +60,65 @@ def test_a_reference_shaped_value_is_not_a_way_around_masking():
     # Only the exact reference grammar is held back; anything longer is masked as before.
     assert "and-more" not in redact_text(f"secret: {REFERENCE}x-and-more")
     assert "hunter2hunter2" not in redact_text(f"{REFERENCE} password=hunter2hunter2")
+
+
+# Review sweep M2: a reference shields nothing joined to it.
+@pytest.mark.parametrize("tail", [".hunter2Pass", ":S3cretValue123", "/sk_" + "live_" + "abcdefghijklmnop1234"])
+def test_a_value_joined_to_a_reference_is_masked_and_the_reference_kept(tail):
+    redacted = redact_text(f"stored as {REFERENCE}{tail} today")
+    assert tail.lstrip(".:/") not in redacted
+    assert REFERENCE in redacted and redacted.endswith(" today")
+
+
+@pytest.mark.parametrize("text", [
+    f"see {REFERENCE}.", f"({REFERENCE})", f'{{"ref": "{REFERENCE}"}}', f"[{REFERENCE}];", REFERENCE,
+    f"'{REFERENCE}'", f"{REFERENCE}, then {REFERENCE}!",
+])
+def test_a_reference_that_ends_stays_readable(text):
+    assert redact_text(text) == text
+
+
+# Synthetic, format-only values, assembled at run time so no literal in the source looks like a
+# live credential to a secret scanner.
+PROVIDER_KEYS = (
+    "sk_" + "live_" + "4eC39HqLyjWDarjtT1zdp7dc",
+    "sk_" + "test_" + "51HxYzAbCdEfGhIjKlMnOp",
+    "ghp" + "_aBcDeFgHiJkLmNoPqRsTuVwXyZ0123456789",
+    "gho" + "_16C7e42F292c6912E7710c838347Ae178B4a",
+    "github" + "_pat_11ABCDEFG0123456789_abcdefghijklmnopqrstuvwxyz",
+    "AKIA" + "IOSFODNN7EXAMPLE",
+    "xox" + "b-123456789012-1234567890123-AbCdEfGhIjKlMnOpQrStUvWx",
+    "AIza" + "SyA1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q",
+    "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U",
+)
+
+
+@pytest.mark.parametrize("key", PROVIDER_KEYS)
+def test_a_standalone_provider_key_is_masked_in_free_text(key):
+    redacted = redact_text(f"the page leaked {key} in a comment")
+    assert key not in redacted and "the page leaked" in redacted and redacted.endswith("in a comment")
+
+
+def test_provider_key_detection_leaves_references_and_words_alone():
+    text = f"kept as {REFERENCE}; ask_live_mode and skeleton_test_case and AKIA-docs stay"
+    assert redact_text(text) == text
+
+
+# Review sweep (informational): mask_credential_shaped is safe on its own for secret-named
+# assignments whose value is not credential-shaped by itself.
+@pytest.mark.parametrize("text, secret", [
+    ("PASSWORD=hunter2", "hunter2"),
+    ("API_KEY=a1b2c3d4e5f6a7b8", "a1b2c3d4e5f6a7b8"),
+    ("SESSION=eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U",
+     "dozjgNryP4J3jVmNHl0w5N"),
+    ("https://app.test/cb?token=abcd1234&lang=en", "abcd1234"),
+])
+def test_a_secret_named_assignment_is_withheld_by_mask_credential_shaped_alone(text, secret):
+    masked = mask_credential_shaped(text)
+    assert secret not in masked
+    assert masked.split("=", 1)[0] == text.split("=", 1)[0]
+
+
+def test_name_aware_masking_keeps_locations_markers_and_plain_settings():
+    text = "TOKEN_URL=https://idp.test/oauth/token PASSWORD=[withheld:2] TOKEN_TYPE=bearer MODE=prod"
+    assert mask_credential_shaped(text) == text

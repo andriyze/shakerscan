@@ -147,7 +147,27 @@ _DESCRIPTIVE_VALUE = re.compile(
     r"returned|leaked|unset|not|no|yes|true|false|n/a|bcrypt|scrypt|argon2(?:id|i|d)?|pbkdf2|"
     r"sha-?1|sha-?256|sha-?512|md5|plaintext|cleartext|hashed|salted|required|optional|ignored|"
     r"accepted|rejected|unchanged|changed|valid|invalid|expired|weak|strong|default|shown|visible)"
-    r"(?![A-Za-z0-9_-])")
+    # The word is the whole value: the text ends there (after closing punctuation at most), or
+    # prose follows after whitespace. A word joined to more value (``md5:5f4d...``,
+    # ``bcrypt$2b$12$...``, ``present:AKIA...``) or a clause after a comma (``none, it is
+    # Tr0ub4dor&3xyz``) is a value, not a description.
+    r"(?=[.;!?)\]]*$|\s)")
+# What a description never carries: a long token mixing letters and digits (a hash, a key), or a
+# shorter one mixing them with capitals or symbols (``Tr0ub4dor&3xyz``). Paths, URLs and record
+# identifiers (UUIDs) are citations, not values.
+_PROSE_WORD = re.compile(r"[^\s,;()\[\]\"'`]{8,}")
+_UUID = re.compile(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}")
+
+
+def _secret_shaped(word: str) -> bool:
+    word = word.strip(".:!?")
+    if len(word) < 8 or word.startswith(("/", "#")) or "://" in word or _UUID.fullmatch(word):
+        return False
+    if not (any(ch.isalpha() for ch in word) and any(ch.isdigit() for ch in word)):
+        return False
+    if len(word) >= 16:
+        return True
+    return any(ch.isupper() for ch in word) or any(not ch.isalnum() and ch not in "-_./" for ch in word)
 
 
 def _looks_secret(text: str) -> bool:
@@ -158,7 +178,11 @@ def _looks_secret(text: str) -> bool:
     if redact_text(text) == text:
         return False
     prose = _DESCRIPTIVE_VALUE.sub(lambda match: f"{match.group(1)} {match.group(3)}", text)
-    return redact_text(prose) != prose
+    if prose == text or redact_text(prose) != prose:
+        return True
+    # Read as prose only because of a descriptive word: the rest of the text must not carry a
+    # value the key rules no longer see (``password: not Tr0ub4dor&3xyz``).
+    return any(_secret_shaped(word) for word in _PROSE_WORD.findall(prose))
 
 
 def clean_text(value: Any, *, field: str, maximum: int, required: bool) -> str:
