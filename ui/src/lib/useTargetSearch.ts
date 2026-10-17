@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { isAbortError } from './fetchLayer.mjs'
 import { getTargetAsset, searchTargetAssets, type TargetAsset } from './targetAssetApi'
-import { collectAcceptedTargets } from './targetSearchModel.mjs'
+import { collectAcceptedTargets, isTargetId } from './targetSearchModel.mjs'
 
 export const TARGET_SEARCH_DEBOUNCE_MS = 250
 export const TARGET_SEARCH_LIMIT = 25
@@ -131,8 +131,9 @@ export function useTargetSearch({
   }, [debounced, enabled, includeInactive, includeServices, limit, webOnly])
 
   // A selection the current matches do not hold (a link, a saved choice): read just that asset.
+  // A link value that cannot be a target id is never requested (the API would answer 400).
   const missing = useMemo(
-    () => [...new Set(selectedIds.filter((id): id is string => Boolean(id) && !known.has(id as string)))],
+    () => [...new Set(selectedIds.filter((id): id is string => isTargetId(id) && !known.has(id as string)))],
     [known, selectedIds],
   )
   const missingKey = missing.join(',')

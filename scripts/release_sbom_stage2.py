@@ -110,6 +110,32 @@ def client_cdx(document: dict) -> dict:
             "components": components,
             "dependencies": [{"ref": root["bom-ref"], "dependsOn": [f["bom-ref"] for f in components]}]}
 
+def extra_cdx(document: dict, extra: str) -> dict:
+    """Lossless mapping of our own optional-extra resolution SPDX (one root, locked packages)."""
+    root_package = next(p for p in document["packages"] if p["SPDXID"] == "SPDXRef-ShakerScanClientExtra")
+    root = {"type": "application", "bom-ref": root_package["SPDXID"], "name": root_package["name"],
+            "version": root_package["versionInfo"], "purl": next(iter(coverage.spdx_purls({"packages": [root_package]}))),
+            "properties": [{"name": "shakerscan:scope", "value": sbom.EXTRA_SCOPE},
+                           {"name": "shakerscan:extra", "value": extra},
+                           {"name": "shakerscan:source-info", "value": root_package["sourceInfo"]}]}
+    components = []
+    for package in document["packages"]:
+        if package is root_package:
+            continue
+        purls = coverage.spdx_purls({"packages": [package]})
+        require(len(purls) == 1, "extra package must have one identity")
+        components.append({"type": "library", "bom-ref": package["SPDXID"], "name": package["name"],
+                           "version": package["versionInfo"], "purl": next(iter(purls)), "scope": "optional",
+                           "hashes": [{"alg": "SHA-256", "content": c["checksumValue"]} for c in package["checksums"]],
+                           "properties": [{"name": "shakerscan:source-info", "value": package["sourceInfo"]}]})
+    return {"bomFormat": "CycloneDX", "specVersion": "1.6", "version": 1,
+            "metadata": {"timestamp": document["creationInfo"]["created"], "component": root,
+                         "tools": {"components": [{"type": "application", "name": "shakerscan-client-sbom-mapper", "version": "2"}]}},
+            "components": components,
+            "dependencies": [{"ref": root["bom-ref"], "dependsOn": [c["bom-ref"] for c in components]}]
+                            + [{"ref": c["bom-ref"], "dependsOn": []} for c in components]}
+
+
 def document_pair(documents: dict, label: str, spdx: dict, cdx: dict, tool: Toolchain) -> dict:
     sbom.validate_spdx(spdx)
     coverage.validate_cdx(cdx)
@@ -209,6 +235,23 @@ def enhance(directory: Path, root: Path, tools: Path, output: Path) -> None:
             name = artifact["file"] + ".cdx.json"
             documents[name] = sbom.json_bytes(cdx)
             extra.append({"scope": "client-archive-files", "distribution": artifact["distribution"],
+                          "cyclonedx": name, "cyclonedx_sha256": sbom.sha256(documents[name])})
+        for entry in index.get("extras", []):
+            for key in ("input", "lock"):
+                path = root / entry[key]
+                require(path.is_file() and sbom.sha256(path.read_bytes()) == entry[key + "_sha256"],
+                        f"extra {entry['extra']}: {entry[key]} differs from the stage-one resolution")
+                plan["inputs"].append({"path": entry[key], "sha256": entry[key + "_sha256"],
+                                       "kind": "python-lock" if key == "lock" else "python-requirements"})
+            spdx = json.loads(documents[entry["sbom"]])
+            tool.validate(spdx)
+            cdx = extra_cdx(spdx, entry["extra"])
+            tool.validate(cdx)
+            coverage.validate_cdx(cdx)
+            require(coverage.spdx_purls(spdx) <= coverage.cdx_purls(cdx), "extra conversion lost package identities")
+            name = entry["sbom"].removesuffix(".spdx.json") + ".cdx.json"
+            documents[name] = sbom.json_bytes(cdx)
+            extra.append({"scope": sbom.EXTRA_SCOPE, "extra": entry["extra"],
                           "cyclonedx": name, "cyclonedx_sha256": sbom.sha256(documents[name])})
         limits = sbom.CLIENT_LIMITS + ["SPDX and CycloneDX documents pass pinned official JSON schemas; signatures and completeness are separate properties."]
     else:
@@ -321,7 +364,10 @@ def verify_extension(directory: Path, index: dict) -> set[str]:
         require(catalog.get("cyclonedx_sha256") == files[cdx_name], "CycloneDX hash binding mismatch")
         coverage.validate_cdx(sbom.load_json(directory / cdx_name))
         cdx_files.add(cdx_name)
-        if index["kind"] == "client":
+        if index["kind"] == "client" and catalog.get("scope") == sbom.EXTRA_SCOPE:
+            subject = ("extra", catalog.get("extra"))
+            require(subject[1] in {e["extra"] for e in index.get("extras", [])}, "conversion of an unindexed optional extra")
+        elif index["kind"] == "client":
             require(catalog.get("scope") == "client-archive-files", "invalid client catalog scope")
             subject = catalog.get("distribution")
             require(subject in ("wheel", "sdist"), "invalid converted distribution")
@@ -349,7 +395,10 @@ def verify_extension(directory: Path, index: dict) -> set[str]:
         subjects.add(subject)
     require(cdx_files == {n for n in files if n.endswith(".cdx.json")}, "unindexed CycloneDX document")
     if index["kind"] == "client":
-        require(subjects == {"wheel", "sdist"}, "missing client CycloneDX conversion")
+        expected = {"wheel", "sdist"} | {("extra", e["extra"]) for e in index.get("extras", [])}
+        require(subjects == expected, "missing client CycloneDX conversion")
+        locked = {(e[key], e[key + "_sha256"]) for e in index.get("extras", []) for key in ("input", "lock")}
+        require({(i.get("path"), i.get("sha256")) for i in plan.get("inputs", [])} == locked, "stage-two extra inputs differ from the index")
     else:
         expected_first = {(a["image"], a["platform"], a["platform_digest"]) for a in index["artifacts"]}
         require(expected_first <= subjects and build_inputs == 1, "missing first-party or build-input catalog")

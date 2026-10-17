@@ -229,8 +229,11 @@ def test_webhook_denial_keeps_its_own_reasons(monkeypatch):
     assert result["response"]["status"]["message"] == "invalid admission package"
 
     def not_admitted(*_args):
-        raise webhook.AdmissionDenied("exact bundle was not admitted")
+        raise webhook.AdmissionDenied("not_admitted")
 
     monkeypatch.setattr(webhook, "_verify", not_admitted)
     result = webhook.review_admission(_verified_review())
     assert result["response"]["status"]["message"] == "exact bundle was not admitted"
+    # A denial names a reason from the table; free text never reaches the caller.
+    with pytest.raises(ValueError):
+        webhook.AdmissionDenied("http://verifier.internal/ answered 500")

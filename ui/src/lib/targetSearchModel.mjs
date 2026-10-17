@@ -1,5 +1,15 @@
 // Pure logic behind the server-side target typeahead (useTargetSearch). No React.
 
+const TARGET_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+
+/**
+ * Whether `id` can name a target (targets and their web origins are UUIDs). A link parameter
+ * that cannot is not looked up: the API answers it with 400, never with an asset.
+ */
+export function isTargetId(id) {
+  return typeof id === 'string' && TARGET_ID.test(id)
+}
+
 /** Pages a picker reads at most for one query while its filter keeps rejecting rows. */
 export const TARGET_SEARCH_MAX_PAGES = 4
 

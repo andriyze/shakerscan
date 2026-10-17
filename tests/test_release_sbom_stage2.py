@@ -202,6 +202,49 @@ class ExtensionIntegrity(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "hash binding"):
                 stage2.verify_extension(directory, index)
 
+    def with_extra(self, directory, *, convert=True, plan_inputs=True):
+        index = self.fixture(directory)
+        extra = {"extra": "record", "scope": sbom.EXTRA_SCOPE, "requires": ["playwright>=1.44"],
+                 "input": "client/requirements/record.txt", "input_sha256": "1" * 64,
+                 "lock": "client/requirements/record.lock", "lock_sha256": "2" * 64}
+        index["extras"] = [extra]
+        if convert:
+            name = "extra-record.cdx.json"
+            (directory / name).write_bytes(sbom.json_bytes(cdx()))
+            index["files"][name] = sbom.sha256(sbom.json_bytes(cdx()))
+            index["extension"]["catalogs"].append({"scope": sbom.EXTRA_SCOPE, "extra": "record", "cyclonedx": name,
+                                                   "cyclonedx_sha256": index["files"][name]})
+        plan = {"kind": "client", "source_sha": SHA, "inputs": [
+            {"path": extra["input"], "sha256": extra["input_sha256"], "kind": "python-requirements"},
+            {"path": extra["lock"], "sha256": extra["lock_sha256"], "kind": "python-lock"}] if plan_inputs else []}
+        (directory / stage2.PLAN).write_bytes(sbom.json_bytes(plan))
+        index["files"][stage2.PLAN] = sbom.sha256(sbom.json_bytes(plan))
+        return index
+
+    def test_an_optional_extra_needs_its_conversion_and_lock_inputs(self):
+        with tempfile.TemporaryDirectory() as t:
+            directory = Path(t)
+            stage2.verify_extension(directory, self.with_extra(directory))
+        with tempfile.TemporaryDirectory() as t:
+            directory = Path(t)
+            with self.assertRaisesRegex(ValueError, "missing client CycloneDX conversion"):
+                stage2.verify_extension(directory, self.with_extra(directory, convert=False))
+        with tempfile.TemporaryDirectory() as t:
+            directory = Path(t)
+            with self.assertRaisesRegex(ValueError, "extra inputs differ"):
+                stage2.verify_extension(directory, self.with_extra(directory, plan_inputs=False))
+
+    def test_extra_mapping_keeps_every_locked_identity(self):
+        sys.path.insert(0, str(ROOT / "tests"))
+        from test_release_sbom import RECORD_LOCK, VERSION, CREATED
+        lock = {"input_path": "client/requirements/record.txt", "input": b"playwright>=1.44\n",
+                "lock_path": "client/requirements/record.lock", "lock": RECORD_LOCK.encode()}
+        document, _ = sbom.extra_document("record", ["playwright>=1.44"], lock, VERSION, SHA, "andriyze/shakerscan", CREATED)
+        converted = stage2.extra_cdx(document, "record")
+        coverage.validate_cdx(converted)
+        self.assertEqual(coverage.spdx_purls(document), coverage.cdx_purls(converted))
+        self.assertEqual({c["scope"] for c in converted["components"]}, {"optional"})
+
     def test_source_checkout_must_be_clean_and_exact(self):
         with patch.object(stage2.subprocess, "check_output", side_effect=["b" * 40]):
             with self.assertRaisesRegex(ValueError, "differs"):
@@ -246,6 +289,16 @@ class OfficialSchemas(unittest.TestCase):
             self.assertEqual({f["fileName"] for f in document["files"]}, {c["name"] for c in cdx_doc["components"]})
             self.assertEqual(len(document["files"]), len(cdx_doc["components"]))
             tool.validate(cdx_doc)
+
+    def test_extra_resolution_validates_offline(self):
+        tool = tooling.Toolchain(Path(os.environ["SHAKERSCAN_SBOM_TOOLS"]))
+        sys.path.insert(0, str(ROOT / "tests"))
+        from test_release_sbom import RECORD_LOCK, VERSION, CREATED
+        lock = {"input_path": "client/requirements/record.txt", "input": b"playwright>=1.44\n",
+                "lock_path": "client/requirements/record.lock", "lock": RECORD_LOCK.encode()}
+        document, _ = sbom.extra_document("record", ["playwright>=1.44"], lock, VERSION, SHA, "andriyze/shakerscan", CREATED)
+        tool.validate(document)
+        tool.validate(stage2.extra_cdx(document, "record"))
 
     def test_build_inputs_validate_offline(self):
         tool = tooling.Toolchain(Path(os.environ["SHAKERSCAN_SBOM_TOOLS"]))
