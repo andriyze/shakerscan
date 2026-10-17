@@ -1674,14 +1674,18 @@ _SQLMAP_RESPONSE_MARKER = re.compile(
 )
 
 
-def _baseline(status: Any, location: Any) -> dict[str, Any] | None:
+def _baseline(status: Any, location: Any, challenge: bool = False) -> dict[str, Any] | None:
     try:
         code = int(status)
     except (TypeError, ValueError):
         return None
     if not 100 <= code <= 599:
         return None
-    return {"status": code, "login_redirect": bool(location) and is_login_location(location)}
+    return {
+        "status": code,
+        "login_redirect": bool(location) and is_login_location(location),
+        "www_authenticate": bool(challenge),
+    }
 
 
 def sqlmap_traffic_baseline(text: str) -> dict[str, Any] | None:
@@ -1689,12 +1693,12 @@ def sqlmap_traffic_baseline(text: str) -> dict[str, Any] | None:
     match = _SQLMAP_RESPONSE_MARKER.search(str(text or ""))
     if match is None:
         return None
+    headers = match.group("headers").splitlines()
     location = next((
-        line.split(":", 1)[1].strip()
-        for line in match.group("headers").splitlines()
-        if line.lower().startswith("location:")
+        line.split(":", 1)[1].strip() for line in headers if line.lower().startswith("location:")
     ), None)
-    return _baseline(match.group(1), location)
+    challenge = any(line.lower().startswith("www-authenticate:") for line in headers)
+    return _baseline(match.group(1), location, challenge)
 
 
 def har_baseline(text: str) -> dict[str, Any] | None:
@@ -1705,11 +1709,12 @@ def har_baseline(text: str) -> dict[str, Any] | None:
         return None
     if not isinstance(response, Mapping):
         return None
-    location = response.get("redirectURL") or next((
-        item.get("value") for item in response.get("headers") or ()
-        if isinstance(item, Mapping) and str(item.get("name") or "").lower() == "location"
-    ), None)
-    return _baseline(response.get("status"), location)
+    names = {
+        str(item.get("name") or "").lower(): item.get("value")
+        for item in response.get("headers") or () if isinstance(item, Mapping)
+    }
+    location = response.get("redirectURL") or names.get("location")
+    return _baseline(response.get("status"), location, "www-authenticate" in names)
 
 
 def har_request_count(text: str) -> int | None:
@@ -2339,12 +2344,14 @@ def parse_scanner_output(
         baseline = dict((wire_log or {}).get("baseline") or {})
         if not baseline and scanner == "sqlmap" and _SQLMAP_NOT_AUTHORIZED in text:
             # No traffic log: sqlmap's own connection-test refusal names the 401.
-            baseline = {"status": 401, "login_redirect": False}
+            baseline = {"status": 401, "login_redirect": False, "www_authenticate": False}
         if baseline.get("status"):
-            records.append({
+            # First, so the record cap (MAX_TOOL_RECORDS) can never drop it.
+            records.insert(0, {
                 "kind": BASELINE_RECORD_KIND,
                 "http_status": int(baseline["status"]),
                 "login_redirect": bool(baseline.get("login_redirect")),
+                "www_authenticate": bool(baseline.get("www_authenticate")),
             })
     records = [record for record in records if any(value not in (None, "", [], {}) for key, value in record.items() if key != "kind")]
     kept = min(len(records), MAX_TOOL_RECORDS)

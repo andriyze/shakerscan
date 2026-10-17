@@ -1,15 +1,24 @@
-"""Whether a verifier's baseline response was the target refusing an unauthenticated request.
+"""Whether a verifier's baseline response was the target refusing the request it replayed.
 
 A verifier compares the target's answer to a control request with its answers to payloads. When
-the control is a 401/403/407, or a redirect to a login page, every payload meets the same wall:
-the code under test never ran, and "no difference" is not "not vulnerable". Lab Scan 13bd3497
-(2.11.0) replayed browser-captured ``/hub/api/<name>/1`` routes without the captured session (a
-capture never keeps credentials); each answered 401, sqlmap stopped after one request per
-technique, and every technique was recorded as a settled negative.
+the control is refused, every payload meets the same wall: the code under test never ran, and
+"no difference" is not "not vulnerable". Lab Scan 13bd3497 (2.11.0) replayed browser-captured
+``/hub/api/<name>/1`` routes without the captured session (a capture never keeps credentials);
+each answered 401, sqlmap stopped after one request per technique, and every technique was
+recorded as a settled negative.
+
+Two refusals are told apart, because they call for different action:
+
+* ``authentication_required`` -- 401, 407, a 403 that asks for credentials
+  (``WWW-Authenticate``), or a redirect to a sign-in page. Every request without a session meets
+  it, so a verifier stops at once; a credential profile is the remedy.
+* ``target_refused`` -- any other 403: a WAF rejecting the tool's user agent, or an ownership
+  check that only some payloads may get past. Payloads can still change the answer, so a
+  verifier keeps testing, but a negative measured against the refusal is not a verdict.
 
 The answer of an authentication endpoint is the exception: a login form answers a wrong password
-with 401 or 403 by design, and that answer is what its injection tests compare against. Callers
-decide which candidates are authentication endpoints; this module only reads responses.
+with 401 or 403 by design, and that answer is what its injection tests compare against
+(``is_authentication_candidate``).
 """
 
 from __future__ import annotations
@@ -20,40 +29,67 @@ from collections.abc import Mapping
 from typing import Any
 
 AUTHENTICATION_REQUIRED = "authentication_required"
+TARGET_REFUSED = "target_refused"
+REFUSAL_REASONS = frozenset({AUTHENTICATION_REQUIRED, TARGET_REFUSED})
 # The record of an external verifier's first (baseline) response, from its own wire log.
 BASELINE_RECORD_KIND = "verifier_baseline_response"
 AUTH_REFUSAL_STATUSES = frozenset({401, 403, 407})
 REDIRECT_STATUSES = frozenset({301, 302, 303, 307, 308})
-# The last path segment of a sign-in page. Matched on the Location's path only (never its query,
-# which may carry a return URL or a token).
+# A sign-in page: its last path segment, optionally with a page extension (never a stylesheet,
+# script or image: /static/login.css is not a sign-in page), or an OAuth/OIDC authorization
+# endpoint (``/oauth2/authorize``, Keycloak's ``/protocol/openid-connect/auth``). Matched on the
+# Location's path only, never its query, which may carry a return URL or a token.
+_PAGE_EXTENSION = r"(?:\.(?:php|html?|aspx?|jsp|do|cgi))?"
 _LOGIN_LEAF = re.compile(
-    r"^(?:log[-_]?in|sign[-_]?in|signon|sso|authenticate|authorize)(?:\.[a-z]{2,5})?$",
+    rf"^(?:log[-_]?in|sign[-_]?in|signon|sso|authenticate|authorize|auth){_PAGE_EXTENSION}$",
     re.IGNORECASE,
 )
+_AUTHORIZATION_PATH = re.compile(
+    r"/(?:protocol/openid-connect/auth|oauth2?/(?:v\d+(?:\.\d+)?/)?authorize|connect/authorize)/?$",
+    re.IGNORECASE,
+)
+# A candidate path that is itself an authentication endpoint (the rule the SQLi proof batch
+# classifies body candidates by).
+_AUTHENTICATION_PATH_TOKENS = ("/login", "/auth", "/session", "/signin", "/sign-in", "/sign_in")
 
 
 def is_login_location(location: Any) -> bool:
-    """True when a redirect's Location path ends at a sign-in page (``/hub/login``)."""
+    """True when a redirect's Location path is a sign-in page (``/hub/login``)."""
     try:
         path = urllib.parse.urlsplit(str(location or "")).path
     except ValueError:
         return False
+    if _AUTHORIZATION_PATH.search(path):
+        return True
     segments = [item for item in path.split("/") if item]
     return bool(segments) and bool(_LOGIN_LEAF.match(segments[-1]))
 
 
-def _location(headers: Mapping[str, Any] | None) -> str | None:
+def is_authentication_candidate(candidate: Mapping[str, Any]) -> bool:
+    """Whether a candidate is an authentication endpoint, whose 401/403 is its real answer."""
+    if str(candidate.get("request_class") or "") == "safe_authentication":
+        return True
+    path = str(candidate.get("canonical_path") or candidate.get("path") or "").lower()
+    return bool(candidate.get("body_field_names")) and any(
+        token in path for token in _AUTHENTICATION_PATH_TOKENS
+    )
+
+
+def _header(headers: Mapping[str, Any] | None, wanted: str) -> str | None:
     for name, value in dict(headers or {}).items():
-        if str(name).lower() == "location":
+        if str(name).lower() == wanted:
             return str(value)
     return None
 
 
-def refusal_status(status: Any, headers: Mapping[str, Any] | None = None) -> int | None:
-    """The status code with which the target refused the request, or None.
+def refusal(
+    status: Any, headers: Mapping[str, Any] | None = None, *,
+    login_redirect: bool | None = None, www_authenticate: bool | None = None,
+) -> tuple[int, str] | None:
+    """``(status, reason)`` when the target refused the request, else None.
 
-    401, 403 and 407 refuse it outright; a redirect refuses it when it sends the client to a
-    sign-in page.
+    ``login_redirect`` and ``www_authenticate`` stand in for ``headers`` when only a summary of
+    the response was kept (a tool's wire log).
     """
     if isinstance(status, bool):
         return None
@@ -61,19 +97,41 @@ def refusal_status(status: Any, headers: Mapping[str, Any] | None = None) -> int
         code = int(status)
     except (TypeError, ValueError):
         return None
-    if code in AUTH_REFUSAL_STATUSES:
-        return code
-    if code in REDIRECT_STATUSES and is_login_location(_location(headers)):
-        return code
+    challenge = (
+        bool(www_authenticate) if www_authenticate is not None
+        else _header(headers, "www-authenticate") is not None
+    )
+    if code in {401, 407} or (code == 403 and challenge):
+        return code, AUTHENTICATION_REQUIRED
+    if code == 403:
+        return code, TARGET_REFUSED
+    if code in REDIRECT_STATUSES and (
+        bool(login_redirect) if login_redirect is not None
+        else is_login_location(_header(headers, "location"))
+    ):
+        return code, AUTHENTICATION_REQUIRED
     return None
 
 
-def refusal_error(code: int) -> str:
-    """The error token a verifier reports for a refused baseline (``authentication_required:401``)."""
-    return f"{AUTHENTICATION_REQUIRED}:{int(code)}"
+def refusal_status(status: Any, headers: Mapping[str, Any] | None = None) -> int | None:
+    """The status code with which the target refused the request, or None."""
+    refused = refusal(status, headers)
+    return refused[0] if refused else None
+
+
+def refusal_error(code: int, reason: str = AUTHENTICATION_REQUIRED) -> str:
+    """The error a verifier reports for a refused baseline (``authentication_required:401``)."""
+    return f"{reason}:{int(code)}"
+
+
+def refusal_reason(error: Any) -> str | None:
+    """The refusal reason an error token names, or None (``target_refused:403`` -> reason)."""
+    token = str(error or "").strip().lower().split(":", 1)[0]
+    return token if token in REFUSAL_REASONS else None
 
 
 __all__ = [
-    "AUTHENTICATION_REQUIRED", "AUTH_REFUSAL_STATUSES", "BASELINE_RECORD_KIND", "is_login_location", "refusal_error",
-    "refusal_status",
+    "AUTHENTICATION_REQUIRED", "AUTH_REFUSAL_STATUSES", "BASELINE_RECORD_KIND",
+    "REFUSAL_REASONS", "TARGET_REFUSED", "is_authentication_candidate", "is_login_location",
+    "refusal", "refusal_error", "refusal_reason", "refusal_status",
 ]

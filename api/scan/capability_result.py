@@ -54,6 +54,9 @@ class CapabilityResultReason(str, Enum):
     # a login page), so its payloads never reached the code under test. Not a negative: the
     # candidate stays unverified until the Scan carries a credential profile for it.
     AUTHENTICATION_REQUIRED = "authentication_required"
+    # The target refused the verifier's baseline with a 403 that asks for no credentials (a WAF
+    # rejecting the tool, an ownership check): what was measured against it is not a verdict.
+    TARGET_REFUSED = "target_refused"
     SCOPE_INVALID = "scope_invalid"
     CANCELLED = "cancelled"
     TIMED_OUT = "timed_out"

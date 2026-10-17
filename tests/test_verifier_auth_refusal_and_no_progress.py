@@ -55,18 +55,21 @@ def test_refusal_statuses_and_login_redirects():
 
 def test_the_wire_log_baseline_is_recorded_for_sqlmap_and_dalfox():
     assert agent_tools.sqlmap_traffic_baseline(SQLMAP_TRAFFIC) == {
-        "status": 401, "login_redirect": False,
+        "status": 401, "login_redirect": False, "www_authenticate": False,
     }
     har = json.dumps({"log": {"entries": [{"response": {
         "status": 303, "headers": [{"name": "Location", "value": "/hub/login"}],
     }}]}})
-    assert agent_tools.har_baseline(har) == {"status": 303, "login_redirect": True}
+    assert agent_tools.har_baseline(har) == {
+        "status": 303, "login_redirect": True, "www_authenticate": False,
+    }
     parsed = agent_tools.parse_scanner_output(
         "sqlmap", "", wire_log={"actual": 1, "baseline": {"status": 401, "login_redirect": False}},
     )
-    assert parsed["records"] == [
-        {"kind": BASELINE_RECORD_KIND, "http_status": 401, "login_redirect": False},
-    ]
+    assert parsed["records"] == [{
+        "kind": BASELINE_RECORD_KIND, "http_status": 401, "login_redirect": False,
+        "www_authenticate": False,
+    }]
     # Without a traffic log, sqlmap's own refusal of its connection test names the 401.
     stdout = (
         "[CRITICAL] not authorized, try to provide right HTTP authentication type and valid "

@@ -269,6 +269,7 @@ const COVERAGE_REASON_LABELS = {
   worker_lost: 'A worker was lost before all planned work finished',
   authentication_uncertain: 'Credential authority could not be confirmed',
   authentication_required: 'The target refused unauthenticated requests (401/403 or a redirect to sign-in), so those candidates were not tested; add a credential profile to verify them',
+  target_refused: "The target refused the verifier's requests (403) without asking for credentials, for example a firewall or an access rule, so those candidates could not be verified",
   insufficient_budget_for_stage: 'A continuation could not fund a single verification stage, so its candidates were left unverified',
   output_truncated: 'A step produced more output than it may keep, so part of its result was cut off',
   source_not_published: 'An optional discovery file (robots.txt or llms.txt) was not published by the target',

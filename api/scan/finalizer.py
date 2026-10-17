@@ -2384,9 +2384,15 @@ def _evaluate_csp(policy: Any) -> dict[str, Any]:
     }
 
 
+# Why a verifier left a candidate inconclusive because the target refused its baseline.
+_REFUSAL_REASONS = frozenset({
+    CapabilityResultReason.AUTHENTICATION_REQUIRED.value,
+    CapabilityResultReason.TARGET_REFUSED.value,
+})
 # Family gaps named by their one cause instead of the generic ``action_incomplete``.
 _NAMED_FAMILY_GAP_REASONS = frozenset({
     CapabilityResultReason.AUTHENTICATION_REQUIRED.value,
+    CapabilityResultReason.TARGET_REFUSED.value,
     "insufficient_budget_for_stage",
 })
 
@@ -2629,14 +2635,14 @@ def finalize_scan_report(
                 if isinstance(item, Mapping)
                 and item.get("kind") in _SLOW_ENDPOINT_RECORD_KINDS
             )
-            # Candidates the target refused unauthenticated (401/403, a redirect to sign-in):
-            # inconclusive, named so coverage says which ones need a credential profile.
-            row["_refused_candidates"].extend(
-                str(item.get("url") or item.get("candidate_id") or "")
-                for item in observations.get(action.action_id, ())
-                if isinstance(item, Mapping)
-                and item.get("inconclusive_reason") == CapabilityResultReason.AUTHENTICATION_REQUIRED.value
-            )
+            # Candidates the target refused (asked for credentials, or a plain 403):
+            # inconclusive, named so coverage says which ones and why.
+            for item in observations.get(action.action_id, ()):
+                if isinstance(item, Mapping) and item.get("inconclusive_reason") in _REFUSAL_REASONS:
+                    row["_refused_candidates"].append((
+                        str(item["inconclusive_reason"]),
+                        str(item.get("url") or item.get("candidate_id") or ""),
+                    ))
             row["planned_candidates"] += max(0, planned - inapplicable)
             row["attempted_candidates"] += len(attempts)
             row["_statuses"].append(result.status.value)
@@ -2687,10 +2693,12 @@ def finalize_scan_report(
             if outcomes:
                 row["budget_inconclusive_candidates"] = outcomes
                 row["_slow_endpoints"].extend(item["url"] for item in outcomes)
-        refused_candidates = sorted(set(filter(None, row.pop("_refused_candidates"))))
-        if refused_candidates:
-            row["authentication_required_candidates"] = refused_candidates[:50]
-            row["authentication_required_candidate_count"] = len(refused_candidates)
+        refused = row.pop("_refused_candidates")
+        for reason in sorted(_REFUSAL_REASONS):
+            named = sorted({candidate for kind, candidate in refused if kind == reason and candidate})
+            if named:
+                row[f"{reason}_candidates"] = named[:50]
+                row[f"{reason}_candidate_count"] = len(named)
         slow_endpoints = sorted(set(filter(None, row.pop("_slow_endpoints"))))
         if slow_endpoints:
             row["slow_endpoints"] = slow_endpoints
