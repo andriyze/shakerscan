@@ -432,6 +432,58 @@ def test_record_a_local_app_headless_and_upload_it(tmp_path, monkeypatch, capsys
 
 
 
+def test_closing_the_browser_window_ends_the_recording(monkeypatch):
+    # Lab 2.11.0 candidate 8dcd692b, headed: closing the window raised TargetClosedError out of
+    # the wait, so no summary was printed and the capture stayed open until the idle close.
+    import types
+
+    class TargetClosedError(Exception):
+        pass
+
+    class Page:
+        def __init__(self):
+            self.closed = False
+
+        def is_closed(self):
+            return self.closed
+
+        def goto(self, *_args, **_kwargs):
+            return None
+
+        def wait_for_timeout(self, _ms):
+            self.closed = True
+            raise TargetClosedError("Target page, context or browser has been closed")
+
+    page = Page()
+    closed = []
+    context = types.SimpleNamespace(
+        pages=[page], new_page=lambda: page, on=lambda *_args: None, close=lambda: closed.append("context"),
+    )
+    browser = types.SimpleNamespace(
+        new_context=lambda: context, is_connected=lambda: False, close=lambda: closed.append("browser"),
+    )
+
+    class Playwright:
+        chromium = types.SimpleNamespace(launch=lambda **_kwargs: browser)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc):
+            return False
+
+    sync_api = types.ModuleType("playwright.sync_api")
+    sync_api.Error = TargetClosedError
+    sync_api.sync_playwright = Playwright
+    monkeypatch.setitem(sys.modules, "playwright", types.ModuleType("playwright"))
+    monkeypatch.setitem(sys.modules, "playwright.sync_api", sync_api)
+    monkeypatch.setattr(record, "_attach", lambda *_args: None)
+    monkeypatch.setattr(record, "_process", lambda *_args: None)
+    recording = types.SimpleNamespace(stopped=None, limits=None, unfinished=0, pump=lambda _now: None)
+    reason = record.run_browser(recording, "https://app.example.test/", headless=False, script=None)
+    assert reason == "browser closed" and closed == ["context", "browser"]
+
+
 @pytest.mark.parametrize(("status", "detail"), [(405, {"detail": "Method Not Allowed"}), (404, {"detail": "Not Found"})])
 def test_an_engine_without_captures_is_named(status, detail):
     class OldEngine:
