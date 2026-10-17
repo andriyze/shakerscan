@@ -471,3 +471,54 @@ def test_assembly_peak_memory_is_bounded(monkeypatch):
     assert len(payload["document"]["log"]["entries"]) == 2_000
     assert digest == store._digest(payload)  # the digest every consumer recomputes
     assert peak < 4 * document_bytes, (peak, document_bytes)
+
+
+class _FinalizeConn:
+    async def fetch(self, sql, *args):
+        return []
+
+    async def fetchrow(self, sql, *args):
+        return {"id": args[0]}
+
+    async def execute(self, sql, *args):
+        return "UPDATE 0"
+
+
+def test_two_concurrent_closes_never_assemble_at_once(monkeypatch):
+    """One assembly per API process: the second close waits for the first, a close that would
+    wait too long answers 503 with Retry-After, and the idle close never queues."""
+    import time as _time
+
+    from api.capture import store
+
+    active = {"now": 0, "max": 0}
+
+    def slow_assemble(batches):
+        active["now"] += 1
+        active["max"] = max(active["max"], active["now"])
+        _time.sleep(0.2)
+        active["now"] -= 1
+        return "enc:fernet:x", "0" * 64
+
+    monkeypatch.setattr(store, "_assemble", slow_assemble)
+
+    def close(reason, wait=None):
+        state = {"state": "open"}
+        return store._finalize(_FinalizeConn(), {"id": reason, "db_now": __import__("datetime").datetime.now()},
+                               {"capture": state}, state, reason=reason, wait_seconds=wait)
+
+    async def scenario():
+        both = await asyncio.gather(close("client"), close("deactivated"))
+        assert len(both) == 2 and active["max"] == 1
+        first = asyncio.create_task(close("client"))
+        await asyncio.sleep(0.05)
+        results = await asyncio.gather(close("idle", wait=0), close("client", wait=0.05), return_exceptions=True)
+        await first
+        return results
+
+    idle, waited = asyncio.run(scenario())
+    assert active["max"] == 1
+    for refused in (idle, waited):
+        assert isinstance(refused, store.AssemblyBusy) and refused.status_code == 503
+        assert refused.headers["Retry-After"] == str(store.ASSEMBLY_RETRY_AFTER_SECONDS)
+        assert refused.detail["error"] == "capture_assembly_busy"

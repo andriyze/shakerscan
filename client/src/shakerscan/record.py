@@ -115,12 +115,14 @@ class ApiClient:
                 body = response.read()
         except urllib.error.HTTPError as exc:
             raw = exc.read(64 * 1024)
+            retry_after = _retry_after(exc.headers.get("Retry-After") if exc.headers else None)
             exc.close()
             try:
                 detail = json.loads(raw.decode("utf-8"))
             except (UnicodeDecodeError, ValueError):
                 detail = None
-            raise UploadError(f"{method} {path} answered {exc.code}", status=exc.code, detail=detail) from None
+            raise UploadError(f"{method} {path} answered {exc.code}", status=exc.code, detail=detail,
+                              retry_after=retry_after) from None
         except (urllib.error.URLError, TimeoutError, OSError) as exc:
             raise UploadError(f"{method} {path} got no answer: {getattr(exc, 'reason', exc)}") from None
         try:
@@ -131,6 +133,33 @@ class ApiClient:
 
     def post(self, path: str, payload: Mapping[str, Any], *, body: bytes | None = None) -> dict[str, Any]:
         return self.request("POST", path, payload, body=body)
+
+
+def _retry_after(value: Any) -> float | None:
+    """A Retry-After in seconds (the delta form), or None."""
+    try:
+        seconds = float(str(value).strip())
+    except (TypeError, ValueError):
+        return None
+    return seconds if seconds >= 0 else None
+
+
+CLOSE_ATTEMPTS = 6
+CLOSE_MAX_WAIT_SECONDS = 30.0
+
+
+def close_capture(api: Any, capture_id: str, dropped: Mapping[str, int], *, sleep: Any = time.sleep) -> dict[str, Any]:
+    """Close the capture, waiting out a server that is busy assembling another one (503 with
+    Retry-After) or not answering; any other refusal is raised at once."""
+    path = f"/request-collections/{urllib.parse.quote(capture_id, safe='')}/capture-close"
+    for attempt in range(CLOSE_ATTEMPTS):
+        try:
+            return api.post(path, {"client_dropped": dict(dropped)})
+        except UploadError as exc:
+            if attempt + 1 >= CLOSE_ATTEMPTS or not exc.retryable:
+                raise
+            sleep(min(CLOSE_MAX_WAIT_SECONDS, exc.retry_after if exc.retry_after is not None else 2.0 * (attempt + 1)))
+    raise AssertionError("unreachable")
 
 
 def _message(exc: UploadError) -> str:
@@ -449,8 +478,7 @@ def cmd_record(args: argparse.Namespace, *, base_url: str, token: str | None) ->
     closed = None
     if complete:
         try:
-            closed = api.post(f"/request-collections/{urllib.parse.quote(recording.capture_id, safe='')}/capture-close",
-                              {"client_dropped": recording.dropped})
+            closed = close_capture(api, recording.capture_id, recording.dropped)
         except UploadError as exc:
             sys.stderr.write(f"shakerscan: could not close the capture ({_message(exc)}); "
                              "the server closes it after 30 idle minutes\n")

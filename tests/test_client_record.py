@@ -542,3 +542,27 @@ def test_stale_profile_directories_are_removed(tmp_path):
     assert record.remove_stale_profiles(str(tmp_path), now=1_000 + record.STALE_PROFILE_SECONDS + 1) == 1
     assert not old.exists() and other.exists()
     assert record.remove_stale_profiles(str(tmp_path)) == 0 and fresh.exists()
+
+
+def test_close_waits_out_a_busy_server_then_succeeds():
+    sleeps, calls = [], []
+
+    class Busy:
+        def post(self, path, payload, *, body=None):
+            calls.append(path)
+            if len(calls) < 3:
+                raise UploadError("busy", status=503, retry_after=7.0)
+            return {"status": "closed", "capture": {"state": "closed"}}
+
+    answer = record.close_capture(Busy(), "c/1", {"assets": 1}, sleep=sleeps.append)
+    assert answer["status"] == "closed" and sleeps == [7.0, 7.0]
+    assert calls[0] == "/request-collections/c%2F1/capture-close"
+
+
+def test_close_does_not_retry_a_refusal():
+    class Refuses:
+        def post(self, path, payload, *, body=None):
+            raise UploadError("forbidden", status=403)
+
+    with pytest.raises(UploadError):
+        record.close_capture(Refuses(), "c-1", {}, sleep=lambda _s: pytest.fail("retried a 403"))

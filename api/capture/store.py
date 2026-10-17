@@ -20,6 +20,7 @@ acknowledged without change, the same ``seq`` with other content is refused, and
 from __future__ import annotations
 
 import asyncio
+import weakref
 from datetime import datetime, timedelta, timezone
 import hashlib
 import json
@@ -527,19 +528,66 @@ def _assemble(encrypted_batches: list[str]) -> tuple[str, str]:
     return _encrypt_text(text), hasher.hexdigest()
 
 
+# Assembling a full capture peaks at several hundred MiB (see _assemble), so one API process
+# assembles one capture at a time; other processes are serialized per capture by the row lock.
+ASSEMBLY_WAIT_SECONDS = 60.0
+ASSEMBLY_RETRY_AFTER_SECONDS = 10
+_assembly_slots: "weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, asyncio.Semaphore]" = (
+    weakref.WeakKeyDictionary()
+)
+
+
+class AssemblyBusy(HTTPException):
+    """Another capture is being assembled in this process: answered 503 with Retry-After."""
+
+    def __init__(self) -> None:
+        super().__init__(
+            status_code=503,
+            detail={"error": "capture_assembly_busy",
+                    "message": "Another capture is being assembled; retry the close shortly"},
+            headers={"Retry-After": str(ASSEMBLY_RETRY_AFTER_SECONDS)},
+        )
+
+
+def _assembly_slot() -> asyncio.Semaphore:
+    loop = asyncio.get_running_loop()
+    slot = _assembly_slots.get(loop)
+    if slot is None:
+        slot = _assembly_slots[loop] = asyncio.Semaphore(1)
+    return slot
+
+
 async def _finalize(conn: Any, row: Mapping[str, Any], metadata: dict[str, Any],
-                    state: dict[str, Any], *, reason: str) -> Mapping[str, Any]:
+                    state: dict[str, Any], *, reason: str,
+                    wait_seconds: float | None = None) -> Mapping[str, Any]:
     """Close a locked open capture: assemble its batches into the encrypted document (once),
-    clear the per-batch copies (their digests stay) and record why it closed."""
-    batches = await conn.fetch(
-        """SELECT encrypted_entries FROM request_collection_capture_batches
-           WHERE collection_id=$1 AND encrypted_entries IS NOT NULL ORDER BY seq""",
-        row["id"],
-    )
-    encrypted, digest = await asyncio.to_thread(
-        _assemble, [str(item["encrypted_entries"]) for item in batches],
-    )
-    del batches
+    clear the per-batch copies (their digests stay) and record why it closed.
+
+    The assembly waits at most ``wait_seconds`` (default ASSEMBLY_WAIT_SECONDS; 0: not at all)
+    for this process's one assembly slot, then raises AssemblyBusy with nothing changed."""
+    slot = _assembly_slot()
+    wait = ASSEMBLY_WAIT_SECONDS if wait_seconds is None else wait_seconds
+    if wait <= 0:
+        if slot.locked():
+            raise AssemblyBusy()
+        await slot.acquire()
+    else:
+        try:
+            await asyncio.wait_for(slot.acquire(), timeout=wait)
+        except asyncio.TimeoutError:
+            raise AssemblyBusy() from None
+    try:
+        batches = await conn.fetch(
+            """SELECT encrypted_entries FROM request_collection_capture_batches
+               WHERE collection_id=$1 AND encrypted_entries IS NOT NULL ORDER BY seq""",
+            row["id"],
+        )
+        encrypted, digest = await asyncio.to_thread(
+            _assemble, [str(item["encrypted_entries"]) for item in batches],
+        )
+        del batches
+    finally:
+        slot.release()
     state.update(state="closed", closed_reason=reason, closed_at=_iso(row["db_now"]))
     updated = await conn.fetchrow(
         """UPDATE request_collections
@@ -624,7 +672,10 @@ async def _close_idle(pool: Any, *, idle_seconds: int, limit: int) -> int:
                     continue
                 try:
                     async with conn.transaction():  # a savepoint: a failed assembly changes nothing
-                        await _finalize(conn, row, metadata, state, reason="idle")
+                        # Never queues behind a client close: a busy slot leaves it for next tick.
+                        await _finalize(conn, row, metadata, state, reason="idle", wait_seconds=0)
+                except AssemblyBusy:
+                    continue
                 except Exception as exc:  # noqa: BLE001 - one capture must not stop the others
                     # Closed without a document so it is not retried every tick; its batches
                     # stay encrypted for an operator to recover. Only the type is logged.

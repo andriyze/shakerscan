@@ -487,10 +487,12 @@ class UploadError(Exception):
 
     ``status`` None: no answer (network error, timeout). ``retryable``: worth sending again."""
 
-    def __init__(self, message: str, *, status: int | None = None, detail: Any = None) -> None:
+    def __init__(self, message: str, *, status: int | None = None, detail: Any = None,
+                 retry_after: float | None = None) -> None:
         super().__init__(message)
         self.status = status
         self.detail = detail
+        self.retry_after = retry_after
 
     @property
     def retryable(self) -> bool:
