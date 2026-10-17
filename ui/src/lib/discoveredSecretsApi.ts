@@ -24,6 +24,7 @@ export interface DiscoveredSecret {
 /** The Enterprise gateway asks for the person's step-up for this one decision. */
 export class StepUpRequired extends Error {}
 
+/** The stored secret's id, a path segment of its own (never the `secret://` scheme). */
 const secretId = (ref: string) => ref.replace(/^secret:\/\//, '')
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
@@ -38,18 +39,30 @@ const json = (method: string, body: unknown): RequestInit => ({ method, headers:
 
 export const listDiscoveredSecrets = (targetId: string, signal?: AbortSignal) =>
   request<{ secrets: DiscoveredSecret[]; count: number }>(`/targets/${pathSegment(targetId)}/discovered-secrets`, { signal })
-export const setDiscoveredSecretState = (targetId: string, ref: string, state: 'active' | 'revoked_by_operator') =>
-  request(`/targets/${pathSegment(targetId)}/discovered-secrets/${pathSegment(secretId(ref))}/state`, json('POST', { state }))
-export const setDiscoveredSecretExpiry = (targetId: string, ref: string, days: number) =>
-  request(`/targets/${pathSegment(targetId)}/discovered-secrets/${pathSegment(secretId(ref))}/expiry`, json('POST', { days }))
-export const grantDiscoveredSecret = (targetId: string, ref: string, toTargetId: string) =>
-  request(`/targets/${pathSegment(targetId)}/discovered-secrets/${pathSegment(secretId(ref))}/grants`, json('POST', { target_id: toTargetId }))
-export const ungrantDiscoveredSecret = (targetId: string, ref: string, toTargetId: string) =>
-  request(`/targets/${pathSegment(targetId)}/discovered-secrets/${pathSegment(secretId(ref))}/grants/${pathSegment(toTargetId)}`, { method: 'DELETE' })
-export const revealDiscoveredSecret = (targetId: string, ref: string) =>
-  request<{ value: string }>(`/targets/${pathSegment(targetId)}/discovered-secrets/${pathSegment(secretId(ref))}/reveal`, json('POST', {}))
-export const promoteDiscoveredSecret = (targetId: string, ref: string, input: { name: string; auth_kind: string; header_name?: string }) =>
-  request<{ profile: { id: string } }>(`/targets/${pathSegment(targetId)}/discovered-secrets/${pathSegment(secretId(ref))}/promote`, json('POST', input))
+export const setDiscoveredSecretState = (targetId: string, ref: string, state: 'active' | 'revoked_by_operator') => {
+  const id = secretId(ref)
+  return request(`/targets/${pathSegment(targetId)}/discovered-secrets/${pathSegment(id)}/state`, json('POST', { state }))
+}
+export const setDiscoveredSecretExpiry = (targetId: string, ref: string, days: number) => {
+  const id = secretId(ref)
+  return request(`/targets/${pathSegment(targetId)}/discovered-secrets/${pathSegment(id)}/expiry`, json('POST', { days }))
+}
+export const grantDiscoveredSecret = (targetId: string, ref: string, toTargetId: string) => {
+  const id = secretId(ref)
+  return request(`/targets/${pathSegment(targetId)}/discovered-secrets/${pathSegment(id)}/grants`, json('POST', { target_id: toTargetId }))
+}
+export const ungrantDiscoveredSecret = (targetId: string, ref: string, toTargetId: string) => {
+  const id = secretId(ref)
+  return request(`/targets/${pathSegment(targetId)}/discovered-secrets/${pathSegment(id)}/grants/${pathSegment(toTargetId)}`, { method: 'DELETE' })
+}
+export const revealDiscoveredSecret = (targetId: string, ref: string) => {
+  const id = secretId(ref)
+  return request<{ value: string }>(`/targets/${pathSegment(targetId)}/discovered-secrets/${pathSegment(id)}/reveal`, json('POST', {}))
+}
+export const promoteDiscoveredSecret = (targetId: string, ref: string, input: { name: string; auth_kind: string; header_name?: string }) => {
+  const id = secretId(ref)
+  return request<{ profile: { id: string } }>(`/targets/${pathSegment(targetId)}/discovered-secrets/${pathSegment(id)}/promote`, json('POST', input))
+}
 
 /** The terminal command that makes a step-up decision on Enterprise. */
 export const terminalCommand = (action: 'reveal' | 'grant' | 'promote', targetId: string, ref: string) =>

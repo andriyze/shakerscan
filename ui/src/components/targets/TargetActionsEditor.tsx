@@ -49,7 +49,7 @@ export function TargetActionsEditor({targetId}:{targetId:string}) {
       setSshInput(ssh && action ? {...action.steps[0].input} : {})
       setDraft(JSON.stringify(action?.steps || [{capability:'ports.discover',input:{profile:'top_100'}}],null,2))
       setOpen(true)
-      const response = await fetch(API_URL+'/hunts/contract')
+      const response = await fetch(`${API_URL}/hunts/contract`)
       if (response.ok) {
         const contract = await response.json()
         const manifest = contract.tool_calls || []

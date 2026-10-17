@@ -1,5 +1,6 @@
 'use client'
 
+import { pathSegment } from '@/lib/apiPath.mjs'
 import React, { useState } from 'react'
 import Link from '@/components/WorkspaceLink'
 import ExportPDFButton from '@/components/ExportPDFButton'
@@ -8,7 +9,7 @@ import RemediationSummary from '@/components/RemediationSummary'
 import FindingActions from '@/components/FindingActions'
 import FindingCard from '@/components/FindingCard'
 import {
-  getApiUrl,
+  API_URL,
   getModelIntakeSbomSummary,
   downloadModelIntakeLicenseArtifact,
   downloadModelIntakeSbom,
@@ -571,7 +572,7 @@ function downloadScanJson(scan: any) {
 }
 
 async function downloadAIRedTeamReport(scanId: string, format: 'json' | 'markdown') {
-  const res = await fetch(`${getApiUrl()}/scans/${scanId}/ai-redteam-report?format=${format}`)
+  const res = await fetch(`${API_URL}/scans/${pathSegment(scanId)}/ai-redteam-report?format=${encodeURIComponent(format)}`)
   if (!res.ok) {
     console.error('Failed to download AI red-team report')
     return
@@ -1030,8 +1031,7 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
   }
 
   const handleDownloadAIRedTeamReport = async (format: 'json' | 'markdown') => {
-    const apiUrl = getApiUrl()
-    const res = await fetch(`${apiUrl}/scans/${scan.id}/ai-redteam-report?format=${format}`)
+    const res = await fetch(`${API_URL}/scans/${pathSegment(scan.id)}/ai-redteam-report?format=${encodeURIComponent(format)}`)
     if (!res.ok) {
       console.error('Failed to download AI red-team report')
       return

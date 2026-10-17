@@ -1,6 +1,6 @@
 'use client'
 
-import { pathSegment } from '@/lib/apiPath.mjs'
+import { pathSegment, queryString } from '@/lib/apiPath.mjs'
 import { useEffect, useState } from 'react'
 import { API_URL } from '@/lib/apiConfig'
 
@@ -53,8 +53,7 @@ export default function AuthenticationHistory({ profileId }: { profileId: string
     if (!open) return
     const controller = new AbortController()
     setLoading(true); setError('')
-    const suffix = page ? `?before=${encodeURIComponent(page)}` : ''
-    void fetch(`${API_URL}/authenticated-scan-profiles/${pathSegment(profileId)}/history${suffix}`, { signal: controller.signal, cache: 'no-store' })
+    void fetch(`${API_URL}/authenticated-scan-profiles/${pathSegment(profileId)}/history${queryString(new URLSearchParams(page ? { before: page } : {}))}`, { signal: controller.signal, cache: 'no-store' })
       .then(async response => {
         if (!response.ok) throw new Error()
         const data = await response.json()

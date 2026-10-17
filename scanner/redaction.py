@@ -281,14 +281,18 @@ def _mask_mysql_passwords(text: str) -> str:
 
 
 _PROVIDER_KEY_RE = re.compile(
-    r"(?<![A-Za-z0-9_])(?:"
-    r"(?:sk|rk)_(?:live|test)_[A-Za-z0-9]{10,}"
-    r"|gh[pousr]_[A-Za-z0-9]{20,}"
-    r"|github_pat_[A-Za-z0-9_]{20,}"
+    # A key starts where no letter or digit runs into it: after ``_`` (``token_ghp_...``), after a
+    # percent-encoded byte (``%2Fsk_live_...``), or after anything else that is not alphanumeric.
+    r"(?:(?<=%[0-9A-Fa-f]{2})|(?<![A-Za-z0-9]))(?:"
+    r"(?:sk|rk)_(?:live|test)_[A-Za-z0-9_-]{10,}"
+    r"|gh[pousr]_[A-Za-z0-9_-]{20,}"
+    r"|github_pat_[A-Za-z0-9_-]{20,}"
+    r"|glpat-[A-Za-z0-9_-]{20,}"
+    r"|sk-ant-[A-Za-z0-9_-]{20,}"
     r"|(?:AKIA|ASIA)[0-9A-Z]{16}"
-    r"|xox[abposr]-[A-Za-z0-9-]{10,}"
+    r"|xox[abposr]-[A-Za-z0-9_-]{10,}"
     r"|AIza[0-9A-Za-z_-]{35}"
-    r")(?![A-Za-z0-9_])")
+    r")(?![A-Za-z0-9_-])")
 
 
 _TEXT_PATTERNS: tuple[tuple[re.Pattern[str], str] | Callable[[str], str], ...] = (
@@ -464,8 +468,14 @@ def _redact_parsed_url_credentials(value: str) -> str:
 # ``secret://<id>/sk_live_...``) is a value and is masked, the reference before it kept.
 _SECRET_REFERENCE_RE = re.compile(
     r"(?<![A-Za-z0-9_])(secret://[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})"
-    r"([^\s\"'<>`]*)")
-_REFERENCE_END_RE = re.compile(r"[.,;:!?)\]}]*")
+    r"(?:"
+    # Ends: closing punctuation at most, then ASCII whitespace or the end of the text.
+    r"(?=[)\]}>.,;:!?\"'`]*(?:[ \t\r\n]|$))"
+    # Ends a quoted string inside structured text: ``"secret://<id>","next"`` or ``...<id>"}``.
+    r"|(?=[\"'`][)\]}]*[,:}\]])"
+    # Anything else joined to it (``<value``, ``"value``, ``\u3000value``, ``.value``) is a value:
+    # everything up to the next ASCII whitespace is masked.
+    r"|([^ \t\r\n]+))")
 _REFERENCE_SLOT = "\x00shakerscan-secret-reference-{}\x00"
 _REFERENCE_SLOT_RE = re.compile("\x00shakerscan-secret-reference-([0-9]+)\x00")
 
@@ -479,11 +489,7 @@ def redact_text(text: Any, *, known_values=()) -> Any:
     references: list[str] = []
     if "secret://" in text and "\x00" not in text:
         def hold(match: re.Match[str]) -> str:
-            reference, tail = match.group(1), match.group(2)
-            if _REFERENCE_END_RE.fullmatch(tail):
-                references.append(reference + tail)
-                return _REFERENCE_SLOT.format(len(references) - 1)
-            references.append(reference + MASK)
+            references.append(match.group(1) + (MASK if match.group(2) else ""))
             return _REFERENCE_SLOT.format(len(references) - 1)
 
         text = _SECRET_REFERENCE_RE.sub(hold, text)

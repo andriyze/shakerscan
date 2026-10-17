@@ -990,3 +990,68 @@ def test_data_outside_either_postgres_layout_names_both_volumes(tmp_path):
     assert "rc=1" in result.stdout
     assert "shakerscan_postgres-cluster at /var/lib/postgresql" in result.stderr
     assert "shakerscan_postgres-data at /var/lib/postgresql/data before 2.6" in result.stderr
+
+
+# --- review sweep re-check (L4): a newline in the install path ---------------------------------
+
+
+def _newline_install(tmp_path: Path) -> tuple[Path, Path, Path]:
+    """An install directory whose path contains a newline, with a canary file and a canary
+    directory named like the path's first line-split fragment."""
+    work = tmp_path / "Shaker\nScan install"
+    work.mkdir()
+    canary_file = tmp_path / "Shaker"
+    canary_file.write_text("not ShakerScan's\n")
+    canary_dir = tmp_path / "Scan install"
+    canary_dir.mkdir()
+    (canary_dir / "keep").write_text("not ShakerScan's\n")
+    return work, canary_file, canary_dir
+
+
+def test_backup_rotation_never_splits_a_path_with_a_newline(tmp_path):
+    """The rotation listed backups with `ls -1d ... | read`, so `<tmp>/Shaker` (a fragment of the
+    install path) reached `rm -rf`."""
+    work, canary_file, canary_dir = _newline_install(tmp_path)
+    (tmp_path / "Shaker").unlink()
+    (tmp_path / "Shaker").mkdir()
+    (tmp_path / "Shaker" / "keep").write_text("not ShakerScan's\n")
+    backups = work / "backups"
+    for name in ("pre-upgrade-20261001T000000Z-2.7.0-to-2.8.0", "pre-upgrade-20261003T000000Z-2.8.0-to-2.9.0",
+                 "pre-upgrade-20261005T000000Z-2.9.0-to-2.10.0"):
+        (backups / name).mkdir(parents=True)
+    result = _backup(work, "2.10.0", "t", SCANNER_VERSION="2.11.0")
+    kept = sorted(path.name for path in backups.glob("pre-upgrade-*"))
+    assert len(kept) == 2 and kept[0] == "pre-upgrade-20261005T000000Z-2.9.0-to-2.10.0", (kept, result.stderr)
+    assert (tmp_path / "Shaker" / "keep").exists() and (canary_dir / "keep").exists()
+
+
+def test_the_release_chain_never_splits_a_path_with_a_newline(tmp_path):
+    work, canary_file, canary_dir = _newline_install(tmp_path)
+    body = _THREE + """
+    for n in 1 2 3 4; do REFS="ghcr.io/x/shakerscan-api@sha256:r$n"; SCANNER_VERSION=2.$((7 + n)).0; record_started_release prune; done
+    head -1 "$WORK/.release-images.current" "$WORK/.release-images.previous" "$WORK/.release-images.previous.2"
+    echo "low-disk=$(prune_unused_release_images)"
+    """
+    result = run(work, body, SHAKERSCAN_KEEP_RELEASES="3")
+    for version in ("2.11.0", "2.10.0", "2.9.0"):
+        assert f"# release {version}" in result.stdout, result.stdout + result.stderr
+    # No image is removed from an install whose path cannot be listed safely.
+    assert _removed(work) == [] and "low-disk=0" in result.stdout
+    assert canary_file.exists() and (canary_dir / "keep").exists()
+    registry = work / "registry" / "installs"
+    assert not registry.exists() or str(work) not in registry.read_text()
+
+
+def test_a_start_or_restart_refuses_an_install_path_with_a_newline(tmp_path):
+    work, _canary_file, _canary_dir = _newline_install(tmp_path)
+    result = run(work, """
+    stack_is_running() { return 0; }
+    ensure_install_dir_space; echo start-rc=$?
+    ensure_datastores_persisting; echo restart-rc=$?
+    """)
+    assert "start-rc=1" in result.stdout and "restart-rc=1" in result.stdout, result.stdout + result.stderr
+    assert "contains a newline or another control character" in result.stderr
+    assert "Nothing was changed" in result.stderr
+    spaced = tmp_path / "Shaker Scan spaced"
+    spaced.mkdir()
+    assert "rc=0" in run(spaced, "ensure_install_path_safe; echo rc=$?").stdout
