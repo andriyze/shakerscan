@@ -157,6 +157,9 @@ class FakeApi(BaseHTTPRequestHandler):
     discovery_status = 200
     standing = True
     missing_scan = False
+    # Revoke-check failure modes: the read after the revoke fails, or the revoke counts nothing.
+    authorization_read_status = 200
+    revoked_count = 1
 
     def log_message(self, *args):
         return
@@ -183,8 +186,11 @@ class FakeApi(BaseHTTPRequestHandler):
                 return self._send(404, {"detail": "not found"})
             return self._send(200, {"status": "completed"})
         if path.endswith("/authorization"):
-            return self._send(200, {"authorization": {"standing": FakeApi.standing,
-                                                      "approval_receipt_id": "receipt-1"}})
+            if not FakeApi.standing and FakeApi.authorization_read_status != 200:
+                return self._send(FakeApi.authorization_read_status, {"detail": "unavailable"})
+            # As the API answers: no authorization at all once it was revoked.
+            return self._send(200, {"authorization": {"standing": True, "approval_receipt_id": "receipt-1"}
+                                    if FakeApi.standing else None})
         if path == f"/targets/{STATE['apex_target_id']}":
             return self._send(200, {"name": "upgrade-path apex (upgraded)"})
         if probe.UNKNOWN_ID in path:
@@ -210,8 +216,8 @@ class FakeApi(BaseHTTPRequestHandler):
 
     def do_DELETE(self):
         self.rfile.read(int(self.headers.get("content-length") or 0))
-        FakeApi.standing = False
-        return self._send(200, {})
+        FakeApi.standing = not FakeApi.revoked_count
+        return self._send(200, {"target_id": STATE["apex_target_id"], "revoked": FakeApi.revoked_count})
 
 
 @pytest.fixture
@@ -220,6 +226,7 @@ def fake_api(tmp_path):
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     FakeApi.discovery_status, FakeApi.standing = 200, True
+    FakeApi.authorization_read_status, FakeApi.revoked_count = 200, 1
     state = tmp_path / "state.json"
     state.write_text(json.dumps(STATE), encoding="utf-8")
     yield f"http://127.0.0.1:{server.server_address[1]}", state, tmp_path / "report.json"
@@ -292,3 +299,28 @@ def test_lost_seeded_reads_fail_against_the_baseline_sweep(fake_api, tmp_path):
         FakeApi.missing_scan = False
     assert code == 1
     assert json.loads(report.read_text(encoding="utf-8"))["checks"]["seeded GETs still read their records"] == "fail"
+
+
+@pytest.mark.parametrize(("mode", "failed"), [
+    ({"authorization_read_status": 500}, "authorization revoke visible"),
+    ({"revoked_count": 0}, "authorization revoke counted"),
+])
+def test_the_revoke_check_fails_unless_the_revoke_is_proven(fake_api, mode, failed):
+    """Entry point: ``check``. A failed read after the revoke, or a revoke that revoked nothing,
+    used to pass because each reads as "not standing"."""
+    base, state, report = fake_api
+    for name, value in mode.items():
+        setattr(FakeApi, name, value)
+    assert probe.main(["check", "--api", base, "--state", str(state), "--report", str(report),
+                       "--expect-version", "2.8.2"]) == 1
+    checks = json.loads(report.read_text(encoding="utf-8"))["checks"]
+    assert checks[failed] == "fail"
+
+
+def test_the_revoke_check_needs_a_standing_authorization_to_revoke(fake_api):
+    base, state, report = fake_api
+    FakeApi.standing = False  # the seeded authorization did not survive the upgrade
+    assert probe.main(["check", "--api", base, "--state", str(state), "--report", str(report),
+                       "--expect-version", "2.8.2"]) == 1
+    checks = json.loads(report.read_text(encoding="utf-8"))["checks"]
+    assert checks["authorization standing before the revoke"] == "fail"
