@@ -32,11 +32,19 @@ def test_request_collection_routes_are_owned_by_extracted_router():
         ("POST", "/request-collections/{collection_id}/selections"),
         ("DELETE", "/request-collections/{collection_id}/selections/{selection_id}"),
     }
+    # Browser captures are collections too; their intake routes live in api/capture/.
+    capture_routes = {
+        ("POST", "/request-collections/captures"),
+        ("POST", "/request-collections/{collection_id}/capture-batches"),
+        ("POST", "/request-collections/{collection_id}/capture-close"),
+    }
     # Resolved from source, not from the live router object: another test in the
     # same interpreter installs a stubbed FastAPI whose APIRouter has no
     # .routes, and this then failed on contamination rather than on ownership.
     actual = set(declared_routes("/request-collections"))
-    assert actual == expected
+    assert actual == expected | capture_routes
+    for method, path in sorted(capture_routes):
+        assert route_defining_file(method, path).as_posix().endswith("capture/router.py")
     # Ownership is the actual claim: every one of these is declared by the
     # extracted module, not by the composition root.
     for method, path in sorted(expected):

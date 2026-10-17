@@ -8,7 +8,7 @@ import {
   getRequestCollection, listRequestCollectionInventory, upsertRequestCollectionBinding,
   type RequestCollectionDetail, type RequestCollectionInventoryItem,
 } from '@/lib/requestCollectionApi'
-import { boundApis, filterRequests, methodCounts, originOf, type CollectionApi } from '@/lib/collectionViewModel.mjs'
+import { boundApis, captureSummary, filterRequests, formatLabel, methodCounts, originOf, type CollectionApi } from '@/lib/collectionViewModel.mjs'
 
 const PAGE = 200
 const METHOD_STYLE: Record<string, string> = {
@@ -103,6 +103,7 @@ export function CollectionViewer({ collectionId, apis = [], onClose, onChanged }
   const otherBindings = (detail?.bindings || []).filter(item => item.is_active && !apis.some(api => api.id === item.target_id))
   const selections = (detail?.selections || []).filter(item => item.is_active)
   const collection = detail?.collection
+  const capture = captureSummary(collection)
 
   return <Modal open={collectionId !== null} title={collection?.name || 'Request collection'} size="xl" onClose={onClose}
     footer={collection ? <div className="flex w-full flex-wrap items-center justify-between gap-3">
@@ -116,7 +117,8 @@ export function CollectionViewer({ collectionId, apis = [], onClose, onChanged }
     </div> : undefined}>
     {error ? <p role="alert" className="text-sm text-red-300">{error}</p> : !collection ? <p role="status" className="py-10 text-center text-sm text-gray-400">Loading collection…</p> : <div className="space-y-4">
       <div className="flex flex-wrap items-center gap-2 text-xs text-gray-400">
-        <span className="inline-flex items-center gap-1.5 rounded-md bg-gray-800 px-2 py-1"><Braces className="h-3.5 w-3.5" aria-hidden="true" />{collection.format}</span>
+        <span className="inline-flex items-center gap-1.5 rounded-md bg-gray-800 px-2 py-1"><Braces className="h-3.5 w-3.5" aria-hidden="true" />{formatLabel(collection)}</span>
+        {capture && <span className="rounded-md bg-gray-800 px-2 py-1">{capture.state} · {capture.counts}</span>}
         <span className="rounded-md bg-gray-800 px-2 py-1">{collection.request_count} requests</span>
         <span className="rounded-md bg-emerald-500/10 px-2 py-1 text-emerald-300">{collection.safe_request_count} safe</span>
         {collection.potentially_mutating_request_count > 0 && <span className="rounded-md bg-amber-500/10 px-2 py-1 text-amber-300">{collection.potentially_mutating_request_count} may change state</span>}

@@ -61,6 +61,7 @@ Read-only Arsenal inspection:
 - `shakerscan_timeline`
 - `shakerscan_plans`
 - `shakerscan_tool_status`
+- `shakerscan_captures`: browser captures recorded with `shakerscan record` (see below)
 
 Target-bound Hunt V2 (including state-changing and target-facing operations):
 
@@ -86,6 +87,16 @@ pages; otherwise (finding.list on an older engine, which refuses unknown paramet
 the timeline and the plans) the adapter pages over the first rows the engine answers (its limit
 maximum, the manifest's newest 200, or 100 findings) and `mcp_view.note` says when there are more
 than it can reach and which filters narrow the list.
+
+`shakerscan_captures` reads the request-collection routes directly (not Arsenal). `action: "list"`
+calls `GET /request-collections?source_format=capture` (optionally for one `target_id`) and pages
+with the adapter's own cursor; each row carries the capture's `capture` block (open or closed,
+counts, `last_seq`). `action: "read"` calls `GET /request-collections/{capture_id}/requests` with
+`since_seq`, `limit` (at most 200) and the engine's list/v1 `cursor`, and answers the redacted index
+rows with their `seq` plus `last_seq`: pass `last_seq` back as `since_seq` to read only what was
+recorded since, so an agent can follow a capture while it is open. Rows hold methods, URLs with
+query values withheld, body field names and `resource:`/`status:` labels; no cookie, token,
+header or body value is ever in an answer.
 
 No tool answer is larger than 64 KB (`MCP_ANSWER_BYTES`). A list page that would be is cut on a
 row boundary and `next_cursor` resumes at the first row left out; any other answer keeps the

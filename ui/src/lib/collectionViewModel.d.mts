@@ -1,4 +1,4 @@
-import type { RequestCollectionBinding, RequestCollectionInventoryItem } from './requestCollectionApi'
+import type { RequestCollectionBinding, RequestCollectionInventoryItem, SharedRequestCollection } from './requestCollectionApi'
 
 export interface CollectionApi { id: string; url: string; label: string; kind: 'host' | 'origin' }
 
@@ -6,3 +6,5 @@ export function filterRequests(items: RequestCollectionInventoryItem[], filter?:
 export function methodCounts(items: RequestCollectionInventoryItem[]): Array<{ method: string; count: number }>
 export function originOf(url: string): string
 export function boundApis<T extends CollectionApi>(bindings: RequestCollectionBinding[], apis: T[]): Array<T & { binding: RequestCollectionBinding | null; bound: boolean }>
+export function formatLabel(collection: Pick<SharedRequestCollection, 'format'> | null | undefined): string
+export function captureSummary(collection: Pick<SharedRequestCollection, 'format' | 'capture' | 'request_count'> | null | undefined): { open: boolean; state: string; counts: string } | null

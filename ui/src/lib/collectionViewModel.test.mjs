@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 
-import { boundApis, filterRequests, methodCounts, originOf } from './collectionViewModel.mjs'
+import { boundApis, captureSummary, filterRequests, formatLabel, methodCounts, originOf } from './collectionViewModel.mjs'
 
 const requests = [
   { request_id: 'a', method: 'GET', name: 'List orders', normalized_path: '/api/orders', folder: 'Orders', tags: ['read'] },
@@ -35,4 +35,15 @@ test('each API of an asset reports whether the collection is bound to it', () =>
   const bindings = [{ id: 'b1', target_id: 'api', is_active: true, allowed_origins: ['https://example.test:8443'] },
     { id: 'b2', target_id: 'web', is_active: false, allowed_origins: ['https://example.test'] }]
   assert.deepEqual(boundApis(bindings, apis).map(api => [api.id, api.bound]), [['host', false], ['web', false], ['api', true]])
+})
+
+test('a browser capture reads as one, with its state and counts', () => {
+  const open = { format: 'capture', request_count: 12, capture: { state: 'open', flow_count: 12, endpoint_count: 5,
+    refused_out_of_scope: 3, refused_over_limit: 0, bodies_dropped: 2 } }
+  assert.equal(formatLabel(open), 'Browser capture')
+  assert.deepEqual(captureSummary(open), { open: true, state: 'Recording', counts: '12 requests · 5 endpoints · 3 refused · 2 without bodies' })
+  const idle = { format: 'capture', capture: { state: 'closed', closed_reason: 'idle', flow_count: 1, endpoint_count: 1 } }
+  assert.deepEqual(captureSummary(idle), { open: false, state: 'Closed (idle)', counts: '1 request · 1 endpoint' })
+  assert.equal(formatLabel({ format: 'openapi' }), 'openapi')
+  assert.equal(captureSummary({ format: 'har', capture: { state: 'open' } }), null)
 })

@@ -52,6 +52,7 @@ contracts and release notes describe what ships.
 ## Operations
 
 - [Client](client.md)
+- [Browser capture (`shakerscan record`)](browser-capture.md)
 - [LAN access](lan-access.md)
 - [Clean reinstall](clean-reinstall.md)
 - [Upgrade and rollback](upgrade-and-rollback.md)

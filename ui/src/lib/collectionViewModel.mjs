@@ -47,3 +47,26 @@ export function boundApis(bindings, apis) {
     return { ...api, binding: binding || null, bound: Boolean(binding) }
   })
 }
+
+/** How a collection's format reads: a browser capture by name, other formats as they are. */
+export function formatLabel(collection) {
+  return collection?.format === 'capture' ? 'Browser capture' : String(collection?.format || '')
+}
+
+/** A browser capture's state and counts, or null for an imported collection. */
+export function captureSummary(collection) {
+  const capture = collection?.format === 'capture' ? collection.capture : null
+  if (!capture) return null
+  const flows = Number(capture.flow_count ?? collection.request_count ?? 0)
+  const endpoints = Number(capture.endpoint_count || 0)
+  const refused = Number(capture.refused_out_of_scope || 0) + Number(capture.refused_over_limit || 0)
+  const open = capture.state === 'open'
+  const parts = [`${flows} request${flows === 1 ? '' : 's'}`, `${endpoints} endpoint${endpoints === 1 ? '' : 's'}`]
+  if (refused) parts.push(`${refused} refused`)
+  if (Number(capture.bodies_dropped || 0)) parts.push(`${capture.bodies_dropped} without bodies`)
+  return {
+    open,
+    state: open ? 'Recording' : capture.closed_reason === 'idle' ? 'Closed (idle)' : 'Closed',
+    counts: parts.join(' · '),
+  }
+}

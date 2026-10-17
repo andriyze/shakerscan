@@ -5,6 +5,7 @@ import { Braces, Eye, Link2, Search, X } from 'lucide-react'
 import { Button, Card, EmptyState, ErrorState, Skeleton } from '@/components/ui'
 import { listRequestCollectionLibrary, type LibraryRequestCollection } from '@/lib/requestCollectionApi'
 import { relativeTime } from '@/lib/targetInventoryModel.mjs'
+import { CollectionFormat } from './CollectionFormat'
 import { CollectionViewer } from './CollectionViewer'
 
 const PAGE = 50
@@ -49,7 +50,7 @@ export function CollectionLibrary({ onManage }: { onManage: (collection: Library
     {error ? <div className="p-4"><ErrorState message={error} /></div>
       : loading && !rows.length ? <div className="space-y-2 p-4">{Array.from({ length: 4 }, (_, index) => <Skeleton key={index} className="h-12 w-full rounded-lg" />)}</div>
       : !rows.length ? <div className="p-4"><EmptyState message={debounced ? 'No collections match' : 'No request collections yet'}
-          hint={debounced ? 'Try a collection name, a format such as openapi, or the owner target.' : 'Choose a target above, then upload a Postman, HAR, OpenAPI or Swagger document.'} /></div>
+          hint={debounced ? 'Try a collection name, a format such as openapi, or the owner target.' : 'Choose a target above, then upload a Postman, HAR, OpenAPI or Swagger document, or record one with shakerscan record.'} /></div>
       : <div className={loading ? 'opacity-60' : ''}>
         <div className="hidden grid-cols-[minmax(0,2fr)_minmax(0,1.5fr)_7rem_6rem_11rem] gap-4 px-4 py-2 text-[11px] font-medium uppercase tracking-wider text-gray-500 lg:grid">
           <span>Collection</span><span>Owner</span><span>Requests</span><span>Bound APIs</span><span className="text-right">Updated</span>
@@ -58,7 +59,7 @@ export function CollectionLibrary({ onManage }: { onManage: (collection: Library
           {rows.map(row => <li key={row.id} className="grid gap-x-4 gap-y-1 px-4 py-3 lg:grid-cols-[minmax(0,2fr)_minmax(0,1.5fr)_7rem_6rem_11rem] lg:items-center">
             <span className="min-w-0">
               <button type="button" onClick={() => setViewing(row.id)} className="block max-w-full truncate text-left text-sm font-medium text-gray-100 hover:text-blue-300">{row.name}</button>
-              <span className="text-[11px] text-gray-500"><span className="rounded bg-gray-800 px-1.5 py-0.5">{row.format}</span>{row.selection_count ? ` · ${row.selection_count} selection${row.selection_count === 1 ? '' : 's'}` : ''}</span>
+              <span className="flex flex-wrap items-center gap-1.5 text-[11px] text-gray-500"><CollectionFormat collection={row} counts />{row.selection_count ? ` · ${row.selection_count} selection${row.selection_count === 1 ? '' : 's'}` : ''}</span>
             </span>
             <span className="min-w-0 text-sm">
               <span className="block truncate text-gray-300">{row.owner_name || row.owner_locator || 'Unknown owner'}</span>
