@@ -207,10 +207,15 @@ def test_worker_watchdog_wires_transactional_reservation_recovery():
     helper = source[start:end]
     assert "async with conn.transaction()" in helper
     assert "await recover_stale_reservations" in helper
-    assert "await repair_terminal_reservation_actions" in helper
+    assert "await repair_settled_reservation_actions" in helper
     assert "BUDGET_RESERVATION_SWEEP_BATCH_SIZE" in helper
     main = source[source.index("async def async_main"):]
-    assert "await sweep_stale_budget_reservations()" in main
+    # Its own task, led by one worker, independent of the job that worker executes.
+    assert 'loop_leader.run_led_loop(\n        db_pool, "sweep_stale_budget_reservations", sweep_stale_budget_reservations' in main
+    assert "await sweep_stale_budget_reservations()" not in main
+    # Shutdown gives the leader connection back before the pool closes (else pool.close() hangs).
+    shutdown = main[main.index("Close database pool"):]
+    assert shutdown.index("leadership_for(db_pool).close()") < shutdown.index("await db_pool.close()")
 
 
 def test_scan_action_recovery_matches_the_declared_column_type():

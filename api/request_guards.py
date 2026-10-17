@@ -202,8 +202,6 @@ ROUTE_CLASSES: tuple[RouteRule, ...] = (
     _rule(r"^/targets/[^/]+/asm/.+$", HEAVY, "asm"),
     _rule(r"^/arsenal/campaigns$", HEAVY, "arsenal"),
     _rule(r"^/arsenal/refuter-reviews/summary$", HEAVY, "arsenal"),
-    _rule(r"^/queue/stats$", HEAVY, "queue"),
-    _rule(r"^/results$", HEAVY, "results"),
     # Exports with no admission of their own share one slot pool.
     _rule(r"^/evidence/export-(?:bundle|manifest)$", EXPORT, "exports"),
     _rule(r"^/model-intake/scans/[^/]+/evidence-export$", EXPORT, "exports"),
