@@ -2,6 +2,7 @@
 
 import { useSearchParams, usePathname } from 'next/navigation'
 import { useCallback, useMemo, useEffect, useState } from 'react'
+import { parseFilterParams, parseReturnParams } from './urlFilterParams.mjs'
 
 export type FilterValue = string | number | undefined
 
@@ -57,17 +58,7 @@ export function useUrlFilters<T extends FilterState = FilterState>(options: UseU
 
   // Parse filters from URL with defaults
   const filters = useMemo(() => {
-    const result: FilterState = { ...defaultsRecord }
-    activeSearchParams.forEach((value, key) => {
-      if (key === 'page') {
-        // Page is 1-based; treat 0 and invalid values as page 1 for backwards compatibility
-        const parsed = parseInt(value, 10)
-        result[key] = parsed >= 1 ? parsed : 1
-      } else {
-        result[key] = value
-      }
-    })
-    return result as T
+    return parseFilterParams(activeSearchParams, defaultsRecord) as T
   }, [activeSearchParams, defaultsRecord])
 
   // Normalize invalid page values in URL (e.g., ?page=0 -> remove page param)
@@ -168,13 +159,7 @@ export function useUrlFilters<T extends FilterState = FilterState>(options: UseU
 
   // Get all return params as an object
   const returnParams = useMemo(() => {
-    const result: FilterState = {}
-    activeSearchParams.forEach((value, key) => {
-      if (key.startsWith('return_')) {
-        result[key.replace('return_', '')] = value
-      }
-    })
-    return result
+    return parseReturnParams(activeSearchParams) as FilterState
   }, [activeSearchParams])
 
   return {

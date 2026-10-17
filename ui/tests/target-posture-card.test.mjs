@@ -28,6 +28,6 @@ test('absence is stated per section instead of implied', () => {
 
 test('the API client reads the posture route and surfaces server errors', () => {
   assert.match(api, /export async function getTargetPosture\(targetId: string, scanId\?: string\): Promise<TargetPosture>/)
-  assert.match(api, /\/targets\/\$\{encodeURIComponent\(targetId\)\}\/posture/)
+  assert.match(api, /\/targets\/\$\{pathSegment\(targetId\)\}\/posture/)
   assert.match(api, /getApiErrorMessage\(res, 'Failed to fetch target posture'\)/)
 })

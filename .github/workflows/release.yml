@@ -17,8 +17,9 @@ concurrency:
   group: shakerscan-release-promotion
   cancel-in-progress: false
 
+# Every job declares what it needs; the workflow default is read-only.
 permissions:
-  contents: write
+  contents: read
   attestations: read
 
 env:

@@ -562,7 +562,7 @@ test('a completed scan exports a downloadable bill of materials', () => {
   // any way out of ShakerScan.
   assert.match(api, /downloadModelIntakeSbom/)
   assert.match(api, /getModelIntakeSbomSummary/)
-  assert.match(api, /\/model-intake\/scans\/\$\{scanId\}\/sbom/)
+  assert.match(api, /\/model-intake\/scans\/\$\{pathSegment\(scanId\)\}\/sbom/)
   assert.match(api, /'cdx\.json'/)
 
   assert.match(report, /ModelIntakeSbomDownload/)

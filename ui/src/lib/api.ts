@@ -13,6 +13,7 @@ import type {
   ModelIntakeScanRequest as GeneratedModelIntakeScanRequest,
 } from './publicApi.generated'
 import { API_URL, getApiErrorMessage } from './apiConfig'
+import { pathSegment } from './apiPath.mjs'
 import { fetchHeavyRead } from './busyRetry.mjs'
 import { getJson } from './fetchLayer.mjs'
 import { exposureAssetsFromBody, exposureAssetsParams } from './exposureAssets.mjs'
@@ -3287,7 +3288,7 @@ export async function getCampaigns(params?: {
 }
 
 export async function getCampaign(id: string, actionLimit: number = 50): Promise<CampaignDetailResponse> {
-  const res = await fetch(`${API_URL}/arsenal/campaigns/${encodeURIComponent(id)}?action_limit=${actionLimit}`)
+  const res = await fetch(`${API_URL}/arsenal/campaigns/${pathSegment(id)}?action_limit=${actionLimit}`)
   if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to load campaign'))
   return res.json()
 }
@@ -3317,7 +3318,7 @@ export async function linkCampaignAction(
   id: string,
   payload: { command_result_id?: string; campaign_action_id?: string }
 ): Promise<{ campaign_id: string; linked_action: CampaignAction; execution_enabled: boolean }> {
-  const res = await fetch(`${API_URL}/arsenal/campaigns/${encodeURIComponent(id)}/actions`, {
+  const res = await fetch(`${API_URL}/arsenal/campaigns/${pathSegment(id)}/actions`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload),
@@ -3345,13 +3346,13 @@ export async function getEvidenceInstances(params?: {
 }
 
 export async function getEvidenceInstance(id: string): Promise<EvidenceInstance> {
-  const res = await fetch(`${API_URL}/evidence/instances/${encodeURIComponent(id)}`)
+  const res = await fetch(`${API_URL}/evidence/instances/${pathSegment(id)}`)
   if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to load evidence instance'))
   return res.json()
 }
 
 export async function getEvidenceObject(id: string): Promise<EvidenceObject> {
-  const res = await fetch(`${API_URL}/evidence/${encodeURIComponent(id)}`)
+  const res = await fetch(`${API_URL}/evidence/${pathSegment(id)}`)
   if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to load evidence object'))
   return res.json()
 }
@@ -3453,7 +3454,7 @@ export async function executeAuthzReplay(
     created_by?: string
   }
 ): Promise<ArsenalExecutionResponse> {
-  const res = await fetch(`${API_URL}/arsenal/campaign-actions/${encodeURIComponent(campaignActionId)}/authz-replay`, {
+  const res = await fetch(`${API_URL}/arsenal/campaign-actions/${pathSegment(campaignActionId)}/authz-replay`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload),
@@ -3471,7 +3472,7 @@ export async function promoteAuthzReplay(
     created_by?: string
   }
 ): Promise<ArsenalExecutionResponse> {
-  const res = await fetch(`${API_URL}/arsenal/campaign-actions/${encodeURIComponent(campaignActionId)}/authz-promote`, {
+  const res = await fetch(`${API_URL}/arsenal/campaign-actions/${pathSegment(campaignActionId)}/authz-promote`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload),
@@ -3535,7 +3536,7 @@ export async function transitionHypothesis(
     created_by?: string
   }
 ): Promise<{ hypothesis: Hypothesis; transitioned: boolean; from: string; to: string; execution_enabled: boolean }> {
-  const res = await fetch(`${API_URL}/arsenal/hypotheses/${encodeURIComponent(hypothesisId)}/transition`, {
+  const res = await fetch(`${API_URL}/arsenal/hypotheses/${pathSegment(hypothesisId)}/transition`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload),
@@ -3615,7 +3616,7 @@ export async function reconcileHypothesisProof(
   findings_created: number
   execution_enabled: boolean
 }> {
-  const res = await fetch(`${API_URL}/arsenal/hypotheses/${encodeURIComponent(hypothesisId)}/reconcile-proof`, {
+  const res = await fetch(`${API_URL}/arsenal/hypotheses/${pathSegment(hypothesisId)}/reconcile-proof`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload),
@@ -3658,7 +3659,7 @@ export async function claimHypothesis(
   hypothesisId: string,
   payload: { owner: string; expected_version: number; lease_seconds?: number }
 ): Promise<{ hypothesis: Hypothesis; claimed: boolean; execution_enabled: boolean }> {
-  const res = await fetch(`${API_URL}/arsenal/hypotheses/${encodeURIComponent(hypothesisId)}/claim`, {
+  const res = await fetch(`${API_URL}/arsenal/hypotheses/${pathSegment(hypothesisId)}/claim`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload),
@@ -3681,7 +3682,7 @@ export async function appendHypothesisSignal(
     created_by?: string
   }
 ): Promise<{ hypothesis: Hypothesis; execution_enabled: boolean }> {
-  const res = await fetch(`${API_URL}/arsenal/hypotheses/${encodeURIComponent(hypothesisId)}/signals`, {
+  const res = await fetch(`${API_URL}/arsenal/hypotheses/${pathSegment(hypothesisId)}/signals`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload),
@@ -3694,7 +3695,7 @@ export async function planHypothesisCampaign(
   hypothesisId: string,
   payload: { campaign_id?: string; campaign_name?: string; operator_message?: string; created_by?: string }
 ): Promise<{ campaign?: Campaign; campaign_id?: string; linked_action?: CampaignAction; execution_enabled: boolean }> {
-  const res = await fetch(`${API_URL}/arsenal/hypotheses/${encodeURIComponent(hypothesisId)}/plan-campaign`, {
+  const res = await fetch(`${API_URL}/arsenal/hypotheses/${pathSegment(hypothesisId)}/plan-campaign`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload),
@@ -3819,7 +3820,7 @@ export async function executeRefuterReviewPlan(refuterReviewId: string, payload:
   requested_by?: string
   confirm_production?: boolean
 } = {}): Promise<RefuterActionResult> {
-  const res = await fetch(`${API_URL}/arsenal/refuter-reviews/${encodeURIComponent(refuterReviewId)}/execute`, {
+  const res = await fetch(`${API_URL}/arsenal/refuter-reviews/${pathSegment(refuterReviewId)}/execute`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload),
@@ -3835,7 +3836,7 @@ export async function deriveRefuterReviewVerdict(refuterReviewId: string, payloa
   verification_id?: string
   created_by?: string
 } = {}): Promise<RefuterActionResult> {
-  const res = await fetch(`${API_URL}/arsenal/refuter-reviews/${encodeURIComponent(refuterReviewId)}/derive-verdict`, {
+  const res = await fetch(`${API_URL}/arsenal/refuter-reviews/${pathSegment(refuterReviewId)}/derive-verdict`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload),
@@ -3903,7 +3904,7 @@ export async function getResearchEpisodes(params?: {
 }
 
 export async function getResearchEpisode(episodeId: string): Promise<ResearchEpisodeDetail> {
-  const res = await fetch(`${API_URL}/research/episodes/${encodeURIComponent(episodeId)}`)
+  const res = await fetch(`${API_URL}/research/episodes/${pathSegment(episodeId)}`)
   if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to load research episode'))
   return res.json()
 }
@@ -3929,7 +3930,7 @@ export async function launchResearchCampaign(payload: ResearchCampaignLaunchRequ
 }
 
 export async function controlResearchCampaign(campaignId: string, action: 'pause' | 'resume' | 'cancel'): Promise<{ campaign: Campaign; affected_episode_ids: string[]; cancelled_episode_ids: string[] }> {
-  const res = await fetch(`${API_URL}/research/campaigns/${encodeURIComponent(campaignId)}/control`, {
+  const res = await fetch(`${API_URL}/research/campaigns/${pathSegment(campaignId)}/control`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ action, created_by: 'research_agent_ui' }),
@@ -3969,7 +3970,7 @@ export interface AgentTwoTierFindings {
 }
 
 export async function getAgentTwoTierFindings(targetId: string): Promise<AgentTwoTierFindings> {
-  const res = await fetch(`${API_URL}/agent/findings/${encodeURIComponent(targetId)}`)
+  const res = await fetch(`${API_URL}/agent/findings/${pathSegment(targetId)}`)
   if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to load agent findings'))
   return res.json()
 }
@@ -3979,7 +3980,7 @@ export async function setResearchEpisodeAutopilot(
   enabled: boolean,
   plannerMode?: ResearchPlannerMode,
 ): Promise<ResearchEpisodeDetail> {
-  const res = await fetch(`${API_URL}/research/episodes/${encodeURIComponent(episodeId)}/autopilot`, {
+  const res = await fetch(`${API_URL}/research/episodes/${pathSegment(episodeId)}/autopilot`, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ enabled, planner_mode: plannerMode, created_by: 'research_agent_ui' }),
@@ -3989,7 +3990,7 @@ export async function setResearchEpisodeAutopilot(
 }
 
 export async function refreshResearchObservation(episodeId: string): Promise<ResearchEpisodeDetail> {
-  const res = await fetch(`${API_URL}/research/episodes/${encodeURIComponent(episodeId)}/observe`, {
+  const res = await fetch(`${API_URL}/research/episodes/${pathSegment(episodeId)}/observe`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ created_by: 'research_agent_ui' }),
@@ -3999,7 +4000,7 @@ export async function refreshResearchObservation(episodeId: string): Promise<Res
 }
 
 export async function cancelResearchEpisode(episodeId: string): Promise<ResearchEpisodeDetail> {
-  const res = await fetch(`${API_URL}/research/episodes/${encodeURIComponent(episodeId)}/cancel`, { method: 'POST' })
+  const res = await fetch(`${API_URL}/research/episodes/${pathSegment(episodeId)}/cancel`, { method: 'POST' })
   if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to cancel research episode'))
   return res.json()
 }
@@ -4107,7 +4108,7 @@ export async function rescanModelIntakeTarget(targetId: string, operatorToken?: 
 }> {
   const storedToken = getStoredModelIntakeOperatorToken()
   const token = operatorToken?.trim() || storedToken.trim()
-  const res = await fetch(`${API_URL}/model-intake/targets/${targetId}/rescan`, {
+  const res = await fetch(`${API_URL}/model-intake/targets/${pathSegment(targetId)}/rescan`, {
     method: 'POST',
     headers: token ? { Authorization: `Bearer ${token}` } : undefined,
   })
@@ -4122,7 +4123,7 @@ export async function updateTargetMetadata(
   metadata: Record<string, string>
 ): Promise<{ id: string; status: string }> {
   const { cohort, ...metadataJson } = metadata
-  const res = await fetch(`${API_URL}/targets/${targetId}`, {
+  const res = await fetch(`${API_URL}/targets/${pathSegment(targetId)}`, {
     method: 'PATCH',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ metadata_json: metadataJson, ...(cohort ? { cohort } : {}) }),
@@ -4133,7 +4134,7 @@ export async function updateTargetMetadata(
 
 /** Bring an archived target back into the inventory; its history was never removed. */
 export async function restoreTarget(targetId: string): Promise<{ id: string; status: string }> {
-  const res = await fetch(`${API_URL}/targets/${encodeURIComponent(targetId)}`, {
+  const res = await fetch(`${API_URL}/targets/${pathSegment(targetId)}`, {
     method: 'PATCH',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ is_active: true }),
@@ -4209,7 +4210,7 @@ export async function getScans(params?: {
 }
 
 export async function getScan(id: string, signal?: AbortSignal): Promise<Scan> {
-  return getJson(`${API_URL}/scans/${id}`, { signal, label: 'Failed to fetch scan' })
+  return getJson(`${API_URL}/scans/${pathSegment(id)}`, { signal, label: 'Failed to fetch scan' })
 }
 
 export interface TargetPostureSection {
@@ -4232,13 +4233,13 @@ export interface TargetPosture {
 /** Latest known headers, TLS, DNS, and network posture for a target, each naming its scan. */
 export async function getTargetPosture(targetId: string, scanId?: string): Promise<TargetPosture> {
   const query = scanId ? `?scan_id=${encodeURIComponent(scanId)}` : ''
-  const res = await fetch(`${API_URL}/targets/${encodeURIComponent(targetId)}/posture${query}`)
+  const res = await fetch(`${API_URL}/targets/${pathSegment(targetId)}/posture${query}`)
   if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to fetch target posture'))
   return res.json()
 }
 
 export async function getScanLogs(id: string, limit: number = 200, signal?: AbortSignal) {
-  return getJson(`${API_URL}/scans/${id}/logs?limit=${limit}`, { signal, label: 'Failed to fetch scan logs' })
+  return getJson(`${API_URL}/scans/${pathSegment(id)}/logs?limit=${limit}`, { signal, label: 'Failed to fetch scan logs' })
 }
 
 export async function submitScan(target: string, options: Record<string, unknown> = {}) {
@@ -4369,7 +4370,7 @@ export async function getModelIntakeRunnerBundle(
   artifact_path?: string
 }> {
   const res = await fetch(
-    `${API_URL}/model-intake/submissions/${submissionId}/runner-bundle?operation=${operation}`,
+    `${API_URL}/model-intake/submissions/${pathSegment(submissionId)}/runner-bundle?operation=${operation}`,
     { headers: modelIntakeWorkflowHeaders(operatorToken) },
   )
   if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to resolve the authoritative runner bundle'))
@@ -4395,7 +4396,7 @@ export async function getModelIntakeEmbeddingConfiguration(
   submissionId: string,
   operatorToken: string,
 ): Promise<ModelIntakeEmbeddingHints> {
-  const res = await fetch(`${API_URL}/model-intake/submissions/${submissionId}/embedding-configuration`, {
+  const res = await fetch(`${API_URL}/model-intake/submissions/${pathSegment(submissionId)}/embedding-configuration`, {
     headers: modelIntakeWorkflowHeaders(operatorToken),
   })
   if (!res.ok) return { available: false, reason: 'unavailable' }
@@ -4425,7 +4426,7 @@ export interface ModelIntakeSbomSummary {
 }
 
 export async function getModelIntakeSbomSummary(scanId: string): Promise<ModelIntakeSbomSummary> {
-  const res = await fetch(`${API_URL}/model-intake/scans/${scanId}/sbom/summary`)
+  const res = await fetch(`${API_URL}/model-intake/scans/${pathSegment(scanId)}/sbom/summary`)
   if (!res.ok) return { available: false, reason: 'unavailable' }
   return res.json()
 }
@@ -4434,7 +4435,7 @@ export async function downloadModelIntakeSbom(
   scanId: string,
   format: 'cyclonedx' | 'spdx' | 'aibom' = 'cyclonedx',
 ): Promise<void> {
-  const res = await fetch(`${API_URL}/model-intake/scans/${scanId}/sbom?format=${format}`)
+  const res = await fetch(`${API_URL}/model-intake/scans/${pathSegment(scanId)}/sbom?format=${format}`)
   if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to export the bill of materials'))
   const blob = await res.blob()
   const url = URL.createObjectURL(blob)
@@ -4455,7 +4456,7 @@ export async function downloadModelIntakeLicenseArtifact(
   format: 'license-bom' | 'third-party-notices',
 ): Promise<void> {
   const endpoint = format === 'license-bom' ? 'license-bom' : 'third-party-notices'
-  const res = await fetch(`${API_URL}/model-intake/scans/${scanId}/${endpoint}`)
+  const res = await fetch(`${API_URL}/model-intake/scans/${pathSegment(scanId)}/${pathSegment(endpoint)}`)
   if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to export license evidence'))
   const blob = await res.blob()
   const url = URL.createObjectURL(blob)
@@ -4631,7 +4632,7 @@ export async function listModelIntakeAutomaticReviews(limit: number = 10): Promi
 }
 
 export async function getModelIntakeAutomaticReview(id: string): Promise<ModelIntakeAutomaticReview> {
-  const res = await fetch(`${API_URL}/model-intake/automatic-reviews/${id}`, { cache: 'no-store' })
+  const res = await fetch(`${API_URL}/model-intake/automatic-reviews/${pathSegment(id)}`, { cache: 'no-store' })
   if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to load automatic Model Intake review'))
   const review = normalizeModelIntakeAutomaticReview(await res.json())
   if (!review) throw new Error('Model Intake returned an invalid automatic review')
@@ -4642,7 +4643,7 @@ export async function downloadModelIntakeAutomaticReport(
   id: string,
   format: 'json' | 'html' | 'sarif',
 ): Promise<{ blob: Blob; filename: string }> {
-  const res = await fetch(`${API_URL}/model-intake/automatic-reviews/${id}/report?format=${format}`)
+  const res = await fetch(`${API_URL}/model-intake/automatic-reviews/${pathSegment(id)}/report?format=${format}`)
   if (!res.ok) throw new Error(await getApiErrorMessage(res, `Failed to export automatic Model Intake ${format.toUpperCase()} report`))
   const suffix = format === 'sarif' ? 'sarif.json' : format
   return { blob: await res.blob(), filename: `model-intake-automatic-${id}.${suffix}` }
@@ -4684,7 +4685,7 @@ export async function createModelIntakeSubmission(data: {
 }
 
 export async function getModelIntakeSubmission(id: string, operatorToken: string): Promise<ModelIntakeWorkflowDetail> {
-  const res = await fetch(`${API_URL}/model-intake/submissions/${id}`, {
+  const res = await fetch(`${API_URL}/model-intake/submissions/${pathSegment(id)}`, {
     headers: modelIntakeWorkflowHeaders(operatorToken),
   })
   if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to load Model Intake submission'))
@@ -4692,7 +4693,7 @@ export async function getModelIntakeSubmission(id: string, operatorToken: string
 }
 
 export async function getModelIntakeSubmissionReport(id: string, operatorToken: string): Promise<ModelIntakeCorporateReport> {
-  const res = await fetch(`${API_URL}/model-intake/submissions/${id}/report?format=json`, {
+  const res = await fetch(`${API_URL}/model-intake/submissions/${pathSegment(id)}/report?format=json`, {
     headers: modelIntakeWorkflowHeaders(operatorToken),
   })
   if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to load normalized Model Intake report'))
@@ -4704,7 +4705,7 @@ export async function downloadModelIntakeSubmissionReport(
   format: 'json' | 'html' | 'sarif',
   operatorToken: string,
 ): Promise<{ blob: Blob; filename: string }> {
-  const res = await fetch(`${API_URL}/model-intake/submissions/${id}/report?format=${format}`, {
+  const res = await fetch(`${API_URL}/model-intake/submissions/${pathSegment(id)}/report?format=${format}`, {
     headers: modelIntakeWorkflowHeaders(operatorToken),
   })
   if (!res.ok) throw new Error(await getApiErrorMessage(res, `Failed to export Model Intake ${format.toUpperCase()} report`))
@@ -4713,7 +4714,7 @@ export async function downloadModelIntakeSubmissionReport(
 }
 
 export async function attachModelIntakeStaticRun(id: string, scanId: string, operatorToken: string): Promise<Record<string, unknown>> {
-  const res = await fetch(`${API_URL}/model-intake/submissions/${id}/static-runs`, {
+  const res = await fetch(`${API_URL}/model-intake/submissions/${pathSegment(id)}/static-runs`, {
     method: 'POST',
     headers: modelIntakeWorkflowHeaders(operatorToken, true),
     body: JSON.stringify({ scan_id: scanId }),
@@ -4723,7 +4724,7 @@ export async function attachModelIntakeStaticRun(id: string, scanId: string, ope
 }
 
 export async function listModelIntakeRunnerJobs(id: string, operatorToken: string): Promise<{ jobs: ModelIntakeRunnerJob[] }> {
-  const res = await fetch(`${API_URL}/model-intake/submissions/${id}/runner-jobs`, {
+  const res = await fetch(`${API_URL}/model-intake/submissions/${pathSegment(id)}/runner-jobs`, {
     headers: modelIntakeWorkflowHeaders(operatorToken),
   })
   if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to load Model Intake runner jobs'))
@@ -4741,7 +4742,7 @@ export async function resolveModelIntakeRunnerProfile(data: {
   profile?: Record<string, unknown> | null
 }> {
   const endpoint = operation === 'conversion' ? 'conversion-profiles' : 'loader-profiles'
-  const res = await fetch(`${API_URL}/model-intake/${endpoint}/resolve`, {
+  const res = await fetch(`${API_URL}/model-intake/${pathSegment(endpoint)}/resolve`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(data),
@@ -4760,7 +4761,7 @@ export async function createModelIntakeRunnerJob(id: string, data: {
   timeout_seconds?: number
   output_bytes?: number
 }, operatorToken: string): Promise<{ job: ModelIntakeRunnerJob; loader_profile: Record<string, unknown>; deployable: false }> {
-  const res = await fetch(`${API_URL}/model-intake/submissions/${id}/runner-jobs`, {
+  const res = await fetch(`${API_URL}/model-intake/submissions/${pathSegment(id)}/runner-jobs`, {
     method: 'POST',
     headers: modelIntakeWorkflowHeaders(operatorToken, true),
     body: JSON.stringify(data),
@@ -4780,7 +4781,7 @@ export async function refreshModelIntakeRunnerJob(submissionId: string, jobId: s
   } | null
   deployable: false
 }> {
-  const res = await fetch(`${API_URL}/model-intake/submissions/${submissionId}/runner-jobs/${jobId}/refresh`, {
+  const res = await fetch(`${API_URL}/model-intake/submissions/${pathSegment(submissionId)}/runner-jobs/${pathSegment(jobId)}/refresh`, {
     method: 'POST',
     headers: modelIntakeWorkflowHeaders(operatorToken),
   })
@@ -4793,7 +4794,7 @@ export async function createModelIntakeAgentSession(id: string, data: {
   max_iterations?: number
   action_budget?: number
 }, operatorToken: string): Promise<Record<string, unknown>> {
-  const res = await fetch(`${API_URL}/model-intake/submissions/${id}/agent/session`, {
+  const res = await fetch(`${API_URL}/model-intake/submissions/${pathSegment(id)}/agent/session`, {
     method: 'POST',
     headers: modelIntakeWorkflowHeaders(operatorToken, true),
     body: JSON.stringify(data),
@@ -4803,7 +4804,7 @@ export async function createModelIntakeAgentSession(id: string, data: {
 }
 
 export async function listModelIntakeAgentSessions(id: string, operatorToken: string): Promise<{ sessions: ModelIntakeAgentSession[]; authority: 'advisory_only' }> {
-  const res = await fetch(`${API_URL}/model-intake/submissions/${id}/agent/sessions`, {
+  const res = await fetch(`${API_URL}/model-intake/submissions/${pathSegment(id)}/agent/sessions`, {
     headers: modelIntakeWorkflowHeaders(operatorToken),
   })
   if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to load advisory Model Intake sessions'))
@@ -4811,7 +4812,7 @@ export async function listModelIntakeAgentSessions(id: string, operatorToken: st
 }
 
 export async function getModelIntakeAgentSession(id: string, operatorToken: string): Promise<{ session: ModelIntakeAgentSession; actions: ModelIntakeWorkflowRecord[]; authority: 'advisory_only' }> {
-  const res = await fetch(`${API_URL}/model-intake/agent/session/${id}`, {
+  const res = await fetch(`${API_URL}/model-intake/agent/session/${pathSegment(id)}`, {
     headers: modelIntakeWorkflowHeaders(operatorToken),
   })
   if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to resume advisory Model Intake session'))
@@ -4819,7 +4820,7 @@ export async function getModelIntakeAgentSession(id: string, operatorToken: stri
 }
 
 export async function cancelModelIntakeAgentSession(id: string, operatorToken: string): Promise<{ session: ModelIntakeAgentSession; cancelled: true; idempotent: boolean; authority: 'advisory_only' }> {
-  const res = await fetch(`${API_URL}/model-intake/agent/session/${id}/cancel`, {
+  const res = await fetch(`${API_URL}/model-intake/agent/session/${pathSegment(id)}/cancel`, {
     method: 'POST',
     headers: modelIntakeWorkflowHeaders(operatorToken),
   })
@@ -4828,7 +4829,7 @@ export async function cancelModelIntakeAgentSession(id: string, operatorToken: s
 }
 
 export async function replyModelIntakeAgentSession(sessionId: string, reply: string, operatorToken: string): Promise<Record<string, unknown>> {
-  const res = await fetch(`${API_URL}/model-intake/agent/session/${sessionId}/reply`, {
+  const res = await fetch(`${API_URL}/model-intake/agent/session/${pathSegment(sessionId)}/reply`, {
     method: 'POST',
     headers: modelIntakeWorkflowHeaders(operatorToken, true),
     body: JSON.stringify({ reply }),
@@ -4838,7 +4839,7 @@ export async function replyModelIntakeAgentSession(sessionId: string, reply: str
 }
 
 export async function freezeModelIntakeEvidence(id: string, deploymentBundle: ModelIntakeDeploymentBundleRequest, operatorToken: string): Promise<Record<string, unknown>> {
-  const res = await fetch(`${API_URL}/model-intake/submissions/${id}/freeze-evidence`, {
+  const res = await fetch(`${API_URL}/model-intake/submissions/${pathSegment(id)}/freeze-evidence`, {
     method: 'POST',
     headers: modelIntakeWorkflowHeaders(operatorToken, true),
     body: JSON.stringify({ deployment_bundle: deploymentBundle }),
@@ -4855,7 +4856,7 @@ export async function createModelIntakeApproval(id: string, data: {
   expires_days?: number
   restrictions?: string[]
 }, operatorToken: string): Promise<Record<string, unknown>> {
-  const res = await fetch(`${API_URL}/model-intake/submissions/${id}/approvals`, {
+  const res = await fetch(`${API_URL}/model-intake/submissions/${pathSegment(id)}/approvals`, {
     method: 'POST',
     headers: modelIntakeWorkflowHeaders(operatorToken, true),
     body: JSON.stringify(data),
@@ -4865,7 +4866,7 @@ export async function createModelIntakeApproval(id: string, data: {
 }
 
 export async function createModelIntakePolicyDecision(id: string, evidenceManifestId: string, operatorToken: string): Promise<Record<string, unknown>> {
-  const res = await fetch(`${API_URL}/model-intake/submissions/${id}/policy-decisions`, {
+  const res = await fetch(`${API_URL}/model-intake/submissions/${pathSegment(id)}/policy-decisions`, {
     method: 'POST',
     headers: modelIntakeWorkflowHeaders(operatorToken, true),
     body: JSON.stringify({ evidence_manifest_id: evidenceManifestId }),
@@ -4875,7 +4876,7 @@ export async function createModelIntakePolicyDecision(id: string, evidenceManife
 }
 
 export async function promoteModelIntakeSubmission(id: string, policyDecisionId: string, idempotencyKey: string, operatorToken: string): Promise<Record<string, unknown>> {
-  const res = await fetch(`${API_URL}/model-intake/submissions/${id}/promote`, {
+  const res = await fetch(`${API_URL}/model-intake/submissions/${pathSegment(id)}/promote`, {
     method: 'POST',
     headers: modelIntakeWorkflowHeaders(operatorToken, true),
     body: JSON.stringify({ policy_decision_id: policyDecisionId, idempotency_key: idempotencyKey }),
@@ -4920,7 +4921,7 @@ export async function createModelIntakeTrustAnchor(data: {
 }
 
 export async function deactivateModelIntakeTrustAnchor(id: string, operatorToken?: string): Promise<{ deactivated: boolean; trust_anchor: ModelIntakeTrustAnchor }> {
-  const res = await fetch(`${API_URL}/model-intake/trust-anchors/${id}`, {
+  const res = await fetch(`${API_URL}/model-intake/trust-anchors/${pathSegment(id)}`, {
     method: 'DELETE',
     headers: operatorToken ? { Authorization: `Bearer ${operatorToken}` } : {},
   })
@@ -4960,7 +4961,7 @@ export async function getAITestScenarios(params?: { includeDemo?: boolean }): Pr
 }
 
 export async function cancelScan(id: string) {
-  const res = await fetch(`${API_URL}/scans/${id}/cancel`, {
+  const res = await fetch(`${API_URL}/scans/${pathSegment(id)}/cancel`, {
     method: 'POST'
   })
   if (!res.ok) throw new Error('Failed to cancel scan')
@@ -5042,7 +5043,7 @@ export async function pruneAsmInventory(
   gone_after?: number | null
   reason: string
 }> {
-  const res = await fetch(`${API_URL}/targets/${encodeURIComponent(targetId)}/asm/prune`, {
+  const res = await fetch(`${API_URL}/targets/${pathSegment(targetId)}/asm/prune`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload),
@@ -5269,7 +5270,7 @@ export async function getDevices(params?: {
 }
 
 export async function getDevice(deviceId: string): Promise<DeviceDetailResponse> {
-  const res = await fetch(`${API_URL}/devices/${encodeURIComponent(deviceId)}`, { cache: 'no-store' })
+  const res = await fetch(`${API_URL}/devices/${pathSegment(deviceId)}`, { cache: 'no-store' })
   if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to fetch connected device'))
   return res.json()
 }
@@ -5296,13 +5297,13 @@ export async function getInvestigationCandidates(params: {
 }
 
 export async function getDeviceCapabilities(deviceId: string): Promise<DeviceCapabilitiesResponse> {
-  const res = await fetch(`${API_URL}/devices/${encodeURIComponent(deviceId)}/capabilities`, { cache: 'no-store' })
+  const res = await fetch(`${API_URL}/devices/${pathSegment(deviceId)}/capabilities`, { cache: 'no-store' })
   if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to load device capabilities'))
   return res.json()
 }
 
 export async function renameDevice(deviceId: string, name: string): Promise<{ device: DeviceTarget }> {
-  const res = await fetch(`${API_URL}/devices/${encodeURIComponent(deviceId)}`, {
+  const res = await fetch(`${API_URL}/devices/${pathSegment(deviceId)}`, {
     method: 'PATCH',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ name }),
@@ -5316,7 +5317,7 @@ export async function changeDeviceLocator(deviceId: string, payload: {
   reason?: string
   confirm_same_device: boolean
 }): Promise<{ status: 'changed' | 'unchanged'; device: DeviceTarget; change?: DeviceLocatorHistory | null }> {
-  const res = await fetch(`${API_URL}/devices/${encodeURIComponent(deviceId)}/locator`, {
+  const res = await fetch(`${API_URL}/devices/${pathSegment(deviceId)}/locator`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload),
@@ -5361,7 +5362,7 @@ export async function scanDevice(deviceId: string, payload: {
   allow_untrusted_tls_credentials?: boolean
   capability_ids?: string[]
 }): Promise<{ scan_id: string; job_id: string; status: string; ui_url: string }> {
-  const res = await fetch(`${API_URL}/targets/${encodeURIComponent(deviceId)}/network-scans`, {
+  const res = await fetch(`${API_URL}/targets/${pathSegment(deviceId)}/network-scans`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload),
@@ -5371,7 +5372,7 @@ export async function scanDevice(deviceId: string, payload: {
 }
 
 export async function getDeviceRequestCollections(deviceId: string): Promise<{ collections: DeviceRequestCollection[]; count: number }> {
-  const res = await fetch(`${API_URL}/devices/${encodeURIComponent(deviceId)}/request-collections`, { cache: 'no-store' })
+  const res = await fetch(`${API_URL}/devices/${pathSegment(deviceId)}/request-collections`, { cache: 'no-store' })
   if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to load imported request collections'))
   const payload = await res.json() as { collections?: DeviceRequestCollection[]; count?: number }
   const collections = (payload.collections || []).map((collection) => ({
@@ -5389,7 +5390,7 @@ export async function getDeviceRequestCollections(deviceId: string): Promise<{ c
 }
 
 export async function getDeviceRequestCollection(deviceId: string, collectionId: string): Promise<DeviceRequestCollection> {
-  const res = await fetch(`${API_URL}/devices/${encodeURIComponent(deviceId)}/request-collections/${encodeURIComponent(collectionId)}`, { cache: 'no-store' })
+  const res = await fetch(`${API_URL}/devices/${pathSegment(deviceId)}/request-collections/${pathSegment(collectionId)}`, { cache: 'no-store' })
   if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to load imported request preview'))
   const payload = await res.json() as { collection: DeviceRequestCollection }
   const collection = payload.collection
@@ -5416,7 +5417,7 @@ export async function createDeviceRequestCollection(deviceId: string, payload: {
   environment?: Record<string, unknown>
   base_url?: string
 }): Promise<{ collection: DeviceRequestCollection }> {
-  const res = await fetch(`${API_URL}/devices/${encodeURIComponent(deviceId)}/request-collections`, {
+  const res = await fetch(`${API_URL}/devices/${pathSegment(deviceId)}/request-collections`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload),
@@ -5426,18 +5427,18 @@ export async function createDeviceRequestCollection(deviceId: string, payload: {
 }
 
 export async function deactivateDeviceRequestCollection(deviceId: string, collectionId: string): Promise<void> {
-  const res = await fetch(`${API_URL}/devices/${encodeURIComponent(deviceId)}/request-collections/${encodeURIComponent(collectionId)}`, { method: 'DELETE' })
+  const res = await fetch(`${API_URL}/devices/${pathSegment(deviceId)}/request-collections/${pathSegment(collectionId)}`, { method: 'DELETE' })
   if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to remove imported request collection'))
 }
 
 export async function getDeviceScanActivity(scanId: string): Promise<DeviceScanActivity> {
-  const res = await fetch(`${API_URL}/scans/${encodeURIComponent(scanId)}/device-activity?limit=100`, { cache: 'no-store' })
+  const res = await fetch(`${API_URL}/scans/${pathSegment(scanId)}/device-activity?limit=100`, { cache: 'no-store' })
   if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to load device scan activity'))
   return res.json()
 }
 
 export async function getDeviceAgentSession(runId: string): Promise<DeviceAgentSession> {
-  const res = await fetch(`${API_URL}/device-agent/session/${encodeURIComponent(runId)}`, { cache: 'no-store' })
+  const res = await fetch(`${API_URL}/device-agent/session/${pathSegment(runId)}`, { cache: 'no-store' })
   if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to load device Hunt'))
   return res.json()
 }
@@ -5458,13 +5459,13 @@ export async function listDeviceAgentSessions(params: {
 }
 
 export async function cancelDeviceAgentSession(runId: string): Promise<DeviceAgentSession> {
-  const res = await fetch(`${API_URL}/device-agent/session/${encodeURIComponent(runId)}/cancel`, { method: 'POST' })
+  const res = await fetch(`${API_URL}/device-agent/session/${pathSegment(runId)}/cancel`, { method: 'POST' })
   if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to cancel device Hunt'))
   return res.json()
 }
 
 export async function getDeviceCredentials(deviceId: string, includeInactive = false): Promise<{ profiles: DeviceCredentialProfile[] }> {
-  const res = await fetch(`${API_URL}/devices/${encodeURIComponent(deviceId)}/credentials?include_inactive=${includeInactive ? 'true' : 'false'}`, { cache: 'no-store' })
+  const res = await fetch(`${API_URL}/devices/${pathSegment(deviceId)}/credentials?include_inactive=${includeInactive ? 'true' : 'false'}`, { cache: 'no-store' })
   if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to load device credentials'))
   return res.json()
 }
@@ -5479,7 +5480,7 @@ export async function createDeviceCredential(deviceId: string, payload: {
   port?: number
   expires_at?: string
 }): Promise<{ profile: DeviceCredentialProfile }> {
-  const res = await fetch(`${API_URL}/devices/${encodeURIComponent(deviceId)}/credentials`, {
+  const res = await fetch(`${API_URL}/devices/${pathSegment(deviceId)}/credentials`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload),
@@ -5489,7 +5490,7 @@ export async function createDeviceCredential(deviceId: string, payload: {
 }
 
 export async function deactivateDeviceCredential(deviceId: string, profileId: string): Promise<void> {
-  const res = await fetch(`${API_URL}/devices/${encodeURIComponent(deviceId)}/credentials/${encodeURIComponent(profileId)}`, { method: 'DELETE' })
+  const res = await fetch(`${API_URL}/devices/${pathSegment(deviceId)}/credentials/${pathSegment(profileId)}`, { method: 'DELETE' })
   if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to deactivate device credential'))
 }
 
@@ -5523,7 +5524,7 @@ export async function updateDevicePolicy(policyId: string, payload: Partial<{
   rules: DevicePolicyRule[]
   is_active: boolean
 }>): Promise<{ policy: DevicePolicy }> {
-  const res = await fetch(`${API_URL}/device-policies/${encodeURIComponent(policyId)}`, {
+  const res = await fetch(`${API_URL}/device-policies/${pathSegment(policyId)}`, {
     method: 'PATCH',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload),
@@ -5534,7 +5535,7 @@ export async function updateDevicePolicy(policyId: string, payload: Partial<{
 
 // Targets
 export async function getTarget(targetId: string): Promise<Target> {
-  const res = await fetch(`${API_URL}/targets/${encodeURIComponent(targetId)}`)
+  const res = await fetch(`${API_URL}/targets/${pathSegment(targetId)}`)
   if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to fetch target'))
   return res.json()
 }
@@ -5623,7 +5624,7 @@ export async function getTargetsGroupedPage(params: {
 
 // Continuous ASM — persistent attack-surface inventory (docs/dast-asm-architecture.md)
 export async function getAsmCoverage(targetId: string): Promise<AsmCoverage> {
-  const res = await fetchHeavyRead(`${API_URL}/targets/${targetId}/asm/coverage`)
+  const res = await fetchHeavyRead(`${API_URL}/targets/${pathSegment(targetId)}/asm/coverage`)
   if (!res.ok) throw new Error('Failed to fetch ASM coverage')
   return res.json()
 }
@@ -5641,7 +5642,7 @@ export async function getAsmEndpoints(
   if (params?.limit) searchParams.set('limit', params.limit.toString())
   if (params?.offset) searchParams.set('offset', params.offset.toString())
 
-  const res = await fetchHeavyRead(`${API_URL}/targets/${targetId}/asm/endpoints?${searchParams}`)
+  const res = await fetchHeavyRead(`${API_URL}/targets/${pathSegment(targetId)}/asm/endpoints?${searchParams}`)
   if (!res.ok) throw new Error('Failed to fetch ASM endpoints')
   return res.json()
 }
@@ -5667,7 +5668,7 @@ export async function testAsmTarget(
   approval_receipt_id?: string | null
   scope_receipt_id?: string | null
 }> {
-  const res = await fetch(`${API_URL}/targets/${targetId}/asm/test`, {
+  const res = await fetch(`${API_URL}/targets/${pathSegment(targetId)}/asm/test`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(opts || {}),
@@ -5683,7 +5684,7 @@ export async function reconAsmTarget(
   targetId: string,
   opts?: { budget_profile?: string; approval_receipt_id?: string }
 ): Promise<AsmActionResponse> {
-  const res = await fetch(`${API_URL}/targets/${targetId}/asm/recon`, {
+  const res = await fetch(`${API_URL}/targets/${pathSegment(targetId)}/asm/recon`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(opts || {}),
@@ -5699,7 +5700,7 @@ export async function improveAsmTarget(
   targetId: string,
   opts?: { batch_size?: number; stale_days?: number; exploit_depth?: boolean; check_family?: string; endpoint_filter?: string; approval_receipt_id?: string }
 ): Promise<AsmActionResponse> {
-  const res = await fetch(`${API_URL}/targets/${targetId}/asm/improve`, {
+  const res = await fetch(`${API_URL}/targets/${pathSegment(targetId)}/asm/improve`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(opts || {}),
@@ -5735,7 +5736,7 @@ export interface AsmPolicy {
 }
 
 export async function getAsmPolicy(targetId: string): Promise<AsmPolicy> {
-  const res = await fetchHeavyRead(`${API_URL}/targets/${targetId}/asm/policy`)
+  const res = await fetchHeavyRead(`${API_URL}/targets/${pathSegment(targetId)}/asm/policy`)
   if (!res.ok) throw new Error('Failed to fetch ASM policy')
   return res.json()
 }
@@ -5744,7 +5745,7 @@ export async function updateAsmPolicy(
   targetId: string,
   body: { enabled?: boolean; config?: Partial<AsmConfig> }
 ): Promise<AsmPolicy> {
-  const res = await fetch(`${API_URL}/targets/${targetId}/asm/policy`, {
+  const res = await fetch(`${API_URL}/targets/${pathSegment(targetId)}/asm/policy`, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
@@ -5763,13 +5764,13 @@ export async function getAsmDiff(
   const searchParams = new URLSearchParams()
   if (params?.days) searchParams.set('days', params.days.toString())
   if (params?.limit) searchParams.set('limit', params.limit.toString())
-  const res = await fetchHeavyRead(`${API_URL}/targets/${targetId}/asm/diff?${searchParams}`)
+  const res = await fetchHeavyRead(`${API_URL}/targets/${pathSegment(targetId)}/asm/diff?${searchParams}`)
   if (!res.ok) throw new Error('Failed to fetch ASM diff')
   return res.json()
 }
 
 export async function getAsmGaps(targetId: string): Promise<AsmGaps> {
-  const res = await fetchHeavyRead(`${API_URL}/targets/${targetId}/asm/gaps`)
+  const res = await fetchHeavyRead(`${API_URL}/targets/${pathSegment(targetId)}/asm/gaps`)
   if (!res.ok) throw new Error('Failed to fetch ASM gaps')
   return res.json()
 }
@@ -5780,7 +5781,7 @@ export async function getAsmActivity(
 ): Promise<AsmActivityResponse> {
   const searchParams = new URLSearchParams()
   if (params?.limit) searchParams.set('limit', params.limit.toString())
-  const res = await fetchHeavyRead(`${API_URL}/targets/${targetId}/asm/activity?${searchParams}`)
+  const res = await fetchHeavyRead(`${API_URL}/targets/${pathSegment(targetId)}/asm/activity?${searchParams}`)
   if (!res.ok) throw new Error('Failed to fetch ASM activity')
   return res.json()
 }
@@ -5838,14 +5839,14 @@ export interface TargetAuthorization {
 // Authorize once per target: the standing authorization every active scan and Hunt reuses.
 // It ends only by revocation or when the target's scope changes.
 export async function getTargetAuthorization(targetId: string): Promise<TargetAuthorization | null> {
-  const res = await fetch(`${API_URL}/targets/${targetId}/authorization`)
+  const res = await fetch(`${API_URL}/targets/${pathSegment(targetId)}/authorization`)
   if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to read target authorization'))
   const body = await res.json()
   return (body.authorization as TargetAuthorization | null) ?? null
 }
 
 export async function authorizeTarget(targetId: string, approvedBy: string): Promise<TargetAuthorization> {
-  const res = await fetch(`${API_URL}/targets/${targetId}/authorization`, {
+  const res = await fetch(`${API_URL}/targets/${pathSegment(targetId)}/authorization`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ approved_by: approvedBy }),
@@ -5859,7 +5860,7 @@ export async function authorizeTarget(targetId: string, approvedBy: string): Pro
 }
 
 export async function revokeTargetAuthorization(targetId: string, revokedBy: string, reason: string): Promise<number> {
-  const res = await fetch(`${API_URL}/targets/${targetId}/authorization`, {
+  const res = await fetch(`${API_URL}/targets/${pathSegment(targetId)}/authorization`, {
     method: 'DELETE',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ revoked_by: revokedBy, reason }),
@@ -5873,7 +5874,7 @@ export async function scanTarget(
   targetId: string,
   request: Omit<ScanStartRequest, 'target' | 'name' | 'target_kind' | 'request_collections' | 'credential_profile_ids'> = {},
 ) {
-  const res = await fetch(`${API_URL}/targets/${targetId}/scan`, {
+  const res = await fetch(`${API_URL}/targets/${pathSegment(targetId)}/scan`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(request)
@@ -6044,7 +6045,7 @@ export async function getDomains(): Promise<{ domains: string[] }> {
 }
 
 export async function getFinding(id: string): Promise<Finding> {
-  const res = await fetch(`${API_URL}/findings/${id}`)
+  const res = await fetch(`${API_URL}/findings/${pathSegment(id)}`)
   if (!res.ok) throw new Error('Failed to fetch finding')
   return res.json()
 }
@@ -6078,7 +6079,7 @@ export async function getFindingEvidence(
   latest_observation_scan_id?: string | null
   evidence_objects: EvidenceObject[]
 }> {
-  const res = await fetch(`${API_URL}/findings/${id}/evidence`)
+  const res = await fetch(`${API_URL}/findings/${pathSegment(id)}/evidence`)
   if (!res.ok) throw new Error('Failed to fetch finding evidence objects')
   return res.json()
 }
@@ -6130,13 +6131,13 @@ export interface GraphHypothesisGenerationResult {
 // First-class application graph for a target: routes, objects, and
 // producer/consumer/auth-boundary edges persisted from scans.
 export async function getApplicationGraph(targetId: string): Promise<ApplicationGraph> {
-  const res = await fetchHeavyRead(`${API_URL}/targets/${targetId}/graph`)
+  const res = await fetchHeavyRead(`${API_URL}/targets/${pathSegment(targetId)}/graph`)
   if (!res.ok) throw new Error('Failed to fetch application graph')
   return res.json()
 }
 
 export async function generateApplicationGraphHypotheses(targetId: string): Promise<GraphHypothesisGenerationResult> {
-  const res = await fetch(`${API_URL}/targets/${targetId}/graph/hypotheses`, { method: 'POST' })
+  const res = await fetch(`${API_URL}/targets/${pathSegment(targetId)}/graph/hypotheses`, { method: 'POST' })
   if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to generate graph hypotheses'))
   return res.json()
 }
@@ -6210,7 +6211,7 @@ export interface DeploymentDecision {
 }
 
 export async function getScanDeploymentDecision(scanId: string): Promise<DeploymentDecision> {
-  const res = await fetch(`${API_URL}/scans/${scanId}/deployment-decision`)
+  const res = await fetch(`${API_URL}/scans/${pathSegment(scanId)}/deployment-decision`)
   if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to fetch deployment decision'))
   return res.json()
 }
@@ -6266,7 +6267,7 @@ export async function createPolicyProfile(data: PolicyProfilePayload, operatorTo
 }
 
 export async function updatePolicyProfile(id: string, data: PolicyProfilePayload, operatorToken?: string): Promise<PolicyProfile> {
-  const res = await fetch(`${API_URL}/policy-profiles/${id}`, {
+  const res = await fetch(`${API_URL}/policy-profiles/${pathSegment(id)}`, {
     method: 'PATCH',
     headers: {
       'Content-Type': 'application/json',
@@ -6279,7 +6280,7 @@ export async function updatePolicyProfile(id: string, data: PolicyProfilePayload
 }
 
 export async function deletePolicyProfile(id: string, operatorToken?: string): Promise<{ deleted: boolean; id: string }> {
-  const res = await fetch(`${API_URL}/policy-profiles/${id}`, {
+  const res = await fetch(`${API_URL}/policy-profiles/${pathSegment(id)}`, {
     method: 'DELETE',
     headers: operatorToken ? { Authorization: `Bearer ${operatorToken}` } : undefined,
   })
@@ -6348,7 +6349,7 @@ export async function createFindingException(data: FindingExceptionPayload): Pro
 }
 
 export async function updateFindingException(id: string, data: FindingExceptionPayload): Promise<FindingException> {
-  const res = await fetch(`${API_URL}/finding-exceptions/${id}`, {
+  const res = await fetch(`${API_URL}/finding-exceptions/${pathSegment(id)}`, {
     method: 'PATCH',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(data),
@@ -6358,7 +6359,7 @@ export async function updateFindingException(id: string, data: FindingExceptionP
 }
 
 export async function deleteFindingException(id: string): Promise<{ deleted: boolean; id: string }> {
-  const res = await fetch(`${API_URL}/finding-exceptions/${id}`, { method: 'DELETE' })
+  const res = await fetch(`${API_URL}/finding-exceptions/${pathSegment(id)}`, { method: 'DELETE' })
   if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to delete finding exception'))
   return res.json()
 }
@@ -6415,7 +6416,7 @@ export async function retestFinding(
   scope_receipt_id?: string | null
 }> {
   const query = mode ? `?mode=${mode}` : ''
-  const res = await fetch(`${API_URL}/findings/${id}/retest${query}`, {
+  const res = await fetch(`${API_URL}/findings/${pathSegment(id)}/retest${query}`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(params)
@@ -6449,7 +6450,7 @@ export async function retestAiFinding(
   approval_receipt_id?: string | null
   scope_receipt_id?: string | null
 }> {
-  const res = await fetch(`${API_URL}/ai/findings/${id}/retest`, {
+  const res = await fetch(`${API_URL}/ai/findings/${pathSegment(id)}/retest`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(params)
@@ -6485,7 +6486,7 @@ export async function replayAiScan(
   approval_receipt_id?: string | null
   scope_receipt_id?: string | null
 }> {
-  const res = await fetch(`${API_URL}/ai/scans/${id}/replay`, {
+  const res = await fetch(`${API_URL}/ai/scans/${pathSegment(id)}/replay`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(params),
@@ -6562,7 +6563,7 @@ export interface AiScanCampaignHistory {
 }
 
 export async function getAiScanCampaignHistory(id: string, limit: number = 6): Promise<AiScanCampaignHistory> {
-  const res = await fetch(`${API_URL}/ai/scans/${id}/campaign-history?limit=${limit}`)
+  const res = await fetch(`${API_URL}/ai/scans/${pathSegment(id)}/campaign-history?limit=${limit}`)
   if (!res.ok) {
     throw new Error(await getApiErrorMessage(res, 'Failed to load AI Gate campaign history'))
   }
@@ -6631,7 +6632,7 @@ export interface AiTargetCampaignHistory {
 }
 
 export async function getAiTargetCampaignHistory(id: string, limit: number = 12): Promise<AiTargetCampaignHistory> {
-  const res = await fetch(`${API_URL}/ai/targets/${id}/campaign-history?limit=${limit}`)
+  const res = await fetch(`${API_URL}/ai/targets/${pathSegment(id)}/campaign-history?limit=${limit}`)
   if (!res.ok) {
     throw new Error(await getApiErrorMessage(res, 'Failed to load AI Gate target campaign history'))
   }
@@ -6643,7 +6644,7 @@ export async function getFindingRetests(id: string, limit: number = 20): Promise
   retests: RetestRecord[]
   count: number
 }> {
-  const res = await fetch(`${API_URL}/retests/finding/${id}?limit=${limit}`)
+  const res = await fetch(`${API_URL}/retests/finding/${pathSegment(id)}?limit=${limit}`)
   if (!res.ok) throw new Error('Failed to fetch retest history')
   return res.json()
 }
@@ -6665,8 +6666,8 @@ export async function updateFinding(
   analyst_verdict_at?: string | null
 }> {
   const url = scanId
-    ? `${API_URL}/findings/${id}?scan_id=${scanId}`
-    : `${API_URL}/findings/${id}`
+    ? `${API_URL}/findings/${pathSegment(id)}?scan_id=${scanId}`
+    : `${API_URL}/findings/${pathSegment(id)}`
   const res = await fetch(url, {
     method: 'PATCH',
     headers: { 'Content-Type': 'application/json' },
@@ -6707,7 +6708,7 @@ export async function deleteFinding(id: string, approval: {
 }): Promise<{ id: string; status: string }> {
   const query = new URLSearchParams({ preview_id: approval.preview_id, approval_receipt_id: approval.approval_receipt_id })
   if (approval.scan_id) query.set('scan_id', approval.scan_id)
-  const res = await fetch(`${API_URL}/findings/${encodeURIComponent(id)}?${query}`, { method: 'DELETE' })
+  const res = await fetch(`${API_URL}/findings/${pathSegment(id)}?${query}`, { method: 'DELETE' })
   if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to delete finding'))
   return res.json()
 }
@@ -6893,7 +6894,7 @@ export async function updateAITarget(
   id: string,
   data: Partial<AITargetPayload> & { is_active?: boolean }
 ): Promise<{ target: AITarget }> {
-  const res = await fetch(`${API_URL}/ai/targets/${id}`, {
+  const res = await fetch(`${API_URL}/ai/targets/${pathSegment(id)}`, {
     method: 'PATCH',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(data),
@@ -6903,13 +6904,13 @@ export async function updateAITarget(
 }
 
 export async function deleteAITarget(id: string): Promise<{ status: string; target_id: string }> {
-  const res = await fetch(`${API_URL}/ai/targets/${id}`, { method: 'DELETE' })
+  const res = await fetch(`${API_URL}/ai/targets/${pathSegment(id)}`, { method: 'DELETE' })
   if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to delete AI target'))
   return res.json()
 }
 
 export async function getAITargetPrincipals(id: string): Promise<{ target_id: string; principals: AITargetPrincipal[] }> {
-  const res = await fetch(`${API_URL}/ai/targets/${id}/principals`)
+  const res = await fetch(`${API_URL}/ai/targets/${pathSegment(id)}/principals`)
   if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to fetch AI target principals'))
   return res.json()
 }
@@ -6918,7 +6919,7 @@ export async function createAITargetPrincipal(
   id: string,
   data: AITargetPrincipalPayload
 ): Promise<{ principal: AITargetPrincipal }> {
-  const res = await fetch(`${API_URL}/ai/targets/${id}/principals`, {
+  const res = await fetch(`${API_URL}/ai/targets/${pathSegment(id)}/principals`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(data),
@@ -6931,7 +6932,7 @@ export async function deleteAITargetPrincipal(
   targetId: string,
   principalId: string
 ): Promise<{ status: string; target_id: string; principal_id: string }> {
-  const res = await fetch(`${API_URL}/ai/targets/${targetId}/principals/${principalId}`, { method: 'DELETE' })
+  const res = await fetch(`${API_URL}/ai/targets/${pathSegment(targetId)}/principals/${pathSegment(principalId)}`, { method: 'DELETE' })
   if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to delete AI target principal'))
   return res.json()
 }
@@ -6962,7 +6963,7 @@ export interface AITargetConnectivityResult {
 }
 
 export async function testAITargetConnectivity(id: string, prompt?: string): Promise<AITargetConnectivityResult> {
-  const res = await fetch(`${API_URL}/ai/targets/${id}/test`, {
+  const res = await fetch(`${API_URL}/ai/targets/${pathSegment(id)}/test`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(prompt ? { prompt } : {}),
@@ -6993,7 +6994,7 @@ export interface AIMCPLiveReadinessResult {
 }
 
 export async function testMCPReadiness(id: string): Promise<AIMCPLiveReadinessResult> {
-  const res = await fetch(`${API_URL}/ai/targets/${id}/mcp/live-readiness`, {
+  const res = await fetch(`${API_URL}/ai/targets/${pathSegment(id)}/mcp/live-readiness`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({}),
@@ -7131,7 +7132,7 @@ export async function getAISurfaces(): Promise<{ ai_surfaces: AISurface[] }> {
 }
 
 export async function getAISurfaceAttempts(id: string): Promise<{ surface: AISurface; attempts: AISurfaceAttempt[] }> {
-  const res = await fetch(`${API_URL}/ai/surfaces/${encodeURIComponent(id)}/attempts`)
+  const res = await fetch(`${API_URL}/ai/surfaces/${pathSegment(id)}/attempts`)
   if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to load AI surface attempts'))
   return res.json()
 }
@@ -7157,7 +7158,7 @@ export async function scanAITarget(
   approval_receipt_id?: string | null
   scope_receipt_id?: string | null
 }> {
-  const res = await fetch(`${API_URL}/ai/targets/${id}/scan`, {
+  const res = await fetch(`${API_URL}/ai/targets/${pathSegment(id)}/scan`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(data),
@@ -7197,7 +7198,7 @@ export async function getFleetNodes(operatorToken?: string): Promise<FleetNodesR
 }
 
 export async function getFleetNodeActivity(nodeId: string, limit = 25, operatorToken?: string): Promise<FleetNodeActivityResponse> {
-  const res = await fetch(`${API_URL}/fleet/nodes/${encodeURIComponent(nodeId)}/activity?limit=${limit}`, {
+  const res = await fetch(`${API_URL}/fleet/nodes/${pathSegment(nodeId)}/activity?limit=${limit}`, {
     cache: 'no-store',
     headers: fleetOperatorHeaders(operatorToken),
   })
@@ -7206,7 +7207,7 @@ export async function getFleetNodeActivity(nodeId: string, limit = 25, operatorT
 }
 
 export async function getFleetNodeEvents(nodeId: string, limit = 25, operatorToken?: string): Promise<FleetNodeEventsResponse> {
-  const res = await fetch(`${API_URL}/fleet/nodes/${encodeURIComponent(nodeId)}/events?limit=${limit}`, {
+  const res = await fetch(`${API_URL}/fleet/nodes/${pathSegment(nodeId)}/events?limit=${limit}`, {
     cache: 'no-store',
     headers: fleetOperatorHeaders(operatorToken),
   })
@@ -7232,7 +7233,7 @@ export async function updateFleetNodeState(
   state: { desired_worker_count?: number; drain?: boolean; worker_image_digest?: string },
   operatorToken?: string,
 ): Promise<FleetNode> {
-  const res = await fetch(`${API_URL}/fleet/nodes/${encodeURIComponent(nodeId)}/state`, {
+  const res = await fetch(`${API_URL}/fleet/nodes/${pathSegment(nodeId)}/state`, {
     method: 'PATCH',
     headers: fleetOperatorHeaders(operatorToken),
     body: JSON.stringify(state),
@@ -7245,7 +7246,7 @@ export async function revokeFleetNode(
   nodeId: string,
   operatorToken?: string,
 ): Promise<{ node_id: string; status: 'disabled'; credentials_revoked: boolean }> {
-  const res = await fetch(`${API_URL}/fleet/nodes/${encodeURIComponent(nodeId)}/revoke`, {
+  const res = await fetch(`${API_URL}/fleet/nodes/${pathSegment(nodeId)}/revoke`, {
     method: 'POST',
     headers: fleetOperatorHeaders(operatorToken),
   })
@@ -7367,7 +7368,7 @@ export async function createSchedule(data: ScheduleCreate): Promise<{ id: string
 }
 
 export async function updateSchedule(id: string, data: Partial<Schedule>): Promise<{ id: string; status: string }> {
-  const res = await fetch(`${API_URL}/schedules/${id}`, {
+  const res = await fetch(`${API_URL}/schedules/${pathSegment(id)}`, {
     method: 'PATCH',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(data)
@@ -7379,7 +7380,7 @@ export async function updateSchedule(id: string, data: Partial<Schedule>): Promi
 }
 
 export async function deleteSchedule(id: string): Promise<{ id: string; status: string }> {
-  const res = await fetch(`${API_URL}/schedules/${id}`, {
+  const res = await fetch(`${API_URL}/schedules/${pathSegment(id)}`, {
     method: 'DELETE'
   })
   if (!res.ok) {
@@ -7411,7 +7412,7 @@ export interface DiscoveryRun {
 }
 
 export async function getDiscoveryRun(discoveryId: string): Promise<DiscoveryRun> {
-  const res = await fetch(`${API_URL}/discovery/${encodeURIComponent(discoveryId)}`)
+  const res = await fetch(`${API_URL}/discovery/${pathSegment(discoveryId)}`)
   if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to read subdomain discovery'))
   return res.json()
 }
@@ -7704,13 +7705,13 @@ export async function listInteractiveSessions(): Promise<InteractiveSessionsList
 }
 
 export async function getTargetPrincipalMatrix(targetId: string, limit: number = 200): Promise<TargetPrincipalMatrixResponse> {
-  const res = await fetch(`${API_URL}/targets/${encodeURIComponent(targetId)}/principal-matrix?limit=${limit}`)
+  const res = await fetch(`${API_URL}/targets/${pathSegment(targetId)}/principal-matrix?limit=${limit}`)
   if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to load target principal matrix'))
   return res.json()
 }
 
 export async function getTargetInvariants(targetId: string): Promise<TargetInvariantListResponse> {
-  const res = await fetch(`${API_URL}/targets/${encodeURIComponent(targetId)}/invariants?include_drafts=true`)
+  const res = await fetch(`${API_URL}/targets/${pathSegment(targetId)}/invariants?include_drafts=true`)
   if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to load target invariants'))
   return res.json()
 }
@@ -7719,7 +7720,7 @@ export async function compileTargetInvariant(
   targetId: string,
   payload: { rule_text: string; method?: string; path?: string; persist_drafts?: boolean; approval_receipt_id?: string },
 ): Promise<TargetInvariantCompileResponse> {
-  const res = await fetch(`${API_URL}/targets/${encodeURIComponent(targetId)}/invariants/compile`, {
+  const res = await fetch(`${API_URL}/targets/${pathSegment(targetId)}/invariants/compile`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload),
@@ -7733,7 +7734,7 @@ export async function approveTargetInvariant(
   contractId: string,
   approvalReceiptId: string,
 ): Promise<{ contract: TargetInvariantContract; planning_authority: boolean; promotion_authority: boolean }> {
-  const res = await fetch(`${API_URL}/targets/${encodeURIComponent(targetId)}/invariants/${encodeURIComponent(contractId)}/approve`, {
+  const res = await fetch(`${API_URL}/targets/${pathSegment(targetId)}/invariants/${pathSegment(contractId)}/approve`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
@@ -7747,7 +7748,7 @@ export async function approveTargetInvariant(
 }
 
 export async function generateTargetInvariantHypotheses(targetId: string): Promise<{ created: number; hypotheses: Array<Record<string, unknown>> }> {
-  const res = await fetch(`${API_URL}/targets/${encodeURIComponent(targetId)}/invariants/hypotheses`, {
+  const res = await fetch(`${API_URL}/targets/${pathSegment(targetId)}/invariants/hypotheses`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ created_by: 'interactive-ui' }),
@@ -7757,13 +7758,13 @@ export async function generateTargetInvariantHypotheses(targetId: string): Promi
 }
 
 export async function getTargetCredentialProfiles(targetId: string): Promise<{ target_id: string; profiles: TargetCredentialProfile[]; count: number }> {
-  const res = await fetch(`${API_URL}/targets/${encodeURIComponent(targetId)}/credential-profiles`)
+  const res = await fetch(`${API_URL}/targets/${pathSegment(targetId)}/credential-profiles`)
   if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to load credential profiles'))
   return res.json()
 }
 
 export async function createTargetCredentialProfile(targetId: string, payload: TargetCredentialProfilePayload): Promise<{ profile: TargetCredentialProfile }> {
-  const res = await fetch(`${API_URL}/targets/${encodeURIComponent(targetId)}/credential-profiles`, {
+  const res = await fetch(`${API_URL}/targets/${pathSegment(targetId)}/credential-profiles`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload),
@@ -7773,7 +7774,7 @@ export async function createTargetCredentialProfile(targetId: string, payload: T
 }
 
 export async function rotateTargetCredentialProfile(targetId: string, profileId: string, payload: { secret: string; expires_at?: string; clear_expiry?: boolean }): Promise<{ profile: TargetCredentialProfile }> {
-  const res = await fetch(`${API_URL}/targets/${encodeURIComponent(targetId)}/credential-profiles/${encodeURIComponent(profileId)}/rotate`, {
+  const res = await fetch(`${API_URL}/targets/${pathSegment(targetId)}/credential-profiles/${pathSegment(profileId)}/rotate`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload),
@@ -7783,13 +7784,13 @@ export async function rotateTargetCredentialProfile(targetId: string, profileId:
 }
 
 export async function deactivateTargetCredentialProfile(targetId: string, profileId: string): Promise<{ status: string; profile: TargetCredentialProfile }> {
-  const res = await fetch(`${API_URL}/targets/${encodeURIComponent(targetId)}/credential-profiles/${encodeURIComponent(profileId)}`, { method: 'DELETE' })
+  const res = await fetch(`${API_URL}/targets/${pathSegment(targetId)}/credential-profiles/${pathSegment(profileId)}`, { method: 'DELETE' })
   if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to deactivate credential profile'))
   return res.json()
 }
 
 export async function createTargetPrincipal(targetId: string, payload: TargetPrincipalPayload): Promise<{ principal: TargetPrincipal; execution_enabled: boolean; findings_created: number }> {
-  const res = await fetch(`${API_URL}/targets/${encodeURIComponent(targetId)}/principals`, {
+  const res = await fetch(`${API_URL}/targets/${pathSegment(targetId)}/principals`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload),
@@ -7799,7 +7800,7 @@ export async function createTargetPrincipal(targetId: string, payload: TargetPri
 }
 
 export async function updateTargetPrincipal(targetId: string, principalId: string, payload: Partial<TargetPrincipalPayload>): Promise<{ principal: TargetPrincipal; execution_enabled: boolean }> {
-  const res = await fetch(`${API_URL}/targets/${encodeURIComponent(targetId)}/principals/${encodeURIComponent(principalId)}`, {
+  const res = await fetch(`${API_URL}/targets/${pathSegment(targetId)}/principals/${pathSegment(principalId)}`, {
     method: 'PATCH',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload),
@@ -7809,7 +7810,7 @@ export async function updateTargetPrincipal(targetId: string, principalId: strin
 }
 
 export async function deactivateTargetPrincipal(targetId: string, principalId: string): Promise<{ status: string; target_id: string; principal_id: string; execution_enabled: boolean }> {
-  const res = await fetch(`${API_URL}/targets/${encodeURIComponent(targetId)}/principals/${encodeURIComponent(principalId)}`, { method: 'DELETE' })
+  const res = await fetch(`${API_URL}/targets/${pathSegment(targetId)}/principals/${pathSegment(principalId)}`, { method: 'DELETE' })
   if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to deactivate target principal'))
   return res.json()
 }
@@ -7870,7 +7871,7 @@ export async function createTargetPolicyApproval(targetId: string, targetUrl: st
 }
 
 export async function upsertTargetPrincipalExpectation(targetId: string, payload: TargetPrincipalExpectationPayload): Promise<{ expectation: TargetPrincipalExpectation; execution_enabled: boolean; findings_created: number; operation_id: string }> {
-  const res = await fetch(`${API_URL}/targets/${encodeURIComponent(targetId)}/principal-matrix`, {
+  const res = await fetch(`${API_URL}/targets/${pathSegment(targetId)}/principal-matrix`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload),
@@ -7881,13 +7882,13 @@ export async function upsertTargetPrincipalExpectation(targetId: string, payload
 
 export async function deleteTargetPrincipalExpectation(targetId: string, expectationId: string, approvalReceiptId: string): Promise<{ status: string; target_id: string; expectation_id: string; execution_enabled: boolean; findings_created: number; operation_id: string }> {
   const query = new URLSearchParams({ approval_receipt_id: approvalReceiptId })
-  const res = await fetch(`${API_URL}/targets/${encodeURIComponent(targetId)}/principal-matrix/${encodeURIComponent(expectationId)}?${query}`, { method: 'DELETE' })
+  const res = await fetch(`${API_URL}/targets/${pathSegment(targetId)}/principal-matrix/${pathSegment(expectationId)}?${query}`, { method: 'DELETE' })
   if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to delete principal expectation'))
   return res.json()
 }
 
 export async function getInteractiveSession(sessionId: string): Promise<InteractiveSessionState> {
-  const res = await fetch(`${API_URL}/session/${encodeURIComponent(sessionId)}`)
+  const res = await fetch(`${API_URL}/session/${pathSegment(sessionId)}`)
   if (!res.ok) {
     throw new Error(await getApiErrorMessage(res, 'Failed to fetch interactive session'))
   }
@@ -7898,7 +7899,7 @@ export async function runInteractiveAction(
   sessionId: string,
   request: InteractiveActionRequest
 ): Promise<Record<string, unknown>> {
-  const res = await fetch(`${API_URL}/session/${encodeURIComponent(sessionId)}/action`, {
+  const res = await fetch(`${API_URL}/session/${pathSegment(sessionId)}/action`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(request),
@@ -7917,7 +7918,7 @@ export async function captureInteractiveScreenshot(
   if (params?.full_page !== undefined) searchParams.set('full_page', String(params.full_page))
   if (params?.user) searchParams.set('user', params.user)
   const query = searchParams.toString()
-  const res = await fetch(`${API_URL}/session/${encodeURIComponent(sessionId)}/screenshot${query ? `?${query}` : ''}`, {
+  const res = await fetch(`${API_URL}/session/${pathSegment(sessionId)}/screenshot${query ? `?${query}` : ''}`, {
     method: 'POST',
   })
   if (!res.ok) {
@@ -7930,7 +7931,7 @@ export async function testInteractiveEndpoint(
   sessionId: string,
   request: InteractiveEndpointTestRequest
 ): Promise<InteractiveEndpointTestResult> {
-  const res = await fetch(`${API_URL}/session/${encodeURIComponent(sessionId)}/test-endpoint`, {
+  const res = await fetch(`${API_URL}/session/${pathSegment(sessionId)}/test-endpoint`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(request),
@@ -7945,7 +7946,7 @@ export async function createInteractiveSessionFinding(
   sessionId: string,
   request: InteractiveSessionFindingCreateRequest
 ): Promise<InteractiveSessionFindingCreateResponse> {
-  const res = await fetch(`${API_URL}/session/${encodeURIComponent(sessionId)}/findings`, {
+  const res = await fetch(`${API_URL}/session/${pathSegment(sessionId)}/findings`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(request),
@@ -7957,7 +7958,7 @@ export async function createInteractiveSessionFinding(
 }
 
 export async function endInteractiveSession(sessionId: string): Promise<{ status: string; session_id: string; message: string }> {
-  const res = await fetch(`${API_URL}/session/${encodeURIComponent(sessionId)}`, {
+  const res = await fetch(`${API_URL}/session/${pathSegment(sessionId)}`, {
     method: 'DELETE',
   })
   if (!res.ok) {
