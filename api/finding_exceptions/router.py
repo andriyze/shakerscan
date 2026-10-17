@@ -16,7 +16,7 @@ import json
 from typing import Any, Callable, Optional
 import uuid
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
 try:
@@ -288,86 +288,155 @@ async def _finding_exception_lifecycle_sweep(
     return response
 
 
+async def _triage_receipt(conn: Any, http_request: Request | None, route: str, apply: Callable[..., Any], *,
+                          exception_id: uuid.UUID, target_id: Any = None, finding_id: Any = None) -> Any:
+    """With ``X-ShakerScan-Decision-Id`` (an authenticating gateway's approved decision), record a
+    reversible receipt of this exception change (targets/triage_receipts.py); otherwise None."""
+    if http_request is None or http_request.headers.get("x-shakerscan-decision-id") is None:
+        return None
+    try:
+        from targets.decision_receipts import receipt_request
+        from targets.triage_receipts import exception_owner
+    except ModuleNotFoundError:
+        from ..targets.decision_receipts import receipt_request
+        from ..targets.triage_receipts import exception_owner
+    try:
+        payload = await http_request.json() if route != "exception_delete" else {}
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail="The approved triage request is not JSON") from exc
+    owner = await exception_owner(conn, target_id=target_id, finding_id=finding_id)
+    return await receipt_request(conn, http_request, owner, "legacy_triage", perform=apply, triage_route=route,
+                                 exception_id=exception_id, triage=payload if isinstance(payload, dict) else {})
+
+
+def _decision_id(http_request: Request | None) -> uuid.UUID | None:
+    value = http_request.headers.get("x-shakerscan-decision-id") if http_request is not None else None
+    if value is None:
+        return None
+    try:
+        return uuid.UUID(value)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail="Invalid decision receipt request") from exc
+
+
 @router.post("/finding-exceptions")
-async def create_finding_exception(req: FindingExceptionRequest):
+async def create_finding_exception(req: FindingExceptionRequest, http_request: Request = None):
     if not (req.finding_id or req.fingerprint):
         raise HTTPException(status_code=422, detail="finding_id or fingerprint is required")
     expires_at = _validate_finding_exception_accountability(req)
+    decision = _decision_id(http_request)
+    created_id = None
+    if decision is not None:
+        try:
+            from targets.triage_receipts import created_exception_id
+        except ModuleNotFoundError:
+            from ..targets.triage_receipts import created_exception_id
+        created_id = created_exception_id(decision)
     async with _pool().acquire() as conn:
         await _require_active_policy_profile(conn, req.policy_id)
-        row = await conn.fetchrow(
-            """
-            INSERT INTO finding_exceptions
-                (finding_id, fingerprint, policy_id, target_id, scope, owner, approver,
-                 reason, compensating_controls, status, expires_at)
-            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
-            RETURNING *
-            """,
-            req.finding_id, req.fingerprint,
-            _uuid_or_422(req.policy_id, "policy_id") if req.policy_id else None,
-            _uuid_or_422(req.target_id, "target_id") if req.target_id else None,
-            req.scope, req.owner, req.approver, req.reason, req.compensating_controls,
-            req.status, expires_at,
-        )
-    return row_to_dict(row)
+
+        async def apply(_actor: str | None = None) -> dict[str, Any]:
+            row = await conn.fetchrow(
+                """
+                INSERT INTO finding_exceptions
+                    (id, finding_id, fingerprint, policy_id, target_id, scope, owner, approver,
+                     reason, compensating_controls, status, expires_at)
+                VALUES (COALESCE($12::uuid, gen_random_uuid()),$1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+                RETURNING *
+                """,
+                req.finding_id, req.fingerprint,
+                _uuid_or_422(req.policy_id, "policy_id") if req.policy_id else None,
+                _uuid_or_422(req.target_id, "target_id") if req.target_id else None,
+                req.scope, req.owner, req.approver, req.reason, req.compensating_controls,
+                req.status, expires_at, created_id,
+            )
+            return json.loads(json.dumps(row_to_dict(row), default=str))
+
+        if created_id is not None:
+            return await _triage_receipt(conn, http_request, "exception_create", apply, exception_id=created_id,
+                                         target_id=req.target_id, finding_id=req.finding_id)
+        return await apply()
 
 
 @router.patch("/finding-exceptions/{exception_id}")
-async def update_finding_exception(exception_id: str, req: FindingExceptionRequest):
+async def update_finding_exception(exception_id: str, req: FindingExceptionRequest, http_request: Request = None):
     exception_uuid = _uuid_or_422(exception_id, "exception_id")
     async with _pool().acquire() as conn:
         current = await conn.fetchrow("SELECT * FROM finding_exceptions WHERE id=$1", exception_uuid)
         if not current:
             raise HTTPException(status_code=404, detail="Finding exception not found")
-        supplied = req.model_dump(exclude_unset=True)
-        merged = {
-            field: supplied.get(field, current.get(field))
-            for field in FindingExceptionRequest.model_fields
-        }
-        for uuid_field in ("policy_id", "target_id"):
-            if merged.get(uuid_field) is not None:
-                merged[uuid_field] = str(merged[uuid_field])
-        merged_req = FindingExceptionRequest(**merged)
-        expires_at = _validate_finding_exception_accountability(merged_req)
-        if merged_req.status in EFFECTIVE_EXCEPTION_STATUSES:
-            await _require_active_policy_profile(conn, merged_req.policy_id)
-        prior_snapshot = {
-            "policy_id": str(current["policy_id"]) if current["policy_id"] else None,
-            "owner": current["owner"],
-            "approver": current["approver"],
-            "reason": current["reason"],
-            "compensating_controls": current["compensating_controls"],
-            "status": current["status"],
-            "expires_at": current["expires_at"].isoformat() if current["expires_at"] else None,
-            "replaced_at": utc_now_iso(),
-        }
-        row = await conn.fetchrow(
-            """
-            UPDATE finding_exceptions SET
-                policy_id=$2, target_id=$3, scope=$4, owner=$5, approver=$6, reason=$7,
-                compensating_controls=$8, status=$9, expires_at=$10, updated_at=NOW(),
-                edit_history = edit_history || $11::jsonb
-            WHERE id=$1 RETURNING *
-            """,
-            exception_uuid,
-            _uuid_or_422(merged_req.policy_id, "policy_id") if merged_req.policy_id else None,
-            _uuid_or_422(merged_req.target_id, "target_id") if merged_req.target_id else None,
-            merged_req.scope, merged_req.owner, merged_req.approver, merged_req.reason,
-            merged_req.compensating_controls, merged_req.status, expires_at,
-            json.dumps([prior_snapshot], default=str),
-        )
-        if not row:
-            raise HTTPException(status_code=404, detail="Finding exception not found")
+        if _decision_id(http_request) is not None:
+            async def apply(_actor: str | None = None) -> dict[str, Any]:
+                return json.loads(json.dumps(await _update_exception(conn, exception_uuid, req), default=str))
+            return await _triage_receipt(conn, http_request, "exception_update", apply, exception_id=exception_uuid,
+                                         target_id=current["target_id"], finding_id=current["finding_id"])
+        return await _update_exception(conn, exception_uuid, req)
+
+
+async def _update_exception(conn: Any, exception_uuid: uuid.UUID, req: FindingExceptionRequest) -> dict[str, Any]:
+    current = await conn.fetchrow("SELECT * FROM finding_exceptions WHERE id=$1 FOR UPDATE", exception_uuid)
+    if not current:
+        raise HTTPException(status_code=404, detail="Finding exception not found")
+    supplied = req.model_dump(exclude_unset=True)
+    merged = {
+        field: supplied.get(field, current.get(field))
+        for field in FindingExceptionRequest.model_fields
+    }
+    for uuid_field in ("policy_id", "target_id"):
+        if merged.get(uuid_field) is not None:
+            merged[uuid_field] = str(merged[uuid_field])
+    # The stored expiry is a timestamp; the request model takes it as ISO text.
+    if hasattr(merged.get("expires_at"), "isoformat"):
+        merged["expires_at"] = merged["expires_at"].isoformat()
+    merged_req = FindingExceptionRequest(**merged)
+    expires_at = _validate_finding_exception_accountability(merged_req)
+    if merged_req.status in EFFECTIVE_EXCEPTION_STATUSES:
+        await _require_active_policy_profile(conn, merged_req.policy_id)
+    prior_snapshot = {
+        "policy_id": str(current["policy_id"]) if current["policy_id"] else None,
+        "owner": current["owner"],
+        "approver": current["approver"],
+        "reason": current["reason"],
+        "compensating_controls": current["compensating_controls"],
+        "status": current["status"],
+        "expires_at": current["expires_at"].isoformat() if current["expires_at"] else None,
+        "replaced_at": utc_now_iso(),
+    }
+    row = await conn.fetchrow(
+        """
+        UPDATE finding_exceptions SET
+            policy_id=$2, target_id=$3, scope=$4, owner=$5, approver=$6, reason=$7,
+            compensating_controls=$8, status=$9, expires_at=$10, updated_at=NOW(),
+            edit_history = edit_history || $11::jsonb
+        WHERE id=$1 RETURNING *
+        """,
+        exception_uuid,
+        _uuid_or_422(merged_req.policy_id, "policy_id") if merged_req.policy_id else None,
+        _uuid_or_422(merged_req.target_id, "target_id") if merged_req.target_id else None,
+        merged_req.scope, merged_req.owner, merged_req.approver, merged_req.reason,
+        merged_req.compensating_controls, merged_req.status, expires_at,
+        json.dumps([prior_snapshot], default=str),
+    )
+    if not row:
+        raise HTTPException(status_code=404, detail="Finding exception not found")
     return row_to_dict(row)
 
 
 @router.delete("/finding-exceptions/{exception_id}")
-async def delete_finding_exception(exception_id: str):
+async def delete_finding_exception(exception_id: str, http_request: Request = None):
+    exception_uuid = _uuid_or_422(exception_id, "exception_id")
     async with _pool().acquire() as conn:
-        result = await conn.execute(
-            "DELETE FROM finding_exceptions WHERE id=$1",
-            _uuid_or_422(exception_id, "exception_id"),
-        )
-    if result.endswith("0"):
-        raise HTTPException(status_code=404, detail="Finding exception not found")
-    return {"deleted": True, "id": exception_id}
+        async def apply(_actor: str | None = None) -> dict[str, Any]:
+            result = await conn.execute("DELETE FROM finding_exceptions WHERE id=$1", exception_uuid)
+            if result.endswith(" 0"):
+                raise HTTPException(status_code=404, detail="Finding exception not found")
+            return {"deleted": True, "id": exception_id}
+
+        if _decision_id(http_request) is not None:
+            current = await conn.fetchrow("SELECT target_id, finding_id FROM finding_exceptions WHERE id=$1",
+                                          exception_uuid)
+            if current is None:
+                raise HTTPException(status_code=404, detail="Finding exception not found")
+            return await _triage_receipt(conn, http_request, "exception_delete", apply, exception_id=exception_uuid,
+                                         target_id=current["target_id"], finding_id=current["finding_id"])
+        return await apply()

@@ -1898,8 +1898,8 @@ for the profile contract, invocation, limits and acceptance gates.
 
 | Surface | Count | Source |
 |---|---|---|
-| Public REST operations | 501 | `api/**/*.py` FastAPI decorators |
-| Unique REST paths | 418 | `api/**/*.py` |
+| Public REST operations | 503 | `api/**/*.py` FastAPI decorators |
+| Unique REST paths | 420 | `api/**/*.py` |
 | Check families | 19 | `api/check_registry.py` |
 | Command Arsenal commands | 85 | `api/command_arsenal.py` |
 | Tool adapters | 0 | `api/command_arsenal.py` |
@@ -1916,7 +1916,7 @@ for the profile contract, invocation, limits and acceptance gates.
 | Canonical slash commands | 14 | `.claude/commands/` |
 | Deprecated Scan-name slash shims | 0 | `.claude/commands/` |
 | Specialized subagents | 3 | `.claude/agents/` |
-| Durable tables | 116 | `db/init.sql` + migrations |
+| Durable tables | 117 | `db/init.sql` + migrations |
 
 ### Public REST Operations
 
@@ -2190,6 +2190,7 @@ for the profile contract, invocation, limits and acceptance gates.
 | `POST` | `/internal/model-intake/runner/storage/cleanup` | `cleanup_runner_storage` |
 | `GET` | `/investigation/candidates` | `list_investigation_candidates` |
 | `GET` | `/investigation/candidates/{candidate_id}` | `get_investigation_candidate` |
+| `GET` | `/knowledge/continue/usage` | `get_continue_usage` |
 | `GET` | `/knowledge/decisions` | `get_decisions` |
 | `GET` | `/metrics/v2` | `get_v2_operational_metrics` |
 | `POST` | `/model-intake/admission/verify` | `verify_model_intake_admission` |
@@ -2397,6 +2398,7 @@ for the profile contract, invocation, limits and acceptance gates.
 | `POST` | `/targets/{target_id}/inventory/hypotheses` | `generate_endpoint_inventory_hypotheses` |
 | `GET` | `/targets/{target_id}/knowledge/changes` | `get_target_knowledge_changes` |
 | `GET` | `/targets/{target_id}/knowledge/continue` | `get_target_knowledge_continue` |
+| `GET` | `/targets/{target_id}/knowledge/continue/measures` | `get_target_continue_measures` |
 | `POST` | `/targets/{target_id}/knowledge/decisions` | `post_decision` |
 | `GET` | `/targets/{target_id}/knowledge/decisions/{receipt_id}` | `get_decision` |
 | `POST` | `/targets/{target_id}/knowledge/decisions/{receipt_id}/revert` | `post_revert` |
@@ -3318,6 +3320,7 @@ Scan feature or a second orchestration engine.
 | `hypotheses` | `api/retest_contract.py` |
 | `investigation_candidate_observations` | `api/retest_contract.py` |
 | `investigation_candidates` | `api/retest_contract.py` |
+| `knowledge_continue_events` | `db/init.sql` |
 | `model_intake_admission_events` | `db/init.sql` |
 | `model_intake_admissions` | `db/init.sql` |
 | `model_intake_agent_actions` | `db/init.sql` |

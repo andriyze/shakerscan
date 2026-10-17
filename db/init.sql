@@ -2623,14 +2623,28 @@ CREATE TABLE IF NOT EXISTS target_interpretations (
     CONSTRAINT target_interpretations_reopen_shape CHECK (
         status <> 'reopened' OR negative_state = 'finding_dismissed')
 );
-CREATE INDEX IF NOT EXISTS idx_target_interpretations_target
-    ON target_interpretations(target_id, status, created_at DESC);
-CREATE INDEX IF NOT EXISTS idx_target_interpretations_hunt
-    ON target_interpretations(hunt_run_id) WHERE hunt_run_id IS NOT NULL;
-CREATE INDEX IF NOT EXISTS idx_target_interpretations_experiment
-    ON target_interpretations(target_id, experiment_key) WHERE experiment_key IS NOT NULL;
-CREATE UNIQUE INDEX IF NOT EXISTS idx_target_interpretations_one_dismissal
-    ON target_interpretations(finding_id) WHERE negative_state = 'finding_dismissed' AND status = 'active';
+DO $interpretation_indexes$
+BEGIN
+    -- Checked first: CREATE INDEX IF NOT EXISTS takes a SHARE lock on the table even when the index
+    -- exists, and this runs at every start.
+    IF to_regclass('idx_target_interpretations_target') IS NULL THEN
+        CREATE INDEX idx_target_interpretations_target
+            ON target_interpretations(target_id, status, created_at DESC);
+    END IF;
+    IF to_regclass('idx_target_interpretations_hunt') IS NULL THEN
+        CREATE INDEX idx_target_interpretations_hunt
+            ON target_interpretations(hunt_run_id) WHERE hunt_run_id IS NOT NULL;
+    END IF;
+    IF to_regclass('idx_target_interpretations_experiment') IS NULL THEN
+        CREATE INDEX idx_target_interpretations_experiment
+            ON target_interpretations(target_id, experiment_key) WHERE experiment_key IS NOT NULL;
+    END IF;
+    IF to_regclass('idx_target_interpretations_one_dismissal') IS NULL THEN
+        CREATE UNIQUE INDEX idx_target_interpretations_one_dismissal
+            ON target_interpretations(finding_id) WHERE negative_state = 'finding_dismissed' AND status = 'active';
+    END IF;
+END
+$interpretation_indexes$;
 -- Whatever path changes a finding's status (a route, a scan or verifier re-detecting it, or an
 -- earlier engine after a rollback), an operator's dismissal ends when the status leaves the
 -- dismissed statuses: it is marked reopened, never left active beside an active finding.
@@ -2722,8 +2736,14 @@ CREATE TABLE IF NOT EXISTS target_operator_decisions (
     reverted_at TIMESTAMPTZ,
     reverted_by TEXT
 );
-CREATE INDEX IF NOT EXISTS idx_target_operator_decisions_target
-    ON target_operator_decisions(target_id,created_at DESC);
+DO $operator_decision_index$
+BEGIN
+    IF to_regclass('idx_target_operator_decisions_target') IS NULL THEN
+        CREATE INDEX idx_target_operator_decisions_target
+            ON target_operator_decisions(target_id,created_at DESC);
+    END IF;
+END
+$operator_decision_index$;
 DO $release_marker_index$
 BEGIN
     IF to_regclass('idx_target_release_markers_target') IS NULL THEN
@@ -2732,6 +2752,33 @@ BEGIN
     END IF;
 END
 $release_marker_index$;
+-- Continue-after-release usage and reuse advice (api/hunt/knowledge_measures.py): which required
+-- re-tests a continue report listed when someone read it, and every skip advice
+-- knowledge.check_experiment gave. Read back by the continuation measures; no text is stored.
+CREATE TABLE IF NOT EXISTS knowledge_continue_events (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    target_id UUID NOT NULL REFERENCES targets(id) ON DELETE CASCADE,
+    kind TEXT NOT NULL CHECK (kind IN ('report_read','skip_advice')),
+    reader TEXT NOT NULL CHECK (reader ~ '^(hunt|operator):' AND length(reader) <= 200),
+    hunt_run_id UUID REFERENCES hunt_runs(id) ON DELETE SET NULL,
+    since_at TIMESTAMPTZ,
+    set_digest TEXT CHECK (set_digest IS NULL OR length(set_digest) <= 64),
+    required JSONB NOT NULL DEFAULT '[]'::jsonb CHECK (jsonb_typeof(required) = 'array'),
+    routes JSONB NOT NULL DEFAULT '[]'::jsonb CHECK (jsonb_typeof(routes) = 'array'),
+    entry_id UUID,
+    request JSONB CHECK (request IS NULL OR jsonb_typeof(request) = 'object'),
+    reads INTEGER NOT NULL DEFAULT 1 CHECK (reads > 0),
+    first_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    last_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+DO $continue_events_index$
+BEGIN
+    IF to_regclass('idx_knowledge_continue_events_target') IS NULL THEN
+        CREATE INDEX idx_knowledge_continue_events_target
+            ON knowledge_continue_events(target_id, kind, first_at DESC);
+    END IF;
+END
+$continue_events_index$;
 
 -- Discovered secrets (2.10): api/hunt/discovered_secrets.py, installed by the startup migration too.
 CREATE TABLE IF NOT EXISTS discovered_secrets (

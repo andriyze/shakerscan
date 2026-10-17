@@ -1518,12 +1518,13 @@ def build_parser() -> argparse.ArgumentParser:
         "knowledge",
         help="review proposed changes to target instructions and saved actions in your own terminal, and continue "
              "a target after its latest release: knowledge review [target] [--accept ID | --reject ID], "
-             "knowledge continue <target> [--refresh], knowledge release <target> [--label L]",
+             "knowledge continue <target> [--refresh], knowledge release <target> [--label L], "
+             "knowledge measures <target>",
     )
     connection(knowledge)
     knowledge.add_argument("args", nargs=argparse.REMAINDER,
                            help="review [target-id] [--accept ID | --reject ID] | show | changes | continue | "
-                                "release | releases | dismiss | reopen")
+                                "measures | usage | release | releases | dismiss | reopen")
     secrets = commands.add_parser(
         "secrets",
         help="secrets discovered on a target: secrets list <target> (never values), revoke|reactivate|expiry, "

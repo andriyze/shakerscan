@@ -21,6 +21,9 @@ async def apply_operator_decision(conn: Any, target: UUID, item: DecisionInput, 
                                           retract_interpretation, retract_run)
         from ..hunt.release_markers import ReleaseMarkerInput, declare_release
     kind = item.decision
+    if kind == 'legacy_triage':
+        # Applied on the triage routes themselves (with X-ShakerScan-Decision-Id), never here.
+        raise HTTPException(422, 'A legacy triage decision is recorded on its own finding or exception route')
     if kind == 'accept':
         if item.text_sha256 is None:
             raise HTTPException(422, 'Accept must name the reviewed text')
