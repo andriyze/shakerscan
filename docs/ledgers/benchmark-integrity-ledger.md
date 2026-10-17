@@ -283,3 +283,25 @@ claim instead of deleting it.
   The gate now requires actual candidate attempts for every expected family when canonical
   family coverage is present. This makes the coverage failure explicit; it does not change the
   0/4 recall result or relax proof requirements.
+
+### 2026-10-17 — Juice Shop answer key follows the 2.11 severity calibration
+
+- Change: 2.11 rates findings per class (`severity-basis/v1`). An unauthenticated metrics endpoint
+  and a browsable directory listing are **medium** (no credential or user data is proven in the
+  response; files proven sensitive are reported as their own findings). The `exposed-metrics` and
+  `exposed-ftp-listing` expectations now require a verified finding of at least medium.
+- Evidence: release-candidate certification of `51341e5dd` (scan `4f743387`) and a lab rerun of the
+  same harness (scan `1aa5b11c`) verified `/metrics` and `/ftp` as medium findings; the scorecard
+  read them as misses only because the answer key still asked for high (recall 0.11 instead of 0.33).
+- Gate consequences, approved by the owner: `min_verified_high_critical` 3 -> 1 (only `sqli-search`
+  is High/Critical among the proven expectations) and `max_unverified_high_ratio` 0.35 -> 0.5 (the
+  one unconfirmed sqlmap High is now one of two High/Critical findings rather than one of four).
+  `min_expected_recall` stays 0.33 and every expectation still requires a verified finding, so a
+  detection regression on either exposure, or a new miss, still fails.
+- Scorer: `collect_scorecard` matched expectations against High/Critical findings only, so an
+  expectation's `min_severity` below high could never be met. Every finding is now a candidate
+  (higher severities first) and each expectation applies its own `min_severity`; the default
+  stays high and the High/Critical counts are computed as before.
+- Rescoring lab scan `1aa5b11c` with the re-keyed fixture: recall 3/9 (0.33), only declared gaps
+  missed, every gate passes.
+- This is a severity re-key, not a detection improvement: recall is unchanged from 2.10 (3/9).

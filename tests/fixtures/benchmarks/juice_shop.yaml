@@ -58,10 +58,14 @@ quality_bar:
 # still fails. Each gap names why and is tracked for a later release.
 gates:
   min_expected_recall: 0.33          # 3 of 9 after the exposure proof-policy correction (see the exposed-confidential gap). Raise as gaps close.
-  min_verified_high_critical: 3      # sqli-search + the two deterministic exposures; per-file confidentiality is no longer force-verified
+  # 2.11 severity calibration (severity-basis/v1): a served /metrics and a browsable directory are
+  # medium, so only sqli-search counts as verified High/Critical, and the single unconfirmed sqlmap
+  # High is now one of two High/Critical findings instead of one of four. Both exposures must still
+  # be verified (their answer-key severity is medium); see benchmark-integrity-ledger 2026-10-17.
+  min_verified_high_critical: 1      # sqli-search; the two deterministic exposures are medium since 2.11
   require_verified_sqli: true        # Juice Shop must prove Critical SQLi
   require_browser_proven_xss: false  # see the xss-dom-search gap: no DOM/fragment discovery yet
-  max_unverified_high_ratio: 0.35
+  max_unverified_high_ratio: 0.5     # 1 unconfirmed High of 2 High/Critical (was 1 of 4 before 2.11)
   # This scan runs a real budget over a large surface, so some families legitimately report partial
   # coverage. The value is still recorded on every card; it is not treated as a release failure.
   require_reliable_grade: false
@@ -138,12 +142,12 @@ expected:
   - id: exposed-metrics
     family: sensitive_exposure
     route: /metrics
-    min_severity: high
+    min_severity: medium
     proof: deterministic
   - id: exposed-ftp-listing
     family: sensitive_exposure
     route: /ftp
-    min_severity: high
+    min_severity: medium
     proof: deterministic
   - id: exposed-confidential
     family: sensitive_exposure

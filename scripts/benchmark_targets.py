@@ -885,6 +885,9 @@ def collect_scorecard(report, fixture):
     found, missed = [], []
     # One finding may credit at most one expectation. Without this a single high-severity finding
     # satisfied every expectation whose class it happened to match, inflating recall silently.
+    # Every finding is a candidate and each expectation applies its own ``min_severity``: an answer
+    # key that asks for a medium finding can be met by one. Higher severities are tried first.
+    by_severity = sorted(enriched, key=lambda entry: -SEV_RANK.get(entry[3], 0))
     expectation_candidates = [
         {
             "finding": entry[0],
@@ -896,7 +899,7 @@ def collect_scorecard(report, fixture):
             "verified": entry[4],
             "browser_proven": entry[5],
         }
-        for index, entry in enumerate(high_crit)
+        for index, entry in enumerate(by_severity)
     ]
     claimed_finding_ids: set[str] = set()
     unmatched_expectations = []

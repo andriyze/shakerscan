@@ -225,6 +225,21 @@ def test_a_verified_finding_satisfies_a_deterministic_expectation():
     assert card["expected_recall"] == 1.0
 
 
+def test_a_verified_medium_finding_meets_only_a_medium_expectation():
+    report = _unverified_metrics_report()
+    report["findings"][0].update(verified=True, severity="medium")
+    medium = _deterministic_fixture()
+    medium["expected"][0]["min_severity"] = "medium"
+
+    assert [item["id"] for item in benchmark.collect_scorecard(report, medium)["expected_found"]] == [
+        "exposed-metrics"]
+    # The default answer-key severity is high: a medium finding does not meet it.
+    high = benchmark.collect_scorecard(report, _deterministic_fixture())
+    assert high["expected_found"] == []
+    # Severity counts are unchanged: a medium finding is not a verified High/Critical.
+    assert high["verified_high_critical"] == 0
+
+
 def test_a_browser_expectation_reports_a_verified_non_browser_finding_as_unproven():
     fixture = {
         "expected": [{
