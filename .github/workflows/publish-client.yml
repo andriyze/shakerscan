@@ -98,6 +98,7 @@ jobs:
         run: |
           python scripts/release_sbom.py client --dist dist --version "$VERSION" \
             --source-sha "$(git rev-parse HEAD)" --generator-source-sha "$(git rev-parse HEAD)" \
+            --source-root . \
             --repository "$GITHUB_REPOSITORY" --output release-sbom
           python scripts/release_sbom.py verify --directory release-sbom --dist dist
       # Keep non-distribution files out of dist/: PyPI must receive only wheel/sdist files.

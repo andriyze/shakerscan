@@ -75,7 +75,7 @@ def _decode_key(value: str) -> bytes:
     return raw
 
 
-def trusted_keys(extra: str | None = None) -> dict[str, bytes]:
+def accepted_signers(extra: str | None = None) -> dict[str, bytes]:
     """Vendor keys plus operator-pinned ``id=base64`` pairs; a pair whose id does not match
     its key is ignored, so a typo cannot alias a trusted id."""
     keys: dict[str, bytes] = {}
@@ -192,7 +192,7 @@ def verify_bundle(
         raise BundleError("malformed_signature") from exc
     if len(signature) != 64:
         raise BundleError("malformed_signature")
-    available = dict(trusted_keys() if keys is None else keys)
+    available = dict(accepted_signers() if keys is None else keys)
     public_key = available.get(manifest["key_id"])
     if public_key is None:
         raise BundleError("untrusted_key")
@@ -525,7 +525,7 @@ def main(argv: list[str] | None = None) -> int:
             "in_force": {key: loaded.get(key) for key in (
                 "status", "source", "snapshot_sha256", "record_count", "generated_at")},
             "bundle": bundle_status(not_older_than=device_advisories.BUNDLED_SNAPSHOT_GENERATED_AT),
-            "trusted_key_ids": sorted(trusted_keys()),
+            "trusted_key_ids": sorted(accepted_signers()),
         }, indent=2, sort_keys=True))
         return 0
     try:

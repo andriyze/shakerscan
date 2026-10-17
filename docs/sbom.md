@@ -1,7 +1,7 @@
 # Release SBOMs
 
 **Status:** Implemented release tooling, stages one and two. Coverage remains explicitly partial.
-**Updated:** 2026-09-21.
+**Updated:** 2026-10-17.
 
 Official publishing pipelines attach artifact-specific inventories and a signed index.
 An SBOM is a contents inventory, not a vulnerability scan, certification or assurance
@@ -27,9 +27,28 @@ listed packages execute or ship in the final application**. A lock-file hash ide
 the input file; it is never substituted for a package distribution's hash.
 
 Client releases retain actual wheel and sdist SPDX file inventories and add CycloneDX
-representations. The current client has no declared third-party runtime dependencies;
-a future nonempty `Requires-Dist` fails generation until dependency resolution is
-implemented. The CLI/MCP copies and agent kit are included in archive file inventories.
+representations. The base install has no declared third-party runtime dependencies: a
+`Requires-Dist` that is not scoped to an optional extra (unconditional, or any other marker)
+fails generation until base dependency resolution is implemented.
+
+Optional extras (since client 0.11.0: `shakerscan[record]`, Playwright for `shakerscan record`)
+are inventoried from their reviewed, hash-locked resolution. Each extra declared in
+`client/pyproject.toml` has `client/requirements/<extra>.txt`, which must list exactly the
+extra's `Requires-Dist`, and `client/requirements/<extra>.lock`, compiled with
+`uv pip compile client/requirements/<extra>.txt --python-version 3.10 --universal --generate-hashes --output-file client/requirements/<extra>.lock`.
+Generation reads both from a clean checkout at the client source commit (`--source-root`)
+and fails when one is missing, modified, unhashed, or no longer matches the declaration. The
+bundle gains `shakerscan-<version>-extra-<extra>.spdx.json` (and its CycloneDX conversion in
+stage two), listing every locked package, version, interpreter marker and the distribution
+hashes the lock accepts, as optional dependencies of the client; `sbom-index.json` binds the
+input and lock hashes under `extras`. This is the resolution reviewed when the release was
+cut, not an install record: `pip install 'shakerscan[record]'` resolves `playwright>=1.44`
+from the package index at install time and can differ, unless installed with
+`--require-hashes -r client/requirements/record.lock`. Extras are not bundled in the
+archives, and native code inside them (Playwright's driver) and the browsers
+`playwright install` downloads are not inventoried.
+
+The CLI/MCP copies and agent kit are included in archive file inventories.
 Python, its standard library, pip/pipx/uv/Homebrew and external agents are not bundled.
 The client version and source commit are independent of the engine release.
 

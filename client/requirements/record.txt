@@ -1,0 +1,4 @@
+# The `record` extra of the shakerscan client (client/pyproject.toml [project.optional-dependencies]).
+# It must list exactly what that extra declares; scripts/release_sbom.py fails otherwise.
+# Lock: uv pip compile client/requirements/record.txt --python-version 3.10 --universal --generate-hashes --output-file client/requirements/record.lock
+playwright>=1.44

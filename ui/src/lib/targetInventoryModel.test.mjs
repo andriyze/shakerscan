@@ -150,7 +150,8 @@ test('a large domain group opens New Scan by reference, capped at one batch', as
   assert.equal(resolved.found, true)
   assert.equal(resolved.total, 120)
   assert.equal(resolved.targets.length, 50)
-  assert.ok(!resolved.targets.includes('https://gone.scale-seed.invalid'))
+  // The inactive member's origin is not filled in (compared by host, not by URL substring).
+  assert.ok(resolved.targets.every(url => new URL(url).hostname !== 'gone.scale-seed.invalid'))
   assert.deepEqual(domainBatchTargets('missing.invalid', page), { targets: [], total: 0, found: false, moreMembers: false })
   assert.match(batchCapNotice(120, 'scale-seed.invalid'), /120 web apps; a batch scans at most 50 at once\. The first 50 are filled in/)
   assert.equal(batchCapNotice(50, 'x'), null)
