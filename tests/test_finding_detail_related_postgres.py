@@ -30,6 +30,7 @@ ROOT = Path(__file__).resolve().parents[1]
 TARGET = uuid.UUID("22222222-2222-4222-8222-222222222222")
 OTHER = uuid.UUID("33333333-3333-4333-8333-333333333333")
 CERT = "c" * 64
+SCAN = uuid.UUID("55555555-5555-4555-8555-555555555555")
 
 
 def test_related_findings_come_from_the_same_target_and_rank_the_shared_certificate_first():
@@ -155,30 +156,53 @@ def test_retired_kinds_resolve_only_untriaged_unseen_rows_on_the_covered_origin(
                                 {**template, "header_name": "content-security-policy"})
             elsewhere = await add("Missing HTTP response header: Referrer-Policy", "nuclei", "https://other.invalid",
                                   {**template, "header_name": "referrer-policy"})
+            verdict_noted = await add("Missing HTTP response header: Referrer-Policy", "nuclei", "https://app.invalid/d",
+                                      {**template, "header_name": "referrer-policy"})
+            retesting = await add("Missing HTTP response header: Referrer-Policy", "nuclei", "https://app.invalid/e",
+                                  {**template, "header_name": "referrer-policy"})
+            reopened = await add("Missing HTTP response header: Referrer-Policy", "nuclei", "https://app.invalid/f",
+                                 {**template, "header_name": "referrer-policy",
+                                  "retired": {"kind": "nuclei_missing_header_folded_into_baseline"}})
+            await conn.execute("UPDATE findings SET analyst_verdict_notes = 'keep' WHERE id = $1", verdict_noted)
+            await conn.execute("UPDATE findings SET last_verification_status = 'queued' WHERE id = $1", retesting)
             baseline = await add("Missing Referrer Policy header", "http_baseline", "https://app.invalid",
                                  {"check": "missing_header_referrer-policy"})
+            await conn.execute("INSERT INTO scans (id, target_id, target_url) VALUES ($1, $2, 'https://app.invalid')",
+                               SCAN, TARGET)
+
+            async def retire():
+                return await retire_superseded_findings(conn, target_id=TARGET, scan_id=str(SCAN), report=report,
+                                                        seen_fingerprints=["seen-now"])
             report = {"target": "https://app.invalid", "http": {"posture_observed": True},
                       "scan_metadata": {"status": "complete", "partial": False, "cancelled": False}, "findings": [{
                 "tool": "http_baseline", "url": "https://app.invalid",
                 "evidence": {"check": "missing_header_referrer-policy"}}]}
-            count = await retire_superseded_findings(conn, target_id=TARGET, scan_id="scan-1", report=report,
-                                                     seen_fingerprints=["seen-now"])
+            # The baseline finding that carries the duplicates is not stored for this scan: nothing retires.
+            unsaved = await retire()
+            await conn.execute("UPDATE findings SET scan_id = $2, status = 'resolved' WHERE id = $1", baseline, SCAN)
+            resolved_baseline = await retire()
+            await conn.execute("UPDATE findings SET status = 'false_positive' WHERE id = $1", baseline)
+            count = await retire()
             statuses = {row["id"]: (row["status"], row["retired"], row["resolved_at"] is not None) for row in await conn.fetch(
                 "SELECT id, status, evidence->'retired' AS retired, resolved_at FROM findings")}
-            return count, statuses, (folded, older_spelling, accepted, judged, seen, present, elsewhere, baseline)
+            return (unsaved, resolved_baseline, count), statuses, (
+                folded, older_spelling, accepted, judged, seen, present, elsewhere, baseline, verdict_noted, retesting,
+                reopened)
         finally:
             await conn.close()
 
-    count, statuses, ids = asyncio.run(go())
-    folded, older_spelling, accepted, judged, seen, present, elsewhere, baseline = ids
-    assert count == 2
+    counts, statuses, ids = asyncio.run(go())
+    folded, older_spelling, accepted, judged, seen, present, elsewhere, baseline, verdict_noted, retesting, reopened = ids
+    assert counts == (0, 0, 2), "retired only while the baseline row is stored for this scan, active or triaged"
     for retired in (folded, older_spelling):
         status, evidence, resolved = statuses[retired]
         assert status == "resolved" and resolved
         assert json.loads(evidence)["kind"] == "nuclei_missing_header_folded_into_baseline"
     assert statuses[accepted][0] == "accepted_risk"
-    for kept in (judged, seen, present, elsewhere, baseline):
+    for kept in (judged, seen, present, elsewhere, verdict_noted, retesting):
         assert statuses[kept][:2] == ("active", None)
+    assert statuses[reopened][0] == "active", "an operator reopened this retired row: never retired again"
+    assert statuses[baseline][:2] == ("false_positive", None)
 
 
 def test_retirement_adversarial_cases_on_the_real_schema():
@@ -222,6 +246,10 @@ def test_retirement_adversarial_cases_on_the_real_schema():
             proof = {"tool": "shakerscan_exposure_probe", "url": "https://app.invalid/.git/config",
                      "severity": "high", "proof_state": "verified",
                      "evidence": {"exposure_class": "version_control_exposure"}}
+            stored_proof = await add("Git config exposed", "shakerscan_exposure_probe",
+                                     "https://app.invalid/.git/config", {"exposure_class": "other_class"},
+                                     severity="high")
+            await conn.execute("UPDATE findings SET scan_id = $2 WHERE id = $1", stored_proof, scan)
 
             def report(status="complete"):
                 return {"target": "https://app.invalid", "http": {"posture_observed": True}, "findings": [proof],
@@ -235,17 +263,22 @@ def test_retirement_adversarial_cases_on_the_real_schema():
                         **kwargs)
 
             not_complete = [await retire(report(status)) for status in ("partial", "failed", "cancelled")]
+            # The stored proof is of another class: it does not carry these rows.
+            wrong_class = await retire(report())
+            await conn.execute("""UPDATE findings SET evidence = '{"exposure_class": "version_control_exposure"}'
+                                  WHERE id = $1""", stored_proof)
             first = await retire(report(), batch_size=1, max_rows=1)
             rest = await retire(report(), batch_size=1)
             again = await retire(report())
             rows = {row["id"]: (row["status"], row["retired"]) for row in await conn.fetch(
                 "SELECT id, status, evidence->'retired' AS retired FROM findings")}
-            return ids, not_complete, first, rest, again, rows
+            return ids, not_complete, first, rest, again, rows, wrong_class
         finally:
             await conn.close()
 
-    ids, not_complete, first, rest, again, rows = asyncio.run(go())
+    ids, not_complete, first, rest, again, rows, wrong_class = asyncio.run(go())
     assert not_complete == [0, 0, 0], "a partial, failed or cancelled scan retires nothing"
+    assert wrong_class == 0, "no stored proof of this class for this scan: nothing is retired"
     assert (first, rest, again) == (1, 1, 0), "bounded per call, and idempotent"
     for name in ("folded", "folded_port"):
         status, record = rows[ids[name]]
