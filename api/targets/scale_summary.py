@@ -285,12 +285,22 @@ ANALYZE_AFTER_FOLDED_ROWS = 50_000
 
 
 async def compact_tick(pool: Any) -> int:
-    """One compaction: fold every pending delta; ANALYZE the counts after a large fold."""
+    """One compaction: fold every pending delta; ANALYZE the counts after a large fold. Then keep
+    the exposure list's per-asset facts warm (``exposure/asset_rank.py``): a read classifies only
+    a bounded number of assets, so a backlog is worked off here."""
     async with pool.acquire() as conn:
         folded = await compact(conn)
         if folded >= ANALYZE_AFTER_FOLDED_ROWS:
             await conn.execute("ANALYZE finding_summary_counts, scan_summary_counts, "
                                "finding_summary_deltas, scan_summary_deltas")
+    try:
+        try:
+            from exposure.asset_rank import refresh_facts_tick
+        except ModuleNotFoundError:
+            from ..exposure.asset_rank import refresh_facts_tick
+        await refresh_facts_tick(pool)
+    except Exception as exc:  # never fails the compaction; the next tick or read retries
+        logger.warning("exposure facts refresh skipped: %s", type(exc).__name__)
     return folded
 
 

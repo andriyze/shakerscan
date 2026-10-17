@@ -8,7 +8,11 @@ cohort rules, action reasons, priority) before slicing a page. Now:
   (``asset_cohorts``, ``ai_assurance``) and kept in ``exposure_target_facts`` /
   ``exposure_ai_target_facts``. A trigger marks a row stale when one of its inputs is edited; a
   read recomputes only missing or stale rows (new, edited, or classified by an older engine), so
-  the rules stay in one place and a steady-state read does no Python work per asset.
+  the rules stay in one place and a steady-state read does no Python work per asset. A read
+  recomputes at most ``FACTS_READ_BUDGET`` rows; a larger backlog (a bulk import, an upgrade, a
+  ``FACTS_VERSION`` bump) is finished by a background task the read starts and by the summary
+  compactor's tick, and until then the read ranks those assets with provisional facts and says so
+  (``classification_pending``). A read never classifies the whole inventory in Python.
 * Finding counts come from the trigger-maintained summary (``targets/scale_summary.py``) and two
   small partial indexes (rows a retest settled; rows that could be proven), never from a pass over
   every finding.
@@ -20,7 +24,9 @@ implementation, kept as the oracle). ``count``/``cursor``/``fields`` select list
 """
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime
+import logging
 from typing import Any, Mapping
 
 try:
@@ -41,6 +47,13 @@ from .scale_indexes import EXPOSURE_SCALE_INDEXES
 FACTS_VERSION = "exposure-facts/1"
 # Cold or invalidated inventories are classified in small transactions, never one Python list.
 FACTS_BATCH = 100
+# The most facts one read recomputes before it ranks (about 0.1 ms each); the background finishes
+# a larger backlog (``complete_facts_in_background``).
+FACTS_READ_BUDGET = 1000
+# Facts an asset is ranked with before its first classification (it then shows as pending).
+PROVISIONAL_EXPOSURE_CLASS = "unknown"
+PROVISIONAL_COHORT = "unclassified"
+logger = logging.getLogger("shakerscan.api.exposure.asset_rank")
 PRIORITY_WEIGHT = {"P1": 300, "P2": 200, "P3": 100}
 STALE_DAYS = 30
 NEW_DAYS = 7
@@ -262,20 +275,24 @@ async def _refresh_kind(conn: Any, kind: str) -> tuple[int, int]:
 
 
 async def refresh_facts(conn: Any, *, include_web: bool = True, include_ai: bool = True,
-                        attempts: int = 3) -> int:
+                        attempts: int = 3, max_rows: int | None = None) -> int:
     """Recompute the facts whose inputs changed (or that an older engine computed); returns how
-    many rows were written. Rows an edit raced are recomputed again, a bounded number of times."""
+    many rows were written. Rows an edit raced are recomputed again, a bounded number of times.
+    ``max_rows`` stops after about that many rows (a read's budget); ``facts_pending`` then says
+    whether any are left."""
     written = 0
+    examined = 0
     kinds = [kind for kind, wanted in (("target", include_web), ("ai", include_ai)) if wanted]
     for attempt in range(attempts):
         raced = 0
         try:
             for kind in kinds:
-                while True:
+                while max_rows is None or examined < max_rows:
                     async with conn.transaction():
                         done, lost = await _refresh_kind(conn, kind)
                     written += done
                     raced += lost
+                    examined += done + lost
                     # A full successful batch leaves more possible work. Commit it before
                     # loading the next batch; edits that raced this one use the outer retry.
                     if lost or done < FACTS_BATCH:
@@ -285,9 +302,49 @@ async def refresh_facts(conn: Any, *, include_web: bool = True, include_ai: bool
             if exc.__class__.__name__ != "DeadlockDetectedError" or attempt == attempts - 1:
                 raise
             raced = 1
-        if not raced:
+        if not raced or (max_rows is not None and examined >= max_rows):
             break
     return written
+
+
+async def facts_pending(conn: Any, *, include_web: bool = True, include_ai: bool = True) -> bool:
+    """Whether an active asset still lacks facts computed by this engine from its current columns."""
+    for kind, wanted in (("target", include_web), ("ai", include_ai)):
+        if wanted and await conn.fetchval(
+                f"SELECT EXISTS ({_FACT_SOURCES[kind]['select']} LIMIT 1)", FRESH_STATE):
+            return True
+    return False
+
+
+_BACKGROUND: dict[str, Any] = {"task": None}
+
+
+def complete_facts_in_background(pool: Any) -> bool:
+    """Start (once per process) a task that recomputes every pending fact; False when one runs.
+
+    A read that left a backlog calls this, so the next read finds the facts ready."""
+    task = _BACKGROUND["task"]
+    if task is not None and not task.done():
+        return False
+
+    async def complete() -> None:
+        try:
+            async with pool.acquire() as conn:
+                await refresh_facts(conn)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # a later read or compactor tick retries
+            logger.warning("exposure facts refresh skipped: %s", type(exc).__name__)
+
+    _BACKGROUND["task"] = asyncio.get_running_loop().create_task(complete())
+    return True
+
+
+async def refresh_facts_tick(pool: Any) -> int:
+    """The summary compactor's share: keep the facts warm whether or not anyone reads the list
+    (a database upgraded to this engine, or rows bulk-loaded without the API, start cold)."""
+    async with pool.acquire() as conn:
+        return await refresh_facts(conn)
 
 
 # --- The ranking ----------------------------------------------------------------------------------
@@ -355,7 +412,9 @@ def _ranked_sql(params: SqlParams, *, root_domain: str | None, kind: str | None,
     web AS (
         SELECT 'target'::text AS asset_kind, t.id,
                CASE WHEN t.discovery_source IS NOT DISTINCT FROM 'model-intake' THEN 'model' ELSE 'web' END AS kind,
-               x.exposure_class, x.cohort, x.owner_present, false AS ai_production, NULL::integer AS blast_static,
+               COALESCE(x.exposure_class, '{PROVISIONAL_EXPOSURE_CLASS}') AS exposure_class,
+               COALESCE(x.cohort, '{PROVISIONAL_COHORT}') AS cohort, COALESCE(x.owner_present, false) AS owner_present,
+               false AS ai_production, NULL::integer AS blast_static,
                t.created_at, COALESCE(t.total_scans, 0) AS total_scans,
                COALESCE(ls.completed_at, t.last_scanned_at) AS last_scanned_at,
                ls.id AS latest_scan_id, ls.status AS latest_scan_status, ls.scan_type AS latest_scan_type,
@@ -367,7 +426,7 @@ def _ranked_sql(params: SqlParams, *, root_domain: str | None, kind: str | None,
                 + COALESCE(adj.dn, 0))::bigint AS proof_needs,
                COALESCE(sus.n, 0)::bigint AS suspected
         FROM targets t
-        JOIN exposure_target_facts x ON x.target_id = t.id
+        LEFT JOIN exposure_target_facts x ON x.target_id = t.id
         {_latest_scan_sql("s.target_id = t.id AND (s.scan_role IS NULL OR s.scan_role <> 'shard')")}
         LEFT JOIN web_counts c ON c.asset_id = t.id
         LEFT JOIN web_settled st ON st.asset_id = t.id
@@ -382,9 +441,10 @@ def _ranked_sql(params: SqlParams, *, root_domain: str | None, kind: str | None,
     ai_counts AS ({asset_finding_counts_sql("ai_target_id", proof_scope="f.target_id IS NULL")}),
     ai AS (
         SELECT 'ai'::text AS asset_kind, a.id, 'ai'::text AS kind,
-               x.exposure_class, x.cohort, x.owner_present,
-               (COALESCE(a.production_mode, false) OR x.environment_production) AS ai_production,
-               x.blast_static_score AS blast_static,
+               COALESCE(x.exposure_class, '{PROVISIONAL_EXPOSURE_CLASS}') AS exposure_class,
+               COALESCE(x.cohort, '{PROVISIONAL_COHORT}') AS cohort, COALESCE(x.owner_present, false) AS owner_present,
+               (COALESCE(a.production_mode, false) OR COALESCE(x.environment_production, false)) AS ai_production,
+               COALESCE(x.blast_static_score, 0) AS blast_static,
                a.created_at, COALESCE(sc.n, 0) AS total_scans,
                COALESCE(ls.completed_at, a.last_scanned_at) AS last_scanned_at,
                ls.id AS latest_scan_id, ls.status AS latest_scan_status, ls.scan_type AS latest_scan_type,
@@ -396,7 +456,7 @@ def _ranked_sql(params: SqlParams, *, root_domain: str | None, kind: str | None,
                (COALESCE(c.proof_needs_verification, 0) + COALESCE(adj.dn, 0))::bigint AS proof_needs,
                0::bigint AS suspected
         FROM ai_targets a
-        JOIN exposure_ai_target_facts x ON x.ai_target_id = a.id
+        LEFT JOIN exposure_ai_target_facts x ON x.ai_target_id = a.id
         {_latest_scan_sql("s.ai_target_id = a.id")}
         LEFT JOIN LATERAL (SELECT COUNT(*) AS n FROM scans s WHERE s.ai_target_id = a.id) sc ON true
         LEFT JOIN ai_counts c ON c.asset_id = a.id
@@ -618,7 +678,8 @@ def stringify_keys(adjustments: Mapping[tuple[str, str], Any]) -> dict[tuple[str
 __all__ = [
     "AI_METADATA_KEYS", "ASSETS_LIST", "COHORT_GROUPS", "EXPOSURE_SCALE_INDEXES", "FACTS_VERSION", "FRESH_STATE",
     "INVESTIGATOR_TOOLS", "METRIC_NAMES", "PRIORITY_WEIGHT", "TARGET_METADATA_KEYS", "adjustment_rows_sql",
-    "ai_target_facts", "exposure_class", "install_exposure_facts", "keyset_page_sql", "metadata_subset_sql",
-    "metrics_from", "offset_page_sql", "refresh_facts", "stringify_keys", "target_facts",
+    "ai_target_facts", "complete_facts_in_background", "exposure_class", "facts_pending", "install_exposure_facts",
+    "keyset_page_sql", "metadata_subset_sql", "metrics_from", "offset_page_sql", "refresh_facts",
+    "refresh_facts_tick", "stringify_keys", "target_facts",
 ]
 
