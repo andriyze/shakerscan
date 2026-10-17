@@ -15,7 +15,8 @@ import type {
 import { API_URL, getApiErrorMessage } from './apiConfig'
 import { fetchHeavyRead } from './busyRetry.mjs'
 import { getJson } from './fetchLayer.mjs'
-import { isListV1, isUnknownListParamError, listV1Params, type ListV1Page, type TotalKind } from './listPage.mjs'
+import { exposureAssetsFromBody, exposureAssetsParams } from './exposureAssets.mjs'
+import { LIST_V1_MAX_LIMIT, isListV1, isUnknownListParamError, listV1Params, type ListV1Page, type TotalKind } from './listPage.mjs'
 
 export { API_URL, getApiUrl } from './apiConfig'
 
@@ -4048,16 +4049,32 @@ export async function getExposureAssets(params?: {
   limit?: number
   offset?: number
 }, signal?: AbortSignal): Promise<ExposureAssetsResponse> {
-  const searchParams = new URLSearchParams()
-  if (params?.root_domain) searchParams.set('root_domain', params.root_domain)
-  if (params?.kind) searchParams.set('kind', params.kind)
-  if (params?.cohort) searchParams.set('cohort', params.cohort)
-  if (params?.limit) searchParams.set('limit', String(params.limit))
-  if (params?.offset) searchParams.set('offset', String(params.offset))
-  const query = searchParams.toString()
-  return getJson(`${API_URL}/exposure/assets${query ? `?${query}` : ''}`, {
-    signal, heavy: true, label: 'Failed to fetch exposure assets',
-  })
+  const legacy = () => {
+    const searchParams = new URLSearchParams()
+    if (params?.root_domain) searchParams.set('root_domain', params.root_domain)
+    if (params?.kind) searchParams.set('kind', params.kind)
+    if (params?.cohort) searchParams.set('cohort', params.cohort)
+    if (params?.limit) searchParams.set('limit', String(params.limit))
+    if (params?.offset) searchParams.set('offset', String(params.offset))
+    const query = searchParams.toString()
+    return getJson(`${API_URL}/exposure/assets${query ? `?${query}` : ''}`, {
+      signal, heavy: true, label: 'Failed to fetch exposure assets',
+    }) as Promise<ExposureAssetsResponse>
+  }
+  // A first page (no offset, at most 200 rows) is one list/v1 page with the headline summary; an
+  // engine without list/v1 here answers its legacy shape, which reads the same way.
+  if ((params?.offset || 0) > 0 || (params?.limit || 0) > LIST_V1_MAX_LIMIT) return legacy()
+  const query = new URLSearchParams(exposureAssetsParams(params))
+  let body: unknown
+  try {
+    body = await getJson(`${API_URL}/exposure/assets?${query}`, {
+      signal, heavy: true, label: 'Failed to fetch exposure assets',
+    })
+  } catch (cause) {
+    if (!isUnknownListParamError(cause)) throw cause
+    return legacy()
+  }
+  return exposureAssetsFromBody(body)
 }
 
 export interface ExposureChangeExample {
