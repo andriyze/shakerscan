@@ -46,6 +46,14 @@ NEX_N2_SHARD = ("https://huggingface.co/nex-agi/Nex-N2-mini/resolve/"
 NEX_N2_FULL_SHA = "d6b15ebf2a6b81f62c9a913bc340486a7a1a97cbbf97a50abf9be53ddcd4f5dc"
 
 
+# What a failed MI-6 check prints: the verification status and two booleans, never key material.
+_SIGNATURE_DETAIL_FIELDS = ("signature_verification_status", "signature_verified", "signature_trusted_root")
+
+
+def _signature_detail(summary: dict) -> str:
+    return " ".join(f"{field}={summary.get(field)}" for field in _SIGNATURE_DETAIL_FIELDS)
+
+
 def run_model_intake() -> H.Scorecard:
     sc = H.Scorecard("model_intake")
     print("\n== Model Intake e2e ==", flush=True)
@@ -229,7 +237,7 @@ def run_model_intake() -> H.Scorecard:
                  s.get("signature_verification_status") == "untrusted_root"
                  and s.get("signature_verified") is False
                  and s.get("signature_trusted_root") is not True,
-                 f"status={s.get('signature_verification_status')} trusted_root={s.get('signature_trusted_root')}")
+                 _signature_detail(s))
     except Exception as e:
         sc.error("MI-6 caller trust-anchor rejection", e)
 
@@ -280,7 +288,7 @@ def run_model_intake() -> H.Scorecard:
             negative.get("signature_verification_status") == "untrusted_key"
             and negative.get("signature_verified") is False
             and negative.get("signature_trusted_root") is False,
-            f"status={negative.get('signature_verification_status')} trusted={negative.get('signature_trusted_root')}",
+            _signature_detail(negative),
         )
 
         correct_anchor_id = _create_anchor("active-correct", FX.SIGNING_PUB_PEM)
@@ -295,7 +303,7 @@ def run_model_intake() -> H.Scorecard:
             positive.get("signature_verification_status") == "verified"
             and positive.get("signature_verified") is True
             and positive.get("signature_trusted_root") is True,
-            f"status={positive.get('signature_verification_status')} trusted={positive.get('signature_trusted_root')}",
+            _signature_detail(positive),
         )
 
         status, deactivated = H.delete(
@@ -315,7 +323,7 @@ def run_model_intake() -> H.Scorecard:
             after_revoke.get("signature_verification_status") == "untrusted_key"
             and after_revoke.get("signature_verified") is False
             and after_revoke.get("signature_trusted_root") is False,
-            f"status={after_revoke.get('signature_verification_status')} trusted={after_revoke.get('signature_trusted_root')}",
+            _signature_detail(after_revoke),
         )
     except Exception as e:
         sc.error("MI-6 durable trust-anchor lifecycle", e)

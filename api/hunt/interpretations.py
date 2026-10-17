@@ -183,15 +183,28 @@ _PROSE_FOLLOWERS = frozenset("""
     would not no
 """.split())
 _NEGATIONS = frozenset({"not", "no"})
-_NEXT_WORD = re.compile(r"\s+(\S+)")
 _PLAIN_WORD = re.compile(r"[a-z]+(?:-[a-z]+)*")
 
 
+def _next_word(text: str, start: int) -> str | None:
+    """The whitespace-separated word after ``text[start:]``'s leading whitespace, if any. A plain
+    scan, linear in the text: a regex here backtracked over long runs of spaces (CodeQL ReDoS)."""
+    end = len(text)
+    first = start
+    while first < end and text[first].isspace():
+        first += 1
+    if first == start or first == end:
+        return None
+    last = first
+    while last < end and not text[last].isspace():
+        last += 1
+    return text[first:last]
+
+
 def _prose_follows(text: str, match: re.Match[str]) -> bool:
-    following = _NEXT_WORD.match(text, match.end())
-    if following is None:
+    word = _next_word(text, match.end())
+    if word is None:
         return True  # the end of the text, or closing punctuation only (the regex's lookahead)
-    word = following.group(1)
     bare = word.rstrip(".,;:!?)]")
     if bare.lower() in _PROSE_FOLLOWERS and bare.isalpha():
         return True
