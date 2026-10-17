@@ -7,6 +7,7 @@ structure remains useful for debugging and coverage reporting.
 
 from __future__ import annotations
 
+import math
 import re
 import urllib.parse
 
@@ -43,6 +44,48 @@ def _looks_opaque_secret(value: str) -> bool:
     ) or "_" in value or "-" in value
 
 
+_TOKEN_CHARS_RE = re.compile(r"^[A-Za-z0-9_~+=-]{16,512}$")
+
+
+def _entropy(value: str) -> float:
+    counts: dict[str, int] = {}
+    for ch in value:
+        counts[ch] = counts.get(ch, 0) + 1
+    return -sum(n / len(value) * math.log2(n / len(value)) for n in counts.values())
+
+
+def _class_changes(value: str) -> int:
+    """How often the character class (upper, lower, digit, other) changes along ``value``:
+    random tokens change nearly every character, words and camel-case names rarely."""
+    def kind(ch: str) -> int:
+        return 0 if ch.isupper() else 1 if ch.islower() else 2 if ch.isdigit() else 3
+    return sum(1 for left, right in zip(value, value[1:]) if kind(left) != kind(right))
+
+
+def token_like_segment(value: str) -> bool:
+    """A path segment that reads as a credential, signature or one-time token rather than a
+    route: the long opaque values above, and shorter random-looking ones (16+ characters, no
+    dot, mixing letters and digits with a character-class change at least every other character
+    and high entropy, ``Zx9Qp2Lm7Rt4Wv8Yb3Nc``). A word slug, a camel-case name with a number
+    (``ProductCategory12``), a file name or a date is not one."""
+    text = str(value or "")
+    if _looks_opaque_secret(text):
+        return True
+    if not _TOKEN_CHARS_RE.fullmatch(text):
+        return False
+    letters = sum(ch.isalpha() for ch in text)
+    digits = sum(ch.isdigit() for ch in text)
+    if digits < 3 or letters < 3:
+        return False
+    return _class_changes(text) * 2 >= len(text) and _entropy(text) >= 3.3
+
+
+def drop_matrix_parameters(segment: str) -> str:
+    """A path segment without its ``;name=value`` matrix parameters (``;jsessionid=...``): the
+    values are session identifiers as often as not, and no route depends on them."""
+    return segment.split(";", 1)[0]
+
+
 def redact_path(path: str) -> str:
     """Return a route-useful path with likely secret segments removed."""
     raw = str(path or "") or "/"
@@ -55,6 +98,7 @@ def redact_path(path: str) -> str:
         if segment == "" and (index == 0 or index == len(segments) - 1):
             redacted.append("")
             continue
+        segment = drop_matrix_parameters(segment)
         decoded = urllib.parse.unquote(segment)
         match = _KEY_VALUE_RE.fullmatch(decoded)
         current_label = _label(decoded)
@@ -62,7 +106,7 @@ def redact_path(path: str) -> str:
             redacted.append("<redacted>")
         elif match and _label(match.group(1)) in _SENSITIVE_LABELS:
             redacted.append(f"{match.group(1)}{match.group(2)}<redacted>")
-        elif _looks_opaque_secret(decoded):
+        elif token_like_segment(decoded):
             redacted.append("<redacted>")
         else:
             redacted.append(segment)

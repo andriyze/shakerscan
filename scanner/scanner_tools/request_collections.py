@@ -17,8 +17,8 @@ from .device_postman import (
     HARD_MAX_REQUESTS,
     SAFE_METHODS,
     SUPPORTED_METHODS,
-    public_request_url,
 )
+from .url_redaction import redact_url
 from .device_request_formats import (
     RequestImportError,
     _request_id as _har_request_id,
@@ -288,7 +288,9 @@ def index_appended_har_entries(
     ordinal the whole document resolves to (``_resolve_har`` numbers entries by position), so
     the worker's selection over the decrypted document and this index agree without resolving
     every earlier entry again. ``tags`` are per-entry labels (resource type, status). Like every
-    index row, no header value, body value or query value is copied.
+    index row, no header value, body value or query value is copied; a recorded URL also loses
+    its ``;matrix`` parameters and every token-like path segment (``url_redaction``), since a
+    live session puts session ids and one-time tokens in paths.
     """
     resolved = _resolve_har({"log": {"entries": list(entries)}}, max_requests=max(1, len(entries)))
     public: list[dict[str, Any]] = []
@@ -296,7 +298,7 @@ def index_appended_har_entries(
         index = start_index + offset
         method = str(request.get("method") or "GET").upper()
         url = str(request.get("url") or "")
-        redacted = public_request_url(url)
+        redacted = redact_url(url)
         content_type, body_field_names = _public_body_metadata(request)
         public.append({
             "id": _har_request_id("har", index, method, url),
