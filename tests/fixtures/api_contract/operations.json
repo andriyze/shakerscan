@@ -1640,6 +1640,11 @@
     "operation_id": "create_request_collection_request_collections_post"
   },
   {
+    "path": "/request-collections/captures",
+    "method": "post",
+    "operation_id": "create_browser_capture_request_collections_captures_post"
+  },
+  {
     "path": "/request-collections/{collection_id}",
     "method": "delete",
     "operation_id": "deactivate_request_collection_request_collections__collection_id__delete"
@@ -1653,6 +1658,16 @@
     "path": "/request-collections/{collection_id}/bindings",
     "method": "post",
     "operation_id": "upsert_request_collection_binding_request_collections__collection_id__bindings_post"
+  },
+  {
+    "path": "/request-collections/{collection_id}/capture-batches",
+    "method": "post",
+    "operation_id": "append_capture_batch_request_collections__collection_id__capture_batches_post"
+  },
+  {
+    "path": "/request-collections/{collection_id}/capture-close",
+    "method": "post",
+    "operation_id": "close_browser_capture_request_collections__collection_id__capture_close_post"
   },
   {
     "path": "/request-collections/{collection_id}/environments",

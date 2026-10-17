@@ -2335,6 +2335,13 @@
     "name": "create_request_collection"
   },
   {
+    "path": "/request-collections/captures",
+    "methods": [
+      "POST"
+    ],
+    "name": "create_browser_capture"
+  },
+  {
     "path": "/request-collections/{collection_id}",
     "methods": [
       "DELETE"
@@ -2354,6 +2361,20 @@
       "POST"
     ],
     "name": "upsert_request_collection_binding"
+  },
+  {
+    "path": "/request-collections/{collection_id}/capture-batches",
+    "methods": [
+      "POST"
+    ],
+    "name": "append_capture_batch"
+  },
+  {
+    "path": "/request-collections/{collection_id}/capture-close",
+    "methods": [
+      "POST"
+    ],
+    "name": "close_browser_capture"
   },
   {
     "path": "/request-collections/{collection_id}/environments",
