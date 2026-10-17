@@ -6,7 +6,9 @@ Moved out of ``worker.py`` (its size is frozen); ``worker`` re-exports every nam
 from __future__ import annotations
 
 import ipaddress
+import re
 import urllib.parse
+from typing import Any
 
 try:
     from action_scope import evaluate_runtime_destination_scope
@@ -200,6 +202,36 @@ def classify_retest_outcome(
         "likely_fixed",
         "Retest could not reproduce exploit behavior with available inputs.",
     )
+
+
+_REFUSAL_TOKEN = re.compile(r"^(authentication_required|target_refused)(?::\d{3})?$")
+
+
+def replay_refusal(result: Any, *, _depth: int = 0, _budget: list[int] | None = None) -> str | None:
+    """The refusal a replay's verifiers stated (``authentication_required:401``), or None.
+
+    A focused replay whose verifiers settled partial because the target refused their baseline
+    (``runtime.auth_refusal``) reproduced nothing because nothing reached the code under test;
+    that is no evidence the finding was fixed. Searches the result's receipts, coverage and
+    errors -- never its findings -- for an exact refusal token, boundedly.
+    """
+    budget = _budget if _budget is not None else [5_000]
+    budget[0] -= 1
+    if budget[0] < 0 or _depth > 8:
+        return None
+    if isinstance(result, str):
+        return result if _REFUSAL_TOKEN.match(result.strip().lower()) else None
+    if isinstance(result, dict):
+        values = [value for key, value in result.items() if key != "findings"]
+    elif isinstance(result, (list, tuple)):
+        values = list(result)
+    else:
+        return None
+    for value in values:
+        found = replay_refusal(value, _depth=_depth + 1, _budget=budget)
+        if found:
+            return found
+    return None
 
 
 def _result_status_for_verdict(verdict: str | None) -> str:

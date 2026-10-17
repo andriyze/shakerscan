@@ -3237,6 +3237,8 @@ class DatabaseNeutralScanActionDispatcher:
         refused_probes: list[str] = []
         # The refusal each probe URL met (``runtime.auth_refusal``), for discovered endpoints.
         refusals: dict[str, tuple[int, str]] = {}
+        challenged: set[str] = set()
+        control_answer: dict[str, bool] = {}
         attempted = resumed = 0
         incomplete = False
         ordinal = start * 1000
@@ -3263,8 +3265,22 @@ class DatabaseNeutralScanActionDispatcher:
             refused = refusal(result.status_code, result.response_headers)
             if refused is not None:
                 refusals[url] = refused
+                if any(str(name).lower() == "www-authenticate" for name in result.response_headers or {}):
+                    challenged.add(url)
             await heartbeat()
             return result.status_code, bytes(result.response_body or b"")
+
+        async def wall_is_site_wide(endpoint: str) -> bool:
+            """Whether the origin's root meets the same refusal as ``endpoint`` (one GET)."""
+            if "control" not in control_answer:
+                if not can_send():
+                    return True
+                root = urllib.parse.urlunsplit(
+                    (*urllib.parse.urlsplit(endpoint)[:2], "/", "", ""),
+                )
+                await send(root)
+                control_answer["control"] = root not in refusals
+            return not control_answer["control"]
 
         for endpoint in candidates:
             attempt_id = hashlib.sha256(f"{manifest_digest}:graphql:{endpoint}".encode()).hexdigest()
@@ -3285,9 +3301,15 @@ class DatabaseNeutralScanActionDispatcher:
             # A discovered GraphQL route whose first probe the target refused was never
             # examined: inconclusive for that reason, not "not GraphQL". A conventional seed
             # location that refuses is usually just absent behind a site-wide wall, so it is not.
-            refused = None if outcome["graphql"] or endpoint in seeds else refusals.get(
-                graphql_request_url(endpoint, GRAPHQL_TYPENAME_QUERY),
-            )
+            first_probe = graphql_request_url(endpoint, GRAPHQL_TYPENAME_QUERY)
+            refused = None if outcome["graphql"] else refusals.get(first_probe)
+            if refused is not None and endpoint in seeds and (
+                first_probe not in challenged or await wall_is_site_wide(endpoint)
+            ):
+                # A seed that asks for credentials while the origin's root answers is a
+                # protected GraphQL endpoint: inconclusive. Behind a site-wide wall it stays
+                # "not GraphQL", as does a seed refused without a challenge.
+                refused = None
             if refused is not None:
                 refused_probes.append(refusal_error(*refused))
             bundled = ({
