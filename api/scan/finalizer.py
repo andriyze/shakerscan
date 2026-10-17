@@ -423,9 +423,85 @@ def _baseline_header_responses(
     return responses
 
 
+# Cookies that carry a login session by their conventional names. A flag missing on one of these
+# is the finding; a preference or analytics cookie without HttpOnly is ordinary.
+_SESSION_COOKIE_NAME_RE = re.compile(
+    r"(?i)^(?:__(?:host|secure)-)?(?:[a-z0-9_.\-]*(?:sess(?:ion)?|sid|auth|token|jwt|login|remember)"
+    r"[a-z0-9_.\-]*|connect\.sid|phpsessid|jsessionid|asp\.net_sessionid|laravel_session)$"
+)
+
+
+def _baseline_cookie_findings(
+    request: Mapping[str, Any], response: Mapping[str, Any], *, receipt: Any,
+    capability_name: str, kind: str,
+) -> list[dict[str, Any]]:
+    """Session cookies the pinned baseline response set without HttpOnly or (on HTTPS) Secure.
+
+    The ``Set-Cookie`` attributes of a recorded response are the proof; only the cookie's name
+    is kept, never its value.
+    """
+    status = response.get("status")
+    if not isinstance(status, int) or not 200 <= status < 400:
+        return []
+    origin = request.get("origin") or response.get("final_url")
+    is_https = urllib.parse.urlsplit(str(origin or "")).scheme.lower() == "https"
+    found: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+    for cookie in list(response.get("set_cookie_metadata") or ())[:50]:
+        if not isinstance(cookie, Mapping):
+            continue
+        name = cookie.get("name")
+        if not isinstance(name, str) or not _SESSION_COOKIE_NAME_RE.match(name):
+            continue
+        missing = []
+        if cookie.get("httponly") is False:
+            missing.append(("HttpOnly", "CWE-1004"))
+        if is_https and cookie.get("secure") is False:
+            missing.append(("Secure", "CWE-614"))
+        for flag, cwe in missing:
+            if (name, flag) in seen:
+                continue
+            seen.add((name, flag))
+            finding = _base_finding(
+                tool="http_baseline",
+                title=f"Session cookie without {flag} flag",
+                severity="low",
+                cwe=cwe,
+                url=origin,
+                evidence={
+                    "check": f"session_cookie_missing_{flag.lower()}",
+                    "url": origin,
+                    "status": status,
+                    "cookie_name": name,
+                    "cookie_flags": {
+                        "secure": cookie.get("secure"), "httponly": cookie.get("httponly"),
+                        "samesite": cookie.get("samesite"),
+                    },
+                    "pinned_address": request.get("pinned_address"),
+                    "canonical_capability": "http.request",
+                    "capability_receipt": receipt,
+                },
+            )
+            finding.update({
+                "verified": True,
+                "suspected": False,
+                "needs_verification": False,
+                "proof_state": "verified",
+                "proof_contract_v2": _canonical_proof_contract_v2(
+                    capability_name=capability_name, kind=kind, receipt=receipt,
+                ),
+                "verification_reason": (
+                    f"Pinned baseline response set the session cookie without {flag}"
+                ),
+            })
+            found.append(finding)
+    return found
+
+
 def _attach_observed_header_responses(
     findings: Sequence[dict[str, Any]],
     observations: Mapping[str, Sequence[Mapping[str, Any]]],
+    baseline_receipt: Mapping[str, Any] | None = None,
 ) -> None:
     """Give each missing-header finding the recorded response that lacks the header.
 
@@ -452,6 +528,22 @@ def _attach_observed_header_responses(
         ):
             continue
         evidence["observed_response"] = {**observed, "header_absent": header}
+        # The pinned baseline response of this origin is an application response (2xx) that
+        # lacks a header the capability always records: that response is the deterministic
+        # proof. A redirect or an error page lacking it proves nothing about the application.
+        if baseline_receipt is None or not 200 <= int(observed["response_status"]) < 300:
+            continue
+        finding.update({
+            "verified": True,
+            "suspected": False,
+            "needs_verification": False,
+            "proof_state": "verified",
+            "proof_contract_v2": _canonical_proof_contract_v2(
+                capability_name="http.request", kind="http_observation",
+                receipt=dict(baseline_receipt),
+            ),
+            "verification_reason": "Pinned baseline response of the origin omitted the header",
+        })
 
 
 def canonical_authz_findings(
@@ -695,6 +787,10 @@ def _findings_for_action(
                         ),
                     })
                     findings.append(finding)
+            findings.extend(_baseline_cookie_findings(
+                request, response, receipt=receipt, capability_name=result.capability_name,
+                kind=str(kind),
+            ))
         elif kind == "xss_alert" and item.get("proof_state") == "verified":
             proof_contract = {
                 "schema_version": "proof-contract/v2",
@@ -2016,7 +2112,11 @@ def finalize_scan_report(
             "budget_consumed": dict(result.budget_consumed),
         })
     findings = list(findings_by_id.values())
-    _attach_observed_header_responses(findings, observations)
+    baseline_result = action_results.get("baseline.http")
+    _attach_observed_header_responses(
+        findings, observations,
+        _receipt(baseline_result) if baseline_result is not None else None,
+    )
 
     # Family-aware coverage: every selected family (one that produced a batch or
     # verifier action) is reported with attempts, findings, budget, and a status.

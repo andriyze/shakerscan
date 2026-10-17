@@ -40,6 +40,8 @@ CANONICAL_PROOF_CONTRACTS: frozenset[str] = frozenset({
     "verbose_error_exposure/v1",
     "graphql_ide_exposure/v1",
     "graphql_introspection_exposure/v1",
+    "html_comment_secret_exposure/v1",
+    "credential_record_exposure/v1",
     # GraphQL checks (capabilities/graphql_probe.py GRAPHQL_PROOF_CONTRACTS).
     "graphql_alias_limit_absent/v1",
     "graphql_duplicate_field_limit_absent/v1",

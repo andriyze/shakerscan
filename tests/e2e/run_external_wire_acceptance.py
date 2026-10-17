@@ -74,7 +74,7 @@ def main(argv: list[str] | None = None) -> int:
                 f"{result.stderr.strip()[-8000:]}"
             )
         receipt = json.loads(result.stdout.strip().splitlines()[-1])
-        if receipt.get("status") != "passed" or receipt.get("tool_count") != 9:
+        if receipt.get("status") != "passed" or receipt.get("tool_count") != 10:
             raise RuntimeError(f"external wire acceptance is incomplete: {receipt}")
         if args.json_output:
             print(json.dumps(receipt, sort_keys=True, separators=(",", ":")))

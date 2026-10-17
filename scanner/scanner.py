@@ -14878,7 +14878,11 @@ def _validate_canonical_http_placement(
             or not isinstance(cookie_metadata, (list, type(None)))
             or any(
                 not isinstance(cookie, dict)
-                or set(cookie) != {"secure", "httponly", "samesite"}
+                or set(cookie) - {"name"} != {"secure", "httponly", "samesite"}
+                or not (cookie.get("name") is None or (
+                    isinstance(cookie.get("name"), str) and 0 < len(cookie["name"]) <= 128
+                    and re.fullmatch(r"[!#$%&'*+\-.^_`|~0-9A-Za-z]+", cookie["name"])
+                ))
                 or not isinstance(cookie.get("secure"), bool)
                 or not isinstance(cookie.get("httponly"), bool)
                 or cookie.get("samesite") not in {None, "strict", "lax", "none"}

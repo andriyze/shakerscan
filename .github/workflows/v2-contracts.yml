@@ -79,7 +79,7 @@ jobs:
             artifacts/v2-external-wire-raw.json \
             > artifacts/v2-external-wire.json
           test "$(jq -r '.status' artifacts/v2-external-wire.json)" = passed
-          test "$(jq -r '.tool_count' artifacts/v2-external-wire.json)" = 9
+          test "$(jq -r '.tool_count' artifacts/v2-external-wire.json)" = 10
 
       - name: Upload external wire acceptance receipt
         if: always()

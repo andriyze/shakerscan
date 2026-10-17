@@ -247,7 +247,7 @@ def test_release_candidate_requires_candidate_image_external_wire_acceptance():
     assert '--worker-container "$worker_name" --json' in text
     assert "artifacts/release-external-wire.json" in text
     assert 'test "$(jq -r \'.status\' artifacts/release-external-wire.json)" = passed' in text
-    assert 'test "$(jq -r \'.tool_count\' artifacts/release-external-wire.json)" = 9' in text
+    assert 'test "$(jq -r \'.tool_count\' artifacts/release-external-wire.json)" = 10' in text
 
 
 def test_platform_pool_gate_requires_default_network_capacity_in_ci():

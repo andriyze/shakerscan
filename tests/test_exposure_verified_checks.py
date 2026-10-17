@@ -227,15 +227,16 @@ def test_ordinary_json_with_a_password_key_is_not_an_actuator_leak():
     assert _classify("/api/settings", body, "application/json") is None
 
 
-def test_heapdump_existence_is_proved_from_the_index_and_never_requested():
+def test_heapdump_index_link_is_discovery_without_access_proof_and_never_requested():
     index = json.dumps({"_links": {
         "self": {"href": "https://app.example.test/actuator", "templated": False},
         "health": {"href": "https://app.example.test/actuator/health", "templated": False},
         "heapdump": {"href": "https://app.example.test/actuator/heapdump", "templated": False},
     }}).encode()
     signature = _classify("/actuator", index, "application/vnd.spring-boot.actuator.v3+json")
-    assert _verified(signature) and signature.exposure_class == "actuator_heapdump_exposed"
-    assert signature.proof_contract == "actuator_heapdump_exposure/v1"
+    assert signature is not None and not _verified(signature)
+    assert signature.exposure_class == "actuator_endpoint"
+    assert signature.proof_contract is None
     without = json.dumps({"_links": {
         "self": {"href": "https://app.example.test/actuator"},
         "health": {"href": "https://app.example.test/actuator/health"},

@@ -14,6 +14,8 @@ from typing import Any, Mapping
 import agent_tools
 from capabilities.browser import BrowserNavigateAdapter
 from runtime.models import TargetBinding
+from scan.nuclei_execution import resolve_active_scan_nuclei_options
+from scan.nuclei_template_index import nuclei_templates_directory
 from worker import _execute_agent_scanner_process
 
 
@@ -58,6 +60,34 @@ TOOL_CASES: tuple[dict[str, Any], ...] = (
     {"tool": "nmap", "path": "/", "budget": {"tcp_ports_attempted": 60, "tool_wall_seconds": 10}},
     {"tool": "naabu", "path": "/", "budget": {"tcp_ports_attempted": 200, "tool_wall_seconds": 10}},
 )
+
+
+# One active-template attempt exactly as a Scan runs it for one endpoint (action_plan's
+# per-endpoint cost: 120 requests, 45 s): the reviewed active allowlist resolved from the pinned
+# bundle in this image, state-changing templates included, so the receipt proves both the HTTP
+# and the state-changing ceiling hold on the wire for the largest selection a Scan can send.
+ACTIVE_NUCLEI_BUDGET = {
+    "http_requests": 120, "state_changing_requests": 120, "tool_wall_seconds": 45,
+}
+
+
+def active_nuclei_case() -> dict[str, Any]:
+    resolved = resolve_active_scan_nuclei_options(
+        {"severity": "high,critical"},
+        templates_dir=nuclei_templates_directory(),
+        allow_state_changing_http=True,
+    )
+    if resolved.skip_reason or not resolved.worker_options.get("template_ids"):
+        raise RuntimeError(
+            f"active nuclei allowlist did not resolve: {resolved.skip_reason or 'empty'}"
+        )
+    return {
+        "tool": "nuclei",
+        "case": "nuclei_active",
+        "path": "/",
+        "budget": dict(ACTIVE_NUCLEI_BUDGET),
+        "options": {**resolved.worker_options, "_batch_attempt": True},
+    }
 
 
 def _request_json(url: str, *, method: str = "GET") -> dict[str, Any]:
@@ -117,6 +147,17 @@ def _assert_wire_bound(
         if isinstance(item, Mapping)
     ])
     connections = max(0, int(traffic.get("connections") or 0))
+    mutations = len([
+        item for item in traffic.get("traffic") or []
+        if isinstance(item, Mapping)
+        and str(item.get("method") or "GET").upper() not in {"GET", "HEAD"}
+    ])
+    state_changing_limit = hard.get("state_changing_requests")
+    if state_changing_limit is not None and mutations > int(state_changing_limit):
+        raise RuntimeError(
+            f"{tool} exceeded its target-observed state-changing ceiling "
+            f"({mutations}>{state_changing_limit})"
+        )
     http_limit = int(hard.get("http_requests") or 0)
     connection_limit = max(
         http_limit,
@@ -141,6 +182,7 @@ def _assert_wire_bound(
         "hard_budget": hard,
         "target_observed_http_requests": request_count,
         "target_observed_connections": connections,
+        "target_observed_state_changing_requests": mutations,
         "limiter_triggered": str(result.get("error") or "") in {
             "connection_limit_exceeded", "timeout",
         },
@@ -179,9 +221,10 @@ async def _run_tool_case(
         "pinned_address": address,
         "authorized_addresses": [address],
     })
-    return _assert_wire_bound(
+    outcome = _assert_wire_bound(
         tool=tool, result=result, traffic=_traffic(origin),
     )
+    return {**outcome, "case": str(case.get("case") or tool)}
 
 
 async def _run_browser_case(origin: str, address: str) -> dict[str, Any]:
@@ -246,7 +289,7 @@ async def run(origin: str) -> dict[str, Any]:
     address = _resolve_address(normalized)
     cases = [
         await _run_tool_case(normalized, address, case)
-        for case in TOOL_CASES
+        for case in (*TOOL_CASES, active_nuclei_case())
     ]
     cases.append(await _run_browser_case(normalized, address))
     return {
