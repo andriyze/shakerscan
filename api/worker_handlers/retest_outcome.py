@@ -157,6 +157,17 @@ def classify_retest_outcome(
             "Exploit path appears blocked by security controls or edge filtering.",
         )
 
+    if evidence_type in {"authentication_required", "target_refused"}:
+        # The replay's baseline was refused (a session-less request, a sign-in redirect, a
+        # 403): every payload met the refusal, so reproducing nothing proves nothing fixed.
+        return (
+            "inconclusive",
+            "inconclusive",
+            "The target refused the retest's baseline request"
+            + (" and asked for credentials" if evidence_type == "authentication_required" else "")
+            + "; the finding could not be retested and stays open.",
+        )
+
     if evidence_type in {"no_url", "unsupported_vulnerability_type"}:
         # Missing replay context is "we could not verify", NOT proof the finding
         # was invalid. false_positive must be reserved for objective FP evidence.
