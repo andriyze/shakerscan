@@ -324,6 +324,12 @@ async def inspect_dns_posture(
         except Exception as exc:  # Resolver implementations expose many subclasses.
             class_name = type(exc).__name__
             if class_name in {"NXDOMAIN", "NoAnswer"}:
+                # An authoritative "no such record" is an answer: posture rules read its absence
+                # (no DMARC, no CAA) only from labels the metadata shows answered.
+                metadata[label] = {
+                    "name": name, "type": query_type, "ttl": None, "answer_count": 0,
+                    "negative": class_name,
+                }
                 return label, []
             if use_doh and class_name in _FALLBACK_CLASSES:
                 recovered = await over_https(label, name, query_type)
@@ -380,6 +386,11 @@ async def inspect_dns_posture(
         raise
     if pending:
         errors.append(f"dns_inspection:Timeout:{len(pending)}")
+        # Name each query the deadline cut off: its label is unanswered, not answered-empty.
+        errors.extend(
+            f"{label}:Timeout" for task, (label, _name, _query_type) in zip(tasks, query_plan)
+            if task in pending
+        )
         for task in pending:
             task.cancel()
         await asyncio.gather(*pending, return_exceptions=True)

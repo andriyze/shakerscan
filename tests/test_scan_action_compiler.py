@@ -185,6 +185,8 @@ def test_large_manifest_compiles_to_bounded_batch_graph():
         "templates.passive_batch", "templates.active_batch",
         "xss.verify_batch", "xss.browser_prove_batch",
         "sqli.verify_batch", "sqli.prove_batch",
+        # The open-redirect probe rides the XSS family's authority (scan/contracts.py).
+        "redirect.verify_batch",
     }
     assert all(1 <= action.capability_args["slice"]["count"] <= 50 for action in batches)
     assert sum(action.required for action in batches if action.capability_name == "xss.verify_batch") == 2
@@ -371,8 +373,11 @@ def test_compiler_closes_focused_xss_prerequisites_without_unrequested_families(
         "addresses_ref": "frozen_addresses",
         "address_count": 2,
     }
+    # Ten connections per origin/address pair (2.11): the four stdlib handshakes plus the six
+    # raw legacy-protocol/weak-suite probes (tls_legacy_probe.PROBE_COUNT), which this profile's
+    # TCP grant pays for on both pairs (tls_connections_per_pair); 2 pairs x 10 = 20.
     assert by_id["baseline.tls"].requested_budget == {
-        "tcp_ports_attempted": 8,
+        "tcp_ports_attempted": 20,
         "tool_wall_seconds": 30,
     }
     assert plan.actions[-1].action_id == "finalize.report"
@@ -625,7 +630,7 @@ def test_shard_action_scopes_assign_global_and_endpoint_work_without_duplicates(
         action.capability_name for action in endpoint.actions
     } == {
         "auth.session.establish", "xss.verify_batch",
-        "xss.browser_prove_batch", "scan.finalize",
+        "xss.browser_prove_batch", "redirect.verify_batch", "scan.finalize",
     }
     assert {"inputs.auth_primary", "prove.xss", "finalize.report"} <= set(endpoint_by_id)
     xss_actions = [

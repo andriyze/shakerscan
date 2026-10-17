@@ -116,6 +116,9 @@ ALLOWED_PLAIN_DIGESTS = {
     ("api/capabilities/browser_steps.py", "browser_surface"): "redacted",
     ("api/capabilities/http.py", "_read_bounded_response"): "integrity",
     ("api/capabilities/nosqli_verify.py", "execute"): "request",
+    # The attempt key of an engine-built probe URL (a manifest route with the canary as the
+    # only query value); the same URL is published beside it, so the digest reveals nothing.
+    ("api/capabilities/open_redirect.py", "redirect_candidates"): "canonical",
     ("api/capabilities/sqli_proof.py", "_sha256"): "request",
     ("api/capabilities/ssh_command_worker.py", "execute"): "request",
     ("api/capabilities/ssh_transport.py", "connect"): "public",
@@ -170,6 +173,8 @@ ALLOWED_PLAIN_DIGESTS = {
     ("api/scan/action_adapter.py", "_external"): "canonical",
     ("api/scan/action_adapter.py", "_external_batch"): "canonical",
     ("api/scan/action_adapter.py", "_nosqli_verify_batch"): "canonical",
+    # The batch attempt id: the manifest digest and the probe's canonical attempt key.
+    ("api/scan/action_adapter.py", "_redirect_verify_batch"): "canonical",
     ("api/scan/action_adapter.py", "_request_mutation_batch"): "canonical",
     ("api/scan/action_adapter.py", "_sqli_proof_batch"): "canonical",
     ("api/scan/action_adapter.py", "_xss_browser_proof_batch"): "canonical",

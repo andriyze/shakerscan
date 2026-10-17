@@ -46,6 +46,7 @@ COPY --from=scanner-runtime /app/data_lifecycle /app/data_lifecycle
 COPY --from=scanner-runtime /app/exposure /app/exposure
 COPY --from=scanner-runtime /app/finding_exceptions /app/finding_exceptions
 COPY --from=scanner-runtime /app/finding_routes /app/finding_routes
+COPY --from=scanner-runtime /app/finding_detail /app/finding_detail
 COPY --from=scanner-runtime /app/fleet_routes /app/fleet_routes
 COPY --from=scanner-runtime /app/hunt /app/hunt
 COPY --from=scanner-runtime /app/model_intake /app/model_intake
