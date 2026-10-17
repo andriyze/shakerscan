@@ -339,8 +339,10 @@ async def route(pool, monkeypatch, **params):
 @pytest.fixture(autouse=True)
 def _cursor_key():
     list_contract.configure_cursor_key(b"f" * 32)
+    list_schema.reset_severity_rank_ready()
     yield
     list_contract.configure_cursor_key(None)
+    list_schema.reset_severity_rank_ready()
 
 
 def _comparable(items):
@@ -796,11 +798,21 @@ def test_the_upgrade_ranks_without_touching_updated_at_and_ends_like_a_fresh_ins
                 await conn.execute(statement)
         assert await conn.fetchval("SELECT count(*) FILTER (WHERE severity_rank = 1) FROM findings") == \
             await conn.fetchval("SELECT count(*) FROM findings")
-        # ... the one-time rank under the startup lock (small batches, updated_at untouched) ...
+        # ... the startup step under the lock ranks nothing (it kept a 500k database's API down for
+        # a minute) and does not claim the rank complete ...
         expected = await conn.fetchval(
             "SELECT count(*) FROM findings WHERE finding_severity_rank(severity) <> 1")
-        assert await list_schema.backfill_severity_rank(conn, batch=97) == expected > 0
         await list_schema.finish_findings_list_schema(conn)
+        assert await conn.fetchval(
+            "SELECT count(*) FROM findings WHERE severity_rank <> finding_severity_rank(severity)") == expected > 0
+        assert not await conn.fetchval("SELECT EXISTS (SELECT 1 FROM app_schema_migrations WHERE name = $1)",
+                                       list_schema.SEVERITY_RANK_MIGRATION)
+        # ... the background task ranks after serving (small batches, updated_at untouched) and
+        # then records the marker ...
+        assert await list_schema.backfill_severity_rank(conn, batch=97) == expected
+        assert await list_schema.repair_severity_rank(pool) == 0
+        assert await conn.fetchval("SELECT EXISTS (SELECT 1 FROM app_schema_migrations WHERE name = $1)",
+                                   list_schema.SEVERITY_RANK_MIGRATION)
         assert await conn.fetchval("SELECT count(*) FROM findings WHERE updated_at <> $1", T0) == 0
         assert await conn.fetchval(
             "SELECT count(*) FROM findings WHERE severity_rank <> finding_severity_rank(severity)") == 0
@@ -847,6 +859,10 @@ def test_api_and_worker_starting_together_on_a_2_10_database_do_not_deadlock():
                 await p.close()
         await asyncio.sleep(1.5)  # backends flush their statistics when they go idle
         assert await _deadlocks(conn) == before
+        # The startup ranked nothing; the API's background task does, once, under its try-lock.
+        assert await conn.fetchval(
+            "SELECT count(*) FROM findings WHERE severity_rank <> finding_severity_rank(severity)") > 0
+        await asyncio.gather(*(list_schema.repair_severity_rank(pool) for _ in range(3)))
         assert await conn.fetchval(
             "SELECT count(*) FROM findings WHERE severity_rank <> finding_severity_rank(severity)") == 0
         assert await conn.fetchval("SELECT count(*) FROM findings WHERE updated_at <> $1", T0) == 0
@@ -877,5 +893,103 @@ def test_a_load_that_bypasses_the_trigger_succeeds_and_is_repaired():
             "SELECT count(*) FROM findings WHERE fingerprint LIKE 'restored-%' AND updated_at <> $1", T0) == 0
         # The API's maintenance task runs the same repair after it starts serving.
         await list_schema.repair_severity_rank_in_background(pool, delay=0)
+
+    run(scenario)
+
+
+def test_lists_answer_the_same_while_an_upgraded_database_is_still_being_ranked(monkeypatch):
+    """The first 2.11 start serves before the existing findings are ranked: meanwhile the list
+    orders by the function the rank is computed from, so every page holds the same rows in the same
+    order, and a cursor taken before the rank completes continues after it."""
+    async def scenario(conn, pool):
+        async def answers():
+            out = {}
+            for filters in ({}, {"status": "active"}, {"severity": "critical,high"}, {"root_domain": "alpha.test"}):
+                for sort_by, sort_order in SORTS:
+                    for offset in (0, 150):
+                        result, _queries = await route(pool, monkeypatch, sort_by=sort_by, sort_order=sort_order,
+                                                       offset=offset, limit=50, **filters)
+                        out[("legacy", str(filters), sort_by, sort_order, offset)] = (
+                            [item["id"] for item in result["findings"]], result["total"])
+                for sort in ("-severity", "severity"):
+                    out[("v1", str(filters), sort)] = [
+                        item["id"] for item in await walk(pool, monkeypatch, limit=41, sort=sort, **filters)]
+            return out
+
+        ranked = await answers()
+        await _back_to_2_10(conn)
+        async with conn.transaction():
+            for statement in list_schema.FINDINGS_LIST_SCHEMA_STATEMENTS:
+                await conn.execute(statement)
+        await list_schema.finish_findings_list_schema(conn)
+        assert await conn.fetchval(
+            "SELECT count(*) FROM findings WHERE severity_rank <> finding_severity_rank(severity)") > 0
+        list_schema.reset_severity_rank_ready()
+        assert await list_schema.severity_rank_ready(conn) is False
+        assert await answers() == ranked
+        _result, queries = await route(pool, monkeypatch, limit=10)
+        assert any("finding_severity_rank(f.severity)" in query for query, _args in queries)
+
+        # A walk that starts unranked and finishes after the background rank recorded its marker.
+        first, _ = await route(pool, monkeypatch, limit=41, sort="-severity")
+        assert await list_schema.repair_severity_rank(pool) > 0
+        monkeypatch.setattr(list_schema, "_RANK_RECHECK_SECONDS", 0.0)
+        assert await list_schema.severity_rank_ready(conn) is True
+        items, cursor = list(first["items"]), first["next_cursor"]
+        while cursor:
+            page, queries = await route(pool, monkeypatch, limit=200, sort="-severity", cursor=cursor)
+            assert any("f.severity_rank" in query and "finding_severity_rank(f.severity)" not in query
+                       for query, _args in queries)
+            items += page["items"]
+            cursor = page["next_cursor"]
+        assert [item["id"] for item in items] == ranked[("v1", "{}", "-severity")]
+        assert await loop_scale_indexes.ensure_loop_scale_indexes(pool)
+
+    run(scenario)
+
+
+def test_a_new_database_is_ranked_at_startup():
+    async def scenario(conn, pool):
+        await conn.execute("DELETE FROM app_schema_migrations WHERE name = $1", list_schema.SEVERITY_RANK_MIGRATION)
+        await list_schema.finish_findings_list_schema(conn)
+        assert await list_schema.severity_rank_ready(conn) is True
+
+    run(scenario, data=False)
+
+
+_OLD_RECONCILE = (
+    """UPDATE targets t SET active_findings_count=counted.n
+       FROM (SELECT t2.id, (SELECT COUNT(*) FROM findings f
+                            WHERE f.target_id=t2.id AND f.status='active') AS n
+             FROM targets t2) counted
+       WHERE t.id=counted.id AND t.active_findings_count IS DISTINCT FROM counted.n""",
+    """UPDATE target_device_profiles p SET active_findings_count=counted.n
+       FROM (SELECT p2.target_id, (SELECT COUNT(*) FROM findings f
+                                   WHERE f.device_target_id=p2.target_id
+                                     AND f.status='active') AS n
+             FROM target_device_profiles p2) counted
+       WHERE p.target_id=counted.target_id AND p.active_findings_count IS DISTINCT FROM counted.n""",
+)
+
+
+def test_the_startup_badge_repair_counts_what_the_per_target_count_did():
+    """The finding badges are repaired on every start under the startup lock; one grouped count
+    replaced a count per target (~3 s per start at 500k findings) with the same result."""
+    async def scenario(conn, pool):
+        from targets.asset_migration import reconcile_active_finding_counts
+        await conn.execute("UPDATE targets SET active_findings_count = (random() * 9)::int")
+        await conn.execute("UPDATE target_device_profiles SET active_findings_count = (random() * 9)::int")
+        state = """SELECT (SELECT array_agg((id, active_findings_count) ORDER BY id) FROM targets),
+                          (SELECT array_agg((target_id, active_findings_count) ORDER BY target_id)
+                           FROM target_device_profiles)"""
+        tx = conn.transaction()
+        await tx.start()
+        for statement in _OLD_RECONCILE:
+            await conn.execute(statement)
+        expected = await conn.fetchrow(state)
+        await tx.rollback()
+        await reconcile_active_finding_counts(conn)
+        assert await conn.fetchrow(state) == expected
+        assert any(n for _id, n in expected[0]) and any(n for _id, n in expected[1])
 
     run(scenario)

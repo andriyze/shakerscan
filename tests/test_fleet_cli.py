@@ -1609,6 +1609,28 @@ def test_init_preflight_accepts_running_work_only_when_the_operator_says_so(tmp_
     assert "[WARN] Queued or running scans: operator accepted" in output
 
 
+@pytest.mark.parametrize(("workers", "marker"), [(0, "[WARN] Worker count: 0"), (1, "[PASS] Worker count"),
+                                              (128, "[PASS] Worker count")])
+def test_init_preflight_accepts_zero_workers_with_a_warning(tmp_path, monkeypatch, capsys, workers, marker):
+    """2.11 C8: the launcher accepts WORKERS=0 (broker-only installs); `fleet init --workers 0`
+    is accepted too, warned like the launcher, instead of refused."""
+    paths = fleet_cli.RuntimePaths(tmp_path)
+    _patch_broker_preflight_host(monkeypatch)
+    monkeypatch.setattr(fleet_cli, "_control_plane_running", lambda _paths: False)
+    fleet_cli.run_init_preflight(paths, _broker_preflight_args(workers=workers))
+    assert marker in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("workers", [-1, 129])
+def test_init_preflight_still_refuses_a_worker_count_out_of_range(tmp_path, monkeypatch, capsys, workers):
+    paths = fleet_cli.RuntimePaths(tmp_path)
+    _patch_broker_preflight_host(monkeypatch)
+    monkeypatch.setattr(fleet_cli, "_control_plane_running", lambda _paths: False)
+    with pytest.raises(fleet_cli.FleetCLIError, match="preflight failed"):
+        fleet_cli.run_init_preflight(paths, _broker_preflight_args(workers=workers))
+    assert "--workers must be between 0 and 128" in capsys.readouterr().out
+
+
 def test_init_preflight_treats_a_stopped_control_plane_as_nothing_to_interrupt(tmp_path, monkeypatch, capsys):
     paths = fleet_cli.RuntimePaths(tmp_path)
     _patch_broker_preflight_host(monkeypatch)

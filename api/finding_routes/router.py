@@ -74,6 +74,7 @@ from .list_query import (
     legacy_order, legacy_page, resolved_proof_filter, row_select_sql, v1_page,
     without_jit,
 )
+from .list_schema import severity_rank_ready
 from .remediation import finding_remediation
 
 
@@ -471,10 +472,9 @@ async def list_findings(
                            count=count or "none", since=since)
         async with _pool().acquire() as conn, without_jit(conn):
             return await v1_page(conn, page, filters=filters, proof_states=proof_states,
-                                 project=finding_proof_fields)
+                                 project=finding_proof_fields, ranked=await severity_rank_ready(conn))
 
     sort_order = sort_order or "desc"
-    order = legacy_order(sort_by, sort_order)
     # Open web-plane hunt candidates are an explicit compatibility opt-in. The default
     # findings contract remains authoritative findings only; candidates have their own
     # endpoint and UI. When requested, ordinary filters can still exclude them.
@@ -493,6 +493,7 @@ async def list_findings(
     )
 
     async with _pool().acquire() as conn, without_jit(conn):
+        order = legacy_order(sort_by, sort_order, ranked=await severity_rank_ready(conn))
         params = SqlParams()
         where = filters.clauses(params)
         # Proof is the canonical projection stated in SQL (proof_sql.py), so a proof filter is one

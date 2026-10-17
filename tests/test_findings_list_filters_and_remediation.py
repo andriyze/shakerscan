@@ -155,6 +155,11 @@ def _list(monkeypatch, rows, conn=None, **params):
 
     monkeypatch.setattr(findings_router, "_pool", lambda: _Pool())
     monkeypatch.setattr(findings_router, "HTTPException", HTTPException)
+
+    async def ranked(_conn):  # a fully ranked database (the unranked order: list_schema)
+        return True
+
+    monkeypatch.setattr(findings_router, "severity_rank_ready", ranked)
     defaults = dict(severity=None, status=None, source_type=None, target_id=None, ai_target_id=None,
                     device_target_id=None, scan_id=None, hunt_id=None, root_domain=None,
                     verification_verdict=None, verification_mode=None, verified_only=False,

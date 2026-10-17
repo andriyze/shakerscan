@@ -21,7 +21,7 @@ list contract: none, a planner estimate, or exact up to 10,000).
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, AsyncIterator, Callable, Iterable, Mapping, Optional
 import uuid
 
@@ -38,7 +38,12 @@ except ModuleNotFoundError:  # package import in host-side tests
 
 from .hunt_scope import finding_hunt_predicate
 from .list_filters import host_in_domain_sql
-from .list_schema import FIRST_SEEN_SORT_SQL, LAST_SEEN_SORT_SQL
+from .list_schema import (
+    FIRST_SEEN_SORT_SQL,
+    LAST_SEEN_SORT_SQL,
+    SEVERITY_RANK_SORT_SQL,
+    SEVERITY_RANK_UNRANKED_SORT_SQL,
+)
 from .proof_sql import (
     latest_retest_mode_sql, proof_state_sql, triage_string_sql, undetermined_proof_sql,
     verified_candidate_sql, verified_sql,
@@ -363,11 +368,13 @@ def apply_proof(row: Mapping[str, Any], project: Callable[[dict[str, Any]], dict
 # --- legacy limit/offset shape -----------------------------------------------------------------
 
 
-def legacy_order(sort_by: Optional[str], sort_order: str) -> list[tuple[str, str]]:
+def legacy_order(sort_by: Optional[str], sort_order: str, *, ranked: bool = True) -> list[tuple[str, str]]:
     """``[(expression, direction)]`` with an id tiebreak, as the legacy list has always sorted.
 
     Descending severity and seen-time orders use the keyset index expressions (a NULL time sorts
     last either way); an ascending seen time keeps NULLS LAST, which the COALESCE form cannot.
+    ``ranked`` false (an upgraded database still being ranked) orders severity by the function the
+    stored rank is computed from: the same order, without the index.
     """
     direction = "DESC" if sort_order == "desc" else "ASC"
     if sort_by in ("first_seen", "last_seen"):
@@ -379,7 +386,8 @@ def legacy_order(sort_by: Optional[str], sort_order: str) -> list[tuple[str, str
     if sort_by == "cvss":
         return [("f.cvss_score", f"{direction} NULLS LAST"), ("f.id", direction)]
     # Severity (most severe first for desc); the newest sighting first within a severity always.
-    return [("f.severity_rank", direction), (LAST_SEEN_SORT_SQL, "DESC"), ("f.id", "DESC")]
+    rank = SEVERITY_RANK_SORT_SQL if ranked else SEVERITY_RANK_UNRANKED_SORT_SQL
+    return [(rank, direction), (LAST_SEEN_SORT_SQL, "DESC"), ("f.id", "DESC")]
 
 
 def order_sql(order: list[tuple[str, str]]) -> str:
@@ -436,7 +444,7 @@ FINDINGS_LIST = ListSpec(
     sorts={
         # Most severe first, then most recently seen: one descending keyset over
         # idx_findings_severity_keyset.
-        "severity": SortKey("f.severity_rank", "int", then=((LAST_SEEN_SORT_SQL, "datetime"),)),
+        "severity": SortKey(SEVERITY_RANK_SORT_SQL, "int", then=((LAST_SEEN_SORT_SQL, "datetime"),)),
         "last_seen": SortKey(LAST_SEEN_SORT_SQL, "datetime"),
         "first_seen": SortKey(FIRST_SEEN_SORT_SQL, "datetime"),
         "cvss": SortKey("COALESCE(f.cvss_score, -1)", "numeric"),
@@ -448,13 +456,21 @@ FINDINGS_LIST = ListSpec(
     table="findings",
 )
 
+#: The same list while an upgraded database is still being ranked (list_schema.severity_rank_ready):
+#: same scope, sort names and filters, so a cursor from either continues in the other.
+FINDINGS_LIST_UNRANKED = replace(FINDINGS_LIST, sorts={
+    **FINDINGS_LIST.sorts,
+    "severity": SortKey(SEVERITY_RANK_UNRANKED_SORT_SQL, "int", then=((LAST_SEEN_SORT_SQL, "datetime"),)),
+})
+
 
 async def v1_page(
     conn: Any, page: Page, *, filters: FindingFilters, proof_states: Optional[list[str]],
-    project: Callable[[dict[str, Any]], dict[str, Any]],
+    project: Callable[[dict[str, Any]], dict[str, Any]], ranked: bool = True,
 ) -> dict[str, Any]:
     """One list/v1 page of findings (summary projection only, never evidence or bodies)."""
-    plan = FINDINGS_LIST.plan(page, filters={**filters.fingerprint(), "proof_state": proof_states})
+    spec = FINDINGS_LIST if ranked else FINDINGS_LIST_UNRANKED
+    plan = spec.plan(page, filters={**filters.fingerprint(), "proof_state": proof_states})
     params = SqlParams()
     where = filters.clauses(params)
     where += plan.filter_clauses(params)
@@ -498,6 +514,7 @@ async def v1_page(
 
 __all__ = [
     "FINDINGS_LIST",
+    "FINDINGS_LIST_UNRANKED",
     "FINDING_DETAIL_COLUMNS",
     "FINDING_SUMMARY_COLUMNS",
     "FindingFilters",

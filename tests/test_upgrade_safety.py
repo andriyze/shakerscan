@@ -19,6 +19,9 @@ set -u
 RED=; GREEN=; YELLOW=; BLUE=; NC=
 SCRIPT_DIR="$WORK"
 CALLS="$WORK/calls.log"; : > "$CALLS"
+# Never the runner's own registry or install.
+SHAKERSCAN_INSTALL_REGISTRY="${SHAKERSCAN_INSTALL_REGISTRY:-$WORK/registry/installs}"
+SHAKERSCAN_HOME="${SHAKERSCAN_HOME:-$WORK/no-default-install}"
 API_IMAGE_REPO=ghcr.io/x/shakerscan-api; SCANNER_IMAGE_REPO=ghcr.io/x/shakerscan-scanner
 UI_IMAGE_REPO=ghcr.io/x/shakerscan-ui; MODEL_INTAKE_IMAGE_REPO=; MODEL_INTAKE_SIGNER_IMAGE_REPO=
 SCANNER_VERSION="${SCANNER_VERSION:-2.10.0}"
@@ -614,3 +617,314 @@ def test_a_successful_start_releases_the_first_dump_for_rotation(tmp_path):
     (backups / ".pre-upgrade-pending").write_text("pre-upgrade-20261010T000000Z-2.9.0-to-2.10.0\n")
     result = run(tmp_path, "record_started_release keep; echo rc=$?")
     assert "rc=0" in result.stdout and not (backups / ".pre-upgrade-pending").exists()
+
+
+_THREE = """
+cat > "$WORK/images" <<'X'
+ghcr.io/x/shakerscan-api@sha256:r1 id-r1 ghcr.io/x/shakerscan-api
+ghcr.io/x/shakerscan-api@sha256:r2 id-r2 ghcr.io/x/shakerscan-api
+ghcr.io/x/shakerscan-api@sha256:r3 id-r3 ghcr.io/x/shakerscan-api
+ghcr.io/x/shakerscan-api@sha256:r4 id-r4 ghcr.io/x/shakerscan-api
+X
+sed -i.bak 's/^ *//' "$WORK/images"
+"""
+
+
+def _removed(tmp_path: Path) -> list[str]:
+    return [line.split()[-1] for line in calls(tmp_path).splitlines() if line.startswith("docker image rm")]
+
+
+def test_a_stopped_second_install_keeps_its_release_and_rollback_images(tmp_path):
+    """2.11 C3: the routine cleanup of one install removed another, stopped install's images (no
+    container protected them). Every install that recorded a release is registered host-wide."""
+    other = tmp_path / "other-install"
+    other.mkdir()
+    registry = tmp_path / "registry" / "installs"
+    registry.parent.mkdir()
+    registry.write_text(f"{other}\n{tmp_path / 'removed-install'}\n")
+    (other / ".release-images.current").write_text("# release 2.9.0\nghcr.io/x/shakerscan-api@sha256:r2\n")
+    (other / ".release-images.previous").write_text("# release 2.8.0\nghcr.io/x/shakerscan-api@sha256:r1\n")
+    body = _THREE + """
+    REFS="ghcr.io/x/shakerscan-api@sha256:r1"; SCANNER_VERSION=2.8.0; record_started_release prune
+    REFS="ghcr.io/x/shakerscan-api@sha256:r2"; SCANNER_VERSION=2.9.0; record_started_release prune
+    REFS="ghcr.io/x/shakerscan-api@sha256:r3"; SCANNER_VERSION=2.10.0; record_started_release prune
+    REFS="ghcr.io/x/shakerscan-api@sha256:r4"; SCANNER_VERSION=2.11.0; record_started_release prune
+    echo "low-disk=$(prune_unused_release_images)"
+    """
+    result = run(tmp_path, body)
+    assert _removed(tmp_path) == [], result.stdout + result.stderr  # r1, r2 are the other install's
+    assert "low-disk=0" in result.stdout
+    assert str(tmp_path.resolve()) in registry.read_text().splitlines()  # this install registered itself
+    # Without the other install's records its images go.
+    registry.write_text("")
+    result = run(tmp_path, _THREE + "echo removed=$(prune_superseded_release_images)")
+    assert sorted(_removed(tmp_path)) == ["ghcr.io/x/shakerscan-api@sha256:r1", "ghcr.io/x/shakerscan-api@sha256:r2"]
+
+
+def test_a_stale_record_rollback_keeps_the_release_that_was_actually_running(tmp_path):
+    """2.11 C9: after a rollback to 2.9 by a launcher that keeps no record, the record still says
+    2.10. Upgrading to 2.11 kept the stale 2.10 record for rollback, and the 2.9 images that were
+    running became removable."""
+    (tmp_path / ".release-images.current").write_text("# release 2.10.0\nghcr.io/x/shakerscan-api@sha256:r3\n")
+    (tmp_path / ".release-images.previous").write_text("# release 2.9.0\nghcr.io/x/shakerscan-api@sha256:r1\n")
+    body = _THREE + """
+    running_api_version() { echo 2.9.0; }
+    echo id-r2 > "$WORK/containers"     # the rolled-back 2.9 runs from another pull (r2)
+    note_running_release
+    : > "$WORK/containers"              # the start replaced it
+    REFS="ghcr.io/x/shakerscan-api@sha256:r4"; SCANNER_VERSION=2.11.0; record_started_release prune
+    cat "$WORK/.release-images.previous"
+    """
+    result = run(tmp_path, body)
+    assert "# release 2.9.0\nid-r2\n" in result.stdout, result.stdout + result.stderr
+    removed = _removed(tmp_path)
+    assert "id-r2" not in removed and "ghcr.io/x/shakerscan-api@sha256:r4" not in removed
+    assert sorted(removed) == ["ghcr.io/x/shakerscan-api@sha256:r1", "ghcr.io/x/shakerscan-api@sha256:r3"], removed
+
+
+def test_a_restart_of_the_release_that_runs_changes_no_kept_release(tmp_path):
+    (tmp_path / ".release-images.current").write_text("# release 2.11.0\nghcr.io/x/shakerscan-api@sha256:r4\n")
+    (tmp_path / ".release-images.previous").write_text("# release 2.10.0\nghcr.io/x/shakerscan-api@sha256:r3\n")
+    body = _THREE + """
+    running_api_version() { echo 2.11.0; }
+    echo id-r4 > "$WORK/containers"
+    note_running_release
+    REFS="ghcr.io/x/shakerscan-api@sha256:r4"; SCANNER_VERSION=2.11.0; record_started_release prune
+    cat "$WORK/.release-images.previous"
+    """
+    result = run(tmp_path, body)
+    assert result.stdout.startswith("# release 2.10.0\nghcr.io/x/shakerscan-api@sha256:r3"), result.stdout
+    assert _removed(tmp_path) == []
+
+
+def test_keep_releases_three_keeps_two_rollback_releases(tmp_path):
+    body = _THREE + """
+    for n in 1 2 3 4; do REFS="ghcr.io/x/shakerscan-api@sha256:r$n"; SCANNER_VERSION=2.$((7 + n)).0; record_started_release prune; done
+    head -1 "$WORK/.release-images.current" "$WORK/.release-images.previous" "$WORK/.release-images.previous.2"
+    """
+    result = run(tmp_path, body, SHAKERSCAN_KEEP_RELEASES="3")
+    assert _removed(tmp_path) == ["ghcr.io/x/shakerscan-api@sha256:r1"], result.stdout + result.stderr
+    assert "# release 2.11.0" in result.stdout and "# release 2.10.0" in result.stdout and "# release 2.9.0" in result.stdout
+    assert "SHAKERSCAN_KEEP_RELEASES=3" in result.stdout
+
+
+def test_keep_releases_one_keeps_no_rollback_images_and_a_lowered_value_releases_the_rest(tmp_path):
+    body = _THREE + """
+    for n in 1 2 3; do REFS="ghcr.io/x/shakerscan-api@sha256:r$n"; SCANNER_VERSION=2.$((7 + n)).0; record_started_release prune; done
+    ls -A "$WORK" | grep release-images >&2
+    SHAKERSCAN_KEEP_RELEASES=1
+    source "$SCRIPT_UNDER_TEST"
+    REFS="ghcr.io/x/shakerscan-api@sha256:r3"; SCANNER_VERSION=2.10.0; record_started_release prune
+    """
+    result = run(tmp_path, body, SHAKERSCAN_KEEP_RELEASES="3", SCRIPT_UNDER_TEST=str(SCRIPT))
+    assert sorted(_removed(tmp_path)) == ["ghcr.io/x/shakerscan-api@sha256:r1", "ghcr.io/x/shakerscan-api@sha256:r2"], \
+        result.stdout + result.stderr
+    assert not (tmp_path / ".release-images.previous").exists()
+    assert not (tmp_path / ".release-images.previous.2").exists()
+
+
+# --- 2.11 C5: install directory space, datastores persisting, volumes, backup offer, images, Redis
+
+
+def _upgrade_pending(tmp_path: Path) -> None:
+    (tmp_path / ".release-images.current").write_text("# release 2.10.0\nref\n")
+
+
+def test_an_upgrade_without_room_in_the_install_directory_stops_with_nothing_changed(tmp_path):
+    _upgrade_pending(tmp_path)
+    body = """
+    df() { printf 'Filesystem 1024-blocks Used Available Capacity Mounted\\n/dev/x 100 1 %s 1%% /\\n' "$((1 * 1024 * 1024))"; }
+    ensure_install_dir_space; echo rc=$?
+    """
+    result = run(tmp_path, body, SCANNER_VERSION="2.11.0")
+    assert "rc=1" in result.stdout and "Not enough disk space in the install directory" in result.stderr
+    assert "Nothing was changed" in result.stderr
+    # A restart of the same release only warns.
+    restart = run(tmp_path, body, SCANNER_VERSION="2.10.0")
+    assert "rc=0" in restart.stdout and "Free disk space soon" in restart.stdout
+
+
+def _persistence(tmp_path: Path, mounts: str, info: str, running: str = "2.10.0", version: str = "2.11.0"):
+    _upgrade_pending(tmp_path)
+    body = f"""
+    echo cid > "$WORK/containers"
+    running_api_version() {{ echo {running}; }}
+    redis_container_state() {{ echo running; }}
+    docker_cli() {{
+      case "$*" in
+        *"--format {{{{range .Mounts}}}}"*) printf '%s\\n' {mounts} ;;
+        "ps -aq --filter"*|"ps -q --filter"*) echo cid ;;
+        *) docker "$@" ;;
+      esac
+    }}
+    compose() {{ echo "compose $*" >> "$CALLS"; case "$*" in *"INFO persistence"*) printf '%s\\n' {info} ;; esac; }}
+    ensure_datastores_persisting; echo rc=$?
+    """
+    return run(tmp_path, body, SCANNER_VERSION=version)
+
+
+def test_datastores_saving_to_their_volumes_let_the_upgrade_proceed(tmp_path):
+    result = _persistence(tmp_path, '"volume /var/lib/postgresql" "volume /data"',
+                          '"loading:0" "rdb_last_bgsave_status:ok" "aof_last_write_status:ok"')
+    assert "rc=0" in result.stdout, result.stdout + result.stderr
+
+
+def test_a_redis_that_cannot_save_stops_the_upgrade_before_anything_is_stopped(tmp_path):
+    result = _persistence(tmp_path, '"volume /var/lib/postgresql" "volume /data"',
+                          '"loading:0" "rdb_last_bgsave_status:err" "aof_last_write_status:err"')
+    assert "rc=1" in result.stdout
+    assert "last snapshot failed" in result.stderr and "append-only file" in result.stderr
+    assert "the running release keeps running" in result.stderr
+    assert "compose stop" not in calls(tmp_path) and "compose down" not in calls(tmp_path)
+
+
+def test_data_outside_its_volume_stops_the_upgrade(tmp_path):
+    result = _persistence(tmp_path, '"bind /docker-entrypoint-initdb.d/init.sql"',
+                          '"loading:0" "rdb_last_bgsave_status:ok"')
+    assert "rc=1" in result.stdout
+    assert "PostgreSQL's data is not on its Docker volume" in result.stderr
+    assert "Redis's data is not on its Docker volume" in result.stderr
+
+
+def test_a_restart_of_the_running_release_is_not_held_by_the_persistence_check(tmp_path):
+    result = _persistence(tmp_path, '""', '"rdb_last_bgsave_status:err"', running="2.11.0", version="2.11.0")
+    assert "rc=0" in result.stdout, result.stdout + result.stderr
+
+
+def test_a_start_never_creates_an_empty_database_over_a_lost_one(tmp_path):
+    _upgrade_pending(tmp_path)
+    result = run(tmp_path, "ensure_database_volume_present; echo rc=$?")
+    assert "rc=1" in result.stdout and "would create an empty database" in result.stderr
+    assert "SHAKERSCAN_ALLOW_NEW_DATABASE=1" in result.stderr
+    (tmp_path / "volume_shakerscan_postgres-cluster").write_text("")
+    assert "rc=0" in run(tmp_path, "ensure_database_volume_present; echo rc=$?").stdout
+    (tmp_path / "volume_shakerscan_postgres-cluster").unlink()
+    assert "rc=0" in run(tmp_path, "ensure_database_volume_present; echo rc=$?",
+                         SHAKERSCAN_ALLOW_NEW_DATABASE="1").stdout
+    # Docker cannot list volumes (permissions): never read as "missing".
+    denied = run(tmp_path, 'docker_cli() { case "$1" in volume) return 1 ;; esac; }; ensure_database_volume_present; echo rc=$?')
+    assert "rc=0" in denied.stdout
+    first = tmp_path / "first"
+    first.mkdir()
+    assert "rc=0" in run(first, "ensure_database_volume_present; echo rc=$?").stdout
+
+
+def test_reset_starts_with_an_empty_database_on_purpose():
+    launcher = (ROOT / "scanner.sh").read_text()
+    body = launcher.split("\nreset_database() {", 1)[1].split("\n}", 1)[0]
+    assert "SHAKERSCAN_ALLOW_NEW_DATABASE=1 start_services" in body
+
+
+def test_a_full_backup_is_taken_before_an_upgrade_when_asked(tmp_path):
+    _upgrade_pending(tmp_path)
+    body = """
+    create_backup() { echo "full-backup" >> "$CALLS"; }
+    offer_upgrade_backup; echo rc=$? taken=$UPGRADE_FULL_BACKUP_TAKEN
+    """
+    result = run(tmp_path, body, SCANNER_VERSION="2.11.0", SHAKERSCAN_UPGRADE_BACKUP="full")
+    assert "rc=0 taken=1" in result.stdout and "full-backup" in calls(tmp_path)
+    # Without a terminal and without the setting: the automatic database dump only.
+    result = run(tmp_path, body, SCANNER_VERSION="2.11.0")
+    assert "rc=0 taken=0" in result.stdout and "full-backup" not in calls(tmp_path)
+    # Not an upgrade: nothing offered.
+    result = run(tmp_path, body, SCANNER_VERSION="2.10.0", SHAKERSCAN_UPGRADE_BACKUP="full")
+    assert "taken=0" in result.stdout and "full-backup" not in calls(tmp_path)
+
+
+def test_a_failed_full_backup_stops_the_upgrade(tmp_path):
+    _upgrade_pending(tmp_path)
+    body = "create_backup() { return 1; }; offer_upgrade_backup; echo rc=$?"
+    result = run(tmp_path, body, SCANNER_VERSION="2.11.0", SHAKERSCAN_UPGRADE_BACKUP="full")
+    assert "rc=1" in result.stdout and "nothing was upgraded" in result.stderr
+
+
+def test_the_start_offers_the_backup_and_skips_the_second_dump_when_it_was_taken():
+    launcher = (ROOT / "scanner.sh").read_text()
+    body = launcher.split("\nstart_services() {", 1)[1].split("\n}", 1)[0]
+    assert body.index("ensure_install_dir_space") < body.index("pull_prebuilt_images")
+    assert body.index("ensure_datastores_persisting") < body.index("stop_services")
+    assert body.index("ensure_database_volume_present") < body.index("compose_up -d postgres")
+    assert body.index("compose_up -d postgres") < body.index("offer_upgrade_backup") < body.index("ensure_pre_upgrade_backup")
+    restart = launcher.split("\nrestart_services() {", 1)[1].split("\n}", 1)[0]
+    assert restart.index("ensure_datastores_persisting") < restart.index("stop_services")
+
+
+def test_images_prune_needs_a_release_record_and_keeps_every_protected_image(tmp_path):
+    body = """
+    echo "ghcr.io/x/shakerscan-api@sha256:x id-x ghcr.io/x/shakerscan-api" > "$WORK/images"
+    images_cmd prune
+    """
+    result = run(tmp_path, body)
+    assert "nothing was removed" in result.stdout and "image rm" not in calls(tmp_path)
+    (tmp_path / ".release-images.current").write_text("# release 2.11.0\nghcr.io/x/shakerscan-api@sha256:new1\n")
+    (tmp_path / ".release-images.previous").write_text("# release 2.10.0\nghcr.io/x/shakerscan-api@sha256:prev\n")
+    body = """
+    cat > "$WORK/images" <<'X'
+    ghcr.io/x/shakerscan-api@sha256:new1 id-new ghcr.io/x/shakerscan-api
+    ghcr.io/x/shakerscan-api@sha256:prev id-prev ghcr.io/x/shakerscan-api
+    ghcr.io/x/shakerscan-api@sha256:old id-old ghcr.io/x/shakerscan-api
+    redis:8 id-redis redis
+    X
+    sed -i.bak 's/^ *//' "$WORK/images"
+    images_cmd prune
+    """
+    result = run(tmp_path, body)
+    removed = [line for line in calls(tmp_path).splitlines() if line.startswith("docker image rm")]
+    assert removed == ["docker image rm id-old"], result.stdout + result.stderr
+    assert "Removed 1 ShakerScan image(s)" in result.stdout
+    assert "volume" not in calls(tmp_path)
+
+
+def test_images_lists_why_each_image_is_kept(tmp_path):
+    (tmp_path / ".release-images.previous").write_text("# release 2.10.0\nghcr.io/x/shakerscan-api@sha256:prev\n")
+    body = """
+    cat > "$WORK/images" <<'X'
+    ghcr.io/x/shakerscan-api@sha256:new1 id-new ghcr.io/x/shakerscan-api
+    ghcr.io/x/shakerscan-api@sha256:prev id-prev ghcr.io/x/shakerscan-api
+    ghcr.io/x/shakerscan-api@sha256:old id-old ghcr.io/x/shakerscan-api
+    X
+    sed -i.bak 's/^ *//' "$WORK/images"
+    docker_cli() {
+      case "$1 $2" in
+        "images --no-trunc") awk -v repo="${@: -1}" '$3 == repo {print $2, $1, "1GB"}' "$WORK/images" ;;
+        *) docker "$@" ;;
+      esac
+    }
+    images_cmd
+    """
+    result = run(tmp_path, body)
+    lines = {line.split()[0]: line for line in result.stdout.splitlines() if line.startswith("ghcr")}
+    assert "kept: this-release" in lines["ghcr.io/x/shakerscan-api@sha256:new1"], result.stdout
+    assert "release 2.10.0 (kept for rollback)" in lines["ghcr.io/x/shakerscan-api@sha256:prev"]
+    assert "removable" in lines["ghcr.io/x/shakerscan-api@sha256:old"]
+    assert "never removed" in result.stdout
+
+
+def test_redis_reset_keeps_a_copy_then_starts_it_empty_and_reconnects_the_services(tmp_path):
+    (tmp_path / "volume_shakerscan_redis-data").write_text("")
+    body = """
+    wait_for_redis_healthy() { return 0; }
+    service_container() { echo cid; }
+    redis_cmd reset --yes; echo rc=$?
+    """
+    result = run(tmp_path, body)
+    assert "rc=0" in result.stdout, result.stdout + result.stderr
+    log = calls(tmp_path)
+    assert log.index("tar czf /backup/redis-data.tgz") < log.index("volume removed shakerscan_redis-data")
+    assert "compose restart api worker agent-tool-worker" in log
+    assert "postgres" not in log
+    assert "queued again automatically" in result.stdout
+
+
+def test_redis_reset_asks_first(tmp_path):
+    result = run(tmp_path, "redis_cmd reset < /dev/null; echo rc=$?")
+    assert "rc=1" in result.stdout and "Cancelled" in result.stdout
+    assert "volume" not in calls(tmp_path)
+
+
+def test_status_warns_when_redis_volume_is_missing(tmp_path):
+    (tmp_path / ".release-images.current").write_text("# release 2.11.0\nref\n")
+    result = run(tmp_path, "upgrade_safety_warnings")
+    assert "Redis's volume is missing" in result.stdout
+    (tmp_path / "volume_shakerscan_redis-data").write_text("")
+    assert "Redis's volume is missing" not in run(tmp_path, "upgrade_safety_warnings").stdout
