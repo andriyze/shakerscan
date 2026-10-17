@@ -14,7 +14,9 @@ from .assessment import mark_unexamined_coverage, withhold_unexamined_grade
 from .action_plan import ScanActionPlan
 from .capability_result import CapabilityResultReference, CapabilityResultStatus, CapabilityResultReason
 from .contracts import SCAN_APPLICATION_SURFACE_FAMILIES
+from .finding_evidence import template_classification, tls_finding_evidence
 from .redirect_evidence import REDIRECT_STATUSES, http_origin, redirect_destination
+from .severity_calibration import calibrate_findings
 from .sqli_stages import INCONCLUSIVE_RECORD_KIND, sqli_budget_outcomes
 from .verification_extension import superseding_results
 from .continuation import (
@@ -1331,6 +1333,7 @@ def _findings_for_action(
                         "protocol": item.get("protocol"),
                         "cipher": item.get("cipher"),
                         "certificate_sha256": item.get("certificate_sha256"),
+                        **tls_finding_evidence(item, observations, check=check),
                         "canonical_capability": "tls.inspect",
                         "capability_receipt": receipt,
                     },
@@ -1363,6 +1366,7 @@ def _findings_for_action(
             if severity not in scoring.SEVERITY_WEIGHT:
                 severity = "info"
             title, header_name = _header_template_title(item)
+            classification = template_classification(item)
             # A response header policy is a property of the origin, not of the path that
             # happened to be requested. Emitting the match per URL turned one missing header
             # into one finding per crawled page -- a thorough scan reported 1,032 "missing
@@ -1383,11 +1387,12 @@ def _findings_for_action(
                 tool="nuclei",
                 title=title,
                 severity=severity,
-                cwe=str(item.get("cwe") or "") or None,
+                cwe=str(item.get("cwe") or "") or next(iter(classification.get("cwe_ids") or ()), None),
                 url=header_origin or matched_url,
                 evidence={
                     "template_id": item.get("template_id"),
                     "matcher_name": item.get("matcher_name"),
+                    **classification,
                     **({"header_name": header_name} if header_name else {}),
                     "matched_at": header_origin or matched_url,
                     **(
@@ -1398,6 +1403,8 @@ def _findings_for_action(
                     "capability_receipt": receipt,
                 },
             )
+            if isinstance(classification.get("cvss_score"), float):
+                finding["cvss_score"] = classification["cvss_score"]
             if header_name and header_origin:
                 header_origin_findings[(header_name, header_origin)] = finding
             finding.update({
@@ -1411,7 +1418,8 @@ def _findings_for_action(
                 "verification_reason": "Template match requires its deterministic proof contract",
             })
             findings.append(finding)
-    return findings
+    # One calibrated severity per class, with its reason kept in the evidence.
+    return calibrate_findings(findings)
 
 
 def _finding_identity(finding: Mapping[str, Any]) -> str:

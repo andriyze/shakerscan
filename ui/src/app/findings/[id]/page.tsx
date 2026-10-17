@@ -841,6 +841,7 @@ function FindingDetailContent() {
       <div className="grid gap-5 lg:grid-cols-[minmax(0,1fr)_20rem]">
         <div className="min-w-0 space-y-5">
           <WhatWeFound
+            detailEvidence={rawEvidenceObject}
             observation={observation}
             description={showSummaryDescription ? summaryDescription : null}
             payloads={evidence.allPayloads.map(decodePayload)}

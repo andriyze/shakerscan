@@ -303,9 +303,13 @@ async def inspect_tls_origin(
 
     trust = "not_evaluated"
     trust_error_type: str | None = None
+    trust_error: dict[str, Any] = {}
     if successful:
+        # Chain trust only. The name check is the separate hostname-match evidence: with it on,
+        # a publicly trusted certificate issued for another name was also reported as an
+        # untrusted chain, one defect counted twice under two titles.
         verified_context = ssl.create_default_context()
-        verified_context.check_hostname = True
+        verified_context.check_hostname = False
         verified_context.verify_mode = ssl.CERT_REQUIRED
         verified_context.set_alpn_protocols(["h2", "http/1.1"])
         try:
@@ -313,6 +317,7 @@ async def inspect_tls_origin(
         except ssl.SSLCertVerificationError as exc:
             trust = "untrusted"
             trust_error_type = type(exc).__name__
+            trust_error = _trust_error(exc)
         except (OSError, ssl.SSLError, asyncio.TimeoutError) as exc:
             trust_error_type = type(exc).__name__
         else:
@@ -419,6 +424,7 @@ async def inspect_tls_origin(
         "certificate_bytes": len(certificate),
         "certificate_trust": trust,
         "certificate_trust_error_type": trust_error_type,
+        **trust_error,
         **certificate_details,
     }
     return {
@@ -463,6 +469,112 @@ def _certificate_chain(tls_object: Any, leaf: bytes) -> tuple[bytes, ...]:
     return tuple(certificates)
 
 
+# OpenSSL X509_V_ERR codes, named for what an operator does about them.
+_TRUST_FAILURE_KINDS: Mapping[int, str] = {
+    2: "issuer_not_found",          # unable to get issuer certificate
+    9: "not_yet_valid",
+    10: "expired",
+    18: "self_signed",              # depth-0 self-signed certificate
+    19: "untrusted_root",           # self-signed certificate in chain (a private CA)
+    20: "issuer_not_found",         # unable to get local issuer certificate
+    21: "issuer_not_found",         # unable to verify the first certificate
+    23: "revoked",
+    24: "issuer_public_key_missing",
+    79: "invalid_ca",
+    26: "invalid_purpose",
+    27: "untrusted_root",           # certificate not trusted
+    28: "rejected",
+}
+
+
+def _trust_error(exc: ssl.SSLCertVerificationError) -> dict[str, Any]:
+    """The verifier's own reason for refusing the chain: OpenSSL's code and message."""
+    code = getattr(exc, "verify_code", None)
+    message = getattr(exc, "verify_message", None)
+    out: dict[str, Any] = {}
+    if isinstance(code, int):
+        out["certificate_trust_error_code"] = code
+        out["certificate_trust_failure"] = _TRUST_FAILURE_KINDS.get(code, "other")
+    if isinstance(message, str) and message.strip():
+        out["certificate_trust_error"] = message.strip()[:200]
+    return out
+
+
+_MAX_CHAIN_DETAILS = 6
+
+
+def _name_attribute(name: Any, oid: Any) -> str | None:
+    try:
+        values = name.get_attributes_for_oid(oid)
+    except (AttributeError, ValueError):
+        return None
+    for value in values or ():
+        text = str(getattr(value, "value", "") or "").strip()
+        if text:
+            return text[:200]
+    return None
+
+
+def _chain_details(certificates: tuple[bytes, ...]) -> list[dict[str, Any]]:
+    """Subject, issuer, validity and CA flag of each certificate the server presented.
+
+    Public certificate metadata only (no key material); bounded to the first few certificates.
+    """
+    if x509 is None:
+        return []
+    details: list[dict[str, Any]] = []
+    now = datetime.now(timezone.utc)
+    for raw in certificates[:_MAX_CHAIN_DETAILS]:
+        try:
+            parsed = x509.load_der_x509_certificate(raw)
+        except (TypeError, ValueError):
+            details.append({"sha256": hashlib.sha256(raw).hexdigest(), "parse_status": "failed"})
+            continue
+        not_after = getattr(parsed, "not_valid_after_utc", None) or parsed.not_valid_after.replace(
+            tzinfo=timezone.utc,
+        )
+        not_before = getattr(parsed, "not_valid_before_utc", None) or parsed.not_valid_before.replace(
+            tzinfo=timezone.utc,
+        )
+        try:
+            is_ca = bool(parsed.extensions.get_extension_for_class(x509.BasicConstraints).value.ca)
+        except x509.ExtensionNotFound:
+            is_ca = False
+        details.append({
+            "subject": parsed.subject.rfc4514_string()[:400],
+            "subject_cn": _name_attribute(parsed.subject, x509.NameOID.COMMON_NAME),
+            "issuer": parsed.issuer.rfc4514_string()[:400],
+            "issuer_cn": _name_attribute(parsed.issuer, x509.NameOID.COMMON_NAME),
+            "not_before": not_before.isoformat(),
+            "not_after": not_after.isoformat(),
+            "expired": now > not_after,
+            "self_signed": parsed.subject == parsed.issuer,
+            "is_ca": is_ca,
+            "sha256": hashlib.sha256(raw).hexdigest(),
+        })
+    return details
+
+
+def _authority_access(parsed: Any) -> dict[str, list[str]]:
+    """AIA URLs: where a client may fetch a missing intermediate (CA Issuers) and check status."""
+    out: dict[str, list[str]] = {"ca_issuers": [], "ocsp": []}
+    try:
+        descriptions = parsed.extensions.get_extension_for_class(
+            x509.AuthorityInformationAccess,
+        ).value
+    except (x509.ExtensionNotFound, ValueError):
+        return out
+    for item in descriptions:
+        location = getattr(getattr(item, "access_location", None), "value", None)
+        if not isinstance(location, str) or not location.lower().startswith(("http://", "https://")):
+            continue
+        if item.access_method == x509.AuthorityInformationAccessOID.CA_ISSUERS:
+            out["ca_issuers"].append(location[:300])
+        elif item.access_method == x509.AuthorityInformationAccessOID.OCSP:
+            out["ocsp"].append(location[:300])
+    return {key: value[:3] for key, value in out.items()}
+
+
 def _certificate_details(
     certificate: bytes,
     *,
@@ -488,6 +600,12 @@ def _certificate_details(
         ).value.get_values_for_type(x509.DNSName))
     except x509.ExtensionNotFound:
         dns_names = ()
+    try:
+        ip_names = tuple(str(item) for item in parsed.extensions.get_extension_for_class(
+            x509.SubjectAlternativeName,
+        ).value.get_values_for_type(x509.IPAddress))
+    except x509.ExtensionNotFound:
+        ip_names = ()
     not_before = getattr(parsed, "not_valid_before_utc", None)
     not_after = getattr(parsed, "not_valid_after_utc", None)
     if not_before is None:
@@ -517,9 +635,17 @@ def _certificate_details(
             0 <= (not_after - now).total_seconds() <= 30 * 86_400
         ),
         "certificate_dns_names": list(dns_names[:100]),
+        "certificate_dns_name_count": len(dns_names),
+        "certificate_ip_addresses": list(ip_names[:20]),
+        "certificate_subject_cn": _name_attribute(parsed.subject, x509.NameOID.COMMON_NAME),
+        "certificate_issuer_cn": _name_attribute(parsed.issuer, x509.NameOID.COMMON_NAME),
         "certificate_hostname_matches": _hostname_matches(
-            hostname, dns_names,
+            hostname, dns_names, ip_names,
         ),
+        **{
+            f"certificate_aia_{key}": value
+            for key, value in _authority_access(parsed).items() if value
+        },
         "certificate_self_signed": parsed.subject == parsed.issuer,
         "certificate_signature_algorithm": (
             parsed.signature_algorithm_oid.dotted_string
@@ -542,6 +668,7 @@ def _certificate_details(
             )
         ),
         **_certificate_chain_summary(chain_certificates or (certificate,)),
+        "certificate_chain_details": _chain_details(chain_certificates or (certificate,)),
     }
 
 
@@ -558,10 +685,21 @@ def _certificate_chain_summary(certificates: tuple[bytes, ...]) -> dict[str, Any
     }
 
 
-def _hostname_matches(hostname: str, dns_names: tuple[str, ...]) -> bool | None:
-    if not dns_names:
-        return None
-    normalized = str(hostname or "").lower().rstrip(".")
+def _hostname_matches(
+    hostname: str, dns_names: tuple[str, ...], ip_names: tuple[str, ...] = (),
+) -> bool | None:
+    normalized = str(hostname or "").lower().rstrip(".").strip("[]")
+    try:
+        literal = ipaddress.ip_address(normalized)
+    except ValueError:
+        literal = None
+    if not dns_names and not ip_names:
+        # RFC 9525 section 4.1: the common name cannot identify a service. An IP identity
+        # matches only an IP SAN, independently of chain trust (section 6.4).
+        return False
+    if literal is not None:
+        # An address is matched only by an IP SAN, never by a DNS name or the common name.
+        return any(_same_address(literal, item) for item in ip_names)
     for raw_name in dns_names:
         name = str(raw_name or "").lower().rstrip(".")
         if name == normalized:
@@ -655,3 +793,10 @@ async def inspect_tls_binding(
         "observations": observations,
         "budget_consumed": consumed,
     }
+
+
+def _same_address(literal: Any, candidate: str) -> bool:
+    try:
+        return ipaddress.ip_address(str(candidate)) == literal
+    except ValueError:
+        return False
