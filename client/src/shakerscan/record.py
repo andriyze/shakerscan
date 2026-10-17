@@ -329,6 +329,7 @@ def run_browser(recording: Recording, start_url: str, *, headless: bool, script:
 
     The context is an in-memory (incognito) one with the disk cache off: the session's cookies
     and cached responses are never written to a profile on disk."""
+    from playwright.sync_api import Error as PlaywrightError
     from playwright.sync_api import sync_playwright
 
     sessions: list[tuple[Any, CdpFlowRecorder, list]] = []
@@ -352,7 +353,13 @@ def run_browser(recording: Recording, start_url: str, *, headless: bool, script:
                 live = [item for item in context.pages if not item.is_closed()]
                 if not live:
                     break
-                live[0].wait_for_timeout(TICK_MS)
+                try:
+                    live[0].wait_for_timeout(TICK_MS)
+                except PlaywrightError:
+                    # Closing the window ends the recording: the wait on the page that closed
+                    # fails (TargetClosedError), and the next pass sees which pages are left.
+                    if not live[0].is_closed() and browser.is_connected():
+                        raise
                 _process(sessions, recording)
                 recording.pump(time.monotonic())
         except KeyboardInterrupt:
