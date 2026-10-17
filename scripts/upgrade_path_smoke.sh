@@ -298,7 +298,11 @@ docker network connect --alias "$FIXTURE_HOST" --alias "app.$APEX" "${PROJECT}_d
 # `docker ps` prints a digest-pinned reference as the bare repository on some Docker versions
 # (GitHub's runners), so the comparison is by image ID: the ID each container runs must be the ID
 # of a locked reference, and the reference it was created from must not be a mutable tag.
-locked_ids="$(sed -n 's/^[A-Z_]*_IMAGE=//p' "$RUNTIME/release-image-lock.env" | while read -r ref; do
+# The Model Intake images are pulled only when the module is on (off by default since 2.10.0), so
+# they are required locally only then; the three core images always are.
+locked_pattern='^[A-Z_]*_IMAGE='
+! grep -qx 'SHAKERSCAN_MODEL_INTAKE_ENABLED=false' "$RUNTIME/.env" || locked_pattern='^(SCANNER|API|UI)_IMAGE='
+locked_ids="$(sed -En "s/${locked_pattern}//p" "$RUNTIME/release-image-lock.env" | while read -r ref; do
     docker image inspect --format '{{.Id}}' "$ref" 2>/dev/null || echo "missing:$ref"; done)"
 grep -q '^missing:' <<< "$locked_ids" && fail "a locked image is not present locally: $(grep '^missing:' <<< "$locked_ids" | head -n 1)"
 running=""
