@@ -1234,6 +1234,9 @@ def build_parser() -> argparse.ArgumentParser:
                                                      "length, when seen, uses (never the value)")
     listed.add_argument("target_id")
     listed.add_argument("--usable", action="store_true", help="only those a Hunt can use now")
+    listed.add_argument("--limit", type=_secrets_limit, default=SECRETS_LIST_DEFAULT, metavar="N",
+                        help=f"show at most N, newest sighting first (default {SECRETS_LIST_DEFAULT}, "
+                             f"at most {SECRETS_LIST_MAX})")
     listed.add_argument("--json", action="store_true", help="print the raw API answer")
     for name, text in (("revoke", "Stop Hunts using a secret (an operator decision later sightings keep)"),
                        ("reactivate", "Let Hunts use a revoked secret again")):
@@ -2224,6 +2227,20 @@ def _run_knowledge_decision(args: argparse.Namespace, client: ApiClient) -> int:
         return 2
 
 
+SECRETS_LIST_DEFAULT = 50
+SECRETS_LIST_MAX = 200
+
+
+def _secrets_limit(value: str) -> int:
+    try:
+        number = int(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError("--limit takes a whole number") from None
+    if not 1 <= number <= SECRETS_LIST_MAX:
+        raise argparse.ArgumentTypeError(f"--limit is 1 to {SECRETS_LIST_MAX}")
+    return number
+
+
 def _reference_id(value: str) -> str:
     return str(value or "").strip().removeprefix("secret://")
 
@@ -2235,19 +2252,35 @@ def _run_secrets(args: argparse.Namespace, client: ApiClient) -> int:
     command, target = args.store_command, str(args.target_id).strip().lower()
     base = f"/targets/{_quoted(target)}/discovered-secrets"
     if command == "list":
-        body = client.request("GET", base + ("?usable_only=true" if args.usable else ""))
-        if args.json:
-            print(json.dumps(body, indent=2, sort_keys=True))
-            return 0
+        # One more than shown, so "there are more" is known rather than guessed. An engine before
+        # 2.11 ignores limit= and answers its own cap (200); the client cuts to --limit either way.
+        asked = min(args.limit + 1, SECRETS_LIST_MAX)
+        query = urllib.parse.urlencode({**({"usable_only": "true"} if args.usable else {}), "limit": asked})
+        body = client.request("GET", f"{base}?{query}")
         rows = body.get("secrets") or [] if isinstance(body, Mapping) else []
+        if args.json:
+            # The extra row only answers "are there more"; it is never printed.
+            listed = {**body, "secrets": rows[: args.limit], "count": len(rows[: args.limit]),
+                      "has_more": len(rows) > args.limit,
+                      "may_have_more": len(rows) > args.limit or len(rows) >= SECRETS_LIST_MAX} \
+                if isinstance(body, Mapping) else body
+            print(json.dumps(listed, indent=2, sort_keys=True))
+            return 0
         if not rows:
             print("no discovered secrets" + (" a Hunt can use" if args.usable else "") + " on this target")
             return 0
-        for row in rows:
+        shown = rows[: args.limit]
+        for row in shown:
             origin = "" if row.get("found_on") == target else f"  granted from {row.get('found_on')}"
             print(_shown(f"{row.get('ref')}  {row.get('kind'):<14} {row.get('label') or '-':<20} "
                          f"{row.get('length')} chars  {row.get('state')}  seen {row.get('seen_count')}x, "
                          f"last {row.get('last_seen_at')}  uses {row.get('uses')}{origin}"))
+        if len(rows) > args.limit:
+            print(f"showing the {len(shown)} most recently seen; there are more: "
+                  f"show more with --limit (at most {SECRETS_LIST_MAX})")
+        elif len(rows) >= SECRETS_LIST_MAX:
+            print(f"showing the {len(shown)} most recently seen; there may be more "
+                  f"(the instance lists at most {SECRETS_LIST_MAX})")
         return 0
     ref_id = _reference_id(args.reference)
     path = f"{base}/{_quoted(ref_id)}"

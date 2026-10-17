@@ -1507,6 +1507,13 @@
     "name": "get_hunt_lifecycle_metrics"
   },
   {
+    "path": "/hunts/permission-requests",
+    "methods": [
+      "GET"
+    ],
+    "name": "list_permission_requests"
+  },
+  {
     "path": "/hunts/{hunt_id}",
     "methods": [
       "GET"

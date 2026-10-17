@@ -1054,3 +1054,68 @@ def test_concurrent_builds_never_wait_under_the_startup_lock_with_a_waiter_prese
             for other in (holder, waiter, builder):
                 await other.close()
     _run(check)
+
+
+async def _deadlocks(conn) -> int:
+    await conn.execute("SELECT pg_stat_clear_snapshot()")
+    return await conn.fetchval("SELECT deadlocks FROM pg_stat_database WHERE datname = current_database()")
+
+
+def test_a_restart_during_builds_on_every_loop_index_table_completes_without_deadlock():
+    """The background builder is mid-CREATE INDEX CONCURRENTLY on every table it builds on (the
+    tables come from LOOP_SCALE_INDEXES, so a table added there is covered), each build stalled on
+    an open snapshot while holding its table lock; a process restarts and runs the startup
+    migrations, and another queues on the startup lock (8675309). Every startup statement on an
+    up-to-date database must be a catalog check that takes no lock a build holds: the startup
+    completes while the builds still wait, and nothing deadlocks."""
+    from retest_contract import run_schema_migrations
+    from runtime.loop_scale_indexes import LOOP_SCALE_INDEXES
+
+    async def check(conn):
+        dsn = require_disposable_database(DSN, DATABASE)
+        tables = {table for _name, table, _definition in LOOP_SCALE_INDEXES}
+        present = {table for table in tables if await conn.fetchval("SELECT to_regclass($1)", table)}
+        assert "hunt_permission_requests" in present
+        picks: dict[str, tuple[str, str]] = {}
+        for name, table, definition in LOOP_SCALE_INDEXES:
+            if table in present and table not in picks and "gin_trgm_ops" not in definition:
+                picks[table] = (name, definition)
+        assert set(picks) == present, "one build on every builder table present"
+        for name, _definition in picks.values():
+            await conn.execute(f"DROP INDEX IF EXISTS {name}")
+        before = await _deadlocks(conn)
+        holder = await asyncpg.connect(dsn)
+        waiter = await asyncpg.connect(dsn)
+        startup_pool = await asyncpg.create_pool(dsn, min_size=1, max_size=2)
+        builders = []
+        try:
+            await holder.execute("BEGIN ISOLATION LEVEL REPEATABLE READ")
+            await holder.fetchval("SELECT 1")  # an open snapshot stalls every concurrent build
+            for name, definition in picks.values():
+                session = await asyncpg.connect(dsn)
+                builders.append((session, asyncio.ensure_future(
+                    session.execute(f"CREATE INDEX CONCURRENTLY {name} ON {definition}"))))
+            await asyncio.sleep(1.0)
+            assert not any(task.done() for _session, task in builders)
+            startup = asyncio.ensure_future(run_schema_migrations(startup_pool))
+            await asyncio.sleep(0.2)
+            queued = asyncio.ensure_future(waiter.execute("SELECT pg_advisory_lock(8675309)"))
+            await asyncio.wait_for(startup, 60)  # blocked behind a build, it would never finish
+            assert not any(task.done() for _session, task in builders)
+            await asyncio.wait_for(queued, 30)
+            await waiter.execute("SELECT pg_advisory_unlock(8675309)")
+            await holder.execute("ROLLBACK")
+            for _session, task in builders:
+                await asyncio.wait_for(task, 120)
+        finally:
+            for session, _task in builders:
+                await session.close()
+            await holder.close()
+            await waiter.close()
+            await startup_pool.close()
+        await asyncio.sleep(1.5)  # backends flush their statistics when they go idle
+        assert await _deadlocks(conn) == before
+        for name, _definition in picks.values():
+            assert await conn.fetchval(
+                "SELECT indisvalid FROM pg_index WHERE indexrelid = to_regclass($1)", name) is True, name
+    _run(check)

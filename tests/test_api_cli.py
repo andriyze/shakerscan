@@ -111,3 +111,29 @@ def test_a_validation_refusal_names_each_field():
     assert code == 1
     assert "status: Field required" in text and "state: Extra inputs are not permitted" in text
     assert "candidate" not in text.replace("Field required", ""), "the rejected value is not echoed"
+
+
+def test_an_oversized_answer_fails_loudly_instead_of_printing_a_truncated_one(monkeypatch, capsys):
+    """an answer over the cap was cut at 8 MiB and printed as if whole (invalid JSON)."""
+    monkeypatch.setattr(api_cli, "MAX_RESPONSE_BYTES", 64)
+    request = api_cli.build_request("GET", "/findings", None, api_url="https://a.example", token=None)
+    exact = json.dumps({"items": ["x" * 40]}).encode()
+    assert len(exact) <= 64
+    assert api_cli.call(request, opener=FakeOpener(200, exact)) == (200, exact.decode())
+    with pytest.raises(api_cli.ApiCliError, match="larger than .* not printed.*limit=.*cursor="):
+        api_cli.call(request, opener=FakeOpener(200, json.dumps({"items": ["x" * 80]}).encode()))
+
+    class Big(FakeOpener):
+        pass
+
+    monkeypatch.setattr(api_cli, "_opener", lambda: Big(200, b'{"items": ["' + b"y" * 200 + b'"]}'))
+    monkeypatch.setattr(api_cli, "bearer_token", lambda: None)
+    assert api_cli.main(["--api-url", "https://a.example", "GET", "/findings"]) == 2
+    captured = capsys.readouterr()
+    assert captured.out == "" and "not printed" in captured.err
+
+
+def test_an_error_body_is_read_only_as_far_as_its_message():
+    request = api_cli.build_request("GET", "/findings", None, api_url="https://a.example", token=None)
+    status, text = api_cli.call(request, opener=FakeOpener(500, b"e" * (api_cli.MAX_ERROR_BYTES + 10)))
+    assert status == 500 and len(text) == api_cli.MAX_ERROR_BYTES

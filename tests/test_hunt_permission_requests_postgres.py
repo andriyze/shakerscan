@@ -1170,3 +1170,202 @@ def test_the_routes_list_long_poll_decide_and_revoke(env):
             assert (await client.post(f"{base}/permission-requests", json={})).status_code == 405
 
     run(env, exchange())
+
+
+def test_the_cross_hunt_feed_pages_expires_and_returns_deltas(env):
+    """GET /hunts/permission-requests: one list/v1 feed over every Hunt, oldest first, with
+    since= deltas, so a terminal watching every open Hunt makes one read instead of one per Hunt
+    (and does not miss Hunts past the first page of each status)."""
+    import httpx
+    from fastapi import FastAPI
+
+    from hunt import permission_router, run_router
+
+    hunts = [run(env, env.hunt(budget={"max_http_requests": 5}, used={"http_requests": 2})) for _ in range(3)]
+    for index, hunt in enumerate(hunts):
+        with pytest.raises(HTTPException):
+            run(env, env.call(hunt, f"feed-{index:04d}", values={"method": "GET", "path": "/", "follow_redirects": True}))
+    # One more Hunt whose request is past its expiry: the feed settles it (with its audit event).
+    stale = run(env, env.hunt(budget={"max_http_requests": 5}, used={"http_requests": 2}))
+    with pytest.raises(HTTPException):
+        run(env, env.call(stale, "feed-stale", values={"method": "GET", "path": "/", "follow_redirects": True}))
+    run(env, env.conn.execute(
+        "UPDATE hunt_permission_requests SET created_at=NOW()-interval '2 days', expires_at=NOW()-interval '1 hour'"
+        " WHERE hunt_run_id=$1", stale["id"]))
+    app = FastAPI()
+    app.include_router(run_router.router)  # the feed is declared ahead of /hunts/{hunt_id}
+    permission_router.configure_permission_router(lambda: env.pool)
+
+    async def exchange():
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://fixture") as client:
+            first = await client.get("/hunts/permission-requests?status=pending&limit=2&count=exact")
+            assert first.status_code == 200, first.text
+            page = first.json()
+            assert page["has_more"] is True and page["total"] == 3 and page["total_kind"] == "exact"
+            assert [item["hunt_id"] for item in page["items"]] == [str(hunts[0]["id"]), str(hunts[1]["id"])]
+            assert all(item["status"] == "pending" and item["approve_command"] for item in page["items"])
+            rest = (await client.get(
+                f"/hunts/permission-requests?status=pending&limit=2&cursor={page['next_cursor']}")).json()
+            assert [item["hunt_id"] for item in rest["items"]] == [str(hunts[2]["id"])]
+            assert rest["has_more"] is False and rest["next_cursor"] is None
+            # The stale request was expired and audited, not listed as pending.
+            (stale_row,) = await env.pool.fetch(
+                "SELECT status FROM hunt_permission_requests WHERE hunt_run_id=$1", stale["id"])
+            assert stale_row["status"] == "expired"
+            events = await env.pool.fetch(
+                "SELECT event FROM hunt_permission_events WHERE hunt_run_id=$1 ORDER BY created_at", stale["id"])
+            assert [row["event"] for row in events] == ["requested", "expired"]
+            # A cursor belongs to its filter set.
+            mismatch = await client.get(f"/hunts/permission-requests?status=granted&cursor={page['next_cursor']}")
+            assert mismatch.status_code == 400 and mismatch.json()["detail"]["error"] == "cursor_mismatch"
+            # One Hunt's requests.
+            one = (await client.get(f"/hunts/permission-requests?hunt_id={hunts[1]['id']}")).json()
+            assert [item["hunt_id"] for item in one["items"]] == [str(hunts[1]["id"])]
+            # Deltas: nothing new since the last page, then the newly raised request.
+            since = rest["generated_at"]
+            quiet = (await client.get("/hunts/permission-requests",
+                                      params={"status": "pending", "since": since})).json()
+            assert {item["hunt_id"] for item in quiet["items"]} <= {str(hunt["id"]) for hunt in hunts}
+            return since
+
+    since = run(env, exchange())
+    fourth = run(env, env.hunt(budget={"max_http_requests": 5}, used={"http_requests": 2}))
+    with pytest.raises(HTTPException):
+        run(env, env.call(fourth, "feed-fourth", values={"method": "GET", "path": "/", "follow_redirects": True}))
+
+    async def delta():
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://fixture") as client:
+            changed = (await client.get("/hunts/permission-requests",
+                                        params={"status": "pending", "since": since})).json()
+            assert str(fourth["id"]) in {item["hunt_id"] for item in changed["items"]}
+            for query, status, error in (
+                ("fields=id", 400, "fields_unsupported"), ("status=bogus", 422, None),
+                ("hunt_id=not-a-uuid", 400, None), (f"hunt_id={uuid.uuid4()}", 404, None),
+                ("limit=201", 422, None),
+            ):
+                answer = await client.get(f"/hunts/permission-requests?{query}")
+                assert answer.status_code == status, (query, answer.text)
+                if error:
+                    assert answer.json()["detail"]["error"] == error
+
+    run(env, delta())
+
+
+def _proposal(env, hunt, subject):
+    from hunt.permission_reasons import KIND_PREAUTHORIZATION
+    from hunt.permission_store import subject_digest
+
+    return run(env, env.conn.fetchrow(
+        """INSERT INTO hunt_permission_requests(hunt_run_id, kind, reason_code, subject_json, subject_digest,
+                                                expires_at)
+           VALUES($1,$2,'preauthorization_proposed',$3::jsonb,$4,NOW()+interval '1 hour') RETURNING *""",
+        hunt["id"], KIND_PREAUTHORIZATION, json.dumps(subject), subject_digest(KIND_PREAUTHORIZATION, subject)))
+
+
+def test_the_feed_since_sees_display_only_changes_and_old_rows_get_updated_at(env):
+    """since= reads updated_at, which a trigger moves on every change, display-only ones too
+    (merged counters, a withheld auto-grant note); requests from before the column take their
+    last known change when the startup migration adds it."""
+    import httpx
+    from fastapi import FastAPI
+
+    from hunt import permission_router, run_router
+
+    hunt = run(env, env.hunt(budget={"max_http_requests": 5}, used={"http_requests": 2}))
+    with pytest.raises(HTTPException):
+        run(env, env.call(hunt, "since-0001", values={"method": "GET", "path": "/", "follow_redirects": True}))
+    app = FastAPI()
+    app.include_router(run_router.router)
+    permission_router.configure_permission_router(lambda: env.pool)
+
+    async def read(**params):
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://fixture") as client:
+            answer = await client.get("/hunts/permission-requests", params={"status": "pending", **params})
+            assert answer.status_code == 200, answer.text
+            return answer.json()
+
+    since = run(env, read())["generated_at"]
+    run(env, env.conn.execute(
+        "UPDATE hunt_permission_requests SET created_at=created_at-interval '1 hour', "
+        "updated_at=NOW()-interval '1 hour' WHERE hunt_run_id=$1", hunt["id"]))
+    assert run(env, read(since=since))["items"] == [], "nothing changed since"
+    run(env, env.conn.execute(
+        """UPDATE hunt_permission_requests SET display_json = display_json || '{"needed_total": 9}'::jsonb
+           WHERE hunt_run_id=$1""", hunt["id"]))
+    changed = run(env, read(since=since))["items"]
+    assert [item["hunt_id"] for item in changed] == [str(hunt["id"])]
+    assert changed[0]["needed_total"] == 9
+
+    # An installation from before the column (2.10): the migration adds it without a rewrite
+    # (nullable, no backfill) and the feed reads such a row as its last known change.
+    run(env, env.conn.execute(
+        "DROP TRIGGER hunt_permission_requests_touch ON hunt_permission_requests;"
+        "ALTER TABLE hunt_permission_requests DROP COLUMN updated_at"))
+    run(env, env.conn.execute(HUNT_PERMISSION_SCHEMA_SQL))
+    row = run(env, env.conn.fetchrow(
+        "SELECT created_at, decided_at, updated_at FROM hunt_permission_requests WHERE hunt_run_id=$1", hunt["id"]))
+    assert row["updated_at"] is None
+    assert run(env, read(since=since))["items"] == [], "an old row reads as its last known change"
+    run(env, env.conn.execute("UPDATE hunt_permission_requests SET decided_by=NULL WHERE hunt_run_id=$1", hunt["id"]))
+    moved = run(env, env.conn.fetchval(
+        "SELECT updated_at > created_at + interval '30 minutes' FROM hunt_permission_requests WHERE hunt_run_id=$1",
+        hunt["id"]))
+    assert moved, "the trigger moves updated_at on every later change"
+
+
+def test_the_feed_locks_only_hunts_with_a_legacy_proposal(env):
+    """A pending proposal recorded with its IDNA 2008 digest needs nothing; only one recorded
+    under IDNA 2003 whose host IDNA 2008 spells differently makes the feed lock its Hunt."""
+    from hunt.permission_bounds import parse_bounds
+    from hunt.permission_store import hunts_to_reconcile
+
+    current = run(env, env.hunt())
+    allow = ["target.authorize:straße.example"]
+    _proposal(env, current, {"allow": allow, "bounds_digest": parse_bounds(allow).digest()})
+    assert run(env, hunts_to_reconcile(env.conn)) == []
+    legacy = run(env, env.hunt())
+    old = _proposal(env, legacy, {"allow": allow, "bounds_digest": "0" * 64})
+    assert run(env, hunts_to_reconcile(env.conn)) == [legacy["id"]]
+
+    import httpx
+    from fastapi import FastAPI
+
+    from hunt import permission_router, run_router
+
+    app = FastAPI()
+    app.include_router(run_router.router)
+    permission_router.configure_permission_router(lambda: env.pool)
+
+    async def read():
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://fixture") as client:
+            return (await client.get("/hunts/permission-requests?status=pending")).json()
+
+    items = run(env, read())["items"]
+    assert str(old["id"]) not in {item["id"] for item in items}, "the legacy proposal was replaced before listing"
+    assert run(env, hunts_to_reconcile(env.conn)) == [], "and is not reconciled again"
+
+
+def test_the_startup_schema_takes_no_lock_on_an_up_to_date_database(env):
+    """The startup runs HUNT_PERMISSION_SCHEMA_SQL on every start, under the startup lock, while
+    the background builder may hold a concurrent build's lock on hunt_permission_requests. On an
+    up-to-date database every statement must be a catalog check: with each permission table
+    locked as a concurrent build locks it, the schema still runs at once."""
+    import asyncpg
+
+    tables = ("hunt_preauthorizations", "hunt_permission_requests", "hunt_permission_grants",
+              "hunt_permission_baselines", "hunt_permission_events")
+
+    async def check():
+        other = await asyncpg.connect(DSN, server_settings={"search_path": env.schema})
+        try:
+            async with other.transaction():
+                for table in tables:
+                    await other.execute(f"LOCK TABLE {table} IN SHARE UPDATE EXCLUSIVE MODE")
+                async with env.pool.acquire() as conn:
+                    async with conn.transaction():
+                        await conn.execute("SET LOCAL lock_timeout = '2s'")
+                        await conn.execute(HUNT_PERMISSION_SCHEMA_SQL)
+        finally:
+            await other.close()
+
+    run(env, check())

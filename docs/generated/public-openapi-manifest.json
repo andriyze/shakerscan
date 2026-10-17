@@ -221,9 +221,9 @@
     "ValidationRequest": "cb81c65a5c80da74a19c6bd92e9c6a68f5cdb22fafeb94270481d463450f893e",
     "WorkerScaleRequest": "52e7ac017dfa1d92efa8e4071026b9bf24c0cf2a17f5d9e742349df3f08f6c62"
   },
-  "contract_sha256": "184b8691295424f90861791ddc7b4712679bc7960a71d4960930b91876efccf6",
+  "contract_sha256": "5c36f783ad339eda5e3c461ceb0b08ef2066286d467e9411a89410dd17d86ad4",
   "openapi": "3.1.0",
-  "operation_count": 490,
+  "operation_count": 491,
   "operations": {
     "DELETE /ai/scans/{scan_id}/transcript": {
       "deprecated": false,
@@ -1870,6 +1870,21 @@
         "Hunt"
       ]
     },
+    "GET /hunts/permission-requests": {
+      "deprecated": false,
+      "operation_id": "list_permission_requests_hunts_permission_requests_get",
+      "parameters_sha256": "e27cc53dca32f1aa28c9cfd5e5dcd8b9386395429ad205829273fb599f0c65e4",
+      "request_schema_sha256": null,
+      "response_schema_sha256": {
+        "200": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "422": "e1fe533ef371cc6965d4015e800b2b5ca90e470f4aae3d57c2754a32b61e8c2d"
+      },
+      "security_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "surface": "hunt",
+      "tags": [
+        "Hunt"
+      ]
+    },
     "GET /hunts/{hunt_id}": {
       "deprecated": false,
       "operation_id": "get_hunt_hunts__hunt_id__get",
@@ -3225,7 +3240,7 @@
     "GET /targets/{target_id}/discovered-secrets": {
       "deprecated": false,
       "operation_id": "get_discovered_secrets_targets__target_id__discovered_secrets_get",
-      "parameters_sha256": "5333d192e73d8e342a8301f4269f3b8d7a233d7e0ac11675299de612de58b580",
+      "parameters_sha256": "872d0607938931f2cd25b29757f50f21015266fdf3b32e73b0ed30b5c1233169",
       "request_schema_sha256": null,
       "response_schema_sha256": {
         "200": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
@@ -6829,6 +6844,7 @@
       "GET /hunts",
       "GET /hunts/contract",
       "GET /hunts/lifecycle-metrics",
+      "GET /hunts/permission-requests",
       "GET /hunts/{hunt_id}",
       "GET /hunts/{hunt_id}/authorization-investigations/{proposal_id}",
       "GET /hunts/{hunt_id}/authorization-investigations/{proposal_id}/reproduction",

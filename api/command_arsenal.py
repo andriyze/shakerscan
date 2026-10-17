@@ -909,7 +909,13 @@ COMMANDS: tuple[ArsenalCommand, ...] = (
         risk_tier="read_only",
         method="GET",
         path="/findings",
-        parameters_schema={"status": {"type": "string"}, "severity": {"type": "string"}},
+        # limit/offset page the list for agents (the MCP findings tool); 100 rows at most here.
+        parameters_schema={
+            "status": {"type": "string"},
+            "severity": {"type": "string"},
+            "limit": {"type": "integer", "minimum": 1, "maximum": 100},
+            "offset": {"type": "integer", "minimum": 0, "maximum": 100_000},
+        },
         evidence_contract=("finding_rows", "proof_state"),
         timeout_seconds=20,
     ),
