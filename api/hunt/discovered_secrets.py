@@ -84,10 +84,33 @@ CREATE TABLE IF NOT EXISTS discovered_secrets (
     state_changed_at TIMESTAMPTZ,
     expires_at TIMESTAMPTZ NOT NULL,
     promoted_profile_id UUID,
+    -- 2.11: what the worker read from the value without disclosing it (hunt/secret_transforms.py);
+    -- NULL until derived (a row stored before 2.11 is filled in by the sweeper).
+    derived JSONB CHECK (derived IS NULL OR jsonb_typeof(derived) = 'object'),
     CONSTRAINT discovered_secrets_target_value_unique UNIQUE (target_id, value_digest)
 );
-CREATE INDEX IF NOT EXISTS idx_discovered_secrets_target
-    ON discovered_secrets(target_id, last_seen_at DESC);
+DO $ds_derived$
+BEGIN
+    -- Checked first: ALTER TABLE takes an exclusive lock even when the column exists.
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_schema = current_schema() AND table_name = 'discovered_secrets'
+          AND column_name = 'derived'
+    ) THEN
+        -- Nullable, no default, no backfill: no table rewrite under the startup lock.
+        ALTER TABLE discovered_secrets ADD COLUMN derived JSONB
+            CHECK (derived IS NULL OR jsonb_typeof(derived) = 'object');
+    END IF;
+END
+$ds_derived$;
+DO $i_discovered_secrets_target$
+BEGIN
+    IF to_regclass('idx_discovered_secrets_target') IS NULL THEN
+        CREATE INDEX idx_discovered_secrets_target
+            ON discovered_secrets(target_id, last_seen_at DESC);
+    END IF;
+END
+$i_discovered_secrets_target$;
 CREATE TABLE IF NOT EXISTS discovered_secret_uses (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     secret_id UUID NOT NULL REFERENCES discovered_secrets(id) ON DELETE CASCADE,
@@ -98,10 +121,21 @@ CREATE TABLE IF NOT EXISTS discovered_secret_uses (
     revealed_by TEXT CHECK (revealed_by IS NULL OR length(revealed_by) BETWEEN 1 AND 200),
     used_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
-CREATE INDEX IF NOT EXISTS idx_discovered_secret_uses_secret
-    ON discovered_secret_uses(secret_id, used_at DESC);
-CREATE INDEX IF NOT EXISTS idx_discovered_secret_uses_run
-    ON discovered_secret_uses(hunt_run_id);
+DO $i_discovered_secret_uses_secret$
+BEGIN
+    IF to_regclass('idx_discovered_secret_uses_secret') IS NULL THEN
+        CREATE INDEX idx_discovered_secret_uses_secret
+            ON discovered_secret_uses(secret_id, used_at DESC);
+    END IF;
+END
+$i_discovered_secret_uses_secret$;
+DO $i_discovered_secret_uses_run$
+BEGIN
+    IF to_regclass('idx_discovered_secret_uses_run') IS NULL THEN
+        CREATE INDEX idx_discovered_secret_uses_run ON discovered_secret_uses(hunt_run_id);
+    END IF;
+END
+$i_discovered_secret_uses_run$;
 CREATE TABLE IF NOT EXISTS discovered_secret_grants (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     secret_id UUID NOT NULL REFERENCES discovered_secrets(id) ON DELETE CASCADE,
@@ -110,8 +144,13 @@ CREATE TABLE IF NOT EXISTS discovered_secret_grants (
     granted_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     CONSTRAINT discovered_secret_grants_unique UNIQUE (secret_id, target_id)
 );
-CREATE INDEX IF NOT EXISTS idx_discovered_secret_grants_target
-    ON discovered_secret_grants(target_id);
+DO $i_discovered_secret_grants_target$
+BEGIN
+    IF to_regclass('idx_discovered_secret_grants_target') IS NULL THEN
+        CREATE INDEX idx_discovered_secret_grants_target ON discovered_secret_grants(target_id);
+    END IF;
+END
+$i_discovered_secret_grants_target$;
 """
 
 
@@ -129,6 +168,14 @@ def _secret_store() -> Any:
     except ModuleNotFoundError:  # package layout in host-side tests
         from .. import secret_store
     return secret_store
+
+
+def _transforms() -> Any:
+    try:
+        from hunt import secret_transforms
+    except ModuleNotFoundError:  # package layout
+        from . import secret_transforms
+    return secret_transforms
 
 
 def value_digest(value: str) -> str | None:
@@ -213,14 +260,18 @@ async def record_discovered(
                     return counts
                 # A sighting extends the expiry and revives an expired row only while no operator
                 # has decided about the row (revoked, or set its expiry): that decision stands.
+                clean_label = str(label or "")[:MAX_LABEL_CHARS]
+                kind = classify(text, clean_label)
+                derived = json.dumps(_transforms().derive(text, kind), sort_keys=True)
                 refreshed = await conn.fetchval(
                     """UPDATE discovered_secrets SET last_seen_at=NOW(), seen_count=seen_count+1,
                         expires_at=CASE WHEN state_changed_by IS NULL
                             THEN GREATEST(expires_at, NOW() + make_interval(days => $3)) ELSE expires_at END,
                         state=CASE WHEN state='expired' AND state_changed_by IS NULL THEN 'active'
-                            ELSE state END
+                            ELSE state END,
+                        derived=COALESCE(derived, $4::jsonb)
                     WHERE target_id=$1 AND value_digest=$2 RETURNING id""",
-                    target, digest, ttl,
+                    target, digest, ttl, derived,
                 )
                 if refreshed:
                     counts["refreshed"] += 1
@@ -231,14 +282,13 @@ async def record_discovered(
                     return counts  # no encryption key: never stored in clear
                 if not str(ciphertext or "").startswith("enc:fernet:"):
                     return counts
-                clean_label = str(label or "")[:MAX_LABEL_CHARS]
                 inserted = await conn.fetchval(
                     """INSERT INTO discovered_secrets(target_id, value_ciphertext, value_digest, kind,
-                        label, length, source, expires_at)
-                    VALUES($1,$2,$3,$4,$5,$6,$7::jsonb, NOW() + make_interval(days => $8))
+                        label, length, source, expires_at, derived)
+                    VALUES($1,$2,$3,$4,$5,$6,$7::jsonb, NOW() + make_interval(days => $8), $9::jsonb)
                     ON CONFLICT (target_id, value_digest) DO NOTHING RETURNING id""",
-                    target, ciphertext, digest, classify(text, clean_label), clean_label, len(text),
-                    json.dumps(clean_source), ttl,
+                    target, ciphertext, digest, kind, clean_label, len(text),
+                    json.dumps(clean_source), ttl, derived,
                 )
                 counts["stored" if inserted else "refreshed"] += 1
             if counts["stored"]:
@@ -276,6 +326,35 @@ async def values_used_by_hunt(conn: Any, hunt_run_id: Any, *, limit: int = 64) -
         except Exception:
             continue
     return values
+
+
+HUNT_USE_SCHEMA = "hunt-discovered-secret-use/v1"
+
+
+async def read_hunt_uses(conn: Any, hunt_run_id: Any, *, limit: int = 2000) -> list[dict[str, Any]]:
+    """Every ``secret://`` resolution of a Hunt, oldest first, for its record: the reference,
+    kind, label, action and destination host. Metadata only, never a value; operator reveals
+    (no Hunt) are not Hunt uses."""
+    rows = await conn.fetch(
+        """SELECT u.id, u.secret_id, u.action_id, u.destination_host, u.used_at,
+            s.kind, s.label, s.target_id
+        FROM discovered_secret_uses u JOIN discovered_secrets s ON s.id=u.secret_id
+        WHERE u.hunt_run_id=$1 AND u.revealed_by IS NULL
+        ORDER BY u.used_at ASC, u.id ASC LIMIT $2""",
+        uuid.UUID(str(hunt_run_id)), max(1, int(limit)),
+    )
+    return [{
+        "schema_version": HUNT_USE_SCHEMA,
+        "id": str(row["id"]),
+        "ref": f"secret://{row['secret_id']}",
+        "kind": row["kind"],
+        "label": row["label"],
+        "action_id": str(row["action_id"]) if row["action_id"] else None,
+        "destination_host": row["destination_host"] or None,
+        "found_on": str(row["target_id"]),
+        "used_at": row["used_at"].isoformat() if hasattr(row["used_at"], "isoformat") else row["used_at"],
+        "secret_values_visible": False,
+    } for row in rows]
 
 
 async def reference_for(conn: Any, *, target_id: Any, value: str) -> str | None:
@@ -363,6 +442,15 @@ async def resolve_for_hunt(
     return str(value)
 
 
+def _decoded(value: Any) -> Any:
+    if isinstance(value, str):
+        try:
+            return json.loads(value)
+        except ValueError:
+            return None
+    return value
+
+
 def _public(row: Mapping[str, Any]) -> dict[str, Any]:
     source = row["source"]
     if isinstance(source, str):
@@ -384,17 +472,21 @@ def _public(row: Mapping[str, Any]) -> dict[str, Any]:
         "promoted_profile_id": str(row["promoted_profile_id"]) if row.get("promoted_profile_id") else None,
         "reveals": row.get("reveals") or 0,
         "granted_to": [str(item) for item in (row["granted_to"] or [])],
+        # What the worker read from the value (JWT header and claim names, hash scheme, key
+        # type...), never the value; None for a row not derived yet.
+        "derived": _transforms().still_valid(_decoded(row.get("derived"))),
     }
 
 
 PLANNER_KEYS = ("ref", "kind", "label", "length", "first_seen_at", "last_seen_at", "seen_count",
-                "state", "expires_at", "uses", "last_used_at")
+                "state", "expires_at", "uses", "last_used_at", "derived")
 
 
 def planner_view(row: Mapping[str, Any], target_id: Any) -> dict[str, Any]:
     """What a Hunt sees of a secret: enough to choose and use it, nothing about other targets,
     Hunts, reveals or credential profiles."""
     view = {key: row.get(key) for key in PLANNER_KEYS}
+    view["derived"] = _transforms().still_valid(_decoded(row.get("derived")))
     view["source_kind"] = (row.get("source") or {}).get("kind")
     view["granted"] = str(row.get("found_on")) != str(_target_uuid(target_id))
     return view
@@ -411,7 +503,7 @@ async def list_for_target(
     # The target's own secrets, and secrets of other targets an operator granted to it.
     rows = await conn.fetch(
         f"""SELECT s.id, s.target_id, s.kind, s.label, s.length, s.source, s.first_seen_at,
-            s.last_seen_at, s.seen_count, s.state, s.expires_at, s.promoted_profile_id,
+            s.last_seen_at, s.seen_count, s.state, s.expires_at, s.promoted_profile_id, s.derived,
             (SELECT count(*) FROM discovered_secret_uses u
              WHERE u.secret_id=s.id AND u.revealed_by IS NULL) AS uses,
             (SELECT max(used_at) FROM discovered_secret_uses u
@@ -547,6 +639,33 @@ async def purge_target(conn: Any, *, target_id: Any) -> int:
     result = await conn.execute(
         "DELETE FROM discovered_secrets WHERE target_id=$1", _target_uuid(target_id))
     return int(str(result).rsplit(" ", 1)[-1] or 0)
+
+
+DERIVE_BATCH = 200
+
+
+async def derive_missing(conn: Any, *, limit: int = DERIVE_BATCH) -> int:
+    """The sweeper, in the worker: derive the metadata of rows stored before 2.11 (``derived``
+    NULL), at most ``limit`` per pass. The value is decrypted here and only metadata is written;
+    a row that cannot be decrypted is marked ``{"transform": "unreadable"}`` so it is not retried."""
+    rows = await conn.fetch(
+        """SELECT id, value_ciphertext, kind FROM discovered_secrets
+        WHERE derived IS NULL ORDER BY last_seen_at DESC LIMIT $1""",
+        max(1, int(limit)),
+    )
+    transforms = _transforms()
+    for row in rows:
+        try:
+            value = str(_secret_store().decrypt_secret(str(row["value_ciphertext"])))
+            derived = transforms.derive(value, str(row["kind"]))
+        except Exception:
+            derived = {"schema_version": transforms.DERIVED_SCHEMA, "transform": "unreadable"}
+        finally:
+            value = ""
+        await conn.execute(
+            "UPDATE discovered_secrets SET derived=$2::jsonb WHERE id=$1 AND derived IS NULL",
+            row["id"], json.dumps(derived, sort_keys=True))
+    return len(rows)
 
 
 async def expire_due(conn: Any) -> dict[str, int]:

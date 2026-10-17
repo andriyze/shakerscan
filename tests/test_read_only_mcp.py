@@ -868,9 +868,49 @@ def test_a_capability_call_without_ids_or_with_fields_at_the_top_level_says_how_
     message = empty.value.message
     assert message.startswith("Missing required tool arguments: capability_name, hunt_id.")
     assert "hunt_id (from shakerscan_hunt_start)" in message and "Example call: " in message
+    # Fields at the top level next to a non-empty input are ambiguous: refused, with the hint.
     with pytest.raises(mcp.MCPError) as flat:
         client.call_tool("shakerscan_hunt_capability", {
             "hunt_id": client.HUNT_ID, "capability_name": "http.request", "method": "GET", "path": "/",
+            "input": {"method": "HEAD", "path": "/x"},
         })
     assert "Unknown tool arguments: method, path. method, path belong inside input, not at the top level." in flat.value.message
     assert client.calls == [] or not any("/capabilities/" in path for _m, path, _p in client.calls)
+
+
+@pytest.mark.parametrize("arguments", [
+    {"method": "GET", "path": "/login"},
+    {"method": "GET", "path": "/login", "input": {}},
+    {"input": '{"method": "GET", "path": "/login"}'},
+])
+def test_b19_the_shapes_models_send_are_taken_for_the_capability_input(arguments):
+    """B19: GLM called http.request without input 16 times, then left MCP for the CLI."""
+    client = ManifestHuntClient()
+    result = client.call_tool("shakerscan_hunt_capability", {
+        "hunt_id": client.HUNT_ID, "capability_name": "http.request", **arguments,
+    })
+    assert result["structuredContent"]["action_id"] == "action-1"
+    assert client.calls[-1][2]["input"] == {"method": "GET", "path": "/login"}
+
+
+def test_b19_lifted_fields_are_still_validated_by_the_capability_schema():
+    client = ManifestHuntClient()
+    with pytest.raises(mcp.MCPError) as refused:
+        client.call_tool("shakerscan_hunt_capability", {
+            "hunt_id": client.HUNT_ID, "capability_name": "http.request", "method": "DELETE", "path": "/",
+        })
+    assert refused.value.code == -32602 and "http.request input" in refused.value.message
+    with pytest.raises(mcp.MCPError) as stray:
+        client.call_tool("shakerscan_hunt_capability", {
+            "hunt_id": client.HUNT_ID, "capability_name": "http.request", "url": "https://x/",
+        })
+    assert "Unknown input fields: url" in stray.value.message
+    assert not any("/capabilities/" in path for _m, path, _p in client.calls)
+
+
+def test_b19_an_empty_input_is_named_as_empty():
+    client = ManifestHuntClient()
+    with pytest.raises(mcp.MCPError) as refused:
+        client.call_tool("shakerscan_hunt_capability", {
+            "hunt_id": client.HUNT_ID, "capability_name": "http.request", "input": {}})
+    assert refused.value.message.startswith("No input was sent (input is missing or {}).")

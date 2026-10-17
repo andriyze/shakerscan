@@ -377,6 +377,21 @@ EXPECTED_CREDENTIAL_USE = {
     "used_at": "2026-10-07T00:00:00+00:00", "secret_values_visible": False,
 }
 
+# A discovered secret the Hunt sent by reference (B17: it was only in the store's use table).
+_SECRET_ID = uuid.UUID("5d2c1e0a-6f3b-4c8e-9a71-2b4d6e8f0a13")
+SECRET_USE_ROW = {
+    "id": uuid.UUID(int=904), "secret_id": _SECRET_ID, "action_id": _USE_ACTION,
+    "destination_host": "app.example.test", "used_at": datetime(2026, 10, 7, tzinfo=timezone.utc),
+    "kind": "password", "label": "DB_PASSWORD", "target_id": _USE_HOME,
+}
+EXPECTED_SECRET_USE = {
+    "schema_version": "hunt-discovered-secret-use/v1", "id": str(uuid.UUID(int=904)),
+    "ref": f"secret://{_SECRET_ID}", "kind": "password", "label": "DB_PASSWORD",
+    "action_id": str(_USE_ACTION), "destination_host": "app.example.test",
+    "found_on": str(_USE_HOME), "used_at": "2026-10-07T00:00:00+00:00",
+    "secret_values_visible": False,
+}
+
 
 def test_hunt_run_service_get_includes_canonical_action_ledger():
     hunt_id = str(uuid.uuid4())
@@ -394,6 +409,9 @@ def test_hunt_run_service_get_includes_canonical_action_ledger():
             if "FROM hunt_credential_uses" in query:
                 assert args[0] == uuid.UUID(hunt_id)
                 return [CREDENTIAL_USE_ROW]
+            if "FROM discovered_secret_uses u" in query:
+                assert args[0] == uuid.UUID(hunt_id)
+                return [SECRET_USE_ROW]
             if "FROM hunt_permission_requests" in query:
                 return []
             assert "FROM hunt_actions WHERE hunt_run_id=$1" in query
@@ -416,6 +434,7 @@ def test_hunt_run_service_get_includes_canonical_action_ledger():
     assert result["actions"][0]["capability_name"] == "collections.inspect"
     # Read-only credential-use ledger: ids, version and source only.
     assert result["credential_uses"] == [EXPECTED_CREDENTIAL_USE]
+    assert result["discovered_secret_uses"] == [EXPECTED_SECRET_USE]
     assert result["outcome_summary"] == {
         "schema_version": "hunt-outcome-summary/v3",
         "capability_calls": 0,
@@ -510,12 +529,16 @@ def test_hunt_record_combines_explicit_trace_debrief_and_redacted_http_archive()
                 return []
             if "FROM hunt_credential_uses" in query:
                 return [CREDENTIAL_USE_ROW]
+            if "FROM discovered_secret_uses u" in query:
+                return [SECRET_USE_ROW]
             raise AssertionError(query)
 
     service = HuntRunService(lambda: _Pool(Connection()))
     record = asyncio.run(service.export_record(hunt_id))
     assert "credential_uses" in record["trace_policy"]["includes"]
     assert record["credential_uses"] == [EXPECTED_CREDENTIAL_USE]
+    assert "discovered_secret_uses" in record["trace_policy"]["includes"]
+    assert record["discovered_secret_uses"] == [EXPECTED_SECRET_USE]
 
     assert record["schema_version"] == "hunt-record/v1"
     assert record["trace_policy"]["kind"] == "explicit_decision_trace"

@@ -103,6 +103,18 @@ def test_letting_hunts_edit_instructions_from_the_cli_takes_a_keypress_and_on_en
     assert helper.index("decide_knowledge(stepup, entry)") < helper.index("send(method, path, payload)")
 
 
+def test_a_finding_decision_from_the_cli_takes_a_keypress_before_any_write():
+    """D3: ``knowledge dismiss|reopen`` reads the finding, asks for the keypress, then decides
+    whether the gateway's step-up applies (the server says), and only then writes."""
+    source = (ROOT / "scripts/v2_cli.py").read_text(encoding="utf-8")
+    body = source[source.index("def _run_knowledge_decision"):]
+    body = body[:body.index("\ndef ", 1)]
+    assert body.index("terminal.require(") < body.index("terminal.key(")
+    writes = [match.start() for match in re.finditer(r'send\("POST"|apply_knowledge_decision\(|decide_knowledge\(', body)]
+    assert writes and body.index("terminal.key(") < min(writes)
+    assert 'approval.instance_kind(send) == "enterprise"' in body
+
+
 def test_no_agent_entry_point_reaches_the_terminal_step_up():
     """The MCP adapter (and the scripts it imports) never call the approval protocol, so an agent
     holding the connection's token can at most begin an approval it cannot finish (the person's

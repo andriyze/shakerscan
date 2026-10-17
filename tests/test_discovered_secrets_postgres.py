@@ -460,3 +460,116 @@ def test_review_fixes_planner_view_promote_once_and_grant_to_an_active_target(mo
         profiles = await conn.fetchval("SELECT count(*) FROM credential_profiles WHERE target_id=$1", owner)
         assert profiles == 1
     run(scenario)
+
+
+def test_a_hunts_record_lists_each_reference_it_sent_and_never_a_reveal_or_value():
+    async def scenario(conn):
+        target = await _target(conn)
+        await store.record_discovered(
+            conn, target_id=target, values=[(SYNTHETIC, "DB_PASSWORD")],
+            source={"kind": "scan_finding", "id": str(uuid4())})
+        ref = (await store.list_for_target(conn, target))[0]["ref"]
+        hunt, action = await _hunt(conn, target)
+        other_hunt, other_action = await _hunt(conn, target)
+        await store.resolve_for_hunt(conn, reference=ref, target_id=target, hunt_run_id=hunt,
+                                     action_id=action, destination_host="app.example.invalid")
+        await store.resolve_for_hunt(conn, reference=ref, target_id=target, hunt_run_id=other_hunt,
+                                     action_id=other_action, destination_host="other.example.invalid")
+        await store.value_for_operator(conn, target_id=target, secret_id=ref.removeprefix("secret://"),
+                                       actor="operator:test", purpose="reveal")
+        uses = await store.read_hunt_uses(conn, hunt)
+        assert [(use["ref"], use["kind"], use["label"], use["action_id"], use["destination_host"])
+                for use in uses] == [(ref, "password", "DB_PASSWORD", str(action), "app.example.invalid")]
+        assert uses[0]["found_on"] == str(target) and uses[0]["secret_values_visible"] is False
+        assert SYNTHETIC not in str(uses)
+    run(scenario)
+
+
+def _jwt_value():
+    import base64
+    import json as _json
+
+    def part(value):
+        return base64.urlsafe_b64encode(_json.dumps(value).encode()).decode().rstrip("=")
+    return f"{part({'alg': 'HS256', 'typ': 'JWT'})}.{part({'sub': 'user-1', 'roles': ['admin']})}.c2lnbmF0dXJl"
+
+
+def test_the_worker_keeps_what_it_read_from_a_value_and_never_the_value():
+    async def scenario(conn):
+        target = await _target(conn)
+        token = _jwt_value()
+        await store.record_discovered(
+            conn, target_id=target, values=[(token, "session_token")],
+            source={"kind": "hunt_action", "id": str(uuid4())})
+        (listed,) = await store.list_for_target(conn, target)
+        derived = listed["derived"]
+        assert derived["transform"] == "jwt" and derived["alg"] == "HS256"
+        assert derived["claim_names"] == ["roles", "sub"] and derived["roles"] == ["admin"]
+        assert token not in str(listed) and "c2lnbmF0dXJl" not in str(listed)
+        assert store.planner_view(listed, target)["derived"] == derived
+        stored = await conn.fetchval("SELECT derived::text FROM discovered_secrets WHERE target_id=$1", target)
+        assert token not in stored and "c2lnbmF0dXJl" not in stored
+    run(scenario)
+
+
+def test_rows_stored_before_derivation_are_filled_in_by_the_sweeper_or_a_sighting():
+    async def scenario(conn):
+        target = await _target(conn)
+        await store.record_discovered(
+            conn, target_id=target, values=[(_jwt_value(), "a"), (SYNTHETIC, "DB_PASSWORD")],
+            source={"kind": "hunt_action", "id": str(uuid4())})
+        await conn.execute("UPDATE discovered_secrets SET derived=NULL WHERE target_id=$1", target)
+        assert {item["derived"] for item in await store.list_for_target(conn, target)} == {None}
+        # A sighting fills it in; an existing derivation is never replaced by a sighting.
+        await store.record_discovered(conn, target_id=target, values=[(SYNTHETIC, "")],
+                                      source={"kind": "retest", "id": "r"})
+        by_label = {item["label"]: item["derived"] for item in await store.list_for_target(conn, target)}
+        assert by_label["DB_PASSWORD"]["transform"] == "none" and by_label["a"] is None
+        assert await store.derive_missing(conn) >= 1
+        by_label = {item["label"]: item["derived"] for item in await store.list_for_target(conn, target)}
+        assert by_label["a"]["transform"] == "jwt"
+        # An unreadable row is marked, not retried forever.
+        await conn.execute(
+            "UPDATE discovered_secrets SET derived=NULL, value_ciphertext='enc:fernet:broken' WHERE target_id=$1 AND label='a'",
+            target)
+        await store.derive_missing(conn)
+        by_label = {item["label"]: item["derived"] for item in await store.list_for_target(conn, target)}
+        assert by_label["a"]["transform"] == "unreadable"
+    run(scenario)
+
+
+def test_the_startup_schema_takes_no_lock_on_an_up_to_date_database():
+    """DISCOVERED_SECRETS_SCHEMA_SQL runs at every start under the startup lock: on an up-to-date
+    database every statement is a catalog check, so it runs while each table is locked as a
+    concurrent index build locks it."""
+    tables = ("discovered_secrets", "discovered_secret_uses", "discovered_secret_grants")
+
+    async def check():
+        other = await asyncpg.connect(DSN)
+        try:
+            async with other.transaction():
+                for table in tables:
+                    await other.execute(f"LOCK TABLE {table} IN SHARE UPDATE EXCLUSIVE MODE")
+                conn = await asyncpg.connect(DSN)
+                try:
+                    async with conn.transaction():
+                        await conn.execute("SET LOCAL lock_timeout = '2s'")
+                        await conn.execute(store.DISCOVERED_SECRETS_SCHEMA_SQL)
+                finally:
+                    await conn.close()
+        finally:
+            await other.close()
+    asyncio.run(check())
+
+
+def test_a_database_from_before_the_derived_column_gains_it_without_a_rewrite():
+    async def scenario(conn):
+        target = await _target(conn)
+        await store.record_discovered(conn, target_id=target, values=[(SYNTHETIC, "DB_PASSWORD")],
+                                      source={"kind": "hunt_action", "id": str(uuid4())})
+        await conn.execute("ALTER TABLE discovered_secrets DROP COLUMN derived")
+        await conn.execute(store.DISCOVERED_SECRETS_SCHEMA_SQL)
+        assert await conn.fetchval(
+            "SELECT derived FROM discovered_secrets WHERE target_id=$1", target) is None
+        assert (await store.list_for_target(conn, target))[0]["derived"] is None
+    run(scenario)
