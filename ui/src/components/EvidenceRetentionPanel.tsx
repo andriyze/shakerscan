@@ -6,12 +6,11 @@ import {
   evidenceExportBundleUrl,
   getEvidenceRetentionExecutions,
   getEvidenceExportManifest,
-  getTargets,
+  getTarget,
   previewScopeReceipt,
   sweepEvidenceRetention,
   type EvidenceExportManifest,
   type EvidenceRetentionSweepResult,
-  type Target,
 } from '@/lib/api'
 import {
   buildEvidenceRetentionSweepCriteria,
@@ -20,7 +19,12 @@ import {
   evidenceRetentionSweepRecoveryState,
 } from '@/lib/evidenceRetention'
 import { Button, ConfirmDialog, RetentionClassBadge, SectionCard, useToast } from '@/components/ui'
-import { boundedTargetDisplay } from '@/lib/targetChoices'
+import { TargetSearchCombobox } from '@/components/targets/TargetSearchCombobox'
+import { boundedDisplayText, boundedTargetDisplay } from '@/lib/targetChoices'
+import type { TargetAsset } from '@/lib/targetAssetApi'
+
+/** What the panel needs of a target: its URL (scope and approval) and whether it is active. */
+type KnownTarget = { id: string; url: string; is_active?: boolean }
 
 const RETENTION_CLASSES = ['standard', 'short', 'sensitive', 'audit', 'legal_hold']
 
@@ -50,9 +54,21 @@ export default function EvidenceRetentionPanel({
 
   // Retention sweep state — starts in dry-run (preview) mode.
   const [olderThanDays, setOlderThanDays] = useState('')
-  const [targets, setTargets] = useState<Target[]>([])
+  // Targets are searched on the server (one bounded page per query); the targets an intent or a
+  // preview names are read one by one. The panel used to load the first 500 targets.
+  const [knownTargets, setKnownTargets] = useState<Map<string, KnownTarget>>(() => new Map())
   const [targetId, setTargetId] = useState('')
   const [targetsLoading, setTargetsLoading] = useState(false)
+  const rememberTarget = useCallback((target: KnownTarget | TargetAsset | undefined) => {
+    if (!target?.id || !target.url) return
+    setKnownTargets((current) => {
+      const existing = current.get(target.id)
+      if (existing && existing.url === target.url && existing.is_active === target.is_active) return current
+      const next = new Map(current)
+      next.set(target.id, { id: target.id, url: target.url, is_active: target.is_active })
+      return next
+    })
+  }, [])
   const [sweepPreview, setSweepPreview] = useState<EvidenceRetentionSweepResult | null>(null)
   const [sweepPreviewCriteriaKey, setSweepPreviewCriteriaKey] = useState<string | null>(null)
   const [sweepLoading, setSweepLoading] = useState(false)
@@ -110,12 +126,8 @@ export default function EvidenceRetentionPanel({
   useEffect(() => {
     if (!globalSweepAvailable) return
     setTargetsLoading(true)
-    Promise.all([
-      getTargets({ includeInactive: true, limit: 500 }),
-      getEvidenceRetentionExecutions({ limit: 20 }),
-    ])
-      .then(([targetResponse, executionResponse]) => {
-        setTargets(targetResponse.targets || [])
+    getEvidenceRetentionExecutions({ limit: 20 })
+      .then((executionResponse) => {
         setUnfinishedExecutions(executionResponse.executions || [])
         const unfinished = executionResponse.executions?.[0]
         if (unfinished) restoreUnfinishedExecution(unfinished)
@@ -123,6 +135,24 @@ export default function EvidenceRetentionPanel({
       .catch((err) => toast.error(err instanceof Error ? err.message : 'Failed to load evidence retention controls'))
       .finally(() => setTargetsLoading(false))
   }, [globalSweepAvailable, restoreUnfinishedExecution, toast])
+
+  // The targets the unfinished intents and the active preview name: read each one once.
+  const referencedTargetIds = [
+    ...unfinishedExecutions.map((item) => item.preview_criteria?.target_id),
+    sweepPreview?.preview_criteria?.target_id,
+    targetId,
+  ].filter((id): id is string => Boolean(id))
+  const missingTargetKey = [...new Set(referencedTargetIds.filter((id) => !knownTargets.has(id)))].sort().join(',')
+  useEffect(() => {
+    if (!missingTargetKey) return
+    let cancelled = false
+    for (const id of missingTargetKey.split(',')) {
+      getTarget(id)
+        .then((target) => { if (!cancelled) rememberTarget(target) })
+        .catch(() => undefined)
+    }
+    return () => { cancelled = true }
+  }, [missingTargetKey, rememberTarget])
 
   useEffect(() => {
     sweepRequestGenerationRef.current += 1
@@ -213,7 +243,7 @@ export default function EvidenceRetentionPanel({
     const previewHash = preview?.preview_hash
     const previewExpiresAt = preview?.preview_expires_at
     const previewTargetId = preview?.preview_criteria?.target_id
-    const previewTarget = targets.find((target) => target.id === previewTargetId)
+    const previewTarget = previewTargetId ? knownTargets.get(previewTargetId) : undefined
     if (!previewId || !previewHash || !previewExpiresAt || !previewTargetId || !previewTarget) {
       toast.error('The retention preview is stale or expired. Run a new dry-run preview.')
       setConfirmExecute(false)
@@ -295,9 +325,9 @@ export default function EvidenceRetentionPanel({
   }
 
   const boundCriteria = activeSweepPreview?.preview_criteria
-  const boundTarget = targets.find((target) => target.id === boundCriteria?.target_id)
+  const boundTarget = boundCriteria?.target_id ? knownTargets.get(boundCriteria.target_id) : undefined
   const boundCriteriaDescription = boundCriteria
-    ? `${boundTarget?.url || boundCriteria.target_id}: ${boundCriteria.retention_class || 'all retention classes'}, ${
+    ? `${boundTarget ? boundedTargetDisplay(boundTarget) : boundedDisplayText(boundCriteria.target_id)}: ${boundCriteria.retention_class || 'all retention classes'}, ${
         boundCriteria.older_than_days == null
           ? 'policy age defaults'
           : `at least ${boundCriteria.older_than_days} days old`
@@ -374,11 +404,11 @@ export default function EvidenceRetentionPanel({
                 >
                   <option value="">Choose an unfinished exact deletion…</option>
                   {unfinishedExecutions.map((item) => {
-                    const target = targets.find((candidate) => candidate.id === item.preview_criteria?.target_id)
+                    const target = item.preview_criteria?.target_id ? knownTargets.get(item.preview_criteria.target_id) : undefined
                     const started = item.execution_started_at ? new Date(item.execution_started_at).toLocaleString() : 'start time unavailable'
                     return (
                       <option key={item.preview_id || started} value={item.preview_id || ''}>
-                        {target?.url || item.preview_criteria?.target_id || 'Unknown target'} — {item.candidate_count} object(s) — {started}
+                        {target ? boundedTargetDisplay(target, { stripScheme: true }) : boundedDisplayText(item.preview_criteria?.target_id || 'Unknown target')} — {item.candidate_count} object(s) — {started}
                       </option>
                     )
                   })}
@@ -391,24 +421,19 @@ export default function EvidenceRetentionPanel({
             <div className="mt-3 flex flex-wrap items-end gap-3">
               <div>
                 <label htmlFor="ev-sweep-target" className="mb-1 block text-xs font-medium text-gray-400">Target</label>
-                <select
+<TargetSearchCombobox
                   id="ev-sweep-target"
                   value={targetId}
-                  onChange={(e) => {
-                    setTargetId(e.target.value)
+                  onChange={(value) => {
+                    setTargetId(value)
                     invalidateSweepPreview()
                   }}
+                  includeInactive
+                  onSelectedAsset={rememberTarget}
                   disabled={targetsLoading || hasExecutingIntent}
-                  className="max-w-xs rounded-lg border border-gray-700 bg-gray-950 px-3 py-2 text-sm text-white focus:border-blue-500 focus:outline-hidden disabled:opacity-60"
-                >
-                  <option value="">{targetsLoading ? 'Loading targets…' : 'Select a target…'}</option>
-                  {targets.map((target) => (
-                    <option key={target.id} value={target.id}>
-                      {boundedTargetDisplay(target, { stripScheme: true })}
-                      {target.is_active ? '' : ' (inactive)'}
-                    </option>
-                  ))}
-                </select>
+                  placeholder={targetsLoading ? 'Loading targets…' : 'Select a target…'}
+                  aria-label="Retention sweep target"
+                />
               </div>
               <div>
                 <label htmlFor="ev-older-than" className="mb-1 block text-xs font-medium text-gray-400">Older than (days, optional)</label>

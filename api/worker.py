@@ -116,6 +116,7 @@ from capabilities.tls import inspect_tls_binding
 from capabilities.replay import ReplayExecutionAdapter, worker_hunt_replay_budget
 from hunt.service_binding import registered_hunt_locator
 from scan.finding_secrets import scrub_findings, scrub_report_secrets
+from scan.live_log import append_scan_log_lines
 from hunt.verification_budget import record_budget_shortage
 from capabilities.request_mutation import RequestMutationVerificationAdapter
 from hunt.action_dispatcher import (
@@ -7514,11 +7515,8 @@ def _append_scan_log_line(scan_id: str, line: str) -> None:
     if not normalized.startswith("[scan]"):
         return
     try:
-        redis_client = get_redis()
-        key = f"scan:{scan_id}:logs"
-        redis_client.rpush(key, normalized)
-        redis_client.ltrim(key, -SCAN_LOG_TAIL, -1)
-        redis_client.expire(key, SCAN_LOG_TTL_SECONDS)
+        append_scan_log_lines(get_redis(), scan_id, [normalized], tail=SCAN_LOG_TAIL,
+                              ttl_seconds=SCAN_LOG_TTL_SECONDS)
     except Exception:
         pass
 

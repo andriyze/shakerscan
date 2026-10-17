@@ -8,7 +8,7 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const detail = readFileSync(path.join(root, 'src/app/scans/[id]/page.tsx'), 'utf8')
 
 test('scan details load log history after a scan reaches a terminal state', () => {
-  assert.match(detail, /const logData = await getScanLogs\(scanId, 500, signal\)/)
+  assert.match(detail, /let logData = await getScanLogs\(scanId, 500, signal, logDeltaRef\.current\.nextSeq\)/)
   // A terminal scan (opened fresh or just finished) still gets its log read.
   assert.match(detail, /logForceRef\.current = true\s*\n\s*logsPoll\.refresh\(\)/)
   // A new scan or retry resets the log loop during render, before usePoll's first tick reads it.

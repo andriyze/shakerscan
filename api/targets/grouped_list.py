@@ -18,8 +18,10 @@ from typing import Any, Callable, Mapping, Sequence
 
 try:
     from list_contract import ListPlan, ListSpec, Page, SortKey, SqlParams, count_total, snapshot_time
+    from target_cohort_sql import cohort_filter_sql, fill_url_classes
 except ModuleNotFoundError:  # package import layout
     from ..list_contract import ListPlan, ListSpec, Page, SortKey, SqlParams, count_total, snapshot_time
+    from ..target_cohort_sql import cohort_filter_sql, fill_url_classes
 
 DEFAULT_MEMBER_LIMIT = 20
 MAX_MEMBER_LIMIT = 200
@@ -36,11 +38,19 @@ _GROUP_FIELDS = {
     "earliest_created": "g.earliest_created",
     "root_id": "g.root_id",
 }
+#: Sorts that need every group's ASM rollup (computed only when one of them is asked for).
+ASM_SORTS = frozenset({"asm_coverage", "asm_untested"})
+#: Targets ``asm_summary`` names as having the most untested endpoints.
+SUMMARY_TOP_TARGETS = 5
 
 
 def _spec(descending: bool) -> ListSpec:
     # Legacy sorts a missing score last in both directions; the sort expression must be NOT NULL.
     score = "COALESCE(g.best_score, -1)" if descending else "COALESCE(g.best_score, 101)"
+    # Groups without an endpoint inventory sort last either way (ratio 2 ascending, -1 descending).
+    no_inventory = "-1.0" if descending else "2.0"
+    asm_ratio = (f"(CASE WHEN g.asm_total > 0 THEN g.asm_tested::float8 / g.asm_total "
+                 f"ELSE {no_inventory} END)")
     return ListSpec(
         scope="targets.grouped",
         sorts={
@@ -49,6 +59,10 @@ def _spec(descending: bool) -> ListSpec:
             "active_findings_count": SortKey("g.total_findings", "int"),
             "last_score": SortKey(score, "int"),
             "created_at": SortKey(f"COALESCE(g.earliest_created, {_EARLIEST})", "datetime"),
+            # Least covered first (ascending): the group's tested share of its endpoint inventory.
+            "asm_coverage": SortKey(asm_ratio, "float"),
+            # Most untested endpoints first with "-asm_untested".
+            "asm_untested": SortKey("(g.asm_total - g.asm_tested)", "int"),
         },
         default_sort="root_domain",
         fields=_GROUP_FIELDS,
@@ -63,8 +77,9 @@ GROUPED_DESC = _spec(True)
 
 def filter_clauses(params: SqlParams, *, include_inactive: bool, search: str | None,
                    discovery_source: str | None, grade: str | None,
-                   has_findings: bool | None) -> list[str]:
-    """The legacy grouped filters, unchanged in meaning."""
+                   has_findings: bool | None, cohorts: Sequence[str] | None = None) -> list[str]:
+    """The legacy grouped filters, unchanged in meaning, plus the list/v1 cohort filter (the
+    target's own cohort, as its row shows it; ``target_cohort_sql.py``)."""
     where: list[str] = []
     if not include_inactive:
         where.append("t.is_active = true")
@@ -81,11 +96,33 @@ def filter_clauses(params: SqlParams, *, include_inactive: bool, search: str | N
         where.append(f"UPPER(t.last_grade) = UPPER({params.add(grade)})")
     if has_findings is not None:
         where.append("t.active_findings_count > 0" if has_findings else "t.active_findings_count = 0")
+    if cohorts:
+        where.append(cohort_filter_sql("t", cohorts, params))
     return where or ["true"]
 
 
-def groups_sql(where: Sequence[str]) -> str:
-    """One row per domain group over the filtered targets (the legacy group values)."""
+def groups_sql(where: Sequence[str], *, with_asm: bool = False) -> str:
+    """One row per domain group over the filtered targets (the legacy group values).
+
+    ``with_asm`` adds ``asm_total``/``asm_tested``: the group's endpoint inventory over every
+    member (the same values as the group's ``asm_coverage`` rollup), for the ASM sorts and the
+    ``has_inventory`` filter. Without it both are 0 and cost nothing.
+    """
+    asm_cte = ""
+    asm_join = ""
+    asm_columns = "0::bigint AS asm_total, 0::bigint AS asm_tested"
+    if with_asm:
+        asm_cte = f""",
+        coverage AS (
+            SELECT f.group_key, SUM(p.total)::bigint AS asm_total,
+                   SUM(CASE WHEN p.attempted > 0 THEN p.attempt_completed
+                            ELSE p.status_tested END)::bigint AS asm_tested
+            FROM ({asm_coverage_sql("SELECT id FROM filtered")}) p
+            JOIN filtered f ON f.id = p.target_id
+            GROUP BY f.group_key
+        )"""
+        asm_join = " LEFT JOIN coverage cv ON cv.group_key = m.group_key"
+        asm_columns = "COALESCE(cv.asm_total, 0)::bigint AS asm_total, COALESCE(cv.asm_tested, 0)::bigint AS asm_tested"
     return f"""(
         WITH filtered AS (
             SELECT t.id, t.url, t.is_root, t.active_findings_count, t.last_score, t.last_scanned_at,
@@ -104,15 +141,15 @@ def groups_sql(where: Sequence[str]) -> str:
                    COALESCE(SUM(active_findings_count) FILTER (WHERE NOT is_root), 0) AS sub_findings,
                    MIN(created_at) FILTER (WHERE NOT is_root) AS sub_earliest
             FROM filtered GROUP BY group_key
-        )
-        SELECT m.group_key AS root_domain, r.id AS root_id,
+        ){asm_cte}
+        SELECT m.group_key AS root_domain, r.id AS root_id, {asm_columns},
                m.subdomain_count::bigint AS subdomain_count,
                (m.subdomain_count + CASE WHEN r.id IS NULL THEN 0 ELSE 1 END)::bigint AS total_count,
                (COALESCE(r.active_findings_count, 0) + m.sub_findings)::bigint AS total_findings,
                r.last_score AS best_score,
                r.last_scanned_at AS latest_scan,
                CASE WHEN r.id IS NOT NULL THEN r.created_at ELSE m.sub_earliest END AS earliest_created
-        FROM members m LEFT JOIN roots r ON r.group_key = m.group_key
+        FROM members m LEFT JOIN roots r ON r.group_key = m.group_key{asm_join}
     ) g"""
 
 
@@ -246,6 +283,47 @@ def plan_for(page: Page, filters: Mapping[str, Any]) -> ListPlan:
     return (GROUPED_DESC if descending else GROUPED_ASC).plan(page, filters=filters)
 
 
+async def asm_summary(conn: Any, where: Sequence[str], values: Sequence[Any]) -> dict[str, Any]:
+    """Endpoint coverage over every filtered target (not one page): totals, how many targets have
+    an inventory, and the targets with the most untested endpoints. The same per-target values as
+    each row's ``asm_coverage`` (``tested`` is the ledger's completed count once attempts exist)."""
+    per_target = f"""
+        WITH filtered AS (SELECT t.id, LEFT(t.url, 2049) AS url, LEFT(t.root_domain, 253) AS root_domain
+                          FROM targets t WHERE {' AND '.join(where)}),
+        p AS (
+            SELECT c.target_id, c.total,
+                   (CASE WHEN c.attempted > 0 THEN c.attempt_completed ELSE c.status_tested END) AS tested
+            FROM ({asm_coverage_sql("SELECT id FROM filtered")}) c
+        )"""
+    totals = await conn.fetchrow(f"""{per_target}
+        SELECT COALESCE(SUM(total), 0)::bigint AS total, COALESCE(SUM(tested), 0)::bigint AS tested,
+               COUNT(*) FILTER (WHERE total > 0)::bigint AS targets
+        FROM p""", *values)
+    top = await conn.fetch(f"""{per_target}
+        SELECT p.target_id, f.url, f.root_domain, p.total, p.tested
+        FROM p JOIN filtered f ON f.id = p.target_id
+        WHERE p.total > 0
+        ORDER BY (p.total - p.tested) DESC, p.target_id
+        LIMIT {SUMMARY_TOP_TARGETS}""", *values)
+    total = int(totals["total"] or 0) if totals else 0
+    tested = min(total, int(totals["tested"] or 0)) if totals else 0
+    return {
+        "total": total,
+        "tested": tested,
+        "untested": max(0, total - tested),
+        "coverage": round(tested / total, 4) if total else 0.0,
+        "targets_with_inventory": int(totals["targets"] or 0) if totals else 0,
+        "most_untested": [
+            {
+                "id": str(row["target_id"]), "url": row["url"], "root_domain": row["root_domain"],
+                "total": int(row["total"] or 0), "tested": min(int(row["total"] or 0), int(row["tested"] or 0)),
+                "untested": max(0, int(row["total"] or 0) - int(row["tested"] or 0)),
+            }
+            for row in top
+        ],
+    }
+
+
 async def grouped_page(
     conn: Any,
     page: Page,
@@ -254,18 +332,28 @@ async def grouped_page(
     member_limit: int,
     member_columns: str,
     public_row: Callable[[Any], dict[str, Any]],
+    cohorts: Sequence[str] | None = None,
+    has_inventory: bool = False,
+    summary: bool = False,
 ) -> dict[str, Any]:
-    """One list/v1 page of domain groups. ``member_columns`` is the legacy target projection."""
+    """One list/v1 page of domain groups. ``member_columns`` is the legacy target projection.
+
+    ``cohorts`` keeps targets of those cohorts (groups then hold only those members);
+    ``has_inventory`` keeps groups with an endpoint inventory; ``summary`` adds ``asm_summary``
+    over every filtered target."""
     plan = plan_for(page, filters)
+    if cohorts:
+        await fill_url_classes(conn)
     params = SqlParams()
     where = filter_clauses(
         params, include_inactive=bool(filters.get("include_inactive")), search=filters.get("search"),
         discovery_source=filters.get("discovery_source"), grade=filters.get("grade"),
-        has_findings=filters.get("has_findings"),
+        has_findings=filters.get("has_findings"), cohorts=cohorts,
     )
     filter_values = params.snapshot()
-    groups_from = groups_sql(where)
-    page_where = plan.keyset_clauses(params)
+    groups_from = groups_sql(where, with_asm=has_inventory or plan.sort_name in ASM_SORTS)
+    group_where = ["g.asm_total > 0"] if has_inventory else []
+    page_where = group_where + plan.keyset_clauses(params)
     generated_at = await snapshot_time(conn)  # before the page query
     rows = await conn.fetch(
         f"SELECT {plan.select_list} FROM {groups_from}"
@@ -273,7 +361,9 @@ async def grouped_page(
         f"ORDER BY {plan.order_by} LIMIT {plan.fetch_limit}",
         *params.values,
     )
-    total, total_kind = await count_total(conn, page.count, from_sql=groups_from, values=filter_values)
+    total, total_kind = await count_total(conn, page.count, from_sql=groups_from, where=group_where,
+                                          values=filter_values)
+    coverage_summary = await asm_summary(conn, where, filter_values) if summary else None
     page_rows = list(rows[: page.limit])
     keys = [row["root_domain"] for row in page_rows]
     root_ids = [row["root_id"] for row in page_rows if row["root_id"] is not None]
@@ -355,13 +445,18 @@ async def grouped_page(
         }
         return group
 
-    return plan.envelope(rows, total=total, total_kind=total_kind, transform=group_item,
+    body = plan.envelope(rows, total=total, total_kind=total_kind, transform=group_item,
                          generated_at=generated_at)
+    if coverage_summary is not None:
+        body["asm_summary"] = coverage_summary
+    return body
 
 
 __all__ = [
     "ASM_COVERAGE_SQL",
+    "ASM_SORTS",
     "asm_coverage_sql",
+    "asm_summary",
     "DEFAULT_MEMBER_LIMIT",
     "GROUPED_ASC",
     "GROUPED_DESC",

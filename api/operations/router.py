@@ -54,6 +54,8 @@ try:
         DiscoveryRefused, admit_discovery, discovery_domain, requester,
     )
     from operations import dashboard_data
+    from list_contract import SqlParams
+    from target_cohort_sql import COHORT_VIEW_PATTERN, cohort_filter_sql, fill_url_classes, row_cohorts, view_cohorts
 except ModuleNotFoundError:  # package import in host-side tests
     from ..ai_control_requirements import AI_CONTROL_REQUIREMENTS
     from ..api_utils import (
@@ -71,6 +73,8 @@ except ModuleNotFoundError:  # package import in host-side tests
     from ..serialization import _decode_json_value, _json_object, _str_list, row_to_dict
     from ..request_guards import reraise_statement_timeout
     from . import dashboard_data
+    from ..list_contract import SqlParams
+    from ..target_cohort_sql import COHORT_VIEW_PATTERN, cohort_filter_sql, fill_url_classes, row_cohorts, view_cohorts
     from .discovery import (
         DiscoveryRefused, admit_discovery, discovery_domain, requester,
     )
@@ -156,6 +160,10 @@ async def get_cli_v1_scan(
     return result
 
 
+#: How much deeper than ``limit`` a cohort-scoped timeline reads to fill its page.
+TIMELINE_COHORT_MAX_DEPTH = 16
+
+
 @router.get("/timeline")
 async def mission_timeline(
     limit: int = Query(50, ge=1, le=200),
@@ -166,6 +174,10 @@ async def mission_timeline(
     include_evidence: bool = Query(True, description="Include evidence-instance binding events."),
     include_refuters: bool = Query(True, description="Include refuter review/signal events."),
     include_exports: bool = Query(True, description="Include durable content-free export events."),
+    cohort: Optional[str] = Query(
+        None, pattern=COHORT_VIEW_PATTERN,
+        description="Only events whose target is in this cohort or cohort view; events with no target stay.",
+    ),
 ):
     """Read-only cross-product mission timeline.
 
@@ -185,151 +197,204 @@ async def mission_timeline(
     include_refuters = bool(_direct_query_value(include_refuters))
     include_exports = bool(_direct_query_value(include_exports))
     hidden_roles = _hidden_scan_roles_for_list()
+    cohort = _direct_query_value(cohort)
+    cohorts = view_cohorts(cohort if isinstance(cohort, str) else None)
 
     async with _pool().acquire() as conn:
-        cr_rows = await conn.fetch(
-            """
-            SELECT cr.*,
-                   s.status AS scan_status,
-                   s.target_url AS scan_target_url,
-                   s.target_id AS scan_target_id,
-                   ca.id AS campaign_action_id,
-                   ca.mission_campaign_id AS mission_campaign_id
-            FROM command_results cr
-            LEFT JOIN scans s ON cr.scan_id = s.id
-            LEFT JOIN LATERAL (
-                SELECT id, mission_campaign_id
-                FROM campaign_actions
-                WHERE command_result_id = cr.id
-                ORDER BY updated_at DESC NULLS LAST, created_at DESC
-                LIMIT 1
-            ) ca ON true
-            WHERE ($2::uuid IS NULL OR s.target_id = $2)
-            ORDER BY cr.created_at DESC
-            LIMIT $1
-            """,
-            limit,
-            target_uuid,
-        )
-        events = [_command_result_timeline_event(row) for row in cr_rows]
+        # A cohort narrows each source in SQL to rows of the cohort's targets (or rows without a
+        # target); every event is then labelled with its exact cohort and filtered on the label.
+        cohort_ids: list[Any] | None = None
+        if cohorts:
+            await fill_url_classes(conn)
+            cohort_params = SqlParams()
+            cohort_ids = [row["id"] for row in await conn.fetch(
+                f"SELECT t.id FROM targets t WHERE {cohort_filter_sql('t', cohorts, cohort_params)}",
+                *cohort_params.values,
+            )]
 
-        if include_campaign_actions:
-            action_rows = await conn.fetch(
+        async def collect(limit: int) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+            cr_rows = await conn.fetch(
                 """
-                SELECT ca.*,
+                SELECT cr.*,
                        s.status AS scan_status,
                        s.target_url AS scan_target_url,
-                       s.target_id AS scan_target_id
-                FROM campaign_actions ca
-                LEFT JOIN scans s ON ca.scan_id = s.id
-                WHERE ca.command_result_id IS NULL
-                  AND ($2::uuid IS NULL OR ca.target_id = $2 OR s.target_id = $2)
-                ORDER BY ca.created_at DESC
-                LIMIT $1
-                """,
-                limit,
-                target_uuid,
-            )
-            events.extend(_campaign_action_timeline_event(row) for row in action_rows)
-
-        if include_scans:
-            scan_rows = await conn.fetch(
-                """
-                SELECT s.id, s.status, s.target_url, s.target_id, s.scan_type,
-                       s.run_kind, s.grade, s.findings_count, s.created_at
-                FROM scans s
-                WHERE (s.scan_role IS NULL OR s.scan_role <> ALL($3::text[]))
-                  AND NOT EXISTS (SELECT 1 FROM command_results cr WHERE cr.scan_id = s.id)
-                  AND ($2::uuid IS NULL OR s.target_id = $2)
-                ORDER BY s.created_at DESC
-                LIMIT $1
-                """,
-                limit,
-                target_uuid,
-                hidden_roles,
-            )
-            events.extend(_scan_timeline_event(row) for row in scan_rows)
-
-        if include_evidence:
-            evidence_rows = await conn.fetch(
-                """
-                SELECT ei.*,
-                       ca.campaign_id AS campaign_id,
                        s.target_id AS scan_target_id,
-                       s.target_url AS scan_target_url,
-                       f.target_id AS finding_target_id
-                FROM evidence_instances ei
-                LEFT JOIN campaign_actions ca ON ei.campaign_action_id = ca.id
-                LEFT JOIN scans s ON ei.scan_id = s.id
-                LEFT JOIN findings f ON ei.finding_id = f.id
-                WHERE ($2::uuid IS NULL OR ei.target_id = $2 OR s.target_id = $2 OR f.target_id = $2)
-                ORDER BY ei.created_at DESC
+                       ca.id AS campaign_action_id,
+                       ca.mission_campaign_id AS mission_campaign_id
+                FROM command_results cr
+                LEFT JOIN scans s ON cr.scan_id = s.id
+                LEFT JOIN LATERAL (
+                    SELECT id, mission_campaign_id
+                    FROM campaign_actions
+                    WHERE command_result_id = cr.id
+                    ORDER BY updated_at DESC NULLS LAST, created_at DESC
+                    LIMIT 1
+                ) ca ON true
+                WHERE ($2::uuid IS NULL OR s.target_id = $2)
+                  AND ($3::uuid[] IS NULL OR s.target_id IS NULL OR s.target_id = ANY($3))
+                ORDER BY cr.created_at DESC
                 LIMIT $1
                 """,
                 limit,
                 target_uuid,
+                cohort_ids,
             )
-            events.extend(_evidence_instance_timeline_event(row) for row in evidence_rows)
+            events = [_command_result_timeline_event(row) for row in cr_rows]
 
-        if include_refuters:
-            refuter_rows = await conn.fetch(
-                """
-                SELECT rr.*,
-                       f.target_id AS finding_target_id,
-                       h.target_id AS hypothesis_target_id
-                FROM refuter_reviews rr
-                LEFT JOIN findings f ON rr.finding_id = f.id
-                LEFT JOIN hypotheses h ON rr.hypothesis_id = h.id
-                WHERE ($2::uuid IS NULL OR rr.target_id = $2 OR f.target_id = $2 OR h.target_id = $2)
-                ORDER BY rr.created_at DESC
-                LIMIT $1
-                """,
-                limit,
-                target_uuid,
-            )
-            events.extend(_refuter_review_timeline_event(row) for row in refuter_rows)
+            if include_campaign_actions:
+                action_rows = await conn.fetch(
+                    """
+                    SELECT ca.*,
+                           s.status AS scan_status,
+                           s.target_url AS scan_target_url,
+                           s.target_id AS scan_target_id
+                    FROM campaign_actions ca
+                    LEFT JOIN scans s ON ca.scan_id = s.id
+                    WHERE ca.command_result_id IS NULL
+                      AND ($2::uuid IS NULL OR ca.target_id = $2 OR s.target_id = $2)
+                      AND ($3::uuid[] IS NULL OR COALESCE(ca.target_id, s.target_id) IS NULL
+                           OR COALESCE(ca.target_id, s.target_id) = ANY($3))
+                    ORDER BY ca.created_at DESC
+                    LIMIT $1
+                    """,
+                    limit,
+                    target_uuid,
+                    cohort_ids,
+                )
+                events.extend(_campaign_action_timeline_event(row) for row in action_rows)
 
-        if include_exports:
-            export_rows = await conn.fetch(
-                """
-                SELECT ee.*,
-                       s.target_id AS scan_target_id,
-                       s.target_url AS scan_target_url,
-                       f.target_id AS finding_target_id
-                FROM export_events ee
-                LEFT JOIN scans s ON ee.scan_id = s.id
-                LEFT JOIN findings f ON ee.finding_id = f.id
-                WHERE ($2::uuid IS NULL OR ee.target_id = $2 OR s.target_id = $2 OR f.target_id = $2)
-                ORDER BY ee.created_at DESC
-                LIMIT $1
-                """,
-                limit,
-                target_uuid,
-            )
-            events.extend(_export_event_timeline_event(row) for row in export_rows)
+            if include_scans:
+                scan_rows = await conn.fetch(
+                    """
+                    SELECT s.id, s.status, s.target_url, s.target_id, s.scan_type,
+                           s.run_kind, s.grade, s.findings_count, s.created_at
+                    FROM scans s
+                    WHERE (s.scan_role IS NULL OR s.scan_role <> ALL($3::text[]))
+                      AND NOT EXISTS (SELECT 1 FROM command_results cr WHERE cr.scan_id = s.id)
+                      AND ($2::uuid IS NULL OR s.target_id = $2)
+                      AND ($4::uuid[] IS NULL OR s.target_id IS NULL OR s.target_id = ANY($4))
+                    ORDER BY s.created_at DESC
+                    LIMIT $1
+                    """,
+                    limit,
+                    target_uuid,
+                    hidden_roles,
+                    cohort_ids,
+                )
+                events.extend(_scan_timeline_event(row) for row in scan_rows)
 
-        upcoming: list[dict[str, Any]] = []
-        if include_schedules:
-            schedule_rows = await conn.fetch(
-                """
-                SELECT sc.id, sc.name, sc.target_id, t.url AS target_url,
-                       sc.frequency, sc.day_of_week, sc.time_of_day, sc.timezone,
-                       sc.jitter_minutes, sc.schedule_kind, sc.scan_type,
-                       sc.next_run_at, sc.last_run_at
-                FROM schedules sc
-                LEFT JOIN targets t ON sc.target_id = t.id
-                WHERE sc.is_active = true AND sc.next_run_at IS NOT NULL
-                  AND ($2::uuid IS NULL OR sc.target_id = $2)
-                ORDER BY sc.next_run_at ASC
-                LIMIT $1
-                """,
-                limit,
-                target_uuid,
-            )
-            upcoming = [_schedule_timeline_event(row) for row in schedule_rows]
+            if include_evidence:
+                evidence_rows = await conn.fetch(
+                    """
+                    SELECT ei.*,
+                           ca.campaign_id AS campaign_id,
+                           s.target_id AS scan_target_id,
+                           s.target_url AS scan_target_url,
+                           f.target_id AS finding_target_id
+                    FROM evidence_instances ei
+                    LEFT JOIN campaign_actions ca ON ei.campaign_action_id = ca.id
+                    LEFT JOIN scans s ON ei.scan_id = s.id
+                    LEFT JOIN findings f ON ei.finding_id = f.id
+                    WHERE ($2::uuid IS NULL OR ei.target_id = $2 OR s.target_id = $2 OR f.target_id = $2)
+                      AND ($3::uuid[] IS NULL OR COALESCE(ei.target_id, s.target_id, f.target_id) IS NULL
+                           OR COALESCE(ei.target_id, s.target_id, f.target_id) = ANY($3))
+                    ORDER BY ei.created_at DESC
+                    LIMIT $1
+                    """,
+                    limit,
+                    target_uuid,
+                    cohort_ids,
+                )
+                events.extend(_evidence_instance_timeline_event(row) for row in evidence_rows)
+
+            if include_refuters:
+                refuter_rows = await conn.fetch(
+                    """
+                    SELECT rr.*,
+                           f.target_id AS finding_target_id,
+                           h.target_id AS hypothesis_target_id
+                    FROM refuter_reviews rr
+                    LEFT JOIN findings f ON rr.finding_id = f.id
+                    LEFT JOIN hypotheses h ON rr.hypothesis_id = h.id
+                    WHERE ($2::uuid IS NULL OR rr.target_id = $2 OR f.target_id = $2 OR h.target_id = $2)
+                      AND ($3::uuid[] IS NULL OR COALESCE(rr.target_id, f.target_id, h.target_id) IS NULL
+                           OR COALESCE(rr.target_id, f.target_id, h.target_id) = ANY($3))
+                    ORDER BY rr.created_at DESC
+                    LIMIT $1
+                    """,
+                    limit,
+                    target_uuid,
+                    cohort_ids,
+                )
+                events.extend(_refuter_review_timeline_event(row) for row in refuter_rows)
+
+            if include_exports:
+                export_rows = await conn.fetch(
+                    """
+                    SELECT ee.*,
+                           s.target_id AS scan_target_id,
+                           s.target_url AS scan_target_url,
+                           f.target_id AS finding_target_id
+                    FROM export_events ee
+                    LEFT JOIN scans s ON ee.scan_id = s.id
+                    LEFT JOIN findings f ON ee.finding_id = f.id
+                    WHERE ($2::uuid IS NULL OR ee.target_id = $2 OR s.target_id = $2 OR f.target_id = $2)
+                      AND ($3::uuid[] IS NULL OR COALESCE(ee.target_id, s.target_id, f.target_id) IS NULL
+                           OR COALESCE(ee.target_id, s.target_id, f.target_id) = ANY($3))
+                    ORDER BY ee.created_at DESC
+                    LIMIT $1
+                    """,
+                    limit,
+                    target_uuid,
+                    cohort_ids,
+                )
+                events.extend(_export_event_timeline_event(row) for row in export_rows)
+
+            upcoming: list[dict[str, Any]] = []
+            if include_schedules:
+                schedule_rows = await conn.fetch(
+                    """
+                    SELECT sc.id, sc.name, sc.target_id, t.url AS target_url,
+                           sc.frequency, sc.day_of_week, sc.time_of_day, sc.timezone,
+                           sc.jitter_minutes, sc.schedule_kind, sc.scan_type,
+                           sc.next_run_at, sc.last_run_at
+                    FROM schedules sc
+                    LEFT JOIN targets t ON sc.target_id = t.id
+                    WHERE sc.is_active = true AND sc.next_run_at IS NOT NULL
+                      AND ($2::uuid IS NULL OR sc.target_id = $2)
+                      AND ($3::uuid[] IS NULL OR sc.target_id IS NULL OR sc.target_id = ANY($3))
+                    ORDER BY sc.next_run_at ASC
+                    LIMIT $1
+                    """,
+                    limit,
+                    target_uuid,
+                    cohort_ids,
+                )
+                upcoming = [_schedule_timeline_event(row) for row in schedule_rows]
+            return events, upcoming
+
+        # A cohort's rows are narrowed in SQL, but a row that names only a URL is decided by its
+        # label afterwards; when that leaves the page short, read deeper (bounded) rather than
+        # return fewer events than exist.
+        fetch_limit = limit
+        while True:
+            events, upcoming = await collect(fetch_limit)
+            labels = await row_cohorts(conn, [*events, *upcoming])
+            for event, label in zip([*events, *upcoming], labels):
+                event["target_cohort"] = label
+            if not cohorts:
+                break
+            kept = [event for event in events if event["target_cohort"] in (None, *cohorts)]
+            short = len(kept) < limit and len(kept) < len(events)
+            events = kept
+            upcoming = [event for event in upcoming if event["target_cohort"] in (None, *cohorts)]
+            if not short or fetch_limit >= limit * TIMELINE_COHORT_MAX_DEPTH:
+                break
+            fetch_limit = min(fetch_limit * 4, limit * TIMELINE_COHORT_MAX_DEPTH)
 
     events.sort(key=_timeline_sort_key, reverse=True)
     events = events[:limit]
+    upcoming = upcoming[:limit]
     return {
         "events": events,
         "upcoming": upcoming,
@@ -1334,6 +1399,9 @@ async def _compute_dashboard() -> dict[str, Any]:
         # Completed scans only: the latest per target/AI target/URL, outside the device plane
         # (device_target_id IS NULL, no device_web_origin role or device run kinds).
         recent_scans = await dashboard_data.recent_latest_scans(conn, limit=10)
+        # The same, per cohort view: each row is labelled with its subject's ``target_cohort``
+        # and a scoped dashboard reads its own list instead of filtering the global one.
+        recent_scans_by_cohort = await dashboard_data.recent_scans_by_cohort(conn, limit=10)
         # Active critical/high findings outside the device plane (COALESCE(source, '') <> 'device').
         recent_findings = await dashboard_data.recent_blocker_findings(conn, limit=10)
         worker_snapshot = _worker_freshness_snapshot()
@@ -1354,6 +1422,7 @@ async def _compute_dashboard() -> dict[str, Any]:
     return {
         "metrics": metrics,
         "recent_scans": recent_scans,
+        "recent_scans_by_cohort": recent_scans_by_cohort,
         "recent_findings": recent_findings,
         "action_center": action_center,
         "product_status": product_status,

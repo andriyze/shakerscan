@@ -59,6 +59,20 @@ def _web_view(locator: str) -> str:
               AND member.url ~ '^https?://'))"""
 
 
+# The UI's "usable web target" rule (ui/src/lib/targetChoices.ts, isUsableWebTarget, plus
+# is_active), so a picker reads only rows it can offer: after a JavaScript trim, a URL of at most
+# 2048 characters with no whitespace that the browser parses with an http(s) protocol and a host.
+# SQL does not re-implement WHATWG URL parsing: the host test is a necessary condition (an
+# authority with a host character after the scheme, ``http:host`` included), so this never drops a
+# row the UI accepts, and the UI still applies its own rule to the page it receives.
+_JS_WHITESPACE = "".join(f"\\u{code:04x}" for code in (
+    0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x20, 0xA0, 0x1680, *range(0x2000, 0x200B), 0x2028, 0x2029, 0x202F,
+    0x205F, 0x3000, 0xFEFF))
+_JS_TRIMMED_URL = f"regexp_replace(t.url, '^[{_JS_WHITESPACE}]+|[{_JS_WHITESPACE}]+$', '', 'g')"
+WEB_ONLY = f"""(t.is_active AND t.url IS NOT NULL
+    AND {_JS_TRIMMED_URL} ~* '^https?:[/\\\\]*[^/\\\\?#]'
+    AND {_JS_TRIMMED_URL} !~ '[{_JS_WHITESPACE}]'
+    AND char_length({_JS_TRIMMED_URL}) BETWEEN 1 AND 2048)"""
 HOST_NETWORK = _host_network('target_asset_locator(t.url)')
 NETWORK_VIEW = _network_view('target_asset_locator(t.url)')
 WEB_VIEW = _web_view('target_asset_locator(t.url)')
@@ -272,10 +286,13 @@ def _scope_query(*, search: str, connected_only: bool, include_inactive: bool,
     """, [include_inactive, connected_only, search.strip()])
 
 
-def _apply_filters(query: _Query, chosen: dict[str, Any], environment: str | None) -> None:
+def _apply_filters(query: _Query, chosen: dict[str, Any], environment: str | None,
+                   web_only: bool = False) -> None:
     for name, value in chosen.items():
         if value is not None:
             query.where += ' AND ' + FILTERS[name][value]
+    if web_only:
+        query.where += ' AND ' + WEB_ONLY
     if environment:
         query.where += f' AND {ENVIRONMENT}={query.bind(environment.strip().lower())}'
 
@@ -290,14 +307,14 @@ async def list_assets(conn: Any, *, search: str = '', connected_only: bool = Fal
                       asset_type: str | None = None, environment: str | None = None,
                       authorization: str | None = None, findings: str | None = None,
                       activity: str | None = None, sort: str = 'name',
-                      include_facets: bool = False) -> dict[str, Any]:
+                      include_facets: bool = False, web_only: bool = False) -> dict[str, Any]:
     """The legacy (limit/offset) inventory response, deprecated for the 2.11.x line."""
     chosen = {'asset_type': asset_type, 'authorization': authorization, 'findings': findings, 'activity': activity}
     _validate(sort, chosen)
     query = _scope_query(search=search, connected_only=connected_only, include_inactive=include_inactive,
                          include_services=include_services)
     facet_query = _Query(query.where, query.parameters)
-    _apply_filters(query, chosen, environment)
+    _apply_filters(query, chosen, environment, web_only)
     from_sql = SUMMARY_FROM if _needs_summary(sort, chosen) else ROOT_FROM
     facets = await inventory_facets(conn, facet_query) if include_facets else None
     if group_by == 'domain':
@@ -488,7 +505,7 @@ async def list_assets_v1(conn: Any, page: Page, *, search: str = '', connected_o
                          environment: str | None = None, authorization: str | None = None,
                          findings: str | None = None, activity: str | None = None,
                          member_limit: int = DEFAULT_MEMBER_LIMIT,
-                         include_facets: bool = False) -> dict[str, Any]:
+                         include_facets: bool = False, web_only: bool = False) -> dict[str, Any]:
     if page.fields is not None:
         raise HTTPException(400, {'error': 'fields_unsupported', 'message': 'the inventory does not support fields='})
     chosen = {'asset_type': asset_type, 'authorization': authorization, 'findings': findings, 'activity': activity}
@@ -497,11 +514,11 @@ async def list_assets_v1(conn: Any, page: Page, *, search: str = '', connected_o
     filters = {**chosen, 'search': search.strip(), 'connected_only': connected_only,
                'include_inactive': include_inactive, 'include_services': include_services,
                'environment': (environment or '').strip().lower() or None, 'group_by': group_by,
-               'member_limit': member_limit}
+               'member_limit': member_limit, 'web_only': web_only}
     query = _scope_query(search=search, connected_only=connected_only, include_inactive=include_inactive,
                          include_services=include_services)
     facet_query = _Query(query.where, query.parameters)
-    _apply_filters(query, chosen, environment)
+    _apply_filters(query, chosen, environment, web_only)
     from_sql = SUMMARY_FROM if _needs_summary(sort_name, chosen) else ROOT_FROM
     if group_by == 'domain':
         if include_services:

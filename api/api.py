@@ -51,7 +51,11 @@ except ModuleNotFoundError:
     from scanner.release_identity import build_fingerprint as release_build_fingerprint
     from scanner.release_identity import load_release_identity
     from scanner.release_identity import published_scanner_version
-from scan.assessment import SCAN_LIST_ASSESSMENT_COLUMNS, project_scan_assessment_row
+from scan.assessment import project_scan_assessment_row
+from scan.list_v1 import scans_page, scan_list_columns
+from scan.live_log import read_scan_log
+from list_compat import direct, mark_deprecated, v1_page, wants_list_v1
+from list_contract import CURSOR_MAX_LENGTH
 from scan.carried_over import gate_findings_from_rows, load_target_history, merge_target_active_blockers, summarize_carried_over
 from scan.deployment_gate_rows import (
     deployment_gate_findings as _deployment_gate_findings,
@@ -3993,6 +3997,7 @@ except ModuleNotFoundError:
 try:
     from gateway_identity import GatewayIdentityMiddleware, capture_key as _capture_gateway_identity_key
     from host_guard import configure_host_guard
+    from list_etag import ListETagMiddleware
     from request_guards import configure_request_guards
     from public_api_contract import (
         PublicV2BodyLimitMiddleware,
@@ -4006,6 +4011,7 @@ try:
 except ModuleNotFoundError:
     from api.gateway_identity import GatewayIdentityMiddleware, capture_key as _capture_gateway_identity_key
     from api.host_guard import configure_host_guard
+    from api.list_etag import ListETagMiddleware
     from api.request_guards import configure_request_guards
     from api.public_api_contract import (
         PublicV2BodyLimitMiddleware,
@@ -7258,7 +7264,8 @@ _cors_kwargs: dict[str, Any] = {
     # canonical V2 endpoint admitted the request. CORS hides non-safelisted
     # response headers unless they are explicitly exposed. Retry-After tells the
     # archive views how long to wait when every export slot is busy (a 503).
-    "expose_headers": ["x-shakerscan-hunt-contract", "retry-after"],
+    # ETag lets the UI's read layer revalidate polled lists with If-None-Match (list_etag.py).
+    "expose_headers": ["x-shakerscan-hunt-contract", "retry-after", "etag", "deprecation"],
 }
 # Optional regex for dynamic remote origins (e.g. a Tailscale MagicDNS name) without listing each.
 _cors_regex = os.environ.get("SHAKERSCAN_CORS_ALLOW_ORIGIN_REGEX", "").strip()
@@ -7270,6 +7277,9 @@ if _cors_regex:
 # and let the origin guard sit inside the replay so a disallowed browser origin could still replay.
 
 
+# Innermost: weak ETags and 304s on the polled list reads (list_etag.py); route functions still
+# return plain data to their in-process callers.
+app.add_middleware(ListETagMiddleware)
 app.add_middleware(LegacyHuntIsolationMiddleware)
 app.add_middleware(PublicV2IdempotencyMiddleware)
 app.add_middleware(PublicV2BodyLimitMiddleware)
@@ -11676,6 +11686,7 @@ async def _submit_batch(
 
 @app.get("/scans")
 async def list_scans(
+    response: Response = None,
     status: Optional[str] = None,
     target_id: Optional[str] = None,
     target: Optional[str] = None,
@@ -11685,9 +11696,13 @@ async def list_scans(
     include_internal: bool = False,
     include_model_intake: bool = False,
     include_devices: bool = False,
-    limit: int = Query(50, ge=1, le=200),
+    limit: Optional[int] = Query(None, ge=1, le=200),
     offset: int = Query(0, ge=0),
     include_details: bool = False,
+    cursor: Optional[str] = Query(None, max_length=CURSOR_MAX_LENGTH),
+    count: Optional[Literal["none", "estimate", "exact"]] = None,
+    fields: Optional[str] = Query(None, max_length=2048),
+    since: Optional[datetime] = Query(None, description="list/v1: scans created or changed at or after this time"),
 ):
     """List scans with optional filtering.
 
@@ -11695,80 +11710,52 @@ async def list_scans(
     evidence scans are hidden by default so the DAST scan list stays a web
     testing surface. Model Intake remains available from its dedicated API/UI;
     use include_model_intake for administrative or evidence-selection views.
+
+    list/v1 (any of ``cursor``/``count``/``fields``/``since``): keyset pages newest first with
+    ``since=`` deltas (scan/list_v1.py); rows keep the list shape. Otherwise the deprecated
+    limit/offset response.
     """
-    async with db_pool.acquire() as conn:
-        scan_columns = "s.*" if include_details else """
-                   s.id, s.target_id, s.target_url, s.status, s.progress,
-                   s.current_phase, s.options, s.scan_type, s.score, s.grade,
-                   s.assurance_score,
-                   s.findings_count, s.created_at, s.started_at, s.completed_at,
-                   s.duration_seconds, s.error_message, s.run_kind, s.ai_target_id,
-                   s.device_target_id, s.parent_scan_id, s.scan_role,
-                   s.shard_index, s.shard_count
-        """
-        query = f"""
-            SELECT {scan_columns}, {SCAN_LIST_ASSESSMENT_COLUMNS},
-                   COALESCE(t.name, ait.name) as target_name,
-                   t.root_domain,
-                   ait.target_type as ai_target_type
-            FROM scans s
+    limit, offset, cursor, count, fields, since = (direct(value) for value in (
+        limit, offset, cursor, count, fields, since))
+    v1 = wants_list_v1(cursor=cursor, count=count, fields=fields, since=since)
+    if v1 and include_details:
+        raise HTTPException(status_code=400, detail={
+            "error": "details_unsupported", "message": "list/v1 rows are summaries; read GET /scans/{id}"})
+    if v1 and fields is not None:
+        raise HTTPException(status_code=400, detail={
+            "error": "fields_unsupported", "message": "the scans list does not support fields="})
+    columns = scan_list_columns(include_details, _SCAN_LIST_OPTION_KEYS)
+    from_sql = """scans s
             LEFT JOIN targets t ON s.target_id = t.id
-            LEFT JOIN ai_targets ait ON s.ai_target_id = ait.id
-            WHERE 1=1
+            LEFT JOIN ai_targets ait ON s.ai_target_id = ait.id"""
+    where_sql = "1=1"
+    hidden_roles = _hidden_scan_roles_for_list(
+        include_shards=include_shards,
+        include_internal=include_internal,
+    )
+    if hidden_roles:
+        role_values = ", ".join(f"'{role}'" for role in hidden_roles)
+        where_sql += f" AND (s.scan_role IS NULL OR s.scan_role NOT IN ({role_values}))"
+    if not include_model_intake:
+        where_sql += """
+            AND COALESCE(s.run_kind, '') <> 'model_intake'
+            AND COALESCE(s.scan_type, '') <> 'model_intake'
         """
-        count_query = """
-            SELECT COUNT(*)
-            FROM scans s
-            LEFT JOIN targets t ON s.target_id = t.id
-            LEFT JOIN ai_targets ait ON s.ai_target_id = ait.id
-            WHERE 1=1
+    if not include_devices:
+        where_sql += """
+            AND COALESCE(s.run_kind, '') NOT IN ('device_posture', 'device_probe', 'device_web_dast')
+            AND COALESCE(s.scan_type, '') NOT IN ('device_posture', 'device_probe')
         """
-        hidden_roles = _hidden_scan_roles_for_list(
-            include_shards=include_shards,
-            include_internal=include_internal,
+    try:
+        filter_sql, params = scan_list_filters(
+            status=status, target_id=target_id, target=target,
+            root_domain=root_domain, created_within_days=created_within_days,
         )
-        if hidden_roles:
-            role_values = ", ".join(f"'{role}'" for role in hidden_roles)
-            role_filter = f" AND (s.scan_role IS NULL OR s.scan_role NOT IN ({role_values}))"
-            query += role_filter
-            count_query += role_filter
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    where_sql += filter_sql
 
-        if not include_model_intake:
-            product_filter = """
-                AND COALESCE(s.run_kind, '') <> 'model_intake'
-                AND COALESCE(s.scan_type, '') <> 'model_intake'
-            """
-            query += product_filter
-            count_query += product_filter
-
-        if not include_devices:
-            device_filter = """
-                AND COALESCE(s.run_kind, '') NOT IN ('device_posture', 'device_probe', 'device_web_dast')
-                AND COALESCE(s.scan_type, '') NOT IN ('device_posture', 'device_probe')
-            """
-            query += device_filter
-            count_query += device_filter
-
-        try:
-            filter_sql, params = scan_list_filters(
-                status=status, target_id=target_id, target=target,
-                root_domain=root_domain, created_within_days=created_within_days,
-            )
-        except ValueError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
-        query += filter_sql
-        count_query += filter_sql
-        count_params = list(params)
-        param_idx = len(params) + 1
-
-        query += f" ORDER BY s.created_at DESC LIMIT ${param_idx} OFFSET ${param_idx + 1}"
-        params.extend([limit, offset])
-
-        rows = await conn.fetch(query, *params)
-        total = await conn.fetchval(count_query, *count_params)
-
-    scans = []
-    for row in rows:
+    def row_to_item(row: dict[str, Any]) -> dict[str, Any]:
         scan = project_scan_assessment_row(dict(row))
         if scan.get("options") is not None:
             scan["options"] = (
@@ -11787,10 +11774,35 @@ async def list_scans(
         if not include_details:
             for key in _SCAN_DETAIL_ONLY_FIELDS:
                 scan.pop(key, None)
-        scans.append(scan)
+        scan.pop("updated_at", None)
+        return scan
+
+    if v1:
+        page = v1_page(limit=limit, cursor=cursor, sort=None, fields=None, count=count, since=since)
+        filters = {
+            "status": status, "target_id": target_id, "target": target, "root_domain": root_domain,
+            "created_within_days": created_within_days, "include_shards": include_shards,
+            "include_internal": include_internal, "include_model_intake": include_model_intake,
+            "include_devices": include_devices,
+        }
+        async with db_pool.acquire() as conn:
+            return await scans_page(conn, page, columns=columns, from_sql=from_sql, where_sql=where_sql,
+                                    params=params, filters=filters, row_to_item=row_to_item)
+
+    mark_deprecated(response)
+    limit = 50 if limit is None else limit
+    async with db_pool.acquire() as conn:
+        count_params = list(params)
+        param_idx = len(params) + 1
+        rows = await conn.fetch(
+            f"SELECT {columns} FROM {from_sql} WHERE {where_sql} "
+            f"ORDER BY s.created_at DESC LIMIT ${param_idx} OFFSET ${param_idx + 1}",
+            *params, limit, offset,
+        )
+        total = await conn.fetchval(f"SELECT COUNT(*) FROM {from_sql} WHERE {where_sql}", *count_params)
 
     return {
-        'scans': scans,
+        'scans': [row_to_item(dict(row)) for row in rows],
         'total': total,
         'limit': limit,
         'offset': offset
@@ -12282,15 +12294,28 @@ async def download_scan_artifact(scan_id: str, artifact_id: str):
 
 
 @app.get("/scans/{scan_id}/logs")
-async def get_scan_logs(scan_id: str, limit: int = Query(200, ge=1, le=1000)):
-    """Get recent scan logs (tail)."""
+async def get_scan_logs(
+    scan_id: str,
+    limit: int = Query(200, ge=1, le=1000),
+    after_seq: Optional[int] = Query(
+        None, ge=0, description="only lines numbered above this (the previous answer's next_seq)"),
+):
+    """Get recent scan logs (tail).
+
+    Lines are numbered (scan/live_log.py): ``next_seq`` is the last line's number; with
+    ``after_seq`` only newer lines come back, and ``truncated`` means some were missed, so the
+    caller replaces its view. ``seq_supported`` is false where there is no numbering (aggregated
+    parent feeds, retained Model Intake activity, lines from an older writer)."""
     r = get_redis()
-    log_key = f"scan:{scan_id}:logs"
-    # Return tail lines
+    limit, after_seq = direct(limit), direct(after_seq)
     try:
-        lines = r.lrange(log_key, max(-limit, -1000), -1) if limit else r.lrange(log_key, -200, -1)
+        numbered = read_scan_log(r, scan_id, limit=limit, after_seq=after_seq)
     except Exception:
-        lines = []
+        numbered = {"lines": [], "seq_supported": False, "next_seq": None, "first_seq": None, "truncated": False}
+    lines = numbered["lines"]
+    if numbered["seq_supported"] and (lines or after_seq is not None):
+        return {"scan_id": scan_id, "lines": lines, "count": len(lines), "limit": limit,
+                **{key: numbered[key] for key in ("seq_supported", "next_seq", "first_seq", "truncated")}}
     # When the displayed row is a parallel parent, its children own execution
     # and therefore own the raw log keys. Aggregate their bounded feeds so the
     # parent page does not misleadingly show "No logs yet" while children run.
@@ -12375,6 +12400,10 @@ async def get_scan_logs(scan_id: str, limit: int = Query(200, ge=1, le=1000)):
         "lines": lines,
         "count": len(lines),
         "limit": limit,
+        "seq_supported": False,
+        "next_seq": None,
+        "first_seq": None,
+        "truncated": False,
     }
 
 

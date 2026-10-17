@@ -229,7 +229,7 @@ export default function ExperimentBuilderPage() {
                 {/* Searched on the server: the first 100 targets used to be the only choices. */}
                 <div className="mt-1.5">
                   <TargetSearchCombobox id="experiment-target" value={targetId} onChange={setTargetId}
-                    accept={webTargetChoice} placeholder="Choose a target…" onSelectedAsset={setSelectedTarget} />
+                    accept={webTargetChoice} webOnly placeholder="Choose a target…" onSelectedAsset={setSelectedTarget} />
                 </div>
               </div>
               <label className="text-xs font-medium text-gray-400">What are you trying to learn?
