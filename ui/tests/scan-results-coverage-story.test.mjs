@@ -120,7 +120,9 @@ test('finding rows show a route, a proof label, and survive narrow screens', () 
   assert.match(detail, /grid-cols-\[auto_minmax\(0,1fr\)_auto\]/)
   assert.match(detail, /block truncate font-mono text-xs text-gray-400/)
   assert.match(detail, /const proof = findingProofLabel\(finding\)/)
-  assert.match(detail, /\{provenCount\} proven/)
+  // Summary and section headings count from one grouping (scanFindingCounts).
+  assert.match(detail, /const counts = scanFindingCounts\(current\)/)
+  assert.match(detail, /\{scanFindingCountsText\(counts\)\}/)
   // The redundant per-row origin pill is gone; origin lives in the section heading.
   assert.doesNotMatch(detail, /\{finding\._origin\}<\/span>/)
 })

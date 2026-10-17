@@ -17,7 +17,10 @@ test('TARGET-FILTERS-001 server filters select Web and IP/network without losing
     if(url.pathname==='/targets/inventory') {
       const kind=url.searchParams.get('asset_type') || 'all'
       filters.push(kind)
-      expect(url.searchParams.get('offset')).toBe('0')
+      // list/v1 group pages (a member cap, no offset); this fixture answers in the legacy shape,
+      // which the page still reads during a rolling upgrade.
+      expect(url.searchParams.get('offset')).toBeNull()
+      expect(url.searchParams.get('member_limit')).toBe('200')
       const matching=kind==='web' ? [targets[0]] : kind==='network' ? [targets[1]] : targets
       return route.fulfill({json:{targets:matching,total:matching.length,total_groups:matching.length,
         groups:matching.map(target=>({root_domain:target.locator,discoverable:/[a-z]/.test(target.locator.split('.').pop()||''),targets:[target]}))}})
