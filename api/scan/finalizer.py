@@ -13,7 +13,11 @@ from typing import Any, Mapping, Sequence
 from . import scoring
 from .assessment import mark_unexamined_coverage, withhold_unexamined_grade
 from .action_plan import ScanActionPlan
-from .capability_result import CapabilityResultReference, CapabilityResultStatus, CapabilityResultReason
+from .capability_result import (
+    CapabilityResultReason,
+    CapabilityResultReference,
+    CapabilityResultStatus,
+)
 from .contracts import SCAN_APPLICATION_SURFACE_FAMILIES
 from .finding_evidence import template_classification, tls_finding_evidence
 from .posture_findings import (
@@ -2379,6 +2383,10 @@ def _evaluate_csp(policy: Any) -> dict[str, Any]:
     }
 
 
+# Family gaps named by their one cause instead of the generic ``action_incomplete``.
+_NAMED_FAMILY_GAP_REASONS = frozenset({CapabilityResultReason.AUTHENTICATION_REQUIRED.value})
+
+
 def finalize_scan_report(
     *,
     plan: ScanActionPlan,
@@ -2566,6 +2574,7 @@ def finalize_scan_report(
             # manifest holds more entries than its slices cover has work that was never attempted,
             # and comparing attempts with slices alone reports that as complete coverage.
             "_manifest_entries": {}, "_scheduled_entries": {}, "_slow_endpoints": [],
+            "_refused_candidates": [],
             "proof_escalation": {
                 "actions": 0, "attempted_candidates": 0,
                 "_statuses": [], "_reasons": [],
@@ -2595,6 +2604,14 @@ def finalize_scan_report(
                 for item in observations.get(action.action_id, ())
                 if isinstance(item, Mapping)
                 and item.get("kind") in _SLOW_ENDPOINT_RECORD_KINDS
+            )
+            # Candidates the target refused unauthenticated (401/403, a redirect to sign-in):
+            # inconclusive, named so coverage says which ones need a credential profile.
+            row["_refused_candidates"].extend(
+                str(item.get("url") or item.get("candidate_id") or "")
+                for item in observations.get(action.action_id, ())
+                if isinstance(item, Mapping)
+                and item.get("inconclusive_reason") == CapabilityResultReason.AUTHENTICATION_REQUIRED.value
             )
             row["planned_candidates"] += max(0, planned - inapplicable)
             row["attempted_candidates"] += len(attempts)
@@ -2646,6 +2663,10 @@ def finalize_scan_report(
             if outcomes:
                 row["budget_inconclusive_candidates"] = outcomes
                 row["_slow_endpoints"].extend(item["url"] for item in outcomes)
+        refused_candidates = sorted(set(filter(None, row.pop("_refused_candidates"))))
+        if refused_candidates:
+            row["authentication_required_candidates"] = refused_candidates[:50]
+            row["authentication_required_candidate_count"] = len(refused_candidates)
         slow_endpoints = sorted(set(filter(None, row.pop("_slow_endpoints"))))
         if slow_endpoints:
             row["slow_endpoints"] = slow_endpoints
@@ -2728,6 +2749,14 @@ def finalize_scan_report(
             ):
                 # Partial because of these named slow endpoints, not a generic timeout.
                 row["reason"] = "slow_endpoints"
+            incomplete_reasons = {
+                reason for status, reason in zip(statuses, batch_reasons) if status != "success"
+            }
+            if not zero_attempts and len(incomplete_reasons) == 1 and (
+                incomplete_reasons <= _NAMED_FAMILY_GAP_REASONS
+            ):
+                # Partial for one stated cause: the target refused the unauthenticated requests.
+                row["reason"] = next(iter(incomplete_reasons))
             if row["required"]:
                 selected_family_gaps.append(family)
         elif row["unscheduled_candidates"] > 0:

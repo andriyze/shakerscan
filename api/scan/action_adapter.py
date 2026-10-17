@@ -244,6 +244,7 @@ from .sqli_stages import (
     prior_stages,
     run_staged_sqli_attempt,
 )
+from .verifier_refusal import is_refusal_error, mark_refused
 from .verification_extension import (
     EXTENDS_ARG,
     LAST_CHANCE_ARG,
@@ -741,6 +742,9 @@ def batch_stop_reason(
     if unattempted or CapabilityResultReason.INSUFFICIENT_PLAN_BUDGET.value in lowered:
         # A SQLi candidate closed for budget names it (soak N55).
         return CapabilityResultReason.INSUFFICIENT_PLAN_BUDGET.value
+    if any(is_refusal_error(item) for item in lowered):
+        # The target refused the unauthenticated baseline: nothing failed, nothing was tested.
+        return CapabilityResultReason.AUTHENTICATION_REQUIRED.value
     return CapabilityResultReason.ADAPTER_FAILED.value
 
 
@@ -4194,6 +4198,15 @@ class DatabaseNeutralScanActionDispatcher:
                         {"url": redact_url(execution_target),
                          "method": body_request.get("method", "GET"), **verdict},
                     )
+            if any(is_refusal_error(item) for item in result.errors or ()):
+                # The target refused the unauthenticated baseline: inconclusive for
+                # authentication, named on the candidate, and not resumed by an extension.
+                head = dict(attempt_observations[0])
+                head.update({
+                    "verdict": "inconclusive", "inconclusive_reason": "authentication_required",
+                })
+                head.pop("resume_wall_seconds", None)
+                attempt_observations = (head, *attempt_observations[1:])
             attempt = {
                 "attempt_id": attempt_id,
                 "candidate_id": candidate_id,
@@ -4720,6 +4733,7 @@ class DatabaseNeutralScanActionDispatcher:
                         args: Mapping[str, Any] = args,
                         socket_factory: FrozenTargetSocketFactory = socket_factory,
                         legacy_spec: Any = legacy_spec,
+                        refusal_exempt: bool = bool(body_request) or tool not in {"sqlmap", "dalfox"},
                     ) -> Any:
                         prepared = fit_prepared_scan_capability(
                             prepare_scan_external_capability(
@@ -4754,7 +4768,9 @@ class DatabaseNeutralScanActionDispatcher:
                             redacted_execution=prepared.redacted_execution,
                             archive_capability_name=action.capability_name,
                         )
-                        return await CapabilityExecutor().execute(
+                        # A run the target refused (401/403, a redirect to sign-in) tested
+                        # nothing: it is inconclusive, never a negative (verifier_refusal).
+                        return mark_refused(await CapabilityExecutor().execute(
                             CapabilityExecutionContext(
                                 specification=legacy_spec,
                                 target=self.target,
@@ -4764,7 +4780,7 @@ class DatabaseNeutralScanActionDispatcher:
                             adapter,
                             heartbeat=heartbeat,
                             cancelled=self.cancelled,
-                        )
+                        ), exempt=refusal_exempt)
 
                     if tool == "sqlmap":
                         # One candidate, verified technique by technique; every finished stage

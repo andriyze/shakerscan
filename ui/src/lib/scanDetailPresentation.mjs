@@ -268,6 +268,7 @@ const COVERAGE_REASON_LABELS = {
   policy_disabled: 'A planned step was disabled by the scan policy',
   worker_lost: 'A worker was lost before all planned work finished',
   authentication_uncertain: 'Credential authority could not be confirmed',
+  authentication_required: 'The target refused unauthenticated requests (401/403 or a redirect to sign-in), so those candidates were not tested; add a credential profile to verify them',
   output_truncated: 'A step produced more output than it may keep, so part of its result was cut off',
   source_not_published: 'An optional discovery file (robots.txt or llms.txt) was not published by the target',
   declared_out_of_scope: "The target's API description declares its routes on another origin (a different host, port or scheme), outside this scan's scope",

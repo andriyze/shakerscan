@@ -18945,6 +18945,7 @@ async def _execute_agent_scanner_process(
             if name in agent_tools.KATANA_TOOLS
             else None
         ),
+        wire_log=wire_log_counter,
     )
     # Apply known identity values before any parsed output or error can be persisted.
     identity_values = agent_tools.scanner_credential_redaction_values(job_data.get("trusted_headers"))
