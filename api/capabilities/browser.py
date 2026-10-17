@@ -13,6 +13,7 @@ import hashlib
 import ipaddress
 import math
 import re
+import sys
 import time
 import uuid
 from http.cookies import SimpleCookie
@@ -34,6 +35,11 @@ except ModuleNotFoundError:  # package imports in host-side tests
     from ..runtime.request_shape import nested_json_body
     from ..runtime.secret_material import contains_secret_material
     from ..runtime.target_bound_socket import FrozenTargetSocketFactory
+
+try:
+    from scanner_tools import http_archive_capture as _scan_capture
+except ModuleNotFoundError:  # package imports in host-side tests
+    from scanner.scanner_tools import http_archive_capture as _scan_capture
 
 try:
     from scanner_tools.url_redaction import redact_client_route, redact_url
@@ -1206,6 +1212,16 @@ async def _execute_browser_action(
                 await pinned_proxy.close()
             except Exception:
                 pass
+            # Inside a Scan worker the browser's tunnel joins the Scan's request archive; the
+            # archive never decides the action's outcome.
+            try:
+                _scan_capture.record_tunnel(
+                    pinned_proxy.tunnel_record(scheme=urllib.parse.urlsplit(prepared.origin).scheme),
+                    capability_name=prepared.capability_name, tool="chromium",
+                )
+            except Exception as exc:  # noqa: BLE001
+                print(f"[http-archive] {prepared.capability_name}: tunnel not recorded: "
+                      f"{type(exc).__name__}", file=sys.stderr, flush=True)
 
 
 def _validate_read_only_interaction(

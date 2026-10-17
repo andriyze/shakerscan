@@ -69,6 +69,16 @@ test('fidelity, notes and capture stats describe every page, not just the first'
   assert.equal(exported.exported, 4)
 })
 
+test('destinations restated on every page are merged once', async () => {
+  const stats = { destinations: [{ origin: 'http://10.10.10.100:5002', calls: 14 }], refused_destinations: [] }
+  const pages = [
+    { total: 2, capture_stats: stats, transactions: [{ id: 'a' }] },
+    { total: 2, capture_stats: { ...stats, destinations: [{ origin: 'http://10.10.10.100:5002', calls: 14 }] }, transactions: [{ id: 'b' }] },
+  ]
+  const exported = await collectArchiveExport(async (offset) => pages[offset], { pageSize: 1 })
+  assert.deepEqual(exported.capture_stats.destinations, [{ origin: 'http://10.10.10.100:5002', calls: 14 }])
+})
+
 test('a call archived mid-export does not appear twice', async () => {
   // A new call lands at the head of the archive between pages, shifting page two by one.
   const pages = [
