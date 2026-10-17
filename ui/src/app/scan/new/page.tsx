@@ -6,7 +6,6 @@ import { placementPreviewLabel } from '@/lib/labels'
 import { useRouter } from 'next/navigation'
 import Link from '@/components/WorkspaceLink'
 import {
-  getTargets,
   getScanPublicContract,
   getWorkers,
   createTarget,
@@ -19,11 +18,12 @@ import {
   type ScanBudgetProfile,
   type ScanPublicContract,
   type ScanContractPreview,
-  type Target,
 } from '@/lib/api'
 import { listCredentialProfiles, type CredentialProfile } from '@/lib/credentialApi'
 import { preferredCredentialId } from '@/lib/credentialDefaults'
 import { Button, Card, Combobox, Field, useToast, type ComboboxOption } from '@/components/ui'
+import { useTargetSearch } from '@/lib/useTargetSearch'
+import type { TargetAsset } from '@/lib/targetAssetApi'
 import { credentialDescription, credentialOptions } from '@/lib/pickerOptions'
 import {
   RequestCollectionPicker,
@@ -31,7 +31,11 @@ import {
 } from '@/components/RequestCollectionPicker'
 import { scanScopeEnvironment, validateScanTarget } from '@/lib/targetValidation'
 import { usableWebTargets } from '@/lib/targetChoices'
+
 import { targetForRegisteredDnsFallback } from '@/lib/targetDns'
+
+/** A registered target a web scan can name: active, with a usable web URL. */
+const registeredWebTarget = (asset: TargetAsset) => usableWebTargets([asset]).length === 1
 
 const BUDGETS: Array<{ value: ScanBudgetProfile; label: string; description: string; limits: string }> = [
   { value: 'fast', label: 'Fast', description: 'Quick feedback for routine checks.', limits: '30 min · 5,000 requests' },
@@ -65,7 +69,6 @@ export default function NewScanPage() {
   const [target, setTarget] = useState('')
   const [batchMode, setBatchMode] = useState(false)
   const [batchTargets, setBatchTargets] = useState('')
-  const [existingTargets, setExistingTargets] = useState<Target[]>([])
   const [targetKind, setTargetKind] = useState<'web' | 'api'>('web')
   const [budgetProfile, setBudgetProfile] = useState<ScanBudgetProfile>('balanced')
   const [activeTesting, setActiveTesting] = useState(false)
@@ -114,13 +117,6 @@ export default function NewScanPage() {
       setTarget(requestedTarget)
     }
     let cancelled = false
-    getTargets()
-      .then((rows) => {
-        if (cancelled) return
-        const list = Array.isArray(rows?.targets) ? rows.targets : Array.isArray(rows) ? rows : []
-        setExistingTargets(usableWebTargets(list))
-      })
-      .catch(() => undefined)
     getWorkers()
       .then((workers) => {
         if (!cancelled) {
@@ -148,6 +144,12 @@ export default function NewScanPage() {
     () => Array.from(new Set(batchTargets.split(/\r?\n/).map((value) => value.trim()).filter(Boolean))),
     [batchTargets],
   )
+  // Registered targets matching what is typed come from a server search (one bounded page per
+  // debounced query); the first 100 targets used to be the only ones recognised.
+  const targetSearch = useTargetSearch({ includeServices: true, accept: registeredWebTarget, enabled: !batchMode })
+  const { setQuery: setTargetQuery } = targetSearch
+  useEffect(() => { setTargetQuery(batchMode ? '' : target) }, [batchMode, setTargetQuery, target])
+  const existingTargets = targetSearch.assets
   const selectedRegisteredTarget = useMemo(
     () => existingTargets.find((item) => item.url === target.trim()),
     [existingTargets, target],

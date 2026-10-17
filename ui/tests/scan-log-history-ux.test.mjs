@@ -8,7 +8,12 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const detail = readFileSync(path.join(root, 'src/app/scans/[id]/page.tsx'), 'utf8')
 
 test('scan details load log history after a scan reaches a terminal state', () => {
-  assert.match(detail, /const logData = await getScanLogs\(scanId, 500\)/)
+  assert.match(detail, /const logData = await getScanLogs\(scanId, 500, signal\)/)
+  // A terminal scan (opened fresh or just finished) still gets its log read.
+  assert.match(detail, /logForceRef\.current = true\s*\n\s*logsPoll\.refresh\(\)/)
+  // A new scan or retry resets the log loop during render, before usePoll's first tick reads it.
+  const reset = detail.indexOf('if (logLoopKeyRef.current !== logLoopKey)')
+  assert.ok(reset > 0 && reset < detail.indexOf('const logsPoll = usePoll('))
   assert.doesNotMatch(detail, /data\?\.status === 'running' \|\| data\?\.status === 'pending' \|\| isModelIntake/)
 })
 
@@ -21,7 +26,7 @@ test('completed and failed DAST views retain a readable execution log', () => {
 
 test('running scans lead with readable progress and searchable live activity', () => {
   assert.match(detail, /Live scan activity/)
-  assert.match(detail, /Updates every 3 seconds/)
+  assert.match(detail, /Updates every 5–30 seconds \(slower while quiet\)/)
   assert.match(detail, /Key activity/)
   assert.match(detail, /Warnings & errors/)
   assert.match(detail, /Finding signals/)

@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { Check, ChevronDown, Search, X } from 'lucide-react'
 import { cn } from '@/lib/cn'
-import { filterOptions, groupOptions, moveActive } from '@/lib/comboboxModel.mjs'
+import { canChooseActive, clampActive, filterOptions, groupOptions, initialActive, moveActive } from '@/lib/comboboxModel.mjs'
 import { fieldClasses } from './Input'
 
 export interface ComboboxOption {
@@ -28,7 +28,7 @@ export interface ComboboxOption {
 export function Combobox({
   id, value, onChange, options, placeholder = 'Choose…', searchPlaceholder = 'Search…',
   noneLabel, emptyMessage = 'No matches', disabled, className, 'aria-describedby': describedBy,
-  'aria-invalid': invalid, 'aria-label': ariaLabel,
+  'aria-invalid': invalid, 'aria-label': ariaLabel, onQueryChange, loading = false, footerNote, optionsQuery,
 }: {
   id?: string
   value: string
@@ -44,6 +44,20 @@ export function Combobox({
   'aria-describedby'?: string
   'aria-invalid'?: boolean
   'aria-label'?: string
+  /**
+   * Server-side search: the typed text goes to the caller, which supplies the matching `options`
+   * (bounded) instead of the list being filtered in the browser.
+   */
+  onQueryChange?: (query: string) => void
+  /** A server search is in flight. */
+  loading?: boolean
+  /** Shown under the list, e.g. "Showing the first 25 matches; type to narrow". */
+  footerNote?: string | null
+  /**
+   * Server search: the query the current `options` answer (useTargetSearch's answeredQuery).
+   * Enter chooses only when it equals the text in the box, so a stale result is never picked.
+   */
+  optionsQuery?: string | null
 }) {
   const generated = useId()
   const listId = `${id || generated}-list`
@@ -56,7 +70,11 @@ export function Combobox({
   const [position, setPosition] = useState<{ top: number; left: number; width: number; maxHeight: number }>({ top: 0, left: 0, width: 320, maxHeight: 320 })
 
   const all = useMemo<ComboboxOption[]>(() => noneLabel !== undefined ? [{ value: '', label: noneLabel }, ...options] : options, [noneLabel, options])
-  const visible = useMemo(() => filterOptions(all, query), [all, query])
+  const remote = Boolean(onQueryChange)
+  const visible = useMemo(() => remote ? all : filterOptions(all, query), [all, query, remote])
+  const onQueryChangeRef = useRef(onQueryChange)
+  onQueryChangeRef.current = onQueryChange
+  useEffect(() => { onQueryChangeRef.current?.(query) }, [query])
   const selected = all.find(option => option.value === value)
 
   const close = useCallback((focusTrigger = false) => {
@@ -87,14 +105,20 @@ export function Combobox({
   }
 
   useLayoutEffect(() => { if (open) place() }, [open, place, visible.length])
+  // The list's identity: a new result list (another query's answer, a page that arrived) resets
+  // the highlight, so it never points at a different option or past the end.
+  const visibleKey = visible.map(option => `${option.value}\u0000${option.disabled ? 1 : 0}`).join('\u0001')
   useEffect(() => {
     if (!open) return
-    const index = visible.findIndex(option => option.value === value && !option.disabled)
-    setActive(index >= 0 ? index : moveActive(visible, -1, 1))
-    requestAnimationFrame(() => search.current?.focus())
-    // Recompute only when the list opens or the query changes.
+    setActive(initialActive(visible, value))
+    // Recompute only when the list opens or what it shows changes.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open, query])
+  }, [open, visibleKey])
+  useEffect(() => {
+    if (open) requestAnimationFrame(() => search.current?.focus())
+  }, [open])
+  const activeIndex = clampActive(visible, active)
+  const chooseReady = canChooseActive({ remote, loading, query, optionsQuery })
   useEffect(() => {
     if (!open) return
     const onPointer = (event: PointerEvent) => {
@@ -115,9 +139,9 @@ export function Combobox({
     }
   }, [open, close, place])
   useEffect(() => {
-    if (!open || active < 0) return
-    panel.current?.querySelector(`[data-index="${active}"]`)?.scrollIntoView({ block: 'nearest' })
-  }, [open, active])
+    if (!open || activeIndex < 0) return
+    panel.current?.querySelector(`[data-index="${activeIndex}"]`)?.scrollIntoView({ block: 'nearest' })
+  }, [open, activeIndex])
 
   function choose(option: ComboboxOption | undefined) {
     if (!option || option.disabled) return
@@ -128,10 +152,11 @@ export function Combobox({
   function onKeyDown(event: React.KeyboardEvent) {
     if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
       event.preventDefault()
-      setActive(current => moveActive(visible, current, event.key === 'ArrowDown' ? 1 : -1))
+      setActive(current => moveActive(visible, clampActive(visible, current), event.key === 'ArrowDown' ? 1 : -1))
     } else if (event.key === 'Enter') {
       event.preventDefault()
-      choose(visible[active])
+      // Server search: only a list that answers the text in the box, and only a valid index.
+      if (chooseReady && activeIndex >= 0) choose(visible[activeIndex])
     } else if (event.key === 'Escape') {
       event.preventDefault()
       close(true)
@@ -163,14 +188,14 @@ export function Combobox({
       <div className="relative border-b border-gray-800 p-2">
         <Search className="pointer-events-none absolute left-4 top-1/2 h-4 w-4 -translate-y-1/2 text-gray-500" aria-hidden="true" />
         <input ref={search} role="combobox" aria-expanded="true" aria-controls={listId} aria-autocomplete="list"
-          aria-label={`${searchPlaceholder.replace(/…$/, '')}`} aria-activedescendant={active >= 0 ? `${listId}-${active}` : undefined}
+          aria-label={`${searchPlaceholder.replace(/…$/, '')}`} aria-activedescendant={activeIndex >= 0 ? `${listId}-${activeIndex}` : undefined}
           value={query} onChange={event => setQuery(event.target.value)} onKeyDown={onKeyDown} placeholder={searchPlaceholder}
           className="w-full rounded-lg border border-gray-700 bg-gray-800 py-1.5 pl-8 pr-8 text-sm text-white placeholder-gray-500 focus:border-blue-500 focus:outline-hidden" />
         {query && <button type="button" aria-label="Clear search" onClick={() => { setQuery(''); search.current?.focus() }}
           className="absolute right-4 top-1/2 -translate-y-1/2 text-gray-500 hover:text-gray-200"><X className="h-3.5 w-3.5" /></button>}
       </div>
       <div id={listId} role="listbox" aria-label={ariaLabel || placeholder} className="min-h-0 flex-1 overflow-y-auto overscroll-contain p-1.5">
-        {!visible.length && <p className="px-3 py-6 text-center text-sm text-gray-500">{emptyMessage}</p>}
+        {!visible.length && <p className="px-3 py-6 text-center text-sm text-gray-500">{loading ? 'Searching…' : emptyMessage}</p>}
         {groupOptions(visible).map(group => <div key={group.name || 'all'} role="group" aria-label={group.name || undefined}>
           {group.name && <p className="px-2.5 pb-1 pt-2 text-[10px] font-semibold uppercase tracking-wider text-gray-500">{group.name}</p>}
           {group.options.map(option => {
@@ -182,7 +207,7 @@ export function Combobox({
               onPointerMove={() => { if (!option.disabled && active !== at) setActive(at) }}
               onClick={() => choose(option)}
               className={cn('flex cursor-pointer items-start gap-2 rounded-lg px-2.5 py-2 text-sm',
-                option.disabled ? 'cursor-not-allowed opacity-40' : at === active ? 'bg-blue-500/15' : 'hover:bg-gray-800')}>
+                option.disabled ? 'cursor-not-allowed opacity-40' : at === activeIndex ? 'bg-blue-500/15' : 'hover:bg-gray-800')}>
               <Check className={cn('mt-0.5 h-4 w-4 shrink-0', isSelected ? 'text-blue-300' : 'invisible')} aria-hidden="true" />
               <span className="min-w-0 flex-1">
                 <span className="flex items-center gap-2">
@@ -196,7 +221,11 @@ export function Combobox({
           })}
         </div>)}
       </div>
-      {all.length > 8 && <p className="border-t border-gray-800 px-3 py-1.5 text-[11px] text-gray-500">{visible.length} of {all.length} · ↑↓ to move, Enter to choose</p>}
+      {remote
+        ? <p className="border-t border-gray-800 px-3 py-1.5 text-[11px] text-gray-500" aria-live="polite">
+            {loading ? 'Searching…' : footerNote || `${visible.length} match${visible.length === 1 ? '' : 'es'}`} · ↑↓ to move, Enter to choose
+          </p>
+        : all.length > 8 && <p className="border-t border-gray-800 px-3 py-1.5 text-[11px] text-gray-500">{visible.length} of {all.length} · ↑↓ to move, Enter to choose</p>}
     </div>}
   </div>
 }

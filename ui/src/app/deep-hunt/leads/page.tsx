@@ -9,7 +9,6 @@ import {
 } from 'lucide-react'
 import {
   getFamilyProofContracts,
-  getTargets,
   scheduleHypotheses,
   transitionHypothesis,
   type FamilyProofContracts,
@@ -19,6 +18,10 @@ import {
 import { Badge, Button, Card, EmptyState, ErrorState, Skeleton, buttonClasses } from '@/components/ui'
 import { InvestigatorTabs } from '@/components/hunt/InvestigatorTabs'
 import { boundedTargetDisplay, usableWebTargets } from '@/lib/targetChoices'
+import { TargetSearchCombobox } from '@/components/targets/TargetSearchCombobox'
+import type { TargetAsset } from '@/lib/targetAssetApi'
+
+const webTargetChoice = (asset: TargetAsset) => usableWebTargets([asset]).length === 1
 
 interface TargetLite { id: string; url: string; name?: string | null; discovery_source?: string | null }
 
@@ -237,7 +240,7 @@ function LeadInspector({ lead, contracts, target, busy, onTransition }: {
 }
 
 export default function InvestigationWorkspacePage() {
-  const [targets, setTargets] = useState<TargetLite[]>([])
+  const [selectedTarget, setSelectedTarget] = useState<TargetLite | undefined>(undefined)
   const [targetId, setTargetId] = useState('')
   const [data, setData] = useState<HypothesisScheduleResponse | null>(null)
   const [contracts, setContracts] = useState<FamilyProofContracts | null>(null)
@@ -249,9 +252,7 @@ export default function InvestigationWorkspacePage() {
   const [transitionError, setTransitionError] = useState<string | null>(null)
 
   useEffect(() => {
-    Promise.all([getTargets(), getFamilyProofContracts()]).then(([targetData, proofData]) => {
-      const list = usableWebTargets((targetData?.targets || targetData || []) as TargetLite[])
-      setTargets(list)
+    getFamilyProofContracts().then((proofData) => {
       setContracts(proofData)
     }).catch((e) => setError(e instanceof Error ? e.message : 'Failed to load investigation context'))
   }, [])
@@ -276,7 +277,6 @@ export default function InvestigationWorkspacePage() {
 
   const selected = useMemo(() => data?.scheduled.find((x) => x.hypothesis_id === selectedId) || null, [data, selectedId])
   const visibleLeads = useMemo(() => data?.scheduled.slice(0, 5) || [], [data])
-  const selectedTarget = useMemo(() => targets.find((target) => target.id === targetId), [targetId, targets])
 
   const transition = useCallback(async (lead: ScheduledLead, to: string) => {
     const h = lead.hypothesis
@@ -314,12 +314,14 @@ export default function InvestigationWorkspacePage() {
 
       <Card className="mt-5 p-4">
         <div className="grid gap-4 md:grid-cols-[minmax(260px,1fr)_auto] md:items-end">
-          <label className="text-xs font-medium text-gray-400">1. Choose a target
-            <select value={targetId} onChange={(e) => setTargetId(e.target.value)} className="mt-1.5 w-full rounded-lg border border-gray-700 bg-gray-950 px-3 py-2 text-sm text-gray-200">
-              <option value="">Choose a target…</option>
-              {targets.map((t) => <option key={t.id} value={t.id}>{t.name ? `${t.name} — ` : ''}{t.url}</option>)}
-            </select>
-          </label>
+          <div className="text-xs font-medium text-gray-400">
+            <label htmlFor="leads-target">1. Choose a target</label>
+            {/* Searched on the server: the first 100 targets used to be the only choices. */}
+            <div className="mt-1.5">
+              <TargetSearchCombobox id="leads-target" value={targetId} onChange={setTargetId}
+                accept={webTargetChoice} placeholder="Choose a target…" onSelectedAsset={setSelectedTarget} />
+            </div>
+          </div>
           <Button variant="secondary" onClick={() => load().catch(() => undefined)} disabled={loading || busy}><RefreshCw className="h-4 w-4" />Refresh</Button>
         </div>
       </Card>

@@ -11,10 +11,14 @@ import { Plus, Search } from 'lucide-react'
 import { buttonClasses, Card, ConfirmDialog, ErrorState, Input, LastUpdated, PageHeader, ScanStatusBadge, Select, TableSkeleton, useToast } from '@/components/ui'
 import { episodesStarted, findingCount, RunStatusBadge, runState } from '@/components/hunt'
 import { boundedTargetDisplay } from '@/lib/targetChoices'
+import { usePoll } from '@/lib/usePoll'
+import { isAbortError } from '@/lib/fetchLayer.mjs'
 
 const PAGE_SIZE = 50
 const SEARCH_DEBOUNCE_MS = 300
 const LIVE_DURATION_REFRESH_MS = 5000
+const SCANS_LIVE_REFRESH_MS = 5000
+const SCANS_IDLE_REFRESH_MS = 60_000
 const AUTH_OPTION_KEYS = [
   'auth_header',
   'auth_cookies',
@@ -217,7 +221,10 @@ function ScansContent() {
     }
   }, [searchInput, searchQuery, setFilter])
 
-  const fetchScans = useCallback(async (isPolling = false): Promise<boolean> => {
+  // /scans has no list/v1 yet, so every read is the legacy limit/offset page with its total; no
+  // `count=` is sent (opting in later would switch the response to cursor pages and break offset
+  // paging). Only exact (non-poll) loads may redirect an out-of-range page.
+  const fetchScans = useCallback(async (isPolling = false, signal?: AbortSignal): Promise<boolean> => {
     // Only show loading skeleton on initial load, not polling refreshes
     if (!isPolling) {
       setLoading(true)
@@ -231,39 +238,46 @@ function ScansContent() {
         created_within_days: withinFilter || undefined,
         include_internal: includeInternal || undefined,
         limit: PAGE_SIZE,
-        offset: (rawPage - 1) * PAGE_SIZE
-      })
-      const fetchedTotal = data.total || 0
-      const maxPage = Math.max(1, Math.ceil(fetchedTotal / PAGE_SIZE))
+        offset: (rawPage - 1) * PAGE_SIZE,
+      }, signal)
+      if (signal?.aborted) return true
+      if (typeof data.total === 'number') {
+        const fetchedTotal = data.total
+        const maxPage = Math.max(1, Math.ceil(fetchedTotal / PAGE_SIZE))
 
-      // If page is out of range and there are results, redirect to last valid page
-      if (rawPage > maxPage && fetchedTotal > 0) {
-        // Don't update state - keep loading while redirecting
-        setFilter('page', maxPage > 1 ? maxPage : undefined)
-        return true
+        // If page is out of range and there are results, redirect to last valid page (exact loads
+        // only: a poll without a count cannot tell).
+        if (!isPolling && rawPage > maxPage && fetchedTotal > 0) {
+          // Don't update state - keep loading while redirecting
+          setFilter('page', maxPage > 1 ? maxPage : undefined)
+          return true
+        }
+        setTotal(fetchedTotal)
       }
 
       setScans(data.scans || [])
-      setTotal(fetchedTotal)
       setLoadError(false)
       setLastUpdated(new Date())
       setLoading(false)
       return true
     } catch (err) {
+      if (isAbortError(err)) return true
       console.error('Failed to fetch scans:', err)
       // Background poll failures keep existing rows; only non-polling loads surface the error state
       if (!isPolling) {
         setLoadError(true)
         setLoading(false)
       }
+      if (isPolling) throw err
       return false
     }
   }, [statusFilter, domainFilter, targetIdFilter, searchQuery, withinFilter, includeInternal, rawPage, setFilter])
 
-  const fetchActiveHunts = useCallback(async (): Promise<boolean> => {
+  const fetchActiveHunts = useCallback(async (signal?: AbortSignal): Promise<boolean> => {
     if (!featureEnabled('hunt')) return true
     try {
       const data = await getCampaigns({ status: 'active', limit: 50 })
+      if (signal?.aborted) return true
       setActiveHunts((data.campaigns || []).filter((campaign) => campaign.campaign_type === 'autonomous_research'))
       return true
     } catch (err) {
@@ -272,15 +286,24 @@ function ScansContent() {
     }
   }, [])
 
-  useEffect(() => {
-    fetchScans()
-    fetchActiveHunts()
-    const interval = setInterval(() => {
-      fetchScans(true)
-      fetchActiveHunts()
-    }, 5000)
-    return () => clearInterval(interval)
-  }, [fetchActiveHunts, fetchScans])
+  // Poll every 5 s only while something on the page is live (a pending/running scan or an active
+  // autonomous Hunt); otherwise once a minute to notice new work. Paused in hidden tabs, backed
+  // off on errors and 429s (lib/usePoll). A filter or page change restarts the loop with an exact
+  // load and aborts the read in flight.
+  const exactLoaded = useRef(false)
+  // Declared before usePoll so the reset lands before the restarted loop's first tick reads it.
+  useEffect(() => { exactLoaded.current = false }, [fetchScans])
+  const live = scans.some((scan) => scan.status === 'pending' || scan.status === 'running') || activeHunts.length > 0
+  usePoll(async (signal) => {
+    const polling = exactLoaded.current
+    const [scansOk] = await Promise.all([fetchScans(polling, signal), fetchActiveHunts(signal)])
+    if (!signal.aborted && scansOk) exactLoaded.current = true
+  }, {
+    intervalMs: SCANS_LIVE_REFRESH_MS,
+    idleIntervalMs: SCANS_IDLE_REFRESH_MS,
+    live,
+    deps: [fetchScans, fetchActiveHunts],
+  })
 
   // Keep running scan elapsed durations fresh without per-second churn.
   useEffect(() => {
@@ -302,7 +325,7 @@ function ScansContent() {
 
   async function handleManualRefresh() {
     setRefreshing(true)
-    const [scansOk, huntsOk] = await Promise.all([fetchScans(true), fetchActiveHunts()])
+    const [scansOk, huntsOk] = await Promise.all([fetchScans(true).catch(() => false), fetchActiveHunts()])
     setRefreshing(false)
     if (!scansOk || !huntsOk) {
       toast.error('Some work could not be refreshed')
@@ -315,7 +338,7 @@ function ScansContent() {
       await cancelScan(scanId)
       setConfirmCancelId(null)
       toast.success('Scan cancelled')
-      fetchScans(true)
+      void fetchScans(true).catch(() => undefined)
     } catch (err) {
       console.error('Failed to cancel scan:', err)
       setConfirmCancelId(null)
@@ -339,7 +362,7 @@ function ScansContent() {
           ? { link: { href: `/scans/${result.scan_id}`, label: 'View scan' } }
           : undefined
       )
-      fetchScans(true)
+      void fetchScans(true).catch(() => undefined)
     } catch (err) {
       console.error('Failed to start scan:', err)
       toast.error(err instanceof Error ? err.message : 'Failed to start scan')

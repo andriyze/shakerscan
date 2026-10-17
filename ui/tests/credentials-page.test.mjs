@@ -82,10 +82,28 @@ test('a share names the target as it is and only offers targets the credential c
   const dialog = fs.readFileSync(path.join(root, 'src/components/credentials/ShareCredentialDialog.tsx'), 'utf8')
   // Soak N6: every share was sent as `network`, and a web basic-auth profile was offered and
   // granted to an SSH-only device. The kind comes from the asset, and the protocol must fit.
-  assert.doesNotMatch(page, /id: asset\.id, kind: 'network'/)
-  assert.match(page, /kind: httpOrigin \? 'web' : asset\.connected_device \? 'device' : 'network'/)
-  assert.match(page, /servesHttp: httpOrigin \|\| \(asset\.origin_count \?\? 0\) > 0\s*\|\| \(\(asset\.service_count \?\? 0\) > 0 \? false : undefined\)/)
+  assert.doesNotMatch(dialog, /id: asset\.id, kind: 'network'/)
+  assert.match(dialog, /kind: httpOrigin \? 'web' : asset\.connected_device \? 'device' : 'network'/)
+  assert.match(dialog, /servesHttp: httpOrigin \|\| \(asset\.origin_count \?\? 0\) > 0\s*\|\| \(\(asset\.service_count \?\? 0\) > 0 \? false : undefined\)/)
   assert.match(dialog, /if \(authKind\.startsWith\('ssh_'\)\) return target\.kind === 'network' \|\| target\.kind === 'device'/)
   assert.match(dialog, /return target\.servesHttp !== false/)
   assert.match(dialog, /protocolFits\(profile\.auth_kind, target\)/)
+})
+
+test('credential target pickers search the server instead of loading every target', () => {
+  const dialog = fs.readFileSync(path.join(root, 'src/components/credentials/ShareCredentialDialog.tsx'), 'utf8')
+  // 2.11: the page loaded the whole inventory (500 per request, every page) before rendering.
+  assert.doesNotMatch(page, /getAllTargetAssets/)
+  assert.match(page, /useTargetSearch\(\{ includeServices: true \}\)/)
+  assert.match(page, /onQueryChange=\{targetSearch\.setQuery\}/)
+  // A link by URL is resolved with one bounded search for its origin, a link by id is read directly.
+  assert.match(page, /searchTargetAssets\(\{ search: requested\.host, limit: 50, includeServices: true \}/)
+  assert.match(page, /new URL\(item\.url\)\.origin === requested\.origin/)
+  assert.match(page, /getTargetAsset\(targetId\)/)
+  // A selection still being read keeps the profiles loading instead of showing none.
+  assert.match(page, /if \(resolvingTarget\) setProfilesLoading\(true\)/)
+  // The share dialog searches inside itself, and still offers only fitting targets.
+  assert.match(dialog, /useTargetSearch\(\{ includeServices: true, enabled: Boolean\(profile\)/)
+  assert.match(dialog, /onQueryChange=\{targetSearch\.setQuery\}/)
+  assert.doesNotMatch(dialog, /targets: ShareTargetChoice\[\]/)
 })

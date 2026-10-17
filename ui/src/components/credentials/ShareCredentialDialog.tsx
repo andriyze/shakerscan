@@ -1,8 +1,8 @@
 'use client'
 
-import { useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import { Share2, X } from 'lucide-react'
-import { Button, Field, Modal, Select } from '@/components/ui'
+import { Button, Combobox, Field, Modal, type ComboboxOption } from '@/components/ui'
 import { useToast } from '@/components/ui'
 import { createTargetPolicyApprovalReceipt } from '@/lib/api'
 import {
@@ -14,6 +14,10 @@ import {
   type CredentialProfile,
   type CredentialTargetKind,
 } from '@/lib/credentialApi'
+import { targetSearchNote } from '@/lib/pickerOptions'
+import { targetSearchProvesEmpty } from '@/lib/targetSearchModel.mjs'
+import type { TargetAsset } from '@/lib/targetAssetApi'
+import { useTargetSearch } from '@/lib/useTargetSearch'
 
 export interface ShareTargetChoice {
   id: string
@@ -22,6 +26,20 @@ export interface ShareTargetChoice {
   detail: string
   /** Whether the target has a web or API origin; undefined when the inventory did not say. */
   servesHttp?: boolean
+}
+
+/** The grant names the target as it is; the server refuses a label that does not match. */
+export function shareTargetChoice(asset: TargetAsset): ShareTargetChoice {
+  const httpOrigin = /^https?:\/\//i.test(asset.url)
+  return {
+    id: asset.id,
+    kind: httpOrigin ? 'web' : asset.connected_device ? 'device' : 'network',
+    label: asset.name || asset.locator,
+    detail: httpOrigin ? asset.url : asset.locator,
+    // As the server decides: no HTTP only on evidence (services observed, no web app linked).
+    servesHttp: httpOrigin || (asset.origin_count ?? 0) > 0
+      || ((asset.service_count ?? 0) > 0 ? false : undefined),
+  }
 }
 
 const ASSET_KINDS: CredentialTargetKind[] = ['web', 'api', 'network', 'device']
@@ -44,12 +62,10 @@ export function protocolFits(authKind: string, target: ShareTargetChoice): boole
  */
 export function ShareCredentialDialog({
   profile,
-  targets,
   onClose,
   onChanged,
 }: {
   profile: CredentialProfile | null
-  targets: ShareTargetChoice[]
   onClose: () => void
   onChanged: () => void
 }) {
@@ -89,12 +105,23 @@ export function ShareCredentialDialog({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [profileId])
 
+  // Targets come from a server search inside the dialog (one bounded page per query), not from
+  // the whole inventory loaded up front.
   const used = useMemo(() => new Set(grants.filter((grant) => grant.active).map((grant) => grant.target_id)), [grants])
-  const choices = useMemo(() => (profile ? targets.filter((target) =>
-    sharesAsset(profile.target_kind, target.kind) && protocolFits(profile.auth_kind, target)
-    && target.id !== profile.target_id && !used.has(target.id)) : []),
-  [profile, targets, used])
+  const fits = useCallback((target: ShareTargetChoice) => Boolean(profile
+    && sharesAsset(profile.target_kind, target.kind) && protocolFits(profile.auth_kind, target)
+    && target.id !== profile.target_id && !used.has(target.id)), [profile, used])
+  // The inventory has no parameter for "shares this credential's kind and protocol", so the search
+  // applies it while reading (and reads on, bounded, while it rejects rows): a page of other kinds
+  // never reads as "no target of this kind".
+  const accept = useCallback((asset: TargetAsset) => fits(shareTargetChoice(asset)), [fits])
+  const targetSearch = useTargetSearch({ includeServices: true, enabled: Boolean(profile), selectedIds: [targetId], accept })
+  const targets = useMemo(() => targetSearch.assets.map(shareTargetChoice), [targetSearch.assets])
+  const choices = useMemo(() => targets.filter(fits), [targets, fits])
   const chosen = choices.find((target) => target.id === targetId)
+  const options = useMemo<ComboboxOption[]>(() => choices.map((target) => ({
+    value: target.id, label: target.label, meta: target.detail, description: target.kind,
+  })), [choices])
   const needsApproval = activeCapabilities.length > 0
 
   if (!profile) return null
@@ -195,10 +222,14 @@ export function ShareCredentialDialog({
 
       <div className="mt-5 grid gap-3 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-end">
         <Field label="Share with target">
-          <Select value={targetId} onChange={(event) => { setTargetId(event.target.value); setApproveActive(false) }} disabled={busy || loading}>
-            <option value="">{choices.length ? 'Choose a target…' : 'No other target of this kind'}</option>
-            {choices.map((target) => <option key={target.id} value={target.id}>{target.label} — {target.detail}</option>)}
-          </Select>
+          <Combobox value={targetId} options={options} disabled={busy || loading}
+            onChange={(value) => { setTargetId(value); setApproveActive(false) }}
+            onQueryChange={targetSearch.setQuery} loading={targetSearch.loading} optionsQuery={targetSearch.answeredQuery}
+            footerNote={targetSearchProvesEmpty({ ...targetSearch, assets: choices })
+              ? 'No other target of this kind'
+              : targetSearchNote({ ...targetSearch, assets: choices })}
+            placeholder="Choose a target…" searchPlaceholder="Search targets by name or host…"
+            aria-label="Share with target" />
         </Field>
         <Button onClick={() => void share()} disabled={!chosen || busy || (needsApproval && !approveActive)} loading={busy}>
           <Share2 className="h-4 w-4" /> Share

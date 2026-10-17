@@ -11,9 +11,11 @@ const service = {id:serviceId,url:'https://router.test:8443',name:'Management se
 for (const link of ['id','url']) {
   test(`credential ${link} link preserves exact service identity`,async ({page}) => {
     const consumers: string[] = []
+    const searches: string[] = []
     await pinMockApiOrigin(page)
     await page.route(`${MOCK_API_ORIGIN}/**`,async route => {
       const url = new URL(route.request().url())
+      if (url.pathname === '/targets/inventory') searches.push(url.searchParams.get('search') || '')
       if (url.pathname === '/targets/inventory') return route.fulfill({json:{
         targets:link === 'id' ? [host] : [host,{...host,...service,asset_id:hostId}],
         total:link === 'id' ? 1 : 2,offset:0,limit:500}})
@@ -30,6 +32,8 @@ for (const link of ['id','url']) {
     await expect(page.getByLabel('Target', {exact:true})).toHaveAttribute('data-value', serviceId)
     await expect.poll(() => consumers).toContain(serviceId)
     expect(consumers).not.toContain(hostId)
+    // A URL link is resolved with one bounded search for its origin, not by loading every target.
+    if (link === 'url') expect(searches).toContain('router.test:8443')
     expect(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth)).toBe(false)
   })
 }

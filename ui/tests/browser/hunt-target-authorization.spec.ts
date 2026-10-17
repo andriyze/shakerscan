@@ -166,15 +166,24 @@ test('a saved run page does not issue the launcher authorization and credential 
     if (path === '/credential-profiles') return route.fulfill({ json: { profiles: [] } })
     return route.fulfill({ json: { status: 'healthy', rows: [], profiles: [], collections: [], requests: [], total: 0, has_more: false, revision: 0, skill: null, operator_skill: null, knowledge: null } })
   })
-  const inventory = page.waitForRequest(request => new URL(request.url()).pathname === '/targets/inventory')
+  const inventoryReads: string[] = []
+  page.on('request', request => { if (new URL(request.url()).pathname === '/targets/inventory') inventoryReads.push(request.url()) })
   await page.goto(`/hunt?run=${runId}`)
-  await inventory
   await expect(page.getByText('Investigate TV ports').first()).toBeVisible()
-  // Give the selection effects a render after the target list resolves.
+  // Give the selection effects a render after the run resolves.
   await page.waitForTimeout(500)
   expect(launcherReads).toEqual([])
+  // A run page does not search the target inventory either: that is launcher state.
+  expect(inventoryReads).toEqual([])
   // The launcher itself still reads both for the same target.
   await page.goto(`/hunt?target=${id}`)
   await expect.poll(() => launcherReads.slice().sort()).toEqual(['/credential-profiles', `/targets/${id}/authorization`])
+  // The launcher's target picker is one bounded list/v1 search, not every inventory page.
+  await expect.poll(() => inventoryReads.length).toBeGreaterThan(0)
+  for (const url of inventoryReads) {
+    const query = new URL(url).searchParams
+    expect(query.get('count')).toBe('none')
+    expect(Number(query.get('limit'))).toBeLessThanOrEqual(50)
+  }
   expect(errors).toEqual([])
 })
