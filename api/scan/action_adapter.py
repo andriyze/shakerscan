@@ -4279,6 +4279,31 @@ class DatabaseNeutralScanActionDispatcher:
             attempt_log.append((candidate_id, retry_round, False, False))
             errors.append(f"candidate_failed:{type(exc).__name__}")
 
+        def needs_hold(entry: tuple[int, Mapping[str, Any], int]) -> bool:
+            """Whether a work entry will be funded, not carried, resumed or skipped below.
+
+            The slice is split across the entries still to fund. Counting the ones the loop
+            carries from an extended action (or resumes from a checkpoint) diluted a
+            continuation's hold: lab Scan 13bd3497's verify.sqli.r01.ext.r02 held 480
+            requests for one unfinished candidate followed by three carried ones, gave it
+            480 // 4 = 120 -- less than the 189 its time-based unit needs -- and seven
+            extensions in a row stopped on the request ceiling without sending a request.
+            """
+            manifest_index, row, retry_round = entry
+            if row.get("parameter_location") == "path" and family != "sqli":
+                return False
+            candidate = _batch_candidate_id(row, manifest_index)
+            key = f"{manifest_digest}:{family}:{candidate}"
+            if retry_round:
+                key += f":retry:{retry_round}"
+            identity = hashlib.sha256(key.encode()).hexdigest()
+            if identity in completed:
+                return False
+            if retry_round:
+                return True
+            route = str(row.get("candidate_id") or row.get("route_id") or "")
+            return identity not in carried and not (route and route in admitted)
+
         try:
             while True:
                 if position >= len(work):
@@ -4416,7 +4441,8 @@ class DatabaseNeutralScanActionDispatcher:
                         execution_target = execution_url_for_manifest_endpoint(
                             manifest, manifest_index,
                         )
-                    remaining_attempts = max(1, len(work) - position + 1)
+                    # This entry and every later one that will actually be funded.
+                    remaining_attempts = 1 + sum(1 for entry in work[position:] if needs_hold(entry))
                     # What the slice has neither consumed nor lent to a running candidate.
                     charge_wall()
                     remaining_budget = candidates.holds.available(consumed)

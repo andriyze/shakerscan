@@ -26,8 +26,9 @@ settled technique is a checkpoint a later extension never re-sends. A stage that
 injection ends the candidate, so time-based blind -- the most expensive and the slowest to
 prove -- runs only when UNION, boolean and error-based were all inconclusive. Once an attempt
 has settled a stage, it does not start a stage whose negative verdict cannot fit the wall left at
-the response time just measured: that stage would be killed part-way and re-sent from its first
-payload, so the candidate stops as wall-stopped and the unspent wall returns to its slice. Every stage is
+the candidate's measured rate (a rate sample, never a run too short to measure one): that stage
+would be killed part-way and re-sent from its first payload, so the candidate stops as
+wall-stopped and the unspent wall returns to its slice. Every stage is
 paced and bounded exactly like the attempt it is part of; a stage holds whatever the
 candidate's sub-budget has left, so no ceiling grows. A stage the wall interrupted is not a
 verdict and the candidate stays unproven-incomplete; a stage that already ran out of wall
@@ -794,7 +795,15 @@ async def run_staged_sqli_attempt(
         # Never predicted faster than the candidate has been observed to answer.
         observed = robust_rate(samples, key)
         per_request = max(latency + delay, observed or 0.0)
-        if ran_here and (latency > 0 or observed) and not probing and (
+        # Only a rate sample (``MINIMUM_RATE_SAMPLE_REQUESTS`` or more requests) can stop a
+        # unit before it starts. A unit that sent one request in sqlmap's one-second start-up
+        # measured start-up, not the target: lab Scan 13bd3497 (2.11.0) settled U, B and E of
+        # ``/hub/api/tickets/1*`` with one request each (the unauthenticated replay answered
+        # 401), read that as ~1 s per response and refused T as 189 s against 177 s left, so
+        # the required verify.sqli.r01 reported timed_out after 11 s with 1,585 requests unused.
+        # An unmeasured unit runs inside its wall; if the wall kills it, its checkpoint is a
+        # rate sample and a continuation resumes it like any other wall-killed unit.
+        if ran_here and observed and not probing and (
             _unit_requests(technique, field_name, count) * per_request > wall
         ):
             # This attempt already settled a unit, and the next one cannot reach its verdict
