@@ -48,8 +48,9 @@ except ModuleNotFoundError:  # package import in host-side tests
 from .services_router import router as services_router
 from .service_inventory import origin as _service_origin
 from .asset_rank import (
-    ASSETS_LIST, adjustment_rows_sql, exposure_class as exposure_class_for, keyset_page_sql, metrics_from,
-    offset_page_sql, refresh_facts, stringify_keys,
+    ASSETS_LIST, FACTS_READ_BUDGET, adjustment_rows_sql, complete_facts_in_background, facts_pending,
+    exposure_class as exposure_class_for, keyset_page_sql, metrics_from, offset_page_sql, refresh_facts,
+    stringify_keys,
 )
 from .proof_rollup import undetermined_adjustments
 
@@ -946,15 +947,27 @@ def _asset_from_row(record: Any) -> dict[str, Any]:
     }
 
 
-async def _ranked_rows(conn: Any, build: Callable[[SqlParams, dict], str], *, kind: str | None) -> list[Any]:
-    """Refresh changed per-asset facts (own short transaction), then run one ranking statement
-    built by ``build`` with JIT off."""
-    await refresh_facts(conn, include_web=kind in (None, "web", "model"), include_ai=kind in (None, "ai"))
+async def _ranked_rows(conn: Any, build: Callable[[SqlParams, dict], str], *,
+                       kind: str | None) -> tuple[list[Any], bool]:
+    """Refresh changed per-asset facts (short transactions, at most ``FACTS_READ_BUDGET`` rows),
+    then run one ranking statement built by ``build`` with JIT off. Returns the rows and whether
+    some assets are ranked with provisional facts (a background task is then finishing them)."""
+    kinds = {"include_web": kind in (None, "web", "model"), "include_ai": kind in (None, "ai")}
+    await refresh_facts(conn, max_rows=FACTS_READ_BUDGET, **kinds)
+    pending = await facts_pending(conn, **kinds)
+    if pending:
+        complete_facts_in_background(_pool())
     async with without_jit(conn):
         adjustments = stringify_keys(undetermined_adjustments(await conn.fetch(adjustment_rows_sql())))
         params = SqlParams()
         sql = build(params, adjustments)
-        return await conn.fetch(sql, *params.values)
+        return await conn.fetch(sql, *params.values), pending
+
+
+# The legacy response's row bound (it was 1000 by default and up to 2000: 1.5-3 MB at scale).
+LEGACY_ASSETS_LIMIT = 500
+LEGACY_ASSETS_HINT = ("Deprecated limit/offset response, at most 500 assets. Page with list/v1: "
+                      "count=none (limit up to 200), then cursor=<next_cursor>.")
 
 
 @router.get("/exposure/assets")
@@ -980,8 +993,11 @@ async def exposure_assets(
     list/v1 (any of ``cursor``/``count``/``fields``): keyset pages (limit 1..200, default 50;
     ``sort`` = ``-priority`` (default) | ``-risk`` | ``-first_seen``, ``-`` descends) with the
     headline ``summary`` (metrics, cohort counts) over every matching asset. Otherwise the
-    deprecated limit/offset response (limit up to 2000, default 1000). Ranking, metrics and
-    cohort counts are SQL over per-asset summaries; only the page's rows are built here.
+    deprecated limit/offset response (at most ``LEGACY_ASSETS_LIMIT`` rows, also the default; a
+    larger ``limit`` is lowered to it and ``truncated`` marks a partial answer). Ranking, metrics
+    and cohort counts are SQL over per-asset summaries; only the page's rows are built here.
+    ``classification_pending`` (legacy top level, list/v1 ``summary``) is true while a background
+    task is still classifying assets added in bulk; they are ranked with provisional facts.
     """
     root_domain, kind, cohort, limit, offset, cursor, sort, fields, count, since = (direct(value) for value in (
         root_domain, kind, cohort, limit, offset, cursor, sort, fields, count, since))
@@ -992,7 +1008,7 @@ async def exposure_assets(
         plan = ASSETS_LIST.plan(page, filters={"root_domain": root_domain, "kind": kind, "cohort": selected_cohort})
         async with _pool().acquire() as conn:
             generated_at = await snapshot_time(conn)
-            rows = await _ranked_rows(conn, lambda params, adjustments: keyset_page_sql(
+            rows, pending = await _ranked_rows(conn, lambda params, adjustments: keyset_page_sql(
                 params, plan, root_domain=root_domain, kind=kind, cohort=selected_cohort, now=now,
                 adjustments=adjustments), kind=kind)
         head = rows[0]
@@ -1006,15 +1022,15 @@ async def exposure_assets(
         body = plan.envelope(items, total=total, total_kind=total_kind, generated_at=generated_at)
         body["summary"] = {
             "metrics": metrics, "new_count": new_count, "cohort": selected_cohort,
-            "cohort_counts": _cohort_counts(head),
+            "cohort_counts": _cohort_counts(head), "classification_pending": pending,
         }
         return body
     if sort is not None:
         raise HTTPException(400, "sort is list/v1 only; add count=none (or a cursor) to use it")
-    limit = 1000 if limit is None else limit
+    limit = LEGACY_ASSETS_LIMIT if limit is None else min(int(limit), LEGACY_ASSETS_LIMIT)
     mark_deprecated(response)
     async with _pool().acquire() as conn:
-        rows = await _ranked_rows(conn, lambda params, adjustments: offset_page_sql(
+        rows, pending = await _ranked_rows(conn, lambda params, adjustments: offset_page_sql(
             params, root_domain=root_domain, kind=kind, cohort=selected_cohort, now=now,
             adjustments=adjustments, limit=limit, offset=offset), kind=kind)
     head = rows[0]
@@ -1031,6 +1047,9 @@ async def exposure_assets(
         "cohort": selected_cohort,
         "cohort_counts": _cohort_counts(head),
         "truncated": offset + len(assets) < total,
+        "limit": limit,
+        "classification_pending": pending,
+        "list_v1_hint": LEGACY_ASSETS_HINT,
     }
 
 

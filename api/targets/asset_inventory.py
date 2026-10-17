@@ -206,6 +206,9 @@ SORTS = {
     'recent': (f"COALESCE(extract(epoch FROM {LAST_SCANNED}),0)", 'max', 'DESC'),
     'created': ('extract(epoch FROM t.created_at)', 'max', 'DESC'),
 }
+# Assets per domain group (list/v1 ``member_limit``; the legacy grouping's cap as well).
+DEFAULT_MEMBER_LIMIT = 20
+MAX_MEMBER_LIMIT = 200
 _NETWORK_LOCATOR = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$")
 
 
@@ -307,8 +310,10 @@ async def list_assets(conn: Any, *, search: str = '', connected_only: bool = Fal
                       asset_type: str | None = None, environment: str | None = None,
                       authorization: str | None = None, findings: str | None = None,
                       activity: str | None = None, sort: str = 'name',
-                      include_facets: bool = False, web_only: bool = False) -> dict[str, Any]:
-    """The legacy (limit/offset) inventory response, deprecated for the 2.11.x line."""
+                      include_facets: bool = False, web_only: bool = False,
+                      member_limit: int = DEFAULT_MEMBER_LIMIT) -> dict[str, Any]:
+    """The legacy (limit/offset) inventory response, deprecated for the 2.11.x line. Domain groups
+    are bounded (``_list_domain_groups``)."""
     chosen = {'asset_type': asset_type, 'authorization': authorization, 'findings': findings, 'activity': activity}
     _validate(sort, chosen)
     query = _scope_query(search=search, connected_only=connected_only, include_inactive=include_inactive,
@@ -320,7 +325,8 @@ async def list_assets(conn: Any, *, search: str = '', connected_only: bool = Fal
     if group_by == 'domain':
         if include_services:
             raise HTTPException(400, 'Domain hierarchy groups assets; service records remain within their asset')
-        result = await _list_domain_groups(conn, query, from_sql=from_sql, sort=sort, limit=limit, offset=offset)
+        result = await _list_domain_groups(conn, query, from_sql=from_sql, sort=sort, limit=limit, offset=offset,
+                                           member_limit=member_limit)
     else:
         total = await conn.fetchval(f'SELECT count(*) FROM {from_sql} WHERE {query.where}', *query.parameters)
         order, _, direction = SORTS[sort]
@@ -335,57 +341,55 @@ async def list_assets(conn: Any, *, search: str = '', connected_only: bool = Fal
     return result
 
 
+#: The legacy domain grouping returns at most this many assets per page across its groups, each
+#: group at most ``member_limit`` of them. The legacy shape lists every shown asset twice (``targets``
+#: and its group's ``targets``): 200 keeps a page near 1 MiB at about 2.4 KB per asset.
+LEGACY_GROUPED_ASSETS = 200
+LEGACY_GROUPS_HINT = ("Deprecated response: each group holds at most `member_limit` assets (default 20) and a "
+                      "page at most 200 assets; `member_count`/`members_truncated` say what was left out. "
+                      "Read groups with list/v1: the same filters plus count=none&group_by=domain"
+                      "&member_limit=<n>, then cursor=<next_cursor>.")
+
+
 async def _list_domain_groups(conn: Any, query: _Query, *, from_sql: str = ROOT_FROM, sort: str, limit: int,
-                              offset: int) -> dict[str, Any]:
-    """Page complete domain groups, rather than cutting a root and its subdomains across pages.
-
-    Grouping uses the Public Suffix List (``group_domain``), which SQL cannot apply, so the
-    matching assets' ids, locators and sort keys are read first, grouped and paged here, and only
-    the page's assets are read in full.
-    """
+                              offset: int, member_limit: int = DEFAULT_MEMBER_LIMIT) -> dict[str, Any]:
+    """Page complete domain groups (limit/offset), rather than cutting a root and its subdomains
+    across pages, with at most ``member_limit`` assets per group and ``LEGACY_GROUPED_ASSETS`` per
+    page. Groups are aggregated in SQL through the Public Suffix List cache
+    (``target_inventory_groups``) and only the page's shown assets are read in full; the order is
+    the legacy one: by domain for ``name``, else by the group's highest (lowest for ``min``) key
+    with a group without one first, ties by domain."""
     order, aggregate, direction = SORTS[sort]
-    matching = await conn.fetch(f"""SELECT t.id,target_asset_locator(t.url) AS locator,{order} AS sort_key
-        FROM {from_sql} WHERE {query.where}""", *query.parameters)
-    members: dict[str, list[Any]] = {}
-    for row in matching:
-        members.setdefault(group_domain(row['locator'] or ''), []).append(row)
-    descending = direction == 'DESC'
-
-    def present(value: Any) -> tuple[int, Any]:
-        # PostgreSQL puts NULL last ascending and first descending.
-        return (1, 0) if value is None else (0, value)
-
-    def group_key(item: tuple[str, list[Any]]) -> Any:
-        domain, rows = item
-        if sort == 'name':
-            return domain
-        values = [row['sort_key'] for row in rows if row['sort_key'] is not None]
-        return present((max if aggregate == 'max' else min)(values) if values else None)
-
-    ordered = sorted(members.items(), key=lambda item: item[0])
-    ordered.sort(key=group_key, reverse=descending)
-    page = ordered[offset:offset + limit]
-    ids = [row['id'] for _domain, rows in page for row in rows]
-    detail = {row['id']: row for row in await conn.fetch(f"""SELECT {ROOT_COLUMNS},{DETAIL_COLUMNS}
-        FROM {ROOT_FROM} WHERE t.id = ANY($2::uuid[])""", query.parameters[0], ids)} if ids else {}
+    await fill_group_cache(conn, from_sql, query)
+    params = SqlParams(query.parameters)
+    groups_from = _groups_from(params, from_sql, query.where, order=order,
+                               aggregate=None if sort == 'name' else aggregate)
+    group_order = ('g.group_domain COLLATE "C"' if sort == 'name'
+                   else f'g.group_sort {direction} NULLS FIRST, g.group_domain COLLATE "C"')
+    totals_values = params.snapshot()
+    # The totals ride on the page rows (one aggregation); a page past the end reads them alone.
+    rows = await conn.fetch(f"""SELECT g.group_domain, g.member_count, count(*) OVER () AS groups,
+            sum(g.member_count) OVER () AS assets
+        FROM {groups_from}
+        ORDER BY {group_order} LIMIT {params.add(limit)} OFFSET {params.add(offset)}""", *params.values)
+    totals = rows[0] if rows else await conn.fetchrow(f"""SELECT count(*) AS groups,
+        COALESCE(sum(g.member_count), 0) AS assets FROM {groups_from}""", *totals_values)
+    domains = [row['group_domain'] for row in rows]
+    members = await _group_members(conn, query, from_sql=from_sql, sort=sort, descending=direction == 'DESC',
+                                   domains=domains, member_limit=member_limit, budget=LEGACY_GROUPED_ASSETS)
     groups: list[dict[str, Any]] = []
     targets = []
-    for domain, rows in page:
-        rows = sorted(rows, key=lambda row: (str(row['locator'] or ''), str(row['id'])))
-        rows.sort(key=lambda row: present(row['sort_key']), reverse=descending)
-        rows.sort(key=lambda row: str(row['locator'] or '') != domain)
-        group = {'root_domain': domain, 'discoverable': discoverable(domain), 'targets': []}
-        for row in rows:
-            if row['id'] not in detail:
-                continue  # removed between the two reads
-            asset = public_asset(detail[row['id']])
-            asset['root_domain'] = domain
-            targets.append(asset)
-            group['targets'].append(asset)
+    for row in rows:
+        group = _group_item(row['group_domain'], int(row['member_count']), members)
+        targets.extend(group['targets'])
         groups.append(group)
-    return {'targets': targets, 'groups': groups, 'total': len(matching),
-            'total_groups': len(members), 'limit': limit, 'offset': offset,
-            'inventory_kind': 'assets', 'group_by': 'domain'}
+    total_groups = int(totals['groups'] or 0)
+    return {'targets': targets, 'groups': groups, 'total': int(totals['assets'] or 0),
+            'total_groups': total_groups, 'limit': limit, 'offset': offset,
+            'inventory_kind': 'assets', 'group_by': 'domain', 'member_limit': member_limit,
+            'has_more': offset + len(groups) < total_groups,
+            'truncated': offset + len(groups) < total_groups or any(g['members_truncated'] for g in groups),
+            'list_v1_hint': LEGACY_GROUPS_HINT}
 
 
 async def inventory_facets(conn: Any, query: _Query) -> dict[str, Any]:
@@ -438,9 +442,10 @@ async def inventory_facets(conn: Any, query: _Query) -> dict[str, Any]:
 # Public Suffix List grouping (``group_domain``) through ``target_inventory_groups``, a cache of
 # that pure function keyed by locator and list version, filled for unseen locators on read.
 
-DEFAULT_MEMBER_LIMIT = 20
-MAX_MEMBER_LIMIT = 200
 _LOCATOR = "COALESCE(target_asset_locator(t.url),'')"
+# Each asset's locator computed once per row (``loc.locator``): target_asset_locator is PL/pgSQL,
+# and the grouping reads compare, join and order on it.
+_LOCATOR_FROM = f"CROSS JOIN LATERAL (SELECT {_LOCATOR} AS locator OFFSET 0) loc"
 _SORT_KEYS = {
     'name': (SORTS['name'][0], 'text'),
     'risk': (RISK_WEIGHT, 'int'),
@@ -483,10 +488,10 @@ _PSL_VERSION: str | None = None
 async def fill_group_cache(conn: Any, from_sql: str, query: _Query) -> int:
     """Compute ``group_domain`` for matching locators the cache has not seen under this list."""
     version_ref = f'${len(query.parameters) + 1}'
-    missing = await conn.fetch(f"""SELECT DISTINCT {_LOCATOR} AS locator FROM {from_sql}
+    missing = await conn.fetch(f"""SELECT DISTINCT loc.locator FROM {from_sql} {_LOCATOR_FROM}
         WHERE {query.where} AND NOT EXISTS (
             SELECT 1 FROM target_inventory_groups cache
-            WHERE cache.locator={_LOCATOR} AND cache.psl_version={version_ref})""",
+            WHERE cache.locator=loc.locator AND cache.psl_version={version_ref})""",
                                *query.parameters, psl_version())
     if not missing:
         return 0
@@ -551,20 +556,80 @@ def _public_v1_asset(row: Any) -> dict[str, Any]:
     return public_asset({key: row[key] for key in row.keys() if key not in _KEYSET_COLUMNS})
 
 
+def _groups_from(params: SqlParams, from_sql: str, where: str, *, order: str, aggregate: str | None) -> str:
+    """One row per domain group of the matching assets: ``group_domain``, ``member_count`` and
+    ``group_sort``, the group's ``aggregate`` (max/min) of the asset sort key (NULL when no asset
+    has one; 0 without an aggregate). Reads the group cache under this list's version."""
+    version = params.add(psl_version())
+    group_sort = '0' if aggregate is None else f"{'max' if aggregate == 'max' else 'min'}(a.sort_key)"
+    return f"""(SELECT a.group_domain, count(*) AS member_count, {group_sort} AS group_sort
+        FROM (SELECT cache.group_domain, {order} AS sort_key
+              FROM {from_sql} {_LOCATOR_FROM}
+              JOIN target_inventory_groups cache ON cache.locator=loc.locator AND cache.psl_version={version}
+              WHERE {where}) a
+        GROUP BY a.group_domain) g"""
+
+
+async def _group_members(conn: Any, query: _Query, *, from_sql: str, sort: str, descending: bool,
+                         domains: list[str], member_limit: int, budget: int | None = None) -> dict[str, list[Any]]:
+    """The first ``member_limit`` assets of each of ``domains`` in the legacy member order (the
+    domain's own asset first, then the sort key in the page's direction with NULL where
+    PostgreSQL places it, then locator and id), at most ``budget`` in all in ``domains`` order.
+    Members are ranked on their keys alone; only the chosen ones are read in full."""
+    members: dict[str, list[Any]] = {domain: [] for domain in domains}
+    if not domains:
+        return members
+    order = SORTS[sort][0]
+    params = SqlParams(query.parameters)
+    version = params.add(psl_version())
+    domains_ref = params.add(domains)
+    limit_ref = params.add(member_limit)
+    direction = 'DESC NULLS FIRST' if descending else 'ASC NULLS LAST'
+    # Text keys compare by code point, as the legacy (Python) grouping did.
+    member_order = f'({order}) COLLATE "C"' if sort == 'name' else order
+    budget_sql = f'LIMIT {params.add(budget)}' if budget is not None else ''
+    rows = await conn.fetch(f"""WITH ranked AS MATERIALIZED (
+            SELECT t.id, cache.group_domain AS __group,
+                   row_number() OVER (PARTITION BY cache.group_domain
+                       ORDER BY (loc.locator IS DISTINCT FROM cache.group_domain), {member_order} {direction},
+                                loc.locator COLLATE "C", t.id) AS __rank
+            FROM {from_sql} {_LOCATOR_FROM}
+            JOIN target_inventory_groups cache ON cache.locator=loc.locator AND cache.psl_version={version}
+            WHERE {query.where} AND cache.group_domain = ANY({domains_ref}::text[])
+        ), chosen AS (
+            SELECT ranked.id, ranked.__group, ranked.__rank,
+                   array_position({domains_ref}::text[], ranked.__group) AS position
+            FROM ranked WHERE ranked.__rank <= {limit_ref}
+            ORDER BY position, ranked.__rank {budget_sql}
+        )
+        SELECT {ROOT_COLUMNS},{DETAIL_COLUMNS}, chosen.__group, chosen.__rank
+        FROM chosen JOIN {ROOT_FROM} ON t.id = chosen.id
+        ORDER BY chosen.position, chosen.__rank""", *params.values)
+    for row in rows:
+        members[row['__group']].append(row)
+    return members
+
+
+def _group_item(domain: str, member_count: int, members: dict[str, list[Any]]) -> dict[str, Any]:
+    targets = []
+    for row in members.get(domain, []):
+        asset = public_asset({key: row[key] for key in row.keys() if key not in ('__group', '__rank')})
+        asset['root_domain'] = domain
+        targets.append(asset)
+    return {'root_domain': domain, 'discoverable': discoverable(domain), 'targets': targets,
+            'member_count': member_count, 'members_truncated': member_count > len(targets)}
+
+
 async def _domain_groups_v1(conn: Any, page: Page, query: _Query, *, from_sql: str, sort_name: str,
                             filters: dict[str, Any], member_limit: int) -> dict[str, Any]:
     plan = GROUPS_V1.plan(page, filters=filters)
     await fill_group_cache(conn, from_sql, query)
     order, aggregate, _direction = SORTS[sort_name]
     params = SqlParams(query.parameters)
-    version = params.add(psl_version())
-    group_sort = '0' if sort_name == 'name' else f"COALESCE({'max' if aggregate == 'max' else 'min'}(a.sort_key),0)"
-    groups_from = f"""(SELECT a.group_domain, count(*) AS member_count, {group_sort} AS group_sort
-        FROM (SELECT cache.group_domain, {order} AS sort_key
-              FROM {from_sql}
-              JOIN target_inventory_groups cache ON cache.locator={_LOCATOR} AND cache.psl_version={version}
-              WHERE {query.where}) a
-        GROUP BY a.group_domain) g"""
+    inner = _groups_from(params, from_sql, query.where, order=order,
+                         aggregate=None if sort_name == 'name' else aggregate)
+    # list/v1 sort keys are NOT NULL: a group without a key sorts as 0.
+    groups_from = f"(SELECT g.group_domain, g.member_count, COALESCE(g.group_sort, 0) AS group_sort FROM {inner}) g"
     count_values = params.snapshot()
     keyset = plan.keyset_clauses(params)
     generated_at = await snapshot_time(conn)  # before the page query
@@ -577,43 +642,11 @@ async def _domain_groups_v1(conn: Any, page: Page, query: _Query, *, from_sql: s
     target_total, target_kind = await count_total(conn, page.count, from_sql=from_sql, where=[query.where],
                                                   values=query.parameters)
     domains = [row['root_domain'] for row in rows[: page.limit]]
-    members: dict[str, list[Any]] = {domain: [] for domain in domains}
-    if domains:
-        descending = (page.sort or '').startswith('-')
-        member_params = SqlParams(query.parameters)
-        member_version = member_params.add(psl_version())
-        domains_ref = member_params.add(domains)
-        limit_ref = member_params.add(member_limit)
-        # The legacy member order: the domain's own asset first, then the sort key in the page's
-        # direction (NULL as PostgreSQL places it), then locator and id.
-        direction = 'DESC NULLS FIRST' if descending else 'ASC NULLS LAST'
-        # Text keys compare by code point, as the legacy (Python) grouping did.
-        member_order = f'({order}) COLLATE "C"' if sort_name == 'name' else order
-        member_rows = await conn.fetch(f"""SELECT * FROM (
-                SELECT {ROOT_COLUMNS},{DETAIL_COLUMNS}, cache.group_domain AS __group,
-                       row_number() OVER (PARTITION BY cache.group_domain
-                           ORDER BY ({_LOCATOR} IS DISTINCT FROM cache.group_domain), {member_order} {direction},
-                                    {_LOCATOR} COLLATE "C", t.id) AS __rank
-                FROM {from_sql}
-                JOIN target_inventory_groups cache ON cache.locator={_LOCATOR} AND cache.psl_version={member_version}
-                WHERE {query.where} AND cache.group_domain = ANY({domains_ref}::text[])) ranked
-            WHERE __rank <= {limit_ref}
-            ORDER BY __group, __rank""", *member_params.values)
-        for row in member_rows:
-            members[row['__group']].append(row)
-
-    def group_item(item: dict[str, Any]) -> dict[str, Any]:
-        domain = item['root_domain']
-        targets = []
-        for row in members.get(domain, []):
-            asset = public_asset({key: row[key] for key in row.keys() if key not in ('__group', '__rank')})
-            asset['root_domain'] = domain
-            targets.append(asset)
-        return {'root_domain': domain, 'discoverable': discoverable(domain), 'targets': targets,
-                'member_count': int(item['member_count']),
-                'members_truncated': int(item['member_count']) > len(targets)}
-
-    body = plan.envelope(rows, total=total, total_kind=kind, transform=group_item, generated_at=generated_at)
+    members = await _group_members(conn, query, from_sql=from_sql, sort=sort_name,
+                                   descending=(page.sort or '').startswith('-'), domains=domains,
+                                   member_limit=member_limit)
+    body = plan.envelope(rows, total=total, total_kind=kind, generated_at=generated_at,
+                         transform=lambda item: _group_item(item['root_domain'], int(item['member_count']), members))
     body.update({'inventory_kind': 'assets', 'group_by': 'domain', 'target_total_kind': target_kind})
     if target_kind != 'none':
         body['target_total'] = target_total

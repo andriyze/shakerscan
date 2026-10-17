@@ -12,6 +12,7 @@ from scope.roots import recompute_spanning_target_roots
 from targets.asset_migration import BoundConnectionPool, migrate_target_assets
 from targets.asset_inputs_migration import migrate_asset_inputs
 from targets.asset_store import list_assets
+from targets.scale_summary import install_summary_counts
 from tests.test_target_asset_migration_postgres import database
 from tests.test_target_asset_inputs_postgres import prepare, encryption
 
@@ -25,6 +26,8 @@ async def _converted(conn):
     async with conn.transaction():
         await migrate_target_assets(conn)
         await migrate_asset_inputs(conn)
+        # The domain grouping reads its Public Suffix List cache (target_inventory_groups).
+        await install_summary_counts(conn)
 
 
 async def _admission(conn, name):

@@ -586,8 +586,9 @@ def test_grouped_legacy_enrichment_equals_the_per_target_queries(monkeypatch):
     async def check(conn):
         await _with_pool(monkeypatch, targets_router)(conn)
         response = _Response()
-        legacy = await targets_router.list_targets_grouped(response, **_grouped_kwargs())
+        await targets_router.list_targets_grouped(response, **_grouped_kwargs())
         assert response.headers["Deprecation"] == "true"
+        legacy = await ref.old_grouped(conn, targets_router)
         ids = [t["id"] for d in legacy["domains"] for t in ([d["root_target"]] if d["root_target"] else []) + d["subdomains"]]
         uuids = [uuid.UUID(i) for i in ids]
         old_investigator = {str(r["target_id"]): (r["investigator_verified_count"], r["investigator_suspected_count"])
@@ -641,8 +642,7 @@ def test_grouped_v1_pages_hold_exactly_the_legacy_groups(monkeypatch, sort_by, s
 
     async def check(conn):
         await _with_pool(monkeypatch, targets_router)(conn)
-        legacy = await targets_router.list_targets_grouped(
-            _Response(), **_grouped_kwargs(sort_by=sort_by, sort_order=sort_order))
+        legacy = await ref.old_grouped(conn, targets_router, sort_by=sort_by, sort_order=sort_order)
         sort = ("-" if sort_order == "desc" else "") + sort_by
 
         async def fetch(page):
@@ -681,6 +681,53 @@ def test_grouped_v1_caps_members_and_reads_only_the_page(monkeypatch):
         assert all(len(g["subdomains"]) <= 5 for g in body["items"])
         # 1,300 targets: no read returns more than a page of groups or of members.
         assert spy.most <= 10 * 6 + 1, sorted(spy.rows, key=lambda item: -item[0])[:2]
+    _run(check)
+
+
+@pytest.mark.parametrize("sort_by,sort_order", [("root_domain", "asc"), ("active_findings_count", "desc")])
+def test_grouped_legacy_is_the_bounded_first_page_and_continues_on_list_v1(monkeypatch, sort_by, sort_order):
+    """The legacy shape holds at most 50 groups of a root and 20 subdomains, the full totals, and a
+    cursor that list/v1 continues: the walk then holds exactly the unbounded legacy groups."""
+    from targets import router as targets_router, grouped_list
+
+    async def check(conn):
+        spy = Spy(conn)
+        await _with_pool(monkeypatch, targets_router)(spy)
+        response = _Response()
+        body = await targets_router.list_targets_grouped(
+            response, **_grouped_kwargs(sort_by=sort_by, sort_order=sort_order, member_limit=200, limit=1000))
+        assert response.headers["Deprecation"] == "true"
+        everything = await ref.old_grouped(conn, targets_router, sort_by=sort_by, sort_order=sort_order)
+        assert (body["limit"], body["member_limit"]) == (grouped_list.LEGACY_MAX_GROUPS, grouped_list.LEGACY_MAX_MEMBERS)
+        assert len(body["domains"]) == 50 and body["has_more"] and body["truncated"] and body["next_cursor"]
+        assert all(len(g["subdomains"]) <= 20 for g in body["domains"])
+        assert (body["total_root_domains"], body["total_targets"]) == (
+            everything["total_root_domains"], everything["total_targets"])
+        assert "list/v1" in body["list_v1_hint"]
+        # 1,300 targets: no read returned more than the page's groups and members.
+        assert spy.most <= 50 * 21 + 1, sorted(spy.rows, key=lambda item: -item[0])[:2]
+        if sort_by == "root_domain":
+            big = next(g for g in body["domains"] if g["root_domain"] == "big.invalid")
+            assert big["subdomain_count"] == BIG_MEMBERS and big["subdomains_truncated"]
+            assert [m["id"] for m in big["subdomains"]] == [
+                m["id"] for m in next(g for g in everything["domains"] if g["root_domain"] == "big.invalid")["subdomains"][:20]]
+        # Continue on list/v1 with the hint's parameters.
+        items = list(body["domains"])
+        cursor = body["next_cursor"]
+        while cursor:
+            page = await targets_router.list_targets_grouped(_Response(), **_grouped_kwargs(
+                sort_by=sort_by, sort_order=sort_order, member_limit=body["member_limit"], limit=body["limit"],
+                cursor=cursor, count="none"))
+            items.extend(page["items"])
+            cursor = page["next_cursor"]
+        assert sorted(g["root_domain"] for g in items) == sorted(g["root_domain"] for g in everything["domains"])
+        legacy_groups = {g["root_domain"]: g for g in everything["domains"]}
+        for group in items:
+            old = legacy_groups[group["root_domain"]]
+            old = {**old, "subdomains": old["subdomains"][:20]}
+            assert {k: v for k, v in _comparable_group(group).items() if k != "values"} == {
+                k: v for k, v in _comparable_group(old).items() if k != "values"}
+            assert group["subdomain_count"] == old["subdomain_count"] and group["total_findings"] == old["total_findings"]
     _run(check)
 
 
@@ -801,7 +848,9 @@ def test_inventory_v1_domain_groups_hold_the_legacy_groups_with_capped_members()
     from targets import asset_inventory as ai
 
     async def check(conn):
-        legacy = await ai.list_assets(conn, group_by="domain", limit=1000)
+        scope = ai._scope_query(search="", connected_only=False, include_inactive=False, include_services=False)
+        legacy = await ref.old_inventory_domain_groups(conn, ai, scope, from_sql=ai.ROOT_FROM, sort="name",
+                                                       limit=1000, offset=0)
         legacy_groups = {g["root_domain"]: [a["id"] for a in g["targets"]] for g in legacy["groups"]}
 
         async def fetch(page):
@@ -829,6 +878,67 @@ def test_inventory_v1_domain_groups_hold_the_legacy_groups_with_capped_members()
         assert all(len(g["targets"]) <= 4 for g in capped["items"])
         assert sum(g["members_truncated"] for g in capped["items"]) >= 0
         assert spy.most <= 10 * 4 + 1, sorted(spy.rows, key=lambda item: -item[0])[:2]
+    _run(check)
+
+
+@pytest.mark.parametrize("sort,options", [("name", {}), ("risk", {}), ("recent", {"findings": "any"}),
+                                          ("created", {})])
+def test_inventory_legacy_domain_groups_are_bounded_and_keep_the_legacy_order(sort, options):
+    """Legacy group pages hold the unbounded legacy groups in the same order, each cut to
+    ``member_limit`` (``member_count``/``members_truncated`` say so), at most LEGACY_GROUPED_ASSETS
+    assets per page, and read no more rows than that."""
+    from targets import asset_inventory as ai
+
+    async def check(conn):
+        scope = ai._scope_query(search="", connected_only=False, include_inactive=False, include_services=False)
+        chosen = {"asset_type": None, "authorization": None, "findings": None, "activity": None, **options}
+        ai._apply_filters(scope, chosen, None)
+        from_sql = ai.SUMMARY_FROM if ai._needs_summary(sort, chosen) else ai.ROOT_FROM
+        everything = await ref.old_inventory_domain_groups(conn, ai, scope, from_sql=from_sql, sort=sort,
+                                                           limit=10_000, offset=0)
+        assert everything["total_groups"] > 40
+        pages, offset = [], 0
+        while True:
+            spy = Spy(conn)
+            body = await ai.list_assets(spy, group_by="domain", sort=sort, limit=40, offset=offset, member_limit=3,
+                                        **options)
+            assert spy.most <= 40 * 3 + 1, sorted(spy.rows, key=lambda item: -item[0])[:2]
+            assert (body["total"], body["total_groups"]) == (everything["total"], everything["total_groups"])
+            assert len(body["targets"]) == sum(len(g["targets"]) for g in body["groups"]) <= ai.LEGACY_GROUPED_ASSETS
+            pages.extend(body["groups"])
+            offset += 40
+            assert body["has_more"] == (offset < body["total_groups"])
+            if not body["has_more"]:
+                break
+        assert [g["root_domain"] for g in pages] == [g["root_domain"] for g in everything["groups"]]
+        for group, old in zip(pages, everything["groups"]):
+            assert [a["id"] for a in group["targets"]] == [a["id"] for a in old["targets"][:3]]
+            assert group["targets"] == old["targets"][:3]
+            assert group["member_count"] == len(old["targets"])
+            assert group["members_truncated"] == (len(old["targets"]) > 3)
+        assert any(g["members_truncated"] for g in pages)
+
+    _run(check)
+
+
+def test_inventory_legacy_domain_groups_stop_at_the_page_asset_budget(monkeypatch):
+    from targets import asset_inventory as ai
+
+    monkeypatch.setattr(ai, "LEGACY_GROUPED_ASSETS", 10)
+
+    async def check(conn):
+        body = await ai.list_assets(conn, group_by="domain", limit=30, member_limit=4)
+        assert len(body["groups"]) == 30 and len(body["targets"]) == 10
+        # Filled in group order, each group up to member_limit, then nothing.
+        remaining = 10
+        for group in body["groups"]:
+            expected = min(4, group["member_count"], remaining)
+            assert len(group["targets"]) == expected
+            remaining -= expected
+        assert remaining == 0
+        assert body["truncated"] and all(g["members_truncated"] for g in body["groups"] if not g["targets"])
+        assert "list/v1" in body["list_v1_hint"]
+
     _run(check)
 
 

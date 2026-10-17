@@ -3,6 +3,7 @@ merge, find-or-create prevention, and the canonical-aware deploy gate. The SQL t
 form must stay equivalent to _canonical_target_key (verified live); this covers the
 Python side."""
 import asyncio
+from datetime import datetime, timezone
 import os
 import sys
 import uuid
@@ -88,8 +89,14 @@ class _TargetBoundaryConn:
         return []
 
     async def fetchval(self, query, *_args):
+        if "clock_timestamp()" in query:  # a list/v1 page's snapshot time
+            return datetime.now(timezone.utc)
         self.fetchval_queries.append(" ".join(query.split()))
         return 0
+
+    async def fetchrow(self, query, *_args):  # the grouped totals
+        self.fetch_queries.append(" ".join(query.split()))
+        return {"groups": 0, "targets": 0}
 
     async def execute(self, query, *_args):  # session settings (SET jit = off)
         return "SET"
@@ -113,9 +120,10 @@ def test_web_target_apis_exclude_model_intake_subjects_by_default(monkeypatch):
     assert all("COALESCE(discovery_source, 'manual') NOT IN ('model-intake','host')" in query for query in conn.fetchval_queries)
     domain_query = next(query for query in target_queries if "SELECT DISTINCT root_domain" in query)
     assert "char_length(btrim(root_domain)) BETWEEN 1 AND 253" in domain_query
-    grouped_query = next(query for query in target_queries if "t.active_findings_count" in query)
-    assert "LEFT(t.url, 2049) AS url" in grouped_query
-    assert "LEFT(t.root_domain, 253) AS root_domain" in grouped_query
+    # The grouped listing (bounded: groups first, then the page's members) projects bounded text.
+    assert any("FROM targets t WHERE" in query and "group_key" in query for query in target_queries)
+    assert "LEFT(t.url, 2049) AS url" in targets_router_module._GROUPED_TARGET_COLUMNS
+    assert "LEFT(t.root_domain, 253) AS root_domain" in targets_router_module._GROUPED_TARGET_COLUMNS
 
 
 def test_target_dedupe_plan_excludes_model_intake_subjects():
