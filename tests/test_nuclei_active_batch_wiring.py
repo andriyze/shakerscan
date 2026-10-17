@@ -54,7 +54,7 @@ class _Backend:
         self.attempts.setdefault(action_id, {})[attempt["attempt_id"]] = dict(attempt)
 
 
-def _plan_and_action(*, requested_budget):
+def _plan_and_action(*, requested_budget, paths=("/",)):
     scan_id = str(uuid.uuid4())
     endpoints = build_endpoint_manifest(
         scan_id=scan_id,
@@ -65,9 +65,9 @@ def _plan_and_action(*, requested_budget):
             "reason": None,
             "endpoints": [{
                 "method": "GET", "scheme": "https", "host": "app.example.test",
-                "port": 443, "normalized_path": "/", "concrete_path": "/",
+                "port": 443, "normalized_path": path, "concrete_path": path,
                 "query_keys": [], "source": "web.crawl",
-            }],
+            } for path in paths],
         },
         source_action_ids=("discover.web_crawl",),
     )
@@ -83,7 +83,7 @@ def _plan_and_action(*, requested_budget):
         capability_args={
             "target_manifest_ref": endpoints.reference().canonical_dict(),
             "template_manifest_ref": templates.reference().canonical_dict(),
-            "slice": {"start": 0, "count": 1},
+            "slice": {"start": 0, "count": len(paths)},
             "profile": "balanced_batch_v1",
             "proof_policy": "deterministic_proof_contract_required",
         },
@@ -128,12 +128,13 @@ async def _noop():
     return None
 
 
-def _drive(monkeypatch, *, policy, requested_budget, templates_dir=str(FIXTURES)):
-    plan, action, backend = _plan_and_action(requested_budget=requested_budget)
-    captured: dict = {}
+def _drive(monkeypatch, *, policy, requested_budget, templates_dir=str(FIXTURES), paths=("/",)):
+    plan, action, backend = _plan_and_action(requested_budget=requested_budget, paths=paths)
+    captured: dict = {"calls": [], "backend": backend}
 
     async def execute(_self, context, adapter, **_kwargs):
         captured["scanner_options"] = dict(adapter._process_payload["scanner_options"])
+        captured["calls"].append(dict(adapter._process_payload["scanner_options"]))
         captured["requested_budget"] = dict(context.requested_budget)
         settled = {name: int(amount) for name, amount in context.requested_budget.items()}
         if "state_changing_requests" in settled:
@@ -253,3 +254,45 @@ def test_active_batch_fails_closed_when_index_unavailable(monkeypatch, tmp_path)
     )
     assert receipt.status == "skipped"
     assert "nuclei_template_index_unavailable" in receipt.errors
+
+
+AUTHORIZED = ScanPolicy(active_testing=True, allow_state_changing_http=True, approval_receipt_id="approval-1")
+HOLD = {"http_requests": 120, "state_changing_requests": 120, "tool_wall_seconds": 45}
+
+
+def test_endpoint_attempts_rotate_through_the_whole_active_allowlist(monkeypatch):
+    # Every attempt used to get the full allowlist and, cut off by its wall, ran the same
+    # first tenth of it on every endpoint. With windows of one template, three endpoints
+    # run three different templates and together cover the allowlist exactly once.
+    from scan import nuclei_execution
+    full_receipt, full = _drive(monkeypatch, policy=AUTHORIZED, requested_budget=HOLD)
+    allowlist = full["scanner_options"]["template_ids"].split(",")
+    assert full_receipt.status == "success" and len(allowlist) >= 3
+    monkeypatch.setattr(nuclei_execution, "ACTIVE_TEMPLATE_WINDOW_SIZE", -(-len(allowlist) // 3))
+    receipt, captured = _drive(monkeypatch, policy=AUTHORIZED, requested_budget=HOLD,
+                               paths=("/", "/a", "/b"))
+    assert receipt.status == "success"
+    windows = [call["template_ids"].split(",") for call in captured["calls"]]
+    assert len(windows) == 3
+    assert sorted(item for window in windows for item in window) == sorted(allowlist)
+    assert all(window for window in windows) and len({tuple(w) for w in windows}) == 3
+    recorded = sorted(item["template_window"]["index"]
+                      for item in captured["backend"].attempts["active.templates"].values())
+    assert recorded == [0, 1, 2]
+
+
+def test_template_window_partitions_deterministically():
+    from scan.nuclei_execution import active_template_window
+    ids = ",".join(f"t{index:03d}" for index in range(250))
+    windows = [active_template_window(ids, ordinal, size=90) for ordinal in range(6)]
+    assert {window.count for window in windows} == {3}
+    assert [window.index for window in windows] == [0, 1, 2, 0, 1, 2]
+    covered = [item for window in windows[:3] for item in window.template_ids.split(",")]
+    assert sorted(covered) == ids.split(",") and len(set(covered)) == 250
+    assert windows[0] == windows[3]
+    assert max(window.templates for window in windows) <= 90
+    assert active_template_window("one", 7).template_ids == "one"
+    with pytest.raises(ValueError):
+        active_template_window("", 0)
+    with pytest.raises(ValueError):
+        active_template_window("a,b", -1)
