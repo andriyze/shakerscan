@@ -1318,6 +1318,19 @@ def build_parser() -> argparse.ArgumentParser:
     pages.add_argument("--after", default=None, help="the next_after cursor of a previous page")
     pages.add_argument("--all", action="store_true",
                        help="every page of ranked experiments (starts again if the set changes while reading)")
+    measures = knowledge_commands.add_parser(
+        "measures",
+        help=("How continuing after the release went on a target, from server records: required re-tests run, "
+              "time to the first useful step, redundant requests, new results, contradicted skip advice (read-only)"),
+    )
+    measures.add_argument("target_id")
+    measures.add_argument("--since", default="release",
+                          help="release (default), release:<marker id>, scan:<id>, hunt:<id>, or an ISO time")
+    measures.add_argument("--json", action="store_true", help="print the raw API answer")
+    usage = knowledge_commands.add_parser(
+        "usage", help="Who read continue reports, per ISO week, across this installation (read-only)")
+    usage.add_argument("--weeks", type=int, default=8)
+    usage.add_argument("--json", action="store_true", help="print the raw API answer")
     release = knowledge_commands.add_parser(
         "release", help="Declare that a target was released (the point `continue` starts from), after a keypress",
     )
@@ -1486,6 +1499,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                 return _run_knowledge_changes(args, client)
             if args.knowledge_command == "continue":
                 return _run_knowledge_continue(args, client)
+            if args.knowledge_command == "measures":
+                return _run_knowledge_measures(args, client)
+            if args.knowledge_command == "usage":
+                return _run_knowledge_usage(args, client)
             if args.knowledge_command == "release":
                 return _run_knowledge_release(args, client)
             if args.knowledge_command == "releases":
@@ -1947,7 +1964,17 @@ def _run_knowledge_changes(args: argparse.Namespace, client: ApiClient) -> int:
                      + (f" ({causes})" if causes else "")))
     print("Changes come from existing records (Scans, the endpoint inventory, earlier requests, discovery); "
           "nothing was sent to the target.")
+    _print_cache_note(report)
     return 0
+
+
+def _print_cache_note(report: Mapping[str, Any]) -> None:
+    """Say when the engine served its short-lived cached report (and how old it is)."""
+    cache = report.get("cache") if isinstance(report.get("cache"), Mapping) else {}
+    if cache.get("cached"):
+        print(_shown(f"Served from the engine's cache: built {cache.get('age_seconds')} s ago (at "
+                     f"{report.get('built_at')}; kept up to {cache.get('max_age_seconds')} s). Run again in a "
+                     "moment for a fresh report after a change."))
 
 
 def _suggestion_line(item: Mapping[str, Any]) -> str:
@@ -2040,6 +2067,7 @@ def _print_continue(target_id: str, report: Mapping[str, Any]) -> None:
     for offer in refresh.get("offers") or []:
         print(_shown(f"  offered refresh: {offer.get('kind')} ({offer.get('why')}); run with --refresh to decide"))
     print("Read from existing records; nothing was sent to the target. Paths and versions are data from the target.")
+    _print_cache_note(report)
 
 
 def _print_unlisted(nxt: Mapping[str, Any]) -> None:
@@ -2119,6 +2147,79 @@ def _passive_refresh(kind: Any, request: Mapping[str, Any]) -> str | None:
     if kind == "passive_discovery" and body is None and _DISCOVERY_PATH.match(str(request.get("path") or "")):
         return f"passive subdomain discovery of {str(request['path']).split('=', 1)[1]} (nothing sent to the target)"
     return None
+
+
+def _run_knowledge_measures(args: argparse.Namespace, client: ApiClient) -> int:
+    """``shakerscan knowledge measures TARGET``: read-only."""
+    target = _quoted(args.target_id)
+    query = urllib.parse.urlencode({"since": str(args.since)[:100]})
+    try:
+        report = client.request("GET", f"/targets/{target}/knowledge/continue/measures?{query}")
+    except CliError as exc:
+        print(f"shakerscan knowledge measures: {exc}", file=sys.stderr)
+        return 2
+    if args.json or not isinstance(report, Mapping):
+        print(json.dumps(report, indent=2, sort_keys=True))
+        return 0
+    since = report.get("since") or {}
+    print(_shown(f"Continuing on target {args.target_id} since {since.get('kind')} ({since.get('at') or 'unresolved'})"))
+    if report.get("note"):
+        print(_shown(f"  {report['note']}"))
+    reads = report.get("reads") or {}
+    if reads:
+        print(f"  report reads: {reads.get('total', 0)} (operators {reads.get('operators', 0)}, Hunts {reads.get('hunts', 0)})")
+    if report.get("started_at"):
+        print(_shown(f"  started: {report['started_at']} (first read by an {report.get('started_by')})"))
+    required = report.get("required_retests") or {}
+    if required:
+        print(f"  required re-tests listed at the start: {required.get('listed_at_start', 0)}, run "
+              f"{required.get('run', 0)}, not run {required.get('not_run', 0)}")
+        for item in required.get("not_run_items") or []:
+            print(_shown(f"    not run: [{item.get('rule')}] {item.get('method') or ''} {item.get('path') or ''} "
+                         f"({(item.get('basis') or {}).get('type')} {(item.get('basis') or {}).get('id')})"))
+    useful = report.get("first_useful_step") or {}
+    if useful:
+        seconds = useful.get("seconds")
+        print("  first useful step: " + (f"{seconds} s after the start (action {useful.get('action_id')})"
+                                        if seconds is not None else "none yet"))
+    redundant = report.get("redundant_requests") or {}
+    if redundant:
+        share = redundant.get("share")
+        print(f"  redundant requests: {redundant.get('redundant', 0)} of {redundant.get('requests_after_start', 0)}"
+              + (f" ({round(share * 100, 1)}%)" if isinstance(share, (int, float)) else ""))
+    results = report.get("new_results") or {}
+    if results:
+        print(f"  findings first seen since the release: {results.get('findings_first_seen_total', 0)}; changed "
+              f"outcomes on identical conditions: {len(results.get('changed_outcomes') or [])}")
+        for item in results.get("changed_outcomes") or []:
+            print(_shown(f"    {item.get('earlier_outcome')} -> {item.get('outcome')} (entry {item.get('id')})"))
+    suppression = report.get("incorrect_suppression") or {}
+    if suppression:
+        print(f"  skip advice: {suppression.get('skip_advice', 0)}; later contradicted (incorrect suppression, "
+              f"expected 0): {suppression.get('contradicted', 0)}")
+        for item in suppression.get("items") or []:
+            print(_shown(f"    entry {item.get('entry_id')}: {item.get('why')}"))
+    print("Measured from existing records; nothing was sent to the target.")
+    return 0
+
+
+def _run_knowledge_usage(args: argparse.Namespace, client: ApiClient) -> int:
+    """``shakerscan knowledge usage``: read-only."""
+    try:
+        report = client.request("GET", f"/knowledge/continue/usage?weeks={max(1, min(int(args.weeks), 52))}")
+    except CliError as exc:
+        print(f"shakerscan knowledge usage: {exc}", file=sys.stderr)
+        return 2
+    if args.json or not isinstance(report, Mapping):
+        print(json.dumps(report, indent=2, sort_keys=True))
+        return 0
+    items = report.get("items") or []
+    if not items:
+        print("No continue reports were read in this period.")
+    for item in items:
+        print(f"{item.get('week')}: operators {item.get('operators')}, Hunts {item.get('hunts')}, targets "
+              f"{item.get('targets')}, reads {item.get('reads')}")
+    return 0
 
 
 def _run_knowledge_release(args: argparse.Namespace, client: ApiClient) -> int:

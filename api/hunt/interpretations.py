@@ -41,6 +41,7 @@ import uuid
 from fastapi import HTTPException
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from .condition_receipts import check_conditions, cited_actions
 from .experiment_conditions import freeze, thaw
 from .knowledge_withheld import withheld_digests
 from .knowledge_changes import safe_refresh
@@ -696,15 +697,27 @@ async def record_interpretation(conn: Any, target_id: Any, entry: Interpretation
             raise _refusal(422, "evidence_required",
                            "Cite at least one server record (a Hunt action or receipt, finding, candidate, scan, "
                            "hypothesis or authorization investigation), not only other interpretations.")
+        conditions_check = None
         if entry.negative_state in EXPERIMENT_STATES:
             states = RAN_ACTION_STATES if entry.negative_state == "experiment_completed_negative" else TERMINAL_ACTION_STATES
-            if not await _ran_actions(conn, target, entry.evidence_refs, states,
-                                      hunt_run_id=hunt_run_id if kind == "hunt" else None):
+            ran = await _ran_actions(conn, target, entry.evidence_refs, states,
+                                     hunt_run_id=hunt_run_id if kind == "hunt" else None)
+            if not ran:
                 raise _refusal(422, "experiment_not_executed",
                                "An experiment result must cite the testing action (or its receipt) that ran it on "
                                "this target's asset; a Hunt cites its own actions"
                                + (", finished as completed or partial." if entry.negative_state
                                   == "experiment_completed_negative" else ", finished."))
+            # The conditions must describe the experiment the cited action ran (method, route, origin,
+            # capability, session), not another one: checked against what the action recorded.
+            conditions_check = check_conditions(conditions, await cited_actions(
+                conn, target, entry.evidence_refs, states, hunt_run_id=hunt_run_id if kind == "hunt" else None), ran)
+            if not conditions_check["consistent"]:
+                raise _refusal(422, "conditions_contradict_cited_action",
+                               "The conditions describe a different experiment than the cited action recorded: "
+                               "record the method, route, origin, technique and principal that action used, or "
+                               "cite the action that ran these conditions.",
+                               contradictions=conditions_check["contradictions"])
         if entry.subject is not None:
             await _require_subject(conn, target, entry.subject)
         if entry.supersedes is not None:
@@ -716,6 +729,8 @@ async def record_interpretation(conn: Any, target_id: Any, entry: Interpretation
                                      conditions=conditions, subject=subject, evidence_refs=entry.evidence_refs,
                                      hunt_run_id=hunt_run_id if kind == "hunt" else None)
         state = decide(dependencies, [], []) if dependencies else "unknown"
+        if conditions_check is not None and dependencies:
+            dependencies["conditions_check"] = conditions_check
         saved = await conn.fetchrow("""INSERT INTO target_interpretations(
                 target_id, kind, negative_state, title, body, provenance, written_by, hunt_run_id,
                 agent_label, model_label, observed_at, evidence_refs, conditions, conditions_sha256,
@@ -878,8 +893,14 @@ async def check_experiment(conn: Any, target_id: Any, conditions: Any, *, hunt_r
                       "written_by": entry["written_by"], "created_at": _iso(entry["created_at"]),
                       "reuse": reuse_decision(dict(entry), key, evaluated=str(entry["id"]) in current,
                                               reobservation=reobservation)})
+    skipped = [item["id"] for item in prior if item["reuse"]["skip"]]
+    if skipped:
+        # Every skip advice is kept (no text) so the continuation measures can check it against what
+        # was observed later: an advised skip followed by a changed answer is an incorrect suppression.
+        from .knowledge_measures import record_skip_advice
+        await record_skip_advice(conn, row["id"], skipped, hunt_run_id=hunt_run_id)
     return {"experiment_key": key, "conditions": exact, "identical": prior,
-            "skip": any(item["reuse"]["skip"] for item in prior),
+            "skip": bool(skipped),
             "conditions_semantics": CONDITIONS_SEMANTICS,
             "note": ("Only an identical experiment (every condition equal, on this target) is matched, and only an "
                      "applicable result bound to the request its cited action made, and that same request repeated "

@@ -1340,6 +1340,7 @@ async def _resolve_finding_mutation_id(
 async def update_finding(
     finding_id: str,
     request: FindingUpdate,
+    http_request: Request,
     scan_id: Optional[str] = Query(None, description="Scope update to specific scan")
 ):
     """Update a finding status by ID or fingerprint.
@@ -1367,13 +1368,40 @@ async def update_finding(
         )
         if resolved_id is None:
             raise HTTPException(status_code=404, detail="Finding not found")
-        result = await conn.fetchrow(FINDING_UPDATE_SQL, request.status, request.notes,
-                                     request.analyst_verdict, resolved_id, request.verdict_change())
-        if not result:
-            raise HTTPException(status_code=404, detail="Finding not found")
-        await _refresh_finding_owner_counts(conn, [result])
 
-    return finding_update_response(result)
+        async def apply(_actor: str | None = None) -> dict[str, Any]:
+            result = await conn.fetchrow(FINDING_UPDATE_SQL, request.status, request.notes,
+                                         request.analyst_verdict, resolved_id, request.verdict_change())
+            if not result:
+                raise HTTPException(status_code=404, detail="Finding not found")
+            await _refresh_finding_owner_counts(conn, [result])
+            return finding_update_response(result)
+
+        recorded = await _triage_receipt(conn, http_request, "finding_patch", [resolved_id], apply)
+        if recorded is not None:
+            return recorded
+        return await apply()
+
+
+async def _triage_receipt(conn: Any, http_request: Request, route: str, finding_ids: list[uuid.UUID],
+                          apply: Callable[..., Any]) -> dict[str, Any] | None:
+    """With ``X-ShakerScan-Decision-Id`` (set by an authenticating gateway after its approval check),
+    record a reversible receipt of this triage change (targets/triage_receipts.py); otherwise None."""
+    if http_request.headers.get("x-shakerscan-decision-id") is None:
+        return None
+    try:
+        from targets.decision_receipts import receipt_request
+        from targets.triage_receipts import finding_owner
+    except ModuleNotFoundError:
+        from ..targets.decision_receipts import receipt_request
+        from ..targets.triage_receipts import finding_owner
+    try:
+        payload = await http_request.json()
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail="The approved triage request is not JSON") from exc
+    owner = await finding_owner(conn, finding_ids)
+    return await receipt_request(conn, http_request, owner, "legacy_triage", perform=apply, triage_route=route,
+                                 finding_ids=finding_ids, triage=payload if isinstance(payload, dict) else {})
 
 
 # The prior status is read in the same statement so the response can say what changed: a client
@@ -1489,7 +1517,7 @@ class BulkFindingUpdateRequest(BaseModel):
 
 
 @router.post("/findings/bulk")
-async def bulk_update_findings(request: BulkFindingUpdateRequest):
+async def bulk_update_findings(request: BulkFindingUpdateRequest, http_request: Request):
     """Bulk update finding statuses."""
     valid_statuses = {"active", "resolved", "false_positive", "accepted_risk"}
     if request.status not in valid_statuses:
@@ -1500,26 +1528,31 @@ async def bulk_update_findings(request: BulkFindingUpdateRequest):
     except (ValueError, AttributeError, TypeError):
         raise HTTPException(status_code=400, detail="finding_ids must all be valid UUIDs")
     async with _pool().acquire() as conn:
-        updated_rows = await conn.fetch("""
-            UPDATE findings
-            SET status = $1,
-                resolved_at = CASE WHEN $1 = 'resolved' THEN COALESCE(resolved_at, NOW())
-                                   WHEN $1 = 'active' THEN NULL
-                                   ELSE resolved_at END,
-                notes = COALESCE($2, notes),
-                updated_at = NOW()
-            WHERE id = ANY($3)
-            RETURNING id, target_id, device_target_id
-        """, request.status, request.notes, ids)
-        await _refresh_finding_owner_counts(conn, updated_rows)
+        async def apply(_actor: str | None = None) -> dict[str, Any]:
+            updated_rows = await conn.fetch("""
+                UPDATE findings
+                SET status = $1,
+                    resolved_at = CASE WHEN $1 = 'resolved' THEN COALESCE(resolved_at, NOW())
+                                       WHEN $1 = 'active' THEN NULL
+                                       ELSE resolved_at END,
+                    notes = COALESCE($2, notes),
+                    updated_at = NOW()
+                WHERE id = ANY($3)
+                RETURNING id, target_id, device_target_id
+            """, request.status, request.notes, ids)
+            await _refresh_finding_owner_counts(conn, updated_rows)
+            return {
+                'updated': len(updated_rows),
+                'requested': len(request.finding_ids),
+                'unique_requested': len(ids),
+                'not_found': max(0, len(ids) - len(updated_rows)),
+                'status': request.status,
+            }
 
-    return {
-        'updated': len(updated_rows),
-        'requested': len(request.finding_ids),
-        'unique_requested': len(ids),
-        'not_found': max(0, len(ids) - len(updated_rows)),
-        'status': request.status,
-    }
+        recorded = await _triage_receipt(conn, http_request, "findings_bulk", ids, apply)
+        if recorded is not None:
+            return recorded
+        return await apply()
 
 
 @router.post("/findings/manual")

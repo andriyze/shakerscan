@@ -253,11 +253,19 @@ def test_unbound_unobserved_or_incomparable_negatives_are_never_reused(monkeypat
                 assert (await _check(hunt, _negative(evidence)['conditions']))['skip'] is False
 
                 await _scan(conn, target, tech={'Express': '4.18'}, at=datetime.now(timezone.utc) - timedelta(hours=1))
-                # Conditions that are not what the cited action requested are never bound: another
-                # principal, another route, another method or a technique that did not run.
-                for conditions in ({'principals': ['admin']}, {'route': '/api/orders/{id}'}, {'method': 'POST'},
-                                   {'technique': 'sqlmap time-based'}, {'principals': None, 'roles': ['viewer'],
-                                                                         'objects': ['invoice:17']}):
+                # Conditions that contradict what the cited action recorded (another route, another
+                # method, another capability) are refused: they describe another experiment.
+                for conditions, fields in (({'route': '/api/orders/{id}'}, ['route']), ({'method': 'POST'}, ['method']),
+                                           ({'technique': 'browser.navigate the invoice page'}, ['technique'])):
+                    refused = await hunt.call('knowledge.record', _negative(evidence, **conditions))
+                    assert refused.status_code == 422, refused.text
+                    detail = refused.json()['detail']
+                    assert detail['error'] == 'conditions_contradict_cited_action'
+                    assert detail['contradictions'][0]['fields'] == fields, conditions
+                # Conditions a recorded request cannot confirm are kept but never bound: a principal
+                # named otherwise than by the session, a technique that is not a capability, roles.
+                for conditions in ({'principals': ['admin']}, {'technique': 'sqlmap time-based'},
+                                   {'principals': None, 'roles': ['viewer'], 'objects': ['invoice:17']}):
                     entry = (await hunt.ok('knowledge.record', _negative(evidence, **conditions)))['result']['interpretation']
                     assert entry['dependencies']['binding']['bound'] is False, conditions
                     asked = {key: value for key, value in {**_negative(evidence)['conditions'], **conditions}.items()
@@ -566,10 +574,19 @@ def test_review_findings_laundering_foreign_citations_banners_and_host_names(mon
                 own = await _request(conn, other.id, path='/api/orders/5')
                 borrowed = await hunt.ok('knowledge.record', {**_negative(evidence), 'evidence_refs': [evidence]})
                 assert borrowed['result']['interpretation']['dependencies']['binding']['bound'] is True
+                # The other Hunt's own action requested another route: the borrowed conditions describe an
+                # experiment it did not run, so the entry is refused.
                 foreign = await other.call('knowledge.record', {**_negative(evidence), 'evidence_refs': [evidence, own]})
-                assert foreign.status_code == 200
-                result = foreign.json()['result']['interpretation']
-                assert result['dependencies']['binding']['bound'] is False
+                assert foreign.status_code == 422, foreign.text
+                assert foreign.json()['detail']['error'] == 'conditions_contradict_cited_action'
+                # Recorded as what its own action ran, it stands, bound to its own request, never the first Hunt's.
+                mine = await other.call('knowledge.record', {**_negative(evidence, route='/api/orders/{id}',
+                                                                          objects=['order:5']),
+                                                            'evidence_refs': [evidence, own]})
+                assert mine.status_code == 200, mine.text
+                result = mine.json()['result']['interpretation']
+                assert result['dependencies']['binding']['action_id'] == str(own)
+                assert result['dependencies']['conditions_check']['checked_against'] == str(own)
 
                 # A changed server banner never reopens a person's dismissal.
                 finding = await conn.fetchval("""INSERT INTO findings(target_id,fingerprint,title,severity,tool,url)

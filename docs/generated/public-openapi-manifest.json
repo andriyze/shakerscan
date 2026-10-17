@@ -63,7 +63,7 @@
     "CredentialProfileCreate": "e126e6b782f64c10eeb4544e2bc0f6719234992b16c69520d41847fdc8567738",
     "CredentialProfilePatch": "b27d3790c601e9eebf639ae8991422fe4b36d1e3c6d39a9ee6fd344d6482aca1",
     "CredentialProfileRotate": "4ca3ebdc99522e21b55ad4c1f39ef1ebe49103f815d8d6f566ab15b7ce24df46",
-    "DecisionInput": "6bd1b6a1e84d3d8cd76237a9d7721e4377e98b5b092aac4e417e79108bc199ed",
+    "DecisionInput": "ec01dcbf5828c250a85fdc2b71b43cb7ab3757a7596969d31aeb5413eeb7a905",
     "DedupeTargetsRequest": "64aa909bb1d9fb6b41e6f127353cfa9d02e6231bf6bba7b3d66c0faa27915c81",
     "DeletionExecution": "a55dc767725f6b0a6e9d58915878ec3206837e740bff406a1d549e8afb9f8923",
     "DeletionSelection": "5a93c9151acb62069471ea66e13e898d54bd2e7d27cdbc8c23bc9ddf2a4f8220",
@@ -221,9 +221,9 @@
     "ValidationRequest": "cb81c65a5c80da74a19c6bd92e9c6a68f5cdb22fafeb94270481d463450f893e",
     "WorkerScaleRequest": "52e7ac017dfa1d92efa8e4071026b9bf24c0cf2a17f5d9e742349df3f08f6c62"
   },
-  "contract_sha256": "5c36f783ad339eda5e3c461ceb0b08ef2066286d467e9411a89410dd17d86ad4",
+  "contract_sha256": "93aa6753eac461a0024d53d4c05a64eb90dc5621060bf85b31d1d864eb48b33f",
   "openapi": "3.1.0",
-  "operation_count": 491,
+  "operation_count": 493,
   "operations": {
     "DELETE /ai/scans/{scan_id}/transcript": {
       "deprecated": false,
@@ -2147,6 +2147,21 @@
       "surface": null,
       "tags": []
     },
+    "GET /knowledge/continue/usage": {
+      "deprecated": false,
+      "operation_id": "get_continue_usage_knowledge_continue_usage_get",
+      "parameters_sha256": "11f3cca07405b6d766a99d6979cc0f61e70f8ec362d89fb5c51bb7cab2eba918",
+      "request_schema_sha256": null,
+      "response_schema_sha256": {
+        "200": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "422": "e1fe533ef371cc6965d4015e800b2b5ca90e470f4aae3d57c2754a32b61e8c2d"
+      },
+      "security_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "surface": null,
+      "tags": [
+        "targets"
+      ]
+    },
     "GET /knowledge/decisions": {
       "deprecated": false,
       "operation_id": "get_decisions_knowledge_decisions_get",
@@ -3370,6 +3385,21 @@
       "deprecated": false,
       "operation_id": "get_target_knowledge_continue_targets__target_id__knowledge_continue_get",
       "parameters_sha256": "391a97925c12ebc8f6e59d2ba7ef66152f34f4b9f860745ccbad44ff02928db8",
+      "request_schema_sha256": null,
+      "response_schema_sha256": {
+        "200": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "422": "e1fe533ef371cc6965d4015e800b2b5ca90e470f4aae3d57c2754a32b61e8c2d"
+      },
+      "security_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "surface": null,
+      "tags": [
+        "targets"
+      ]
+    },
+    "GET /targets/{target_id}/knowledge/continue/measures": {
+      "deprecated": false,
+      "operation_id": "get_target_continue_measures_targets__target_id__knowledge_continue_measures_get",
+      "parameters_sha256": "c966b07c551d888d8a68923ef8e4ad1311164b0acd40b5504a791425538cef7d",
       "request_schema_sha256": null,
       "response_schema_sha256": {
         "200": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",

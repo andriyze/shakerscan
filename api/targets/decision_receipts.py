@@ -28,7 +28,7 @@ class DecisionInput(BaseModel):
     model_config = ConfigDict(extra='forbid')
     receipt_id: UUID
     decision: Literal['accept', 'confirm', 'allow_changes', 'dismiss', 'reopen', 'retract',
-                      'retract_hunt', 'release_marker']
+                      'retract_hunt', 'release_marker', 'legacy_triage']
     target_id: UUID
     subject_id: UUID | None = None
     text_sha256: str | None = Field(default=None, pattern=r'^[0-9a-f]{64}$')
@@ -37,10 +37,29 @@ class DecisionInput(BaseModel):
     note: str | None = Field(default=None, max_length=2000)
     release_label: str | None = Field(default=None, max_length=120)
     released_at: str | None = Field(default=None, max_length=100)
+    # legacy_triage only (targets/triage_receipts.py): which older triage route, the findings or the
+    # exception it changes, and the exact request body the person approved (bound by the digest).
+    triage_route: Literal['finding_patch', 'findings_bulk', 'exception_create', 'exception_update',
+                          'exception_delete'] | None = None
+    finding_ids: list[UUID] | None = Field(default=None, min_length=1, max_length=500)
+    exception_id: UUID | None = None
+    triage: dict | None = None
 
     @model_validator(mode='after')
     def shape(self):
         kind = self.decision
+        if (self.triage_route is not None) != (kind == 'legacy_triage'):
+            raise ValueError('Only a legacy triage decision names a triage route')
+        if kind == 'legacy_triage':
+            findings = self.triage_route in {'finding_patch', 'findings_bulk'}
+            if (self.finding_ids is not None) != findings or (self.exception_id is not None) == findings:
+                raise ValueError('A triage decision names its findings or its exception')
+            if self.triage_route == 'finding_patch' and len(self.finding_ids or ()) != 1:
+                raise ValueError('A finding update names one finding')
+            if self.triage is None or len(_canonical(self.triage)) > 64 * 1024:
+                raise ValueError('A triage decision names the exact request it applies')
+        elif self.finding_ids is not None or self.exception_id is not None or self.triage is not None:
+            raise ValueError('Only a legacy triage decision names findings, an exception or a triage request')
         if (self.subject_id is not None) != (kind in {'accept','dismiss','reopen','retract','retract_hunt'}):
             raise ValueError('Decision must name exactly its subject')
         if (self.text_sha256 is not None) != (kind in {'accept','confirm','release_marker'}):
@@ -115,6 +134,9 @@ def public_receipt(row: Any) -> dict:
 
 async def _snapshot(conn: Any, target: UUID, item: DecisionInput, *, legacy_entries: bool = False) -> dict:
     row = await target_metadata_row(conn, target, lock=True)
+    if item.decision == 'legacy_triage':
+        from .triage_receipts import snapshot as triage_snapshot
+        return await triage_snapshot(conn, row['id'], item)
     if item.decision == 'allow_changes':
         from .hunt_authority import authority_row
         # Permissions live on the shared host asset, as on the canonical write route.
@@ -243,6 +265,10 @@ async def receipt_request(conn: Any, request: Request, target_id: Any, kind: str
 
 async def _restore(conn: Any, target: UUID, item: DecisionInput, before: dict, after: dict, actor: str):
     row = await target_metadata_row(conn, target, lock=True)
+    if item.decision == 'legacy_triage':
+        from .triage_receipts import restore as triage_restore
+        await triage_restore(conn, row['id'], before, after, actor)
+        return
     if item.decision == 'allow_changes':
         from .hunt_authority import authority_row
         row = await authority_row(conn, target, lock=True)
