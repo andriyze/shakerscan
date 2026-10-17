@@ -284,23 +284,25 @@ SUMMARY_COMPACT_TICK_TIMEOUT = 600.0
 ANALYZE_AFTER_FOLDED_ROWS = 50_000
 
 
+#: More upkeep the compactor's tick runs after folding, each ``hook(pool)``, registered by its own
+#: module (the exposure facts warm-up, ``exposure/asset_rank.py``) so this module imports none.
+TICK_HOOKS: list[Any] = []
+
+
 async def compact_tick(pool: Any) -> int:
-    """One compaction: fold every pending delta; ANALYZE the counts after a large fold. Then keep
-    the exposure list's per-asset facts warm (``exposure/asset_rank.py``): a read classifies only
-    a bounded number of assets, so a backlog is worked off here."""
+    """One compaction: fold every pending delta; ANALYZE the counts after a large fold. Then the
+    registered ``TICK_HOOKS`` (a failing hook never fails the compaction)."""
     async with pool.acquire() as conn:
         folded = await compact(conn)
         if folded >= ANALYZE_AFTER_FOLDED_ROWS:
             await conn.execute("ANALYZE finding_summary_counts, scan_summary_counts, "
                                "finding_summary_deltas, scan_summary_deltas")
-    try:
+    for hook in list(TICK_HOOKS):
         try:
-            from exposure.asset_rank import refresh_facts_tick
-        except ModuleNotFoundError:
-            from ..exposure.asset_rank import refresh_facts_tick
-        await refresh_facts_tick(pool)
-    except Exception as exc:  # never fails the compaction; the next tick or read retries
-        logger.warning("exposure facts refresh skipped: %s", type(exc).__name__)
+            await hook(pool)
+        except Exception as exc:  # the next tick (or a read) retries
+            logger.warning("summary tick upkeep %s skipped: %s", getattr(hook, "__name__", hook),
+                           type(exc).__name__)
     return folded
 
 

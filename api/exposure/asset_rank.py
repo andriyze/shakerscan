@@ -34,11 +34,13 @@ try:
     from api_utils import _parse_graph_json
     from asset_cohorts import target_cohort, target_exposure_class
     from list_contract import ListSpec, SortKey, SqlParams
+    from targets.scale_summary import TICK_HOOKS as summary_tick_hooks
 except ModuleNotFoundError:  # package import in host-side tests
     from ..ai_assurance import build_agent_blast_radius
     from ..api_utils import _parse_graph_json
     from ..asset_cohorts import target_cohort, target_exposure_class
     from ..list_contract import ListSpec, SortKey, SqlParams
+    from ..targets.scale_summary import TICK_HOOKS as summary_tick_hooks
 
 from .proof_rollup import INVESTIGATOR_TOOLS, NEEDS_VERIFICATION_SQL, asset_finding_counts_sql, proof_counts_sql
 from .scale_indexes import EXPOSURE_SCALE_INDEXES
@@ -345,6 +347,10 @@ async def refresh_facts_tick(pool: Any) -> int:
     (a database upgraded to this engine, or rows bulk-loaded without the API, start cold)."""
     async with pool.acquire() as conn:
         return await refresh_facts(conn)
+
+
+if refresh_facts_tick not in summary_tick_hooks:
+    summary_tick_hooks.append(refresh_facts_tick)
 
 
 # --- The ranking ----------------------------------------------------------------------------------
