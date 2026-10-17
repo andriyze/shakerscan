@@ -48,9 +48,28 @@ _AUTHORIZATION_PATH = re.compile(
     r"/(?:protocol/openid-connect/auth|oauth2?/(?:v\d+(?:\.\d+)?/)?authorize|connect/authorize)/?$",
     re.IGNORECASE,
 )
-# A candidate path that is itself an authentication endpoint (the rule the SQLi proof batch
-# classifies body candidates by).
-_AUTHENTICATION_PATH_TOKENS = ("/login", "/auth", "/session", "/signin", "/sign-in", "/sign_in")
+# Whole path segments that name an authentication endpoint (``/hub/login``, ``/oauth/token``),
+# and the prefixes whose last or second-to-last segment is one (``/auth/login``, ``/session/new``).
+# Whole segments only: ``/api/authors``, ``/api/sessions/123/notes`` and ``/api/loginhistory``
+# are application routes, not authentication endpoints.
+_AUTHENTICATION_SEGMENTS = frozenset({
+    "login", "log-in", "log_in", "signin", "sign-in", "sign_in", "logon", "authenticate", "token",
+})
+_AUTHENTICATION_PREFIXES = frozenset({"auth", "session"})
+
+
+def is_authentication_path(path: Any) -> bool:
+    """Whether a route path names an authentication endpoint, by whole segments."""
+    try:
+        text = urllib.parse.urlsplit(str(path or "")).path
+    except ValueError:
+        return False
+    segments = [item.lower() for item in text.split("/") if item]
+    return any(
+        item in _AUTHENTICATION_SEGMENTS
+        or (item in _AUTHENTICATION_PREFIXES and index >= len(segments) - 2)
+        for index, item in enumerate(segments)
+    )
 
 
 def is_login_location(location: Any) -> bool:
@@ -69,9 +88,8 @@ def is_authentication_candidate(candidate: Mapping[str, Any]) -> bool:
     """Whether a candidate is an authentication endpoint, whose 401/403 is its real answer."""
     if str(candidate.get("request_class") or "") == "safe_authentication":
         return True
-    path = str(candidate.get("canonical_path") or candidate.get("path") or "").lower()
-    return bool(candidate.get("body_field_names")) and any(
-        token in path for token in _AUTHENTICATION_PATH_TOKENS
+    return bool(candidate.get("body_field_names")) and is_authentication_path(
+        candidate.get("canonical_path") or candidate.get("path"),
     )
 
 
@@ -132,6 +150,7 @@ def refusal_reason(error: Any) -> str | None:
 
 __all__ = [
     "AUTHENTICATION_REQUIRED", "AUTH_REFUSAL_STATUSES", "BASELINE_RECORD_KIND",
-    "REFUSAL_REASONS", "TARGET_REFUSED", "is_authentication_candidate", "is_login_location",
+    "REFUSAL_REASONS", "TARGET_REFUSED", "is_authentication_candidate", "is_authentication_path",
+    "is_login_location",
     "refusal", "refusal_error", "refusal_reason", "refusal_status",
 ]

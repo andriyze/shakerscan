@@ -331,6 +331,7 @@ from worker_handlers.retest_outcome import (  # noqa: F401 - re-exported
     _detect_security_block_text,
     classify_retest_outcome,
     _result_status_for_verdict,
+    replay_refusal,
 )
 from worker_handlers.retest_authority import (
     ai_replay_authority_stop,
@@ -4947,6 +4948,9 @@ async def finalize_ai_finding_retest(
         verdict = "inconclusive"
         verdict_reason = "Focused AI Gate replay completed with execution errors and did not reproduce the finding."
         confidence = None
+    elif refused := replay_refusal(result):  # the target refused the replay: not evidence of a fix
+        status, result_status, verdict, confidence = "completed", "inconclusive", "inconclusive", None
+        verdict_reason = f"Focused AI Gate replay was refused by the target ({refused}); the finding stays open."
     else:
         status = "completed"
         result_status = "likely_fixed"
