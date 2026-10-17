@@ -136,6 +136,8 @@ def source_identity(root: Path, expected: str) -> None:
 # verification downloaded each original index, both platform manifests and every blob:
 # https://github.com/andriyze/shakerscan/actions/runs/36032207153
 # This is not a generic registry fallback, image upgrade or trust in mutable mirror tags.
+# The Compose files now name the mirror references directly, because the upstream ones stopped
+# being publicly pullable (#218); this table still serves sources that name the originals.
 SUPPORTING_MIRRORS = {
     "quay.io/minio/minio@sha256:a1ea29fa28355559ef137d71fc570e508a214ec84ff8083e39bc5428980b015e":
         "ghcr.io/teableio/minio@sha256:a1ea29fa28355559ef137d71fc570e508a214ec84ff8083e39bc5428980b015e",
@@ -162,11 +164,13 @@ def supporting_service_platforms(service: dict) -> dict[str, str]:
     reference = repository + "@" + digest
     print(f"Inspecting supporting image {reference}", flush=True)
     mirror = SUPPORTING_MIRRORS.get(reference)
+    reviewed = mirror is not None or reference in coverage.REVIEWED_MIRROR_REFERENCES
     try:
         try:
-            # Preserve the existing generic path. Reviewed mirror identities additionally
-            # verify raw manifest bytes, so a registry cannot change a pinned subject.
-            kwargs = {"expected_digest": digest} if mirror else {}
+            # Preserve the existing generic path. Reviewed mirror identities, as originals or as
+            # the references Compose names, additionally verify raw manifest bytes, so a registry
+            # cannot change a pinned subject.
+            kwargs = {"expected_digest": digest} if reviewed else {}
             document = sbom.run_json(["docker", "buildx", "imagetools", "inspect", reference, "--raw"], **kwargs)
         except sbom.SBOMCommandError:
             if mirror is None:

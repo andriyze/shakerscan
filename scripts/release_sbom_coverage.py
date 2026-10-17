@@ -25,6 +25,16 @@ def default_image(value: str) -> tuple[str, str | None]:
     return value, None
 
 
+# Exact image references outside Docker Hub and Quay that Compose may name: public mirrors of
+# upstream MinIO images that are no longer publicly pullable (#218), at the upstream digests.
+# Only these digests pass, and release_sbom_stage2 verifies their raw manifest bytes.
+REVIEWED_MIRROR_REFERENCES = frozenset({
+    "ghcr.io/teableio/minio@sha256:a1ea29fa28355559ef137d71fc570e508a214ec84ff8083e39bc5428980b015e",
+    "ghcr.io/teableio/minio-mc@sha256:aead63c77f9db9107f1696fb08ecb0faeda23729cde94b0f663edf4fe09728e3",
+})
+REVIEWED_MIRROR_REPOSITORIES = frozenset(ref.split("@", 1)[0] for ref in REVIEWED_MIRROR_REFERENCES)
+
+
 def canonical_image(value: str, require_digest: bool = True) -> tuple[str, str]:
     parts = value.split("@")
     require(len(parts) <= 2, "invalid image identity")
@@ -36,9 +46,12 @@ def canonical_image(value: str, require_digest: bool = True) -> tuple[str, str]:
         repository = "docker.io/library/" + repository
     elif "." not in first and ":" not in first:
         repository = "docker.io/" + repository
-    require(re.fullmatch(r"(?:docker\.io|quay\.io)/[a-z0-9][a-z0-9_./-]+", repository), "unexpected image registry/repository")
+    require(re.fullmatch(r"(?:docker\.io|quay\.io)/[a-z0-9][a-z0-9_./-]+", repository)
+            or repository in REVIEWED_MIRROR_REPOSITORIES, "unexpected image registry/repository")
     digest = parts[1] if len(parts) == 2 else ""
     require(not require_digest or DIGEST.fullmatch(digest), "supporting-service image must be digest pinned")
+    require(repository not in REVIEWED_MIRROR_REPOSITORIES or not require_digest
+            or repository + "@" + digest in REVIEWED_MIRROR_REFERENCES, "unreviewed mirror image digest")
     return repository, digest
 
 
