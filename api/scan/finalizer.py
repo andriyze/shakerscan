@@ -332,6 +332,10 @@ try:
     from scanner_tools.xss_evidence import apply_xss_execution_evidence as _apply_xss_execution_evidence
 except ModuleNotFoundError:
     from scanner.scanner_tools.xss_evidence import apply_xss_execution_evidence as _apply_xss_execution_evidence
+try:
+    from scanner_tools.corporate_identity import corporate_surface as _corporate_surface
+except ModuleNotFoundError:
+    from scanner.scanner_tools.corporate_identity import corporate_surface as _corporate_surface
 
 
 def _base_finding(
@@ -1809,6 +1813,9 @@ def _posture_sections(
     subdomain_sources: dict[str, set[str]] = {}
     takeover_summary: dict[str, Any] = {}
     takeover_outcomes: dict[str, list[str]] = {}
+    fingerprint_rows: list[Mapping[str, Any]] = []
+    content_rows: list[Mapping[str, Any]] = []
+    recon_active_rows: dict[str, list[Mapping[str, Any]]] = {}
 
     for action_id, rows in observations.items():
         for row in rows or ():
@@ -1938,7 +1945,12 @@ def _posture_sections(
                     subdomain_sources.setdefault(host, set()).add(row["source"][:64])
             elif kind == "infrastructure_intelligence":
                 infrastructure_observation = dict(row)
+            elif kind == "content_discovery":
+                content_rows.append(row)
+            elif kind in _RECON_ACTIVE_KINDS:
+                recon_active_rows.setdefault(kind, []).append(row)
             elif kind == "http_fingerprint":
+                fingerprint_rows.append(row)
                 for item in row.get("technologies") or ():
                     name = str((item or {}).get("name") if isinstance(item, Mapping) else item)
                     if name and name not in seen_tech:
@@ -2029,8 +2041,12 @@ def _posture_sections(
             "limitations": list(infrastructure_observation.get("limitations") or ()),
             "errors": list(infrastructure_observation.get("errors") or ()),
         }
-    if technologies or server_versions or subdomain_hosts:
-        discovery: dict[str, Any] = {}
+    corporate = _corporate_surface(fingerprint_rows, content_rows)
+    active_recon = _recon_active_sections(recon_active_rows)
+    if technologies or server_versions or subdomain_hosts or corporate or active_recon:
+        discovery: dict[str, Any] = dict(active_recon)
+        if corporate:
+            discovery["corporate_surface"] = corporate
         if technologies:
             discovery["tech"] = {"items": technologies}
         if server_versions:
@@ -2071,6 +2087,45 @@ def _posture_sections(
         sections["discovery"] = discovery
     return sections
 
+
+
+_RECON_ACTIVE_KINDS = frozenset({
+    "dns_enumeration", "virtual_host", "virtual_host_discovery",
+    "discovered_parameter", "parameter_discovery",
+})
+
+
+def _recon_active_sections(rows: Mapping[str, Sequence[Mapping[str, Any]]]) -> dict[str, Any]:
+    """The opt-in recon_active family's report sections: leads with their controls.
+
+    Enumerated DNS names are listed with the other discovered subdomains (and recorded as
+    separate targets); this adds each run's own account. Virtual hosts and parameters are leads
+    only: no finding, score or route is derived from them here.
+    """
+    def plain(row: Mapping[str, Any]) -> dict[str, Any]:
+        return {key: value for key, value in row.items() if key != "kind"}
+
+    sections: dict[str, Any] = {}
+    if rows.get("dns_enumeration"):
+        sections["dns_enumeration"] = {
+            "runs": [plain(row) for row in rows["dns_enumeration"]][:4],
+            "scope": "names_under_bound_root_domains_only",
+        }
+    if rows.get("virtual_host_discovery") or rows.get("virtual_host"):
+        summary = plain((rows.get("virtual_host_discovery") or [{}])[0])
+        sections["virtual_hosts"] = {
+            **summary,
+            "items": [plain(row) for row in rows.get("virtual_host") or ()][:50],
+            "scope": "leads_on_the_bound_address_not_routes_or_targets",
+        }
+    if rows.get("parameter_discovery") or rows.get("discovered_parameter"):
+        summary = plain((rows.get("parameter_discovery") or [{}])[0])
+        sections["parameters"] = {
+            **summary,
+            "items": [plain(row) for row in rows.get("discovered_parameter") or ()][:200],
+            "scope": "leads_on_observed_routes_fed_to_candidate_pipeline",
+        }
+    return sections
 
 
 def _off_origin_redirect(

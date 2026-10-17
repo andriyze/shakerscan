@@ -1050,6 +1050,7 @@ def build_endpoint_manifest(
         # inferred from a fetched page, so it is depth 0 like a seeded endpoint.
         "web.spec_ingest": 0,
         "subdomains.discover": 1,
+        "web.param_discover": 1,
     }
     entries: list[dict[str, Any]] = []
     excluded_sensitive_paths = 0
@@ -1184,6 +1185,8 @@ def build_candidate_manifest(
         # The application's own spec is authoritative about what a route accepts, on a par with an
         # operator-declared known endpoint.
         "web.spec_ingest": (14, "api_specification_source"),
+        # A name the route was observed to read against a random-name control.
+        "web.param_discover": (10, "parameter_discovery_source"),
         "web.probe": (6, "probe_observed_source"),
         "seed": (4, "seed_source"),
     }

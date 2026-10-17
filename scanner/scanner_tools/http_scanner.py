@@ -8,6 +8,13 @@ from contextlib import asynccontextmanager
 from typing import Any
 
 from .common import run, normalize_hash_route_url
+from .unsafe_actions import (
+    RISKY_INTERACTION_KEYWORDS,
+    RISKY_NAVIGATION_KEYWORDS,
+    contains_risky_keyword,
+    navigation_url_is_safe,
+    semantic_text,
+)
 
 # Optional Playwright
 try:
@@ -47,35 +54,11 @@ _BROWSER_SAFE_INTERACTION_SELECTORS = (
     '[class*="sidenav"] a[href]',
     'a[href^="/"]',
 )
-_BROWSER_RISKY_INTERACTION_KEYWORDS = (
-    "logout", "log out", "sign out", "signout",
-    "delete", "remove", "destroy", "erase",
-    "cancel", "deactivate", "disable", "revoke",
-    "reset", "clear all", "wipe", "start", "run", "launch",
-    "submit", "save", "create", "update", "approve", "reject",
-    "unsubscribe", "close account", "terminate",
-)
-_BROWSER_RISKY_NAVIGATION_KEYWORDS = (
-    "logout", "log out", "sign out", "signout",
-    "delete", "remove", "destroy", "erase", "deactivate", "disable",
-    "revoke", "reset", "clear all", "wipe", "unsubscribe",
-    "close account", "terminate",
-)
-
-
-def _browser_semantic_text(*values: Any) -> str:
-    """Normalize camelCase and separators so action words cannot hide in identifiers."""
-    combined = " ".join(str(value or "") for value in values)
-    combined = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", " ", combined)
-    return re.sub(r"[^A-Za-z0-9]+", " ", combined).strip().lower()
-
-
-def _browser_contains_risky_keyword(values: tuple[Any, ...], keywords: tuple[str, ...]) -> bool:
-    combined = _browser_semantic_text(*values)
-    if not combined:
-        return False
-    padded = f" {combined} "
-    return any(f" {_browser_semantic_text(keyword)} " in padded for keyword in keywords)
+# One list of action words for every automated discovery path (scanner_tools.unsafe_actions).
+_BROWSER_RISKY_INTERACTION_KEYWORDS = RISKY_INTERACTION_KEYWORDS
+_BROWSER_RISKY_NAVIGATION_KEYWORDS = RISKY_NAVIGATION_KEYWORDS
+_browser_semantic_text = semantic_text
+_browser_contains_risky_keyword = contains_risky_keyword
 
 
 def _browser_interaction_method_allowed(method: str) -> bool:
@@ -93,11 +76,7 @@ def _browser_interaction_element_is_safe(*values: Any) -> bool:
     return not _browser_contains_risky_keyword(values, _BROWSER_RISKY_INTERACTION_KEYWORDS)
 
 
-def _browser_navigation_url_is_safe(value: str) -> bool:
-    parsed = urllib.parse.urlsplit(str(value or ""))
-    return not _browser_contains_risky_keyword(
-        (parsed.path, parsed.fragment), _BROWSER_RISKY_NAVIGATION_KEYWORDS,
-    )
+_browser_navigation_url_is_safe = navigation_url_is_safe
 
 
 def _browser_origin(value: str) -> str | None:

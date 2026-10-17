@@ -45,8 +45,10 @@ class _Pool:
 
 
 def _spy(calls):
-    async def record(pool, report, *, scan_id, allowed_root_domains=None, plan_targets=None):
-        calls.append({"report": report, "scan_id": scan_id, "roots": allowed_root_domains})
+    async def record(pool, report, *, scan_id, allowed_root_domains=None, plan_targets=None,
+                     planned_capabilities=None):
+        calls.append({"report": report, "scan_id": scan_id, "roots": allowed_root_domains,
+                      "planned": planned_capabilities})
         report["discovery"]["subdomains"]["targets"] = {"status": "recorded", "added": 1}
         return report["discovery"]["subdomains"]["targets"]
 
@@ -95,12 +97,15 @@ def test_an_invalid_final_report_raises_the_callers_error():
 def test_a_broker_report_is_recorded_under_the_control_planes_binding(monkeypatch):
     calls = []
     monkeypatch.setattr(subdomain_targets, "record_scan_subdomain_discovery", _spy(calls))
-    monkeypatch.setattr(subdomain_targets, "bound_root_domains", lambda options: ("shakerscan.com",))
+    monkeypatch.setattr(subdomain_targets, "_job_binding",
+                        lambda options: (("shakerscan.com",), frozenset()))
     report = _report()
     asyncio.run(subdomain_targets.record_ingested_report_subdomains(
         _Pool(), report, scan_id=SCAN_ID, options={"scan_type": "smart"},
     ))
     assert len(calls) == 1 and calls[0]["roots"] == ("shakerscan.com",)
+    # The node's report does not say which Scan-produced sources ran: the job's binding does.
+    assert calls[0]["planned"] == frozenset()
     assert report["discovery"]["subdomains"]["targets"]["status"] == "recorded"
 
     calls.clear()

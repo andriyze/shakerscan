@@ -950,6 +950,7 @@ class ParallelActionPlanCompiler:
         include_network: bool,
         include_subdomains: bool,
         budget: Any = None,
+        include_recon_active: bool = False,
     ) -> dict[str, int]:
         """Sum the registry cost of every capability the discovery stage can plan.
 
@@ -965,6 +966,11 @@ class ParallelActionPlanCompiler:
             names.extend(("subdomains.discover", "subdomains.takeover_check"))
         if include_network:
             names.extend(("ports.discover", "service.fingerprint"))
+        if include_recon_active:
+            names.append("web.param_discover")
+            # Name guessing (Host/SNI and DNS) needs subdomain-discovery apex authority.
+            if include_subdomains:
+                names.extend(("vhost.discover", "dns.enumerate"))
         totals: dict[str, int] = {}
         for name in names:
             try:
@@ -1010,6 +1016,10 @@ class ParallelActionPlanCompiler:
             include_network=include_network,
             include_subdomains=bool(execution_plan.policy.subdomain_discovery),
             budget=parent,
+            include_recon_active=bool(
+                execution_plan.policy.active_testing
+                and "recon_active" in set(execution_plan.resolved_families or ())
+            ),
         )
         # Headroom for per-action reservation rounding; never above the parent.
         wall = min(parent.max_tool_wall_seconds, max(180, int(cost.get("tool_wall_seconds", 0) * 1.2)))

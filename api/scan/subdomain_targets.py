@@ -12,6 +12,7 @@ It never widens a Scan: the names become targets for their own, separately autho
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 import json
 from typing import Any, Mapping, Sequence
 import uuid
@@ -25,9 +26,20 @@ try:
     from scanner_tools.discovered_names import canonical_name, filter_subdomains
 except ModuleNotFoundError:  # package import (api.scan.subdomain_targets)
     from scanner.scanner_tools.discovered_names import canonical_name, filter_subdomains
+try:
+    from runtime.models import apex_recon_roots
+except ModuleNotFoundError:  # package import
+    from ..runtime.models import apex_recon_roots
 
 
 DISCOVERY_SOURCE = "subfinder"
+# Sources a Scan produced itself rather than read from a passive dataset, with the capability
+# whose planned action alone may claim each one.
+OWN_SOURCES = frozenset({"dns_enumeration"})
+OWN_SOURCE_CAPABILITIES = {"dns_enumeration": "dns.enumerate"}
+# ``targets.discovery_source`` of a name only the Scan's own DNS enumeration named. Like
+# ``subfinder`` it is not a declared target: it grants no apex (operations.discovery).
+ENUMERATION_TARGET_SOURCE = "dns-enumeration"
 # The whole DNS check of one scan's names, not each lookup. Recording runs between finalization
 # and the saved result; with a dead resolver every name used to cost its full lookup timeout --
 # about a minute for a full window -- before the finished scan was stored.
@@ -130,6 +142,10 @@ def _recorded_outcome(
         "notes": list(resolution.get("notes") or ()),
         "partial": bool(reasons),
         "partial_reasons": reasons,
+        # What each class of name means (a certificate is historical issuance; a resolving
+        # name is not a reachable service) and which names were already targets.
+        **({"provenance": dict(resolution["provenance"])}
+           if isinstance(resolution.get("provenance"), Mapping) else {}),
     }
 
 
@@ -140,6 +156,7 @@ async def record_scan_subdomain_discovery(
     scan_id: str,
     allowed_root_domains: Sequence[str] | None = None,
     plan_targets: Any = None,
+    planned_capabilities: frozenset[str] | None = None,
 ) -> dict[str, Any] | None:
     """Store the report's discovered subdomains as a discovery run and targets.
 
@@ -150,7 +167,9 @@ async def record_scan_subdomain_discovery(
 
     The report may come from a fleet node, so its section is not authority: only a root domain
     in the Scan's own binding (``allowed_root_domains``; none given records nothing) is recorded,
-    and only names that are DNS names under it.
+    and only names that are DNS names under it. A Scan-produced source (``dns_enumeration``) is
+    accepted only when ``planned_capabilities`` (the job's own plan; None trusts the local
+    report) contains the capability that produces it; a name only that source named is dropped.
     """
     discovery = report.get("discovery") if isinstance(report, Mapping) else None
     section = discovery.get("subdomains") if isinstance(discovery, Mapping) else None
@@ -167,6 +186,22 @@ async def record_scan_subdomain_discovery(
         section["targets"] = outcome
         return outcome
     listed = list(section.get("hosts") or ())
+    sources = section.get("sources") if isinstance(section.get("sources"), Mapping) else {}
+    if planned_capabilities is not None:
+        refused_sources = {
+            source for source, capability in OWN_SOURCE_CAPABILITIES.items()
+            if capability not in planned_capabilities
+        }
+        if refused_sources:
+            kept_sources = {
+                name: [item for item in values or () if item not in refused_sources]
+                for name, values in sources.items()
+            }
+            listed = [
+                name for name in listed
+                if not (sources.get(name) and not kept_sources.get(name))
+            ]
+            sources = kept_sources
     # The report may come from a fleet node: only canonical names strictly below the bound
     # root, on a label boundary, are recorded (``notexample.com`` is not under ``example.com``).
     hosts, _refused = filter_subdomains(listed, root_domain)
@@ -177,10 +212,19 @@ async def record_scan_subdomain_discovery(
     found = max(len(listed), _count(section.get("total"), len(listed)))
     # Which sources named each host (a certificate keeps a name a wildcard would otherwise
     # explain away). Absent in reports finalized before sources were listed.
-    sources = section.get("sources") if isinstance(section.get("sources"), Mapping) else {}
     evidence = {
-        name: [f"{DISCOVERY_SOURCE}:{item}" for item in sources.get(name) or ()]
+        name: [
+            # A Scan's own DNS enumeration is not an upstream subfinder source.
+            item if item in OWN_SOURCES else f"{DISCOVERY_SOURCE}:{item}"
+            for item in sources.get(name) or ()
+        ]
         for name in hosts
+    }
+    # A name only the Scan's own enumeration named is stored under its own source, so the
+    # inventory never presents an active guess as a passive dataset's answer.
+    source_by_name = {
+        name: ENUMERATION_TARGET_SOURCE for name, values in evidence.items()
+        if values and all(item in OWN_SOURCES for item in values)
     }
     planner = plan_targets or (
         lambda names: _plan_with_deadline(names, root_domain=root_domain, evidence=evidence)
@@ -208,7 +252,9 @@ async def record_scan_subdomain_discovery(
             # enclosing transaction would turn into an aborted run.
             async with pool.acquire() as conn:
                 resolution = await target_resolution.store_discovered_targets(
-                    conn, plan, root_domain, source=DISCOVERY_SOURCE,
+                    conn, plan, root_domain, source=DISCOVERY_SOURCE, evidence=evidence,
+                    discovery_id=discovery_id, source_by_name=source_by_name,
+                    observed_at=datetime.now(timezone.utc).isoformat(),
                 )
                 resolution = {
                     **resolution,
@@ -239,8 +285,9 @@ async def record_scan_subdomain_discovery(
     return outcome
 
 
-def bound_root_domains(options: Mapping[str, Any]) -> tuple[str, ...] | None:
-    """The root domains a canonical Scan job is bound to, or None when none can be derived."""
+def _job_binding(options: Mapping[str, Any]) -> tuple[tuple[str, ...], frozenset[str]] | None:
+    """The bound root domains of a canonical Scan job and the Scan-produced discovery
+    capabilities its policy and binding admit, or None."""
     try:
         from .executor import build_native_scan_execution
         from .worker_dispatch import prepare_worker_dispatch
@@ -249,9 +296,25 @@ def bound_root_domains(options: Mapping[str, Any]) -> tuple[str, ...] | None:
         if not admission.canonical or admission.plan is None:
             return None
         execution = build_native_scan_execution(admission.plan, normalized)
-        return tuple(execution.target_binding.allowed_root_domains)
+        plan = execution.execution_plan
+        binding = execution.target_binding
+        # The planner's own condition for ``dns.enumerate`` (scan.action_plan): the opt-in
+        # recon_active family with active authority and apex authority over the binding.
+        enumerated = bool(
+            plan.policy.active_testing
+            and "recon_active" in set(plan.resolved_families or ())
+            and apex_recon_roots(plan.policy, binding)
+        )
+        capabilities = frozenset({"dns.enumerate"} if enumerated else ())
+        return tuple(binding.allowed_root_domains), capabilities
     except Exception:  # noqa: BLE001 -- a job whose binding cannot be derived records nothing
         return None
+
+
+def bound_root_domains(options: Mapping[str, Any]) -> tuple[str, ...] | None:
+    """The root domains a canonical Scan job is bound to, or None when none can be derived."""
+    binding = _job_binding(options)
+    return binding[0] if binding is not None else None
 
 
 async def load_recorded_scan_report(
@@ -300,8 +363,12 @@ async def record_ingested_report_subdomains(
     discovery = report.get("discovery") if isinstance(report, Mapping) else None
     if not isinstance(discovery, Mapping) or not isinstance(discovery.get("subdomains"), Mapping):
         return None
+    binding = _job_binding(options)
     return await record_scan_subdomain_discovery(
-        pool, report, scan_id=scan_id, allowed_root_domains=bound_root_domains(options),
+        pool, report, scan_id=scan_id,
+        allowed_root_domains=binding[0] if binding is not None else None,
+        # The node's report is not authority for which sources ran: only the job's own plan is.
+        planned_capabilities=binding[1] if binding is not None else frozenset(),
     )
 
 

@@ -99,6 +99,10 @@ ALLOWED_PLAIN_DIGESTS = {
     ("api/hunt/knowledge_continue.py", "_with_authority"): "canonical",
     ("api/hunt/knowledge_dependencies.py", "_sha"): "redacted",
     ("api/scan/action_adapter.py", "_graphql_verify_batch"): "canonical",
+    # recon_active: the response digest only compares two answers inside one action and is
+    # never emitted (leads carry status and length); the list digest is of our own bundled file.
+    ("api/scan/recon_active_actions.py", "_signature"): "inprocess",
+    ("api/capabilities/recon_active.py", "load_bundled_list"): "integrity",
     ("api/capabilities/artifact.py", "_window_recorder"): "integrity",
     ("api/capabilities/artifact.py", "record"): "integrity",
     ("api/capabilities/auth.py", "_session_evidence_digest"): "redacted",

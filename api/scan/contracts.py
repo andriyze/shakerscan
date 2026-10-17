@@ -45,7 +45,7 @@ BUDGET_PROFILES: Mapping[str, ScanBudget] = {
 # names here would create a successful no-op Scan.
 SCAN_V2_FAMILY_NAMES = (
     "recon", "nuclei_passive", "nuclei_active", "xss", "sqli", "bola",
-    "sensitive_exposure", "nosqli", "authz_surface", "graphql",
+    "sensitive_exposure", "nosqli", "authz_surface", "graphql", "recon_active",
 )
 # Families that examine the application itself: they discover its surface or test what was
 # discovered. sensitive_exposure alone only reads a fixed list of well-known locations (its
@@ -90,6 +90,8 @@ _SCAN_V2_FAMILY_CAPABILITIES: Mapping[str, tuple[str, ...]] = {
     "nosqli": ("nosqli.verify_batch",),
     "authz_surface": ("authz_surface.verify_batch",),
     "graphql": ("graphql.verify_batch",),
+    # Parameter discovery first: it is the one recon_active action every web Scan can plan.
+    "recon_active": ("web.param_discover", "vhost.discover", "dns.enumerate"),
 }
 # Proof capabilities are additional verifiers a family may escalate to after its
 # batch action produces a candidate. They are part of the family's authority even
@@ -489,6 +491,8 @@ def resolve_scan_contract(
         raise ValueError("network_discovery requires active_testing")
     if resolved_policy.network_discovery and not resolved_policy.approval_receipt_id:
         raise ValueError("network_discovery requires a target-bound approval receipt")
+    if "recon_active" in resolved and not resolved_policy.approval_receipt_id:
+        raise ValueError("recon_active requires a target-bound approval receipt")
     merged_advanced = dict(advanced or {})
     budget = _resolve_budget(
         profile,

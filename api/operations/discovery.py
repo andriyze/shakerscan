@@ -54,7 +54,7 @@ MAX_ACTIVE_CEILING = 20
 ACTIVE_WINDOW = timedelta(hours=2)
 ADMISSION_LOCK = 0x5348_4B44_4953_4331  # "SHKDISC1": serializes discovery admission
 # Targets inserted by automation do not count as declared by a person.
-UNDECLARED_SOURCES = ("subfinder", "gungnir-monitor", "model-intake", "ai_session", "ai_gate",
+UNDECLARED_SOURCES = ("subfinder", "dns-enumeration", "gungnir-monitor", "model-intake", "ai_session", "ai_gate",
                       "device-service", "scan")
 DEFAULT_REQUESTER = "local-operator"
 

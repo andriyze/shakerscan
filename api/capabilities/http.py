@@ -442,6 +442,32 @@ def _bound_redirect_url(
     ))
 
 
+def bound_virtual_host(value: Any, target: TargetBinding) -> str | None:
+    """The canonical name when it lies strictly below an apex the binding declares.
+
+    Only an operator-declared apex (``TargetBinding.declared_apex_roots``) admits other names:
+    the registrable domain of a host bound below it (``zendesk.com`` for ``acme.zendesk.com``)
+    belongs to a provider, and its other names are other tenants on a shared edge.
+    """
+    try:
+        from scanner_tools.discovered_names import subdomain_of
+    except ModuleNotFoundError:  # package import
+        from scanner.scanner_tools.discovered_names import subdomain_of
+    for root in target.declared_apex_roots():
+        name = subdomain_of(value, root)
+        if name:
+            return name
+    return None
+
+
+def _host_port_suffix(url: str) -> str:
+    """``:port`` for a Host header when the URL names a non-default port, else empty."""
+    parsed = urllib.parse.urlsplit(url)
+    port = parsed.port
+    default = 443 if parsed.scheme.lower() == "https" else 80
+    return f":{port}" if port is not None and port != default else ""
+
+
 def request_error_class(exc: BaseException) -> str:
     """Name a failed request by its cause, not just the exception the client wrapped it in.
 
@@ -486,8 +512,15 @@ async def execute_bound_http_request(
     private_response_sink: Callable[[WorkerPrivateHTTPResponse], None] | None = None,
     private_response_headers: tuple[str, ...] = (),
     response_body_limit: int = MAX_BODY_BYTES,
+    virtual_host: str | None = None,
 ) -> dict[str, Any]:
-    """Execute one bounded request while revalidating every destination hop."""
+    """Execute one bounded request while revalidating every destination hop.
+
+    ``virtual_host`` (virtual-host discovery only) asks the same frozen origin, address and port
+    under another name: the Host header and TLS SNI carry it. It must be a DNS name strictly
+    below one of the binding's root domains; redirects are never followed for it. It changes
+    only which site the bound server is asked for, never where the request goes.
+    """
     import httpx
 
     method = agent_tools.coerce_method(args.get("method"))
@@ -499,6 +532,12 @@ async def execute_bound_http_request(
             "error": f"{method} is a state-changing request and requires approval",
         }
     follow_redirects = args.get("follow_redirects") is True
+    if virtual_host is not None:
+        accepted_host = bound_virtual_host(virtual_host, target)
+        if accepted_host is None or method not in {"GET", "HEAD"}:
+            return {"ok": False, "error": "scope: virtual host is outside the bound root domains"}
+        virtual_host = accepted_host
+        follow_redirects = False
     if follow_redirects and method not in {"GET", "HEAD", "OPTIONS"}:
         return {
             "ok": False,
@@ -597,6 +636,7 @@ async def execute_bound_http_request(
         "direct_origin": bool(via_address),
         "address_policy": socket_factory.policy_receipt,
         "follow_redirects": follow_redirects,
+        **({"virtual_host": virtual_host} if virtual_host is not None else {}),
     }
     timeout = max(1, min(60, int(timeout_seconds)))
     started = time.perf_counter()
@@ -637,6 +677,9 @@ async def execute_bound_http_request(
                             current_url, candidate_address,
                         )
                     )
+                    if virtual_host is not None:
+                        sni_hostname = virtual_host
+                        host_header = virtual_host + _host_port_suffix(current_url)
                     request = client.build_request(
                         current_method,
                         pinned_url,

@@ -68,7 +68,7 @@ def test_surface_manifest_unifies_producers_and_redacts_values():
     assert set(manifest["producers"]) == {
         "seed", "known_endpoints", "collections.replay", "web.probe",
         "web.crawl", "web.browser_crawl", "web.content_discover", "web.spec_ingest",
-        "subdomains.discover",
+        "subdomains.discover", "web.param_discover",
     }
     assert secret not in encoded
     assert "owner" in encoded

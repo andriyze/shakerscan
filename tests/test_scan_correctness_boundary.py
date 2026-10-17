@@ -6,7 +6,10 @@ from urllib.parse import parse_qsl, urlsplit
 
 import pytest
 
-from api.scan.negative_control import indistinguishable_from_absent, negative_control_entries
+from api.scan.negative_control import (
+    control_slot_count, indistinguishable_from_absent, negative_control_entries,
+    with_negative_controls,
+)
 from api.scan.work_manifests import (
     ScanWorkManifest, ScanWorkManifestError, ScanWorkManifestUnrepresentableError,
     build_candidate_manifest, build_endpoint_manifest, execution_url_for_manifest_candidate,
@@ -113,3 +116,14 @@ def test_same_origin_redirect_loop_is_not_an_origin_move():
     controls = [control_row("/" + path, target="app.example.test")
                 for path in negative_control_entries(2, seed="dedup-test")]
     assert indistinguishable_from_absent([*controls, control_row("/admin", target="app.example.test")]) == frozenset()
+
+
+def test_negative_controls_use_reserved_slots_before_replacing_entries():
+    limit = 40
+    controls = control_slot_count(limit)
+    entries = [f"e{i}" for i in range(limit - controls)]
+    kept = with_negative_controls(entries, request_limit=limit, seed="s")
+    assert kept[:len(entries)] == entries and len(kept) == limit
+    full = [f"e{i}" for i in range(limit)]
+    replaced = with_negative_controls(full, request_limit=limit, seed="s")
+    assert len(replaced) == limit and replaced[:limit - controls] == full[:limit - controls]

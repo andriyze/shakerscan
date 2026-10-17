@@ -438,7 +438,7 @@ async def list_targets_grouped(
     response: Response = None,
     include_inactive: bool = False,
     search: Optional[str] = None,
-    discovery_source: Optional[str] = Query(None, pattern="^(manual|subfinder|gungnir-monitor|import|model-intake)$"),
+    discovery_source: Optional[str] = Query(None, pattern="^(manual|subfinder|dns-enumeration|gungnir-monitor|import|model-intake)$"),
     grade: Optional[str] = Query(None, pattern="^[A-Fa-f]$"),
     has_findings: Optional[bool] = None,
     sort_by: Optional[str] = Query("root_domain", pattern="^(root_domain|last_scanned_at|active_findings_count|last_score|created_at)$"),
