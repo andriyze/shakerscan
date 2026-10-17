@@ -449,6 +449,20 @@ class CleanShakerScanTests(unittest.TestCase):
         result = self.run_script("--yes", env={"XDG_STATE_HOME": str(self.root / "xdg-state")})
         self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
         self.assertIn(str(xdg / "a.json"), self.removed())
+        # An isolated profile wins over the session's XDG directories, as in the client: cleaning
+        # one profile removes its own records, never those another profile keeps under XDG.
+        self.log.unlink()
+        second = self.root / "profile2" / "client"
+        second.mkdir(parents=True)
+        (second / "config.json").write_text('{"url":"http://fixture:8080"}\n')
+        beside = self._records(self.root / "profile2" / "client.state")
+        xdg = self._records(self.root / "xdg-state2" / "shakerscan")
+        result = self.run_script("--yes", env={"SHAKERSCAN_CONFIG_DIR": str(second),
+                                               "XDG_STATE_HOME": str(self.root / "xdg-state2")})
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        self.assertIn(str(beside / "a.json"), self.removed())
+        self.assertNotIn(str(xdg / "a.json"), self.removed())
+        self.assertTrue((xdg / "a.json").exists())
 
     def test_relative_state_directory_and_linked_state_root_are_refused(self):
         result = self.run_script("--yes", env={"SHAKERSCAN_STATE_DIR": "relative/state"})

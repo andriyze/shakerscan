@@ -64,8 +64,8 @@ try:
     from runtime.sealed_inputs import SealedInputError, seal_private_input, validate_sealed_input_public_key
     from scan.action_plan import ScanActionPlan, ScanActionPlanCompiler, ScanActionPlanError, credential_profile_action_refs, request_collection_action_refs, interactive_auth_input_action_ids
     from scan.action_store import PostgresScanActionStore
-    from scan.authorization import ActionAuthorityDecision, revalidate_scan_action_authority
-    from scan.broker_authority import RunningBrokerAuthority
+    from scan.action_authority_guard import scan_action_authority_reason
+    from scan.broker_authority import RunningBrokerAuthority, authority_exempt
     from scan.broker_backend import AUTHORITY_WITHDRAWN_DETAIL
     from scan.worker_action_executor import with_authority_interruption
     from scan.broker_execution import BrokerScanExecutionError, heartbeat_broker_scan_execution, settle_broker_scan_execution
@@ -119,8 +119,8 @@ except ModuleNotFoundError:  # package import in host-side tests
     from ..runtime.sealed_inputs import SealedInputError, seal_private_input, validate_sealed_input_public_key
     from ..scan.action_plan import ScanActionPlan, ScanActionPlanCompiler, ScanActionPlanError, credential_profile_action_refs, request_collection_action_refs, interactive_auth_input_action_ids
     from ..scan.action_store import PostgresScanActionStore
-    from ..scan.authorization import ActionAuthorityDecision, revalidate_scan_action_authority
-    from ..scan.broker_authority import RunningBrokerAuthority
+    from ..scan.action_authority_guard import scan_action_authority_reason
+    from ..scan.broker_authority import RunningBrokerAuthority, authority_exempt
     from ..scan.broker_backend import AUTHORITY_WITHDRAWN_DETAIL
     from ..scan.worker_action_executor import with_authority_interruption
     from ..scan.broker_execution import BrokerScanExecutionError, heartbeat_broker_scan_execution, settle_broker_scan_execution
@@ -1250,13 +1250,26 @@ async def lease_broker_scan_action(
                 status_code=208,
                 content={"detail": "broker Scan action was cancelled before execution"},
             )
-        await _revalidate_broker_action_authority(
+        blocked = await _revalidate_broker_action_authority(
             conn, action=action, canonical_job=job,
         )
         try:
             action_lease = await backend.acquire_action_with_connection(
                 conn, action,
             )
+            if blocked is not None:
+                # As the local executor does: the action is settled blocked, with no traffic and
+                # no charge, and the Scan goes on (later actions are blocked the same way and the
+                # report finalizer still runs). Refusing the lease instead failed the node's whole
+                # run, so a fleet Scan whose authorization was withdrawn lost its report.
+                await backend.settle_with_connection(conn, action_lease, _broker_blocked_receipt(
+                    action, action_lease, canonical_job=job, scan_id=str(_row["scan_id"]),
+                    worker_id=body.worker_id, reason=blocked,
+                ))
+                return JSONResponse(
+                    status_code=208,
+                    content={"detail": f"broker Scan action was blocked: {blocked}"},
+                )
         except ActionAlreadyTerminal:
             return JSONResponse(
                 status_code=208,
@@ -3161,15 +3174,18 @@ async def _revalidate_broker_action_authority(
     *,
     action: Any,
     canonical_job: Any,
-) -> None:
-    target_active = await conn.fetchval(
-        "SELECT is_active FROM targets WHERE id=$1",
-        uuid.UUID(str(canonical_job.target.target_id)),
-    )
-    if target_active is not True:
-        raise HTTPException(status_code=409, detail="broker Scan target is inactive")
+) -> str | None:
+    """``None`` when the action may be leased, else the reason code that blocks it.
+
+    The decision is the local guard's full check (``scan_action_authority_reason``: an active
+    target, then ``revalidate_scan_action_authority``). The report finalizer is exempt, as the
+    local executor never re-checks it: it sends no target traffic and assembles what earlier
+    actions confirmed, so a withdrawn Scan still ends with its report.
+    """
+    if authority_exempt(action):
+        return None
     policy = canonical_job.execution_plan.policy
-    decision = await revalidate_scan_action_authority(
+    reason, _decision = await scan_action_authority_reason(
         conn,
         action=action,
         target_binding=canonical_job.target,
@@ -3178,11 +3194,38 @@ async def _revalidate_broker_action_authority(
         ),
         approval_receipt_id=policy.approval_receipt_id,
     )
-    if decision is not ActionAuthorityDecision.ALLOWED:
-        raise HTTPException(
-            status_code=409,
-            detail=f"broker action authorization rejected: {decision.value}",
-        )
+    return reason
+
+
+def _broker_blocked_receipt(action: Any, lease: Any, *, canonical_job: Any, scan_id: str,
+                            worker_id: str, reason: str) -> CapabilityReceipt:
+    """The zero-traffic ``blocked`` receipt the node's executor would settle for ``reason``."""
+    now = datetime.now(timezone.utc).isoformat()
+    policy = canonical_job.execution_plan.policy
+    return CapabilityReceipt(
+        capability_name=action.capability_name,
+        adapter_name=str(action.placement.get("adapter_name") or ""),
+        adapter_version=str(action.placement.get("adapter_version") or ""),
+        target_id=str(canonical_job.target.target_id),
+        scan_id=str(scan_id),
+        worker_id=worker_id,
+        scope_receipt_id=canonical_job.target.scope_receipt_id,
+        approval_receipt_id=policy.approval_receipt_id,
+        status="blocked",
+        input_digest=str(action.action_digest),
+        parser_version="scan-orchestrator/v1",
+        started_at=now,
+        finished_at=now,
+        budget_reserved=action.requested_budget,
+        budget_consumed={name: 0 for name in action.requested_budget},
+        redacted_execution={
+            "action_id": action.action_id,
+            "execution_started": False,
+            "lease_id": lease.lease_id,
+        },
+        observations=(),
+        errors=(reason,),
+    )
 
 
 async def _broker_scan_time_limit_reached(conn: Any, *, scan_id: str, canonical_job: Any) -> bool:

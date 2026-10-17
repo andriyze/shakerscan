@@ -175,20 +175,36 @@ def _stored_host_pattern(raw: str) -> HostPattern:
         return exc.pattern
 
 
-def _stored_credential_target(raw: str) -> str | None:
-    """A stored ``credential.use`` entry, or None when it names a public suffix as a host."""
+def _credential_target_refusal(raw: str) -> tuple[str | None, str | None]:
+    """``(entry, None)`` for a stored ``credential.use`` entry that still names one target id or
+    one exact host, else ``(None, why)``.
+
+    Fail closed, as stored ``target.authorize`` patterns do: an entry that names a public suffix,
+    no longer parses, or names a wildcard or a port (never accepted for ``credential.use``) covers
+    nothing. It used to be kept as stored text whenever it did not parse, so coverage depended on
+    string equality with whatever the request carried rather than on the grammar the person
+    approved.
+    """
     try:
-        uuid.UUID(raw)
-        return raw
+        return str(uuid.UUID(raw)), None
     except ValueError:
         pass
     try:
-        parse_host_pattern(raw)
+        pattern = parse_host_pattern(raw)
     except PublicSuffixBoundError:
-        return None
+        return None, f"{raw} is a public suffix; this credential bound no longer covers any host."
     except BoundError:
-        return raw
-    return raw
+        return None, (f"{raw} is not a target id or a valid host name; this credential bound no "
+                      "longer covers any host.")
+    if pattern.wildcard or pattern.port:
+        return None, (f"{raw} is not an exact host (credential.use names target ids or exact "
+                      "hosts); this credential bound no longer covers any host.")
+    return pattern.host, None
+
+
+def _stored_credential_target(raw: str) -> str | None:
+    """A stored ``credential.use`` entry as it covers requests, or None when it covers nothing."""
+    return _credential_target_refusal(raw)[0]
 
 
 def refused_bounds(value: Mapping[str, Any]) -> list[dict[str, str]]:
@@ -205,9 +221,10 @@ def refused_bounds(value: Mapping[str, Any]) -> list[dict[str, str]]:
                 "refused; it no longer covers any host. Start the Hunt with a bound you control."
             )})
     for item in value.get("credential_targets") or ():
-        if _stored_credential_target(str(item)) is None:
+        _entry, why = _credential_target_refusal(str(item))
+        if why is not None:
             refused.append({"bound": f"{KIND_CREDENTIAL_USE}:{item}", "message": (
-                f"{item} is a public suffix; this credential bound no longer covers any host."
+                f"{why} Start the Hunt with a bound you control."
             )})
     return refused
 
@@ -440,10 +457,12 @@ def _rebuilt(value: Mapping[str, Any], *, target_patterns: Iterable[str],
         budget_multiplier=value.get("budget_multiplier"),
         budget_totals={str(k): int(v) for k, v in dict(value.get("budget_totals") or {}).items()},
         # Stored patterns: one naming a public suffix is kept as stored and covers nothing.
-        credential_targets=tuple(
-            item for item in (str(raw) for raw in credential_targets)
-            if _stored_credential_target(item) is not None
-        ),
+        # A credential entry that names a public suffix, no longer parses, or is not an exact
+        # host covers nothing (``_credential_target_refusal``); the rest are matched canonically.
+        credential_targets=tuple(dict.fromkeys(
+            entry for entry in (_stored_credential_target(str(raw)) for raw in credential_targets)
+            if entry is not None
+        )),
         target_patterns=tuple(_stored_host_pattern(str(item)) for item in target_patterns),
         capability_flags=tuple(str(item) for item in value.get("capability_flags") or ()),
         ssh_first_contact=bool(value.get("ssh_host_trust_first_contact")),
