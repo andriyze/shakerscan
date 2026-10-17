@@ -29,6 +29,7 @@ try:
         _severity_sort_value, _short_url_label,
     )
     from serialization import row_to_dict
+    from finding_routes.list_query import without_jit
 except ModuleNotFoundError:  # package import in host-side tests
     from ..ai_assurance import build_agent_blast_radius
     from ..asset_cohorts import target_cohort, target_exposure_class
@@ -37,11 +38,12 @@ except ModuleNotFoundError:  # package import in host-side tests
         _severity_sort_value, _short_url_label,
     )
     from ..serialization import row_to_dict
+    from ..finding_routes.list_query import without_jit
 
 
 from .services_router import router as services_router
 from .service_inventory import origin as _service_origin
-from .proof_rollup import active_finding_proof_counts
+from .proof_rollup import asset_finding_counts_sql, undetermined_adjustments, undetermined_rows_sql
 
 router = APIRouter()
 router.include_router(services_router)
@@ -927,6 +929,37 @@ def _exposure_recommended_actions(*, kind: str, reasons: list[str], active_verif
     return unique[:5]
 
 
+# Metadata keys the asset row reads (cohort, ownership, AI blast radius): the rest of the JSON
+# stays in the database.
+_TARGET_METADATA_KEYS = ("cohort", "environment", "owner", "asset_owner", "risk_tier", "data_classification")
+_AI_METADATA_KEYS = (
+    "cohort", "environment", "owner", "asset_owner", "risk_tier", "data_classification",
+    "tool_inventory", "tools", "mcp_tools", "per_tool_scopes", "tool_scopes", "mcp_scopes",
+    "oauth_scopes", "delegated_identity", "service_accounts", "agent_identities", "memory_stores",
+    "memory", "state_stores", "write_action_approval", "dry_run_mode", "transaction_limits",
+    "sandboxing", "audit_logs", "kill_switch",
+)
+
+
+def _metadata_subset_sql(column: str, keys: tuple[str, ...]) -> str:
+    """Only ``keys`` of a JSON object (absent keys stay absent); a non-object passes unchanged."""
+    names = ", ".join("'" + key + "'" for key in keys)
+    return (
+        f"(CASE WHEN jsonb_typeof({column}) = 'object' THEN COALESCE((SELECT jsonb_object_agg(e.key, e.value)"
+        f" FROM jsonb_each({column}) e WHERE e.key IN ({names})), '{{}}'::jsonb) ELSE {column} END)"
+    )
+
+
+def _proof_numbers(row: Any, adjust: dict[str, int] | None) -> dict[str, int]:
+    adjust = adjust or {}
+    return {
+        "verified": int(row["proof_verified"] or 0) + adjust.get("verified", 0),
+        "needs_verification": int(row["proof_needs_verification"] or 0) + adjust.get("needs_verification", 0),
+        "investigator_verified": int(row.get("proof_investigator_verified") or 0)
+        + adjust.get("investigator_verified", 0),
+    }
+
+
 @router.get("/exposure/assets")
 async def exposure_assets(
     root_domain: Optional[str] = None,
@@ -945,134 +978,101 @@ async def exposure_assets(
     first-seen timestamp. Each asset carries the graph ``node_id`` so the UI can
     jump straight into the Map lens focused on it.
     """
-    async with _pool().acquire() as conn:
-        target_rows = await conn.fetch(
-            """
-            SELECT t.id, t.url, t.name, t.root_domain, t.discovery_source, t.metadata_json,
-                   t.last_grade, t.last_score, t.last_scanned_at, t.created_at, t.total_scans,
-                   ls.id AS latest_scan_id, ls.status AS latest_scan_status,
-                   ls.scan_type AS latest_scan_type, ls.completion_status, ls.top_coverage_status,
-                   ls.completed_at AS latest_scan_completed_at,
-                   COALESCE(fc.active_total, 0) AS active_total,
-                   COALESCE(fc.active_critical, 0) AS active_critical,
-                   COALESCE(fc.active_high, 0) AS active_high,
-                   COALESCE(fc.active_verified, 0) AS active_verified,
-                   COALESCE(fc.active_needs_verification, 0)
-                       + COALESCE(ic.investigator_suspected_count, 0) AS active_needs_verification,
-                   COALESCE(fc.investigator_verified_count, 0) AS investigator_verified_count,
-                   COALESCE(ic.investigator_suspected_count, 0) AS investigator_suspected_count
-            FROM targets t
-            LEFT JOIN LATERAL (
-                SELECT id, status, scan_type, completed_at,
-                       result -> 'scan_completion_status' AS completion_status,
-                       result ->> 'coverage_status' AS top_coverage_status
-                FROM scans s
-                WHERE s.target_id = t.id
-                  AND (s.scan_role IS NULL OR s.scan_role <> 'shard')
-                ORDER BY s.created_at DESC
-                LIMIT 1
-            ) ls ON true
-            LEFT JOIN (
-                SELECT target_id,
-                    COUNT(*) FILTER (WHERE status = 'active') AS active_total,
-                    COUNT(*) FILTER (WHERE status = 'active' AND severity = 'critical') AS active_critical,
-                    COUNT(*) FILTER (WHERE status = 'active' AND severity = 'high') AS active_high,
-                    COUNT(*) FILTER (WHERE status = 'active' AND last_verification_verdict = 'exploited') AS active_verified,
-                    COUNT(*) FILTER (
-                        WHERE status = 'active'
-                          AND last_verification_verdict = 'exploited'
-                          AND tool IN ('autonomous_workflow', 'bola')
-                    ) AS investigator_verified_count,
-                    COUNT(*) FILTER (
-                        WHERE status = 'active'
-                          AND (
-                            last_verification_verdict IS NULL
-                            OR last_verification_verdict IN ('inconclusive', 'error', 'likely_vulnerable')
-                            OR analyst_verdict IN ('needs_review', 'retest_needed')
-                          )
-                    ) AS active_needs_verification
-                FROM findings WHERE target_id IS NOT NULL GROUP BY target_id
-            ) fc ON fc.target_id = t.id
-            LEFT JOIN (
-                SELECT target_id, COUNT(*) AS investigator_suspected_count
-                FROM investigation_candidates
-                WHERE plane='web'
-                  AND status IN ('new','verification_queued','verifying','inconclusive','blocked')
-                GROUP BY target_id
-            ) ic ON ic.target_id = t.id
-            WHERE t.is_active = true
-              AND ($1::text IS NULL OR t.root_domain = $1::text)
-            """,
-            root_domain,
-        )
+    include_web = kind in (None, "web", "model")
+    include_ai = kind in (None, "ai")
+    target_rows: list[Any] = []
+    ai_rows: list[Any] = []
+    async with _pool().acquire() as conn, without_jit(conn):
+        if include_web:
+            target_rows = await conn.fetch(
+                f"""
+                SELECT t.id, t.url, t.name, t.root_domain, t.discovery_source,
+                       {_metadata_subset_sql("t.metadata_json", _TARGET_METADATA_KEYS)} AS metadata_json,
+                       t.last_grade, t.last_score, t.last_scanned_at, t.created_at, t.total_scans,
+                       ls.id AS latest_scan_id, ls.status AS latest_scan_status,
+                       ls.scan_type AS latest_scan_type, ls.completion_status, ls.top_coverage_status,
+                       ls.completed_at AS latest_scan_completed_at,
+                       COALESCE(fc.active_total, 0) AS active_total,
+                       COALESCE(fc.active_critical, 0) AS active_critical,
+                       COALESCE(fc.active_high, 0) AS active_high,
+                       COALESCE(fc.proof_verified, 0) AS proof_verified,
+                       COALESCE(fc.proof_needs_verification, 0) AS proof_needs_verification,
+                       COALESCE(fc.proof_investigator_verified, 0) AS proof_investigator_verified,
+                       COALESCE(ic.investigator_suspected_count, 0) AS investigator_suspected_count
+                FROM targets t
+                LEFT JOIN LATERAL (
+                    SELECT id, status, scan_type, completed_at,
+                           result -> 'scan_completion_status' AS completion_status,
+                           result ->> 'coverage_status' AS top_coverage_status
+                    FROM scans s
+                    WHERE s.target_id = t.id
+                      AND (s.scan_role IS NULL OR s.scan_role <> 'shard')
+                    ORDER BY s.created_at DESC
+                    LIMIT 1
+                ) ls ON true
+                LEFT JOIN ({asset_finding_counts_sql("target_id", proof_scope="TRUE")}) fc
+                    ON fc.asset_id = t.id
+                LEFT JOIN (
+                    SELECT target_id, COUNT(*) AS investigator_suspected_count
+                    FROM investigation_candidates
+                    WHERE plane='web'
+                      AND status IN ('new','verification_queued','verifying','inconclusive','blocked')
+                    GROUP BY target_id
+                ) ic ON ic.target_id = t.id
+                WHERE t.is_active = true
+                  AND ($1::text IS NULL OR t.root_domain = $1::text)
+                  AND ($2::text IS NULL
+                       OR ($2::text = 'model') = (t.discovery_source IS NOT DISTINCT FROM 'model-intake'))
+                """,
+                root_domain, kind if kind in ("web", "model") else None,
+            )
+        if include_ai:
+            ai_rows = await conn.fetch(
+                f"""
+                SELECT a.id, a.name, a.endpoint_url, a.target_type, a.production_mode,
+                       a.last_scanned_at, a.created_at,
+                       {_metadata_subset_sql("a.metadata_json", _AI_METADATA_KEYS)} AS metadata_json,
+                       ls.id AS latest_scan_id, ls.status AS latest_scan_status,
+                       ls.scan_type AS latest_scan_type, ls.completion_status, ls.top_coverage_status,
+                       ls.completed_at AS latest_scan_completed_at,
+                       COALESCE(sc.scan_count, 0) AS scan_count,
+                       COALESCE(fc.active_total, 0) AS active_total,
+                       COALESCE(fc.active_critical, 0) AS active_critical,
+                       COALESCE(fc.active_high, 0) AS active_high,
+                       COALESCE(fc.proof_verified, 0) AS proof_verified,
+                       COALESCE(fc.proof_needs_verification, 0) AS proof_needs_verification
+                FROM ai_targets a
+                LEFT JOIN LATERAL (
+                    SELECT id, status, scan_type, completed_at,
+                           result -> 'scan_completion_status' AS completion_status,
+                           result ->> 'coverage_status' AS top_coverage_status
+                    FROM scans s
+                    WHERE s.ai_target_id = a.id
+                    ORDER BY s.created_at DESC
+                    LIMIT 1
+                ) ls ON true
+                LEFT JOIN LATERAL (
+                    SELECT COUNT(*) AS scan_count FROM scans s WHERE s.ai_target_id = a.id
+                ) sc ON true
+                LEFT JOIN ({asset_finding_counts_sql("ai_target_id", proof_scope="f.target_id IS NULL")}) fc
+                    ON fc.asset_id = a.id
+                WHERE a.is_active = true
+                  AND ($1::text IS NULL OR LOWER(a.endpoint_url) LIKE '%' || LOWER($1::text) || '%')
+                """,
+                root_domain,
+            )
+        # The SQL counts decide proof for every row but the rare one whose triage only Python's
+        # JSON reader accepts; those few are projected here (an index probe finds them).
+        adjustments = undetermined_adjustments(await conn.fetch(
+            undetermined_rows_sql(), [row["id"] for row in target_rows], [row["id"] for row in ai_rows],
+        ))
 
-        ai_rows = await conn.fetch(
-            """
-            SELECT a.id, a.name, a.endpoint_url, a.target_type, a.production_mode,
-                   a.last_scanned_at, a.created_at, a.metadata_json,
-                   ls.id AS latest_scan_id, ls.status AS latest_scan_status,
-                   ls.scan_type AS latest_scan_type, ls.completion_status, ls.top_coverage_status,
-                   ls.completed_at AS latest_scan_completed_at,
-                   COALESCE(sc.scan_count, 0) AS scan_count,
-                   COALESCE(fc.active_total, 0) AS active_total,
-                   COALESCE(fc.active_critical, 0) AS active_critical,
-                   COALESCE(fc.active_high, 0) AS active_high,
-                   COALESCE(fc.active_verified, 0) AS active_verified,
-                   COALESCE(fc.active_needs_verification, 0) AS active_needs_verification
-            FROM ai_targets a
-            LEFT JOIN LATERAL (
-                SELECT id, status, scan_type, completed_at,
-                       result -> 'scan_completion_status' AS completion_status,
-                       result ->> 'coverage_status' AS top_coverage_status
-                FROM scans s
-                WHERE s.ai_target_id = a.id
-                ORDER BY s.created_at DESC
-                LIMIT 1
-            ) ls ON true
-            LEFT JOIN (
-                SELECT ai_target_id, COUNT(*) AS scan_count
-                FROM scans WHERE ai_target_id IS NOT NULL GROUP BY ai_target_id
-            ) sc ON sc.ai_target_id = a.id
-            LEFT JOIN (
-                SELECT ai_target_id,
-                    COUNT(*) FILTER (WHERE status = 'active') AS active_total,
-                    COUNT(*) FILTER (WHERE status = 'active' AND severity = 'critical') AS active_critical,
-                    COUNT(*) FILTER (WHERE status = 'active' AND severity = 'high') AS active_high,
-                    COUNT(*) FILTER (WHERE status = 'active' AND last_verification_verdict = 'exploited') AS active_verified,
-                    COUNT(*) FILTER (
-                        WHERE status = 'active'
-                          AND (
-                            last_verification_verdict IS NULL
-                            OR last_verification_verdict IN ('inconclusive', 'error', 'likely_vulnerable')
-                            OR analyst_verdict IN ('needs_review', 'retest_needed')
-                          )
-                    ) AS active_needs_verification
-                FROM findings WHERE ai_target_id IS NOT NULL GROUP BY ai_target_id
-            ) fc ON fc.ai_target_id = a.id
-            WHERE a.is_active = true
-              AND ($1::text IS NULL OR LOWER(a.endpoint_url) LIKE '%' || LOWER($1::text) || '%')
-            """,
-            root_domain,
-        )
-
-    # The finding list preserves scan-time deterministic proof after an inconclusive
-    # retest. Reuse its projection here instead of counting only the latest verdict.
-    target_ids = [row["id"] for row in target_rows]
-    ai_ids = [row["id"] for row in ai_rows]
-    async with _pool().acquire() as conn:
-        proof_rows = await conn.fetch(
-            """SELECT f.*, CASE WHEN latest_retest.verdict IS NOT NULL
-                       THEN latest_retest.verification_mode END AS latest_retest_mode
-               FROM findings f
-               LEFT JOIN LATERAL (
-                   SELECT verdict, verification_mode FROM finding_verifications
-                   WHERE finding_id=f.id ORDER BY created_at DESC, id DESC LIMIT 1
-               ) latest_retest ON TRUE
-               WHERE f.status='active'
-                 AND (f.target_id=ANY($1::uuid[]) OR f.ai_target_id=ANY($2::uuid[]))""",
-            target_ids, ai_ids,
-        )
-    proof_counts = active_finding_proof_counts(proof_rows)
+    proof_counts = {
+        **{("target", str(row["id"])): _proof_numbers(row, adjustments.get(("target", str(row["id"]))))
+           for row in target_rows},
+        **{("ai", str(row["id"])): _proof_numbers(row, adjustments.get(("ai", str(row["id"]))))
+           for row in ai_rows},
+    }
     assets: list[dict[str, Any]] = []
 
     for row in target_rows:
@@ -1378,102 +1378,85 @@ async def exposure_changes(
     if anchor is None:
         anchor = datetime.now(timezone.utc) - timedelta(days=days)
 
+    # Each category is a COUNT plus its newest ``examples`` rows: the window can hold every finding.
+    async def counted(conn: Any, from_where: str, columns: str, order: str) -> tuple[int, list[Any]]:
+        total = await conn.fetchval(f"SELECT count(*) {from_where}", anchor, root_domain)
+        rows = await conn.fetch(
+            f"SELECT {columns} {from_where} ORDER BY {order} LIMIT $3", anchor, root_domain, examples,
+        ) if examples else []
+        return int(total or 0), list(rows)
+
+    findings_scope = """
+              AND ($2::text IS NULL
+                   OR f.target_id IN (SELECT id FROM targets WHERE root_domain = $2::text)
+                   OR f.ai_target_id IN (SELECT id FROM ai_targets
+                                         WHERE LOWER(endpoint_url) LIKE '%' || LOWER($2::text) || '%'))"""
+    finding_columns = """f.title, f.severity, f.first_seen_at, f.resolved_at,
+                   COALESCE((SELECT root_domain FROM targets WHERE id = f.target_id),
+                            (SELECT name FROM ai_targets WHERE id = f.ai_target_id), f.url) AS subject"""
     async with _pool().acquire() as conn:
-        new_targets = await conn.fetch(
-            """
-            SELECT COALESCE(name, url) AS label, url, discovery_source, created_at
-            FROM targets
+        new_targets_count, new_targets = await counted(
+            conn,
+            """FROM targets
             WHERE is_active = true AND created_at > $1
-              AND ($2::text IS NULL OR root_domain = $2::text)
-            ORDER BY created_at DESC
-            """,
-            anchor,
-            root_domain,
+              AND ($2::text IS NULL OR root_domain = $2::text)""",
+            "COALESCE(name, url) AS label, url, discovery_source, created_at", "created_at DESC",
         )
-        new_ai = await conn.fetch(
-            """
-            SELECT name AS label, endpoint_url AS url, created_at
-            FROM ai_targets
+        new_ai_count, new_ai = await counted(
+            conn,
+            """FROM ai_targets
             WHERE is_active = true AND created_at > $1
-              AND ($2::text IS NULL OR LOWER(endpoint_url) LIKE '%' || LOWER($2::text) || '%')
-            ORDER BY created_at DESC
-            """,
-            anchor,
-            root_domain,
+              AND ($2::text IS NULL OR LOWER(endpoint_url) LIKE '%' || LOWER($2::text) || '%')""",
+            "name AS label, endpoint_url AS url, created_at", "created_at DESC",
         )
-        new_findings = await conn.fetch(
-            """
-            SELECT f.title, f.severity, f.first_seen_at,
-                   COALESCE(t.root_domain, ait.name, f.url) AS subject
-            FROM findings f
-            LEFT JOIN targets t ON f.target_id = t.id
-            LEFT JOIN ai_targets ait ON f.ai_target_id = ait.id
-            WHERE f.status = 'active' AND f.severity IN ('critical', 'high')
-              AND f.first_seen_at > $1
-              AND ($2::text IS NULL OR t.root_domain = $2::text
-                   OR LOWER(ait.endpoint_url) LIKE '%' || LOWER($2::text) || '%')
-            ORDER BY f.first_seen_at DESC
-            """,
-            anchor,
-            root_domain,
+        new_critical_count, new_critical = await counted(
+            conn,
+            f"""FROM findings f
+            WHERE f.status = 'active' AND f.severity = 'critical' AND f.first_seen_at > $1{findings_scope}""",
+            finding_columns, "f.first_seen_at DESC",
         )
-        resolved_findings = await conn.fetch(
-            """
-            SELECT f.title, f.severity, f.resolved_at,
-                   COALESCE(t.root_domain, ait.name, f.url) AS subject
-            FROM findings f
-            LEFT JOIN targets t ON f.target_id = t.id
-            LEFT JOIN ai_targets ait ON f.ai_target_id = ait.id
-            WHERE f.status = 'resolved' AND f.resolved_at > $1
-              AND ($2::text IS NULL OR t.root_domain = $2::text
-                   OR LOWER(ait.endpoint_url) LIKE '%' || LOWER($2::text) || '%')
-            ORDER BY f.resolved_at DESC
-            """,
-            anchor,
-            root_domain,
+        new_high_count, new_high = await counted(
+            conn,
+            f"""FROM findings f
+            WHERE f.status = 'active' AND f.severity = 'high' AND f.first_seen_at > $1{findings_scope}""",
+            finding_columns, "f.first_seen_at DESC",
         )
-        failed_scans = await conn.fetch(
-            """
-            SELECT s.id, s.target_url AS label, s.scan_type, s.created_at
-            FROM scans s
+        resolved_count, resolved_findings = await counted(
+            conn,
+            f"""FROM findings f
+            WHERE f.status = 'resolved' AND f.resolved_at > $1{findings_scope}""",
+            finding_columns, "f.resolved_at DESC",
+        )
+        failed_scans_count, failed_scans = await counted(
+            conn,
+            """FROM scans s
             LEFT JOIN targets t ON s.target_id = t.id
             LEFT JOIN ai_targets ait ON s.ai_target_id = ait.id
             WHERE s.status = 'failed' AND s.created_at > $1
               AND (s.scan_role IS NULL OR s.scan_role <> 'shard')
               AND ($2::text IS NULL OR t.root_domain = $2::text
-                   OR LOWER(ait.endpoint_url) LIKE '%' || LOWER($2::text) || '%')
-            ORDER BY s.created_at DESC
-            """,
-            anchor,
-            root_domain,
+                   OR LOWER(ait.endpoint_url) LIKE '%' || LOWER($2::text) || '%')""",
+            "s.id, s.target_url AS label, s.scan_type, s.created_at", "s.created_at DESC",
         )
-        went_stale_web = await conn.fetch(
-            """
-            SELECT COALESCE(name, url) AS label, last_scanned_at
-            FROM targets
+        went_stale_web_count, went_stale_web = await counted(
+            conn,
+            """FROM targets
             WHERE is_active = true AND total_scans > 0 AND last_scanned_at IS NOT NULL
               AND last_scanned_at <= NOW() - INTERVAL '30 days'
               AND last_scanned_at > $1::timestamptz - INTERVAL '30 days'
-              AND ($2::text IS NULL OR root_domain = $2::text)
-            ORDER BY last_scanned_at DESC
-            """,
-            anchor,
-            root_domain,
+              AND ($2::text IS NULL OR root_domain = $2::text)""",
+            "COALESCE(name, url) AS label, last_scanned_at", "last_scanned_at DESC",
         )
         # AI surfaces go stale too — the destination view's stale-window filter
         # spans every asset kind, so the tile must count the same population.
-        went_stale_ai = await conn.fetch(
-            """
-            SELECT name AS label, last_scanned_at
-            FROM ai_targets
+        went_stale_ai_count, went_stale_ai = await counted(
+            conn,
+            """FROM ai_targets
             WHERE is_active = true AND last_scanned_at IS NOT NULL
               AND last_scanned_at <= NOW() - INTERVAL '30 days'
               AND last_scanned_at > $1::timestamptz - INTERVAL '30 days'
-              AND ($2::text IS NULL OR LOWER(endpoint_url) LIKE '%' || LOWER($2::text) || '%')
-            ORDER BY last_scanned_at DESC
-            """,
-            anchor,
-            root_domain,
+              AND ($2::text IS NULL OR LOWER(endpoint_url) LIKE '%' || LOWER($2::text) || '%')""",
+            "name AS label, last_scanned_at", "last_scanned_at DESC",
         )
     went_stale = sorted(
         [*went_stale_web, *went_stale_ai],
@@ -1526,21 +1509,18 @@ async def exposure_changes(
             for r in rows[:examples]
         ]
 
-    new_critical = [r for r in new_findings if r["severity"] == "critical"]
-    new_high = [r for r in new_findings if r["severity"] == "high"]
-
     categories = [
         {
             "key": "new_assets",
             "label": "New assets",
-            "count": len(new_targets) + len(new_ai),
+            "count": new_targets_count + new_ai_count,
             "href": href("/targets", sort="created"),
             "examples": new_asset_examples[:examples],
         },
         {
             "key": "new_critical",
             "label": "New critical findings",
-            "count": len(new_critical),
+            "count": new_critical_count,
             "href": href(
                 "/findings", status="active", severity="critical",
                 first_seen_within=window_days, sort_by="first_seen", sort_order="desc",
@@ -1550,7 +1530,7 @@ async def exposure_changes(
         {
             "key": "new_high",
             "label": "New high findings",
-            "count": len(new_high),
+            "count": new_high_count,
             "href": href(
                 "/findings", status="active", severity="high",
                 first_seen_within=window_days, sort_by="first_seen", sort_order="desc",
@@ -1560,14 +1540,14 @@ async def exposure_changes(
         {
             "key": "resolved",
             "label": "Findings resolved",
-            "count": len(resolved_findings),
+            "count": resolved_count,
             "href": href("/findings", status="resolved", resolved_within=window_days, sort_by="last_seen", sort_order="desc"),
             "examples": finding_examples(resolved_findings, "resolved_at"),
         },
         {
             "key": "failed_scans",
             "label": "Failed scans",
-            "count": len(failed_scans),
+            "count": failed_scans_count,
             "href": href("/scans", status="failed", within=window_days),
             "examples": [
                 {"label": r["label"], "detail": r["scan_type"], "when": fmt_when(r["created_at"])}
@@ -1577,7 +1557,7 @@ async def exposure_changes(
         {
             "key": "went_stale",
             "label": "Went stale",
-            "count": len(went_stale),
+            "count": went_stale_web_count + went_stale_ai_count,
             "href": href("/targets", activity="scanned"),
             "examples": [
                 {

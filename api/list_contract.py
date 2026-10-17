@@ -72,7 +72,9 @@ Rules the helpers rely on:
 * Filters are added before the keyset clause, so ``params.snapshot()`` taken between the two
   is exactly the count query's argument list.
 * A sort expression must be NOT NULL (wrap a nullable column in ``COALESCE``) and should have a
-  btree index over ``(sort expression, id)`` so the keyset clause is an index range scan.
+  btree index over ``(sort expression, id)`` so the keyset clause is an index range scan. A
+  ``SortKey`` may add further keys (``then=((expr, kind), ...)``, same direction, before the id):
+  the cursor carries every key and the index is ``(expr, then..., id)``.
 * A ``text`` sort key is ordered by its first ``max_chars`` (default 200) characters,
   ``left(expr, max_chars)``, everywhere: in ``order_by``, the keyset clause and the cursor. That
   bound keeps every cursor the server issues within the accepted cursor length whatever the
@@ -86,7 +88,7 @@ Rules the helpers rely on:
 from __future__ import annotations
 
 import base64
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 import hashlib
 import hmac
@@ -180,22 +182,34 @@ PageDep = Annotated[Page, Depends(page_params)]
 
 @dataclass(frozen=True)
 class SortKey:
-    """A declared sort: a NOT NULL SQL expression and the type its cursor value decodes to."""
+    """A declared sort: a NOT NULL SQL expression and the type its cursor value decodes to.
+
+    ``then`` adds further NOT NULL ``(expression, kind)`` keys, ordered in the same direction
+    before the id tiebreaker (severity, then last seen); the cursor carries every key.
+    """
 
     expr: str
     kind: SortKind
+    then: tuple[tuple[str, SortKind], ...] = ()
     max_chars: int = 200
 
     def __post_init__(self) -> None:
-        if self.kind == "text" and not 1 <= self.max_chars <= MAX_TEXT_SORT_CHARS:
+        kinds = [self.kind, *(kind for _expr, kind in self.then)]
+        if "text" in kinds and not 1 <= self.max_chars <= MAX_TEXT_SORT_CHARS:
             raise ValueError(f"a text sort key is bounded to 1..{MAX_TEXT_SORT_CHARS} characters")
+
+    def _bounded(self, expr: str, kind: SortKind) -> str:
+        return f"left(({expr}), {int(self.max_chars)})" if kind == "text" else expr
 
     @property
     def sql(self) -> str:
         """The ordering expression: text keys are bounded so their cursor always fits."""
-        if self.kind == "text":
-            return f"left(({self.expr}), {int(self.max_chars)})"
-        return self.expr
+        return self._bounded(self.expr, self.kind)
+
+    @property
+    def columns(self) -> tuple[tuple[str, SortKind], ...]:
+        """Every ordering expression (bounded like ``sql``) with its kind, before the id."""
+        return ((self.sql, self.kind), *((self._bounded(expr, kind), kind) for expr, kind in self.then))
 
 
 class SqlParams:
@@ -260,7 +274,7 @@ class ListSpec:
         fingerprint = _fingerprint(self.scope, sort, filters or {}, page.since)
         position = None
         if page.cursor is not None:
-            position = _decode_cursor(page.cursor, fingerprint, self.sorts[name].kind, self.id_kind)
+            position = _decode_cursor(page.cursor, fingerprint, self.sorts[name].columns, self.id_kind)
         return ListPlan(self, page, name, descending, chosen, fingerprint, position)
 
 
@@ -274,29 +288,49 @@ class ListPlan:
     descending: bool
     fields: tuple[str, ...]
     fingerprint: str
-    position: tuple[Any, Any] | None = field(default=None)
+    #: The previous page's last row: every sort key value, then the id.
+    position: tuple[Any, ...] | None = field(default=None)
 
     @property
     def sort_expr(self) -> str:
         return self.spec.sorts[self.sort_name].sql
 
     @property
+    def _sort_columns(self) -> tuple[tuple[str, SortKind], ...]:
+        return self.spec.sorts[self.sort_name].columns
+
+    @staticmethod
+    def _sort_alias(index: int) -> str:
+        return _SORT_COLUMN if index == 0 else f"{_SORT_COLUMN}_{index}"
+
+    @property
     def select_list(self) -> str:
-        """The requested fields plus the two keyset columns ``envelope`` reads and strips."""
+        """The requested fields plus the keyset columns ``envelope`` reads and strips."""
         columns = [f"{self.spec.fields[name]} AS {name}" for name in self.fields]
-        columns.append(f"{self.sort_expr} AS {_SORT_COLUMN}")
+        for index, (expr, _kind) in enumerate(self._sort_columns):
+            columns.append(f"{expr} AS {self._sort_alias(index)}")
         columns.append(f"{self.spec.id_expr} AS {_ID_COLUMN}")
         return ", ".join(columns)
 
     @property
     def order_by(self) -> str:
         direction = "DESC" if self.descending else "ASC"
-        return f"{self.sort_expr} {direction}, {self.spec.id_expr} {direction}"
+        keys = [expr for expr, _kind in self._sort_columns] + [self.spec.id_expr]
+        return ", ".join(f"{key} {direction}" for key in keys)
 
     @property
     def fetch_limit(self) -> int:
         """One more than the page: the extra row only proves ``has_more``."""
         return self.page.limit + 1
+
+    def after(self, row: Mapping[str, Any]) -> "ListPlan":
+        """This plan positioned after ``row`` (a row fetched with ``select_list``).
+
+        For an endpoint that drops some fetched rows in Python and fetches again to fill the
+        page; the cursor ``envelope`` issues still comes from the last row it returns.
+        """
+        values = [row[self._sort_alias(index)] for index in range(len(self._sort_columns))]
+        return replace(self, position=(*values, row[_ID_COLUMN]))
 
     def filter_clauses(self, params: SqlParams) -> list[str]:
         """Contract-level filters (``since``) that the count must also honour."""
@@ -308,10 +342,10 @@ class ListPlan:
         """The position after the previous page; empty on the first page."""
         if self.position is None:
             return []
-        sort_value, id_value = self.position
         operator = "<" if self.descending else ">"
-        return [f"({self.sort_expr}, {self.spec.id_expr}) {operator} "
-                f"({params.add(sort_value)}, {params.add(id_value)})"]
+        keys = [expr for expr, _kind in self._sort_columns] + [self.spec.id_expr]
+        values = [params.add(value) for value in self.position]
+        return [f"({', '.join(keys)}) {operator} ({', '.join(values)})"]
 
     def envelope(
         self, rows: Sequence[Mapping[str, Any]], *, total: int | None = None,
@@ -325,11 +359,12 @@ class ListPlan:
         if has_more and page_rows:
             last = page_rows[-1]
             key = self.spec.sorts[self.sort_name]
-            sort_value = last[_SORT_COLUMN]
-            if key.kind == "text" and sort_value is not None and len(str(sort_value)) > key.max_chars:
-                raise ValueError("a text sort value is longer than its bound; select plan.select_list")
+            sort_values = [last[self._sort_alias(index)] for index in range(len(self._sort_columns))]
+            for value, (_expr, kind) in zip(sort_values, self._sort_columns):
+                if kind == "text" and value is not None and len(str(value)) > key.max_chars:
+                    raise ValueError("a text sort value is longer than its bound; select plan.select_list")
             next_cursor = _encode_cursor(
-                self.fingerprint, sort_value, last[_ID_COLUMN], key.kind, self.spec.id_kind,
+                self.fingerprint, sort_values, last[_ID_COLUMN], self._sort_columns, self.spec.id_kind,
             )
         items = []
         for row in page_rows:
@@ -511,18 +546,18 @@ def _mac(payload: str) -> str:
     return _b64(hmac.new(_key(), payload.encode("ascii"), hashlib.sha256).digest()[:16])
 
 
-def _encode_cursor(fingerprint: str, sort_value: Any, id_value: Any, sort_kind: SortKind,
-                   id_kind: SortKind) -> str:
+def _encode_cursor(fingerprint: str, sort_values: Sequence[Any], id_value: Any,
+                   sort_columns: Sequence[tuple[str, SortKind]], id_kind: SortKind) -> str:
+    keys = [_encode_value(value, kind) for value, (_expr, kind) in zip(sort_values, sort_columns, strict=True)]
     payload = _b64(json.dumps(
-        {"v": 1, "q": fingerprint,
-         "k": [_encode_value(sort_value, sort_kind), _encode_value(id_value, id_kind)]},
+        {"v": 1, "q": fingerprint, "k": [*keys, _encode_value(id_value, id_kind)]},
         separators=(",", ":"), ensure_ascii=False,
     ).encode("utf-8"))
     return f"{payload}.{_mac(payload)}"
 
 
-def _decode_cursor(cursor: str, fingerprint: str, sort_kind: SortKind,
-                   id_kind: SortKind) -> tuple[Any, Any]:
+def _decode_cursor(cursor: str, fingerprint: str, sort_columns: Sequence[tuple[str, SortKind]],
+                   id_kind: SortKind) -> tuple[Any, ...]:
     invalid = _bad_request("invalid_cursor", "the cursor is malformed or was not issued by this server")
     if not cursor.isascii():
         raise invalid
@@ -543,8 +578,11 @@ def _decode_cursor(cursor: str, fingerprint: str, sort_kind: SortKind,
             "the cursor belongs to a different filter, sort or since; restart without a cursor",
         )
     try:
-        sort_raw, id_raw = body["k"]
-        return _decode_value(sort_raw, sort_kind), _decode_value(id_raw, id_kind)
+        raw = body["k"]
+        if not isinstance(raw, list) or len(raw) != len(sort_columns) + 1:
+            raise ValueError("key count")
+        values = [_decode_value(value, kind) for value, (_expr, kind) in zip(raw, sort_columns)]
+        return (*values, _decode_value(raw[-1], id_kind))
     except (KeyError, TypeError, ValueError) as exc:
         raise invalid from exc
 

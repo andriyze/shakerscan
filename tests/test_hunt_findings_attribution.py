@@ -58,5 +58,6 @@ def test_opt_in_candidate_union_cannot_escape_hunt_filter():
 
 def test_route_applies_the_predicates_to_both_queries():
     source = (Path(__file__).resolve().parents[1] / "api/finding_routes/router.py").read_text()
-    assert 'query += " AND " + finding_hunt_predicate(param_idx)' in source
+    filters = (Path(__file__).resolve().parents[1] / "api/finding_routes/list_query.py").read_text()
+    assert "where.append(finding_hunt_predicate(len(params.values)))" in filters
     assert 'candidate_query += " AND " + candidate_hunt_predicate(cand_idx)' in source

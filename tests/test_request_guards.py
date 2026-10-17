@@ -61,8 +61,13 @@ SETTINGS = rg.GuardSettings(
     ("GET", "/targets/inventory", "include_facets=off", "interactive", None),
     ("GET", "/targets/inventory", "include_facets=maybe", "interactive", None),
     # Interim heavy rows until their endpoints are bounded.
-    ("HEAD", "/findings", "", "heavy", "findings"),
-    ("GET", "/findings", "limit=50&offset=400000", "heavy", "findings"),
+    # Bounded since 2.11 (index-ordered page, separate count): an interactive read again.
+    ("HEAD", "/findings", "", "interactive", None),
+    ("GET", "/findings", "limit=50&offset=400000", "interactive", None),
+    ("GET", "/findings", "proof_state=suspected&limit=50", "heavy", "findings"),
+    ("GET", "/findings", "proof_state=%2C", "interactive", None),
+    ("GET", "/findings", "proof_state=suspected&cursor=abc", "interactive", None),
+    ("GET", "/findings", "proof_state=verified&count=exact", "interactive", None),
     ("GET", "/targets/abc/graph", "", "heavy", "target_graph"),
     ("GET", "/targets/abc/asm/gaps", "", "heavy", "asm"),
     ("GET", "/targets/abc/asm/endpoints", "limit=1000", "heavy", "asm"),
@@ -105,7 +110,8 @@ def test_the_classification_is_one_table_a_row_can_leave():
     original = rg.ROUTE_CLASSES
     try:
         rg.ROUTE_CLASSES = remaining
-        assert rg.classify_request("GET", "/findings") == rg.RequestClass("interactive", None)
+        assert rg.classify_request("GET", "/findings", b"proof_state=suspected") == rg.RequestClass(
+            "interactive", None)
     finally:
         rg.ROUTE_CLASSES = original
 

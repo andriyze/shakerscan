@@ -7,6 +7,7 @@ stub-import pattern of tests/test_api_scan_option_masking.py.
 """
 
 import os
+import inspect
 import sys
 import types
 from datetime import datetime, timedelta, timezone
@@ -216,6 +217,9 @@ def test_auto_verify_limit_is_raised_to_eight():
 
 def test_findings_endpoint_keeps_candidates_opt_in_and_only_on_the_deep_hunt_surface():
     endpoint = route_source("GET", "/findings")
+    # The candidate side of the list lives in its own helper.
+    findings_router = sys.modules["finding_routes.router"]
+    endpoint += "\n" + inspect.getsource(findings_router._open_candidates)
 
     assert "include_candidates: bool = False" in endpoint
     assert '"include_candidates"' in endpoint
@@ -234,7 +238,7 @@ def test_findings_endpoint_keeps_candidates_opt_in_and_only_on_the_deep_hunt_sur
     assert "'candidates_total': candidates_total" in endpoint
     assert "'included_candidates': included_candidates" in endpoint
     # List rows retain proof derivation but shed detail-only evidence blobs.
-    assert "row_dict.update(finding_proof_fields(row_dict))" in endpoint
+    assert "project=finding_proof_fields" in endpoint
     assert "for key in _FINDING_DETAIL_ONLY_FIELDS" in endpoint
     assert "'details_included': include_details" in endpoint
     assert "'omitted_detail_fields':" in endpoint

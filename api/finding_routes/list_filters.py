@@ -3,13 +3,13 @@
 Severity takes several values (``severity=critical,high``). Proof is the canonical projection
 (``finding_proof_fields``) over stored evidence and the latest retest. The proof filter applies its
 exact SQL form (``proof_sql.py``, held to the Python projection by a real-PostgreSQL parity test),
-so the database paginates and counts it; a row the SQL cannot decide sends the request through
-``stream_proof_matches``, which projects in Python from a cursor without loading the result set.
+so the database paginates and counts it; the rare row the SQL cannot decide is projected in Python
+first and joins the clause by id (``list_query.resolved_proof_filter``).
 """
 
 from __future__ import annotations
 
-from typing import Any, Callable, Iterable
+from typing import Iterable
 
 SEVERITIES = ("critical", "high", "medium", "low", "info")
 PROOF_STATES = ("verified", "suspected", "unverified")
@@ -32,35 +32,6 @@ def parse_choice_list(value: str | None, allowed: Iterable[str], name: str) -> l
         if item not in chosen:
             chosen.append(item)
     return chosen or None
-
-
-async def stream_proof_matches(
-    conn: Any,
-    query: str,
-    params: list,
-    proof_states: Iterable[str],
-    project: Callable[[dict[str, Any]], dict[str, Any]],
-    *,
-    keep: int,
-) -> tuple[list[dict[str, Any]], int]:
-    """Exact proof filter by projection, streamed: the first ``keep`` matches and the match count.
-
-    Rows come from a server-side cursor in query order, so memory holds the requested prefix and
-    one fetch batch, whatever the number of rows the other filters leave.
-    """
-    wanted = set(proof_states)
-    kept: list[dict[str, Any]] = []
-    total = 0
-    async with conn.transaction():
-        async for row in conn.cursor(query, *params, prefetch=500):
-            item = dict(row)
-            item.pop("total_count", None)
-            item.update(project(item))
-            if item.get("proof_state") in wanted:
-                if total < keep:
-                    kept.append(item)
-                total += 1
-    return kept, total
 
 
 # The host part of a URL or locator ("https://user@app.example.com:8443/x", "app.example.com:22").
