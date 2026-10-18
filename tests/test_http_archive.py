@@ -29,7 +29,6 @@ from api.runtime.http_archive import (
     transaction_rows,
 )
 from api.runtime.http_archive_reader import (
-    _search_pattern,
     archive_fidelity,
     count_transactions,
     export_document,
@@ -38,6 +37,7 @@ from api.runtime.http_archive_reader import (
     read_transactions,
     read_archive_stats,
 )
+from api.runtime.http_archive_search import search_pattern as _search_pattern, searchable_url
 from api.capabilities.http import _read_bounded_response
 from scanner.scanner_tools import http_archive_capture
 
@@ -734,7 +734,9 @@ async def test_archive_browser_filters_count_and_rows_with_the_same_search():
     count_query, count_params = conn.calls[0][1:]
     row_query, row_params = conn.calls[1][1:]
     for query in (count_query, row_query):
-        assert "url ILIKE" not in query
+        # The masked origin and path, never the raw stored URL (http_archive_search).
+        assert "search_url,'') ILIKE" in query
+        assert " url ILIKE" not in query and "t.url ILIKE" not in query
         assert "capability_name" in query
         assert "adapter" in query
     assert count_params == ("scan-1", "POST", 401, "%/login%")
@@ -776,6 +778,29 @@ async def test_scan_archive_resolver_includes_nested_worker_children():
 
 def test_archive_search_escapes_like_operators_and_never_queries_raw_urls():
     assert _search_pattern(r"50%_done\x") == "%50\\%\\_done\\\\x%"
+
+
+def test_archive_search_matches_the_masked_origin_and_path_only():
+    """An operator finds ``/hub/login`` in a scan's archive; a reader of the masked archive cannot
+    confirm a value it withholds (userinfo password, query value, a token in the path)."""
+    assert searchable_url("https://honey.example/hub/login?next=/a&token=abc#frag") == (
+        "https://honey.example/hub/login"
+    )
+    assert searchable_url("https://user:hunter2@app.example:8443/a/b") == "https://app.example:8443/a/b"
+    jwt = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.c2lnbmF0dXJlLXZhbHVl"
+    assert searchable_url(f"https://app.example/verify/{jwt}/done") == "https://app.example/verify/***/done"
+    key = "ghp_" + "a1b2c3d4e5" * 3
+    assert key not in (searchable_url(f"https://app.example/keys/{key}") or "")
+    assert searchable_url("") is None and searchable_url("http://[::1/x") is None
+
+
+def test_archived_rows_carry_their_searchable_url():
+    [row] = transaction_rows([HttpTransaction(
+        plane="scan", method="get", url="https://user:pw@honey.example/hub/login?session=s3cret",
+        scan_id="scan-1",
+    )], store_blob=lambda content: "blob")
+    assert row["url"] == "https://user:pw@honey.example/hub/login?session=s3cret"
+    assert row["search_url"] == "https://honey.example/hub/login"
 
 
 def test_filtered_export_reports_matches_and_whole_archive_count_separately():
@@ -845,6 +870,11 @@ async def test_archive_batch_reuses_identical_evidence_blobs(monkeypatch):
             self.blob_inserts = 0
             self.blob_insert_statements = 0
 
+        async def fetchval(self, query, *params):
+            # The archive writer's check that http_transactions has search_url.
+            assert "attname='search_url'" in query
+            return True
+
         async def fetch(self, query, *params):
             assert "FROM evidence_objects" in query
             return []
@@ -888,6 +918,11 @@ async def test_archive_drops_raw_payloads_when_the_encryption_key_is_unavailable
     rows = []
 
     class Conn:
+        async def fetchval(self, query, *params):
+            # The archive writer's check that http_transactions has search_url.
+            assert "attname='search_url'" in query
+            return True
+
         async def fetch(self, query, *params):
             return []
 
@@ -912,6 +947,11 @@ async def test_archive_batch_reuses_existing_content_addressed_blob():
     existing_id = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
 
     class Conn:
+        async def fetchval(self, query, *params):
+            # The archive writer's check that http_transactions has search_url.
+            assert "attname='search_url'" in query
+            return True
+
         async def fetch(self, query, *params):
             return [{
                 "id": existing_id,

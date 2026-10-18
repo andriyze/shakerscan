@@ -27,6 +27,7 @@ import uuid
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
 
+from .http_archive_search import SEARCH_URL_PRESENT_SQL, searchable_url
 
 ARCHIVE_SCHEMA = "http-transaction/v1"
 # These blobs hold request and response bodies as sent, so they are credential-bearing by
@@ -238,6 +239,8 @@ def transaction_rows(
             "principal_slot": item.principal_slot,
             "method": str(item.method).upper()[:16],
             "url": str(item.url)[:8_000],
+            # What an archive search matches; never the raw URL (http_archive_search).
+            "search_url": searchable_url(str(item.url)[:8_000]),
             "http_version": item.http_version,
             "status_code": item.status_code,
             "request_headers_object_id": store_blob(
@@ -312,7 +315,7 @@ INSERT INTO http_transactions (
     request_headers_object_id, request_body_object_id, request_body_sha256, request_body_bytes,
     response_headers_object_id, response_body_object_id, response_body_sha256, response_body_bytes,
     remote_ip, direct_origin, redirect_of, started_at, elapsed_ms, error, truncated,
-    retention_class, metadata_json
+    retention_class, metadata_json, search_url
 ) SELECT
     r.plane, r.sequence, r.scan_id, r.hunt_run_id, r.hunt_action_id, r.scan_action_id,
     r.target_id, r.device_target_id, r.capability_name, r.adapter, r.principal_slot,
@@ -320,7 +323,7 @@ INSERT INTO http_transactions (
     r.request_headers_object_id, r.request_body_object_id, r.request_body_sha256, r.request_body_bytes,
     r.response_headers_object_id, r.response_body_object_id, r.response_body_sha256, r.response_body_bytes,
     r.remote_ip, r.direct_origin, r.redirect_of, r.started_at, r.elapsed_ms, r.error, r.truncated,
-    r.retention_class, r.metadata_json
+    r.retention_class, r.metadata_json, r.search_url
 FROM jsonb_to_recordset($1::jsonb) AS r(
     plane text, sequence int, scan_id uuid, hunt_run_id uuid, hunt_action_id uuid,
     scan_action_id text, target_id uuid, device_target_id uuid, capability_name text,
@@ -329,9 +332,16 @@ FROM jsonb_to_recordset($1::jsonb) AS r(
     request_body_sha256 text, request_body_bytes int, response_headers_object_id uuid,
     response_body_object_id uuid, response_body_sha256 text, response_body_bytes int,
     remote_ip text, direct_origin boolean, redirect_of uuid, started_at timestamptz,
-    elapsed_ms int, error text, truncated boolean, retention_class text, metadata_json jsonb
+    elapsed_ms int, error text, truncated boolean, retention_class text, metadata_json jsonb,
+    search_url text
 )
 """
+# The same insert for a database the API's startup step has not yet given search_url.
+INSERT_WITHOUT_SEARCH_URL_SQL = (
+    INSERT_SQL.replace("metadata_json, search_url\n", "metadata_json\n")
+    .replace("r.metadata_json, r.search_url\n", "r.metadata_json\n")
+    .replace("metadata_json jsonb,\n    search_url text\n", "metadata_json jsonb\n")
+)
 
 
 async def persist_transactions(conn, rows: Sequence[Mapping[str, Any]]) -> int:
@@ -357,8 +367,24 @@ async def persist_transactions(conn, rows: Sequence[Mapping[str, Any]]) -> int:
         started = row.get("started_at")
         if hasattr(started, "isoformat"):
             row["started_at"] = started.isoformat()
-    await conn.execute(INSERT_SQL, json.dumps(payload, default=str))
+    await conn.execute(
+        INSERT_SQL if await _search_url_column(conn) else INSERT_WITHOUT_SEARCH_URL_SQL,
+        json.dumps(payload, default=str),
+    )
     return len(payload)
+
+
+# Workers wait only for PostgreSQL and Redis, so on an upgrade one can archive before the API's
+# startup step has added search_url; naming the missing column would lose the whole batch. The
+# column is named once this process has seen it, and it is never removed again.
+_search_url_column_present = False
+
+
+async def _search_url_column(conn) -> bool:
+    global _search_url_column_present
+    if not _search_url_column_present:
+        _search_url_column_present = bool(await conn.fetchval(SEARCH_URL_PRESENT_SQL))
+    return _search_url_column_present
 
 
 def har_entry(row: Mapping[str, Any], *, request_body: str | None, response_body: str | None) -> dict[str, Any]:
@@ -659,6 +685,8 @@ async def archive_http_transactions(
             "capability_name": item.capability_name, "adapter": item.adapter,
             "principal_slot": item.principal_slot,
             "method": str(item.method).upper()[:16], "url": str(item.url)[:8_000],
+            # What an archive search matches; never the raw URL (http_archive_search).
+            "search_url": searchable_url(str(item.url)[:8_000]),
             "http_version": item.http_version, "status_code": item.status_code,
             "request_headers_object_id": entry["request_headers"],
             "request_body_object_id": entry["request_body"],
