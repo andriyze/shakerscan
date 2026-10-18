@@ -47,6 +47,7 @@ from .archive_export_worker import (
     worker_context,
 )
 from .http_archive import ARCHIVE_SCHEMA, har_document, har_entry
+from .http_archive_search import search_clause
 
 try:
     from evidence_storage import delete_remote_evidence_object, hydrate_evidence_content, local_evidence_path
@@ -185,14 +186,6 @@ def _append_scan_clause(
     return owners
 
 
-def _search_pattern(value: str) -> str:
-    """Literal ILIKE pattern; `%`, `_`, and backslash are ordinary search text."""
-    escaped = (
-        str(value).strip().replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-    )
-    return f"%{escaped}%"
-
-
 def _json_safe(value: Any) -> Any:
     """Timestamps and UUIDs arrive as driver objects; an export is JSON."""
     if value is None or isinstance(value, (str, int, float, bool)):
@@ -237,12 +230,7 @@ async def read_transactions(
         params.append(int(status_code))
         clauses.append(f"t.status_code=${len(params)}")
     if search:
-        params.append(_search_pattern(search))
-        clauses.append(
-            f"(COALESCE(t.capability_name,'') ILIKE ${len(params)} ESCAPE '\\'"
-            f" OR COALESCE(t.adapter,'') ILIKE ${len(params)} ESCAPE '\\'"
-            f" OR t.method ILIKE ${len(params)} ESCAPE '\\')"
-        )
+        clauses.append(search_clause(params, search, alias="t."))
     where = " WHERE " + " AND ".join(clauses)
     params.extend([min(int(limit), MAX_EXPORT_ROWS), max(0, int(offset))])
     rows = await conn.fetch(
@@ -448,12 +436,7 @@ async def count_transactions(
         params.append(int(status_code))
         clauses.append(f"status_code=${len(params)}")
     if search:
-        params.append(_search_pattern(search))
-        clauses.append(
-            f"(COALESCE(capability_name,'') ILIKE ${len(params)} ESCAPE '\\'"
-            f" OR COALESCE(adapter,'') ILIKE ${len(params)} ESCAPE '\\'"
-            f" OR method ILIKE ${len(params)} ESCAPE '\\')"
-        )
+        clauses.append(search_clause(params, search))
     return int(await conn.fetchval(
         "SELECT COUNT(*) FROM http_transactions WHERE " + " AND ".join(clauses),
         *params,

@@ -228,7 +228,7 @@
     "ValidationRequest": "cb81c65a5c80da74a19c6bd92e9c6a68f5cdb22fafeb94270481d463450f893e",
     "WorkerScaleRequest": "52e7ac017dfa1d92efa8e4071026b9bf24c0cf2a17f5d9e742349df3f08f6c62"
   },
-  "contract_sha256": "89e3380b4b009e4ab3401bdaf2c3b0e1b217db02f75cff2db0e09553f819d012",
+  "contract_sha256": "76bde709a38c61b24169a582112004928534fef85be2d00c779725115d99916e",
   "openapi": "3.1.0",
   "operation_count": 496,
   "operations": {
@@ -1996,7 +1996,7 @@
     "GET /hunts/{hunt_id}/http-transactions": {
       "deprecated": false,
       "operation_id": "export_hunt_transactions_hunts__hunt_id__http_transactions_get",
-      "parameters_sha256": "38e2c79a0bb4f25daa2d39ce30f124db8296705f9392e511e3efeb7211672f7f",
+      "parameters_sha256": "90921c1e39079566be86415f1b594d8860459e05a3e9232512e32e76017cc694",
       "request_schema_sha256": null,
       "response_schema_sha256": {
         "200": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
@@ -2895,7 +2895,7 @@
     "GET /scans/{scan_id}/http-transactions": {
       "deprecated": false,
       "operation_id": "export_scan_transactions_scans__scan_id__http_transactions_get",
-      "parameters_sha256": "1c0177ce39a3960aba55b67dafe33cb5d665a95cfa9c2c6b0d12042f31586bcf",
+      "parameters_sha256": "96c24b599710246e9b6fe946b1c56a50d85a88e80ddb91379a3e1cb022097107",
       "request_schema_sha256": null,
       "response_schema_sha256": {
         "200": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",

@@ -327,6 +327,13 @@ async def _build_export_bytes(
     return encoded.render(), total
 
 
+SEARCH_DESCRIPTION = (
+    "Case-insensitive literal substring of a call's capability, adapter, method, or masked origin "
+    "and path (no userinfo, query, or fragment). Calls archived before 2.11.0 match on capability, "
+    "adapter, and method only."
+)
+
+
 @router.get("/scans/{scan_id}/http-transactions", tags=["Scan"])
 async def export_scan_transactions(
     request: Request,
@@ -335,7 +342,7 @@ async def export_scan_transactions(
     redaction: str = Query("redacted"),
     method: str | None = Query(None),
     status_code: int | None = Query(None),
-    search: str | None = Query(None, max_length=200),
+    search: str | None = Query(None, max_length=200, description=SEARCH_DESCRIPTION),
     limit: int = Query(1_000, ge=1, le=MAX_EXPORT_ROWS),
     offset: int = Query(0, ge=0),
 ):
@@ -359,7 +366,7 @@ async def export_hunt_transactions(
     redaction: str = Query("redacted"),
     method: str | None = Query(None),
     status_code: int | None = Query(None),
-    search: str | None = Query(None, max_length=200),
+    search: str | None = Query(None, max_length=200, description=SEARCH_DESCRIPTION),
     limit: int = Query(1_000, ge=1, le=MAX_EXPORT_ROWS),
     offset: int = Query(0, ge=0),
 ):

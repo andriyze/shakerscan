@@ -2518,6 +2518,8 @@ CREATE TABLE IF NOT EXISTS http_transactions (
     retention_class TEXT NOT NULL DEFAULT 'sensitive',
     metadata_json JSONB NOT NULL DEFAULT '{}'::jsonb,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    -- The masked origin and path an archive search matches (never the raw URL).
+    search_url TEXT,
     CONSTRAINT http_transactions_owner_check CHECK (
         num_nonnulls(scan_id, hunt_run_id) = 1
     )

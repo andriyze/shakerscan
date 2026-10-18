@@ -70,6 +70,11 @@ class ArchiveDB:
         self.transactions: list[dict] = []
         self.stats: dict[str, int] = {}
 
+    async def fetchval(self, query, *params):
+        # The archive writer's check that http_transactions has search_url.
+        assert "attname='search_url'" in query
+        return True
+
     async def fetch(self, query, *params):
         if "SELECT DISTINCT ON (scan_id, content_sha256)" in query:
             digests, owners = params
