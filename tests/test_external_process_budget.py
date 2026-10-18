@@ -117,6 +117,25 @@ def test_ffuf_exact_wordlist_has_no_hidden_calibration_or_redirect_requests():
     assert plan.budget_proof["method"] == "exact_wordlist"
 
 
+def test_ffuf_reports_every_status_the_path_lead_readers_count_as_a_hit():
+    """A 303 to a sign-in page (an unlinked application's root) and a 308 were filtered by ffuf
+    before any reader saw them, while the readers already count every redirect as a hit."""
+    from scan.redirect_evidence import REDIRECT_STATUSES
+    from scanner_tools.corporate_identity import _PATH_HIT_STATUSES
+
+    plan = _plan(
+        "ffuf",
+        {"http_requests": 7, "tool_wall_seconds": 9},
+        runtime_paths={"ffuf_wordlist": "/tmp/worker-owned-list", "ffuf_word_count": 7},
+    )
+    matched = {int(code) for code in plan.argv[plan.argv.index("-mc") + 1].split(",")}
+
+    assert REDIRECT_STATUSES <= matched
+    assert matched == set(_PATH_HIT_STATUSES)
+    # Still no redirect following: a hit is the response itself, inside the exact reservation.
+    assert "-r" not in plan.argv
+
+
 def test_ffuf_scales_throughput_to_finish_immutable_wordlist_within_hold():
     plan = _plan(
         "ffuf",

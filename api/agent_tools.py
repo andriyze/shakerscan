@@ -694,6 +694,13 @@ def _tmpl_sqlmap(url: str, opts: dict[str, Any]) -> list[str]:
     return args
 
 
+# Statuses content discovery reports. Every redirect status counts, as the path-lead readers
+# count them (corporate_identity, recon_active): a 303 to a sign-in page is how many applications
+# answer an unauthenticated request for their root. A host that redirects every path the same way
+# is caught by the negative-control probes (scan/negative_control.py), not by this list.
+FFUF_MATCH_CODES = "200,204,301,302,303,307,308,401,403,405"
+
+
 def _tmpl_ffuf(url: str, opts: dict[str, Any]) -> list[str]:
     # Bounded content/dir discovery. Read-only (GET). One tunable: wordlist in {common,api,admin}
     # -> a small BUNDLED list (unknown/invalid -> common; no arbitrary path). Automatic
@@ -704,7 +711,7 @@ def _tmpl_ffuf(url: str, opts: dict[str, Any]) -> list[str]:
     wordlist = scanner_ffuf_wordlist_source(opts)
     base = url.split("?", 1)[0].rstrip("/")
     return ["-u", f"{base}/FUZZ", "-w", wordlist,
-            "-mc", "200,204,301,302,307,401,403,405",
+            "-mc", FFUF_MATCH_CODES,
             "-t", "5", "-rate", "5", "-timeout", "8", "-maxtime", "40", "-s", "-json"]
 
 
