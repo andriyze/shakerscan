@@ -51,6 +51,7 @@ BUILD_RECEIPT_OPERATION=""
 BUILD_RECEIPT_PHASE="not_started"
 BUILD_RECEIPT_STARTED_AT=""
 BUILD_RECEIPT_SCOPE="all"
+BUILD_NETWORK_AUTO_HOST=0
 RUNTIME_MODE_EXPLICIT=0
 
 command_exists() {
@@ -1740,6 +1741,7 @@ set_build_env() {
     if [ -z "${SHAKERSCAN_BUILD_NETWORK:-}" ]; then
         if [ "${PLATFORM:-}" = "macos" ]; then
             export SHAKERSCAN_BUILD_NETWORK="host"
+            BUILD_NETWORK_AUTO_HOST=1
         else
             export SHAKERSCAN_BUILD_NETWORK="default"
         fi
@@ -3286,6 +3288,29 @@ check_build_storage() {
     echo -e "${BLUE}Docker storage preflight: $((free_kb / 1024 / 1024)) GiB free; ${minimum_gb} GiB required.${NC}"
 }
 
+# Compose 5.6 builds through bake, which refuses a host-network build ("pass
+# --allow=network.host") and offers no flag to grant it. Keep the macOS host
+# default only where this Compose can build with it; an operator's explicit
+# SHAKERSCAN_BUILD_NETWORK is never changed.
+ensure_build_network_supported() {
+    local probe_dir
+    if [ "$BUILD_NETWORK_AUTO_HOST" -ne 1 ] || [ "${SHAKERSCAN_BUILD_NETWORK:-}" != "host" ]; then
+        return 0
+    fi
+    BUILD_NETWORK_AUTO_HOST=0
+    resolve_compose_command || return 0
+    probe_dir="$(mktemp -d)" || return 0
+    printf 'FROM scratch\n' > "$probe_dir/Dockerfile"
+    printf 'services:\n  probe:\n    image: shakerscan-build-network-probe:local\n    build:\n      context: .\n      network: host\n' \
+        > "$probe_dir/compose.yml"
+    if ! "${DOCKER_COMPOSE_CMD[@]}" -p shakerscan-build-network-probe -f "$probe_dir/compose.yml" build -q > /dev/null 2>&1; then
+        export SHAKERSCAN_BUILD_NETWORK="default"
+        echo -e "${YELLOW}This Docker Compose cannot build with host networking; building on the default network. Set SHAKERSCAN_BUILD_NETWORK to choose explicitly.${NC}"
+    fi
+    docker_cli image rm shakerscan-build-network-probe:local > /dev/null 2>&1 || true
+    rm -rf "$probe_dir"
+}
+
 run_build_step() {
     local phase="$1"
     shift
@@ -3366,6 +3391,9 @@ build_local_scanner_family() {
 build_local_images() {
     local no_cache="${1:-}"
 
+    # Every local build path (build, rebuild, and start from a checkout without a full build
+    # receipt) reaches this; after the first check the probe is a no-op.
+    ensure_build_network_supported
     build_local_scanner_family "$no_cache"
     run_build_step ui_and_signer compose build $no_cache ui model-intake-signer
 }
@@ -3373,6 +3401,7 @@ build_local_images() {
 build_images() {
     prepare_runtime_files
     set_build_env
+    ensure_build_network_supported
     begin_build_receipt build all
     check_build_storage "" all
     echo -e "${GREEN}Building Docker images...${NC}"
@@ -3386,6 +3415,7 @@ build_images() {
 rebuild_images() {
     prepare_runtime_files
     set_build_env
+    ensure_build_network_supported
     local NO_CACHE=""
     local SERVICES=""
     local SERVICE_DESC="all services"

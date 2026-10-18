@@ -109,6 +109,7 @@ SCRIPT_DIR={shlex.quote(str(ROOT))}
 SHAKERSCAN_NETWORK_WORKER_ENABLED={configured}
 prepare_runtime_files() {{ :; }}
 set_build_env() {{ :; }}
+ensure_build_network_supported() {{ :; }}
 begin_build_receipt() {{ :; }}
 check_build_storage() {{ :; }}
 running_scan_worker_count() {{ printf '{running}'; }}
