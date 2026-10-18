@@ -17,10 +17,16 @@ Recording needs Playwright, an optional part of the client:
 
 ```bash
 pipx install --force 'shakerscan[record]'    # or: pipx inject shakerscan playwright
-python -m playwright install chromium         # with the client's Python, once
+# Once, with the client's own Python (pipx keeps it in its own environment):
+"$(pipx environment --value PIPX_LOCAL_VENVS)/shakerscan/bin/python" -m playwright install chromium
 ```
 
 Without it, `shakerscan record` prints these commands and exits.
+
+On the machine that runs an open-source install, `./scanner.sh record <target>` works too. The
+launcher finds a client installed by pipx or pip, or the Python behind a `shakerscan` client
+command on `PATH`. It hands the recording to that client, pointed at this install, and says
+which command downloads the browser if that is still needed.
 
 ## Record
 

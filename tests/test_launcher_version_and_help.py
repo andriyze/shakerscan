@@ -112,6 +112,74 @@ def test_record_without_the_client_names_the_install_commands(install):
     result = _record(install, stub, "https://app.example.test")
     assert result.returncode == 2
     assert "pipx install --force 'shakerscan[record]'" in result.stderr
-    assert "python -m playwright install chromium" in result.stderr
+    assert "run this command again" in result.stderr
     assert "python3 -m shakerscan" not in result.stdout
     assert "Unknown command" not in result.stdout + result.stderr
+
+
+# A client interpreter stub: `-c` probes answer per module (the Chromium check is the one that
+# starts sync_playwright); `-m` echoes what it was asked to run.
+def _client_stub(name, *, chromium_rc=0):
+    return (
+        "#!/bin/sh\n"
+        'if [ "$1" = "-c" ]; then\n'
+        '  case "$2" in\n'
+        f"    *sync_playwright*) exit {chromium_rc} ;;\n"
+        "    *) exit 0 ;;\n"
+        "  esac\n"
+        "fi\n"
+        f'echo "{name} $*"\n'
+    )
+
+
+def _no_system_client():
+    return '#!/bin/sh\nif [ "$1" = "-c" ]; then exit 1; fi\necho "python3 $*"\n'
+
+
+def test_record_finds_a_client_installed_by_pipx(install):
+    """The documented install (pipx) keeps the client out of the system python3."""
+    venv_python = install / ".local" / "pipx" / "venvs" / "shakerscan" / "bin" / "python"
+    venv_python.parent.mkdir(parents=True)
+    venv_python.write_text(_client_stub("pipx-python"), encoding="utf-8")
+    venv_python.chmod(0o755)
+    result = _record(install, _no_system_client(), "https://app.example.test")
+    assert result.returncode == 0, result.stdout + result.stderr
+    line = result.stdout.strip().splitlines()[-1]
+    assert line.startswith("pipx-python -m shakerscan record --url http")
+    assert line.endswith("https://app.example.test")
+
+
+def test_record_finds_the_client_behind_a_shakerscan_command_on_path(install):
+    client_python = install / "venv" / "bin" / "python"
+    client_python.parent.mkdir(parents=True)
+    client_python.write_text(_client_stub("venv-python"), encoding="utf-8")
+    client_python.chmod(0o755)
+    bin_dir = install / "bin"
+    bin_dir.mkdir()
+    (bin_dir / "shakerscan").write_text(f"#!{client_python}\nimport sys\n", encoding="utf-8")
+    (bin_dir / "shakerscan").chmod(0o755)
+    result = _record(install, _no_system_client(), "t-1")
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert result.stdout.strip().splitlines()[-1].startswith("venv-python -m shakerscan record --url http")
+
+
+def test_record_ignores_a_shakerscan_command_that_is_not_a_python_client(install):
+    # The unrelated npm `shakerscan` CLI is a node script.
+    bin_dir = install / "bin"
+    bin_dir.mkdir()
+    (bin_dir / "shakerscan").write_text("#!/usr/bin/env node\nconsole.log(1)\n", encoding="utf-8")
+    (bin_dir / "shakerscan").chmod(0o755)
+    result = _record(install, _no_system_client(), "t-1")
+    assert result.returncode == 2
+    assert "pipx install --force 'shakerscan[record]'" in result.stderr
+
+
+def test_record_names_the_browser_download_with_the_clients_own_python(install):
+    venv_python = install / ".local" / "pipx" / "venvs" / "shakerscan" / "bin" / "python"
+    venv_python.parent.mkdir(parents=True)
+    venv_python.write_text(_client_stub("pipx-python", chromium_rc=3), encoding="utf-8")
+    venv_python.chmod(0o755)
+    result = _record(install, _no_system_client(), "https://app.example.test")
+    assert result.returncode == 2
+    assert f'"{venv_python}" -m playwright install chromium' in result.stderr
+    assert "-m shakerscan record" not in result.stdout
