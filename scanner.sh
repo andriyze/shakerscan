@@ -3115,20 +3115,67 @@ run_v2_scan_cli() {
     python3 "$SCRIPT_DIR/scripts/scan_cli.py" "${cli_args[@]}" "$@"
 }
 
+# The Pythons a ShakerScan client may be installed in, most specific first: the system python3,
+# pipx's environment (the documented install, which keeps the client out of the system Python),
+# and the interpreter behind a `shakerscan` client command on PATH.
+client_record_pythons() {
+    local venvs client_cmd shebang
+    command_exists python3 && echo python3
+    if command_exists pipx; then
+        venvs="$(pipx environment --value PIPX_LOCAL_VENVS 2>/dev/null || true)"
+        [ -n "$venvs" ] && echo "$venvs/shakerscan/bin/python"
+    fi
+    [ -n "${PIPX_HOME:-}" ] && echo "$PIPX_HOME/venvs/shakerscan/bin/python"
+    echo "$HOME/.local/pipx/venvs/shakerscan/bin/python"
+    echo "$HOME/.local/share/pipx/venvs/shakerscan/bin/python"
+    echo "$HOME/Library/Application Support/pipx/venvs/shakerscan/bin/python"
+    client_cmd="$(command -v shakerscan 2>/dev/null || true)"
+    if [ -n "$client_cmd" ] && [ -f "$client_cmd" ]; then
+        shebang="$(head -n 1 "$client_cmd" 2>/dev/null || true)"
+        # An absolute interpreter (pip and pipx write these) or `env python3`; any other script,
+        # such as the unrelated npm `shakerscan` CLI (`env node`), is not a client.
+        case "$shebang" in
+            '#!/usr/bin/env '*python*) echo "${shebang#\#!/usr/bin/env }" ;;
+            '#!'*python*) echo "${shebang#\#!}" ;;
+        esac
+    fi
+}
+
 run_client_record() {
     # `record` opens a browser on this machine and uploads what it records; that is the
     # shakerscan client's job (with its optional Playwright extra), not the engine's. Hand the
     # command to an installed client, pointed at this instance; otherwise say how to get one.
-    if python3 -c 'import shakerscan.record, playwright' > /dev/null 2>&1; then
-        exec python3 -m shakerscan record --url "$(api_probe_url)" "$@"
+    local py client_py=""
+    while IFS= read -r py; do
+        [ -n "$py" ] || continue
+        case "$py" in */*) [ -x "$py" ] || continue ;; esac
+        if "$py" -c 'import shakerscan.record' > /dev/null 2>&1; then
+            client_py="$py"
+            break
+        fi
+    done < <(client_record_pythons)
+    if [ -n "$client_py" ]; then
+        # The client names its own missing Playwright extra. A missing browser download is said
+        # here with this client's interpreter: its `playwright` command is usually not on PATH.
+        if "$client_py" -c 'import playwright' > /dev/null 2>&1 \
+            && ! "$client_py" -c 'import os, sys
+from playwright.sync_api import sync_playwright
+with sync_playwright() as p:
+    sys.exit(0 if os.path.exists(p.chromium.executable_path) else 3)' > /dev/null 2>&1; then
+            {
+                echo "The ShakerScan client is installed, but its recording browser is not downloaded yet. Download it once:"
+                echo "  \"$client_py\" -m playwright install chromium"
+            } >&2
+            return 2
+        fi
+        exec "$client_py" -m shakerscan record --url "$(api_probe_url)" "$@"
     fi
     {
         echo "shakerscan record runs in the ShakerScan client, which opens the recorded browser on this machine."
-        echo "Install the client with its recording extra, then download its browser once:"
+        echo "Install the client with its recording extra, then run this command again:"
         echo "  pipx install --force 'shakerscan[record]'"
-        echo "  python -m playwright install chromium     # with the client's Python, once"
-        echo "The client then owns the shakerscan command and hands engine commands to this install:"
-        echo "  shakerscan record <target-id-or-url>"
+        echo "It finds a client installed by pipx, by pip, or as the shakerscan command on PATH, and"
+        echo "says how to download the recording browser if that is still needed."
     } >&2
     return 2
 }
