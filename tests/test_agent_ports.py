@@ -1256,6 +1256,24 @@ def test_dalfox_sqlmap_output_is_typed_and_payloads_not_exposed():
     assert t["collection"] == "/rest/basket"
 
 
+def test_sqlmap_dbms_fingerprint_is_only_the_summary_line():
+    # Unit fixture in the shape of a recorded sqlmap --batch run: the DBMS prompt, a fingerprint
+    # warning and an info line all mention "back-end DBMS"; only the summary line names it.
+    output = "\n".join((
+        "[03:35:11] [INFO] heuristic (basic) test shows that GET parameter 'id' might be injectable (possible DBMS: 'SQLite')",
+        "it looks like the back-end DBMS is 'SQLite'. Do you want to skip test payloads specific for other DBMSes? [Y/n] Y",
+        "GET parameter 'id' is vulnerable. Do you want to keep testing the others (if any)? [y/N] N",
+        "[03:35:12] [WARNING] the back-end DBMS is not MySQL",
+        "[03:35:12] [INFO] the back-end DBMS is SQLite",
+        "back-end DBMS: SQLite",
+        "back-end DBMS operating system: Linux Ubuntu",
+    ))
+    records = at.parse_scanner_output("sqlmap", output)["records"]
+    fingerprints = [r["message"] for r in records if r["kind"] == "sqli_dbms_fingerprint"]
+    assert fingerprints == ["back-end DBMS: SQLite"]
+    assert [r["param"] for r in records if r["kind"] == "sqli_finding"] == ["id"]
+
+
 # ------------------------------------------------------------------------ runner --------
 
 def test_interactsh_validator_rejects_public_and_malformed_servers():

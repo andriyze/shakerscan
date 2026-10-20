@@ -397,6 +397,19 @@ def _base_finding(
     }
 
 
+# sqlmap's summary line, "back-end DBMS: SQLite" (optionally after log tags). A fingerprint
+# recorded from another line that mentions the DBMS, such as the --batch prompt "it looks like the
+# back-end DBMS is 'X'. Do you want to skip ...", names no DBMS.
+_SQLMAP_DBMS_LINE_RE = re.compile(r"(?:\[[^\]]*\]\s*)*back-end DBMS:\s*(\S.*)")
+
+
+def _sqlmap_dbms(row: Mapping[str, Any]) -> str:
+    if row.get("dbms"):
+        return str(row["dbms"]).strip()[:120]
+    match = _SQLMAP_DBMS_LINE_RE.fullmatch(str(row.get("message") or "").strip())
+    return match.group(1).strip()[:120] if match else ""
+
+
 def _observed_url_key(value: Any) -> str | None:
     """Canonicalize one exact response URL for cross-capability comparison."""
     try:
@@ -1190,10 +1203,9 @@ def _findings_for_action(
             # SQLMap labels remain candidates until a payload/control
             # differential produces the deterministic proof contract.
             dbms = next((
-                str(row.get("dbms") or row.get("message") or "").split("back-end DBMS:", 1)[-1].strip()[:120]
-                for row in observations
+                name for row in observations
                 if isinstance(row, Mapping) and row.get("kind") == "sqli_dbms_fingerprint"
-                and (row.get("dbms") or row.get("message"))
+                for name in (_sqlmap_dbms(row),) if name
             ), None)
             finding = _base_finding(
                 tool="sqlmap",

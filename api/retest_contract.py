@@ -11,6 +11,8 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
+import shlex
 import urllib.parse
 import uuid
 from dataclasses import dataclass
@@ -545,6 +547,53 @@ def parse_json_field(value: Any) -> dict[str, Any]:
     return {}
 
 
+# sqlmap marks a path-segment injection point with "*" after the segment value (/products/1*) and
+# names it "#1*". The marker is sqlmap's own syntax, not part of the application's URL, so a replay
+# sends the payload in that segment of the unmarked URL instead of as a "#1*" query parameter.
+_SQLMAP_URI_MARKER = re.compile(r"#(\d+)\*")
+
+
+def _sqlmap_marked_segment_urls(url: str, param: str, payload: str) -> tuple[str, str] | None:
+    """(unmarked URL, URL with ``payload`` appended to the marked segment), or None."""
+    marker = _SQLMAP_URI_MARKER.fullmatch(param)
+    if not marker:
+        return None
+    try:
+        parsed = urllib.parse.urlsplit(url)
+    except ValueError:
+        return None
+    segments = parsed.path.split("/")
+    marked = [index for index, segment in enumerate(segments) if segment.endswith("*")]
+    if not 1 <= int(marker.group(1)) <= len(marked):
+        return None
+    index = marked[int(marker.group(1)) - 1]
+    plain = [segment.rstrip("*") for segment in segments]
+    injected = [*plain[:index], plain[index] + urllib.parse.quote(payload, safe=""), *plain[index + 1:]]
+    return (urllib.parse.urlunsplit(parsed._replace(path="/".join(plain))),
+            urllib.parse.urlunsplit(parsed._replace(path="/".join(injected))))
+
+
+def path_segment_retest_result(inputs: dict[str, Any], replay_commands: list[str]) -> dict[str, Any] | None:
+    """An inconclusive result, sending nothing, for a SQLi point sqlmap marked in a path segment.
+
+    The retest prover injects only query and form parameters. Given ``#1*`` it would request the
+    starred URL with a ``#1*`` parameter the application never reads, so the retest declines and the
+    finding stays open; the replay commands still show the marked segment for a manual check.
+    """
+    param = str(inputs.get("param") or "").strip()
+    if str(inputs.get("finding_type") or "") != "sqli" or not _SQLMAP_URI_MARKER.fullmatch(param):
+        return None
+    reason = ("The injection point is a URL path segment (sqlmap marker " + param + "); Retest replays "
+              "only query and form parameters, so it sent nothing and the finding stays open.")
+    return {
+        "status": "completed", "result_status": "inconclusive", "verdict": "inconclusive",
+        "verdict_reason": reason, "error_message": None, "confidence": None, "proof": None,
+        "replay_commands": replay_commands,
+        "artifacts": {"skipped_reason": "path_segment_injection_point", "param": param},
+        "attempts_exhausted": True, "retry_class": "validation", "retryable": False,
+    }
+
+
 def infer_retest_inputs(verification: dict[str, Any]) -> dict[str, Any]:
     """Build effective retest inputs using verification row and finding evidence."""
     evidence = parse_json_field(verification.get("evidence"))
@@ -626,6 +675,9 @@ def build_replay_commands(inputs: dict[str, Any]) -> list[str]:
     method = str(inputs.get("method") or "GET").strip().upper()
     param = str(inputs.get("param") or "").strip()
     payload = str(inputs.get("payload") or "").strip() or DEFAULT_REPLAY_PAYLOADS.get(finding_type, "test")
+    marked = _sqlmap_marked_segment_urls(target_url, param, payload) if method != "POST" else None
+    if marked and finding_type not in ("exposed_file", "generic_http"):
+        return [f"curl -i -k {shlex.quote(url)}" for url in marked]
 
     if not target_url:
         return []

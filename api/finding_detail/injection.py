@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import urllib.parse
 from typing import Any, Mapping
 
@@ -43,16 +44,58 @@ def _location(finding: Mapping[str, Any], evidence: Mapping[str, Any]) -> tuple[
     return url, method, parameter
 
 
-def _with_value(url: str, parameter: str, value: str) -> str:
-    """``url`` with query ``parameter`` set to ``value`` (other parameters kept)."""
+def _with_value(url: str, parameter: str, value: str, name: str = "") -> str:
+    """``url`` with query ``parameter`` set to ``value``, sent as ``name`` when given (other parameters kept)."""
     try:
         parsed = urllib.parse.urlsplit(url)
     except ValueError:
         return url
-    query = [(k, v) for k, v in urllib.parse.parse_qsl(parsed.query, keep_blank_values=True) if k != parameter]
-    query.append((parameter, value))
+    sent = name or parameter
+    query = [(k, v) for k, v in urllib.parse.parse_qsl(parsed.query, keep_blank_values=True) if k not in {parameter, sent}]
+    query.append((sent, value))
     return urllib.parse.urlunsplit(parsed._replace(query=urllib.parse.urlencode(query)))
 
+
+# A path-segment candidate reaches sqlmap with its custom injection marker after the segment value
+# (/products/1*), and sqlmap names that injection point "#1*"; neither belongs to the application.
+_SQLMAP_MARKER_NAME = re.compile(r"#(\d+)\*")
+# A proof row keeps the route (/products/{int}) and names the segment path_N. The values are the
+# ones a Scan puts in a templated segment when it requests the route, so the command sends what the
+# proof sent.
+_PATH_FIELD = re.compile(r"path_(\d+)")
+_SEGMENT_SAMPLES = {"{int}": "1", "{uuid}": "00000000-0000-4000-8000-000000000000"}
+
+
+def _path_injection(url: str, parameter: str) -> tuple[str, str, str] | None:
+    """(URL to show, parameter name, URL with a quote in the segment) for an injectable path segment.
+
+    The segment is not a query parameter, so setting one in the query tests nothing.
+    """
+    try:
+        parsed = urllib.parse.urlsplit(url)
+    except ValueError:
+        return None
+    segments = parsed.path.split("/")
+    marker, field = _SQLMAP_MARKER_NAME.fullmatch(parameter), _PATH_FIELD.fullmatch(parameter)
+    if marker:
+        marked = [index for index, segment in enumerate(segments) if segment.endswith("*")]
+        if not 1 <= int(marker.group(1)) <= len(marked):
+            return None
+        index = marked[int(marker.group(1)) - 1]
+        shown = sent = [segment.rstrip("*") for segment in segments]
+    elif field and 0 < int(field.group(1)) < len(segments) and segments[int(field.group(1))] in _SEGMENT_SAMPLES:
+        index, shown = int(field.group(1)), segments
+        sent = [_SEGMENT_SAMPLES.get(segment, segment) for segment in segments]
+    else:
+        return None
+    quoted = [*sent[:index], sent[index] + "%27", *sent[index + 1:]]
+    rebuilt = [urllib.parse.urlunsplit(parsed._replace(path="/".join(path))) for path in (shown, quoted)]
+    return rebuilt[0], f"path_{index}", rebuilt[1]
+
+
+# sqlmap's --batch prompt, which older scans stored as the DBMS: "it looks like the back-end DBMS is
+# 'SQLite'. Do you want to skip test payloads specific for other DBMSes? [Y/n] Y".
+_SQLMAP_DBMS_PROMPT = re.compile(r"back-end DBMS is '([^']{1,60})'")
 
 _DBMS_MARKERS = (
     ("SQLite", ("sqlite",)), ("PostgreSQL", ("postgres", "pg_", "psql", "pgsql")),
@@ -68,10 +111,15 @@ def dbms_from(signatures: list[str], excerpt: str) -> str:
 
 def build_sqli(finding: Mapping[str, Any], evidence: Mapping[str, Any]) -> dict[str, Any]:
     raw_url, method, parameter = _location(finding, evidence)
+    path_point = _path_injection(raw_url, parameter) if method == "GET" else None
+    if path_point:
+        raw_url, parameter, quoted_url = path_point
     url = display_url(raw_url)
     verified = finding.get("proof_state") == "verified" or finding.get("verified") is True
     signatures = strings(evidence.get("database_error_signatures"), 6, 200)
-    dbms = text(evidence.get("dbms"), 60) or dbms_from(signatures, text(evidence.get("redacted_excerpt"), 1200))
+    stored_dbms = text(evidence.get("dbms"), 300)
+    prompt = _SQLMAP_DBMS_PROMPT.search(stored_dbms)
+    dbms = (prompt.group(1) if prompt else stored_dbms[:60]) or dbms_from(signatures, text(evidence.get("redacted_excerpt"), 1200))
     timing = record(evidence.get("timing_ms"))
     technique = text(evidence.get("technique"), 80).replace("_", " ")
     reps = integer(evidence.get("repetitions"))
@@ -99,7 +147,7 @@ def build_sqli(finding: Mapping[str, Any], evidence: Mapping[str, Any]) -> dict[
     reproduce = None
     if method == "GET" and parameter and raw_url.startswith(("http://", "https://")) and "." not in parameter:
         reproduce = command(
-            f"curl -sS {q(_with_value(raw_url, parameter, chr(39)))} | grep -iE 'sql|syntax|database|ORA-|SQLITE'",
+            f"curl -sS {q(quoted_url if path_point else _with_value(raw_url, parameter, chr(39)))} | grep -iE 'sql|syntax|database|ORA-|SQLITE'",
             expect="a database error for the single quote, none for a normal value",
             note="One harmless quote; do not run destructive payloads against production.",
         )
@@ -138,6 +186,17 @@ def build_nosqli(finding: Mapping[str, Any], evidence: Mapping[str, Any]) -> dic
     url, method, parameter = _location(finding, evidence)
     operator = text(evidence.get("operator"), 30)
     bypass = "bypass" in text(finding.get("title")).lower()
+    # The proof sends the operator where the request carries the field: as query brackets
+    # (field[$ne]=x) for a GET or HEAD with no stored request, in the stored request's body otherwise.
+    in_query = method in {"GET", "HEAD"} and not evidence.get("request_ref_id")
+    if in_query:
+        field = parameter or "field"
+        bracketed = f"{field}[{operator or '$ne'}]"
+        reproduce = command(f"curl -sS {q(_with_value(url, field, 'x', name=bracketed))}",
+                            note=f"Compare with the same request with {field}=x, an ordinary string value.")
+    else:
+        reproduce = command(f"curl -sS -X {q(method)} {q(url)} -H 'content-type: application/json' -d {q('{' + chr(34) + (parameter or 'field') + chr(34) + ':{' + chr(34) + (operator or '$ne') + chr(34) + ':null}}')}",
+                            note="Compare with the same request using an ordinary string value.")
     return {
         "class": "injection.nosqli",
         "class_label": "NoSQL operator injection",
@@ -149,11 +208,10 @@ def build_nosqli(finding: Mapping[str, Any], evidence: Mapping[str, Any]) -> dic
         "pairs": _pairs(evidence),
         "expected": ["Operators in input rejected or treated as literal strings; the response identical to the control."],
         "context": ["Operator injection lets an attacker change query logic: match any record, skip the password check, or enumerate data."],
-        "reproduce": command(f"curl -sS -X {q(method)} {q(url)} -H 'content-type: application/json' -d {q('{' + chr(34) + (parameter or 'field') + chr(34) + ':{' + chr(34) + (operator or '$ne') + chr(34) + ':null}}')}",
-                             note="Compare with the same request using an ordinary string value."),
+        "reproduce": reproduce,
         "fix": ["Validate that each field has the expected type (a string, not an object) before it reaches the query.",
                 "Use the driver's sanitizer (mongo-sanitize / express-mongo-sanitize) or reject keys starting with $."],
-        "examples": [{"label": "Express", "code": "if (typeof req.body.username !== 'string') return res.status(400).end()"}],
+        "examples": [{"label": "Express", "code": f"if (typeof req.{'query' if in_query else 'body'}.username !== 'string') return res.status(400).end()"}],
     }
 
 

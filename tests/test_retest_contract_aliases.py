@@ -4,6 +4,7 @@ Tests for retest type normalization and inference coverage.
 
 import json
 import os
+import shlex
 import sys
 
 
@@ -229,3 +230,23 @@ def test_retest_queue_binding_requires_the_exact_durable_subject():
          "candidate_id": "33333333-3333-4333-8333-333333333333"},
         {"job_id": "job-1", "finding_id": "33333333-3333-4333-8333-333333333333"},
     )
+
+
+def test_replay_commands_put_a_sqlmap_path_marker_payload_in_the_segment():
+    # Unit fixture: a sqlmap path candidate as recorded by a 2.11.0 lab scan (host renamed to
+    # .invalid). sqlmap marks the segment as /products/1* and names the point "#1*".
+    inferred = infer_retest_inputs({
+        "finding_type": "sqli",
+        "finding_url": "http://sqli-path.fixture.invalid/products/1*",
+        "evidence": {"url": "http://sqli-path.fixture.invalid/products/1*", "param": "#1*", "method": "GET"},
+    })
+    commands = build_replay_commands(inferred)
+    assert [shlex.split(command)[3] for command in commands] == [
+        "http://sqli-path.fixture.invalid/products/1",
+        "http://sqli-path.fixture.invalid/products/1%27%20OR%20%271%27%3D%271",
+    ]
+    assert not any("*" in command or "%2A" in command or "%23" in command for command in commands)
+    # A query parameter named like a marker, with no marked segment, keeps the query replay.
+    plain = build_replay_commands({"finding_type": "sqli", "original_url": "http://s.invalid/p?a=1",
+                                   "param": "#1*", "method": "GET"})
+    assert "%231%2A=" in plain[1]
