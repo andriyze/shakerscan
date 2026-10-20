@@ -104,8 +104,11 @@ def build_sqli(finding: Mapping[str, Any], evidence: Mapping[str, Any]) -> dict[
             note="One harmless quote; do not run destructive payloads against production.",
         )
     elif parameter:
+        # The request and parameter are target-chosen, so they are printed as quoted words; the
+        # comment line stays fixed text (an interactive zsh does not read "#" as a comment).
         reproduce = command(
-            f"# Send {method} {url} with {parameter} set to a single quote (') and compare with a normal value.",
+            "# Send this request with the parameter set to a single quote, then to a normal value, and compare:\n"
+            f"printf '%s\\n' {q(f'{method} {url}')} {q(f'parameter: {parameter}')}",
             note="The finding stores the request shape, not a replayable body; the Retest button replays it.",
         )
     return {
@@ -181,9 +184,15 @@ def build_xss(finding: Mapping[str, Any], evidence: Mapping[str, Any]) -> dict[s
             "A script running on this origin acts as the signed-in user: it can read pages, submit forms and send data elsewhere."
             + (" Session cookies without HttpOnly are directly readable." if verified else ""),
         ],
+        # The URL is target-chosen (a crawled path can hold $(...)), so it is never a bare shell
+        # line: pasted, the command only prints it.
         "reproduce": command(
-            f"# Open in a browser you are willing to test with:\n{url}" if url.startswith(("http://", "https://")) else "# Retest replays the stored request.",
-            note="The URL is the exact request that executed; it contains the scanner's harmless marker payload.",
+            f"# Open this URL in a browser you are willing to test with:\nprintf '%s\\n' {q(url)}"
+            if url.startswith(("http://", "https://")) else "# Retest replays the stored request.",
+            note="The page the scanner sent the input to"
+                 + ("; the pages where it ran are under Where it executed" if stored else "")
+                 + ". Stored evidence keeps this URL without the values the scanner injected, so opening it "
+                   "does not replay the payload; Retest replays the stored request.",
         ),
         "fix": [
             f"Encode {parameter or 'the value'} for the context it is written into (HTML text, attribute, JavaScript or URL) when rendering.",

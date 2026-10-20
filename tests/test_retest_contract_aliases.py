@@ -129,7 +129,7 @@ def test_replay_commands_for_exposed_file_are_plain_get():
             "original_url": "https://example.com/id_rsa",
         }
     )
-    assert commands == ["curl -i -k 'https://example.com/id_rsa'"]
+    assert commands == ["curl -i -k https://example.com/id_rsa"]
 
 
 def test_infer_retest_inputs_for_exposed_file_finding_row():

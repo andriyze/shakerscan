@@ -11,22 +11,24 @@ from __future__ import annotations
 
 import json
 import re
-import shlex
 from typing import Any
 import urllib.parse
 
 try:
     from scanner_tools.remediation_kb import match_remediation
+    from scanner_tools.shell_words import shell_word
 except ImportError:  # host-side tests add api/ only; the runtime image has scanner_tools on /app
     import os
     import sys
 
     sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "scanner"))
     from scanner_tools.remediation_kb import match_remediation
+    from scanner_tools.shell_words import shell_word
 
 
-_PLACEHOLDER_URL = re.compile(r"https?://example\.com(?P<path>/[^\s'\"|]*)?")
-_PLACEHOLDER_HOST = re.compile(r"(?<![\w.-])example\.com\b")
+# One pattern, one pass: a value already put in the command is never searched again, so a finding
+# URL that itself contains "example.com" cannot have a quoted host spliced inside its quotes.
+_PLACEHOLDER = re.compile(r"(?P<url>https?://example\.com(?P<path>/[^\s'\"|]*)?)|(?<![\w.-])example\.com\b")
 
 
 def _finding_location(finding: dict[str, Any]) -> tuple[str, str, str]:
@@ -55,7 +57,7 @@ def localize_command(command: Any, finding: dict[str, Any]) -> str | None:
 
     The knowledge base writes ``https://example.com/<path>``; copied as is it checks nothing. A
     placeholder with a path becomes the finding's URL (the path the finding is about), one without
-    a path becomes its origin, and a bare host (``dig``) its host. Values are shell-quoted.
+    a path becomes its origin, and a bare host (``dig``) its host. Each value is one ``shell_word``.
     """
     if not isinstance(command, str) or not command:
         return None
@@ -64,10 +66,11 @@ def localize_command(command: Any, finding: dict[str, Any]) -> str | None:
         return command
 
     def replace(match: re.Match[str]) -> str:
-        return shlex.quote(url if match.group("path") else origin)
+        if match.group("url") is None:
+            return shell_word(host)
+        return shell_word(url if match.group("path") else origin)
 
-    localized = _PLACEHOLDER_URL.sub(replace, command)
-    return _PLACEHOLDER_HOST.sub(lambda _m: shlex.quote(host), localized)
+    return _PLACEHOLDER.sub(replace, command)
 
 
 def finding_remediation(finding: dict[str, Any]) -> dict[str, Any] | None:

@@ -20,9 +20,11 @@ from fastapi import APIRouter, HTTPException, Query
 try:
     from serialization import row_to_dict
     from ai_targets import router as _ai_targets
+    from retest_contract import current_replay_commands
 except ModuleNotFoundError:  # package import in host-side tests
     from ..serialization import row_to_dict
     from ..ai_targets import router as _ai_targets
+    from ..retest_contract import current_replay_commands
 
 router = APIRouter()
 
@@ -110,6 +112,10 @@ def public_retest_row(row: Any) -> dict[str, Any]:
                 result[field] = json.loads(value)
             except (TypeError, ValueError):
                 pass
+    # Rebuilt from the row's replay inputs, so a row stored before every word was shell-quoted
+    # never hands out its old copyable text.
+    if "replay_commands" in result:
+        result["replay_commands"] = current_replay_commands(result)
     proof = result.get("proof") if isinstance(result.get("proof"), dict) else {}
     proof_proven = proof.get("proven") is True
     mode = str(result.get("verification_mode") or "").lower()
