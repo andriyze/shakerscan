@@ -332,8 +332,11 @@ and values under an OpenAPI `example` are documentation. A key counts only when 
 is secret (`DB_PASSWORD`, `clientSecret`; not `SECRETS_MANAGER_ENDPOINT`), and a credential-free URL,
 host name, address, class name, file path, boolean or number is configuration, never a secret. The first match in a batch reads two paths
 that cannot exist; a match byte-identical to the host's answer for an absent path is dropped
-(`indistinguishable_from_absent`). `/actuator/heapdump` is never requested -- its exposure is proved
-from the anonymous actuator index. Evidence keeps field names, provider categories and scrypt value
+(`indistinguishable_from_absent`). A path ending in `/heapdump` (such as `/actuator/heapdump`) is
+never requested, because it makes the JVM write a full heap dump: not by this probe, and not by an
+active Nuclei template, whose selection drops any template whose paths, raw requests, payloads or
+variables reach one (`springboot-heapdump` in the pinned bundle). An anonymous actuator index that
+links it is recorded as an `actuator_endpoint` discovery, not as proof. Evidence keeps field names, provider categories and scrypt value
 fingerprints of at most 20 distinct secrets per body, never a value. The scrypt salt, and the HMAC
 that replaces `response_body_sha256` (as `response_body_hmac`) for any body whose content is
 withheld, use a key derived from the installation's credential key, so fingerprints match across
