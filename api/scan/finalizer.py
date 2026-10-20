@@ -826,6 +826,7 @@ def _findings_for_action(
     observations: Sequence[Mapping[str, Any]],
     *,
     unobserved_response_urls: frozenset[str] = frozenset(),
+    target_url: str = "",
 ) -> list[dict[str, Any]]:
     findings: list[dict[str, Any]] = []
     header_origin_findings: dict[tuple[str, str], dict[str, Any]] = {}
@@ -960,7 +961,7 @@ def _findings_for_action(
             ))
         elif kind == "dns_posture":
             findings.extend(dns_posture_findings(
-                item, make=_verified_posture_factory(result, receipt, str(kind)),
+                item, make=_verified_posture_factory(result, receipt, str(kind)), target_url=target_url,
             ))
         elif kind == "open_redirect_proof":
             redirect = open_redirect_finding(
@@ -2508,6 +2509,7 @@ def finalize_scan_report(
             result,
             rows,
             unobserved_response_urls=frozenset(unobserved_response_urls),
+            target_url=target_url,
         ):
             identity = _finding_identity(finding)
             existing = findings_by_id.get(identity)
