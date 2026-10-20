@@ -38,9 +38,9 @@ for (const link of ['id','url']) {
   })
 }
 
-// Review (2.11): a ?target=URL link read one search page for its host, so an exact origin that
-// sorted after the first page of substring matches (an apex domain with many discovered
-// subdomains) was reported as "not found" and the page fell back to every credential.
+// A ?target=URL link must find its exact origin even when it sorts after the first page of
+// substring matches for its host (an apex domain with many discovered subdomains). Reading only
+// the first page reported "not found" and fell back to every credential.
 const uuid = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, '0')}`
 type Row = {id: string; asset_id: string; name: string; url: string; locator: string; is_active: boolean
   environment: string; connected_device: boolean; created_at: string; updated_at: string}
@@ -80,17 +80,28 @@ function servePage(rows: Row[], url: URL, {endless = false} = {}) {
     total: null, total_kind: 'none', generated_at: '2026-10-19T00:00:00Z'}
 }
 
-async function routeApex(page: import('@playwright/test').Page, rows: Row[], options: {endless?: boolean} = {}) {
-  const linkSearches: {cursor: string | null; webOnly: string | null}[] = []
+type LinkFailure = 'server error' | 'refused cursor' | 'lost connection'
+
+async function routeApex(page: import('@playwright/test').Page, rows: Row[],
+  options: {endless?: boolean; failCursorPage?: LinkFailure} = {}) {
+  const linkSearches: {cursor: string | null; webOnly: string | null; hasMore: boolean | null}[] = []
   const consumers: string[] = []
   await pinMockApiOrigin(page)
   await page.route(`${MOCK_API_ORIGIN}/**`, async route => {
     const url = new URL(route.request().url())
     if (url.pathname === '/targets/inventory') {
-      if (url.searchParams.get('search') === 'corp.example') {
-        linkSearches.push({cursor: url.searchParams.get('cursor'), webOnly: url.searchParams.get('web_only')})
+      const linkSearch = url.searchParams.get('search') === 'corp.example'
+      const cursor = url.searchParams.get('cursor')
+      if (linkSearch && cursor !== null && options.failCursorPage) {
+        linkSearches.push({cursor, webOnly: url.searchParams.get('web_only'), hasMore: null})
+        if (options.failCursorPage === 'lost connection') return route.abort('failed')
+        if (options.failCursorPage === 'refused cursor') return route.fulfill({status: 400, json: {detail: {
+          error: 'invalid_cursor', message: 'the cursor is malformed or was not issued by this server'}}})
+        return route.fulfill({status: 500, json: {detail: 'the inventory database is unavailable'}})
       }
-      return route.fulfill({json: servePage(rows, url, options)})
+      const body = servePage(rows, url, options)
+      if (linkSearch) linkSearches.push({cursor, webOnly: url.searchParams.get('web_only'), hasMore: body.has_more})
+      return route.fulfill({json: body})
     }
     if (url.pathname === `/targets/${exactId}/asset`) return route.fulfill({json: {target: rows[0], origins: []}})
     if (url.pathname === '/credential-profiles') {
@@ -102,6 +113,9 @@ async function routeApex(page: import('@playwright/test').Page, rows: Row[], opt
   return {linkSearches, consumers}
 }
 
+/** The distinct link-search cursors in the order they were first read (dev mode runs effects twice). */
+const cursorsRead = (searches: {cursor: string | null}[]) => [...new Set(searches.map((search) => search.cursor))]
+
 test('credential URL link finds its exact origin beyond the first search page', async ({page}) => {
   // 300 subdomains: 600 rows (300 web) sort ahead of the apex, so it is not on the first page.
   const rows = apexInventory(300)
@@ -111,17 +125,24 @@ test('credential URL link finds its exact origin beyond the first search page', 
   await expect(page).toHaveURL(new RegExp(`[?&]target_id=${exactId}`))
   expect(new URL(page.url()).searchParams.get('target')).toBeNull()
   await expect.poll(() => consumers).toContain(exactId)
-  expect(linkSearches.some((search) => search.cursor !== null), 'the next page is requested with its cursor').toBe(true)
+  // 301 web rows sort ahead of the apex: the second page (from the first page's cursor) holds it,
+  // and nothing is read after it.
+  expect(cursorsRead(linkSearches), 'the next page is requested with its cursor').toEqual([null, '200'])
   await expect(page.getByText('was not found', {exact: false})).toHaveCount(0)
   await expect(page.getByText('Could not find the linked target', {exact: false})).toHaveCount(0)
 })
 
 test('credential URL link reports not found only after every matching page was read', async ({page}) => {
-  const rows = apexInventory(300, {withExact: false})
+  // 500 subdomains: 502 web rows match the host, three pages of 200.
+  const rows = apexInventory(500, {withExact: false})
   const {linkSearches, consumers} = await routeApex(page, rows)
   await page.goto(`/credentials?${new URLSearchParams({target: `${exactUrl}/`})}`)
   await expect(page.getByText(`The linked target ${exactUrl}/ was not found`, {exact: false})).toBeVisible()
-  expect(linkSearches.some((search) => search.cursor !== null), 'every page was read before "not found"').toBe(true)
+  // Every page, in order, each from the cursor of the one before, until the inventory said no more.
+  expect(cursorsRead(linkSearches), 'every page was read before "not found"').toEqual([null, '200', '400'])
+  expect(linkSearches.every((search) => search.webOnly === 'true')).toBe(true)
+  expect(linkSearches.filter((search) => search.cursor === '400').map((search) => search.hasMore)).toContain(false)
+  expect(linkSearches.filter((search) => search.cursor !== '400').every((search) => search.hasMore === true)).toBe(true)
   await expect(page.getByLabel('Target', {exact: true})).toHaveAttribute('data-value', '')
   expect(consumers).not.toContain(exactId)
 })
@@ -135,3 +156,28 @@ test('credential URL link that the bounded search cannot settle says so instead 
   // Bounded: the reading stops rather than walking an endless inventory.
   expect(new Set(linkSearches.map((search) => search.cursor)).size).toBeLessThanOrEqual(10)
 })
+
+// A page read that fails proves nothing about the target: the page says the search failed and keeps
+// the link, instead of claiming the target does not exist.
+const failureReasons: Record<LinkFailure, string | null> = {
+  'server error': 'the inventory database is unavailable',
+  'refused cursor': 'the cursor is malformed or was not issued by this server',
+  'lost connection': null,
+}
+for (const failure of Object.keys(failureReasons) as LinkFailure[]) {
+  test(`credential URL link whose search read fails (${failure}) says so instead of "not found"`, async ({page}) => {
+    const {linkSearches, consumers} = await routeApex(page, apexInventory(300), {failCursorPage: failure})
+    await page.goto(`/credentials?${new URLSearchParams({target: `${exactUrl}/`})}`)
+    const notice = page.getByText(`Could not finish searching for the linked target ${exactUrl}/`, {exact: false})
+    await expect(notice).toBeVisible()
+    const reason = failureReasons[failure]
+    if (reason) await expect(notice).toContainText(reason)
+    await expect(page.getByText('was not found', {exact: false})).toHaveCount(0)
+    await expect(page.getByText('among the first', {exact: false})).toHaveCount(0)
+    expect(cursorsRead(linkSearches), 'the failed read was the second page').toEqual([null, '200'])
+    await expect(page.getByLabel('Target', {exact: true})).toHaveAttribute('data-value', '')
+    // The link stays as it was, so a reload tries again.
+    expect(new URL(page.url()).searchParams.get('target')).toBe(`${exactUrl}/`)
+    expect(consumers).not.toContain(exactId)
+  })
+}

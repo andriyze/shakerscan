@@ -12,7 +12,11 @@ export function resolveTargetByOrigin<T extends { id: string; url: string }, P =
   url: string
   maxPages?: number
   signal?: AbortSignal
-}): Promise<{ status: 'found' | 'missing' | 'unconfirmed'; target: T | null; scanned: number }>
+}): Promise<
+  | { status: 'found' | 'missing' | 'unconfirmed'; target: T | null; scanned: number }
+  | { status: 'failed'; target: null; scanned: number; error: string }
+>
+export function readFailureText(error: unknown): string
 export function targetSearchNoteText(search: {
   assets: unknown[]; hasMore: boolean; error: string | null; query: string
   scanned?: number; filtered?: boolean; loading?: boolean

@@ -2,8 +2,8 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 
 import {
-  TARGET_LINK_MAX_PAGES, TARGET_SEARCH_MAX_PAGES, collectAcceptedTargets, resolveTargetByOrigin, targetSearchNoteText,
-  targetSearchProvesEmpty,
+  TARGET_LINK_MAX_PAGES, TARGET_SEARCH_MAX_PAGES, collectAcceptedTargets, readFailureText, resolveTargetByOrigin,
+  targetSearchNoteText, targetSearchProvesEmpty,
 } from './targetSearchModel.mjs'
 
 const row = (id, url) => ({ id, url })
@@ -75,9 +75,9 @@ test('notes', () => {
   assert.equal(n({ assets: [1] }), '1 match')
 })
 
-// Review (2.11): a ?target=URL link read one search page for its host and reported "not found"
-// whenever the exact origin sorted after the first page of substring matches (an apex domain with
-// many discovered subdomains), although the target existed.
+// A ?target=URL link must find its exact origin even when it sorts after the first page of
+// substring matches for its host (an apex domain with many discovered subdomains). Reading only
+// the first page reported "not found" although the target existed.
 const subdomains = (count) => Array.from({ length: count }, (_, i) => row(`s${i}`, `https://app${i}.corp.example`))
 /** list/v1-style pages: cursors are opaque strings, `null` asks for the first page. */
 function cursorInventory(rows, size) {
@@ -158,4 +158,60 @@ test('a link that is not an http(s) URL is missing without a search', async () =
     assert.equal(result.status, 'missing', url)
   }
   assert.deepEqual(source.reads, [])
+})
+
+// A page read that fails (a server error, a refused cursor, a lost connection) proves nothing
+// about the target, so it is reported as a failed read, never as "missing".
+function failingInventory(rows, size, failAt, failure) {
+  const source = cursorInventory(rows, size)
+  return {
+    reads: source.reads,
+    fetchPage: async (position) => {
+      if (source.reads.length === failAt) {
+        source.reads.push(position)
+        throw failure
+      }
+      return source.fetchPage(position)
+    },
+  }
+}
+
+test('a page read that fails part way is "failed", never "missing"', async () => {
+  const cases = [
+    ['a server error', new Error('Target search failed (500)'), 'Target search failed (500)'],
+    ['a refused cursor', new Error('the cursor is malformed or was not issued by this server.'),
+      'the cursor is malformed or was not issued by this server'],
+    ['a lost connection', new TypeError('Failed to fetch'), 'Failed to fetch'],
+  ]
+  for (const [label, failure, message] of cases) {
+    const source = failingInventory([...subdomains(300), row('exact', 'https://corp.example')], 200, 1, failure)
+    const result = await resolveTargetByOrigin({ fetchPage: source.fetchPage, url: 'https://corp.example/' })
+    assert.equal(result.status, 'failed', label)
+    assert.equal(result.target, null, label)
+    assert.equal(result.error, message, label)
+    assert.equal(result.scanned, 200, `${label}: the rows read before the failure`)
+    assert.deepEqual(source.reads, [null, 'c200'], `${label}: no read after the failure`)
+  }
+})
+
+test('a first page that fails is "failed" with a readable reason', async () => {
+  const source = failingInventory(subdomains(10), 200, 0, 'not an Error')
+  const result = await resolveTargetByOrigin({ fetchPage: source.fetchPage, url: 'https://corp.example/' })
+  assert.equal(result.status, 'failed')
+  assert.equal(result.scanned, 0)
+  assert.equal(result.error, 'the search could not be completed')
+  assert.equal(readFailureText(new Error('  ')), 'the search could not be completed')
+  assert.equal(readFailureText(new Error('Target search failed (502). ')), 'Target search failed (502)')
+})
+
+test('a read that fails because the caller aborted is an abort, not a failed read', async () => {
+  const controller = new AbortController()
+  const fetchPage = async () => {
+    controller.abort()
+    throw new TypeError('Failed to fetch')
+  }
+  await assert.rejects(
+    resolveTargetByOrigin({ fetchPage, url: 'https://corp.example/', signal: controller.signal }),
+    (error) => error.name === 'AbortError',
+  )
 })

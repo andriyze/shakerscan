@@ -43,7 +43,7 @@ import { getTargetAsset, searchTargetAssets } from '@/lib/targetAssetApi'
 import { useTargetSearch } from '@/lib/useTargetSearch'
 import { useUrlFilters } from '@/lib/useUrlFilters'
 import { LIST_V1_MAX_LIMIT } from '@/lib/listPage.mjs'
-import { resolveTargetByOrigin } from '@/lib/targetSearchModel.mjs'
+import { readFailureText, resolveTargetByOrigin } from '@/lib/targetSearchModel.mjs'
 
 const HTTP_KINDS: { value: CredentialAuthKind; label: string }[] = [
   { value: 'bearer_token', label: 'Bearer token' },
@@ -248,8 +248,9 @@ function CredentialsContent() {
   const targetId = filters.target_id || ''
   const setTargetId = useCallback((id: string) => setFilters({ target_id: id || undefined, target: undefined }), [setFilters])
   const [missingTarget, setMissingTarget] = useState<string | null>(null)
-  // A URL link the bounded search could neither find nor rule out.
-  const [unconfirmedTarget, setUnconfirmedTarget] = useState<{url: string; scanned: number} | null>(null)
+  // A URL link the search could neither find nor rule out: the page bound was reached, or a page
+  // read failed (`failure` says why).
+  const [unconfirmedTarget, setUnconfirmedTarget] = useState<{url: string; scanned: number; failure?: string} | null>(null)
   const latestProfileRequest = useRef(0)
   const [profiles, setProfiles] = useState<CredentialProfile[]>([])
   const [includeInactive, setIncludeInactive] = useState(false)
@@ -309,7 +310,8 @@ function CredentialsContent() {
   // server search for its host, read page by page (bounded) until a row with the same origin is
   // found or the matches run out: the search sorts by name, so the exact origin can follow many
   // other matches (an apex domain behind its subdomains). "Not found" is said only once every
-  // matching page was read. The id is read directly.
+  // matching page was read; a failed read (server error, refused cursor, lost connection) is shown
+  // as such and keeps the link. The id is read directly.
   useEffect(() => {
     const requestedUrl = typeof filters.target === 'string' ? filters.target : ''
     if (targetId || !requestedUrl) return
@@ -326,9 +328,12 @@ function CredentialsContent() {
       .then((result) => {
         if (result.target) { remember(result.target); setFilters({target_id:result.target.id,target:undefined}) }
         else if (result.status === 'unconfirmed') setUnconfirmedTarget({url: requestedUrl, scanned: result.scanned})
+        else if (result.status === 'failed') setUnconfirmedTarget({url: requestedUrl, scanned: result.scanned, failure: result.error})
         else setMissingTarget(requestedUrl)
       })
-      .catch(() => { if (!controller.signal.aborted) setMissingTarget(requestedUrl) })
+      .catch((reason) => {
+        if (!controller.signal.aborted) setUnconfirmedTarget({url: requestedUrl, scanned: 0, failure: readFailureText(reason)})
+      })
     return () => controller.abort()
   },[filters.target,remember,setFilters,targetId])
 
@@ -605,7 +610,9 @@ function CredentialsContent() {
       )}
       {unconfirmedTarget && (
         <div role="alert" className="mb-4 rounded-sm border border-amber-900/60 bg-amber-950/30 p-3 text-sm text-amber-200">
-          Could not find the linked target {unconfirmedTarget.url} among the first {unconfirmedTarget.scanned} targets matching its host. Search for it above.
+          {unconfirmedTarget.failure
+            ? <>Could not finish searching for the linked target {unconfirmedTarget.url}: {unconfirmedTarget.failure}. Search for it above, or reload to try again.</>
+            : <>Could not find the linked target {unconfirmedTarget.url} among the first {unconfirmedTarget.scanned} targets matching its host. Search for it above.</>}
         </div>
       )}
       {targetId && (targetKind === 'web' || targetKind === 'api') && <AuthenticationProfiles targetId={targetId} credentials={profiles} />}

@@ -101,6 +101,9 @@ test('credential target pickers search the server instead of loading every targe
   assert.match(page, /resolveTargetByOrigin\(\{\s*url: requested\.href,\s*signal: controller\.signal,/)
   assert.match(page, /search: requested\.host, limit: LIST_V1_MAX_LIMIT, includeServices: true, webOnly: true, position,/)
   assert.match(page, /else if \(result\.status === 'unconfirmed'\) setUnconfirmedTarget\(/)
+  // A failed read is shown as one, never as a target that does not exist.
+  assert.match(page, /else if \(result\.status === 'failed'\) setUnconfirmedTarget\(\{url: requestedUrl, scanned: result\.scanned, failure:/)
+  assert.doesNotMatch(page, /\.catch\(\(\) => \{ if \(!controller\.signal\.aborted\) setMissingTarget\(requestedUrl\)/)
   assert.match(page, /getTargetAsset\(targetId\)/)
   // A selection still being read keeps the profiles loading instead of showing none.
   assert.match(page, /if \(resolvingTarget\) setProfilesLoading\(true\)/)
