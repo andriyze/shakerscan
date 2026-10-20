@@ -42,6 +42,8 @@ import {
 import { getTargetAsset, searchTargetAssets } from '@/lib/targetAssetApi'
 import { useTargetSearch } from '@/lib/useTargetSearch'
 import { useUrlFilters } from '@/lib/useUrlFilters'
+import { LIST_V1_MAX_LIMIT } from '@/lib/listPage.mjs'
+import { resolveTargetByOrigin } from '@/lib/targetSearchModel.mjs'
 
 const HTTP_KINDS: { value: CredentialAuthKind; label: string }[] = [
   { value: 'bearer_token', label: 'Bearer token' },
@@ -246,6 +248,8 @@ function CredentialsContent() {
   const targetId = filters.target_id || ''
   const setTargetId = useCallback((id: string) => setFilters({ target_id: id || undefined, target: undefined }), [setFilters])
   const [missingTarget, setMissingTarget] = useState<string | null>(null)
+  // A URL link the bounded search could neither find nor rule out.
+  const [unconfirmedTarget, setUnconfirmedTarget] = useState<{url: string; scanned: number} | null>(null)
   const latestProfileRequest = useRef(0)
   const [profiles, setProfiles] = useState<CredentialProfile[]>([])
   const [includeInactive, setIncludeInactive] = useState(false)
@@ -301,21 +305,27 @@ function CredentialsContent() {
     return counts
   }, {}), [profiles])
 
-  // A link may name a target by URL (?target=) or id (?target_id=). The URL is resolved with one
-  // bounded server search for its origin; the id is read directly.
+  // A link may name a target by URL (?target=) or id (?target_id=). The URL is resolved by a
+  // server search for its host, read page by page (bounded) until a row with the same origin is
+  // found or the matches run out: the search sorts by name, so the exact origin can follow many
+  // other matches (an apex domain behind its subdomains). "Not found" is said only once every
+  // matching page was read. The id is read directly.
   useEffect(() => {
     const requestedUrl = typeof filters.target === 'string' ? filters.target : ''
     if (targetId || !requestedUrl) return
     let requested: URL
     try { requested = new URL(requestedUrl) } catch { setMissingTarget(requestedUrl); return }
     const controller = new AbortController()
-    searchTargetAssets({ search: requested.host, limit: 50, includeServices: true }, controller.signal)
-      .then((page) => {
-        const asset = page.targets.find((item) => {
-          if (!/^https?:\/\//i.test(item.url)) return false
-          try { return new URL(item.url).origin === requested.origin } catch { return false }
-        })
-        if (asset) { remember(asset); setFilters({target_id:asset.id,target:undefined}) }
+    resolveTargetByOrigin({
+      url: requested.href,
+      signal: controller.signal,
+      fetchPage: (position: string | number | null) => searchTargetAssets({
+        search: requested.host, limit: LIST_V1_MAX_LIMIT, includeServices: true, webOnly: true, position,
+      }, controller.signal),
+    })
+      .then((result) => {
+        if (result.target) { remember(result.target); setFilters({target_id:result.target.id,target:undefined}) }
+        else if (result.status === 'unconfirmed') setUnconfirmedTarget({url: requestedUrl, scanned: result.scanned})
         else setMissingTarget(requestedUrl)
       })
       .catch(() => { if (!controller.signal.aborted) setMissingTarget(requestedUrl) })
@@ -442,6 +452,7 @@ function CredentialsContent() {
     setProfiles([])
     setError(null)
     setMissingTarget(null)
+    setUnconfirmedTarget(null)
     setFilters({ target_kind: kind === 'web' ? undefined : kind, target: undefined })
   }
 
@@ -554,7 +565,7 @@ function CredentialsContent() {
             <Combobox value={selectedChoice ? targetId : ''} options={targetOptionList} noneLabel="All targets"
               searchPlaceholder="Search targets by name, host or environment…"
               onQueryChange={targetSearch.setQuery} loading={targetSearch.loading} optionsQuery={targetSearch.answeredQuery} footerNote={targetSearchNote(targetSearch)}
-              onChange={(value) => { setMissingTarget(null); setTargetId(value) }} />
+              onChange={(value) => { setMissingTarget(null); setUnconfirmedTarget(null); setTargetId(value) }} />
           </Field>
           <label className="flex h-10 items-center gap-2 text-sm text-gray-400">
             <input type="checkbox" checked={includeInactive} onChange={(event) => setIncludeInactive(event.target.checked)} />
@@ -590,6 +601,11 @@ function CredentialsContent() {
       {missingTarget && (
         <div role="alert" className="mb-4 rounded-sm border border-amber-900/60 bg-amber-950/30 p-3 text-sm text-amber-200">
           The linked target {missingTarget} was not found among active targets that can hold credentials. Choose a target above.
+        </div>
+      )}
+      {unconfirmedTarget && (
+        <div role="alert" className="mb-4 rounded-sm border border-amber-900/60 bg-amber-950/30 p-3 text-sm text-amber-200">
+          Could not find the linked target {unconfirmedTarget.url} among the first {unconfirmedTarget.scanned} targets matching its host. Search for it above.
         </div>
       )}
       {targetId && (targetKind === 'web' || targetKind === 'api') && <AuthenticationProfiles targetId={targetId} credentials={profiles} />}
