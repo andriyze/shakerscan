@@ -24,6 +24,7 @@ from api.scan.capability_result import CapabilityResultStatus
 from api.scan.external_process import (
     ACTIVE_TEMPLATE_PLANNED_GET_ONLY_WINDOWS,
     ACTIVE_TEMPLATE_PLANNED_WINDOWS,
+    ACTIVE_TEMPLATE_WINDOW_RETRY_SECONDS,
 )
 from tests.scan_round_fixtures import (
     admitted_round_fixture,
@@ -90,12 +91,20 @@ def test_a_two_endpoint_host_plans_all_39_windows_over_three_rounds(profile):
         )
     )
     assert covered == list(range(39))
-    # Each position holds what one endpoint attempt always held.
+    # Each position holds what one endpoint attempt always held; a slice of further windows also
+    # holds one retry of a window its wall cut off. The first round's slice holds no retry.
+    assert "window_retry_seconds" not in r01.capability_args
     for number in planned:
         for action in planned[number]:
             count = action.capability_args["slice"]["count"]
+            retry = (
+                ACTIVE_TEMPLATE_WINDOW_RETRY_SECONDS
+                if action.capability_args["slice"]["start"] >= 2 else 0
+            )
+            assert action.capability_args.get("window_retry_seconds", 0) == retry
             assert dict(action.requested_budget) == {
-                name: amount * count for name, amount in POSITION.items()
+                name: amount * count + (retry if name == "tool_wall_seconds" else 0)
+                for name, amount in POSITION.items()
             }
 
 

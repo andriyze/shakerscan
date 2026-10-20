@@ -54,6 +54,7 @@ from .work_manifests import (
 from .external_process import (
     ACTIVE_TEMPLATE_PLANNED_GET_ONLY_WINDOWS,
     ACTIVE_TEMPLATE_PLANNED_WINDOWS,
+    ACTIVE_TEMPLATE_WINDOW_RETRY_SECONDS,
     batch_attempt_floor,
     batch_attempt_capacity,
     batch_row_cost_class,
@@ -1588,6 +1589,11 @@ class ScanActionPlanCompiler:
                     )
                     for name, amount in maximum.items()
                 }
+                window_retry = blueprint.capability_args.get("window_retry_seconds")
+                if blueprint.capability_name == "templates.active_batch" and isinstance(
+                    window_retry, int,
+                ) and not isinstance(window_retry, bool) and window_retry > 0:
+                    budget["tool_wall_seconds"] = int(budget.get("tool_wall_seconds", 0)) + window_retry
                 if blueprint.capability_name == "templates.passive_batch":
                     budget["http_requests"] = max(
                         int(budget.get("http_requests", 0)),
@@ -1965,6 +1971,18 @@ class ScanActionPlanCompiler:
                 raise ScanActionPlanError(
                     f"required batch action {base_action_id} exceeds plan graph capacity"
                 )
+            # A slice of further template windows also holds one retry of a window its wall
+            # cut off (see ACTIVE_TEMPLATE_WINDOW_RETRY_SECONDS), from wall the ledger has left
+            # once this lane's slices are paid, so the retry never prices a slice out.
+            window_retry = 0
+            if work_count != entry_count and lane_wall > 0:
+                spare_wall = (
+                    int(limits.get("tool_wall_seconds", 0))
+                    - int(reserved.get("tool_wall_seconds", 0)) - count * lane_wall
+                )
+                window_retry = min(
+                    ACTIVE_TEMPLATE_WINDOW_RETRY_SECONDS, max(0, spare_wall) // max(1, count),
+                )
             for batch_index in range(count):
                 start = manifest_offset + batch_index * batch_size
                 slice_count = (
@@ -1996,6 +2014,10 @@ class ScanActionPlanCompiler:
                         **(
                             {"endpoint_entries": int(entry_count)}
                             if work_count != entry_count else {}
+                        ),
+                        **(
+                            {"window_retry_seconds": int(window_retry)}
+                            if window_retry and start >= entry_count else {}
                         ),
                         "scheduled_batches": int(count),
                         "total_batches": int(total_batches),

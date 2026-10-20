@@ -276,6 +276,7 @@ from .external_process import (
     order_batch_rows_by_cost_class,
     template_attempt_wall,
     template_retry_wall,
+    window_template_attempt_hold,
 )
 from .continuation import (
     ScanContinuationError,
@@ -4224,6 +4225,19 @@ class DatabaseNeutralScanActionDispatcher:
         # pack inside its share needs the pack's latency bound (template_retry_wall), and its
         # retry holds that much of what the batch has left.
         retry_partial_timeouts = action.capability_name == "templates.passive_batch"
+        # A further template window (a thorough or deep slice's positions) the wall cut off is
+        # retried even when it already reported a match: its other templates never ran, and
+        # zoo d0a8d43c8 lost one or two windows on 16 of 57 hosts that way. The slice holds
+        # the retry's wall beside its positions (``window_retry_seconds``).
+        retry_cut_off = retry_partial_timeouts or window_endpoints is not None
+        raw_retry_wall = action.capability_args.get("window_retry_seconds")
+        window_retry_wall = (
+            int(raw_retry_wall)
+            if window_endpoints is not None and isinstance(raw_retry_wall, int)
+            and not isinstance(raw_retry_wall, bool)
+            and 0 < raw_retry_wall < int(action.requested_budget.get("tool_wall_seconds") or 0)
+            else 0
+        )
         empty_timeouts: dict[str, int] = {}
         # The first attempt each retried endpoint was cut off in, and the redacted URL each
         # endpoint was attempted at, so an endpoint that never finished can be named.
@@ -4425,7 +4439,7 @@ class DatabaseNeutralScanActionDispatcher:
                 bool(getattr(result, "timed_out", False)) or result.status == "timed_out"
             )
             needs_retry = retry_empty_timeouts and result_timed_out and (
-                not result.observations or (retry_partial_timeouts and result_wall_killed)
+                not result.observations or (retry_cut_off and result_wall_killed)
             )
             if needs_retry and not retry_round:
                 cut_off_attempts[candidate_id] = attempt_id
@@ -4641,7 +4655,7 @@ class DatabaseNeutralScanActionDispatcher:
                     )
                     prior_empty = retry_empty_timeouts and prior_timed_out and (
                         _no_tool_output(prior.get("observations") or ())
-                        or (retry_partial_timeouts and prior_wall_killed)
+                        or (retry_cut_off and prior_wall_killed)
                     )
                     if prior_empty and not retry_round:
                         cut_off_attempts[candidate_id] = attempt_id
@@ -4775,7 +4789,8 @@ class DatabaseNeutralScanActionDispatcher:
                     }
                     if tool == "nuclei" and sub_budget.get("tool_wall_seconds"):
                         planned_share = (
-                            int(action.requested_budget.get("tool_wall_seconds") or 0)
+                            (int(action.requested_budget.get("tool_wall_seconds") or 0)
+                             - window_retry_wall)
                             // max(1, first_pass)
                         )
                         passive_pack = action.capability_name == "templates.passive_batch"
@@ -4796,6 +4811,13 @@ class DatabaseNeutralScanActionDispatcher:
                                 ),
                             )
                         )
+                        if window_endpoints is not None:
+                            sub_budget = window_template_attempt_hold(
+                                sub_budget, remaining_budget=remaining_budget,
+                                remaining_attempts=remaining_attempts,
+                                requested_budget=action.requested_budget,
+                                first_pass=first_pass, planned_wall_share=planned_share,
+                            )
                     if body_request:
                         # Every request a body attempt sends is a mutation, so the body scanner
                         # requires state_changing_requests >= http_requests (capabilities/scanner.py).
