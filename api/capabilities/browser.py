@@ -186,7 +186,9 @@ class XSSBrowserProofAdapter:
     """Execute one server-derived XSS payload in the pinned browser runtime."""
 
     capability_name = "xss.browser_prove_batch"
-    adapter_name = "playwright"
+    # The identity the registry declares for xss.browser_prove_batch; the executor refuses
+    # any other. The Hunt prover (a subclass) declares the plain runtime it runs under.
+    adapter_name = "playwright.xss_proof_batch"
     adapter_version = "1"
     parser_version = "xss-browser-proof/v1"
     manages_cancellation = True
