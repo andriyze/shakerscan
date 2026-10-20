@@ -236,11 +236,10 @@ async def service_page_v1(conn: Any, page: Page, *, target_kind: str, target_id:
     )
     total, total_kind = await count_total(conn, page.count, from_sql=f"({FILTERED_TARGETS_SQL}) f",
                                           values=list(params))
-    inventories = {}
-    for row in rows[: page.limit]:
-        inventories[row["id"]] = await target_inventory(conn, dict(row), snapshot, matcher, registry)
-    body = plan.envelope(rows, total=total, total_kind=total_kind, generated_at=generated_at,
-                         transform=lambda item: inventories[item["id"]])
+    body = plan.envelope(rows, total=total, total_kind=total_kind, generated_at=generated_at)
+    # One inventory per page row, in page order: a connected device and its host target share an
+    # id, so the id alone does not name a row.
+    body["items"] = [await target_inventory(conn, dict(row), snapshot, matcher, registry) for row in rows[: page.limit]]
     body.update(_intelligence_fields(snapshot))
     return body
 
