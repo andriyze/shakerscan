@@ -288,6 +288,7 @@ from .capability_execution import (
     prepare_scan_inline_capability,
     scan_external_execution_target,
     scan_parameterized_execution_candidates,
+    tls_legacy_probes_affordable,
 )
 from .execution_backend import ActionHeartbeat, ActionLease
 from .finalizer import _observed_url_key, finalize_scan_report
@@ -1512,11 +1513,19 @@ class DatabaseNeutralScanActionDispatcher:
             raise ScanActionAdapterError(
                 "TLS action differs from the frozen target matrix"
             )
+        # The action's own hold decides the raw legacy-protocol/weak-suite probes: one reserved
+        # for the handshakes only (a reduced TCP grant, or a plan compiled before the probes were
+        # reserved) must not open them and then fail its budget contract.
+        legacy_probes = tls_legacy_probes_affordable(
+            action.requested_budget,
+            len(https_origins) * len(self.target.allowed_addresses),
+        )
 
         async def operation() -> Mapping[str, Any]:
             return await inspect_tls_binding(
                 target=self.target,
                 timeout_seconds_per_target=15,
+                legacy_probes=legacy_probes,
             )
 
         adapter = self._prepared_inline(
