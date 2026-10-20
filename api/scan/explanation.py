@@ -8,6 +8,7 @@ import json
 from typing import Any, Mapping, Sequence
 
 from .activity import action_diagnostic_error_class
+from .finalizer import _ACTIVE_VERIFIER_CAPABILITIES
 from .parallel_compiler import (
     parallel_action_occurrence_id,
     summarize_parallel_action_coverage,
@@ -24,11 +25,9 @@ _TERMINAL = frozenset({
     "timed_out",
 })
 _SUCCESS = frozenset({"success"})
-_ACTIVE_VERIFIERS = frozenset({
-    "templates.scan", "xss.verify", "sqli.verify", "authz.verify",
-    "templates.active_batch", "xss.verify_batch", "sqli.verify_batch",
-    "browser.proof",
-})
+# The report's own verifier set: a separate, shorter copy here left NoSQL, GraphQL, exposure, proof
+# and request verifiers out, so the page and the stored report named different zero-attempt actions.
+_ACTIVE_VERIFIERS = _ACTIVE_VERIFIER_CAPABILITIES
 _TRAFFIC_DIMENSIONS = frozenset({
     "http_requests", "state_changing_requests", "browser_actions",
     "tcp_ports_attempted", "hosts_attempted",
@@ -775,9 +774,12 @@ def build_scan_execution_explanation(
             seen.add(item["action_id"])
         return item
 
+    # Skipped as not applicable is a settled "nothing to do", as the report and the parallel
+    # merge count it: a required verifier with no candidate on this surface left no work undone.
     required_incomplete = [
         effective for effective in (effective_row(item) for item in required_rows)
         if effective["status"] not in _SUCCESS
+        and not (effective["status"] == "skipped" and effective.get("reason_code") == "not_applicable")
     ]
     work_manifests = _work_manifests(
         report_execution if parallel_actions else execution
