@@ -3,6 +3,8 @@ from __future__ import annotations
 import hashlib
 import pathlib
 
+import pytest
+
 from api.scan.action_plan import ScanAction, ScanActionPlan
 from api.scan.finalizer import finalize_scan_report
 from tests.test_scan_finalizer import _result_with_observation_count
@@ -201,37 +203,94 @@ def test_not_applicable_proof_does_not_make_its_family_incomplete():
     assert row["proof_escalation"]["status"] == "not_applicable"
 
 
-def test_a_failed_proof_is_reported_without_failing_its_verifier():
-    """A proof that ran and failed is a proof limitation, not a coverage gap."""
+@pytest.mark.parametrize(("status", "reason"), [
+    ("failed", "adapter_failed"),
+    ("timed_out", "timed_out"),
+])
+def test_a_proof_that_broke_leaves_its_family_partial_and_the_grade_unreliable(status, reason):
+    """A proof that crashed or ran out of time left its verifier's candidates without a verdict.
+
+    Unit fixture from a reflected-XSS lab target: Dalfox flagged the one candidate as a
+    reflection (an R alert, never verified with its headless check off), and only the browser
+    proof can promote that. The proof raised and settled adapter_failed, the report carried no
+    XSS row at all, and the family still read complete with a reliable A/100.
+    """
     from api.scan.capability_result import CapabilityResultReason, CapabilityResultStatus
     from tests.test_scan_orchestrator import _result
 
-    sqli = _batch_action("verify.sqli", "sqli.verify_batch", 0, count=2)
-    prove = _batch_action("prove.sqli", "sqli.prove_batch", 1, count=2, required=False)
-    final = _action("finalize.report", 2, dependencies=(sqli.action_id, prove.action_id))
+    xss = _batch_action("verify.xss.r01", "xss.verify_batch", 0, count=1)
+    prove = _batch_action(
+        "prove.xss.r01", "xss.browser_prove_batch", 1, count=1, required=False,
+    )
+    final = _action("finalize.report", 2, dependencies=(xss.action_id, prove.action_id))
     plan = ScanActionPlan(
         scan_id=SCAN_ID, execution_plan_digest="b" * 64,
-        target_binding_digest="a" * 64, actions=(sqli, prove, final),
+        target_binding_digest="a" * 64, actions=(xss, prove, final),
+    )
+    dalfox = (
+        {**_attempt("c1"), "family": "xss", "proof_state": "candidate"},
+        {"kind": "xss_alert", "candidate_id": "c1", "alert_type": "R",
+         "url": "https://app.example.test/search", "param": "q", "proof_state": "candidate"},
     )
     results = {
-        sqli.action_id: _result_with_observation_count(sqli, 2),
+        xss.action_id: _result_with_observation_count(xss, len(dalfox)),
+        prove.action_id: _result(
+            prove,
+            status=CapabilityResultStatus(status),
+            reason=CapabilityResultReason(reason),
+        ),
+    }
+    report = finalize_scan_report(
+        plan=plan, target_url="https://app.example.test",
+        action_results=results, observations={xss.action_id: dalfox, prove.action_id: ()},
+    )
+
+    row = _family(report, "xss")
+    # The verifier's own execution is still counted as it ran.
+    assert row["attempted_candidates"] == 1
+    assert row["proof_escalation"]["status"] == "failed"
+    assert row["proof_escalation"]["reason"] == reason
+    assert row["verified_findings"] == 0
+    assert row["coverage_status"] == "partial"
+    assert row["reason"] == "proof_escalation_failed"
+    assert report["coverage"]["selected_family_gaps"] == ["xss"]
+    assert report["coverage"]["status"] == "partial"
+    assert report["result"]["grade_reliable"] is False
+    assert "selected_family_incomplete" in report["coverage"]["grade_reliability"]["reasons"]
+
+
+def test_a_proof_that_broke_in_an_optional_family_does_not_flip_reliability():
+    from api.scan.capability_result import CapabilityResultReason, CapabilityResultStatus
+    from tests.test_scan_orchestrator import _result
+
+    xss = _batch_action("verify.xss", "xss.verify_batch", 0, count=1, required=False)
+    prove = _batch_action(
+        "prove.xss", "xss.browser_prove_batch", 1, count=1, required=False,
+    )
+    final = _action("finalize.report", 2, dependencies=(xss.action_id, prove.action_id))
+    plan = ScanActionPlan(
+        scan_id=SCAN_ID, execution_plan_digest="b" * 64,
+        target_binding_digest="a" * 64, actions=(xss, prove, final),
+    )
+    results = {
+        xss.action_id: _result_with_observation_count(xss, 1),
         prove.action_id: _result(
             prove,
             status=CapabilityResultStatus.FAILED,
             reason=CapabilityResultReason.ADAPTER_FAILED,
         ),
     }
-    observations = {sqli.action_id: (_attempt("c1"), _attempt("c2")), prove.action_id: ()}
     report = finalize_scan_report(
         plan=plan, target_url="https://app.example.test",
-        action_results=results, observations=observations,
+        action_results=results,
+        observations={xss.action_id: (_attempt("c1"),), prove.action_id: ()},
     )
 
-    row = _family(report, "sqli")
-    assert row["attempted_candidates"] == 2
-    assert row["coverage_status"] == "complete"
+    row = _family(report, "xss")
+    assert row["coverage_status"] == "partial"
+    assert row["reason"] == "proof_escalation_failed"
     assert report["coverage"]["selected_family_gaps"] == []
-    assert row["proof_escalation"]["status"] == "failed"
+    assert "selected_family_incomplete" not in report["coverage"]["grade_reliability"]["reasons"]
 
 
 def test_an_unfundable_proof_is_reported_as_unavailable_not_failed():
