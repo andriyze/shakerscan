@@ -98,10 +98,11 @@ Checks before an upgrade changes anything:
 - A start never creates an empty database over a lost one: when this install has run before and its
   database volume is missing, `start` stops and points to `backups/`. To start empty on purpose:
   `SHAKERSCAN_ALLOW_NEW_DATABASE=1 shakerscan start` (`shakerscan reset` does this itself).
-- A start never runs PostgreSQL 18 beside PostgreSQL 16 data that was never migrated (the
-  `postgres-data` volume of a release before 2.6, with no `postgres-cluster` volume): `start`,
-  `restart` and every other command that would start PostgreSQL stop before anything is downloaded
-  or stopped, and name the way through 2.10.0 (see PostgreSQL 18 below).
+- A start never runs PostgreSQL 18 beside PostgreSQL 16 data with no `postgres-cluster` volume (the
+  `postgres-data` volume of a release before 2.6): `start`, `restart` and every other command that
+  would start PostgreSQL stop before anything is downloaded, stopped or removed. Data that was never
+  migrated is pointed to 2.10.0; when this install has run PostgreSQL 18 before, `postgres-data` is
+  the copy a migration kept and `start` points to `backups/` (see PostgreSQL 18 below).
 
 Images:
 
@@ -133,7 +134,8 @@ After a reset, Scans that were waiting to start are queued again automatically w
 minutes; a Scan that was running is marked with an unknown outcome and can be started again.
 `shakerscan status` and `doctor` warn when Docker or the install directory is short of space,
 when the database or Redis volume of an install that has run before is missing, or when the
-PostgreSQL 16 `postgres-data` volume is present (never migrated, or left beside `postgres-cluster`).
+PostgreSQL 16 `postgres-data` volume was never migrated or sits beside `postgres-cluster` with no
+record of its migration (see PostgreSQL 18 below).
 
 ## Upgrade
 
@@ -244,11 +246,16 @@ launcher cannot take files back from another id.
 ## PostgreSQL 18
 
 ShakerScan runs PostgreSQL 18, with the data in the `postgres-cluster` volume. Releases before 2.6
-ran PostgreSQL 16 with the data in the `postgres-data` volume, and 2.6 to 2.10 migrated it on their
-first start. This release does not migrate PostgreSQL 16 data. When `postgres-data` exists without
-`postgres-cluster`, `start` stops with nothing changed, and every other command that would start
-PostgreSQL refuses. Upgrade through 2.10.0: it copies the data into PostgreSQL 18, compares row
-counts, sequences and roles with the source, and leaves `postgres-data` in place:
+ran PostgreSQL 16 with the data in the `postgres-data` volume. 2.6 to 2.10 migrated it on their
+first start, kept `postgres-data` as a copy for rollback, and recorded the migration in
+`backups/postgres-16-to-18-<time>/shakerscan-migration.txt`. This release does not migrate
+PostgreSQL 16 data. When `postgres-data` exists without `postgres-cluster`, `start` stops with
+nothing changed, and every other command that would start PostgreSQL refuses before it changes
+anything. A `POSTGRES_IMAGE` override must name a PostgreSQL 18 image.
+
+**Data that was never migrated** (this install has no release record of 2.10 or later and no
+migration record in `backups/`). Upgrade through 2.10.0: it copies the data into PostgreSQL 18,
+compares row counts, sequences and roles with the source, and leaves `postgres-data` in place:
 
 ```bash
 curl -fsSL https://install.shakerscan.com | SHAKERSCAN_INSTALL_VERSION=2.10.0 sh
@@ -257,16 +264,36 @@ curl -fsSL https://install.shakerscan.com | sh
 ```
 
 For an install outside `~/.shakerscan`, add `SHAKERSCAN_HOME=/path/to/your/install` beside the other
-variable in both installer commands. To start this release with an empty database instead (the
-`postgres-data` volume is not touched), run `SHAKERSCAN_ALLOW_NEW_DATABASE=1 shakerscan start`. A
-`POSTGRES_IMAGE` override must name a PostgreSQL 18 image.
+variable in both installer commands. In a source checkout, use the `v2.10.0` tag instead: the
+installer would replace the checkout's files with a release's and switch it to prebuilt images.
+
+```bash
+git checkout v2.10.0 && ./scanner.sh start --local
+# check in the UI that your targets and scans are there, then return to your branch
+git checkout <your-branch> && ./scanner.sh start --local
+```
+
+To start this release with an empty database instead (the `postgres-data` volume is not touched), run
+`SHAKERSCAN_ALLOW_NEW_DATABASE=1 shakerscan start`.
+
+**The database volume is missing and `postgres-data` is still there.** On an install that has run
+PostgreSQL 18 before (a release record, or a migration record in `backups/`), `postgres-cluster` was
+lost, for example by `docker compose down -v`. `postgres-data` beside it is the copy the migration
+kept: it holds the data as it was on the day of the migration, which `start` names when the record is
+in `backups/`, and nothing recorded since. `start` stops and points to `backups/`: restore the newest
+backup there (see Roll back after a failed upgrade, below). Only when no backup is newer than that
+copy is it worth migrating it again through 2.10.0 as above, knowing that everything recorded after
+the migration is missing from it. One exception: on an install that went straight from a release
+before 2.6 to 2.11.0 (next paragraph) and lost `postgres-cluster` since, `postgres-data` is the only
+copy of your data and the pre-upgrade dumps are of the empty database; upgrade through 2.10.0 as above.
 
 **An install that 2.11.0 started on an empty database.** 2.11.0 did not refuse: on an install
 upgraded directly from a release before 2.6 it created a new, empty `postgres-cluster` beside
 `postgres-data`, and any pre-upgrade dump it took is of the empty database. The PostgreSQL 16 data in
-`postgres-data` was not changed. `status` and `doctor` report the two volumes side by side. To move
-the data across, use the 2.10.0 launcher, which sets the empty cluster aside and copies
-`postgres-data` again (it asks you to type `remigrate`):
+`postgres-data` was not changed. `status` and `doctor` warn about `postgres-data` beside
+`postgres-cluster` while `backups/` holds no record of migrating it. To move the data across, use the
+2.10.0 launcher, which sets the empty cluster aside and copies `postgres-data` again (it asks you to
+type `remigrate`):
 
 ```bash
 curl -fsSL https://install.shakerscan.com | SHAKERSCAN_INSTALL_VERSION=2.10.0 SHAKERSCAN_START=0 sh
@@ -277,8 +304,16 @@ curl -fsSL https://install.shakerscan.com | sh
 ```
 
 What was recorded on the empty database stays in the set-aside copy inside `postgres-cluster`; it is
-not merged. After a migration this release neither reads nor removes `postgres-data`: it is an old
-copy of the data as it was migrated.
+not merged. 2.10.0 records this migration in `backups/` as well, so the warning stops.
+
+**The copy kept after a migration.** This release neither reads nor removes `postgres-data`: after a
+migration it is an old copy of the data as it was migrated. While `backups/` holds the record of that
+migration, `status` and `doctor` say nothing about it. Without the record (the backups were deleted,
+or the install directory was replaced) they warn while both volumes exist. If ShakerScan shows the
+targets and scans you had before 2.11, the migration took place and `postgres-data` is only the old
+copy: once you no longer need it to roll back to a release before 2.6, `docker volume rm
+shakerscan_postgres-data` (with your Compose project name in place of `shakerscan`) removes it and
+the warning. If ShakerScan shows none of them, follow the previous paragraph instead.
 
 `shakerscan reset` deletes the `postgres-cluster` database volume, not `postgres-data`.
 

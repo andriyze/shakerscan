@@ -639,9 +639,10 @@ compose() {
         return 1
     fi
 
-    # up/run/create can start PostgreSQL directly or as a dependency. Beside PostgreSQL 16 data that
-    # was never migrated, PostgreSQL 18 would initialize a new, empty database, so they are refused
-    # (scripts/upgrade_safety.sh). The refusal goes to stderr: callers often discard Compose's stdout.
+    # up/run/create can start PostgreSQL directly or as a dependency. Beside PostgreSQL 16 data with
+    # no postgres-cluster volume, PostgreSQL 18 would initialize a new, empty database, so they are
+    # refused (scripts/upgrade_safety.sh). The refusal goes to stderr: callers often discard
+    # Compose's stdout.
     case "$(compose_subcommand "$@")" in
         up|run|create)
             ensure_no_unmigrated_legacy_database || return 1
@@ -649,6 +650,21 @@ compose() {
     esac
 
     "${DOCKER_COMPOSE_CMD[@]}" "${COMPOSE_FILE_ARGS[@]}" "$@"
+}
+
+# Commands that change the install (a volume, containers, .env) before their own `compose up` or
+# `compose run`. Beside PostgreSQL 16 data with no postgres-cluster volume compose() refuses that
+# call, so these are refused first, with nothing changed: `redis reset` would otherwise remove
+# Redis's volume, `rebuild` the running workers, `model-intake` its .env setting. start and restart
+# check inside start_services and restart_services.
+command_changes_then_starts_containers() {
+    case "$1 ${2:-}" in
+        "scale "*|"rebuild "*|"shell "*|"redis reset"|"devices start"|"devices restart"|\
+        "model-intake enable"|"model-intake disable"|"gungnir start")
+            return 0
+            ;;
+    esac
+    return 1
 }
 
 compose_up() {
@@ -2570,7 +2586,8 @@ start_services() {
     # Every step fails closed with an explicit return: callers such as `reset` call this in an
     # `||` list, where `set -e` does not apply.
     note_running_release
-    # PostgreSQL 16 data this release cannot migrate: refused before anything is downloaded or stopped.
+    # PostgreSQL 16 data with no postgres-cluster volume (never migrated, or the copy a migration
+    # kept beside a lost database): refused before anything is downloaded or stopped.
     ensure_no_unmigrated_legacy_database || return 1
     prepare_runtime_files || return 1
     persist_remote_access_env || return 1
@@ -4725,6 +4742,11 @@ case $COMMAND in
         fi
         ;;
 esac
+
+# After the dependency check, so Docker is asked with sudo when the launcher needs it.
+if command_changes_then_starts_containers "$COMMAND" "${ARGS[0]:-}" && ! ensure_no_unmigrated_legacy_database; then
+    exit 1
+fi
 
 case $COMMAND in
     start)

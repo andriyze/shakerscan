@@ -4,8 +4,11 @@ Releases 2.6 to 2.10 migrated that volume into `<project>_postgres-cluster` befo
 PostgreSQL. Once the migration was removed, nothing refused the old layout: `start` (and the
 installer's start) ran `compose up -d postgres`, PostgreSQL 18 initialized a new, empty database in
 a new postgres-cluster volume beside the real data, and the "pre-upgrade" dump was taken from the
-empty one. The launcher now refuses every Compose call that can start PostgreSQL in that state, and
-`start`/`restart` refuse before anything is downloaded or stopped.
+empty one. The launcher now refuses every Compose call that can start PostgreSQL in that state;
+`start`/`restart` refuse before anything is downloaded or stopped, and the commands that change the
+install before their own `compose up` (`redis reset`, `rebuild`, `model-intake`, ...) refuse first.
+When this install ran PostgreSQL 18 before, postgres-data is the copy a migration kept beside a lost
+postgres-cluster, and the refusal points to backups/ instead.
 
 Unit fixtures: Docker, Compose and the network are stubbed (a fake `docker` on PATH for the
 start-level test); no container runs.
@@ -261,12 +264,20 @@ RUNTIME_FILES = ("scanner.sh", "docker-compose.release.yml", "scripts/upgrade_sa
 
 
 def _start(tmp_path: Path, command: str, *, running: bool) -> tuple[subprocess.CompletedProcess[str], str, list[str]]:
+    return _launch(tmp_path, command, "--prebuilt", "-y", running=running)
+
+
+def _launch(tmp_path: Path, *args: str, running: bool = False,
+            record: str | None = None) -> tuple[subprocess.CompletedProcess[str], str, list[str]]:
+    """The real launcher in a copy of the runtime files, against the fake Docker, beside postgres-data."""
     install = tmp_path / "install"
     for relative in RUNTIME_FILES:
         (install / relative).parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(ROOT / relative, install / relative)
     (install / ".shakerscan-local-build").write_text("prebuilt\n")
     (install / ".env").write_text(f"POSTGRES_PASSWORD={'p' * 40}\nREDIS_PASSWORD={'r' * 40}\n")
+    if record is not None:
+        (install / ".release-images.current").write_text(record)
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     (bin_dir / "docker").write_text(FAKE_DOCKER)
@@ -281,7 +292,7 @@ def _start(tmp_path: Path, command: str, *, running: bool) -> tuple[subprocess.C
     log = tmp_path / "docker.log"
     log.write_text("")
     result = subprocess.run(
-        ["bash", str(install / "scanner.sh"), command, "--prebuilt", "-y"], cwd=install, capture_output=True,
+        ["bash", str(install / "scanner.sh"), *args], cwd=install, capture_output=True,
         text=True, timeout=120, check=False, stdin=subprocess.DEVNULL,
         env={"HOME": str(tmp_path / "home"), "PATH": f"{bin_dir}:/usr/bin:/bin:/usr/sbin:/sbin", "TERM": "dumb",
              "FAKE_DOCKER_LOG": str(log), "FAKE_DOCKER_VOLUMES": str(volumes), "FAKE_RUNNING": "1" if running else "0",
@@ -308,3 +319,73 @@ def test_start_refuses_unmigrated_postgresql_16_data_with_nothing_changed(tmp_pa
     assert "shakerscan_postgres-data" in result.stderr and "SHAKERSCAN_INSTALL_VERSION=2.10.0" in result.stderr, output
     if running:
         assert "the running release keeps running" in result.stderr, output
+
+
+def _changes(docker_log: str) -> list[str]:
+    """Every Docker call in the log that changes a container, volume, network or image."""
+    mutating = re.compile(r"\s(up|run|create|down|stop|rm|restart|pull|build|kill)(\s|$)")
+    changed = []
+    for line in docker_log.splitlines():
+        if line.startswith("compose "):
+            if mutating.search(line):
+                changed.append(line)
+        elif re.match(r"(rm|run|create|stop|kill|restart|build|buildx|pull|(volume|network|image) (rm|create|prune))(\s|$)",
+                      line):
+            changed.append(line)
+    return changed
+
+
+@pytest.mark.parametrize("args", [
+    ("redis", "reset", "--yes"),
+    ("model-intake", "enable"),
+    ("model-intake", "disable"),
+    ("scale", "2"),
+    ("rebuild",),
+    ("devices", "start"),
+    ("devices", "restart"),
+    ("gungnir", "start"),
+    ("shell",),
+], ids=lambda args: " ".join(args))
+def test_commands_that_change_the_install_before_starting_containers_refuse_first(tmp_path, args):
+    """`redis reset` removed Redis's volume (its copy was refused, silently) and then could not start
+    Redis; `rebuild` removed the running workers; `model-intake` wrote .env. Each then reached a
+    refused `compose up`. Now each is refused before it changes anything."""
+    result, docker_log, volumes = _launch(tmp_path, *args, "--prebuilt", "-y", running=True)
+    output = result.stdout + result.stderr
+    assert _changes(docker_log) == [], docker_log
+    assert volumes == ["shakerscan_postgres-data", "shakerscan_redis-data"]
+    # Every launcher command records the API sandbox group first; nothing else may be written.
+    env = [line for line in (tmp_path / "install" / ".env").read_text().splitlines()
+           if not line.startswith("SHAKERSCAN_API_SANDBOX_GROUP_GID=")]
+    assert env == [f"POSTGRES_PASSWORD={'p' * 40}", f"REDIS_PASSWORD={'r' * 40}"]
+    assert result.returncode == 1, output + docker_log
+    assert "shakerscan_postgres-data" in result.stderr and "never migrated" in result.stderr, output
+
+
+@pytest.mark.parametrize("args", [("redis",), ("devices", "status"), ("model-intake", "status"), ("backup", "list"),
+                                  ("logs", "api")], ids=lambda args: " ".join(args))
+def test_commands_that_only_read_still_run_beside_the_old_data(tmp_path, args):
+    result, docker_log, _ = _launch(tmp_path, *args, "--prebuilt", "-y")
+    assert "never migrated" not in result.stdout + result.stderr, result.stdout + result.stderr
+    assert _changes(docker_log) == [], docker_log
+
+
+def test_start_beside_the_copy_a_migration_kept_points_to_backups(tmp_path):
+    """A 2.10 record: postgres-cluster was lost (say `docker compose down -v`) and postgres-data is the
+    copy kept on the migration day. 2.10.0 would migrate that stale copy again as if it were current."""
+    result, docker_log, volumes = _launch(tmp_path, "start", "--prebuilt", "-y", record="# release 2.10.0\nref\n")
+    output = result.stdout + result.stderr
+    assert _changes(docker_log) == [] and volumes == ["shakerscan_postgres-data", "shakerscan_redis-data"], docker_log
+    assert result.returncode == 1, output
+    assert "missing although this install has started before" in result.stderr, output
+    assert "backups" in result.stderr and "nothing recorded since" in result.stderr
+    assert "never migrated" not in result.stderr and "SHAKERSCAN_INSTALL_VERSION=2.10.0" not in result.stderr
+
+
+def test_a_source_checkout_start_is_pointed_to_the_2_10_0_tag(tmp_path):
+    result, docker_log, volumes = _launch(tmp_path, "start", "--local", "-y")
+    output = result.stdout + result.stderr
+    assert _changes(docker_log) == [] and volumes == ["shakerscan_postgres-data", "shakerscan_redis-data"], docker_log
+    assert result.returncode == 1, output
+    assert "git checkout v2.10.0 && ./scanner.sh start --local" in result.stderr, output
+    assert "install.shakerscan.com" not in result.stderr

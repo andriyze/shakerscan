@@ -1149,3 +1149,105 @@ def test_status_names_unmigrated_postgresql_16_data_and_an_old_copy_left_beside_
     assert "volume rm" not in both  # it may be the only copy of the data: never suggest removing it
     (tmp_path / "volume_shakerscan_postgres-data").unlink()
     assert "postgres-data" not in run(tmp_path, "upgrade_safety_warnings").stdout
+
+
+# --- postgres-data beside a lost postgres-cluster, and the record a migration left in backups/ ----
+
+
+def _migration_record(tmp_path: Path, stamp: str = "20261001T004718Z", *, volume: str = "shakerscan_postgres-data",
+                      incomplete: bool = False) -> None:
+    """What 2.6 to 2.10 wrote next to their migration dump (scripts/postgres_upgrade.sh in 2.10.0)."""
+    directory = tmp_path / "backups" / f"postgres-16-to-18-{stamp}"
+    directory.mkdir(parents=True)
+    (directory / "shakerscan-migration.txt").write_text(
+        f"from_kind=legacy\nfrom_major=16\nfrom_volume={volume}\nsource_control=abc\nto_major=18\n"
+        f"migrated_at={stamp}\nbackup={directory}\ntables_verified=42\n")
+    if incomplete:
+        (directory / ".incomplete").write_text("PostgreSQL upgrade did not complete; this dump is not verified.\n")
+
+
+def test_a_lost_database_beside_the_kept_copy_points_to_backups_not_to_a_migration(tmp_path):
+    """A 2.10 record proves a migration ran (2.10 migrated before PostgreSQL could start): postgres-data
+    is the copy it kept, older than the lost postgres-cluster. Migrating it again through 2.10.0 would
+    bring back the data of the migration day as if it were current."""
+    _upgrade_pending(tmp_path)
+    _volumes(tmp_path, "postgres-data", "redis-data")
+    result = run(tmp_path, _LEGACY_GATE)
+    assert "rc=1" in result.stdout, result.stdout + result.stderr
+    assert "missing although this install has started before" in result.stderr
+    assert f"{tmp_path}/backups" in result.stderr and "backup list" in result.stderr
+    assert "copy kept from a migration" in result.stderr and "nothing recorded since" in result.stderr
+    assert "never migrated" not in result.stderr
+    assert "SHAKERSCAN_INSTALL_VERSION=2.10.0" not in result.stderr
+    assert "Nothing was changed" in result.stderr and "SHAKERSCAN_ALLOW_NEW_DATABASE=1" in result.stderr
+    assert _compose_calls(tmp_path) == []
+
+
+def test_a_migration_record_names_the_day_of_the_copy_even_without_a_release_record(tmp_path):
+    """2.6 to 2.9 wrote no release record, only the migration record in backups/."""
+    _volumes(tmp_path, "postgres-data")
+    _migration_record(tmp_path, "20260920T101500Z")
+    _migration_record(tmp_path, "20261001T004718Z")
+    result = run(tmp_path, _LEGACY_GATE)
+    assert "rc=1" in result.stdout, result.stdout + result.stderr
+    assert "copy kept from the migration on 2026-10-01" in result.stderr, result.stderr
+    assert "never migrated" not in result.stderr and "SHAKERSCAN_INSTALL_VERSION=2.10.0" not in result.stderr
+
+
+def test_an_unfinished_or_foreign_migration_record_does_not_count(tmp_path):
+    unfinished = tmp_path / "unfinished"
+    foreign = tmp_path / "foreign"
+    for work in (unfinished, foreign):
+        work.mkdir()
+        _volumes(work, "postgres-data")
+    _migration_record(unfinished, incomplete=True)
+    _migration_record(foreign, volume="other_postgres-data")
+    for work in (unfinished, foreign):
+        result = run(work, _LEGACY_GATE)
+        assert "rc=1" in result.stdout and "never migrated" in result.stderr, (work.name, result.stderr)
+        assert "SHAKERSCAN_INSTALL_VERSION=2.10.0" in result.stderr
+
+
+def test_status_gives_one_consistent_warning_for_a_lost_database_beside_the_kept_copy(tmp_path):
+    (tmp_path / ".env").write_text("POSTGRES_PASSWORD=x\n")
+    _upgrade_pending(tmp_path)
+    _volumes(tmp_path, "postgres-data", "redis-data")
+    warnings = [line for line in run(tmp_path, "upgrade_safety_warnings").stdout.splitlines() if "postgres" in line
+                or "database" in line]
+    assert len(warnings) == 1, warnings
+    assert "missing although this install has started before" in warnings[0]
+    assert "backups" in warnings[0] and "never migrated" not in warnings[0]
+
+
+def test_status_says_nothing_about_the_copy_a_recorded_migration_kept(tmp_path):
+    """2.10 removed postgres-data 30 days after a migration; 2.11 never does, so most migrated installs
+    keep it. With the migration's record in backups/ it is the expected rollback copy, not a warning
+    on every status and doctor run."""
+    _volumes(tmp_path, "postgres-data", "postgres-cluster", "redis-data")
+    _upgrade_pending(tmp_path)
+    _migration_record(tmp_path)
+    assert "postgres" not in run(tmp_path, "upgrade_safety_warnings").stdout
+    assert "rc=0" in run(tmp_path, _LEGACY_GATE).stdout
+    # Without the record (2.11.0 started this install empty, or the backups were deleted) it warns.
+    for receipt in (tmp_path / "backups").glob("postgres-*/shakerscan-migration.txt"):
+        receipt.unlink()
+    unproven = run(tmp_path, "upgrade_safety_warnings").stdout
+    assert "beside shakerscan_postgres-cluster" in unproven and "no record of migrating it" in unproven, unproven
+
+
+def test_a_source_checkout_is_pointed_to_the_2_10_0_tag_not_to_the_installer(tmp_path):
+    """The installer would overwrite a checkout's tracked files with a release's and switch it to
+    prebuilt images."""
+    _volumes(tmp_path, "postgres-data")
+    body = """
+    git() { [ "$3" = symbolic-ref ] && echo fix/my-branch; }
+    USE_PREBUILT=0
+    ensure_no_unmigrated_legacy_database; echo rc=$?
+    """
+    result = run(tmp_path, body)
+    assert "rc=1" in result.stdout, result.stdout + result.stderr
+    assert "git checkout v2.10.0 && ./scanner.sh start --local" in result.stderr, result.stderr
+    assert "git checkout fix/my-branch" in result.stderr
+    assert "install.shakerscan.com" not in result.stderr
+    prebuilt = run(tmp_path, _LEGACY_GATE).stderr
+    assert "SHAKERSCAN_INSTALL_VERSION=2.10.0" in prebuilt and "git checkout" not in prebuilt
