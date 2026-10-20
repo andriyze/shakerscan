@@ -314,3 +314,47 @@ def test_redacted_query_values_read_as_masked_in_the_brief_and_dates_are_short()
     assert "1024-bit RSA key" in key["summary"]
     expired = build_finding_detail(_tls("tls_certificate_expired", certificate={"not_after": "2025-01-01T00:00:00+00:00"}))
     assert "expired on 2025-01-01" in expired["summary"] and "T00" not in expired["summary"]
+
+
+# Unit fixtures below reproduce the stored evidence and sqlmap output of a recorded 2.11.0 scan of
+# lab targets (hosts renamed to .invalid). A sqlmap run under --batch prints this prompt before its
+# "back-end DBMS:" summary line.
+_SQLMAP_DBMS_PROMPT = (
+    "it looks like the back-end DBMS is 'SQLite'. Do you want to skip test payloads specific for "
+    "other DBMSes? [Y/n] Y"
+)
+
+
+def test_finalizer_takes_the_dbms_from_the_sqlmap_summary_line_not_the_batch_prompt():
+    from api.scan.finalizer import _findings_for_action
+    from tests.test_scan_finalizer import _result_with_observation_count
+    from tests.test_scan_orchestrator import _action
+    action = _action("dast.sqli", 0, capability_name="sqli.verify_batch")
+    result = _result_with_observation_count(action, 4)
+    findings = _findings_for_action(result, [
+        {"kind": "sqli_finding", "url": "http://s.invalid/product?id=%3Credacted%3E", "param": "id",
+         "message": "GET parameter 'id' is vulnerable."},
+        # Recorded by a worker whose parser kept every line that mentioned the DBMS.
+        {"kind": "sqli_dbms_fingerprint", "message": _SQLMAP_DBMS_PROMPT},
+        {"kind": "sqli_dbms_fingerprint", "message": "[03:35:12] [INFO] the back-end DBMS is SQLite"},
+        {"kind": "sqli_dbms_fingerprint", "message": "back-end DBMS: SQLite"},
+    ])
+    assert findings[0]["evidence"]["dbms"] == "SQLite"
+    # Only the prompt: no DBMS is recorded rather than the prompt text.
+    result = _result_with_observation_count(action, 2)
+    findings = _findings_for_action(result, [
+        {"kind": "sqli_finding", "url": "http://s.invalid/product?id=1", "param": "id", "message": "x"},
+        {"kind": "sqli_dbms_fingerprint", "message": _SQLMAP_DBMS_PROMPT},
+    ])
+    assert "dbms" not in findings[0]["evidence"]
+
+
+def test_sqli_brief_reads_a_stored_sqlmap_prompt_as_the_database_name():
+    brief = build_finding_detail({"tool": "sqlmap", "severity": "high", "proof_state": "likely_vulnerable",
+        "url": "http://sqli.fixture.invalid/product?id=%3Credacted%3E", "title": "Potential SQL injection",
+        "evidence": {"url": "http://sqli.fixture.invalid/product?id=%3Credacted%3E", "param": "id", "method": "GET",
+                     "dbms": _SQLMAP_DBMS_PROMPT, "sqlmap_message": "GET parameter 'id' is vulnerable."}})
+    database = next(fact["value"] for fact in brief["observed"] if fact["label"] == "Database")
+    assert database == "SQLite"
+    assert "Do you want" not in json.dumps(brief)
+

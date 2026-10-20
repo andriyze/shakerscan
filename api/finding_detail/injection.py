@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import urllib.parse
 from typing import Any, Mapping
 
@@ -54,6 +55,10 @@ def _with_value(url: str, parameter: str, value: str) -> str:
     return urllib.parse.urlunsplit(parsed._replace(query=urllib.parse.urlencode(query)))
 
 
+# sqlmap's --batch prompt, which older scans stored as the DBMS: "it looks like the back-end DBMS is
+# 'SQLite'. Do you want to skip test payloads specific for other DBMSes? [Y/n] Y".
+_SQLMAP_DBMS_PROMPT = re.compile(r"back-end DBMS is '([^']{1,60})'")
+
 _DBMS_MARKERS = (
     ("SQLite", ("sqlite",)), ("PostgreSQL", ("postgres", "pg_", "psql", "pgsql")),
     ("MySQL / MariaDB", ("mysql", "mariadb")), ("Microsoft SQL Server", ("microsoft sql", "mssql", "sqlserver", "odbc sql server")),
@@ -71,7 +76,9 @@ def build_sqli(finding: Mapping[str, Any], evidence: Mapping[str, Any]) -> dict[
     url = display_url(raw_url)
     verified = finding.get("proof_state") == "verified" or finding.get("verified") is True
     signatures = strings(evidence.get("database_error_signatures"), 6, 200)
-    dbms = text(evidence.get("dbms"), 60) or dbms_from(signatures, text(evidence.get("redacted_excerpt"), 1200))
+    stored_dbms = text(evidence.get("dbms"), 300)
+    prompt = _SQLMAP_DBMS_PROMPT.search(stored_dbms)
+    dbms = (prompt.group(1) if prompt else stored_dbms[:60]) or dbms_from(signatures, text(evidence.get("redacted_excerpt"), 1200))
     timing = record(evidence.get("timing_ms"))
     technique = text(evidence.get("technique"), 80).replace("_", " ")
     reps = integer(evidence.get("repetitions"))

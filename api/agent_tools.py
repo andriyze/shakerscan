@@ -2115,6 +2115,10 @@ def _template_metadata(info: Mapping[str, Any], item: Mapping[str, Any]) -> dict
 BASELINE_RECORDING_TOOLS = frozenset({"sqlmap", "dalfox"})
 # sqlmap raises this on a 401 to its connection test and skips the target.
 _SQLMAP_NOT_AUTHORIZED = "not authorized, try to provide right HTTP authentication"
+# sqlmap's summary line names the DBMS ("back-end DBMS: SQLite", optionally after log tags). Other
+# lines also mention it: the --batch prompt "it looks like the back-end DBMS is 'X'. Do you want
+# ...", "the back-end DBMS is not X" and "back-end DBMS operating system: ...".
+_SQLMAP_DBMS_LINE_RE = re.compile(r"^(?:\[[^\]]*\]\s*)*back-end DBMS:\s*(\S.*)$")
 
 
 def parse_scanner_output(
@@ -2327,7 +2331,7 @@ def parse_scanner_output(
                     ),
                     "proof_state": "candidate",
                 })
-            elif line.startswith("[INFO] back-end DBMS:") or "back-end DBMS" in line:
+            elif _SQLMAP_DBMS_LINE_RE.match(line):
                 records.append({
                     "kind": "sqli_dbms_fingerprint",
                     "message": line[:300],
