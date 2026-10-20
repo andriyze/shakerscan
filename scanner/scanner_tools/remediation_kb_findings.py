@@ -775,6 +775,11 @@ HEADER_REMEDIATION: dict[str, str] = {
     "cross-origin-resource-policy": "missing_corp",
     "x-permitted-cross-domain-policies": "missing_x_permitted_cross_domain_policies",
 }
+# A header that is present with a weak value is a different problem from a missing one; the check
+# names it where the title would read as the missing header's.
+CHECK_REMEDIATION: dict[str, str] = {
+    "weak_header_content-security-policy": "weak_csp",
+}
 _HEADER_TITLE = re.compile(r"^(?:missing http response header:\s*(?P<named>[a-z0-9-]+)|(?P<bare>[a-z0-9-]+) (?:header )?missing)\b")
 
 # Fixed titles from finding catalogs (AI Gate probes, Hunt workflows), normalized: lower case,
@@ -856,6 +861,9 @@ def finding_type_remediation_key(finding: dict[str, Any], evidence: dict[str, An
             return TLS_TITLE_CHECKS[title]
     if title in EXACT_TITLE_REMEDIATION:
         return EXACT_TITLE_REMEDIATION[title]
+    check = str(evidence.get("check") or "").strip().lower()
+    if check in CHECK_REMEDIATION:
+        return CHECK_REMEDIATION[check]
     template_id = str(evidence.get("template_id") or "").strip().lower()
     if template_id in TEMPLATE_REMEDIATION:
         return TEMPLATE_REMEDIATION[template_id]

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from typing import Any, Mapping
 
 from .common import command, detected_stack, fact, facts, origin_of, q, record, text
@@ -42,6 +43,23 @@ HEADERS: Mapping[str, tuple[str, str, str]] = {
     "cross-origin-embedder-policy": ("Cross-Origin-Embedder-Policy", "require-corp", "Requires embedded resources to opt in to being loaded."),
     "cross-origin-resource-policy": ("Cross-Origin-Resource-Policy", "same-origin", "Stops other origins from embedding this response."),
 }
+
+
+# A CSP source expression copied from the observed policy into an example: keywords, schemes,
+# hosts and wildcard hosts only, so a target-chosen value cannot break out of the snippet.
+_CSP_SOURCE = re.compile(r"'[a-z0-9-]{1,40}'|[a-z0-9*][a-z0-9.*:/_-]{0,200}", re.IGNORECASE)
+
+
+def _observed_frame_ancestors(policy: str) -> str:
+    """The observed CSP frame-ancestors sources when they already restrict framing, else ""."""
+    for part in policy.split(";"):
+        tokens = part.split()
+        if tokens and tokens[0].lower() == "frame-ancestors":
+            sources = tokens[1:]
+            if sources and "*" not in sources and all(_CSP_SOURCE.fullmatch(token) for token in sources):
+                return " ".join(sources)
+            return ""
+    return ""
 
 
 def _stack_example(stack: str | None, header: str, value: str) -> list[dict[str, str]]:
@@ -122,6 +140,15 @@ def build_weak_header(finding: Mapping[str, Any], evidence: Mapping[str, Any]) -
     current = text(evidence.get("observed_value"), 2000) or text(headers.get(header), 2000)
     issues = [record(item) for item in evidence.get("issues") or () if isinstance(item, Mapping)]
     expected = text(evidence.get("expected_value"), 600) or value
+    # A policy that already restricts framing keeps its own frame-ancestors: recommending 'self'
+    # in place of an observed 'none' would loosen the protection while fixing something else.
+    framing = _observed_frame_ancestors(current) if header == "content-security-policy" else ""
+    if framing:
+        value = value.replace("frame-ancestors 'self'", f"frame-ancestors {framing}")
+        expected = expected.replace("frame-ancestors 'self'", f"frame-ancestors {framing}")
+    # Some expectations describe a value ("DENY or SAMEORIGIN", "nonces or hashes"); only one that is
+    # the recommended value itself is a header line the check can print.
+    literal = bool(expected) and expected == value
     stack = detected_stack(headers)
     curl = f"curl -sS -o /dev/null -D - {q(url or origin)} | grep -i {q('^' + header + ':')}"
     return {
@@ -135,10 +162,10 @@ def build_weak_header(finding: Mapping[str, Any], evidence: Mapping[str, Any]) -
             fact("Response status", observed.get("response_status") or evidence.get("status"), mono=True),
             fact("Server", headers.get("server"), mono=True),
         ),
-        "expected": [f"{display}: {expected}"] if expected else [],
+        "expected": [f"{display}: {expected}" if literal else f"{display} — {expected}"] if expected else [],
         "context": [text(item.get("text"), 400) for item in issues] + [purpose],
         "reproduce": command(curl, expect=f"{display}: {current[:120]}"),
-        "verify": command(curl, expect=f"{display}: {expected[:160]}" if expected else f"a {display} line without the weaknesses listed"),
+        "verify": command(curl, expect=f"{display}: {expected[:160]}" if literal else f"a {display} line without the weaknesses listed above"),
         "fix": [f"Change the {display} value sent by {origin}{' (detected server: ' + stack + ')' if stack else ''}: {expected}."]
                + (["Replace inline scripts with external files or add a per-response nonce, then drop 'unsafe-inline'; test with Content-Security-Policy-Report-Only first."] if header == "content-security-policy" else [])
                + (["Raise max-age to at least 15552000 (180 days), ideally 31536000; add includeSubDomains once every subdomain serves HTTPS."] if header == "strict-transport-security" else []),
