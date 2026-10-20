@@ -58,20 +58,24 @@ def test_related_findings_come_from_the_same_target_and_rank_the_shared_certific
                 "certificate": {"dns_names": ["other.invalid"], "sha256": CERT}, "requested_host": "h.invalid"}, severity="high")
             shared = await add(TARGET, "TLS certificate chain is not trusted", "tls.inspect", "https://alt.invalid",
                                {"check": "tls_certificate_untrusted", "certificate": {"sha256": CERT}})
-            same_check = await add(TARGET, "TLS certificate expires within 30 days", "tls.inspect", "https://h.invalid:8444",
-                                   {"check": "tls_certificate_expiring"}, severity="low")
+            same_check = await add(TARGET, "TLS certificate hostname mismatch", "tls.inspect", "https://h.invalid:8444/x",
+                                   {"check": "tls_certificate_hostname_mismatch"}, severity="low")
+            # Same tool and origin, another check: not "the same check".
+            other_check = await add(TARGET, "TLS certificate expires within 30 days", "tls.inspect", "https://h.invalid:8444",
+                                    {"check": "tls_certificate_expiring"}, severity="low")
             await add(TARGET, "Resolved one", "tls.inspect", "https://h.invalid:8444", {"certificate_sha256": CERT}, status="resolved")
             await add(OTHER, "Other target", "tls.inspect", "https://h.invalid:8444", {"certificate_sha256": CERT})
             row = dict(await conn.fetchrow("SELECT * FROM findings WHERE id = $1", subject))
             rows = [dict(item) for item in await conn.fetch(RELATED_SQL, *related_sql_args(row))]
-            return row, rows, shared, same_check
+            return row, rows, shared, same_check, other_check
         finally:
             await conn.close()
 
-    row, rows, shared, same_check = asyncio.run(go())
+    row, rows, shared, same_check, other_check = asyncio.run(go())
+    assert str(other_check) not in {str(item["id"]) for item in rows}
     related = related_findings(row, rows)
     assert [item["id"] for item in related] == [str(shared), str(same_check)]
-    assert related[0]["relation"] == "Same certificate"
+    assert [item["relation"] for item in related] == ["Same certificate", "Same check on this origin"]
     brief = build_finding_detail(row)  # the JSONB evidence as asyncpg returns it (text)
     assert brief["class"] == "tls.certificate_hostname_mismatch"
     assert "other.invalid" in brief["summary"]
@@ -111,7 +115,9 @@ def test_related_findings_are_filtered_by_origin_in_sql_and_use_the_built_indexe
                 if name in {"idx_findings_active_target_origin", "idx_findings_active_target_certificate"}:
                     await conn.execute(f"CREATE INDEX {name} ON {definition}")
             subject = await add("Missing CSP", "http_baseline", "https://app.invalid", {"check": "missing_header_csp"})
-            default_port = await add("Same tool", "http_baseline", "https://APP.invalid:443/x", {})
+            default_port = await add("Same check", "http_baseline", "https://APP.invalid:443/x", {"check": "missing_header_csp"})
+            other_check = await add("Same tool, other check", "http_baseline", "https://app.invalid/w",
+                                    {"check": "missing_header_hsts"}, severity="low")
             other_origin = await add("Other origin", "http_baseline", "https://other.invalid", {}, severity="critical")
             other_port = await add("Other port", "http_baseline", "https://app.invalid:8443", {}, severity="high")
             low = await add("Low, other tool", "nuclei", "https://app.invalid/y", {}, severity="low")
@@ -120,15 +126,17 @@ def test_related_findings_are_filtered_by_origin_in_sql_and_use_the_built_indexe
             rows = [dict(item) for item in await conn.fetch(RELATED_SQL, *related_sql_args(row))]
             await conn.execute("SET enable_seqscan = off")
             plan = "\n".join(r[0] for r in await conn.fetch("EXPLAIN " + RELATED_SQL, *related_sql_args(row)))
-            return rows, plan, default_port, other_origin, other_port, low, significant
+            return row, rows, plan, default_port, other_check, other_origin, other_port, low, significant
         finally:
             await conn.close()
 
-    rows, plan, default_port, other_origin, other_port, low, significant = asyncio.run(go())
+    row, rows, plan, default_port, other_check, other_origin, other_port, low, significant = asyncio.run(go())
     returned = {str(item["id"]) for item in rows}
     assert str(other_origin) not in returned and str(other_port) not in returned and str(low) not in returned
-    related = related_findings({"url": "https://app.invalid", "tool": "http_baseline", "evidence": {}}, rows)
+    assert str(other_check) not in returned
+    related = related_findings(row, rows)
     assert [item["id"] for item in related] == [str(default_port), str(significant)]
+    assert related[0]["relation"] == "Same check on this origin"
     assert "idx_findings_active_target_origin" in plan
 
 
