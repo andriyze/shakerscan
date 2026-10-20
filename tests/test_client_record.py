@@ -619,3 +619,61 @@ def test_close_does_not_retry_a_refusal():
 
     with pytest.raises(UploadError):
         record.close_capture(Refuses(), "c-1", {}, sleep=lambda _s: pytest.fail("retried a 403"))
+
+
+def _redirecting_server(location=None):
+    """A loopback server that answers every request with a 302 to ``location`` (or, without one,
+    with a capture-shaped 200), and records each request's method, path and whether it carried
+    an Authorization header."""
+    hops = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, *args):
+            pass
+
+        def _answer(self):
+            self.rfile.read(int(self.headers.get("Content-Length") or 0))
+            hops.append((self.command, self.path, self.headers.get("Authorization") is not None))
+            data = b"" if location else json.dumps({**CAPTURE, "id": "elsewhere", "status": "applied"}).encode()
+            self.send_response(302 if location else 200)
+            if location:
+                self.send_header("Location", location)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+
+        do_GET = do_POST = _answer
+
+    server, url = _serve(Handler)
+    return server, url, hops
+
+
+def test_a_redirect_stops_create_batch_and_close_and_the_token_never_follows_it():
+    """Real sockets, no mocks: the instance answers 302 to another origin. Nothing reaches that
+    origin; creating the capture is refused with the redirect named, and a batch or the close is
+    refused once instead of being retried."""
+    elsewhere, elsewhere_url, elsewhere_hops = _redirecting_server()
+    location = elsewhere_url.replace("127.0.0.1", "localhost") + "/collect"
+    instance, instance_url, instance_hops = _redirecting_server(location)
+    try:
+        api = record.ApiClient(instance_url, "dummy-token-never-a-real-credential", timeout=5)
+        with pytest.raises(record.RecordError, match="redirect") as refused:
+            record.create_capture(api, "https://app.example.test", None)
+        assert location.rsplit("/", 1)[0] in str(refused.value)
+        recording = record.Recording(CAPTURE, api, include_assets=False)
+        recording.offer({"method": "GET", "url": "https://app.example.test/api/a", "resource_type": "xhr"}, 0.0)
+        assert recording.finish() is False and "redirect" in recording.stopped
+        with pytest.raises(UploadError) as closing:
+            record.close_capture(api, "c-1", {}, sleep=lambda _s: pytest.fail("retried a redirect"))
+        assert closing.value.status == 302 and not closing.value.retryable
+    finally:
+        for server in (instance, elsewhere):
+            server.shutdown()
+            server.server_close()
+    assert [(method, path) for method, path, _auth in instance_hops] == [
+        ("POST", "/request-collections/captures"),
+        ("POST", "/request-collections/c-1/capture-batches"),
+        ("POST", "/request-collections/c-1/capture-close"),
+    ]
+    assert elsewhere_hops == [], "the bearer token followed the redirect to another origin"

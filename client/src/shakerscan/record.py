@@ -42,6 +42,7 @@ from ._capture import (
     encode_json,
     endpoint_key,
 )
+from ._vendored import helper
 
 TEST_HOOKS_ENV = "SHAKERSCAN_RECORD_TEST_HOOKS"
 KEEPALIVE_SECONDS = 300.0
@@ -87,8 +88,17 @@ def add_parser(commands: Any, connection: Any) -> None:
     record.add_argument("--script", help=argparse.SUPPRESS)
 
 
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """Never follow a redirect: urllib's default handler re-sends the Authorization header to
+    whatever Location names, another host or plain http. The caller reports the 3xx instead."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: ANN001
+        return None
+
+
 class ApiClient:
-    """JSON over the client's connection; a token goes only to https or a loopback address."""
+    """JSON over the client's connection; a token goes only to https or a loopback address, and
+    never follows a redirect."""
 
     def __init__(self, base_url: str, token: str | None, *, timeout: float = 60.0, opener: Any = None) -> None:
         parts = urllib.parse.urlsplit(base_url)
@@ -98,7 +108,7 @@ class ApiClient:
         self.base_url = base_url.rstrip("/")
         self.token = token
         self.timeout = timeout
-        self.opener = opener or urllib.request.build_opener()
+        self.opener = opener or urllib.request.build_opener(_NoRedirect())
 
     def request(self, method: str, path: str, payload: Mapping[str, Any] | None = None, *,
                 headers: Mapping[str, str] | None = None, body: bytes | None = None) -> dict[str, Any]:
@@ -116,7 +126,13 @@ class ApiClient:
         except urllib.error.HTTPError as exc:
             raw = exc.read(64 * 1024)
             retry_after = _retry_after(exc.headers.get("Retry-After") if exc.headers else None)
+            location = exc.headers.get("Location") if exc.headers else None
             exc.close()
+            if 300 <= exc.code < 400:
+                # Not followed (_NoRedirect): name where it points and how to connect there.
+                explanation = helper("_redirect_hint").redirect_explanation(
+                    exc.code, location, request.full_url, option="--url")
+                raise UploadError(f"{method} {path}: {explanation}", status=exc.code) from None
             try:
                 detail = json.loads(raw.decode("utf-8"))
             except (UnicodeDecodeError, ValueError):
