@@ -25,7 +25,7 @@ import math
 import os
 import re
 import urllib.parse
-from typing import Any, Mapping, Optional
+from typing import Any, Mapping, Optional, Sequence
 
 from runtime.auth_refusal import BASELINE_RECORD_KIND, is_login_location
 from runtime.capability_registry import CAPABILITY_REGISTRY
@@ -375,6 +375,32 @@ MAX_TOOL_RECORDS = 1_500
 EXTERNAL_VERIFICATION_FLOORS: dict[str, dict[str, int]] = {
     "dalfox": {"http_requests": 400, "tool_wall_seconds": 120},
     "sqlmap": {"http_requests": 900, "tool_wall_seconds": 300},
+}
+# Per-call holds of the largest Hunt budget profile (thorough). Fast and balanced Hunts reserve
+# the registry hold (sqli.verify 900 requests / 300 s, xss.verify 400 / 120 s), and the argv
+# paces a call the same way on every profile: sqlmap BEUT at --delay 1 with one thread (about
+# 1 request/s), Dalfox at --delay 1000 ms with 3 workers (about 3.3 requests/s). At that pace a
+# one-field sqlmap negative (about 432 requests) needs 441-475 s, and Dalfox about 1,300 requests
+# (390-430 s) per parameter, so the registry wall ended those calls before a verdict. These holds
+# raise the wall without touching argv or rate, and keep rate x wall within 90% of the request
+# hold (sqlmap 1 x 540 = 540 <= 810; Dalfox 3.33 x 480 = 1,600 <= 1,620), so the pinned
+# connection ceiling never stops a paced call before its wall does.
+HUNT_THOROUGH_SCANNER_HOLDS: dict[str, dict[str, int]] = {
+    "sqli.verify": {"http_requests": 900, "tool_wall_seconds": 540},
+    "xss.verify": {
+        "http_requests": 1_800, "tool_wall_seconds": 480, "browser_actions": 2,
+    },
+}
+# The longer process ceiling a single (non-batch) verification may run under, on the same argv.
+# Only a reservation that covers all of it runs with it; any other reservation at or above the
+# floor runs at the floor, so a paced call only ever runs one of these two reviewed shapes.
+# Headless Dalfox (deep_domxss) runs unpaced with 10 workers, so it stays at its floor.
+_EXTERNAL_VERIFICATION_CEILINGS: dict[str, dict[str, int]] = {
+    tool: {
+        name: HUNT_THOROUGH_SCANNER_HOLDS[capability][name]
+        for name in ("http_requests", "tool_wall_seconds")
+    }
+    for tool, capability in (("dalfox", "xss.verify"), ("sqlmap", "sqli.verify"))
 }
 # The smallest slice on which one batched attempt can still reach a verdict.
 # A batch divided its reservation evenly across every ranked candidate, so a
@@ -871,12 +897,116 @@ def validate_private_interactsh_server(url: Any) -> str | None:
     return f"{scheme}://{authority}"
 
 
-def canonical_hunt_scanner_budget(capability_name: str) -> dict[str, int]:
-    """Admission ceiling for the exact server-owned Hunt scanner selection."""
+def canonical_hunt_scanner_budget(
+    capability_name: str,
+    *,
+    budget_profile: str | None = None,
+    deep_domxss: bool = False,
+    device_target: bool = False,
+) -> dict[str, int]:
+    """Admission ceiling for the exact server-owned Hunt scanner selection.
+
+    A thorough Hunt reserves ``HUNT_THOROUGH_SCANNER_HOLDS`` for ``sqli.verify`` and
+    ``xss.verify``. Every other profile and the passive ``templates.scan`` pack keep the registry
+    hold, and so do:
+
+    - a call against a device target, whose fragility allowance is charged one point per held
+      request and which is not given a longer paced call;
+    - a headless (``deep_domxss``) ``xss.verify``, which runs unpaced or in the pinned browser.
+
+    An ``xss.verify`` the worker routes to the pinned browser (one URL-fragment parameter) runs
+    inside its own fixed limits under either hold, and settles only what it used.
+    """
     budget = dict(CAPABILITY_REGISTRY.require(capability_name).budget_cost)
     if capability_name == "templates.scan":
         budget["http_requests"] = canonical_passive_nuclei_request_upper_bound()
+        return budget
+    tier = HUNT_THOROUGH_SCANNER_HOLDS.get(capability_name)
+    if (
+        budget_profile == "thorough"
+        and tier is not None
+        and not device_target
+        and not (capability_name == "xss.verify" and deep_domxss)
+    ):
+        budget.update(tier)
     return budget
+
+
+def hunt_scanner_budget_context(
+    run: Mapping[str, Any], capability_input: Mapping[str, Any],
+) -> dict[str, Any]:
+    """What sizes a Hunt scanner call's hold, read from the Hunt row and the call input.
+
+    Admission and the worker's re-derivation both read it here: the action digest covers the
+    hold, so the two must derive the same one.
+    """
+    return {
+        "budget_profile": run.get("budget_profile"),
+        "deep_domxss": capability_input.get("deep_domxss") is True,
+        "device_target": bool(run.get("device_target_id")),
+    }
+
+
+def hunt_scanner_dispatch_budgets(
+    capability_name: str,
+    *,
+    budget_profile: str | None = None,
+    deep_domxss: bool = False,
+    device_target: bool = False,
+) -> tuple[dict[str, int], ...]:
+    """The holds a Hunt scanner call may run at, the current one first.
+
+    The second is the registry hold. Admission steps down to it when the Hunt's remaining ledger
+    cannot fund the current one, and a call admitted before per-profile holds existed reserved
+    it. The worker accepts either, and verifies the action digest against the one reserved.
+    """
+    current = canonical_hunt_scanner_budget(
+        capability_name, budget_profile=budget_profile, deep_domxss=deep_domxss,
+        device_target=device_target,
+    )
+    legacy = canonical_hunt_scanner_budget(capability_name)
+    return (current,) if legacy == current else (current, legacy)
+
+
+def affordable_hunt_scanner_hold(
+    candidates: Sequence[Mapping[str, int]],
+    *,
+    limits: Mapping[str, int],
+    used: Mapping[str, Any],
+) -> dict[str, int]:
+    """The first candidate hold the remaining ledger can fund, else the first (current) one.
+
+    Only the ledger dimensions are compared. When none fits, the current hold is returned, so
+    the refusal states what the current hold needs.
+    """
+    for candidate in candidates:
+        if all(
+            int(used.get(name) or 0) + int(amount) <= int(limits[name])
+            for name, amount in candidate.items()
+            if name in limits
+        ):
+            return dict(candidate)
+    return dict(candidates[0])
+
+
+def admitted_hunt_scanner_hold(
+    stored: Mapping[str, Any],
+    candidates: Sequence[Mapping[str, int]],
+) -> dict[str, int]:
+    """The candidate hold equal to the durable reservation, else the first (current) one."""
+    recorded = {str(name): int(amount) for name, amount in dict(stored).items()}
+    for candidate in candidates:
+        if dict(candidate) == recorded:
+            return dict(candidate)
+    return dict(candidates[0])
+
+
+def hunt_scanner_timeout_ms(
+    default_timeout_ms: int, reserved_budget: Mapping[str, Any],
+) -> int:
+    """How long one Hunt scanner call may run: its spec default, or its reserved wall if longer."""
+    wall = int(reserved_budget.get("tool_wall_seconds") or 0)
+    return max(int(default_timeout_ms), wall * 1_000)
 
 
 def canonical_hunt_scanner_options(
@@ -1174,6 +1304,24 @@ def scanner_ffuf_wordlist_sources(options: Mapping[str, Any] | None = None) -> t
 def scanner_ffuf_wordlist_source(options: Mapping[str, Any] | None = None) -> str:
     """The first bundled source a selection reads; callers can never supply a filesystem path."""
     return scanner_ffuf_wordlist_sources(options)[0]
+
+
+def _external_verification_hard(
+    tool: str, reservation: Mapping[str, int], *, headless: bool = False,
+) -> dict[str, int]:
+    """Process ceiling of one non-batch verification reserved at or above its floor.
+
+    A reservation that covers the whole reviewed ceiling runs with it (a thorough Hunt hold keeps
+    its longer wall). Any other one runs exactly at the floor, as every reservation did before, so
+    a registry-sized hold keeps the floor profile. The paced rate times either wall stays within
+    the request hold; a shape in between, such as 400 requests over 480 s, would not.
+    """
+    floor = EXTERNAL_VERIFICATION_FLOORS[tool]
+    ceiling = floor if headless else _EXTERNAL_VERIFICATION_CEILINGS[tool]
+    covered = all(
+        int(reservation.get(name) or 0) >= int(amount) for name, amount in ceiling.items()
+    )
+    return dict(ceiling if covered else floor)
 
 
 def build_enforced_scanner_plan(
@@ -1510,8 +1658,10 @@ def build_enforced_scanner_plan(
             http >= EXTERNAL_VERIFICATION_FLOORS["dalfox"]["http_requests"]
             and wall >= EXTERNAL_VERIFICATION_FLOORS["dalfox"]["tool_wall_seconds"]
         ):
-            hard = dict(EXTERNAL_VERIFICATION_FLOORS["dalfox"])
-            timeout_seconds = EXTERNAL_VERIFICATION_FLOORS["dalfox"]["tool_wall_seconds"]
+            hard = _external_verification_hard(
+                "dalfox", reservation, headless=deep_domxss,
+            )
+            timeout_seconds = hard["tool_wall_seconds"]
             timeout_ms = timeout_seconds * 1_000
             mode, method = "conservative", "fixed_conservative_profile"
             proof_inputs = {
@@ -1549,8 +1699,8 @@ def build_enforced_scanner_plan(
             http >= EXTERNAL_VERIFICATION_FLOORS["sqlmap"]["http_requests"]
             and wall >= EXTERNAL_VERIFICATION_FLOORS["sqlmap"]["tool_wall_seconds"]
         ):
-            hard = dict(EXTERNAL_VERIFICATION_FLOORS["sqlmap"])
-            timeout_seconds = EXTERNAL_VERIFICATION_FLOORS["sqlmap"]["tool_wall_seconds"]
+            hard = _external_verification_hard("sqlmap", reservation)
+            timeout_seconds = hard["tool_wall_seconds"]
             timeout_ms = timeout_seconds * 1_000
             mode, method = "conservative", "fixed_conservative_profile"
             techniques, profile = technique, "full"

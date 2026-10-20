@@ -20342,15 +20342,17 @@ async def process_canonical_scanner_capability_job(
                 limits = _worker_hunt_ledger_limits(
                     _worker_json_object(run["budget_json"])
                 )
-                requested_budget = {
-                    key: int(value)
-                    for key, value in agent_tools.canonical_hunt_scanner_budget(capability_name).items()
-                    if key in limits
-                }
-                requested_budget["agent_actions"] = 1
-                if spec.requires_active_approval or uses_service_origin:
-                    requested_budget["active_actions"] = 1
-                reserve_device_traffic(run, agent_tools.CAPABILITY_REGISTRY.require(capability_name), requested_budget)
+                def scanner_hold(base: Mapping[str, Any]) -> dict[str, int]:
+                    hold = {key: int(value) for key, value in base.items() if key in limits}
+                    hold["agent_actions"] = 1
+                    if spec.requires_active_approval or uses_service_origin:
+                        hold["active_actions"] = 1
+                    reserve_device_traffic(run, agent_tools.CAPABILITY_REGISTRY.require(capability_name), hold)
+                    return hold
+                # The run's per-profile hold, or the registry hold (stepped down or admitted before it existed).
+                requested_budget = agent_tools.admitted_hunt_scanner_hold(stored.record.requested, [
+                    scanner_hold(base) for base in agent_tools.hunt_scanner_dispatch_budgets(
+                        capability_name, **agent_tools.hunt_scanner_budget_context(run, capability_input))])
                 recomputed_digest = hunt_capability_action_digest(
                     hunt_id=hunt_id,
                     action_id=action_id,
@@ -20468,7 +20470,7 @@ async def process_canonical_scanner_capability_job(
                 "execution_target": execution_target,
                 "registered_target": registered_target,
                 "scanner_options": scanner_options,
-                "timeout_ms": int(spec.default_timeout_ms),
+                "timeout_ms": agent_tools.hunt_scanner_timeout_ms(spec.default_timeout_ms, persisted.record.requested),
                 "pinned_address": pinned_address,
                 "authorized_addresses": authorized_addresses,
                 "oob_interactsh_server": oob_server,
