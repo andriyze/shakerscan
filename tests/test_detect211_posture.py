@@ -123,6 +123,24 @@ def test_cors_reflection_and_null_origin_with_credentials_are_high():
     assert [(f["title"], f["severity"]) for f in null] == [("CORS policy trusts the null origin", "high")]
 
 
+def test_cors_reflection_is_judged_on_the_observation_as_the_receipt_stores_it():
+    """Unit fixture: an origin-reflecting target's answer, stored through the runtime receipt
+    redactor exactly as a worker's receipt stores every observation."""
+    import api.runtime  # noqa: F401 -- importing the runtime installs its receipt redactor
+    from api.runtime import receipts
+    [observation] = _cors("baseline.cors", {
+        "access-control-allow-origin": CORS_PROBE_ORIGIN, "access-control-allow-credentials": "true"})["baseline.cors"]
+    stored = receipts.redact_receipt_value(dict(observation))
+    # The redactor renders a bare URL origin with a "/" path, so the stored header no longer
+    # spells the Origin that was sent.
+    assert stored["response"]["security_headers"]["access-control-allow-origin"] == CORS_PROBE_ORIGIN + "/"
+    findings = _report({"baseline.cors": [stored]})["findings"]
+    assert [(f["title"], f["severity"]) for f in findings] == [("CORS policy reflects any origin", "high")]
+    assert findings[0]["evidence"]["access_control_allow_origin"] == CORS_PROBE_ORIGIN
+    brief = build_finding_detail(findings[0])
+    assert brief["reproduce"]["expect"] == "access-control-allow-origin: " + CORS_PROBE_ORIGIN
+
+
 def test_cors_answers_that_grant_nothing_are_not_findings():
     assert _report(_cors("baseline.cors", {}))["findings"] == []
     assert _report(_cors("baseline.cors", {"access-control-allow-origin": "https://app.example.test"}))["findings"] == []

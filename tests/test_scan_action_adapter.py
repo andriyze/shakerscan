@@ -1816,6 +1816,46 @@ def test_database_neutral_http_receipt_drops_body_and_redacts_urls(monkeypatch):
     assert "<redacted>" in serialized
 
 
+@pytest.mark.parametrize(("granted", "reflected"), [
+    ("https://shakerscan-cors-probe.invalid", True),
+    # Not the Origin a browser sent: it would refuse the cross-origin read.
+    ("https://shakerscan-cors-probe.invalid/", False),
+    ("https://app.example.test", False),
+])
+def test_cors_probe_is_judged_on_the_header_as_received_not_as_the_receipt_stores_it(
+    monkeypatch, granted, reflected,
+):
+    """Unit fixture: the probe answer of an origin-reflecting target, through the real receipt."""
+    from scan.posture_findings import CORS_PROBE_ORIGIN, cors_findings
+    action = _action("baseline.cors", "http.request", 0)
+    plan = ScanActionPlan(
+        scan_id=str(uuid.uuid4()), execution_plan_digest="a" * 64,
+        target_binding_digest=TARGET.digest, actions=(action,),
+    )
+    sent = {}
+
+    async def execute_bound(_origin, args, **_kwargs):
+        sent.update(args.get("headers") or {})
+        return {
+            "ok": True,
+            "request": {"method": "GET", "origin": "https://app.example.test", "path": "/"},
+            "response": {"status": 200, "security_headers": {
+                "access-control-allow-origin": granted, "access-control-allow-credentials": "true",
+            }},
+            "redirect_chain": [], "hops_followed": 0,
+        }
+
+    monkeypatch.setattr(action_adapter_module, "execute_bound_http_request", execute_bound)
+    receipt = asyncio.run(_dispatcher(plan, Backend())(action, _lease(plan, action), _noop))
+    assert receipt.status == "success" and sent == {"Origin": CORS_PROBE_ORIGIN}
+    [observation] = receipt.observations
+    findings = cors_findings(
+        action.action_id, observation["request"], observation["response"], make=lambda **finding: finding,
+    )
+    titles = [finding["title"] for finding in findings]
+    assert titles == (["CORS policy reflects any origin"] if reflected else [])
+
+
 def test_database_neutral_network_action_limits_commands_to_reserved_hosts(monkeypatch):
     target = TargetBinding(
         target_id=TARGET.target_id,

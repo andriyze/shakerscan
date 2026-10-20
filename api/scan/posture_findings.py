@@ -261,6 +261,25 @@ def _truthy(value: Any) -> bool:
     return str(value or "").strip().lower() == "true"
 
 
+def cors_probe_verdict(sent: str, headers: Mapping[str, Any]) -> dict[str, bool]:
+    """Whether the answer granted the Origin sent, judged on the header as received.
+
+    The probe records this with its response because the receipt redactor rewrites URL-shaped
+    values (a bare origin gains a "/" path): the stored header no longer spells the Origin sent.
+    """
+    allowed = str(headers.get("access-control-allow-origin") or "").strip()
+    return {"sent_origin_granted": bool(allowed) and allowed.lower() == sent.lower()}
+
+
+def _grants_sent_origin(sent: str, allowed: str, response: Mapping[str, Any]) -> bool:
+    verdict = response.get("cors_probe")
+    if isinstance(verdict, Mapping) and isinstance(verdict.get("sent_origin_granted"), bool):
+        return verdict["sent_origin_granted"]
+    # Recorded without the verdict: the stored header is the redactor's rendering, which adds a
+    # "/" path to the echoed probe origin (it has none of its own).
+    return allowed.lower() == sent.lower() or (sent != "null" and allowed.lower() == sent.lower() + "/")
+
+
 def cors_findings(
     action_id: str, request: Mapping[str, Any], response: Mapping[str, Any], *, make: FindingFactory,
 ) -> list[dict[str, Any]]:
@@ -276,12 +295,15 @@ def cors_findings(
     path = str(request.get("path") or "/")
     if not allowed:
         return []
-    if sent == "null" and allowed.lower() == "null":
+    granted = _grants_sent_origin(sent, allowed, response)
+    if granted:
+        allowed = sent  # the header as received; the stored copy is the redactor's rendering
+    if sent == "null" and granted:
         kind, severity, title = "cors_null_origin", ("high" if credentials else "low"), "CORS policy trusts the null origin"
         why = ("Any site can send requests from a sandboxed frame, whose Origin is null, and read the answers"
                + (" with the user's cookies: data the user can see is readable by that site." if credentials else
                   "; without credentials only what an anonymous request returns is exposed."))
-    elif sent != "null" and allowed.lower() == sent.lower():
+    elif sent != "null" and granted:
         kind, severity, title = "cors_reflected_origin", ("high" if credentials else "low"), "CORS policy reflects any origin"
         why = ("The server echoes whatever Origin it is sent, so every website is trusted"
                + (" and allowed to read responses with the user's cookies: data the user can see is readable by any site." if credentials else
@@ -449,7 +471,7 @@ def dns_posture_findings(observation: Mapping[str, Any], *, make: FindingFactory
 
 __all__ = [
     "CORS_PROBE_ACTIONS", "CORS_PROBE_ORIGIN", "OPT_IN_HEADERS", "REDIRECT_CANARY_HOST", "REDIRECT_CANARY_URL",
-    "cors_findings", "dns_posture_findings", "header_value_issues", "is_redirect_parameter",
+    "cors_findings", "cors_probe_verdict", "dns_posture_findings", "header_value_issues", "is_redirect_parameter",
     "open_redirect_finding", "redact_url_queries", "redirects_to_canary", "severity_basis",
     "weak_header_findings",
 ]
