@@ -60,6 +60,13 @@ def load(name: str) -> ModuleType:
     return _import(name, RUNTIME_SCRIPTS[name])
 
 
+def helper(name: str) -> ModuleType:
+    """Return the vendored helper module ``name`` (``_redirect_hint``)."""
+    if name not in RUNTIME_HELPERS:
+        raise ValueError(f"unknown runtime helper {name!r}")
+    return _import(name, RUNTIME_HELPERS[name])
+
+
 def _import(name: str, filename: str) -> ModuleType:
     qualified = f"shakerscan.{name}"
     if qualified in sys.modules:
