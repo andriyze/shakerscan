@@ -2647,7 +2647,8 @@ def finalize_scan_report(
             pass
         elif action.capability_name in _PROOF_CAPABILITIES:
             # Escalation over candidates the verifier already counted: record it
-            # separately so it can neither double-count nor fail its family.
+            # separately so it never double-counts them. Only an escalation that
+            # broke (failed or timed out, below) leaves its family partial.
             proof = row["proof_escalation"]
             proof["actions"] += 1
             proof["attempted_candidates"] += len(attempts)
@@ -2744,6 +2745,11 @@ def finalize_scan_report(
         proof = row["proof_escalation"]
         proof_statuses = proof.pop("_statuses")
         proof_reasons = proof.pop("_reasons")
+        # An escalation that crashed or ran out of time left the candidates its verifier
+        # flagged without a verdict. A reflection Dalfox only flagged reaches the report
+        # through the browser proof alone, so the family was not examined to completion. A
+        # skip (nothing eligible, or no browser budget on this shard) is not a break.
+        proof_broke = any(status in {"failed", "timed_out"} for status in proof_statuses)
         if not proof_statuses:
             # The family planned no escalation at all.
             proof["status"] = "not_planned"
@@ -2842,6 +2848,11 @@ def finalize_scan_report(
         elif row["unattempted_candidates"] > 0:
             row["coverage_status"] = "partial"
             row["reason"] = "candidates_unattempted"
+            if row["required"]:
+                selected_family_gaps.append(family)
+        elif proof_broke:
+            row["coverage_status"] = "partial"
+            row["reason"] = "proof_escalation_failed"
             if row["required"]:
                 selected_family_gaps.append(family)
         else:
