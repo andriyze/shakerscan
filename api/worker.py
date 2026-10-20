@@ -10128,7 +10128,10 @@ async def _execute_scan_tls_capability(
     )
     if allocation is None:
         return _skipped_scan_tls_summary("insufficient_stage_budget")
-    legacy_probes = tls_legacy_probes_affordable(allocation, len(https_origins) * len(target.allowed_addresses))
+    legacy_probes = tls_legacy_probes_affordable(
+        canonical_action.requested_budget if canonical_action is not None else allocation,
+        len(https_origins) * len(target.allowed_addresses),
+    )
     stored, idempotent_redelivery = await _execute_reserved_scan_capability(
         admission=admission,
         execution=execution,

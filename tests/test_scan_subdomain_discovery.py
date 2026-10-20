@@ -1632,6 +1632,48 @@ def test_tls_stage_uses_registered_inline_capability_with_exact_hold(monkeypatch
     assert summary["durable_budget_settled"] is True
 
 
+def test_canonical_tls_stage_runs_legacy_probes_only_when_its_hold_pays(monkeypatch):
+    # The canonical action's own reservation is the hold, so it decides the raw probes: a
+    # four-connection action must not run them even when the Scan budget could pay for ten.
+    _plan, _target, options = _authority(enabled=True, network=False)
+    probes = []
+
+    async def inspect(*, target, timeout_seconds_per_target, legacy_probes):
+        probes.append(legacy_probes)
+        return {"ok": True, "status": "success", "observations": []}
+
+    async def execute_capability(**kwargs):
+        await kwargs["inline_operation"]()
+        return _stored_network_capability(
+            "tls.inspect", observations=[],
+            amounts={"tcp_ports_attempted": 1, "tool_wall_seconds": 1},
+        ), False
+
+    monkeypatch.setattr(worker, "inspect_tls_binding", inspect)
+    monkeypatch.setattr(worker, "_execute_reserved_scan_capability", execute_capability)
+    for reserved in (4, 10):
+        action = SimpleNamespace(
+            action_id="baseline.tls",
+            capability_name="tls.inspect",
+            capability_args={
+                "origins_ref": "frozen_https_origins",
+                "origin_count": 1,
+                "addresses_ref": "frozen_addresses",
+                "address_count": 1,
+            },
+            requested_budget={"tcp_ports_attempted": reserved, "tool_wall_seconds": 15},
+        )
+        asyncio.run(worker._execute_scan_tls_capability(
+            "https://app.example.test",
+            options,
+            scan_id="00000000-0000-0000-0000-000000000001",
+            job_id="job-1",
+            canonical_action=action,
+        ))
+
+    assert probes == [False, True]
+
+
 def test_http_baseline_stage_uses_registered_inline_capability(monkeypatch):
     _plan, target, options = _authority(enabled=True, network=False)
     calls = []
