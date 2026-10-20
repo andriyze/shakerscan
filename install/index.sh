@@ -530,7 +530,9 @@ refuse_foreign_install() {
         say "To adopt the data volumes from $INSTALL_DIR anyway (that install's results/ evidence will not be visible here), set SHAKERSCAN_ADOPT_EXISTING_DATA=1." >&2
         exit 1
     fi
-    if docker volume inspect "${project}_postgres-cluster" >/dev/null 2>&1; then
+    # postgres-data: a release before 2.6 (PostgreSQL 16 data, which this release does not migrate).
+    if docker volume inspect "${project}_postgres-cluster" >/dev/null 2>&1 || \
+       docker volume inspect "${project}_postgres-data" >/dev/null 2>&1; then
         say "Error: a PostgreSQL data volume for Compose project '$project' already exists, but $INSTALL_DIR is not the install that created it." >&2
         say "If that install lives in another directory, upgrade it in place: SHAKERSCAN_HOME=<that directory> sh -c 'curl -fsSL $INSTALL_URL | sh'" >&2
         say "To adopt the volume from $INSTALL_DIR (its database password will be rotated), set SHAKERSCAN_ADOPT_EXISTING_DATA=1." >&2

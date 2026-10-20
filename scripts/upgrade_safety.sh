@@ -762,6 +762,14 @@ upgrade_safety_warnings() {
         && ! docker_cli volume inspect "${project}_postgres-cluster" >/dev/null 2>&1; then
         echo "ShakerScan's database volume is missing although this install has started before; restore it from a backup in $SCRIPT_DIR/backups before using it."
     fi
+    if docker_cli volume ls -q >/dev/null 2>&1 \
+        && docker_cli volume inspect "${project}_postgres-data" >/dev/null 2>&1; then
+        if ! docker_cli volume inspect "${project}_postgres-cluster" >/dev/null 2>&1; then
+            echo "ShakerScan's database is PostgreSQL 16 data in ${project}_postgres-data, never migrated; this release does not start beside it. Upgrade through 2.10.0 first: $POSTGRES_18_DOC"
+        else
+            echo "The PostgreSQL 16 volume ${project}_postgres-data is still present beside ${project}_postgres-cluster: an old copy after a migration by 2.6 to 2.10, unless ShakerScan shows none of your earlier data (then read $POSTGRES_18_DOC before using this install)."
+        fi
+    fi
     if [ -f "$RELEASE_STATE_CURRENT" ] && docker_cli volume ls -q >/dev/null 2>&1 \
         && ! docker_cli volume inspect "$(redis_volume)" >/dev/null 2>&1; then
         echo "Redis's volume is missing (it holds queues and job state only); the next start creates it empty and waiting scans are queued again automatically."
@@ -835,8 +843,8 @@ datastore_persistence_problems() {
     local info
     if [ -n "$(service_container postgres)" ]; then
         # 2.6 and later mount the postgres-cluster volume at /var/lib/postgresql; a release before
-        # 2.6 mounts postgres-data at /var/lib/postgresql/data (scripts/postgres_upgrade.sh moves
-        # it on this start). Either is a volume that survives the switch.
+        # 2.6 mounts postgres-data at /var/lib/postgresql/data (this release does not migrate it:
+        # ensure_no_unmigrated_legacy_database refuses the start). Either is a volume that survives.
         service_data_on_volume postgres /var/lib/postgresql /var/lib/postgresql/data \
             || echo "PostgreSQL's data is not on its Docker volume (${COMPOSE_PROJECT_NAME:-shakerscan}_postgres-cluster at /var/lib/postgresql, or ${COMPOSE_PROJECT_NAME:-shakerscan}_postgres-data at /var/lib/postgresql/data before 2.6)."
     fi
@@ -886,6 +894,50 @@ ensure_database_volume_present() {
     echo "Starting now would create an empty database. Nothing was changed." >&2
     echo "Restore the database from a backup in $SCRIPT_DIR/backups ('$(cli_hint) backup list'), or, to start with" >&2
     echo "an empty database on purpose, run 'SHAKERSCAN_ALLOW_NEW_DATABASE=1 $(cli_hint) start'." >&2
+    return 1
+}
+
+# Releases before 2.6 ran PostgreSQL 16 with the data in <project>_postgres-data; 2.6 to 2.10
+# migrated it into <project>_postgres-cluster on their first start. This release does not migrate
+# it: beside that volume alone, PostgreSQL 18 would initialize a new, empty database in a new
+# postgres-cluster volume. True when Docker lists volumes, the old one exists and the new one does
+# not. Docker's answer is kept for the rest of this launcher run; when Docker cannot answer, the
+# check says no (never guess) and asks again next time.
+LEGACY_DATABASE_STATE=""
+POSTGRES_18_DOC="https://github.com/andriyze/shakerscan/blob/main/docs/upgrade-and-rollback.md#postgresql-18"
+legacy_database_unmigrated() {
+    local project="${COMPOSE_PROJECT_NAME:-shakerscan}"
+    if [ -z "$LEGACY_DATABASE_STATE" ]; then
+        docker_cli volume ls -q >/dev/null 2>&1 || return 1
+        if docker_cli volume inspect "${project}_postgres-data" >/dev/null 2>&1 \
+            && ! docker_cli volume inspect "${project}_postgres-cluster" >/dev/null 2>&1; then
+            LEGACY_DATABASE_STATE=unmigrated
+        else
+            LEGACY_DATABASE_STATE=none
+        fi
+    fi
+    [ "$LEGACY_DATABASE_STATE" = unmigrated ]
+}
+
+# Nothing may start PostgreSQL beside PostgreSQL 16 data that was never migrated: the release would
+# run on a new, empty database (and an upgrade's backup would save the empty one). The launcher
+# calls this before anything is downloaded or stopped, and before every Compose call that can start
+# PostgreSQL.
+ensure_no_unmigrated_legacy_database() {
+    local project="${COMPOSE_PROJECT_NAME:-shakerscan}"
+    is_truthy "${SHAKERSCAN_ALLOW_NEW_DATABASE:-0}" && return 0
+    legacy_database_unmigrated || return 0
+    echo -e "${RED}ShakerScan's database is PostgreSQL 16 data in the ${project}_postgres-data volume, never migrated to PostgreSQL 18.${NC}" >&2
+    echo "This release does not migrate PostgreSQL 16 data: starting it would create a new, empty database." >&2
+    if stack_is_running; then
+        echo "Nothing was changed: the running release keeps running, and ${project}_postgres-data is kept as it is." >&2
+    else
+        echo "Nothing was changed: ${project}_postgres-data is kept as it is." >&2
+    fi
+    echo "Upgrade through 2.10.0 first, which migrates the data on its first start:" >&2
+    echo "  curl -fsSL https://install.shakerscan.com | SHAKERSCAN_HOME=\"$SCRIPT_DIR\" SHAKERSCAN_INSTALL_VERSION=2.10.0 sh" >&2
+    echo "Check that your targets and scans are there, then run the installer again without SHAKERSCAN_INSTALL_VERSION." >&2
+    echo "To start this release with an empty database instead, run 'SHAKERSCAN_ALLOW_NEW_DATABASE=1 $(cli_hint) start'." >&2
     return 1
 }
 

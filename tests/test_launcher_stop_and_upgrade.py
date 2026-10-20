@@ -246,6 +246,7 @@ ensure_pre_upgrade_backup() { printf 'pre-upgrade-backup\n'; }
 ensure_install_dir_space() { printf 'install-dir-space\n'; }
 ensure_datastores_persisting() { printf 'datastores-persisting\n'; }
 ensure_database_volume_present() { printf 'database-volume\n'; }
+ensure_no_unmigrated_legacy_database() { printf 'legacy-database\n'; }
 offer_upgrade_backup() { printf 'offer-backup\n'; }
 ensure_redis_ready() { printf 'redis-ready\n'; }
 record_started_release() { printf 'record-release:%s\n' "$1"; }
@@ -385,6 +386,8 @@ running_compose_service_count() {
 # The running version is noted while the stack still runs (it decides the pre-upgrade backup).
 note_running_release() { if [ -e "$STOPPED" ]; then printf 'note:stopped\n'; else printf 'note:running\n'; fi; }
 stop_services() { printf 'stop\n'; : > "$STOPPED"; }
+# Checked while the stack still runs, before anything is stopped.
+ensure_no_unmigrated_legacy_database() { if [ -e "$STOPPED" ]; then printf 'legacy:stopped\n'; else printf 'legacy:running\n'; fi; }
 start_services() { printf 'start:%s\n' "$*"; }
 set_build_env() { :; }
 # Checked while the stack still runs (a stopped stack has nothing to check).
@@ -412,7 +415,19 @@ def test_restart_counts_the_opt_in_lanes_before_stop_removes_them(tmp_path):
 
     assert result.returncode == 0, result.stdout + result.stderr
     # workers, device-worker lane, Gungnir lane: all taken while the lanes were still running.
-    assert result.stdout.splitlines() == ["note:running", "persist:running", "stop", "start:3 1 1"]
+    assert result.stdout.splitlines() == ["legacy:running", "note:running", "persist:running", "stop", "start:3 1 1"]
+
+
+def test_restart_beside_unmigrated_postgresql_16_data_stops_nothing(tmp_path):
+    harness = RESTART_HARNESS.replace(
+        "__RESTART_SERVICES__", SCRIPT.split("\nrestart_services() {", 1)[1].split("\n}", 1)[0]
+    )
+    stub = next(line for line in harness.splitlines() if line.startswith("ensure_no_unmigrated_legacy_database() {"))
+    harness = harness.replace(stub, "ensure_no_unmigrated_legacy_database() { printf 'legacy:refused\\n'; return 1; }")
+    harness = harness.rstrip()[: -len("restart_services")] + "restart_services || echo rc=$?\n"
+    result = subprocess.run(["bash", "-c", harness], cwd=ROOT, capture_output=True, text=True, timeout=20,
+                            check=False, env={**os.environ, "STOPPED": str(tmp_path / "stopped")})
+    assert result.stdout.splitlines() == ["legacy:refused", "rc=1"], result.stdout + result.stderr
 
 
 def test_running_service_count_ignores_one_off_runs(tmp_path):
@@ -504,7 +519,8 @@ def _real_start_harness(failing: str, tail: str) -> str:
 FAIL_CLOSED_STEPS = ["pull_prebuilt_images", "wait_for_url", "verify_running_build_identity",
                      "verify_specialized_worker_identity", "set_build_env", "record_started_release",
                      "ensure_install_dir_space", "ensure_datastores_persisting",
-                     "ensure_database_volume_present", "offer_upgrade_backup"]
+                     "ensure_database_volume_present", "offer_upgrade_backup",
+                     "ensure_no_unmigrated_legacy_database"]
 
 
 @pytest.mark.parametrize("failing", FAIL_CLOSED_STEPS)
@@ -515,6 +531,17 @@ def test_start_fails_closed_even_where_set_e_does_not_apply(failing):
                             check=False, env={**os.environ, "REASON": "", "SCRIPT_DIR": str(ROOT)})
     assert f"{failing}-failed" in result.stdout, result.stdout + result.stderr
     assert "START-FAILED" in result.stdout and "Services started." not in result.stdout, result.stdout
+
+
+def test_start_beside_unmigrated_postgresql_16_data_pulls_stops_and_starts_nothing():
+    """The refusal comes first: a running pre-2.6 release keeps running and no image is pulled."""
+    harness = _real_start_harness("ensure_no_unmigrated_legacy_database",
+                                  "\nif start_services; then echo START-OK; else echo START-FAILED; fi\n")
+    result = subprocess.run(["bash", "-c", harness], cwd=ROOT, capture_output=True, text=True, timeout=20,
+                            check=False, env={**os.environ, "REASON": "found ShakerScan 2.5.6 running",
+                                              "SCRIPT_DIR": str(ROOT)})
+    assert result.stdout.splitlines() == ["note-running", "ensure_no_unmigrated_legacy_database-failed",
+                                          "START-FAILED"], result.stdout + result.stderr
 
 
 def test_reset_fails_when_the_fresh_stack_fails_its_identity_check(tmp_path):

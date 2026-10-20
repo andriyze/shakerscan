@@ -1055,3 +1055,97 @@ def test_a_start_or_restart_refuses_an_install_path_with_a_newline(tmp_path):
     spaced = tmp_path / "Shaker Scan spaced"
     spaced.mkdir()
     assert "rc=0" in run(spaced, "ensure_install_path_safe; echo rc=$?").stdout
+
+
+# --- PostgreSQL 16 data that was never migrated (the postgres-data volume of releases before 2.6) --
+
+
+def _volumes(tmp_path: Path, *names: str) -> None:
+    for name in names:
+        (tmp_path / f"volume_shakerscan_{name}").write_text("")
+
+
+def _compose_calls(tmp_path: Path) -> list[str]:
+    return [line for line in calls(tmp_path).splitlines() if line.startswith("compose ")]
+
+
+_LEGACY_GATE = "ensure_no_unmigrated_legacy_database; echo rc=$?"
+
+
+def test_unmigrated_postgresql_16_data_is_refused_before_anything_changes(tmp_path):
+    """A release before 2.6 keeps PostgreSQL 16 data in postgres-data and, never started by a 2.10 or
+    later launcher, leaves no release record. This release does not migrate it: a start created an
+    empty postgres-cluster beside it and took its "pre-upgrade" dump from the empty database."""
+    _volumes(tmp_path, "postgres-data", "redis-data")
+    result = run(tmp_path, _LEGACY_GATE)
+    assert "rc=1" in result.stdout, result.stdout + result.stderr
+    assert "shakerscan_postgres-data" in result.stderr and "never migrated" in result.stderr
+    assert "SHAKERSCAN_INSTALL_VERSION=2.10.0" in result.stderr
+    assert "Nothing was changed" in result.stderr
+    assert "SHAKERSCAN_ALLOW_NEW_DATABASE=1" in result.stderr
+    assert _compose_calls(tmp_path) == []
+    assert "volume rm" not in calls(tmp_path)
+
+
+def test_unmigrated_data_is_refused_while_the_old_release_runs(tmp_path):
+    """The old stack running: the first start of a 2.10 or later launcher records only
+    .release-images.previous, and the refusal leaves that release running."""
+    _volumes(tmp_path, "postgres-data")
+    (tmp_path / ".release-images.previous").write_text("# release 2.5.6\nid-running\n")
+    result = run(tmp_path, 'echo cid > "$WORK/containers"\n' + _LEGACY_GATE)
+    assert "rc=1" in result.stdout, result.stdout + result.stderr
+    assert "the running release keeps running" in result.stderr
+    assert _compose_calls(tmp_path) == []
+
+
+def test_unmigrated_data_may_be_started_empty_only_on_purpose(tmp_path):
+    _volumes(tmp_path, "postgres-data")
+    result = run(tmp_path, _LEGACY_GATE, SHAKERSCAN_ALLOW_NEW_DATABASE="1")
+    assert "rc=0" in result.stdout and result.stderr == "", result.stdout + result.stderr
+
+
+def test_migrated_or_fresh_installs_are_not_held_by_the_legacy_check(tmp_path):
+    both = tmp_path / "both"          # migrated by 2.6 to 2.10, the old copy still present
+    cluster = tmp_path / "cluster"    # migrated, the old copy removed; or installed on 2.6 or later
+    fresh = tmp_path / "fresh"
+    for work in (both, cluster, fresh):
+        work.mkdir()
+    _volumes(both, "postgres-data", "postgres-cluster")
+    _volumes(cluster, "postgres-cluster")
+    for work in (both, cluster, fresh):
+        result = run(work, _LEGACY_GATE)
+        assert "rc=0" in result.stdout and result.stderr == "", (work.name, result.stdout + result.stderr)
+
+
+def test_the_legacy_check_never_guesses_when_docker_cannot_list_volumes(tmp_path):
+    _volumes(tmp_path, "postgres-data")
+    body = """
+    docker_cli() { case "$1" in volume) return 1 ;; esac; docker "$@"; }
+    ensure_no_unmigrated_legacy_database; echo first=$?
+    unset -f docker_cli; docker_cli() { docker "$@"; }
+    ensure_no_unmigrated_legacy_database; echo second=$?
+    """
+    result = run(tmp_path, body)
+    assert "first=0" in result.stdout, result.stdout + result.stderr
+    # An answer Docker could not give is asked again, never kept for the rest of the run.
+    assert "second=1" in result.stdout, result.stdout + result.stderr
+
+
+def test_a_lost_database_is_still_refused_when_the_install_has_a_record(tmp_path):
+    _upgrade_pending(tmp_path)
+    result = run(tmp_path, "ensure_database_volume_present; echo rc=$?")
+    assert "rc=1" in result.stdout and "would create an empty database" in result.stderr
+
+
+def test_status_names_unmigrated_postgresql_16_data_and_an_old_copy_left_beside_the_cluster(tmp_path):
+    _volumes(tmp_path, "postgres-data", "redis-data")
+    unmigrated = run(tmp_path, "upgrade_safety_warnings").stdout
+    assert "shakerscan_postgres-data" in unmigrated and "never migrated" in unmigrated, unmigrated
+    assert "2.10.0" in unmigrated
+    _volumes(tmp_path, "postgres-cluster")
+    both = run(tmp_path, "upgrade_safety_warnings").stdout
+    assert "never migrated" not in both
+    assert "shakerscan_postgres-data" in both and "beside shakerscan_postgres-cluster" in both, both
+    assert "volume rm" not in both  # it may be the only copy of the data: never suggest removing it
+    (tmp_path / "volume_shakerscan_postgres-data").unlink()
+    assert "postgres-data" not in run(tmp_path, "upgrade_safety_warnings").stdout

@@ -809,6 +809,7 @@ ensure_redis_ready() { printf 'redis-ready\n'; }
 ensure_install_dir_space() { :; }
 ensure_datastores_persisting() { :; }
 ensure_database_volume_present() { :; }
+ensure_no_unmigrated_legacy_database() { :; }
 offer_upgrade_backup() { :; }
 record_started_release() { printf 'record-release:%s\n' "$1"; }
 build_local_images() { printf 'build-local\n'; }
@@ -1187,6 +1188,7 @@ ensure_redis_ready() { printf 'redis-ready\n'; }
 ensure_install_dir_space() { :; }
 ensure_datastores_persisting() { :; }
 ensure_database_volume_present() { :; }
+ensure_no_unmigrated_legacy_database() { :; }
 offer_upgrade_backup() { :; }
 record_started_release() { printf 'record-release:%s\n' "$1"; }
 build_local_images() { printf 'build-local\n'; }
