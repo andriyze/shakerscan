@@ -595,12 +595,31 @@ def _replay_url(url: str) -> str:
     }))
 
 
+# Query values a stored finding URL carries in place of a value the scanner masked.
+_MASKED_QUERY_VALUES = frozenset({"<redacted>", "[redacted]"})
+
+
+def _has_masked_query_value(url: str) -> bool:
+    try:
+        query = urllib.parse.urlsplit(url).query
+    except ValueError:
+        return False
+    return any(
+        value.strip().lower() in _MASKED_QUERY_VALUES
+        for _name, value in urllib.parse.parse_qsl(query, keep_blank_values=True)
+    )
+
+
 def build_replay_commands(inputs: dict[str, Any]) -> list[str]:
     """Generate copy/paste commands to replay a verification attempt.
 
     The URL, parameter and payload come from the finding, so the target chose them: each reaches
     curl as one ``shell_word`` and a pasted command runs nothing but curl. Form bodies are
     URL-encoded here (``--data``) rather than by curl, so a payload keeps every byte it had.
+
+    A URL stored with a masked query value is not replayed as stored: that would send the mask
+    marker, not the recorded value. The payload variant, which sets the tested parameter itself,
+    still is.
     """
     finding_type = str(inputs.get("finding_type") or "").strip().lower()
     target_url = str(inputs.get("original_url") or inputs.get("target_url") or "").strip()
@@ -612,7 +631,9 @@ def build_replay_commands(inputs: dict[str, Any]) -> list[str]:
         return []
 
     url = shell_word(_replay_url(target_url))
-    commands = [f"curl -i -k {url}"]
+    commands: list[str] = []
+    if not _has_masked_query_value(target_url):
+        commands.append(f"curl -i -k {url}")
 
     if finding_type in ("exposed_file", "generic_http"):
         # Exposure replays are a plain GET; injection-style payload commands

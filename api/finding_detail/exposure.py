@@ -7,6 +7,11 @@ from typing import Any, Mapping
 
 from .common import command, fact, facts, integer, join_limited, origin_of, q, record, strings, text, url_parts
 
+try:
+    from capabilities.graphql_probe import GRAPHQL_REQUEST_HEADERS, INTROSPECTION_QUERY, endpoint_of, graphql_request_url
+except ModuleNotFoundError:  # package import layout
+    from ..capabilities.graphql_probe import GRAPHQL_REQUEST_HEADERS, INTROSPECTION_QUERY, endpoint_of, graphql_request_url
+
 _SECRET_REF = re.compile(r"^secret://[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
 
 # class -> (label, what it is, why it matters, fix steps)
@@ -188,6 +193,26 @@ def _block_examples(exposure_class: str, path: str) -> list[dict[str, str]]:
     return examples
 
 
+def _introspection_steps(url: str) -> tuple[list[str], dict[str, str], dict[str, str]] | None:
+    """The expected answer, reproduce and check of an introspection finding.
+
+    The stored request URL has its query value masked, but that value was the scanner's fixed
+    introspection document, which is no secret: the request is rebuilt from it. With
+    introspection off a GraphQL server still answers, usually 200 with an error, so the check
+    looks for the schema in the answer rather than for a status.
+    """
+    if not url_parts(url)[0]:
+        return None
+    headers = " ".join(f"-H {q(f'{name}: {value}')}" for name, value in GRAPHQL_REQUEST_HEADERS)
+    request = graphql_request_url(endpoint_of(url), INTROSPECTION_QUERY)
+    curl = f"curl -sS {headers} {q(request)} | grep -c '\"__schema\"'"
+    return (
+        ["An error instead of the schema: introspection is off for anyone who should not read it."],
+        command(curl, expect='1 or more: the answer carries "__schema"', note="Prints only a count, never the schema."),
+        command(curl, expect='0: no "__schema" in the answer (with introspection off the server still answers, usually 200 with an error)'),
+    )
+
+
 def build(finding: Mapping[str, Any], evidence: Mapping[str, Any]) -> dict[str, Any]:
     exposure_class = text(evidence.get("exposure_class"), 80)
     label, what, why, fix = _signature_entry(text(evidence.get("matched_signature"), 200)) or _CLASSES.get(
@@ -219,6 +244,11 @@ def build(finding: Mapping[str, Any], evidence: Mapping[str, Any]) -> dict[str, 
         context.append(f"The scanner reached this path via {via.replace('_', ' ')}.")
     excerpt = text(evidence.get("redacted_excerpt"), 1200)
     curl = f"curl -sS -o /dev/null -w '%{{http_code}} %{{content_type}} %{{size_download}} bytes\\n' {q(url)}"
+    expected = ["404 or 403: this content should not be served to anonymous users."]
+    reproduce = command(curl, expect=f"{status or 200} with a non-empty body", note="Prints only status, type and size, never the content.")
+    verify = command(curl, expect="404 or 403")
+    if exposure_class == "graphql_introspection_enabled":
+        expected, reproduce, verify = _introspection_steps(url) or (expected, reproduce, verify)
     return {
         "class": f"exposure.{exposure_class}" if exposure_class else "exposure",
         "class_label": label,
@@ -230,10 +260,10 @@ def build(finding: Mapping[str, Any], evidence: Mapping[str, Any]) -> dict[str, 
         ),
         "secrets": secrets,
         "excerpt": {"label": "Response excerpt (masked by the scanner)", "text": excerpt} if excerpt else None,
-        "expected": ["404 or 403: this content should not be served to anonymous users."],
+        "expected": expected,
         "context": context,
-        "reproduce": command(curl, expect=f"{status or 200} with a non-empty body", note="Prints only status, type and size, never the content."),
-        "verify": command(curl, expect="404 or 403"),
+        "reproduce": reproduce,
+        "verify": verify,
         "fix": list(fix) + ([f"Credentials to rotate: {join_limited(fields, 12)}."] if secrets and not any("named below" in step for step in fix) else []),
         "secret_refs": secret_refs(evidence),
         "examples": _block_examples(exposure_class, path),

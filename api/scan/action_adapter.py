@@ -303,7 +303,7 @@ from .nuclei_execution import (
     resolve_active_scan_nuclei_options,
     window_position_candidate_id,
 )
-from .posture_findings import CORS_PROBE_ACTIONS
+from .posture_findings import CORS_PROBE_ACTIONS, cors_probe_verdict
 from .negative_control import negative_control_entries
 from .nuclei_template_index import nuclei_templates_directory
 from .private_inputs import BrokerPrivateScanInputs
@@ -1393,6 +1393,12 @@ class DatabaseNeutralScanActionDispatcher:
                 dict(result.get("response") or {})
                 if isinstance(result.get("response"), Mapping) else {}
             )
+            if cors_probe_origin is not None:
+                # Judged before the receipt redacts the header it compares.
+                headers = response.get("security_headers")
+                response["cors_probe"] = cors_probe_verdict(
+                    cors_probe_origin, headers if isinstance(headers, Mapping) else {},
+                )
             if action.action_id == "baseline.security_txt":
                 body = str(response.get("body_sample") or "").strip()
                 markers = (

@@ -271,6 +271,29 @@ def test_exposure_brief_lists_masked_secrets_and_links_stored_references():
     assert SECRET_VALUE not in json.dumps(brief) and "f1" not in json.dumps(brief["secrets"])
 
 
+def test_graphql_introspection_commands_send_the_introspection_document_and_look_for_the_schema():
+    """Unit fixture: a stored introspection finding; the receipt masked the request's query value."""
+    from api.capabilities.graphql_probe import INTROSPECTION_QUERY, graphql_request_url
+    from api.finding_detail.common import q
+    finding = {"tool": "shakerscan_exposure_probe", "severity": "low", "proof_state": "verified",
+               "url": "http://gql.fixture.invalid/graphql", "evidence": {
+                   "exposure_class": "graphql_introspection_enabled", "response_status": 200,
+                   "request_url": "http://gql.fixture.invalid/graphql?query=%3Credacted%3E",
+                   "content_type": "application/json", "matched_signature": '"__schema"'}}
+    brief = build_finding_detail(finding)
+    sent = graphql_request_url("http://gql.fixture.invalid/graphql", INTROSPECTION_QUERY)
+    for step in ("reproduce", "verify"):
+        command = brief[step]["command"]
+        assert q(sent) in command and "redacted" not in command
+        # Apollo Server refuses a "simple" GET without it (CSRF prevention); the probe sends it.
+        assert "Apollo-Require-Preflight: true" in command
+        assert '"__schema"' in command
+    assert "__schema" in brief["reproduce"]["expect"]
+    # With introspection off a GraphQL server still answers, usually 200 with an error.
+    assert "404" not in brief["verify"]["expect"] and "__schema" in brief["verify"]["expect"]
+    assert not any("404 or 403" in line for line in brief["expected"])
+
+
 def test_verbose_error_is_calibrated_low_but_a_proven_secret_keeps_high():
     plain = calibrate_finding({"tool": "shakerscan_exposure_probe", "severity": "medium", "evidence": {"exposure_class": "verbose_error_disclosure"}})
     assert plain["severity"] == "low"
@@ -343,14 +366,47 @@ def test_malformed_historical_rows_still_get_a_brief(evidence):
 
 
 def test_related_findings_rank_same_certificate_then_same_check():
-    finding = {"id": "a", "tool": "tls.inspect", "url": "https://h.invalid:8444", "evidence": {"certificate_sha256": "c" * 64}}
+    finding = {"id": "a", "tool": "tls.inspect", "url": "https://h.invalid:8444",
+               "evidence": {"check": "tls_certificate_expiring", "certificate_sha256": "c" * 64}}
     rows = [
-        {"id": "00000000-0000-4000-8000-000000000001", "title": "Missing CSP", "severity": "low", "url": "https://h.invalid:8444", "tool": "http_baseline"},
-        {"id": "00000000-0000-4000-8000-000000000002", "title": "Untrusted", "severity": "medium", "url": "https://other.invalid", "tool": "tls.inspect", "certificate_sha256": "c" * 64},
-        {"id": "00000000-0000-4000-8000-000000000003", "title": "Expiring", "severity": "low", "url": "https://h.invalid:8444", "tool": "tls.inspect"},
+        {"id": "00000000-0000-4000-8000-000000000001", "title": "Missing CSP", "severity": "low", "url": "https://h.invalid:8444", "tool": "http_baseline", "check_id": "missing_header_content-security-policy"},
+        {"id": "00000000-0000-4000-8000-000000000002", "title": "Untrusted", "severity": "medium", "url": "https://other.invalid", "tool": "tls.inspect", "certificate_sha256": "c" * 64, "check_id": "tls_certificate_untrusted"},
+        {"id": "00000000-0000-4000-8000-000000000003", "title": "Expiring", "severity": "low", "url": "https://h.invalid:8444/x", "tool": "tls.inspect", "check_id": "tls_certificate_expiring"},
     ]
     related = related_findings(finding, rows)
     assert [item["relation"] for item in related] == ["Same certificate", "Same check on this origin"]
+
+
+def test_related_findings_call_only_the_same_check_the_same_check():
+    """Unit fixture: one origin's findings from one tool that runs several checks."""
+    from api.finding_detail import related_sql_args
+    origin = "http://cors.fixture.invalid"
+    csp = {"id": "a", "target_id": "t", "tool": "http_baseline", "title": "Weak Content-Security-Policy header value",
+           "severity": "info", "url": origin, "evidence": {"check": "weak_header_content-security-policy"}}
+
+    def row(n, title, severity, check, tool="http_baseline", **extra):
+        return {"id": f"00000000-0000-4000-8000-00000000000{n}", "title": title, "severity": severity, "url": origin,
+                "tool": tool, "check_id": check, **extra}
+    rows = [
+        row(1, "CORS policy trusts the null origin", "high", "cors_null_origin"),
+        row(2, "Missing X-Frame-Options header", "low", "missing_header_x-frame-options"),
+        row(3, "Weak Content-Security-Policy header value", "info", "weak_header_content-security-policy"),
+    ]
+    related = related_findings(csp, rows)
+    assert [(item["id"][-1], item["relation"]) for item in related] == [
+        ("3", "Same check on this origin"), ("1", "Other significant finding on this origin")]
+    # The relation's query asks for the same check, not every finding of the tool.
+    assert related_sql_args(csp)[6] == "weak_header_content-security-policy"
+    # Without a recorded check, the template that matched names it, then the title.
+    template = {"id": "b", "target_id": "t", "tool": "nuclei", "title": "HTTP Missing Security Headers", "severity": "info", "url": origin,
+                "evidence": {"template_id": "http-missing-security-headers", "header_name": "x-frame-options"}}
+    nuclei = [
+        row(4, "HTTP Missing Security Headers", "info", None, tool="nuclei", template_id="http-missing-security-headers"),
+        row(5, "Wappalyzer Technology Detection", "info", None, tool="nuclei", template_id="tech-detect"),
+    ]
+    assert [(item["id"][-1], item["relation"]) for item in related_findings(template, nuclei)] == [
+        ("4", "Same check on this origin")]
+    assert related_sql_args(template)[6] == "http-missing-security-headers"
 
 
 def test_finalizer_records_the_baseline_response_for_header_and_cookie_findings():

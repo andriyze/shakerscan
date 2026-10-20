@@ -64,7 +64,7 @@ def test_shell_word_keeps_the_familiar_shlex_form_for_ordinary_values(value):
 
 @pytest.mark.parametrize("payload", PAYLOADS)
 def test_get_replay_sends_exactly_the_stored_url_and_the_payload(payload, tmp_path):
-    url = f"http://app.fixture.invalid/{payload}/search?q=%3Credacted%3E&page=2"
+    url = f"http://app.fixture.invalid/{payload}/search?q=books&page=2"
     attack = f"<script>{payload}</script>"
     plain, injected = build_replay_commands({"finding_type": "xss", "target_url": url, "param": "q", "payload": attack})
     for run in paste(plain, tmp_path):
@@ -96,7 +96,7 @@ def test_post_replay_sends_exactly_the_parameter_and_the_payload(payload, param,
 
 def test_replay_of_a_stored_finding_row_runs_nothing_from_its_url(tmp_path):
     # A browser keeps quotes, $, braces and parentheses in a crawled path.
-    url = "http://app.fixture.invalid/'$(touch${IFS}.shell-ran)'/search?q=%3Credacted%3E"
+    url = "http://app.fixture.invalid/'$(touch${IFS}.shell-ran)'/search?q=books"
     inputs = infer_retest_inputs({"title": "Reflected XSS", "tool": "dalfox", "finding_url": url, "target_url": url,
                                   "evidence": json.dumps({"url": url, "param": "q"})})
     commands = build_replay_commands(inputs)
@@ -121,9 +121,9 @@ def test_exposure_replay_is_one_plain_get():
 
 
 def test_a_stored_row_never_serves_its_old_command_text(tmp_path):
-    url = "http://app.fixture.invalid/'$(pwn)'/search?q=%3Credacted%3E"
+    url = "http://app.fixture.invalid/'$(pwn)'/search?q=books"
     # What a row queued before shell_word holds: the path closes the hand-written quotes.
-    old = ["curl -i -k 'http://app.fixture.invalid/%27%24%28pwn%29%27/search?q=%3Credacted%3E'",
+    old = ["curl -i -k 'http://app.fixture.invalid/%27%24%28pwn%29%27/search?q=books'",
            "curl -i -k 'http://app.fixture.invalid/'$(pwn)'/search?q=%3Cscript%3Ealert%281%29%3C%2Fscript%3E'"]
     row = {"finding_type": "xss", "target_url": url, "original_url": url, "param": "q", "payload": None,
            "method": "GET", "replay_commands": json.dumps(old)}

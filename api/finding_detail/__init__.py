@@ -114,8 +114,11 @@ except ModuleNotFoundError:  # package import layout
     from ..finding_routes.list_schema import FINDING_CERTIFICATE_SQL as CERTIFICATE_SQL, FINDING_ORIGIN_SQL as ORIGIN_SQL
 _RELATED_COLUMNS = f"""id, title, severity, url, tool, status, last_seen_at,
            evidence->>'check' AS check_id,
+           evidence->>'template_id' AS template_id,
            evidence->>'exposure_class' AS exposure_class,
            {CERTIFICATE_SQL} AS certificate_sha256"""
+# What makes two findings of one tool the same check (``_check_key`` reads it the same way).
+_CHECK_KEY_SQL = "COALESCE(NULLIF(evidence->>'check', ''), NULLIF(evidence->>'template_id', ''), title)"
 _RELATED_BASE = "target_id = $1 AND id <> $2 AND status = 'active'"
 _RELATED_PER_RELATION = 20
 RELATED_SQL = f"""
@@ -130,6 +133,7 @@ RELATED_SQL = f"""
     UNION ALL
     (SELECT {_RELATED_COLUMNS} FROM findings
      WHERE {_RELATED_BASE} AND $5::text IS NOT NULL AND {ORIGIN_SQL} = ANY($4::text[]) AND tool = $5::text
+       AND {_CHECK_KEY_SQL} = $7::text
      LIMIT {_RELATED_PER_RELATION})
     UNION ALL
     (SELECT {_RELATED_COLUMNS} FROM findings
@@ -140,6 +144,15 @@ RELATED_SQL = f"""
      WHERE {_RELATED_BASE} AND {ORIGIN_SQL} = ANY($4::text[]) AND severity = 'medium'
      LIMIT {_RELATED_PER_RELATION})
 """
+
+
+def _check_key(check: Any, template_id: Any, title: Any) -> str:
+    """The check a finding reports: the recorded check, else the template that matched, else
+    the title. One tool runs many checks (every response-header rule is ``http_baseline``)."""
+    for value in (check, template_id, title):
+        if isinstance(value, str) and value:
+            return value
+    return ""
 
 
 def _finding_origin(finding: Mapping[str, Any]) -> str:
@@ -162,6 +175,7 @@ def related_sql_args(finding: Mapping[str, Any]) -> tuple[Any, ...]:
     return (
         finding["target_id"], finding["id"], cert, origins,
         text(finding.get("tool"), 80) or None, bool(text(evidence.get("exposure_class"), 80)),
+        _check_key(evidence.get("check"), evidence.get("template_id"), finding.get("title")) or None,
     )
 
 
@@ -175,6 +189,7 @@ def related_findings(finding: Mapping[str, Any], rows: list[Mapping[str, Any]], 
     cert = text(evidence.get("certificate_sha256") or record(evidence.get("certificate")).get("sha256"), 64)
     origin = _finding_origin(finding)
     tool = text(finding.get("tool"), 80)
+    check = _check_key(evidence.get("check"), evidence.get("template_id"), finding.get("title"))
     exposure_class = text(evidence.get("exposure_class"), 80)
     ranked: list[tuple[int, int, dict[str, Any]]] = []
     seen: set[str] = set()
@@ -188,7 +203,9 @@ def related_findings(finding: Mapping[str, Any], rows: list[Mapping[str, Any]], 
             reason, priority = "Same certificate", 0
         elif exposure_class and row.get("exposure_class") and origin_of(row.get("url")) == origin:
             reason, priority = "Other exposed content on this origin", 1
-        elif tool and row.get("tool") == tool and origin and origin_of(row.get("url")) == origin:
+        elif (tool and row.get("tool") == tool and check
+              and _check_key(row.get("check_id"), row.get("template_id"), row.get("title")) == check
+              and origin and origin_of(row.get("url")) == origin):
             reason, priority = "Same check on this origin", 2
         elif origin and origin_of(row.get("url")) == origin and _SEVERITY_RANK.get(str(row.get("severity")), 5) <= 2:
             reason, priority = "Other significant finding on this origin", 3
