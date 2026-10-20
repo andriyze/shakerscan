@@ -20,7 +20,7 @@ from .capability_result import (
     CapabilityResultStatus,
 )
 from .contracts import SCAN_APPLICATION_SURFACE_FAMILIES
-from .finding_evidence import template_classification, tls_finding_evidence
+from .finding_evidence import template_classification, tls_finding_evidence, tls_untrusted_by_leaf_weakness
 from .posture_findings import (
     CORS_PROBE_ACTIONS, OPT_IN_HEADERS, cors_findings, dns_posture_findings, open_redirect_finding,
     redact_url_queries, weak_header_findings,
@@ -1491,7 +1491,9 @@ def _findings_for_action(
                  "TLS certificate is not yet valid", "medium", "CWE-295", "tls_certificate_not_yet_valid"),
                 (item.get("certificate_hostname_matches") is False,
                  "TLS certificate hostname mismatch", "high", "CWE-295", "tls_certificate_hostname_mismatch"),
-                (item.get("certificate_trust") == "untrusted",
+                # Not when the verifier refused only the leaf's own weak key or signature,
+                # which the weak-key / weak-signature finding below already reports.
+                (item.get("certificate_trust") == "untrusted" and not tls_untrusted_by_leaf_weakness(item),
                  "TLS certificate chain is not trusted", "medium", "CWE-295", "tls_certificate_untrusted"),
                 (item.get("legacy_protocol_negotiated") is True,
                  "Legacy TLS protocol negotiated", "high", "CWE-326", "tls_legacy_protocol"),
