@@ -21,6 +21,7 @@ from .capability_result import (
 )
 from .contracts import SCAN_APPLICATION_SURFACE_FAMILIES
 from .finding_evidence import template_classification, tls_finding_evidence
+from .external_process import ACTIVE_TEMPLATE_WINDOWS_RECORD_KIND, TEMPLATE_WINDOW_BEYOND_ALLOWLIST
 from .posture_findings import (
     CORS_PROBE_ACTIONS, OPT_IN_HEADERS, cors_findings, dns_posture_findings, open_redirect_finding,
     redact_url_queries, weak_header_findings,
@@ -2397,6 +2398,22 @@ _NAMED_FAMILY_GAP_REASONS = frozenset({
 })
 
 
+def _windows_beyond_allowlist_only(action: Any, rows: Sequence[Any]) -> bool:
+    """An active-template slice whose every planned position was past the allowlist's windows.
+
+    It ran nothing by design (a GET-only allowlist has fewer windows than were planned), so it
+    is not an active verifier that attempted nothing.
+    """
+    raw_slice = action.capability_args.get("slice")
+    planned = int(raw_slice.get("count") or 0) if isinstance(raw_slice, Mapping) else 0
+    beyond = sum(
+        1 for item in rows or ()
+        if isinstance(item, Mapping) and item.get("kind") == "candidate_inapplicable"
+        and item.get("reason") == TEMPLATE_WINDOW_BEYOND_ALLOWLIST
+    )
+    return action.capability_name == "templates.active_batch" and 0 < planned <= beyond
+
+
 def _family_action_reason(action: Any, result: Any) -> str:
     """The reason one verifier action contributes to its family's coverage.
 
@@ -2564,11 +2581,25 @@ def finalize_scan_report(
     # required action did not complete, makes the grade unreliable — a scan can no
     # longer report a reliable grade while a chosen family did no work.
     family_coverage: dict[str, dict[str, Any]] = {}
+    # The active-template windows the Scan's sweeps finished, per allowlist size: a slice
+    # without a mutation hold runs the smaller GET-only allowlist, whose windows are others.
+    template_windows_run: dict[int, set[int]] = {}
     for action in expected_actions:
         family = _FAMILY_BY_CAPABILITY.get(action.capability_name)
         if family is None:
             continue
         result = action_results[action.action_id]
+        if action.capability_name == "templates.active_batch":
+            for item in observations.get(action.action_id, ()):
+                if not isinstance(item, Mapping) or item.get("kind") != ACTIVE_TEMPLATE_WINDOWS_RECORD_KIND:
+                    continue
+                count = item.get("window_count")
+                if isinstance(count, int) and not isinstance(count, bool) and count > 0:
+                    template_windows_run.setdefault(count, set()).update(
+                        int(index) for index in item.get("windows_run") or ()
+                        if isinstance(index, int) and not isinstance(index, bool)
+                        and 0 <= index < count
+                    )
         raw_slice = action.capability_args.get("slice")
         planned = (
             int(raw_slice.get("count") or 0)
@@ -2677,6 +2708,13 @@ def finalize_scan_report(
             row["verified_findings"] += 1
         elif finding.get("suspected") is True:
             row["suspected_findings"] += 1
+    if template_windows_run and "nuclei_active" in family_coverage:
+        # Informational: how much of the largest permitted active allowlist ran. A sweep runs
+        # one window per attempt, so a host with fewer endpoints than windows ran a fraction.
+        total = max(template_windows_run)
+        family_coverage["nuclei_active"]["template_windows"] = {
+            "run": len(template_windows_run[total]), "total": total,
+        }
     selected_family_gaps: list[str] = []
     for family, row in family_coverage.items():
         statuses = row.pop("_statuses")
@@ -2882,6 +2920,7 @@ def finalize_scan_report(
             for name, amount in action_results[action.action_id].budget_consumed.items()
             if name in _TRAFFIC_BUDGETS
         )
+        and not _windows_beyond_allowlist_only(action, observations.get(action.action_id, ()))
     ]
     placement_gaps = [
         action.action_id

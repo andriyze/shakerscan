@@ -39,6 +39,16 @@ BUDGET_PROFILES: Mapping[str, ScanBudget] = {
     "thorough": ScanBudget(10_800, 60_000, 30_000, 3_000, 60_000, 10_800, 8, 6_000, 1_000),
     "deep": ScanBudget(21_600, 150_000, 75_000, 7_500, 150_000, 21_600, 16, 15_000, 2_500),
 }
+# The profiles whose plans are sized for the work to finish, not only to fit: their tool wall
+# follows a lowered duration, their SQLi extensions hold the wall their remaining techniques
+# need, later rounds step down to a slice the residual can fund, and their direct Scans run
+# every active-template window. Fast and balanced plans are unchanged.
+BUDGET_SUFFICIENCY_PROFILES = frozenset({"thorough", "deep"})
+
+
+def budget_sufficiency(profile: Any) -> bool:
+    """Whether a Scan of this budget profile plans its work to completion (see above)."""
+    return str(profile or "").strip().lower() in BUDGET_SUFFICIENCY_PROFILES
 
 # These are the only family names with concrete canonical action-graph semantics.
 # The broader check registry remains available to ASM; accepting unimplemented
@@ -367,6 +377,18 @@ def _resolve_budget(
         base[key] = value
     if "max_hosts" not in advanced:
         base["max_hosts"] = min(base["max_hosts"], base["max_endpoints"])
+    if (
+        budget_sufficiency(profile)
+        and advanced.get("max_duration_seconds") is not None
+        and advanced.get("max_tool_wall_seconds") is None
+    ):
+        # Tool wall never exceeds total wall. Actions run one at a time, so a lowered
+        # duration left at the profile's tool wall planned about three times the work the
+        # deadline lets run, and the deadline then killed it (lab Scans at 3,600 s planned
+        # 10,800 s). An explicit tool-wall limit is kept as given.
+        base["max_tool_wall_seconds"] = min(
+            base["max_tool_wall_seconds"], base["max_duration_seconds"],
+        )
     if "max_state_changing_requests" not in advanced:
         base["max_state_changing_requests"] = min(
             base["max_state_changing_requests"], base["max_http_requests"],

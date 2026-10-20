@@ -25,13 +25,19 @@ ACTIVE_FAMILIES = ("recon", "nuclei_passive", "nuclei_active", "xss", "sqli")
 BODY_ENDPOINT = 'POST /api/login json:{"username":"a","password":"b"}'
 
 
-def custom_endpoints(*, endpoints: int, queries: int, body: bool) -> list[str]:
-    """Operator endpoints giving ``endpoints`` manifest entries (the origin is one of them)."""
-    plain = max(0, int(endpoints) - int(queries) - int(bool(body)) - 1)
+def custom_endpoints(*, endpoints: int, queries: int, body: bool | int) -> list[str]:
+    """Operator endpoints giving ``endpoints`` manifest entries (the origin is one of them).
+
+    ``body`` is whether there is a request-body endpoint, or how many there are.
+    """
+    bodies = int(body)
+    plain = max(0, int(endpoints) - int(queries) - bodies - 1)
     rows = [f"GET /q{index:03d}?q=1" for index in range(int(queries))]
     rows += [f"GET /p{index:03d}" for index in range(plain)]
-    if body:
-        rows.append(BODY_ENDPOINT)
+    rows += [
+        BODY_ENDPOINT if index == 0 else BODY_ENDPOINT.replace("/api/login", f"/api/form{index:03d}")
+        for index in range(bodies)
+    ]
     return rows
 
 
@@ -40,7 +46,7 @@ def admitted_round_fixture(
     *,
     endpoints: int,
     queries: int,
-    body: bool = False,
+    body: bool | int = False,
     state_changing: bool = True,
     families: tuple[str, ...] = ACTIVE_FAMILIES,
     advanced: Mapping[str, Any] | None = None,
