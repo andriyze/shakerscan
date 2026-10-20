@@ -7,6 +7,7 @@ try:
 except ModuleNotFoundError:  # package import layout
     from api.capabilities.secret_material import keyed_body_digest
 import asyncio
+import contextlib
 from dataclasses import dataclass, field
 import json
 import hashlib
@@ -25,6 +26,7 @@ try:
     from hunt.capability_executor import CapabilityAdapterResult, Cancelled, Heartbeat
     from pinned_socks_proxy import PinnedSocksProxy
     from runtime.auth_refusal import AUTHENTICATION_REQUIRED, is_login_location, refusal
+    from runtime.auth_session_store import AuthSessionStoreError
     from runtime.models import PreparedExecution, TargetBinding
     from runtime.request_shape import nested_json_body
     from runtime.secret_material import contains_secret_material
@@ -33,6 +35,7 @@ except ModuleNotFoundError:  # package imports in host-side tests
     from ..hunt.capability_executor import CapabilityAdapterResult, Cancelled, Heartbeat
     from ..pinned_socks_proxy import PinnedSocksProxy
     from ..runtime.auth_refusal import AUTHENTICATION_REQUIRED, is_login_location, refusal
+    from ..runtime.auth_session_store import AuthSessionStoreError
     from ..runtime.models import PreparedExecution, TargetBinding
     from ..runtime.request_shape import nested_json_body
     from ..runtime.secret_material import contains_secret_material
@@ -735,11 +738,34 @@ def browser_capability_adapter(name: str):
     return adapters[normalized]
 
 
+def _refused_session_code(exc: Exception) -> str:
+    # The store's refusals are fixed sentences without target data; reduce them to a stable code.
+    message = str(exc)
+    if "capability" in message:
+        return "auth_session_capability_not_allowed"
+    if "expired or revoked" in message:
+        return "auth_session_expired"
+    return "auth_session_unavailable"
+
+
 async def _execute_browser_with_session(prepared, *, session_loader, heartbeat, cancelled):
     if prepared.session_ref:
         if session_loader is None:
             raise BrowserCapabilityInputError("Managed browser session requires worker resolution")
-        async with session_loader() as headers:
+        async with contextlib.AsyncExitStack() as stack:
+            try:
+                headers = await stack.enter_async_context(session_loader())
+            except AuthSessionStoreError as exc:
+                # A refused session ends the action before any request, with its reason: as a
+                # bare adapter fault the agent could not tell that the session's profile does
+                # not allow the browser.
+                return CapabilityAdapterResult(
+                    status="failed",
+                    errors=(_refused_session_code(exc),),
+                    actual_budget={},
+                    parser_version=prepared.parser_version,
+                    redacted_execution=prepared.redacted_execution,
+                )
             return await _execute_browser_action(prepared, heartbeat=heartbeat, cancelled=cancelled, trusted_headers=headers)
     return await _execute_browser_action(prepared, heartbeat=heartbeat, cancelled=cancelled)
 
