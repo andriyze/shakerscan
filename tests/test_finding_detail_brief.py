@@ -358,3 +358,58 @@ def test_sqli_brief_reads_a_stored_sqlmap_prompt_as_the_database_name():
     assert database == "SQLite"
     assert "Do you want" not in json.dumps(brief)
 
+
+def test_sqlmap_path_marker_brief_quotes_the_segment_and_hides_the_marker():
+    # Stored as recorded: the candidate reached sqlmap as /products/1*, and sqlmap names it "#1*".
+    url = "http://sqli-path.fixture.invalid/products/1*"
+    brief = build_finding_detail({"tool": "sqlmap", "severity": "high", "proof_state": "likely_vulnerable",
+        "url": url, "title": "Potential SQL injection", "target_url": "http://sqli-path.fixture.invalid",
+        "evidence": {"url": url, "param": "#1*", "method": "GET", "sqlmap_message": "URI parameter '#1*' is vulnerable."}})
+    where = {fact["label"]: fact["value"] for fact in brief["where"]}
+    assert where["Endpoint"] == "GET http://sqli-path.fixture.invalid/products/1"
+    assert where["Parameter"] == "path_2"
+    assert "#1*" not in brief["summary"] and "products/1*" not in brief["summary"]
+    assert not any("#1*" in step for step in brief["fix"])
+    command = brief["reproduce"]["command"]
+    assert shlex.split(command)[2] == "http://sqli-path.fixture.invalid/products/1%27"
+    assert brief["verify"]["command"] == command
+
+
+@pytest.mark.parametrize("canonical,quoted", [
+    ("/products/{int}", "/products/1%27"),
+    ("/orders/{int}/items/{uuid}", "/orders/1/items/00000000-0000-4000-8000-000000000000%27"),
+])
+def test_verified_path_sqli_brief_quotes_the_segment_with_the_value_the_scan_sent(canonical, quoted):
+    field = f"path_{len(canonical.split('/')) - 1}"
+    brief = build_finding_detail({"tool": "shakerscan_sqli_proof", "severity": "critical", "proof_state": "verified",
+        "url": canonical, "title": "Verified SQL injection", "target_url": "http://sqli-path.fixture.invalid",
+        "evidence": {"method": "GET", "field_path": field, "technique": "error_based_repeated", "repetitions": 2,
+                     "payload_shape": "<original>'", "request_class": "safe_read", "request_ref_id": None}})
+    command = brief["reproduce"]["command"]
+    assert shlex.split(command)[2] == "http://sqli-path.fixture.invalid" + quoted
+    assert "{" not in command and f"{field}=" not in command
+
+
+def test_query_proved_nosqli_brief_reproduces_with_query_brackets_not_a_json_body():
+    brief = build_finding_detail({"tool": "shakerscan_nosqli_verify", "severity": "high", "proof_state": "verified",
+        "url": "/api/users", "title": "Verified NoSQL injection", "target_url": "http://nosqli.fixture.invalid",
+        "evidence": {"method": "GET", "field_path": "username", "operator": "$ne", "request_ref_id": None,
+                     "request_class": "safe_read", "technique": "operator_equality_complement_differential",
+                     "repetitions": 2}})
+    words = shlex.split(brief["reproduce"]["command"])
+    assert words[:2] == ["curl", "-sS"] and "-d" not in words and "-X" not in words
+    sent = next(word for word in words if word.startswith("http"))
+    assert sent.startswith("http://nosqli.fixture.invalid/api/users?username%5B%24ne%5D=")
+    assert "req.query.username" in brief["examples"][0]["code"]
+
+
+def test_body_proved_nosqli_brief_keeps_the_json_body_request():
+    brief = build_finding_detail({"tool": "shakerscan_nosqli_verify", "severity": "critical", "proof_state": "verified",
+        "url": "/api/login", "title": "Verified NoSQL injection authentication bypass",
+        "target_url": "http://nosqli.fixture.invalid",
+        "evidence": {"method": "POST", "field_path": "password", "operator": "$ne", "request_ref_id": "ref-1",
+                     "request_class": "safe_authentication", "repetitions": 2}})
+    words = shlex.split(brief["reproduce"]["command"])
+    assert words[words.index("-X") + 1] == "POST"
+    assert json.loads(words[words.index("-d") + 1]) == {"password": {"$ne": None}}
+    assert "req.body.username" in brief["examples"][0]["code"]
