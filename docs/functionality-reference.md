@@ -3034,7 +3034,7 @@ Only key names and declaring sources are documented; secret values are never rea
 | `RETEST_SLOT_WAIT_MAX_SECONDS` | `api/worker.py` |
 | `RETEST_STALE_BATCH_SIZE` | `api/worker.py`, `docker-compose.release.yml`, `docker-compose.yml` |
 | `RETEST_STALE_CHECK_INTERVAL_SECONDS` | `api/worker.py`, `docker-compose.release.yml`, `docker-compose.yml` |
-| `RETEST_STALE_REQUEUE_LIMIT` | `api/worker.py`, `docker-compose.release.yml`, `docker-compose.yml` |
+| `RETEST_STALE_REQUEUE_LIMIT` | `api/retest_contract.py`, `docker-compose.release.yml`, `docker-compose.yml` |
 | `RETEST_WATCHDOG_LOCK_KEY` | `api/worker.py` |
 | `RETEST_WATCHDOG_LOCK_SECONDS` | `api/worker.py` |
 | `SCANNER_DALFOX_DEEP_DOMXSS` | `scanner/scanner_tools/active_checks.py` |
