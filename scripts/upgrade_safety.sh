@@ -9,9 +9,9 @@
 #     previous release); otherwise it refuses, naming the numbers, with nothing changed. A start
 #     with nothing to download never needs this room.
 #   - ensure_pre_upgrade_backup: a version-changing start dumps PostgreSQL first (outside Docker).
-#     The version it upgrades from is the one the running API reports; the release record only
-#     when nothing runs, and a record that an older launcher's start (or a reinstall) may have left
-#     out of date means a backup.
+#     The version it upgrades from is the one the running API reports; otherwise the release
+#     record. A record that does not name the image of the API container (running or stopped), or
+#     that an older launcher's start (or a reinstall) may have left out of date, means a backup.
 #   - ensure_redis_ready: Redis must be healthy before anything that depends on it. A damaged
 #     append-only file is repaired (a copy of its data is kept first); a Redis that cannot write
 #     gets room from old images. Only a damaged Redis whose data was copied may start empty: it
@@ -133,9 +133,11 @@ running_api_version() {
 # not say. Noted once per launcher run, before the first stop (restart, clean-slate start).
 # With it, the ShakerScan images its containers use: the release a start replaces is kept for
 # rollback by what actually ran, even when the release record says otherwise (a rollback by an
-# older launcher, which keeps no record).
+# older launcher, which keeps no record). And the release image the project's API container
+# (running or stopped) was created from: the release record is trusted only when it names it.
 RELEASE_RUNNING_BEFORE_START=""
 RELEASE_RUNNING_IMAGES=""
+RELEASE_API_IMAGE_BEFORE_START=""
 RELEASE_RUNNING_NOTED=0
 note_running_release() {
     [ "$RELEASE_RUNNING_NOTED" = 1 ] && return 0
@@ -145,7 +147,40 @@ note_running_release() {
         RELEASE_RUNNING_IMAGES="$(project_container_image_ids | sed '/^$/d' | sort -u | while read -r id; do
             if image_is_shakerscan "$id"; then echo "$id"; fi; done)"
     fi
+    RELEASE_API_IMAGE_BEFORE_START="$(api_container_release_image)"
     RELEASE_RUNNING_NOTED=1
+}
+
+# The image id of the project's API container, running or stopped (`compose down` removes it; a
+# plain stop or a crash does not), when it is a ShakerScan release image. Empty otherwise: none, or
+# a local build's image, which no release record names. A container Docker cannot say the image of
+# gives "uninspectable", which no record names either: the record is then not trusted.
+api_container_release_image() {
+    local container image
+    container="$(service_container api)"
+    [ -n "$container" ] || return 0
+    image="$(docker_cli inspect --format '{{.Image}}' "$container" 2>/dev/null || true)"
+    if [ -z "$image" ]; then
+        echo uninspectable
+    elif image_is_shakerscan "$image"; then
+        printf '%s\n' "$image"
+    fi
+    return 0
+}
+
+# Whether the release record names the image of the API container noted before this start; with
+# no such container there is nothing to compare. A container of another release (started by an
+# older launcher after a rollback, or by hand with the Compose file), or a record whose images are
+# gone, means the record does not describe the database.
+release_record_names_api_image() {
+    local ref
+    [ -n "$RELEASE_API_IMAGE_BEFORE_START" ] || return 0
+    for ref in $(release_state_refs "$RELEASE_STATE_CURRENT"); do
+        if [ "$(docker_cli image inspect --format '{{.Id}}' "$ref" 2>/dev/null || true)" = "$RELEASE_API_IMAGE_BEFORE_START" ]; then
+            return 0
+        fi
+    done
+    return 1
 }
 
 # The release record may not describe the database: since it was written, this install was started
@@ -475,11 +510,12 @@ pending_upgrade_from() {
     local from
     note_running_release
     if [ -f "$RELEASE_STATE_CURRENT" ]; then
-        # The running API is the truth; the record only when nothing ran to ask. A record that may
-        # be out of date is not trusted: the database is saved, named for the recorded version.
+        # The version the running API reports is the truth; otherwise the record, when it names the
+        # image of the API container there was. A record that does not, or that may be out of date,
+        # is not trusted: the database is saved, named for the recorded version.
         if [ -n "$RELEASE_RUNNING_BEFORE_START" ]; then
             from="$RELEASE_RUNNING_BEFORE_START"
-        elif release_record_is_stale; then
+        elif ! release_record_names_api_image || release_record_is_stale; then
             from="unverified-$(started_release_version | tr -cd 'A-Za-z0-9._-')"
         else
             from="$(started_release_version)"

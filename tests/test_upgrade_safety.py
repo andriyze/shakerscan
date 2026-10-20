@@ -587,6 +587,104 @@ def test_a_restart_of_the_recorded_release_is_still_not_an_upgrade(tmp_path):
     assert "pre-upgrade" not in latest.stdout, latest.stdout
 
 
+# A record of 2.10.0 (image r10) and the 2.9.0 image (r9) an older launcher, or a hand-run Compose
+# command, may have started since. Unit fixture: the stub's `docker inspect` names a container by its
+# image id.
+_RECORDED = r"""
+printf '%s\n' 'ghcr.io/x/shakerscan-api@sha256:r9 id-r9 ghcr.io/x/shakerscan-api' \
+    'ghcr.io/x/shakerscan-api@sha256:r10 id-r10 ghcr.io/x/shakerscan-api' > "$WORK/images"
+printf '# release 2.10.0\nghcr.io/x/shakerscan-api@sha256:r10\n' > "$WORK/.release-images.current"
+"""
+
+
+def test_an_api_running_images_the_record_does_not_name_means_a_backup(tmp_path):
+    """The record still named 2.10.0 while the API ran 2.9.0 images whose environment gives no
+    usable version (started by hand with the release Compose file, which defaults it to "latest").
+    Starting 2.10.0 skipped the backup although it migrates the 2.9.0 database."""
+    before = _RECORDED + """
+echo id-r9 > "$WORK/containers"
+running_api_version() { echo latest; }
+"""
+    result = _backup(tmp_path, "2.10.0", "t", before=before)
+    assert "rc=0" in result.stdout and "-unverified-2.10.0-to-2.10.0" in result.stdout, result.stdout + result.stderr
+
+
+def test_a_stopped_api_container_the_record_does_not_name_means_a_backup(tmp_path):
+    """Nothing runs to ask (the containers were stopped, not removed), and the runtime marker is
+    older than the record: the stopped API container's image still shows the record is stale."""
+    before = _RECORDED + """
+echo prebuilt > "$WORK/.shakerscan-local-build"
+touch -t 202610010000 "$WORK/.shakerscan-local-build"
+echo id-r9 > "$WORK/containers"    # `docker ps -a` lists the stopped API container
+running_api_version() { :; }       # nothing runs
+"""
+    result = _backup(tmp_path, "2.10.0", "t", before=before)
+    assert "rc=0" in result.stdout and "-unverified-2.10.0-to-2.10.0" in result.stdout, result.stdout + result.stderr
+
+
+def test_an_api_container_docker_cannot_inspect_means_a_backup(tmp_path):
+    """Docker lists an API container but cannot say which image it was created from: the record
+    cannot be checked against it, so it is not trusted."""
+    before = _RECORDED + """
+echo id-r10 > "$WORK/containers"
+docker_cli() { case "$*" in *'{{.Image}}'*) return 1 ;; esac; docker "$@"; }
+"""
+    result = _backup(tmp_path, "2.10.0", "t", before=before)
+    assert "rc=0" in result.stdout and "-unverified-2.10.0-to-2.10.0" in result.stdout, result.stdout + result.stderr
+
+
+def test_a_record_whose_images_are_gone_is_not_trusted_while_an_api_container_exists(tmp_path):
+    """The images the record names are no longer on this host, so they cannot be what the API
+    container runs."""
+    before = """
+printf '%s\n' 'ghcr.io/x/shakerscan-api@sha256:r9 id-r9 ghcr.io/x/shakerscan-api' > "$WORK/images"
+printf '# release 2.10.0\nghcr.io/x/shakerscan-api@sha256:r10\n' > "$WORK/.release-images.current"
+echo id-r9 > "$WORK/containers"
+"""
+    result = _backup(tmp_path, "2.10.0", "t", before=before)
+    assert "rc=0" in result.stdout and "-unverified-2.10.0-to-2.10.0" in result.stdout, result.stdout + result.stderr
+
+
+def test_the_api_image_is_noted_before_the_stack_is_stopped(tmp_path):
+    """A clean-slate start or a restart removes the containers before the backup is decided."""
+    before = _RECORDED + """
+echo id-r9 > "$WORK/containers"
+note_running_release
+: > "$WORK/containers"             # the start stopped and removed the stack
+"""
+    result = _backup(tmp_path, "2.10.0", "t", before=before)
+    assert "-unverified-2.10.0-to-2.10.0" in result.stdout, result.stdout + result.stderr
+
+
+def test_a_record_that_names_the_api_image_is_trusted(tmp_path):
+    """No backup for a restart of the recorded release, whatever its API says about its version, nor
+    for a local build, whose images the record does not name."""
+    recorded = _backup(tmp_path, "2.10.0", "t", before=_RECORDED + """
+echo id-r10 > "$WORK/containers"
+running_api_version() { echo latest; }
+""")
+    assert "rc=0" in recorded.stdout and "pre-upgrade" not in recorded.stdout, recorded.stdout + recorded.stderr
+    local_build = tmp_path / "local"
+    local_build.mkdir()
+    built = _backup(local_build, "2.10.0", "t", before=_RECORDED + """
+echo 'shakerscan-api:latest id-local shakerscan-api' >> "$WORK/images"
+echo id-local > "$WORK/containers"
+""")
+    assert "rc=0" in built.stdout and "pre-upgrade" not in built.stdout, built.stdout + built.stderr
+
+
+def test_a_version_the_api_reports_still_decides_over_its_image(tmp_path):
+    """The record lags behind the release that runs (a start that failed after 2.10.0 came up): a
+    start of 2.10.0 is no upgrade, as before."""
+    before = _RECORDED + """
+printf '# release 2.9.0\nghcr.io/x/shakerscan-api@sha256:r9\n' > "$WORK/.release-images.current"
+echo id-r10 > "$WORK/containers"
+running_api_version() { echo 2.10.0; }
+"""
+    result = _backup(tmp_path, "2.9.0", "t", before=before)
+    assert "rc=0" in result.stdout and "pre-upgrade" not in result.stdout, result.stdout + result.stderr
+
+
 def test_without_any_record_a_running_release_of_another_version_is_backed_up(tmp_path):
     """A local build, or a release whose images were not recognised, leaves no record; the version
     its API reports still makes the start an upgrade."""
