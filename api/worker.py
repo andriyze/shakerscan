@@ -57,6 +57,7 @@ from retest_contract import (
     mark_candidate_inconclusive,
     normalize_retest_type,
     parse_json_field,
+    path_segment_retest_result,
     retest_queue_binding_matches,
     run_schema_migrations,
     settle_retest_subject_error,
@@ -5715,6 +5716,8 @@ async def run_finding_retest(verification: dict) -> dict:
             "retryable": False,
         }
 
+    if declined := path_segment_retest_result(inputs, replay_commands):
+        return {**declined, "attempt_ladder": attempt_ladder}
     test_url = inputs.get("original_url") or inputs.get("target_url")
     if not test_url:
         return {

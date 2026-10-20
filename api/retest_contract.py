@@ -568,6 +568,27 @@ def _sqlmap_marked_segment_urls(url: str, param: str, payload: str) -> tuple[str
             urllib.parse.urlunsplit(parsed._replace(path="/".join(injected))))
 
 
+def path_segment_retest_result(inputs: dict[str, Any], replay_commands: list[str]) -> dict[str, Any] | None:
+    """An inconclusive result, sending nothing, for a SQLi point sqlmap marked in a path segment.
+
+    The retest prover injects only query and form parameters. Given ``#1*`` it would request the
+    starred URL with a ``#1*`` parameter the application never reads, so the retest declines and the
+    finding stays open; the replay commands still show the marked segment for a manual check.
+    """
+    param = str(inputs.get("param") or "").strip()
+    if str(inputs.get("finding_type") or "") != "sqli" or not _SQLMAP_URI_MARKER.fullmatch(param):
+        return None
+    reason = ("The injection point is a URL path segment (sqlmap marker " + param + "); Retest replays "
+              "only query and form parameters, so it sent nothing and the finding stays open.")
+    return {
+        "status": "completed", "result_status": "inconclusive", "verdict": "inconclusive",
+        "verdict_reason": reason, "error_message": None, "confidence": None, "proof": None,
+        "replay_commands": replay_commands,
+        "artifacts": {"skipped_reason": "path_segment_injection_point", "param": param},
+        "attempts_exhausted": True, "retry_class": "validation", "retryable": False,
+    }
+
+
 def infer_retest_inputs(verification: dict[str, Any]) -> dict[str, Any]:
     """Build effective retest inputs using verification row and finding evidence."""
     evidence = parse_json_field(verification.get("evidence"))
