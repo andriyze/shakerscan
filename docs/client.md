@@ -474,6 +474,9 @@ it, prints the connection options and then that CLI's own help. `query` takes ev
 engine's `/hunts/{id}/query` accepts, the same as the MCP tool, including `hypotheses`,
 `graph_nodes`, `graph_edges`, `endpoint_groups` and `service_intelligence`, and `--cursor` to
 follow `next_cursor`.
+`hunt call` exits 0 only when the action was admitted: a refusal, a pending permission request
+and an action replayed as `blocked` (its permission was denied, expired or withdrawn) exit 2, with
+the server's answer still printed as JSON.
 
 ## Versioning and release
 

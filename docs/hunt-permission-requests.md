@@ -629,7 +629,9 @@ client and `./scanner.sh approve` on an engine install run the same protocol.
 - `shakerscan hunt permissions list [HUNT] [--status S] | show <id> | wait <id> [--seconds N]`:
   JSON with the server-rendered text; `wait` answers `granted`, `denied`, `expired`, `withdrawn`
   or `still_pending`. `shakerscan hunt call` refused with `permission_required` names the request
-  and the `shakerscan approve` command.
+  and the `shakerscan approve` command. Both exit 2; so does a retry whose action is replayed as
+  `blocked` (denied, expired or withdrawn): the replay is a 2xx body, still printed as JSON, but the
+  action did not run.
 - `--allow BOUND` (repeatable) on `shakerscan hunt start` and `shakerscan agent`;
   `--propose-allow BOUND` on `hunt start` sends `proposed_allow` (one pending request), as the MCP
   start tool does with its `allow` argument.

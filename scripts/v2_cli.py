@@ -1557,11 +1557,26 @@ def main(argv: Sequence[str] | None = None) -> int:
         else:
             raise CliError("unknown command")
         print(json.dumps(result, indent=2, sort_keys=True))
-        return 0
+        return _hunt_call_exit(args, result)
     except CliError as exc:
         print(json.dumps(exc.public_dict(), sort_keys=True), file=sys.stderr)
         return 2
 
+
+def _hunt_call_exit(args: argparse.Namespace, result: Any) -> int:
+    """``hunt call`` whose action was refused (a denied, expired or withdrawn permission replayed
+    as ``blocked``) exits 2 like any other refusal: the body is a 2xx replay, but nothing ran."""
+    if getattr(args, "product", None) != "hunt" or getattr(args, "hunt_command", None) != "call":
+        return 0
+    response = result.get("response") if isinstance(result, Mapping) else None
+    action = response.get("action_result") if isinstance(response, Mapping) else None
+    if not isinstance(action, Mapping) or str(action.get("status") or "") != "blocked":
+        return 0
+    errors = [str(item) for item in action.get("errors") or () if item]
+    reason = errors[0] if errors else "blocked"
+    print(json.dumps({"error": f"the action was refused ({reason}) and did not run",
+                      "error_type": "action_blocked"}, sort_keys=True), file=sys.stderr)
+    return 2
 
 
 def _run_approval(args: argparse.Namespace, client: ApiClient) -> int:
