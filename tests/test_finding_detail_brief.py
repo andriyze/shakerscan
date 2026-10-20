@@ -4,13 +4,13 @@ from __future__ import annotations
 
 import json
 import shlex
-import shutil
-import subprocess
 
 import pytest
 
 from api.finding_detail import build_finding_detail, related_findings
 from api.scan.severity_calibration import calibrate_finding
+from scanner.scanner_tools.shell_words import shell_word
+from tests.shell_paste import PAYLOADS, paste
 
 SECRET_VALUE = "AKIA" + "ZOOFIXTUREVALUE1"  # split: a synthetic fixture, not a real key
 
@@ -69,28 +69,20 @@ def test_commands_quote_target_controlled_values():
     assert "'\"'\"'$(id)" in header["reproduce"]["command"]
 
 
-# Path segments a hostile target can put in a link the scanner crawls. Each one makes a shell
-# that reads it unquoted run ``touch``; the last also breaks out of a single-quoted word.
-_SHELL_PAYLOADS = ("$(touch$IFS.shell-ran)", "`touch$IFS.shell-ran`", ";touch$IFS.shell-ran;", "'$(touch$IFS.shell-ran)")
+# Text a hostile target can put in a crawled link, a header, a name or a parameter; each one runs
+# a marker when a shell reads it unquoted (tests/shell_paste.py).
+_SHELL_PAYLOADS = PAYLOADS
 
 
 def _assert_safe_to_paste(command, tmp_path):
-    """Run a copied brief command as a terminal would, under bash and sh.
+    """Paste a copied brief command into every shell on this host; return what each one ran.
 
-    Only ``touch`` is on PATH, so curl, openssl, dig and the like are not found and nothing
-    reaches the network: the marker file appears only if a shell ran target-chosen syntax.
+    The stand-ins on PATH record their arguments and nothing reaches the network: the marker
+    appears only if a shell ran target-chosen syntax. A copied command never carries a control
+    character, which a terminal would act on while pasting.
     """
-    tools, work = tmp_path / "bin", tmp_path / "work"
-    tools.mkdir(exist_ok=True)
-    work.mkdir(exist_ok=True)
-    if not (tools / "touch").exists():
-        (tools / "touch").symlink_to(shutil.which("touch"))
-    env = {"PATH": str(tools), "HOME": str(tmp_path)}
-    for shell in (shutil.which("bash"), "/bin/sh"):
-        parsed = subprocess.run([shell, "-n", "-c", command], env=env, capture_output=True, text=True, timeout=20, check=False)
-        assert parsed.returncode == 0, (shell, command, parsed.stderr)
-        subprocess.run([shell, "-c", command], cwd=work, env=env, capture_output=True, text=True, timeout=20, check=False)
-        assert not (work / ".shell-ran").exists(), (shell, command)
+    assert not any(ch != "\n" and (ch < " " or "\x7f" <= ch <= "\x9f") for ch in command), repr(command)
+    return paste(command, tmp_path)
 
 
 @pytest.mark.parametrize("payload", _SHELL_PAYLOADS)
@@ -101,13 +93,19 @@ def test_xss_reproduce_keeps_a_target_chosen_url_inside_one_quoted_word(tool, pa
         "evidence": {"parameter_name": "q", "injection_location": "query", "request_url": url, "url": url}})
     assert brief["class"] == "injection.xss"
     command = brief["reproduce"]["command"]
-    assert shlex.quote(url) in command
+    assert shell_word(url) in command
     for line in command.splitlines():
-        if not line.startswith("#"):
-            assert all(word == url for word in shlex.split(line) if "shell-ran" in word), line
-    _assert_safe_to_paste(command, tmp_path)
+        if line.startswith("#"):
+            assert payload not in line, line  # fixed text: an interactive zsh would expand it
+        else:
+            assert all(word == url for word in shlex.split(line) if payload in word), line
+    # Pasted, the command prints exactly the URL and runs nothing else.
+    for run in _assert_safe_to_paste(command, tmp_path):
+        assert run.stdout == url + "\n" and run.calls == (), run
     # Stored query values are redacted: the URL locates the page, Retest replays the payload.
-    assert "marker payload" not in brief["reproduce"]["note"] and "Retest" in brief["reproduce"]["note"]
+    note = brief["reproduce"]["note"]
+    assert "marker payload" not in note and "Retest" in note
+    assert note.startswith("The page the scanner sent the input to.")
 
 
 def test_a_crawled_hostile_path_reaches_the_xss_brief_only_as_a_quoted_word(tmp_path):
@@ -137,8 +135,9 @@ def test_a_crawled_hostile_path_reaches_the_xss_brief_only_as_a_quoted_word(tmp_
     brief = build_finding_detail(stored)
     assert brief["class"] == "injection.xss"
     command = brief["reproduce"]["command"]
-    assert shlex.quote(stored["evidence"]["request_url"]) in command
-    _assert_safe_to_paste(command, tmp_path)
+    assert shell_word(stored["evidence"]["request_url"]) in command
+    for run in _assert_safe_to_paste(command, tmp_path):
+        assert run.stdout == stored["evidence"]["request_url"] + "\n", run
 
 
 def _hostile_findings(payload):
@@ -180,9 +179,46 @@ def test_no_brief_command_runs_shell_syntax_from_target_values(kind, payload, tm
     brief = build_finding_detail(_hostile_findings(payload)[kind])
     assert brief["class"] != "generic", kind  # the intended builder ran, not the fallback
     commands = [brief[key]["command"] for key in ("reproduce", "verify") if brief.get(key)]
-    assert any("shell-ran" in command for command in commands), (kind, commands)
+    # The hostile value reached a command, as (part of) one word.
+    assert any(payload in word for command in commands for word in shlex.split(command)), (kind, commands)
     for command in commands:
+        # "#" lines hold fixed text only: an interactive zsh does not read them as comments.
+        assert all(payload not in line for line in command.splitlines() if line.lstrip().startswith("#")), command
         _assert_safe_to_paste(command, tmp_path)
+
+
+@pytest.mark.parametrize("payload", _SHELL_PAYLOADS)
+def test_sqli_body_reproduce_prints_exactly_the_request_and_the_parameter(payload, tmp_path):
+    url = f"https://app.fixture.invalid/{payload}/login"
+    brief = build_finding_detail({"tool": "request_sqli_differential", "evidence": {
+        "origin": url, "method": "POST", "field_path": f"user{payload}"}})
+    for run in _assert_safe_to_paste(brief["reproduce"]["command"], tmp_path):
+        assert run.stdout == f"POST {url}\nparameter: user{payload}\n" and run.calls == (), run
+
+
+def test_target_text_never_rides_on_a_comment_line(tmp_path):
+    # An interactive zsh reads "#" as a command unless INTERACTIVE_COMMENTS is set (it is off by
+    # default), so a URL on a "#" line is expanded there. This parameter balances the quotes of
+    # the fixed comment text the SQLi brief used to wrap around the request.
+    url = "https://app.fixture.invalid/$(pwn)/login"
+    brief = build_finding_detail({"tool": "request_sqli_differential", "evidence": {
+        "origin": url, "method": "POST", "field_path": "x; : $(: '"}})
+    command = brief["reproduce"]["command"]
+    comments = [line for line in command.splitlines() if line.startswith("#")]
+    assert comments and not any("$(" in line or "'" in line for line in comments), command
+    for run in _assert_safe_to_paste(command, tmp_path):
+        assert run.stdout == f"POST {url}\nparameter: x; : $(: '\n", run
+
+
+def test_stored_xss_note_names_the_request_page_not_the_execution_page():
+    url = "https://app.fixture.invalid/comments"
+    brief = build_finding_detail({"tool": "shakerscan_browser_proof", "proof_state": "verified", "url": url, "evidence": {
+        "request_url": url, "parameter_name": "body", "related_request_urls": ["https://app.fixture.invalid/wall"]}})
+    assert brief["class_label"].startswith("Stored")
+    assert {"label": "Where it executed", "value": "https://app.fixture.invalid/wall", "mono": True} in brief["where"]
+    note = brief["reproduce"]["note"]
+    assert note.startswith("The page the scanner sent the input to; the pages where it ran are under Where it executed.")
+    assert "where the input executed" not in note
 
 
 def test_missing_header_uses_the_recorded_response_and_the_detected_server():
@@ -409,6 +445,38 @@ def test_knowledge_base_check_commands_target_the_finding_not_example_com():
     remediation = finding_remediation(finding)
     assert "https://app.fixture.invalid/actuator/env" in remediation["verification"]
     assert "example.com" not in remediation["verification"]
+
+
+# A finding URL that itself names example.com, on a host holding shell syntax: a second pass over
+# the localized command would splice the quoted host inside the URL's quotes.
+_HOSTILE_CHECK_URL = "http://app$(pwn).fixture.invalid/$(pwn)/x?next=example.com"
+
+
+def test_check_command_places_each_finding_value_once_as_one_word(tmp_path):
+    from api.finding_routes.remediation import localize_command
+    command = localize_command("curl -sI https://example.com/.env && dig +short CAA example.com", {"url": _HOSTILE_CHECK_URL})
+    for run in _assert_safe_to_paste(command, tmp_path):
+        assert sorted(run.calls) == [("curl", ("-sI", _HOSTILE_CHECK_URL)),
+                                     ("dig", ("+short", "CAA", "app$(pwn).fixture.invalid"))], run
+
+
+def test_every_knowledge_base_check_command_is_safe_for_a_hostile_finding(tmp_path):
+    from api.finding_routes.remediation import localize_command
+    from scanner.scanner_tools import remediation_kb
+    checks = sorted({entry["verification"] for table in vars(remediation_kb).values() if isinstance(table, dict)
+                     for entry in table.values() if isinstance(entry, dict) and isinstance(entry.get("verification"), str)
+                     and "example.com" in entry["verification"]})
+    assert len(checks) > 20
+    localized = 0
+    for check in checks:
+        command = localize_command(check, {"url": _HOSTILE_CHECK_URL})
+        runs = _assert_safe_to_paste(command, tmp_path)
+        if command != check:  # a placeholder was replaced: the finding's value reached a tool intact
+            localized += 1
+            for run in runs:
+                assert any(_HOSTILE_CHECK_URL in arg or "app$(pwn).fixture.invalid" in arg
+                           for _tool, args in run.calls for arg in args), (run, command)
+    assert localized > 20
 
 
 def test_hsts_absence_on_plain_http_is_not_a_finding():

@@ -12,7 +12,6 @@ import logging
 import math
 import os
 import re
-import shlex
 import signal
 import socket
 import ssl
@@ -28,6 +27,7 @@ from scanner_tools.common import (
     run,
     snapshot_subprocess_receipts,
 )
+from scanner_tools.shell_words import shell_word
 try:
     from constants import (
         resolve_active_enrichment_limits,
@@ -8591,17 +8591,19 @@ async def build_report(target: str,
 
             # Manual verify commands embedded in evidence (safe)
             url = file_info.get("url", urllib.parse.urljoin(base_url + "/", (file_info.get("path") or "").lstrip("/")))
+            # The URL path came from the target; each value is one shell_word.
             verify_cmds = [
-                f"curl -sI {shlex.quote(url)}",
-                f"curl -sL {shlex.quote(url)} | sed -n '1,40p'",
+                f"curl -sI {shell_word(url)}",
+                f"curl -sL {shell_word(url)} | sed -n '1,40p'",
             ]
             if ".git" in path_l:
                 base = base_url.rstrip("/")
-                verify_cmds.extend([f"curl -sL {shlex.quote(base)}/.git/HEAD", f"curl -sL {shlex.quote(base)}/.git/config"])
+                verify_cmds.extend([f"curl -sL {shell_word(base + '/.git/HEAD')}", f"curl -sL {shell_word(base + '/.git/config')}"])
             if any(m in path_l for m in ["id_rsa", "id_dsa", "id_ecdsa", "id_ed25519", "server.key", "private.key", ".pem"]):
-                verify_cmds.append(f"curl -sL {shlex.quote(url)} | grep -E 'BEGIN (OPENSSH|RSA|DSA|EC) PRIVATE KEY' -m1")
+                verify_cmds.append(f"curl -sL {shell_word(url)} | grep -E 'BEGIN (OPENSSH|RSA|DSA|EC) PRIVATE KEY' -m1")
             if any(m in path_l for m in ["database.yml", "database.yaml", "db.yml", "db.yaml"]):
-                verify_cmds.append(f"curl -sL {shlex.quote(url)} | grep -Ei '(^|[:\"'\\s])(password|username|adapter|database)[:=]' -m1")
+                credential_key = shell_word("(^|[[:space:]:\"'])(password|username|adapter|database)[:=]")
+                verify_cmds.append(f"curl -sL {shell_word(url)} | grep -Ei {credential_key} -m1")
 
             duplicate_count = int(file_info.get("duplicate_count") or 0)
             duplicate_suffix = f" (+{duplicate_count} duplicate paths)" if duplicate_count else ""

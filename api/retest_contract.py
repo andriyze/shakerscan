@@ -17,6 +17,11 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Mapping
 
+try:
+    from scanner_tools.shell_words import shell_word
+except ModuleNotFoundError:  # package import in host-side tests
+    from scanner.scanner_tools.shell_words import shell_word
+
 from runtime.credential_store import PostgresCredentialProfileStore
 from runtime.auth_session_store import PostgresAuthSessionStore
 from runtime.credential_migration import (
@@ -571,8 +576,32 @@ def infer_retest_inputs(verification: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+# Characters a replayed URL keeps as written in its path, query and fragment: RFC 3986 delimiters
+# and existing percent-escapes. Anything else (spaces, controls, non-ASCII, "[]{}" that curl would
+# glob) is percent-encoded so curl receives one valid URL. Shell safety does not rest on this:
+# every target-derived word of a replay command goes through shell_word.
+_REPLAY_URL_SAFE = "!$%&'()*+,/:;=?@~"
+_FORM = "-H 'Content-Type: application/x-www-form-urlencoded'"
+
+
+def _replay_url(url: str) -> str:
+    try:
+        parts = urllib.parse.urlsplit(url)
+    except ValueError:
+        return urllib.parse.quote(url, safe=":/?#" + _REPLAY_URL_SAFE)
+    return urllib.parse.urlunsplit(parts._replace(**{
+        name: urllib.parse.quote(getattr(parts, name), safe=_REPLAY_URL_SAFE)
+        for name in ("path", "query", "fragment")
+    }))
+
+
 def build_replay_commands(inputs: dict[str, Any]) -> list[str]:
-    """Generate copy/paste commands to replay a verification attempt."""
+    """Generate copy/paste commands to replay a verification attempt.
+
+    The URL, parameter and payload come from the finding, so the target chose them: each reaches
+    curl as one ``shell_word`` and a pasted command runs nothing but curl. Form bodies are
+    URL-encoded here (``--data``) rather than by curl, so a payload keeps every byte it had.
+    """
     finding_type = str(inputs.get("finding_type") or "").strip().lower()
     target_url = str(inputs.get("original_url") or inputs.get("target_url") or "").strip()
     method = str(inputs.get("method") or "GET").strip().upper()
@@ -582,39 +611,45 @@ def build_replay_commands(inputs: dict[str, Any]) -> list[str]:
     if not target_url:
         return []
 
-    commands: list[str] = []
-    quoted_url = urllib.parse.quote(target_url, safe=":/?&=%#.-_~")
-
-    commands.append(f"curl -i -k '{quoted_url}'")
+    url = shell_word(_replay_url(target_url))
+    commands = [f"curl -i -k {url}"]
 
     if finding_type in ("exposed_file", "generic_http"):
         # Exposure replays are a plain GET; injection-style payload commands
         # would be misleading here.
         return commands
 
-    if param:
-        if method == "POST":
-            commands.append(
-                "curl -i -k -X POST "
-                f"'{quoted_url}' "
-                "-H 'Content-Type: application/x-www-form-urlencoded' "
-                f"--data-urlencode '{param}={payload}'"
-            )
-        else:
-            parsed = urllib.parse.urlparse(target_url)
-            q = urllib.parse.parse_qs(parsed.query, keep_blank_values=True)
-            q[param] = [payload]
-            injected_query = urllib.parse.urlencode(q, doseq=True)
-            injected_url = urllib.parse.urlunparse(parsed._replace(query=injected_query))
-            commands.append(f"curl -i -k '{injected_url}'")
+    if param and method != "POST":
+        parsed = urllib.parse.urlparse(target_url)
+        query = urllib.parse.parse_qs(parsed.query, keep_blank_values=True)
+        query[param] = [payload]
+        injected = urllib.parse.urlunparse(parsed._replace(query=urllib.parse.urlencode(query, doseq=True)))
+        commands.append(f"curl -i -k {shell_word(_replay_url(injected))}")
     else:
-        commands.append(
-            "curl -i -k -X POST "
-            f"'{quoted_url}' "
-            f"-H 'Content-Type: application/x-www-form-urlencoded' --data 'payload={urllib.parse.quote_plus(payload)}'"
-        )
+        body = urllib.parse.urlencode({param or "payload": payload})
+        commands.append(f"curl -i -k -X POST {url} {_FORM} --data {shell_word(body)}")
 
     return commands
+
+
+def current_replay_commands(row: Mapping[str, Any]) -> Any:
+    """The replay commands to show for a stored verification row.
+
+    A row keeps the command text it was queued with, and a row written before every word was
+    shell-quoted can hold a target-chosen URL that a shell would expand. Text commands are
+    therefore rebuilt from the row's own replay inputs. A row without inputs, and structured
+    entries (an AI Gate replay plan), are returned as stored.
+    """
+    stored = row.get("replay_commands")
+    if isinstance(stored, str):
+        try:
+            stored = json.loads(stored)
+        except (TypeError, ValueError):
+            return stored
+    rebuildable = isinstance(stored, list) and bool(stored) and all(isinstance(item, str) for item in stored)
+    if not rebuildable or not str(row.get("target_url") or "").strip():
+        return stored
+    return build_replay_commands(infer_retest_inputs(dict(row)))
 
 
 def extract_auth_context(scan_options: dict[str, Any] | None) -> dict[str, str] | None:

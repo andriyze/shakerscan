@@ -86,7 +86,7 @@ try:
     from http_experiment import ExperimentContractError, execute_experiment
     from request_models import HypothesisRequest, ScanAdvancedLimits, ScanOptions
     from research_agent import RISK_TIER_ORDER
-    from retest_contract import infer_type_from_title_tool
+    from retest_contract import current_replay_commands, infer_type_from_title_tool
     from serialization import row_to_dict
     from workflow_experiment import WorkflowContractError, normalize_workflow, validate_principal_contexts
     from ai_targets import router as _ai_targets
@@ -106,7 +106,7 @@ except ModuleNotFoundError:  # package import in host-side tests
     from ..http_experiment import ExperimentContractError, execute_experiment
     from ..request_models import HypothesisRequest, ScanAdvancedLimits, ScanOptions
     from ..research_agent import RISK_TIER_ORDER
-    from ..retest_contract import infer_type_from_title_tool
+    from ..retest_contract import current_replay_commands, infer_type_from_title_tool
     from ..serialization import row_to_dict
     from ..workflow_experiment import WorkflowContractError, normalize_workflow, validate_principal_contexts
     from ..ai_targets import router as _ai_targets
@@ -9102,7 +9102,7 @@ async def _derive_refuter_review_verdict(
     outcome = _refuter_review_from_verification_outcome(verification)
     proof = _decode_json_value(verification.get("proof")) or {}
     artifacts = _decode_json_value(verification.get("artifacts")) or {}
-    replay_commands = _decode_json_value(verification.get("replay_commands")) or []
+    replay_commands = current_replay_commands(verification) or []
     counterevidence = _redact_agent_payload({
         "verification_id": str(verification.get("id")),
         "verification_status": verification.get("status"),
