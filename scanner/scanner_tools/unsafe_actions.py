@@ -17,7 +17,7 @@ from typing import Any
 import urllib.parse
 
 RISKY_INTERACTION_KEYWORDS = (
-    "logout", "log out", "sign out", "signout",
+    "logout", "log out", "logoff", "log off", "sign out", "signout", "sign off", "signoff",
     "delete", "remove", "destroy", "erase",
     "cancel", "deactivate", "disable", "revoke",
     "reset", "clear all", "wipe", "start", "run", "launch",
@@ -25,7 +25,7 @@ RISKY_INTERACTION_KEYWORDS = (
     "unsubscribe", "close account", "terminate",
 )
 RISKY_NAVIGATION_KEYWORDS = (
-    "logout", "log out", "sign out", "signout",
+    "logout", "log out", "logoff", "log off", "sign out", "signout", "sign off", "signoff",
     "delete", "remove", "destroy", "erase", "deactivate", "disable",
     "revoke", "reset", "clear all", "wipe", "unsubscribe",
     "close account", "terminate",

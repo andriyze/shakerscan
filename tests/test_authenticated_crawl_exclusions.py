@@ -30,7 +30,8 @@ def test_an_authenticated_crawl_excludes_action_links(tool):
     for url in ("https://example.test/logout", "https://example.test/hub/log-out",
                 "https://example.test/user/logoutAll", "https://example.test/signOut",
                 "https://example.test/account/delete?id=1", "https://example.test/api/deleteUser",
-                "https://example.test/Sign_Out", "https://example.test/settings/reset"):
+                "https://example.test/Sign_Out", "https://example.test/settings/reset",
+                "https://example.test/Account/LogOff", "https://example.test/signoff"):
         assert pattern.search(url), url
     for url in ("https://example.test/", "https://example.test/catalog",
                 "https://example.test/blog/removed-items", "https://example.test/hub/orders",
