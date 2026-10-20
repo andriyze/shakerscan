@@ -245,10 +245,13 @@ def _request_tokens(document, bundle: Path):
 
 
 def test_pinned_bundle_never_runs_a_template_that_requests_a_never_requested_path():
-    """Image test: the pinned bundle the scanner image installs (``NUCLEI_TEMPLATES``)."""
-    bundle = Path(nuclei_templates_directory())
-    if not (bundle / "http").is_dir():
+    """Image test: the pinned bundle the scanner image installs (``NUCLEI_TEMPLATES``).
+
+    The release candidate runs it in the scanner image. Where ``NUCLEI_TEMPLATES`` is set
+    the bundle must be there, so a missing bundle fails instead of skipping."""
+    if "NUCLEI_TEMPLATES" not in os.environ:
         pytest.skip("requires the pinned Nuclei template bundle of the scanner image")
+    bundle = Path(nuclei_templates_directory())
     # The cached index is the one the selections below read, so the bundle is parsed once.
     index = nuclei_template_index._cached_index(str(bundle))
     found = {record.template_id for record in index.templates if record.never_requested}
@@ -275,3 +278,18 @@ def test_pinned_bundle_never_runs_a_template_that_requests_a_never_requested_pat
             if any(is_never_requested("/" + token.lstrip("/")) for token in _request_tokens(document, bundle)):
                 offenders.add(template_id.group(1))
     assert offenders == set()
+
+
+def test_release_candidate_runs_the_pinned_bundle_test_in_the_scanner_image():
+    root = Path(__file__).resolve().parents[1]
+    workflow = yaml.safe_load(
+        (root / ".github" / "workflows" / "release-candidate.yml").read_text(encoding="utf-8"))
+    steps = [step for job in workflow["jobs"].values() for step in job.get("steps") or []]
+    names = [str(step.get("name") or "") for step in steps]
+    check = next(step for step in steps
+                 if step.get("name") == "Verify the active Nuclei selection never requests a heapdump path")
+    script = check["run"]
+    assert "--network none" in script and "shakerscan-scanner:release-candidate" in script
+    assert "tests/test_nuclei_template_index.py" in script
+    # The same candidate bytes are checked before the wire acceptance and publication.
+    assert names.index(check["name"]) < names.index("Enforce candidate-image external wire ceilings")

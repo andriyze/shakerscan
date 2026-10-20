@@ -412,6 +412,17 @@ jobs:
               sys.exit("first canonical passive nuclei run in a fresh scanner container is not warm")
           PY
 
+      - name: Verify the active Nuclei selection never requests a heapdump path
+        shell: bash
+        run: |
+          # The pinned template bundle exists only in the scanner image, so the selection test
+          # that reads it runs there; with NUCLEI_TEMPLATES set it fails if the bundle is absent.
+          docker run --rm --network none --entrypoint python \
+            -e PYTHONPATH=/src/api:/src/scanner:/src \
+            -v "$PWD:/src:ro" -w /src \
+            shakerscan-scanner:release-candidate \
+            -m pytest -q -p no:cacheprovider tests/test_nuclei_template_index.py
+
       - name: Enforce candidate-image external wire ceilings
         env:
           CANDIDATE_SHA: ${{ needs.meta.outputs.candidate_sha }}
