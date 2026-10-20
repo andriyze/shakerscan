@@ -15,6 +15,7 @@ from typing import Any, Awaitable, Callable, Iterable, Mapping, Protocol, Sequen
 import json
 import math
 import statistics
+import sys
 import time
 import urllib.parse
 try:
@@ -4474,6 +4475,13 @@ class DatabaseNeutralScanActionDispatcher:
             attempt_id: str, candidate_id: str, retry_round: int, exc: BaseException,
         ) -> None:
             nonlocal attempted, retried, terminal_failure
+            # The exception type carries no target data; without this line a batch that settled
+            # adapter_failed left nothing in the worker log to say which candidate failed or why.
+            print(
+                f"[scan] action {action.action_id} candidate {candidate_id} failed: "
+                f"{type(exc).__name__}",
+                file=sys.stderr, flush=True,
+            )
             # One candidate that raises anywhere in its setup or execution must never fail the
             # whole batch action. execution_request_for_manifest_candidate and the external
             # capability preparation raise ValueError/ScanWorkManifestError on a candidate the

@@ -2084,27 +2084,33 @@ def execution_request_for_manifest_candidate(
             "field_name": str(candidate["parameter_name"]),
             "body_field_names": [],
         }
+    routes = [
+        item for item in endpoint_manifest.entries
+        if item["route_id"] == candidate["route_id"]
+    ]
+    if not routes:
+        raise ScanWorkManifestError(
+            "candidate route is absent from its endpoint manifest"
+        )
+    # Body fields are not part of a route's identity, so one route can be declared more than
+    # once: a replayed collection request records only its method and URL, while the declared
+    # endpoint for the same route names its fields. The candidate was built from the entry that
+    # declares its body, so resolve against that entry rather than the first one for the route.
     endpoint = next(
         (
-            item for item in endpoint_manifest.entries
-            if item["route_id"] == candidate["route_id"]
+            item for item in routes
+            if item["method"] == candidate["method"]
+            and item["canonical_path"] == candidate["canonical_path"]
+            and str(candidate["parameter_name"]) in (item.get("body_field_names") or ())
+            and sorted(body_fields) == sorted(item.get("body_field_names") or ())
         ),
         None,
     )
     if endpoint is None:
         raise ScanWorkManifestError(
-            "candidate route is absent from its endpoint manifest"
-        )
-    declared = list(endpoint.get("body_field_names") or ())
-    if (
-        endpoint["method"] != candidate["method"]
-        or endpoint["canonical_path"] != candidate["canonical_path"]
-        or str(candidate["parameter_name"]) not in declared
-        or sorted(body_fields) != sorted(declared)
-    ):
-        raise ScanWorkManifestError(
             "candidate identity conflicts with its endpoint manifest"
         )
+    declared = list(endpoint.get("body_field_names") or ())
     return {
         "method": str(endpoint["method"]),
         "url": execution_url_for_endpoint(endpoint, parameter_name=None),
