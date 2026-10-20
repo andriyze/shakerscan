@@ -248,3 +248,82 @@ def test_scan_cli_prints_no_notice_without_a_fallback(monkeypatch, capsys):
     response = {"scan_id": "00000000-0000-0000-0000-000000000003", "status": "queued"}
     assert _run_with_response(monkeypatch, ["example.com"], response) == 0
     assert "Notice:" not in capsys.readouterr().out
+
+
+def _run_with_authorization(monkeypatch, argv, *, authorization):
+    """Like _run, but answers the target registration and standing-authorization reads."""
+    calls = []
+
+    def request(url, *, payload=None, idempotency_key=None):
+        calls.append((url, payload, idempotency_key))
+        if url.endswith("/scan/contracts"):
+            return _contract()
+        if url.endswith("/targets") and payload is not None:
+            return {"id": "11111111-1111-1111-1111-111111111111", "url": payload["url"],
+                    "status": "already_exists"}
+        if url.endswith("/authorization"):
+            return {"target_id": "11111111-1111-1111-1111-111111111111",
+                    "authorization": authorization}
+        return {"scan_id": "00000000-0000-0000-0000-000000000001", "status": "queued"}
+
+    monkeypatch.setattr(scan_cli, "_request_json", request)
+    result = scan_cli.main([
+        "--api-url", "http://api.test:8080",
+        "--ui-url", "http://ui.test:3000",
+        *argv,
+    ])
+    return result, calls
+
+
+def test_state_changing_scan_reuses_the_targets_standing_authorization(monkeypatch, capsys):
+    result, calls = _run_with_authorization(monkeypatch, [
+        "https://example.com", "--active-testing", "--confirm-active",
+        "--allow-state-changing-http", "--collection-selection", "selection-1", "--json",
+    ], authorization={"approval_receipt_id": "standing-receipt-1", "standing": True})
+
+    assert result == 0, capsys.readouterr().err
+    urls = [url for url, _payload, _key in calls]
+    assert "http://api.test:8080/targets/11111111-1111-1111-1111-111111111111/authorization" in urls
+    submitted = calls[-1]
+    assert submitted[0] == "http://api.test:8080/scans"
+    assert submitted[1]["approval_receipt_id"] == "standing-receipt-1"
+
+
+def test_state_changing_scan_without_standing_authorization_says_how_to_get_one(monkeypatch, capsys):
+    result, calls = _run_with_authorization(monkeypatch, [
+        "https://example.com", "--active-testing", "--confirm-active",
+        "--allow-state-changing-http",
+    ], authorization=None)
+
+    assert result == 1
+    error = capsys.readouterr().err
+    assert "/targets/11111111-1111-1111-1111-111111111111/authorization" in error
+    assert "--approval-receipt" in error
+    assert not any(url.endswith("/scans") for url, _payload, _key in calls)
+
+
+def test_credentialed_scan_without_a_receipt_names_the_credential_receipt(monkeypatch, capsys):
+    result, calls = _run_with_authorization(monkeypatch, [
+        "https://example.com", "--credential-profile", "profile-1",
+    ], authorization={"approval_receipt_id": "standing-receipt-1"})
+
+    assert result == 1
+    error = capsys.readouterr().err
+    assert "credential" in error and "--approval-receipt" in error
+    assert "/arsenal/approvals" in error
+    assert not any(url.endswith("/scans") for url, _payload, _key in calls)
+
+
+def test_scan_help_word_prints_help_and_submits_nothing(monkeypatch, capsys):
+    result, calls = _run(monkeypatch, ["help"])
+
+    assert result == 0
+    assert calls == []
+    assert "--budget-profile" in capsys.readouterr().out
+
+
+def test_scan_help_documents_the_active_confirmation_and_the_receipt():
+    help_text = " ".join(scan_cli._parser().format_help().split())
+    assert "--confirm-active" in help_text
+    receipt_line = help_text[help_text.index("--approval-receipt UUID Target-bound"):]
+    assert "standing authorization" in receipt_line.split("--idempotency-key")[0]

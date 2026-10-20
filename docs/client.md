@@ -478,6 +478,18 @@ follow `next_cursor`.
 and an action replayed as `blocked` (its permission was denied, expired or withdrawn) exit 2, with
 the server's answer still printed as JSON.
 
+## Scan from a script
+
+`shakerscan scan` forwards to the runtime's scan CLI; `shakerscan scan --help` (or `scan help`)
+prints its options and submits nothing. Active authority that can change the target
+(`--allow-state-changing-http`, `--network-discovery`) needs a target-bound approval receipt.
+Without credentials the CLI uses the target's standing authorization, the same one New Scan in
+the UI uses; a target that has none is refused with the
+`POST /targets/{id}/authorization` call that creates it. Credential use (`--credential-profile`)
+needs a credential-tier receipt from `POST /arsenal/approvals`, passed as `--approval-receipt`;
+an instance may reserve creating one to administrators. `--active-testing` off a terminal also
+needs `--confirm-active`.
+
 ## Versioning and release
 
 A client built from a repository checkout (a release, or `pipx install

@@ -1523,7 +1523,10 @@ def build_parser() -> argparse.ArgumentParser:
     api.add_argument("args", nargs=argparse.REMAINDER, help="METHOD PATH [JSON]")
     scan = commands.add_parser("scan", help="submit and follow scans on the connected instance (the runtime's scan CLI)")
     connection(scan)
-    scan.add_argument("args", nargs=argparse.REMAINDER, help="the scan CLI's arguments; nothing prints its help")
+    scan.add_argument(
+        "args", nargs=argparse.REMAINDER,
+        help="the scan CLI's arguments: TARGET [options]; `shakerscan scan --help` lists them",
+    )
     check = commands.add_parser(
         "check",
         help="run a free bounded public posture check via https://pub.shakerscan.com (no engine or account)",
@@ -1606,11 +1609,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         # `shakerscan scan --budget-profile fast URL` failed unless `--` came first.
         # Only the leading connection options are the client's; the rest is forwarded as is.
         own, forwarded = split_connection_options(argv[1:])
-        if argv[0] in {"hunt", "approve", "deny", "knowledge", "secrets"}:
-            # The runtime Hunt CLI's subcommands are what `hunt --help` should list.
+        if argv[0] in {"scan", "hunt", "approve", "deny", "knowledge", "secrets"}:
+            # The runtime CLI's own options and subcommands are what `scan --help` and
+            # `hunt --help` should list; the wrapper's usage named none of them.
             if any(token in ("-h", "--help") for token in own):
                 own = [token for token in own if token not in ("-h", "--help")]
                 forwarded = ["--help", *forwarded]
+        if argv[0] in {"hunt", "approve", "deny", "knowledge", "secrets"}:
             extra, forwarded = extract_connection_options(forwarded)
             own += extra
         args = parser.parse_args([argv[0], *own])
