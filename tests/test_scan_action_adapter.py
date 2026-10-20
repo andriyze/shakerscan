@@ -931,7 +931,7 @@ def test_database_neutral_batch_checkpoints_and_resumes_each_candidate(monkeypat
     assert all(len(attempt_id) == 64 for attempt_id in backend.attempts[action.action_id])
 
 
-def test_one_unresolvable_candidate_does_not_fail_the_whole_verify_batch(monkeypatch):
+def test_one_unresolvable_candidate_does_not_fail_the_whole_verify_batch(monkeypatch, capsys):
     """A candidate whose request cannot be resolved must fail only its own attempt.
 
     The 2.2.0-era batch called execution_request_for_manifest_candidate with no per-candidate
@@ -1023,6 +1023,13 @@ def test_one_unresolvable_candidate_does_not_fail_the_whole_verify_batch(monkeyp
         "candidate_failed" in str(err)
         for item in attempts.values() for err in (item.get("errors") or ())
     )
+    # The failed candidate is named in the worker log with its exception type, so a batch that
+    # settles partial/adapter_failed can be diagnosed from the log, not only from the database.
+    failed_id = next(
+        str(item["candidate_id"]) for item in attempts.values() if item.get("status") == "failed"
+    )
+    logged = capsys.readouterr().err
+    assert f"candidate {failed_id} failed: ScanWorkManifestError" in logged
 
 
 def test_one_unconstructable_sqli_proof_candidate_does_not_fail_the_whole_batch(monkeypatch):

@@ -268,7 +268,7 @@ const COVERAGE_REASON_LABELS = {
   policy_disabled: 'A planned step was disabled by the scan policy',
   worker_lost: 'A worker was lost before all planned work finished',
   authentication_uncertain: 'Credential authority could not be confirmed',
-  authentication_required: 'The target refused unauthenticated requests (401/403 or a redirect to sign-in), so those candidates were not tested; to verify them, attach a credential profile that allows these checks',
+  authentication_required: 'The target refused unauthenticated requests (401/403 or a redirect to sign-in), so those candidates were not tested; to verify them, the scan needs a credential profile whose allowed capabilities include these checks: attach one, or add the checks to the attached profile (active verifiers need approved elevation)',
   target_refused: "The target refused the verifier's requests (403) without asking for credentials, for example a firewall or an access rule, so those candidates could not be verified",
   insufficient_budget_for_stage: 'A continuation could not fund a single verification stage, so its candidates were left unverified',
   output_truncated: 'A step produced more output than it may keep, so part of its result was cut off',

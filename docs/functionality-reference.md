@@ -562,6 +562,13 @@ the worker checks the profile's semantic `allowed_capabilities` against the exac
 to execute. Static identities can authorize capabilities such as `http.request`, `web.crawl`,
 `templates.scan`, `collections.replay_safe`, `xss.verify`, `sqli.verify`, or `authz.verify`.
 Interactive form/OAuth profiles must additionally authorize `auth.session.establish`.
+A blank allowlist on an HTTP identity grants the read-only capabilities that use it: `http.request`,
+the Scan producers (`web.probe`, `web.crawl`, `web.browser_crawl`, `web.content_discover`,
+`web.spec_ingest`, the passive templates, `collections.replay_safe`) and `browser.navigate`, plus
+the session lifecycle for interactive kinds. Active verifiers (`xss.verify_batch`,
+`sqli.verify_batch`, `authz.verify`, `collections.replay_active`, ...) are never defaults; they need
+explicit elevation with an approval receipt, and an action the profile does not allow runs without
+the identity.
 
 Canonical Scan submission accepts up to two `credential_profile_ids`, bound to the exact Web/API
 target. Profiles hold authorization headers, bearer tokens, API-key headers, cookies, custom

@@ -10,8 +10,8 @@ import { DeleteRecordsButton } from '@/components/lifecycle/DeleteRecordsButton'
 import { CopyButton } from '@/components/findings/detail/CopyButton'
 import { Button, Card, ConfirmDialog, Tabs, useToast } from '@/components/ui'
 import type { DeviceAgentShellPlan } from '@/lib/api'
-import { cancelHuntV2, confirmHuntShellPlan, getHuntV2, type HuntV2 } from '@/lib/huntV2'
-import { agentHandoff, defaultRunTab, exhaustedDimension, huntIsLive, pendingDecisions, type RunTab } from '@/lib/huntRunModel.mjs'
+import { cancelHuntV2, confirmHuntShellPlan, getHuntV2, listHuntPermissionRequests, type HuntV2 } from '@/lib/huntV2'
+import { agentHandoff, decidedPermissionRequests, defaultRunTab, exhaustedDimension, huntIsLive, pendingDecisions, type DecidedPermissionRequest, type RunTab } from '@/lib/huntRunModel.mjs'
 import { HUNT_SESSION_NON_AUTONOMOUS_NOTICE, huntStatusLabel } from '@/lib/labels'
 import HuntBudgetEditor from './HuntBudgetEditor'
 import { HuntDetails, ShellPlanCard } from './HuntDetails'
@@ -46,6 +46,32 @@ function AgentHandoff({ hunt, started }: { hunt: HuntV2; started: boolean }) {
       </div>
     </div>
   </Card>
+}
+
+/** Permission requests already decided: who decided, how and when. Read-only, like the pending list. */
+function PermissionDecisions({ huntId, pendingCount }: { huntId: string; pendingCount: number }) {
+  const [decided, setDecided] = useState<DecidedPermissionRequest[]>([])
+  // Re-read when the pending list changes: a request leaving it has just been decided.
+  useEffect(() => {
+    let current = true
+    listHuntPermissionRequests(huntId)
+      .then(rows => { if (current) setDecided(decidedPermissionRequests(rows)) })
+      .catch(() => { if (current) setDecided([]) })
+    return () => { current = false }
+  }, [huntId, pendingCount])
+  if (decided.length === 0) return null
+  return <section aria-label="Permission decisions" className="rounded-xl border border-gray-800 bg-gray-900/60 p-4">
+    <h2 className="text-sm font-semibold text-gray-200">Permission decisions</h2>
+    <ul className="mt-2 space-y-1">
+      {decided.map(item => <li key={item.id} className="flex flex-wrap items-center gap-x-2 text-sm text-gray-300">
+        <span className={item.status === 'granted' ? 'text-emerald-300' : 'text-red-300'}>{item.status}</span>
+        <span>{item.title}</span>
+        <span className="text-xs text-gray-500">
+          {[item.decidedBy && `by ${item.decidedBy}`, item.via, item.decidedAt && new Date(item.decidedAt).toLocaleString()].filter(Boolean).join(' · ')}
+        </span>
+      </li>)}
+    </ul>
+  </section>
 }
 
 /**
@@ -199,6 +225,8 @@ export function HuntRunView({ hunt, onChange, target }: {
         <HuntBudgetEditor hunt={hunt} onChanged={onChange} initialDimension={exhaustedDimension(hunt)} />
       </div>}
     </section>}
+
+    <PermissionDecisions huntId={hunt.hunt_id} pendingCount={permissionDecisions.length} />
 
     <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
       {[

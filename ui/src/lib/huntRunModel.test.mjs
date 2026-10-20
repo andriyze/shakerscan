@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 
-import { agentHandoff, budgetUsage, defaultRunTab, huntIsLive, huntStopReasonLabel, huntStopReasonText, pendingDecisions, requestsByAction } from './huntRunModel.mjs'
+import { agentHandoff, budgetUsage, decidedPermissionRequests, defaultRunTab, huntIsLive, huntStopReasonLabel, huntStopReasonText, pendingDecisions, requestsByAction } from './huntRunModel.mjs'
 
 test('a live run opens on its requests, a finished one on its results, and a hash wins', () => {
   assert.equal(defaultRunTab({ status: 'active' }), 'requests')
@@ -94,4 +94,20 @@ test('a Hunt the upgrade could not rebuild explains itself instead of showing it
   assert.equal(huntStopReasonText(null), '')
   assert.equal(huntStopReasonLabel('permission_authority_unrepaired'), 'cancelled on upgrade: permissions could not be rebuilt')
   assert.equal(huntStopReasonLabel('cancelled'), 'cancelled')
+})
+
+test('decided permission requests stay readable with who decided, how and when, newest first', () => {
+  const decided = decidedPermissionRequests([
+    { id: 'p1', status: 'pending', title: 'Raise the HTTP budget' },
+    { id: 'g1', status: 'granted', title: 'Raise the HTTP budget', decided_by: 'op1', decision_via: 'terminal_stepup', decided_at: '2026-10-20T17:30:00Z' },
+    { id: 'd1', status: 'denied', kind: 'capability.enable', decided_by: 'op1', decision_via: 'terminal_stepup', decided_at: '2026-10-20T17:31:00Z' },
+    { id: 'e1', status: 'expired', title: 'Use a credential', decided_at: null },
+    { status: 'granted' },
+  ])
+  assert.deepEqual(decided.map(item => item.id), ['d1', 'g1', 'e1'])
+  assert.deepEqual(decided[0], {
+    id: 'd1', title: 'capability.enable', status: 'denied', decidedBy: 'op1', via: 'in a terminal with step-up', decidedAt: '2026-10-20T17:31:00Z',
+  })
+  assert.equal(decided[2].decidedBy, null)
+  assert.deepEqual(decidedPermissionRequests(null), [])
 })

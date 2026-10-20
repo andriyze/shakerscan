@@ -20,6 +20,8 @@ export function pendingDecisions(
   } | null | undefined,
   shellPlans?: Array<{ plan_id: string; status?: string }>,
 ): PendingDecision[]
+export interface DecidedPermissionRequest { id: string; title: string; status: string; decidedBy: string | null; via: string | null; decidedAt: string | null }
+export function decidedPermissionRequests(rows: Array<{ id?: string; kind?: string; title?: string; status?: string; decided_by?: string | null; decision_via?: string | null; decided_at?: string | null }> | null | undefined): DecidedPermissionRequest[]
 export function requestsByAction<T extends { hunt_action_id?: string | null }>(rows: T[] | null | undefined): { byAction: Map<string, T[]>; unlinked: T[] }
 export function agentHandoff(hunt: { hunt_id?: string } | null | undefined): { command: string; prompt: string }
 export interface ActionOutcome { input: Record<string, unknown> | null; errors: string[] }

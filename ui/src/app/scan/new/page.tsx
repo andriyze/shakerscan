@@ -24,6 +24,7 @@ import { preferredCredentialId } from '@/lib/credentialDefaults'
 import { Button, Card, Combobox, Field, useToast, type ComboboxOption } from '@/components/ui'
 import { useTargetSearch } from '@/lib/useTargetSearch'
 import { getTargetAssets, type TargetAsset } from '@/lib/targetAssetApi'
+import { credentialScanCoverageNote } from '@/lib/credentialScanCoverage.mjs'
 import { DOMAIN_LOOKUP_MAX_PAGES, DOMAIN_LOOKUP_PAGE, INVENTORY_MEMBER_LIMIT, SCAN_BATCH_MAX, batchCapNotice, capBatchTargets, findDomainGroup } from '@/lib/targetInventoryModel.mjs'
 import { credentialDescription, credentialOptions } from '@/lib/pickerOptions'
 import {
@@ -288,7 +289,8 @@ export default function NewScanPage() {
     if (!interactive && !scanContract.credentials.semantic_capabilities.some((name) => allowed.has(name))) {
       return { compatible: false, reason: 'does not allow a Scan action capability' }
     }
-    return { compatible: true }
+    const coverageNote = credentialScanCoverageNote(profile.allowed_capabilities, { families: resolvedFamilies })
+    return coverageNote ? { compatible: true, reason: coverageNote } : { compatible: true }
   }
 
   function removeConfirmedActiveSelections() {

@@ -2366,7 +2366,7 @@ async def asm_test(target_id: str, request: AsmTestRequest = None):
                 detail=(
                     f"Target already has an active scan ({_active_ids[0]}); wait for it to "
                     "finish before queueing another ASM action. It may be a hidden "
-                    "Continuous-ASM batch/recon scan — open it via the 'view scan' link on "
+                    "ASM batch or recon scan — open it via the 'view scan' link on "
                     "the coverage advisor, the 'ASM activity' panel on this page, or enable "
                     "'Show ASM/internal scans' on the Scans page."
                 ),
@@ -2449,7 +2449,7 @@ async def asm_recon(target_id: str, request: AsmReconRequest = None):
                 detail=(
                     f"Target already has an active scan ({_active_ids[0]}); wait for it to "
                     "finish before queueing another ASM action. It may be a hidden "
-                    "Continuous-ASM batch/recon scan — open it via the 'view scan' link on "
+                    "ASM batch or recon scan — open it via the 'view scan' link on "
                     "the coverage advisor, the 'ASM activity' panel on this page, or enable "
                     "'Show ASM/internal scans' on the Scans page."
                 ),

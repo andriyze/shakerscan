@@ -759,6 +759,7 @@ download "$REPO_RAW_BASE/scanner/scanner_tools/request_replay.py" "$INSTALL_DIR/
 download "$REPO_RAW_BASE/scanner/scanner_tools/request_collections.py" "$INSTALL_DIR/scanner/scanner_tools/request_collections.py"
 download "$REPO_RAW_BASE/scanner/scanner_tools/device_request_formats.py" "$INSTALL_DIR/scanner/scanner_tools/device_request_formats.py"
 download "$REPO_RAW_BASE/scanner/scanner_tools/url_redaction.py" "$INSTALL_DIR/scanner/scanner_tools/url_redaction.py"
+download "$REPO_RAW_BASE/scanner/scanner_tools/unsafe_actions.py" "$INSTALL_DIR/scanner/scanner_tools/unsafe_actions.py"
 download "$REPO_RAW_BASE/scanner/scanner_tools/xss_evidence.py" "$INSTALL_DIR/scanner/scanner_tools/xss_evidence.py"
 download "$REPO_RAW_BASE/scanner/scanner_tools/corporate_identity.py" "$INSTALL_DIR/scanner/scanner_tools/corporate_identity.py"
 download "$REPO_RAW_BASE/scanner/scanner_tools/discovered_names.py" "$INSTALL_DIR/scanner/scanner_tools/discovered_names.py"

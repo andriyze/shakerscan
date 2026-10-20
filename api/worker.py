@@ -260,6 +260,8 @@ from scan.continuation import (
     placed_discovery_stage_receipts,
 )
 from scan.manifest_store import PostgresScanManifestStore
+from scan.inventory_harvest import post_scan_probes_allowed, record_scan_inventory
+from scanner_tools.unsafe_actions import path_may_change_state
 from scan.continuation_rounds import (
     ContinuationRuntime,
     load_continuation_request_manifests,
@@ -13792,17 +13794,10 @@ async def process_scan_job(job_data: dict):
         # the per-target inventory (docs §16). Best-effort; never fails the scan.
         if target_id and not error:
             try:
-                worklist = (result.get('active_checks') or {}).get('active_worklist')
-                if worklist:
-                    # Drop spec/OPTIONS-derived phantom (404) endpoints before recording.
-                    worklist = await asm_inventory.filter_reachable_worklist(target, worklist, options)
-                if worklist:
-                    async with db_pool.acquire() as conn:
-                        auth_state = asm_inventory.auth_state_from_options(options)
-                        n = await asm_inventory.upsert_endpoints(
-                            conn, target_id, worklist, source='scan', auth_state=auth_state,
-                            scan_id=scan_id,
-                        )
+                n, _inventory_source = await record_scan_inventory(
+                    db_pool, asm_inventory, result, scan_id=scan_id, target_id=target_id,
+                    target_url=str(target or ""), options=options)
+                if n:
                     print(f"[{job_id[:8]}] ASM inventory: upserted {n} endpoints", flush=True)
 
                 # Focused BOLA/auth preflights can intentionally skip discovery and
@@ -13851,7 +13846,7 @@ async def process_scan_job(job_data: dict):
                     _sweep_max = int(os.environ.get("ASM_SCAN_SWEEP_MAX") or 400)
                 except (TypeError, ValueError):
                     _sweep_max = 400
-                if _sweep_max > 0:
+                if _sweep_max > 0 and post_scan_probes_allowed(options):
                     async with db_pool.acquire() as conn:
                         _sw = await asm_inventory.sweep_endpoint_reachability(
                             conn, target, target_id, options, max_probe=_sweep_max
@@ -18569,9 +18564,9 @@ _agent_scanner_request_settlement = agent_tools.agent_scanner_request_settlement
 
 
 def _materialize_bounded_ffuf_wordlist(
-    *, options: Mapping[str, Any], reservation: Mapping[str, Any], scratch_dir: str,
+    *, options: Mapping[str, Any], reservation: Mapping[str, Any], scratch_dir: str, authenticated: bool = False,
 ) -> tuple[str, int]:
-    """Create the exact owner-only wordlist whose entries equal FFUF's wire ceiling."""
+    """Create the exact owner-only wordlist (without action entries when a session is attached)."""
     try:
         request_limit = max(0, int(reservation.get("http_requests") or 0))
     except (TypeError, ValueError) as exc:
@@ -18595,7 +18590,7 @@ def _materialize_bounded_ffuf_wordlist(
             or entry.startswith("#")
             or len(entry.encode("utf-8")) > 512
             or any(character in entry for character in "\x00\r\n")
-            or entry in seen
+            or entry in seen or (authenticated and path_may_change_state(entry))
         ):
             continue
         seen.add(entry)
@@ -18710,7 +18705,7 @@ async def _execute_agent_scanner_process(
             os.chmod(scratch_dir, 0o700)
         if name == "ffuf":
             wordlist_path, word_count = _materialize_bounded_ffuf_wordlist(
-                options=options,
+                options=options, authenticated=bool(job_data.get("trusted_headers")),
                 reservation=reserved_budget,
                 scratch_dir=str(scratch_dir),
             )

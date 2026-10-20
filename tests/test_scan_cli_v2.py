@@ -248,3 +248,59 @@ def test_scan_cli_prints_no_notice_without_a_fallback(monkeypatch, capsys):
     response = {"scan_id": "00000000-0000-0000-0000-000000000003", "status": "queued"}
     assert _run_with_response(monkeypatch, ["example.com"], response) == 0
     assert "Notice:" not in capsys.readouterr().out
+
+
+def _run_recording(monkeypatch, argv):
+    calls = []
+
+    def request(url, *, payload=None, idempotency_key=None):
+        calls.append((url, payload, idempotency_key))
+        if url.endswith("/scan/contracts"):
+            return _contract()
+        return {"scan_id": "00000000-0000-0000-0000-000000000001", "status": "queued"}
+
+    monkeypatch.setattr(scan_cli, "_request_json", request)
+    result = scan_cli.main([
+        "--api-url", "http://api.test:8080",
+        "--ui-url", "http://ui.test:3000",
+        *argv,
+    ])
+    return result, calls
+
+
+@pytest.mark.parametrize("authority", [
+    ["--active-testing", "--confirm-active", "--allow-state-changing-http",
+     "--collection-selection", "selection-1"],
+    ["--credential-profile", "profile-1"],
+])
+def test_a_scan_without_a_receipt_is_left_to_the_servers_standing_authorization(
+    monkeypatch, capsys, authority,
+):
+    """The CLI refused before any request ("the selected authority requires --approval-receipt").
+
+    Admission already resolves the target's standing authorization when no receipt is passed,
+    exactly as for New Scan in the UI, and refuses with its own reason when it does not cover the
+    request. The CLI registers nothing itself, so a refused scan leaves no target behind.
+    """
+    result, calls = _run_recording(monkeypatch, ["https://example.com", *authority, "--json"])
+
+    assert result == 0, capsys.readouterr().err
+    assert [url for url, _payload, _key in calls] == [
+        "http://api.test:8080/scan/contracts", "http://api.test:8080/scans",
+    ]
+    assert "approval_receipt_id" not in calls[-1][1]
+
+
+def test_scan_help_word_prints_help_and_submits_nothing(monkeypatch, capsys):
+    result, calls = _run(monkeypatch, ["help"])
+
+    assert result == 0
+    assert calls == []
+    assert "--budget-profile" in capsys.readouterr().out
+
+
+def test_scan_help_documents_the_active_confirmation_and_the_receipt():
+    help_text = " ".join(scan_cli._parser().format_help().split())
+    assert "--confirm-active" in help_text
+    receipt_line = help_text[help_text.index("--approval-receipt UUID Target-bound"):]
+    assert "standing authorization" in receipt_line.split("--idempotency-key")[0]

@@ -34,7 +34,7 @@ from pathlib import Path
 
 from . import __version__
 from . import _workspace
-from ._vendored import kit_sources, load
+from ._vendored import helper, kit_sources, load
 
 INSTALL_ONE_LINER = "curl -fsSL https://install.shakerscan.com | sh"
 CLIENT_COMMANDS = (
@@ -431,7 +431,8 @@ def fetch_connect_link(link: str, *, opener=None, timeout: float = 20.0) -> dict
             raise ClientError("too many connect attempts from this address; wait a few minutes") from exc
         raise ClientError(f"the instance answered HTTP {exc.code} to the connect link") from exc
     except (urllib.error.URLError, OSError, TimeoutError) as exc:
-        raise ClientError(f"cannot reach the instance: {getattr(exc, 'reason', exc)}") from exc
+        reason = getattr(exc, "reason", exc)
+        raise ClientError(_with_certificate_hint(f"cannot reach the instance: {reason}", reason)) from exc
     try:
         data = json.loads(body.decode("utf-8"))
     except ValueError as exc:
@@ -1293,7 +1294,12 @@ def _with_reason(exc: Exception) -> str:
     if getattr(exc, "http_status", None) is not None:
         return message  # the server answered: its reason is already in the message
     reason = getattr(exc, "data", None)
-    return f"{message}: {reason}" if reason else message
+    return _with_certificate_hint(f"{message}: {reason}", reason) if reason else message
+
+
+def _with_certificate_hint(message: str, reason: object) -> str:
+    """``message`` plus how to trust a private CA, when ``reason`` is a refused certificate."""
+    return helper("_redirect_hint").with_certificate_hint(message, reason)
 
 
 def cmd_record(args: argparse.Namespace) -> int:
@@ -1517,7 +1523,10 @@ def build_parser() -> argparse.ArgumentParser:
     api.add_argument("args", nargs=argparse.REMAINDER, help="METHOD PATH [JSON]")
     scan = commands.add_parser("scan", help="submit and follow scans on the connected instance (the runtime's scan CLI)")
     connection(scan)
-    scan.add_argument("args", nargs=argparse.REMAINDER, help="the scan CLI's arguments; nothing prints its help")
+    scan.add_argument(
+        "args", nargs=argparse.REMAINDER,
+        help="the scan CLI's arguments: TARGET [options]; `shakerscan scan --help` lists them",
+    )
     check = commands.add_parser(
         "check",
         help="run a free bounded public posture check via https://pub.shakerscan.com (no engine or account)",
@@ -1600,11 +1609,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         # `shakerscan scan --budget-profile fast URL` failed unless `--` came first.
         # Only the leading connection options are the client's; the rest is forwarded as is.
         own, forwarded = split_connection_options(argv[1:])
-        if argv[0] in {"hunt", "approve", "deny", "knowledge", "secrets"}:
-            # The runtime Hunt CLI's subcommands are what `hunt --help` should list.
+        if argv[0] in {"scan", "hunt", "approve", "deny", "knowledge", "secrets"}:
+            # The runtime CLI's own options and subcommands are what `scan --help` and
+            # `hunt --help` should list; the wrapper's usage named none of them.
             if any(token in ("-h", "--help") for token in own):
                 own = [token for token in own if token not in ("-h", "--help")]
                 forwarded = ["--help", *forwarded]
+        if argv[0] in {"hunt", "approve", "deny", "knowledge", "secrets"}:
             extra, forwarded = extract_connection_options(forwarded)
             own += extra
         args = parser.parse_args([argv[0], *own])

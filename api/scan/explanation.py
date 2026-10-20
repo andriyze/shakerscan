@@ -48,8 +48,9 @@ _REASON_LABELS = {
     "authentication_uncertain": "Credential authority could not be confirmed; review the identity and approval before starting new work",
     "authentication_required": (
         "The target refused the unauthenticated requests (401/403 or a redirect to sign-in), "
-        "so those candidates were not tested; to verify them, attach a credential profile "
-        "that allows these checks"
+        "so those candidates were not tested; to verify them, the scan needs a credential "
+        "profile whose allowed capabilities include these checks: attach one, or add the "
+        "checks to the attached profile (active verifiers need approved elevation)"
     ),
     "target_refused": (
         "The target refused the verifier's requests (403) without asking for credentials, for "

@@ -75,7 +75,15 @@ def _parser() -> argparse.ArgumentParser:
         "--collection-selection", action="append", default=[], metavar="UUID",
         help="Attach an exact-target saved request selection (maximum sixteen)",
     )
-    parser.add_argument("--approval-receipt", metavar="UUID")
+    parser.add_argument(
+        "--approval-receipt", metavar="UUID",
+        help=(
+            "Target-bound approval receipt. Without one the server uses the target's standing "
+            "authorization (GET /targets/{id}/authorization), as New Scan in the UI does, and "
+            "refuses with its reason when that does not cover the request; credential use may "
+            "need a credential-tier receipt from POST /arsenal/approvals"
+        ),
+    )
     parser.add_argument(
         "--idempotency-key",
         metavar="KEY",
@@ -108,7 +116,10 @@ def _parser() -> argparse.ArgumentParser:
         )
     parser.add_argument("--force-single-worker", action="store_true")
     parser.add_argument("--json", action="store_true", help="Emit only scan-start/v2 JSON")
-    parser.add_argument("--confirm-active", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument(
+        "--confirm-active", action="store_true",
+        help="Confirm target authorization for --active-testing without a prompt (required off a terminal)",
+    )
     parser.add_argument("--api-url", required=True, help=argparse.SUPPRESS)
     parser.add_argument("--ui-url", required=True, help=argparse.SUPPRESS)
     return parser
@@ -214,7 +225,14 @@ def _request_json(
             api_detail=api_detail,
         ) from exc
     except (urllib.error.URLError, TimeoutError, OSError) as exc:
-        raise ScanCliError(f"could not reach the ShakerScan API: {exc.reason if hasattr(exc, 'reason') else exc}") from exc
+        try:
+            from redirect_hint import with_certificate_hint
+        except ModuleNotFoundError:
+            from scripts.redirect_hint import with_certificate_hint
+        reason = exc.reason if hasattr(exc, "reason") else exc
+        raise ScanCliError(
+            with_certificate_hint(f"could not reach the ShakerScan API: {reason}", reason)
+        ) from exc
     try:
         decoded = json.loads(body)
     except (json.JSONDecodeError, UnicodeDecodeError) as exc:
@@ -297,8 +315,6 @@ def _payload(args: argparse.Namespace) -> dict[str, Any]:
                 "--idempotency-key must start with an alphanumeric character and "
                 "use only letters, numbers, underscore, dot, colon, or hyphen"
             )
-    if (args.allow_state_changing_http or args.network_discovery or args.credential_profile) and not args.approval_receipt:
-        raise ScanCliError("the selected authority requires --approval-receipt")
     if args.node_id and args.placement != "auto":
         raise ScanCliError("--node-id cannot be combined with --placement local or remote")
     if args.shards and args.execution not in {"parallel", "coverage"}:
@@ -378,6 +394,10 @@ def _payload(args: argparse.Namespace) -> dict[str, Any]:
 def main(argv: list[str] | None = None) -> int:
     parser = _parser()
     args = parser.parse_args(argv)
+    if args.target == "help":
+        # `scan help` is a request for this text, never a scan of a host named "help".
+        parser.print_help()
+        return 0
     args.include_family = _split_names(args.include_family)
     args.exclude_family = _split_names(args.exclude_family)
     try:

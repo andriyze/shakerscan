@@ -213,3 +213,32 @@ def test_authentication_field_names_rank_as_injection_candidates():
     assert login_score > transport["score"], (login_score, transport["score"])
     for item in login.entries:
         assert "sqli_semantic_parameter" in item["ranking_rationale"]
+
+
+def test_a_body_candidate_resolves_when_a_replayed_request_shares_its_route():
+    """A replayed collection request and a declared endpoint can name the same route.
+
+    The replay producer records only method and URL, so its entry declares no body fields, and it
+    is collected first. Resolving a body candidate against the first entry with the candidate's
+    route refused the login form's candidate as an identity conflict, and the XSS and SQL injection
+    batches that held it ended with no request sent.
+    """
+    replayed = _endpoint(
+        source_tool="collections.replay", content_type=None, body_field_names=[],
+    )
+    declared = _endpoint(content_type="application/x-www-form-urlencoded",
+                         body_field_names=["password", "username"])
+    assert replayed["route_id"] == declared["route_id"]
+    endpoints = _manifest([replayed, declared])
+    candidates = build_candidate_manifest(
+        endpoints, source_action_ids=("discover.crawl",), maximum=50,
+        allow_state_changing_http=True)
+    assert len(candidates.entries) == 1
+
+    request = execution_request_for_manifest_candidate(endpoints, candidates, 0)
+
+    assert request["method"] == "POST"
+    assert request["url"] == "https://target.test/rest/user/login"
+    assert request["content_type"] == "application/x-www-form-urlencoded"
+    assert request["field_name"] == "username"
+    assert request["body_field_names"] == ["password", "username"]

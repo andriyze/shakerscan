@@ -204,6 +204,24 @@ export async function getHuntV2(huntId: string): Promise<HuntV2> {
   return response.json()
 }
 
+export interface HuntPermissionRequestRow {
+  id: string
+  kind?: string
+  title?: string
+  status?: string
+  decided_by?: string | null
+  decision_via?: string | null
+  decided_at?: string | null
+}
+
+/** Every permission request of this Hunt, pending and decided (the run record lists only pending). */
+export async function listHuntPermissionRequests(huntId: string): Promise<HuntPermissionRequestRow[]> {
+  const response = await fetch(`${API_URL}/hunts/${pathSegment(huntId)}/permission-requests`)
+  if (!response.ok) throw new Error(await getApiErrorMessage(response, `Failed to load permission requests (${response.status})`))
+  const body = await response.json()
+  return Array.isArray(body?.requests) ? body.requests : []
+}
+
 export async function suggestHuntSkills(
   huntId: string,
   signals: string[] = [],

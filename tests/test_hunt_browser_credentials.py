@@ -46,3 +46,45 @@ def test_browser_rechecks_live_authority_and_exact_session_capability(monkeypatc
         assert calls[1][1]["selected_origins"] == ("https://fixture.example.test:8443",)
         assert headers == {}
         assert calls[-1] == "closed"
+
+
+@pytest.mark.parametrize(("message", "code"), [
+    ("authentication session is incompatible with the capability",
+     "auth_session_capability_not_allowed"),
+    ("authentication session profile no longer allows the capability",
+     "auth_session_capability_not_allowed"),
+    ("authentication session is expired or revoked", "auth_session_expired"),
+])
+def test_a_refused_browser_session_names_the_reason_and_sends_nothing(message, code):
+    """A session the store refuses ends the browser action with its reason, before any request.
+
+    The refusal escaped the adapter as a bare ``adapter_fault:AuthSessionStoreError``, so neither
+    the agent nor the operator learned that the session's profile does not allow the browser.
+    """
+    from api.capabilities import browser
+
+    # The store error class exactly as the browser module imported it (import layouts differ).
+    AuthSessionStoreError = getattr(browser, "AuthSessionStoreError", RuntimeError)
+
+    @asynccontextmanager
+    async def refused_loader():
+        raise AuthSessionStoreError(message)
+        yield {}
+
+    async def never(*_args, **_kwargs):
+        raise AssertionError("no browser traffic after a refused session")
+
+    prepared = SimpleNamespace(session_ref="session", parser_version="browser-navigation/v1",
+                               redacted_execution={"origin": "https://fixture.example.test"})
+    original = browser._execute_browser_action
+    browser._execute_browser_action = never
+    try:
+        result = asyncio.run(browser._execute_browser_with_session(
+            prepared, session_loader=refused_loader, heartbeat=None, cancelled=lambda: False,
+        ))
+    finally:
+        browser._execute_browser_action = original
+    assert result.status == "failed"
+    assert result.errors == (code,)
+    assert result.execution_started is False
+    assert dict(result.actual_budget) == {}
