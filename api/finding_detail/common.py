@@ -160,14 +160,16 @@ def visible_scalar_facts(evidence: Mapping[str, Any], limit: int = 12) -> list[d
 
 
 # Server products named by a recorded Server / X-Powered-By header, for stack-specific examples.
+# Tomcat's connector calls itself "Apache-Coyote" and Tomcat "Apache Tomcat": both are matched
+# before the bare "apache" of Apache httpd.
 _STACKS = (
     ("nginx", ("nginx", "openresty")),
+    ("tomcat", ("tomcat", "coyote", "jetty")),
     ("apache", ("apache",)),
     ("iis", ("microsoft-iis", "asp.net")),
     ("caddy", ("caddy",)),
     ("express", ("express",)),
     ("php", ("php",)),
-    ("tomcat", ("tomcat", "coyote", "jetty")),
     ("werkzeug", ("werkzeug", "gunicorn", "uvicorn", "python")),
 )
 
