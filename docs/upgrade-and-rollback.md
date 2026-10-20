@@ -48,11 +48,13 @@ shakerscan backup delete all                # every backup, including PostgreSQL
 A `start` that changes the release version also saves the database first, to
 `backups/pre-upgrade-<time>-<from>-to-<to>/` (the newest two are kept, and until a start succeeds
 also the first one of that upgrade, taken before any migration ran), and stops if that fails. The
-version it upgrades from is the one the running API reports. When nothing is running, the launcher
-uses the release it recorded at its last start; if a launcher older than 2.10 (which keeps no such
-record, for example after a rollback) or the installer has run since, it saves the database anyway
-and names the backup `unverified-<recorded>`. `shakerscan reset` starts the emptied stack exactly as
-`start` does, without this backup.
+version it upgrades from is the one the running API reports. When the API reports none (nothing is
+running, or it was started without the launcher), the launcher uses the release it recorded at its
+last start. It saves the database anyway, naming the backup `unverified-<recorded>`, when that
+record cannot be trusted: the API container (running or stopped) was created from an image the
+record does not name (or Docker cannot say which), or a launcher older than 2.10 (which keeps no
+such record, for example after a rollback) or the installer has run since. `shakerscan reset`
+starts the emptied stack exactly as `start` does, without this backup.
 
 Target unification replaces the legacy device and input tables with compatibility views. Before
 starting the new API/workers against an existing legacy database, the launcher automatically creates
