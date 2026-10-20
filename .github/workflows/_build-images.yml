@@ -226,7 +226,7 @@ jobs:
           touch "/tmp/digests/model-intake/${model_intake_digest#sha256:}"
 
       - name: Upload digests
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: runtime-digests-${{ env.PLATFORM_PAIR }}
           path: /tmp/digests/*
@@ -306,7 +306,7 @@ jobs:
           touch "/tmp/digests/ui/${digest#sha256:}"
 
       - name: Upload UI digest
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: ui-digests-${{ env.PLATFORM_PAIR }}
           path: /tmp/digests/*
@@ -383,7 +383,7 @@ jobs:
           touch "/tmp/digests/signer/${digest#sha256:}"
 
       - name: Upload signer digest
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: signer-digests-${{ env.PLATFORM_PAIR }}
           path: /tmp/digests/*
@@ -579,7 +579,7 @@ jobs:
           mv "$receipt_tmp" release-candidate-receipt.json
 
       - name: Upload uncertified manifest receipt
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: release-candidate-uncertified-${{ inputs.version }}-${{ inputs.candidate_sha }}
           path: release-candidate-receipt.json

@@ -80,3 +80,45 @@ def test_candidate_acceptance_checkouts_do_not_keep_the_token():
         assert checkouts, name
         for step in checkouts:
             assert step["with"].get("persist-credentials") is False, name
+
+
+USES = re.compile(r"^\s*(?:-\s+)?uses:\s*['\"]?([^\s'\"#]+)['\"]?\s*(?:#\s*(\S+))?")
+
+
+def _action_pins() -> dict[str, dict[str, list[str]]]:
+    """Every third-party action reference: action -> pinned ref -> the places that use it."""
+    pins: dict[str, dict[str, list[str]]] = {}
+    for path in WORKFLOWS + sorted((ROOT / ".github" / "actions").glob("*/action.yml")):
+        for number, line in enumerate(path.read_text().splitlines(), start=1):
+            match = USES.match(line)
+            if not match or match.group(1).startswith(("./", "docker://")):
+                continue
+            action, _, ref = match.group(1).partition("@")
+            comment = match.group(2) or ""
+            pins.setdefault(action, {}).setdefault(f"{ref} {comment}".strip(), []).append(
+                f"{path.relative_to(ROOT)}:{number}"
+            )
+    return pins
+
+
+def test_third_party_actions_are_pinned_to_one_full_commit_sha():
+    # A tag can be moved to other code; a commit SHA cannot. One SHA per action across every
+    # workflow keeps a partial update from leaving jobs on an older major release: 17 uploads
+    # stayed on upload-artifact 4.6.2 while 45 others had moved to 7.0.1. Where a pin names its
+    # release in a trailing comment, every use of that action names the same one.
+    pins = _action_pins()
+    assert "actions/checkout" in pins and "actions/upload-artifact" in pins
+    loose = [
+        f"{action}@{ref}: {places[0]}"
+        for action, refs in pins.items()
+        for ref, places in refs.items()
+        if not re.fullmatch(r"[0-9a-f]{40}(?: v\d+(?:\.\d+)*)?", ref)
+    ]
+    assert loose == []
+    split = {}
+    for action, refs in pins.items():
+        shas = {ref.split()[0] for ref in refs}
+        comments = {ref.split()[1] for ref in refs if " " in ref}
+        if len(shas) > 1 or len(comments) > 1:
+            split[action] = {ref: places[:3] for ref, places in refs.items()}
+    assert split == {}

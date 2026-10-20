@@ -83,7 +83,7 @@ jobs:
 
       - name: Upload external wire acceptance receipt
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: external-wire-${{ github.sha }}
           path: artifacts/v2-external-wire.json
@@ -101,7 +101,7 @@ jobs:
 
       - name: Upload Scan cancellation race receipt
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: v2-scan-cancellation-race
           path: artifacts/v2-scan-cancellation-race.json
@@ -118,7 +118,7 @@ jobs:
 
       - name: Upload Scan reservation identity receipt
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: v2-scan-reservation-identity
           path: artifacts/v2-scan-reservation-identity.json
@@ -137,7 +137,7 @@ jobs:
 
       - name: Upload Scan action resume receipt
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: v2-scan-action-resume
           path: artifacts/v2-scan-action-resume.json
@@ -166,7 +166,7 @@ jobs:
 
       - name: Upload Model Intake scorecard
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: v2-model-intake-e2e
           path: artifacts/v2-model-intake-scorecard.json
