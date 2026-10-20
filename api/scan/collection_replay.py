@@ -16,10 +16,10 @@ except ModuleNotFoundError:  # package import in host-side tests
     from ..runtime.request_collection_store import RequestCollectionSelection
 
 try:
-    from scanner_tools.request_collections import RequestSelector
+    from scanner_tools.request_collections import RequestSelector, withheld_capture_request_ids
     from scanner_tools.request_replay import ReplayAuthorization, ReplayPlan
 except ModuleNotFoundError:  # package import in host-side tests
-    from scanner.scanner_tools.request_collections import RequestSelector
+    from scanner.scanner_tools.request_collections import RequestSelector, withheld_capture_request_ids
     from scanner.scanner_tools.request_replay import ReplayAuthorization, ReplayPlan
 
 from .capability_execution import scan_budget_ledger_limits
@@ -35,11 +35,19 @@ class ScanCollectionReplayContractError(ValueError):
     """Saved replay input cannot execute under the immutable Scan contract."""
 
 
+class ScanCollectionReplayWithheld(ScanCollectionReplayContractError):
+    """Every request a manifest names is a capture request that replay withholds (its recorded
+    path carries a credential): nothing is sent, and the action is skipped, not failed."""
+
+
 def validate_scan_replay_request_manifest(
     plan: Any,
     manifest: ScanWorkManifest,
+    *,
+    withheld_request_ids: frozenset[str] = frozenset(),
 ) -> None:
-    """Fail closed if decrypted replay work differs from its public manifest."""
+    """Fail closed if decrypted replay work differs from its public manifest. Requests the
+    worker withholds from a capture's replay (``withheld_request_ids``) are not expected."""
     expected_requests = tuple(
         (
             str(item["request_ref_id"]),
@@ -47,6 +55,7 @@ def validate_scan_replay_request_manifest(
             str(item["request_class"]),
         )
         for item in manifest.entries
+        if str(item["request_ref_id"]) not in withheld_request_ids
     )
     actual_requests = tuple(
         (
@@ -71,6 +80,8 @@ def validate_scan_replay_request_manifest(
 def narrow_replay_plan_to_request_manifest(
     plan: ReplayPlan,
     manifest: ScanWorkManifest,
+    *,
+    payload: Mapping[str, Any] | None = None,
 ) -> ReplayPlan:
     """Project a decrypted saved selection onto one child's exact authority.
 
@@ -78,6 +89,13 @@ def narrow_replay_plan_to_request_manifest(
     they may execute only the opaque request references assigned to their own
     immutable manifest.  Rebuilding ordinals makes the resulting private plan
     independently sealable for a broker lease.
+
+    ``payload`` is the decrypted collection the plan was resolved from. A capture
+    indexed before path credentials were withheld can list such a request as
+    supported, so its manifest names it; the plan never contains it. That request
+    is left out instead of failing the child, and when it leaves nothing,
+    ``ScanCollectionReplayWithheld`` says so. Any other missing reference still
+    fails closed.
     """
     if manifest.kind.value != "request":
         raise ScanCollectionReplayContractError(
@@ -93,22 +111,33 @@ def narrow_replay_plan_to_request_manifest(
         raise ScanCollectionReplayContractError(
             "immutable request manifest contains ambiguous references"
         )
-    missing = [request_id for request_id in expected_ids if request_id not in by_id]
-    if missing:
+    missing = {request_id for request_id in expected_ids if request_id not in by_id}
+    withheld: frozenset[str] = frozenset()
+    if missing and payload is not None:
+        withheld = frozenset(missing & withheld_capture_request_ids(payload))
+    if missing - withheld:
         raise ScanCollectionReplayContractError(
             "decrypted replay plan is missing child request authority"
+        )
+    kept = [request_id for request_id in expected_ids if request_id not in withheld]
+    if not kept:
+        raise ScanCollectionReplayWithheld(
+            "every request of this replay is a capture request whose recorded path carries "
+            "a credential; none is replayed"
         )
     narrowed = ReplayPlan(
         requests=tuple(
             replace(by_id[request_id], ordinal=index)
-            for index, request_id in enumerate(expected_ids)
+            for index, request_id in enumerate(kept)
         ),
         allowed_origins=plan.allowed_origins,
         default_origin=plan.default_origin,
         authorization=plan.authorization,
         schema_version=plan.schema_version,
     )
-    validate_scan_replay_request_manifest(narrowed, manifest)
+    validate_scan_replay_request_manifest(
+        narrowed, manifest, withheld_request_ids=withheld,
+    )
     return narrowed
 
 

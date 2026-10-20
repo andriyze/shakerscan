@@ -16,7 +16,7 @@ import urllib.parse
 from collections import Counter
 from typing import Any
 
-from .url_redaction import is_sensitive_label, token_like_segment
+from .url_redaction import drop_matrix_parameters, is_sensitive_label, redact_url, token_like_segment
 from .device_postman import (
     MAX_BODY_BYTES,
     MAX_COLLECTION_BYTES,
@@ -53,6 +53,9 @@ _CAPTURE_CREDENTIAL_NAME_RE = re.compile(r"(?:auth|csrf|xsrf|bearer|signature)",
 # The marker a capture document's log carries (api/capture/flows.py): a capture stays a capture
 # even if its row were relabelled, because re-validation keeps the log.
 CAPTURE_LOG_SCHEMA = "browser-capture/v1"
+# A capture request whose recorded path carries a credential (a session id, a reset, magic-login
+# or invitation token, a one-time code): the path is the credential, so it is not replayed.
+CAPTURED_PATH_CREDENTIAL_WITHHELD = "captured_path_credential_withheld"
 
 
 class RequestImportError(ValueError):
@@ -211,32 +214,398 @@ def is_captured_credential_header(name: str) -> bool:
     )
 
 
-_CAPTURE_SECRET_QUERY_RE = re.compile(r"(?:^|[-_.])(?:sig|code|auth|jwt|sid|key)(?:$|[-_.])", re.I)
+# Names a credential travels under as a query parameter or a ``name=value`` path segment: a
+# credential label, a name containing a credential word, or ``sig``/``code``/``auth``/``jwt``/
+# ``sid``/``key`` as a whole word of the name.
+_CREDENTIAL_NAME_RE = re.compile(
+    r"(?:authorization|api[-_]?key|token|secret|password|passwd|passcode|passphrase|cookie"
+    r"|session|credential|private[-_]?key|otp|csrf|xsrf)"
+    r"|(?:^|[-_.])(?:sig|code|auth|jwt|sid|key)(?:$|[-_.])",
+    re.I,
+)
+
+
+def is_credential_name(name: str) -> bool:
+    """A parameter name whose recorded value is a credential (``token``, ``access_key``,
+    ``x-sig``, ``sessionid``): a capture's replay withholds it from a query string and from a
+    ``name=value`` path segment."""
+    text = str(name or "")
+    return is_sensitive_label(text) or bool(_CREDENTIAL_NAME_RE.search(text))
 
 
 def is_captured_secret_query(name: str, value: str) -> bool:
     """A query parameter a recorded session used as a credential: named like a token, secret,
-    session, signature, code or key (the index masking's names), or with a token-like value
-    (a JWT, a long hex or opaque string, a random-looking one)."""
+    session, signature, code or key (``is_credential_name``), or with a token-like value (a JWT,
+    a long hex or opaque string, a random-looking one)."""
     text = str(name or "")
     return (
-        is_sensitive_label(text)
-        or bool(_SENSITIVE_NAME_RE.search(text))
-        or bool(_CAPTURE_SECRET_FIELD_RE.search(text))
-        or bool(_CAPTURE_SECRET_QUERY_RE.search(text))
+        is_credential_name(text)
         or token_like_segment(urllib.parse.unquote(str(value or "")))
         # A bare parameter (``?<token>``) is its own value.
         or token_like_segment(urllib.parse.unquote(text))
     )
 
 
-def _replayable_capture_url(url: str) -> tuple[str, list[str]]:
-    """``url`` without path ``;name=value`` parameters (``;jsessionid=``) and without its
-    credential-like query parameters; the names of the parameters left out."""
+# What a capture's replay withholds from a recorded path.
+#
+# ``url_redaction.redact_path`` is the display mask of every request list, receipt and endpoint
+# inventory, and the scanner's sensitive-path gate. It errs towards hiding (any value after
+# ``auth`` or ``session``, every UUID, any 28-character slug), which costs nothing in a list but
+# would stop ordinary requests from being replayed. A capture's replay therefore decides with its
+# own rule, written for credentials, and leaves the shared mask alone. A path segment carries a
+# credential when it is:
+#
+# - an ASP.NET cookieless session or ticket: ``(S(<session-id>))``, ``(X(1)F(<ticket>))``;
+# - a ``name=value`` pair named like a credential (``is_credential_name``: ``token=<v>``,
+#   ``sessionid=<v>``, ``x-sig=<v>``), or a ``name:value`` one whose value is value-shaped;
+# - wherever it appears, a JWT, 32 or more hex characters (a dashless UUID, an MD5 or SHA digest
+#   and a git commit id included), or a random token of 32 or more characters. A UUID written
+#   with dashes and a ``sha256-<hex>`` digest name resources;
+# - a value-shaped segment right after a credential or share word (``_CREDENTIAL_PATH_LABELS``,
+#   or a compound or plural of one of ``_CREDENTIAL_PATH_WORDS``): ``/s/<session-id>/``,
+#   ``/share/<token>``, ``/reset/<token>``, ``/verify-email/<token>``, ``/otp/482913``. A route
+#   word there (``/auth/login``, ``/session/current``, ``/token/refresh``, ``/verify/v2``) is
+#   not a value; a number is (``/share/1234``);
+# - a random token (``url_redaction.token_like_segment``) right after a download or short-link
+#   word (``_LINK_PATH_LABELS``): ``/download/<token>``, ``/m/<token>``.
+#
+# A segment that repeats a credential value recorded in a URL of the same capture (a share
+# page's token in the path of an API call it makes) is withheld too (``_withheld_path_segments``).
+# A capture's request list masks every segment replay withholds as well as what the display mask
+# hides (``redact_captured_url``).
+_CREDENTIAL_PATH_LABELS = frozenset({
+    # The display mask's credential words (``url_redaction``), in label form.
+    "access-token", "accesstoken", "api-key", "apikey", "auth", "authorization", "bearer",
+    "code", "confirm", "confirmation", "credential", "credentials", "invite", "invitation",
+    "key", "magic", "nonce", "otp", "password", "recover", "recovery", "reset", "secret",
+    "session", "signature", "signed", "sso", "token", "verify", "verification",
+    # Sessions, share links, sign-in links and one-time codes.
+    "s", "sid", "share", "shared", "login", "signin", "sign-in", "activate", "activation",
+    "unsubscribe", "passwordless", "one-time", "onetime", "2fa", "mfa",
+})
+# A label of up to three words with one of these words (or its plural) is a credential label
+# too: ``verify-email``, ``confirm_account``, ``session-id``, ``reset-password``, ``sessions``.
+_CREDENTIAL_PATH_WORDS = frozenset({
+    "token", "otp", "reset", "magic", "invite", "invitation", "nonce", "verify",
+    "verification", "confirm", "confirmation", "activate", "activation", "session", "secret",
+    "password", "passwordless", "unsubscribe", "share", "recover", "recovery", "sso",
+})
+_LINK_PATH_LABELS = frozenset({"d", "dl", "download", "downloads", "l", "link", "links", "m"})
+_PATH_PAIR_RE = re.compile(r"^([^=:]{1,80})([:=])(.*)$")
+_COOKIELESS_SESSION_RE = re.compile(r"^\((?:[A-Za-z]\([^()]*\))+\)$")
+_JWT_SEGMENT_RE = re.compile(r"^eyJ[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{5,}$")
+_HEX_SEGMENT_RE = re.compile(r"^[0-9a-fA-F]{32,}$")
+_TOKEN_SEGMENT_RE = re.compile(r"^[A-Za-z0-9_~+=-]{32,}$")
+_TOKEN_RUN_SPLIT_RE = re.compile(r"[-_.~+=]+")
+_UUID_RE = re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
+_DIGEST_RE = re.compile(r"^(?:md5|sha1|sha224|sha256|sha384|sha512|blake2b|blake3)[-_:]", re.I)
+_VERSION_RE = re.compile(r"^[vV]\d{1,3}(?:\.\d{1,3}){0,2}$")
+_PROTOCOL_WORD_RE = re.compile(r"^(?:[a-z]{2,10}|[A-Z]{2,10})\d$")
+_WORD_RE = re.compile(r"^[^\W\d_]+(?:[-_.][^\W\d_]+)*$")
+
+
+def _path_label(segment: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "-", segment.strip().lower()).strip("-")
+
+
+def _case_switches(run: str) -> int:
+    return sum(
+        1 for left, right in zip(run, run[1:], strict=False)
+        if left.isalpha() and right.isalpha() and left.isupper() != right.isupper()
+    )
+
+
+def _letter_digit_switches(run: str) -> int:
+    return sum(1 for left, right in zip(run, run[1:], strict=False) if left.isdigit() != right.isdigit())
+
+
+def _route_word(value: str) -> bool:
+    """Route structure, not a value: letters (``login``, ``check-otp``, ``report.pdf``) whose
+    case does not change at random, a version (``v3``) or a one-case word with one digit
+    (``oauth2``)."""
+    if _VERSION_RE.fullmatch(value) or _PROTOCOL_WORD_RE.fullmatch(value):
+        return True
+    return bool(_WORD_RE.fullmatch(value)) and not any(
+        len(run) >= 8 and _case_switches(run) * 2 >= len(run) for run in re.split(r"[-_.]", value)
+    )
+
+
+def _value_shaped(value: str) -> bool:
+    """Four or more characters that are not a route word: with a digit or another character,
+    or letters whose case changes at random."""
+    return len(value) >= 4 and not _route_word(value)
+
+
+def _standalone_credential(value: str) -> bool:
+    """A segment that is a credential whatever precedes it (see the rule above)."""
+    if (
+        _COOKIELESS_SESSION_RE.fullmatch(value)
+        or _JWT_SEGMENT_RE.fullmatch(value)
+        or _HEX_SEGMENT_RE.fullmatch(value)
+    ):
+        return True
+    if not _TOKEN_SEGMENT_RE.fullmatch(value) or _UUID_RE.fullmatch(value) or _DIGEST_RE.match(value):
+        return False
+    # A random run switches between letters and digits, or letter case, far more often than a
+    # word slug with numbers (``release-notes-2026-10-19``) does.
+    return any(
+        len(run) >= 8 and (
+            _letter_digit_switches(run) >= 3
+            or (len(run) >= 12 and _case_switches(run) * 3 >= len(run))
+        )
+        for run in _TOKEN_RUN_SPLIT_RE.split(value)
+    )
+
+
+def _label_kind(label: str) -> str | None:
+    """``"credential"`` when a value after this path word is a credential, ``"link"`` when a
+    random token after it is, ``None`` otherwise."""
+    if label in _CREDENTIAL_PATH_LABELS:
+        return "credential"
+    words = label.split("-")
+    if len(words) <= 3 and any(
+        word in _CREDENTIAL_PATH_WORDS
+        or (word.endswith("s") and word[:-1] in _CREDENTIAL_PATH_WORDS)
+        for word in words
+    ):
+        return "credential"
+    return "link" if label in _LINK_PATH_LABELS else None
+
+
+def _path_credentials(path: str) -> list[tuple[int, str]]:
+    """``(position, shown prefix)`` for each segment of ``path`` (positions in
+    ``path.split("/")``) that carries a credential: the prefix is ``name=`` for a credential
+    pair, whose name may still be shown, and empty when the whole segment is the credential."""
+    found: list[tuple[int, str]] = []
+    previous: str | None = None
+    for position, segment in enumerate(str(path or "").split("/")):
+        decoded = urllib.parse.unquote(drop_matrix_parameters(segment))
+        if not decoded:
+            previous = None
+            continue
+        pair = _PATH_PAIR_RE.fullmatch(decoded)
+        if (
+            pair and pair.group(3) and is_credential_name(pair.group(1))
+            and (pair.group(2) == "=" or _value_shaped(pair.group(3)))
+        ):
+            found.append((position, pair.group(1) + pair.group(2)))
+        elif (
+            _standalone_credential(decoded)
+            or (previous == "credential" and _value_shaped(decoded))
+            or (
+                previous == "link" and token_like_segment(decoded)
+                and not _UUID_RE.fullmatch(decoded)
+            )
+        ):
+            found.append((position, ""))
+        previous = _label_kind(_path_label(decoded))
+    return found
+
+
+def _withheld_path_segments(url: str, recorded: frozenset[str]) -> dict[int, str]:
+    """``{position: shown prefix}`` for each segment of ``url``'s path that a capture's replay
+    withholds: those the rule above marks (``_path_credentials``) and those that repeat a
+    credential value recorded in a URL of the same capture (``recorded``, from
+    ``captured_credential_values``: a share page's token in the path of an API call it makes)."""
+    try:
+        path = urllib.parse.urlsplit(str(url or "").strip()).path
+    except ValueError:
+        return {}
+    found = {
+        position: "" for position, segment in enumerate(path.split("/"))
+        if recorded and _holds_recorded_credential(drop_matrix_parameters(segment), recorded)
+    }
+    found.update(_path_credentials(path))
+    return found
+
+
+def captured_path_credential_segments(url: str, recorded: frozenset[str] = frozenset()) -> list[int]:
+    """Positions (``path.split("/")``, so a leading ``/`` makes the first segment 1) of the
+    segments of a recorded ``url`` that carry a credential under the capture replay rule above:
+    a session id after ``/s/``, a share, reset, magic-login or invitation token, a one-time code,
+    ``token=<value>``, an ASP.NET cookieless session, a JWT or a long hex or random token; never
+    a route word, a UUID with dashes or a short resource id with no credential word before it.
+    With ``recorded`` (``captured_credential_values`` of the capture's requests), a segment that
+    repeats one of those values is among them too. ``redact_captured_url`` masks each of them."""
+    return sorted(_withheld_path_segments(url, recorded))
+
+
+def redact_captured_url(url: str, recorded: frozenset[str] = frozenset()) -> str:
+    """A recorded URL as a capture's request list shows it: the display mask every request list
+    uses (``url_redaction.redact_url``) with each segment the capture replay withholds
+    (``captured_path_credential_segments``) masked too, so the list never shows a value that
+    replay treats as a credential. A URL whose path carries no credential is shown exactly as
+    ``redact_url`` shows it."""
+    text = str(url or "").strip()
+    shown = redact_url(text, max_length=1 << 20)
+    found = _withheld_path_segments(text, recorded)
+    if found:
+        parts = urllib.parse.urlsplit(shown)
+        segments = parts.path.split("/")
+        for position, prefix in found.items():
+            if position < len(segments):
+                segments[position] = prefix + "<redacted>"
+        shown = urllib.parse.urlunsplit(parts._replace(path="/".join(segments)))
+    return shown[:2_000]
+
+
+# Copies of the page's URL a browser puts in a request: the Referer, a path-bearing Origin,
+# htmx's ``HX-Current-URL`` and the Next.js router's ``Next-Url`` (a path). Every header whose
+# value is an absolute http(s) URL or path is read as one (``_looks_like_page_url``), as are URLs
+# and paths in JSON and form bodies and in query values; a Referer that is not a URL is not sent.
+_ABSOLUTE_URL_RE = re.compile(r"^\s*https?://", re.I)
+_URL_IN_TEXT_RE = re.compile(r"https?://[^\s\"'<>\\]+", re.I)
+# The runs a recorded credential value is matched by elsewhere in a request.
+_CREDENTIAL_PIECE_RE = re.compile(r"[A-Za-z0-9_~-]+")
+
+
+def _query_carries_credential(query: str) -> bool:
+    return any(
+        is_captured_secret_query(name, item)
+        for name, item in urllib.parse.parse_qsl(query, keep_blank_values=True)
+    )
+
+
+def _fragment_carries_credential(fragment: str) -> bool:
+    """``#access_token=<v>`` (an implicit grant), or an SPA route whose path or query carries a
+    credential (``#/s/<session-id>``, ``#/welcome?token=<v>``)."""
+    route, _separator, query = fragment.partition("?")
+    route = route[1:] if route.startswith("!") else route
+    if route.startswith("/"):
+        return bool(_path_credentials(route)) or _query_carries_credential(query)
+    return _query_carries_credential(fragment)
+
+
+def _page_url_without_credential(value: str, *, origin_form: bool = False) -> str | None:
+    """A copy of a page URL (a Referer, an ``HX-Current-URL``, a ``Next-Url`` path, a URL in a
+    body or a query value) as a capture replay sends it: ``value`` itself when it carries no
+    credential; only its origin (``https://app.example/``, or without the ``/`` for an Origin
+    header) when its userinfo, path (``captured_path_credential_segments``), ``;matrix``
+    parameters, query or fragment held one, and ``/`` for a same-origin path that did; ``None``
+    when it is neither an http(s) URL nor an absolute path."""
+    text = str(value or "").strip()
+    try:
+        parts = urllib.parse.urlsplit(text)
+        _port = parts.port  # an invalid port raises ValueError
+    except ValueError:
+        return None
+    if parts.scheme or parts.netloc:
+        if parts.scheme.lower() not in {"http", "https"} or not parts.hostname:
+            return None
+        origin: str | None = f"{parts.scheme.lower()}://{parts.netloc.rsplit('@', 1)[-1]}"
+    elif text.startswith("/") and not text.startswith("//"):
+        origin = None
+    else:
+        return None
+    carries_credential = (
+        "@" in parts.netloc or ";" in parts.path
+        or bool(_path_credentials(parts.path))
+        or _query_carries_credential(parts.query)
+        or _fragment_carries_credential(parts.fragment)
+    )
+    if not carries_credential:
+        return value
+    if origin is None:
+        return "/"
+    return origin if origin_form else origin + "/"
+
+
+def _credential_pieces(value: str) -> set[str]:
+    """The runs of a credential value that identify a copy of it: six or more characters that
+    are not a route word."""
+    return {
+        piece for piece in _CREDENTIAL_PIECE_RE.findall(str(value or ""))
+        if len(piece) >= 6 and not _route_word(piece)
+    }
+
+
+def _url_credential_pieces(url: str) -> set[str]:
+    """The credential values a recorded URL or path carries, as ``_credential_pieces``: its
+    withheld path segments, the userinfo password, and ``;matrix``, query and fragment parameters
+    named like a credential (``is_credential_name``)."""
+    try:
+        parts = urllib.parse.urlsplit(str(url or "").strip())
+    except ValueError:
+        return set()
+    route, _separator, fragment_query = parts.fragment.partition("?")
+    route = route[1:] if route.startswith("!/") else route
+    values = [urllib.parse.unquote(parts.password)] if parts.password else []
+    for path in (parts.path, route if route.startswith("/") else ""):
+        segments = path.split("/")
+        values.extend(
+            urllib.parse.unquote(drop_matrix_parameters(segments[position]))[len(prefix):]
+            for position, prefix in _path_credentials(path)
+        )
+        for segment in segments:
+            for parameter in segment.split(";")[1:]:
+                name, _equals, value = parameter.partition("=")
+                if is_credential_name(urllib.parse.unquote(name)):
+                    values.append(urllib.parse.unquote(value))
+    for query in (parts.query, fragment_query, "" if route.startswith("/") else route):
+        values.extend(
+            item for name, item in urllib.parse.parse_qsl(query, keep_blank_values=True)
+            if is_credential_name(name)
+        )
+    pieces: set[str] = set()
+    for value in values:
+        pieces |= _credential_pieces(value)
+    return pieces
+
+
+def captured_credential_values(requests: list[dict[str, Any]]) -> frozenset[str]:
+    """Every credential value the recorded URLs of a capture carry (as ``_credential_pieces``):
+    the request URLs and the page URLs and paths in their headers. A copy of one of them
+    anywhere else in a replayed request (another request's path, a router state header, a JSON
+    field, a beacon body) is left out too."""
+    pieces: set[str] = set()
+    for request in requests:
+        pieces |= _url_credential_pieces(str(request.get("url") or ""))
+        pieces |= _url_credential_pieces(str(request.get("url_template") or ""))
+        for _name, value in [
+            *list(request.get("header_items") or []), *dict(request.get("headers") or {}).items(),
+        ]:
+            text = str(value or "")
+            if _looks_like_page_url(text):
+                pieces |= _url_credential_pieces(text)
+    return frozenset(pieces)
+
+
+def _holds_recorded_credential(text: str, pieces: frozenset[str]) -> bool:
+    if not pieces or not text:
+        return False
+    candidates = [text, urllib.parse.unquote(text)] if "%" in text else [text]
+    return any(
+        piece in pieces for candidate in candidates for piece in _CREDENTIAL_PIECE_RE.findall(candidate)
+    )
+
+
+def _looks_like_page_url(text: str) -> bool:
+    stripped = text.strip()
+    return bool(_ABSOLUTE_URL_RE.match(stripped)) or (
+        stripped.startswith("/") and not stripped.startswith("//")
+    )
+
+
+def _replayable_text(text: str, pieces: frozenset[str]) -> str:
+    """A recorded value (a query value, a JSON or form field) as a capture replay sends it: a
+    page URL or path without its credential (``_page_url_without_credential``), empty when it
+    is a URL that does not parse or holds a recorded credential value, otherwise unchanged."""
+    replayable = text
+    if _looks_like_page_url(text):
+        replayable = _page_url_without_credential(text) or ""
+    return "" if _holds_recorded_credential(replayable, pieces) else replayable
+
+
+def _replayable_capture_url(url: str, pieces: frozenset[str] = frozenset()) -> tuple[str, list[str], bool]:
+    """``url`` without userinfo, path ``;name=value`` parameters (``;jsessionid=``) and its
+    credential query parameters (named like a credential, token-like, or a copy of a page URL or
+    of a recorded credential value); the names of the parameters left out, and whether userinfo
+    was."""
     try:
         parts = urllib.parse.urlsplit(url)
     except ValueError:
-        return url, []
+        return url, [], False
+    netloc = parts.netloc.rsplit("@", 1)[-1]
     path = parts.path
     if ";" in path:
         path = "/".join(segment.split(";", 1)[0] for segment in path.split("/"))
@@ -245,16 +614,20 @@ def _replayable_capture_url(url: str) -> tuple[str, list[str]]:
     if query:
         kept = []
         for name, value in urllib.parse.parse_qsl(query, keep_blank_values=True):
-            if is_captured_secret_query(name, value):
+            if is_captured_secret_query(name, value) or _replayable_text(value, pieces) != value:
                 if name[:160] not in withheld:
                     withheld.append(name[:160])
             else:
                 kept.append((name, value))
         if withheld:
             query = urllib.parse.urlencode(kept)
-    if path == parts.path and not withheld:
-        return url, []
-    return urllib.parse.urlunsplit((parts.scheme, parts.netloc, path, query, parts.fragment)), withheld
+    if path == parts.path and not withheld and netloc == parts.netloc:
+        return url, [], False
+    return (
+        urllib.parse.urlunsplit((parts.scheme, netloc, path, query, parts.fragment)),
+        withheld,
+        netloc != parts.netloc,
+    )
 
 
 _CAPTURE_SECRET_FIELD_RE = re.compile(
@@ -305,21 +678,51 @@ def _blank_secret_fields(value: Any, withheld: set[str]) -> Any:
     return value
 
 
+def _without_credential_copies(value: Any, pieces: frozenset[str], withheld: set[str], key: str = "") -> Any:
+    """A parsed JSON body with every string that is a page URL carrying a credential reduced to
+    its origin, and every string holding a recorded credential value emptied
+    (``_replayable_text``); the field names changed go into ``withheld``."""
+    if isinstance(value, dict):
+        return {
+            name: _without_credential_copies(item, pieces, withheld, str(name))
+            for name, item in value.items()
+        }
+    if isinstance(value, list):
+        return [_without_credential_copies(item, pieces, withheld, key) for item in value]
+    if isinstance(value, str):
+        replayable = _replayable_text(value, pieces)
+        if replayable != value:
+            withheld.add((key or "[]")[:160])
+        return replayable
+    return value
+
+
+def _holds_credential_copy(text: str, pieces: frozenset[str]) -> bool:
+    """Body text that cannot be parsed but holds a page URL carrying a credential or a recorded
+    credential value."""
+    return _holds_recorded_credential(text, pieces) or any(
+        _page_url_without_credential(found) != found for found in _URL_IN_TEXT_RE.findall(text)
+    )
+
+
 _MULTIPART_NAME_RE = re.compile(rb'(?i)content-disposition:[^\r\n]*?\bname="([^"]*)"')
 
 
-def _without_secret_multipart_fields(body: bytes, content_type: str, withheld: set[str]) -> bytes | None:
-    """A multipart/form-data body with the content of secret-named parts emptied, or None when it
-    cannot be parsed confidently."""
+def _without_secret_multipart_fields(
+    body: bytes, content_type: str, withheld: set[str], pieces: frozenset[str] = frozenset(),
+) -> bytes | None:
+    """A multipart/form-data body with the content of secret-named parts, and of parts that
+    hold a copy of a recorded credential, emptied, or None when it cannot be parsed
+    confidently."""
     match = re.search(r'boundary="?([^";]+)"?', content_type, re.I)
     if not match:
         return None
     delimiter = b"--" + match.group(1).strip().encode("latin-1")
-    pieces = body.split(delimiter)
-    if len(pieces) < 3 or not pieces[-1].startswith(b"--"):
+    pieces_of_body = body.split(delimiter)
+    if len(pieces_of_body) < 3 or not pieces_of_body[-1].startswith(b"--"):
         return None
-    rebuilt = [pieces[0]]
-    for piece in pieces[1:-1]:
+    rebuilt = [pieces_of_body[0]]
+    for piece in pieces_of_body[1:-1]:
         head, separator, content = piece.partition(b"\r\n\r\n")
         if not separator:
             return None
@@ -327,18 +730,23 @@ def _without_secret_multipart_fields(body: bytes, content_type: str, withheld: s
         if name is None:
             return None
         field = name.group(1).decode("utf-8", "replace")
-        if is_captured_secret_field(field):
+        if is_captured_secret_field(field) or _holds_credential_copy(content.decode("utf-8", "replace"), pieces):
             withheld.add(field[:160])
             content = b"\r\n" if content.endswith(b"\r\n") else b""
         rebuilt.append(head + separator + content)
-    rebuilt.append(pieces[-1])
+    rebuilt.append(pieces_of_body[-1])
     return delimiter.join(rebuilt)
 
 
-def _without_secret_body_fields(request: dict[str, Any]) -> tuple[bytes, list[str]]:
+def _without_secret_body_fields(
+    request: dict[str, Any], pieces: frozenset[str] = frozenset(),
+) -> tuple[bytes, list[str]]:
     """A captured body with every password-, token- or secret-named field emptied (JSON, form,
-    multipart): the password typed into a recorded login form is never sent again. A body that
-    cannot be parsed confidently but names a secret field anywhere is withheld whole (``*``)."""
+    multipart): the password typed into a recorded login form is never sent again. A page URL in
+    a JSON or form field that carries a credential is sent as its origin (or ``/``), and a field
+    that holds a recorded credential value (``pieces``) is emptied. A body that cannot be parsed
+    confidently but names a secret field anywhere, or holds such a URL or value, is withheld
+    whole (``*``)."""
     body = request.get("body") if isinstance(request.get("body"), bytes) else b""
     if not body:
         return body, []
@@ -349,9 +757,10 @@ def _without_secret_body_fields(request: dict[str, Any]) -> tuple[bytes, list[st
     )
     content_type = raw_content_type.lower()
     withheld: set[str] = set()
-    hinted = bool(_BODY_SECRET_HINT_RE.search(body.decode("utf-8", "replace")))
+    loose_text = body.decode("utf-8", "replace")
+    hinted = bool(_BODY_SECRET_HINT_RE.search(loose_text)) or _holds_credential_copy(loose_text, pieces)
     if "multipart/form-data" in content_type:
-        rebuilt = _without_secret_multipart_fields(body, raw_content_type, withheld)
+        rebuilt = _without_secret_multipart_fields(body, raw_content_type, withheld, pieces)
         if rebuilt is None:
             return (b"", ["*"]) if hinted else (body, [])
         return (rebuilt, sorted(withheld)) if withheld else (body, [])
@@ -364,7 +773,7 @@ def _without_secret_body_fields(request: dict[str, Any]) -> tuple[bytes, list[st
             parsed = json.loads(text)
         except ValueError:
             return (b"", ["*"]) if hinted else (body, [])
-        blanked = _blank_secret_fields(parsed, withheld)
+        blanked = _without_credential_copies(_blank_secret_fields(parsed, withheld), pieces, withheld)
         if not withheld:
             return body, []
         return json.dumps(blanked, separators=(",", ":"), ensure_ascii=False).encode("utf-8"), sorted(withheld)
@@ -373,59 +782,104 @@ def _without_secret_body_fields(request: dict[str, Any]) -> tuple[bytes, list[st
     ):
         kept = []
         for name, item in urllib.parse.parse_qsl(text, keep_blank_values=True):
-            if is_captured_secret_field(name):
+            replayable = "" if is_captured_secret_field(name) else _replayable_text(item, pieces)
+            if replayable != item or is_captured_secret_field(name):
                 withheld.add(name[:160])
-                item = ""
-            kept.append((name, item))
+            kept.append((name, replayable))
         if withheld:
             return urllib.parse.urlencode(kept).encode("utf-8"), sorted(withheld)
         return body, []
     return (b"", ["*"]) if hinted else (body, [])
 
 
+def _replay_header_pairs(pairs: Any, pieces: frozenset[str]) -> tuple[list[tuple[str, str]], set[str]]:
+    """Recorded headers as a capture replay sends them, and the names of those it changed or
+    left out (besides credential headers): no credential header, no Content-Length (an emptied
+    body field changes the length, and the replay computes it from the body it sends), every
+    value that is an absolute URL or path (a Referer, an Origin, ``HX-Current-URL``,
+    ``Next-Url``: copies of the page URL) without the credential it carried, no Referer that is
+    not a URL and no URL that does not parse, and no header that holds a recorded credential
+    value (``pieces``: the Next.js router state, for one)."""
+    kept: list[tuple[str, str]] = []
+    changed: set[str] = set()
+    for name, value in pairs:
+        lowered = str(name).lower()
+        if is_captured_credential_header(name) or lowered == "content-length":
+            continue
+        text = str(value or "")
+        replayable: str | None = text
+        if text.strip() and (lowered == "referer" or _looks_like_page_url(text)):
+            # ``None``: a Referer that is not a URL, or a URL that does not parse; neither is sent.
+            replayable = _page_url_without_credential(text, origin_form=lowered == "origin")
+        if replayable is not None and _holds_recorded_credential(replayable, pieces):
+            replayable = None
+        if replayable != text:
+            changed.add(lowered)
+        if replayable is not None:
+            kept.append((name, replayable))
+    return kept, changed
+
+
 def strip_captured_credentials(requests: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Resolved capture requests without a single recorded credential header.
+    """Resolved capture requests without a single recorded credential.
 
     Every consumer that replays a collection (Scan replay, Hunt ``collections.replay_*``, device
     requests) resolves it through ``resolve_imported_requests``, so this is the one place a
     capture's cookies and tokens are removed; a replay that needs a session gets it from a
-    credential profile. Path ``;matrix`` parameters (a ``;jsessionid=`` session) are dropped
-    from the replayed URL, as are query parameters named like a credential or holding a
-    token-like value, and password-, token- and secret-named JSON and form body fields are
-    emptied. The names removed are kept (``captured_credentials_withheld``,
+    credential profile. Credential headers, userinfo, path ``;matrix`` parameters (a
+    ``;jsessionid=`` session) and query parameters named like a credential or holding a
+    token-like value are dropped from the replayed request, and password-, token- and
+    secret-named JSON and form body fields are emptied. A request whose path itself carries a
+    credential (``/s/<session>/``, ``/reset/<token>``, ``/api/token=<v>/``:
+    ``captured_path_credential_segments``), or repeats a credential value recorded in any URL of
+    the capture (``captured_credential_values``), cannot be sent without it, so it is not
+    replayed at all: its URL is replaced by the form the capture's request list shows
+    (``redact_captured_url``) and it carries ``error = CAPTURED_PATH_CREDENTIAL_WITHHELD``.
+    Copies of a page URL that carries a credential (a Referer, Origin, ``HX-Current-URL`` or
+    ``Next-Url``, a URL in a query value or a JSON or form field) are sent as its origin or
+    ``/``, and a header, query value or field that holds a recorded credential value is left out
+    or emptied. The names (and path positions) removed are kept
+    (``captured_credentials_withheld``, ``captured_path_segments_withheld``,
     ``captured_query_parameters_withheld``, ``captured_body_fields_withheld``, and all of them in
     ``captured_withheld`` for the replay plan), never their values."""
+    pieces = captured_credential_values(requests)
     stripped: list[dict[str, Any]] = []
     for request in requests:
-        # Content-Length goes too: an emptied body field changes the length, and the replay
-        # computes it from the body it sends.
-        items = [
-            (name, value) for name, value in request.get("header_items") or []
-            if not is_captured_credential_header(name) and str(name).lower() != "content-length"
-        ]
+        items, items_changed = _replay_header_pairs(request.get("header_items") or [], pieces)
+        headers, headers_changed = _replay_header_pairs(dict(request.get("headers") or {}).items(), pieces)
         withheld = sorted({
             str(name).lower() for name in dict(request.get("headers") or {})
             if is_captured_credential_header(name)
+        } | items_changed | headers_changed)
+        body, body_fields = _without_secret_body_fields(request, pieces)
+        recorded_url = str(request.get("url") or "")
+        recorded_template = str(request.get("url_template") or "")
+        url, query_withheld, userinfo_withheld = _replayable_capture_url(recorded_url, pieces)
+        template, _query, _userinfo = _replayable_capture_url(recorded_template, pieces)
+        path_withheld = sorted({
+            *captured_path_credential_segments(recorded_url, pieces),
+            *captured_path_credential_segments(recorded_template, pieces),
         })
-        body, body_fields = _without_secret_body_fields(request)
-        url, query_withheld = _replayable_capture_url(str(request.get("url") or ""))
-        template, _ = _replayable_capture_url(str(request.get("url_template") or ""))
+        if path_withheld:
+            url = redact_captured_url(url, pieces)
+            template = redact_captured_url(template, pieces) if template else template
         stripped.append({
             **request,
             "body": body,
             "captured_body_fields_withheld": body_fields,
+            "captured_path_segments_withheld": path_withheld,
             "captured_query_parameters_withheld": query_withheld,
             "captured_withheld": [
                 *(f"header:{name}" for name in withheld),
+                *(["url:userinfo"] if userinfo_withheld else []),
+                *(f"path:{position}" for position in path_withheld),
                 *(f"query:{name}" for name in query_withheld),
                 *(f"body:{name}" for name in body_fields),
             ],
+            "error": CAPTURED_PATH_CREDENTIAL_WITHHELD if path_withheld else request.get("error"),
             "url": url,
             "url_template": template,
-            "headers": {
-                name: value for name, value in dict(request.get("headers") or {}).items()
-                if not is_captured_credential_header(name) and str(name).lower() != "content-length"
-            },
+            "headers": dict(headers),
             "header_items": items,
             "sensitive_header_names": [],
             "auth_type": "none",

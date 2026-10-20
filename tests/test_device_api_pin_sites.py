@@ -158,3 +158,48 @@ def test_the_control_replay_connects_to_the_pinned_public_address(monkeypatch, s
         _replay(monkeypatch, PUBLIC_ADDRESS)
     assert caught.value.status_code == 502
     assert [item["connect_address"] for item in sent] == [PUBLIC_ADDRESS]
+
+
+def test_the_control_replay_never_sends_a_withheld_capture_request(monkeypatch, sent):
+    """A device collection can be a browser capture. Its state-changing request whose recorded
+    path carries a credential resolves with the redacted URL and an import error; the control
+    proof refuses it as unbound before any traffic instead of sending the placeholder path."""
+    from capture.flows import CaptureFlow, empty_capture_document, har_entry
+
+    def entry(path):
+        return har_entry(CaptureFlow.model_validate({"method": "POST", "url": f"http://tv.test{path}"}))[0]
+
+    payload = empty_capture_document()
+    payload["document"]["log"]["entries"] = [
+        entry("/s/Zx9Qp2Lm7Rt4Wv8Yb3NcKd5Hj6/api/setting"), entry("/api/setting"),
+    ]
+    change, undo = device_router._resolve_imported_device_requests(payload)
+    assert change["error"] == "captured_path_credential_withheld" and undo["error"] is None
+    collection_id = str(uuid.uuid4())
+    digest = hashlib.sha256(json.dumps(
+        payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False,
+    ).encode()).hexdigest()
+    blocked: list[list[str]] = []
+
+    async def origins(_device_target_id):
+        return [_origin(PUBLIC_ADDRESS)]
+
+    async def record_blocked(**kwargs):
+        blocked.append(list(kwargs["gaps"]))
+        return {"ok": False, "gaps": kwargs["gaps"]}
+
+    rows = [{"id": collection_id, "name": "c", "document_sha256": digest, "encrypted_payload": "x"}]
+    monkeypatch.setattr(device_router, "_pool_provider", lambda: _FakePool(rows))
+    monkeypatch.setattr(device_router, "_device_confirmed_web_origins", origins)
+    monkeypatch.setattr(device_router, "_device_control_authorization_blocked", record_blocked)
+    monkeypatch.setattr(device_router.device_agent, "control_authorization_precondition_gaps", lambda *_a: [])
+    monkeypatch.setattr(device_router, "decrypt_secret", lambda _value: json.dumps(payload))
+    monkeypatch.setattr(device_router, "_device_paired_reverse_request", lambda items, _id: items[-1])
+    asyncio.run(device_router._verify_device_control_authorization_candidate(
+        run_id=uuid.uuid4(), device_target_id=uuid.uuid4(), candidate_id=uuid.uuid4(),
+        state={"device_request_collections": [{"collection_id": collection_id}]},
+        locus={"collection_id": collection_id, "request_id": change["id"], "cleanup_request_id": undo["id"],
+               "state_path": "/api/setting"},
+    ))
+    assert blocked == [["exact_state_changing_request_not_bound"]]
+    assert sent == []

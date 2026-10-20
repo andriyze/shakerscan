@@ -18,11 +18,16 @@ from .device_postman import (
     SAFE_METHODS,
     SUPPORTED_METHODS,
 )
-from .url_redaction import redact_url
 from .device_request_formats import (
+    CAPTURE_FORMAT,
+    CAPTURED_PATH_CREDENTIAL_WITHHELD,
     RequestImportError,
     _request_id as _har_request_id,
     _resolve_har,
+    captured_credential_values,
+    captured_path_credential_segments,
+    is_capture_document,
+    redact_captured_url,
     resolve_imported_requests,
     validate_request_document,
 )
@@ -272,9 +277,17 @@ def validate_and_index(
             content_type, body_field_names = _public_body_metadata(private)
             enriched["content_type"] = content_type
             enriched["body_field_names"] = body_field_names
+            if private.get("error"):
+                # What the worker will resolve: a capture-marked HAR withholds requests
+                # whose path holds a credential.
+                enriched["supported"] = False
+            if private.get("error") == CAPTURED_PATH_CREDENTIAL_WITHHELD:
+                # Shown as a capture's request list shows it (``redact_captured_url``).
+                enriched["url"] = str(private.get("url") or "")
         public_requests.append(enriched)
     rows = redacted_index(public_requests)
     summary["requests"] = rows
+    summary["unsupported_request_count"] = sum(1 for row in rows if not row["supported"])
     return payload, summary, rows
 
 
@@ -290,15 +303,22 @@ def index_appended_har_entries(
     every earlier entry again. ``tags`` are per-entry labels (resource type, status). Like every
     index row, no header value, body value or query value is copied; a recorded URL also loses
     its ``;matrix`` parameters and every token-like path segment (``url_redaction``), since a
-    live session puts session ids and one-time tokens in paths.
+    live session puts session ids and one-time tokens in paths. A row whose recorded path
+    carries a credential, or repeats one recorded in a URL of the same batch
+    (``captured_path_credential_segments``), is not ``supported``: a capture's replay withholds
+    that request (``strip_captured_credentials``), and its URL masks those segments too
+    (``redact_captured_url``). Every other row shows its URL exactly as
+    ``url_redaction.redact_url`` does. A repeat of a value recorded in an earlier batch is
+    withheld when the capture is resolved for replay, which reads every batch.
     """
     resolved = _resolve_har({"log": {"entries": list(entries)}}, max_requests=max(1, len(entries)))
+    recorded = captured_credential_values(resolved)
     public: list[dict[str, Any]] = []
     for offset, request in enumerate(resolved):
         index = start_index + offset
         method = str(request.get("method") or "GET").upper()
         url = str(request.get("url") or "")
-        redacted = redact_url(url)
+        redacted = redact_captured_url(url, recorded)
         content_type, body_field_names = _public_body_metadata(request)
         public.append({
             "id": _har_request_id("har", index, method, url),
@@ -312,7 +332,10 @@ def index_appended_har_entries(
             "auth_type": str(request.get("auth_type") or "none")[:200],
             "tags": list(tags[offset]) if tags and offset < len(tags) else [],
             "safe_method": method in SAFE_METHODS,
-            "supported": method in SUPPORTED_METHODS and bool(url) and not request.get("error"),
+            "supported": (
+                method in SUPPORTED_METHODS and bool(url) and not request.get("error")
+                and not captured_path_credential_segments(url, recorded)
+            ),
         })
     rows = redacted_index(public)
     for offset, row in enumerate(rows):
@@ -379,6 +402,46 @@ def page_index(
     }
 
 
+def withheld_capture_request_ids(payload: Mapping[str, Any]) -> frozenset[str]:
+    """Ids of a capture's requests that replay withholds because the recorded path carries a
+    credential; empty for any other collection. A capture indexed before that rule existed may
+    still list one of them as supported: replay leaves it out and names the reason."""
+    if not isinstance(payload, Mapping):
+        return frozenset()
+    format_name = str(payload.get("format") or "")
+    if format_name != CAPTURE_FORMAT and not (
+        format_name == "har" and is_capture_document(payload.get("document"))
+    ):
+        return frozenset()
+    return frozenset(
+        str(request.get("id"))
+        for request in resolve_imported_requests(
+            dict(payload), max_requests=REQUEST_COLLECTION_IMPORT_HARD_MAX
+        )
+        if request.get("error") == CAPTURED_PATH_CREDENTIAL_WITHHELD and request.get("id")
+    )
+
+
+def replay_queue_refusal(
+    payload: Mapping[str, Any], queued_ids: Iterable[str], allowed_ids: Iterable[str],
+) -> str | None:
+    """Why queued replay request ids cannot run, or ``None`` when they can. A queued capture
+    request withheld from replay is left out (the selection skips it); the queue is refused only
+    when nothing else remains or a remaining id is outside the saved selection."""
+    queued, allowed = set(queued_ids), set(allowed_ids)
+    if queued and queued.issubset(allowed):
+        return None
+    remaining = queued - withheld_capture_request_ids(payload)
+    if queued and not remaining:
+        return (
+            "queued replay requests are capture requests whose recorded path carries a "
+            "credential; they are never replayed"
+        )
+    if not remaining or not remaining.issubset(allowed):
+        return "queued replay requests exceed the saved collection selection"
+    return None
+
+
 def select_requests(
     payload: Mapping[str, Any], selector: RequestSelector
 ) -> list[dict[str, Any]]:
@@ -392,6 +455,10 @@ def select_requests(
     tags = set(selector.tags)
     selected: list[dict[str, Any]] = []
     for request in resolved:
+        # A capture request whose path is a recorded credential is never replayed; leaving it
+        # out keeps it from failing the rest of the selection.
+        if request.get("error") == CAPTURED_PATH_CREDENTIAL_WITHHELD:
+            continue
         method = str(request.get("method") or "GET").upper()
         if selector.safe_methods_only and method not in SAFE_METHODS:
             continue
