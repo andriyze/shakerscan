@@ -437,6 +437,20 @@ PATH_CREDENTIALS = [
     ("/api/access_key={}/report", "AKIAFIXTURE01", [2]),
     ("/download/{}", "Ab3_dE5-fG7hJ9kL1mN3pQ5rS7tU9vW1xY3z", [2]),
     ("/verify/{}", "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.c2lnbmF0dXJlX3Zh", [2]),
+    # An ASP.NET cookieless session, compound and plural labels, short links, credential pairs
+    # the display mask shows, and an unlabelled hex token the random-run rule alone would miss.
+    ("/(S({}))/default.aspx", "lit3py55t21z5v55vlm25s55", [1]),
+    ("/app/(X(1)S({}))/Orders.aspx", "lit3py55t21z5v55vlm25s55", [2]),
+    ("/api/sessions/{}", "Zx9Qp2Lm7Rt4Wv8Yb3NcKd5Hj6", [3]),
+    ("/verify-email/{}", "Vfy7Fixture2", [2]),
+    ("/confirm_account/{}", "Cnf7Fixture2", [2]),
+    ("/session-id/{}", "Sid7Fixture2", [2]),
+    ("/login/{}", "Lgn7Fixture2", [2]),
+    ("/unsubscribe/{}", "Uns7Fixture2", [2]),
+    ("/m/{}", "Mq7Lm2Np9Rt4Wv8Yb3NcKd5Hj6", [2]),
+    ("/api/sessionid={}/me", "qwertyuiop", [2]),  # after "=", even a word is the value
+    ("/api/x-sig={}/file", "Sig7Fixture2", [2]),
+    ("/hooks/{}/events", "deadbeefcafebabedeadbeefcafebabe", [2]),
 ]
 # Ordinary REST, SPA and asset routes a capture replays exactly as recorded: route words after a
 # credential word (/auth/login, /session/current, /token/refresh), versions, UUID and ObjectId
@@ -456,6 +470,8 @@ ORDINARY_ROUTES = [
     "/_next/static/aB3dE5fG7hJ9kL1mN3pQ5/_buildManifest.js",
     "/_next/static/chunks/pages/_app-3c9d8e1f2a4b5c6d.js", "/assets/index-B7xQ2kLm.js",
     "/blog/introducing-the-new-dashboard-experience-2026",
+    "/download/report-2024.pdf", "/m/settings", "/login/oauth2", "/verify-email/sent",
+    "/api/sessions/123", "/check-otp/v2", "/api/share/settings", "/s/v2",
 ]
 
 
@@ -524,11 +540,15 @@ def test_a_capture_replay_keeps_ordinary_route_segments(path):
 
 
 def test_the_request_list_masks_every_segment_replay_withholds():
-    """Replay withholds a subset of what the list masks, so a list never shows a value that
-    replay treats as a credential (a fixed corpus and a seeded random one; unit fixtures)."""
+    """A capture's request list masks every segment its replay withholds, so it never shows a
+    value that replay treats as a credential, and shows every other URL exactly as the shared
+    display mask does (a fixed corpus and a seeded random one; unit fixtures)."""
     import random
 
-    from scanner.scanner_tools.url_redaction import credential_path_segments, redact_path
+    from scanner.scanner_tools.device_request_formats import (
+        captured_path_credential_segments, redact_captured_url,
+    )
+    from scanner.scanner_tools.url_redaction import redact_url
 
     words = ["api", "v2", "auth", "login", "session", "s", "share", "sid", "reset", "otp", "token",
              "magic-link", "users", "posts", "invite", "code", "list", "me", "x"]
@@ -545,9 +565,14 @@ def test_the_request_list_masks_every_segment_replay_withholds():
     corpus += ORDINARY_ROUTES
     corpus += ["/" + "/".join(segment() for _ in range(rng.randint(1, 6))) for _ in range(5_000)]
     for path in corpus:
-        shown = redact_path(path).split("/")
-        for position in credential_path_segments(path):
-            assert "<redacted>" in shown[position], (path, position)
+        url = f"https://app.example.test{path}"
+        withheld = captured_path_credential_segments(url)
+        shown = redact_captured_url(url)
+        segments = shown.removeprefix("https://app.example.test").split("/")
+        for position in withheld:
+            assert segments[position].endswith("<redacted>"), (path, position)
+        if not withheld:
+            assert shown == redact_url(url), path
 
 
 def test_a_capture_replay_sends_a_credential_referer_as_its_origin():

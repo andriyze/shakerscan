@@ -36,25 +36,6 @@ def is_sensitive_label(name: str) -> bool:
     return _label(str(name or "")) in _SENSITIVE_LABELS
 
 
-# Names a credential travels under as a query parameter or a ``name=value`` path segment: a
-# credential label, a name containing a credential word, or ``sig``/``code``/``auth``/``jwt``/
-# ``sid``/``key`` as a whole word of the name.
-_CREDENTIAL_NAME_RE = re.compile(
-    r"(?:authorization|api[-_]?key|token|secret|password|passwd|passcode|passphrase|cookie"
-    r"|session|credential|private[-_]?key|otp|csrf|xsrf)"
-    r"|(?:^|[-_.])(?:sig|code|auth|jwt|sid|key)(?:$|[-_.])",
-    re.I,
-)
-
-
-def is_credential_name(name: str) -> bool:
-    """A parameter name whose value is a credential (``token``, ``access_key``, ``x-sig``,
-    ``sessionid``): what a browser capture's replay never sends from a recorded query string or
-    a ``name=value`` path segment."""
-    text = str(name or "")
-    return is_sensitive_label(text) or bool(_CREDENTIAL_NAME_RE.search(text))
-
-
 def _looks_opaque_secret(value: str) -> bool:
     if _JWT_RE.fullmatch(value) or _HEX_SECRET_RE.fullmatch(value):
         return True
@@ -110,151 +91,32 @@ def drop_matrix_parameters(segment: str) -> str:
     return segment.split(";", 1)[0]
 
 
-# Which recorded path segments are credentials (the replay rule).
-#
-# Display masking (``redact_path``) errs towards hiding: any value after ``auth`` or
-# ``session``, every UUID, any 28-character slug. That costs nothing in a list but would stop
-# ordinary requests from being replayed. A browser capture's replay withholds only a segment that
-# carries a credential:
-#
-# - a ``name=value`` pair named like a credential (the names a capture withholds from a query
-#   string, ``is_credential_name``), or ``name:value`` with a value-shaped value;
-# - a value-shaped segment right after a credential label: ``/reset/<token>``, ``/otp/482913``,
-#   ``/s/<session-id>/``, ``/share/<token>``; never ``/auth/login``, ``/session/current`` or
-#   ``/api/auth/v3/``;
-# - wherever it appears, a JWT, 32 or more hex characters, or a random 32+ character token. A
-#   UUID, a ``sha256-<hex>`` digest, a 24-hex object id or a short opaque id
-#   (``a5ZmDQ8Lx8A9LGmBbBKBjk``) names a resource unless a credential label precedes it.
-#
-# ``redact_path`` masks every segment this rule marks, so a request list never shows a value that
-# replay treats as a credential.
-_PATH_CREDENTIAL_LABELS = _SENSITIVE_LABELS | frozenset({
-    "s", "sid", "share", "shared", "magic-link", "magic-login", "reset-password",
-    "password-reset",
-})
-_UUID_RE = re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
-_DIGEST_RE = re.compile(r"^(?:md5|sha1|sha224|sha256|sha384|sha512|blake2b|blake3)[-_:]", re.I)
-_VERSION_RE = re.compile(r"^[vV]\d{1,3}(?:\.\d{1,3}){0,2}$")
-_PROTOCOL_WORD_RE = re.compile(r"^(?:[a-z]{2,10}|[A-Z]{2,10})\d$")
-_WORD_RE = re.compile(r"^[^\W\d_]+(?:[-_.][^\W\d_]+)*$")
-_TOKEN_RUN_SPLIT_RE = re.compile(r"[-_.~+=]+")
-
-
-def _plain_word(value: str) -> bool:
-    """Route structure: letters (``login``, ``check-otp``, ``report.pdf``) that do not change
-    case at random, a version (``v3``) or a one-case word with one digit (``oauth2``)."""
-    if _VERSION_RE.fullmatch(value) or _PROTOCOL_WORD_RE.fullmatch(value):
-        return True
-    if not _WORD_RE.fullmatch(value):
-        return False
-    return not any(
-        len(run) >= 8 and _class_changes(run) * 2 >= len(run)
-        for run in re.split(r"[-_.]", value)
-    )
-
-
-def _value_shaped(value: str) -> bool:
-    """A segment that reads as a value, not a route word: four or more characters with a digit,
-    another character, or a run of letters that changes case at random."""
-    return len(value) >= 4 and not _plain_word(value)
-
-
-def _letter_digit_switches(run: str) -> int:
-    return sum(1 for left, right in zip(run, run[1:]) if left.isdigit() != right.isdigit())
-
-
-def _case_switches(run: str) -> int:
-    return sum(
-        1 for left, right in zip(run, run[1:])
-        if left.isalpha() and right.isalpha() and left.isupper() != right.isupper()
-    )
-
-
-def _standalone_credential(value: str) -> bool:
-    """A segment that is a credential with no label before it: a JWT, 32+ hex characters, or a
-    32+ character token with a run that switches between letters and digits (or letter case) at
-    random. A word slug with numbers (``release-notes-2026-10-19``), a UUID or a digest is not."""
-    if _JWT_RE.fullmatch(value) and value.startswith("eyJ"):
-        return True
-    if _HEX_SECRET_RE.fullmatch(value):
-        return True
-    if len(value) < 32 or not _TOKEN_CHARS_RE.fullmatch(value):
-        return False
-    if _UUID_RE.fullmatch(value) or _DIGEST_RE.match(value):
-        return False
-    return any(
-        len(run) >= 8 and (
-            _letter_digit_switches(run) >= 3
-            or (len(run) >= 12 and _case_switches(run) * 3 >= len(run))
-        )
-        for run in _TOKEN_RUN_SPLIT_RE.split(value)
-    )
-
-
-def _credential_kind(decoded: str, match: re.Match[str] | None, previous_label: str) -> str | None:
-    """``"pair"`` for a credential ``name=value`` segment (its name may still be shown),
-    ``"value"`` for a segment that is a credential as a whole, ``None`` for route structure."""
-    if (
-        match and match.group(3) and match.group(3) != "<redacted>"
-        and is_credential_name(match.group(1))
-        and (match.group(2) == "=" or _value_shaped(match.group(3)))
-    ):
-        return "pair"
-    if _standalone_credential(decoded):
-        return "value"
-    if previous_label in _PATH_CREDENTIAL_LABELS and _value_shaped(decoded):
-        return "value"
-    return None
-
-
-def _path_segments(path: str) -> list[tuple[str, str | None, bool]]:
-    """Each ``/``-separated segment of ``path`` without its ``;matrix`` parameters, its display
-    replacement (``None`` when it is shown) and whether it carries a credential (replay rule)."""
-    segments = (str(path or "") or "/").split("/")
-    result: list[tuple[str, str | None, bool]] = []
-    previous_label = ""
-    for index, segment in enumerate(segments):
-        if segment == "" and (index == 0 or index == len(segments) - 1):
-            result.append(("", None, False))
-            continue
-        segment = drop_matrix_parameters(segment)
-        decoded = urllib.parse.unquote(segment)
-        match = _KEY_VALUE_RE.fullmatch(decoded)
-        credential = _credential_kind(decoded, match, previous_label)
-        if previous_label in _SENSITIVE_LABELS:
-            replacement: str | None = "<redacted>"
-        elif match and _label(match.group(1)) in _SENSITIVE_LABELS:
-            replacement = f"{match.group(1)}{match.group(2)}<redacted>"
-        elif token_like_segment(decoded) or credential == "value":
-            replacement = "<redacted>"
-        elif match and credential == "pair":
-            replacement = f"{match.group(1)}{match.group(2)}<redacted>"
-        else:
-            replacement = None
-        result.append((segment, replacement, credential is not None))
-        previous_label = _label(decoded)
-    return result
-
-
-def credential_path_segments(path: str) -> list[int]:
-    """Positions in ``path.split("/")`` of the segments that carry a credential (the replay rule
-    above); a leading ``/`` makes the first segment position 1. ``redact_path`` masks each of
-    them, and more."""
-    return [
-        position for position, (_segment, _replacement, credential) in enumerate(_path_segments(path))
-        if credential
-    ]
-
-
 def redact_path(path: str) -> str:
     """Return a route-useful path with likely secret segments removed."""
     raw = str(path or "") or "/"
     leading = raw.startswith("/")
     trailing = raw.endswith("/") and raw != "/"
-    result = "/".join(
-        segment if replacement is None else replacement
-        for segment, replacement, _credential in _path_segments(raw)
-    )
+    segments = raw.split("/")
+    redacted: list[str] = []
+    previous_label = ""
+    for index, segment in enumerate(segments):
+        if segment == "" and (index == 0 or index == len(segments) - 1):
+            redacted.append("")
+            continue
+        segment = drop_matrix_parameters(segment)
+        decoded = urllib.parse.unquote(segment)
+        match = _KEY_VALUE_RE.fullmatch(decoded)
+        current_label = _label(decoded)
+        if previous_label in _SENSITIVE_LABELS:
+            redacted.append("<redacted>")
+        elif match and _label(match.group(1)) in _SENSITIVE_LABELS:
+            redacted.append(f"{match.group(1)}{match.group(2)}<redacted>")
+        elif token_like_segment(decoded):
+            redacted.append("<redacted>")
+        else:
+            redacted.append(segment)
+        previous_label = current_label
+    result = "/".join(redacted)
     if leading and not result.startswith("/"):
         result = "/" + result
     if trailing and not result.endswith("/"):

@@ -18,15 +18,16 @@ from .device_postman import (
     SAFE_METHODS,
     SUPPORTED_METHODS,
 )
-from .url_redaction import redact_url
 from .device_request_formats import (
     CAPTURE_FORMAT,
     CAPTURED_PATH_CREDENTIAL_WITHHELD,
     RequestImportError,
     _request_id as _har_request_id,
     _resolve_har,
+    captured_credential_values,
     captured_path_credential_segments,
     is_capture_document,
+    redact_captured_url,
     resolve_imported_requests,
     validate_request_document,
 )
@@ -280,6 +281,9 @@ def validate_and_index(
                 # What the worker will resolve: a capture-marked HAR withholds requests
                 # whose path holds a credential.
                 enriched["supported"] = False
+            if private.get("error") == CAPTURED_PATH_CREDENTIAL_WITHHELD:
+                # Shown as a capture's request list shows it (``redact_captured_url``).
+                enriched["url"] = str(private.get("url") or "")
         public_requests.append(enriched)
     rows = redacted_index(public_requests)
     summary["requests"] = rows
@@ -300,16 +304,21 @@ def index_appended_har_entries(
     index row, no header value, body value or query value is copied; a recorded URL also loses
     its ``;matrix`` parameters and every token-like path segment (``url_redaction``), since a
     live session puts session ids and one-time tokens in paths. A row whose recorded path
-    carries a credential (``captured_path_credential_segments``) is not ``supported``: a
-    capture's replay withholds that request (``strip_captured_credentials``).
+    carries a credential, or repeats one recorded in a URL of the same batch
+    (``captured_path_credential_segments``), is not ``supported``: a capture's replay withholds
+    that request (``strip_captured_credentials``), and its URL masks those segments too
+    (``redact_captured_url``). Every other row shows its URL exactly as
+    ``url_redaction.redact_url`` does. A repeat of a value recorded in an earlier batch is
+    withheld when the capture is resolved for replay, which reads every batch.
     """
     resolved = _resolve_har({"log": {"entries": list(entries)}}, max_requests=max(1, len(entries)))
+    recorded = captured_credential_values(resolved)
     public: list[dict[str, Any]] = []
     for offset, request in enumerate(resolved):
         index = start_index + offset
         method = str(request.get("method") or "GET").upper()
         url = str(request.get("url") or "")
-        redacted = redact_url(url)
+        redacted = redact_captured_url(url, recorded)
         content_type, body_field_names = _public_body_metadata(request)
         public.append({
             "id": _har_request_id("har", index, method, url),
@@ -325,7 +334,7 @@ def index_appended_har_entries(
             "safe_method": method in SAFE_METHODS,
             "supported": (
                 method in SUPPORTED_METHODS and bool(url) and not request.get("error")
-                and not captured_path_credential_segments(url)
+                and not captured_path_credential_segments(url, recorded)
             ),
         })
     rows = redacted_index(public)

@@ -221,6 +221,66 @@ def test_a_capture_indexed_before_path_credentials_were_withheld_still_replays_t
     assert len(har_plan.requests) == 3
 
 
+def test_rows_the_previous_index_showed_unmasked_still_build_a_scan_and_never_replay():
+    """A capture indexed by the previous release stored each row as ``redact_url`` showed it,
+    every request supported. For a path the shared mask shows as it is (``/s/a1b2c3d4/``,
+    ``/share/doc-2024/``, ``sessionid=1234``) the stored route still passes the unchanged
+    sensitive-path gate, so a Scan request manifest is built from those rows; the worker resolves
+    the capture again, never replays the withheld requests, and replays the rest. A selection
+    or a Hunt queue naming them by id leaves them out the same way. Unit fixtures only."""
+    from api.capture.flows import CaptureFlow, har_entry
+    from api.scan.work_manifests import route_id
+    from scanner.scanner_tools.device_request_formats import resolve_imported_requests
+    from scanner.scanner_tools.request_collections import (
+        RequestSelector, redacted_index, replay_queue_refusal, select_requests,
+    )
+    from scanner.scanner_tools.url_redaction import redact_url
+
+    paths = ["/api/items", "/s/a1b2c3d4/dashboard", "/share/doc-2024/view", "/api/sessionid=1234/me"]
+    urls = [f"https://app.example.test{path}" for path in paths]
+    payload = {"format": "capture", "document": {"log": {"version": "1.2", "entries": [
+        har_entry(CaptureFlow.model_validate({"method": "GET", "url": url}))[0] for url in urls
+    ]}}}
+    resolved = resolve_imported_requests(payload)
+    ids = [request["id"] for request in resolved]
+    assert [request["error"] for request in resolved] == [None] + ["captured_path_credential_withheld"] * 3
+    legacy_rows = redacted_index([
+        {"id": request_id, "method": "GET", "url": redact_url(url), "supported": True}
+        for request_id, url in zip(ids, urls, strict=True)
+    ])
+    assert [row["normalized_path"] for row in legacy_rows] == paths
+    manifest = build_request_manifest(
+        scan_id="40000000-0000-4000-8000-000000000002",
+        target_binding_digest="a" * 64,
+        source_action_ids=("inputs.collection_00",),
+        requests=tuple({
+            "request_ref_id": row["request_id"],
+            "route_id": route_id(
+                target_binding_digest="a" * 64, method="GET", scheme="https",
+                host="app.example.test", port=443, canonical_path=row["normalized_path"],
+                query_parameter_names=[],
+            ),
+            "method": "GET", "auth_lane": "anonymous", "selected_shard": None,
+            "safe_method": True, "body_schema_digest": None,
+        } for row in legacy_rows),
+    )
+    plan = build_selected_replay_plan(
+        payload,
+        scan_replay_selector(RequestCollectionSelection(max_requests=10), "safe_reads", runtime_limit=10),
+        allowed_origins=["https://app.example.test"],
+        default_origin="https://app.example.test",
+    )
+    narrowed = narrow_replay_plan_to_request_manifest(plan, manifest, payload=payload)
+    assert [request.request_id for request in narrowed.requests] == [ids[0]]
+    wire = repr(narrowed.wire_requests())
+    assert all(secret not in wire for secret in ("a1b2c3d4", "doc-2024", "sessionid"))
+
+    by_id = RequestSelector(request_ids=tuple(ids), safe_methods_only=False)
+    assert [request["id"] for request in select_requests(payload, by_id)] == [ids[0]]
+    assert replay_queue_refusal(payload, ids, {ids[0]}) is None
+    assert "recorded path carries a credential" in replay_queue_refusal(payload, ids[1:], {ids[0]})
+
+
 def test_a_hunt_queue_of_withheld_capture_requests_is_refused_by_name():
     from scanner.scanner_tools.request_collections import replay_queue_refusal
 
