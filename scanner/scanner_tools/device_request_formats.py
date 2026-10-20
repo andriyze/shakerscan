@@ -16,7 +16,7 @@ import urllib.parse
 from collections import Counter
 from typing import Any
 
-from .url_redaction import is_sensitive_label, token_like_segment
+from .url_redaction import is_sensitive_label, redact_url, secret_path_segments, token_like_segment
 from .device_postman import (
     MAX_BODY_BYTES,
     MAX_COLLECTION_BYTES,
@@ -53,6 +53,9 @@ _CAPTURE_CREDENTIAL_NAME_RE = re.compile(r"(?:auth|csrf|xsrf|bearer|signature)",
 # The marker a capture document's log carries (api/capture/flows.py): a capture stays a capture
 # even if its row were relabelled, because re-validation keeps the log.
 CAPTURE_LOG_SCHEMA = "browser-capture/v1"
+# A capture request whose recorded path carries a credential (a session id, a reset, magic-login
+# or invitation token, a one-time code): the path is the credential, so it is not replayed.
+CAPTURED_PATH_CREDENTIAL_WITHHELD = "captured_path_credential_withheld"
 
 
 class RequestImportError(ValueError):
@@ -257,6 +260,16 @@ def _replayable_capture_url(url: str) -> tuple[str, list[str]]:
     return urllib.parse.urlunsplit((parts.scheme, parts.netloc, path, query, parts.fragment)), withheld
 
 
+def captured_path_credential_segments(url: str) -> list[int]:
+    """Positions (``path.split("/")``) of the segments of a recorded ``url`` that hold a
+    credential: exactly the segments the collection index masks (``url_redaction``)."""
+    try:
+        path = urllib.parse.urlsplit(str(url or "")).path
+    except ValueError:
+        return []
+    return secret_path_segments(path)
+
+
 _CAPTURE_SECRET_FIELD_RE = re.compile(
     r"(?:password|passwd|passcode|passphrase|secret|token|api[-_]?key|credential|private[-_]?key|otp|csrf|xsrf)",
     re.I,
@@ -392,7 +405,11 @@ def strip_captured_credentials(requests: list[dict[str, Any]]) -> list[dict[str,
     credential profile. Path ``;matrix`` parameters (a ``;jsessionid=`` session) are dropped
     from the replayed URL, as are query parameters named like a credential or holding a
     token-like value, and password-, token- and secret-named JSON and form body fields are
-    emptied. The names removed are kept (``captured_credentials_withheld``,
+    emptied. A request whose path itself holds a credential (``/s/<session>/``,
+    ``/reset/<token>``, ``/api/token=<v>/``: the segments the collection index masks) cannot be
+    sent without it, so it is not replayed at all: its URL is replaced by the redacted form and
+    it carries ``error = CAPTURED_PATH_CREDENTIAL_WITHHELD``. The names (and path positions)
+    removed are kept (``captured_credentials_withheld``, ``captured_path_segments_withheld``,
     ``captured_query_parameters_withheld``, ``captured_body_fields_withheld``, and all of them in
     ``captured_withheld`` for the replay plan), never their values."""
     stripped: list[dict[str, Any]] = []
@@ -408,18 +425,30 @@ def strip_captured_credentials(requests: list[dict[str, Any]]) -> list[dict[str,
             if is_captured_credential_header(name)
         })
         body, body_fields = _without_secret_body_fields(request)
-        url, query_withheld = _replayable_capture_url(str(request.get("url") or ""))
-        template, _ = _replayable_capture_url(str(request.get("url_template") or ""))
+        recorded_url = str(request.get("url") or "")
+        recorded_template = str(request.get("url_template") or "")
+        url, query_withheld = _replayable_capture_url(recorded_url)
+        template, _ = _replayable_capture_url(recorded_template)
+        path_withheld = sorted({
+            *captured_path_credential_segments(recorded_url),
+            *captured_path_credential_segments(recorded_template),
+        })
+        if path_withheld:
+            url = redact_url(url)
+            template = redact_url(template) if template else template
         stripped.append({
             **request,
             "body": body,
             "captured_body_fields_withheld": body_fields,
+            "captured_path_segments_withheld": path_withheld,
             "captured_query_parameters_withheld": query_withheld,
             "captured_withheld": [
                 *(f"header:{name}" for name in withheld),
+                *(f"path:{position}" for position in path_withheld),
                 *(f"query:{name}" for name in query_withheld),
                 *(f"body:{name}" for name in body_fields),
             ],
+            "error": CAPTURED_PATH_CREDENTIAL_WITHHELD if path_withheld else request.get("error"),
             "url": url,
             "url_template": template,
             "headers": {

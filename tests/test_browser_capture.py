@@ -421,7 +421,112 @@ def test_a_capture_relabelled_as_har_is_still_stripped():
     assert request["captured_withheld"]
 
 
-def test_device_scans_refuse_an_open_capture():
+# A recorded path that carries a credential: (path, the fixture value in it, the positions of the
+# segments a capture replay withholds). Unit fixtures only.
+PATH_CREDENTIALS = [
+    ("/auth/magic-login/{}", "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08", [2, 3]),
+    ("/magic/{}", "mgk7Fixture", [2]),
+    ("/password/reset/{}", "rst7Fixture", [2, 3]),
+    ("/s/{}/dashboard", "Zx9Qp2Lm7Rt4Wv8Yb3NcKd5Hj6", [2]),
+    ("/api/token={}/me", "tkn7Fixture", [2]),
+    ("/invite/{}", "inv7Fixture", [2]),
+    ("/otp/{}", "otp7Fixture", [2]),
+]
+ORDINARY_ROUTES = ["/products/ProductCategory12", "/docs/getting-started", "/2026-01-01/report", "/files/report.pdf"]
+
+
+def _get_entry(path):
+    return har_entry(CaptureFlow.model_validate({"method": "GET", "url": f"https://app.example.test{path}"}))[0]
+
+
+@pytest.mark.parametrize(("template", "secret", "positions"), PATH_CREDENTIALS)
+def test_a_capture_replay_withholds_credential_path_segments(template, secret, positions):
+    """A session id, magic-login, reset, invitation or one-time code in a recorded path is a
+    credential like a cookie: a capture's replay never sends it, every selection leaves the
+    request out, and its index row is not offered as replayable."""
+    from scanner.scanner_tools.device_request_formats import resolve_imported_requests
+    from scanner.scanner_tools.request_collections import RequestSelector, select_requests
+    from scanner.scanner_tools.request_replay import build_selected_replay_plan
+
+    path = template.format(secret)
+    entries = [_get_entry(path), _get_entry("/products/ProductCategory12")]
+    payload = _capture_payload(entries)
+    withheld, control = resolve_imported_requests(payload)
+    assert withheld["error"] == "captured_path_credential_withheld"
+    assert withheld["captured_path_segments_withheld"] == positions
+    assert withheld["captured_withheld"] == [f"path:{position}" for position in positions]
+    assert secret not in json.dumps(withheld, default=str)
+    assert control["error"] is None and control["url"] == "https://app.example.test/products/ProductCategory12"
+
+    for selector in (RequestSelector(), RequestSelector(safe_methods_only=False)):
+        assert [item["id"] for item in select_requests(payload, selector)] == [control["id"]]
+    plan = build_selected_replay_plan(
+        payload, RequestSelector(safe_methods_only=False), allowed_origins=ORIGINS)
+    assert [request.request_id for request in plan.requests] == [control["id"]]
+    assert secret not in json.dumps([plan.public_dict(), list(plan.wire_requests())], default=str)
+
+    rows = index_appended_har_entries(entries, start_index=0)
+    assert [row["supported"] for row in rows] == [False, True]
+    assert rows[0]["request_id"] == withheld["id"]
+    assert secret not in json.dumps(rows)
+
+    # The same document imported as an ordinary HAR is replayed as the operator supplied it.
+    har, _control = resolve_imported_requests({"format": "har", "document": payload["document"]})
+    assert har["url"] == f"https://app.example.test{path}" and har["error"] is None
+
+
+@pytest.mark.parametrize("path", ORDINARY_ROUTES)
+def test_a_capture_replay_keeps_ordinary_route_segments(path):
+    from scanner.scanner_tools.device_request_formats import resolve_imported_requests
+
+    entry = _get_entry(path)
+    (request,) = resolve_imported_requests(_capture_payload([entry]))
+    assert request["url"] == f"https://app.example.test{path}" and request["error"] is None
+    assert request["captured_path_segments_withheld"] == [] and request["captured_withheld"] == []
+    (row,) = index_appended_har_entries([entry], start_index=0)
+    assert row["supported"] is True
+
+
+# Paths whose credential segments the collection index masks (url_redaction). Unit fixtures only.
+MASKED_PATHS = [
+    ("/s/Zx9Qp2Lm7Rt4Wv8Yb3NcKd5Hj6/dashboard", "Zx9Qp2Lm7Rt4Wv8Yb3NcKd5Hj6"),
+    ("/share/Qx7Lm2Np9Rt4Wv8Yb3", "Qx7Lm2Np9Rt4Wv8Yb3"),
+    ("/otp/otpFixture1", "otpFixture1"),
+    ("/sso/ssoFixture1/callback", "ssoFixture1"),
+    ("/nonce/nonceFixture1", "nonceFixture1"),
+    ("/api-key/apikeyFixture1", "apikeyFixture1"),
+    ("/invitation/invFixture1", "invFixture1"),
+    ("/app;jsessionid=JSESSIONFIXTURE1/home", "JSESSIONFIXTURE1"),
+    ("/api/token=tokFixture1/me", "tokFixture1"),
+    ("/auth/magic-login/9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08",
+     "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"),
+]
+
+
+def test_capture_wire_urls_and_replay_plans_mask_what_the_index_masks():
+    from scanner.scanner_tools import request_replay, v2_request_replay_hardening
+    from scanner.scanner_tools.device_request_formats import resolve_imported_requests
+    from scanner.scanner_tools.url_redaction import redact_url
+
+    # Importing the package applies the compatibility hardening: this is the redactor in use.
+    assert request_replay._redacted_url is v2_request_replay_hardening._redacted_url
+    entries = [_get_entry(path) for path, _secret in MASKED_PATHS]
+    resolved = resolve_imported_requests(_capture_payload(entries))
+    rows = index_appended_har_entries(entries, start_index=0)
+    for (path, secret), request, row in zip(MASKED_PATHS, resolved, rows, strict=True):
+        url = f"https://app.example.test{path}"
+        index_url = redact_url(url)
+        assert row["redacted_url"] == index_url and secret not in index_url
+        assert secret not in request["url"] and secret not in request["url_template"]
+        # An ordinary HAR import replays the path exactly; its plan (and so its receipt) shows
+        # the path the way the index does.
+        plan = request_replay.build_replay_plan(
+            [{"id": "r1", "method": "GET", "url": url}], allowed_origins=ORIGINS)
+        assert plan.requests[0].wire_dict()["url"] == url
+        public = plan.public_dict()
+        assert public["secret_values_visible"] is False
+        assert public["requests"][0]["redacted_url"] == index_url, path
+
     from fastapi import HTTPException
 
     from api.devices import router as devices_router

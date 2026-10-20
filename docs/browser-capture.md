@@ -126,10 +126,14 @@ The library labels it **Browser capture**, with Recording or Closed and its coun
   parameters named like a credential or holding a token-like value, and empties password-, pass-,
   pwd-, PIN-, OTP-, token- and secret-named fields in JSON (nested objects and lists included),
   form and multipart bodies; a body it cannot parse that names such a field is not replayed at
-  all. A recorded login form is replayed without the password you typed, and each replay request
-  names what was left out (`captured_withheld`). A capture cannot be edited, relabelled or
-  replaced through the collection or device routes. To test as the account you used, add it as a
-  credential profile.
+  all. A request whose path itself holds a credential (a session id such as `/s/<id>/`, a
+  magic-login, reset or invitation token, a one-time code, `token=<value>`: the segments the
+  request list masks) is not replayed either: it is marked unsupported in the list, left out of
+  every selection, and names the withheld positions (`path:2`). A recorded login form is replayed
+  without the password you typed, and each replay request names what was left out
+  (`captured_withheld`). A capture cannot be edited, relabelled or replaced through the
+  collection or device routes. To test as the account you used, or a flow behind such a link, add
+  it as a credential profile.
 - Only the target's exact origin is captured; an application that calls an API on another origin
   needs that API as its own target and its own capture.
 - Only Chromium is supported, and only browser traffic: applications that are not web pages are

@@ -91,32 +91,51 @@ def drop_matrix_parameters(segment: str) -> str:
     return segment.split(";", 1)[0]
 
 
+def _segment_redactions(path: str) -> list[tuple[str, str | None]]:
+    """Each ``/``-separated segment of ``path`` without its ``;matrix`` parameters, paired with
+    its replacement when it holds a credential (``None`` when it is route structure)."""
+    segments = (str(path or "") or "/").split("/")
+    result: list[tuple[str, str | None]] = []
+    previous_label = ""
+    for index, segment in enumerate(segments):
+        if segment == "" and (index == 0 or index == len(segments) - 1):
+            result.append(("", None))
+            continue
+        segment = drop_matrix_parameters(segment)
+        decoded = urllib.parse.unquote(segment)
+        match = _KEY_VALUE_RE.fullmatch(decoded)
+        if previous_label in _SENSITIVE_LABELS:
+            replacement: str | None = "<redacted>"
+        elif match and _label(match.group(1)) in _SENSITIVE_LABELS:
+            replacement = f"{match.group(1)}{match.group(2)}<redacted>"
+        elif token_like_segment(decoded):
+            replacement = "<redacted>"
+        else:
+            replacement = None
+        result.append((segment, replacement))
+        previous_label = _label(decoded)
+    return result
+
+
+def secret_path_segments(path: str) -> list[int]:
+    """Positions in ``path.split("/")`` of the segments ``redact_path`` replaces: one after a
+    credential label (``/reset/<v>``), a ``token=<v>`` pair, or a token-like value. A leading
+    ``/`` makes the first segment position 1."""
+    return [
+        position for position, (_segment, replacement) in enumerate(_segment_redactions(path))
+        if replacement is not None
+    ]
+
+
 def redact_path(path: str) -> str:
     """Return a route-useful path with likely secret segments removed."""
     raw = str(path or "") or "/"
     leading = raw.startswith("/")
     trailing = raw.endswith("/") and raw != "/"
-    segments = raw.split("/")
-    redacted: list[str] = []
-    previous_label = ""
-    for index, segment in enumerate(segments):
-        if segment == "" and (index == 0 or index == len(segments) - 1):
-            redacted.append("")
-            continue
-        segment = drop_matrix_parameters(segment)
-        decoded = urllib.parse.unquote(segment)
-        match = _KEY_VALUE_RE.fullmatch(decoded)
-        current_label = _label(decoded)
-        if previous_label in _SENSITIVE_LABELS:
-            redacted.append("<redacted>")
-        elif match and _label(match.group(1)) in _SENSITIVE_LABELS:
-            redacted.append(f"{match.group(1)}{match.group(2)}<redacted>")
-        elif token_like_segment(decoded):
-            redacted.append("<redacted>")
-        else:
-            redacted.append(segment)
-        previous_label = current_label
-    result = "/".join(redacted)
+    result = "/".join(
+        segment if replacement is None else replacement
+        for segment, replacement in _segment_redactions(raw)
+    )
     if leading and not result.startswith("/"):
         result = "/" + result
     if trailing and not result.endswith("/"):

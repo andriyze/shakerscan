@@ -505,6 +505,29 @@ def test_replay_receipt_preserves_content_free_source_authority_provenance():
     assert "body-secret" not in rendered
 
 
+def test_receipt_shows_a_path_credential_the_way_the_collection_index_does():
+    """An exact replay sends its imported path unchanged; the plan and receipt it leaves behind
+    mask a session id in that path exactly as the collection index does."""
+    from scanner_tools.url_redaction import redact_url
+
+    url = "https://api.example.test/s/Zx9Qp2Lm7Rt4Wv8Yb3NcKd5Hj6/dashboard"
+    transport = FakeTransport([_result(final_url=url)])
+    outcome = asyncio.run(execute_replay_plan(
+        _plan([{**_request(), "url": url}]),
+        target=_target(), owner_kind="hunt", owner_id="hunt-1", worker_id="worker-1",
+        limits={"http_requests": 10}, consumed={}, transport=transport, clock=Clock(),
+    ))
+
+    assert transport.calls[0]["request"].wire_dict()["url"] == url
+    index_form = redact_url(url)
+    assert index_form == "https://api.example.test/s/<redacted>/dashboard"
+    observation = outcome.receipt.observations[0]
+    assert observation["redacted_url"] == index_form
+    assert observation["final_url"] == index_form
+    assert [item["redacted_url"] for item in outcome.receipt.redacted_execution["requests"]] == [index_form]
+    assert "Zx9Qp2Lm7Rt4Wv8Yb3NcKd5Hj6" not in repr(outcome.receipt.public_dict())
+
+
 def test_executor_requires_bounded_transport_results():
     with pytest.raises(ReplayExecutionError, match="capture limit"):
         ReplayTransportResult(
