@@ -289,10 +289,11 @@ _METRICS_TYPE_RE = re.compile(r"(?m)^# TYPE \S")
 # say "Index of /", Python's http.server says "Directory listing for /", and
 # the Node/Express serve-index middleware says "listing directory /". Matching
 # only the first two missed an exposed directory whose links this module was
-# already parsing correctly.
+# already parsing correctly. Every one of them names the listed path, so the
+# title must: a page merely titled "Directory listing" (or "Index of
+# Enterprises") is an ordinary page, not a server-generated index.
 _LISTING_RE = re.compile(
-    r"(?i)<title>\s*(?:index of|directory listing|listing directory)"
-    r"|Directory listing for /"
+    r"(?i)<title>\s*(?:index of|directory listing for|listing directory)\s+/"
 )
 # Endpoint identity is metadata, not proof of sensitive disclosure. The vendor
 # media type is specific; ordinary HAL `_links` and generic health `status`
@@ -1032,11 +1033,11 @@ _NGINX_STATUS_COUNTERS_RE = re.compile(
 def _server_status(text: str) -> ExposureSignature | None:
     head = text[:_PARSE_MAX_CHARS]
     if _APACHE_STATUS_RE.search(head) and _APACHE_STATUS_FIELD_RE.search(head):
-        return _sig("metrics_endpoint", _APACHE_STATUS_RE.pattern)
+        return _sig("metrics_endpoint", "apache_server_status")
     if _APACHE_STATUS_AUTO_RE.search(head) and _APACHE_STATUS_WORKERS_RE.search(head):
-        return _sig("metrics_endpoint", _APACHE_STATUS_AUTO_RE.pattern)
+        return _sig("metrics_endpoint", "apache_server_status_auto")
     if _NGINX_STATUS_RE.search(head) and _NGINX_STATUS_COUNTERS_RE.search(head):
-        return _sig("metrics_endpoint", _NGINX_STATUS_RE.pattern)
+        return _sig("metrics_endpoint", "nginx_stub_status")
     return None
 
 
@@ -1098,7 +1099,7 @@ def _structured_html(text: str, path: str = "") -> ExposureSignature | None:
     # Only at an IDE location: a documentation page showing the same setup code is not an IDE.
     ide = graphql_ide_page(text) if graphql_ide_location(path) else None
     if ide is not None:
-        return _sig("graphql_ide_exposure", "(?i)graphiql|graphqlplayground")
+        return _sig("graphql_ide_exposure", "graphql_ide_page")
     return _html_comment_secret(text)
 
 
@@ -1400,17 +1401,17 @@ def classify_exposure(
     # Secret material in any other non-HTML body is the strongest remaining signal.
     if not is_html:
         if _PRIVATE_KEY_RE.search(text):
-            return _sig("private_key_material", _PRIVATE_KEY_RE.pattern,
+            return _sig("private_key_material", "pem_private_key_header",
                         _dedupe(selfevident_secret_evidence(text)))
         cloud = _cloud_credentials(text)
         if cloud:
             return _sig("cloud_credential_material", "aws_credential", cloud)
     if not is_html and _is_metrics_exposition(text):
-        return _sig("metrics_endpoint", _METRICS_HELP_RE.pattern)
+        return _sig("metrics_endpoint", "prometheus_exposition")
     if content_type.startswith(_ACTUATOR_MEDIA_TYPE) and "+json" in content_type:
         return _sig("actuator_endpoint", "actuator_vendor_media_type")
     if _LISTING_RE.search(text):
-        return _sig("directory_listing", _LISTING_RE.pattern)
+        return _sig("directory_listing", "autoindex_title")
     if _ERROR_RE.search(text):
         return _sig("verbose_error_disclosure", "server_error_disclosure")
     return None
@@ -1501,6 +1502,16 @@ _CONFIG_DOCUMENT_PATTERNS = frozenset({
 })
 # A known value shorter than this is too common to scrub or to test an excerpt for.
 _MIN_SCRUBBED_VALUE_LENGTH = 4
+# A signature is stored and shown by name; these names locate the excerpt at what matched.
+_EXCERPT_ANCHORS: dict[str, re.Pattern[str]] = {
+    "apache_server_status": _APACHE_STATUS_RE,
+    "apache_server_status_auto": _APACHE_STATUS_AUTO_RE,
+    "nginx_stub_status": _NGINX_STATUS_RE,
+    "pem_private_key_header": _PRIVATE_KEY_RE,
+    "prometheus_exposition": _METRICS_HELP_RE,
+    "autoindex_title": _LISTING_RE,
+    "graphql_ide_page": re.compile(r"(?i)graphiql|graphqlplayground"),
+}
 
 
 def _withheld_notice(signature: ExposureSignature) -> str:
@@ -1537,10 +1548,12 @@ def redacted_exposure_excerpt(body: bytes, signature: ExposureSignature) -> str:
         return f"[{signature.exposure_class} detected - binary content withheld]"
     full = _decode(body)
     text = full
-    try:
-        compiled = re.compile(signature.matched_pattern)
-    except re.error:
-        compiled = None
+    compiled = _EXCERPT_ANCHORS.get(signature.matched_pattern)
+    if compiled is None:
+        try:
+            compiled = re.compile(signature.matched_pattern)
+        except re.error:
+            compiled = None
     found = compiled.search(text) if compiled is not None else None
     if found is not None:
         start = max(0, found.start() - 40)
