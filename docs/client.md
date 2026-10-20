@@ -208,6 +208,18 @@ Explicit options and the environment still win over the saved profile:
   through the environment, never on the command line, is sent only over `https://`, and is never
   printed; a token with a plain-http URL refuses to start.
 
+An instance whose certificate comes from a private or corporate CA is reachable once this machine
+trusts that CA. Point `SSL_CERT_FILE` at a PEM bundle that contains it (for example your system
+bundle with the CA appended), and export it where you run `shakerscan` and where your agent starts:
+the MCP server the agent spawns (`shakerscan mcp`) inherits it from that environment, not from the
+saved profile. A certificate the client does not trust is reported with this hint by `connect`,
+`doctor` and every command:
+
+```bash
+export SSL_CERT_FILE=/etc/ssl/certs/ca-with-corporate-root.pem
+shakerscan connect https://scanner.example.com/_enterprise/connect/<code>
+```
+
 Check a connection before handing it to an agent:
 
 ```bash

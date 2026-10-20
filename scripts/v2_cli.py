@@ -136,6 +136,15 @@ def _redirect_text(exc: urllib.error.HTTPError, request_url: str) -> str:
     return redirect_explanation(exc.code, location, request_url, option="--url")
 
 
+def _certificate_text(message: str, reason: object) -> str:
+    """Name the remedy when the failure is an untrusted (private CA) certificate."""
+    try:
+        from redirect_hint import with_certificate_hint
+    except ModuleNotFoundError:
+        from scripts.redirect_hint import with_certificate_hint
+    return with_certificate_hint(message, reason)
+
+
 def _approval():
     """The terminal approval protocol (scripts/hunt_approve.py), loaded when a command needs it."""
     try:
@@ -234,7 +243,7 @@ class ApiClient:
             ) from exc
         except urllib.error.URLError as exc:
             raise CliError(
-                f"cannot reach ShakerScan API: {exc.reason}",
+                _certificate_text(f"cannot reach ShakerScan API: {exc.reason}", exc.reason),
                 error_type="network_error",
             ) from exc
         except (TimeoutError, OSError) as exc:
@@ -297,7 +306,7 @@ class ApiClient:
             ) from exc
         except urllib.error.URLError as exc:
             raise CliError(
-                f"cannot reach ShakerScan API: {exc.reason}",
+                _certificate_text(f"cannot reach ShakerScan API: {exc.reason}", exc.reason),
                 error_type="network_error",
             ) from exc
         if len(raw) > max_bytes:
@@ -1552,6 +1561,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     except CliError as exc:
         print(json.dumps(exc.public_dict(), sort_keys=True), file=sys.stderr)
         return 2
+
 
 
 def _run_approval(args: argparse.Namespace, client: ApiClient) -> int:

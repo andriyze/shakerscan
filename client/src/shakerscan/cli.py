@@ -34,7 +34,7 @@ from pathlib import Path
 
 from . import __version__
 from . import _workspace
-from ._vendored import kit_sources, load
+from ._vendored import helper, kit_sources, load
 
 INSTALL_ONE_LINER = "curl -fsSL https://install.shakerscan.com | sh"
 CLIENT_COMMANDS = (
@@ -431,7 +431,8 @@ def fetch_connect_link(link: str, *, opener=None, timeout: float = 20.0) -> dict
             raise ClientError("too many connect attempts from this address; wait a few minutes") from exc
         raise ClientError(f"the instance answered HTTP {exc.code} to the connect link") from exc
     except (urllib.error.URLError, OSError, TimeoutError) as exc:
-        raise ClientError(f"cannot reach the instance: {getattr(exc, 'reason', exc)}") from exc
+        reason = getattr(exc, "reason", exc)
+        raise ClientError(_with_certificate_hint(f"cannot reach the instance: {reason}", reason)) from exc
     try:
         data = json.loads(body.decode("utf-8"))
     except ValueError as exc:
@@ -1293,7 +1294,12 @@ def _with_reason(exc: Exception) -> str:
     if getattr(exc, "http_status", None) is not None:
         return message  # the server answered: its reason is already in the message
     reason = getattr(exc, "data", None)
-    return f"{message}: {reason}" if reason else message
+    return _with_certificate_hint(f"{message}: {reason}", reason) if reason else message
+
+
+def _with_certificate_hint(message: str, reason: object) -> str:
+    """``message`` plus how to trust a private CA, when ``reason`` is a refused certificate."""
+    return helper("_redirect_hint").with_certificate_hint(message, reason)
 
 
 def cmd_record(args: argparse.Namespace) -> int:

@@ -197,6 +197,15 @@ def _redirect_explanation(status: int, location: Any, request_url: str, *, optio
     return redirect_explanation(status, location, request_url, option=option)
 
 
+def _with_certificate_hint(message: str, reason: Any) -> str:
+    """Name how to trust a private CA when the failure is an untrusted certificate."""
+    try:
+        from redirect_hint import with_certificate_hint
+    except ModuleNotFoundError:
+        from scripts.redirect_hint import with_certificate_hint
+    return with_certificate_hint(message, reason)
+
+
 def _bounded_text(value: Any, limit: int) -> str | None:
     if value is None:
         return None
@@ -1865,7 +1874,9 @@ class ArsenalClient:
                 -32002, message, detail[:4_000], http_status=exc.code, retry_after=retry_after,
             ) from exc
         except (urllib.error.URLError, TimeoutError, OSError) as exc:
-            raise MCPError(-32001, "ShakerScan API is unavailable", str(exc)[:1_000]) from exc
+            raise MCPError(
+                -32001, "ShakerScan API is unavailable", _with_certificate_hint(str(exc)[:1_000], exc),
+            ) from exc
         if len(raw) > self.max_response_bytes:
             raise MCPError(-32003, "ShakerScan API response exceeded the MCP response cap")
         try:

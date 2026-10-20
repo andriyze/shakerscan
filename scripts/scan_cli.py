@@ -214,7 +214,14 @@ def _request_json(
             api_detail=api_detail,
         ) from exc
     except (urllib.error.URLError, TimeoutError, OSError) as exc:
-        raise ScanCliError(f"could not reach the ShakerScan API: {exc.reason if hasattr(exc, 'reason') else exc}") from exc
+        try:
+            from redirect_hint import with_certificate_hint
+        except ModuleNotFoundError:
+            from scripts.redirect_hint import with_certificate_hint
+        reason = exc.reason if hasattr(exc, "reason") else exc
+        raise ScanCliError(
+            with_certificate_hint(f"could not reach the ShakerScan API: {reason}", reason)
+        ) from exc
     try:
         decoded = json.loads(body)
     except (json.JSONDecodeError, UnicodeDecodeError) as exc:

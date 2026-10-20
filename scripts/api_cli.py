@@ -134,7 +134,12 @@ def call(request: urllib.request.Request, *, opener=None, timeout: float = 60.0)
             raise ApiCliError(redirect_explanation(exc.code, location, request.full_url)) from exc
         return exc.code, exc.read(MAX_ERROR_BYTES).decode("utf-8", "replace")
     except (urllib.error.URLError, TimeoutError, OSError) as exc:
-        raise ApiCliError(f"cannot reach {request.full_url}: {getattr(exc, 'reason', exc)}") from exc
+        try:
+            from redirect_hint import with_certificate_hint
+        except ModuleNotFoundError:
+            from scripts.redirect_hint import with_certificate_hint
+        reason = getattr(exc, "reason", exc)
+        raise ApiCliError(with_certificate_hint(f"cannot reach {request.full_url}: {reason}", reason)) from exc
 
 
 def render(status: int, text: str) -> tuple[str, int]:

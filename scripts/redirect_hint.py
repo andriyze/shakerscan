@@ -4,6 +4,9 @@ Every ShakerScan client refuses to follow a redirect, because following one re-s
 token to whatever ``Location`` names. A bare "HTTP 308" left people guessing (D17); the usual
 cause is an ``http://`` address for an instance served over HTTPS, so name that origin and the
 client option that sets it.
+
+A refused certificate is the other connection failure that needs a remedy and not only a reason:
+an instance with a certificate from a private CA is unreachable until this machine trusts that CA.
 """
 
 from __future__ import annotations
@@ -41,4 +44,29 @@ def redirect_explanation(status: int, location: str | None, request_url: str, *,
     return text + f" Use the instance's own origin (shakerscan connect <origin>, or {option} <origin>)."
 
 
-__all__ = ["redirect_explanation", "redirect_origin"]
+_CERTIFICATE_FAILURES = ("certificate_verify_failed", "certificate verify failed")
+CERTIFICATE_HINT = (
+    "this machine does not trust the instance's TLS certificate. If it comes from a private or "
+    "corporate CA, set SSL_CERT_FILE to a PEM bundle that includes that CA, exported where you run "
+    "shakerscan and where your agent starts `shakerscan mcp`, so the MCP server inherits it"
+)
+
+
+def certificate_hint(reason: object) -> str:
+    """The remedy for a TLS verification failure in ``reason``, or "" for any other failure."""
+    text = str(reason or "").lower()
+    if any(marker in text for marker in _CERTIFICATE_FAILURES):
+        return CERTIFICATE_HINT
+    return ""
+
+
+def with_certificate_hint(message: str, reason: object) -> str:
+    """``message`` followed by the certificate remedy when ``reason`` is a TLS verification failure."""
+    hint = certificate_hint(reason)
+    return f"{message}. Hint: {hint}" if hint else message
+
+
+__all__ = [
+    "CERTIFICATE_HINT", "certificate_hint", "redirect_explanation", "redirect_origin",
+    "with_certificate_hint",
+]
