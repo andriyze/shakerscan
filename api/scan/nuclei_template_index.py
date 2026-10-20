@@ -17,6 +17,9 @@ selection by the methods it actually issues, so the executor can:
   dangerous/destructive tier that could authorize them (the ``intrusive`` risk
   tier in ``scan.authorization`` is a per-action dangerous-approval concept that
   the deterministic Scan does not plumb), so they are excluded unconditionally;
+* always exclude templates that request a path the exposure probe never requests
+  (``capabilities.exposure_probe.is_never_requested``: a ``/heapdump`` route makes
+  the JVM write a full heap dump), whatever their method and the authorization;
 * fail closed: when the index cannot be built, or no permitted template remains,
   the executor skips the active Nuclei run and records a coverage gap instead of
   running an unbounded selection.
@@ -41,6 +44,11 @@ try:  # PyYAML ships in the scanner/worker image where this runs.
 except ModuleNotFoundError:  # pragma: no cover - index then fails closed
     yaml = None  # type: ignore[assignment]
 
+try:
+    from capabilities.exposure_probe import is_never_requested
+except ModuleNotFoundError:  # package import layout
+    from ..capabilities.exposure_probe import is_never_requested
+
 
 # Methods that do not change server state. Every other verb (POST, PUT, DELETE,
 # PATCH, OPTIONS, PROPFIND, ...) is treated as state-changing, matching the
@@ -55,6 +63,13 @@ _DEFAULT_IGNORE_TAGS = frozenset({"dos", "local", "fuzz", "bruteforce", "txt-ser
 _UNKNOWN_METHOD = "UNKNOWN"
 _DEFAULT_SEVERITIES = ("high", "critical")
 _DEFAULT_TAGS = ("exposure", "misconfig", "auth-bypass", "default-login")
+# Reviewed templates of the pinned bundle that request a never-requested path. They stay
+# excluded even if a bundle update hides the path from the request expansion below; a test
+# pins this set to what that expansion finds in the pinned bundle.
+NEVER_REQUESTED_TEMPLATE_IDS = frozenset({"springboot-heapdump"})
+# The request target of a raw request: the token after the method, past any ``@`` annotations.
+_RAW_TARGET_RE = re.compile(r"\s*(?:@[^\n]*\n\s*)*\S+[ \t]+(\S+)")
+_PLACEHOLDER_RE = re.compile(r"\{\{\s*([^{}]*?)\s*\}\}")
 
 
 @dataclass(frozen=True)
@@ -74,6 +89,9 @@ class _TemplateRecord:
     # Exploit-class check (rce, lfi, sqli, deserialization, ssti, xxe, code/command injection,
     # ssrf, or a code/javascript/flow step): a verify Scan runs it only with the exploit tier.
     exploit_class: bool = False
+    # Requests a path ``is_never_requested`` refuses, in a path, a raw request line, or once a
+    # payload or variable value is put into one.
+    never_requested: bool = False
 
     @property
     def state_changing(self) -> bool:
@@ -103,6 +121,7 @@ class ActiveNucleiSelection:
     state_changing_count: int
     intrusive_excluded: int
     oob_excluded: int = 0
+    never_requested_excluded: int = 0
     # Verify Scans only: which requested checks ran, which did not and why, and which ran but
     # cannot give a reliable "not matched". Recorded on the step's receipt.
     verify_selection: Mapping[str, Any] | None = None
@@ -178,6 +197,65 @@ def _is_fuzzing(document: Mapping[str, Any]) -> bool:
     )
 
 
+def _payload_values(
+    values: Any, bundle: str, template_dir: str, files: dict[str, tuple[str, ...]],
+) -> tuple[str, ...]:
+    """A payload's values: an inline list, or the lines of a file inside the bundle, read
+    from the bundle root (``helpers/...``) or beside the template."""
+    if isinstance(values, (list, tuple)):
+        return tuple(str(item) for item in values)
+    for base in (bundle, template_dir):
+        path = os.path.realpath(os.path.join(base, str(values)))
+        if not path.startswith(os.path.realpath(bundle) + os.sep):
+            continue
+        if path not in files:
+            try:
+                with open(path, "r", encoding="utf-8", errors="replace") as handle:
+                    files[path] = tuple(line.strip() for line in handle)
+            except OSError:
+                continue
+        return files[path]
+    return (str(values),)
+
+
+def _requests_never_requested_path(
+    document: Mapping[str, Any], bundle: str, template_dir: str, files: dict[str, tuple[str, ...]],
+) -> bool:
+    """Whether a path, a raw request line, or either with one payload or variable value put
+    into it, is a path the exposure probe never requests. Other placeholders read as empty."""
+    requests = document.get("http") or document.get("requests") or []
+    if not isinstance(requests, list):
+        return False
+    template_variables = document.get("variables")
+    for request in requests:
+        if not isinstance(request, Mapping):
+            continue
+        values: dict[str, Any] = {}
+        for source in (template_variables, request.get("variables")):
+            if isinstance(source, Mapping):
+                values.update({str(name): [value] for name, value in source.items()})
+        if isinstance(request.get("payloads"), Mapping):
+            values.update({str(name): value for name, value in request["payloads"].items()})
+        paths = request.get("path") if isinstance(request.get("path"), list) else []
+        raws = request.get("raw") if isinstance(request.get("raw"), list) else []
+        targets = [str(path) for path in paths]
+        targets.extend(match.group(1) for match in map(_RAW_TARGET_RE.match, map(str, raws)) if match)
+        for target in targets:
+            fills: list[dict[str, str]] = [{}]
+            for name in {match.group(1) for match in _PLACEHOLDER_RE.finditer(target)} & set(values):
+                fills.extend(
+                    {name: value}
+                    for value in _payload_values(values[name], bundle, template_dir, files)
+                )
+            if any(is_never_requested(_filled(target, fill)) for fill in fills):
+                return True
+    return False
+
+
+def _filled(target: str, fill: Mapping[str, str]) -> str:
+    return _PLACEHOLDER_RE.sub(lambda match: fill.get(match.group(1), ""), target)
+
+
 def _parse_ignore(templates_dir: str) -> tuple[frozenset[str], frozenset[str]]:
     path = os.path.join(templates_dir, ".nuclei-ignore")
     if yaml is None:
@@ -212,6 +290,7 @@ def build_nuclei_method_index(templates_dir: str) -> NucleiMethodIndex:
     ignore_tags, ignore_files = _parse_ignore(templates_dir)
     records: dict[str, _TemplateRecord] = {}
     parse_errors = 0
+    payload_files: dict[str, tuple[str, ...]] = {}
     for dirpath, _dirs, files in os.walk(root):
         for filename in files:
             if not filename.endswith(".yaml"):
@@ -254,6 +333,8 @@ def build_nuclei_method_index(templates_dir: str) -> NucleiMethodIndex:
                 redirects=_follows_redirects(document),
                 exploit_class=bool(tags & EXPLOIT_CLASS_TAGS) or any(
                     key in document for key in ("code", "javascript", "flow")),
+                never_requested=_requests_never_requested_path(
+                    document, templates_dir, dirpath, payload_files),
             )
             prior = records.get(template_id)
             if prior is not None:
@@ -268,6 +349,7 @@ def build_nuclei_method_index(templates_dir: str) -> NucleiMethodIndex:
                     oob=prior.oob or record.oob,
                     redirects=prior.redirects or record.redirects,
                     exploit_class=prior.exploit_class or record.exploit_class,
+                    never_requested=prior.never_requested or record.never_requested,
                 )
             records[template_id] = record
     return NucleiMethodIndex(
@@ -311,7 +393,8 @@ def resolve_active_nuclei_selection(
     ``skip`` is set (fail closed) when the index cannot be built or no permitted
     template remains; the caller then records a coverage gap, not a clean result.
     ``only_template_ids`` (a verify Scan) selects exactly those templates instead of the
-    severity/tag filter; intrusive and unauthorized non-GET templates are still dropped.
+    severity/tag filter; intrusive, never-requested-path and unauthorized non-GET templates
+    are still dropped.
     """
     exact_ids = _as_tag_set(only_template_ids)
     want_sev = _normalize_filter(severities, _DEFAULT_SEVERITIES)
@@ -344,12 +427,16 @@ def resolve_active_nuclei_selection(
     get_only: list[str] = []
     state_changing: list[str] = []
     intrusive_excluded = 0
+    never_requested_excluded = 0
     for record in matched:
         if record.intrusive:
             # Destructive templates need more than state-changing permission, and
             # Scan has no dangerous/destructive tier to grant it, so they are
             # excluded whether or not state-changing HTTP is authorized.
             intrusive_excluded += 1
+            continue
+        if _never_requested(record):
+            never_requested_excluded += 1
             continue
         if not _TEMPLATE_ID_RE.match(record.template_id):
             continue
@@ -368,6 +455,7 @@ def resolve_active_nuclei_selection(
             total_matched=len(matched), get_only_count=len(get_only),
             state_changing_count=len(state_changing),
             intrusive_excluded=intrusive_excluded,
+            never_requested_excluded=never_requested_excluded,
         )
     includes_state_changing = allow_state_changing_http and bool(state_changing)
     return ActiveNucleiSelection(
@@ -377,7 +465,13 @@ def resolve_active_nuclei_selection(
         total_matched=len(matched), get_only_count=len(get_only),
         state_changing_count=len(state_changing),
         intrusive_excluded=intrusive_excluded,
+        never_requested_excluded=never_requested_excluded,
     )
+
+
+def _never_requested(record: _TemplateRecord) -> bool:
+    """The template requests a path a Scan never requests, whatever its method or authority."""
+    return record.never_requested or record.template_id in NEVER_REQUESTED_TEMPLATE_IDS
 
 
 def _exact_selection(index: NucleiMethodIndex, exact_ids: frozenset[str], *,
@@ -398,6 +492,8 @@ def _exact_selection(index: NucleiMethodIndex, exact_ids: frozenset[str], *,
             excluded[template_id] = "needs_oob_interaction"
         elif record.intrusive:
             excluded[template_id] = "intrusive"
+        elif _never_requested(record):
+            excluded[template_id] = "never_requested_path"
         elif record.exploit_class and not allow_exploit_classes:
             excluded[template_id] = "exploit_class_needs_exploit_tier"
         elif record.state_changing and not allow_state_changing_http:
@@ -420,5 +516,7 @@ def _exact_selection(index: NucleiMethodIndex, exact_ids: frozenset[str], *,
         state_changing_count=state_changing,
         intrusive_excluded=sum(1 for reason in excluded.values() if reason == "intrusive"),
         oob_excluded=sum(1 for reason in excluded.values() if reason == "needs_oob_interaction"),
+        never_requested_excluded=sum(
+            1 for reason in excluded.values() if reason == "never_requested_path"),
         verify_selection=selection,
     )

@@ -130,7 +130,8 @@ A candidate whose CVE has a check in this release carries `verification`. When t
 target's own origin, **Verify** submits an ordinary Scan with `verify_templates` (the named checks
 only, `policy.active_testing` and the `nuclei_active` family, under the target's standing
 authorization and budgets). The worker runs each named check or records why it did not:
-`intrusive`, `needs_oob_interaction` (Scans run without interactsh), `needs_state_changing_http`,
+`intrusive`, `never_requested_path` (the check requests a path Scans never request, such as
+`/actuator/heapdump`), `needs_oob_interaction` (Scans run without interactsh), `needs_state_changing_http`,
 `exploit_class_needs_exploit_tier` (checks tagged rce, lfi, sqli, deserialization, ssti, xxe,
 code-injection, cmdi or ssrf, or with a code/javascript/flow step, need state-changing authority;
 admission refuses them up front when the snapshot classes them `safety: exploit`), or
