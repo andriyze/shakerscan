@@ -15,7 +15,11 @@ from pathlib import Path
 
 from runtime.models import ScanBudget, ScanPolicy, TargetBinding
 from scan.execution import ScanExecutionPlan
-from scan.inventory_harvest import scan_inventory_worklist
+from scan.inventory_harvest import (
+    post_scan_probes_allowed,
+    record_scan_inventory,
+    scan_inventory_worklist,
+)
 
 SCAN_ID = "38e0dd54-0000-4000-8000-000000000001"
 
@@ -31,7 +35,7 @@ def _binding() -> TargetBinding:
     )
 
 
-def _recon_options(*, run_kind: str | None = "asm_recon") -> dict:
+def _recon_options(*, run_kind: str | None = "asm_recon", max_endpoints: int = 2000) -> dict:
     plan = ScanExecutionPlan(
         policy=ScanPolicy(
             active_testing=False,
@@ -41,7 +45,7 @@ def _recon_options(*, run_kind: str | None = "asm_recon") -> dict:
             include_families=("recon",),
         ),
         budget_profile="balanced",
-        budget=ScanBudget(1200, 5000, 2000, 200, 5000, 900, 4, 0, 100),
+        budget=ScanBudget(1200, 5000, max_endpoints, 200, 5000, 900, 4, 0, min(100, max_endpoints)),
     )
     options = plan.option_metadata()
     options.update({"active": False, "network_discovery": False, "subfinder": False})
@@ -163,11 +167,91 @@ def test_scan_without_discovery_receipts_or_canonical_authority_yields_nothing()
     assert conn.queries == []
 
 
-def test_worker_persists_standalone_inventory_through_the_canonical_harvest():
-    """The worker's standalone-scan inventory step must use the canonical harvest."""
+def _many_routes(count):
+    statuses = {"discover.web_crawl": "success"}
+    observations = {"discover.web_crawl": [
+        {"kind": "discovered_route", "method": "GET",
+         "url": f"https://app.example.test/page{index}?id=1"}
+        for index in range(count)
+    ] + [
+        {"kind": "discovered_route", "method": "GET", "url": "http://app.example.test/plain?q=1"},
+        {"kind": "discovered_route", "method": "GET",
+         "url": "https://app.example.test:8443/other-port?q=1"},
+        {"kind": "discovered_route", "method": "GET", "url": "https://evil.test/x?q=1"},
+    ]}
+    return statuses, observations
+
+
+def test_the_harvest_never_records_more_than_the_scan_endpoint_budget():
+    conn = _Conn(*_many_routes(12))
+    worklist, _source = asyncio.run(scan_inventory_worklist(
+        _Pool(conn), {}, scan_id=SCAN_ID, target_url="https://app.example.test",
+        options=_recon_options(max_endpoints=5),
+    ))
+    assert 0 < len(worklist) <= 5
+
+
+def test_the_harvest_keeps_only_the_bound_origin():
+    conn = _Conn(*_many_routes(3))
+    worklist, _source = asyncio.run(scan_inventory_worklist(
+        _Pool(conn), {}, scan_id=SCAN_ID, target_url="https://app.example.test",
+        options=_recon_options(),
+    ))
+    # The bound origin's routes (and the scan's seed) only: no other scheme, port or host.
+    assert sorted(worklist) == ["GET /", "GET /page0?id=", "GET /page1?id=", "GET /page2?id="]
+
+
+class _Inventory:
+    """Records what the inventory step asks for; a probe here would be traffic outside the scan."""
+
+    def __init__(self):
+        self.calls = []
+
+    async def filter_reachable_worklist(self, target, worklist, options):
+        self.calls.append("filter_reachable_worklist")
+        return worklist
+
+    def auth_state_from_options(self, options):
+        return "anon"
+
+    async def upsert_endpoints(self, conn, target_id, worklist, *, source, auth_state, scan_id):
+        self.calls.append(("upsert", source, tuple(sorted(worklist))))
+        return len(worklist)
+
+
+def test_a_canonical_scan_records_its_inventory_without_new_traffic():
+    """The harvest records what the scan's own pinned, budgeted discovery observed.
+
+    The reachability filter re-requests every endpoint with its own resolver and no budget; run
+    after every canonical scan it would add traffic the scan never admitted.
+    """
+    conn = _Conn(*_recon_receipts())
+    inventory = _Inventory()
+    count, source = asyncio.run(record_scan_inventory(
+        _Pool(conn), inventory, {}, scan_id=SCAN_ID, target_id="target-recon",
+        target_url="https://app.example.test", options=_recon_options(),
+    ))
+    assert count >= 2 and source == "recon"
+    assert [call[0] for call in inventory.calls] == ["upsert"]
+    assert post_scan_probes_allowed(_recon_options()) is False
+
+
+def test_a_legacy_report_worklist_is_still_filtered_for_phantoms():
+    conn = _Conn({}, {})
+    inventory = _Inventory()
+    result = {"active_checks": {"active_worklist": ["GET /legacy?q="]}}
+    asyncio.run(record_scan_inventory(
+        _Pool(conn), inventory, result, scan_id=SCAN_ID, target_id="target-recon",
+        target_url="https://app.example.test", options={"run_kind": "scan"},
+    ))
+    assert inventory.calls[0] == "filter_reachable_worklist"
+    assert post_scan_probes_allowed({"run_kind": "scan"}) is True
+
+
+def test_the_worker_gates_both_post_scan_probes_on_the_canonical_check():
     source = (Path(__file__).resolve().parents[1] / "api" / "worker.py").read_text()
     start = source.index("# Continuous ASM: persist this scan's discovered endpoint worklist")
-    block = source[start:source.index("ASM authenticated telemetry inventory", start)]
-    assert "await scan_inventory_worklist(" in block
-    assert "source=inventory_source" in block
-    assert "result.get('active_checks')" not in block
+    block = source[start:source.index("finalize_ai_finding_retest(", start)]
+    assert "await record_scan_inventory(" in block
+    assert "filter_reachable_worklist" not in block
+    assert "if _sweep_max > 0 and post_scan_probes_allowed(options):" in block

@@ -70,3 +70,40 @@ async def scan_inventory_worklist(
         max_endpoints=max_endpoints,
     )
     return worklist, source
+
+
+def post_scan_probes_allowed(options: Mapping[str, Any] | None) -> bool:
+    """Whether the worker may probe the target after the scan (reachability filter and sweep).
+
+    Those probes resolve the host themselves and run outside the plan's budget. A canonical Scan
+    sends traffic only through its pinned, budgeted transport, so it gets none; its inventory is
+    recorded from what its own discovery observed. The explicit prune action still sweeps.
+    """
+    return not (options or {}).get("_canonical_target_binding")
+
+
+async def record_scan_inventory(
+    pool: Any,
+    inventory: Any,
+    result: Mapping[str, Any] | None,
+    *,
+    scan_id: str,
+    target_id: Any,
+    target_url: str,
+    options: Mapping[str, Any] | None,
+) -> tuple[int, str]:
+    """Persist a completed Scan's endpoints into the per-target inventory; ``(count, source)``."""
+    worklist, source = await scan_inventory_worklist(
+        pool, result, scan_id=scan_id, target_url=target_url, options=options,
+    )
+    if worklist and post_scan_probes_allowed(options):
+        # A legacy report worklist can hold spec/OPTIONS-derived phantom (404) endpoints.
+        worklist = await inventory.filter_reachable_worklist(target_url, worklist, options)
+    if not worklist:
+        return 0, source
+    async with pool.acquire() as conn:
+        count = await inventory.upsert_endpoints(
+            conn, target_id, worklist, source=source,
+            auth_state=inventory.auth_state_from_options(options), scan_id=scan_id,
+        )
+    return count, source
