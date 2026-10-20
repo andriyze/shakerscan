@@ -4228,16 +4228,20 @@ class DatabaseNeutralScanActionDispatcher:
         # A further template window (a thorough or deep slice's positions) the wall cut off is
         # retried even when it already reported a match: its other templates never ran, and
         # zoo d0a8d43c8 lost one or two windows on 16 of 57 hosts that way. The slice holds
-        # the retry's wall beside its positions (``window_retry_seconds``).
+        # the retry's wall and requests beside its positions (``window_retry_hold``); the
+        # positions' planned shares are what the slice holds without it.
         retry_cut_off = retry_partial_timeouts or window_endpoints is not None
-        raw_retry_wall = action.capability_args.get("window_retry_seconds")
-        window_retry_wall = (
-            int(raw_retry_wall)
-            if window_endpoints is not None and isinstance(raw_retry_wall, int)
-            and not isinstance(raw_retry_wall, bool)
-            and 0 < raw_retry_wall < int(action.requested_budget.get("tool_wall_seconds") or 0)
-            else 0
-        )
+        raw_retry = action.capability_args.get("window_retry_hold")
+        positions_budget = {
+            name: int(amount) - (
+                int(raw_retry[name])
+                if window_endpoints is not None and isinstance(raw_retry, Mapping)
+                and isinstance(raw_retry.get(name), int) and not isinstance(raw_retry[name], bool)
+                and 0 < int(raw_retry[name]) < int(amount)
+                else 0
+            )
+            for name, amount in action.requested_budget.items()
+        }
         empty_timeouts: dict[str, int] = {}
         # The first attempt each retried endpoint was cut off in, and the redacted URL each
         # endpoint was attempted at, so an endpoint that never finished can be named.
@@ -4789,8 +4793,7 @@ class DatabaseNeutralScanActionDispatcher:
                     }
                     if tool == "nuclei" and sub_budget.get("tool_wall_seconds"):
                         planned_share = (
-                            (int(action.requested_budget.get("tool_wall_seconds") or 0)
-                             - window_retry_wall)
+                            int(positions_budget.get("tool_wall_seconds") or 0)
                             // max(1, first_pass)
                         )
                         passive_pack = action.capability_name == "templates.passive_batch"
@@ -4815,7 +4818,7 @@ class DatabaseNeutralScanActionDispatcher:
                             sub_budget = window_template_attempt_hold(
                                 sub_budget, remaining_budget=remaining_budget,
                                 remaining_attempts=remaining_attempts,
-                                requested_budget=action.requested_budget,
+                                requested_budget=positions_budget,
                                 first_pass=first_pass, planned_wall_share=planned_share,
                             )
                     if body_request:

@@ -18,14 +18,19 @@ from dataclasses import replace
 
 import pytest
 
-from api.scan.action_plan import ScanAction, ScanActionPlan, ScanActionPlanCompiler
-from api.scan.finalizer import finalize_scan_report
+from api.scan.action_plan import (
+    ScanAction,
+    ScanActionPlan,
+    ScanActionPlanCompiler,
+    window_retry_hold,
+)
 from api.scan.capability_result import CapabilityResultStatus
 from api.scan.external_process import (
     ACTIVE_TEMPLATE_PLANNED_GET_ONLY_WINDOWS,
     ACTIVE_TEMPLATE_PLANNED_WINDOWS,
     ACTIVE_TEMPLATE_WINDOW_RETRY_SECONDS,
 )
+from api.scan.finalizer import finalize_scan_report
 from tests.scan_round_fixtures import (
     admitted_round_fixture,
     appended_actions,
@@ -34,7 +39,8 @@ from tests.scan_round_fixtures import (
     settle_round,
 )
 from tests.test_scan_finalizer import _result_with_observation_count
-from tests.test_scan_orchestrator import SCAN_ID, _action as plan_action
+from tests.test_scan_orchestrator import SCAN_ID
+from tests.test_scan_orchestrator import _action as plan_action
 
 NUCLEI_ONLY = ("recon", "nuclei_passive", "nuclei_active")
 POSITION = {"http_requests": 120, "state_changing_requests": 120, "tool_wall_seconds": 45}
@@ -92,20 +98,51 @@ def test_a_two_endpoint_host_plans_all_39_windows_over_three_rounds(profile):
     )
     assert covered == list(range(39))
     # Each position holds what one endpoint attempt always held; a slice of further windows also
-    # holds one retry of a window its wall cut off. The first round's slice holds no retry.
-    assert "window_retry_seconds" not in r01.capability_args
+    # holds one retry of a window its wall cut off: up to 135 s and the requests (and mutations)
+    # that wall paces at the positions' 2 requests/s, as far as the ledger leaves them (this
+    # fixture's mutation allowance trims the last one). The first round's slice holds no retry.
+    assert "window_retry_hold" not in r01.capability_args
     for number in planned:
         for action in planned[number]:
             count = action.capability_args["slice"]["count"]
-            retry = (
-                ACTIVE_TEMPLATE_WINDOW_RETRY_SECONDS
-                if action.capability_args["slice"]["start"] >= 2 else 0
-            )
-            assert action.capability_args.get("window_retry_seconds", 0) == retry
+            retry = dict(action.capability_args.get("window_retry_hold") or {})
+            if action.capability_args["slice"]["start"] >= 2:
+                assert 45 < retry["tool_wall_seconds"] <= ACTIVE_TEMPLATE_WINDOW_RETRY_SECONDS
+                assert retry["http_requests"] == retry["state_changing_requests"] == (
+                    2 * retry["tool_wall_seconds"]
+                )
+            else:
+                assert retry == {}
             assert dict(action.requested_budget) == {
-                name: amount * count + (retry if name == "tool_wall_seconds" else 0)
-                for name, amount in POSITION.items()
+                name: amount * count + retry.get(name, 0) for name, amount in POSITION.items()
             }
+
+
+def test_a_window_retry_hold_is_capped_by_what_the_lane_leaves_of_the_ledger():
+    shape = {"http_requests": 3960, "state_changing_requests": 3960, "tool_wall_seconds": 1485}
+    roomy = {"http_requests": 60_000, "state_changing_requests": 6_000, "tool_wall_seconds": 10_800}
+    assert window_retry_hold(shape, limits=roomy, reserved={}, slices=1) == {
+        "tool_wall_seconds": ACTIVE_TEMPLATE_WINDOW_RETRY_SECONDS,
+        "http_requests": 270, "state_changing_requests": 270,
+    }
+    # Mutations left after the lane's two slices and the required work: 100 a slice, so the
+    # retry holds 100 requests and the 50 s they pace at 2 requests/s.
+    tight = {**roomy, "state_changing_requests": 2 * 3960 + 200 + 300}
+    assert window_retry_hold(shape, limits=tight, reserved={"state_changing_requests": 300}, slices=2) == {
+        "tool_wall_seconds": 50, "http_requests": 100, "state_changing_requests": 100,
+    }
+    # Wall left: 40 s, so 80 requests.
+    short = {**roomy, "tool_wall_seconds": 1485 + 40}
+    assert window_retry_hold(shape, limits=short, reserved={}, slices=1) == {
+        "tool_wall_seconds": 40, "http_requests": 80, "state_changing_requests": 80,
+    }
+    # Nothing left in any one dimension: no retry hold at all.
+    assert window_retry_hold(shape, limits={**roomy, "tool_wall_seconds": 1485}, reserved={}, slices=1) == {}
+    # A GET-only slice holds no mutations for its retry either.
+    get_only = {"http_requests": 3960, "tool_wall_seconds": 1485}
+    assert window_retry_hold(get_only, limits=roomy, reserved={}, slices=1) == {
+        "tool_wall_seconds": 135, "http_requests": 270,
+    }
 
 
 
@@ -357,13 +394,19 @@ def test_a_sharded_scan_reports_how_much_of_the_allowlist_its_shards_ran():
     """Shards keep one position per endpoint, so each runs the allowlist's leading windows on
     its own endpoints. The merged family row says how many windows ran, as a direct Scan's
     report does: those of the shard that ran the most, of the largest allowlist."""
-    from tests.test_parallel_action_compiler import (
-        _assignments, _authority, _canonical_child_report, _children, _parent_assignment,
-        _projected_plans, _target,
-    )
     from api.scan.parallel_compiler import (
-        ParallelActionPlanCompiler, merge_parallel_action_executions,
+        ParallelActionPlanCompiler,
+        merge_parallel_action_executions,
         summarize_parallel_action_coverage,
+    )
+    from tests.test_parallel_action_compiler import (
+        _assignments,
+        _authority,
+        _canonical_child_report,
+        _children,
+        _parent_assignment,
+        _projected_plans,
+        _target,
     )
 
     execution, parent = _authority()

@@ -274,7 +274,10 @@ def template_retry_wall(
 #: (``template_retry_wall``). Zoo run d0a8d43c8: windows send 32-102 requests (2 per second
 #: at the 120-request / 45-second position hold), so a heavy window that opened a slice -- with
 #: no earlier attempt to have left it wall -- needed about 48 s of its 45 and was cut off; with
-#: a match already reported it was not retried, and 16 of 57 hosts lost one or two windows.
+#: a match already reported it was not retried, and 16 of 57 hosts lost one or two windows. The
+#: slice holds the requests (and mutations) this wall paces at the positions' rate beside it
+#: (``action_plan.window_retry_hold``): without them a final slice's retry was shortened to the
+#: few requests left and never ran.
 ACTIVE_TEMPLATE_WINDOW_RETRY_SECONDS = 45 * _TEMPLATE_ATTEMPT_SHARE_MULTIPLE
 
 

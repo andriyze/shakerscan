@@ -1,10 +1,12 @@
-"""Every planned active-template window finishes inside its slice at the zoo's measured timing.
+"""Every planned active-template window finishes inside its slice under a zoo-derived timing model.
 
 Unit fixture, no scanner process: the real batch adapter runs synthetic slices whose attempts are
-answered by a timing model of the finding-zoo run on d0a8d43c8 (thorough, state-changing HTTP).
-There, 23 of 169 active-template slices ended ``timed_out`` on the 16 of 57 hosts with three to
-five endpoints, and those hosts reported 37 or 38 of 39 template windows run. The receipts show
-the slices did not run out of wall (round 2 used about 1,230 of its 1,485 s); single attempts did:
+answered by a timing MODEL built from the finding-zoo run on d0a8d43c8 (thorough, state-changing
+HTTP). It is not a replay: the run's per-attempt checkpoints were not available, only each
+slice's holds and consumption. There, 23 of 169 active-template slices ended ``timed_out`` on the
+16 of 57 hosts with three to five endpoints, and those hosts reported 37 or 38 of 39 template
+windows run. The slices did not run out of wall (round 2 used about 1,230 of its 1,485 s); the
+model attributes the losses to single attempts:
 
 * nuclei paces at the attempt's requests over its wall. The wall earlier attempts left unspent was
   carried to the next one but its request hold stayed an even split, so a carried wall halved the
@@ -15,23 +17,23 @@ the slices did not run out of wall (round 2 used about 1,230 of its 1,485 s); si
 * A cut-off window that had already reported a match was not retried, so its other templates
   never ran on that host.
 
-The model's per-window request counts are the zoo's (derived from the slices' consumed requests
-at each endpoint count; windows not separable there send 63, the zoo's mean); a window takes its
-requests over the attempt's rate plus a second, and an attempt whose wall is shorter is cut off
-after reporting a match.
+The per-window request counts are reconstructed from the slices' consumed requests at each
+endpoint count (windows not separable there are given 63, the run's mean). A window takes its
+requests over the attempt's rate plus a second. The model is pessimistic against the zoo: every
+attempt reports a match before any cut-off, so the existing retry of an empty cut-off never
+rescues one (on the zoo, hosts with one or two endpoints recovered such windows that way).
 """
 
 from __future__ import annotations
 
 import asyncio
-from dataclasses import replace
 import math
 import uuid
+from dataclasses import replace
 
 import pytest
-
-from hunt.capability_executor import CapabilityAdapterResult
 import scan.action_adapter as action_adapter_module
+from hunt.capability_executor import CapabilityAdapterResult
 from scan.action_adapter import DatabaseNeutralScanActionDispatcher
 from scan.action_plan import ScanActionPlan
 from scan.execution_backend import ActionLease
@@ -44,8 +46,8 @@ from scan.nuclei_execution import active_template_window
 from tests.test_active_template_window_attempts import (  # noqa: F401  (bundle is a fixture)
     AUTHORIZED,
     TARGET,
-    _Host,
     _allowlist,
+    _Host,
     _windows_record,
     bundle,
 )
@@ -153,28 +155,39 @@ def _planned_slices(endpoints):
     return slices
 
 
-def _slice_action(host, number, start, count, endpoints):
-    """A slice as the planner holds it: 120 requests / 45 s a position, and one retry's wall on
-    a slice of further windows (the planner's holds are pinned in test_active_template_windows)."""
+#: What the planner holds for a window retry beside a slice's positions when the ledger has room
+#: (``action_plan.window_retry_hold``; the planner's own holds are pinned in
+#: test_active_template_windows): the share multiple's wall at the positions' 2 requests/s.
+RETRY_HOLD = {
+    "tool_wall_seconds": ACTIVE_TEMPLATE_WINDOW_RETRY_SECONDS,
+    "http_requests": 2 * ACTIVE_TEMPLATE_WINDOW_RETRY_SECONDS,
+    "state_changing_requests": 2 * ACTIVE_TEMPLATE_WINDOW_RETRY_SECONDS,
+}
+
+
+def _slice_action(host, number, start, count, endpoints, retry_hold=RETRY_HOLD):
+    """A slice as the planner holds it: 120 requests / 45 s a position, plus the retry hold on a
+    slice of further windows."""
     action = host.action(f"active.templates.r{number:02d}", start=start, count=count)
-    if start < endpoints:
+    if start < endpoints or not retry_hold:
         return action
     return replace(
         action,
-        capability_args={
-            **action.capability_args, "window_retry_seconds": ACTIVE_TEMPLATE_WINDOW_RETRY_SECONDS,
-        },
+        capability_args={**action.capability_args, "window_retry_hold": dict(retry_hold)},
         requested_budget={
-            **action.requested_budget,
-            "tool_wall_seconds": int(action.requested_budget["tool_wall_seconds"])
-            + ACTIVE_TEMPLATE_WINDOW_RETRY_SECONDS,
+            name: int(amount) + int(retry_hold.get(name, 0))
+            for name, amount in action.requested_budget.items()
         },
         action_digest=None,
     )
 
 
+def _host(endpoints):
+    return _Host(tuple(["/"] + [f"/p{index}" for index in range(1, endpoints)]))
+
+
 def _run_host(monkeypatch, bundle_dir, endpoints, timing):
-    host = _Host(tuple(["/"] + [f"/p{index}" for index in range(1, endpoints)]))
+    host = _host(endpoints)
     actions = [
         _slice_action(host, number, start, count, endpoints)
         for number, (start, count) in enumerate(_planned_slices(endpoints), start=1)
@@ -202,27 +215,62 @@ def test_every_window_finishes_at_the_zoo_timing(monkeypatch, bundle, endpoints)
             assert int(amount) <= int(action.requested_budget[name])
 
 
-def test_a_cut_off_window_that_reported_a_match_is_retried_and_counted(monkeypatch, bundle):  # noqa: F811
-    """A window heavier than anything a slice can carry to it is cut off; its retry, funded by the
-    slice's retry wall, finishes it. The first attempt's identity is the planned position's."""
-    timing = _ZooTiming(bundle, requests={**ZOO_WINDOW_REQUESTS, 3: 150})
-    host, actions, receipts = _run_host(monkeypatch, bundle, 3, timing)
-    second = receipts[1]
-    assert second.status == "success"
-    assert 3 in _windows_record(second)["windows_run"]
-    assert second.redacted_execution["retried_count"] == 1
-    assert second.redacted_execution["recovered_count"] == 1
+def test_a_heavy_window_opening_a_two_position_final_slice_finishes(monkeypatch, bundle):  # noqa: F811
+    """A four-endpoint host's round 3 is windows 37 and 38 (240 requests / 90 s of positions).
+    With a wall-only retry hold, a 125-request window 37 got 120 requests / 60 s, was cut off,
+    and its retry was shortened to the few requests left and never ran. The retry's requests are
+    held too, so the window finishes."""
+    timing = _ZooTiming(bundle, requests={**ZOO_WINDOW_REQUESTS, 37: 125})
+    host = _host(4)
+    action = _slice_action(host, 3, 37, 2, 4)
+    assert dict(action.requested_budget) == {
+        "http_requests": 510, "state_changing_requests": 510, "tool_wall_seconds": 225,
+    }
+    receipt = _dispatch(monkeypatch, host, bundle, action, timing)
+    assert receipt.status == "success" and not receipt.timed_out
+    assert _windows_record(receipt)["windows_run"] == [37, 38]
+    assert all(item["seconds"] <= item["budget"]["tool_wall_seconds"] for item in timing.attempts)
+    for name, amount in receipt.budget_consumed.items():
+        assert int(amount) <= int(action.requested_budget[name])
+    # The same slice holding the retry's wall alone loses the window, as 2.11.1's first fix did.
+    wall_only = _ZooTiming(bundle, requests={**ZOO_WINDOW_REQUESTS, 37: 125})
+    other = _host(4)
+    lost = _dispatch(
+        monkeypatch, other, bundle,
+        _slice_action(other, 3, 37, 2, 4, retry_hold={"tool_wall_seconds": 135}), wall_only,
+    )
+    assert _windows_record(lost)["windows_run"] == [38]
+    assert lost.redacted_execution["retried_count"] == 0
+
+
+def test_a_cut_off_window_is_retried_once_and_its_reproduced_match_kept_once(monkeypatch, bundle):  # noqa: F811
+    """A slice the ledger left no retry hold still retries a window its wall cut off after a
+    match, from what the slice's other windows left. First-pass identities are the planned
+    positions'; the match the retry reproduced is recorded once; a resume re-sends nothing."""
+    timing = _ZooTiming(bundle)
+    host = _host(3)
+    action = _slice_action(host, 2, 3, 33, 3, retry_hold=None)
+    receipt = _dispatch(monkeypatch, host, bundle, action, timing)
     window_three = [item for item in timing.attempts if item["window"] == 3]
     assert len(window_three) == 2
-    assert window_three[0]["seconds"] > window_three[0]["budget"]["tool_wall_seconds"]
+    assert window_three[0]["budget"]["tool_wall_seconds"] == 45
+    assert window_three[0]["seconds"] > 45
     assert window_three[1]["seconds"] <= window_three[1]["budget"]["tool_wall_seconds"]
-    attempts = host.backend.attempts[actions[1].action_id]
+    assert receipt.status == "success" and not receipt.timed_out
+    assert 3 in _windows_record(receipt)["windows_run"]
+    assert receipt.redacted_execution["retried_count"] == 1
+    assert receipt.redacted_execution["recovered_count"] == 1
+    matches = [
+        item for item in receipt.observations
+        if item.get("kind") == "template_match" and item.get("template_id") == "synthetic-window-3"
+    ]
+    assert len(matches) == 1
+    attempts = host.backend.attempts[action.action_id]
     assert {
         position for position in range(3, 36) if host.attempt_id(position) in attempts
     } == set(range(3, 36))
-    # Resumed, the slice re-sends nothing: both attempts are checkpointed.
     sent = len(timing.attempts)
-    resumed = _dispatch(monkeypatch, host, bundle, actions[1], timing)
+    resumed = _dispatch(monkeypatch, host, bundle, action, timing)
     assert len(timing.attempts) == sent
     assert resumed.status == "success"
     assert 3 in _windows_record(resumed)["windows_run"]
@@ -243,7 +291,7 @@ def test_an_endpoints_own_slice_without_planned_windows_keeps_its_retry_rule(mon
 
 
 def test_a_window_attempt_keeps_its_planned_rate_inside_the_slice_holds():
-    planned = {"http_requests": 3960, "state_changing_requests": 3960, "tool_wall_seconds": 1620}
+    planned = {"http_requests": 3960, "state_changing_requests": 3960, "tool_wall_seconds": 1485}
     # A carried wall now carries the requests that keep 2 requests/s.
     hold = window_template_attempt_hold(
         {"http_requests": 122, "state_changing_requests": 122, "tool_wall_seconds": 74},
@@ -268,3 +316,10 @@ def test_a_window_attempt_keeps_its_planned_rate_inside_the_slice_holds():
         remaining_attempts=1, requested_budget=planned, first_pass=33, planned_wall_share=45,
     )
     assert last == {"http_requests": 30, "state_changing_requests": 30, "tool_wall_seconds": 45}
+    # An even split already above the planned pace is kept, never cut back to it.
+    even = window_template_attempt_hold(
+        {"http_requests": 150, "state_changing_requests": 150, "tool_wall_seconds": 45},
+        remaining_budget={"http_requests": 300, "state_changing_requests": 300, "tool_wall_seconds": 90},
+        remaining_attempts=2, requested_budget=planned, first_pass=33, planned_wall_share=45,
+    )
+    assert even == {"http_requests": 150, "state_changing_requests": 150, "tool_wall_seconds": 45}
