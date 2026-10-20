@@ -6,6 +6,17 @@ export function collectAcceptedTargets<T extends { id: string }, P = unknown>(op
   limit: number
   maxPages?: number
 }): Promise<{ matches: T[]; hasMore: boolean; scanned: number; pages: number; filtered: boolean }>
+export const TARGET_LINK_MAX_PAGES: number
+export function resolveTargetByOrigin<T extends { id: string; url: string }, P = unknown>(options: {
+  fetchPage: (position: P | null) => Promise<{ targets: T[]; hasMore: boolean; next: P | null }>
+  url: string
+  maxPages?: number
+  signal?: AbortSignal
+}): Promise<
+  | { status: 'found' | 'missing' | 'unconfirmed'; target: T | null; scanned: number }
+  | { status: 'failed'; target: null; scanned: number; error: string }
+>
+export function readFailureText(error: unknown): string
 export function targetSearchNoteText(search: {
   assets: unknown[]; hasMore: boolean; error: string | null; query: string
   scanned?: number; filtered?: boolean; loading?: boolean

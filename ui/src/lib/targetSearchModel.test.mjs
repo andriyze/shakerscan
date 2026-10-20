@@ -1,7 +1,10 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 
-import { TARGET_SEARCH_MAX_PAGES, collectAcceptedTargets, targetSearchNoteText, targetSearchProvesEmpty } from './targetSearchModel.mjs'
+import {
+  TARGET_LINK_MAX_PAGES, TARGET_SEARCH_MAX_PAGES, collectAcceptedTargets, readFailureText, resolveTargetByOrigin,
+  targetSearchNoteText, targetSearchProvesEmpty,
+} from './targetSearchModel.mjs'
 
 const row = (id, url) => ({ id, url })
 /** An inventory whose rows come in pages of `size`, positions by index. */
@@ -70,4 +73,145 @@ test('notes', () => {
   assert.equal(n({ query: 'x', filtered: true }), 'No matching target of this kind')
   assert.equal(n({}), 'No targets yet')
   assert.equal(n({ assets: [1] }), '1 match')
+})
+
+// A ?target=URL link must find its exact origin even when it sorts after the first page of
+// substring matches for its host (an apex domain with many discovered subdomains). Reading only
+// the first page reported "not found" although the target existed.
+const subdomains = (count) => Array.from({ length: count }, (_, i) => row(`s${i}`, `https://app${i}.corp.example`))
+/** list/v1-style pages: cursors are opaque strings, `null` asks for the first page. */
+function cursorInventory(rows, size) {
+  const reads = []
+  return {
+    reads,
+    fetchPage: async (position) => {
+      reads.push(position)
+      const start = position === null ? 0 : Number(String(position).slice(1))
+      const targets = rows.slice(start, start + size)
+      const hasMore = start + size < rows.length
+      return { targets, hasMore, next: hasMore ? `c${start + size}` : null }
+    },
+  }
+}
+
+test('a link resolves on the first page without reading further', async () => {
+  const source = cursorInventory([row('exact', 'https://corp.example'), ...subdomains(300)], 200)
+  const result = await resolveTargetByOrigin({ fetchPage: source.fetchPage, url: 'https://corp.example/' })
+  assert.equal(result.status, 'found')
+  assert.equal(result.target.id, 'exact')
+  assert.deepEqual(source.reads, [null])
+})
+
+test('a link whose origin sorts after the first page reads on with the cursor until it is found', async () => {
+  const source = cursorInventory([...subdomains(300), row('exact', 'https://corp.example'), ...subdomains(50)], 200)
+  const result = await resolveTargetByOrigin({ fetchPage: source.fetchPage, url: 'https://corp.example/' })
+  assert.equal(result.status, 'found')
+  assert.equal(result.target.id, 'exact')
+  assert.deepEqual(source.reads, [null, 'c200'], 'the second read continues from the first page\'s cursor')
+})
+
+test('the same host on another port or scheme is a different origin and never matches', async () => {
+  const decoys = [row('port', 'https://corp.example:8443'), row('scheme', 'http://corp.example'), row('host', 'host://corp.example')]
+  const source = cursorInventory([...decoys, ...subdomains(10)], 200)
+  const result = await resolveTargetByOrigin({ fetchPage: source.fetchPage, url: 'https://corp.example/' })
+  assert.equal(result.status, 'missing')
+  assert.equal(result.target, null)
+  const port = await resolveTargetByOrigin({ fetchPage: cursorInventory(decoys, 200).fetchPage, url: 'https://corp.example:8443/path' })
+  assert.equal(port.target?.id, 'port', 'an explicit port names its own origin')
+})
+
+test('"missing" only after every matching page was read', async () => {
+  const source = cursorInventory(subdomains(450), 200)
+  const result = await resolveTargetByOrigin({ fetchPage: source.fetchPage, url: 'https://corp.example/' })
+  assert.equal(result.status, 'missing')
+  assert.deepEqual(source.reads, [null, 'c200', 'c400'])
+})
+
+test('reaching the page bound with more pages left is "unconfirmed", never "missing"', async () => {
+  const source = cursorInventory(subdomains(5000), 200)
+  const result = await resolveTargetByOrigin({ fetchPage: source.fetchPage, url: 'https://corp.example/' })
+  assert.equal(result.status, 'unconfirmed')
+  assert.equal(result.target, null)
+  assert.equal(source.reads.length, TARGET_LINK_MAX_PAGES)
+  assert.equal(result.scanned, TARGET_LINK_MAX_PAGES * 200)
+})
+
+test('an abort between pages stops further requests', async () => {
+  const controller = new AbortController()
+  const source = cursorInventory(subdomains(1000), 200)
+  const fetchPage = async (position) => {
+    const page = await source.fetchPage(position)
+    controller.abort()
+    return page
+  }
+  await assert.rejects(
+    resolveTargetByOrigin({ fetchPage, url: 'https://corp.example/', signal: controller.signal }),
+    (error) => error.name === 'AbortError',
+  )
+  assert.deepEqual(source.reads, [null])
+})
+
+test('a link that is not an http(s) URL is missing without a search', async () => {
+  const source = cursorInventory(subdomains(10), 200)
+  for (const url of ['host://corp.example', 'not a url', '']) {
+    const result = await resolveTargetByOrigin({ fetchPage: source.fetchPage, url })
+    assert.equal(result.status, 'missing', url)
+  }
+  assert.deepEqual(source.reads, [])
+})
+
+// A page read that fails (a server error, a refused cursor, a lost connection) proves nothing
+// about the target, so it is reported as a failed read, never as "missing".
+function failingInventory(rows, size, failAt, failure) {
+  const source = cursorInventory(rows, size)
+  return {
+    reads: source.reads,
+    fetchPage: async (position) => {
+      if (source.reads.length === failAt) {
+        source.reads.push(position)
+        throw failure
+      }
+      return source.fetchPage(position)
+    },
+  }
+}
+
+test('a page read that fails part way is "failed", never "missing"', async () => {
+  const cases = [
+    ['a server error', new Error('Target search failed (500)'), 'Target search failed (500)'],
+    ['a refused cursor', new Error('the cursor is malformed or was not issued by this server.'),
+      'the cursor is malformed or was not issued by this server'],
+    ['a lost connection', new TypeError('Failed to fetch'), 'Failed to fetch'],
+  ]
+  for (const [label, failure, message] of cases) {
+    const source = failingInventory([...subdomains(300), row('exact', 'https://corp.example')], 200, 1, failure)
+    const result = await resolveTargetByOrigin({ fetchPage: source.fetchPage, url: 'https://corp.example/' })
+    assert.equal(result.status, 'failed', label)
+    assert.equal(result.target, null, label)
+    assert.equal(result.error, message, label)
+    assert.equal(result.scanned, 200, `${label}: the rows read before the failure`)
+    assert.deepEqual(source.reads, [null, 'c200'], `${label}: no read after the failure`)
+  }
+})
+
+test('a first page that fails is "failed" with a readable reason', async () => {
+  const source = failingInventory(subdomains(10), 200, 0, 'not an Error')
+  const result = await resolveTargetByOrigin({ fetchPage: source.fetchPage, url: 'https://corp.example/' })
+  assert.equal(result.status, 'failed')
+  assert.equal(result.scanned, 0)
+  assert.equal(result.error, 'the search could not be completed')
+  assert.equal(readFailureText(new Error('  ')), 'the search could not be completed')
+  assert.equal(readFailureText(new Error('Target search failed (502). ')), 'Target search failed (502)')
+})
+
+test('a read that fails because the caller aborted is an abort, not a failed read', async () => {
+  const controller = new AbortController()
+  const fetchPage = async () => {
+    controller.abort()
+    throw new TypeError('Failed to fetch')
+  }
+  await assert.rejects(
+    resolveTargetByOrigin({ fetchPage, url: 'https://corp.example/', signal: controller.signal }),
+    (error) => error.name === 'AbortError',
+  )
 })
