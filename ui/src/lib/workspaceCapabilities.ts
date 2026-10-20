@@ -51,6 +51,14 @@ export function featureEnabled(feature: string): boolean {
     && policy.mode === 'managed' && policy.features?.[feature]?.state === 'enabled'
 }
 
+export function featureUnavailableReason(feature: string): string | undefined {
+  // The managed policy's own explanation for a feature it does not enable, if it gives one.
+  const policy = typeof window === 'undefined' ? undefined : window.__SHAKERSCAN_CAPABILITIES__
+  if (!policy || policy.schema !== 'shakerscan.workspace-capabilities/v1' || policy.mode !== 'managed') return undefined
+  const reason = policy.features?.[feature]?.reason
+  return typeof reason === 'string' && reason.trim() && reason.length <= 300 ? reason.trim() : undefined
+}
+
 export function managedTargetAuthorizationIsAutomatic(): boolean {
   // A managed deployment can record the target's standing authorization itself when active
   // work is submitted; it then reports target_authorization as unavailable because the

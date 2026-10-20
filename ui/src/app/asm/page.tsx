@@ -75,6 +75,7 @@ import {
   useToast,
 } from '@/components/ui'
 import { ApprovalReceiptField } from '@/components/ApprovalReceiptField'
+import { featureEnabled, featureUnavailableReason } from '@/lib/workspaceCapabilities'
 
 interface AsmFilters {
   [key: string]: string | number | undefined
@@ -178,6 +179,8 @@ function CoverageStat({ label, value, accent = '' }: { label: string; value: num
 const ROLLUP_GROUPS = 50
 const ROLLUP_MEMBERS = 200
 
+const UNINVENTORIED_SHOWN = 24
+
 interface RollupRow {
   target: Target
   root_domain: string
@@ -267,9 +270,24 @@ function RollupView({
     // Least covered first, within what is loaded.
     return flat.sort((a, b) => resolvedCoverage(a.target.asm_coverage) - resolvedCoverage(b.target.asm_coverage))
   }, [groups])
+  // Loaded targets with no inventory yet. Their per-target view is where "Discover endpoints"
+  // builds the first inventory, so the rollup must link to it rather than hide them.
+  const uninventoried = useMemo(() => {
+    const flat: RollupRow[] = []
+    for (const d of groups) {
+      if (d.root_target && !d.root_target.asm_coverage) flat.push({ target: d.root_target, root_domain: d.root_domain })
+      for (const s of d.subdomains) {
+        if (!s.asm_coverage) flat.push({ target: s, root_domain: d.root_domain })
+      }
+    }
+    return flat
+  }, [groups])
   const truncatedGroups = groups.filter((group) => group.subdomains_truncated).length
 
   const visible = domainFilter ? rows.filter((r) => r.root_domain === domainFilter) : rows
+  const visibleUninventoried = domainFilter
+    ? uninventoried.filter((r) => r.root_domain === domainFilter)
+    : uninventoried
 
   if (loading) return <TableSkeleton />
   if (error) return <ErrorState message="Failed to load attack-surface inventory." onRetry={load} />
@@ -310,7 +328,7 @@ function RollupView({
         ) : (
           <EmptyState
             message="No attack-surface inventory yet"
-            hint="Run a coverage scan on a target to populate its persistent endpoint inventory, then come back to track and close coverage over time."
+            hint="Open a target below and choose Discover endpoints (or run an active scan on it) to build its persistent endpoint inventory, then come back to track and close coverage over time."
           />
         )
       ) : (
@@ -364,6 +382,28 @@ function RollupView({
               })}
             </tbody>
           </table>
+        </div>
+      )}
+      {visibleUninventoried.length > 0 && (
+        <div data-testid="asm-uninventoried" className="space-y-2 border-t border-gray-800 pt-3">
+          <p className="text-xs text-gray-500">
+            {visibleUninventoried.length} loaded target{visibleUninventoried.length === 1 ? ' has' : 's have'} no
+            inventory yet. Open one to discover its endpoints.
+          </p>
+          <ul className="flex flex-wrap gap-2">
+            {visibleUninventoried.slice(0, UNINVENTORIED_SHOWN).map(({ target }) => (
+              <li key={target.id}>
+                <Button variant="secondary" size="sm" onClick={() => onSelect(target.id)}>
+                  {boundedTargetDisplay(target)}
+                </Button>
+              </li>
+            ))}
+          </ul>
+          {visibleUninventoried.length > UNINVENTORIED_SHOWN ? (
+            <p className="text-xs text-gray-600">
+              Showing {UNINVENTORIED_SHOWN}; filter by a domain to narrow the list.
+            </p>
+          ) : null}
         </div>
       )}
       {hasMore && (
@@ -539,6 +579,32 @@ function toAsmCheckFamilyOptions(
 }
 
 function ContinuousCard({ targetId, targetUrl }: { targetId: string; targetUrl: string }) {
+  // A managed deployment that does not offer background testing says so up front, before an
+  // approval receipt can be minted for a policy the server would refuse to save. The policy is
+  // client-only, so it is read after mount to keep the server markup identical.
+  const [available, setAvailable] = useState<boolean | null>(null)
+  useEffect(() => { setAvailable(featureEnabled('asm_continuous')) }, [])
+  if (available === null) return <Card className="p-4"><Skeleton className="h-6 w-48" /></Card>
+  if (!available) {
+    return (
+      <Card className="p-4 space-y-2" data-testid="asm-continuous-unavailable">
+        <div className="flex items-center gap-2">
+          <Repeat className="h-5 w-5 text-gray-500" />
+          <h2 className="text-sm font-medium text-gray-300">Continuous testing</h2>
+          <Badge className="bg-gray-700/50 text-gray-400">unavailable</Badge>
+        </div>
+        <p className="text-xs text-gray-500">
+          {featureUnavailableReason('asm_continuous')
+            || 'Background testing is not available on this deployment.'}{' '}
+          Use Discover endpoints and Test next endpoint batch to work through the inventory on demand.
+        </p>
+      </Card>
+    )
+  }
+  return <ContinuousPolicyCard targetId={targetId} targetUrl={targetUrl} />
+}
+
+function ContinuousPolicyCard({ targetId, targetUrl }: { targetId: string; targetUrl: string }) {
   const toast = useToast()
   const [policy, setPolicy] = useState<AsmPolicy | null>(null)
   const [cfg, setCfg] = useState<AsmConfig | null>(null)
@@ -1902,7 +1968,7 @@ function AsmContent() {
         <div>
           <h1 className="text-2xl font-bold text-white">Coverage</h1>
           <p className="text-sm text-gray-500">
-            How much of each target’s discovered endpoints have been security-tested — tracked over time (Continuous ASM).
+            How much of each target’s discovered endpoints have been security-tested — tracked over time.
           </p>
         </div>
       </div>
