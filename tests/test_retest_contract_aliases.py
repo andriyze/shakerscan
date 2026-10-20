@@ -2,6 +2,7 @@
 Tests for retest type normalization and inference coverage.
 """
 
+import json
 import os
 import sys
 
@@ -130,6 +131,27 @@ def test_replay_commands_for_exposed_file_are_plain_get():
         }
     )
     assert commands == ["curl -i -k 'https://example.com/id_rsa'"]
+
+
+def test_replay_commands_never_send_a_value_the_scanner_masked():
+    """Unit fixture: a SQL injection finding whose stored URL has its query value masked."""
+    masked_url = "http://sqli.fixture.invalid/product?id=%3Credacted%3E"
+    commands = build_replay_commands(infer_retest_inputs({
+        "title": "Potential SQL injection", "tool": "sqlmap", "finding_type": "sqli",
+        "target_url": "http://sqli.fixture.invalid", "finding_url": masked_url,
+        "evidence": json.dumps({"param": "id", "method": "GET", "url": masked_url}),
+    }))
+    # Replayed as stored it would send the mask marker; the payload variant sets the value itself.
+    assert len(commands) == 1 and "redacted" not in commands[0]
+    assert "/product?id=%27+OR+%271%27%3D%271" in commands[0]
+    unmasked = build_replay_commands(infer_retest_inputs({
+        "title": "Potential SQL injection", "tool": "sqlmap", "finding_type": "sqli",
+        "target_url": "http://sqli.fixture.invalid", "finding_url": "http://sqli.fixture.invalid/product?id=1",
+        "evidence": json.dumps({"param": "id"}),
+    }))
+    assert len(unmasked) == 2 and "/product?id=1" in unmasked[0]
+    exposed = build_replay_commands({"finding_type": "exposed_file", "original_url": "https://x.fixture.invalid/f?k=<redacted>"})
+    assert exposed == []
 
 
 def test_infer_retest_inputs_for_exposed_file_finding_row():

@@ -6,6 +6,7 @@ import asyncio
 
 from api.capabilities.open_redirect import probe_candidate, probe_url, redirect_candidates
 from api.finding_detail import build_finding_detail
+from api.finding_detail.common import q
 from api.scan.action_plan import ScanActionPlan
 from api.scan.finalizer import finalize_scan_report
 from api.scan.posture_findings import (
@@ -244,6 +245,25 @@ def test_a_proven_redirect_becomes_a_medium_finding_with_a_brief():
     assert brief["severity"]["reason"].startswith("A link on this trusted origin")
     not_proven = _probe(302, "/home")
     assert _report({"verify.redirect": [not_proven]}, capabilities={"verify.redirect": "redirect.verify_batch"})["findings"] == []
+
+
+def test_redirect_commands_send_the_canary_although_the_stored_url_is_masked():
+    """Unit fixture: a proven redirect, stored through the runtime receipt redactor, which masks
+    every query value of a URL, the probe's own canary included."""
+    import api.runtime  # noqa: F401 -- importing the runtime installs its receipt redactor
+    from api.runtime import receipts
+    sent = probe_url("https://app.example.test/go", "next")
+
+    async def send(_url):
+        return 302, {"Location": REDIRECT_CANARY_URL}
+    proof = asyncio.run(probe_candidate({"url": sent, "parameter": "next", "route_id": "r1"}, send))
+    stored = receipts.redact_receipt_value({**proof, "kind": "open_redirect_proof"})
+    assert stored["url"] == "https://app.example.test/go?next=%3Credacted%3E"
+    [finding] = _report({"verify.redirect": [stored]}, capabilities={"verify.redirect": "redirect.verify_batch"})["findings"]
+    brief = build_finding_detail(finding)
+    for step in ("reproduce", "verify"):
+        assert q(sent) in brief[step]["command"] and "redacted" not in brief[step]["command"]
+    assert brief["reproduce"]["expect"] == "location: " + REDIRECT_CANARY_URL
 
 
 def test_queries_the_deadline_cut_off_are_not_absent_records():

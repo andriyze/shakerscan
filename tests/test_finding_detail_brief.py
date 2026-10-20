@@ -117,6 +117,29 @@ def test_exposure_brief_lists_masked_secrets_and_links_stored_references():
     assert SECRET_VALUE not in json.dumps(brief) and "f1" not in json.dumps(brief["secrets"])
 
 
+def test_graphql_introspection_commands_send_the_introspection_document_and_look_for_the_schema():
+    """Unit fixture: a stored introspection finding; the receipt masked the request's query value."""
+    from api.capabilities.graphql_probe import INTROSPECTION_QUERY, graphql_request_url
+    from api.finding_detail.common import q
+    finding = {"tool": "shakerscan_exposure_probe", "severity": "low", "proof_state": "verified",
+               "url": "http://gql.fixture.invalid/graphql", "evidence": {
+                   "exposure_class": "graphql_introspection_enabled", "response_status": 200,
+                   "request_url": "http://gql.fixture.invalid/graphql?query=%3Credacted%3E",
+                   "content_type": "application/json", "matched_signature": '"__schema"'}}
+    brief = build_finding_detail(finding)
+    sent = graphql_request_url("http://gql.fixture.invalid/graphql", INTROSPECTION_QUERY)
+    for step in ("reproduce", "verify"):
+        command = brief[step]["command"]
+        assert q(sent) in command and "redacted" not in command
+        # Apollo Server refuses a "simple" GET without it (CSRF prevention); the probe sends it.
+        assert "Apollo-Require-Preflight: true" in command
+        assert '"__schema"' in command
+    assert "__schema" in brief["reproduce"]["expect"]
+    # With introspection off a GraphQL server still answers, usually 200 with an error.
+    assert "404" not in brief["verify"]["expect"] and "__schema" in brief["verify"]["expect"]
+    assert not any("404 or 403" in line for line in brief["expected"])
+
+
 def test_verbose_error_is_calibrated_low_but_a_proven_secret_keeps_high():
     plain = calibrate_finding({"tool": "shakerscan_exposure_probe", "severity": "medium", "evidence": {"exposure_class": "verbose_error_disclosure"}})
     assert plain["severity"] == "low"
