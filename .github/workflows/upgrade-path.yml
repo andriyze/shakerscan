@@ -6,7 +6,8 @@ name: Upgrade path
 # (scripts/upgrade_path_smoke.sh). Any 5xx fails. It upgrades from the stable channel and from the
 # newest published release between stable and the candidate, when that differs. The release
 # candidate calls this before certifying; a pull request that changes the gate runs it against the
-# newest candidate built on main.
+# newest candidate built on main, upgrading from the release before stable while main still
+# carries the promoted stable version.
 on:
   workflow_call:
     inputs:
@@ -50,11 +51,17 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           REPOSITORY: ${{ github.repository }}
+          # Empty for a pull request. Between releases its tree still carries the promoted stable
+          # version, so it upgrades from the newest published release below it. A release
+          # candidate passes its exact commit and must be newer than stable.
+          CANDIDATE_SHA: ${{ inputs.candidate_sha }}
         shell: bash
         run: |
+          between=()
+          [ -n "$CANDIDATE_SHA" ] || between=(--between-releases)
           published="$(gh release list -R "$REPOSITORY" --exclude-drafts --exclude-pre-releases \
             --limit 100 --json tagName --jq '.[].tagName')"
-          versions="$(python3 scripts/upgrade_path_probe.py baselines \
+          versions="$(python3 scripts/upgrade_path_probe.py baselines ${between[@]+"${between[@]}"} \
             --stable "$(tr -d '[:space:]' < install/STABLE_VERSION)" \
             --candidate "$(tr -d '[:space:]' < VERSION)" --published "$published" \
             | jq -Rnc '[inputs | select(test("^[0-9]+\\.[0-9]+\\.[0-9]+$"))]')"
