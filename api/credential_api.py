@@ -27,6 +27,7 @@ try:
         public_credential_configuration,
     )
     from runtime.capability_registry import CAPABILITY_REGISTRY
+    from runtime.scan_credentials import SCAN_SEMANTIC_CREDENTIAL_CAPABILITIES
 except ModuleNotFoundError:
     from api.runtime.credential_store import (
         CredentialProfileMetadata,
@@ -44,6 +45,7 @@ except ModuleNotFoundError:
         public_credential_configuration,
     )
     from api.runtime.capability_registry import CAPABILITY_REGISTRY
+    from api.runtime.scan_credentials import SCAN_SEMANTIC_CREDENTIAL_CAPABILITIES
 
 try:
     from secret_store import SecretStoreUnavailable, encrypt_secret, encryption_enabled
@@ -205,6 +207,26 @@ def _custom_headers(value: Mapping[str, SecretStr] | None) -> dict[str, str] | N
     return {str(name): secret.get_secret_value() for name, secret in value.items()}
 
 
+# Capabilities that consume an HTTP identity: Scan applies the profile to each of these per
+# action, and the bounded browser loads an established session for its navigation.
+HTTP_IDENTITY_CAPABILITIES = frozenset(
+    SCAN_SEMANTIC_CREDENTIAL_CAPABILITIES | {"browser.navigate", "browser.interact"}
+)
+_SESSION_LIFECYCLE_CAPABILITIES = (
+    "auth.session.establish", "auth.session.refresh", "auth.session.revoke",
+)
+# The browser capability in a blank HTTP allowlist. Navigation sends only read-only requests;
+# interaction stays an explicit choice.
+_DEFAULT_BROWSER_CAPABILITIES = ("browser.navigate",)
+
+
+def _requires_active_elevation(spec: Any) -> bool:
+    return (
+        spec.risk_tier in {"active", "mutation"}
+        or spec.required_approval in {"active_testing", "network_discovery"}
+    )
+
+
 def _safe_credential_capabilities(
     *, target_kind: str, auth_kind: str,
 ) -> tuple[str, ...]:
@@ -214,14 +236,21 @@ def _safe_credential_capabilities(
         return ()
     if auth_kind == "query_parameter":
         return ("collections.replay_safe",)
+    # A blank allowlist covers every read-only capability that uses the identity. Granting only
+    # http.request let a Scan sign in and then crawl and discover anonymously, because Scan
+    # applies the profile per action; the Hunt browser could not use its own session either.
+    # Active verifiers are never a default: they need explicit, approved elevation.
+    names = {"http.request", *_DEFAULT_BROWSER_CAPABILITIES} | {
+        name for name in SCAN_SEMANTIC_CREDENTIAL_CAPABILITIES
+        if name not in _SESSION_LIFECYCLE_CAPABILITIES
+    }
+    defaults = sorted(
+        spec.name for spec in map(CAPABILITY_REGISTRY.require, names)
+        if target_kind in spec.target_kinds and not _requires_active_elevation(spec)
+    )
     if auth_kind in {"form_login", "oauth_client_credentials", "oauth_password", "json_login"}:
-        return (
-            "auth.session.establish",
-            "auth.session.refresh",
-            "auth.session.revoke",
-            "http.request",
-        )
-    return ("http.request",)
+        return (*_SESSION_LIFECYCLE_CAPABILITIES, *defaults)
+    return tuple(defaults)
 
 
 def _credential_capabilities(
@@ -263,11 +292,7 @@ def _credential_capabilities(
         ssh_capability = spec.placement_requirements.get('credential_binding') == 'ssh' or spec.name.startswith('device.ssh.')
         if auth_kind.startswith('ssh_') != ssh_capability:
             raise HTTPException(status_code=422,detail=f"capability {name} cannot consume {auth_kind} credentials")
-        requires_active_elevation = (
-            spec.risk_tier in {"active", "mutation"}
-            or spec.required_approval in {"active_testing","network_discovery"}
-        )
-        if requires_active_elevation and not allow_active:
+        if _requires_active_elevation(spec) and not allow_active:
             raise HTTPException(
                 status_code=422,
                 detail=(
@@ -293,16 +318,17 @@ async def credential_capability_catalog(
             continue
         if not spec.placement_requirements.get("credentials_resolved_server_side") and not (
             auth_kind.startswith("ssh_") and spec.name.startswith("device.ssh.")
+        ) and not (
+            # Scan and the browser apply an HTTP identity per action; the allowlist must be
+            # able to name them.
+            auth_kind != "query_parameter" and spec.name in HTTP_IDENTITY_CAPABILITIES
         ):
             continue
         capabilities.append({
             "name": spec.name,
             "description": spec.description,
             "risk_tier": spec.risk_tier,
-            "requires_active_approval": (
-                spec.risk_tier in {"active", "mutation"}
-                or spec.required_approval in {"active_testing","network_discovery"}
-            ),
+            "requires_active_approval": _requires_active_elevation(spec),
             "default": spec.name in defaults,
         })
     return {
