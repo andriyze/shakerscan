@@ -58,7 +58,7 @@ jobs:
         run: |
           test -n "$SHAKERSCAN_SBOM_TOOLS"
           tar -czf sbom-toolchain.tar.gz -C "$SHAKERSCAN_SBOM_TOOLS" .
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
         with:
           name: pinned-sbom-validation-toolchain
@@ -73,7 +73,7 @@ jobs:
           git ls-tree -r HEAD > sbom-validation-inputs/source-tree.txt
           git archive --format=tar HEAD | gzip -n > sbom-validation-inputs/source.tar.gz
           (cd sbom-validation-inputs && sha256sum SOURCE_COMMIT source-tree.txt source.tar.gz > SHA256SUMS)
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
         with:
           name: unsigned-sbom-validation-inputs
@@ -139,7 +139,7 @@ jobs:
             --source-root "$RUNNER_TEMP/sbom-release-source" --tools "$SHAKERSCAN_SBOM_TOOLS" \
             --output engine-sbom-expanded
           python3 scripts/release_sbom.py verify --directory engine-sbom-expanded
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: unsigned-engine-sbom-smoke
           path: engine-sbom-expanded/
