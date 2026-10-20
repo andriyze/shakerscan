@@ -260,6 +260,7 @@ from scan.continuation import (
     placed_discovery_stage_receipts,
 )
 from scan.manifest_store import PostgresScanManifestStore
+from scan.inventory_harvest import scan_inventory_worklist
 from scan.continuation_rounds import (
     ContinuationRuntime,
     load_continuation_request_manifests,
@@ -13792,15 +13793,15 @@ async def process_scan_job(job_data: dict):
         # the per-target inventory (docs §16). Best-effort; never fails the scan.
         if target_id and not error:
             try:
-                worklist = (result.get('active_checks') or {}).get('active_worklist')
-                if worklist:
-                    # Drop spec/OPTIONS-derived phantom (404) endpoints before recording.
+                worklist, inventory_source = await scan_inventory_worklist(
+                    db_pool, result, scan_id=scan_id, target_url=str(target or ""), options=options)
+                if worklist:  # drop spec/OPTIONS-derived phantom (404) endpoints before recording
                     worklist = await asm_inventory.filter_reachable_worklist(target, worklist, options)
                 if worklist:
                     async with db_pool.acquire() as conn:
                         auth_state = asm_inventory.auth_state_from_options(options)
                         n = await asm_inventory.upsert_endpoints(
-                            conn, target_id, worklist, source='scan', auth_state=auth_state,
+                            conn, target_id, worklist, source=inventory_source, auth_state=auth_state,
                             scan_id=scan_id,
                         )
                     print(f"[{job_id[:8]}] ASM inventory: upserted {n} endpoints", flush=True)
