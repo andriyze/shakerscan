@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 import shlex
+import shutil
+import subprocess
 
 import pytest
 
@@ -65,6 +67,122 @@ def test_commands_quote_target_controlled_values():
     header = build_finding_detail({"tool": "http_baseline", "severity": "low", "url": "https://x.invalid/a'$(id)",
                                    "evidence": {"check": "missing_header_content-security-policy", "url": "https://x.invalid/a'$(id)", "header": "content-security-policy"}})
     assert "'\"'\"'$(id)" in header["reproduce"]["command"]
+
+
+# Path segments a hostile target can put in a link the scanner crawls. Each one makes a shell
+# that reads it unquoted run ``touch``; the last also breaks out of a single-quoted word.
+_SHELL_PAYLOADS = ("$(touch$IFS.shell-ran)", "`touch$IFS.shell-ran`", ";touch$IFS.shell-ran;", "'$(touch$IFS.shell-ran)")
+
+
+def _assert_safe_to_paste(command, tmp_path):
+    """Run a copied brief command as a terminal would, under bash and sh.
+
+    Only ``touch`` is on PATH, so curl, openssl, dig and the like are not found and nothing
+    reaches the network: the marker file appears only if a shell ran target-chosen syntax.
+    """
+    tools, work = tmp_path / "bin", tmp_path / "work"
+    tools.mkdir(exist_ok=True)
+    work.mkdir(exist_ok=True)
+    if not (tools / "touch").exists():
+        (tools / "touch").symlink_to(shutil.which("touch"))
+    env = {"PATH": str(tools), "HOME": str(tmp_path)}
+    for shell in (shutil.which("bash"), "/bin/sh"):
+        parsed = subprocess.run([shell, "-n", "-c", command], env=env, capture_output=True, text=True, timeout=20, check=False)
+        assert parsed.returncode == 0, (shell, command, parsed.stderr)
+        subprocess.run([shell, "-c", command], cwd=work, env=env, capture_output=True, text=True, timeout=20, check=False)
+        assert not (work / ".shell-ran").exists(), (shell, command)
+
+
+@pytest.mark.parametrize("payload", _SHELL_PAYLOADS)
+@pytest.mark.parametrize("tool", ["shakerscan_browser_proof", "dalfox", "request_xss_differential"])
+def test_xss_reproduce_keeps_a_target_chosen_url_inside_one_quoted_word(tool, payload, tmp_path):
+    url = f"http://app.fixture.invalid/{payload}/search?q=%3Credacted%3E"
+    brief = build_finding_detail({"tool": tool, "severity": "high", "proof_state": "verified", "cwe": "CWE-79", "url": url,
+        "evidence": {"parameter_name": "q", "injection_location": "query", "request_url": url, "url": url}})
+    assert brief["class"] == "injection.xss"
+    command = brief["reproduce"]["command"]
+    assert shlex.quote(url) in command
+    for line in command.splitlines():
+        if not line.startswith("#"):
+            assert all(word == url for word in shlex.split(line) if "shell-ran" in word), line
+    _assert_safe_to_paste(command, tmp_path)
+    # Stored query values are redacted: the URL locates the page, Retest replays the payload.
+    assert "marker payload" not in brief["reproduce"]["note"] and "Retest" in brief["reproduce"]["note"]
+
+
+def test_a_crawled_hostile_path_reaches_the_xss_brief_only_as_a_quoted_word(tmp_path):
+    # The real chain: proof preparation, the stored proof URL, the finalizer row, the brief.
+    from api.capabilities.browser import XSSBrowserProofAdapter, _proof_request_url
+    from api.runtime.models import TargetBinding
+    from api.scan.finalizer import _findings_for_action
+    from tests.test_scan_finalizer import _result_with_observation_count
+    from tests.test_scan_orchestrator import _action
+    target = TargetBinding(target_id="00000000-0000-4000-8000-0000000000aa", target_kind="web",
+                           canonical_host="app.fixture.invalid", allowed_origins=("http://app.fixture.invalid",),
+                           allowed_addresses=("10.0.0.5",))
+    prepared = XSSBrowserProofAdapter.prepare(
+        target=target, execution_url="http://app.fixture.invalid/$(touch$IFS.shell-ran)/search?q=x&page=1",
+        candidate_id="c" * 32, parameter_name="q")
+    action = _action("dast.xss_prove", 0, capability_name="xss.browser_prove_batch")
+    findings = _findings_for_action(_result_with_observation_count(action, 1), [{
+        "kind": "xss_browser_proof", "candidate_id": prepared.candidate_id, "parameter_name": prepared.parameter_name,
+        "injection_location": prepared.injection_location, "request_url": _proof_request_url(prepared.url),
+        "related_request_urls": [], "proof_state": "verified", "finding_verdict": "verified", "proof_producer": "shakerscan",
+        "evidence_type": "dom_execution", "technique": "headless_xss_dom", "payload_sha256": prepared.payload_sha256,
+        "marker_sha256": prepared.marker_sha256, "event_transcript": [], "dom_marker_executed": True,
+        "sanitized_screenshot_sha256": "0" * 64, "browser_build": "fixture", "same_origin": True,
+    }])
+    assert len(findings) == 1
+    stored = json.loads(json.dumps(findings[0], default=str))
+    brief = build_finding_detail(stored)
+    assert brief["class"] == "injection.xss"
+    command = brief["reproduce"]["command"]
+    assert shlex.quote(stored["evidence"]["request_url"]) in command
+    _assert_safe_to_paste(command, tmp_path)
+
+
+def _hostile_findings(payload):
+    """One finding per brief builder whose target-controlled fields carry ``payload``."""
+    url = f"https://app.fixture.invalid/{payload}/x"
+    host = f"app{payload}.fixture.invalid"
+    return {
+        "tls": _tls("tls_certificate_hostname_mismatch", requested_host=host, pinned_address=host, certificate={}),
+        "missing_header": {"tool": "http_baseline", "url": url, "evidence": {
+            "check": "missing_header_content-security-policy", "url": url, "header": "content-security-policy"}},
+        "weak_header": {"tool": "http_baseline", "url": url, "evidence": {
+            "check": "weak_header_content-security-policy", "url": url, "header": "content-security-policy", "observed_value": "default-src *"}},
+        "cookie": {"tool": "http_baseline", "url": url, "evidence": {
+            "check": "session_cookie_missing_httponly", "url": url, "cookie_name": f"sid{payload}"}},
+        "cors": {"tool": "http_baseline", "url": url, "evidence": {
+            "check": "cors_reflected_origin", "url": url, "path": f"/{payload}", "request_origin_header": f"https://{host}"}},
+        "open_redirect": {"tool": "http_baseline", "url": url, "evidence": {"check": "open_redirect", "url": url, "location": url}},
+        "dns": {"tool": "dns.inspect", "evidence": {"check": "spf_missing", "host": host, "query_name": host}},
+        "exposure": {"tool": "shakerscan_exposure_probe", "url": url, "evidence": {
+            "exposure_class": "environment_secret_file", "request_url": url, "response_status": 200}},
+        "sqli_query": {"tool": "shakerscan_sqli_proof", "proof_state": "verified", "url": url + "?id=1",
+                       "evidence": {"method": "GET", "field_path": "id"}},
+        "sqli_body": {"tool": "request_sqli_differential", "evidence": {"origin": url, "method": "POST", "field_path": f"id{payload}"}},
+        "nosqli": {"tool": "shakerscan_nosqli_verify", "url": url, "evidence": {
+            "method": "POST", "parameter": f"user{payload}", "operator": f"$ne{payload}"}},
+        "xss": {"tool": "shakerscan_browser_proof", "proof_state": "verified", "url": url, "evidence": {"request_url": url, "parameter_name": "q"}},
+        "bola": {"tool": "smart_authz", "url": url, "evidence": {"url": url}},
+        "anonymous_parity": {"tool": "shakerscan_authz_surface", "url": url, "evidence": {"url": url}},
+        "graphql": {"tool": "shakerscan_graphql_probe", "evidence": {"check": "field_suggestions", "endpoint": url, "misspelling": f"usr{payload}"}},
+        "takeover": {"tool": "subdomain_takeover", "evidence": {
+            "check": "subdomain_takeover", "host": host, "terminal": f"x{payload}.s3.amazonaws.com"}},
+        "template": {"tool": "nuclei", "url": url, "evidence": {"template_id": f"tpl{payload}", "matched_at": url}},
+    }
+
+
+@pytest.mark.parametrize("payload", _SHELL_PAYLOADS)
+@pytest.mark.parametrize("kind", list(_hostile_findings("x")))
+def test_no_brief_command_runs_shell_syntax_from_target_values(kind, payload, tmp_path):
+    brief = build_finding_detail(_hostile_findings(payload)[kind])
+    assert brief["class"] != "generic", kind  # the intended builder ran, not the fallback
+    commands = [brief[key]["command"] for key in ("reproduce", "verify") if brief.get(key)]
+    assert any("shell-ran" in command for command in commands), (kind, commands)
+    for command in commands:
+        _assert_safe_to_paste(command, tmp_path)
 
 
 def test_missing_header_uses_the_recorded_response_and_the_detected_server():

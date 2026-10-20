@@ -181,9 +181,13 @@ def build_xss(finding: Mapping[str, Any], evidence: Mapping[str, Any]) -> dict[s
             "A script running on this origin acts as the signed-in user: it can read pages, submit forms and send data elsewhere."
             + (" Session cookies without HttpOnly are directly readable." if verified else ""),
         ],
+        # The URL is target-chosen (a crawled path can hold $(...)), so it is never a bare shell
+        # line: pasted, the command only prints it.
         "reproduce": command(
-            f"# Open in a browser you are willing to test with:\n{url}" if url.startswith(("http://", "https://")) else "# Retest replays the stored request.",
-            note="The URL is the exact request that executed; it contains the scanner's harmless marker payload.",
+            f"# Open this URL in a browser you are willing to test with:\nprintf '%s\\n' {q(url)}"
+            if url.startswith(("http://", "https://")) else "# Retest replays the stored request.",
+            note="The page where the input executed. Stored evidence does not keep the values the scanner sent, "
+                 "so opening it does not replay the payload; Retest replays the stored request.",
         ),
         "fix": [
             f"Encode {parameter or 'the value'} for the context it is written into (HTML text, attribute, JavaScript or URL) when rendering.",
