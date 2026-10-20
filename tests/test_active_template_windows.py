@@ -21,7 +21,10 @@ import pytest
 from api.scan.action_plan import ScanAction, ScanActionPlan, ScanActionPlanCompiler
 from api.scan.finalizer import finalize_scan_report
 from api.scan.capability_result import CapabilityResultStatus
-from api.scan.external_process import ACTIVE_TEMPLATE_PLANNED_WINDOWS
+from api.scan.external_process import (
+    ACTIVE_TEMPLATE_PLANNED_GET_ONLY_WINDOWS,
+    ACTIVE_TEMPLATE_PLANNED_WINDOWS,
+)
 from tests.scan_round_fixtures import (
     admitted_round_fixture,
     appended_actions,
@@ -95,6 +98,27 @@ def test_a_two_endpoint_host_plans_all_39_windows_over_three_rounds(profile):
                 name: amount * count for name, amount in POSITION.items()
             }
 
+
+
+@pytest.mark.parametrize("profile", ["thorough", "deep"])
+def test_without_state_changing_http_a_host_plans_the_get_only_allowlists_windows(profile):
+    """Without state-changing authority every position runs the GET-only allowlist, which has
+    26 windows on the pinned bundle. Planning 39 held 13 positions (1,560 requests, 585 s) that
+    could only run nothing, and a deadline that cut them read the family as partial."""
+    planned = _plan_rounds(profile, endpoints=2, state_changing=False)
+    actions = [action for number in planned for action in planned[number]]
+    assert {action.capability_args["manifest_entries"] for action in actions} == {
+        ACTIVE_TEMPLATE_PLANNED_GET_ONLY_WINDOWS,
+    } == {26}
+    covered = sorted(
+        position for action in actions
+        for position in range(
+            action.capability_args["slice"]["start"],
+            action.capability_args["slice"]["start"] + action.capability_args["slice"]["count"],
+        )
+    )
+    assert covered == list(range(26))
+    assert all("state_changing_requests" not in action.requested_budget for action in actions)
 
 @pytest.mark.parametrize("profile", ["fast", "balanced"])
 def test_fast_and_balanced_plan_one_position_per_endpoint(profile):
@@ -318,3 +342,45 @@ def test_a_slice_whose_every_position_was_past_the_allowlist_is_not_a_zero_attem
     family = next(row for row in report["coverage"]["family_coverage"] if row["family"] == "nuclei_active")
     assert family["planned_candidates"] == 33
     assert family["attempted_candidates"] == 33
+
+
+def test_a_sharded_scan_reports_how_much_of_the_allowlist_its_shards_ran():
+    """Shards keep one position per endpoint, so each runs the allowlist's leading windows on
+    its own endpoints. The merged family row says how many windows ran, as a direct Scan's
+    report does: those of the shard that ran the most, of the largest allowlist."""
+    from tests.test_parallel_action_compiler import (
+        _assignments, _authority, _canonical_child_report, _children, _parent_assignment,
+        _projected_plans, _target,
+    )
+    from api.scan.parallel_compiler import (
+        ParallelActionPlanCompiler, merge_parallel_action_executions,
+        summarize_parallel_action_coverage,
+    )
+
+    execution, parent = _authority()
+    children = _children()
+    partition = ParallelActionPlanCompiler().compile(
+        parent_execution_plan=execution, parent_action_plan=parent, target_binding=_target(),
+        child_specs=children, strategy="scope",
+    )
+    plans = _projected_plans(partition, parent)
+    assignments = _assignments(children)
+    record = partition.record(
+        plans, child_work_assignments=assignments,
+        parent_work_assignment=_parent_assignment(assignments),
+    )
+    reports = {scan_id: _canonical_child_report(plan) for scan_id, plan in plans.items()}
+    for scan_id, windows in zip(sorted(plans)[1:], ({"run": 3, "total": 39}, {"run": 2, "total": 39})):
+        reports[scan_id]["coverage"] = {"family_coverage": [{
+            "family": "nuclei_active", "selected": True, "required": True,
+            "coverage_status": "complete", "batch_actions": 1, "planned_candidates": windows["run"],
+            "attempted_candidates": windows["run"], "template_windows": windows,
+        }]}
+    merged = merge_parallel_action_executions(
+        record, child_results=reports, child_statuses=dict.fromkeys(plans, "completed"),
+    )
+    family, = merged["family_coverage"]
+    assert family["template_windows"] == {"run": 3, "total": 39}
+    assert summarize_parallel_action_coverage(merged)["family_coverage"][0]["template_windows"] == {
+        "run": 3, "total": 39,
+    }

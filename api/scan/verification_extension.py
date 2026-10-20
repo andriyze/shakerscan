@@ -101,12 +101,28 @@ _UNFUNDED_STOP_REASONS = frozenset(reason.value for reason in BUDGET_EXHAUSTION_
 # a slice -- sqlmap's per-request delay and the slice's shared request gate -- divide its wall
 # by its request hold, so an extension holding the lane's whole share of wall for 480 requests
 # ran at 6.25 s per request (lab test targets, thorough; 12.5 s on deep) while its remaining
-# technique needed about 100 s. Such an extension holds the wall its remaining units need, but
-# never so little that it would send faster than this.
+# technique needed about 100 s. Such an extension holds the requests its remaining units need and
+# the wall they need, and never sends faster than this: its request holds are never more than
+# its wall paces at this rate, and it is never admitted on less wall than one attempt's floor of
+# requests needs at this rate (216 s for 480). One the round cannot give that much waits for a
+# later round rather than sending faster.
 SQLI_EXTENSION_MINIMUM_SECONDS_PER_REQUEST = (
     _BATCH_ATTEMPT_COSTS["sqli.verify_batch"]["tool_wall_seconds"]
     / (BATCH_ATTEMPT_REQUEST_HEADROOM * _BATCH_ATTEMPT_COSTS["sqli.verify_batch"]["http_requests"])
 )
+# The same pace in whole numbers: a first slice holds this many seconds for this many requests.
+_SQLI_PACE_WALL = int(_BATCH_ATTEMPT_COSTS["sqli.verify_batch"]["tool_wall_seconds"])
+_SQLI_PACE_REQUESTS = int(_BATCH_ATTEMPT_COSTS["sqli.verify_batch"]["http_requests"])
+
+
+def _sqli_paced_wall(requests: int) -> int:
+    """The least wall at which ``requests`` are paced no faster than a first slice."""
+    return -(-int(requests) * _SQLI_PACE_WALL // _SQLI_PACE_REQUESTS)
+
+
+def _sqli_paced_requests(wall: int) -> int:
+    """The most requests ``wall`` paces no faster than a first slice."""
+    return max(0, int(wall)) * _SQLI_PACE_REQUESTS // _SQLI_PACE_WALL
 
 
 def lane_round_wall_ceiling(execution_plan: Any) -> int | None:
@@ -660,10 +676,12 @@ def plan_verification_extensions(
     POST candidates, each wall-killed in technique B, were never extended at all.
 
     On a thorough or deep Scan (``budget_profile``, see ``contracts.budget_sufficiency``) a
-    request-bound SQLi extension holds the wall its remaining units need rather than the
-    lane's share, never paced faster than a first slice; and a slice whose holds funded no
-    attempt at all is extended once at the body floor of the request-body candidates it holds
-    (``body_positions``: the candidate manifest's digest and body indexes).
+    request-bound SQLi extension holds the requests its remaining units can send and the wall
+    they need rather than the lane's share, and is never paced faster than a first slice: one
+    the round's fair share cannot give the wall one attempt's floor needs at that pace waits for
+    a later round. A slice whose holds funded no attempt at all is extended once at the body
+    floor of the request-body candidates it holds (``body_positions``: the candidate manifest's
+    digest and body indexes).
     """
     sufficient = budget_sufficiency(budget_profile)
     actions = tuple(getattr(parent_plan, "actions", ()) or ())
@@ -714,6 +732,7 @@ def plan_verification_extensions(
                 "floor_wall": unit["tool_wall_seconds"],
                 "held_wall": unit["tool_wall_seconds"] * count,
                 "probe": False, "low": False, "request_need": None, "no_progress": False,
+                "need_sized": False,
             })
             continue
         if not _extendable_stop(action.capability_name, result):
@@ -795,22 +814,28 @@ def plan_verification_extensions(
             and "http_requests" in request_need
             and action.action_id in (stage_remaining_walls or {})
         )
+        floor_wall = int(math.ceil(held_wall * floor))
+        if need_sized:
+            # Never admitted on less wall than one attempt's floor of requests needs at a first
+            # slice's pace, in whole seconds: under a contended round its fair share fell to the
+            # next unit's 111 s while it still held 480 requests (3.9 requests per second).
+            floor_wall = max(
+                int(resume_wall) if request_need and resume_wall else floor_wall,
+                _sqli_paced_wall(int(request_need["http_requests"][0])),
+            )
         lanes.setdefault(action.capability_name, []).append({
             "index": index, "action": action, "reserved": reserved, "depth": depth,
             "need_wall": (
                 # Thorough and deep: the wall its remaining units are predicted to need, never
                 # paced faster than a first slice (both of the slice's pacers divide this wall
-                # by its request hold); the wall it does not spend returns to later rounds.
+                # by its request hold, which is what its remaining units can send); the wall it
+                # does not spend returns to later rounds.
                 min(
                     math.floor(held_wall * scale),
                     max(
                         math.ceil(held_wall * floor),
                         _with_slack(int(stage_remaining_walls[action.action_id])),
-                        math.ceil(round(
-                            SQLI_EXTENSION_MINIMUM_SECONDS_PER_REQUEST
-                            * BATCH_ATTEMPT_REQUEST_HEADROOM
-                            * int(request_need["http_requests"][1]), 6,
-                        )),
+                        _sqli_paced_wall(int(request_need["http_requests"][1])),
                     ),
                 ) if need_sized
                 # A request-bound slice needs holds, not time: its requests scale with its wall.
@@ -826,13 +851,14 @@ def plan_verification_extensions(
                     ),
                 )
             ),
-            "floor_wall": int(math.ceil(held_wall * floor)),
+            "floor_wall": floor_wall,
             "held_wall": held_wall,
             "probe": concluded == "probe",
             # Funded only from what the round's new work leaves (``reserved_for_new_work``).
             "low": concluded in {"probe", "degraded"},
             "request_need": request_need,
             "no_progress": no_progress,
+            "need_sized": need_sized,
         })
     planned_by_index: dict[int, dict[str, Any]] = {}
     # The residual is shared fairly between the lanes with work waiting, not handed to the
@@ -936,7 +962,19 @@ def plan_verification_extensions(
                             scale = 0.0
                         continue
                     scale = min(scale, room / amount)
-            if whole is None and scale * item["held_wall"] < item["floor_wall"]:
+            need_sized = whole is None and bool(item.get("need_sized"))
+            if need_sized:
+                # Its wall as granted, in whole seconds: ``held * (wall / held)`` can round a
+                # second away (a 420 s parent's 216 s became 215 s, faster than a first slice),
+                # and it is admitted only on its pace floor. Its request holds are what its
+                # remaining units can send, bounded by the residual and by that wall's
+                # first-slice pace. Scaling them with the wall instead left a slice whose holds
+                # were mostly wall (a body floor's 480 requests over 420 s) request-bound again.
+                paced_wall = math.floor(round(item["held_wall"] * scale, 6))
+                if paced_wall < item["floor_wall"]:
+                    continue
+                paced_requests = _sqli_paced_requests(paced_wall)
+            elif whole is None and scale * item["held_wall"] < item["floor_wall"]:
                 continue
             action = item["action"]
             budget = whole if whole is not None else {
@@ -945,10 +983,12 @@ def plan_verification_extensions(
                         max(0, remaining.get(name, 0)) if caps[name] is None
                         else max(0, min(remaining.get(name, 0), caps[name])),
                         max(needs[name][0], min(
-                            needs[name][1], math.floor(int(amount) * scale),
+                            needs[name][1],
+                            paced_requests if need_sized else math.floor(int(amount) * scale),
                         )),
                     )
                     if name in needs
+                    else paced_wall if need_sized and name == "tool_wall_seconds"
                     else int(math.floor(int(amount) * scale))
                     if name in _SCALED_DIMENSIONS else int(amount)
                 )

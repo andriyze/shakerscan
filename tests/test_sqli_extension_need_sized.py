@@ -9,7 +9,8 @@ its last technique needed, so it ran at 6.25 s per request: on lab test targets 
 extension spent 1,181-1,219 s on 189-195 requests that the first slice's pace would have sent
 in about 100 s. On thorough and deep the extension now holds what its remaining units are
 predicted to need, never paced faster than a first slice (0.5 s per request), so the
-target sees the first slice's load.
+target sees the first slice's load. That holds when several extensions share a round too: one
+the round cannot give a first slice's pace waits for a later round.
 
 These are planner fixtures: synthetic settled results, no scanner process.
 """
@@ -149,3 +150,149 @@ def test_an_extension_is_never_paced_faster_than_a_first_slice_nor_held_past_its
     assert wall >= pace * http, "never faster than 0.5 s per request"
     assert wall <= max(resume_wall, _with_slack(remaining_wall), math.ceil(pace * http))
     assert http == max(480, math.ceil(remaining_requests / BATCH_ATTEMPT_REQUEST_HEADROOM) + 1)
+
+
+# --- several extensions in one round --------------------------------------------------------
+
+BODY_PARENT = {"http_requests": 480, "state_changing_requests": 480, "tool_wall_seconds": 420}
+
+
+def _paced(budget):
+    """Never faster than a first slice: wall / http >= 180 / 400, in whole numbers."""
+    return budget["tool_wall_seconds"] * 400 >= budget["http_requests"] * 180
+
+
+def _round(count, *, profile_wall, residual_wall, reserved=RESERVED, remaining_requests=189,
+           remaining_wall=111):
+    actions, results = [], {}
+    for index in range(count):
+        action_id = f"verify.sqli.{index:03d}.r01"
+        actions.append(SimpleNamespace(
+            action_id=action_id, capability_name="sqli.verify_batch", stage="verify_candidates",
+            capability_args={
+                "slice": {"start": index, "count": 1}, "continuation_work_key": "verify.sqli",
+                "candidate_manifest_ref": {"kind": "candidate"},
+            },
+            dependencies=(), requested_budget=dict(reserved),
+        ))
+        consumed = {"http_requests": 285, "tool_wall_seconds": 136}
+        if "state_changing_requests" in reserved:
+            consumed["state_changing_requests"] = 285
+        results[action_id] = SimpleNamespace(
+            status=SimpleNamespace(value="partial"),
+            reason_code=SimpleNamespace(value="http_request_budget_exhausted"),
+            budget_reserved=dict(reserved), budget_consumed=consumed,
+        )
+    ids = [action.action_id for action in actions]
+    return plan_verification_extensions(
+        parent_plan=SimpleNamespace(actions=tuple(actions)), parent_results=results,
+        profile_limits={**THOROUGH, "tool_wall_seconds": profile_wall},
+        residual={"http_requests": 50_000, "state_changing_requests": 5_000,
+                  "tool_wall_seconds": residual_wall},
+        stage_resume_walls=dict.fromkeys(ids, 111),
+        stage_remaining_walls=dict.fromkeys(ids, remaining_wall),
+        stage_remaining_requests=dict.fromkeys(ids, remaining_requests),
+        final_round=True, budget_profile="thorough",
+    )
+
+
+@pytest.mark.parametrize("reserved", [RESERVED, BODY_PARENT], ids=["query-slice", "body-floor"])
+@pytest.mark.parametrize("count", [1, 3, 4, 5, 8, 12])
+@pytest.mark.parametrize(("profile_wall", "residual_wall"), [(10_800, 9_000), (3_600, 2_400), (3_600, 500)])
+def test_extensions_sharing_a_round_are_never_paced_faster_than_a_first_slice(
+    reserved, count, profile_wall, residual_wall,
+):
+    """A lane's round share is divided fairly, but never below one attempt's floor at a first
+    slice's pace (480 requests in 216 s). At a 3,600 s tool wall (a lowered duration) the share
+    is 900 s: eight extensions each held 480 requests on 112 s (3.9 requests per second);
+    now four run at 216 s and the rest wait for a later round."""
+    planned = _round(count, profile_wall=profile_wall, residual_wall=residual_wall, reserved=reserved)
+    share = min(profile_wall // 4, residual_wall)
+    mutations = 5_000 // 480 if "state_changing_requests" in reserved else count
+    assert len(planned) == min(count, share // 216, mutations)
+    for item in planned:
+        assert item["budget"]["tool_wall_seconds"] >= 216
+        assert _paced(item["budget"]), item["budget"]
+    assert sum(item["budget"]["tool_wall_seconds"] for item in planned) <= share
+
+
+@pytest.mark.parametrize("remaining_requests", [189, 500, 756, 900, 1_500])
+def test_a_body_floor_parents_extension_holds_what_its_units_can_send(remaining_requests):
+    """A slice held mostly wall (a body floor's 480 requests over 420 s): scaling its requests
+    with the wall it is granted held 480 of the 557-1,668 its units need, so it stopped on its
+    request hold again a round later. It now holds them, on the wall that paces them."""
+    remaining_wall = math.ceil(remaining_requests * 0.5) + 20
+    planned = plan_verification_extensions(
+        parent_plan=SimpleNamespace(actions=(_slice(),)),
+        parent_results={SLICE: SimpleNamespace(
+            status=SimpleNamespace(value="partial"),
+            reason_code=SimpleNamespace(value="http_request_budget_exhausted"),
+            budget_reserved=dict(BODY_PARENT),
+            budget_consumed={"http_requests": 470, "state_changing_requests": 470,
+                             "tool_wall_seconds": 240},
+        )},
+        profile_limits=THOROUGH, residual=dict(THOROUGH),
+        stage_resume_walls={SLICE: max(30, remaining_wall // 2)},
+        stage_remaining_walls={SLICE: remaining_wall},
+        stage_remaining_requests={SLICE: remaining_requests}, budget_profile="thorough",
+    )
+    budget = planned[0]["budget"]
+    need = max(480, math.ceil(remaining_requests / BATCH_ATTEMPT_REQUEST_HEADROOM) + 1)
+    assert budget["http_requests"] == budget["state_changing_requests"] == need
+    assert _paced(budget)
+    # 216 s for 480 requests, not 215: the granted wall is never rounded a second away.
+    if remaining_requests == 189:
+        assert budget["tool_wall_seconds"] == 216
+
+
+def test_the_round_compiler_never_squeezes_an_extension_under_its_pace():
+    """A thorough Scan at a lowered 3,600 s duration, its SQLi slices stopped on their request
+    holds with one 189-request unit left: every round's extensions keep a first slice's pace and
+    fit the lane's 900 s round share; ones that do not fit wait for a later round."""
+    from api.scan.capability_result import CapabilityResultReason, CapabilityResultStatus
+    from tests.scan_round_fixtures import (
+        admitted_round_fixture, appended_actions, compile_round, settle_lightly, settle_round,
+    )
+
+    fixture = admitted_round_fixture(
+        "thorough", endpoints=26, queries=24, families=("recon", "nuclei_passive", "sqli"),
+        advanced={"max_duration_seconds": 3_600, "max_state_changing_requests": 6_000},
+    )
+    assert fixture["execution_plan"].budget.max_tool_wall_seconds == 3_600
+
+    def request_bound(action):
+        if action.capability_name != "sqli.verify_batch":
+            return settle_lightly(action)
+        held = action.requested_budget
+        return (CapabilityResultStatus.PARTIAL, CapabilityResultReason.HTTP_REQUEST_BUDGET_EXHAUSTED, {
+            "http_requests": held["http_requests"] * 285 // 400,
+            "tool_wall_seconds": held["tool_wall_seconds"] * 136 // 180,
+        })
+
+    def one_unit_left(action):
+        if action.capability_name != "sqli.verify_batch":
+            return ()
+        return ({
+            "kind": "candidate_attempt", "attempt_id": action.action_id.encode().hex()[:64].ljust(64, "0"),
+            "candidate_id": "c0", "family": "sqli", "status": "partial",
+            "resume_wall_seconds": 111, "remaining_wall_seconds": 111, "remaining_requests": 189,
+        },)
+
+    settle_round(fixture)
+    extended = 0
+    for number in range(1, 9):
+        settle_round(fixture, request_bound, observations=one_unit_left)
+        parent_count = len(fixture["parent_plan"].actions)
+        appended = appended_actions(compile_round(fixture, number), parent_count)
+        extensions = [
+            action for action in appended
+            if action.capability_name == "sqli.verify_batch" and action.capability_args.get("extends")
+        ]
+        extended += len(extensions)
+        for action in extensions:
+            assert action.requested_budget["tool_wall_seconds"] >= 216
+            assert _paced(action.requested_budget), action.requested_budget
+        assert sum(action.requested_budget["tool_wall_seconds"] for action in extensions) <= 900
+        if any(action.action_id == "finalize.report" for action in appended):
+            break
+    assert extended >= 8

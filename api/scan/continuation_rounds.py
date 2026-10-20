@@ -514,6 +514,9 @@ def compile_continuation_round(
     )
     allocated_plan = allocate_scan_action_plan(
         continuation_raw, ContinuationBudgetCeiling(residual),
+        # A lane's slices are admitted first slice first, so a residual that funds one of
+        # them funds the one the round can append.
+        lane_order=sufficient,
     ).plan
     continuation_plan = select_continuation_actions(
         allocated_plan,

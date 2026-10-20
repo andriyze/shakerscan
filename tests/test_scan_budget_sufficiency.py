@@ -181,3 +181,119 @@ def test_the_lane_share_is_of_the_frozen_profile_wall_not_the_residual():
     assert {action.action_id for action in allocated.actions} >= {
         action.action_id for action in sweeps
     }
+
+
+def test_a_later_round_that_cannot_fund_a_mutation_hold_leaves_its_sweep_positions_unscheduled():
+    """Under state-changing authority every position runs the allowlist with state-changing
+    templates. A later round whose residual funds no mutation hold (240 left, under the
+    smallest tier's 480) appends no sweep: the floor shape would run the GET-only allowlist
+    where those windows were planned and read as scheduled. The report names the positions
+    unscheduled instead."""
+    import hashlib
+    from dataclasses import replace
+
+    from api.scan.finalizer import finalize_scan_report
+    from tests.test_scan_finalizer import _result_with_observation_count
+
+    fixture = admitted_round_fixture(
+        "thorough", endpoints=215, queries=0, body=False,
+        families=("recon", "nuclei_passive", "nuclei_active"),
+        advanced={"max_state_changing_requests": 4_200},
+    )
+    settle_round(fixture)
+    compile_round(fixture, 1)
+
+    def outcome(action):
+        if action.capability_name == "templates.active_batch":
+            return (CapabilityResultStatus.SUCCESS, None, dict(action.requested_budget))
+        return settle_lightly(action)
+
+    def attempts(action):
+        if action.capability_name != "templates.active_batch":
+            return ()
+        start, count = action.capability_args["slice"]["start"], action.capability_args["slice"]["count"]
+        return tuple({
+            "kind": "candidate_attempt", "family": "nuclei_active", "status": "success",
+            "attempt_id": hashlib.sha256(f"{action.action_id}:{position}".encode()).hexdigest(),
+            "candidate_id": f"endpoint-{position}",
+        } for position in range(start, start + count))
+
+    settle_round(fixture, outcome, observations=attempts)
+    residual = reconciled_continuation_ceiling(fixture["allocation"], fixture["parent_results"])
+    assert 0 < residual["state_changing_requests"] < 480
+    appended = []
+    for number in (2, 3, 4):
+        parent_count = len(fixture["parent_plan"].actions)
+        prepared = compile_round(fixture, number)
+        appended.extend(appended_actions(prepared, parent_count))
+        settle_round(fixture, outcome, observations=attempts)
+        if any(action.action_id == "finalize.report" for action in appended):
+            break
+    assert not [action for action in appended if action.capability_name == "templates.active_batch"]
+    actions = {action.action_id: action for action in fixture["parent_plan"].actions}
+    results = {
+        action_id: replace(
+            _result_with_observation_count(actions[action_id], len(fixture["observations"][action_id])),
+            budget_consumed=dict(result.budget_consumed), result_digest=None,
+        ) if fixture["observations"].get(action_id) else result
+        for action_id, result in fixture["parent_results"].items() if action_id != "finalize.report"
+    }
+    report = finalize_scan_report(
+        plan=fixture["parent_plan"], target_url="https://app.example.test", action_results=results,
+        observations=fixture["observations"], plan_revision=prepared.revision,
+    )
+    family = next(row for row in report["coverage"]["family_coverage"] if row["family"] == "nuclei_active")
+    assert family["coverage_status"] == "partial"
+    assert family["reason"] == "manifest_entries_unscheduled"
+    assert (family["manifest_candidates"], family["unscheduled_candidates"]) == (215, 182)
+    assert report["result"]["grade_reliable"] is False
+
+
+def test_a_round_admits_a_lanes_first_sweep_before_its_next_one():
+    """A large thorough application whose round-2 verifiers took part of the mutation residual:
+    it funds one balanced sweep, not two. The allocator admitted ``active.templates.001.r02``
+    before ``active.templates.r02`` (by id), skipped the first, and the round then dropped
+    both, because a lane's appended slices must be a contiguous prefix: no sweep ran in round
+    2. A lane's first slice is admitted first, so the round appends it."""
+    fixture = admitted_round_fixture(
+        "thorough", families=LAB_FAMILIES, endpoints=215, queries=14, body=3,
+    )
+
+    def outcome(action):
+        held = action.requested_budget
+        if action.capability_name == "templates.active_batch":
+            count = int(action.capability_args["slice"]["count"])
+            http = min(held.get("http_requests", 0), 60 * count)
+            return (CapabilityResultStatus.SUCCESS, None, {
+                "http_requests": http,
+                "state_changing_requests": http if held.get("state_changing_requests") else 0,
+                "tool_wall_seconds": min(held.get("tool_wall_seconds", 0), 30 * count),
+            })
+        share = 0.7 if action.capability_name in {"sqli.verify_batch", "xss.verify_batch"} else 0.5
+        return (CapabilityResultStatus.SUCCESS, None, {
+            name: int(amount * share) for name, amount in held.items()
+        })
+
+    settle_round(fixture, outcome)
+    compile_round(fixture, 1)
+    settle_round(fixture, outcome)
+    residual = reconciled_continuation_ceiling(fixture["allocation"], fixture["parent_results"])
+    parent_count = len(fixture["parent_plan"].actions)
+    appended = appended_actions(compile_round(fixture, 2), parent_count)
+    verifiers = sum(
+        action.requested_budget.get("state_changing_requests", 0) for action in appended
+        if action.capability_name in {"sqli.verify_batch", "xss.verify_batch"}
+    )
+    _size, balanced = batch_profile_shape(
+        "balanced", "templates.active_batch", allow_state_changing_http=True,
+    )
+    # Two balanced sweeps fit the residual alone, one beside the round's verifiers.
+    assert residual["state_changing_requests"] >= 2 * balanced["state_changing_requests"]
+    assert residual["state_changing_requests"] - verifiers < 2 * balanced["state_changing_requests"]
+    sweeps = _sweeps_of(appended)
+    assert [action.action_id for action in sweeps] == ["active.templates.r02"]
+    assert sweeps[0].capability_args["slice"] == {"start": 33, "count": 11}
+
+
+def _sweeps_of(actions):
+    return [action for action in actions if action.capability_name == "templates.active_batch"]

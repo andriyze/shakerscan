@@ -52,6 +52,7 @@ from .work_manifests import (
     ScanWorkManifestReference,
 )
 from .external_process import (
+    ACTIVE_TEMPLATE_PLANNED_GET_ONLY_WINDOWS,
     ACTIVE_TEMPLATE_PLANNED_WINDOWS,
     batch_attempt_floor,
     batch_attempt_capacity,
@@ -1842,14 +1843,19 @@ class ScanActionPlanCompiler:
             # one each endpoint's manifest ordinal picks: position o runs window o on endpoint
             # o % E (see action_adapter). The first continuation round plans the endpoints' own
             # positions exactly as before; later rounds plan the remaining windows. Parallel
-            # shards and verify Scans keep one position per endpoint.
+            # shards and verify Scans keep one position per endpoint. Without state-changing
+            # HTTP the allowlist is the GET-only one, which has fewer windows.
+            planned_windows = (
+                ACTIVE_TEMPLATE_PLANNED_WINDOWS if policy.allow_state_changing_http
+                else ACTIVE_TEMPLATE_PLANNED_GET_ONLY_WINDOWS
+            )
             work_count = (
-                ACTIVE_TEMPLATE_PLANNED_WINDOWS
+                planned_windows
                 if capability_name == "templates.active_batch"
                 and active_template_windows
                 and budget_sufficiency(execution_plan.budget_profile)
                 and not shard_authority
-                and 0 < entry_count < ACTIVE_TEMPLATE_PLANNED_WINDOWS
+                and 0 < entry_count < planned_windows
                 else entry_count
             )
             planned_entries = work_count if continuation_round >= 2 else entry_count

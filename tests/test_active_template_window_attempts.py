@@ -29,6 +29,7 @@ import scan.action_adapter as action_adapter_module
 from scan.action_adapter import DatabaseNeutralScanActionDispatcher, _batch_candidate_id
 from scan.action_plan import ScanAction, ScanActionPlan
 from scan.execution_backend import ActionLease
+from scan.external_process import ACTIVE_TEMPLATE_PLANNED_GET_ONLY_WINDOWS
 from scan.nuclei_execution import (
     ACTIVE_TEMPLATE_PLANNED_WINDOWS,
     ACTIVE_TEMPLATE_WINDOW_SIZE,
@@ -147,7 +148,7 @@ class _Host:
             dependencies=(), required=False, supporting=False, output_schema=spec.output_schema,
         )
 
-    def run(self, monkeypatch, bundle_dir, action, *, policy=AUTHORIZED):
+    def run(self, monkeypatch, bundle_dir, action, *, policy=AUTHORIZED, statuses=None):
         plan = ScanActionPlan(
             scan_id=self.scan_id, execution_plan_digest="a" * 64,
             target_binding_digest=TARGET.digest, actions=(action,),
@@ -162,7 +163,7 @@ class _Host:
                 "template_ids": payload["scanner_options"]["template_ids"],
             })
             return CapabilityAdapterResult(
-                status="success",
+                status=(statuses or {}).get(len(calls) - 1, "success"),
                 actual_budget={name: 1 for name in context.requested_budget},
                 observations=(), execution_started=True, parser_version="nuclei-jsonl/v1",
             )
@@ -296,6 +297,21 @@ def test_a_position_past_a_get_only_allowlist_runs_nothing(monkeypatch, bundle):
     assert _windows_record(receipts[1])["window_count"] == get_windows
 
 
+def test_only_windows_whose_attempt_finished_are_reported_run(monkeypatch, bundle):
+    """A window whose attempt timed out or failed did not run its templates; the slice's record
+    (and so ``nuclei_active.template_windows``) leaves it out."""
+    host = _Host(("/", "/a"))
+    receipt = host.run(
+        monkeypatch, bundle, host.action("active.templates.r02", start=2, count=4),
+        statuses={1: "timed_out", 2: "failed"},
+    )
+    assert [call["template_ids"] for call in host.calls[:4]] == [
+        active_template_window(_allowlist(bundle, state_changing=True), position).template_ids
+        for position in range(2, 6)
+    ]
+    assert _windows_record(receipt)["windows_run"] == [2, 5]
+
+
 def test_a_slice_whose_declared_endpoints_disagree_with_its_manifest_fails_closed(monkeypatch, bundle):
     host = _Host(("/", "/a"))
     action = host.action("active.templates.r02", start=2, count=4)
@@ -319,4 +335,21 @@ def test_the_planned_windows_match_the_pinned_bundle():
     state_changing = _allowlist(directory, state_changing=True).split(",")
     get_only = _allowlist(directory, state_changing=False).split(",")
     assert ACTIVE_TEMPLATE_PLANNED_WINDOWS == math.ceil(len(state_changing) / ACTIVE_TEMPLATE_WINDOW_SIZE)
-    assert math.ceil(len(get_only) / ACTIVE_TEMPLATE_WINDOW_SIZE) <= ACTIVE_TEMPLATE_PLANNED_WINDOWS
+    assert ACTIVE_TEMPLATE_PLANNED_GET_ONLY_WINDOWS == math.ceil(len(get_only) / ACTIVE_TEMPLATE_WINDOW_SIZE)
+    assert ACTIVE_TEMPLATE_PLANNED_GET_ONLY_WINDOWS <= ACTIVE_TEMPLATE_PLANNED_WINDOWS
+
+
+# The template bundle both planned window counts were measured on (1,146 permitted templates
+# with state-changing HTTP, 761 GET-only), in the scanner image built from it.
+MEASURED_BUNDLE_COMMIT = "2935d63aebd1f5f4a3c8e87c6e7f5c47f689b115"
+MEASURED_BUNDLE_SHA256 = "20aff7085b5c1771a8f7a28624009359a1cedab924c9ad7836078ca07e28de39"
+
+
+def test_the_planned_windows_were_measured_on_the_bundle_the_image_pins():
+    """The test above re-measures the windows, but only where the bundle is installed. A bundle
+    bump whose allowlist splits into more windows would leave the extra ones unplanned while the
+    family read complete, so the bump fails here, on any host, until they are re-measured."""
+    dockerfile = (Path(__file__).parents[1] / "scanner" / "Dockerfile").read_text()
+    assert f"ARG NUCLEI_TEMPLATES_COMMIT={MEASURED_BUNDLE_COMMIT}" in dockerfile
+    assert f"ARG NUCLEI_TEMPLATES_SHA256={MEASURED_BUNDLE_SHA256}" in dockerfile
+    assert (ACTIVE_TEMPLATE_PLANNED_WINDOWS, ACTIVE_TEMPLATE_PLANNED_GET_ONLY_WINDOWS) == (39, 26)

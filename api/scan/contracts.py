@@ -341,6 +341,47 @@ def bind_scan_scope_receipt(
     return replace(contract, policy=policy, execution_plan=plan)
 
 
+def _tool_wall_follows_duration(profile: str, advanced: Mapping[str, Any] | None) -> bool:
+    """Whether a lowered duration also lowers this Scan's tool wall (thorough and deep only)."""
+    advanced = advanced if isinstance(advanced, Mapping) else {}
+    return (
+        budget_sufficiency(profile)
+        and advanced.get("max_duration_seconds") is not None
+        and advanced.get("max_tool_wall_seconds") is None
+    )
+
+
+def bind_scan_fan_out(
+    contract: ResolvedScanContract, advanced: Mapping[str, Any] | None,
+) -> ResolvedScanContract:
+    """The contract of a Scan that fans out into parallel children, from its resolved one.
+
+    A lowered duration lowers a thorough or deep Scan's tool wall because the Scan runs its
+    actions one at a time (``_resolve_budget``). A parallel parent's tool wall is divided among
+    children that run at the same time, each under the whole duration, so lowering it cut every
+    child's share by the number of children: a thorough parent at 3,600 s with four endpoint
+    children gave each about 720 s instead of about 2,160 s. Such a parent keeps the profile's
+    tool wall, exactly as it resolved before the duration lowered it; every other limit, the
+    policy and the families are unchanged. ``advanced`` is the limits the contract resolved
+    from, so an explicit tool-wall limit is never raised.
+    """
+    if not _tool_wall_follows_duration(contract.budget_profile, advanced):
+        return contract
+    profile_wall = int(BUDGET_PROFILES[contract.budget_profile].max_tool_wall_seconds)
+    if int(contract.budget.max_tool_wall_seconds) >= profile_wall:
+        return contract
+    budget = replace(contract.budget, max_tool_wall_seconds=profile_wall)
+    plan = ScanExecutionPlan(
+        policy=contract.policy,
+        budget_profile=contract.budget_profile,
+        budget=budget,
+        family_preset=contract.execution_plan.family_preset,
+        requested_families=contract.execution_plan.requested_families,
+        resolved_families=contract.execution_plan.resolved_families,
+    )
+    return replace(contract, budget=budget, execution_plan=plan)
+
+
 def _resolve_budget(
     profile: str,
     advanced: Mapping[str, Any] | None,
@@ -377,15 +418,12 @@ def _resolve_budget(
         base[key] = value
     if "max_hosts" not in advanced:
         base["max_hosts"] = min(base["max_hosts"], base["max_endpoints"])
-    if (
-        budget_sufficiency(profile)
-        and advanced.get("max_duration_seconds") is not None
-        and advanced.get("max_tool_wall_seconds") is None
-    ):
-        # Tool wall never exceeds total wall. Actions run one at a time, so a lowered
+    if _tool_wall_follows_duration(profile, advanced):
+        # Tool wall never exceeds total wall. A Scan's actions run one at a time, so a lowered
         # duration left at the profile's tool wall planned about three times the work the
         # deadline lets run, and the deadline then killed it (lab Scans at 3,600 s planned
-        # 10,800 s). An explicit tool-wall limit is kept as given.
+        # 10,800 s). An explicit tool-wall limit is kept as given. A Scan that fans out into
+        # parallel children keeps the profile's tool wall (``bind_scan_fan_out``).
         base["max_tool_wall_seconds"] = min(
             base["max_tool_wall_seconds"], base["max_duration_seconds"],
         )

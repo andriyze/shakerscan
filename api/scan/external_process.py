@@ -185,6 +185,10 @@ _TEMPLATE_ATTEMPT_SHARE_MULTIPLE = 3
 #: allowlist has fewer windows, and an attempt past them runs nothing
 #: (``nuclei_execution.active_template_window_applies``).
 ACTIVE_TEMPLATE_PLANNED_WINDOWS = 39
+#: The same without state-changing HTTP: the GET-only allowlist's ceil(761 / 30) windows on the
+#: pinned bundle. A Scan without that authority plans only these, so it neither holds budget
+#: for positions that would run nothing nor reads partial when a deadline cuts them.
+ACTIVE_TEMPLATE_PLANNED_GET_ONLY_WINDOWS = 26
 #: The record an active-template slice ends with: the windows its attempts finished and how
 #: many the allowlist has. The report unions them into ``nuclei_active.template_windows``.
 ACTIVE_TEMPLATE_WINDOWS_RECORD_KIND = "active_template_windows"

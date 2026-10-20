@@ -24,7 +24,11 @@ import pytest
 
 from api.scan.action_plan import slice_body_attempt_floor
 from api.scan.external_process import batch_attempt_floor
-from api.scan.verification_extension import EXTENDS_ARG, plan_verification_extensions
+from api.scan.verification_extension import (
+    EXTENDS_ARG,
+    _zero_attempt_floor,
+    plan_verification_extensions,
+)
 from tests.scan_round_fixtures import (
     admitted_round_fixture,
     appended_actions,
@@ -170,6 +174,27 @@ def test_the_floor_extension_funds_as_many_body_attempts_as_the_residual_does():
         [action], results, bodies=frozenset({0, 1, 2}),
         residual={**THOROUGH, "state_changing_requests": 479},
     ) == ()
+
+
+def test_how_many_body_attempts_a_floor_extension_asks_for_is_what_the_residual_funds():
+    """Before the round's lanes share anything, a floor extension asks only for the body
+    attempts the Scan's residual requests, mutations and the lane's round share fund."""
+    action = _floor_slice(count=3)
+    floor = batch_attempt_floor("sqli.verify_batch", body_candidate=True)
+
+    def attempts(*, wall_ceiling=2_700, **remaining):
+        return _zero_attempt_floor(
+            action, _refused(), body_positions=(DIGEST, frozenset({0, 1, 2})),
+            remaining={"http_requests": 60_000, "state_changing_requests": 6_000, **remaining},
+            wall_ceiling=wall_ceiling,
+        )
+
+    assert attempts() == (floor, 3)
+    assert attempts(state_changing_requests=960) == (floor, 2)
+    assert attempts(state_changing_requests=479) is None
+    assert attempts(http_requests=959) == (floor, 1)
+    assert attempts(wall_ceiling=839) == (floor, 1)
+    assert attempts(wall_ceiling=419) is None
 
 
 def test_a_slice_of_query_candidates_or_one_that_sent_traffic_is_not_floor_extended():

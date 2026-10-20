@@ -167,6 +167,23 @@ def _allocation_priority(action: ScanAction) -> int:
     return 7
 
 
+def _lane_position(action_id: str) -> tuple[str, int]:
+    """(lane, occurrence) of an action: a lane's additional slices come after its first.
+
+    A continuation round names a lane's first slice ``<lane>.rNN`` and its next ones
+    ``<lane>.001.rNN``, ``<lane>.002.rNN`` ..., which sort before the first by id.
+    """
+    match = _BATCH_OCCURRENCE_SUFFIX.search(action_id)
+    if match is None:
+        return action_id, 0
+    occurrence = match.group(0)
+    round_suffix = _ROUND_SUFFIX.search(occurrence)
+    return (
+        action_id[:match.start()] + (round_suffix.group(0) if round_suffix else ""),
+        int(occurrence[1:4]),
+    )
+
+
 def allocate_scan_action_plan(
     plan: ScanActionPlan,
     budget: ScanBudget | ScanBudgetLimits,
@@ -174,6 +191,7 @@ def allocate_scan_action_plan(
     assign_residual_to_finalizer: bool = False,
     require_finalizer: bool = True,
     reserved_budget: Mapping[str, int] | None = None,
+    lane_order: bool = False,
 ) -> ScanBudgetAllocation:
     """Admit the complete worst-case graph before any action may execute.
 
@@ -183,6 +201,12 @@ def allocate_scan_action_plan(
     in the immutable plan with a stable skip reason. Residual authority remains
     visibly unallocated; explicit continuation holds stay in that residual authority.
     The pure finalizer never receives target-traffic authority.
+
+    With ``lane_order`` (continuation rounds of thorough and deep Scans) a lane's later slices
+    that rank with its first slice are admitted right after it, in order. By id ``.001``
+    came first: when the residual funded one slice of a lane, that one was admitted, the first
+    was skipped, and the round then dropped both (a lane's appended slices must be a contiguous
+    prefix), so a large target's second-round template sweep never ran.
     """
     limits = budget.ledger_limits()
     reserved = {
@@ -220,10 +244,18 @@ def allocate_scan_action_plan(
             if allocated[name] + reserved.get(name, 0) + amount > limits[name]
         }
 
-    for action in sorted(
-        plan.actions,
-        key=lambda item: (_allocation_priority(item), item.action_id),
-    ):
+    priorities = {action.action_id: _allocation_priority(action) for action in plan.actions}
+
+    def admission_order(item: ScanAction) -> tuple[int, str, int]:
+        priority = priorities[item.action_id]
+        if lane_order:
+            lane, occurrence = _lane_position(item.action_id)
+            if occurrence and priorities.get(lane) == priority:
+                # Right after the lane's first slice; every other action keeps its place.
+                return priority, lane, occurrence
+        return priority, item.action_id, 0
+
+    for action in sorted(plan.actions, key=admission_order):
         failed_dependencies = tuple(
             dependency
             for dependency in action.dependencies
