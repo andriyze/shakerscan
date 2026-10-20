@@ -15,6 +15,7 @@ from capture.flows import CaptureBatch, CaptureClose, CaptureCreate, CaptureDrop
 from scanner_tools.request_collections import RequestSelector, select_requests
 from targets.asset_migration import BoundConnectionPool, migrate_target_assets
 from targets.asset_inputs_migration import migrate_asset_inputs
+from targets.router import normalize_target_url
 from tests.test_target_asset_migration_postgres import database
 from tests.test_target_asset_inputs_postgres import prepare, encryption
 
@@ -318,6 +319,32 @@ def test_target_url_lookup_treats_like_wildcards_literally(monkeypatch):
         await conn.execute("INSERT INTO targets(url,name) VALUES('https://app_1.example.test.other.test','Twin')")
         status, cut = await detail(capture_router.create_browser_capture(CaptureCreate(target_url="https://app_1.example.test/")))
         assert status == 409 and cut["error"] == "ambiguous_target" and "by id" in cut["message"]
+    run(monkeypatch, body)
+
+
+def test_target_url_lookup_resolves_an_ipv6_literal_target(monkeypatch):
+    async def body(conn, target):
+        url, _note = normalize_target_url("http://[2001:db8::1]:8080/")
+        assert url == "http://[2001:db8::1]:8080"  # stored bracketed, as target creation stores it
+        await conn.execute("UPDATE targets SET url=$2 WHERE id=$1", target, url)
+        ipv4 = await conn.fetchval("INSERT INTO targets(url,name) VALUES('http://192.0.2.10:8080','V4') RETURNING id")
+        spellings = ("http://[2001:db8::1]:8080", "http://[2001:db8::1]:8080/login", "http://[2001:DB8:0::1]:8080/")
+        for number, spelling in enumerate(spellings):
+            created = await capture_router.create_browser_capture(
+                CaptureCreate(target_url=spelling, name=f"IPv6 capture {number}"))
+            assert created["target_id"] == str(target), spelling
+            assert created["allowed_origins"] == ["http://[2001:db8::1]:8080"]
+        status, missing = await detail(capture_router.create_browser_capture(
+            CaptureCreate(target_url="http://[2001:db8::2]:8080")))
+        assert status == 404 and "[2001:db8::2]" in missing
+        created = await capture_router.create_browser_capture(CaptureCreate(target_url="http://192.0.2.10:8080/"))
+        assert created["target_id"] == str(ipv4)
+        monkeypatch.setattr(capture_store, "_TARGET_MATCH_LIMIT", 1)
+        await conn.execute("INSERT INTO targets(url,name) VALUES('http://[2001:db8::1]:9090','Other port')")
+        status, cut = await detail(capture_router.create_browser_capture(
+            CaptureCreate(target_url="http://[2001:db8::1]:8080")))
+        assert status == 409 and cut["error"] == "ambiguous_target"
+        assert "start with http://[2001:db8::1];" in cut["message"]
     run(monkeypatch, body)
 
 
