@@ -3082,10 +3082,12 @@ class DatabaseNeutralScanActionDispatcher:
         wall_deadline = time.monotonic() + max(1, int(action.requested_budget.get("tool_wall_seconds") or 1))
         errors: list[str] = []
         refused_probes: list[str] = []
+        # The transport's error code for each probe that got no HTTP answer.
+        unanswered: list[str] = []
         attempted = resumed = 0
         ordinal = start * 1000
 
-        async def send(url: str) -> tuple[int | None, Mapping[str, Any] | None]:
+        async def send(url: str) -> tuple[int | None, Mapping[str, Any] | None, str | None]:
             nonlocal ordinal
             ordinal += 1
             request = ReplayRequest(
@@ -3101,7 +3103,9 @@ class DatabaseNeutralScanActionDispatcher:
             if result.error_code:
                 errors.append(str(result.error_code))
             await heartbeat()
-            return result.status_code, result.response_headers
+            return result.status_code, result.response_headers, (
+                "timeout" if getattr(result, "timed_out", False) else result.error_code
+            )
 
         for candidate in candidates:
             attempt_id = hashlib.sha256(
@@ -3125,6 +3129,21 @@ class DatabaseNeutralScanActionDispatcher:
             ):
                 break
             proof = await probe_redirect_candidate(candidate, send)
+            if proof["proof_state"] == "unproven":
+                # No HTTP answer: the parameter was never tested. A gap, never "not proven",
+                # and not checkpointed, so a resumed batch probes it again.
+                no_answer = proof["inconclusive_reason"]
+                probe_timed_out = no_answer == CapabilityResultReason.TIMED_OUT.value
+                unanswered.append("timeout" if probe_timed_out else "transport_error")
+                observations.extend(({
+                    "kind": "candidate_attempt", "attempt_id": attempt_id,
+                    "candidate_id": attempt_id[:32], "family": "open_redirect",
+                    "status": "timed_out" if probe_timed_out else "partial", "proof_state": "unproven",
+                    "verdict": "inconclusive", "inconclusive_reason": no_answer,
+                    "budget_consumed": {"http_requests": 1},
+                }, proof))
+                attempted += 1
+                continue
             refused = proof.get("inconclusive_reason")
             if refused:
                 refused_probes.append(f"{refused}:{proof.get('refusal_status') or 0}")
@@ -3158,21 +3177,25 @@ class DatabaseNeutralScanActionDispatcher:
         )
         # Every candidate attempted, but the target refused some probes: partial for that
         # reason (a credential request named before a plain refusal), never "not proven".
+        # Probes that got no answer are partial for theirs: a request that timed out is
+        # `timed_out`; a failed connection, like any failed attempt, is `adapter_failed`.
         stated = [stopped_by] if partial else (
-            [batch_stop_reason(refused_probes, unattempted=0)] if refused_probes else []
+            [batch_stop_reason(refused_probes, unattempted=0)] if refused_probes
+            else [batch_stop_reason(unanswered, unattempted=0)] if unanswered else []
         )
         return self._receipt(
-            action, status="partial" if partial or refused_probes else "success",
+            action, status="partial" if partial or refused_probes or unanswered else "success",
             parser_version=OPEN_REDIRECT_PARSER_VERSION, started_at=started_at,
             observations=tuple(observations),
             errors=tuple(stated + refused_probes[:5] + errors[:20]), consumed=consumed,
-            partial=partial or bool(refused_probes),
+            partial=partial or bool(refused_probes or unanswered),
             timed_out=partial and stopped_by == CapabilityResultReason.TIMED_OUT.value,
             redacted_execution={
                 "action_id": action.action_id, "manifest_digest": manifest_digest,
                 "slice": {"start": start, "count": count},
                 "candidate_count": len(candidates), "attempted_count": attempted,
                 "resumed_count": resumed, "unattempted_count": unattempted,
+                "unanswered_count": len(unanswered),
                 "checkpoint_mode": "after_each_candidate",
             },
         )

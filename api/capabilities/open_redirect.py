@@ -6,6 +6,8 @@ Each is requested once with GET, that one parameter set to an out-of-scope, non-
 URL (``https://shakerscan-redirect-probe.invalid/``), and redirects are NOT followed: the canary
 is never contacted. A redirect whose ``Location`` names the canary host is the proof; any other
 answer (the application ignored the value, kept the user on-site, refused it) is not a finding.
+A probe that got no answer at all (timed out, connection failed) tested nothing: it is
+``unproven`` and inconclusive, and the caller leaves it unsettled.
 
 Pure functions plus one bounded loop over an injected ``send``; scope, pinning and the archive
 are the caller's transport's.
@@ -70,12 +72,30 @@ def _location(headers: Mapping[str, Any] | None) -> str:
     return ""
 
 
-SendResult = tuple[int | None, Mapping[str, Any] | None]
+# ``(status, headers)``, optionally followed by the transport's error code (``timeout``,
+# ``transport_error``) for a request that got no HTTP answer (status ``None``).
+SendResult = tuple[int | None, Mapping[str, Any] | None] | tuple[int | None, Mapping[str, Any] | None, str | None]
 
 
 async def probe_candidate(candidate: Mapping[str, str], send: Callable[[str], Awaitable[SendResult]]) -> dict[str, Any]:
     """One request; a ``open_redirect_proof`` observation when Location names the canary."""
-    status, headers = await send(candidate["url"])
+    status, headers, *transport_error = await send(candidate["url"])
+    if not isinstance(status, int):
+        # No HTTP answer (the request timed out or the connection failed): the parameter was
+        # never tested, so the probe is unproven and inconclusive, not "not an open redirect".
+        return {
+            "kind": "open_redirect_proof",
+            "url": candidate["url"],
+            "parameter": candidate["parameter"],
+            "route_id": candidate.get("route_id"),
+            "status": None,
+            "location": "",
+            "proof_state": "unproven",
+            "finding_verdict": "inconclusive",
+            "inconclusive_reason": (
+                "timed_out" if transport_error and transport_error[0] == "timeout" else "transport_error"
+            ),
+        }
     location = _location(headers)
     proven = isinstance(status, int) and status in _REDIRECT_STATUSES and redirects_to_canary(location)
     # A refused probe (401/403, a redirect to sign-in) never reached the redirect logic: the
