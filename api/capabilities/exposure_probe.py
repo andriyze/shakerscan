@@ -291,9 +291,13 @@ _METRICS_TYPE_RE = re.compile(r"(?m)^# TYPE \S")
 # only the first two missed an exposed directory whose links this module was
 # already parsing correctly. Every one of them names the listed path, so the
 # title must: a page merely titled "Directory listing" (or "Index of
-# Enterprises") is an ordinary page, not a server-generated index.
+# Enterprises") is an ordinary page, not a server-generated index. Tomcat's
+# DefaultServlet brackets the path ("Directory Listing For [/files/]"), some
+# servers put a colon or a non-breaking space before it, and FTP-backed
+# indexes name a URL instead of a path.
 _LISTING_RE = re.compile(
-    r"(?i)<title>\s*(?:index of|directory listing for|listing directory)\s+/"
+    r"(?i)<title>\s*(?:index of|directory listing for|listing directory)"
+    r"\s*:?(?:\s|&nbsp;)*\[?(?:/|[a-z][a-z0-9+.-]{0,15}://)"
 )
 # Endpoint identity is metadata, not proof of sensitive disclosure. The vendor
 # media type is specific; ordinary HAL `_links` and generic health `status`

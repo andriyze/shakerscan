@@ -45,9 +45,15 @@ HEADERS: Mapping[str, tuple[str, str, str]] = {
 }
 
 
-# A CSP source expression copied from the observed policy into an example: keywords, schemes,
-# hosts and wildcard hosts only, so a target-chosen value cannot break out of the snippet.
-_CSP_SOURCE = re.compile(r"'[a-z0-9-]{1,40}'|[a-z0-9*][a-z0-9.*:/_-]{0,200}", re.IGNORECASE)
+# A frame-ancestors source worth copying from the observed policy into an example: 'none',
+# 'self', or one named host with its scheme. Scheme sources (https:, data:) and wildcard hosts
+# (*.com) let many sites frame the page, and anything else could break out of the snippet, so
+# those fall back to the recommended 'self'.
+_SAFE_FRAME_SOURCE = re.compile(
+    r"'(?:none|self)'|https?://[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?"
+    r"(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?){0,20}(?::\d{1,5})?/?",
+    re.IGNORECASE,
+)
 
 
 def _observed_frame_ancestors(policy: str) -> str:
@@ -56,7 +62,7 @@ def _observed_frame_ancestors(policy: str) -> str:
         tokens = part.split()
         if tokens and tokens[0].lower() == "frame-ancestors":
             sources = tokens[1:]
-            if sources and "*" not in sources and all(_CSP_SOURCE.fullmatch(token) for token in sources):
+            if sources and all(_SAFE_FRAME_SOURCE.fullmatch(token) for token in sources):
                 return " ".join(sources)
             return ""
     return ""

@@ -15,6 +15,9 @@ import urllib.parse
 import pytest
 
 from api.capabilities.graphql_probe import (
+    ALIAS_COUNT,
+    DUPLICATE_FIELD_COUNT,
+    GRAPHQL_REQUEST_HEADERS,
     INTROSPECTION_QUERY,
     RESERVED_PROBE_FIELDS,
     alias_query,
@@ -96,3 +99,33 @@ def test_commands_are_get_requests_like_the_probe():
     args = shlex.split(brief["reproduce"]["command"])
     assert "-G" in args and ENDPOINT in args
     assert urllib.parse.urlsplit(ENDPOINT).path == "/graphql"
+
+
+def _headers(command: str) -> list[str]:
+    args = shlex.split(command)
+    return [args[index + 1] for index, arg in enumerate(args) if arg == "-H"]
+
+
+@pytest.mark.parametrize("check,evidence", [
+    ("alias_limit_absent", {"alias_count": 100}),
+    ("duplicate_field_limit_absent", {"duplicate_count": 100}),
+    ("field_suggestions", {"misspelling": "usr", "suggested_fields": ["user"]}),
+])
+def test_commands_send_the_probe_headers(check, evidence):
+    brief = _probe(check, **evidence)
+    expected = [f"{name}: {value}" for name, value in GRAPHQL_REQUEST_HEADERS]
+    assert "Apollo-Require-Preflight: true" in expected
+    for key in ("reproduce", "verify"):
+        assert _headers(brief[key]["command"]) == expected
+
+
+@pytest.mark.parametrize("check,key,default,query", [
+    ("alias_limit_absent", "alias_count", ALIAS_COUNT, alias_query),
+    ("duplicate_field_limit_absent", "duplicate_count", DUPLICATE_FIELD_COUNT, duplicate_field_query),
+])
+@pytest.mark.parametrize("stored", [5000, 0, -3, "many"])
+def test_a_count_the_probe_never_sends_falls_back_to_the_probe_count(check, key, default, query, stored):
+    brief = _probe(check, **{key: stored})
+    command = brief["reproduce"]["command"]
+    assert _document(command) == query(default)
+    assert len(command) < 2000

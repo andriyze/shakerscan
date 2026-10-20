@@ -49,24 +49,52 @@ def test_a_page_titled_like_a_listing_is_not_a_listing(title):
     assert classify_exposure(path="/", status=200, headers=HTML, body=body.encode()) is None
 
 
+# Tomcat DefaultServlet (listings=true) brackets the path in its title.
+TOMCAT_LISTING = (
+    b"<!doctype html><html lang=\"en\"><head><title>Directory Listing For [/files/]</title></head>"
+    b"<body><h1>Directory Listing For [/files/]</h1><table><tr><td><a href=\"/files/notes.txt\">"
+    b"<tt>notes.txt</tt></a></td><td><tt>0.1 kb</tt></td></tr></table><h3>Apache Tomcat/9.0.80</h3>"
+    b"</body></html>"
+)
+
+
+@pytest.mark.parametrize("title", [
+    "Index of /files/", "Directory listing for /files/", "listing directory /files/",
+    "Directory Listing For [/files/]", "Index of: /files/", "Index of&nbsp;/files/", "Index of ftp://ftp.fixture.invalid/pub/",
+])
+def test_server_generated_listing_titles_still_match(title):
+    body = f"<html><head><title>{title}</title></head><body><a href='notes.txt'>notes.txt</a></body></html>"
+    signature = classify_exposure(path="/files/", status=200, headers=HTML, body=body.encode())
+    assert signature is not None and signature.exposure_class == "directory_listing"
+
+
+def test_a_tomcat_directory_listing_is_a_listing():
+    signature = classify_exposure(path="/files/", status=200, headers=HTML, body=TOMCAT_LISTING)
+    assert signature is not None and signature.exposure_class == "directory_listing"
+    assert signature.matched_pattern == "autoindex_title"
+    assert "Directory Listing For [/files/]" in redacted_exposure_excerpt(TOMCAT_LISTING, signature)
+
+
 def test_the_landing_page_is_not_a_listing_but_the_index_it_links_to_is():
     assert classify_exposure(path="/", status=200, headers=HTML, body=LANDING_PAGE) is None
     listing = classify_exposure(path="/files/", status=200, headers=HTML, body=AUTOINDEX)
     assert listing is not None and listing.exposure_class == "directory_listing"
 
 
-@pytest.mark.parametrize("path,body,content_type,klass", [
-    ("/files/", AUTOINDEX, "text/html", "directory_listing"),
-    ("/server-status", APACHE_STATUS, "text/html", "metrics_endpoint"),
-    ("/server-status", APACHE_AUTO, "text/plain", "metrics_endpoint"),
-    ("/nginx_status", NGINX_STATUS, "text/plain", "metrics_endpoint"),
-    ("/metrics", METRICS, "text/plain", "metrics_endpoint"),
-    ("/id_rsa", b"-----BEGIN " b"OPENSSH PRIVATE KEY-----\nb3Blbn...", "text/plain", "private_key_material"),
-    ("/graphiql", DVGA_GRAPHIQL, "text/html", "graphql_ide_exposure"),
+@pytest.mark.parametrize("path,body,content_type,klass,name", [
+    ("/files/", AUTOINDEX, "text/html", "directory_listing", "autoindex_title"),
+    ("/server-status", APACHE_STATUS, "text/html", "metrics_endpoint", "apache_server_status"),
+    ("/server-status", APACHE_AUTO, "text/plain", "metrics_endpoint", "apache_server_status_auto"),
+    ("/nginx_status", NGINX_STATUS, "text/plain", "metrics_endpoint", "nginx_stub_status"),
+    ("/metrics", METRICS, "text/plain", "metrics_endpoint", "prometheus_exposition"),
+    ("/id_rsa", b"-----BEGIN " b"OPENSSH PRIVATE KEY-----\nb3Blbn...", "text/plain", "private_key_material", None),
+    ("/graphiql", DVGA_GRAPHIQL, "text/html", "graphql_ide_exposure", None),
 ])
-def test_signatures_are_names_and_excerpts_still_start_at_the_match(path, body, content_type, klass):
+def test_signatures_are_names_and_excerpts_still_start_at_the_match(path, body, content_type, klass, name):
     signature = classify_exposure(path=path, status=200, headers={"Content-Type": content_type}, body=body)
     assert signature is not None and signature.exposure_class == klass
+    if name is not None:
+        assert signature.matched_pattern == name
     assert not any(token in signature.matched_pattern for token in REGEX_SYNTAX), signature.matched_pattern
     if signature.exposure_class in {"directory_listing", "metrics_endpoint"}:
         excerpt = redacted_exposure_excerpt(body, signature)

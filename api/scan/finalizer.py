@@ -122,6 +122,27 @@ _TRAFFIC_BUDGETS = frozenset({
     "http_requests", "state_changing_requests", "browser_actions",
     "tcp_ports_attempted", "hosts_attempted",
 })
+
+
+def active_verifier_attempted_nothing(
+    capability_name: str, status: Any, consumed: Mapping[str, Any], candidate_count: int,
+) -> bool:
+    """An active verifier that finished with candidates waiting but sent no traffic.
+
+    The report and the coverage explanation both read zero-attempt work through this one
+    predicate, so the page and the stored report always name the same actions.
+    """
+    status_value = getattr(status, "value", status)
+    return (
+        capability_name in _ACTIVE_VERIFIER_CAPABILITIES
+        and candidate_count > 0
+        and status_value in {"success", "partial"}
+        and not any(
+            int(amount or 0) > 0 for name, amount in consumed.items() if name in _TRAFFIC_BUDGETS
+        )
+    )
+
+
 # Context collection is retained in the action ledger but cannot improve or
 # weaken vulnerability coverage, assurance, score, or grade.
 _INFORMATIONAL_CAPABILITIES = frozenset({"infrastructure.inspect"})
@@ -2877,15 +2898,11 @@ def finalize_scan_report(
     zero_attempt_actions = [
         action.action_id
         for action in coverage_actions
-        if action.capability_name in _ACTIVE_VERIFIER_CAPABILITIES
-        and candidate_count > 0
-        and action_results[action.action_id].status in {
-            CapabilityResultStatus.SUCCESS, CapabilityResultStatus.PARTIAL,
-        }
-        and not any(
-            int(amount) > 0
-            for name, amount in action_results[action.action_id].budget_consumed.items()
-            if name in _TRAFFIC_BUDGETS
+        if active_verifier_attempted_nothing(
+            action.capability_name,
+            action_results[action.action_id].status,
+            action_results[action.action_id].budget_consumed,
+            candidate_count,
         )
     ]
     placement_gaps = [

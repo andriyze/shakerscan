@@ -760,3 +760,18 @@ def test_zero_attempt_verifiers_are_the_ones_the_report_counts():
     coverage = explanation["coverage"]
     assert coverage["active_zero_attempt_actions"] == ["verify.nosqli.r01"]
     assert "active_verifier_zero_attempts" in coverage["grade_reliability"]["reasons"]
+
+
+def test_the_page_and_the_report_share_one_zero_attempt_predicate():
+    from api.scan import explanation as explanation_module
+    from api.scan import finalizer
+    from api.scan.capability_result import CapabilityResultStatus
+
+    assert explanation_module.active_verifier_attempted_nothing is finalizer.active_verifier_attempted_nothing
+    predicate = finalizer.active_verifier_attempted_nothing
+    assert predicate("nosqli.verify_batch", CapabilityResultStatus.SUCCESS, {"http_requests": 0}, 3)
+    assert predicate("graphql.verify_batch", "partial", {"cpu_seconds": 4}, 1)
+    assert not predicate("nosqli.verify_batch", "success", {"http_requests": 0}, 0)
+    assert not predicate("nosqli.verify_batch", "success", {"browser_actions": 1}, 3)
+    assert not predicate("nosqli.verify_batch", "failed", {"http_requests": 0}, 3)
+    assert not predicate("infrastructure.inspect", "success", {}, 3)

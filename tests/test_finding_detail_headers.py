@@ -73,16 +73,31 @@ def test_weak_csp_check_expects_a_header_not_prose_and_keeps_the_stricter_framin
     assert "frame-ancestors 'none'" in json.dumps(brief["examples"])
 
 
-def test_weak_csp_without_framing_or_with_any_origin_framing_recommends_self():
-    for observed in ("default-src *", "default-src 'self'; frame-ancestors *"):
-        brief = build_finding_detail(_weak("content-security-policy", observed, CSP_PROSE))
-        assert "frame-ancestors 'self'" in json.dumps(brief["examples"])
+@pytest.mark.parametrize("framing", [
+    "", "frame-ancestors *", "frame-ancestors https:", "frame-ancestors http:", "frame-ancestors data:",
+    "frame-ancestors *.com", "frame-ancestors https://*.example.com", "frame-ancestors 'self' https:",
+    "frame-ancestors app.example.com",
+])
+def test_weak_csp_with_permissive_or_no_framing_recommends_self(framing):
+    observed = f"default-src *; {framing}" if framing else "default-src *"
+    brief = build_finding_detail(_weak("content-security-policy", observed, CSP_PROSE))
+    pasted = json.dumps(brief["examples"]) + json.dumps(brief["fix"]) + json.dumps(brief["expected"])
+    assert "frame-ancestors 'self'" in json.dumps(brief["examples"])
+    if framing:
+        assert framing not in pasted
+
+
+def test_named_framing_origins_are_kept():
+    observed = "default-src *; frame-ancestors 'self' https://portal.example.com:8443"
+    brief = build_finding_detail(_weak("content-security-policy", observed, CSP_PROSE))
+    assert "frame-ancestors 'self' https://portal.example.com:8443" in json.dumps(brief["examples"])
 
 
 def test_a_hostile_framing_directive_is_not_copied_into_an_example():
     observed = "default-src *; frame-ancestors 'none'\" always; return 200 \"x"
     examples = json.dumps(build_finding_detail(_weak("content-security-policy", observed, CSP_PROSE))["examples"])
-    assert "return 200" not in examples
+    assert "return 200" not in examples and "frame-ancestors 'none'" not in examples
+    assert "frame-ancestors 'self'" in examples
 
 
 @pytest.mark.parametrize("header,observed,expected", [

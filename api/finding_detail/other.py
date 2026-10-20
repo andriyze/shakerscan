@@ -20,8 +20,9 @@ except ModuleNotFoundError:  # package import in host-side tests
     )
 
 _CVE = re.compile(r"^CVE-\d{4}-\d{4,}$")
-# The probe's own counts bound what a copyable command repeats (and keep it whole: a command is
-# cut at 2,000 characters); a stored count outside them did not come from this probe.
+# The probe's own counts bound what a copyable command repeats; a stored count outside them did
+# not come from this probe. At those counts the command stays whole (commands are cut at 2,000
+# characters) for any endpoint up to about 360 characters.
 _MAX_REPEATED_FIELDS = max(ALIAS_COUNT, DUPLICATE_FIELD_COUNT)
 _LIMITS_FIX = "Limit {what}, depth and cost per query (graphql-armor {plugin} / maxDepth / costLimit, or your server's validation rules)."
 
