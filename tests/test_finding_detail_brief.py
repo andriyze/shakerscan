@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import shlex
+import urllib.parse
 
 import pytest
 
@@ -413,3 +414,40 @@ def test_body_proved_nosqli_brief_keeps_the_json_body_request():
     assert words[words.index("-X") + 1] == "POST"
     assert json.loads(words[words.index("-d") + 1]) == {"password": {"$ne": None}}
     assert "req.body.username" in brief["examples"][0]["code"]
+
+
+@pytest.mark.parametrize("method", ["GET", "HEAD"])
+def test_nosqli_proved_from_a_stored_get_request_keeps_the_json_body(method):
+    # A stored request (request_ref_id) is replayed with the operator in its body whatever the method.
+    brief = build_finding_detail({"tool": "shakerscan_nosqli_verify", "severity": "high", "proof_state": "verified",
+        "url": "/api/users", "title": "Verified NoSQL injection", "target_url": "http://nosqli.fixture.invalid",
+        "evidence": {"method": method, "field_path": "username", "operator": "$ne", "request_ref_id": "ref-1",
+                     "request_class": "safe_read", "repetitions": 2}})
+    words = shlex.split(brief["reproduce"]["command"])
+    assert words[words.index("-X") + 1] == method
+    assert json.loads(words[words.index("-d") + 1]) == {"username": {"$ne": None}}
+    assert "req.body.username" in brief["examples"][0]["code"]
+
+
+def test_query_proved_nosqli_brief_replaces_the_field_already_in_the_query():
+    brief = build_finding_detail({"tool": "shakerscan_nosqli_verify", "severity": "high", "proof_state": "verified",
+        "url": "http://nosqli.fixture.invalid/api/users?username=bob&page=2", "title": "Verified NoSQL injection",
+        "evidence": {"method": "GET", "field_path": "username", "operator": "$ne", "request_ref_id": None,
+                     "repetitions": 2}})
+    sent = next(word for word in shlex.split(brief["reproduce"]["command"]) if word.startswith("http"))
+    query = urllib.parse.parse_qsl(urllib.parse.urlsplit(sent).query, keep_blank_values=True)
+    assert sorted(query) == [("page", "2"), ("username[$ne]", "x")]
+
+
+@pytest.mark.parametrize("url,param", [
+    ("http://sqli-path.fixture.invalid/products/1*", "#1*"),
+    ("http://sqli-path.fixture.invalid/products/{int}", "path_2"),
+])
+def test_body_sqli_brief_does_not_reinterpret_the_path(url, param):
+    # A non-GET point is a body field: the brief shows the stored location and offers no path command.
+    brief = build_finding_detail({"tool": "sqlmap", "severity": "high", "proof_state": "likely_vulnerable",
+        "url": url, "title": "Potential SQL injection",
+        "evidence": {"url": url, "param": param, "method": "POST"}})
+    where = {fact["label"]: fact["value"] for fact in brief["where"]}
+    assert where["Endpoint"] == f"POST {url}" and where["Parameter"] == param
+    assert "%27" not in json.dumps(brief.get("reproduce"))
