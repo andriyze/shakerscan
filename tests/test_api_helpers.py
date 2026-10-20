@@ -21274,11 +21274,24 @@ class _StopAtBinding(Exception):
     pass
 
 
+class _NoopAdmissionTransaction:
+    """Unit fixture: scan admission opens one transaction; these fakes record nothing in it."""
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *_args):
+        return False
+
+
 def test_scan_submission_passes_frozen_inferred_origins_to_target_binding(monkeypatch):
     """Drive submission through the binding construction, as the smoke Scan does."""
     target_id = uuid.uuid4()
 
     class Conn:
+        def transaction(self):  # admission runs in one transaction
+            return _NoopAdmissionTransaction()
+
         async def fetchrow(self, *_args):
             return {"id": target_id}
 
@@ -21443,6 +21456,9 @@ def _scan_submission_approval(monkeypatch, *, credential_profile_ids=None, appro
         return ["93.184.215.14"]
 
     class Conn:
+        def transaction(self):  # admission runs in one transaction
+            return _NoopAdmissionTransaction()
+
         async def fetchrow(self, query, *args):
             if query == "SELECT id FROM targets WHERE url = $1":
                 return {"id": target_id}
@@ -21533,6 +21549,9 @@ def test_a_submitted_thorough_scan_keeps_the_profile_tool_wall_only_when_it_fans
         return ["93.184.215.14"]
 
     class Conn:
+        def transaction(self):  # admission runs in one transaction
+            return _NoopAdmissionTransaction()
+
         async def fetchrow(self, query, *args):
             if query == "SELECT id FROM targets WHERE url = $1":
                 return {"id": target_id}
