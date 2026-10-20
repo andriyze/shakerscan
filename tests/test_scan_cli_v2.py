@@ -250,20 +250,13 @@ def test_scan_cli_prints_no_notice_without_a_fallback(monkeypatch, capsys):
     assert "Notice:" not in capsys.readouterr().out
 
 
-def _run_with_authorization(monkeypatch, argv, *, authorization):
-    """Like _run, but answers the target registration and standing-authorization reads."""
+def _run_recording(monkeypatch, argv):
     calls = []
 
     def request(url, *, payload=None, idempotency_key=None):
         calls.append((url, payload, idempotency_key))
         if url.endswith("/scan/contracts"):
             return _contract()
-        if url.endswith("/targets") and payload is not None:
-            return {"id": "11111111-1111-1111-1111-111111111111", "url": payload["url"],
-                    "status": "already_exists"}
-        if url.endswith("/authorization"):
-            return {"target_id": "11111111-1111-1111-1111-111111111111",
-                    "authorization": authorization}
         return {"scan_id": "00000000-0000-0000-0000-000000000001", "status": "queued"}
 
     monkeypatch.setattr(scan_cli, "_request_json", request)
@@ -275,43 +268,27 @@ def _run_with_authorization(monkeypatch, argv, *, authorization):
     return result, calls
 
 
-def test_state_changing_scan_reuses_the_targets_standing_authorization(monkeypatch, capsys):
-    result, calls = _run_with_authorization(monkeypatch, [
-        "https://example.com", "--active-testing", "--confirm-active",
-        "--allow-state-changing-http", "--collection-selection", "selection-1", "--json",
-    ], authorization={"approval_receipt_id": "standing-receipt-1", "standing": True})
+@pytest.mark.parametrize("authority", [
+    ["--active-testing", "--confirm-active", "--allow-state-changing-http",
+     "--collection-selection", "selection-1"],
+    ["--credential-profile", "profile-1"],
+])
+def test_a_scan_without_a_receipt_is_left_to_the_servers_standing_authorization(
+    monkeypatch, capsys, authority,
+):
+    """The CLI refused before any request ("the selected authority requires --approval-receipt").
+
+    Admission already resolves the target's standing authorization when no receipt is passed,
+    exactly as for New Scan in the UI, and refuses with its own reason when it does not cover the
+    request. The CLI registers nothing itself, so a refused scan leaves no target behind.
+    """
+    result, calls = _run_recording(monkeypatch, ["https://example.com", *authority, "--json"])
 
     assert result == 0, capsys.readouterr().err
-    urls = [url for url, _payload, _key in calls]
-    assert "http://api.test:8080/targets/11111111-1111-1111-1111-111111111111/authorization" in urls
-    submitted = calls[-1]
-    assert submitted[0] == "http://api.test:8080/scans"
-    assert submitted[1]["approval_receipt_id"] == "standing-receipt-1"
-
-
-def test_state_changing_scan_without_standing_authorization_says_how_to_get_one(monkeypatch, capsys):
-    result, calls = _run_with_authorization(monkeypatch, [
-        "https://example.com", "--active-testing", "--confirm-active",
-        "--allow-state-changing-http",
-    ], authorization=None)
-
-    assert result == 1
-    error = capsys.readouterr().err
-    assert "/targets/11111111-1111-1111-1111-111111111111/authorization" in error
-    assert "--approval-receipt" in error
-    assert not any(url.endswith("/scans") for url, _payload, _key in calls)
-
-
-def test_credentialed_scan_without_a_receipt_names_the_credential_receipt(monkeypatch, capsys):
-    result, calls = _run_with_authorization(monkeypatch, [
-        "https://example.com", "--credential-profile", "profile-1",
-    ], authorization={"approval_receipt_id": "standing-receipt-1"})
-
-    assert result == 1
-    error = capsys.readouterr().err
-    assert "credential" in error and "--approval-receipt" in error
-    assert "/arsenal/approvals" in error
-    assert not any(url.endswith("/scans") for url, _payload, _key in calls)
+    assert [url for url, _payload, _key in calls] == [
+        "http://api.test:8080/scan/contracts", "http://api.test:8080/scans",
+    ]
+    assert "approval_receipt_id" not in calls[-1][1]
 
 
 def test_scan_help_word_prints_help_and_submits_nothing(monkeypatch, capsys):

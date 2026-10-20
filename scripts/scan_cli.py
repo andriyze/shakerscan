@@ -78,9 +78,10 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--approval-receipt", metavar="UUID",
         help=(
-            "Target-bound approval for active authority. Without credentials it defaults to the "
-            "target's standing authorization (GET /targets/{id}/authorization); credential use "
-            "needs a credential-tier receipt from POST /arsenal/approvals"
+            "Target-bound approval receipt. Without one the server uses the target's standing "
+            "authorization (GET /targets/{id}/authorization), as New Scan in the UI does, and "
+            "refuses with its reason when that does not cover the request; credential use may "
+            "need a credential-tier receipt from POST /arsenal/approvals"
         ),
     )
     parser.add_argument(
@@ -314,12 +315,6 @@ def _payload(args: argparse.Namespace) -> dict[str, Any]:
                 "--idempotency-key must start with an alphanumeric character and "
                 "use only letters, numbers, underscore, dot, colon, or hyphen"
             )
-    if args.credential_profile and not args.approval_receipt:
-        raise ScanCliError(
-            "credential use requires a credential-tier approval receipt: create one for this target "
-            "with POST /arsenal/approvals (an instance may reserve that to administrators) and pass "
-            "--approval-receipt"
-        )
     if args.node_id and args.placement != "auto":
         raise ScanCliError("--node-id cannot be combined with --placement local or remote")
     if args.shards and args.execution not in {"parallel", "coverage"}:
@@ -396,34 +391,6 @@ def _payload(args: argparse.Namespace) -> dict[str, Any]:
     }
 
 
-def _needs_standing_authorization(args: argparse.Namespace) -> bool:
-    return bool(
-        (args.allow_state_changing_http or args.network_discovery)
-        and not args.approval_receipt and not args.credential_profile
-    )
-
-
-def _standing_authorization_receipt(api_url: str, target: str) -> str:
-    """The target's standing authorization receipt, as New Scan in the UI uses it.
-
-    Registration is the canonical find-or-create, so an existing target is reused. Nothing is
-    authorized here: a target without a standing authorization is refused with how to create one.
-    """
-    registered = _request_json(f"{api_url}/targets", payload={"url": target})
-    target_id = str(registered.get("id") or "").strip()
-    if not target_id:
-        raise ScanCliError("the target could not be registered to look up its authorization")
-    path = f"/targets/{target_id}/authorization"
-    standing = _request_json(f"{api_url}{path}").get("authorization")
-    receipt = str(standing.get("approval_receipt_id") or "").strip() if isinstance(standing, dict) else ""
-    if not receipt:
-        raise ScanCliError(
-            f"target {target_id} has no standing authorization for active testing: authorize it once "
-            f"(New Scan in the UI, or POST {path} with an approved_by name), or pass --approval-receipt"
-        )
-    return receipt
-
-
 def main(argv: list[str] | None = None) -> int:
     parser = _parser()
     args = parser.parse_args(argv)
@@ -440,8 +407,6 @@ def main(argv: list[str] | None = None) -> int:
         api_url = args.api_url.rstrip("/")
         contract = _request_json(f"{api_url}/scan/contracts")
         _validate_against_contract(args, contract, args._advanced)
-        if _needs_standing_authorization(args):
-            payload["approval_receipt_id"] = _standing_authorization_receipt(api_url, args.target)
         response = _request_json(
             f"{api_url}/scans",
             payload=payload,
