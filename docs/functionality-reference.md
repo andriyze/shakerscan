@@ -1223,6 +1223,16 @@ argv and revalidates the target host; the API never spawns them. The external co
 model context: ShakerScan cannot meter an external coding agent's tokens, and makes no token-budget
 claim for that planner. It meters every executable capability.
 
+A scanner call's hold depends on the Hunt's budget profile only for `sqli.verify` and `xss.verify`,
+whose paced argv cannot finish inside the registry wall. On `thorough`, `sqli.verify` reserves 900
+requests / 540 s and `xss.verify` 1,800 requests / 480 s; a headless `deep_domxss` call keeps
+400 / 120 s. `fast` and `balanced` keep the registry holds (900 / 300 s and 400 / 120 s), and the
+capability manifest's `budget_cost` lists those. The argv and request rate are the same on every
+profile (sqlmap about 1 request/s, Dalfox about 3.3 requests/s). The process deadline, the worker
+lease and the API wait (counted from enqueue, plus 30 s) follow the reserved wall, so a thorough
+`sqli.verify` is waited on for up to 570 s. A call admitted before these holds existed still runs at
+the hold it reserved.
+
 `service.nse_check` exposes Nmap's scripting engine inside Hunt only for the reviewed
 `ssl-enum-ciphers`, `http-security-headers`, `http-methods`, and `http-trace` scripts. It requires
 network-discovery authority and a standing active authorization, accepts at most four bound TCP

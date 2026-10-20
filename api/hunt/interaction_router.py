@@ -2175,7 +2175,11 @@ async def _execute_hunt_capability_lifecycle(
                     else:
                         charges = {
                             key: int(value) for key, value in (
-                                agent_tools.canonical_hunt_scanner_budget(name) if is_scanner else spec.budget_cost
+                                # The Hunt's own profile sizes a scanner call's hold.
+                                agent_tools.canonical_hunt_scanner_budget(
+                                    name, budget_profile=run.get("budget_profile"),
+                                    deep_domxss=request.input.get("deep_domxss") is True,
+                                ) if is_scanner else spec.budget_cost
                             ).items() if key in limits
                         }
                         if name == "authz.verify":
@@ -2982,7 +2986,11 @@ async def _execute_hunt_capability_lifecycle(
             result = await _enqueue_canonical_scanner_capability(
                 capability_name=name,
                 capability_input=request.input,
-                timeout_ms=int(spec.default_timeout_ms),
+                # The wait follows the reserved wall, so a longer per-profile hold is not
+                # cancelled at the registry default while it is still running.
+                timeout_ms=agent_tools.hunt_scanner_timeout_ms(
+                    spec.default_timeout_ms, durable_reservation.record.requested,
+                ),
                 hunt_id=str(run["id"]),
                 action_id=str(action_id),
                 reservation_id=durable_reservation.record.reservation_id,
