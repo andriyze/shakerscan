@@ -146,6 +146,99 @@ def test_private_replay_narrowing_fails_when_child_reference_is_absent():
         narrow_replay_plan_to_request_manifest(plan, manifest)
 
 
+def _capture_request_manifest(request_ids):
+    return build_request_manifest(
+        scan_id="40000000-0000-4000-8000-000000000001",
+        target_binding_digest="a" * 64,
+        source_action_ids=("inputs.collection_00",),
+        requests=tuple({
+            "request_ref_id": request_id,
+            "route_id": f"{index + 1:064x}",
+            "method": "GET",
+            "auth_lane": "anonymous",
+            "selected_shard": None,
+            "safe_method": True,
+            "body_schema_digest": None,
+        } for index, request_id in enumerate(request_ids)),
+    )
+
+
+def test_a_capture_indexed_before_path_credentials_were_withheld_still_replays_the_rest():
+    """A capture whose request list was written before path credentials were withheld lists
+    such a request as supported, so a Scan's request manifest names it. The worker never sends
+    it: narrowing leaves it out and replays the rest instead of failing the action, and a
+    manifest whose every request is withheld is skipped (``ScanCollectionReplayWithheld``).
+    Any other missing reference still fails closed. Unit fixtures only."""
+    from api.capture.flows import CaptureFlow, har_entry
+    from api.scan.collection_replay import ScanCollectionReplayWithheld
+
+    def entry(path):
+        return har_entry(CaptureFlow.model_validate({
+            "method": "GET", "url": f"https://app.example.test{path}",
+        }))[0]
+
+    secret = "Zx9Qp2Lm7Rt4Wv8Yb3NcKd5Hj6"
+    payload = {"format": "capture", "document": {"log": {"version": "1.2", "entries": [
+        entry("/api/items"), entry(f"/s/{secret}/dashboard"), entry("/api/orders"),
+    ]}}}
+    selector = scan_replay_selector(
+        RequestCollectionSelection(max_requests=10), "safe_reads", runtime_limit=10,
+    )
+    plan = build_selected_replay_plan(
+        payload, selector,
+        allowed_origins=["https://app.example.test"],
+        default_origin="https://app.example.test",
+    )
+    from scanner.scanner_tools.device_request_formats import resolve_imported_requests
+
+    items, withheld, orders = (request["id"] for request in resolve_imported_requests(payload))
+    assert [request.request_id for request in plan.requests] == [items, orders]
+    # What an index row written before the rule offered: all three requests supported.
+    manifest = _capture_request_manifest((orders, withheld, items))
+
+    with pytest.raises(ScanCollectionReplayContractError, match="missing child request authority"):
+        narrow_replay_plan_to_request_manifest(plan, manifest)
+    narrowed = narrow_replay_plan_to_request_manifest(plan, manifest, payload=payload)
+    assert [request.request_id for request in narrowed.requests] == [orders, items]
+    assert [request.ordinal for request in narrowed.requests] == [0, 1]
+    assert secret not in repr(narrowed.wire_requests())
+
+    with pytest.raises(ScanCollectionReplayWithheld, match="none is replayed"):
+        narrow_replay_plan_to_request_manifest(
+            plan, _capture_request_manifest((withheld,)), payload=payload,
+        )
+    with pytest.raises(ScanCollectionReplayContractError, match="missing child request authority") as other:
+        narrow_replay_plan_to_request_manifest(
+            plan, _capture_request_manifest((items, "f" * 24)), payload=payload,
+        )
+    assert not isinstance(other.value, ScanCollectionReplayWithheld)
+    # An ordinary HAR of the same traffic withholds nothing: the request is replayed as supplied.
+    har_plan = build_selected_replay_plan(
+        {"format": "har", "document": payload["document"]}, selector,
+        allowed_origins=["https://app.example.test"],
+        default_origin="https://app.example.test",
+    )
+    assert len(har_plan.requests) == 3
+
+
+def test_a_hunt_queue_of_withheld_capture_requests_is_refused_by_name():
+    from scanner.scanner_tools.request_collections import replay_queue_refusal
+
+    payload = {"format": "capture", "document": {"log": {"version": "1.2", "entries": [
+        {"request": {"method": "GET", "url": "https://app.example.test/api/items"}},
+        {"request": {"method": "GET", "url": "https://app.example.test/s/Zx9Qp2Lm7Rt4Wv8Yb3NcKd5Hj6/x"}},
+    ]}}}
+    from scanner.scanner_tools.device_request_formats import resolve_imported_requests
+
+    items, withheld = (request["id"] for request in resolve_imported_requests(payload))
+    allowed = {items}
+    assert replay_queue_refusal(payload, [items], allowed) is None
+    assert replay_queue_refusal(payload, [items, withheld], allowed) is None  # the selection skips it
+    assert "recorded path carries a credential" in replay_queue_refusal(payload, [withheld], allowed)
+    assert "exceed the saved collection selection" in replay_queue_refusal(payload, ["f" * 24], allowed)
+    assert "exceed the saved collection selection" in replay_queue_refusal(payload, [], allowed)
+
+
 def test_database_json_fields_decode_serialized_arrays_and_objects():
     assert json_array_field('["https://api.example.test"]') == [
         "https://api.example.test"

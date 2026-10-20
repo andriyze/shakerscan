@@ -611,6 +611,35 @@ def test_database_neutral_dispatcher_lazily_loads_local_private_replay(monkeypat
     assert loaded == [(collection.action_id, {})]
 
 
+def test_a_collection_action_whose_every_request_is_withheld_is_skipped_not_failed(monkeypatch):
+    """A capture indexed before path credentials were withheld can give a collection action only
+    requests the worker withholds: the action is skipped with that reason and sends nothing."""
+    from scan.collection_replay import ScanCollectionReplayWithheld
+
+    collection = _action("inputs.collection_00", "collections.replay_safe", 0)
+    plan = ScanActionPlan(
+        scan_id=str(uuid.uuid4()),
+        execution_plan_digest="a" * 64,
+        target_binding_digest=TARGET.digest,
+        actions=(collection,),
+    )
+
+    async def loader(_action, _options):
+        raise ScanCollectionReplayWithheld("every request is withheld")
+
+    class Transport:
+        async def send(self, _request, **_kwargs):
+            raise AssertionError("a withheld capture request must not be sent")
+
+    monkeypatch.setattr(action_adapter_module, "PinnedAiohttpReplayTransport", Transport)
+    receipt = asyncio.run(_dispatcher(
+        plan, Backend(), private_replay_plan_loader=loader,
+    )(collection, _lease(plan, collection), _noop))
+
+    assert receipt.status == "skipped"
+    assert receipt.errors == ("captured_path_credential_withheld",)
+
+
 @pytest.mark.parametrize(
     ("allowed", "session", "expected_status", "expected_cookie"),
     [

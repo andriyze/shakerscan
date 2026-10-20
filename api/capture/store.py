@@ -460,6 +460,11 @@ async def _append(conn: Any, row: Mapping[str, Any], metadata: dict[str, Any],
     state.update(
         last_seq=batch.seq,
         flow_count=flow_count,
+        # Recorded requests replay leaves out (most often a path that carries a credential),
+        # like an import's unsupported_request_count; request_count and endpoint_count still
+        # include them.
+        unsupported_request_count=int(state.get("unsupported_request_count") or 0)
+        + sum(1 for item in index if not item.get("supported", True)),
         document_bytes=built["document_bytes"],
         refused_out_of_scope=int(state.get("refused_out_of_scope") or 0) + built["refused_scope"],
         refused_over_limit=int(state.get("refused_over_limit") or 0) + built["refused_limit"],

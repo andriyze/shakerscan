@@ -36,6 +36,8 @@ export interface BrowserCaptureState {
   last_seq: number
   flow_count: number
   endpoint_count: number
+  /** Recorded requests replay leaves out (most often because the path carries a credential). */
+  unsupported_request_count?: number
   refused_out_of_scope: number
   refused_over_limit: number
   bodies_dropped: number

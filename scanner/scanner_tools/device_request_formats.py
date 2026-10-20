@@ -16,7 +16,7 @@ import urllib.parse
 from collections import Counter
 from typing import Any
 
-from .url_redaction import is_sensitive_label, redact_url, secret_path_segments, token_like_segment
+from .url_redaction import credential_path_segments, is_credential_name, redact_url, token_like_segment
 from .device_postman import (
     MAX_BODY_BYTES,
     MAX_COLLECTION_BYTES,
@@ -214,19 +214,14 @@ def is_captured_credential_header(name: str) -> bool:
     )
 
 
-_CAPTURE_SECRET_QUERY_RE = re.compile(r"(?:^|[-_.])(?:sig|code|auth|jwt|sid|key)(?:$|[-_.])", re.I)
-
-
 def is_captured_secret_query(name: str, value: str) -> bool:
     """A query parameter a recorded session used as a credential: named like a token, secret,
-    session, signature, code or key (the index masking's names), or with a token-like value
-    (a JWT, a long hex or opaque string, a random-looking one)."""
+    session, signature, code or key (``url_redaction.is_credential_name``, which also decides
+    a ``name=value`` path segment), or with a token-like value (a JWT, a long hex or opaque
+    string, a random-looking one)."""
     text = str(name or "")
     return (
-        is_sensitive_label(text)
-        or bool(_SENSITIVE_NAME_RE.search(text))
-        or bool(_CAPTURE_SECRET_FIELD_RE.search(text))
-        or bool(_CAPTURE_SECRET_QUERY_RE.search(text))
+        is_credential_name(text)
         or token_like_segment(urllib.parse.unquote(str(value or "")))
         # A bare parameter (``?<token>``) is its own value.
         or token_like_segment(urllib.parse.unquote(text))
@@ -261,13 +256,45 @@ def _replayable_capture_url(url: str) -> tuple[str, list[str]]:
 
 
 def captured_path_credential_segments(url: str) -> list[int]:
-    """Positions (``path.split("/")``) of the segments of a recorded ``url`` that hold a
-    credential: exactly the segments the collection index masks (``url_redaction``)."""
+    """Positions (``path.split("/")``) of the segments of a recorded ``url`` that carry a
+    credential (``url_redaction.credential_path_segments``: a session id after ``/s/``, a
+    reset, magic-login or invitation token, a one-time code, ``token=<value>``, a JWT or a long
+    random token; never a route word, a UUID or a short resource id). The collection index masks
+    each of them."""
     try:
         path = urllib.parse.urlsplit(str(url or "")).path
     except ValueError:
         return []
-    return secret_path_segments(path)
+    return credential_path_segments(path)
+
+
+def _replayable_capture_referer(value: str) -> str | None:
+    """The Referer a capture replay sends for a recorded one: unchanged when it carries no
+    credential, only the page's origin (``https://app.example/``, as a browser sends it across
+    origins) when its path, ``;matrix`` parameters, query, fragment or userinfo held one, and
+    ``None`` (not sent) when it is not an http(s) URL. A page under ``/s/<session>/`` sends its
+    full URL as the Referer of every request it makes."""
+    text = str(value or "").strip()
+    if not text:
+        return value
+    try:
+        parts = urllib.parse.urlsplit(text)
+        parts.port  # an invalid port raises ValueError
+    except ValueError:
+        return None
+    if parts.scheme.lower() not in {"http", "https"} or not parts.hostname:
+        return None
+    carries_credential = (
+        "@" in parts.netloc or ";" in parts.path or bool(parts.fragment)
+        or bool(captured_path_credential_segments(text))
+        or any(
+            is_captured_secret_query(name, item)
+            for name, item in urllib.parse.parse_qsl(parts.query, keep_blank_values=True)
+        )
+    )
+    if not carries_credential:
+        return value
+    return f"{parts.scheme.lower()}://{parts.netloc.rsplit('@', 1)[-1]}/"
 
 
 _CAPTURE_SECRET_FIELD_RE = re.compile(
@@ -396,6 +423,27 @@ def _without_secret_body_fields(request: dict[str, Any]) -> tuple[bytes, list[st
     return (b"", ["*"]) if hinted else (body, [])
 
 
+def _replay_header_pairs(pairs: Any) -> tuple[list[tuple[str, str]], bool]:
+    """Recorded headers as a capture replay sends them: no credential header, no Content-Length
+    (an emptied body field changes the length, and the replay computes it from the body it
+    sends), and a Referer without the credential it carried; True when a Referer was changed or
+    left out."""
+    kept: list[tuple[str, str]] = []
+    referer_withheld = False
+    for name, value in pairs:
+        lowered = str(name).lower()
+        if is_captured_credential_header(name) or lowered == "content-length":
+            continue
+        if lowered == "referer":
+            replayable = _replayable_capture_referer(value)
+            referer_withheld = referer_withheld or replayable != value
+            if replayable is None:
+                continue
+            value = replayable
+        kept.append((name, value))
+    return kept, referer_withheld
+
+
 def strip_captured_credentials(requests: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Resolved capture requests without a single recorded credential header.
 
@@ -405,25 +453,22 @@ def strip_captured_credentials(requests: list[dict[str, Any]]) -> list[dict[str,
     credential profile. Path ``;matrix`` parameters (a ``;jsessionid=`` session) are dropped
     from the replayed URL, as are query parameters named like a credential or holding a
     token-like value, and password-, token- and secret-named JSON and form body fields are
-    emptied. A request whose path itself holds a credential (``/s/<session>/``,
-    ``/reset/<token>``, ``/api/token=<v>/``: the segments the collection index masks) cannot be
+    emptied. A request whose path itself carries a credential (``/s/<session>/``,
+    ``/reset/<token>``, ``/api/token=<v>/``: ``captured_path_credential_segments``) cannot be
     sent without it, so it is not replayed at all: its URL is replaced by the redacted form and
-    it carries ``error = CAPTURED_PATH_CREDENTIAL_WITHHELD``. The names (and path positions)
-    removed are kept (``captured_credentials_withheld``, ``captured_path_segments_withheld``,
+    it carries ``error = CAPTURED_PATH_CREDENTIAL_WITHHELD``. A Referer that carries a credential
+    is sent as its origin. The names (and path positions) removed are kept
+    (``captured_credentials_withheld``, ``captured_path_segments_withheld``,
     ``captured_query_parameters_withheld``, ``captured_body_fields_withheld``, and all of them in
     ``captured_withheld`` for the replay plan), never their values."""
     stripped: list[dict[str, Any]] = []
     for request in requests:
-        # Content-Length goes too: an emptied body field changes the length, and the replay
-        # computes it from the body it sends.
-        items = [
-            (name, value) for name, value in request.get("header_items") or []
-            if not is_captured_credential_header(name) and str(name).lower() != "content-length"
-        ]
+        items, referer_items_withheld = _replay_header_pairs(request.get("header_items") or [])
+        headers, referer_withheld = _replay_header_pairs(dict(request.get("headers") or {}).items())
         withheld = sorted({
             str(name).lower() for name in dict(request.get("headers") or {})
             if is_captured_credential_header(name)
-        })
+        } | ({"referer"} if referer_items_withheld or referer_withheld else set()))
         body, body_fields = _without_secret_body_fields(request)
         recorded_url = str(request.get("url") or "")
         recorded_template = str(request.get("url_template") or "")
@@ -451,10 +496,7 @@ def strip_captured_credentials(requests: list[dict[str, Any]]) -> list[dict[str,
             "error": CAPTURED_PATH_CREDENTIAL_WITHHELD if path_withheld else request.get("error"),
             "url": url,
             "url_template": template,
-            "headers": {
-                name: value for name, value in dict(request.get("headers") or {}).items()
-                if not is_captured_credential_header(name) and str(name).lower() != "content-length"
-            },
+            "headers": dict(headers),
             "header_items": items,
             "sensitive_header_names": [],
             "auth_type": "none",

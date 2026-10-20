@@ -71,7 +71,7 @@ try:
     from scan.worker_action_executor import with_authority_interruption
     from scan.broker_execution import BrokerScanExecutionError, heartbeat_broker_scan_execution, settle_broker_scan_execution
     from scan.budget_allocator import ScanBudgetAllocationError, allocate_scan_action_plan
-    from scan.collection_replay import EXECUTABLE_REPLAY_POLICIES, ScanCollectionReplayContractError, narrow_replay_plan_to_request_manifest, scan_replay_authorization, scan_replay_selector
+    from scan.collection_replay import EXECUTABLE_REPLAY_POLICIES, ScanCollectionReplayContractError, ScanCollectionReplayWithheld, narrow_replay_plan_to_request_manifest, scan_replay_authorization, scan_replay_selector
     from scan.continuation import ContinuationBudgetCeiling, reconciled_continuation_ceiling, ScanContinuationError, amended_scan_plan_revision, build_discovery_continuation_manifests, merge_scan_action_continuation
     from scan.continuation_rounds import compile_continuation_round, compile_next_continuation
     from scan.scan_deadline import (
@@ -129,7 +129,7 @@ except ModuleNotFoundError:  # package import in host-side tests
     from ..scan.worker_action_executor import with_authority_interruption
     from ..scan.broker_execution import BrokerScanExecutionError, heartbeat_broker_scan_execution, settle_broker_scan_execution
     from ..scan.budget_allocator import ScanBudgetAllocationError, allocate_scan_action_plan
-    from ..scan.collection_replay import EXECUTABLE_REPLAY_POLICIES, ScanCollectionReplayContractError, narrow_replay_plan_to_request_manifest, scan_replay_authorization, scan_replay_selector
+    from ..scan.collection_replay import EXECUTABLE_REPLAY_POLICIES, ScanCollectionReplayContractError, ScanCollectionReplayWithheld, narrow_replay_plan_to_request_manifest, scan_replay_authorization, scan_replay_selector
     from ..scan.continuation import ContinuationBudgetCeiling, ScanContinuationError, amended_scan_plan_revision, build_discovery_continuation_manifests, merge_scan_action_continuation
     from ..scan.continuation_rounds import compile_continuation_round, compile_next_continuation
     from ..scan.scan_deadline import (
@@ -2720,13 +2720,17 @@ async def _build_broker_private_scan_payload(
             "collections.replay_safe", "collections.replay_authentication",
             "collections.replay_active",
         }:
-            replay_plans[action.action_id] = await _broker_private_replay_plan(
+            replay_plan = await _broker_private_replay_plan(
                 conn,
                 action=action,
                 options=public_options,
                 target=target,
                 scan_id=scan_id,
             )
+            # None: every request of the action is withheld from a capture's replay; the
+            # node finds no private plan and skips the action.
+            if replay_plan is not None:
+                replay_plans[action.action_id] = replay_plan
     public_payload = copy.deepcopy(payload)
     public_payload["options"] = public_options
     private_payload = {
@@ -3718,8 +3722,9 @@ async def _broker_private_replay_plan(
     options: Mapping[str, Any],
     target: TargetBinding,
     scan_id: str,
-) -> dict[str, Any]:
-    """Materialize one exact replay plan and prove it against public authority."""
+) -> dict[str, Any] | None:
+    """Materialize one exact replay plan and prove it against public authority; ``None`` when a
+    capture's replay withholds every request the action names."""
     bound_ref = action.capability_args.get("request_collection_ref")
     raw_manifest_ref = action.capability_args.get("request_manifest_ref")
     if not isinstance(bound_ref, Mapping) or not isinstance(
@@ -3931,9 +3936,11 @@ async def _broker_private_replay_plan(
             ),
         )
         replay_plan = narrow_replay_plan_to_request_manifest(
-            replay_plan, manifest,
+            replay_plan, manifest, payload=collection_payload,
         )
         return private_replay_plan_payload(replay_plan)
+    except ScanCollectionReplayWithheld:
+        return None
     except (ValueError, ScanCollectionReplayContractError) as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 

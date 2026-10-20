@@ -405,7 +405,7 @@ try:
     )
     from scanner_tools.build_fingerprint import hash_source_files, runtime_file_map
     from scanner_tools.device_web import run_pinned_device_web_scan
-    from scanner_tools.request_collections import RequestSelector, select_requests
+    from scanner_tools.request_collections import RequestSelector, replay_queue_refusal, select_requests
     from scanner_tools.request_replay import (
         ReplayAuthorization,
         RequestReplayError,
@@ -422,7 +422,7 @@ except ModuleNotFoundError:
     )
     from scanner.scanner_tools.build_fingerprint import hash_source_files, runtime_file_map
     from scanner.scanner_tools.device_web import run_pinned_device_web_scan
-    from scanner.scanner_tools.request_collections import RequestSelector, select_requests
+    from scanner.scanner_tools.request_collections import RequestSelector, replay_queue_refusal, select_requests
     from scanner.scanner_tools.request_replay import (
         ReplayAuthorization,
         RequestReplayError,
@@ -12644,7 +12644,7 @@ async def _execute_scan_request_collections(
         )
         if canonical_request_manifest is not None:
             plan = narrow_replay_plan_to_request_manifest(
-                plan, canonical_request_manifest,
+                plan, canonical_request_manifest, payload=payload,
             )
         receipt_context: dict[str, Any] = {
             "collection_id": collection_id,
@@ -19437,11 +19437,10 @@ async def process_request_collection_replay_job(job_data: dict[str, Any]) -> Non
             for item in select_requests(payload, stored_runtime_selector)
             if item.get("id")
         }
-        queued_request_ids = set(selector.request_ids)
-        if not queued_request_ids or not queued_request_ids.issubset(allowed_request_ids):
-            raise ReplayExecutionError(
-                "queued replay requests exceed the saved collection selection"
-            )
+        # A queued capture request withheld from replay (its path carries a credential) is left
+        # out; the queue is refused when nothing else remains or it exceeds the selection.
+        if refusal := replay_queue_refusal(payload, selector.request_ids, allowed_request_ids):
+            raise ReplayExecutionError(refusal)
         plan = build_selected_replay_plan(
             payload,
             selector,

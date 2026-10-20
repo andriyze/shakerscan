@@ -126,14 +126,21 @@ The library labels it **Browser capture**, with Recording or Closed and its coun
   parameters named like a credential or holding a token-like value, and empties password-, pass-,
   pwd-, PIN-, OTP-, token- and secret-named fields in JSON (nested objects and lists included),
   form and multipart bodies; a body it cannot parse that names such a field is not replayed at
-  all. A request whose path itself holds a credential (a session id such as `/s/<id>/`, a
-  magic-login, reset or invitation token, a one-time code, `token=<value>`: the segments the
-  request list masks) is not replayed either: it is marked unsupported in the list, left out of
-  every selection, and names the withheld positions (`path:2`). A recorded login form is replayed
-  without the password you typed, and each replay request names what was left out
-  (`captured_withheld`). A capture cannot be edited, relabelled or replaced through the
-  collection or device routes. To test as the account you used, or a flow behind such a link, add
-  it as a credential profile.
+  all. A request whose path itself carries a credential is not replayed either: a value after a
+  credential or share word (`/s/<session-id>/`, `/share/<token>`, `/reset/<token>`,
+  `/magic-login/<token>`, `/otp/482913`, `/invite/<code>`), a `token=<value>` segment, a JWT, or a
+  long hex or random token. Route words after those words (`/auth/login`, `/session/current`,
+  `/api/token/refresh`), versions, UUIDs and short resource ids are replayed as recorded. A
+  withheld request stays in the list, marked unsupported and counted as not replayed, is left out
+  of every selection, and names the withheld positions (`path:2`). A capture listed before this
+  rule can still show such a request as supported; a Scan or Hunt replay leaves it out and
+  replays the rest. A Referer that carries a credential is sent as the page's origin. A recorded
+  login form is replayed without the password you typed, and each replay request names what was
+  left out (`captured_withheld`). A capture cannot be edited, relabelled or replaced through the
+  collection or device routes. To test as the account you used, add it as a credential profile. A
+  credential profile does not bring back a request whose link is the credential (a session id
+  or a magic link in the path): a Scan or Hunt that signs in with the profile reaches that part
+  of the application with its own session.
 - Only the target's exact origin is captured; an application that calls an API on another origin
   needs that API as its own target and its own capture.
 - Only Chromium is supported, and only browser traffic: applications that are not web pages are

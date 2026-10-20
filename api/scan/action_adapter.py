@@ -237,6 +237,7 @@ except (ImportError, ModuleNotFoundError):
     )
 
 from .action_plan import ScanAction, ScanActionPlan
+from .collection_replay import ScanCollectionReplayWithheld
 from .sqli_concurrency import (
     CANDIDATE_CONCURRENCY_ARG,
     ELAPSED_DIMENSIONS,
@@ -951,6 +952,9 @@ class DatabaseNeutralScanActionDispatcher:
         # action actually succeeds.  Preloading them would let a dependent
         # verifier run after a failed or skipped collection action.
         self._private_requests: dict[str, Any] = {}
+        # Collection actions whose every request a capture's replay withholds (the recorded
+        # path carries a credential): skipped with that reason, not failed.
+        self._withheld_replay_actions: set[str] = set()
 
     async def _private_replay_plan(
         self, action: ScanAction,
@@ -958,7 +962,11 @@ class DatabaseNeutralScanActionDispatcher:
         plan = self._private_replay_plans.get(action.action_id)
         if plan is not None or self._private_replay_plan_loader is None:
             return plan
-        plan = await self._private_replay_plan_loader(action, self.options)
+        try:
+            plan = await self._private_replay_plan_loader(action, self.options)
+        except ScanCollectionReplayWithheld:
+            self._withheld_replay_actions.add(action.action_id)
+            return None
         if plan is not None:
             self._private_replay_plans[action.action_id] = plan
         return plan
@@ -1639,7 +1647,11 @@ class DatabaseNeutralScanActionDispatcher:
     ) -> CapabilityReceipt:
         plan = await self._private_replay_plan(action)
         if plan is None:
-            return self._skip(action, "private_request_unavailable")
+            return self._skip(action, (
+                "captured_path_credential_withheld"
+                if action.action_id in self._withheld_replay_actions
+                else "private_request_unavailable"
+            ))
         if any(
             int(action.requested_budget.get(name) or 0) < int(amount)
             for name, amount in plan.estimated_budget.items()

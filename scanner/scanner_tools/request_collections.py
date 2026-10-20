@@ -20,11 +20,13 @@ from .device_postman import (
 )
 from .url_redaction import redact_url
 from .device_request_formats import (
+    CAPTURE_FORMAT,
     CAPTURED_PATH_CREDENTIAL_WITHHELD,
     RequestImportError,
     _request_id as _har_request_id,
     _resolve_har,
     captured_path_credential_segments,
+    is_capture_document,
     resolve_imported_requests,
     validate_request_document,
 )
@@ -281,6 +283,7 @@ def validate_and_index(
         public_requests.append(enriched)
     rows = redacted_index(public_requests)
     summary["requests"] = rows
+    summary["unsupported_request_count"] = sum(1 for row in rows if not row["supported"])
     return payload, summary, rows
 
 
@@ -296,9 +299,9 @@ def index_appended_har_entries(
     every earlier entry again. ``tags`` are per-entry labels (resource type, status). Like every
     index row, no header value, body value or query value is copied; a recorded URL also loses
     its ``;matrix`` parameters and every token-like path segment (``url_redaction``), since a
-    live session puts session ids and one-time tokens in paths. A row whose recorded path holds
-    such a credential is not ``supported``: a capture's replay withholds that request
-    (``strip_captured_credentials``).
+    live session puts session ids and one-time tokens in paths. A row whose recorded path
+    carries a credential (``captured_path_credential_segments``) is not ``supported``: a
+    capture's replay withholds that request (``strip_captured_credentials``).
     """
     resolved = _resolve_har({"log": {"entries": list(entries)}}, max_requests=max(1, len(entries)))
     public: list[dict[str, Any]] = []
@@ -388,6 +391,46 @@ def page_index(
         "limit": limit,
         "next_offset": offset + len(page) if offset + len(page) < len(rows) else None,
     }
+
+
+def withheld_capture_request_ids(payload: Mapping[str, Any]) -> frozenset[str]:
+    """Ids of a capture's requests that replay withholds because the recorded path carries a
+    credential; empty for any other collection. A capture indexed before that rule existed may
+    still list one of them as supported: replay leaves it out and names the reason."""
+    if not isinstance(payload, Mapping):
+        return frozenset()
+    format_name = str(payload.get("format") or "")
+    if format_name != CAPTURE_FORMAT and not (
+        format_name == "har" and is_capture_document(payload.get("document"))
+    ):
+        return frozenset()
+    return frozenset(
+        str(request.get("id"))
+        for request in resolve_imported_requests(
+            dict(payload), max_requests=REQUEST_COLLECTION_IMPORT_HARD_MAX
+        )
+        if request.get("error") == CAPTURED_PATH_CREDENTIAL_WITHHELD and request.get("id")
+    )
+
+
+def replay_queue_refusal(
+    payload: Mapping[str, Any], queued_ids: Iterable[str], allowed_ids: Iterable[str],
+) -> str | None:
+    """Why queued replay request ids cannot run, or ``None`` when they can. A queued capture
+    request withheld from replay is left out (the selection skips it); the queue is refused only
+    when nothing else remains or a remaining id is outside the saved selection."""
+    queued, allowed = set(queued_ids), set(allowed_ids)
+    if queued and queued.issubset(allowed):
+        return None
+    remaining = queued - withheld_capture_request_ids(payload)
+    if queued and not remaining:
+        return (
+            "queued replay requests are capture requests whose recorded path carries a "
+            "credential; they are never replayed"
+        )
+    if not remaining or not remaining.issubset(allowed):
+        return "queued replay requests exceed the saved collection selection"
+    return None
 
 
 def select_requests(

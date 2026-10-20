@@ -46,7 +46,7 @@ from hunt.dispatch_authority import (  # noqa: F401
     HuntDispatchRejected, dispatch_http_target, dispatch_replay_authority, dispatch_scope_binding,
     settle_rejected_dispatch, settle_rejected_replay_dispatch,
 )
-from scanner_tools.request_collections import RequestSelector, select_requests
+from scanner_tools.request_collections import RequestSelector, replay_queue_refusal, select_requests  # noqa: F401
 from scanner_tools.request_replay import ReplayAuthorization, RequestReplayError, build_selected_replay_plan
 from tests.test_hunt_authz_verification_limit import AdmissionStore, Lifecycle, admission, HUNT, TARGET
 
