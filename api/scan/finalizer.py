@@ -610,10 +610,13 @@ def _attach_observed_header_responses(
         if evidence.get("template_id") != "http-missing-security-headers" or not header:
             continue
         observed = responses.get(_http_origin(finding.get("url")) or "")
+        # An error page is not the response a header finding is about: the template matched
+        # other pages (the root's own match is dropped), so a 4xx/5xx root is not their evidence.
         if (
             observed is None
             or header not in _BASELINE_RECORDED_HEADERS
             or header in observed["observed_headers"]
+            or not 200 <= int(observed["response_status"]) < 400
         ):
             continue
         evidence["observed_response"] = {**observed, "header_absent": header}

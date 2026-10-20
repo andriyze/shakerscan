@@ -84,9 +84,16 @@ def build_missing_header(finding: Mapping[str, Any], evidence: Mapping[str, Any]
         header = text(evidence.get("check"), 120).removeprefix("missing_header_").lower()
     display, value, purpose = HEADERS.get(header, (header.title(), "", "A browser security header."))
     observed = record(evidence.get("observed_response"))
-    headers = {str(k).lower(): v for k, v in record(observed.get("observed_headers")).items()}
     url = text(evidence.get("url") or evidence.get("matched_at") or finding.get("url"), 400)
     origin = origin_of(url) or url
+    # A recorded error page (older findings carried the root's 404) is not the response that lacked
+    # the header: show none, and point the commands at a page the check matched.
+    observed_status = observed.get("response_status")
+    if isinstance(observed_status, int) and not 200 <= observed_status < 400:
+        observed = {}
+    if not observed:
+        url = text((evidence.get("matched_urls") or [None])[0], 400) or url
+    headers = {str(k).lower(): v for k, v in record(observed.get("observed_headers")).items()}
     status = observed.get("response_status") or evidence.get("status")
     request_line = text(observed.get("request_line"), 300)
     stack = detected_stack(headers)
