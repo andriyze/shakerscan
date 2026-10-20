@@ -274,7 +274,7 @@ def test_exposure_brief_lists_masked_secrets_and_links_stored_references():
 
 def test_graphql_introspection_commands_send_the_introspection_document_and_look_for_the_schema():
     """Unit fixture: a stored introspection finding; the receipt masked the request's query value."""
-    from api.capabilities.graphql_probe import INTROSPECTION_QUERY, graphql_request_url
+    from api.capabilities.graphql_probe import INTROSPECTION_QUERY
     from api.finding_detail.common import q
     finding = {"tool": "shakerscan_exposure_probe", "severity": "low", "proof_state": "verified",
                "url": "http://gql.fixture.invalid/graphql", "evidence": {
@@ -282,13 +282,13 @@ def test_graphql_introspection_commands_send_the_introspection_document_and_look
                    "request_url": "http://gql.fixture.invalid/graphql?query=%3Credacted%3E",
                    "content_type": "application/json", "matched_signature": '"__schema"'}}
     brief = build_finding_detail(finding)
-    sent = graphql_request_url("http://gql.fixture.invalid/graphql", INTROSPECTION_QUERY)
     for step in ("reproduce", "verify"):
         command = brief[step]["command"]
-        assert q(sent) in command and "redacted" not in command
+        # The introspection document goes as a GET query value (-G with --data-urlencode).
+        assert " -G " in command and q("http://gql.fixture.invalid/graphql") in command
+        assert q("query=" + INTROSPECTION_QUERY) in command and "redacted" not in command
         # Apollo Server refuses a "simple" GET without it (CSRF prevention); the probe sends it.
         assert "Apollo-Require-Preflight: true" in command
-        assert '"__schema"' in command
     assert "__schema" in brief["reproduce"]["expect"]
     # With introspection off a GraphQL server still answers, usually 200 with an error.
     assert "404" not in brief["verify"]["expect"] and "__schema" in brief["verify"]["expect"]

@@ -43,6 +43,7 @@ import deployment_policy
 from request_guards import statement_timeout_pool_options, unbounded_statements
 from scan import coverage_rollup
 from retest_contract import (
+    RETEST_STALE_REQUEUE_LIMIT,
     AI_ONLY_RETEST_TYPES,
     DEFAULT_REPLAY_PAYLOADS,
     SUPPORTED_RETEST_TYPES,
@@ -59,6 +60,7 @@ from retest_contract import (
     parse_json_field,
     path_segment_retest_result,
     retest_queue_binding_matches,
+    stale_retest_should_requeue as _stale_retest_should_requeue,
     run_schema_migrations,
     settle_retest_subject_error,
     validate_retest_job_payload,
@@ -1462,7 +1464,6 @@ RETEST_AI_CIRCUIT_COOLDOWN_SECONDS = max(30, int(os.environ.get("RETEST_AI_CIRCU
 RETEST_STALE_CHECK_INTERVAL_SECONDS = max(10, int(os.environ.get("RETEST_STALE_CHECK_INTERVAL_SECONDS", "30")))
 RETEST_RUNNING_STALE_SECONDS = max(30, int(os.environ.get("RETEST_RUNNING_STALE_SECONDS", "600")))
 RETEST_STALE_BATCH_SIZE = max(1, int(os.environ.get("RETEST_STALE_BATCH_SIZE", "25")))
-RETEST_STALE_REQUEUE_LIMIT = max(0, int(os.environ.get("RETEST_STALE_REQUEUE_LIMIT", "1")))
 RETEST_WATCHDOG_LOCK_KEY = os.environ.get("RETEST_WATCHDOG_LOCK_KEY", "retest:watchdog:lock")
 RETEST_WATCHDOG_LOCK_SECONDS = max(10, int(os.environ.get("RETEST_WATCHDOG_LOCK_SECONDS", "30")))
 _reservation_sweep_interval = int(
@@ -5596,10 +5597,6 @@ def _clear_ai_circuit_state(r) -> None:
         r.set("retest:ai:circuit_recovered", "1", ex=120)
     except Exception:
         pass
-
-
-def _stale_retest_should_requeue(attempt_count: int) -> bool:
-    return int(attempt_count) <= RETEST_STALE_REQUEUE_LIMIT
 
 
 def _current_retest_capabilities() -> dict[str, bool]:

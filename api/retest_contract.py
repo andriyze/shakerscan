@@ -573,6 +573,14 @@ def _sqlmap_marked_segment_urls(url: str, param: str, payload: str) -> tuple[str
             urllib.parse.urlunsplit(parsed._replace(path="/".join(injected))))
 
 
+# A retest left stale by a lost worker is requeued at most this many times before it fails.
+RETEST_STALE_REQUEUE_LIMIT = max(0, int(os.environ.get("RETEST_STALE_REQUEUE_LIMIT", "1")))
+
+
+def stale_retest_should_requeue(attempt_count: int) -> bool:
+    return int(attempt_count) <= RETEST_STALE_REQUEUE_LIMIT
+
+
 def path_segment_retest_result(inputs: dict[str, Any], replay_commands: list[str]) -> dict[str, Any] | None:
     """An inconclusive result, sending nothing, for a SQLi point sqlmap marked in a path segment.
 
