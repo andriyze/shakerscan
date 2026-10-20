@@ -6977,3 +6977,70 @@ def test_strip_null_bytes_removes_nul_from_nested_finding_strings():
     assert cleaned["evidence"]["markers"] == ["ab", "c"]
     assert cleaned["nested"][0]["deep"] == "xy"
     assert cleaned["confidence"] == 0.9  # non-strings untouched
+
+
+def test_an_authenticated_ffuf_wordlist_leaves_out_state_changing_paths(tmp_path, monkeypatch):
+    """Content discovery that carries a session must not request an action such as /logout.
+
+    The bundled list holds ``logout``; requested with the scan's session it would end the session
+    (or worse), which an anonymous request cannot do. The crawler's action words decide.
+    """
+    source = tmp_path / "source.txt"
+    source.write_text("admin\nlogout\ndelete-account\napi\nsignOut\n", encoding="utf-8")
+    monkeypatch.setitem(worker.agent_tools._AGENT_FFUF_WORDLISTS, "common", str(source))
+    def materialize(authenticated):
+        scratch = tmp_path / f"scratch-{authenticated}"
+        scratch.mkdir(mode=0o700)
+        path, _count = worker._materialize_bounded_ffuf_wordlist(
+            options={"wordlist": "common"}, reservation={"http_requests": 5},
+            scratch_dir=str(scratch), authenticated=authenticated,
+        )
+        return Path(path).read_text(encoding="utf-8").splitlines()
+
+    assert materialize(True) == ["admin", "api"]
+    assert materialize(False) == ["admin", "logout", "delete-account", "api", "signOut"]
+
+
+def test_the_scanner_job_marks_the_ffuf_wordlist_authenticated_when_it_carries_a_session(
+    monkeypatch, tmp_path,
+):
+    seen = []
+    real = worker._materialize_bounded_ffuf_wordlist
+
+    def spy(**kwargs):
+        seen.append(kwargs.get("authenticated"))
+        raise worker.agent_tools.AgentToolError("stop after the wordlist")
+
+    monkeypatch.setattr(worker, "_materialize_bounded_ffuf_wordlist", spy)
+
+    class _Redis:
+        def __init__(self): self.values = {}
+        def exists(self, _key): return False
+        def set(self, key, value, ex=None): self.values[key] = value
+        def hset(self, key, mapping=None): return None
+        def expire(self, _key, _ttl): return True
+        def delete(self, key): self.values.pop(key, None)
+
+    class _PinnedProxy:
+        def __init__(self, **_kwargs): self.bytes_to_target = self.bytes_from_target = 0
+        @property
+        def proxy_url(self): return "socks5://127.0.0.1:41000"
+        async def start(self): return self
+        async def close(self): return None
+
+    monkeypatch.setattr(worker, "PinnedSocksProxy", _PinnedProxy)
+    monkeypatch.setattr(worker, "get_redis", lambda: _Redis())
+    for headers in ({"Cookie": "session=worker-only"}, None):
+        job = {
+            "job_id": "agent-job-ffuf", "type": "agent_scanner_tool", "tool_name": "ffuf",
+            "registered_target": "https://example.test",
+            "execution_target": "https://example.test/", "scanner_options": {},
+            "timeout_ms": 30_000, "pinned_address": "203.0.113.7",
+            "authorized_addresses": ["203.0.113.7"],
+            "_reserved_budget": {"http_requests": 4, "tool_wall_seconds": 30},
+        }
+        if headers:
+            job["trusted_headers"] = headers
+        asyncio.run(worker.process_agent_scanner_tool_job(job))
+    assert real is not spy
+    assert seen == [True, False]

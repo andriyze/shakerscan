@@ -51,8 +51,10 @@ from target_address_policy import MAX_FROZEN_ADDRESSES, primary_frozen_address
 
 try:
     from scanner_tools.url_redaction import redact_client_route, redact_url
+    from scanner_tools.unsafe_actions import navigation_exclusion_expression
 except ModuleNotFoundError:  # package import in host-side tests
     from scanner.scanner_tools.url_redaction import redact_client_route, redact_url
+    from scanner.scanner_tools.unsafe_actions import navigation_exclusion_expression
 
 # Methods the model may request. Reads are read-only; writes are credential/active-gated.
 READ_METHODS: frozenset[str] = frozenset({"GET", "HEAD", "OPTIONS"})
@@ -1242,6 +1244,10 @@ def build_scanner_argv(
         + pin_args
         + _trusted_scanner_header_args(name, trusted_headers)
     )
+    if name in KATANA_TOOLS and trusted_headers:
+        # A crawl carrying a session must not follow an action link: /logout ends the session
+        # and /account/delete changes the account, which the anonymous crawl cannot do.
+        argv += ["-crawl-out-scope", navigation_exclusion_expression()]
     if name == "nuclei":
         argv = _apply_nuclei_interactsh(argv, oob_interactsh_server, oob_interactsh_token)
     return (

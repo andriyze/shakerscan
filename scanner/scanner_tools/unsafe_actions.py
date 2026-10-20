@@ -86,7 +86,38 @@ def path_may_change_state(path: str) -> bool:
     return any(token_like_segment(segment) for segment in text.split("/") if segment)
 
 
+def navigation_exclusion_expression(keywords: tuple[str, ...] = RISKY_NAVIGATION_KEYWORDS) -> str:
+    """A regular expression matching a URL whose path or query names one of ``keywords``.
+
+    For crawlers that take a URL exclusion pattern. Like ``contains_risky_keyword`` it matches a
+    whole word after a separator or at a camelCase hump (``/log-out``, ``logoutAll``,
+    ``deleteUser``) but not a word inside another (``/catalog``, ``removed``). The host is never
+    examined, so an action word in a hostname cannot exclude the whole site. The expression
+    uses only syntax shared by Python and Go (RE2) and contains no comma, which list-valued
+    command-line flags would split on.
+    """
+    insensitive: list[str] = []
+    capitalized: list[str] = []
+    for keyword in keywords:
+        words = semantic_text(keyword).split()
+        if not words:
+            continue
+        joiner = "[^A-Za-z0-9]*"
+        insensitive.append(joiner.join(f"(?i:{re.escape(word)})" for word in words))
+        first, rest = words[0][0], words[0][1:]
+        capitalized.append(joiner.join(
+            [f"{re.escape(first.upper())}(?i:{re.escape(rest)})" if rest else re.escape(first.upper())]
+            + [f"(?i:{re.escape(word)})" for word in words[1:]]
+        ))
+    return (
+        "^[^:/?#]+://[^/?#]*[/?#]"
+        f"(?:(?:.*[^A-Za-z])?(?:{'|'.join(insensitive)})|.*[a-z0-9](?:{'|'.join(capitalized)}))"
+        "(?:[^a-z]|$)"
+    )
+
+
 __all__ = [
     "RISKY_INTERACTION_KEYWORDS", "RISKY_NAVIGATION_KEYWORDS", "contains_risky_keyword",
-    "navigation_url_is_safe", "path_may_change_state", "semantic_text", "token_like_segment",
+    "navigation_exclusion_expression", "navigation_url_is_safe", "path_may_change_state",
+    "semantic_text", "token_like_segment",
 ]
