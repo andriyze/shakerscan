@@ -191,7 +191,8 @@ def build_cookie(finding: Mapping[str, Any], evidence: Mapping[str, Any]) -> dic
         "context": context,
         "reproduce": command(curl, expect=f"a Set-Cookie line for {name} without {missing}"),
         "verify": command(curl, expect=f"the Set-Cookie line for {name} includes {missing}"),
-        "fix": [f"Set {missing} (and Secure, HttpOnly, SameSite=Lax) on {name} where the application creates its session cookie."],
+        "fix": [f"Set {missing} on {name} where the application creates its session cookie, together with "
+                f"{'HttpOnly' if missing == 'Secure' else 'Secure'} and SameSite=Lax."],
         "examples": examples,
     }
 

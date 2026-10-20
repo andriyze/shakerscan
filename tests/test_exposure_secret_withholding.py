@@ -124,7 +124,7 @@ def test_configuration_documents_are_withheld_and_keep_only_key_names(
     excerpt = redacted_exposure_excerpt(body, signature)
     assert excerpt.startswith(f"[{signature.exposure_class} detected - content withheld"), label
     # Key names stay as evidence so an operator knows what to rotate.
-    assert "secret-named keys:" in excerpt
+    assert "keys named as secrets:" in excerpt
 
 
 def test_free_text_excerpts_mask_every_secret_named_assignment():

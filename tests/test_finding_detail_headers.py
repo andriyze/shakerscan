@@ -33,3 +33,18 @@ def test_weak_header_on_tomcat_leads_with_the_tomcat_example():
     assert brief["examples"][0]["label"] == "Tomcat / Spring"
     assert "Header always set" not in json.dumps(brief["examples"][0])
 
+
+def _cookie(check):
+    return build_finding_detail({"tool": "http_baseline", "severity": "low", "url": "https://app.fixture.invalid/",
+        "evidence": {"check": check, "cookie_name": "sessionid", "url": "https://app.fixture.invalid/",
+                     "cookie_flags": {"secure": False, "httponly": False, "samesite": None}}})
+
+
+@pytest.mark.parametrize("check,missing,other", [
+    ("session_cookie_missing_secure", "Secure", "HttpOnly"),
+    ("session_cookie_missing_httponly", "HttpOnly", "Secure"),
+])
+def test_cookie_fix_names_the_missing_flag_once(check, missing, other):
+    fix = _cookie(check)["fix"][0]
+    assert fix.count(missing) == 1, fix
+    assert other in fix and "SameSite=Lax" in fix and "sessionid" in fix

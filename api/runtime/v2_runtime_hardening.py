@@ -88,7 +88,8 @@ def _redact_receipt_value(value: Any, *, key: str | None = None) -> Any:
         import hashlib
         return {"bytes_sha256": hashlib.sha256(value).hexdigest(), "size": len(value)}
     if isinstance(value, str):
-        return _redact_string(value)
+        named = _receipts._redact_named_string(key, value)
+        return named if named is not None else _redact_string(value)
     if value is None or isinstance(value, (bool, int, float)):
         return value
     return _redact_string(str(value))

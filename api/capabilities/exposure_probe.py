@@ -1524,7 +1524,7 @@ def _withheld_notice(signature: ExposureSignature) -> str:
     ))
     if keys:
         shown = ", ".join(keys[:20]) + (f" (+{len(keys) - 20} more)" if len(keys) > 20 else "")
-        notice += f"; secret-named keys: {shown}"
+        notice += f"; keys named as secrets: {shown}"
     return notice + "]"
 
 
