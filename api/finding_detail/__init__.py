@@ -44,6 +44,8 @@ def _builder(finding: Mapping[str, Any], evidence: Mapping[str, Any]):
         return posture.build_open_redirect
     if tool == "dns.inspect" and check:
         return posture.build_dns
+    if tool == "shakerscan_exposure_probe" and evidence.get("exposure_class") == "graphql_introspection_enabled":
+        return other.build_graphql_introspection
     if tool == "shakerscan_exposure_probe" and evidence.get("exposure_class"):
         return exposure.build
     if tool in {"shakerscan_sqli_proof", "sqlmap", "request_sqli_differential"}:
