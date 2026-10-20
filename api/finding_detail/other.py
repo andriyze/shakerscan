@@ -6,39 +6,108 @@ import os
 import re
 from typing import Any, Mapping
 
-from .common import command, fact, facts, join_limited, origin_of, q, record, strings, text, visible_scalar_facts
+from .common import command, fact, facts, integer, join_limited, origin_of, q, record, strings, text, visible_scalar_facts
+
+try:
+    from capabilities.graphql_probe import (
+        ALIAS_COUNT, DUPLICATE_FIELD_COUNT, GRAPHQL_REQUEST_HEADERS, INTROSPECTION_QUERY, alias_query,
+        duplicate_field_query, endpoint_of, is_graphql_name, reserved_probe_query,
+    )
+except ModuleNotFoundError:  # package import in host-side tests
+    from ..capabilities.graphql_probe import (
+        ALIAS_COUNT, DUPLICATE_FIELD_COUNT, GRAPHQL_REQUEST_HEADERS, INTROSPECTION_QUERY, alias_query,
+        duplicate_field_query, endpoint_of, is_graphql_name, reserved_probe_query,
+    )
 
 _CVE = re.compile(r"^CVE-\d{4}-\d{4,}$")
+# The probe's own counts bound what a copyable command repeats; a stored count outside them did
+# not come from this probe. At those counts the command stays whole (commands are cut at 2,000
+# characters) for any endpoint up to about 360 characters.
+_MAX_REPEATED_FIELDS = max(ALIAS_COUNT, DUPLICATE_FIELD_COUNT)
+_LIMITS_FIX = "Limit {what}, depth and cost per query (graphql-armor {plugin} / maxDepth / costLimit, or your server's validation rules)."
+
+
+def _graphql_get(endpoint: str, document: str) -> str:
+    """The request the probe sent: a GET whose only query parameter is ``document``."""
+    headers = " ".join(f"-H {q(f'{name}: {value}')}" for name, value in GRAPHQL_REQUEST_HEADERS)
+    return f"curl -sS -G {q(endpoint)} {headers} --data-urlencode {q('query=' + document)}"
+
+
+def _repeat_count(value: Any, default: int) -> int:
+    count = integer(value)
+    return count if count is not None and 1 <= count <= _MAX_REPEATED_FIELDS else default
+
+
+def build_graphql_introspection(finding: Mapping[str, Any], evidence: Mapping[str, Any]) -> dict[str, Any]:
+    """Introspection is a server setting on a live API: checked by asking for the schema, never by a status."""
+    endpoint = endpoint_of(text(evidence.get("request_url") or finding.get("url"), 600))
+    status = evidence.get("response_status")
+    request = _graphql_get(endpoint, INTROSPECTION_QUERY)
+    excerpt = text(evidence.get("redacted_excerpt"), 1200)
+    via = text(evidence.get("discovered_via"), 80)
+    return {
+        "class": "exposure.graphql_introspection_enabled", "class_label": "GraphQL introspection enabled",
+        "summary": f"{endpoint} answered an anonymous introspection query with its schema" + (f" (HTTP {status})" if status else "") + ".",
+        "where": facts(fact("Endpoint", endpoint, mono=True), fact("Origin", origin_of(endpoint), mono=True)),
+        "observed": facts(fact("Response status", status, mono=True), fact("Content type", evidence.get("content_type"), mono=True)),
+        "excerpt": {"label": "Response excerpt (masked by the scanner)", "text": excerpt} if excerpt else None,
+        "expected": ["An error instead of the schema: introspection disabled for anonymous clients, with the API itself still answering."],
+        "context": ["Anyone can list every type, query and mutation, including internal or admin operations."]
+                   + ([f"The scanner reached this endpoint via {via.replace('_', ' ')}."] if via else []),
+        "reproduce": command(request, expect='"data" with a "__schema" object that lists the types'),
+        "verify": command(request, expect='an "errors" list and no "__schema" (an HTTP 200 or 400 error answer both mean it is off)'),
+        "fix": ["Disable introspection in production (Apollo Server: introspection: false; graphql-java: NO_INTROSPECTION_FIELD_VISIBILITY).",
+                "Do not block the endpoint's path at the web server: that takes the whole API offline."],
+    }
 
 
 def build_graphql(finding: Mapping[str, Any], evidence: Mapping[str, Any]) -> dict[str, Any]:
     check = text(evidence.get("check"), 60)
-    endpoint = text(evidence.get("endpoint") or finding.get("url"), 400)
-    post = lambda body: f"curl -sS -X POST {q(endpoint)} -H 'content-type: application/json' -d {q(body)}"
+    endpoint = endpoint_of(text(evidence.get("endpoint") or finding.get("url"), 400))
     if check == "field_suggestions":
         fields = strings(evidence.get("suggested_fields"), 10, 80)
+        names = [name.strip() for name in str(evidence.get("misspelling") or "").split(",")[:20]]
+        names = [name for name in names if is_graphql_name(name)]
+        document = "query{" + " ".join(names) + "}" if names else reserved_probe_query()
+        request = _graphql_get(endpoint, document)
         return {
             "class": "graphql.field_suggestions", "class_label": "GraphQL field suggestions",
-            "summary": f"{endpoint} answers a misspelled field ({text(evidence.get('misspelling'), 80)}) with \"Did you mean …\" hints that reveal real field names: {join_limited(fields, 6)}.",
+            "summary": f"{endpoint} answers a misspelled field ({join_limited(names, 8) or text(evidence.get('misspelling'), 80)}) with \"Did you mean …\" hints that reveal real field names: {join_limited(fields, 6)}.",
             "where": facts(fact("Endpoint", endpoint, mono=True), fact("Root type", evidence.get("root_type"), mono=True)),
-            "observed": facts(fact("Misspelled field sent", evidence.get("misspelling"), mono=True), fact("Fields revealed", join_limited(fields, 10), mono=True)),
+            "observed": facts(fact("Misspelled field sent", join_limited(names, 20) or evidence.get("misspelling"), mono=True), fact("Fields revealed", join_limited(fields, 10), mono=True)),
             "expected": ["A generic validation error without suggestions."],
             "context": ["Suggestions let anyone rebuild the schema even with introspection disabled."],
-            "reproduce": command(post('{"query":"{ ' + (text(evidence.get("misspelling"), 60) or "usr") + ' }"}'), expect="\"Did you mean\" in the error"),
+            "reproduce": command(request, expect="\"Did you mean\" in the error"),
+            "verify": command(request, expect="a validation error without \"Did you mean\""),
             "fix": ["Disable suggestions in production (graphql-armor blockFieldSuggestion; Apollo: mask validation errors)."],
         }
-    if check in {"alias_limit_absent", "duplicate_field_limit_absent"}:
-        count = evidence.get("alias_count") or evidence.get("duplicate_count")
-        what = "aliases" if check == "alias_limit_absent" else "duplicate fields"
+    if check == "alias_limit_absent":
+        count = _repeat_count(evidence.get("alias_count"), ALIAS_COUNT)
+        request = _graphql_get(endpoint, alias_query(count))
         return {
-            "class": f"graphql.{check}", "class_label": f"No GraphQL {what} limit",
-            "summary": f"{endpoint} executed one query with {count} {what}; nothing limits how much work a single request can ask for.",
+            "class": f"graphql.{check}", "class_label": "No GraphQL aliases limit",
+            "summary": f"{endpoint} executed one query with {count} aliases; nothing limits how much work a single request can ask for.",
             "where": facts(fact("Endpoint", endpoint, mono=True)),
-            "observed": facts(fact(f"{what.capitalize()} accepted", count), fact("Response status", evidence.get("response_status"), mono=True)),
-            "expected": ["A validation error once a query exceeds a small limit (e.g. 15 aliases)."],
+            "observed": facts(fact("Aliases accepted", count), fact("Response status", evidence.get("response_status"), mono=True)),
+            "expected": ["A validation error once a query exceeds a small alias limit (e.g. 15 aliases)."],
             "context": ["Unbounded aliasing lets one request multiply expensive resolvers (resource exhaustion) or batch password/OTP guesses past rate limits."],
-            "reproduce": command(post('{"query":"{ ' + " ".join(f"a{i}: __typename" for i in range(20)) + ' }"}'), expect="20 results in one response"),
-            "fix": ["Limit aliases, duplicate fields, depth and cost per query (graphql-armor maxAliases / maxDepth / costLimit, or your server's validation rules)."],
+            "reproduce": command(request, expect=f"{count} aliased __typename results in one response, without errors"),
+            "verify": command(request, expect="an error rejecting the query, not data"),
+            "fix": [_LIMITS_FIX.format(what="aliases", plugin="maxAliases")],
+        }
+    if check == "duplicate_field_limit_absent":
+        count = _repeat_count(evidence.get("duplicate_count"), DUPLICATE_FIELD_COUNT)
+        request = _graphql_get(endpoint, duplicate_field_query(count))
+        return {
+            "class": f"graphql.{check}", "class_label": "No GraphQL duplicate fields limit",
+            "summary": f"{endpoint} executed one query that repeats a field {count} times; nothing limits how much work a single request can ask for.",
+            "where": facts(fact("Endpoint", endpoint, mono=True)),
+            "observed": facts(fact("Duplicate fields accepted", count), fact("Response status", evidence.get("response_status"), mono=True)),
+            "expected": ["A validation error once a query repeats a field more than a small limit."],
+            "context": ["The server parses, validates and merges every repeated copy; without a limit one request can carry thousands of copies and tie up the server (resource exhaustion)."],
+            "reproduce": command(request, expect="data with __typename and no errors"),
+            "verify": command(request, expect="an error rejecting the query, not data"),
+            "fix": [_LIMITS_FIX.format(what="repeated fields (or tokens)", plugin="maxTokens")],
         }
     return {}
 
@@ -210,4 +279,7 @@ def build_generic(finding: Mapping[str, Any], evidence: Mapping[str, Any]) -> di
     }
 
 
-__all__ = ["build_ai", "build_generic", "build_graphql", "build_takeover", "build_template", "cve_context"]
+__all__ = [
+    "build_ai", "build_generic", "build_graphql", "build_graphql_introspection", "build_takeover", "build_template",
+    "cve_context",
+]

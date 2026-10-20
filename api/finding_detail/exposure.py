@@ -150,13 +150,17 @@ _SERVER_STATUS_PAGE = (
     ["Restrict the status page to local or internal addresses: Apache <Location \"/server-status\"> Require local </Location> · nginx location = /nginx_status { stub_status; allow 127.0.0.1; deny all; }",
      "Turn ExtendedStatus off if request lines are not needed, or remove mod_status from the public virtual host."],
 )
+_SERVER_STATUS_SIGNATURES = frozenset({"apache_server_status", "apache_server_status_auto", "nginx_stub_status"})
+# Older findings stored the status grammars' patterns instead of their names.
 _SERVER_STATUS_MARKERS = ("Apache Server Status", "Scoreboard:", "Active connections:")
+# A signature is shown by name; a stored regular expression (older findings) is not a name.
+_SIGNATURE_NAME = re.compile(r"[A-Za-z0-9_.\-]{1,120}")
 
 
 def _signature_entry(signature: str) -> tuple[str, str, str, list[str]] | None:
     if signature == "htpasswd_hash_lines":
         return _PASSWORD_HASH_FILE
-    if any(marker in signature for marker in _SERVER_STATUS_MARKERS):
+    if signature in _SERVER_STATUS_SIGNATURES or any(marker in signature for marker in _SERVER_STATUS_MARKERS):
         return _SERVER_STATUS_PAGE
     return None
 
@@ -178,6 +182,10 @@ def _block_examples(exposure_class: str, path: str) -> list[dict[str, str]]:
     prefix = ""
     if segments and (segments[0] in {".git", ".svn", ".hg", "actuator", "server-status", "debug"} or exposure_class == "directory_listing"):
         prefix = "/" + segments[0] + "/" if exposure_class != "directory_listing" else (path if path.endswith("/") else path.rsplit("/", 1)[0] + "/")
+        # The bare segment itself (/server-status, /actuator) is not under "/<segment>/": a rule for
+        # that prefix leaves the exposed path served. Without the slash it covers both.
+        if exposure_class != "directory_listing" and len(segments) == 1:
+            prefix = "/" + segments[0]
     target = prefix or path
     nginx = (f"location ^~ {target} {{ deny all; }}" if prefix else f"location = {target} {{ return 404; }}")
     apache = (f'<Location "{target}">\n    Require all denied\n</Location>')
@@ -215,7 +223,8 @@ def _introspection_steps(url: str) -> tuple[list[str], dict[str, str], dict[str,
 
 def build(finding: Mapping[str, Any], evidence: Mapping[str, Any]) -> dict[str, Any]:
     exposure_class = text(evidence.get("exposure_class"), 80)
-    label, what, why, fix = _signature_entry(text(evidence.get("matched_signature"), 200)) or _CLASSES.get(
+    signature = text(evidence.get("matched_signature"), 200)
+    label, what, why, fix = _signature_entry(signature) or _CLASSES.get(
         exposure_class, (exposure_class.replace("_", " ").capitalize() or "Sensitive exposure", "sensitive content", "", []),
     )
     url = text(evidence.get("request_url") or finding.get("url"), 600)
@@ -256,7 +265,7 @@ def build(finding: Mapping[str, Any], evidence: Mapping[str, Any]) -> dict[str, 
         "where": facts(fact("URL", url, mono=True), fact("Origin", origin_of(url), mono=True)),
         "observed": facts(
             fact("Response status", status, mono=True), fact("Content type", evidence.get("content_type"), mono=True),
-            fact("Matched signature", evidence.get("matched_signature"), mono=True),
+            fact("Matched signature", signature if _SIGNATURE_NAME.fullmatch(signature) else "", mono=True),
         ),
         "secrets": secrets,
         "excerpt": {"label": "Response excerpt (masked by the scanner)", "text": excerpt} if excerpt else None,

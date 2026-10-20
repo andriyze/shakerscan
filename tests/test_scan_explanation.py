@@ -709,3 +709,69 @@ def test_explanation_coverage_has_a_stable_injection_candidate_field():
     )
     assert "injection_candidates" in coverage_response(explanation)
     assert coverage_response(explanation)["injection_candidates"] is None
+
+
+def _verifier_plan(*actions):
+    """A finished Scan's plan: a succeeded baseline plus the given verifier actions."""
+    common = {"placement": {"eligible_backends": ["local"]}, "supporting": False, "dependencies": [],
+              "requested_budget": {"http_requests": 4}, "capability_args": {}}
+    rows = [{**common, "action_id": "baseline.http", "action_digest": "d" * 64, "stage": "deterministic_baseline",
+             "ordinal": 0, "capability_name": "http.request", "required": True, "admission_status": "planned"}]
+    for index, (action_id, capability, required) in enumerate(actions, start=1):
+        rows.append({**common, "action_id": action_id, "action_digest": f"{index:x}" * 64,
+                     "stage": "active_verification", "ordinal": index, "capability_name": capability,
+                     "required": required, "admission_status": "planned"})
+    return {"schema_version": "scan-action-plan/v1", "scan_id": SCAN_ID, "plan_digest": "a" * 64,
+            "execution_plan_digest": "b" * 64, "target_binding_digest": "c" * 64, "actions": rows}
+
+
+def _done(action_id, ordinal, *, status="success", reason=None, http_requests=1):
+    return {"action_id": action_id, "ordinal": ordinal, "status": status, "reason_code": reason,
+            "result_json": {"budget_reserved": {"http_requests": 4},
+                            "budget_consumed": {"http_requests": http_requests}}}
+
+
+def test_a_required_verifier_skipped_as_not_applicable_does_not_make_the_grade_provisional():
+    """Recorded on a GraphQL-only target: the required SQLi proof had no candidate and settled
+    skipped/not_applicable. The stored grade was reliable; the coverage page said provisional."""
+    explanation = build_scan_execution_explanation(
+        scan_id=SCAN_ID, scan_status="completed",
+        plan_payload=_verifier_plan(("prove.sqli.r01", "sqli.prove_batch", True)),
+        action_rows=[_done("baseline.http", 0),
+                     _done("prove.sqli.r01", 1, status="skipped", reason="not_applicable", http_requests=0)],
+        report={"coverage": {"status": "complete", "grade_reliability": {"reliable": True, "reasons": []}}},
+    )
+    reliability = explanation["coverage"]["grade_reliability"]
+    assert reliability["reliable"] is True, reliability
+    assert "not_applicable" not in reliability["reasons"]
+
+
+def test_zero_attempt_verifiers_are_the_ones_the_report_counts():
+    """Recorded on an IDOR target: the NoSQL verifier succeeded without sending a request while
+    candidates existed; the stored report listed it as a zero-attempt verifier and the page did not."""
+    manifest = {"kind": "candidate", "manifest_id": "44444444-4444-4444-8444-444444444444",
+                "manifest_digest": "4" * 64, "entry_count": 3, "status": "complete"}
+    explanation = build_scan_execution_explanation(
+        scan_id=SCAN_ID, scan_status="completed",
+        plan_payload=_verifier_plan(("verify.nosqli.r01", "nosqli.verify_batch", False)),
+        action_rows=[_done("baseline.http", 0), _done("verify.nosqli.r01", 1, http_requests=0)],
+        report={"canonical_action_execution": {"work_manifests": [manifest]}},
+    )
+    coverage = explanation["coverage"]
+    assert coverage["active_zero_attempt_actions"] == ["verify.nosqli.r01"]
+    assert "active_verifier_zero_attempts" in coverage["grade_reliability"]["reasons"]
+
+
+def test_the_page_and_the_report_share_one_zero_attempt_predicate():
+    from api.scan import explanation as explanation_module
+    from api.scan import finalizer
+    from api.scan.capability_result import CapabilityResultStatus
+
+    assert explanation_module.active_verifier_attempted_nothing is finalizer.active_verifier_attempted_nothing
+    predicate = finalizer.active_verifier_attempted_nothing
+    assert predicate("nosqli.verify_batch", CapabilityResultStatus.SUCCESS, {"http_requests": 0}, 3)
+    assert predicate("graphql.verify_batch", "partial", {"cpu_seconds": 4}, 1)
+    assert not predicate("nosqli.verify_batch", "success", {"http_requests": 0}, 0)
+    assert not predicate("nosqli.verify_batch", "success", {"browser_actions": 1}, 3)
+    assert not predicate("nosqli.verify_batch", "failed", {"http_requests": 0}, 3)
+    assert not predicate("infrastructure.inspect", "success", {}, 3)

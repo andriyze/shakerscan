@@ -385,7 +385,25 @@ def _spf_records(values: Sequence[Any]) -> list[str]:
     return [str(value).strip() for value in values if str(value).strip().lower().startswith("v=spf1")]
 
 
-def dns_posture_findings(observation: Mapping[str, Any], *, make: FindingFactory) -> list[dict[str, Any]]:
+def _dns_subject_url(host: str, target_url: str) -> str:
+    """The target's own origin when the inspected name is the target's host; otherwise the
+    name's HTTPS origin, as the takeover check names a discovered host."""
+    try:
+        parsed = urllib.parse.urlsplit(str(target_url or ""))
+        target_host = str(parsed.hostname or "").lower().rstrip(".")
+        port = parsed.port
+    except ValueError:
+        return f"https://{host}"
+    scheme = parsed.scheme.lower()
+    if scheme not in {"http", "https"} or target_host != host:
+        return f"https://{host}"
+    default = 443 if scheme == "https" else 80
+    return f"{scheme}://{host}" + ("" if port in (None, default) else f":{port}")
+
+
+def dns_posture_findings(
+    observation: Mapping[str, Any], *, make: FindingFactory, target_url: str = "",
+) -> list[dict[str, Any]]:
     """SPF, DMARC and CAA posture of a domain target from the recorded DNS answers."""
     host = str(observation.get("canonical_host") or "").lower().rstrip(".")
     records = observation.get("records") if isinstance(observation.get("records"), Mapping) else {}
@@ -395,7 +413,8 @@ def dns_posture_findings(observation: Mapping[str, Any], *, make: FindingFactory
     if not apex:
         return []  # an address or a single-label name has no mail/CA policy of its own
     is_apex = apex == host
-    url = f"https://{host}"  # as the takeover check names a host: its HTTPS origin
+    # An http-only target does not serve https://<host>/: name the origin the target is scanned at.
+    url = _dns_subject_url(host, target_url)
     # A label is judged only when its query was answered (records or an authoritative negative
     # answer recorded in record_metadata). A query that timed out or failed leaves its label with
     # an empty list too, and reading that as "no record" reported verified missing DMARC/CAA/SPF.

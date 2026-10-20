@@ -8,6 +8,7 @@ import json
 from typing import Any, Mapping, Sequence
 
 from .activity import action_diagnostic_error_class
+from .finalizer import active_verifier_attempted_nothing
 from .parallel_compiler import (
     parallel_action_occurrence_id,
     summarize_parallel_action_coverage,
@@ -24,15 +25,6 @@ _TERMINAL = frozenset({
     "timed_out",
 })
 _SUCCESS = frozenset({"success"})
-_ACTIVE_VERIFIERS = frozenset({
-    "templates.scan", "xss.verify", "sqli.verify", "authz.verify",
-    "templates.active_batch", "xss.verify_batch", "sqli.verify_batch",
-    "browser.proof",
-})
-_TRAFFIC_DIMENSIONS = frozenset({
-    "http_requests", "state_changing_requests", "browser_actions",
-    "tcp_ports_attempted", "hosts_attempted",
-})
 _SCAN_BUDGET_FIELDS = {
     "max_http_requests": "http_requests",
     "max_state_changing_requests": "state_changing_requests",
@@ -775,9 +767,12 @@ def build_scan_execution_explanation(
             seen.add(item["action_id"])
         return item
 
+    # Skipped as not applicable is a settled "nothing to do", as the report and the parallel
+    # merge count it: a required verifier with no candidate on this surface left no work undone.
     required_incomplete = [
         effective for effective in (effective_row(item) for item in required_rows)
         if effective["status"] not in _SUCCESS
+        and not (effective["status"] == "skipped" and effective.get("reason_code") == "not_applicable")
     ]
     work_manifests = _work_manifests(
         report_execution if parallel_actions else execution
@@ -786,14 +781,12 @@ def build_scan_execution_explanation(
         item["entry_count"] for item in work_manifests
         if item["kind"] == "candidate" and item["status"] != "cancelled"
     )
+    # The report's own predicate: a separate copy here named a shorter verifier set, so the page
+    # and the stored report listed different zero-attempt actions.
     zero_attempt_verifiers = [
         item for item in capability_rows
-        if candidate_count > 0
-        and item["capability_name"] in _ACTIVE_VERIFIERS
-        and item["status"] in {"success", "partial"}
-        and not any(
-            amount > 0 for name, amount in item["budget"]["consumed"].items()
-            if name in _TRAFFIC_DIMENSIONS
+        if active_verifier_attempted_nothing(
+            item["capability_name"], item["status"], item["budget"]["consumed"], candidate_count,
         )
     ]
     report_coverage = (

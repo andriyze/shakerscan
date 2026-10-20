@@ -6,7 +6,12 @@ import re
 _MAX_CHARS = 262_144
 _HEADER = re.compile(r'(?m)^[A-Za-z_][A-Za-z_0-9.]{0,200}(?:Error|Exception):[^\r\n]{0,2000}|^Error:[^\r\n]{0,2000}')
 _PYTHON_FILE = re.compile(r'''(?m)^[ \t]+File ["'](?:/|[A-Za-z]:[\\/])[^"'\r\n]{1,1024}["'], line [0-9]{1,8}\b''')
-_JAVA_FRAME = re.compile(r'(?m)^[ \t]+at [A-Za-z_$][\w.$]{0,300}\([^\r\n()]{1,200}\.java:[0-9]{1,8}\)')
+# A JDK 9+ frame may name its class loader and module before the class: "java.base/java.lang.X",
+# "app//com.example.X", "loader/module@1.0/com.example.X" (and JBoss Modules' "mod@1.0//").
+_JAVA_FRAME = re.compile(
+    r'(?m)^[ \t]+at (?:[\w.$@+-]{1,200}/)?(?:[\w.$-]{0,200}(?:@[\w.+-]{1,64})?/)?'
+    r'[A-Za-z_$][\w.$]{0,300}\([^\r\n()]{1,200}\.java:[0-9]{1,8}\)'
+)
 _JS_FRAME = re.compile(r'(?m)^[ \t]+at (?:[^\r\n()]{0,200}\()?(?:/|[A-Za-z]:[\\/])[^()\r\n]{1,1024}:[0-9]{1,8}:[0-9]{1,8}\)?[ \t]*$')
 _PHP_ERROR = re.compile(r'(?m)^(?:PHP )?(?:Fatal error|Parse error):[^\r\n]{1,2000}\bin (?:/|[A-Za-z]:[\\/])[^\r\n]{1,1024} on line [0-9]{1,8}\b')
 
