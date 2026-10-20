@@ -1,32 +1,45 @@
 """A thorough Hunt's sqli.verify and xss.verify calls get a wall they can finish in.
 
-Measured on lab Hunts: 2 of 2 sqli.verify calls timed out at 300.06 s and 300.08 s after 272 and
-295 requests, and 2 of 2 Juice Shop xss.verify calls timed out at 120 s after 400 requests. The
-argv paces sqlmap at about 1 request/s and Dalfox at about 3.3 requests/s on every Hunt profile,
-so a one-field sqlmap negative (about 432 requests) and one Dalfox parameter (about 1,300
-requests) cannot finish inside the registry wall. Every profile reserved the same hold.
+In measured runs, 2 of 2 sqli.verify calls timed out at 300.06 s and 300.08 s after 272 and 295
+requests, and 2 of 2 xss.verify calls timed out at 120 s after 400 requests. The argv paces
+sqlmap at about 1 request/s and Dalfox at about 3.3 requests/s on every Hunt profile, so a
+one-field sqlmap negative (about 432 requests) and one Dalfox parameter (about 1,300 requests)
+cannot finish inside the registry wall. Every profile reserved the same hold.
 
 A thorough Hunt now reserves 900 requests / 540 s for sqli.verify and 1,800 requests / 480 s for
-xss.verify, with the same argv. Fast and balanced Hunts, the passive templates.scan pack and
-headless (deep_domxss) xss.verify keep their 2.11.0 holds, plans and waits byte for byte.
+xss.verify, with the same argv. Fast and balanced Hunts, the passive templates.scan pack, calls
+against a device target, headless (deep_domxss) xss.verify and fragment-route xss.verify keep
+their 2.11.0 holds, plans and waits byte for byte. A thorough call the remaining ledger cannot
+fund at the longer hold is admitted at the registry hold, as it was before.
 """
 from __future__ import annotations
 
+import ast
 import asyncio
 import json
-from types import SimpleNamespace
 import uuid
+from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
+from fastapi import HTTPException
 
+from api import device_agent
 from api.hunt import interaction_router as router
 from api.hunt.capability_reservations import hunt_capability_lease_seconds
+from api.hunt.device_policy import DeviceHuntPolicyState
+from api.hunt.device_traffic import reserve_device_traffic
 from api.runtime.capability_registry import CAPABILITY_REGISTRY
 from tests.test_hunt_authz_verification_limit import (
-    HUNT, AdmissionStore, Lifecycle, Reservation, admission,
+    HUNT,
+    AdmissionStore,
+    Lifecycle,
+    Reservation,
+    admission,
 )
 
 agent_tools = router.agent_tools
+ROOT = Path(__file__).resolve().parents[1]
 
 SQLMAP_OUTPUT = {"sqlmap_output_dir": "/tmp/shakerscan-sqlmap-fixture"}
 DALFOX_SCRATCH = {"scratch_dir": "/tmp/shakerscan-dalfox-fixture"}
@@ -44,7 +57,7 @@ PLAN_DIGESTS_2_11_0 = {
         "12946aeb1d41159d1285fbb55a1901884b790a67bd64fd20272c15f615b07869"
     ),
 }
-# Lab measurements behind the thorough holds (2.10.0 Hunt evals; no relevant change in 2.11).
+# Measured request rates behind the thorough holds (paced argv, one parameter, fast target).
 MEASURED_SQLMAP_REQUESTS_PER_SECOND = 0.98
 MEASURED_DALFOX_REQUESTS_PER_SECOND = 3.33
 
@@ -83,16 +96,67 @@ def test_a_thorough_hunt_reserves_the_reviewed_per_call_holds():
     ) == REGISTRY_XSS
 
 
+def test_a_thorough_hunt_keeps_the_registry_hold_where_no_paced_dalfox_or_device_limit_allows():
+    thorough = {"budget_profile": "thorough"}
+    # A device's fragility allowance is charged one point per held request (thorough allows 500
+    # per Hunt), so a device target keeps the registry hold for both verifiers.
+    for name, registry in (("sqli.verify", REGISTRY_SQLI), ("xss.verify", REGISTRY_XSS)):
+        assert agent_tools.canonical_hunt_scanner_budget(
+            name, **thorough, device_target=True,
+        ) == registry
+    # A fragment-route xss.verify goes to the pinned browser prover, not to paced Dalfox. sqlmap
+    # never sees a fragment, so a fragment on its path changes nothing.
+    assert agent_tools.canonical_hunt_scanner_budget(
+        "xss.verify", **thorough, fragment_route=True,
+    ) == REGISTRY_XSS
+    assert agent_tools.canonical_hunt_scanner_budget(
+        "sqli.verify", **thorough, fragment_route=True,
+    ) == THOROUGH_SQLI
+
+
+@pytest.mark.parametrize("run,values,expected", [
+    ({"budget_profile": "thorough", "device_target_id": None}, {"path": "/search?q=1"},
+     {"budget_profile": "thorough", "deep_domxss": False, "fragment_route": False,
+      "device_target": False}),
+    ({"budget_profile": "thorough", "device_target_id": uuid.UUID(int=9)},
+     {"path": "/#/search?q=1", "deep_domxss": True},
+     {"budget_profile": "thorough", "deep_domxss": True, "fragment_route": True,
+      "device_target": True}),
+    # An empty fragment is no client route, and only a literal true asks for headless Dalfox.
+    ({"budget_profile": "balanced"}, {"path": "/search?q=1#", "deep_domxss": "true"},
+     {"budget_profile": "balanced", "deep_domxss": False, "fragment_route": False,
+      "device_target": False}),
+    ({}, {}, {"budget_profile": None, "deep_domxss": False, "fragment_route": False,
+              "device_target": False}),
+])
+def test_admission_and_the_worker_read_the_same_hold_context(run, values, expected):
+    assert agent_tools.hunt_scanner_budget_context(run, values) == expected
+
+
+_CONTEXTS = [
+    {"deep_domxss": deep, "fragment_route": fragment, "device_target": device}
+    for deep in (False, True) for fragment in (False, True) for device in (False, True)
+]
+
+
 @pytest.mark.parametrize("profile", [None, "fast", "balanced"])
 def test_fast_balanced_and_unprofiled_hunts_keep_every_registry_hold(profile):
     for spec in CAPABILITY_REGISTRY.for_hunt_executor("worker_scanner"):
         expected = dict(spec.budget_cost)
         if spec.name == "templates.scan":
             expected["http_requests"] = 7
-        for deep in (False, True):
+        for context in _CONTEXTS:
             assert agent_tools.canonical_hunt_scanner_budget(
-                spec.name, budget_profile=profile, deep_domxss=deep,
-            ) == expected, spec.name
+                spec.name, budget_profile=profile, **context,
+            ) == expected, (spec.name, context)
+            # One hold only, whatever the ledger has left: no step-down and no second candidate.
+            holds = agent_tools.hunt_scanner_dispatch_budgets(
+                spec.name, budget_profile=profile, **context,
+            )
+            assert holds == (expected,), (spec.name, context)
+            assert agent_tools.affordable_hunt_scanner_hold(
+                holds, limits={"http_requests": 1, "tool_wall_seconds": 1}, used={},
+            ) == expected
     assert agent_tools.canonical_hunt_scanner_budget("sqli.verify") == REGISTRY_SQLI
 
 
@@ -155,19 +219,30 @@ def test_headless_dalfox_stays_at_its_floor_whatever_it_reserved():
     assert plan.timeout_ms == 120_000
 
 
+FLOOR_SQLMAP = {"http_requests": 900, "tool_wall_seconds": 300}
+FLOOR_DALFOX = {"http_requests": 400, "tool_wall_seconds": 120}
+TIER_SQLMAP = {"http_requests": 900, "tool_wall_seconds": 540}
+TIER_DALFOX = {"http_requests": 1_800, "tool_wall_seconds": 480}
+
+
 @pytest.mark.parametrize("capability,reservation,expected", [
-    ("sqli.verify", {"http_requests": 900, "tool_wall_seconds": 400},
-     {"http_requests": 900, "tool_wall_seconds": 400}),
-    ("sqli.verify", {"http_requests": 5_000, "tool_wall_seconds": 3_600},
-     {"http_requests": 900, "tool_wall_seconds": 540}),
-    ("xss.verify", {"http_requests": 900, "tool_wall_seconds": 200},
-     {"http_requests": 900, "tool_wall_seconds": 200}),
-    ("xss.verify", {"http_requests": 9_000, "tool_wall_seconds": 3_600},
-     {"http_requests": 1_800, "tool_wall_seconds": 480}),
+    # In between the floor and the reviewed ceiling: exactly the floor, as before.
+    ("sqli.verify", {"http_requests": 900, "tool_wall_seconds": 400}, FLOOR_SQLMAP),
+    ("sqli.verify", {"http_requests": 5_000, "tool_wall_seconds": 539}, FLOOR_SQLMAP),
+    ("xss.verify", {"http_requests": 400, "tool_wall_seconds": 480}, FLOOR_DALFOX),
+    ("xss.verify", {"http_requests": 900, "tool_wall_seconds": 200}, FLOOR_DALFOX),
+    ("xss.verify", {"http_requests": 1_799, "tool_wall_seconds": 3_600}, FLOOR_DALFOX),
+    # Covering the whole reviewed ceiling: the ceiling, never more.
+    ("sqli.verify", TIER_SQLMAP, TIER_SQLMAP),
+    ("sqli.verify", {"http_requests": 5_000, "tool_wall_seconds": 3_600}, TIER_SQLMAP),
+    ("xss.verify", TIER_DALFOX, TIER_DALFOX),
+    ("xss.verify", {"http_requests": 9_000, "tool_wall_seconds": 3_600}, TIER_DALFOX),
 ])
-def test_a_plan_runs_with_what_it_reserved_up_to_the_reviewed_ceiling(
+def test_a_plan_runs_at_the_floor_or_with_a_covered_reviewed_ceiling(
     capability, reservation, expected,
 ):
+    """Only the two reviewed shapes run, so the paced rate never meets the request hold before
+    the wall: 400 requests over 480 s would reach its connection ceiling at about 120 s."""
     path = "/item?id=1" if capability == "sqli.verify" else "/search?q=1"
     plan = _plan(capability, {"path": path}, reservation)
     assert plan.hard_budget_dict == expected
@@ -244,36 +319,144 @@ def test_the_worker_accepts_the_current_hold_and_a_call_admitted_before_it_exist
     assert pick({**current, "http_requests": 901}, [current, legacy]) == current
 
 
+# --- where the reserved hold is read --------------------------------------------------------
+#
+# Structural pins, for a unit run without PostgreSQL. tests/test_hunt_thorough_scanner_dispatch_
+# postgres.py executes the same call sites through admission, the queue and the worker.
+
+
+def _function(relative, name):
+    tree = ast.parse((ROOT / relative).read_text(encoding="utf-8"))
+    return next(
+        node for node in ast.walk(tree)
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == name
+    )
+
+
+def _calls(node, name):
+    return [
+        call for call in ast.walk(node)
+        if isinstance(call, ast.Call)
+        and (getattr(call.func, "attr", None) or getattr(call.func, "id", None)) == name
+    ]
+
+
+def test_the_api_waits_for_the_wall_its_own_reservation_holds():
+    lifecycle = _function("api/hunt/interaction_router.py", "_execute_hunt_capability_lifecycle")
+    (enqueue,) = _calls(lifecycle, "_enqueue_canonical_scanner_capability")
+    timeout = next(keyword.value for keyword in enqueue.keywords if keyword.arg == "timeout_ms")
+    assert ast.unparse(timeout) == (
+        "agent_tools.hunt_scanner_timeout_ms(spec.default_timeout_ms, "
+        "durable_reservation.record.requested)"
+    )
+
+
+def test_the_worker_rederives_the_hold_from_the_hunt_row_and_runs_the_reserved_wall():
+    job = _function("api/worker.py", "process_canonical_scanner_capability_job")
+    (dispatch,) = _calls(job, "hunt_scanner_dispatch_budgets")
+    assert ast.unparse(dispatch) == (
+        "agent_tools.hunt_scanner_dispatch_budgets(capability_name, "
+        "**agent_tools.hunt_scanner_budget_context(run, capability_input))"
+    )
+    (admitted,) = _calls(job, "admitted_hunt_scanner_hold")
+    assert ast.unparse(admitted.args[0]) == "stored.record.requested"
+    payload_timeouts = [
+        value for node in ast.walk(job) if isinstance(node, ast.Dict)
+        for key, value in zip(node.keys, node.values)
+        if isinstance(key, ast.Constant) and key.value == "timeout_ms"
+    ]
+    assert [ast.unparse(value) for value in payload_timeouts] == [
+        "agent_tools.hunt_scanner_timeout_ms(spec.default_timeout_ms, persisted.record.requested)"
+    ]
+
+
 # --- admission, through the production lifecycle ----------------------------------------------
 
 
-def _scanner_admission(profile, name, values):
-    store = AdmissionStore()
+DEVICE = uuid.UUID(int=9)
+DEVICE_LOCATOR = "192.0.2.5"
+
+
+class _LedgerReservation(Reservation):
+    """Labelled double: a durable hold, checked against the ledger the way the store checks it."""
+
+    def reserve_against(self, *, limits, consumed, lease_seconds):
+        used = router.reserve_budget_snapshot(limits, consumed, self.requested)
+        self.status = "reserved"
+        return self, used
+
+
+class _DeviceAdmissionStore(AdmissionStore):
+    """Labelled double: the admission transaction for a Hunt whose target is a device."""
+
+    def __init__(self):
+        super().__init__()
+        self.run.update({
+            "target_id": None, "device_target_id": DEVICE, "target_kind": "device",
+            "context_pack": {"target": {"kind": "device", "locator": DEVICE_LOCATOR}},
+        })
+
+    async def fetchrow(self, sql, *args):
+        if "FROM device_targets" in sql:
+            assert args == (DEVICE,)
+            return {"primary_locator": DEVICE_LOCATOR, "is_active": True}
+        return await super().fetchrow(sql, *args)
+
+
+def _scanner_admission(profile, name, values, *, budget=None, used=None, device=False):
+    store = _DeviceAdmissionStore() if device else AdmissionStore()
     store.run["budget_profile"] = profile
     store.run["budget_json"].update({
         "max_duration_seconds": 14_400, "max_http_requests": 20_000,
         "max_browser_actions": 1_000,
+        **({"max_device_fragility_points": 500} if device else {}),
+        **(budget or {}),
     })
+    store.run["budget_used_json"].update(used or {})
     recorded: list[dict[str, int]] = []
+    device_admissions: list[dict[str, int]] = []
 
     def reservation(**kwargs):
         recorded.append(dict(kwargs["amounts"]))
-        return Reservation(kwargs["amounts"])
+        return _LedgerReservation(kwargs["amounts"])
+
+    async def device_admission(_conn, run, *, fragility, requests, scans=0, capability_name=None):
+        # Labelled double: the device ledger queries. The device policy check itself is the
+        # production one, at the limits a thorough device Hunt starts with.
+        device_admissions.append({"fragility": fragility, "requests": requests})
+        if fragility > device_agent.MAX_FRAGILITY_PER_DEVICE_DAY:
+            raise ValueError("Daily fragility budget for this device is exhausted")
+        DeviceHuntPolicyState.initial(
+            safety_profile="authenticated_active",
+            fragility_limit=int(store.run["budget_json"]["max_device_fragility_points"]),
+            request_limit=int(store.run["budget_json"]["max_http_requests"]),
+        ).require_admission(request_attempts=requests, fragility_cost=fragility)
 
     overrides = {
         "agent_tools": SimpleNamespace(
             normalize_principal_slot=lambda _value: "anonymous", IDENTITY_HEADERS=set(),
-            canonical_hunt_scanner_budget=agent_tools.canonical_hunt_scanner_budget,
+            affordable_hunt_scanner_hold=agent_tools.affordable_hunt_scanner_hold,
+            hunt_scanner_dispatch_budgets=agent_tools.hunt_scanner_dispatch_budgets,
+            hunt_scanner_budget_context=agent_tools.hunt_scanner_budget_context,
         ),
         "_hunt_public": lambda *args, **kwargs: {"capabilities": [{"name": name}]},
         "DurableBudgetReservation": SimpleNamespace(request=reservation),
+        "BudgetExceeded": router.BudgetExceeded,
+        "require_device_admission": device_admission,
     }
     # The labelled double's worker_scanner placement; the capability name is what admission reads.
     lifecycle = Lifecycle("xss.verify")
+    # What decides whether a device run charges fragility for the call's traffic.
+    lifecycle.specification.placement_requirements = dict(
+        CAPABILITY_REGISTRY.require(name).placement_requirements,
+    )
     asyncio.run(admission(store, **overrides)(
         str(HUNT), name, SimpleNamespace(input=values, idempotency_key="scanner-0001"), lifecycle,
     ))
     assert len(recorded) == 1
+    if device:
+        assert len(device_admissions) == 1
+        recorded[0]["_device_admission"] = device_admissions[0]
     return recorded[0]
 
 
@@ -281,6 +464,8 @@ def _scanner_admission(profile, name, values):
     ("thorough", "sqli.verify", {"path": "/item?id=1"}, THOROUGH_SQLI),
     ("thorough", "xss.verify", {"path": "/search?q=1"}, THOROUGH_XSS),
     ("thorough", "xss.verify", {"path": "/search?q=1", "deep_domxss": True}, REGISTRY_XSS),
+    ("thorough", "xss.verify", {"path": "/#/search?q=1"}, REGISTRY_XSS),
+    ("thorough", "sqli.verify", {"path": "/item?id=1#details"}, THOROUGH_SQLI),
     ("balanced", "sqli.verify", {"path": "/item?id=1"}, REGISTRY_SQLI),
     ("balanced", "xss.verify", {"path": "/search?q=1"}, REGISTRY_XSS),
     ("fast", "xss.verify", {"path": "/search?q=1"}, REGISTRY_XSS),
@@ -289,6 +474,72 @@ def test_admission_reserves_the_hold_of_the_hunt_profile(profile, name, values, 
     charges = _scanner_admission(profile, name, values)
     assert {key: charges[key] for key in expected} == expected
     assert charges["agent_actions"] == 1 and charges["active_actions"] == 1
+
+
+def test_a_thorough_device_xss_verify_keeps_the_registry_hold_and_is_admitted():
+    """A device's fragility allowance is charged one point per held request. A thorough
+    xss.verify at 1,800 requests would need 1,800 of the Hunt's 500 points (and of the device's
+    2,000 a day); at the registry hold it charges the 400 it always did and is admitted."""
+    charges = _scanner_admission("thorough", "xss.verify", {"path": "/search?q=1"}, device=True)
+    assert {key: charges[key] for key in REGISTRY_XSS} == REGISTRY_XSS
+    assert charges["device_fragility_points"] == 400
+    assert charges["_device_admission"] == {"fragility": 400, "requests": 400}
+
+
+def test_a_thorough_device_sqli_verify_is_refused_as_it_always_was():
+    """Its registry hold (900 points) already exceeded a thorough device Hunt's 500."""
+    with pytest.raises(HTTPException, match="fragility limit is exhausted") as error:
+        _scanner_admission("thorough", "sqli.verify", {"path": "/item?id=1"}, device=True)
+    assert error.value.status_code == 409
+    assert agent_tools.hunt_scanner_dispatch_budgets(
+        "sqli.verify", **agent_tools.hunt_scanner_budget_context(
+            {"budget_profile": "thorough", "device_target_id": DEVICE}, {"path": "/item?id=1"},
+        ),
+    ) == (REGISTRY_SQLI,)
+
+
+def test_the_thorough_hold_on_a_device_would_be_refused_by_the_device_policy():
+    """What admission met when a device run took the thorough xss.verify hold."""
+    charges = dict(THOROUGH_XSS)
+    reserve_device_traffic(
+        {"device_target_id": DEVICE}, CAPABILITY_REGISTRY.require("xss.verify"), charges,
+    )
+    assert charges["device_fragility_points"] == 1_800
+    with pytest.raises(ValueError, match="fragility limit is exhausted"):
+        DeviceHuntPolicyState.initial(
+            safety_profile="authenticated_active", fragility_limit=500, request_limit=20_000,
+        ).require_admission(request_attempts=1_800, fragility_cost=1_800)
+
+
+@pytest.mark.parametrize("name,values,budget,used,expected", [
+    # Remaining wall between the registry and the thorough wall.
+    ("sqli.verify", {"path": "/item?id=1"}, {}, {"tool_wall_seconds": 14_000}, REGISTRY_SQLI),
+    ("xss.verify", {"path": "/search?q=1"}, {}, {"tool_wall_seconds": 14_100}, REGISTRY_XSS),
+    # Remaining HTTP between the registry and the thorough request hold.
+    ("xss.verify", {"path": "/search?q=1"}, {}, {"http_requests": 19_000}, REGISTRY_XSS),
+    # A thorough Hunt started with a request budget below the thorough xss.verify hold.
+    ("xss.verify", {"path": "/search?q=1"}, {"max_http_requests": 1_500}, {}, REGISTRY_XSS),
+    ("sqli.verify", {"path": "/item?id=1"}, {"max_duration_seconds": 500}, {}, REGISTRY_SQLI),
+    # Exactly enough for the thorough hold: it is taken.
+    ("sqli.verify", {"path": "/item?id=1"}, {}, {"tool_wall_seconds": 13_860}, THOROUGH_SQLI),
+    ("xss.verify", {"path": "/search?q=1"}, {"max_http_requests": 1_800}, {}, THOROUGH_XSS),
+])
+def test_a_thorough_hold_the_ledger_cannot_fund_steps_down_to_the_registry_hold(
+    name, values, budget, used, expected,
+):
+    charges = _scanner_admission("thorough", name, values, budget=budget, used=used)
+    assert {key: charges[key] for key in expected} == expected
+
+
+def test_a_call_neither_hold_fits_is_refused_with_what_the_thorough_hold_needs():
+    with pytest.raises(HTTPException) as error:
+        _scanner_admission(
+            "thorough", "sqli.verify", {"path": "/item?id=1"},
+            used={"tool_wall_seconds": 14_200},
+        )
+    detail = error.value.detail
+    assert detail["reason_code"] in {"budget_exhausted", "budget_insufficient_for_action"}
+    assert detail["shortages"] == {"tool_wall_seconds": 14_200 + 540 - 14_400}
 
 
 # --- the API wait ------------------------------------------------------------------------------

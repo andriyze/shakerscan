@@ -2175,10 +2175,16 @@ async def _execute_hunt_capability_lifecycle(
                     else:
                         charges = {
                             key: int(value) for key, value in (
-                                # The Hunt's own profile sizes a scanner call's hold.
-                                agent_tools.canonical_hunt_scanner_budget(
-                                    name, budget_profile=run.get("budget_profile"),
-                                    deep_domxss=request.input.get("deep_domxss") is True,
+                                # The Hunt's own profile sizes a scanner call's hold. A longer
+                                # hold the remaining ledger cannot fund steps down to the
+                                # registry hold, which the worker also accepts.
+                                agent_tools.affordable_hunt_scanner_hold(
+                                    agent_tools.hunt_scanner_dispatch_budgets(
+                                        name, **agent_tools.hunt_scanner_budget_context(
+                                            run, request.input,
+                                        ),
+                                    ),
+                                    limits=limits, used=used,
                                 ) if is_scanner else spec.budget_cost
                             ).items() if key in limits
                         }

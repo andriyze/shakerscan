@@ -391,9 +391,10 @@ HUNT_THOROUGH_SCANNER_HOLDS: dict[str, dict[str, int]] = {
         "http_requests": 1_800, "tool_wall_seconds": 480, "browser_actions": 2,
     },
 }
-# The largest process ceiling a single (non-batch) verification may run under. A reservation at
-# or above the floor runs with what it reserved, up to this ceiling, on the same argv. Headless
-# Dalfox (deep_domxss) runs unpaced with 10 workers, so it stays at its floor.
+# The longer process ceiling a single (non-batch) verification may run under, on the same argv.
+# Only a reservation that covers all of it runs with it; any other reservation at or above the
+# floor runs at the floor, so a paced call only ever runs one of these two reviewed shapes.
+# Headless Dalfox (deep_domxss) runs unpaced with 10 workers, so it stays at its floor.
 _EXTERNAL_VERIFICATION_CEILINGS: dict[str, dict[str, int]] = {
     tool: {
         name: HUNT_THOROUGH_SCANNER_HOLDS[capability][name]
@@ -901,12 +902,21 @@ def canonical_hunt_scanner_budget(
     *,
     budget_profile: str | None = None,
     deep_domxss: bool = False,
+    fragment_route: bool = False,
+    device_target: bool = False,
 ) -> dict[str, int]:
     """Admission ceiling for the exact server-owned Hunt scanner selection.
 
     A thorough Hunt reserves ``HUNT_THOROUGH_SCANNER_HOLDS`` for ``sqli.verify`` and
-    ``xss.verify``. Every other profile, the passive ``templates.scan`` pack and a headless
-    (``deep_domxss``) ``xss.verify`` keep the registry hold.
+    ``xss.verify``. Every other profile and the passive ``templates.scan`` pack keep the registry
+    hold, and so do:
+
+    - a call against a device target, whose fragility allowance is charged one point per held
+      request and which is not given a longer paced call;
+    - a headless (``deep_domxss``) ``xss.verify``, which runs unpaced or in the pinned browser;
+    - an ``xss.verify`` whose path carries a URL fragment. The pinned browser proves a fragment
+      parameter in far less than the registry hold, and when it cannot take the path, Dalfox
+      runs at the registry hold.
     """
     budget = dict(CAPABILITY_REGISTRY.require(capability_name).budget_cost)
     if capability_name == "templates.scan":
@@ -916,10 +926,28 @@ def canonical_hunt_scanner_budget(
     if (
         budget_profile == "thorough"
         and tier is not None
-        and not (capability_name == "xss.verify" and deep_domxss)
+        and not device_target
+        and not (capability_name == "xss.verify" and (deep_domxss or fragment_route))
     ):
         budget.update(tier)
     return budget
+
+
+def hunt_scanner_budget_context(
+    run: Mapping[str, Any], capability_input: Mapping[str, Any],
+) -> dict[str, Any]:
+    """What sizes a Hunt scanner call's hold, read from the Hunt row and the call input.
+
+    Admission and the worker's re-derivation both read it here: the action digest covers the
+    hold, so the two must derive the same one.
+    """
+    return {
+        "budget_profile": run.get("budget_profile"),
+        "deep_domxss": capability_input.get("deep_domxss") is True,
+        # The registered target is an origin, so the path alone carries the call's fragment.
+        "fragment_route": bool(str(capability_input.get("path") or "").partition("#")[2]),
+        "device_target": bool(run.get("device_target_id")),
+    }
 
 
 def hunt_scanner_dispatch_budgets(
@@ -927,17 +955,42 @@ def hunt_scanner_dispatch_budgets(
     *,
     budget_profile: str | None = None,
     deep_domxss: bool = False,
+    fragment_route: bool = False,
+    device_target: bool = False,
 ) -> tuple[dict[str, int], ...]:
-    """The holds a worker accepts for a queued Hunt scanner call, the current one first.
+    """The holds a Hunt scanner call may run at, the current one first.
 
-    A call admitted before per-profile holds existed reserved the registry hold. It stays
-    runnable at that hold after an upgrade, and its digest is still verified against it.
+    The second is the registry hold. Admission steps down to it when the Hunt's remaining ledger
+    cannot fund the current one, and a call admitted before per-profile holds existed reserved
+    it. The worker accepts either, and verifies the action digest against the one reserved.
     """
     current = canonical_hunt_scanner_budget(
         capability_name, budget_profile=budget_profile, deep_domxss=deep_domxss,
+        fragment_route=fragment_route, device_target=device_target,
     )
     legacy = canonical_hunt_scanner_budget(capability_name)
     return (current,) if legacy == current else (current, legacy)
+
+
+def affordable_hunt_scanner_hold(
+    candidates: Sequence[Mapping[str, int]],
+    *,
+    limits: Mapping[str, int],
+    used: Mapping[str, Any],
+) -> dict[str, int]:
+    """The first candidate hold the remaining ledger can fund, else the first (current) one.
+
+    Only the ledger dimensions are compared. When none fits, the current hold is returned, so
+    the refusal states what the current hold needs.
+    """
+    for candidate in candidates:
+        if all(
+            int(used.get(name) or 0) + int(amount) <= int(limits[name])
+            for name, amount in candidate.items()
+            if name in limits
+        ):
+            return dict(candidate)
+    return dict(candidates[0])
 
 
 def admitted_hunt_scanner_hold(
@@ -1262,17 +1315,17 @@ def _external_verification_hard(
 ) -> dict[str, int]:
     """Process ceiling of one non-batch verification reserved at or above its floor.
 
-    It is what the call reserved, up to the reviewed ceiling, so a registry-sized hold keeps
-    exactly the floor profile and a thorough Hunt hold keeps its longer wall.
+    A reservation that covers the whole reviewed ceiling runs with it (a thorough Hunt hold keeps
+    its longer wall). Any other one runs exactly at the floor, as every reservation did before, so
+    a registry-sized hold keeps the floor profile. The paced rate times either wall stays within
+    the request hold; a shape in between, such as 400 requests over 480 s, would not.
     """
-    ceiling = (
-        EXTERNAL_VERIFICATION_FLOORS[tool] if headless
-        else _EXTERNAL_VERIFICATION_CEILINGS[tool]
+    floor = EXTERNAL_VERIFICATION_FLOORS[tool]
+    ceiling = floor if headless else _EXTERNAL_VERIFICATION_CEILINGS[tool]
+    covered = all(
+        int(reservation.get(name) or 0) >= int(amount) for name, amount in ceiling.items()
     )
-    return {
-        name: min(int(reservation.get(name) or 0), int(amount))
-        for name, amount in ceiling.items()
-    }
+    return dict(ceiling if covered else floor)
 
 
 def build_enforced_scanner_plan(

@@ -20347,11 +20347,10 @@ async def process_canonical_scanner_capability_job(
                         hold["active_actions"] = 1
                     reserve_device_traffic(run, agent_tools.CAPABILITY_REGISTRY.require(capability_name), hold)
                     return hold
-                # The run's per-profile hold, or the registry hold of a call admitted before it existed.
+                # The run's per-profile hold, or the registry hold (stepped down or admitted before it existed).
                 requested_budget = agent_tools.admitted_hunt_scanner_hold(stored.record.requested, [
                     scanner_hold(base) for base in agent_tools.hunt_scanner_dispatch_budgets(
-                        capability_name, budget_profile=run.get("budget_profile"),
-                        deep_domxss=capability_input.get("deep_domxss") is True)])
+                        capability_name, **agent_tools.hunt_scanner_budget_context(run, capability_input))])
                 recomputed_digest = hunt_capability_action_digest(
                     hunt_id=hunt_id,
                     action_id=action_id,

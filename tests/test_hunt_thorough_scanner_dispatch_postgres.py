@@ -2,8 +2,9 @@
 
 Admission reserves the thorough hold, the API waits for the reserved wall, and the worker
 re-derives the same hold from the Hunt row, verifies the action digest against it and hands the
-process the same wall. A call admitted at the registry hold, the only hold before per-profile
-holds existed, still dispatches after the upgrade and runs at that hold.
+process the same wall. A thorough call the remaining ledger cannot fund at the longer hold is
+admitted at the registry hold and runs at it. A call admitted at the registry hold, the only hold
+before per-profile holds existed, still dispatches after the upgrade and runs at that hold.
 
 Labelled doubles, and only these: Redis (an in-memory dictionary; the queue hands the job straight
 to the worker), the per-call active approval check, and the scanner process (it records the
@@ -33,14 +34,14 @@ TARGET_ADDRESS = "203.0.113.10"
 PATH = "/item?id=1"
 
 
-async def _active_hunt(pool, profile):
+async def _active_hunt(pool, profile, **budget_overrides):
     from hunt.start_contract import HUNT_BUDGET_PROFILES
     from target_authorization import authorize_target
 
     async with pool.acquire() as conn:
         target = await conn.fetchval("INSERT INTO targets(url) VALUES($1) RETURNING id", TARGET_URL)
         standing = await authorize_target(conn, target, approved_by="alice@example.test")
-        budget = dict(vars(HUNT_BUDGET_PROFILES[profile]))
+        budget = {**vars(HUNT_BUDGET_PROFILES[profile]), **budget_overrides}
         allowed = ["sqli.verify"]
         policy = {
             "schema_version": "hunt-policy/v2", "target_kind": "web", "active_testing": True,
@@ -187,6 +188,27 @@ def test_the_hunt_profile_sizes_the_hold_the_wait_and_the_process_wall(stack, pr
     stack.loop.run_until_complete(scenario())
 
 
+def test_a_thorough_hold_the_ledger_cannot_fund_steps_down_and_runs_at_the_registry_hold(stack):
+    """A thorough Hunt with 500 s of wall cannot fund the 540 s hold. The call is admitted at
+    the registry hold instead of refused, and the worker accepts and runs it at that hold."""
+    async def scenario():
+        hunt, standing = await _active_hunt(stack.pool, "thorough", max_duration_seconds=500)
+        stack.state["scope_receipt_id"] = str(standing["scope_receipt_id"])
+        result = await _call(stack, hunt, "stepped-sqli-0001")
+        assert not isinstance(result, Exception), getattr(result, "detail", result)
+        assert result["action_result"]["status"] == "success", result
+        status, reservation, decode = await _reservation(stack.pool, hunt, "stepped-sqli-0001")
+        assert status == "completed" and reservation["status"] == "committed"
+        requested = decode(reservation["requested_json"])
+        assert requested["http_requests"] == 900 and requested["tool_wall_seconds"] == 300
+        assert stack.waits == [300_000]
+        (process,) = stack.processes
+        assert process["timeout_ms"] == 300_000
+        assert process["hard_budget"] == {"http_requests": 900, "tool_wall_seconds": 300}
+
+    stack.loop.run_until_complete(scenario())
+
+
 def test_a_thorough_call_admitted_at_the_registry_hold_still_runs_at_that_hold(stack, monkeypatch):
     """An API that predates per-profile holds admitted every sqli.verify at 900 / 300 s. A worker
     that has them must accept that durable action (digest verified against the registry hold)
@@ -198,8 +220,8 @@ def test_a_thorough_call_admitted_at_the_registry_hold_still_runs_at_that_hold(s
             return getattr(current, name)
 
         @staticmethod
-        def canonical_hunt_scanner_budget(name, **_profile):
-            return current.canonical_hunt_scanner_budget(name)
+        def hunt_scanner_dispatch_budgets(name, **_context):
+            return (current.canonical_hunt_scanner_budget(name),)
 
     # Only the API side changes; the worker keeps the current module.
     monkeypatch.setattr(stack.router, "agent_tools", OlderAdmission())
