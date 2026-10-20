@@ -902,7 +902,6 @@ def canonical_hunt_scanner_budget(
     *,
     budget_profile: str | None = None,
     deep_domxss: bool = False,
-    fragment_route: bool = False,
     device_target: bool = False,
 ) -> dict[str, int]:
     """Admission ceiling for the exact server-owned Hunt scanner selection.
@@ -913,10 +912,10 @@ def canonical_hunt_scanner_budget(
 
     - a call against a device target, whose fragility allowance is charged one point per held
       request and which is not given a longer paced call;
-    - a headless (``deep_domxss``) ``xss.verify``, which runs unpaced or in the pinned browser;
-    - an ``xss.verify`` whose path carries a URL fragment. The pinned browser proves a fragment
-      parameter in far less than the registry hold, and when it cannot take the path, Dalfox
-      runs at the registry hold.
+    - a headless (``deep_domxss``) ``xss.verify``, which runs unpaced or in the pinned browser.
+
+    An ``xss.verify`` the worker routes to the pinned browser (one URL-fragment parameter) runs
+    inside its own fixed limits under either hold, and settles only what it used.
     """
     budget = dict(CAPABILITY_REGISTRY.require(capability_name).budget_cost)
     if capability_name == "templates.scan":
@@ -927,7 +926,7 @@ def canonical_hunt_scanner_budget(
         budget_profile == "thorough"
         and tier is not None
         and not device_target
-        and not (capability_name == "xss.verify" and (deep_domxss or fragment_route))
+        and not (capability_name == "xss.verify" and deep_domxss)
     ):
         budget.update(tier)
     return budget
@@ -944,8 +943,6 @@ def hunt_scanner_budget_context(
     return {
         "budget_profile": run.get("budget_profile"),
         "deep_domxss": capability_input.get("deep_domxss") is True,
-        # The registered target is an origin, so the path alone carries the call's fragment.
-        "fragment_route": bool(str(capability_input.get("path") or "").partition("#")[2]),
         "device_target": bool(run.get("device_target_id")),
     }
 
@@ -955,7 +952,6 @@ def hunt_scanner_dispatch_budgets(
     *,
     budget_profile: str | None = None,
     deep_domxss: bool = False,
-    fragment_route: bool = False,
     device_target: bool = False,
 ) -> tuple[dict[str, int], ...]:
     """The holds a Hunt scanner call may run at, the current one first.
@@ -966,7 +962,7 @@ def hunt_scanner_dispatch_budgets(
     """
     current = canonical_hunt_scanner_budget(
         capability_name, budget_profile=budget_profile, deep_domxss=deep_domxss,
-        fragment_route=fragment_route, device_target=device_target,
+        device_target=device_target,
     )
     legacy = canonical_hunt_scanner_budget(capability_name)
     return (current,) if legacy == current else (current, legacy)

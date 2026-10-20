@@ -8,9 +8,9 @@ cannot finish inside the registry wall. Every profile reserved the same hold.
 
 A thorough Hunt now reserves 900 requests / 540 s for sqli.verify and 1,800 requests / 480 s for
 xss.verify, with the same argv. Fast and balanced Hunts, the passive templates.scan pack, calls
-against a device target, headless (deep_domxss) xss.verify and fragment-route xss.verify keep
-their 2.11.0 holds, plans and waits byte for byte. A thorough call the remaining ledger cannot
-fund at the longer hold is admitted at the registry hold, as it was before.
+against a device target and headless (deep_domxss) xss.verify keep their 2.11.0 holds, plans and
+waits byte for byte. A thorough call the remaining ledger cannot fund at the longer hold is
+admitted at the registry hold, as it was before.
 """
 from __future__ import annotations
 
@@ -29,7 +29,9 @@ from api.hunt import interaction_router as router
 from api.hunt.capability_reservations import hunt_capability_lease_seconds
 from api.hunt.device_policy import DeviceHuntPolicyState
 from api.hunt.device_traffic import reserve_device_traffic
+from api.hunt.fragment_xss_proof import hunt_browser_xss_proof_adapter
 from api.runtime.capability_registry import CAPABILITY_REGISTRY
+from api.runtime.models import TargetBinding
 from tests.test_hunt_authz_verification_limit import (
     HUNT,
     AdmissionStore,
@@ -96,46 +98,73 @@ def test_a_thorough_hunt_reserves_the_reviewed_per_call_holds():
     ) == REGISTRY_XSS
 
 
-def test_a_thorough_hunt_keeps_the_registry_hold_where_no_paced_dalfox_or_device_limit_allows():
-    thorough = {"budget_profile": "thorough"}
+def test_a_thorough_device_call_keeps_the_registry_hold():
     # A device's fragility allowance is charged one point per held request (thorough allows 500
     # per Hunt), so a device target keeps the registry hold for both verifiers.
     for name, registry in (("sqli.verify", REGISTRY_SQLI), ("xss.verify", REGISTRY_XSS)):
         assert agent_tools.canonical_hunt_scanner_budget(
-            name, **thorough, device_target=True,
+            name, budget_profile="thorough", device_target=True,
         ) == registry
-    # A fragment-route xss.verify goes to the pinned browser prover, not to paced Dalfox. sqlmap
-    # never sees a fragment, so a fragment on its path changes nothing.
-    assert agent_tools.canonical_hunt_scanner_budget(
-        "xss.verify", **thorough, fragment_route=True,
-    ) == REGISTRY_XSS
-    assert agent_tools.canonical_hunt_scanner_budget(
-        "sqli.verify", **thorough, fragment_route=True,
-    ) == THOROUGH_SQLI
+
+
+BROWSER_TARGET = TargetBinding(
+    target_id="10000000-0000-0000-0000-000000000002",
+    target_kind="web",
+    canonical_host="app.example.test",
+    allowed_origins=("http://app.example.test:8080",),
+    allowed_addresses=("192.0.2.10",),
+    scope_receipt_id="10000000-0000-0000-0000-000000000003",
+)
+
+
+@pytest.mark.parametrize("path,browser", [
+    # One fragment parameter and no server query: the worker runs the pinned browser prover.
+    ("/#/search?q=1", True),
+    # Everything else with a fragment runs paced Dalfox, which needs the longer wall.
+    ("/search?q=1#results", False),
+    ("/#/a?x=1&y=2", False),
+    ("/page#top", False),
+    ("/page?a=1&b=2#top", False),
+])
+def test_a_fragment_on_the_path_does_not_change_the_thorough_xss_verify_hold(path, browser):
+    """The hold is read from the profile, the device and deep_domxss only. A path the browser
+    takes runs within the prover's fixed limits, which fit inside either hold; a fragment path the
+    browser does not take runs paced Dalfox and gets the thorough wall."""
+    context = agent_tools.hunt_scanner_budget_context(
+        {"budget_profile": "thorough", "device_target_id": None}, {"path": path},
+    )
+    assert agent_tools.canonical_hunt_scanner_budget("xss.verify", **context) == THOROUGH_XSS
+    assert agent_tools.canonical_hunt_scanner_budget("sqli.verify", **context) == THOROUGH_SQLI
+    adapter = hunt_browser_xss_proof_adapter(
+        capability_name="xss.verify", spec=CAPABILITY_REGISTRY.require("xss.verify"),
+        target=BROWSER_TARGET, execution_target="http://app.example.test:8080" + path,
+        action_id="fragment-hold",
+    )
+    assert (adapter is not None) is browser
+    if adapter is not None:
+        estimate = dict(adapter.prepared.estimated_budget)
+        for hold in (THOROUGH_XSS, REGISTRY_XSS):
+            assert all(estimate[name] <= hold[name] for name in estimate), (estimate, hold)
 
 
 @pytest.mark.parametrize("run,values,expected", [
     ({"budget_profile": "thorough", "device_target_id": None}, {"path": "/search?q=1"},
-     {"budget_profile": "thorough", "deep_domxss": False, "fragment_route": False,
-      "device_target": False}),
+     {"budget_profile": "thorough", "deep_domxss": False, "device_target": False}),
     ({"budget_profile": "thorough", "device_target_id": uuid.UUID(int=9)},
      {"path": "/#/search?q=1", "deep_domxss": True},
-     {"budget_profile": "thorough", "deep_domxss": True, "fragment_route": True,
-      "device_target": True}),
-    # An empty fragment is no client route, and only a literal true asks for headless Dalfox.
+     {"budget_profile": "thorough", "deep_domxss": True, "device_target": True}),
+    # Only a literal true asks for headless Dalfox.
     ({"budget_profile": "balanced"}, {"path": "/search?q=1#", "deep_domxss": "true"},
-     {"budget_profile": "balanced", "deep_domxss": False, "fragment_route": False,
-      "device_target": False}),
-    ({}, {}, {"budget_profile": None, "deep_domxss": False, "fragment_route": False,
-              "device_target": False}),
+     {"budget_profile": "balanced", "deep_domxss": False, "device_target": False}),
+    ({}, {}, {"budget_profile": None, "deep_domxss": False, "device_target": False}),
 ])
 def test_admission_and_the_worker_read_the_same_hold_context(run, values, expected):
     assert agent_tools.hunt_scanner_budget_context(run, values) == expected
 
 
 _CONTEXTS = [
-    {"deep_domxss": deep, "fragment_route": fragment, "device_target": device}
-    for deep in (False, True) for fragment in (False, True) for device in (False, True)
+    {"deep_domxss": deep, "device_target": device}
+    for deep in (False, True) for device in (False, True)
 ]
 
 
@@ -360,6 +389,20 @@ def test_the_worker_rederives_the_hold_from_the_hunt_row_and_runs_the_reserved_w
     )
     (admitted,) = _calls(job, "admitted_hunt_scanner_hold")
     assert ast.unparse(admitted.args[0]) == "stored.record.requested"
+    # Every candidate hold is offered, the registry hold included: a call stepped down at
+    # admission, or admitted before per-profile holds existed, reserved that one.
+    assert ast.unparse(admitted.args[1]) == "[scanner_hold(base) for base in " + ast.unparse(
+        dispatch,
+    ) + "]"
+    assigned = [
+        node for node in ast.walk(job)
+        if isinstance(node, ast.Assign) and node.value is admitted
+    ]
+    assert [ast.unparse(node.targets[0]) for node in assigned] == ["requested_budget"]
+    (digest,) = _calls(job, "hunt_capability_action_digest")
+    assert ast.unparse(next(
+        keyword.value for keyword in digest.keywords if keyword.arg == "requested_budget"
+    )) == "requested_budget"
     payload_timeouts = [
         value for node in ast.walk(job) if isinstance(node, ast.Dict)
         for key, value in zip(node.keys, node.values)
@@ -464,7 +507,9 @@ def _scanner_admission(profile, name, values, *, budget=None, used=None, device=
     ("thorough", "sqli.verify", {"path": "/item?id=1"}, THOROUGH_SQLI),
     ("thorough", "xss.verify", {"path": "/search?q=1"}, THOROUGH_XSS),
     ("thorough", "xss.verify", {"path": "/search?q=1", "deep_domxss": True}, REGISTRY_XSS),
-    ("thorough", "xss.verify", {"path": "/#/search?q=1"}, REGISTRY_XSS),
+    # A fragment on the path does not change the hold (the browser route fits inside it).
+    ("thorough", "xss.verify", {"path": "/#/search?q=1"}, THOROUGH_XSS),
+    ("thorough", "xss.verify", {"path": "/search?q=1#results"}, THOROUGH_XSS),
     ("thorough", "sqli.verify", {"path": "/item?id=1#details"}, THOROUGH_SQLI),
     ("balanced", "sqli.verify", {"path": "/item?id=1"}, REGISTRY_SQLI),
     ("balanced", "xss.verify", {"path": "/search?q=1"}, REGISTRY_XSS),
