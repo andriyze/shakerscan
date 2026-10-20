@@ -14965,10 +14965,13 @@ async def _record_blocked_command_result(
     operation id / receipt refs / blocked reasons as a successful queue. It is
     best-effort on purpose: an audit-write failure must never mask or alter the
     security rejection that is about to be raised.
+
+    A refusal raised inside the caller's transaction rolls that transaction back, so the row is
+    written on a connection of its own there; otherwise the refusal would leave no trace.
     """
-    try:
+    async def write(target_conn):
         return await _record_command_result(
-            conn,
+            target_conn,
             command=command or _command_from_action(action_name),
             status=status,
             risk_tier=risk_tier,
@@ -14979,6 +14982,14 @@ async def _record_blocked_command_result(
             result_json={"action": action_name, "outcome": status},
             created_by=created_by,
         )
+
+    in_transaction = getattr(conn, "is_in_transaction", None)
+    try:
+        if callable(in_transaction) and in_transaction() is True and db_pool is not None:
+            async with db_pool.acquire() as audit_conn:
+                if audit_conn is not conn:
+                    return await write(audit_conn)
+        return await write(conn)
     except Exception:
         return None
 
