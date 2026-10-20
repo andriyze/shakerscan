@@ -42,7 +42,7 @@ except ModuleNotFoundError:
 from .capability_execution import (
     SCAN_BASE_ORIGIN_CAPABILITIES, scan_discovery_reservation, tls_connections_per_pair,
 )
-from .contracts import BUDGET_PROFILES, SCAN_V2_INTERACTIVE_AUTH_KINDS
+from .contracts import BUDGET_PROFILES, SCAN_V2_INTERACTIVE_AUTH_KINDS, budget_sufficiency
 from .posture_findings import CORS_PROBE_ACTIONS
 from .execution import ScanExecutionPlan
 from .work_manifests import (
@@ -52,6 +52,8 @@ from .work_manifests import (
     ScanWorkManifestReference,
 )
 from .external_process import (
+    ACTIVE_TEMPLATE_PLANNED_GET_ONLY_WINDOWS,
+    ACTIVE_TEMPLATE_PLANNED_WINDOWS,
     batch_attempt_floor,
     batch_attempt_capacity,
     batch_row_cost_class,
@@ -328,6 +330,43 @@ def slice_body_mutation_hold(
         if name != "state_changing_requests" and int(amount) > 0
     ])
     return int(body_floor.get("state_changing_requests", 0)) * fundable
+
+
+def slice_body_attempt_floor(
+    capability_name: str,
+    capability_args: Mapping[str, Any],
+    body_positions: tuple[str, frozenset[int]] | None,
+) -> dict[str, int]:
+    """The request and wall holds a verifier slice needs to attempt one of its body candidates.
+
+    Its query candidates' floors plus one body attempt's floor; empty when the slice holds no
+    body candidate or its composition is unknown. A slice is sized linearly from its tier shape,
+    so a thorough SQLi slice holding one request-body candidate held 400 requests and 180 s --
+    under the body floor of 480 requests and 420 s -- and its candidate was never attempted
+    (DVGA, every lab run).
+    """
+    if capability_name not in _BODY_VERIFIER_CAPABILITIES or body_positions is None:
+        return {}
+    reference = capability_args.get("candidate_manifest_ref")
+    raw_slice = capability_args.get("slice")
+    if (
+        not isinstance(reference, Mapping)
+        or str(reference.get("manifest_digest") or "") != body_positions[0]
+        or not isinstance(raw_slice, Mapping)
+    ):
+        return {}
+    start = int(raw_slice.get("start") or 0)
+    count = int(raw_slice.get("count") or 0)
+    bodies = sum(1 for index in range(start, start + count) if index in body_positions[1])
+    if not bodies:
+        return {}
+    queries = max(0, count - bodies)
+    query_floor = batch_attempt_floor(capability_name)
+    body_floor = batch_attempt_floor(capability_name, body_candidate=True)
+    return {
+        name: queries * int(query_floor.get(name, 0)) + int(body_floor.get(name, 0))
+        for name in ("http_requests", "tool_wall_seconds")
+    }
 
 
 def _affordable_batch_tier(
@@ -943,6 +982,7 @@ class ScanActionPlanCompiler:
         action_budgets: Mapping[str, Mapping[str, int]] | None = None,
         verification_extensions: Sequence[Mapping[str, Any]] = (),
         body_positions: tuple[str, frozenset[int]] | None = None,
+        active_template_windows: bool = False,
     ) -> ScanActionPlan:
         scope = str(action_scope or "").strip().lower()
         if scope not in {"full", "global", "discovery", "endpoint"}:
@@ -959,6 +999,8 @@ class ScanActionPlanCompiler:
             raise ScanActionPlanError("continuation_round must be between zero and eight")
         if not isinstance(require_family_minimums, bool):
             raise ScanActionPlanError("require_family_minimums must be a boolean")
+        if not isinstance(active_template_windows, bool):
+            raise ScanActionPlanError("active_template_windows must be a boolean")
         offsets: dict[str, int] = {}
         for raw_name, raw_offset in dict(manifest_offsets or {}).items():
             name = _token(raw_name, name="manifest offset action")
@@ -1590,6 +1632,19 @@ class ScanActionPlanCompiler:
                     and "candidate_manifest_ref" in blueprint.capability_args
                 ):
                     budget.pop("state_changing_requests", None)
+                if budget_sufficiency(execution_plan.budget_profile) and (
+                    policy.allow_state_changing_http
+                ):
+                    # A slice holding a body candidate holds what one body attempt needs
+                    # beside its query candidates, within the tier shape it was admitted at,
+                    # so the mutation hold below can fund it. A floor-shaped lane's shape has
+                    # no room for a body attempt and is unchanged.
+                    for name, amount in slice_body_attempt_floor(
+                        blueprint.capability_name, blueprint.capability_args, body_positions,
+                    ).items():
+                        budget[name] = max(
+                            int(budget.get(name, 0)), min(int(amount), int(maximum.get(name, 0))),
+                        )
                 body_hold = (
                     slice_body_mutation_hold(
                         blueprint.capability_name, blueprint.capability_args,
@@ -1784,7 +1839,27 @@ class ScanActionPlanCompiler:
             # sharded Scan was 483 requests of a 600-request slice, i.e. the ledger
             # was large enough until its siblings were counted.
             entry_count = int(manifest_ref.get("entry_count") or 0) if manifest_ref else 0
-            manifest_offset = min(entry_count, offsets.get(base_action_id, 0))
+            # A thorough or deep direct Scan runs every active-template window, not only the
+            # one each endpoint's manifest ordinal picks: position o runs window o on endpoint
+            # o % E (see action_adapter). The first continuation round plans the endpoints' own
+            # positions exactly as before; later rounds plan the remaining windows. Parallel
+            # shards and verify Scans keep one position per endpoint. Without state-changing
+            # HTTP the allowlist is the GET-only one, which has fewer windows.
+            planned_windows = (
+                ACTIVE_TEMPLATE_PLANNED_WINDOWS if policy.allow_state_changing_http
+                else ACTIVE_TEMPLATE_PLANNED_GET_ONLY_WINDOWS
+            )
+            work_count = (
+                planned_windows
+                if capability_name == "templates.active_batch"
+                and active_template_windows
+                and budget_sufficiency(execution_plan.budget_profile)
+                and not shard_authority
+                and 0 < entry_count < planned_windows
+                else entry_count
+            )
+            planned_entries = work_count if continuation_round >= 2 else entry_count
+            manifest_offset = min(planned_entries, offsets.get(base_action_id, 0))
             batch_size, batch_budget = _affordable_batch_tier(
                 capability_name,
                 budget_profile=execution_plan.budget_profile,
@@ -1803,7 +1878,20 @@ class ScanActionPlanCompiler:
                     for name, limit in limits.items()
                 },
             )
-            remaining_entries = max(0, entry_count - manifest_offset)
+            if (
+                capability_name == "templates.active_batch"
+                and continuation_round >= 2
+                and budget_sufficiency(execution_plan.budget_profile)
+                and not shard_authority
+                and policy.allow_state_changing_http
+                and int(batch_budget.get("state_changing_requests") or 0) <= 0
+            ):
+                # A later round chooses its tier against the residual. One without a mutation
+                # hold (the floor shape) would run the GET-only allowlist where the Scan's
+                # state-changing one was planned, and read as scheduled: the positions are left
+                # unscheduled instead, and the report says so.
+                return
+            remaining_entries = max(0, planned_entries - manifest_offset)
             if continuation_round > 0 and manifest_ref and entry_count == 0:
                 # A materialized empty worklist is exhaustion, not the unknown
                 # admission surface. Do not append eight placeholder attempts.
@@ -1847,7 +1935,15 @@ class ScanActionPlanCompiler:
             # picked up from this lane's next index by the continuation rounds.
             lane_wall = int(batch_budget.get("tool_wall_seconds") or 0)
             if lane_wall > 0:
-                lane_cap = int((int(limits.get("tool_wall_seconds", 0)) * _LANE_WALL_SHARE) // lane_wall)
+                # The share is of the frozen profile wall: a continuation round of a thorough
+                # or deep Scan is compiled against what is left (``ledger_limits``), and its
+                # lanes must not shrink round after round as the residual does.
+                lane_wall_limit = (
+                    execution_plan.budget.ledger_limits()["tool_wall_seconds"]
+                    if budget_sufficiency(execution_plan.budget_profile) and not shard_authority
+                    else limits.get("tool_wall_seconds", 0)
+                )
+                lane_cap = int((int(lane_wall_limit) * _LANE_WALL_SHARE) // lane_wall)
                 count = min(count, max(minimum_batches, 1, lane_cap))
             count = min(
                 total_batches,
@@ -1872,7 +1968,7 @@ class ScanActionPlanCompiler:
             for batch_index in range(count):
                 start = manifest_offset + batch_index * batch_size
                 slice_count = (
-                    min(batch_size, max(0, entry_count - start))
+                    min(batch_size, max(0, planned_entries - start))
                     if entry_count else 1
                 )
                 slice_id = (
@@ -1895,7 +1991,12 @@ class ScanActionPlanCompiler:
                         # affordability, the batch ceiling and graph capacity can all cut `count`
                         # below `total_batches`; without this the finalizer compares attempts with
                         # scheduled slices and reports complete coverage over a truncated plan.
-                        "manifest_entries": int(entry_count),
+                        "manifest_entries": int(work_count),
+                        # Positions past the endpoints run further template windows on them.
+                        **(
+                            {"endpoint_entries": int(entry_count)}
+                            if work_count != entry_count else {}
+                        ),
                         "scheduled_batches": int(count),
                         "total_batches": int(total_batches),
                         "profile": f"{execution_plan.budget_profile}_batch_v1",

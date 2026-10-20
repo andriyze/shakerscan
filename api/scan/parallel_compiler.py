@@ -1888,6 +1888,23 @@ def merge_parallel_action_executions(
                 "unattempted_candidates", "verified_findings", "suspected_findings",
             ):
                 aggregate[key] += max(0, int(raw.get(key) or 0))
+            windows = raw.get("template_windows")
+            if isinstance(windows, Mapping) and all(
+                isinstance(windows.get(name), int) and not isinstance(windows.get(name), bool)
+                for name in ("run", "total")
+            ) and 0 <= windows["run"] <= windows["total"]:
+                # Informational, as in a direct Scan's report. Every shard plans one position per
+                # endpoint, so each runs the allowlist's leading windows on its own endpoints:
+                # the shards together ran the windows of the one that ran the most (of the
+                # largest allowlist), never fewer. Only counts reach the merge, so it reports
+                # that shard's.
+                merged = aggregate.get("template_windows")
+                if merged is None or (windows["total"], windows["run"]) > (
+                    merged["total"], merged["run"],
+                ):
+                    aggregate["template_windows"] = {
+                        "run": int(windows["run"]), "total": int(windows["total"]),
+                    }
             if int(raw.get("batch_actions") or 0) == 0 and raw.get("reason") in {
                 "not_planned", "no_candidates",
             }:

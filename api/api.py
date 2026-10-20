@@ -573,6 +573,7 @@ try:
         ResolvedScanContract,
         SCAN_AUTHENTICATION_KEYS,
         SCAN_V2_FAMILY_NAMES,
+        bind_scan_fan_out,
         bind_scan_scope_receipt,
         resolve_scan_contract,
         scan_family_capabilities,
@@ -700,6 +701,7 @@ except ModuleNotFoundError:
         ResolvedScanContract,
         SCAN_AUTHENTICATION_KEYS,
         SCAN_V2_FAMILY_NAMES,
+        bind_scan_fan_out,
         bind_scan_scope_receipt,
         resolve_scan_contract,
         scan_family_capabilities,
@@ -1954,6 +1956,23 @@ def _build_canonical_scan_options_payload(
     for key in ("scan_type", "quick", "thorough"):
         options_payload.pop(key, None)
     policy = contract.policy
+    options_payload.update({
+        "active": policy.active_testing,
+        "network_discovery": policy.network_discovery,
+        "subfinder": policy.subdomain_discovery,
+        "budget_profile": contract.budget_profile,
+        **_canonical_scanner_budget_options(contract),
+    })
+    options_payload, _family = _apply_scan_check_family_policy(
+        options_payload,
+        enforce_preconditions=not defer_family_preconditions,
+    )
+    options_payload.update(contract.option_metadata())
+    return options_payload
+
+
+def _canonical_scanner_budget_options(contract: ResolvedScanContract) -> dict[str, Any]:
+    """The scanner budget snapshots a Scan's worker inputs carry, from its canonical budget."""
     budget = contract.budget
     scanner_budget = {
         "max_duration_minutes": max(1, (budget.max_duration_seconds + 59) // 60),
@@ -1965,29 +1984,46 @@ def _build_canonical_scan_options_payload(
         "nuclei_max_targets": budget.max_endpoints,
         "active_worklist_max": budget.max_endpoints,
     }
-    if policy.active_testing:
+    if contract.policy.active_testing:
         scanner_budget.update({
             "active_max_seconds": budget.max_tool_wall_seconds,
             "active_max_endpoints": budget.max_endpoints,
         })
-    options_payload.update({
-        "active": policy.active_testing,
-        "network_discovery": policy.network_discovery,
-        "subfinder": policy.subdomain_discovery,
-        "budget_profile": contract.budget_profile,
+    return {
         "custom_budget": dict(scanner_budget),
         "resolved_budget": {
             **scanner_budget,
             "budget_profile": contract.budget_profile,
             "budget_source": "canonical_plan",
         },
-    })
-    options_payload, _family = _apply_scan_check_family_policy(
-        options_payload,
-        enforce_preconditions=not defer_family_preconditions,
-    )
-    options_payload.update(contract.option_metadata())
-    return options_payload
+    }
+
+
+# The worker inputs that snapshot the canonical execution plan and its budget.
+_SCAN_EXECUTION_PLAN_OPTION_KEYS = (
+    "scan_execution_plan_digest", "scan_execution_plan", "resolved_scan_budget",
+)
+
+
+def _bind_fan_out_scan_contract(
+    contract: ResolvedScanContract,
+    options_payload: dict[str, Any],
+    advanced: Mapping[str, Any] | None,
+) -> ResolvedScanContract:
+    """The contract of a Scan that became a parallel parent, with its inputs kept in step.
+
+    A thorough or deep Scan whose duration was lowered resolves a tool wall no larger than that
+    duration, because a Scan runs its actions one at a time. A parallel parent divides its tool
+    wall among children that run at the same time, so it keeps the profile's tool wall
+    (``bind_scan_fan_out``); the plan snapshot and scanner budget in its inputs follow.
+    """
+    bound = bind_scan_fan_out(contract, advanced)
+    if bound is contract:
+        return contract
+    metadata = bound.option_metadata()
+    options_payload.update({key: metadata[key] for key in _SCAN_EXECUTION_PLAN_OPTION_KEYS})
+    options_payload.update(_canonical_scanner_budget_options(bound))
+    return bound
 
 
 def _apply_auto_sharding_policy(
@@ -3275,6 +3311,7 @@ async def run_due_schedules(pool: asyncpg.Pool):
                     reason="legacy Scan authority was not migrated",
                 )
                 continue
+            schedule_advanced_limits = scan_options.get("advanced")
             try:
                 scan_contract, scan_options_model = (
                     _resolve_normal_schedule_options(scan_options)
@@ -3305,6 +3342,11 @@ async def run_due_schedules(pool: asyncpg.Pool):
                 active_testing,
                 max_workers=scan_contract.budget.max_workers,
             )
+            if parallel_enabled:
+                scan_contract = _bind_fan_out_scan_contract(
+                    scan_contract, scan_options,
+                    schedule_advanced_limits if isinstance(schedule_advanced_limits, Mapping) else None,
+                )
             scan_role = 'parent' if parallel_enabled else 'standalone'
             # The exact routing this job is queued with, so a job lost from the queue is resent
             # identically (_requeue_scan_lost_from_queue).
@@ -11046,11 +11088,12 @@ async def _submit_scan(
         # Authorize once per target: a standing authorization recorded for this target's scope
         # is reused instead of asking for a new receipt on every active scan.
         approval_receipt_id = await target_dns_alias.standing_authorization_for_target_url(db_pool, normalized_target)
+    scan_advanced_limits = browser_login_scan_limits(request)
     try:
         scan_contract = resolve_scan_contract(
             budget_profile=request.budget_profile or execution_options.budget_profile,
             policy=request.policy,
-            advanced=browser_login_scan_limits(request),
+            advanced=scan_advanced_limits,
             approval_receipt_id=approval_receipt_id,
         )
     except ValueError as exc:
@@ -11362,6 +11405,10 @@ async def _submit_scan(
             scan_contract.policy.active_testing,
             max_workers=scan_contract.budget.max_workers,
         )
+        if parallel_enabled:
+            scan_contract = _bind_fan_out_scan_contract(
+                scan_contract, options_payload, scan_advanced_limits,
+            )
         if parallel_worker_count is not None:
             parallel_worker_count = min(
                 max(0, int(parallel_worker_count)),

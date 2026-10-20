@@ -5,6 +5,13 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Mapping
 
+# Defined beside the batch attempt costs, which the planner and the report (shipped to the
+# host by the installer, unlike this module) read; re-exported here for the adapter.
+from .external_process import (  # noqa: F401
+    ACTIVE_TEMPLATE_PLANNED_WINDOWS,
+    ACTIVE_TEMPLATE_WINDOWS_RECORD_KIND,
+    TEMPLATE_WINDOW_BEYOND_ALLOWLIST,
+)
 from .nuclei_template_index import resolve_active_nuclei_selection
 
 
@@ -100,3 +107,62 @@ def active_template_window(
     index = ordinal % count
     chosen = ids[index::count]
     return ActiveTemplateWindow(",".join(chosen), index, count, len(chosen))
+
+
+def active_template_window_count(template_ids: str, *, size: int | None = None) -> int:
+    """How many windows the allowlist splits into (see ``active_template_window``)."""
+    ids = [item for item in str(template_ids or "").split(",") if item]
+    size = ACTIVE_TEMPLATE_WINDOW_SIZE if size is None else int(size)
+    return max(1, -(-len(ids) // max(1, size))) if ids else 0
+
+
+def active_template_window_applies(
+    template_ids: str, position: int, *, endpoint_entries: int,
+) -> bool:
+    """Whether a planned position past the endpoints still names a window of its own.
+
+    A position below the endpoint count is an endpoint's own attempt and runs exactly as it
+    always did. A later position runs window ``position`` on endpoint ``position % E`` only
+    while the allowlist has that many windows; past them it would repeat a window already run
+    on the same host, so it runs nothing.
+    """
+    if position < max(0, int(endpoint_entries)):
+        return True
+    return position < active_template_window_count(template_ids)
+
+
+def planned_endpoint_entries(
+    capability_args: Mapping[str, Any], manifest_entries: int,
+) -> int | None:
+    """E when an active-template slice plans positions past its endpoints, else None.
+
+    The planner declares ``endpoint_entries`` (E, the endpoint manifest's size) beside
+    ``manifest_entries`` (the positions it plans) only when it planned more positions than
+    endpoints. Both must agree with the immutable manifest and the planned window count.
+    """
+    raw = capability_args.get("endpoint_entries")
+    if raw is None:
+        return None
+    declared = capability_args.get("manifest_entries")
+    if (
+        isinstance(raw, bool) or not isinstance(raw, int) or raw < 1
+        or raw != int(manifest_entries)
+        or isinstance(declared, bool) or not isinstance(declared, int)
+        or not raw <= declared <= max(raw, ACTIVE_TEMPLATE_PLANNED_WINDOWS)
+    ):
+        raise ValueError("active template positions disagree with the endpoint manifest")
+    return raw
+
+
+def window_position_candidate_id(
+    candidate_id: str, position: int, endpoint_entries: int | None,
+) -> str:
+    """The attempt identity of a planned position: an endpoint's own below E, unchanged.
+
+    A position past the endpoints runs another window on endpoint ``position % E``, so it is
+    its own attempt; positions below E keep the identity -- and so the checkpoints and resume
+    -- every earlier release gave them.
+    """
+    if endpoint_entries is None or position < int(endpoint_entries):
+        return candidate_id
+    return f"{candidate_id}:window:{int(position)}"

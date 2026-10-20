@@ -293,7 +293,16 @@ from .capability_execution import (
 )
 from .execution_backend import ActionHeartbeat, ActionLease
 from .finalizer import _observed_url_key, finalize_scan_report
-from .nuclei_execution import active_template_window, resolve_active_scan_nuclei_options
+from .nuclei_execution import (
+    ACTIVE_TEMPLATE_WINDOWS_RECORD_KIND,
+    TEMPLATE_WINDOW_BEYOND_ALLOWLIST,
+    active_template_window,
+    active_template_window_applies,
+    active_template_window_count,
+    planned_endpoint_entries,
+    resolve_active_scan_nuclei_options,
+    window_position_candidate_id,
+)
 from .posture_findings import CORS_PROBE_ACTIONS
 from .negative_control import negative_control_entries
 from .nuclei_template_index import nuclei_templates_directory
@@ -4020,14 +4029,39 @@ class DatabaseNeutralScanActionDispatcher:
             or not 1 <= count <= 50
         ):
             raise ScanActionAdapterError("batch action slice is invalid")
-        stop = min(len(manifest.entries), start + count)
+        # A thorough or deep active-template slice may plan positions past its E endpoints:
+        # position o runs template window o on endpoint o % E (nuclei_execution).
+        try:
+            window_endpoints = (
+                planned_endpoint_entries(action.capability_args, len(manifest.entries))
+                if action.capability_name == "templates.active_batch" else None
+            )
+        except ValueError as exc:
+            raise ScanActionAdapterError(str(exc)) from exc
+        stop = min(
+            len(manifest.entries) if window_endpoints is None
+            else int(action.capability_args["manifest_entries"]),
+            start + count,
+        )
         # Fund cheaper candidate classes before expensive body candidates within the slice, so an
         # expensive attempt runs only on the budget cheaper verdicts did not need and can never
         # displace one (R1: see order_batch_rows_by_cost_class). Score order is preserved inside a
         # class; the slice membership is unchanged, only the attempt order within it.
         rows = tuple(order_batch_rows_by_cost_class(
             enumerate(manifest.entries[start:stop], start=start)
+            if window_endpoints is None else (
+                (position, manifest.entries[position % window_endpoints])
+                for position in range(start, stop)
+            )
         ))
+
+        def batch_candidate_id(row: Mapping[str, Any], manifest_index: int) -> str:
+            if window_endpoints is None:
+                return _batch_candidate_id(row, manifest_index)
+            return window_position_candidate_id(
+                _batch_candidate_id(row, manifest_index % window_endpoints),
+                manifest_index, window_endpoints,
+            )
         if not rows:
             return self._skip(action, self._empty_slice_reason(manifest))
         template_options: dict[str, Any] = {}
@@ -4073,6 +4107,23 @@ class DatabaseNeutralScanActionDispatcher:
                 return self._skip(action, resolved.skip_reason, verify_selection=verify_selection)
             worker_template_options = dict(resolved.worker_options)
             args_template_options = dict(resolved.capability_args)
+        # An active sweep runs one window of the allowlist per attempt (a verify Scan runs its
+        # named checks whole); the slice reports which windows its attempts finished.
+        windowed = (
+            tool == "nuclei" and worker_template_options.get("template_profile") == "active"
+            and verify_selection is None
+        )
+        allowlist = str(worker_template_options.get("template_ids") or "")
+        windows_run: set[int] = set()
+
+        def window_applies(manifest_index: int) -> bool:
+            """Whether a planned position names a window (an endpoint's own always does)."""
+            if window_endpoints is None or manifest_index < window_endpoints:
+                return True
+            return windowed and active_template_window_applies(
+                allowlist, manifest_index, endpoint_entries=window_endpoints,
+            )
+
         load_attempts = getattr(self.backend, "load_batch_attempts", None)
         checkpoint_attempt = getattr(self.backend, "checkpoint_batch_attempt", None)
         if not callable(load_attempts) or not callable(checkpoint_attempt):
@@ -4350,6 +4401,8 @@ class DatabaseNeutralScanActionDispatcher:
             }
             if result.status != "cancelled":
                 await checkpoint_attempt(action.action_id, attempt)
+            if candidate_id in template_windows and result.status in _BATCH_SUCCESS_STATUSES:
+                windows_run.add(int(template_windows[candidate_id]["index"]))
             if retry_round:
                 retried += 1
                 if result.observations:
@@ -4475,7 +4528,9 @@ class DatabaseNeutralScanActionDispatcher:
             manifest_index, row, retry_round = entry
             if row.get("parameter_location") == "path" and family != "sqli":
                 return False
-            candidate = _batch_candidate_id(row, manifest_index)
+            if not window_applies(manifest_index):
+                return False
+            candidate = batch_candidate_id(row, manifest_index)
             key = f"{manifest_digest}:{family}:{candidate}"
             if retry_round:
                 key += f":retry:{retry_round}"
@@ -4497,7 +4552,7 @@ class DatabaseNeutralScanActionDispatcher:
                         break
                     work.extend(
                         (manifest_index, row, 1) for manifest_index, row in rows
-                        if _batch_candidate_id(row, manifest_index) in still_empty
+                        if batch_candidate_id(row, manifest_index) in still_empty
                     )
                     if position >= len(work):
                         break
@@ -4518,7 +4573,18 @@ class DatabaseNeutralScanActionDispatcher:
                         "reason": "path_segment_candidate",
                     })
                     continue
-                candidate_id = _batch_candidate_id(row, manifest_index)
+                if not window_applies(manifest_index):
+                    # A planned window past the allowlist's own windows (a GET-only allowlist
+                    # has fewer) would repeat one already run on this host: nothing is sent.
+                    inapplicable += 1
+                    observations.append({
+                        "kind": "candidate_inapplicable",
+                        "candidate_id": batch_candidate_id(row, manifest_index),
+                        "family": family,
+                        "reason": TEMPLATE_WINDOW_BEYOND_ALLOWLIST,
+                    })
+                    continue
+                candidate_id = batch_candidate_id(row, manifest_index)
                 attempt_key = f"{manifest_digest}:{family}:{candidate_id}"
                 if retry_round:
                     attempt_key += f":retry:{retry_round}"
@@ -4567,6 +4633,9 @@ class DatabaseNeutralScanActionDispatcher:
                         cut_off_attempts[candidate_id] = attempt_id
                     if retry_round and not _no_tool_output(prior.get("observations") or ()):
                         retried_with_output.add(candidate_id)
+                    prior_window = prior.get("template_window")
+                    if prior_status in _BATCH_SUCCESS_STATUSES and isinstance(prior_window, Mapping):
+                        windows_run.add(int(prior_window.get("index") or 0))
                     prior_wall = int(dict(prior.get("budget_consumed") or {}).get(
                         "tool_wall_seconds", 0,
                     ) or 0)
@@ -4622,7 +4691,8 @@ class DatabaseNeutralScanActionDispatcher:
                             }
                     else:
                         execution_target = execution_url_for_manifest_endpoint(
-                            manifest, manifest_index,
+                            manifest, manifest_index if window_endpoints is None
+                            else manifest_index % window_endpoints,
                         )
                     # This entry and every later one that will actually be funded.
                     remaining_attempts = 1 + sum(1 for entry in work[position:] if needs_hold(entry))
@@ -5018,6 +5088,13 @@ class DatabaseNeutralScanActionDispatcher:
             item for entry in observations
             for item in (entry if isinstance(entry, list) else (entry,))
         ]
+        if windowed and allowlist:
+            observations.append({
+                "kind": ACTIVE_TEMPLATE_WINDOWS_RECORD_KIND,
+                "family": family,
+                "windows_run": sorted(windows_run),
+                "window_count": active_template_window_count(allowlist),
+            })
         for candidate_id, held in deferred_errors.items():
             if candidate_id not in recovered:
                 errors.extend(held)

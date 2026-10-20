@@ -177,6 +177,23 @@ PASSIVE_PACK_ATTEMPT_WALL_SECONDS = 7 * 5 + 5
 # An active template attempt may take this many times its planned share when earlier
 # attempts left the wall unspent.
 _TEMPLATE_ATTEMPT_SHARE_MULTIPLE = 3
+#: The windows the permitted active-template allowlist splits into on the pinned bundle with
+#: state-changing HTTP: ceil(1,146 / 30), at ``nuclei_execution.ACTIVE_TEMPLATE_WINDOW_SIZE``
+#: templates an attempt. A thorough or deep direct Scan plans one attempt per window even when
+#: the host has fewer endpoints than windows (a host with two endpoints otherwise ran 2 of 39
+#: windows, about 60 of 1,146 templates). An image test pins it to the bundle; a GET-only
+#: allowlist has fewer windows, and an attempt past them runs nothing
+#: (``nuclei_execution.active_template_window_applies``).
+ACTIVE_TEMPLATE_PLANNED_WINDOWS = 39
+#: The same without state-changing HTTP: the GET-only allowlist's ceil(761 / 30) windows on the
+#: pinned bundle. A Scan without that authority plans only these, so it neither holds budget
+#: for positions that would run nothing nor reads partial when a deadline cuts them.
+ACTIVE_TEMPLATE_PLANNED_GET_ONLY_WINDOWS = 26
+#: The record an active-template slice ends with: the windows its attempts finished and how
+#: many the allowlist has. The report unions them into ``nuclei_active.template_windows``.
+ACTIVE_TEMPLATE_WINDOWS_RECORD_KIND = "active_template_windows"
+#: Why a planned position past the allowlist's own windows ran nothing.
+TEMPLATE_WINDOW_BEYOND_ALLOWLIST = "template_window_beyond_allowlist"
 
 
 # What a later passive-pack attempt is reserved once finished attempts on this target have

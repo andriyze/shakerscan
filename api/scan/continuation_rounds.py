@@ -31,6 +31,7 @@ from .action_store import PostgresScanActionStore
 from .budget_allocator import allocate_scan_action_plan
 from .capability_execution import ScanCapabilityContractError
 from .capability_result import CapabilityResultReference
+from .contracts import budget_sufficiency
 from .continuation import (
     MAX_SCAN_CONTINUATION_ROUNDS,
     ContinuationBudgetCeiling,
@@ -419,6 +420,10 @@ def compile_continuation_round(
     # Admit against what the settled actions actually left, not the worst-case
     # residual frozen at submission (see reconciled_continuation_ceiling).
     residual = reconciled_continuation_ceiling(allocation, parent_results)
+    # The round's candidates are materialized, so each verifier slice holds the mutation
+    # allowance of the body candidates it actually holds, and none for a query slice.
+    body_positions = body_candidate_positions(candidates)
+    sufficient = budget_sufficiency(execution_plan.budget_profile)
     # A verifier slice that a slow target wall-killed with most of its requests unsent
     # is carried into this round, its holds scaled by the latency it measured.
     extensions = (
@@ -434,6 +439,8 @@ def compile_continuation_round(
             stage_last_chance_walls=last_chance_walls,
             reserved_for_new_work=new_work_reserve(parent_plan, candidates),
             final_round=revision_number >= MAX_SCAN_CONTINUATION_ROUNDS,
+            budget_profile=execution_plan.budget_profile,
+            body_positions=body_positions,
         )
         if revision_number >= 2 and not finalize_only else ()
     )
@@ -469,6 +476,19 @@ def compile_continuation_round(
         ),
         action_scope="endpoint",
         action_budgets=zero_cost_existing_inputs,
+        # A thorough or deep round chooses each lane's tier against what the settled actions
+        # left, so a lane whose full-ceiling tier the residual cannot fund steps down to one it
+        # can instead of being skipped: active templates reserve a mutation per request, and
+        # no second-round sweep was compiled on any large 2.11 target (3,960 needed, 3,833 left).
+        ledger_limits=(
+            {
+                name: min(int(limit), int(residual.get(name, limit)))
+                for name, limit in execution_plan.budget.ledger_limits().items()
+            }
+            if sufficient else None
+        ),
+        # Every active-template window, unless the Scan verifies named templates only.
+        active_template_windows=not options.get("verify_templates"),
         # Every work revision receives a unique action namespace. The terminal
         # revision reuses the last round's namespace only while compiling the
         # finalizer reservation; no round's work is appended twice.
@@ -485,10 +505,7 @@ def compile_continuation_round(
             for action in parent_plan.actions[:len(allocation.parent_action_ids)]
         ),
         verification_extensions=extensions,
-        # The round's candidates are materialized, so each verifier slice holds the
-        # mutation allowance of the body candidates it actually holds, and none for a
-        # slice of query candidates.
-        body_positions=body_candidate_positions(candidates),
+        body_positions=body_positions,
     )
     # Optional work the frozen allocation does not grant is left out before admission, so it
     # never holds residual budget; the Scan's report states each capability left out.
@@ -497,6 +514,9 @@ def compile_continuation_round(
     )
     allocated_plan = allocate_scan_action_plan(
         continuation_raw, ContinuationBudgetCeiling(residual),
+        # A lane's slices are admitted first slice first, so a residual that funds one of
+        # them funds the one the round can append.
+        lane_order=sufficient,
     ).plan
     continuation_plan = select_continuation_actions(
         allocated_plan,
