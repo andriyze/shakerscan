@@ -41,3 +41,19 @@ test('finite template metadata displays as metadata even without certificate evi
   assert.ok(result.groups[0].facts.some(fact => fact.label === 'Template CVSS' && fact.value === '7.5'))
   assert.ok(!result.groups[0].facts.some(fact => fact.label === 'EPSS'))
 })
+
+test('a weak-cipher finding shows the negotiated suite apart from the weak suites it accepts', () => {
+  // Unit fixture shaped like a stored weak-cipher finding: the weak suite the finding is about is
+  // `cipher`; the suite a normal handshake negotiates is `negotiated_cipher`.
+  const facts = findingDetailEvidence({
+    protocol: 'TLSv1.2', cipher: 'ECDHE-RSA-RC4-SHA', negotiated_cipher: 'ECDHE-RSA-AES256-GCM-SHA384',
+    weak_ciphers_supported: ['ECDHE-RSA-RC4-SHA', 'ECDHE-RSA-DES-CBC3-SHA'], supported_protocols: ['TLSv1', 'TLSv1.2'],
+  }).groups.flatMap(group => group.facts)
+  const value = label => facts.find(fact => fact.label === label)?.value
+  assert.equal(value('Negotiated cipher'), 'ECDHE-RSA-AES256-GCM-SHA384')
+  assert.equal(value('Weak suites accepted'), 'ECDHE-RSA-RC4-SHA, ECDHE-RSA-DES-CBC3-SHA')
+  assert.equal(value('Protocols observed'), 'TLSv1, TLSv1.2')
+  // Any other TLS finding keeps its negotiated suite under `cipher`.
+  const other = findingDetailEvidence({ cipher: 'TLS_AES_256_GCM_SHA384' }).groups.flatMap(group => group.facts)
+  assert.ok(other.some(fact => fact.label === 'Negotiated cipher' && fact.value === 'TLS_AES_256_GCM_SHA384'))
+})

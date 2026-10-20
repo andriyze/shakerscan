@@ -32,7 +32,12 @@ export function findingDetailEvidence(value: unknown): DetailEvidence {
   const trust = record(stored.trust)
   add('TLS observation', [
     ...facts(stored, [['requested_host', 'Requested host'], ['pinned_address', 'Connected address'],
-      ['protocol', 'Negotiated protocol'], ['cipher', 'Negotiated cipher'], ['chain_status', 'Chain capture']]),
+      ['protocol', 'Negotiated protocol']]),
+    // A weak-cipher finding stores the weak suite it is about as `cipher` and the suite a normal
+    // handshake negotiates as `negotiated_cipher`; the weak suite is not what was negotiated.
+    { label: 'Negotiated cipher', value: text(stored.negotiated_cipher) || text(stored.cipher) },
+    { label: 'Weak suites accepted', value: list(stored.weak_ciphers_supported, 12) },
+    ...facts(stored, [['chain_status', 'Chain capture']]),
     ...facts(trust, [['result', 'Chain trust'], ['failure', 'Verifier reason'],
       ['error_code', 'Verifier code'], ['error', 'Verifier message']]),
     { label: 'Protocols observed', value: list(stored.supported_protocols, 6) },

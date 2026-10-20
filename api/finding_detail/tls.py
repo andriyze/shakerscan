@@ -21,7 +21,7 @@ _LABELS = {
 _TRUST_REASONS = {
     "self_signed": "the certificate is self-signed: it is its own issuer, so no trusted CA vouches for it",
     "untrusted_root": "the chain ends at a root certificate that is not in the client trust store (a private or unknown CA)",
-    "issuer_not_found": "the issuing certificate was neither sent by the server nor found in the trust store (usually a missing intermediate)",
+    "issuer_not_found": "the issuing certificate was neither sent by the server nor found in the trust store (a missing intermediate, or a private CA the clients do not trust)",
     "expired": "a certificate in the chain is past its expiry date",
     "not_yet_valid": "a certificate in the chain is not valid yet",
     "revoked": "the certificate was revoked by its CA",
@@ -29,7 +29,13 @@ _TRUST_REASONS = {
     "invalid_purpose": "the certificate is not issued for TLS server authentication",
     "issuer_public_key_missing": "the issuer's public key could not be read",
     "rejected": "the trust store explicitly rejects the root",
+    "weak_key": "a certificate in the chain has a key smaller than the verifier accepts",
+    "weak_signature": "a certificate in the chain is signed with a digest the verifier refuses (SHA-1 or MD5)",
 }
+
+# OpenSSL verify codes for a key (66 the server's, 67 an issuer's) or a signature digest (68)
+# below the verifier's security level. Findings recorded before they had a name say "other".
+_STRENGTH_FAILURES = {66: "weak_key", 67: "weak_key", 68: "weak_signature"}
 
 _SERVER_FIXES = {
     "protocol": [
@@ -57,6 +63,69 @@ def _connect(evidence: Mapping[str, Any], finding: Mapping[str, Any]) -> tuple[s
 def _s_client(address: str, sni: str, port: int | None, extra: str = "") -> str:
     target = f"[{address}]:{port}" if ":" in address else f"{address}:{port}"
     return f"openssl s_client -connect {q(target)} -servername {q(sni)}{extra} </dev/null"
+
+
+def _weak_links(chain: list[dict[str, Any]], flag: str) -> list[dict[str, Any]]:
+    """Issuing certificates the server sent whose key or signature is weak (``flag``).
+
+    A self-signed root's own signature is never checked, so it is not named for a weak signature.
+    """
+    return [
+        link for link in chain[1:]
+        if link.get(flag) is True and not (flag == "weak_signature" and link.get("self_signed") is True)
+    ]
+
+
+def _issuer_not_found_fix(cert: Mapping[str, Any], chain: list[dict[str, Any]], sent: int | None) -> list[str]:
+    """Code 20/2/21: the verifier could not find who issued the last certificate the server sent.
+
+    That is a missing intermediate, or a CA (often a private root) the clients do not have; adding
+    a root to the served chain does not make it trusted. A certificate that names where its issuer
+    can be downloaded (AIA) comes from a CA that publishes its intermediates, so the missing
+    intermediate is the likely cause; otherwise both are named.
+    """
+    last = chain[-1] if len(chain) > 1 and sent and sent > 1 else {}
+    missing = text(last.get("issuer_cn") or last.get("issuer") or cert.get("issuer_cn") or cert.get("issuer")) or "its issuer"
+    counted = f"The server sent {sent} certificate(s), and neither they nor the trust store include {missing}. " if sent else ""
+    chain_step = "nginx: ssl_certificate must point to the full-chain file (leaf + intermediates); Apache 2.4.8+: SSLCertificateFile with the chain appended."
+    aia = strings(cert.get("aia_ca_issuers"), 3)
+    if aia:
+        return [
+            f"{counted}Configure the full chain: the leaf followed by the intermediate that issued it ({missing}).",
+            chain_step,
+            f"The certificate names where its issuer can be downloaded: {join_limited(aia, 2)}.",
+        ]
+    return [
+        f"{counted}Either {missing} is an intermediate the server does not send, or it is a CA the clients do not trust (a private CA).",
+        f"If {missing} is an intermediate: serve the leaf followed by it. {chain_step}",
+        f"If {missing} is a private CA: for a public service, use a certificate from a publicly trusted CA; for an internal service, install its root on the clients. Sending a root in the chain does not make it trusted.",
+    ]
+
+
+def _strength_fix(failure: str, code: int | None, cert: Mapping[str, Any], chain: list[dict[str, Any]]) -> list[str]:
+    """Codes 66/67/68 that no finding of the served certificate explains: name the weak one."""
+    if failure == "weak_key":
+        if code == 66:
+            bits = integer(cert.get("public_key_bits"))
+            return [
+                f"The server certificate's {f'{bits}-bit key' if bits else 'key'} is below the verifier's minimum (RSA 2048 bits, EC 224 bits).",
+                "Generate a NEW key (renewing with the same key keeps it weak), have it signed, install the certificate and key, and reload the terminator.",
+            ]
+        named = [
+            f"{text(link.get('subject'))} uses a {link.get('public_key_bits')}-bit {text(link.get('public_key_type')).removesuffix('PublicKey')} key."
+            for link in _weak_links(chain, "weak_public_key")[:2]
+        ] or ["An issuing CA certificate (one the server sent, or the root it chains to) has a key below the verifier's minimum (RSA 2048 bits, EC 224 bits)."]
+        return named + ["Install your CA's current intermediates; for a private CA, reissue its certificates with RSA 2048+ or EC P-256 keys and re-sign the server certificate."]
+    if text(cert.get("signature_hash")).lower() in {"md5", "sha1"}:
+        return [
+            f"The server certificate is signed with {text(cert.get('signature_hash')).upper()}.",
+            "Reissue it with a SHA-256 signature and install it with its current intermediates.",
+        ]
+    named = [
+        f"{text(link.get('subject'))} is signed with {text(link.get('signature_hash')).upper() or 'a weak digest'}."
+        for link in _weak_links(chain, "weak_signature")[:2]
+    ] or ["An intermediate certificate in the chain is signed with SHA-1 or MD5."]
+    return named + ["Install your CA's current SHA-256 intermediates; for a private CA, reissue the intermediate with a SHA-256 signature."]
 
 
 def build(finding: Mapping[str, Any], evidence: Mapping[str, Any]) -> dict[str, Any]:
@@ -130,8 +199,11 @@ def build(finding: Mapping[str, Any], evidence: Mapping[str, Any]) -> dict[str, 
         ] + ([f"If clients must use the address {host}, add it as an IP SAN, or give the service a DNS name and use that."] if ip_requested else [])
     elif check == "tls_certificate_untrusted":
         failure = text(trust.get("failure"), 60)
+        if failure in {"", "other"}:
+            failure = _STRENGTH_FAILURES.get(integer(trust.get("error_code")) or -1, failure)
         reason = _TRUST_REASONS.get(failure) or text(trust.get("error"), 200) or "the verifier refused the chain"
-        length = integer(evidence.get("chain_length")) or len(chain)
+        # `not_captured`: the runtime could not read the chain, so only the leaf is known.
+        length = (integer(evidence.get("chain_length")) or len(chain)) if evidence.get("chain_status") != "not_captured" else None
         issuer = text(cert.get("issuer_cn") or cert.get("issuer"))
         out["summary"] = f"Clients that verify certificates refuse {origin or host}: {reason}."
         out["expected"] = ["A chain from the served certificate through its intermediates to a root the clients trust."]
@@ -139,6 +211,10 @@ def build(finding: Mapping[str, Any], evidence: Mapping[str, Any]) -> dict[str, 
             fact("Verifier result", " · ".join(part for part in (text(trust.get("error"), 200), f"code {trust.get('error_code')}" if trust.get("error_code") is not None else "") if part)),
             fact("Certificates sent by the server", length),
         ) + cert_facts
+        out["reproduce"] = command(
+            _s_client(address, host, port) + " 2>/dev/null | sed -n '/^Certificate chain/,/^---/p'",
+            note="Lists every certificate the server sends, in order: s: is its subject and i: the issuer it names.",
+        )
         fix = []
         if failure == "self_signed" or cert.get("self_signed") is True:
             fix = [
@@ -146,11 +222,9 @@ def build(finding: Mapping[str, Any], evidence: Mapping[str, Any]) -> dict[str, 
                 "For an internal-only service, issue it from your internal CA and install that CA's root on the clients; never tell clients to skip verification.",
             ]
         elif failure == "issuer_not_found":
-            aia = strings(cert.get("aia_ca_issuers"), 3)
-            fix = [
-                f"The server sent {length} certificate(s). Configure the full chain: the leaf followed by the intermediate that issued it ({issuer}).",
-                "nginx: ssl_certificate must point to the full-chain file (leaf + intermediates); Apache 2.4.8+: SSLCertificateFile with the chain appended.",
-            ] + ([f"The certificate names where its issuer can be downloaded: {join_limited(aia, 2)}."] if aia else [])
+            fix = _issuer_not_found_fix(cert, chain, length)
+        elif failure in {"weak_key", "weak_signature"}:
+            fix = _strength_fix(failure, integer(trust.get("error_code")), cert, chain)
         elif failure == "untrusted_root":
             root = text(chain[-1].get("subject")) if chain else issuer
             fix = [
@@ -193,7 +267,9 @@ def build(finding: Mapping[str, Any], evidence: Mapping[str, Any]) -> dict[str, 
             text(row.get("protocol")) for row in probes if row.get("supported") is True
         ]
         modern = [text(row.get("protocol")) for row in attempts if row.get("supported") is True and text(row.get("protocol")).startswith("TLSv1.")]
-        refused = [text(row.get("protocol")) for row in [*probes, *attempts] if row.get("supported") is False and text(row.get("protocol"))]
+        # Protocol versions only: `default_negotiation` names the scan's own fallback handshake.
+        refused = [text(row.get("protocol")) for row in [*probes, *attempts]
+                   if row.get("supported") is False and text(row.get("protocol")).startswith(("SSLv", "TLSv"))]
         best = text(evidence.get("protocol"))
         accepted = [*legacy, *[name for name in modern if name not in legacy]]
         out["summary"] = (
@@ -236,19 +312,45 @@ def build(finding: Mapping[str, Any], evidence: Mapping[str, Any]) -> dict[str, 
         )
         out["expected"] = ["Only AEAD suites (AES-GCM or ChaCha20-Poly1305) with forward secrecy (ECDHE); no RC4, DES/3DES, NULL, EXPORT or anonymous suites."]
         out["fix"] = [f"Remove {join_limited(weak, 4) or cipher} (and every RC4, DES/3DES, NULL, EXPORT and anonymous suite) from the server's cipher list:"] + _SERVER_FIXES["cipher"]
-        out["reproduce"] = command(f"nmap --script ssl-enum-ciphers -p {port} {q(host or address)}", note="Lists every suite the server accepts, graded. A current OpenSSL client may lack RC4/DES entirely, so `openssl s_client -cipher` can fail locally.")
-        out["verify"] = command(_s_client(host or address, host, port, f" -cipher {q((weak[0] if weak else cipher) + ':@SECLEVEL=0')}") + " 2>&1 | grep -E 'Cipher is|alert|error'", expect="a handshake failure for every weak suite")
-    elif check == "tls_certificate_weak_signature":
-        out["summary"] = f"The certificate served at {origin or host} is signed with {text(cert.get('signature_hash')).upper() or 'a weak hash'}."
-        out["expected"] = ["A SHA-256 (or stronger) signature, which every public CA issues today."]
-        out["fix"] = [f"Reissue the certificate for {covered} with a SHA-256 signature and install it with its current intermediates."]
-    elif check == "tls_certificate_weak_public_key":
-        out["summary"] = f"The certificate served at {origin or host} uses a {cert.get('public_key_bits')}-bit {text(cert.get('public_key_type')).removesuffix('PublicKey') or 'public'} key."
-        out["expected"] = ["RSA 2048 bits or more, or an EC P-256 key."]
-        out["fix"] = [
-            "Generate a NEW key (renewing with the same key keeps it weak), e.g. openssl req -new -newkey rsa:3072 -nodes -keyout server.key -out server.csr, or an EC P-256 key.",
-            "Have the CSR signed, install the new certificate and key, and reload the terminator.",
-        ]
+        enumerate_suites = f"nmap --script ssl-enum-ciphers -p {port} {q(host or address)}"
+        out["reproduce"] = command(enumerate_suites, note="Lists every suite the server accepts, graded. nmap writes its own ClientHello, so it can offer RC4 and DES; a current OpenSSL client often cannot, and `openssl s_client -cipher` then fails locally with 'no cipher match' whatever the server accepts.")
+        # The check offers the weak suites itself: `openssl s_client -cipher RC4...` on an OpenSSL
+        # without RC4 printed the same local error for a fixed and a vulnerable server. Suite
+        # names are IANA's (TLS_RSA_WITH_RC4_128_SHA); a bare NULL would match the
+        # "compressors: NULL" line every server prints.
+        out["verify"] = command(enumerate_suites + " | grep -E 'TLSv1|SSLv3|RC4|DES|WITH_NULL|EXPORT|_anon_'",
+                                expect="only the protocol version headers (such as TLSv1.2:), with no RC4, DES/3DES, NULL, EXPORT or anon suite listed")
+    elif check in {"tls_certificate_weak_signature", "tls_certificate_weak_public_key"}:
+        signature = check == "tls_certificate_weak_signature"
+        # The generic subject/issuer/dates printout showed neither the digest nor the key size.
+        printed = "Signature Algorithm" if signature else "Public-Key"
+        out["reproduce"] = command(_s_client(address, host, port) + f" 2>/dev/null | openssl x509 -noout -text | grep -E 'Subject:|{printed}'")
+        out["verify"] = command(
+            _s_client(host or address, host, port) + f" 2>/dev/null | openssl x509 -noout -text | grep -E '{printed}'",
+            expect=(
+                "Signature Algorithm: sha256WithRSAEncryption (or ecdsa-with-SHA256, or a stronger digest); never sha1 or md5" if signature
+                else "Public-Key: (2048 bit) or more for RSA, (256 bit) for EC"
+            ),
+        )
+        code = integer(trust.get("error_code"))
+        if trust.get("result") == "untrusted" and code == (68 if signature else 66):
+            context.append(
+                f"Clients that verify certificates refuse this certificate for its {'signature' if signature else 'key'} "
+                f"(verifier: {text(trust.get('error'), 120) or 'refused'}, code {code})."
+                + (" The verifier refuses a weak server key before it builds the chain, so whether the chain reaches a trusted root is checked only after the key is replaced."
+                   if not signature else "")
+            )
+        if signature:
+            out["summary"] = f"The certificate served at {origin or host} is signed with {text(cert.get('signature_hash')).upper() or 'a weak hash'}."
+            out["expected"] = ["A SHA-256 (or stronger) signature, which every public CA issues today."]
+            out["fix"] = [f"Reissue the certificate for {covered} with a SHA-256 signature and install it with its current intermediates."]
+        else:
+            out["summary"] = f"The certificate served at {origin or host} uses a {cert.get('public_key_bits')}-bit {text(cert.get('public_key_type')).removesuffix('PublicKey') or 'public'} key."
+            out["expected"] = ["RSA 2048 bits or more, or an EC P-256 key."]
+            out["fix"] = [
+                "Generate a NEW key (renewing with the same key keeps it weak), e.g. openssl req -new -newkey rsa:3072 -nodes -keyout server.key -out server.csr, or an EC P-256 key.",
+                "Have the CSR signed, install the new certificate and key, and reload the terminator.",
+            ]
     else:
         out["summary"] = text(finding.get("title"))
     out["context"] = context
