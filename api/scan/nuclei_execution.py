@@ -12,6 +12,7 @@ from .external_process import (  # noqa: F401
     ACTIVE_TEMPLATE_PLANNED_WINDOWS,
     ACTIVE_TEMPLATE_WINDOWS_RECORD_KIND,
     TEMPLATE_WINDOW_BEYOND_ALLOWLIST,
+    TEMPLATE_WINDOW_PAST_BASES,
 )
 from .nuclei_template_index import resolve_active_nuclei_selection
 

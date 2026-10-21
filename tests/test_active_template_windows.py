@@ -239,7 +239,7 @@ def _report_slice(action_id, ordinal, *, start, count, windows, required):
     )
 
 
-def _report(slices, *, windows, shared=False):
+def _report(slices, *, windows, shared=False, bases=None):
 
     actions = [
         _report_slice(f"active.templates.r{number:02d}", index, start=start, count=count,
@@ -263,7 +263,8 @@ def _report(slices, *, windows, shared=False):
             } for position in range(start, start + count)),
             {"kind": "active_template_windows", "family": "nuclei_active",
              "windows_run": list(range(start, start + count)), "window_count": 39,
-             **({"repeated_across_shards": True} if shared else {})},
+             **({"repeated_across_shards": True} if shared else {}),
+             **({"bases": bases(start, count)} if bases else {})},
         )
     results = {
         action.action_id: _result_with_observation_count(action, len(observations[action.action_id]))
@@ -445,3 +446,53 @@ def test_a_sharded_scan_reports_how_much_of_the_allowlist_its_shards_ran():
     assert summarize_parallel_action_coverage(merged)["family_coverage"][0]["template_windows"] == {
         "run": 3, "total": 39, "repeated_across_shards": True,
     }
+
+
+FIRST, SECOND = "https://app.example.test/", "https://app.example.test:8443/"
+FULL = [(1, 0, 2), (2, 2, 33), (3, 35, 4)]
+
+
+def _first_base_only(start, count):
+    return [
+        {"base": FIRST, "windows_run": list(range(start, start + count))},
+        {"base": SECOND, "windows_run": []},
+    ]
+
+
+def test_a_second_origin_short_of_windows_makes_a_thorough_sweep_partial():
+    """Run and total count (base, window) pairs. A thorough host whose second origin ran no
+    window read 39 of 39 complete; it is 39 of 78, partial, and says one base is short."""
+    report, family = _report(FULL, windows=True, bases=_first_base_only)
+    assert family["template_windows"] == {
+        "run": 39, "total": 78,
+        "bases": [{"base": FIRST, "run": 39, "total": 39}, {"base": SECOND, "run": 0, "total": 39}],
+    }
+    assert family["coverage_status"] == "partial"
+    assert family["reason"] == "template_windows_incomplete_on_origin"
+    assert family["template_windows_incomplete_bases"] == 1
+    assert report["result"]["grade_reliable"] is False
+    assert "template_windows_incomplete_on_origin" in report["coverage"]["reasons"]
+
+
+def test_a_single_origin_that_ran_every_window_reads_39_of_39_complete():
+    _report_body, family = _report(
+        FULL, windows=True,
+        bases=lambda start, count: [{"base": FIRST, "windows_run": list(range(start, start + count))}],
+    )
+    assert family["coverage_status"] == "complete"
+    assert family["template_windows"] == {
+        "run": 39, "total": 39, "bases": [{"base": FIRST, "run": 39, "total": 39}],
+    }
+
+
+def test_a_balanced_sweep_short_on_a_base_keeps_its_status():
+    _report_body, family = _report([(1, 0, 2)], windows=False, bases=_first_base_only)
+    assert family["coverage_status"] == "complete"
+    assert family["template_windows"]["run"] == 2 and family["template_windows"]["total"] == 78
+
+
+def test_a_shards_short_base_is_not_held_to_every_window():
+    """A shard runs its own part of the endpoints; its siblings run theirs."""
+    _report_body, family = _report(FULL, windows=True, bases=_first_base_only, shared=True)
+    assert family["coverage_status"] == "complete"
+    assert family["template_windows"]["repeated_across_shards"] is True

@@ -298,6 +298,7 @@ from .finalizer import _observed_url_key, finalize_scan_report
 from .nuclei_execution import (
     ACTIVE_TEMPLATE_WINDOWS_RECORD_KIND,
     TEMPLATE_WINDOW_BEYOND_ALLOWLIST,
+    TEMPLATE_WINDOW_PAST_BASES,
     active_template_window,
     active_template_window_applies,
     active_template_window_count,
@@ -4125,6 +4126,8 @@ class DatabaseNeutralScanActionDispatcher:
         )
         allowlist = str(worker_template_options.get("template_ids") or "")
         windows_run: set[int] = set()
+        # The windows each sweep base finished, so coverage can say which base ran how many.
+        base_windows_run: dict[str, set[int]] = {}
 
         # Each sweep position runs window p % W at base p // W: the target URL's directory, then
         # the manifest's other origins' roots (active_sweep_bases). A scheme-inferred Scan's
@@ -4140,17 +4143,27 @@ class DatabaseNeutralScanActionDispatcher:
         ) if windowed else ()
         sweep_windows = active_template_window_count(allowlist) if windowed else 0
 
+        def position_base(manifest_index: int) -> str | None:
+            return active_sweep_base(
+                manifest_index, bases=sweep_bases, window_count=sweep_windows,
+            ) if windowed else None
+
+        def window_skip_reason(manifest_index: int) -> str | None:
+            """Why a planned position runs nothing, or None when it names a pair of its own."""
+            if (
+                window_endpoints is not None and manifest_index >= window_endpoints
+                and not (windowed and active_template_window_applies(
+                    allowlist, manifest_index, endpoint_entries=window_endpoints,
+                ))
+            ):
+                return TEMPLATE_WINDOW_BEYOND_ALLOWLIST
+            if windowed and position_base(manifest_index) is None:
+                return TEMPLATE_WINDOW_PAST_BASES
+            return None
+
         def window_applies(manifest_index: int) -> bool:
             """Whether a planned position names a (base, window) pair no other position runs."""
-            if windowed and active_sweep_base(
-                manifest_index, bases=sweep_bases, window_count=sweep_windows,
-            ) is None:
-                return False
-            if window_endpoints is None or manifest_index < window_endpoints:
-                return True
-            return windowed and active_template_window_applies(
-                allowlist, manifest_index, endpoint_entries=window_endpoints,
-            )
+            return window_skip_reason(manifest_index) is None
 
         load_attempts = getattr(self.backend, "load_batch_attempts", None)
         checkpoint_attempt = getattr(self.backend, "checkpoint_batch_attempt", None)
@@ -4279,6 +4292,7 @@ class DatabaseNeutralScanActionDispatcher:
         attempt_log: list[tuple[str, int, bool, bool]] = []
         work = [(manifest_index, row, 0) for manifest_index, row in rows]
         template_windows: dict[str, dict[str, int]] = {}
+        candidate_bases: dict[str, str] = {}
         first_pass = len(work)
         position = 0
         # SQLi candidates of one slice may run concurrently, inside the slice's reservation and
@@ -4448,6 +4462,10 @@ class DatabaseNeutralScanActionDispatcher:
                 await checkpoint_attempt(action.action_id, attempt)
             if candidate_id in template_windows and result.status in _BATCH_SUCCESS_STATUSES:
                 windows_run.add(int(template_windows[candidate_id]["index"]))
+                if candidate_id in candidate_bases:
+                    base_windows_run.setdefault(candidate_bases[candidate_id], set()).add(
+                        int(template_windows[candidate_id]["index"])
+                    )
             if retry_round:
                 retried += 1
                 if result.observations:
@@ -4634,7 +4652,7 @@ class DatabaseNeutralScanActionDispatcher:
                         "kind": "candidate_inapplicable",
                         "candidate_id": batch_candidate_id(row, manifest_index),
                         "family": family,
-                        "reason": TEMPLATE_WINDOW_BEYOND_ALLOWLIST,
+                        "reason": window_skip_reason(manifest_index),
                     })
                     continue
                 candidate_id = batch_candidate_id(row, manifest_index)
@@ -4689,6 +4707,11 @@ class DatabaseNeutralScanActionDispatcher:
                     prior_window = prior.get("template_window")
                     if prior_status in _BATCH_SUCCESS_STATUSES and isinstance(prior_window, Mapping):
                         windows_run.add(int(prior_window.get("index") or 0))
+                        resumed_base = position_base(manifest_index)
+                        if resumed_base is not None:
+                            base_windows_run.setdefault(resumed_base, set()).add(
+                                int(prior_window.get("index") or 0)
+                            )
                     prior_wall = int(dict(prior.get("budget_consumed") or {}).get(
                         "tool_wall_seconds", 0,
                     ) or 0)
@@ -5000,6 +5023,8 @@ class DatabaseNeutralScanActionDispatcher:
                             )
                             scanner_options["template_ids"] = window.template_ids
                             template_windows[candidate_id] = window.record()
+                            if position_base(manifest_index) is not None:
+                                candidate_bases[candidate_id] = str(position_base(manifest_index))
                     elif tool == "dalfox":
                         scanner_options["severity"] = "high"
                         args["severity"] = "high"
@@ -5169,6 +5194,12 @@ class DatabaseNeutralScanActionDispatcher:
                 "family": family,
                 "windows_run": sorted(windows_run),
                 "window_count": active_template_window_count(allowlist),
+                # Every base the sweep maps positions to, in order, and the windows each
+                # finished: a second origin that ran 11 of 39 windows is not "39 of 39".
+                "bases": [
+                    {"base": base, "windows_run": sorted(base_windows_run.get(base, ()))}
+                    for base in sweep_bases
+                ],
                 **({"repeated_across_shards": True} if shared else {}),
             })
         for candidate_id, held in deferred_errors.items():

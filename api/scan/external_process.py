@@ -194,6 +194,13 @@ ACTIVE_TEMPLATE_PLANNED_GET_ONLY_WINDOWS = 26
 ACTIVE_TEMPLATE_WINDOWS_RECORD_KIND = "active_template_windows"
 #: Why a planned position past the allowlist's own windows ran nothing.
 TEMPLATE_WINDOW_BEYOND_ALLOWLIST = "template_window_beyond_allowlist"
+#: Why a sweep position past every base's windows ran nothing: each (base, window) pair it could
+#: name already runs at an earlier position (a host with more endpoints than its bases have
+#: windows).
+TEMPLATE_WINDOW_PAST_BASES = "template_window_past_bases"
+#: Why a thorough or deep Scan's active templates read partial when a sweep base -- the target's
+#: or another origin's -- ran fewer than every window.
+TEMPLATE_WINDOWS_INCOMPLETE_ON_ORIGIN = "template_windows_incomplete_on_origin"
 
 
 # What a later passive-pack attempt is reserved once finished attempts on this target have

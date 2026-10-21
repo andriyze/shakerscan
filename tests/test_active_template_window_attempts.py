@@ -92,6 +92,9 @@ class _Backend:
     async def checkpoint_batch_attempt(self, action_id, attempt):
         self.attempts.setdefault(action_id, {})[attempt["attempt_id"]] = dict(attempt)
 
+    async def load_observations(self, action_id):
+        return tuple(getattr(self, "observations", {}).get(action_id, ()))
+
 
 class _Host:
     """One endpoint manifest and template manifest; slices of it run through the adapter."""
@@ -155,10 +158,13 @@ class _Host:
             dependencies=(), required=False, supporting=False, output_schema=spec.output_schema,
         )
 
-    def run(self, monkeypatch, bundle_dir, action, *, policy=AUTHORIZED, statuses=None, options=None):
+    def run(
+        self, monkeypatch, bundle_dir, action, *, policy=AUTHORIZED, statuses=None, options=None,
+        before=(),
+    ):
         plan = ScanActionPlan(
             scan_id=self.scan_id, execution_plan_digest="a" * 64,
-            target_binding_digest=self.target.digest, actions=(action,),
+            target_binding_digest=self.target.digest, actions=(*before, action),
         )
         calls = self.calls
 
@@ -333,7 +339,7 @@ def test_fifty_endpoints_on_one_origin_run_39_distinct_pairs_and_send_nothing_el
     assert {call["url"] for call in host.calls} == {"https://app.example.test/"}
     beyond = [item for item in receipt.observations if item.get("kind") == "candidate_inapplicable"]
     assert len(beyond) == 11
-    assert {item["reason"] for item in beyond} == {"template_window_beyond_allowlist"}
+    assert {item["reason"] for item in beyond} == {"template_window_past_bases"}
     assert receipt.status == "success"
     assert receipt.redacted_execution["unattempted_count"] == 0
     assert receipt.redacted_execution["inapplicable_count"] == 11
@@ -559,3 +565,122 @@ def test_two_shard_children_say_their_sweeps_may_repeat_each_others_windows(monk
         options={"canonical_shard_authority": {"shard_index": -1, "shard_count": 0, "parallel_discovery": True}},
     )
     assert "repeated_across_shards" not in _windows_record(found)
+
+
+TWO_ORIGINS = TargetBinding(
+    target_id="target-1", target_kind="web", canonical_host="app.example.test",
+    allowed_origins=("https://app.example.test", "https://app.example.test:8443"),
+    allowed_addresses=("192.0.2.10",), allowed_root_domains=("example.test",),
+)
+
+
+def test_the_windows_record_names_what_each_base_finished(monkeypatch, bundle):
+    host = _Host(
+        tuple(f"/p{index}" for index in range(30)) + tuple((8443, f"/q{index}") for index in range(20)),
+        target=TWO_ORIGINS,
+    )
+    receipt = host.run(
+        monkeypatch, bundle, host.action("active.templates.r01", start=0, count=50, windows=False),
+    )
+    assert _windows_record(receipt)["bases"] == [
+        {"base": "https://app.example.test/", "windows_run": list(range(39))},
+        {"base": "https://app.example.test:8443/", "windows_run": list(range(11))},
+    ]
+
+
+def test_a_thorough_host_with_a_second_origin_records_that_origin_ran_no_window(monkeypatch, bundle):
+    """Fewer endpoints than windows plans 39 positions, all at the first base: the record says
+    the second origin finished none, so the report cannot read 39 of 39."""
+    host = _Host(("/", "/a", (8443, "/q")), target=TWO_ORIGINS)
+    receipts = [
+        host.run(monkeypatch, bundle, host.action(f"active.templates.r{number:02d}", start=start, count=count))
+        for number, (start, count) in enumerate(((0, 3), (3, 33), (36, 3)), start=1)
+    ]
+    assert {call["url"] for call in host.calls} == {"https://app.example.test/"}
+    assert _windows_record(receipts[0])["bases"][1] == {
+        "base": "https://app.example.test:8443/", "windows_run": [],
+    }
+
+
+def test_sweep_bases_do_not_depend_on_manifest_order():
+    entries = [
+        {"scheme": "https", "host": "app.example.test", "port": 9443},
+        {"scheme": "http", "host": "app.example.test", "port": 8080},
+        {"scheme": "https", "host": "app.example.test", "port": 443},
+        {"scheme": "https", "host": "app.example.test", "port": 8443},
+    ]
+    expected = (
+        "https://app.example.test/", "http://app.example.test:8080/",
+        "https://app.example.test:8443/", "https://app.example.test:9443/",
+    )
+    assert active_sweep_bases("https://app.example.test/", entries) == expected
+    assert active_sweep_bases("https://app.example.test/", list(reversed(entries))) == expected
+
+
+def test_a_resumed_slice_on_three_origins_maps_positions_to_the_same_bases(monkeypatch, bundle):
+    three = TargetBinding(
+        target_id="target-1", target_kind="web", canonical_host="app.example.test",
+        allowed_origins=(
+            "https://app.example.test", "https://app.example.test:8443", "https://app.example.test:9443",
+        ),
+        allowed_addresses=("192.0.2.10",), allowed_root_domains=("example.test",),
+    )
+    paths = (
+        tuple(f"/p{index}" for index in range(30)) + tuple((9443, f"/r{index}") for index in range(10))
+        + tuple((8443, f"/q{index}") for index in range(10))
+    )
+    host = _Host(paths, target=three)
+    action = host.action("active.templates.r01", start=0, count=50, windows=False)
+    first = host.run(monkeypatch, bundle, action, statuses={45: "failed"})
+    sent = list(host.calls)
+    assert [call["url"] for call in sent[39:]] == ["https://app.example.test:8443/"] * 11
+    resumed = host.run(monkeypatch, bundle, action)
+    assert host.calls == sent
+    assert _windows_record(resumed)["bases"] == _windows_record(first)["bases"]
+
+
+def _origin_select_action(host):
+    spec = CAPABILITY_REGISTRY.require("scan.origin_select")
+    return ScanAction(
+        action_id="origin.select", stage="discovery", ordinal=0,
+        capability_name="scan.origin_select", capability_args={},
+        target_binding_digest=host.target.digest, input_binding_digest="2" * 64,
+        requested_budget={"http_requests": 2, "tool_wall_seconds": 20},
+        placement={
+            "schema_version": "scan-action-placement/v1", "eligible_backends": ["local", "broker"],
+            "requirements": dict(spec.placement_requirements),
+            "adapter_name": spec.adapter, "adapter_version": spec.adapter_version,
+        },
+        dependencies=(), required=True, supporting=False, output_schema=spec.output_schema,
+    )
+
+
+INFERRED = TargetBinding(
+    target_id="target-1", target_kind="web", canonical_host="app.example.test",
+    allowed_origins=("https://app.example.test", "http://app.example.test"),
+    allowed_addresses=("192.0.2.10",), allowed_root_domains=("example.test",),
+    inferred_origins=("https://app.example.test", "http://app.example.test"),
+)
+
+
+@pytest.mark.parametrize("options", [{}, {"canonical_shard_authority": {
+    "shard_index": 1, "shard_count": 2, "shard_label": "work:anonymous[1]", "parallel_discovery": False,
+}}])
+def test_a_scheme_inferred_sweep_runs_at_the_origin_the_scan_selected(monkeypatch, bundle, options):
+    """The origin selection chose http (https did not answer): the sweep, in a direct Scan and in
+    a parallel shard alike, runs there, not at the first inferred origin."""
+    host = _Host(
+        tuple(("http", 80, f"/p{index}") for index in range(3)),
+        target=INFERRED, target_url="app.example.test",
+    )
+    select = _origin_select_action(host)
+    host.backend.observations = {select.action_id: ({
+        "kind": "origin_selection_observation", "selected_origin": "http://app.example.test",
+        "attempts": [],
+    },)}
+    sweep = replace(
+        host.action("active.templates.r01", start=0, count=3, windows=False), ordinal=1,
+        action_digest=None,
+    )
+    host.run(monkeypatch, bundle, sweep, options=options, before=(select,))
+    assert {call["url"] for call in host.calls} == {"http://app.example.test/"}
