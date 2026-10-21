@@ -61,7 +61,10 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--subdomain-discovery", action="store_true")
     parser.add_argument(
         "--include-family", action="append", default=[], metavar="NAME[,NAME]",
-        help="Add server-advertised Scan families to the preset the policy implies",
+        help=(
+            "Add server-advertised Scan families to the preset the policy implies "
+            "(active templates, nuclei_active, are in no preset: add them here)"
+        ),
     )
     parser.add_argument(
         "--exclude-family", action="append", default=[], metavar="NAME[,NAME]",
@@ -431,6 +434,11 @@ def main(argv: list[str] | None = None) -> int:
         }
         # The name submitted had no address record and the engine scanned its www/apex twin.
         # Say so: the scan is running against a different name than the one typed.
+        resolved = [str(item) for item in response.get("resolved_families") or () if str(item)]
+        if resolved:
+            result["resolved_families"] = resolved
+            if response.get("family_preset"):
+                result["family_preset"] = str(response["family_preset"])
         notice = str(response.get("notice") or "").strip()
         if notice:
             result["notice"] = notice
@@ -446,6 +454,15 @@ def main(argv: list[str] | None = None) -> int:
             print(f"Scan ID: {scan_id}")
             print(f"Status: {status}")
             print(f"Plan: deterministic Scan · {args.budget_profile} budget · active testing {'on' if args.active_testing else 'off'}")
+            if resolved:
+                preset = f" ({result['family_preset']})" if result.get("family_preset") else ""
+                print(f"Families: {', '.join(resolved)}{preset}")
+                if args.active_testing and "nuclei_active" not in resolved:
+                    # The standard active set (here and in New Scan) holds no active templates
+                    # on any budget profile; say how to add them rather than leave a thorough
+                    # scan's operator to find out from the report.
+                    print("Active templates (nuclei_active) are not in this set; add "
+                          "--include-family nuclei_active to run them.")
             print(f"View progress at: {result['ui_url']}")
         return 0
     except ScanCliError as exc:

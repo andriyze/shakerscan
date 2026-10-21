@@ -304,3 +304,57 @@ def test_scan_help_documents_the_active_confirmation_and_the_receipt():
     assert "--confirm-active" in help_text
     receipt_line = help_text[help_text.index("--approval-receipt UUID Target-bound"):]
     assert "standing authorization" in receipt_line.split("--idempotency-key")[0]
+
+
+# E1 O4 / item 5: a thorough scan from the terminal ran no active templates. Both entry points
+# send the same policy (the CLI implies the preset from --active-testing, New Scan names
+# "standard_active"), and that preset has never held nuclei_active on any budget profile.
+@pytest.mark.parametrize("profile", ["fast", "balanced", "thorough", "deep"])
+def test_terminal_and_new_scan_resolve_the_same_families_for_a_profile(monkeypatch, profile):
+    import sys
+    from pathlib import Path
+
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "api"))
+    from scan.contracts import resolve_scan_contract
+
+    _result, calls = _run_recording(monkeypatch, [
+        "https://example.com", "--budget-profile", profile, "--active-testing", "--confirm-active", "--json",
+    ])
+    terminal = calls[-1][1]["policy"]
+    new_scan = {"preset": "standard_active", "active_testing": True, "include_families": [], "exclude_families": []}
+    assert (
+        resolve_scan_contract(budget_profile=profile, policy=terminal).execution_plan.resolved_families
+        == resolve_scan_contract(budget_profile=profile, policy=new_scan).execution_plan.resolved_families
+    )
+    page = (Path(__file__).resolve().parents[1] / "ui/src/app/scan/new/page.tsx").read_text()
+    resolved = resolve_scan_contract(budget_profile=profile, policy=new_scan).execution_plan.resolved_families
+    assert "['" + "', '".join(resolved) + "']" in page, "New Scan's local preview lists the same set"
+
+
+def test_the_terminal_says_which_families_run_and_how_to_add_active_templates(monkeypatch, capsys):
+    response = {
+        "scan_id": "00000000-0000-0000-0000-000000000004", "status": "queued",
+        "family_preset": "standard_active",
+        "resolved_families": ["recon", "nuclei_passive", "xss", "sqli", "sensitive_exposure"],
+    }
+    assert _run_with_response(monkeypatch, [
+        "https://example.com", "--budget-profile", "thorough", "--active-testing", "--confirm-active",
+    ], response) == 0
+    out = capsys.readouterr().out
+    assert "Families: recon, nuclei_passive, xss, sqli, sensitive_exposure (standard_active)" in out
+    assert "--include-family nuclei_active" in out
+
+
+def test_no_active_template_hint_when_they_run_or_testing_is_passive(monkeypatch, capsys):
+    response = {
+        "scan_id": "00000000-0000-0000-0000-000000000005", "status": "queued",
+        "resolved_families": ["recon", "nuclei_passive", "nuclei_active", "xss", "sqli"],
+    }
+    assert _run_with_response(monkeypatch, [
+        "https://example.com", "--active-testing", "--confirm-active",
+    ], response) == 0
+    assert "--include-family nuclei_active" not in capsys.readouterr().out
+    passive = {"scan_id": "00000000-0000-0000-0000-000000000006", "status": "queued",
+               "resolved_families": ["recon", "nuclei_passive", "sensitive_exposure"]}
+    assert _run_with_response(monkeypatch, ["https://example.com"], passive) == 0
+    assert "--include-family nuclei_active" not in capsys.readouterr().out
