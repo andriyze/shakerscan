@@ -41,19 +41,29 @@ def _git(cwd: Path, *args: str) -> str:
     ).stdout.strip()
 
 
-def _commit(tree: Path, *, version: str, manifest: str, gate: str, message: str) -> str:
+def _manifest_text(files: dict[str, str]) -> str:
+    return "".join(
+        f"{hashlib.sha256(body.encode()).hexdigest()}  {path}\n" for path, body in sorted(files.items())
+    )
+
+
+def _commit(
+    tree: Path, *, version: str, runtime: str, gate: str, message: str, gate_is_runtime=False,
+) -> str:
+    """A tree with one runtime file listed in a real install/MANIFEST.sha256, and the gate."""
     (tree / "install").mkdir(exist_ok=True)
     (tree / "scripts").mkdir(exist_ok=True)
     (tree / "VERSION").write_text(version + "\n", encoding="utf-8")
-    (tree / "install" / "MANIFEST.sha256").write_text(manifest, encoding="utf-8")
+    (tree / "install" / "index.sh").write_text(runtime, encoding="utf-8")
     (tree / GATE).write_text(gate, encoding="utf-8")
+    listed = {"install/index.sh": runtime, **({GATE: gate} if gate_is_runtime else {})}
+    (tree / "install" / "MANIFEST.sha256").write_text(_manifest_text(listed), encoding="utf-8")
     _git(tree, "add", "-A")
     _git(tree, "commit", "-qm", message)
     return _git(tree, "rev-parse", "HEAD")
 
 
-@pytest.fixture
-def lane(tmp_path):
+def _make_lane(tmp_path, *, gate_is_runtime=False):
     """A main candidate commit on the origin, and a pull request checkout of a later commit."""
     origin, tree, stubs = tmp_path / "origin.git", tmp_path / "tree", tmp_path / "bin"
     tree.mkdir()
@@ -63,11 +73,18 @@ def lane(tmp_path):
     _git(tree, "init", "-q")
     _git(tree, "remote", "add", "origin", str(origin))
     candidate = _commit(
-        tree, version="2.11.0", manifest="candidate runtime\n", gate="old gate\n",
-        message="candidate",
+        tree, version="2.11.0", runtime="candidate runtime\n", gate="old gate\n",
+        message="candidate", gate_is_runtime=gate_is_runtime,
     )
     _git(tree, "push", "-q", "origin", "HEAD:refs/heads/main")
-    return {"tmp": tmp_path, "tree": tree, "stubs": stubs, "candidate": candidate}
+    manifest = hashlib.sha256((tree / "install" / "MANIFEST.sha256").read_bytes()).hexdigest()
+    return {"tmp": tmp_path, "tree": tree, "stubs": stubs, "candidate": candidate,
+            "manifest": manifest}
+
+
+@pytest.fixture
+def lane(tmp_path):
+    return _make_lane(tmp_path)
 
 
 def _stub_gh(lane, receipt: dict) -> Path:
@@ -93,7 +110,7 @@ def _stub_gh(lane, receipt: dict) -> Path:
 
 
 def _receipt(lane, **overrides) -> dict:
-    manifest = hashlib.sha256(b"candidate runtime\n").hexdigest()
+    manifest = lane["manifest"]
     return {
         "schema_version": "shakerscan-release-candidate/v1", "version": "2.11.0",
         "candidate_sha": lane["candidate"], "runtime_manifest_sha256": manifest, **overrides,
@@ -122,7 +139,7 @@ def _run(lane, *args: str):
 def test_a_version_bump_installs_the_candidates_commit_with_the_pull_requests_gate(lane):
     tree = lane["tree"]
     pull_request = _commit(
-        tree, version="2.11.1", manifest="pull request runtime\n", gate="new gate\n",
+        tree, version="2.11.1", runtime="pull request runtime\n", gate="new gate\n",
         message="bump",
     )
     _stub_gh(lane, _receipt(lane))
@@ -130,7 +147,7 @@ def test_a_version_bump_installs_the_candidates_commit_with_the_pull_requests_ga
     assert result.returncode == 0, result.stderr
     assert _git(tree, "rev-parse", "HEAD") == lane["candidate"] != pull_request
     assert (tree / "VERSION").read_text(encoding="utf-8").strip() == "2.11.0"
-    assert (tree / "install" / "MANIFEST.sha256").read_text(encoding="utf-8") == "candidate runtime\n"
+    assert (tree / "install" / "index.sh").read_text(encoding="utf-8") == "candidate runtime\n"
     # The gate under test is the pull request's.
     assert (tree / GATE).read_text(encoding="utf-8") == "new gate\n"
     assert outputs == {
@@ -152,18 +169,18 @@ def test_a_version_bump_installs_the_candidates_commit_with_the_pull_requests_ga
 def test_a_pull_request_on_the_candidates_version_keeps_its_own_tree(lane):
     tree = lane["tree"]
     head = _commit(
-        tree, version="2.11.0", manifest="dependency bump\n", gate="new gate\n", message="deps",
+        tree, version="2.11.0", runtime="dependency bump\n", gate="new gate\n", message="deps",
     )
     _stub_gh(lane, _receipt(lane))
     result, outputs, _summary = _run(lane, GATE)
     assert result.returncode == 0, result.stderr
     assert _git(tree, "rev-parse", "HEAD") == head
-    assert (tree / "install" / "MANIFEST.sha256").read_text(encoding="utf-8") == "dependency bump\n"
+    assert (tree / "install" / "index.sh").read_text(encoding="utf-8") == "dependency bump\n"
     assert outputs["pinned"] == "false"
 
 
 def test_the_chosen_run_is_downloaded_again_not_the_newest(lane):
-    _commit(lane["tree"], version="2.11.1", manifest="x\n", gate="new gate\n", message="bump")
+    _commit(lane["tree"], version="2.11.1", runtime="x\n", gate="new gate\n", message="bump")
     calls = _stub_gh(lane, _receipt(lane))
     result, outputs, _summary = _run(lane, "--run-id", "77", GATE)
     assert result.returncode == 0, result.stderr
@@ -174,25 +191,55 @@ def test_the_chosen_run_is_downloaded_again_not_the_newest(lane):
 
 
 @pytest.mark.parametrize("override, message", [
-    ({"runtime_manifest_sha256": "0" * 64}, "runtime manifest differs"),
+    ({"runtime_manifest_sha256": "0" * 64}, "does not carry the candidate's runtime manifest"),
     ({"candidate_sha": "not-a-commit"}, "names no commit"),
     ({"version": ""}, "names no version"),
 ])
 def test_an_inconsistent_candidate_fails_the_lane(lane, override, message):
-    _commit(lane["tree"], version="2.11.1", manifest="x\n", gate="new gate\n", message="bump")
+    _commit(lane["tree"], version="2.11.1", runtime="x\n", gate="new gate\n", message="bump")
     _stub_gh(lane, _receipt(lane, **override))
     result, _outputs, _summary = _run(lane, GATE)
     assert result.returncode != 0
     assert message in result.stderr
 
 
-@pytest.mark.parametrize("gate", ["../outside.sh", "/etc/passwd", "scripts/missing.sh"])
+@pytest.mark.parametrize("gate", ["../outside.sh", "scripts/../../outside.sh", "/etc/passwd",
+                                  "scripts/missing.sh"])
 def test_a_gate_file_must_be_a_file_of_the_pull_requests_tree(lane, gate):
-    _commit(lane["tree"], version="2.11.1", manifest="x\n", gate="new gate\n", message="bump")
+    # The traversal targets exist, so only the path guard can refuse them.
+    (lane["tmp"] / "outside.sh").write_text("not the tree\n", encoding="utf-8")
+    _commit(lane["tree"], version="2.11.1", runtime="x\n", gate="new gate\n", message="bump")
     _stub_gh(lane, _receipt(lane))
     result, _outputs, _summary = _run(lane, gate)
     assert result.returncode != 0
+    assert "not a path inside the tree" in result.stderr or "not in the pull request" in result.stderr
     assert _git(lane["tree"], "log", "-1", "--format=%s") == "bump"
+
+
+def test_a_gate_file_the_installer_ships_cannot_replace_the_candidates_runtime(tmp_path):
+    """The candidate's manifest lists the gate file: restoring the pull request's copy would
+    install a runtime file the candidate was not built from."""
+    lane = _make_lane(tmp_path, gate_is_runtime=True)
+    _commit(lane["tree"], version="2.11.1", runtime="x\n", gate="new gate\n", message="bump")
+    _stub_gh(lane, _receipt(lane))
+    result, _outputs, _summary = _run(lane, GATE)
+    assert result.returncode != 0
+    assert f"gate file {GATE} is a runtime file" in result.stderr
+
+
+def test_a_pinned_tree_whose_runtime_files_differ_from_the_manifest_fails(lane):
+    """Checked file by file, not only by the manifest's own digest: this candidate commit keeps
+    the candidate's manifest but carries a different runtime file."""
+    tree = lane["tree"]
+    (tree / "install" / "index.sh").write_text("tampered\n", encoding="utf-8")
+    _git(tree, "commit", "-qam", "tampered candidate")
+    tampered = _git(tree, "rev-parse", "HEAD")
+    _git(tree, "push", "-q", "-f", "origin", "HEAD:refs/heads/main")
+    _commit(tree, version="2.11.1", runtime="y\n", gate="new gate\n", message="bump")
+    _stub_gh(lane, _receipt(lane, candidate_sha=tampered))
+    result, _outputs, _summary = _run(lane, GATE)
+    assert result.returncode != 0
+    assert "runtime files differ from the candidate's manifest" in result.stderr
 
 
 # --- the workflows ---------------------------------------------------------------------------
