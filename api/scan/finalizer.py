@@ -196,6 +196,9 @@ _DISCOVERY_TRUNCATION_REASONS = frozenset({
     # Stopped, or never started, because the Scan reached its time limit.
     "scan_time_limit",
 })
+_DISCOVERY_FAILED_STATUSES = frozenset({
+    CapabilityResultStatus.FAILED, CapabilityResultStatus.BLOCKED,
+})
 # GraphQL checks (capabilities/graphql_probe.py): title and CWE per check.
 _GRAPHQL_CHECKS = {
     "field_suggestions": ("GraphQL field suggestions enabled", "CWE-200"),
@@ -2464,30 +2467,84 @@ def _windows_beyond_allowlist_only(action: Any, rows: Sequence[Any]) -> bool:
     return action.capability_name == "templates.active_batch" and 0 < planned <= beyond
 
 
+def _authz_nothing_to_examine(item: Mapping[str, Any]) -> str | None:
+    """Why one ownership differential had nothing to compare, or None when it had something.
+
+    No in-scope route at all; or routes that were all filtered out as low-value producers
+    (sign-in, health, public catalogue pages), counted by ``producer_candidate_count``. An
+    observation from before that count was recorded cannot show the second.
+    """
+    if str(item.get("reason") or "") in _AUTHZ_NOTHING_TO_EXAMINE:
+        return str(item["reason"])
+    count = item.get("producer_candidate_count")
+    if (
+        item.get("mode") != "selected_object"
+        and isinstance(count, int) and not isinstance(count, bool) and count == 0
+        and not int(item.get("producers_tested") or 0)
+    ):
+        return "no_producer_candidates"
+    return None
+
+
+def _authz_compared(item: Mapping[str, Any]) -> bool:
+    """Whether one ownership differential compared anything.
+
+    The replay path compared once a producer was tested or the differential was proven. The
+    selected-object path (two sibling object URLs) compared once it sent a request: it never
+    reports producers, and its verdict stays inconclusive even when it ran to completion.
+    """
+    if item.get("proof_state") == "verified":
+        return True
+    if item.get("mode") == "selected_object":
+        return item.get("selected_request_examined") is True or int(
+            item.get("requests_attempted") or 0
+        ) > 0
+    return int(item.get("producers_tested") or 0) > 0
+
+
 def _authz_comparison_work(
     result: Any, rows: Sequence[Any],
-) -> tuple[int, set[str], int]:
-    """(planned, attempts, inapplicable) for one authz.verify action.
+) -> tuple[int, set[str], int, list[str]]:
+    """(planned, attempts, inapplicable, why nothing to examine) for one authz.verify action.
 
-    The action plans one comparison unless it settled skipped. It made one only when a producer
-    was tested or the differential was proven; two credentials that resolved to one identity,
-    or routes of which no producer was tested, compared nothing. No in-scope route at all is
-    nothing to examine.
+    The action plans one comparison unless it settled skipped. Two credentials that resolved to
+    one identity, or routes of which no producer was tested, compared nothing.
     """
     differentials = [
         item for item in rows or ()
         if isinstance(item, Mapping) and item.get("kind") == "authz_differential"
     ]
     planned = 0 if result.status is CapabilityResultStatus.SKIPPED else 1
-    inapplicable = int(any(
-        str(item.get("reason") or "") in _AUTHZ_NOTHING_TO_EXAMINE for item in differentials
-    ))
-    compared = any(
-        item.get("proof_state") == "verified"
-        or int(item.get("producers_tested") or 0) > 0
-        for item in differentials
+    compared = any(_authz_compared(item) for item in differentials)
+    empty = sorted({
+        reason for item in differentials
+        for reason in (_authz_nothing_to_examine(item),) if reason
+    })
+    inapplicable = int(bool(empty) and not compared)
+    return (
+        planned, ({f"authz:{result.action_id}"} if compared else set()), inapplicable,
+        empty if inapplicable else [],
     )
-    return planned, ({f"authz:{result.action_id}"} if compared else set()), inapplicable
+
+
+def _proven_empty_manifest(action: Any, known: Mapping[str, Mapping[str, Any]]) -> bool:
+    """Whether the manifest a slice indexes is known to have been produced complete and empty.
+
+    The planner declares ``manifest_entries: 0`` both for a manifest that held nothing and as an
+    admission placeholder for one not yet produced, and a producer that failed leaves 0 too.
+    Only the Scan's own reference to that manifest -- complete, with no entry -- tells them
+    apart, as an adapter does before skipping an empty slice (``_empty_slice_reason``).
+    """
+    for name in _SLICE_MANIFEST_ARGS:
+        reference = action.capability_args.get(name)
+        if isinstance(reference, Mapping) and reference.get("manifest_digest"):
+            item = known.get(str(reference["manifest_digest"]))
+            return (
+                item is not None
+                and str(item.get("status") or "") == "complete"
+                and int(item.get("entry_count") or 0) == 0
+            )
+    return False
 
 
 def _auxiliary_check_coverage(entries: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
@@ -2684,6 +2741,14 @@ def finalize_scan_report(
     # without a mutation hold runs the smaller GET-only allowlist, whose windows are others.
     template_windows_run: dict[int, set[int]] = {}
     auxiliary_entries: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    known_manifests = [
+        dict(item) for item in (*work_manifest_references, *revision.work_manifest_references)
+        if isinstance(item, Mapping)
+    ]
+    manifests_by_digest = {
+        str(item["manifest_digest"]): item for item in known_manifests
+        if item.get("manifest_digest")
+    }
     for action in expected_actions:
         family = _FAMILY_BY_CAPABILITY.get(action.capability_name)
         auxiliary = _AUXILIARY_CHECKS.get(action.capability_name)
@@ -2723,25 +2788,30 @@ def finalize_scan_report(
         # A slice entry the verifier recorded as inapplicable to its family (a path-segment
         # candidate handed to Dalfox) was never attemptable, so it is not planned work that
         # went unattempted. It stays in the scheduled count: the slice did cover it.
-        inapplicable = sum(
-            1 for item in observations.get(action.action_id, ())
+        # Distinct entries: two records about one entry account for one.
+        inapplicable = len({
+            str(item.get("candidate_id") or index)
+            for index, item in enumerate(observations.get(action.action_id, ()))
             if isinstance(item, Mapping) and item.get("kind") == "candidate_inapplicable"
-        )
+        })
+        empty_reasons: list[str] = []
         if action.capability_name == "authz.verify":
-            planned, attempts, inapplicable = _authz_comparison_work(
+            planned, attempts, inapplicable, empty_reasons = _authz_comparison_work(
                 result, observations.get(action.action_id, ()),
             )
         # The action settled having nothing to examine: skipped as not applicable, or it
-        # succeeded over a slice whose manifest held no entry or whose every entry it recorded
-        # as inapplicable. Anything else that attempted nothing did no work.
+        # succeeded over a slice whose every entry it recorded as inapplicable, or whose
+        # manifest the Scan's references show was produced complete with no entry. Anything
+        # else that attempted nothing did no work.
         settled_empty = (
             result.status is CapabilityResultStatus.SKIPPED
             and result.reason_code is CapabilityResultReason.NOT_APPLICABLE
         ) or (
             result.status is CapabilityResultStatus.SUCCESS
-            and not attempts
             and max(0, planned - inapplicable) == 0
-            and (inapplicable > 0 or declared_entries == 0)
+            and (inapplicable > 0 or (
+                declared_entries == 0 and _proven_empty_manifest(action, manifests_by_digest)
+            ))
         )
         if auxiliary is not None:
             if action.action_id not in superseded:
@@ -2758,7 +2828,7 @@ def finalize_scan_report(
             "batch_actions": 0, "planned_candidates": 0, "attempted_candidates": 0,
             "verified_findings": 0, "suspected_findings": 0,
             "budget_reserved": {}, "budget_consumed": {}, "_statuses": [], "_reasons": [],
-            "_settled_empty": [],
+            "_settled_empty": [], "_empty_reasons": [],
             # Per-capability manifest size vs what the plan actually scheduled. A capability whose
             # manifest holds more entries than its slices cover has work that was never attempted,
             # and comparing attempts with slices alone reports that as complete coverage.
@@ -2808,6 +2878,7 @@ def finalize_scan_report(
             row["_statuses"].append(result.status.value)
             row["_reasons"].append(_family_action_reason(action, result))
             row["_settled_empty"].append(settled_empty)
+            row["_empty_reasons"].extend(empty_reasons)
             declared = action.capability_args.get("manifest_entries")
             # Every slice of one worklist declares the same manifest size. A passive Scan
             # runs the pack over two worklists -- the admitted surface and the discovered
@@ -2938,6 +3009,7 @@ def finalize_scan_report(
         # ran against a surface that offered it nothing; that is a complete examination with
         # no work, not one that failed to finish, and the row says so (``no_candidates``).
         settled_empty = row.pop("_settled_empty")
+        empty_reasons = sorted(set(row.pop("_empty_reasons")))
         no_candidates = (
             row["batch_actions"] > 0
             and row["planned_candidates"] == 0
@@ -2987,9 +3059,14 @@ def finalize_scan_report(
             row["reason"] = "candidates_unattempted"
             if row["required"]:
                 selected_family_gaps.append(family)
-        elif row["attempted_candidates"] == 0 and not no_candidates:
-            # Nothing was attempted and nothing shows the family had nothing to examine (an
-            # undeclared manifest, an ownership comparison that compared nothing): no work.
+        elif (
+            row["attempted_candidates"] == 0 and not no_candidates
+            # A finding is evidence of work, attempted or not.
+            and not (row["verified_findings"] or row["suspected_findings"])
+        ):
+            # Nothing was attempted and nothing shows the family had nothing to examine (a
+            # manifest not known to be complete and empty, an ownership comparison that
+            # compared nothing): no work.
             row["coverage_status"] = "partial"
             row["reason"] = "zero_work"
             if row["required"]:
@@ -3002,16 +3079,12 @@ def finalize_scan_report(
         else:
             row["coverage_status"] = "complete"
             row["reason"] = "no_candidates" if no_candidates else None
-    for (family, name), entries in sorted(auxiliary_entries.items()):
-        if family in family_coverage:
-            family_coverage[family][name] = _auxiliary_check_coverage(entries)
+            if no_candidates and empty_reasons:
+                # Why there was nothing to examine, when the check can say.
+                row["no_candidates_reasons"] = empty_reasons
     # Every selected check family is reported, including one the plan gave no action: an
     # absent family read as nothing to report, and the Scan as complete. `recon` is
     # discovery, not a check family with a verifier, so it has no row.
-    known_manifests = [
-        dict(item) for item in (*work_manifest_references, *revision.work_manifest_references)
-        if isinstance(item, Mapping)
-    ]
     unplanned_families = sorted(
         {str(item).strip() for item in resolved_families or ()}
         & set(_FAMILY_BY_CAPABILITY.values())
@@ -3021,6 +3094,11 @@ def finalize_scan_report(
         row = family_coverage[family] = _unplanned_family_row(family, known_manifests)
         if row["coverage_status"] != "complete":
             selected_family_gaps.append(family)
+    # After the unplanned rows, so a check that ran while its family planned no verifier (no
+    # candidates for it) is still reported.
+    for (family, name), entries in sorted(auxiliary_entries.items()):
+        if family in family_coverage:
+            family_coverage[family][name] = _auxiliary_check_coverage(entries)
     families_without_candidates = sorted(
         family for family, row in family_coverage.items()
         if row.get("reason") == "no_candidates"
@@ -3149,6 +3227,15 @@ def finalize_scan_report(
         if isinstance(explicit_http_status, int)
         else "unknown"
     )
+    # A discovery producer that failed outright produced no surface at all; what later stages
+    # had to examine is unknown, so the Scan's coverage is not complete either.
+    failed_discovery = sorted(
+        action.action_id
+        for action in coverage_actions
+        if not action.required
+        and action.capability_name in _SURFACE_DISCOVERY_CAPABILITIES
+        and action_results[action.action_id].status in _DISCOVERY_FAILED_STATUSES
+    )
     truncated_discovery = sorted(
         action.action_id
         for action in coverage_actions
@@ -3190,6 +3277,7 @@ def finalize_scan_report(
         for _action, result in required_incomplete
     } | ({"active_verifier_zero_attempts"} if zero_attempt_actions else set())
       | ({"discovery_truncated"} if truncated_discovery else set())
+      | ({"discovery_failed"} if failed_discovery else set())
       | ({"placement_unavailable"} if placement_gaps else set())
       | ({"no_families_selected"} if no_families_selected else set())
       | ({"application_surface_not_examined"} if surface_not_examined else set())
@@ -3206,6 +3294,7 @@ def finalize_scan_report(
         | ({"selected_family_no_candidates"} if families_without_candidates else set())
         | ({"active_verifier_zero_attempts"} if zero_attempt_actions else set())
         | ({"discovery_truncated"} if truncated_discovery else set())
+        | ({"discovery_failed"} if failed_discovery else set())
         | ({"placement_unavailable"} if placement_gaps else set())
         | ({"bound_origin_redirects_off_origin"}
            if application_forwarded_off_origin else set())
@@ -3336,7 +3425,7 @@ def finalize_scan_report(
         if row["unattempted_candidates"] or row["incomplete_candidates"]:
             row["status"] = "partial"
     if (
-        zero_attempt_actions or truncated_discovery or selected_family_gaps
+        zero_attempt_actions or truncated_discovery or failed_discovery or selected_family_gaps
     ) and coverage_status == "complete":
         # A selected family that did not cover its surface (entries never scheduled, candidates
         # left unattempted) leaves the Scan's coverage incomplete even when every action it did
@@ -3361,6 +3450,7 @@ def finalize_scan_report(
         },
         "optional_gaps": optional_gaps,
         "truncated_discovery_actions": truncated_discovery,
+        "failed_discovery_actions": failed_discovery,
         "active_zero_attempt_actions": zero_attempt_actions,
         "candidate_coverage": candidate_coverage,
         "family_coverage": sorted(

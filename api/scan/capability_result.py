@@ -78,6 +78,10 @@ class CapabilityResultReason(str, Enum):
     MANIFEST_UNAVAILABLE = "manifest_unavailable"
     UNSUPPORTED_OUTPUT_SCHEMA = "unsupported_output_schema"
     NOT_APPLICABLE = "not_applicable"
+    # The action was skipped because something it needs was missing (no reachable canonical
+    # origin, no authenticated principal, a private request it could not read): not an empty
+    # surface, so not "not applicable". The receipt keeps the adapter's own token.
+    PREREQUISITE_UNAVAILABLE = "prerequisite_unavailable"
     # An optional discovery source (robots.txt, llms.txt) was answered with the site's HTML
     # shell: the target never published it. The action is partial because the coverage the
     # file would imply is not real, but nothing was cut off or misparsed.

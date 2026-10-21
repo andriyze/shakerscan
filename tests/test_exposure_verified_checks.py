@@ -444,9 +444,15 @@ def _finalized(observation: dict) -> dict:
                           target_binding_digest="a" * 64, actions=(probe, final))
     return finalize_scan_report(
         plan=plan, target_url="https://app.example.test",
-        action_results={probe.action_id: _result_with_observation_count(probe, 1)},
-        observations={probe.action_id: (observation,)},
+        action_results={probe.action_id: _result_with_observation_count(probe, 2)},
+        # The probe's attempt beside its proof: the family did its work, so a report built here
+        # is complete unless the proof itself changes that.
+        observations={probe.action_id: (EXPOSURE_ATTEMPT, observation)},
     )
+
+
+EXPOSURE_ATTEMPT = {"kind": "candidate_attempt", "attempt_id": "e" * 64,
+                    "candidate_id": "exposure-1", "status": "success"}
 
 
 def _observation(path: str, body: bytes, content_type: str) -> dict:

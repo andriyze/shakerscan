@@ -20,6 +20,10 @@ from tests.test_scan_action_compiler import _execution, _target
 from tests.test_scan_finalizer import _result_with_observation_count
 from tests.test_scan_orchestrator import SCAN_ID, _action
 
+# The probe's attempt beside its proof: the family did its work.
+EXPOSURE_ATTEMPT = {"kind": "candidate_attempt", "attempt_id": "e" * 64,
+                    "candidate_id": "exposure-1", "status": "success"}
+
 
 def test_secret_material_outranks_structural_disclosure():
     private_key = classify_exposure(
@@ -339,14 +343,19 @@ def test_historical_structural_proof_flags_cannot_promote_a_finding():
                          target_binding_digest="a" * 64, actions=(probe, final))
     def _report(category):
         return finalize_scan_report(plan=plan, target_url="https://app.example.test",
-            action_results={probe.action_id: _result_with_observation_count(probe, 1)},
-            observations={probe.action_id: ({"kind": "sensitive_exposure_proof",
+            action_results={probe.action_id: _result_with_observation_count(probe, 2)},
+            observations={probe.action_id: (EXPOSURE_ATTEMPT, {"kind": "sensitive_exposure_proof",
                 "proof_state": "verified", "finding_verdict": "verified",
                 "exposure_class": category, "severity": "high", "response_status": 200,
                 "request_url": "https://app.example.test/public", "response_body_sha256": "c" * 64},)})
     # Identity or mere reachability cannot promote even when the observation carries verified flags.
     for category in ("confidential_file", "listed_file", "actuator_endpoint", "exposed_api_specification"):
-        assert not _report(category)['findings'], category
+        report = _report(category)
+        assert not report['findings'], category
+        # Refusing the finding does not change what the probe examined.
+        [exposure] = [row for row in report['coverage']['family_coverage']
+                      if row['family'] == 'sensitive_exposure']
+        assert exposure['coverage_status'] == 'complete', category
     # A deterministic server-state misconfiguration is a finding.
     for category in ("directory_listing", "metrics_endpoint"):
         assert _report(category)['findings'], category

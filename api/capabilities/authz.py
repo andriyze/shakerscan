@@ -354,6 +354,11 @@ async def verify_target_bound_object_authorization(
         "principal_contexts_distinct": True,
         "route_count": len(normalized_routes),
         "producers_tested": int(result.get("producers_tested") or 0),
+        # Routes left as producers after low-value ones (sign-in, health, catalogue) were
+        # filtered out; 0 means there was nothing to compare, not a comparison that failed.
+        # Absent when the replay stopped before it filtered (one principal context, say).
+        **({"producer_candidate_count": int(result.get("producer_candidate_count") or 0)}
+           if "producer_candidate_count" in result else {}),
         "replays_completed": int(result.get("replays_completed") or 0),
         "write_replays_attempted": int(
             result.get("write_replays_attempted") or 0

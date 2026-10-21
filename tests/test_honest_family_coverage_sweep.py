@@ -226,7 +226,18 @@ def test_a_compiled_scan_whose_family_did_no_work_never_reads_complete(
 # --- the sweep: every capability, every way of doing nothing --------------------------------
 
 
-def _planned_slice(action_id, capability, ordinal, *, count=3, required=True, entries=None):
+def _manifest_ref(entry_count, *, status="complete", digest="d" * 64):
+    """A work manifest reference as the planner freezes one into a slice's arguments."""
+    return {
+        "manifest_id": "40000000-0000-4000-8000-000000000001", "kind": "candidate",
+        "content_schema": "scan-candidate-work-entry/v1", "manifest_digest": digest,
+        "entry_count": entry_count, "status": status,
+    }
+
+
+def _planned_slice(
+    action_id, capability, ordinal, *, count=3, required=True, entries=None, manifest_ref=None,
+):
     """A batch action shaped as the planner shapes one (``add_manifest_batches``)."""
     args = (
         {"principal_lanes": ["primary", "secondary"], "endpoint_manifest_ref": None}
@@ -236,6 +247,7 @@ def _planned_slice(action_id, capability, ordinal, *, count=3, required=True, en
             "scheduled_batches": 1, "total_batches": 1,
             "profile": "balanced_batch_v1",
             "proof_policy": "deterministic_proof_contract_required",
+            **({"candidate_manifest_ref": manifest_ref} if manifest_ref else {}),
         }
     )
     return ScanAction(
@@ -281,7 +293,7 @@ def _companion_family(family):
     return "nuclei_active" if family == "nuclei_passive" else "nuclei_passive"
 
 
-def _finalize(actions, results, observations, family):
+def _finalize(actions, results, observations, family, *, work_manifests=()):
     final = _action(
         "finalize.report", len(actions), dependencies=tuple(a.action_id for a in actions),
     )
@@ -293,6 +305,7 @@ def _finalize(actions, results, observations, family):
         plan=plan, target_url="https://app.example.test",
         action_results=results, observations=observations,
         resolved_families=[family, _companion_family(family)],
+        work_manifest_references=work_manifests,
     )
     rows = {row["family"]: row for row in report["coverage"]["family_coverage"]}
     return report, rows[family]
@@ -382,18 +395,154 @@ def test_a_family_with_nothing_to_examine_is_complete_and_says_why(family, capab
 )
 def test_a_slice_over_an_empty_manifest_is_complete_and_says_why(family, capability):
     """The planner gives an empty manifest a slice of one (``add_manifest_batches``); a verifier
-    that settled it successfully had nothing to attempt, and the coverage names that."""
+    that settled it successfully had nothing to attempt, and the coverage names that. The
+    manifest's own reference proves it was produced complete with no entry."""
     passive, passive_result, passive_rows = _companion_that_worked(family)
-    verifier = _planned_slice("verify.swept", capability, 1, count=1, entries=0)
+    reference = _manifest_ref(0)
+    verifier = _planned_slice(
+        "verify.swept", capability, 1, count=1, entries=0, manifest_ref=reference,
+    )
     report, row = _finalize(
         (passive, verifier),
         {passive.action_id: passive_result,
          verifier.action_id: _result_with_observation_count(verifier, 0)},
         {passive.action_id: passive_rows, verifier.action_id: ()},
-        family,
+        family, work_manifests=(reference,),
     )
     assert row["coverage_status"] == "complete"
     assert row["reason"] == "no_candidates"
+
+
+EMPTY_WITHOUT_PROOF = (
+    # The admission placeholder: the manifest did not exist yet, so the planner declared 0.
+    ("no_manifest_reference", None, ()),
+    # The producer stopped before the manifest was finished.
+    ("incomplete_manifest", _manifest_ref(0, status="partial"), (_manifest_ref(0, status="partial"),)),
+    # The slice names a manifest the Scan's references do not hold.
+    ("unknown_manifest", _manifest_ref(0), (_manifest_ref(0, digest="e" * 64),)),
+)
+
+
+@pytest.mark.parametrize(
+    "family, capability", [item for item in VERIFIERS if item[1] != "authz.verify"],
+)
+@pytest.mark.parametrize(
+    "case, reference, work_manifests", EMPTY_WITHOUT_PROOF, ids=[c[0] for c in EMPTY_WITHOUT_PROOF],
+)
+def test_a_declared_empty_manifest_without_a_complete_reference_is_no_work(
+    family, capability, case, reference, work_manifests,
+):
+    passive, passive_result, passive_rows = _companion_that_worked(family)
+    verifier = _planned_slice(
+        "verify.swept", capability, 1, count=1, entries=0, manifest_ref=reference,
+    )
+    report, row = _finalize(
+        (passive, verifier),
+        {passive.action_id: passive_result,
+         verifier.action_id: _result_with_observation_count(verifier, 0)},
+        {passive.action_id: passive_rows, verifier.action_id: ()},
+        family, work_manifests=work_manifests,
+    )
+    assert row["coverage_status"] == "partial", case
+    assert row["reason"] == "zero_work"
+    assert report["result"]["grade_reliable"] is False
+
+
+def test_a_failed_discovery_cannot_launder_an_empty_slice_into_no_candidates():
+    """An optional crawl failed, so the candidate manifest was never produced; the XSS slice
+    the admission plan declared empty settled successfully over nothing."""
+    from tests.test_scan_orchestrator import _action as plain_action
+
+    passive, passive_result, passive_rows = _companion_that_worked("xss")
+    crawl = replace(
+        plain_action("discover.web_crawl", 1, capability_name="web.crawl"),
+        required=False, action_digest=None,
+    )
+    verifier = _planned_slice("verify.swept", "xss.verify_batch", 2, count=1, entries=0)
+    report, row = _finalize(
+        (passive, crawl, verifier),
+        {passive.action_id: passive_result,
+         crawl.action_id: _result(crawl, status=Status.FAILED, reason=Reason.ADAPTER_FAILED),
+         verifier.action_id: _result_with_observation_count(verifier, 0)},
+        {passive.action_id: passive_rows, verifier.action_id: ()},
+        "xss",
+    )
+    assert (row["coverage_status"], row["reason"]) == ("partial", "zero_work")
+    assert report["coverage"]["status"] != "complete"
+    assert "discovery_failed" in report["coverage"]["reasons"]
+    assert report["result"]["grade_reliable"] is False
+
+
+def test_a_failed_discovery_producer_leaves_the_scan_partial_with_its_reason():
+    from tests.test_scan_orchestrator import _action as plain_action
+
+    passive, passive_result, passive_rows = _companion_that_worked("xss")
+    verifier = _planned_slice("verify.swept", "xss.verify_batch", 2)
+    crawl = replace(
+        plain_action("discover.web_crawl", 1, capability_name="web.crawl"),
+        required=False, action_digest=None,
+    )
+    report, row = _finalize(
+        (passive, crawl, verifier),
+        {passive.action_id: passive_result,
+         crawl.action_id: _result(crawl, status=Status.FAILED, reason=Reason.ADAPTER_FAILED),
+         verifier.action_id: _result_with_observation_count(verifier, 3)},
+        {passive.action_id: passive_rows, verifier.action_id: _work_rows(verifier)},
+        "xss",
+    )
+    assert row["coverage_status"] == "complete"
+    assert report["coverage"]["status"] == "partial"
+    assert "discovery_failed" in report["coverage"]["reasons"]
+    assert report["coverage"]["failed_discovery_actions"] == [crawl.action_id]
+    assert "discovery_failed" in report["coverage"]["grade_reliability"]["reasons"]
+
+
+@pytest.mark.parametrize(
+    "family, capability", [item for item in VERIFIERS if item[1] != "authz.verify"],
+)
+def test_inapplicable_records_count_distinct_entries(family, capability):
+    """Two records about one entry leave the slice's other entry unaccounted for."""
+    passive, passive_result, passive_rows = _companion_that_worked(family)
+    verifier = _planned_slice("verify.swept", capability, 1, count=2)
+    rows = tuple(
+        {"kind": "candidate_inapplicable", "candidate_id": "c-0", "reason": reason}
+        for reason in ("not_this_family", "path_segment_candidate")
+    )
+    _report, row = _finalize(
+        (passive, verifier),
+        {passive.action_id: passive_result,
+         verifier.action_id: _result_with_observation_count(verifier, len(rows))},
+        {passive.action_id: passive_rows, verifier.action_id: rows},
+        family,
+    )
+    assert row["planned_candidates"] == 1
+    assert row["coverage_status"] == "partial"
+    assert row["reason"] != "no_candidates"
+
+
+@pytest.mark.parametrize(
+    "family, capability", [item for item in VERIFIERS if item[1] != "authz.verify"],
+)
+def test_a_slice_that_recorded_attempts_is_not_a_family_without_candidates(family, capability):
+    """Every slice entry was recorded inapplicable, yet the verifier also recorded an attempt:
+    it did work, so it is complete but not "no candidates"."""
+    passive, passive_result, passive_rows = _companion_that_worked(family)
+    verifier = _planned_slice("verify.swept", capability, 1, count=2)
+    rows = (
+        *({"kind": "candidate_inapplicable", "candidate_id": f"c-{index}", "reason": "x"}
+          for index in range(2)),
+        *_work_rows(verifier, 1),
+    )
+    _report, row = _finalize(
+        (passive, verifier),
+        {passive.action_id: passive_result,
+         verifier.action_id: _result_with_observation_count(verifier, len(rows))},
+        {passive.action_id: passive_rows, verifier.action_id: rows},
+        family,
+    )
+    assert row["attempted_candidates"] == 1
+    assert row["coverage_status"] == "complete"
+    assert row["reason"] is None
 
 
 @pytest.mark.parametrize(
@@ -455,6 +604,27 @@ def test_a_verifier_without_a_declared_manifest_that_attempted_nothing_is_partia
     # No route of the target was in scope: nothing to examine, and the row says so.
     ({"proof_state": "inconclusive", "reason": "no_target_bound_routes",
       "principal_contexts_distinct": True}, ("complete", "no_candidates")),
+    # Routes existed and every one was filtered out as a low-value producer: nothing to examine.
+    ({"proof_state": "inconclusive", "reason": "ownership_differential_not_proven",
+      "principal_contexts_distinct": True, "route_count": 3, "producer_candidate_count": 0,
+      "producers_tested": 0, "replays_completed": 0}, ("complete", "no_candidates")),
+    # The selected-object comparison (two sibling object URLs) ran its requests.
+    ({"mode": "selected_object", "proof_state": "inconclusive",
+      "selected_request_examined": True, "access_denied": True,
+      "reason": "selected_object_denied_to_secondary", "requests_attempted": 3},
+     ("complete", None)),
+    ({"mode": "selected_object", "proof_state": "inconclusive",
+      "selected_request_examined": True, "cross_access_observed": True,
+      "reason": "selected_object_cross_access_observed_entitlement_unproven",
+      "requests_attempted": 4}, ("complete", None)),
+    # It stopped at the secondary baseline, after a request.
+    ({"mode": "selected_object", "proof_state": "inconclusive",
+      "selected_request_examined": False, "reason": "secondary_baseline_status_404",
+      "requests_attempted": 1}, ("complete", None)),
+    # It sent nothing.
+    ({"mode": "selected_object", "proof_state": "inconclusive",
+      "selected_request_examined": False, "reason": "selected_object_not_examined",
+      "requests_attempted": 0}, ("partial", "zero_attempts")),
 ])
 def test_an_object_authorization_check_that_compared_nothing_is_not_complete(
     observation, expected,
@@ -463,6 +633,43 @@ def test_an_object_authorization_check_that_compared_nothing_is_not_complete(
     report, row = _verifier_report("bola", "authz.verify", Status.SUCCESS, None, rows=rows)
     assert (row["coverage_status"], row["reason"]) == expected
     assert report["result"]["grade_reliable"] is (expected[0] == "complete")
+
+
+@pytest.mark.parametrize("observation, stated", [
+    ({"reason": "no_target_bound_routes"}, "no_target_bound_routes"),
+    ({"reason": "ownership_differential_not_proven", "route_count": 3,
+      "producer_candidate_count": 0, "producers_tested": 0}, "no_producer_candidates"),
+])
+def test_object_authorization_with_nothing_to_examine_states_why(observation, stated):
+    rows = ({"kind": "authz_differential", "proof_state": "inconclusive",
+             "principal_contexts_distinct": True, **observation},)
+    _report, row = _verifier_report("bola", "authz.verify", Status.SUCCESS, None, rows=rows)
+    assert row["reason"] == "no_candidates"
+    assert row["no_candidates_reasons"] == [stated]
+
+
+def test_a_family_whose_verifier_produced_a_finding_did_work():
+    """A finding is evidence of work even when the verifier counted no attempt."""
+    family = "sensitive_exposure"
+    passive, passive_result, passive_rows = _companion_that_worked(family)
+    probe = replace(
+        _planned_slice("verify.swept", "exposure.verify_batch", 1, count=1, entries=0),
+        capability_args={"profile": "balanced_batch_v1"}, action_digest=None,
+    )
+    rows = ({"kind": "sensitive_exposure_proof", "proof_state": "verified",
+             "finding_verdict": "verified", "exposure_class": "directory_listing",
+             "severity": "high", "response_status": 200,
+             "request_url": "https://app.example.test/files/", "response_body_sha256": "c" * 64},)
+    report, row = _finalize(
+        (passive, probe),
+        {passive.action_id: passive_result,
+         probe.action_id: _result_with_observation_count(probe, 1)},
+        {passive.action_id: passive_rows, probe.action_id: rows},
+        family,
+    )
+    assert row["verified_findings"] == 1
+    assert row["coverage_status"] == "complete"
+    assert row["reason"] is None
 
 
 # --- proof escalation ------------------------------------------------------------------------
@@ -571,6 +778,25 @@ def test_an_auxiliary_check_reports_its_work_and_its_empty_surface(family, capab
     assert row[name]["status"] == "not_applicable"
 
 
+def test_an_auxiliary_check_is_reported_when_its_family_had_no_verifier_action():
+    """The XSS verifier was never planned (no candidates), yet the open-redirect probe ran: its
+    row is attached to the family's unplanned row instead of being dropped."""
+    family, capability = AUXILIARIES[0]
+    name = finalizer._AUXILIARY_CHECKS[capability][1]
+    passive, passive_result, passive_rows = _companion_that_worked(family)
+    check = _planned_slice("verify.auxiliary", capability, 1, required=False)
+    _report, row = _finalize(
+        (passive, check),
+        {passive.action_id: passive_result,
+         check.action_id: _result(check, status=Status.FAILED, reason=Reason.ADAPTER_FAILED)},
+        {passive.action_id: passive_rows},
+        family,
+    )
+    assert row["batch_actions"] == 0
+    assert row[name]["status"] == "partial"
+    assert row[name]["reason"] == "adapter_failed"
+
+
 # --- the parallel merge keeps the distinction ------------------------------------------------
 
 
@@ -584,3 +810,40 @@ def test_a_shard_that_did_no_work_keeps_the_merged_family_partial(attempted, exp
     })
     assert merged["coverage_status"] == "partial"
     assert merged["reason"] == expected
+
+
+@pytest.mark.parametrize("children, expected", [
+    ((("complete", None, 2, 2), ("complete", None, 1, 1)), ("complete", None, 3, 3)),
+    ((("complete", None, 2, 2), ("partial", "adapter_failed", 1, 0)), ("partial", "adapter_failed", 3, 2)),
+    ((("not_applicable", "no_candidates", 0, 0), ("complete", None, 1, 1)), ("complete", None, 1, 1)),
+    ((("not_applicable", "no_candidates", 0, 0),) * 2, ("not_applicable", "no_candidates", 0, 0)),
+])
+def test_the_parallel_merge_carries_the_auxiliary_check_row(children, expected):
+    from api.scan.parallel_compiler import merge_auxiliary_check_rows
+
+    merged = merge_auxiliary_check_rows([
+        {"actions": 1, "status": status, "reason": reason,
+         "planned_candidates": planned, "attempted_candidates": attempted}
+        for status, reason, planned, attempted in children
+    ])
+    assert (merged["status"], merged["reason"], merged["planned_candidates"],
+            merged["attempted_candidates"]) == expected
+    assert merged["actions"] == len(children)
+
+
+def test_the_reconciled_family_keeps_the_merged_auxiliary_row():
+    from api.scan.parallel_compiler import _reconciled_family_coverage
+
+    merged = _reconciled_family_coverage({
+        "family": "xss", "reason": None, "coverage_status": "complete",
+        "attempted_candidates": 3, "batch_actions": 2,
+        "_auxiliary": {"open_redirect": [
+            {"actions": 1, "status": "complete", "reason": None,
+             "planned_candidates": 1, "attempted_candidates": 1},
+            {"actions": 1, "status": "partial", "reason": "timed_out",
+             "planned_candidates": 2, "attempted_candidates": 0},
+        ]},
+    })
+    assert "_auxiliary" not in merged
+    assert merged["open_redirect"]["status"] == "partial"
+    assert merged["open_redirect"]["reason"] == "timed_out"
