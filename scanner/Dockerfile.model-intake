@@ -110,7 +110,7 @@ RUN --mount=type=bind,source=scanner/apt_install.sh,target=/tmp/apt_install.sh,r
     "/opt/model-intake-tools/pip-audit/bin/python" -c \
       'import importlib.util as u; assert u.find_spec("setuptools") is None; assert u.find_spec("pip._vendor.msgpack") is None; assert u.find_spec("pip._vendor.pkg_resources") is None'; \
     ! grep -Eq "^(msgpack|setuptools)==" "$vendor/vendor.txt"; \
-    # pip 26.2.1 vendors urllib3 2.7.0 (CVE-2026-97687, CVE-2026-97689; fixed in 2.8.0) and
+    # pip 26.2.2 still vendors urllib3 2.7.0 (CVE-2026-97687, CVE-2026-97689; fixed in 2.8.0) and
     # pip-api needs pip, so that copy is replaced with this environment's hash-locked urllib3,
     # rewritten the way pip vendors it. The pip checks below then run on the replaced copy.
     python3 /opt/model-intake-locks/revendor_pip_urllib3.py "$vendor" \
