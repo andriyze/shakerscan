@@ -645,3 +645,37 @@ def test_hunt_call_still_exits_zero_for_an_action_that_ran(monkeypatch, capsys):
 
     assert code == 0
     assert json.loads(captured.out)["response"]["action_result"]["status"] == "completed"
+
+
+@pytest.mark.parametrize(("slot", "field"), [
+    ("primary", "primary_credential_profile_id"),
+    ("secondary", "secondary_credential_profile_id"),
+    ("service", "service_credential_profile_id"),
+    ("web", "web_credential_profile_id"),
+    ("ssh", "ssh_credential_profile_id"),
+    ("oauth", "oauth_credential_profile_id"),
+])
+def test_hunt_start_credential_ref_accepts_the_short_slot_name(slot, field):
+    """E1-N5: the help says SLOT=ID; primary=<id> must mean primary_credential_profile_id."""
+    args = _parse(
+        "hunt", "start", "--target-id", "target-1", "--target-kind", "web",
+        "--credential-ref", f"{slot}=profile-1",
+    )
+    assert v2_cli._hunt_start_payload(args, HUNT_CONTRACT)["credential_refs"] == {field: "profile-1"}
+
+
+def test_hunt_start_credential_ref_refuses_a_slot_given_twice_under_both_names():
+    args = _parse(
+        "hunt", "start", "--target-id", "target-1", "--target-kind", "web",
+        "--credential-ref", "primary=profile-1",
+        "--credential-ref", "primary_credential_profile_id=profile-2",
+    )
+    with pytest.raises(v2_cli.CliError, match="duplicate credential reference"):
+        v2_cli._hunt_start_payload(args, HUNT_CONTRACT)
+
+
+def test_hunt_start_help_lists_the_credential_slots(capsys):
+    with pytest.raises(SystemExit):
+        _parse("hunt", "start", "--help")
+    out = capsys.readouterr().out
+    assert "primary" in out and "secondary" in out
