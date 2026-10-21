@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import urllib.parse
 from dataclasses import dataclass
 from typing import Any, Mapping, Sequence
 
@@ -154,38 +155,67 @@ def planned_endpoint_entries(
     return raw
 
 
-def window_base_endpoint(entries: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
-    """The endpoint every active-template window runs at, on every profile: the scan's seed.
+def _origin(scheme: str, host: str, port: int | None) -> str:
+    scheme = scheme.lower()
+    host = host.lower().rstrip(".")
+    authority = f"[{host}]" if ":" in host else host
+    default = 443 if scheme == "https" else 80
+    return f"{scheme}://{authority}" if port in (None, default) else f"{scheme}://{authority}:{port}"
+
+
+def active_sweep_bases(
+    target_url: str, entries: Sequence[Mapping[str, Any]], *, exclude_origins: Sequence[str] = (),
+) -> tuple[str, ...]:
+    """The base URLs an active-template sweep runs its windows at, in order.
 
     A window's templates address the host from nuclei's base URL: ``{{BaseURL}}/images/json``,
     and a raw ``GET /version`` is joined to the base path as well. Running window o at endpoint
     o % E put a discovered endpoint's path under them: zoo docker's endpoints were /version,
     /info and /, so misconfigured-docker asked /version/images/json and docker-daemon-exposed
     asked under /info, both got 404, and both windows counted as run with the host's two
-    critical findings lost. The seed is the URL the operator scanned (an application under a base
-    path keeps it); without a seed entry (a parallel shard's slice of the endpoints), the root of
-    the manifest's first origin.
+    critical findings lost.
+
+    The first base is the directory of the URL the Scan targets (the dispatcher's own target
+    URL, so a parallel shard has the same one): a path ending in ``/`` is kept, otherwise its
+    last segment is dropped (``/app/login.php`` -> ``/app/``; ``/app`` -> ``/``, since nothing
+    says ``app`` is a directory), and the query and fragment are dropped. Every other origin the
+    endpoint manifest names (all inside the Scan's frozen binding) follows at its root, sorted,
+    except ``exclude_origins``: a scheme-inferred Scan's origin it did not select (the other
+    scheme usually only redirects, and batch attempts follow no redirects).
 
     No permitted template needs a discovered endpoint's path (pinned bundle, 1,145 permitted
     templates): none fuzzes the endpoint or appends a query to it; 550 append a path to
     {{BaseURL}}, 495 send raw requests with absolute paths (joined to the base path), and 108 ask
     {{BaseURL}} itself to recognise a product's page -- which a window ran on one arbitrary
-    endpoint, never on each, so the seed is where that check is meaningful.
+    endpoint, never on each, so the bases are where that check is meaningful.
     """
-    if not entries:
-        raise ValueError("active template windows need an endpoint")
-    seeds = [
-        entry for entry in entries
-        if str(entry.get("source_tool") or "") == "seed"
-        and not entry.get("query_parameter_names") and not entry.get("body_field_names")
-    ]
-    if seeds:
-        return dict(min(seeds, key=lambda entry: int(entry.get("discovery_depth") or 0)))
-    return {
-        **dict(entries[0]), "canonical_path": "/", "query_parameter_names": [],
-        "body_field_names": [], "browser_fragment_path": None,
-        "browser_fragment_query_parameter_names": [],
-    }
+    parsed = urllib.parse.urlsplit(str(target_url or ""))
+    if parsed.scheme.lower() not in {"http", "https"} or not parsed.hostname:
+        raise ValueError("an active-template sweep needs an absolute HTTP(S) target URL")
+    path = parsed.path or "/"
+    if not path.endswith("/"):
+        path = path[: path.rfind("/") + 1] or "/"
+    first_origin = _origin(parsed.scheme, parsed.hostname, parsed.port)
+    others = sorted({
+        _origin(str(entry["scheme"]), str(entry["host"]), int(entry["port"]))
+        for entry in entries
+        if entry.get("scheme") and entry.get("host") and entry.get("port")
+    } - {first_origin} - {str(origin).rstrip("/").lower() for origin in exclude_origins})
+    return (first_origin + path, *(origin + "/" for origin in others))
+
+
+def active_sweep_base(position: int, *, bases: Sequence[str], window_count: int) -> str | None:
+    """Where a sweep position runs: window ``position % W`` at base ``position // W``.
+
+    Every (base, window) pair runs once. A position past ``len(bases) x W`` would repeat a
+    pair already run -- a host with 215 endpoints and one origin repeated each of its 39
+    windows five or six times at the same URL, mutating templates included -- so it runs
+    nothing (``None``). The window a position runs is unchanged
+    (``active_template_window``), and so are the plan, the holds and the attempt identities.
+    """
+    count = max(1, int(window_count))
+    index = int(position) // count
+    return bases[index] if 0 <= index < len(bases) else None
 
 
 def window_position_candidate_id(

@@ -303,7 +303,8 @@ from .nuclei_execution import (
     active_template_window_count,
     planned_endpoint_entries,
     resolve_active_scan_nuclei_options,
-    window_base_endpoint,
+    active_sweep_base,
+    active_sweep_bases,
     window_position_candidate_id,
 )
 from .posture_findings import CORS_PROBE_ACTIONS, cors_probe_verdict
@@ -4125,8 +4126,26 @@ class DatabaseNeutralScanActionDispatcher:
         allowlist = str(worker_template_options.get("template_ids") or "")
         windows_run: set[int] = set()
 
+        # Each sweep position runs window p % W at base p // W: the target URL's directory, then
+        # the manifest's other origins' roots (active_sweep_bases). A scheme-inferred Scan's
+        # target URL is the origin it selected.
+        if windowed and self.target.inferred_origins:
+            await self._restore_selected_origin()
+        sweep_bases = active_sweep_bases(
+            self.target_url, manifest.entries,
+            exclude_origins=tuple(
+                origin for origin in self.target.inferred_origins
+                if not self.target_url.lower().startswith(origin.lower() + "/")
+            ),
+        ) if windowed else ()
+        sweep_windows = active_template_window_count(allowlist) if windowed else 0
+
         def window_applies(manifest_index: int) -> bool:
-            """Whether a planned position names a window (an endpoint's own always does)."""
+            """Whether a planned position names a (base, window) pair no other position runs."""
+            if windowed and active_sweep_base(
+                manifest_index, bases=sweep_bases, window_count=sweep_windows,
+            ) is None:
+                return False
             if window_endpoints is None or manifest_index < window_endpoints:
                 return True
             return windowed and active_template_window_applies(
@@ -4607,8 +4626,9 @@ class DatabaseNeutralScanActionDispatcher:
                     })
                     continue
                 if not window_applies(manifest_index):
-                    # A planned window past the allowlist's own windows (a GET-only allowlist
-                    # has fewer) would repeat one already run on this host: nothing is sent.
+                    # A planned position whose (base, window) pair another position already
+                    # runs -- past the allowlist's own windows, or past every base's windows
+                    # -- would repeat it on this host: nothing is sent.
                     inapplicable += 1
                     observations.append({
                         "kind": "candidate_inapplicable",
@@ -4723,11 +4743,13 @@ class DatabaseNeutralScanActionDispatcher:
                                 "injection_field": str(resolved["field_name"]),
                             }
                     else:
-                        # An active sweep runs every window at the scan's seed: its templates
-                        # address the host from the base URL (window_base_endpoint). A passive
-                        # pack and a verify Scan's named checks run at each endpoint.
+                        # An active sweep runs each window at a base, never under a discovered
+                        # endpoint's path (active_sweep_bases). A passive pack and a verify
+                        # Scan's named checks run at each endpoint.
                         execution_target = (
-                            execution_url_for_endpoint(window_base_endpoint(manifest.entries))
+                            str(active_sweep_base(
+                                manifest_index, bases=sweep_bases, window_count=sweep_windows,
+                            ))
                             if windowed
                             else execution_url_for_manifest_endpoint(manifest, manifest_index)
                         )

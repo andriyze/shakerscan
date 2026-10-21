@@ -188,3 +188,13 @@ def test_planned_passive_slices_hold_retry_headroom():
     assert passive_batch_request_hold(3) == PACK * 3
     # The single-route admission slice keeps exactly the pack (tight parallel children).
     assert passive_batch_request_hold(1) == PACK
+
+
+def test_the_passive_pack_runs_at_each_endpoints_own_url(monkeypatch):
+    """The active sweep runs its windows at the Scan's base; the passive pack reads each
+    endpoint's own response headers and stays at each endpoint's URL."""
+    paths = ("/version", "/info", "/app/login")
+    budget = {"http_requests": passive_batch_request_hold(3), "tool_wall_seconds": 36}
+    receipt, calls = _run(monkeypatch, paths, budget)
+    assert sorted(path for path, _ in calls) == sorted(paths)
+    assert receipt.status == "success"

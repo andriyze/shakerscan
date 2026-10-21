@@ -128,6 +128,21 @@ def test_verify_scan_with_state_changing_authority_runs_the_named_post_check(mon
     assert captured["scanner_options"]["template_ids"] == "django-debug-exposure"
 
 
+def test_a_verify_scans_named_checks_run_at_each_endpoints_own_url(monkeypatch):
+    """A verify Scan re-runs named checks where they matched; unlike the active sweep, whose
+    windows run at the Scan's base, it stays at each endpoint's URL."""
+    receipt, captured = _drive_verify(
+        monkeypatch, VERIFY,
+        policy=ScanPolicy(active_testing=True, approval_receipt_id="approval-1"),
+        requested_budget={"http_requests": 240, "tool_wall_seconds": 90},
+        paths=("/version", "/app/login"),
+    )
+    assert receipt.status == "success"
+    assert sorted(captured["targets"]) == [
+        "https://app.example.test/app/login", "https://app.example.test/version",
+    ]
+
+
 def test_verify_scan_whose_check_is_absent_from_the_bundle_records_a_gap(monkeypatch):
     receipt, _captured = _drive_verify(
         monkeypatch, ("cve-2099-0001",),

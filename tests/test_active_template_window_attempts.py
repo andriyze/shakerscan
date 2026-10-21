@@ -32,6 +32,8 @@ from scan.external_process import ACTIVE_TEMPLATE_PLANNED_GET_ONLY_WINDOWS
 from scan.nuclei_execution import (
     ACTIVE_TEMPLATE_PLANNED_WINDOWS,
     ACTIVE_TEMPLATE_WINDOW_SIZE,
+    active_sweep_base,
+    active_sweep_bases,
     active_template_window,
     resolve_active_scan_nuclei_options,
 )
@@ -94,22 +96,29 @@ class _Backend:
 class _Host:
     """One endpoint manifest and template manifest; slices of it run through the adapter."""
 
-    def __init__(self, paths, sources=None):
+    def __init__(self, paths, sources=None, *, target=None, target_url="https://app.example.test/"):
+        self.target = TARGET if target is None else target
+        self.target_url = target_url
         self.scan_id = str(uuid.uuid4())
+        located = [
+            ("https", 443, item) if not isinstance(item, tuple)
+            else item if len(item) == 3 else ("https", *item)
+            for item in paths
+        ]
         self.endpoints = build_endpoint_manifest(
-            scan_id=self.scan_id, target_binding_digest=TARGET.digest,
+            scan_id=self.scan_id, target_binding_digest=self.target.digest,
             surface_manifest={
                 "schema_version": "endpoint-manifest/v2", "status": "complete", "reason": None,
                 "endpoints": [{
-                    "method": "GET", "scheme": "https", "host": "app.example.test", "port": 443,
+                    "method": "GET", "scheme": scheme, "host": "app.example.test", "port": port,
                     "normalized_path": path, "concrete_path": path, "query_keys": [],
                     "source": (sources or {}).get(path, "web.crawl"),
-                } for path in paths],
+                } for scheme, port, path in located],
             },
             source_action_ids=("discover.web_crawl",),
         )
         self.templates = build_canonical_nuclei_template_manifest(
-            scan_id=self.scan_id, target_binding_digest=TARGET.digest,
+            scan_id=self.scan_id, target_binding_digest=self.target.digest,
         )
         self.backend = _Backend({
             self.endpoints.manifest_id: self.endpoints, self.templates.manifest_id: self.templates,
@@ -135,7 +144,7 @@ class _Host:
                 "profile": "thorough_batch_v1",
                 "proof_policy": "deterministic_proof_contract_required",
             },
-            target_binding_digest=TARGET.digest, input_binding_digest="1" * 64,
+            target_binding_digest=self.target.digest, input_binding_digest="1" * 64,
             requested_budget=hold,
             placement={
                 "schema_version": "scan-action-placement/v1",
@@ -149,7 +158,7 @@ class _Host:
     def run(self, monkeypatch, bundle_dir, action, *, policy=AUTHORIZED, statuses=None):
         plan = ScanActionPlan(
             scan_id=self.scan_id, execution_plan_digest="a" * 64,
-            target_binding_digest=TARGET.digest, actions=(action,),
+            target_binding_digest=self.target.digest, actions=(action,),
         )
         calls = self.calls
 
@@ -176,7 +185,7 @@ class _Host:
             return None
 
         dispatcher = DatabaseNeutralScanActionDispatcher(
-            target_url="https://app.example.test/", options={}, target=TARGET, policy=policy,
+            target_url=self.target_url, options={}, target=self.target, policy=policy,
             scan_id=plan.scan_id, job_id="job-1", worker_id="broker:worker-1", plan=plan,
             backend=self.backend, process_runner=process_runner, cancelled=lambda: False,
         )
@@ -254,11 +263,101 @@ def test_every_window_runs_at_the_scans_seed_url_not_a_discovered_endpoints_path
     ]
 
 
-def test_a_seed_with_a_base_path_is_where_the_windows_run(monkeypatch, bundle):
-    host = _Host(("/app/", "/app/login", "/app/api"), sources={"/app/": "seed"})
+@pytest.mark.parametrize(("target_url", "base"), [
+    ("https://app.example.test/", "https://app.example.test/"),
+    ("https://app.example.test/app/login.php", "https://app.example.test/app/"),
+    ("https://app.example.test/app/?page=1#top", "https://app.example.test/app/"),
+    ("https://app.example.test/app/", "https://app.example.test/app/"),
+    ("https://app.example.test/app", "https://app.example.test/"),
+    ("https://app.example.test/index.php?page=1", "https://app.example.test/"),
+    ("https://APP.example.test:443/a/b/c.html", "https://app.example.test/a/b/"),
+])
+def test_the_sweep_base_is_the_target_urls_directory(target_url, base):
+    entries = [{"scheme": "https", "host": "app.example.test", "port": 443}]
+    assert active_sweep_bases(target_url, entries) == (base,)
+
+
+def test_other_origins_follow_the_target_base_at_their_roots_in_a_stable_order():
+    entries = [
+        {"scheme": "https", "host": "app.example.test", "port": 8443},
+        {"scheme": "https", "host": "app.example.test", "port": 443},
+        {"scheme": "http", "host": "app.example.test", "port": 8080},
+        {"scheme": "https", "host": "app.example.test", "port": 8443},
+    ]
+    assert active_sweep_bases("https://app.example.test/app/login.php", entries) == (
+        "https://app.example.test/app/",
+        "http://app.example.test:8080/",
+        "https://app.example.test:8443/",
+    )
+
+
+def test_the_215_endpoint_scenario_runs_no_base_and_window_pair_twice():
+    """The invariance fixture's thorough host has 215 endpoints on one origin: every position
+    used to run window p % 39 at the same URL, about 176 repeats, mutating templates included."""
+    bases = ("https://app.example.test/",)
+    pairs = [
+        (active_sweep_base(position, bases=bases, window_count=39), position % 39)
+        for position in range(215)
+    ]
+    run = [pair for pair in pairs if pair[0] is not None]
+    assert len(run) == len(set(run)) == 39
+    assert sum(1 for pair in pairs if pair[0] is None) == 215 - 39
+
+
+@pytest.mark.parametrize(("target_url", "base"), [
+    ("https://app.example.test/app/login.php", "https://app.example.test/app/"),
+    ("https://app.example.test/app/?page=1", "https://app.example.test/app/"),
+    ("https://app.example.test/app/", "https://app.example.test/app/"),
+    ("https://app.example.test/", "https://app.example.test/"),
+])
+def test_every_window_runs_at_the_target_urls_directory(monkeypatch, bundle, target_url, base):
+    host = _Host(("/app/login.php", "/app/x", "/app/y"), target_url=target_url)
     host.run(monkeypatch, bundle, host.action("active.templates.r01", start=0, count=3))
     host.run(monkeypatch, bundle, host.action("active.templates.r02", start=3, count=4))
+    assert {call["url"] for call in host.calls} == {base}
+
+
+def test_a_shard_without_the_seed_entry_still_runs_at_the_scans_base(monkeypatch, bundle):
+    host = _Host(("/app/x", "/app/y"), target_url="https://app.example.test/app/login.php")
+    host.run(monkeypatch, bundle, host.action("active.templates.r01", start=0, count=2, windows=False))
     assert {call["url"] for call in host.calls} == {"https://app.example.test/app/"}
+
+
+def test_fifty_endpoints_on_one_origin_run_39_distinct_pairs_and_send_nothing_else(monkeypatch, bundle):
+    host = _Host(tuple(f"/p{index}" for index in range(50)))
+    receipt = host.run(
+        monkeypatch, bundle, host.action("active.templates.r01", start=0, count=50, windows=False),
+    )
+    pairs = [(call["url"], call["template_ids"]) for call in host.calls]
+    assert len(pairs) == len(set(pairs)) == 39
+    assert {call["url"] for call in host.calls} == {"https://app.example.test/"}
+    beyond = [item for item in receipt.observations if item.get("kind") == "candidate_inapplicable"]
+    assert len(beyond) == 11
+    assert {item["reason"] for item in beyond} == {"template_window_beyond_allowlist"}
+    assert receipt.status == "success"
+    assert receipt.redacted_execution["unattempted_count"] == 0
+    assert receipt.redacted_execution["inapplicable_count"] == 11
+    assert _windows_record(receipt)["windows_run"] == list(range(39))
+
+
+def test_a_second_origin_runs_the_windows_past_the_first_origins_at_its_root(monkeypatch, bundle):
+    target = TargetBinding(
+        target_id="target-1", target_kind="web", canonical_host="app.example.test",
+        allowed_origins=("https://app.example.test", "https://app.example.test:8443"),
+        allowed_addresses=("192.0.2.10",), allowed_root_domains=("example.test",),
+    )
+    paths = tuple(f"/p{index}" for index in range(30)) + tuple(
+        (8443, f"/q{index}") for index in range(20)
+    )
+    host = _Host(paths, target=target)
+    receipt = host.run(
+        monkeypatch, bundle, host.action("active.templates.r01", start=0, count=50, windows=False),
+    )
+    urls = [call["url"] for call in host.calls]
+    assert urls == ["https://app.example.test/"] * 39 + ["https://app.example.test:8443/"] * 11
+    pairs = [(call["url"], call["template_ids"]) for call in host.calls]
+    assert len(set(pairs)) == 50
+    assert receipt.redacted_execution["inapplicable_count"] == 0
 
 
 def test_a_slice_without_planned_windows_runs_its_windows_at_the_seed_too(monkeypatch, bundle):
@@ -395,3 +494,35 @@ def test_the_planned_windows_were_measured_on_the_bundle_the_image_pins():
     assert f"ARG NUCLEI_TEMPLATES_COMMIT={MEASURED_BUNDLE_COMMIT}" in dockerfile
     assert f"ARG NUCLEI_TEMPLATES_SHA256={MEASURED_BUNDLE_SHA256}" in dockerfile
     assert (ACTIVE_TEMPLATE_PLANNED_WINDOWS, ACTIVE_TEMPLATE_PLANNED_GET_ONLY_WINDOWS) == (39, 26)
+
+
+def test_a_scheme_inferred_scans_unselected_origin_is_not_a_sweep_base():
+    entries = [
+        {"scheme": "https", "host": "app.example.test", "port": 443},
+        {"scheme": "http", "host": "app.example.test", "port": 80},
+        {"scheme": "http", "host": "app.example.test", "port": 8080},
+    ]
+    assert active_sweep_bases(
+        "https://app.example.test/", entries, exclude_origins=("http://app.example.test",),
+    ) == ("https://app.example.test/", "http://app.example.test:8080/")
+    assert active_sweep_bases("https://app.example.test/", entries) == (
+        "https://app.example.test/", "http://app.example.test/", "http://app.example.test:8080/",
+    )
+
+
+def test_a_scheme_inferred_scan_sweeps_only_the_origin_it_runs_at(monkeypatch, bundle):
+    target = TargetBinding(
+        target_id="target-1", target_kind="web", canonical_host="app.example.test",
+        allowed_origins=("https://app.example.test", "http://app.example.test"),
+        allowed_addresses=("192.0.2.10",), allowed_root_domains=("example.test",),
+        inferred_origins=("https://app.example.test", "http://app.example.test"),
+    )
+    host = _Host(
+        tuple(f"/p{index}" for index in range(30)) + tuple(("http", 80, f"/q{index}") for index in range(20)),
+        target=target, target_url="app.example.test",
+    )
+    receipt = host.run(
+        monkeypatch, bundle, host.action("active.templates.r01", start=0, count=50, windows=False),
+    )
+    assert {call["url"] for call in host.calls} == {"https://app.example.test/"}
+    assert receipt.redacted_execution["inapplicable_count"] == 11
