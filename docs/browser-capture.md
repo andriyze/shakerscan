@@ -183,3 +183,6 @@ The library labels it **Browser capture**, with Recording or Closed and its coun
   not captured.
 - Capture never grants scope: everything replayed or tested from it still goes through the
   target's scope and authorization checks.
+- These withholding rules are for browser captures. An imported HAR file or Postman collection is
+  a file the operator chose, so its request URLs are replayed as given, credentials in their paths
+  and queries included.
