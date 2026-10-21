@@ -87,6 +87,7 @@ _REASON_LABELS = {
     "manifest_unavailable": "Required immutable work was unavailable",
     "unsupported_output_schema": "The worker returned an unsupported result format",
     "not_applicable": "The capability did not apply to this target",
+    "nuclei_selection_empty": "The scan's template policy left no template to run",
     "prerequisite_unavailable": (
         "A step was skipped because something it needs was missing, such as a reachable "
         "origin or an authenticated session"

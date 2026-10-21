@@ -67,6 +67,11 @@ _LEASE_TOKEN_RE = re.compile(r"^[A-Za-z0-9_-]{16,256}$")
 _NOTHING_TO_DO_SKIP_TOKENS = frozenset({
     "not_applicable", "no_xss_candidate_observation", "no_sqli_candidate_observation",
 })
+# Skip tokens of an active template selection that left nothing to run
+# (nuclei_template_index.ActiveNucleiSelection.skip_reason).
+_TEMPLATE_SELECTION_EMPTY_SKIP_TOKENS = frozenset({
+    "no_eligible_nuclei_templates", "verify_checks_excluded", "verify_checks_need_oob_interaction",
+})
 
 
 class ScanExecutionBackendError(RuntimeError):
@@ -1071,8 +1076,11 @@ class PostgresScanExecutionBackend:
         authenticated principal) read as a family with nothing to examine.
         """
         for error in receipt.errors:
-            if str(error or "").strip().lower().split(":", 1)[0] in _NOTHING_TO_DO_SKIP_TOKENS:
+            token = str(error or "").strip().lower().split(":", 1)[0]
+            if token in _NOTHING_TO_DO_SKIP_TOKENS:
                 return CapabilityResultReason.NOT_APPLICABLE
+            if token in _TEMPLATE_SELECTION_EMPTY_SKIP_TOKENS:
+                return CapabilityResultReason.NUCLEI_SELECTION_EMPTY
         return cls._receipt_reason(receipt, CapabilityResultReason.PREREQUISITE_UNAVAILABLE)
 
     @staticmethod

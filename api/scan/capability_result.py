@@ -82,6 +82,9 @@ class CapabilityResultReason(str, Enum):
     # origin, no authenticated principal, a private request it could not read): not an empty
     # surface, so not "not applicable". The receipt keeps the adapter's own token.
     PREREQUISITE_UNAVAILABLE = "prerequisite_unavailable"
+    # The Scan's template policy (or the checks a verify Scan named) left no active template to
+    # run. The receipt keeps the selection's own token.
+    NUCLEI_SELECTION_EMPTY = "nuclei_selection_empty"
     # An optional discovery source (robots.txt, llms.txt) was answered with the site's HTML
     # shell: the target never published it. The action is partial because the coverage the
     # file would imply is not real, but nothing was cut off or misparsed.

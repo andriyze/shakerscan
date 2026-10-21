@@ -261,6 +261,7 @@ const COVERAGE_REASON_LABELS = {
   process_killed: 'A tool was killed by the system (for example, out of memory) before it finished; what it wrote before that is kept',
   discovery_truncated: 'Surface discovery was cut short by its budget, so part of the application was never examined',
   discovery_failed: 'A surface discovery step failed, so what the application exposes was never fully examined',
+  nuclei_selection_empty: "The scan's template policy left no template to run",
   prerequisite_unavailable: 'A step was skipped because something it needs was missing, such as a reachable origin or an authenticated session',
   cancelled: 'The run was cancelled before all planned work finished',
   budget_exhausted: 'The run exhausted its budget before all planned work finished',

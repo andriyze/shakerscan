@@ -418,9 +418,31 @@ EMPTY_WITHOUT_PROOF = (
     ("no_manifest_reference", None, ()),
     # The producer stopped before the manifest was finished.
     ("incomplete_manifest", _manifest_ref(0, status="partial"), (_manifest_ref(0, status="partial"),)),
-    # The slice names a manifest the Scan's references do not hold.
-    ("unknown_manifest", _manifest_ref(0), (_manifest_ref(0, digest="e" * 64),)),
+    # A rebuild whose references lack the slice's manifest falls back to the slice's own
+    # reference, which here says the producer did not finish.
+    ("unlisted_incomplete_manifest", _manifest_ref(0, status="partial"),
+     (_manifest_ref(0, digest="e" * 64),)),
 )
+
+
+@pytest.mark.parametrize(
+    "family, capability", [item for item in VERIFIERS if item[1] != "authz.verify"],
+)
+def test_a_rebuild_without_the_manifest_list_reads_the_slices_own_reference(family, capability):
+    """An offline rebuild may carry no manifest list for the slice; the reference frozen into
+    the slice's arguments (complete, no entry) still shows there was nothing to examine."""
+    passive, passive_result, passive_rows = _companion_that_worked(family)
+    verifier = _planned_slice(
+        "verify.swept", capability, 1, count=1, entries=0, manifest_ref=_manifest_ref(0),
+    )
+    _report, row = _finalize(
+        (passive, verifier),
+        {passive.action_id: passive_result,
+         verifier.action_id: _result_with_observation_count(verifier, 0)},
+        {passive.action_id: passive_rows, verifier.action_id: ()},
+        family, work_manifests=(),
+    )
+    assert (row["coverage_status"], row["reason"]) == ("complete", "no_candidates")
 
 
 @pytest.mark.parametrize(
@@ -473,28 +495,67 @@ def test_a_failed_discovery_cannot_launder_an_empty_slice_into_no_candidates():
     assert report["result"]["grade_reliable"] is False
 
 
-def test_a_failed_discovery_producer_leaves_the_scan_partial_with_its_reason():
+def _discovery_report(outcomes):
+    """A Scan whose XSS verifier did its work beside optional discovery producers that settled
+    as ``outcomes`` says: (capability, status, reason)."""
     from tests.test_scan_orchestrator import _action as plain_action
 
     passive, passive_result, passive_rows = _companion_that_worked("xss")
-    verifier = _planned_slice("verify.swept", "xss.verify_batch", 2)
-    crawl = replace(
-        plain_action("discover.web_crawl", 1, capability_name="web.crawl"),
-        required=False, action_digest=None,
-    )
-    report, row = _finalize(
-        (passive, crawl, verifier),
-        {passive.action_id: passive_result,
-         crawl.action_id: _result(crawl, status=Status.FAILED, reason=Reason.ADAPTER_FAILED),
-         verifier.action_id: _result_with_observation_count(verifier, 3)},
+    actions, results = [passive], {passive.action_id: passive_result}
+    for index, (capability, status, reason) in enumerate(outcomes, start=1):
+        producer = replace(
+            plain_action(f"discover.{capability.split('.')[-1]}", index, capability_name=capability),
+            required=False, action_digest=None,
+        )
+        actions.append(producer)
+        results[producer.action_id] = _result(producer, status=status, reason=reason)
+    verifier = _planned_slice("verify.swept", "xss.verify_batch", len(actions))
+    actions.append(verifier)
+    results[verifier.action_id] = _result_with_observation_count(verifier, 3)
+    report, _row = _finalize(
+        tuple(actions), results,
         {passive.action_id: passive_rows, verifier.action_id: _work_rows(verifier)},
         "xss",
     )
-    assert row["coverage_status"] == "complete"
+    return report, [action.action_id for action in actions[1:-1]]
+
+
+FAILED = (Status.FAILED, Reason.ADAPTER_FAILED)
+REFUSED = (Status.BLOCKED, Reason.POLICY_DISABLED)
+UNPLACED = (Status.SKIPPED, Reason.PREREQUISITE_UNAVAILABLE)
+WORKED = (Status.SUCCESS, None)
+
+
+@pytest.mark.parametrize("outcomes", [
+    (("web.crawl", *FAILED),),
+    (("web.crawl", *FAILED), ("web.browser_crawl", *REFUSED)),
+    (("web.spec_ingest", *UNPLACED),),
+    (("web.crawl", *FAILED), ("web.content_discover", *UNPLACED)),
+], ids=["only_crawl_failed", "every_crawl_failed", "only_spec_skipped", "failed_and_skipped"])
+def test_discovery_with_no_producer_that_worked_leaves_the_scan_partial(outcomes):
+    report, producers = _discovery_report(outcomes)
     assert report["coverage"]["status"] == "partial"
     assert "discovery_failed" in report["coverage"]["reasons"]
-    assert report["coverage"]["failed_discovery_actions"] == [crawl.action_id]
+    assert report["coverage"]["failed_discovery_actions"] == sorted(producers)
     assert "discovery_failed" in report["coverage"]["grade_reliability"]["reasons"]
+    assert report["result"]["grade_reliable"] is False
+
+
+@pytest.mark.parametrize("outcomes", [
+    # No browser runtime: the planner promises the static crawl alone completes the Scan.
+    (("web.browser_crawl", *FAILED), ("web.crawl", *WORKED)),
+    (("web.browser_crawl", *REFUSED), ("web.crawl", *WORKED)),
+    (("web.spec_ingest", *UNPLACED), ("web.crawl", *WORKED)),
+], ids=["browser_crawl_failed", "browser_crawl_refused", "spec_ingest_skipped"])
+def test_a_failed_producer_beside_one_that_worked_is_stated_not_a_gap(outcomes):
+    report, producers = _discovery_report(outcomes)
+    failed = sorted(action for action, outcome in zip(producers, outcomes)
+                    if outcome[1] is not Status.SUCCESS)
+    assert "discovery_failed" in report["coverage"]["reasons"]
+    assert report["coverage"]["failed_discovery_actions"] == failed
+    assert report["coverage"]["status"] == "complete"
+    assert "discovery_failed" not in report["coverage"]["grade_reliability"]["reasons"]
+    assert report["result"]["grade_reliable"] is True
 
 
 @pytest.mark.parametrize(
@@ -617,10 +678,14 @@ def test_a_verifier_without_a_declared_manifest_that_attempted_nothing_is_partia
       "selected_request_examined": True, "cross_access_observed": True,
       "reason": "selected_object_cross_access_observed_entitlement_unproven",
       "requests_attempted": 4}, ("complete", None)),
-    # It stopped at the secondary baseline, after a request.
+    # It stopped before fetching the selected object across principals: requests were sent, but
+    # nothing was compared.
     ({"mode": "selected_object", "proof_state": "inconclusive",
       "selected_request_examined": False, "reason": "secondary_baseline_status_404",
-      "requests_attempted": 1}, ("complete", None)),
+      "requests_attempted": 1}, ("partial", "zero_attempts")),
+    ({"mode": "selected_object", "proof_state": "inconclusive",
+      "selected_request_examined": False, "reason": "primary_response_object_unresolved",
+      "requests_attempted": 2}, ("partial", "zero_attempts")),
     # It sent nothing.
     ({"mode": "selected_object", "proof_state": "inconclusive",
       "selected_request_examined": False, "reason": "selected_object_not_examined",

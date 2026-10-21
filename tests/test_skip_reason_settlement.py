@@ -41,6 +41,7 @@ def test_a_skip_with_nothing_to_do_is_not_applicable(errors):
     ("credential_session_unavailable",),
     ("private_request_unavailable",),
     ("state_changing_authority_missing",),
+    ("nuclei_template_index_unavailable",),
     ("something_new",),
     (),
 ])
@@ -57,3 +58,16 @@ def test_a_skip_for_a_missing_prerequisite_is_not_not_applicable(errors):
 ])
 def test_a_skip_with_a_stable_reason_keeps_it(errors, reason):
     assert _outcome(errors) == (CapabilityResultStatus.SKIPPED, reason)
+
+
+@pytest.mark.parametrize("errors", [
+    ("no_eligible_nuclei_templates",),
+    ("verify_checks_excluded",),
+    ("verify_checks_need_oob_interaction",),
+])
+def test_a_template_selection_that_left_nothing_to_run_has_its_own_reason(errors):
+    """The Scan's template policy (or the checks a verify Scan named) left no template to run:
+    not an empty surface and not a missing prerequisite."""
+    assert _outcome(errors) == (
+        CapabilityResultStatus.SKIPPED, CapabilityResultReason.NUCLEI_SELECTION_EMPTY,
+    )

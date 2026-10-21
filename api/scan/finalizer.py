@@ -2490,15 +2490,15 @@ def _authz_compared(item: Mapping[str, Any]) -> bool:
     """Whether one ownership differential compared anything.
 
     The replay path compared once a producer was tested or the differential was proven. The
-    selected-object path (two sibling object URLs) compared once it sent a request: it never
-    reports producers, and its verdict stays inconclusive even when it ran to completion.
+    selected-object path (two sibling object URLs) compared once the selected object's request
+    as the other principal was answered: it never reports producers, and its verdict stays
+    inconclusive even when it ran to completion. Requests that stopped before that (a secondary
+    baseline that failed, an owner response without the object) compared nothing.
     """
     if item.get("proof_state") == "verified":
         return True
     if item.get("mode") == "selected_object":
-        return item.get("selected_request_examined") is True or int(
-            item.get("requests_attempted") or 0
-        ) > 0
+        return item.get("selected_request_examined") is True
     return int(item.get("producers_tested") or 0) > 0
 
 
@@ -2533,15 +2533,15 @@ def _proven_empty_manifest(action: Any, known: Mapping[str, Mapping[str, Any]]) 
     The planner declares ``manifest_entries: 0`` both for a manifest that held nothing and as an
     admission placeholder for one not yet produced, and a producer that failed leaves 0 too.
     Only the Scan's own reference to that manifest -- complete, with no entry -- tells them
-    apart, as an adapter does before skipping an empty slice (``_empty_slice_reason``).
+    apart, as an adapter does before skipping an empty slice (``_empty_slice_reason``). A
+    rebuild whose manifest list lacks it reads the reference frozen into the slice's arguments.
     """
     for name in _SLICE_MANIFEST_ARGS:
         reference = action.capability_args.get(name)
         if isinstance(reference, Mapping) and reference.get("manifest_digest"):
-            item = known.get(str(reference["manifest_digest"]))
+            item = known.get(str(reference["manifest_digest"])) or reference
             return (
-                item is not None
-                and str(item.get("status") or "") == "complete"
+                str(item.get("status") or "") == "complete"
                 and int(item.get("entry_count") or 0) == 0
             )
     return False
@@ -3227,15 +3227,29 @@ def finalize_scan_report(
         if isinstance(explicit_http_status, int)
         else "unknown"
     )
-    # A discovery producer that failed outright produced no surface at all; what later stages
-    # had to examine is unknown, so the Scan's coverage is not complete either.
+    # An optional discovery producer that failed, was refused, or was skipped for a missing
+    # prerequisite produced no surface. It is always stated. It leaves the Scan's coverage
+    # incomplete only when no other surface producer worked: a target without a browser runtime
+    # still completes on the static crawl alone.
     failed_discovery = sorted(
         action.action_id
         for action in coverage_actions
         if not action.required
         and action.capability_name in _SURFACE_DISCOVERY_CAPABILITIES
-        and action_results[action.action_id].status in _DISCOVERY_FAILED_STATUSES
+        and (
+            action_results[action.action_id].status in _DISCOVERY_FAILED_STATUSES
+            or action_results[action.action_id].reason_code
+            is CapabilityResultReason.PREREQUISITE_UNAVAILABLE
+        )
     )
+    surface_produced = any(
+        action.capability_name in _SURFACE_DISCOVERY_CAPABILITIES
+        and action_results[action.action_id].status in {
+            CapabilityResultStatus.SUCCESS, CapabilityResultStatus.PARTIAL,
+        }
+        for action in coverage_actions
+    )
+    discovery_gap = bool(failed_discovery) and not surface_produced
     truncated_discovery = sorted(
         action.action_id
         for action in coverage_actions
@@ -3277,7 +3291,7 @@ def finalize_scan_report(
         for _action, result in required_incomplete
     } | ({"active_verifier_zero_attempts"} if zero_attempt_actions else set())
       | ({"discovery_truncated"} if truncated_discovery else set())
-      | ({"discovery_failed"} if failed_discovery else set())
+      | ({"discovery_failed"} if discovery_gap else set())
       | ({"placement_unavailable"} if placement_gaps else set())
       | ({"no_families_selected"} if no_families_selected else set())
       | ({"application_surface_not_examined"} if surface_not_examined else set())
@@ -3425,7 +3439,7 @@ def finalize_scan_report(
         if row["unattempted_candidates"] or row["incomplete_candidates"]:
             row["status"] = "partial"
     if (
-        zero_attempt_actions or truncated_discovery or failed_discovery or selected_family_gaps
+        zero_attempt_actions or truncated_discovery or discovery_gap or selected_family_gaps
     ) and coverage_status == "complete":
         # A selected family that did not cover its surface (entries never scheduled, candidates
         # left unattempted) leaves the Scan's coverage incomplete even when every action it did
