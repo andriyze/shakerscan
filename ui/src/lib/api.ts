@@ -2140,7 +2140,16 @@ export interface AsmRecommendation {
   next_action: 'recon' | 'test' | 'wait'
   label: string
   reason: string
-  blockers: Array<{ kind: string; count: number; message: string; scan_id?: string; scan_ids?: string[] }>
+  blockers: Array<{
+    kind: string
+    count: number
+    message: string
+    scan_id?: string
+    scan_ids?: string[]
+    /** `asm` for an ASM batch/recon scan, `scan` for any other. */
+    scan_kind?: 'asm' | 'scan'
+    hidden_from_scans_list?: boolean
+  }>
 }
 
 export interface AsmSchedulerDecision {
@@ -2156,12 +2165,14 @@ export interface AsmSchedulerDecision {
   recorded_at?: string
   active_scan_id?: string
   active_scan_ids?: string[]
+  active_scan_kind?: 'asm' | 'scan'
 }
 
 export interface AsmSchedulerState {
   decision?: AsmSchedulerDecision | null
   last_decision?: AsmSchedulerDecision | null
   active_scan_ids?: string[]
+  active_scan_kind?: 'asm' | 'scan' | null
   claimable?: number
   tested_today?: number
   daily_cap_remaining?: number | null
