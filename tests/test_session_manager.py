@@ -55,7 +55,9 @@ def test_managed_profile_auth_replaces_prior_identity_and_records_server_binding
     user = session.state.users["user1"]
     assert result["success"] is True
     assert context.cleared is True
-    assert context.headers == {"Authorization": "Bearer new"}
+    # The context's session-header route reads these; they are never set context-wide.
+    assert context.headers is None
+    assert session._session_headers["user1"] == {"Authorization": "Bearer new"}
     assert user.headers == {"Authorization": "Bearer new"}
     assert user.cookies == {}
     assert user.credential_profile_id == "new-profile"

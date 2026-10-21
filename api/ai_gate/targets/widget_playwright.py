@@ -14,6 +14,11 @@ from ai_gate.budget import CHARS_PER_TOKEN_ESTIMATE, RequestBudget
 from ai_gate.targets.rest_json import as_dict, build_headers, build_url
 
 try:
+    from scanner_tools.credential_redirects import bind_session_headers
+except ModuleNotFoundError:  # package import layout
+    from scanner.scanner_tools.credential_redirects import bind_session_headers
+
+try:
     if not os.environ.get("PLAYWRIGHT_BROWSERS_PATH") and os.path.exists("/ms-playwright"):
         os.environ["PLAYWRIGHT_BROWSERS_PATH"] = "/ms-playwright"
     from playwright.async_api import TimeoutError as PlaywrightTimeoutError
@@ -652,11 +657,14 @@ class WidgetPlaywrightConversationTarget:
 
         if auth_kind == "basic_auth" and isinstance(secret, str) and ":" in secret:
             username, password = secret.split(":", 1)
-            context_kwargs["http_credentials"] = {"username": username, "password": password}
+            parsed_endpoint = urlparse(self.endpoint_url)
+            context_kwargs["http_credentials"] = {
+                "username": username, "password": password,
+                # Answer an authentication challenge from the endpoint's origin only.
+                "origin": f"{parsed_endpoint.scheme}://{parsed_endpoint.netloc}",
+            }
 
         header_overrides = {k: v for k, v in self.headers.items() if k.lower() != "cookie"}
-        if header_overrides:
-            context_kwargs["extra_http_headers"] = header_overrides
 
         auth_state = as_dict(self.metadata.get("playwright_auth_state")) or as_dict(
             self.metadata.get("widget_auth_state")
@@ -664,12 +672,15 @@ class WidgetPlaywrightConversationTarget:
         if auth_state:
             context_kwargs["storage_state"] = auth_state
 
+        navigation_url = str(self.manifest.get("entry_url") or self.endpoint_url)
         self._context = await self._browser.new_context(**context_kwargs)
+        if header_overrides:
+            # The configured headers go to the widget page's and the endpoint's origins only.
+            await bind_session_headers(self._context, [navigation_url, self.endpoint_url], header_overrides)
         self._page = await self._context.new_page()
         self._page.on("request", self._record_request)
         self._page.on("response", self._record_response)
 
-        navigation_url = str(self.manifest.get("entry_url") or self.endpoint_url)
         if auth_kind == "cookie" and isinstance(secret, str) and secret.strip():
             parsed = urlparse(navigation_url)
             cookies = [

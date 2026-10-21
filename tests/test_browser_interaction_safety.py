@@ -118,7 +118,8 @@ def test_passive_browser_route_allows_navigation_get():
         async def abort(self, reason):
             self.aborted = reason
 
-        async def continue_(self):
+        async def fallback(self):
+            # Handed on to the context's other routes (the session-header route), not sent here.
             self.continued = True
 
     class Request:

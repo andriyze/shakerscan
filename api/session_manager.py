@@ -44,6 +44,10 @@ try:
     from redaction import is_sensitive_key, redact_text
 except ModuleNotFoundError:  # package import layout
     from scanner.redaction import is_sensitive_key, redact_text
+try:
+    from scanner_tools.credential_redirects import bind_session_headers
+except ModuleNotFoundError:  # package import layout
+    from scanner.scanner_tools.credential_redirects import bind_session_headers
 
 # A response header whose name says it carries a credential (``X-Subject-Token``, ``X-Auth-Token``,
 # ``X-Upstream-Auth``, a session or key header): withheld whatever its value looks like.
@@ -208,6 +212,7 @@ class InteractiveSession:
         self._playwright = None
         self._browser: Browser | None = None
         self._contexts: dict[str, BrowserContext] = {}  # user_name -> context
+        self._session_headers: dict[str, dict[str, str]] = {}  # user_name -> set_auth headers
         self._pages: dict[str, Page] = {}  # user_name -> page
         self._user_allowed_origins: dict[str, set[tuple[str, str, int]]] = {}  # user_name -> allowed origins
         self._network_log: list[dict] = []
@@ -281,6 +286,11 @@ class InteractiveSession:
             # its traffic through the guard's egress proxy (redirect hops and WebSockets too).
             **await guarded_context_options(),
         )
+        # Headers set with set_auth go to the target's origin only, never to what its pages load
+        # or redirect to (registered before the page route, which hands requests on).
+        await bind_session_headers(
+            context, [self.target_url], lambda: self._session_headers.get(user_name, {}),
+        )
 
         # Set up network interception
         page = await context.new_page()
@@ -301,7 +311,7 @@ class InteractiveSession:
             request_url = route.request.url
             # Allow data/blob/about URLs (inline resources)
             if request_url.startswith(("data:", "blob:", "about:")):
-                await route.continue_()
+                await route.fallback()
                 return
             if destination_guard is not None and not destination_guard.check(request_url):
                 await route.abort("blockedbyclient")
@@ -309,18 +319,18 @@ class InteractiveSession:
 
             # Always allow same-origin
             if self._is_in_scope(request_url):
-                await route.continue_()
+                await route.fallback()
                 return
 
             # Allow explicitly permitted origins for this user
             origin_key = self._origin_key(request_url)
             if origin_key and origin_key in self._user_allowed_origins.get(user_name, set()):
-                await route.continue_()
+                await route.fallback()
                 return
 
             # Allow cross-origin static assets to avoid breaking app rendering
             if route.request.resource_type in CROSS_ORIGIN_ALLOWED_RESOURCE_TYPES:
-                await route.continue_()
+                await route.fallback()
                 return
 
             # Block cross-origin navigation/requests by default
@@ -745,7 +755,7 @@ class InteractiveSession:
         try:
             context = self._contexts.get(user)
             if context:
-                await context.set_extra_http_headers(merged_headers)
+                self._session_headers[user] = dict(merged_headers)
         except Exception:
             return {
                 "success": False,

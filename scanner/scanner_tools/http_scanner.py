@@ -188,7 +188,8 @@ async def _guard_browser_interaction_request(route: Any, request: Any, guard: di
             guard["sample_truncated"] = True
         await route.abort("blockedbyclient")
         return
-    await route.continue_()
+    # Handed on, so the session-header route (registered first) can still add its headers.
+    await route.fallback()
 
 
 def _redirect_chain_from_header_blocks(start_url: str, blocks: list[str]) -> list[str]:
@@ -531,13 +532,14 @@ async def browser_fetch(
                 "service_workers": "block",
             }
             auth_cookies: list[dict[str, Any]] = []
+            session_headers: dict[str, Any] = {}
             if auth_session:
                 try:
                     exported = auth_session.export_session()
                     headers = exported.get("headers", {}) or {}
                     headers = {k: v for k, v in headers.items() if str(k).lower() != "cookie"}
                     if headers:
-                        ctx_kwargs["extra_http_headers"] = headers
+                        session_headers = headers
                     cookie_map = exported.get("cookies", {}) or {}
                     if cookie_map:
                         base_domain = urllib.parse.urlparse(url).hostname or urllib.parse.urlparse(url).netloc
@@ -553,6 +555,9 @@ async def browser_fetch(
                     auth_cookies = []
 
             ctx = await browser.new_context(**ctx_kwargs)
+            if session_headers:
+                # Session headers go to the target's origin only (registered before the guard).
+                await credential_redirects.bind_session_headers(ctx, [url], session_headers)
             if auth_cookies:
                 try:
                     await ctx.add_cookies(auth_cookies)
@@ -1911,13 +1916,14 @@ async def interactive_browser_crawl(
             }
 
             auth_cookies = []
+            session_headers: dict[str, Any] = {}
             if auth_session:
                 try:
                     exported = auth_session.export_session()
                     headers = exported.get("headers", {}) or {}
                     headers = {k: v for k, v in headers.items() if str(k).lower() != "cookie"}
                     if headers:
-                        ctx_kwargs["extra_http_headers"] = headers
+                        session_headers = headers
                     cookie_map = exported.get("cookies", {}) or {}
                     if cookie_map:
                         base_domain = urllib.parse.urlparse(url).hostname
@@ -1933,6 +1939,9 @@ async def interactive_browser_crawl(
                     pass
 
             ctx = await browser.new_context(**ctx_kwargs)
+            if session_headers:
+                # Session headers go to the target's origin only (registered before the guard).
+                await credential_redirects.bind_session_headers(ctx, [url], session_headers)
             if auth_cookies:
                 try:
                     await ctx.add_cookies(auth_cookies)

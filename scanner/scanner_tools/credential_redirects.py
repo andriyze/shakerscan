@@ -310,3 +310,74 @@ async def run_curl_same_origin(cmd: list[str], run_hop: RunHop, *, timeout: int,
             url_index = _last_url_index(base)
         current_url = urllib.parse.urljoin(current_url, location)
     return "".join(prefix), "\n".join(errors), 1  # pragma: no cover - the loop always returns
+
+
+# --- browser contexts ------------------------------------------------------------------------
+#
+# Playwright's ``extra_http_headers`` add the headers to every request a page makes, other
+# origins and redirect hops included, and a route that continues a request with extra headers
+# carries them into its redirects too (redirect hops never reach a route handler). A context
+# that carries session headers therefore fetches each request to the target's origin itself
+# (``route.fetch`` with the context's cookies, proxy and TLS settings, redirects not followed),
+# with the headers added, and hands the response to the page:
+#
+# - a non-redirect response is the response;
+# - a redirect of a fetch, script or other subresource is followed here while it stays on the
+#   origin, with the headers; a redirect elsewhere is returned for the browser to follow, and a
+#   hop the browser follows carries no session header;
+# - a redirect of a navigation is returned for the browser to follow (the page's URL must be
+#   the URL that answered). Its next hop has the context's cookies but not the session header.
+#
+# Requests to any other origin are passed on untouched. Cookies keep their own domain scoping.
+
+_BROWSER_DROPPED_ON_REWRITE = frozenset({"content-type", "content-length"})
+
+
+async def _browser_fetch(route: Any, request: Any, headers: dict[str, str], origin: tuple[str, str, int] | None,
+                         origins: frozenset) -> Any:
+    response = await route.fetch(headers=headers, max_redirects=0)
+    if request.is_navigation_request():
+        return response
+    url, method = request.url, request.method.upper()
+    for _hop in range(DEFAULT_MAX_REDIRECTS):
+        location = response.headers.get("location")
+        if response.status not in REDIRECT_STATUSES or not location:
+            return response
+        next_url = urllib.parse.urljoin(url, location.strip())
+        if origin_key(next_url) not in origins:
+            return response
+        next_method = redirect_method(method, response.status)
+        options: dict[str, Any] = {"url": next_url, "method": next_method, "max_redirects": 0}
+        if next_method != method:
+            headers = {k: v for k, v in headers.items() if k.lower() not in _BROWSER_DROPPED_ON_REWRITE}
+            options["post_data"] = b""
+        await response.dispose()
+        response = await route.fetch(headers=headers, **options)
+        url, method = next_url, next_method
+    return response
+
+
+async def bind_session_headers(context: Any, origin_urls: Any, headers: Any) -> None:
+    """Send ``headers`` (a mapping, or a callable returning the current one) with a context's
+    requests to the origins of ``origin_urls`` only (see above). Register it before any other
+    route of the context: those hand a request on with ``route.fallback()``."""
+    origins = frozenset(key for key in (origin_key(url) for url in origin_urls) if key is not None)
+
+    async def handler(route: Any, request: Any) -> None:
+        current = headers() if callable(headers) else headers
+        origin = origin_key(request.url)
+        if not current or origin is None or origin not in origins:
+            await route.fallback()
+            return
+        merged = dict(await request.all_headers())
+        lowered = {str(name).lower() for name in current}
+        merged = {name: value for name, value in merged.items() if name.lower() not in lowered}
+        merged.update({str(name): str(value) for name, value in dict(current).items()})
+        try:
+            response = await _browser_fetch(route, request, merged, origin, origins)
+        except Exception:  # the request failed as it would have in the browser
+            await route.abort("failed")
+            return
+        await route.fulfill(response=response)
+
+    await context.route("**/*", handler)
