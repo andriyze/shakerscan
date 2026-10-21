@@ -26,6 +26,7 @@ from .posture_findings import (
     CORS_PROBE_ACTIONS, OPT_IN_HEADERS, cors_findings, dns_posture_findings, open_redirect_finding,
     redact_url_queries, weak_header_findings,
 )
+from .negative_control import indistinguishable_from_absent, is_negative_control_url
 from .redirect_evidence import REDIRECT_STATUSES, http_origin, redirect_destination
 from .severity_calibration import calibrate_findings
 from .sqli_stages import INCONCLUSIVE_RECORD_KIND, sqli_budget_outcomes
@@ -2527,6 +2528,25 @@ def _authz_comparison_work(
     )
 
 
+def _discovery_contributed(capability_name: str, rows: Sequence[Any]) -> bool:
+    """Whether a surface producer recorded a route the endpoint manifest takes in.
+
+    Mirrors surface_manifest: crawlers and spec ingestion contribute ``discovered_route``
+    records; content discovery contributes ``content_discovery`` records other than its negative
+    control and paths indistinguishable from one that cannot exist.
+    """
+    items = [item for item in rows or () if isinstance(item, Mapping)]
+    if capability_name == "web.content_discover":
+        absent = indistinguishable_from_absent(items)
+        return any(
+            item.get("kind") == "content_discovery"
+            and not is_negative_control_url(item.get("url"))
+            and str(item.get("url") or "") not in absent
+            for item in items
+        )
+    return any(item.get("kind") == "discovered_route" for item in items)
+
+
 def _proven_empty_manifest(action: Any, known: Mapping[str, Mapping[str, Any]]) -> bool:
     """Whether the manifest a slice indexes is known to have been produced complete and empty.
 
@@ -3242,11 +3262,14 @@ def finalize_scan_report(
             is CapabilityResultReason.PREREQUISITE_UNAVAILABLE
         )
     )
+    # A sibling covers for it only when it settled and contributed routes: spec ingestion that
+    # succeeded on a target publishing no spec, or a crawl that found nothing, produced none.
     surface_produced = any(
         action.capability_name in _SURFACE_DISCOVERY_CAPABILITIES
         and action_results[action.action_id].status in {
             CapabilityResultStatus.SUCCESS, CapabilityResultStatus.PARTIAL,
         }
+        and _discovery_contributed(action.capability_name, observations.get(action.action_id, ()))
         for action in coverage_actions
     )
     discovery_gap = bool(failed_discovery) and not surface_produced

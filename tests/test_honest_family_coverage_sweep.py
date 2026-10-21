@@ -497,24 +497,31 @@ def test_a_failed_discovery_cannot_launder_an_empty_slice_into_no_candidates():
 
 def _discovery_report(outcomes):
     """A Scan whose XSS verifier did its work beside optional discovery producers that settled
-    as ``outcomes`` says: (capability, status, reason)."""
+    as ``outcomes`` says: (capability, status, reason[, observations])."""
     from tests.test_scan_orchestrator import _action as plain_action
 
     passive, passive_result, passive_rows = _companion_that_worked("xss")
     actions, results = [passive], {passive.action_id: passive_result}
-    for index, (capability, status, reason) in enumerate(outcomes, start=1):
+    observations = {}
+    for index, (capability, status, reason, *rows) in enumerate(outcomes, start=1):
         producer = replace(
             plain_action(f"discover.{capability.split('.')[-1]}", index, capability_name=capability),
             required=False, action_digest=None,
         )
         actions.append(producer)
-        results[producer.action_id] = _result(producer, status=status, reason=reason)
+        rows = tuple(rows[0]) if rows else ()
+        results[producer.action_id] = (
+            _result_with_observation_count(producer, len(rows)) if rows
+            else _result(producer, status=status, reason=reason)
+        )
+        if rows:
+            observations[producer.action_id] = rows
     verifier = _planned_slice("verify.swept", "xss.verify_batch", len(actions))
     actions.append(verifier)
     results[verifier.action_id] = _result_with_observation_count(verifier, 3)
     report, _row = _finalize(
         tuple(actions), results,
-        {passive.action_id: passive_rows, verifier.action_id: _work_rows(verifier)},
+        {passive.action_id: passive_rows, verifier.action_id: _work_rows(verifier), **observations},
         "xss",
     )
     return report, [action.action_id for action in actions[1:-1]]
@@ -524,6 +531,12 @@ FAILED = (Status.FAILED, Reason.ADAPTER_FAILED)
 REFUSED = (Status.BLOCKED, Reason.POLICY_DISABLED)
 UNPLACED = (Status.SKIPPED, Reason.PREREQUISITE_UNAVAILABLE)
 WORKED = (Status.SUCCESS, None)
+# Producers that settled success and contributed routes to the endpoint manifest.
+ROUTES = ({"kind": "discovered_route", "method": "GET", "url": "https://app.example.test/a"},)
+FOUND = (Status.SUCCESS, None, ROUTES)
+CONTENT = (Status.SUCCESS, None, (
+    {"kind": "content_discovery", "url": "https://app.example.test/admin", "status": 200},
+))
 
 
 @pytest.mark.parametrize("outcomes", [
@@ -531,22 +544,33 @@ WORKED = (Status.SUCCESS, None)
     (("web.crawl", *FAILED), ("web.browser_crawl", *REFUSED)),
     (("web.spec_ingest", *UNPLACED),),
     (("web.crawl", *FAILED), ("web.content_discover", *UNPLACED)),
-], ids=["only_crawl_failed", "every_crawl_failed", "only_spec_skipped", "failed_and_skipped"])
+    # A target that publishes no spec: spec ingestion succeeded and declared no route.
+    (("web.crawl", *FAILED), ("web.spec_ingest", *WORKED)),
+    # A crawl that succeeded and found nothing produced no surface either.
+    (("web.browser_crawl", *FAILED), ("web.crawl", *WORKED)),
+], ids=["only_crawl_failed", "every_crawl_failed", "only_spec_skipped", "failed_and_skipped",
+        "crawl_failed_spec_empty", "browser_failed_crawl_empty"])
 def test_discovery_with_no_producer_that_worked_leaves_the_scan_partial(outcomes):
     report, producers = _discovery_report(outcomes)
+    failed = sorted(action for action, outcome in zip(producers, outcomes)
+                    if outcome[1] is not Status.SUCCESS)
     assert report["coverage"]["status"] == "partial"
     assert "discovery_failed" in report["coverage"]["reasons"]
-    assert report["coverage"]["failed_discovery_actions"] == sorted(producers)
+    assert report["coverage"]["failed_discovery_actions"] == failed
     assert "discovery_failed" in report["coverage"]["grade_reliability"]["reasons"]
     assert report["result"]["grade_reliable"] is False
 
 
 @pytest.mark.parametrize("outcomes", [
     # No browser runtime: the planner promises the static crawl alone completes the Scan.
-    (("web.browser_crawl", *FAILED), ("web.crawl", *WORKED)),
-    (("web.browser_crawl", *REFUSED), ("web.crawl", *WORKED)),
-    (("web.spec_ingest", *UNPLACED), ("web.crawl", *WORKED)),
-], ids=["browser_crawl_failed", "browser_crawl_refused", "spec_ingest_skipped"])
+    (("web.browser_crawl", *FAILED), ("web.crawl", *FOUND)),
+    (("web.browser_crawl", *REFUSED), ("web.crawl", *FOUND)),
+    (("web.spec_ingest", *UNPLACED), ("web.crawl", *FOUND)),
+    # The crawl failed, but the published spec declared routes.
+    (("web.crawl", *FAILED), ("web.spec_ingest", *FOUND)),
+    (("web.crawl", *FAILED), ("web.content_discover", *CONTENT)),
+], ids=["browser_crawl_failed", "browser_crawl_refused", "spec_ingest_skipped",
+        "crawl_failed_spec_routes", "crawl_failed_content_found"])
 def test_a_failed_producer_beside_one_that_worked_is_stated_not_a_gap(outcomes):
     report, producers = _discovery_report(outcomes)
     failed = sorted(action for action, outcome in zip(producers, outcomes)
