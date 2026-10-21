@@ -220,18 +220,39 @@ def test_custom_key_rotation_files_are_excluded_too(tmp_path):
         assert not any("custom.fernet" in name for name in archive.getnames())
 
 
-def _path_without_python(tmp_path: Path) -> str:
+SYSTEM_COMMAND_DIRECTORIES = (Path("/usr/bin"), Path("/bin"), Path("/usr/sbin"), Path("/sbin"))
+
+
+def _path_without_python(tmp_path: Path, directories=SYSTEM_COMMAND_DIRECTORIES) -> str:
     """A PATH holding every system command except Python, like a minimal host."""
     bin_dir = tmp_path / "no-python-bin"
     bin_dir.mkdir()
-    for directory in (Path("/usr/bin"), Path("/bin"), Path("/usr/sbin"), Path("/sbin")):
+    for directory in directories:
         if not directory.is_dir():
             continue
         for tool in directory.iterdir():
-            if tool.name.startswith("python") or (bin_dir / tool.name).exists():
+            link = bin_dir / tool.name
+            # is_symlink, not exists: exists() follows the link, so a dangling system entry seen
+            # again through /bin -> /usr/bin looked absent and symlink_to raised FileExistsError.
+            if tool.name.startswith("python") or link.is_symlink():
                 continue
-            (bin_dir / tool.name).symlink_to(tool)
+            link.symlink_to(tool)
     return str(bin_dir)
+
+
+def test_the_python_free_path_survives_dangling_and_repeated_system_entries(tmp_path):
+    """/bin is /usr/bin on merged-/usr hosts, so every name is seen twice; a dangling package
+    symlink (Ubuntu's grub-ntldr-img) then made Path.exists() miss the link already made."""
+    usr_bin, sbin = tmp_path / "usr-bin", tmp_path / "sbin"
+    usr_bin.mkdir()
+    sbin.mkdir()
+    for directory in (usr_bin, sbin):
+        (directory / "tar").write_text("#!/bin/sh\n")
+        (directory / "dangling-tool").symlink_to(tmp_path / "removed-by-a-package")
+        (directory / "python3").write_text("#!/bin/sh\n")
+    path = Path(_path_without_python(tmp_path, directories=(usr_bin, usr_bin, sbin)))
+    assert sorted(entry.name for entry in path.iterdir()) == ["dangling-tool", "tar"]
+    assert (path / "tar").resolve() == (usr_bin / "tar").resolve()
 
 
 @pytest.mark.parametrize("spelling", ["results/.credential_enc.key", "/results/.credential_enc.key"])
