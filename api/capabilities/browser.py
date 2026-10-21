@@ -8,6 +8,7 @@ except ModuleNotFoundError:  # package import layout
     from api.capabilities.secret_material import keyed_body_digest
 import asyncio
 import contextlib
+import dataclasses
 from dataclasses import dataclass, field
 import json
 import hashlib
@@ -50,6 +51,10 @@ try:
     from scanner_tools.url_redaction import redact_client_route, redact_url
 except ModuleNotFoundError:  # package imports in host-side tests
     from scanner.scanner_tools.url_redaction import redact_client_route, redact_url
+try:
+    from scanner_tools import credential_redirects as _credential_redirects
+except ModuleNotFoundError:  # package imports in host-side tests
+    from scanner.scanner_tools import credential_redirects as _credential_redirects
 
 
 SAFE_BROWSER_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
@@ -777,6 +782,29 @@ async def _execute_browser_action(
     cancelled: Cancelled,
     trusted_headers: Mapping[str, str] | None = None,
 ) -> CapabilityAdapterResult:
+    """Run one browser action. Trusted headers go to the bound origin only, and the result says
+    what they could not reach (``browser_session_header_coverage``)."""
+    events = _credential_redirects.SessionHeaderEvents()
+    result = await _execute_browser_action_in_context(
+        prepared, heartbeat=heartbeat, cancelled=cancelled, trusted_headers=trusted_headers,
+        session_header_events=events,
+    )
+    if not events.reasons():
+        return result
+    coverage = {"kind": "browser_session_header_coverage", **events.as_dict()}
+    return dataclasses.replace(
+        result, observations=(coverage, *result.observations)[:MAX_BROWSER_RESPONSE_OBSERVATIONS],
+    )
+
+
+async def _execute_browser_action_in_context(
+    prepared: PreparedBrowserAction,
+    *,
+    heartbeat: Heartbeat,
+    cancelled: Cancelled,
+    trusted_headers: Mapping[str, str] | None = None,
+    session_header_events: Any = None,
+) -> CapabilityAdapterResult:
     started = time.monotonic()
     request_count = 0
     proof_body_requests = 0
@@ -871,6 +899,18 @@ async def _execute_browser_action(
                      "httpOnly": True, "secure": prepared.origin.startswith("https:")}
                     for key, cookie in cookies.items()
                 ])
+        header_origins = _credential_redirects.bound_origins([prepared.origin])
+        if trusted_headers and session_header_events is not None:
+            context.on("console", session_header_events.observe_console)
+
+        def allow_redirect_hop() -> bool:
+            # A redirect followed for a subresource is one more request of this action.
+            nonlocal request_count
+            if request_count >= prepared.max_requests:
+                return False
+            request_count += 1
+            return True
+
         await context.add_init_script(
             "window.WebSocket = class { constructor() { throw new Error('blocked'); } };"
             "window.EventSource = class { constructor() { throw new Error('blocked'); } };"
@@ -909,11 +949,18 @@ async def _execute_browser_action(
                             if name.lower() != "cookie"
                         }}
                         headers["content-type"] = str(prepared.content_type)
-                        await route.continue_(
-                            method=prepared.method,
-                            post_data=prepared.body,
-                            headers=headers,
-                        )
+                        if trusted_headers:
+                            # Fetched here, so a redirect never carries the trusted headers.
+                            await _credential_redirects.fulfill_with_session_headers(
+                                route, request, headers, header_origins, session_header_events,
+                                on_hop=allow_redirect_hop, method=prepared.method, post_data=prepared.body,
+                            )
+                        else:
+                            await route.continue_(
+                                method=prepared.method,
+                                post_data=prepared.body,
+                                headers=headers,
+                            )
                         return
                 elif request.method.upper() not in SAFE_BROWSER_METHODS:
                     if not isinstance(prepared, PreparedBrowserInteraction) or not prepared.max_state_changing_requests:
@@ -944,7 +991,12 @@ async def _execute_browser_action(
                     name.lower(): value for name, value in trusted_headers.items()
                     if name.lower() != "cookie"
                 }}
-                await route.continue_(headers=headers)
+                # Continuing with the headers would carry them into every redirect hop, which
+                # the pinned proxy admits to the target's address written as another origin.
+                await _credential_redirects.fulfill_with_session_headers(
+                    route, request, headers, header_origins, session_header_events,
+                    on_hop=allow_redirect_hop,
+                )
             else:
                 await route.continue_()
 

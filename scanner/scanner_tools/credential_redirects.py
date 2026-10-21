@@ -20,7 +20,7 @@ import contextlib
 import re
 import time
 import urllib.parse
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from typing import Any
 
 REDIRECT_STATUSES = frozenset({301, 302, 303, 307, 308})
@@ -524,31 +524,53 @@ def add_session_header_reasons(coverage: dict[str, Any], recorded: Any) -> None:
 
 
 async def _browser_fetch(route: Any, request: Any, headers: dict[str, str], origin: tuple[str, str, int] | None,
-                         origins: frozenset, events: SessionHeaderEvents) -> Any:
-    response = await route.fetch(headers=headers, max_redirects=0)
+                         origins: frozenset, events: SessionHeaderEvents, *,
+                         overrides: dict[str, Any] | None = None, on_hop: Callable[[], bool] | None = None) -> Any:
+    overrides = dict(overrides or {})
+    response = await route.fetch(headers=headers, max_redirects=0, **overrides)
     if request.is_navigation_request():
         location = response.headers.get("location")
         if 300 <= response.status < 400 and location:
             if origin_key(urllib.parse.urljoin(request.url, location.strip())) in origins:
                 events.record(SESSION_HEADER_DROPPED_ON_NAVIGATION_REDIRECT)
         return response
-    url, method = request.url, request.method.upper()
+    url, method = request.url, str(overrides.get("method") or request.method).upper()
     for _hop in range(DEFAULT_MAX_REDIRECTS):
         location = response.headers.get("location")
         if response.status not in REDIRECT_STATUSES or not location:
             return response
         next_url = urllib.parse.urljoin(url, location.strip())
-        if origin_key(next_url) not in origins:
+        if origin_key(next_url) not in origins or (on_hop is not None and not on_hop()):
             return response
         next_method = redirect_method(method, response.status)
         options: dict[str, Any] = {"url": next_url, "method": next_method, "max_redirects": 0}
         if next_method != method:
             headers = {k: v for k, v in headers.items() if k.lower() not in _BROWSER_DROPPED_ON_REWRITE}
             options["post_data"] = b""
+        elif "post_data" in overrides:
+            options["post_data"] = overrides["post_data"]
         await response.dispose()
         response = await route.fetch(headers=headers, **options)
         url, method = next_url, next_method
     return response
+
+
+async def fulfill_with_session_headers(route: Any, request: Any, headers: Mapping[str, str], origins: Any,
+                                       events: SessionHeaderEvents, *, on_hop: Callable[[], bool] | None = None,
+                                       **overrides: Any) -> None:
+    """Answer a routed request to the bound origin with session ``headers`` (see above):
+    fetched without following redirects, redirects within ``origins`` followed here for a
+    subresource (``on_hop`` may refuse another hop), and the response handed to the page.
+    ``overrides`` (method, post_data) apply to the first request only."""
+    try:
+        response = await _browser_fetch(
+            route, request, dict(headers), origin_key(request.url), frozenset(origins), events,
+            overrides=overrides, on_hop=on_hop,
+        )
+    except Exception:  # the request failed as it would have in the browser
+        await route.abort("failed")
+        return
+    await route.fulfill(response=response)
 
 
 def bound_origins(origin_urls: Any) -> set[tuple[str, str, int]]:
@@ -584,12 +606,7 @@ async def bind_session_headers(context: Any, origin_urls: Any, headers: Any) -> 
         lowered = {str(name).lower() for name in current}
         merged = {name: value for name, value in merged.items() if name.lower() not in lowered}
         merged.update({str(name): str(value) for name, value in dict(current).items()})
-        try:
-            response = await _browser_fetch(route, request, merged, origin, origins, events)
-        except Exception:  # the request failed as it would have in the browser
-            await route.abort("failed")
-            return
-        await route.fulfill(response=response)
+        await fulfill_with_session_headers(route, request, merged, origins, events)
 
     await context.route("**/*", handler)
     return events

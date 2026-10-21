@@ -56,6 +56,8 @@ def _install_fake_browser(monkeypatch, *, requires_auth: bool):
         def __init__(self, method, url):
             self.method, self.url, self.headers = method, url, {"user-agent": "x"}
 
+        def is_navigation_request(self): return True
+
     class FakeRoute:
         def __init__(self, request, page): self.request, self.page = request, page
         async def abort(self, _reason): return None
@@ -65,6 +67,14 @@ def _install_fake_browser(monkeypatch, *, requires_auth: bool):
             seen["headers"].append(headers)
             seen["requests"].append(kwargs)
             self.page.authenticated = headers.get("authorization") == SECRET
+
+        # A request carrying the session is fetched by the route (redirects not followed)
+        # and fulfilled, so no redirect hop carries the session headers.
+        async def fetch(self, **kwargs):
+            await self.continue_(**{key: value for key, value in kwargs.items() if key != "max_redirects"})
+            return types.SimpleNamespace(status=200, headers={})
+
+        async def fulfill(self, **_kwargs): return None
 
     class FakeResponse:
         def __init__(self, method, url, status):
