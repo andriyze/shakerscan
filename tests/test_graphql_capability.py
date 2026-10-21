@@ -30,6 +30,11 @@ from tests.toplevel_scan_fixtures import (
 )
 
 
+# The exposure probe's attempt beside its proof: the family did its work.
+EXPOSURE_ATTEMPT = {"kind": "candidate_attempt", "attempt_id": "e" * 64,
+                    "candidate_id": "exposure-1", "status": "success"}
+
+
 def _action(action_id, ordinal, *, capability_name=None, dependencies=()):
     capability = "scan.finalize" if action_id == "finalize.report" else capability_name
     return _adapter_action(action_id, capability, ordinal, dependencies=dependencies)
@@ -124,7 +129,11 @@ def test_a_graphql_proof_from_another_capability_is_not_promoted():
     plan = _plan(other, final)
     report = finalize_scan_report(
         plan=plan, target_url="https://app.example.test",
-        action_results={other.action_id: _result_with_observation_count(other, 1)},
-        observations={other.action_id: (_proof("alias_limit_absent"),)},
+        action_results={other.action_id: _result_with_observation_count(other, 2)},
+        observations={other.action_id: (EXPOSURE_ATTEMPT, _proof("alias_limit_absent"))},
     )
     assert report["findings"] == []
+    # The exposure probe did its work; the foreign proof only fails to become a finding.
+    [exposure] = [row for row in report["coverage"]["family_coverage"]
+                  if row["family"] == "sensitive_exposure"]
+    assert exposure["coverage_status"] == "complete"

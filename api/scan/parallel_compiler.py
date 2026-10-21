@@ -1888,6 +1888,10 @@ def merge_parallel_action_executions(
                 "unattempted_candidates", "verified_findings", "suspected_findings",
             ):
                 aggregate[key] += max(0, int(raw.get(key) or 0))
+            for name, check in raw.items():
+                # A best-effort check's own row (finalizer._AUXILIARY_CHECKS), merged per shard.
+                if name in _AUXILIARY_CHECK_ROWS and isinstance(check, Mapping):
+                    aggregate.setdefault("_auxiliary", {}).setdefault(name, []).append(check)
             windows = raw.get("template_windows")
             if isinstance(windows, Mapping) and all(
                 isinstance(windows.get(name), int) and not isinstance(windows.get(name), bool)
@@ -2013,6 +2017,38 @@ def merge_parallel_action_executions(
 _MIN_INJECTABLE_ENDPOINTS_PER_SHARD = 8
 
 
+_AUXILIARY_CHECK_ROWS = frozenset({"open_redirect"})
+_AUXILIARY_STATUS_ORDER = ("not_applicable", "complete", "partial")
+
+
+def merge_auxiliary_check_rows(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    """One auxiliary check's row across shards: summed counts, the least complete status.
+
+    A shard that had nothing for the check (not_applicable) says nothing about the others; any
+    shard that left work undone leaves the merged check partial with its reason.
+    """
+    statuses = [str(row.get("status") or "partial") for row in rows]
+    status = max(
+        statuses,
+        key=lambda value: _AUXILIARY_STATUS_ORDER.index(value)
+        if value in _AUXILIARY_STATUS_ORDER else len(_AUXILIARY_STATUS_ORDER),
+    )
+    if status not in _AUXILIARY_STATUS_ORDER:
+        status = "partial"
+    reason = next(
+        (row.get("reason") for row, value in zip(rows, statuses)
+         if value == status and row.get("reason")),
+        None,
+    )
+    return {
+        "actions": sum(int(row.get("actions") or 0) for row in rows),
+        "planned_candidates": sum(int(row.get("planned_candidates") or 0) for row in rows),
+        "attempted_candidates": sum(int(row.get("attempted_candidates") or 0) for row in rows),
+        "status": status,
+        "reason": reason if status != "complete" else None,
+    }
+
+
 def _reconciled_family_coverage(aggregate: Mapping[str, Any]) -> dict[str, Any]:
     """Make a merged family's reason agree with the counters merged beside it.
 
@@ -2041,8 +2077,11 @@ def _reconciled_family_coverage(aggregate: Mapping[str, Any]) -> dict[str, Any]:
             # Pairs more than one shard ran: run counts each once.
             **({"repeated_pairs": repeated} if repeated else {}),
         }
+    for name, checks in (row.pop("_auxiliary", None) or {}).items():
+        row[name] = merge_auxiliary_check_rows(checks)
     if (
-        str(row.get("reason") or "") == "zero_attempts"
+        # zero_work is the same claim for a family that planned no counted candidate.
+        str(row.get("reason") or "") in {"zero_attempts", "zero_work"}
         and int(row.get("attempted_candidates") or 0) > 0
     ):
         row["reason"] = "child_family_incomplete"

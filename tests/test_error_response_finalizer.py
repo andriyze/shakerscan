@@ -8,6 +8,7 @@ from api.scan.action_adapter import _exposure_observation
 from api.scan.action_plan import ScanActionPlan
 from api.scan.finalizer import finalize_scan_report
 from tests.test_scan_finalizer import _result_with_observation_count
+from tests.test_exposure_verified_checks import EXPOSURE_ATTEMPT
 from tests.test_scan_orchestrator import SCAN_ID, _action
 
 
@@ -26,8 +27,9 @@ def report_for(item):
     plan = ScanActionPlan(scan_id=SCAN_ID, execution_plan_digest='b' * 64,
                          target_binding_digest='a' * 64, actions=(action, final))
     return finalize_scan_report(plan=plan, target_url='https://app.example.test',
-        action_results={action.action_id: _result_with_observation_count(action, 1)},
-        observations={action.action_id: (item,)})
+        action_results={action.action_id: _result_with_observation_count(action, 2)},
+        # The probe's attempt beside its proof: the family did its work.
+        observations={action.action_id: (EXPOSURE_ATTEMPT, item)})
 
 
 def test_stack_disclosure_becomes_a_finding_with_its_observed_500_and_v2_contract():
@@ -47,4 +49,9 @@ def test_stack_disclosure_becomes_a_finding_with_its_observed_500_and_v2_contrac
     {'exposure_class': 'configuration_secret_file'},
 ])
 def test_a_stored_contract_name_cannot_override_class_signature_or_status(changes):
-    assert report_for({**observation(), **changes})['findings'] == []
+    report = report_for({**observation(), **changes})
+    assert report['findings'] == []
+    # Refusing the finding does not change what the probe examined.
+    [exposure] = [row for row in report['coverage']['family_coverage']
+                  if row['family'] == 'sensitive_exposure']
+    assert exposure['coverage_status'] == 'complete'

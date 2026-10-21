@@ -86,6 +86,9 @@ def test_target_bound_authz_capability_emits_content_free_verified_proof(
     assert observation["object_absent_from_secondary_listing"] is True
     assert observation["responses_equivalent"] is True
     assert observation["secret_values_visible"] is False
+    # The routes the replay could use as producers, so coverage can tell "nothing to examine"
+    # from "examined nothing".
+    assert observation["producer_candidate_count"] == 1
     serialized = json.dumps(result)
     assert "owner-private" not in serialized
     assert "attacker-private" not in serialized
@@ -157,3 +160,23 @@ def test_authz_capability_fails_closed_on_runtime_scope_rejection(monkeypatch):
             primary_headers={"Authorization": "Bearer owner-private"},
             secondary_headers={"Authorization": "Bearer attacker-private"},
         ))
+
+
+def test_routes_that_are_all_low_value_producers_are_counted_as_no_producer_candidates(
+    monkeypatch,
+):
+    async def unexpected_request(*_args, **_kwargs):
+        raise AssertionError("no producer should have been requested")
+
+    monkeypatch.setattr(authz, "execute_bound_http_request", unexpected_request)
+    result = asyncio.run(authz.verify_target_bound_object_authorization(
+        "https://app.example.test",
+        ["/login", "/health", "/docs"],
+        target=TARGET,
+        primary_headers={"Authorization": "Bearer owner-private"},
+        secondary_headers={"Authorization": "Bearer attacker-private"},
+    ))
+    observation = result["observation"]
+    assert observation["route_count"] == 3
+    assert observation["producer_candidate_count"] == 0
+    assert observation["producers_tested"] == 0
