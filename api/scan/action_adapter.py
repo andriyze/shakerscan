@@ -5155,11 +5155,21 @@ class DatabaseNeutralScanActionDispatcher:
             for item in (entry if isinstance(entry, list) else (entry,))
         ]
         if windowed and allowlist:
+            shard = self.options.get("canonical_shard_authority")
+            # A parallel shard maps its own positions to (base, window) pairs, as a direct Scan
+            # does, but nothing it holds says which pairs its siblings run: assigning them would
+            # need the parent's split in the shard authority, which binds the child's plan. Its
+            # sweep may repeat a sibling's windows at the same base, and its record says so.
+            shared = bool(
+                isinstance(shard, Mapping) and not shard.get("parallel_discovery")
+                and isinstance(shard.get("shard_count"), int) and int(shard["shard_count"]) >= 2
+            )
             observations.append({
                 "kind": ACTIVE_TEMPLATE_WINDOWS_RECORD_KIND,
                 "family": family,
                 "windows_run": sorted(windows_run),
                 "window_count": active_template_window_count(allowlist),
+                **({"repeated_across_shards": True} if shared else {}),
             })
         for candidate_id, held in deferred_errors.items():
             if candidate_id not in recovered:

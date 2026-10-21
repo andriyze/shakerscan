@@ -2624,6 +2624,7 @@ def finalize_scan_report(
     # The active-template windows the Scan's sweeps finished, per allowlist size: a slice
     # without a mutation hold runs the smaller GET-only allowlist, whose windows are others.
     template_windows_run: dict[int, set[int]] = {}
+    template_windows_shared = False
     for action in expected_actions:
         family = _FAMILY_BY_CAPABILITY.get(action.capability_name)
         if family is None:
@@ -2634,6 +2635,7 @@ def finalize_scan_report(
                 if not isinstance(item, Mapping) or item.get("kind") != ACTIVE_TEMPLATE_WINDOWS_RECORD_KIND:
                     continue
                 count = item.get("window_count")
+                template_windows_shared |= item.get("repeated_across_shards") is True
                 if isinstance(count, int) and not isinstance(count, bool) and count > 0:
                     template_windows_run.setdefault(count, set()).update(
                         int(index) for index in item.get("windows_run") or ()
@@ -2755,6 +2757,8 @@ def finalize_scan_report(
         total = max(template_windows_run)
         family_coverage["nuclei_active"]["template_windows"] = {
             "run": len(template_windows_run[total]), "total": total,
+            # A parallel shard's sweep may repeat its siblings' windows at the same base.
+            **({"repeated_across_shards": True} if template_windows_shared else {}),
         }
     selected_family_gaps: list[str] = []
     for family, row in family_coverage.items():

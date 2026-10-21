@@ -239,7 +239,7 @@ def _report_slice(action_id, ordinal, *, start, count, windows, required):
     )
 
 
-def _report(slices, *, windows):
+def _report(slices, *, windows, shared=False):
 
     actions = [
         _report_slice(f"active.templates.r{number:02d}", index, start=start, count=count,
@@ -262,7 +262,8 @@ def _report(slices, *, windows):
                 "candidate_id": f"endpoint-{position % 2}",
             } for position in range(start, start + count)),
             {"kind": "active_template_windows", "family": "nuclei_active",
-             "windows_run": list(range(start, start + count)), "window_count": 39},
+             "windows_run": list(range(start, start + count)), "window_count": 39,
+             **({"repeated_across_shards": True} if shared else {})},
         )
     results = {
         action.action_id: _result_with_observation_count(action, len(observations[action.action_id]))
@@ -290,6 +291,12 @@ def test_a_thorough_host_that_ran_every_window_is_complete():
     assert family["coverage_status"] == "complete"
     assert family["template_windows"] == {"run": 39, "total": 39}
     assert family["manifest_candidates"] == 39 and family["unscheduled_candidates"] == 0
+
+
+def test_a_shards_report_says_its_windows_may_repeat_a_siblings():
+    _report_body, family = _report([(1, 0, 2)], windows=False, shared=True)
+    assert family["coverage_status"] == "complete"
+    assert family["template_windows"] == {"run": 2, "total": 39, "repeated_across_shards": True}
 
 
 def test_a_balanced_host_keeps_its_status_and_now_says_how_much_of_the_allowlist_ran():
@@ -422,7 +429,9 @@ def test_a_sharded_scan_reports_how_much_of_the_allowlist_its_shards_ran():
         parent_work_assignment=_parent_assignment(assignments),
     )
     reports = {scan_id: _canonical_child_report(plan) for scan_id, plan in plans.items()}
-    for scan_id, windows in zip(sorted(plans)[1:], ({"run": 3, "total": 39}, {"run": 2, "total": 39})):
+    for scan_id, windows in zip(sorted(plans)[1:], (
+        {"run": 3, "total": 39}, {"run": 2, "total": 39, "repeated_across_shards": True},
+    )):
         reports[scan_id]["coverage"] = {"family_coverage": [{
             "family": "nuclei_active", "selected": True, "required": True,
             "coverage_status": "complete", "batch_actions": 1, "planned_candidates": windows["run"],
@@ -432,7 +441,7 @@ def test_a_sharded_scan_reports_how_much_of_the_allowlist_its_shards_ran():
         record, child_results=reports, child_statuses=dict.fromkeys(plans, "completed"),
     )
     family, = merged["family_coverage"]
-    assert family["template_windows"] == {"run": 3, "total": 39}
+    assert family["template_windows"] == {"run": 3, "total": 39, "repeated_across_shards": True}
     assert summarize_parallel_action_coverage(merged)["family_coverage"][0]["template_windows"] == {
-        "run": 3, "total": 39,
+        "run": 3, "total": 39, "repeated_across_shards": True,
     }

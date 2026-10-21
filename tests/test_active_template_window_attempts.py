@@ -155,7 +155,7 @@ class _Host:
             dependencies=(), required=False, supporting=False, output_schema=spec.output_schema,
         )
 
-    def run(self, monkeypatch, bundle_dir, action, *, policy=AUTHORIZED, statuses=None):
+    def run(self, monkeypatch, bundle_dir, action, *, policy=AUTHORIZED, statuses=None, options=None):
         plan = ScanActionPlan(
             scan_id=self.scan_id, execution_plan_digest="a" * 64,
             target_binding_digest=self.target.digest, actions=(action,),
@@ -185,7 +185,7 @@ class _Host:
             return None
 
         dispatcher = DatabaseNeutralScanActionDispatcher(
-            target_url=self.target_url, options={}, target=self.target, policy=policy,
+            target_url=self.target_url, options=dict(options or {}), target=self.target, policy=policy,
             scan_id=plan.scan_id, job_id="job-1", worker_id="broker:worker-1", plan=plan,
             backend=self.backend, process_runner=process_runner, cancelled=lambda: False,
         )
@@ -526,3 +526,36 @@ def test_a_scheme_inferred_scan_sweeps_only_the_origin_it_runs_at(monkeypatch, b
     )
     assert {call["url"] for call in host.calls} == {"https://app.example.test/"}
     assert receipt.redacted_execution["inapplicable_count"] == 11
+
+
+def _shard(index, count=2):
+    return {"canonical_shard_authority": {
+        "shard_index": index, "shard_count": count, "shard_label": f"work:anonymous[{index}]",
+        "parallel_discovery": False,
+    }}
+
+
+def test_two_shard_children_say_their_sweeps_may_repeat_each_others_windows(monkeypatch, bundle):
+    """A parallel shard maps its own positions to (base, window) pairs; nothing it holds says
+    which pairs its siblings run (assigning them would change the shard authority that binds the
+    child's plan). Both children run the leading windows at the same base, and both say so."""
+    children = [_Host(("/a", "/b", "/c")), _Host(("/d", "/e"))]
+    receipts = [
+        child.run(
+            monkeypatch, bundle, child.action("active.templates.r01", start=0, count=len(child.endpoints.entries), windows=False),
+            options=_shard(index),
+        )
+        for index, child in enumerate(children)
+    ]
+    pairs = [(call["url"], call["template_ids"]) for child in children for call in child.calls]
+    assert len(pairs) - len(set(pairs)) == 2  # windows 0 and 1, at the same base, twice
+    assert all(_windows_record(receipt)["repeated_across_shards"] is True for receipt in receipts)
+    direct = _Host(("/a", "/b"))
+    plain = direct.run(monkeypatch, bundle, direct.action("active.templates.r01", start=0, count=2, windows=False))
+    assert "repeated_across_shards" not in _windows_record(plain)
+    discovery = _Host(("/a",))
+    found = discovery.run(
+        monkeypatch, bundle, discovery.action("active.templates.r01", start=0, count=1, windows=False),
+        options={"canonical_shard_authority": {"shard_index": -1, "shard_count": 0, "parallel_discovery": True}},
+    )
+    assert "repeated_across_shards" not in _windows_record(found)

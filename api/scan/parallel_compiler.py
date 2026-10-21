@@ -1899,12 +1899,18 @@ def merge_parallel_action_executions(
                 # largest allowlist), never fewer. Only counts reach the merge, so it reports
                 # that shard's.
                 merged = aggregate.get("template_windows")
+                shared = windows.get("repeated_across_shards") is True or bool(
+                    merged and merged.get("repeated_across_shards")
+                )
                 if merged is None or (windows["total"], windows["run"]) > (
                     merged["total"], merged["run"],
                 ):
                     aggregate["template_windows"] = {
                         "run": int(windows["run"]), "total": int(windows["total"]),
                     }
+                if shared:
+                    # The shards' sweeps may have repeated windows at the same base.
+                    aggregate["template_windows"]["repeated_across_shards"] = True
             if int(raw.get("batch_actions") or 0) == 0 and raw.get("reason") in {
                 "not_planned", "no_candidates",
             }:
