@@ -246,6 +246,14 @@ def is_captured_secret_query(name: str, value: str) -> bool:
     )
 
 
+def captured_secret_query_name(name: str, bare: bool) -> bool:
+    """A query name a display masks: token-like, or a bare parameter (``?<name>``, its own
+    value) that ``is_captured_secret_query`` treats as a credential."""
+    return token_like_segment(urllib.parse.unquote(str(name or ""))) or (
+        bare and is_captured_secret_query(name, "")
+    )
+
+
 # What a capture's replay withholds from a recorded path.
 #
 # ``url_redaction.redact_path`` is the display mask of every request list, receipt and endpoint
@@ -437,7 +445,7 @@ def redact_captured_url(url: str, recorded: frozenset[str] = frozenset()) -> str
     replay treats as a credential. A URL whose path carries no credential is shown exactly as
     ``redact_url`` shows it."""
     text = str(url or "").strip()
-    shown = redact_url(text, max_length=1 << 20)
+    shown = redact_url(text, max_length=1 << 20, secret_query_name=captured_secret_query_name)
     found = _withheld_path_segments(text, recorded)
     if found:
         parts = urllib.parse.urlsplit(shown)

@@ -13,6 +13,7 @@ import urllib.parse
 from typing import Any
 
 from . import request_replay as _request_replay
+from .device_request_formats import captured_secret_query_name
 from .url_redaction import redact_url
 
 
@@ -64,7 +65,7 @@ def _redacted_url(value: str) -> str:
     # The shared evidence redactor first (credential labels, ``;matrix`` parameters, token-like
     # segments, userinfo, query values), so a plan or receipt never shows a path segment the
     # collection index masks; then this module's own path pass over what remains.
-    parsed = urllib.parse.urlsplit(redact_url(value))
+    parsed = urllib.parse.urlsplit(redact_url(value, secret_query_name=captured_secret_query_name))
     return urllib.parse.urlunsplit((
         parsed.scheme,
         parsed.netloc,
