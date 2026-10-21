@@ -98,3 +98,25 @@ def test_mcp_adapter_error_names_ssl_cert_file_for_an_untrusted_certificate(monk
     with pytest.raises(mcp.MCPError) as caught:
         client.request_json("GET", "/health")
     assert "SSL_CERT_FILE" in str(caught.value.data)
+
+
+def test_doctor_prints_the_certificate_hint_once_per_line(monkeypatch, capsys):
+    """E1-N1: the MCP adapter already appends the hint to its reason; doctor must not add it again."""
+    for name in (cli.ENV_URL, cli.ENV_TOKEN, cli.ENV_TOKEN_FILE):
+        monkeypatch.delenv(name, raising=False)
+    mcp = load("_mcp")
+    monkeypatch.setattr(mcp.urllib.request, "urlopen", lambda *a, **k: _Refusing().open(None))
+    monkeypatch.setattr(mcp.urllib.request, "build_opener", lambda *a, **k: _Refusing())
+    assert cli.main(["doctor", "--url", "https://scanner.example.com"]) == 1
+    lines = [line for line in capsys.readouterr().out.splitlines() if "SSL_CERT_FILE" in line]
+    assert lines, "doctor names SSL_CERT_FILE"
+    for line in lines:
+        assert line.count("SSL_CERT_FILE") == 1, line
+        assert line.count("Hint:") == 1, line
+
+
+def test_certificate_hint_is_not_appended_twice():
+    import redirect_hint
+
+    once = redirect_hint.with_certificate_hint(f"unavailable: {UNTRUSTED}", UNTRUSTED)
+    assert redirect_hint.with_certificate_hint(f"api: {once}", once).count("Hint:") == 1
