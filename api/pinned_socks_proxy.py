@@ -212,6 +212,14 @@ class PinnedSocksProxy:
         self.methods_observed: dict[str, int] = {}
         self.refused_destinations: dict[str, int] = {}
         self.refused_destinations_other = 0
+        # A hostname target is reached by its hostname only; its address written as the host
+        # is another origin (see _destination_allowed).
+        self.address_literal_destinations_refused = 0
+        try:
+            ipaddress.ip_address(self.hostname.strip("[]"))
+            self._address_target = True
+        except ValueError:
+            self._address_target = False
         self.limit_exceeded = asyncio.Event()
         # A shared request gate (scan.sqli_concurrency.RequestRateGate): every connection to the
         # target waits for its start time, so the processes sharing one gate stay within its
@@ -295,7 +303,12 @@ class PinnedSocksProxy:
                 for key, count in sorted(self.refused_destinations.items())
             ],
             "refused_destinations_other": int(self.refused_destinations_other),
+            "address_literal_destinations_refused": int(self.address_literal_destinations_refused),
         }
+
+    def receipt(self) -> dict[str, Any]:
+        """The tunnel record (``tunnel_record``) of this proxy's own scheme."""
+        return self.tunnel_record(scheme="https" if self.port == 443 else "http")
 
     def _accept(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         self.connection_attempts += 1
@@ -341,7 +354,13 @@ class PinnedSocksProxy:
                 return
             destination = await asyncio.wait_for(self._read_destination(reader, atyp), timeout=3)
             requested_port = struct.unpack("!H", await reader.readexactly(2))[0]
-            allowed_hosts = {self.hostname, *self.pinned_addresses}
+            # Every scanner on this path addresses the proxy by hostname (remote DNS), so for a
+            # hostname target a request for its address can only be a redirect or a page
+            # reference to that address as another origin, which would carry the session
+            # headers browsers and tools add to every request: refused and counted.
+            allowed_hosts = {self.hostname, *self.pinned_addresses} if self._address_target else {self.hostname}
+            if destination not in allowed_hosts and destination in self.pinned_addresses:
+                self.address_literal_destinations_refused += 1
             if destination not in allowed_hosts or requested_port != self.port:
                 self._note_refused(destination, requested_port)
                 await self._reply(writer, 2)

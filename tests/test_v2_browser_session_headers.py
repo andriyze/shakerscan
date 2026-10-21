@@ -107,7 +107,8 @@ def _to_address(hits):
 def test_a_redirect_to_the_pinned_address_as_another_origin_carries_no_trusted_header():
     with _server() as (port, hits):
         _run(port, "/nav-cross")
-    assert _to_address(hits), hits  # the hop reached the server through the pin
+    # The hop to the address is refused at the pinned proxy (a hostname target is reached by
+    # its hostname only); whatever reaches the server under that name carries no header.
     assert [hit for hit in _to_address(hits) if hit[2]] == []
     assert (f"{HOST}:{port}", "/nav-cross", SECRET) in hits
 
