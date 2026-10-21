@@ -84,3 +84,21 @@ def test_error_messages_from_the_server_are_terminal_safe(monkeypatch, value):
     assert cli.main(["version"]) == 2
     assert _terminal_safe(stderr.getvalue()), repr(stderr.getvalue())
     assert stderr.getvalue().startswith("shakerscan: the instance said: ")
+
+
+@pytest.mark.parametrize("value", HOSTILE)
+def test_connect_shows_the_links_role_and_label_terminal_safe(monkeypatch, tmp_path, capsys, value):
+    import argparse
+
+    monkeypatch.setattr(cli, "fetch_connect_link", lambda _link, timeout: {
+        "url": "https://scanner.example", "token": "fixture-token", "role": f"admin{value}", "label": f"laptop{value}",
+    })
+    monkeypatch.setattr(cli, "verify_token", lambda *_a, **_k: None)
+    monkeypatch.setattr(cli, "save_profile", lambda _url, _token: tmp_path)
+    monkeypatch.setattr(cli, "cmd_doctor", lambda _args: 0)
+    args = argparse.Namespace(target="https://scanner.example/_enterprise/connect/abc", timeout=5, claude=False,
+                              no_token=False, token_stdin=False)
+    assert cli.cmd_connect(args) == 0
+    shown = capsys.readouterr().out
+    assert _terminal_safe(shown), repr(shown)
+    assert "admin" in shown and "laptop" in shown

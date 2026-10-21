@@ -479,7 +479,7 @@ def cmd_connect(args: argparse.Namespace) -> int:
     if CONNECT_PATH in target:
         claimed = fetch_connect_link(target, timeout=float(args.timeout or 20.0))
         url, token = claimed["url"], claimed["token"]
-        who = f" ({claimed.get('role', '?')} token '{claimed.get('label', '')}')"
+        who = f" ({_shown(claimed.get('role', '?'))} token '{_shown(claimed.get('label', ''))}')"
     else:
         parts = urllib.parse.urlsplit(target)
         if parts.scheme not in ("http", "https") or not parts.hostname or parts.path not in ("", "/") \
@@ -509,9 +509,9 @@ def cmd_connect(args: argparse.Namespace) -> int:
         verify_token(url, token, timeout=float(args.timeout or 20.0))
     directory = save_profile(url, token)
     if token is None:
-        print(f"saved:     {url}{who}\n           address in {directory / 'config.json'}; no token file")
+        print(f"saved:     {_shown(url)}{who}\n           address in {directory / 'config.json'}; no token file")
     else:
-        print(f"saved:     {url}{who}\n           token in {directory / 'token'} (owner-only), address in {directory / 'config.json'}")
+        print(f"saved:     {_shown(url)}{who}\n           token in {directory / 'token'} (owner-only), address in {directory / 'config.json'}")
     for key in (ENV_URL, ENV_TOKEN, ENV_TOKEN_FILE, ENV_ALLOW_REMOTE):
         os.environ.pop(key, None)
     code = cmd_doctor(argparse.Namespace(url=None, token_file=None, timeout=args.timeout))
