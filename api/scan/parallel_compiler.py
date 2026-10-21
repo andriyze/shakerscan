@@ -2007,7 +2007,8 @@ def _reconciled_family_coverage(aggregate: Mapping[str, Any]) -> dict[str, Any]:
     row = dict(aggregate)
     unplanned = row.pop("_unplanned_children", None) or {}
     if (
-        str(row.get("reason") or "") == "zero_attempts"
+        # zero_work is the same claim for a family that planned no counted candidate.
+        str(row.get("reason") or "") in {"zero_attempts", "zero_work"}
         and int(row.get("attempted_candidates") or 0) > 0
     ):
         row["reason"] = "child_family_incomplete"
