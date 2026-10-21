@@ -16,7 +16,9 @@ import urllib.parse
 from collections import Counter
 from typing import Any
 
-from .url_redaction import drop_matrix_parameters, is_sensitive_label, redact_url, token_like_segment
+from .url_redaction import (
+    drop_matrix_parameters, is_sensitive_label, redact_url, token_like_query_name, token_like_segment,
+)
 from .device_postman import (
     MAX_BODY_BYTES,
     MAX_COLLECTION_BYTES,
@@ -249,9 +251,7 @@ def is_captured_secret_query(name: str, value: str) -> bool:
 def captured_secret_query_name(name: str, bare: bool) -> bool:
     """A query name a display masks: token-like, or a bare parameter (``?<name>``, its own
     value) that ``is_captured_secret_query`` treats as a credential."""
-    return token_like_segment(urllib.parse.unquote(str(name or ""))) or (
-        bare and is_captured_secret_query(name, "")
-    )
+    return token_like_query_name(name, bare) or (bare and is_captured_secret_query(name, ""))
 
 
 # What a capture's replay withholds from a recorded path.

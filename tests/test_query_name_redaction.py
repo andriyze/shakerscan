@@ -30,14 +30,22 @@ DISPLAYS = {
 }
 
 
+# Standard base64 with "+", "/" and "=" padding (the name is cut at the first "="), and an AWS
+# access key id: unit fixtures, not real credentials.
+BASE64 = "q8Zx+2Lm/7Rt4Wv8Yb3Nc5Kd1Hf6G=="
+AKIA = "AKIA" + "ZOOFIXTUREVALUE1"
+
+
 @pytest.mark.parametrize("display", DISPLAYS.values(), ids=DISPLAYS.keys())
 @pytest.mark.parametrize("query", [
     JWT, RANDOM, f"{JWT}&page=2", f"page=2&{RANDOM}", f"{RANDOM}=1", urllib.parse.quote(JWT, safe=""),
+    BASE64, urllib.parse.quote(BASE64, safe=""), f"{BASE64}&page=2", AKIA, f"{AKIA}&q=1",
 ])
 def test_token_used_as_a_query_name_is_masked(display, query):
     shown = display(f"https://app.example/api/items?{query}")
-    assert JWT not in shown and RANDOM not in shown
-    assert JWT not in urllib.parse.unquote(shown) and RANDOM not in urllib.parse.unquote(shown)
+    readable = urllib.parse.unquote_plus(shown)
+    for secret in (JWT, RANDOM, AKIA, BASE64.rstrip("="), BASE64[:12], BASE64[13:20]):
+        assert secret not in shown and secret not in readable and secret not in urllib.parse.unquote(shown)
     assert "redacted" in shown
 
 

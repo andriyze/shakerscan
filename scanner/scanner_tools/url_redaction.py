@@ -137,9 +137,19 @@ def _query_items(query: str) -> list[tuple[str, bool]]:
     return items
 
 
+_BASE64_NAME_RE = re.compile(r"[A-Za-z0-9+/ ]{16,}=*")
+_ACCESS_KEY_ID_RE = re.compile(r"(?:AKIA|ASIA)[0-9A-Z]{16}")
+
+
 def token_like_query_name(name: str, bare: bool = False) -> bool:  # noqa: ARG001 - predicate signature
-    """A query name that is itself a credential (``?<JWT>``, ``?<random token>``)."""
-    return token_like_segment(urllib.parse.unquote(str(name or "")))
+    """A query name that is itself a credential: a JWT or random token (``?<token>``), standard
+    base64 (its ``+`` read back as a space, cut at the first ``=``) or an AWS access key id."""
+    text = urllib.parse.unquote(str(name or ""))
+    if token_like_segment(text) or _ACCESS_KEY_ID_RE.fullmatch(text):
+        return True
+    if _BASE64_NAME_RE.fullmatch(text) and ("+" in text or "/" in text or " " in text or text.endswith("=")):
+        return token_like_segment(re.sub(r"[+/ =]", "", text))
+    return False
 
 
 def redact_url(
