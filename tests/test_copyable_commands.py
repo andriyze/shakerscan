@@ -13,6 +13,7 @@ import urllib.parse
 import pytest
 
 from api.retest_contract import (
+    _sqlmap_marked_segment_urls,
     build_replay_commands,
     current_replay_commands,
     infer_retest_inputs,
@@ -76,6 +77,27 @@ def test_get_replay_sends_exactly_the_stored_url_and_the_payload(payload, tmp_pa
         sent = urllib.parse.urlsplit(args[2])
         _same_url(urllib.parse.urlunsplit(sent._replace(query="")), url.split("?")[0])
         assert urllib.parse.parse_qs(sent.query) == {"q": [attack], "page": ["2"]}, run
+
+
+# A path-segment injection point (sqlmap's "/products/1*", named "#1*"): the segment and the
+# rest of the stored path are target-chosen too, including control characters and the
+# backslash-quote forms fish reads inside single quotes.
+_PATH_MARKER_WORDS = (*PAYLOADS, "a\x15b", "\x1b[31m", "\x03pwn", "\x85", "\r$(pwn)", "x\\'$(pwn)", "\\';pwn;\\'")
+
+
+@pytest.mark.parametrize("payload", _PATH_MARKER_WORDS)
+def test_path_marker_replay_sends_exactly_the_unmarked_and_injected_urls(payload, tmp_path):
+    url = f"http://app.fixture.invalid/{payload}/products/1{payload}*/reviews?page=2"
+    attack = f"' OR {payload} --x"
+    plain, injected = build_replay_commands({"finding_type": "sqli", "target_url": url, "param": "#1*", "payload": attack})
+    expected_urls = _sqlmap_marked_segment_urls(url, "#1*", attack)
+    assert expected_urls and "*" not in expected_urls[0]
+    for command, expected in zip((plain, injected), expected_urls, strict=True):
+        assert not any(ch < " " or "\x7f" <= ch <= "\x9f" for ch in command), repr(command)
+        for run in paste(command, tmp_path):
+            args = _only_curl(run)
+            assert args[:2] == ("-i", "-k") and len(args) == 3, run
+            _same_url(args[2], expected)
 
 
 @pytest.mark.parametrize("payload", PAYLOADS)
