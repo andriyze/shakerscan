@@ -24,7 +24,7 @@ from api.scan.action_plan import (
     ScanActionPlanCompiler,
     window_retry_hold,
 )
-from api.scan.capability_result import CapabilityResultStatus
+from api.scan.capability_result import CapabilityResultReference, CapabilityResultStatus
 from api.scan.external_process import (
     ACTIVE_TEMPLATE_PLANNED_GET_ONLY_WINDOWS,
     ACTIVE_TEMPLATE_PLANNED_WINDOWS,
@@ -41,6 +41,7 @@ from tests.scan_round_fixtures import (
 from tests.test_scan_finalizer import _result_with_observation_count
 from tests.test_scan_orchestrator import SCAN_ID
 from tests.test_scan_orchestrator import _action as plan_action
+from tests.test_scan_orchestrator import _result as _orchestrator_result
 
 NUCLEI_ONLY = ("recon", "nuclei_passive", "nuclei_active")
 POSITION = {"http_requests": 120, "state_changing_requests": 120, "tool_wall_seconds": 45}
@@ -239,7 +240,7 @@ def _report_slice(action_id, ordinal, *, start, count, windows, required):
     )
 
 
-def _report(slices, *, windows, shared=False, bases=None):
+def _report(slices, *, windows, shared=False, bases=None, legacy=()):
 
     actions = [
         _report_slice(f"active.templates.r{number:02d}", index, start=start, count=count,
@@ -263,7 +264,8 @@ def _report(slices, *, windows, shared=False, bases=None):
             } for position in range(start, start + count)),
             {"kind": "active_template_windows", "family": "nuclei_active",
              "windows_run": list(range(start, start + count)), "window_count": 39,
-             **({"repeated_across_shards": True} if shared else {}),
+             **({"shard_part": {"index": 0, "count": 2}} if shared else {}),
+             **({"legacy_windows_run": list(legacy)} if legacy else {}),
              **({"bases": bases(start, count)} if bases else {})},
         )
     results = {
@@ -294,10 +296,21 @@ def test_a_thorough_host_that_ran_every_window_is_complete():
     assert family["manifest_candidates"] == 39 and family["unscheduled_candidates"] == 0
 
 
-def test_a_shards_report_says_its_windows_may_repeat_a_siblings():
+def test_a_shards_report_names_its_part_of_the_pairs():
     _report_body, family = _report([(1, 0, 2)], windows=False, shared=True)
     assert family["coverage_status"] == "complete"
-    assert family["template_windows"] == {"run": 2, "total": 39, "repeated_across_shards": True}
+    assert family["template_windows"] == {"run": 2, "total": 39, "shard_part": {"index": 0, "count": 2}}
+
+
+def test_windows_an_earlier_mapping_ran_are_listed_and_not_counted_at_a_base():
+    _report_body, family = _report(
+        [(1, 0, 2)], windows=False, legacy=(6,),
+        bases=lambda start, count: [{"base": "https://app.example.test/", "windows_run": [0, 1]}],
+    )
+    assert family["template_windows"] == {
+        "run": 2, "total": 39, "legacy_windows_run": 1,
+        "bases": [{"base": "https://app.example.test/", "run": 2, "total": 39}],
+    }
 
 
 def test_a_balanced_host_keeps_its_status_and_now_says_how_much_of_the_allowlist_ran():
@@ -430,8 +443,12 @@ def test_a_sharded_scan_reports_how_much_of_the_allowlist_its_shards_ran():
         parent_work_assignment=_parent_assignment(assignments),
     )
     reports = {scan_id: _canonical_child_report(plan) for scan_id, plan in plans.items()}
+    base = "https://app.example.test/"
     for scan_id, windows in zip(sorted(plans)[1:], (
-        {"run": 3, "total": 39}, {"run": 2, "total": 39, "repeated_across_shards": True},
+        {"run": 3, "total": 39, "shard_part": {"index": 0, "count": 2},
+         "bases": [{"base": base, "run": 3, "total": 39}]},
+        {"run": 2, "total": 39, "shard_part": {"index": 1, "count": 2},
+         "bases": [{"base": base, "run": 2, "total": 39}]},
     )):
         reports[scan_id]["coverage"] = {"family_coverage": [{
             "family": "nuclei_active", "selected": True, "required": True,
@@ -442,10 +459,10 @@ def test_a_sharded_scan_reports_how_much_of_the_allowlist_its_shards_ran():
         record, child_results=reports, child_statuses=dict.fromkeys(plans, "completed"),
     )
     family, = merged["family_coverage"]
-    assert family["template_windows"] == {"run": 3, "total": 39, "repeated_across_shards": True}
-    assert summarize_parallel_action_coverage(merged)["family_coverage"][0]["template_windows"] == {
-        "run": 3, "total": 39, "repeated_across_shards": True,
-    }
+    # The shards ran disjoint pairs, so their per-base runs add up.
+    expected = {"run": 5, "total": 39, "bases": [{"base": base, "run": 5, "total": 39}]}
+    assert family["template_windows"] == expected
+    assert summarize_parallel_action_coverage(merged)["family_coverage"][0]["template_windows"] == expected
 
 
 FIRST, SECOND = "https://app.example.test/", "https://app.example.test:8443/"
@@ -495,4 +512,61 @@ def test_a_shards_short_base_is_not_held_to_every_window():
     """A shard runs its own part of the endpoints; its siblings run theirs."""
     _report_body, family = _report(FULL, windows=True, bases=_first_base_only, shared=True)
     assert family["coverage_status"] == "complete"
-    assert family["template_windows"]["repeated_across_shards"] is True
+    assert family["template_windows"]["shard_part"] == {"index": 0, "count": 2}
+
+
+def test_a_slice_whose_every_position_is_past_the_bases_ran_nothing_by_design():
+    """A 215-endpoint host on one origin: slice 1 runs the 39 pairs, every position of the next
+    slices maps past the base. Such a slice is not an active verifier that attempted nothing."""
+    first = _report_slice("active.templates.r01", 0, start=0, count=39, windows=False, required=True)
+    later = _report_slice("active.templates.r01.001", 1, start=39, count=50, windows=False, required=False)
+    final = plan_action("finalize.report", 2, dependencies=(first.action_id, later.action_id))
+    plan = ScanActionPlan(
+        scan_id=SCAN_ID, execution_plan_digest="b" * 64, target_binding_digest="a" * 64,
+        actions=(first, later, final),
+    )
+    observations = {
+        first.action_id: (
+            *({
+                "kind": "candidate_attempt", "family": "nuclei_active", "status": "success",
+                "attempt_id": hashlib.sha256(f"p{position}".encode()).hexdigest(),
+                "candidate_id": f"endpoint-{position}",
+            } for position in range(39)),
+            {"kind": "active_template_windows", "family": "nuclei_active",
+             "windows_run": list(range(39)), "window_count": 39,
+             "bases": [{"base": "https://app.example.test/", "windows_run": list(range(39))}]},
+        ),
+        later.action_id: (
+            *({
+                "kind": "candidate_inapplicable", "family": "nuclei_active",
+                "candidate_id": f"endpoint-{position}", "reason": "template_window_past_bases",
+            } for position in range(39, 89)),
+            {"kind": "active_template_windows", "family": "nuclei_active",
+             "windows_run": [], "window_count": 39,
+             "bases": [{"base": "https://app.example.test/", "windows_run": []}]},
+        ),
+    }
+    results = {
+        action.action_id: _result_with_observation_count(action, len(observations[action.action_id]))
+        for action in (first, later)
+    }
+    # The first slice sent its windows' traffic; the later one sent nothing.
+    counted = results[first.action_id]
+    charged = _orchestrator_result(first, status=CapabilityResultStatus.SUCCESS, charge_full=True)
+    results[first.action_id] = CapabilityResultReference(**{
+        **charged.digest_material(), "receipt_ref": charged.receipt_ref,
+        "observation_manifest_ref": counted.observation_manifest_ref,
+    })
+    report = finalize_scan_report(
+        plan=plan, target_url="https://app.example.test", action_results=results,
+        observations=observations,
+        # Candidates exist, so a slice that sent nothing would otherwise read as attempting none.
+        work_manifest_references=({
+            "kind": "candidate", "manifest_id": "44444444-4444-4444-8444-444444444444",
+            "manifest_digest": "4" * 64, "entry_count": 3, "status": "complete",
+        },),
+    )
+    assert "active_verifier_zero_attempts" not in report["coverage"]["reasons"]
+    assert "active_verifier_zero_attempts" not in report["coverage"]["grade_reliability"]["reasons"]
+    family = next(row for row in report["coverage"]["family_coverage"] if row["family"] == "nuclei_active")
+    assert family["template_windows"]["run"] == 39 and family["template_windows"]["total"] == 39

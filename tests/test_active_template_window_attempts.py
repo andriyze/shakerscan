@@ -541,30 +541,150 @@ def _shard(index, count=2):
     }}
 
 
-def test_two_shard_children_say_their_sweeps_may_repeat_each_others_windows(monkeypatch, bundle):
-    """A parallel shard maps its own positions to (base, window) pairs; nothing it holds says
-    which pairs its siblings run (assigning them would change the shard authority that binds the
-    child's plan). Both children run the leading windows at the same base, and both say so."""
-    children = [_Host(("/a", "/b", "/c")), _Host(("/d", "/e"))]
-    receipts = [
-        child.run(
-            monkeypatch, bundle, child.action("active.templates.r01", start=0, count=len(child.endpoints.entries), windows=False),
-            options=_shard(index),
-        )
-        for index, child in enumerate(children)
+def _window_index(bundle_dir):
+    allowlist = _allowlist(bundle_dir, state_changing=True)
+    return {active_template_window(allowlist, index).template_ids: index for index in range(39)}
+
+
+def _run_shards(monkeypatch, bundle_dir, children, *, target=None):
+    receipts = []
+    for index, paths in enumerate(children):
+        child = _Host(paths, target=target)
+        receipts.append((child, child.run(
+            monkeypatch, bundle_dir,
+            child.action("active.templates.r01", start=0, count=len(child.endpoints.entries), windows=False),
+            options=_shard(index, len(children)),
+        )))
+    return receipts
+
+
+def test_two_shards_split_the_pairs_and_never_run_one_twice(monkeypatch, bundle):
+    """Shard k of n runs index p * n + k: shard 0 windows 0, 2, 4; shard 1 windows 1, 3."""
+    index_of = _window_index(bundle)
+    receipts = _run_shards(monkeypatch, bundle, [("/a", "/b", "/c"), ("/d", "/e")])
+    ran = [
+        (call["url"], index_of[call["template_ids"]])
+        for child, _receipt in receipts for call in child.calls
     ]
-    pairs = [(call["url"], call["template_ids"]) for child in children for call in child.calls]
-    assert len(pairs) - len(set(pairs)) == 2  # windows 0 and 1, at the same base, twice
-    assert all(_windows_record(receipt)["repeated_across_shards"] is True for receipt in receipts)
+    assert len(ran) == len(set(ran)) == 5
+    assert [window for _url, window in ran] == [0, 2, 4, 1, 3]
+    assert {url for url, _window in ran} == {"https://app.example.test/"}
+    records = [_windows_record(receipt) for _child, receipt in receipts]
+    assert [record["shard_part"] for record in records] == [
+        {"index": 0, "count": 2}, {"index": 1, "count": 2},
+    ]
+    assert all("repeated_across_shards" not in record for record in records)
+
+
+def test_three_shards_together_run_every_pair_once_and_the_rest_is_past_the_bases(monkeypatch, bundle):
+    index_of = _window_index(bundle)
+    children = [tuple(f"/s{shard}-{index}" for index in range(20)) for shard in range(3)]
+    receipts = _run_shards(monkeypatch, bundle, children)
+    ran = [index_of[call["template_ids"]] for child, _receipt in receipts for call in child.calls]
+    assert sorted(ran) == list(range(39))
+    past = [
+        item for _child, receipt in receipts for item in receipt.observations
+        if item.get("kind") == "candidate_inapplicable"
+    ]
+    assert len(past) == 60 - 39
+    assert {item["reason"] for item in past} == {"template_window_past_bases"}
+
+
+def test_shards_map_over_the_bindings_origins_whatever_endpoints_each_holds(monkeypatch, bundle):
+    """A shard holding only the first origin's endpoints still maps index i to the same base as a
+    sibling holding the second origin's: both use the binding's allowed origins."""
+    target = TargetBinding(
+        target_id="target-1", target_kind="web", canonical_host="app.example.test",
+        allowed_origins=("https://app.example.test", "https://app.example.test:8443"),
+        allowed_addresses=("192.0.2.10",), allowed_root_domains=("example.test",),
+    )
+    first = tuple(f"/a{index}" for index in range(30))
+    second = tuple((8443, f"/b{index}") for index in range(30))
+    receipts = _run_shards(monkeypatch, bundle, [first, second], target=target)
+    index_of = _window_index(bundle)
+    ran = [(call["url"], index_of[call["template_ids"]]) for child, _ in receipts for call in child.calls]
+    assert len(ran) == len(set(ran)) == 60
+    assert [record["base"] for record in _windows_record(receipts[0][1])["bases"]] == [
+        "https://app.example.test/", "https://app.example.test:8443/",
+    ] == [record["base"] for record in _windows_record(receipts[1][1])["bases"]]
+    assert sum(len(entry["windows_run"]) for _c, r in receipts for entry in _windows_record(r)["bases"]) == 60
+
+
+def test_the_parallel_discovery_child_and_a_direct_scan_hold_no_shard_part(monkeypatch, bundle):
     direct = _Host(("/a", "/b"))
     plain = direct.run(monkeypatch, bundle, direct.action("active.templates.r01", start=0, count=2, windows=False))
-    assert "repeated_across_shards" not in _windows_record(plain)
+    assert "shard_part" not in _windows_record(plain)
     discovery = _Host(("/a",))
     found = discovery.run(
         monkeypatch, bundle, discovery.action("active.templates.r01", start=0, count=1, windows=False),
         options={"canonical_shard_authority": {"shard_index": -1, "shard_count": 0, "parallel_discovery": True}},
     )
-    assert "repeated_across_shards" not in _windows_record(found)
+    assert "shard_part" not in _windows_record(found)
+
+
+def _legacy_checkpoint(host, action, position, window, *, base=None):
+    """An attempt a 2.11.0 worker checkpointed: its window, no base (it ran at the endpoint)."""
+    attempt_id = host.attempt_id(position)
+    host.backend.attempts.setdefault(action.action_id, {})[attempt_id] = {
+        "attempt_id": attempt_id,
+        "candidate_id": "legacy",
+        "template_window": {"index": window, "count": 39, "templates": 30, **({"base": base} if base else {})},
+        "status": "success", "timed_out": False,
+        "budget_consumed": {"http_requests": 60, "state_changing_requests": 60, "tool_wall_seconds": 30},
+        "observations": ({
+            "kind": "template_match", "template_id": f"legacy-{window}",
+            "matched_at": "https://app.example.test/p45/images/json", "attempt_id": attempt_id,
+        },),
+        "errors": (), "proof_state": "unproven",
+    }
+
+
+def test_a_2_11_0_attempt_past_the_bases_is_resumed_with_its_finding_never_dropped(monkeypatch, bundle):
+    """Position 45 of a 50-endpoint slice now maps past the bases. A 2.11.0 worker had already
+    run it (window 6 at its endpoint's path) and found something: the resume keeps the record and
+    sends nothing, and the window is listed as run by an earlier mapping, not credited to a base."""
+    host = _Host(tuple(f"/p{index}" for index in range(50)))
+    action = host.action("active.templates.r01", start=0, count=50, windows=False)
+    _legacy_checkpoint(host, action, 45, 6)
+    receipt = host.run(monkeypatch, bundle, action)
+    assert len(host.calls) == 39
+    assert any(item.get("template_id") == "legacy-6" for item in receipt.observations)
+    record = _windows_record(receipt)
+    assert record["legacy_windows_run"] == [6]
+    assert receipt.redacted_execution["resumed_count"] == 1
+    assert receipt.redacted_execution["inapplicable_count"] == 10
+
+
+def test_a_2_11_0_attempt_at_an_endpoints_path_is_not_credited_to_the_base(monkeypatch, bundle):
+    host = _Host(("/version", "/info", "/"))
+    action = host.action("active.templates.r01", start=0, count=3, windows=False)
+    _legacy_checkpoint(host, action, 1, 1)
+    receipt = host.run(monkeypatch, bundle, action)
+    assert len(host.calls) == 2
+    record = _windows_record(receipt)
+    assert record["bases"] == [{"base": "https://app.example.test/", "windows_run": [0, 2]}]
+    assert record["legacy_windows_run"] == [1]
+    # The same attempt checkpointed by this release, at the base it maps to, is credited.
+    fresh = _Host(("/version", "/info", "/"))
+    again = fresh.action("active.templates.r01", start=0, count=3, windows=False)
+    _legacy_checkpoint(fresh, again, 1, 1, base="https://app.example.test/")
+    record = _windows_record(fresh.run(monkeypatch, bundle, again))
+    assert record["bases"] == [{"base": "https://app.example.test/", "windows_run": [0, 1, 2]}]
+    assert "legacy_windows_run" not in record
+
+
+def test_a_shard_slice_in_flight_across_the_upgrade_resumes_and_never_resends(monkeypatch, bundle):
+    """Shard 1 of 2 had run its position 0 as window 0 (the old mapping); it now maps to index 1.
+    The attempt is resumed, nothing is re-sent for it, and its window counts as legacy."""
+    host = _Host(("/d", "/e"))
+    action = host.action("active.templates.r01", start=0, count=2, windows=False)
+    _legacy_checkpoint(host, action, 0, 0)
+    receipt = host.run(monkeypatch, bundle, action, options=_shard(1))
+    index_of = _window_index(bundle)
+    assert [index_of[call["template_ids"]] for call in host.calls] == [3]
+    record = _windows_record(receipt)
+    assert record["legacy_windows_run"] == [0]
+    assert record["bases"] == [{"base": "https://app.example.test/", "windows_run": [3]}]
 
 
 TWO_ORIGINS = TargetBinding(

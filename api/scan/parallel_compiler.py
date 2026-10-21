@@ -1893,24 +1893,31 @@ def merge_parallel_action_executions(
                 isinstance(windows.get(name), int) and not isinstance(windows.get(name), bool)
                 for name in ("run", "total")
             ) and 0 <= windows["run"] <= windows["total"]:
-                # Informational, as in a direct Scan's report. Every shard plans one position per
-                # endpoint, so each runs the allowlist's leading windows on its own endpoints:
-                # the shards together ran the windows of the one that ran the most (of the
-                # largest allowlist), never fewer. Only counts reach the merge, so it reports
-                # that shard's.
+                # Informational, as in a direct Scan's report. A shard that declares its part of
+                # the (base, window) pairs ran pairs no sibling ran, so the shards' per-base runs
+                # add up (to at most each base's total). A shard from before that split ran the
+                # allowlist's leading windows on its own endpoints, as its siblings did: the
+                # shards together ran the windows of the one that ran the most, never fewer.
                 merged = aggregate.get("template_windows")
-                shared = windows.get("repeated_across_shards") is True or bool(
-                    merged and merged.get("repeated_across_shards")
-                )
-                if merged is None or (windows["total"], windows["run"]) > (
-                    merged["total"], merged["run"],
+                bases = windows.get("bases")
+                if isinstance(windows.get("shard_part"), Mapping) and isinstance(bases, list) and (
+                    merged is None or "_bases" in merged
                 ):
+                    merged = aggregate.setdefault("template_windows", {"_bases": {}})
+                    for entry in bases:
+                        if isinstance(entry, Mapping) and isinstance(entry.get("base"), str):
+                            run, total = int(entry.get("run") or 0), int(entry.get("total") or 0)
+                            seen = merged["_bases"].setdefault(entry["base"], [0, total])
+                            seen[0] = min(max(seen[1], total), seen[0] + max(0, run))
+                            seen[1] = max(seen[1], total)
+                    merged["run"] = sum(run for run, _total in merged["_bases"].values())
+                    merged["total"] = sum(total for _run, total in merged["_bases"].values())
+                elif merged is None or "_bases" not in merged and (
+                    windows["total"], windows["run"],
+                ) > (merged["total"], merged["run"]):
                     aggregate["template_windows"] = {
                         "run": int(windows["run"]), "total": int(windows["total"]),
                     }
-                if shared:
-                    # The shards' sweeps may have repeated windows at the same base.
-                    aggregate["template_windows"]["repeated_across_shards"] = True
             if int(raw.get("batch_actions") or 0) == 0 and raw.get("reason") in {
                 "not_planned", "no_candidates",
             }:
@@ -2012,6 +2019,16 @@ def _reconciled_family_coverage(aggregate: Mapping[str, Any]) -> dict[str, Any]:
     """
     row = dict(aggregate)
     unplanned = row.pop("_unplanned_children", None) or {}
+    windows = row.get("template_windows")
+    if isinstance(windows, Mapping) and "_bases" in windows:
+        # The shards' summed per-base runs, as a direct Scan lists them.
+        row["template_windows"] = {
+            "run": int(windows["run"]), "total": int(windows["total"]),
+            "bases": [
+                {"base": base, "run": run, "total": total}
+                for base, (run, total) in windows["_bases"].items()
+            ],
+        }
     if (
         str(row.get("reason") or "") == "zero_attempts"
         and int(row.get("attempted_candidates") or 0) > 0

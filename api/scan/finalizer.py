@@ -2629,7 +2629,10 @@ def finalize_scan_report(
     # The active-template windows the Scan's sweeps finished, per allowlist size: a slice
     # without a mutation hold runs the smaller GET-only allowlist, whose windows are others.
     template_windows_run: dict[int, set[int]] = {}
-    template_windows_shared = False
+    # A parallel shard's part of the (base, window) pairs, and windows resumed from attempts an
+    # earlier mapping ran (a 2.11.0 worker at an endpoint's path), credited to no base.
+    template_windows_shard: dict[str, Any] | None = None
+    template_windows_legacy: set[int] = set()
     # Per allowlist size, the windows each sweep base finished, in the order the sweep maps
     # positions to them; and whether a thorough or deep direct sweep holds every base to every
     # window (a fast or balanced one runs one window per endpoint by design).
@@ -2645,7 +2648,13 @@ def finalize_scan_report(
                 if not isinstance(item, Mapping) or item.get("kind") != ACTIVE_TEMPLATE_WINDOWS_RECORD_KIND:
                     continue
                 count = item.get("window_count")
-                template_windows_shared |= item.get("repeated_across_shards") is True
+                part = item.get("shard_part")
+                if isinstance(part, Mapping) and isinstance(part.get("count"), int):
+                    template_windows_shard = {"index": part.get("index"), "count": part.get("count")}
+                template_windows_legacy.update(
+                    int(index) for index in item.get("legacy_windows_run") or ()
+                    if isinstance(index, int) and not isinstance(index, bool)
+                )
                 if isinstance(count, int) and not isinstance(count, bool) and count > 0:
                     template_windows_run.setdefault(count, set()).update(
                         int(index) for index in item.get("windows_run") or ()
@@ -2665,7 +2674,7 @@ def finalize_scan_report(
                         profile = str(action.capability_args.get("profile") or "")
                         template_windows_strict |= budget_sufficiency(
                             profile.removesuffix("_batch_v1"),
-                        ) and item.get("repeated_across_shards") is not True
+                        ) and not isinstance(item.get("shard_part"), Mapping)
         raw_slice = action.capability_args.get("slice")
         planned = (
             int(raw_slice.get("count") or 0)
@@ -2799,9 +2808,13 @@ def finalize_scan_report(
             family_coverage["nuclei_active"]["template_windows"] = {
                 "run": len(template_windows_run[total]), "total": total,
             }
-        if template_windows_shared:
-            # A parallel shard's sweep may repeat its siblings' windows at the same base.
-            family_coverage["nuclei_active"]["template_windows"]["repeated_across_shards"] = True
+        if template_windows_shard is not None:
+            # This shard ran its part of the pairs; its siblings ran the others.
+            family_coverage["nuclei_active"]["template_windows"]["shard_part"] = template_windows_shard
+        if template_windows_legacy:
+            family_coverage["nuclei_active"]["template_windows"]["legacy_windows_run"] = len(
+                template_windows_legacy,
+            )
     selected_family_gaps: list[str] = []
     for family, row in family_coverage.items():
         statuses = row.pop("_statuses")

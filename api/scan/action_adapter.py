@@ -4128,24 +4128,50 @@ class DatabaseNeutralScanActionDispatcher:
         windows_run: set[int] = set()
         # The windows each sweep base finished, so coverage can say which base ran how many.
         base_windows_run: dict[str, set[int]] = {}
+        legacy_windows_run: set[int] = set()
 
-        # Each sweep position runs window p % W at base p // W: the target URL's directory, then
-        # the manifest's other origins' roots (active_sweep_bases). A scheme-inferred Scan's
-        # target URL is the origin it selected.
+        # Each sweep position names one (base, window) pair, index i: base i // W, window i % W.
+        # The bases are the target URL's directory, then other origins' roots
+        # (active_sweep_bases); a scheme-inferred Scan's target URL is the origin it selected. A
+        # direct Scan's position p is index p. Parallel shard k of n holds index p * n + k, so
+        # the shards never run the same pair and together run the first n x positions of them;
+        # every shard maps over the same bases, the binding's allowed origins, which each child
+        # has whatever part of the endpoints it holds.
         if windowed and self.target.inferred_origins:
             await self._restore_selected_origin()
+        shard = self.options.get("canonical_shard_authority")
+        shard_part = (
+            (int(shard["shard_index"]), int(shard["shard_count"]))
+            if isinstance(shard, Mapping) and not shard.get("parallel_discovery")
+            and isinstance(shard.get("shard_index"), int) and isinstance(shard.get("shard_count"), int)
+            and not isinstance(shard.get("shard_index"), bool)
+            and int(shard["shard_count"]) >= 2 and 0 <= int(shard["shard_index"]) < int(shard["shard_count"])
+            else None
+        )
+        unselected_origins = tuple(
+            origin for origin in self.target.inferred_origins
+            if not self.target_url.lower().startswith(origin.lower() + "/")
+        )
         sweep_bases = active_sweep_bases(
-            self.target_url, manifest.entries,
-            exclude_origins=tuple(
-                origin for origin in self.target.inferred_origins
-                if not self.target_url.lower().startswith(origin.lower() + "/")
-            ),
+            self.target_url,
+            manifest.entries if shard_part is None else [
+                {"scheme": parsed.scheme, "host": parsed.hostname,
+                 "port": parsed.port or (443 if parsed.scheme == "https" else 80)}
+                for parsed in (urllib.parse.urlsplit(origin) for origin in self.target.allowed_origins)
+                if parsed.hostname
+            ],
+            exclude_origins=unselected_origins,
         ) if windowed else ()
         sweep_windows = active_template_window_count(allowlist) if windowed else 0
 
+        def sweep_index(manifest_index: int) -> int:
+            if shard_part is None:
+                return manifest_index
+            return manifest_index * shard_part[1] + shard_part[0]
+
         def position_base(manifest_index: int) -> str | None:
             return active_sweep_base(
-                manifest_index, bases=sweep_bases, window_count=sweep_windows,
+                sweep_index(manifest_index), bases=sweep_bases, window_count=sweep_windows,
             ) if windowed else None
 
         def window_skip_reason(manifest_index: int) -> str | None:
@@ -4643,23 +4669,26 @@ class DatabaseNeutralScanActionDispatcher:
                         "reason": "path_segment_candidate",
                     })
                     continue
-                if not window_applies(manifest_index):
+                candidate_id = batch_candidate_id(row, manifest_index)
+                attempt_key = f"{manifest_digest}:{family}:{candidate_id}"
+                if retry_round:
+                    attempt_key += f":retry:{retry_round}"
+                attempt_id = hashlib.sha256(attempt_key.encode()).hexdigest()
+                # A checkpointed attempt is resumed before the position is judged: an attempt a
+                # 2.11.0 worker (or a shard under an earlier mapping) already ran keeps its
+                # records and is never re-sent, whatever the position maps to now.
+                if attempt_id not in completed and not window_applies(manifest_index):
                     # A planned position whose (base, window) pair another position already
                     # runs -- past the allowlist's own windows, or past every base's windows
                     # -- would repeat it on this host: nothing is sent.
                     inapplicable += 1
                     observations.append({
                         "kind": "candidate_inapplicable",
-                        "candidate_id": batch_candidate_id(row, manifest_index),
+                        "candidate_id": candidate_id,
                         "family": family,
                         "reason": window_skip_reason(manifest_index),
                     })
                     continue
-                candidate_id = batch_candidate_id(row, manifest_index)
-                attempt_key = f"{manifest_digest}:{family}:{candidate_id}"
-                if retry_round:
-                    attempt_key += f":retry:{retry_round}"
-                attempt_id = hashlib.sha256(attempt_key.encode()).hexdigest()
                 route_identity = str(row.get("candidate_id") or row.get("route_id") or "")
                 carry = None if retry_round or attempt_id in completed else (
                     carried[attempt_id] if attempt_id in carried
@@ -4706,12 +4735,19 @@ class DatabaseNeutralScanActionDispatcher:
                         retried_with_output.add(candidate_id)
                     prior_window = prior.get("template_window")
                     if prior_status in _BATCH_SUCCESS_STATUSES and isinstance(prior_window, Mapping):
-                        windows_run.add(int(prior_window.get("index") or 0))
+                        prior_index = int(prior_window.get("index") or 0)
+                        windows_run.add(prior_index)
                         resumed_base = position_base(manifest_index)
-                        if resumed_base is not None:
-                            base_windows_run.setdefault(resumed_base, set()).add(
-                                int(prior_window.get("index") or 0)
-                            )
+                        if (
+                            resumed_base is not None and prior_window.get("base") == resumed_base
+                            and sweep_windows and prior_index == sweep_index(manifest_index) % sweep_windows
+                        ):
+                            base_windows_run.setdefault(resumed_base, set()).add(prior_index)
+                        elif windowed:
+                            # Run by an earlier mapping -- a 2.11.0 worker at an endpoint's
+                            # path, or a shard before shards split the pairs: kept, never
+                            # re-sent, and not credited to a base it did not run at.
+                            legacy_windows_run.add(prior_index)
                     prior_wall = int(dict(prior.get("budget_consumed") or {}).get(
                         "tool_wall_seconds", 0,
                     ) or 0)
@@ -4770,9 +4806,7 @@ class DatabaseNeutralScanActionDispatcher:
                         # endpoint's path (active_sweep_bases). A passive pack and a verify
                         # Scan's named checks run at each endpoint.
                         execution_target = (
-                            str(active_sweep_base(
-                                manifest_index, bases=sweep_bases, window_count=sweep_windows,
-                            ))
+                            str(position_base(manifest_index))
                             if windowed
                             else execution_url_for_manifest_endpoint(manifest, manifest_index)
                         )
@@ -5019,12 +5053,16 @@ class DatabaseNeutralScanActionDispatcher:
                         if (worker_template_options.get("template_profile") == "active"
                                 and verify_selection is None):
                             window = active_template_window(
-                                str(worker_template_options.get("template_ids") or ""), manifest_index,
+                                str(worker_template_options.get("template_ids") or ""),
+                                sweep_index(manifest_index),
                             )
                             scanner_options["template_ids"] = window.template_ids
                             template_windows[candidate_id] = window.record()
                             if position_base(manifest_index) is not None:
                                 candidate_bases[candidate_id] = str(position_base(manifest_index))
+                                # The base is checkpointed with the window, so a resume credits
+                                # the attempt only to the base it actually ran at.
+                                template_windows[candidate_id]["base"] = candidate_bases[candidate_id]
                     elif tool == "dalfox":
                         scanner_options["severity"] = "high"
                         args["severity"] = "high"
@@ -5180,15 +5218,6 @@ class DatabaseNeutralScanActionDispatcher:
             for item in (entry if isinstance(entry, list) else (entry,))
         ]
         if windowed and allowlist:
-            shard = self.options.get("canonical_shard_authority")
-            # A parallel shard maps its own positions to (base, window) pairs, as a direct Scan
-            # does, but nothing it holds says which pairs its siblings run: assigning them would
-            # need the parent's split in the shard authority, which binds the child's plan. Its
-            # sweep may repeat a sibling's windows at the same base, and its record says so.
-            shared = bool(
-                isinstance(shard, Mapping) and not shard.get("parallel_discovery")
-                and isinstance(shard.get("shard_count"), int) and int(shard["shard_count"]) >= 2
-            )
             observations.append({
                 "kind": ACTIVE_TEMPLATE_WINDOWS_RECORD_KIND,
                 "family": family,
@@ -5200,7 +5229,12 @@ class DatabaseNeutralScanActionDispatcher:
                     {"base": base, "windows_run": sorted(base_windows_run.get(base, ()))}
                     for base in sweep_bases
                 ],
-                **({"repeated_across_shards": True} if shared else {}),
+                # A shard's part of the pairs: its siblings run the others.
+                **({"shard_part": {"index": shard_part[0], "count": shard_part[1]}}
+                   if shard_part is not None else {}),
+                # Windows resumed from attempts an earlier mapping ran (a 2.11.0 worker at an
+                # endpoint's path): kept, not counted as run at any base.
+                **({"legacy_windows_run": sorted(legacy_windows_run)} if legacy_windows_run else {}),
             })
         for candidate_id, held in deferred_errors.items():
             if candidate_id not in recovered:
