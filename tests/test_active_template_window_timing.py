@@ -218,8 +218,9 @@ def test_every_window_finishes_at_the_zoo_timing(monkeypatch, bundle, endpoints)
 def test_a_heavy_window_opening_a_two_position_final_slice_finishes(monkeypatch, bundle):  # noqa: F811
     """A four-endpoint host's round 3 is windows 37 and 38 (240 requests / 90 s of positions).
     With a wall-only retry hold, a 125-request window 37 got 120 requests / 60 s, was cut off,
-    and its retry was shortened to the few requests left and never ran. The retry's requests are
-    held too, so the window finishes."""
+    and its retry was shortened to the few requests left and never ran. The slice now holds the
+    retry's requests with its wall, so window 37's first attempt can use that headroom at the
+    planned 2 requests/s and finishes without a retry."""
     timing = _ZooTiming(bundle, requests={**ZOO_WINDOW_REQUESTS, 37: 125})
     host = _host(4)
     action = _slice_action(host, 3, 37, 2, 4)
@@ -230,6 +231,9 @@ def test_a_heavy_window_opening_a_two_position_final_slice_finishes(monkeypatch,
     assert receipt.status == "success" and not receipt.timed_out
     assert _windows_record(receipt)["windows_run"] == [37, 38]
     assert all(item["seconds"] <= item["budget"]["tool_wall_seconds"] for item in timing.attempts)
+    # The retry hold is headroom, not a faster pace: window 37 runs at its planned rate.
+    first = next(item for item in timing.attempts if item["window"] == 37)
+    assert first["rate"] == 2
     for name, amount in receipt.budget_consumed.items():
         assert int(amount) <= int(action.requested_budget[name])
     # The same slice holding the retry's wall alone loses the window, as 2.11.1's first fix did.

@@ -286,14 +286,14 @@ def test_a_thorough_host_whose_later_windows_never_ran_is_partial():
 
 
 def test_a_thorough_host_that_ran_every_window_is_complete():
-    report, family = _report([(1, 0, 2), (2, 2, 33), (3, 35, 4)], windows=True)
+    _report_body, family = _report([(1, 0, 2), (2, 2, 33), (3, 35, 4)], windows=True)
     assert family["coverage_status"] == "complete"
     assert family["template_windows"] == {"run": 39, "total": 39}
     assert family["manifest_candidates"] == 39 and family["unscheduled_candidates"] == 0
 
 
 def test_a_balanced_host_keeps_its_status_and_now_says_how_much_of_the_allowlist_ran():
-    report, family = _report([(1, 0, 2)], windows=False)
+    _report_body, family = _report([(1, 0, 2)], windows=False)
     assert family["coverage_status"] == "complete"
     assert family["template_windows"] == {"run": 2, "total": 39}
 
