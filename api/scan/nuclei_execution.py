@@ -205,6 +205,37 @@ def active_sweep_bases(
     return (first_origin + path, *(origin + "/" for origin in others))
 
 
+def active_sweep_index(
+    position: int, *, shard_index: int | None, shard_count: int | None, pair_count: int,
+) -> int | None:
+    """The (base, window) pair index a sweep position runs, or None past every pair.
+
+    A direct Scan's position p is pair p. A parallel Scan's children are one global child at
+    shard index 0 (it holds no endpoint, so it never sweeps; the parallel planner always puts it
+    first) and n - 1 endpoint children at indices 1..n-1. Endpoint child k' = k - 1 of n' = n - 1
+    starts its positions at offset k' x floor(P / n') around the P pairs and runs them in order:
+
+    * alone it runs min(E, P) distinct pairs for its E positions, as a direct Scan would, so a
+      lane or family child never runs fewer windows than 2.11.0 gave it;
+    * the children start P / n' apart, so they run different pairs until a child's positions
+      reach the next child's offset, after which they may overlap (the parallel merge counts the
+      distinct pairs and the repeats).
+
+    An interleaved split (pair p x n + k) ran far fewer windows on a typical parallel Scan,
+    because n counts the global child, the family children that never sweep, and every lane.
+    A position at or past P runs nothing, so no child repeats a pair of its own.
+    """
+    pairs = max(0, int(pair_count))
+    position = int(position)
+    if position < 0 or position >= pairs:
+        return None
+    if shard_index is None or shard_count is None or int(shard_count) < 2 or int(shard_index) < 1:
+        return position
+    children = int(shard_count) - 1
+    offset = (int(shard_index) - 1) * (pairs // children)
+    return (position + offset) % pairs
+
+
 def active_sweep_base(position: int, *, bases: Sequence[str], window_count: int) -> str | None:
     """Where a sweep position runs: window ``position % W`` at base ``position // W``.
 

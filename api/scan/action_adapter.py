@@ -306,6 +306,7 @@ from .nuclei_execution import (
     resolve_active_scan_nuclei_options,
     active_sweep_base,
     active_sweep_bases,
+    active_sweep_index,
     window_position_candidate_id,
 )
 from .posture_findings import CORS_PROBE_ACTIONS, cors_probe_verdict
@@ -4133,10 +4134,9 @@ class DatabaseNeutralScanActionDispatcher:
         # Each sweep position names one (base, window) pair, index i: base i // W, window i % W.
         # The bases are the target URL's directory, then other origins' roots
         # (active_sweep_bases); a scheme-inferred Scan's target URL is the origin it selected. A
-        # direct Scan's position p is index p. Parallel shard k of n holds index p * n + k, so
-        # the shards never run the same pair and together run the first n x positions of them;
-        # every shard maps over the same bases, the binding's allowed origins, which each child
-        # has whatever part of the endpoints it holds.
+        # direct Scan's position p is index p; a parallel endpoint child starts its positions at
+        # its own offset around the pairs (active_sweep_index). Every shard maps over the same
+        # bases, the binding's allowed origins, whatever part of the endpoints it holds.
         if windowed and self.target.inferred_origins:
             await self._restore_selected_origin()
         shard = self.options.get("canonical_shard_authority")
@@ -4164,10 +4164,17 @@ class DatabaseNeutralScanActionDispatcher:
         ) if windowed else ()
         sweep_windows = active_template_window_count(allowlist) if windowed else 0
 
+        sweep_pairs = sweep_windows * len(sweep_bases)
+
         def sweep_index(manifest_index: int) -> int:
-            if shard_part is None:
-                return manifest_index
-            return manifest_index * shard_part[1] + shard_part[0]
+            """The pair a position runs (active_sweep_index); the pair count when past them."""
+            index = active_sweep_index(
+                manifest_index,
+                shard_index=shard_part[0] if shard_part else None,
+                shard_count=shard_part[1] if shard_part else None,
+                pair_count=sweep_pairs,
+            )
+            return sweep_pairs if index is None else index
 
         def position_base(manifest_index: int) -> str | None:
             return active_sweep_base(

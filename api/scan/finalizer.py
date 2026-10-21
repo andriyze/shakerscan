@@ -2796,7 +2796,12 @@ def finalize_scan_report(
                 "run": sum(len(windows) for windows in per_base.values()),
                 "total": total * len(per_base),
                 "bases": [
-                    {"base": base, "run": len(windows), "total": total}
+                    {
+                        "base": base, "run": len(windows), "total": total,
+                        # A shard's own windows, so the parallel merge can count the distinct
+                        # pairs its children ran and the ones they repeated.
+                        **({"windows_run": sorted(windows)} if template_windows_shard else {}),
+                    }
                     for base, windows in per_base.items()
                 ],
             }

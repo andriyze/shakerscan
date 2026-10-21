@@ -1893,25 +1893,34 @@ def merge_parallel_action_executions(
                 isinstance(windows.get(name), int) and not isinstance(windows.get(name), bool)
                 for name in ("run", "total")
             ) and 0 <= windows["run"] <= windows["total"]:
-                # Informational, as in a direct Scan's report. A shard that declares its part of
-                # the (base, window) pairs ran pairs no sibling ran, so the shards' per-base runs
-                # add up (to at most each base's total). A shard from before that split ran the
-                # allowlist's leading windows on its own endpoints, as its siblings did: the
-                # shards together ran the windows of the one that ran the most, never fewer.
+                # Informational, as in a direct Scan's report. A shard that lists the windows it
+                # ran at each base lets the merge count the distinct (base, window) pairs the
+                # shards ran -- at most each base's total -- and the pairs two shards both ran. A
+                # shard from before that ran the allowlist's leading windows on its own endpoints,
+                # as its siblings did: the shards together ran the windows of the one that ran the
+                # most, never fewer.
                 merged = aggregate.get("template_windows")
                 bases = windows.get("bases")
                 if isinstance(windows.get("shard_part"), Mapping) and isinstance(bases, list) and (
                     merged is None or "_bases" in merged
                 ):
-                    merged = aggregate.setdefault("template_windows", {"_bases": {}})
+                    merged = aggregate.setdefault("template_windows", {"_bases": {}, "_runs": 0})
                     for entry in bases:
-                        if isinstance(entry, Mapping) and isinstance(entry.get("base"), str):
-                            run, total = int(entry.get("run") or 0), int(entry.get("total") or 0)
-                            seen = merged["_bases"].setdefault(entry["base"], [0, total])
-                            seen[0] = min(max(seen[1], total), seen[0] + max(0, run))
-                            seen[1] = max(seen[1], total)
-                    merged["run"] = sum(run for run, _total in merged["_bases"].values())
-                    merged["total"] = sum(total for _run, total in merged["_bases"].values())
+                        if not (isinstance(entry, Mapping) and isinstance(entry.get("base"), str)):
+                            continue
+                        total = max(0, int(entry.get("total") or 0))
+                        ran = {
+                            int(index) for index in entry.get("windows_run") or ()
+                            if isinstance(index, int) and not isinstance(index, bool)
+                            and 0 <= index < total
+                        }
+                        seen = merged["_bases"].setdefault(entry["base"], [set(), total])
+                        seen[0] |= ran
+                        seen[1] = max(seen[1], total)
+                        merged["_runs"] += len(ran)
+                    # Each base's windows were read against its total, so no base counts more.
+                    merged["run"] = sum(len(ran) for ran, _total in merged["_bases"].values())
+                    merged["total"] = sum(total for _ran, total in merged["_bases"].values())
                 elif merged is None or "_bases" not in merged and (
                     windows["total"], windows["run"],
                 ) > (merged["total"], merged["run"]):
@@ -2022,12 +2031,15 @@ def _reconciled_family_coverage(aggregate: Mapping[str, Any]) -> dict[str, Any]:
     windows = row.get("template_windows")
     if isinstance(windows, Mapping) and "_bases" in windows:
         # The shards' summed per-base runs, as a direct Scan lists them.
+        repeated = max(0, int(windows.get("_runs") or 0) - int(windows["run"]))
         row["template_windows"] = {
             "run": int(windows["run"]), "total": int(windows["total"]),
             "bases": [
-                {"base": base, "run": run, "total": total}
-                for base, (run, total) in windows["_bases"].items()
+                {"base": base, "run": len(ran), "total": total}
+                for base, (ran, total) in windows["_bases"].items()
             ],
+            # Pairs more than one shard ran: run counts each once.
+            **({"repeated_pairs": repeated} if repeated else {}),
         }
     if (
         str(row.get("reason") or "") == "zero_attempts"

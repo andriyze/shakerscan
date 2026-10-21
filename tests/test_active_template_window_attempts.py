@@ -547,52 +547,53 @@ def _window_index(bundle_dir):
 
 
 def _run_shards(monkeypatch, bundle_dir, children, *, target=None):
+    """Endpoint children at shard indices 1..n behind the global child at index 0."""
     receipts = []
-    for index, paths in enumerate(children):
+    for index, paths in enumerate(children, start=1):
         child = _Host(paths, target=target)
         receipts.append((child, child.run(
             monkeypatch, bundle_dir,
             child.action("active.templates.r01", start=0, count=len(child.endpoints.entries), windows=False),
-            options=_shard(index, len(children)),
+            options=_shard(index, len(children) + 1),
         )))
     return receipts
 
 
-def test_two_shards_split_the_pairs_and_never_run_one_twice(monkeypatch, bundle):
-    """Shard k of n runs index p * n + k: shard 0 windows 0, 2, 4; shard 1 windows 1, 3."""
+def test_two_endpoint_children_start_apart_around_the_windows(monkeypatch, bundle):
+    """Child 1 starts at window 0, child 2 at window 19 (39 // 2)."""
     index_of = _window_index(bundle)
     receipts = _run_shards(monkeypatch, bundle, [("/a", "/b", "/c"), ("/d", "/e")])
     ran = [
         (call["url"], index_of[call["template_ids"]])
         for child, _receipt in receipts for call in child.calls
     ]
-    assert len(ran) == len(set(ran)) == 5
-    assert [window for _url, window in ran] == [0, 2, 4, 1, 3]
+    assert [window for _url, window in ran] == [0, 1, 2, 19, 20]
+    assert len(ran) == len(set(ran))
     assert {url for url, _window in ran} == {"https://app.example.test/"}
     records = [_windows_record(receipt) for _child, receipt in receipts]
     assert [record["shard_part"] for record in records] == [
-        {"index": 0, "count": 2}, {"index": 1, "count": 2},
+        {"index": 1, "count": 3}, {"index": 2, "count": 3},
     ]
-    assert all("repeated_across_shards" not in record for record in records)
 
 
-def test_three_shards_together_run_every_pair_once_and_the_rest_is_past_the_bases(monkeypatch, bundle):
+def test_each_child_alone_runs_its_endpoints_worth_and_children_may_overlap(monkeypatch, bundle):
+    """Three children of 20 endpoints start at 0, 13 and 26: each runs 20 distinct windows (as
+    2.11.0 gave it), together they run all 39, and 21 pairs ran twice."""
     index_of = _window_index(bundle)
     children = [tuple(f"/s{shard}-{index}" for index in range(20)) for shard in range(3)]
     receipts = _run_shards(monkeypatch, bundle, children)
-    ran = [index_of[call["template_ids"]] for child, _receipt in receipts for call in child.calls]
-    assert sorted(ran) == list(range(39))
-    past = [
-        item for _child, receipt in receipts for item in receipt.observations
-        if item.get("kind") == "candidate_inapplicable"
-    ]
-    assert len(past) == 60 - 39
-    assert {item["reason"] for item in past} == {"template_window_past_bases"}
+    per_child = [[index_of[call["template_ids"]] for call in child.calls] for child, _ in receipts]
+    assert all(len(windows) == len(set(windows)) == 20 for windows in per_child)
+    union = set().union(*per_child)
+    assert union == set(range(39))
+    assert sum(map(len, per_child)) - len(union) == 21
+    assert per_child[2][:3] == [26, 27, 28] and per_child[2][13] == 0
 
 
 def test_shards_map_over_the_bindings_origins_whatever_endpoints_each_holds(monkeypatch, bundle):
-    """A shard holding only the first origin's endpoints still maps index i to the same base as a
-    sibling holding the second origin's: both use the binding's allowed origins."""
+    """With two origins there are 78 pairs: child 1 starts at the first origin's window 0, child 2
+    at the second origin's. Both map over the binding's allowed origins, so both list the same
+    bases whatever part of the endpoints each holds."""
     target = TargetBinding(
         target_id="target-1", target_kind="web", canonical_host="app.example.test",
         allowed_origins=("https://app.example.test", "https://app.example.test:8443"),
@@ -604,10 +605,11 @@ def test_shards_map_over_the_bindings_origins_whatever_endpoints_each_holds(monk
     index_of = _window_index(bundle)
     ran = [(call["url"], index_of[call["template_ids"]]) for child, _ in receipts for call in child.calls]
     assert len(ran) == len(set(ran)) == 60
+    assert {url for url, _ in ran[:30]} == {"https://app.example.test/"}
+    assert {url for url, _ in ran[30:]} == {"https://app.example.test:8443/"}
     assert [record["base"] for record in _windows_record(receipts[0][1])["bases"]] == [
         "https://app.example.test/", "https://app.example.test:8443/",
     ] == [record["base"] for record in _windows_record(receipts[1][1])["bases"]]
-    assert sum(len(entry["windows_run"]) for _c, r in receipts for entry in _windows_record(r)["bases"]) == 60
 
 
 def test_the_parallel_discovery_child_and_a_direct_scan_hold_no_shard_part(monkeypatch, bundle):
@@ -674,17 +676,18 @@ def test_a_2_11_0_attempt_at_an_endpoints_path_is_not_credited_to_the_base(monke
 
 
 def test_a_shard_slice_in_flight_across_the_upgrade_resumes_and_never_resends(monkeypatch, bundle):
-    """Shard 1 of 2 had run its position 0 as window 0 (the old mapping); it now maps to index 1.
-    The attempt is resumed, nothing is re-sent for it, and its window counts as legacy."""
+    """Endpoint child 2 of 2 had run its position 0 as window 0 (the 2.11.0 mapping); it now maps
+    to window 19. The attempt is resumed, nothing is re-sent for it, and its window counts as
+    legacy, not as window 19 at the base."""
     host = _Host(("/d", "/e"))
     action = host.action("active.templates.r01", start=0, count=2, windows=False)
     _legacy_checkpoint(host, action, 0, 0)
-    receipt = host.run(monkeypatch, bundle, action, options=_shard(1))
+    receipt = host.run(monkeypatch, bundle, action, options=_shard(2, 3))
     index_of = _window_index(bundle)
-    assert [index_of[call["template_ids"]] for call in host.calls] == [3]
+    assert [index_of[call["template_ids"]] for call in host.calls] == [20]
     record = _windows_record(receipt)
     assert record["legacy_windows_run"] == [0]
-    assert record["bases"] == [{"base": "https://app.example.test/", "windows_run": [3]}]
+    assert record["bases"] == [{"base": "https://app.example.test/", "windows_run": [20]}]
 
 
 TWO_ORIGINS = TargetBinding(

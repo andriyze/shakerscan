@@ -444,11 +444,12 @@ def test_a_sharded_scan_reports_how_much_of_the_allowlist_its_shards_ran():
     )
     reports = {scan_id: _canonical_child_report(plan) for scan_id, plan in plans.items()}
     base = "https://app.example.test/"
+    # Child 1 ran windows 0-2, child 2 windows 2-3 and an out-of-range index it cannot have run.
     for scan_id, windows in zip(sorted(plans)[1:], (
-        {"run": 3, "total": 39, "shard_part": {"index": 0, "count": 2},
-         "bases": [{"base": base, "run": 3, "total": 39}]},
-        {"run": 2, "total": 39, "shard_part": {"index": 1, "count": 2},
-         "bases": [{"base": base, "run": 2, "total": 39}]},
+        {"run": 3, "total": 39, "shard_part": {"index": 1, "count": 3},
+         "bases": [{"base": base, "run": 3, "total": 39, "windows_run": [0, 1, 2]}]},
+        {"run": 2, "total": 39, "shard_part": {"index": 2, "count": 3},
+         "bases": [{"base": base, "run": 3, "total": 39, "windows_run": [2, 3, 45]}]},
     )):
         reports[scan_id]["coverage"] = {"family_coverage": [{
             "family": "nuclei_active", "selected": True, "required": True,
@@ -459,8 +460,10 @@ def test_a_sharded_scan_reports_how_much_of_the_allowlist_its_shards_ran():
         record, child_results=reports, child_statuses=dict.fromkeys(plans, "completed"),
     )
     family, = merged["family_coverage"]
-    # The shards ran disjoint pairs, so their per-base runs add up.
-    expected = {"run": 5, "total": 39, "bases": [{"base": base, "run": 5, "total": 39}]}
+    # Distinct pairs count once (window 2 ran twice), never more than the base's windows.
+    expected = {
+        "run": 4, "total": 39, "bases": [{"base": base, "run": 4, "total": 39}], "repeated_pairs": 1,
+    }
     assert family["template_windows"] == expected
     assert summarize_parallel_action_coverage(merged)["family_coverage"][0]["template_windows"] == expected
 
@@ -513,6 +516,11 @@ def test_a_shards_short_base_is_not_held_to_every_window():
     _report_body, family = _report(FULL, windows=True, bases=_first_base_only, shared=True)
     assert family["coverage_status"] == "complete"
     assert family["template_windows"]["shard_part"] == {"index": 0, "count": 2}
+    # A shard lists the windows it ran at each base, for the parallel merge to union.
+    assert family["template_windows"]["bases"] == [
+        {"base": FIRST, "run": 39, "total": 39, "windows_run": list(range(39))},
+        {"base": SECOND, "run": 0, "total": 39, "windows_run": []},
+    ]
 
 
 def test_a_slice_whose_every_position_is_past_the_bases_ran_nothing_by_design():
