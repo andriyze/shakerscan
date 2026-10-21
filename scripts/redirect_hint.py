@@ -39,6 +39,8 @@ def shell_word(value: object) -> str:
 def _host(netloc: str, hostname: str) -> str | None:
     """``hostname`` written back as a DNS name, IPv4 address or bracketed IPv6 address."""
     if netloc.rsplit("@", 1)[-1].startswith("["):
+        if "%" in hostname:
+            return None  # a zone id is local to one machine, and free text
         try:
             return f"[{ipaddress.IPv6Address(hostname).compressed}]"
         except ValueError:
