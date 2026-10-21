@@ -54,6 +54,7 @@ from .work_manifests import (
 from .external_process import (
     ACTIVE_TEMPLATE_PLANNED_GET_ONLY_WINDOWS,
     ACTIVE_TEMPLATE_PLANNED_WINDOWS,
+    ACTIVE_TEMPLATE_WINDOW_RETRY_SECONDS,
     batch_attempt_floor,
     batch_attempt_capacity,
     batch_row_cost_class,
@@ -405,6 +406,48 @@ def _affordable_batch_tier(
     # candidates at the floor rather than skipping them; a ledger too small even for
     # that keeps the floor shape and fails admission honestly.
     return _floor_batch_shape(capability_name)
+
+
+_WINDOW_RETRY_DIMENSIONS = ("tool_wall_seconds", "http_requests", "state_changing_requests")
+
+
+def window_retry_hold(
+    slice_budget: Mapping[str, int],
+    *,
+    limits: Mapping[str, int],
+    reserved: Mapping[str, int],
+    slices: int,
+) -> dict[str, int]:
+    """What a slice of further template windows holds for one retry of a window cut off.
+
+    The retry runs at the rate the slice's positions were planned at (requests over wall), so it
+    holds requests -- and, when the slice holds mutations, as many state-changing requests -- for
+    its wall at that rate, not wall alone: a wall-only retry in a two-position final slice was
+    shortened to the few requests the slice had left and then not run at all. Each dimension is
+    capped at what the ledger has left once the lane's ``slices`` slices are paid, shared between
+    them, so the retry never prices a slice out; a ledger that cannot fund it holds none.
+    """
+    count = max(1, int(slices))
+    wall_share = int(slice_budget.get("tool_wall_seconds") or 0)
+    requests_share = int(slice_budget.get("http_requests") or 0)
+    if wall_share <= 0 or requests_share <= 0:
+        return {}
+    rate = max(1, requests_share // wall_share)
+
+    def spare(name: str) -> int:
+        left = int(limits.get(name, 0)) - int(reserved.get(name, 0)) - count * int(slice_budget[name])
+        return max(0, left) // count
+
+    wall = min(ACTIVE_TEMPLATE_WINDOW_RETRY_SECONDS, spare("tool_wall_seconds"))
+    request_names = [
+        name for name in ("http_requests", "state_changing_requests")
+        if int(slice_budget.get(name) or 0) > 0
+    ]
+    requests = min([wall * rate, *(spare(name) for name in request_names)])
+    wall = min(wall, requests // rate)
+    if wall <= 0 or requests <= 0:
+        return {}
+    return {"tool_wall_seconds": wall, **{name: requests for name in request_names}}
 
 
 def _floor_batch_shape(capability_name: str) -> tuple[int, Mapping[str, int]]:
@@ -1588,6 +1631,13 @@ class ScanActionPlanCompiler:
                     )
                     for name, amount in maximum.items()
                 }
+                window_retry = blueprint.capability_args.get("window_retry_hold")
+                if blueprint.capability_name == "templates.active_batch" and isinstance(
+                    window_retry, Mapping,
+                ):
+                    for name, amount in window_retry.items():
+                        if name in budget and isinstance(amount, int) and amount > 0:
+                            budget[name] = int(budget[name]) + int(amount)
                 if blueprint.capability_name == "templates.passive_batch":
                     budget["http_requests"] = max(
                         int(budget.get("http_requests", 0)),
@@ -1965,6 +2015,12 @@ class ScanActionPlanCompiler:
                 raise ScanActionPlanError(
                     f"required batch action {base_action_id} exceeds plan graph capacity"
                 )
+            # A slice of further template windows also holds one retry of a window its wall
+            # cut off, from what the ledger has left once this lane's slices are paid.
+            window_retry = (
+                window_retry_hold(batch_budget, limits=limits, reserved=reserved, slices=count)
+                if work_count != entry_count else {}
+            )
             for batch_index in range(count):
                 start = manifest_offset + batch_index * batch_size
                 slice_count = (
@@ -1996,6 +2052,10 @@ class ScanActionPlanCompiler:
                         **(
                             {"endpoint_entries": int(entry_count)}
                             if work_count != entry_count else {}
+                        ),
+                        **(
+                            {"window_retry_hold": dict(window_retry)}
+                            if window_retry and start >= entry_count else {}
                         ),
                         "scheduled_batches": int(count),
                         "total_batches": int(total_batches),
