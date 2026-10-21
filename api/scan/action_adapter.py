@@ -276,6 +276,7 @@ from .external_process import (
     order_batch_rows_by_cost_class,
     template_attempt_wall,
     template_retry_wall,
+    window_template_attempt_hold,
 )
 from .continuation import (
     ScanContinuationError,
@@ -297,11 +298,15 @@ from .finalizer import _observed_url_key, finalize_scan_report
 from .nuclei_execution import (
     ACTIVE_TEMPLATE_WINDOWS_RECORD_KIND,
     TEMPLATE_WINDOW_BEYOND_ALLOWLIST,
+    TEMPLATE_WINDOW_PAST_BASES,
     active_template_window,
     active_template_window_applies,
     active_template_window_count,
     planned_endpoint_entries,
     resolve_active_scan_nuclei_options,
+    active_sweep_base,
+    active_sweep_bases,
+    active_sweep_index,
     window_position_candidate_id,
 )
 from .posture_findings import CORS_PROBE_ACTIONS, cors_probe_verdict
@@ -4122,14 +4127,76 @@ class DatabaseNeutralScanActionDispatcher:
         )
         allowlist = str(worker_template_options.get("template_ids") or "")
         windows_run: set[int] = set()
+        # The windows each sweep base finished, so coverage can say which base ran how many.
+        base_windows_run: dict[str, set[int]] = {}
+        legacy_windows_run: set[int] = set()
+
+        # Each sweep position names one (base, window) pair, index i: base i // W, window i % W.
+        # The bases are the target URL's directory, then other origins' roots
+        # (active_sweep_bases); a scheme-inferred Scan's target URL is the origin it selected. A
+        # direct Scan's position p is index p; a parallel endpoint child starts its positions at
+        # its own offset around the pairs (active_sweep_index). Every shard maps over the same
+        # bases, the binding's allowed origins, whatever part of the endpoints it holds.
+        if windowed and self.target.inferred_origins:
+            await self._restore_selected_origin()
+        shard = self.options.get("canonical_shard_authority")
+        shard_part = (
+            (int(shard["shard_index"]), int(shard["shard_count"]))
+            if isinstance(shard, Mapping) and not shard.get("parallel_discovery")
+            and isinstance(shard.get("shard_index"), int) and isinstance(shard.get("shard_count"), int)
+            and not isinstance(shard.get("shard_index"), bool)
+            and int(shard["shard_count"]) >= 2 and 0 <= int(shard["shard_index"]) < int(shard["shard_count"])
+            else None
+        )
+        unselected_origins = tuple(
+            origin for origin in self.target.inferred_origins
+            if not self.target_url.lower().startswith(origin.lower() + "/")
+        )
+        sweep_bases = active_sweep_bases(
+            self.target_url,
+            manifest.entries if shard_part is None else [
+                {"scheme": parsed.scheme, "host": parsed.hostname,
+                 "port": parsed.port or (443 if parsed.scheme == "https" else 80)}
+                for parsed in (urllib.parse.urlsplit(origin) for origin in self.target.allowed_origins)
+                if parsed.hostname
+            ],
+            exclude_origins=unselected_origins,
+        ) if windowed else ()
+        sweep_windows = active_template_window_count(allowlist) if windowed else 0
+
+        sweep_pairs = sweep_windows * len(sweep_bases)
+
+        def sweep_index(manifest_index: int) -> int:
+            """The pair a position runs (active_sweep_index); the pair count when past them."""
+            index = active_sweep_index(
+                manifest_index,
+                shard_index=shard_part[0] if shard_part else None,
+                shard_count=shard_part[1] if shard_part else None,
+                pair_count=sweep_pairs,
+            )
+            return sweep_pairs if index is None else index
+
+        def position_base(manifest_index: int) -> str | None:
+            return active_sweep_base(
+                sweep_index(manifest_index), bases=sweep_bases, window_count=sweep_windows,
+            ) if windowed else None
+
+        def window_skip_reason(manifest_index: int) -> str | None:
+            """Why a planned position runs nothing, or None when it names a pair of its own."""
+            if (
+                window_endpoints is not None and manifest_index >= window_endpoints
+                and not (windowed and active_template_window_applies(
+                    allowlist, manifest_index, endpoint_entries=window_endpoints,
+                ))
+            ):
+                return TEMPLATE_WINDOW_BEYOND_ALLOWLIST
+            if windowed and position_base(manifest_index) is None:
+                return TEMPLATE_WINDOW_PAST_BASES
+            return None
 
         def window_applies(manifest_index: int) -> bool:
-            """Whether a planned position names a window (an endpoint's own always does)."""
-            if window_endpoints is None or manifest_index < window_endpoints:
-                return True
-            return windowed and active_template_window_applies(
-                allowlist, manifest_index, endpoint_entries=window_endpoints,
-            )
+            """Whether a planned position names a (base, window) pair no other position runs."""
+            return window_skip_reason(manifest_index) is None
 
         load_attempts = getattr(self.backend, "load_batch_attempts", None)
         checkpoint_attempt = getattr(self.backend, "checkpoint_batch_attempt", None)
@@ -4224,6 +4291,23 @@ class DatabaseNeutralScanActionDispatcher:
         # pack inside its share needs the pack's latency bound (template_retry_wall), and its
         # retry holds that much of what the batch has left.
         retry_partial_timeouts = action.capability_name == "templates.passive_batch"
+        # A further template window (a thorough or deep slice's positions) the wall cut off is
+        # retried even when it already reported a match: its other templates never ran, and
+        # zoo d0a8d43c8 lost one or two windows on 16 of 57 hosts that way. The slice holds
+        # the retry's wall and requests beside its positions (``window_retry_hold``); the
+        # positions' planned shares are what the slice holds without it.
+        retry_cut_off = retry_partial_timeouts or window_endpoints is not None
+        raw_retry = action.capability_args.get("window_retry_hold")
+        positions_budget = {
+            name: int(amount) - (
+                int(raw_retry[name])
+                if window_endpoints is not None and isinstance(raw_retry, Mapping)
+                and isinstance(raw_retry.get(name), int) and not isinstance(raw_retry[name], bool)
+                and 0 < int(raw_retry[name]) < int(amount)
+                else 0
+            )
+            for name, amount in action.requested_budget.items()
+        }
         empty_timeouts: dict[str, int] = {}
         # The first attempt each retried endpoint was cut off in, and the redacted URL each
         # endpoint was attempted at, so an endpoint that never finished can be named.
@@ -4241,6 +4325,7 @@ class DatabaseNeutralScanActionDispatcher:
         attempt_log: list[tuple[str, int, bool, bool]] = []
         work = [(manifest_index, row, 0) for manifest_index, row in rows]
         template_windows: dict[str, dict[str, int]] = {}
+        candidate_bases: dict[str, str] = {}
         first_pass = len(work)
         position = 0
         # SQLi candidates of one slice may run concurrently, inside the slice's reservation and
@@ -4410,6 +4495,10 @@ class DatabaseNeutralScanActionDispatcher:
                 await checkpoint_attempt(action.action_id, attempt)
             if candidate_id in template_windows and result.status in _BATCH_SUCCESS_STATUSES:
                 windows_run.add(int(template_windows[candidate_id]["index"]))
+                if candidate_id in candidate_bases:
+                    base_windows_run.setdefault(candidate_bases[candidate_id], set()).add(
+                        int(template_windows[candidate_id]["index"])
+                    )
             if retry_round:
                 retried += 1
                 if result.observations:
@@ -4425,7 +4514,7 @@ class DatabaseNeutralScanActionDispatcher:
                 bool(getattr(result, "timed_out", False)) or result.status == "timed_out"
             )
             needs_retry = retry_empty_timeouts and result_timed_out and (
-                not result.observations or (retry_partial_timeouts and result_wall_killed)
+                not result.observations or (retry_cut_off and result_wall_killed)
             )
             if needs_retry and not retry_round:
                 cut_off_attempts[candidate_id] = attempt_id
@@ -4587,22 +4676,26 @@ class DatabaseNeutralScanActionDispatcher:
                         "reason": "path_segment_candidate",
                     })
                     continue
-                if not window_applies(manifest_index):
-                    # A planned window past the allowlist's own windows (a GET-only allowlist
-                    # has fewer) would repeat one already run on this host: nothing is sent.
-                    inapplicable += 1
-                    observations.append({
-                        "kind": "candidate_inapplicable",
-                        "candidate_id": batch_candidate_id(row, manifest_index),
-                        "family": family,
-                        "reason": TEMPLATE_WINDOW_BEYOND_ALLOWLIST,
-                    })
-                    continue
                 candidate_id = batch_candidate_id(row, manifest_index)
                 attempt_key = f"{manifest_digest}:{family}:{candidate_id}"
                 if retry_round:
                     attempt_key += f":retry:{retry_round}"
                 attempt_id = hashlib.sha256(attempt_key.encode()).hexdigest()
+                # A checkpointed attempt is resumed before the position is judged: an attempt a
+                # 2.11.0 worker (or a shard under an earlier mapping) already ran keeps its
+                # records and is never re-sent, whatever the position maps to now.
+                if attempt_id not in completed and not window_applies(manifest_index):
+                    # A planned position whose (base, window) pair another position already
+                    # runs -- past the allowlist's own windows, or past every base's windows
+                    # -- would repeat it on this host: nothing is sent.
+                    inapplicable += 1
+                    observations.append({
+                        "kind": "candidate_inapplicable",
+                        "candidate_id": candidate_id,
+                        "family": family,
+                        "reason": window_skip_reason(manifest_index),
+                    })
+                    continue
                 route_identity = str(row.get("candidate_id") or row.get("route_id") or "")
                 carry = None if retry_round or attempt_id in completed else (
                     carried[attempt_id] if attempt_id in carried
@@ -4641,7 +4734,7 @@ class DatabaseNeutralScanActionDispatcher:
                     )
                     prior_empty = retry_empty_timeouts and prior_timed_out and (
                         _no_tool_output(prior.get("observations") or ())
-                        or (retry_partial_timeouts and prior_wall_killed)
+                        or (retry_cut_off and prior_wall_killed)
                     )
                     if prior_empty and not retry_round:
                         cut_off_attempts[candidate_id] = attempt_id
@@ -4649,7 +4742,19 @@ class DatabaseNeutralScanActionDispatcher:
                         retried_with_output.add(candidate_id)
                     prior_window = prior.get("template_window")
                     if prior_status in _BATCH_SUCCESS_STATUSES and isinstance(prior_window, Mapping):
-                        windows_run.add(int(prior_window.get("index") or 0))
+                        prior_index = int(prior_window.get("index") or 0)
+                        windows_run.add(prior_index)
+                        resumed_base = position_base(manifest_index)
+                        if (
+                            resumed_base is not None and prior_window.get("base") == resumed_base
+                            and sweep_windows and prior_index == sweep_index(manifest_index) % sweep_windows
+                        ):
+                            base_windows_run.setdefault(resumed_base, set()).add(prior_index)
+                        elif windowed:
+                            # Run by an earlier mapping -- a 2.11.0 worker at an endpoint's
+                            # path, or a shard before shards split the pairs: kept, never
+                            # re-sent, and not credited to a base it did not run at.
+                            legacy_windows_run.add(prior_index)
                     prior_wall = int(dict(prior.get("budget_consumed") or {}).get(
                         "tool_wall_seconds", 0,
                     ) or 0)
@@ -4704,9 +4809,13 @@ class DatabaseNeutralScanActionDispatcher:
                                 "injection_field": str(resolved["field_name"]),
                             }
                     else:
-                        execution_target = execution_url_for_manifest_endpoint(
-                            manifest, manifest_index if window_endpoints is None
-                            else manifest_index % window_endpoints,
+                        # An active sweep runs each window at a base, never under a discovered
+                        # endpoint's path (active_sweep_bases). A passive pack and a verify
+                        # Scan's named checks run at each endpoint.
+                        execution_target = (
+                            str(position_base(manifest_index))
+                            if windowed
+                            else execution_url_for_manifest_endpoint(manifest, manifest_index)
                         )
                     # This entry and every later one that will actually be funded.
                     remaining_attempts = 1 + sum(1 for entry in work[position:] if needs_hold(entry))
@@ -4775,7 +4884,7 @@ class DatabaseNeutralScanActionDispatcher:
                     }
                     if tool == "nuclei" and sub_budget.get("tool_wall_seconds"):
                         planned_share = (
-                            int(action.requested_budget.get("tool_wall_seconds") or 0)
+                            int(positions_budget.get("tool_wall_seconds") or 0)
                             // max(1, first_pass)
                         )
                         passive_pack = action.capability_name == "templates.passive_batch"
@@ -4796,6 +4905,13 @@ class DatabaseNeutralScanActionDispatcher:
                                 ),
                             )
                         )
+                        if window_endpoints is not None:
+                            sub_budget = window_template_attempt_hold(
+                                sub_budget, remaining_budget=remaining_budget,
+                                remaining_attempts=remaining_attempts,
+                                requested_budget=positions_budget,
+                                first_pass=first_pass, planned_wall_share=planned_share,
+                            )
                     if body_request:
                         # Every request a body attempt sends is a mutation, so the body scanner
                         # requires state_changing_requests >= http_requests (capabilities/scanner.py).
@@ -4944,10 +5060,16 @@ class DatabaseNeutralScanActionDispatcher:
                         if (worker_template_options.get("template_profile") == "active"
                                 and verify_selection is None):
                             window = active_template_window(
-                                str(worker_template_options.get("template_ids") or ""), manifest_index,
+                                str(worker_template_options.get("template_ids") or ""),
+                                sweep_index(manifest_index),
                             )
                             scanner_options["template_ids"] = window.template_ids
                             template_windows[candidate_id] = window.record()
+                            if position_base(manifest_index) is not None:
+                                candidate_bases[candidate_id] = str(position_base(manifest_index))
+                                # The base is checkpointed with the window, so a resume credits
+                                # the attempt only to the base it actually ran at.
+                                template_windows[candidate_id]["base"] = candidate_bases[candidate_id]
                     elif tool == "dalfox":
                         scanner_options["severity"] = "high"
                         args["severity"] = "high"
@@ -5108,6 +5230,18 @@ class DatabaseNeutralScanActionDispatcher:
                 "family": family,
                 "windows_run": sorted(windows_run),
                 "window_count": active_template_window_count(allowlist),
+                # Every base the sweep maps positions to, in order, and the windows each
+                # finished: a second origin that ran 11 of 39 windows is not "39 of 39".
+                "bases": [
+                    {"base": base, "windows_run": sorted(base_windows_run.get(base, ()))}
+                    for base in sweep_bases
+                ],
+                # A shard's part of the pairs: its siblings run the others.
+                **({"shard_part": {"index": shard_part[0], "count": shard_part[1]}}
+                   if shard_part is not None else {}),
+                # Windows resumed from attempts an earlier mapping ran (a 2.11.0 worker at an
+                # endpoint's path): kept, not counted as run at any base.
+                **({"legacy_windows_run": sorted(legacy_windows_run)} if legacy_windows_run else {}),
             })
         for candidate_id, held in deferred_errors.items():
             if candidate_id not in recovered:

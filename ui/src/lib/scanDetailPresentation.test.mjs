@@ -694,3 +694,16 @@ test('the release line names the severity bar its count is against', () => {
   assert.equal(releaseLine({ decision: 'block', blocking_count: 120, blocking_findings: blockers.slice(0, 2) }, 's', 1).text,
     'Release is blocked by 120 unresolved critical findings on this target.')
 })
+
+test('active templates short of every window at a scanned origin read as an operator label', () => {
+  const result = scanResultPresentation({
+    result: {
+      findings: [],
+      result: {},
+      coverage: { reasons: ['template_windows_incomplete_on_origin'], family_coverage: [] },
+    },
+  }, { band: 'limited', label: 'Limited coverage' })
+  assert.deepEqual(result.coverageGapReasons, [
+    'Active templates did not all run at one of the scanned origins (the target or another origin the scan discovered), so some checks never ran there',
+  ])
+})

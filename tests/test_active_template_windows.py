@@ -18,13 +18,19 @@ from dataclasses import replace
 
 import pytest
 
-from api.scan.action_plan import ScanAction, ScanActionPlan, ScanActionPlanCompiler
-from api.scan.finalizer import finalize_scan_report
-from api.scan.capability_result import CapabilityResultStatus
+from api.scan.action_plan import (
+    ScanAction,
+    ScanActionPlan,
+    ScanActionPlanCompiler,
+    window_retry_hold,
+)
+from api.scan.capability_result import CapabilityResultReference, CapabilityResultStatus
 from api.scan.external_process import (
     ACTIVE_TEMPLATE_PLANNED_GET_ONLY_WINDOWS,
     ACTIVE_TEMPLATE_PLANNED_WINDOWS,
+    ACTIVE_TEMPLATE_WINDOW_RETRY_SECONDS,
 )
+from api.scan.finalizer import finalize_scan_report
 from tests.scan_round_fixtures import (
     admitted_round_fixture,
     appended_actions,
@@ -33,7 +39,9 @@ from tests.scan_round_fixtures import (
     settle_round,
 )
 from tests.test_scan_finalizer import _result_with_observation_count
-from tests.test_scan_orchestrator import SCAN_ID, _action as plan_action
+from tests.test_scan_orchestrator import SCAN_ID
+from tests.test_scan_orchestrator import _action as plan_action
+from tests.test_scan_orchestrator import _result as _orchestrator_result
 
 NUCLEI_ONLY = ("recon", "nuclei_passive", "nuclei_active")
 POSITION = {"http_requests": 120, "state_changing_requests": 120, "tool_wall_seconds": 45}
@@ -90,13 +98,52 @@ def test_a_two_endpoint_host_plans_all_39_windows_over_three_rounds(profile):
         )
     )
     assert covered == list(range(39))
-    # Each position holds what one endpoint attempt always held.
+    # Each position holds what one endpoint attempt always held; a slice of further windows also
+    # holds one retry of a window its wall cut off: up to 135 s and the requests (and mutations)
+    # that wall paces at the positions' 2 requests/s, as far as the ledger leaves them (this
+    # fixture's mutation allowance trims the last one). The first round's slice holds no retry.
+    assert "window_retry_hold" not in r01.capability_args
     for number in planned:
         for action in planned[number]:
             count = action.capability_args["slice"]["count"]
+            retry = dict(action.capability_args.get("window_retry_hold") or {})
+            if action.capability_args["slice"]["start"] >= 2:
+                assert 45 < retry["tool_wall_seconds"] <= ACTIVE_TEMPLATE_WINDOW_RETRY_SECONDS
+                assert retry["http_requests"] == retry["state_changing_requests"] == (
+                    2 * retry["tool_wall_seconds"]
+                )
+            else:
+                assert retry == {}
             assert dict(action.requested_budget) == {
-                name: amount * count for name, amount in POSITION.items()
+                name: amount * count + retry.get(name, 0) for name, amount in POSITION.items()
             }
+
+
+def test_a_window_retry_hold_is_capped_by_what_the_lane_leaves_of_the_ledger():
+    shape = {"http_requests": 3960, "state_changing_requests": 3960, "tool_wall_seconds": 1485}
+    roomy = {"http_requests": 60_000, "state_changing_requests": 6_000, "tool_wall_seconds": 10_800}
+    assert window_retry_hold(shape, limits=roomy, reserved={}, slices=1) == {
+        "tool_wall_seconds": ACTIVE_TEMPLATE_WINDOW_RETRY_SECONDS,
+        "http_requests": 270, "state_changing_requests": 270,
+    }
+    # Mutations left after the lane's two slices and the required work: 100 a slice, so the
+    # retry holds 100 requests and the 50 s they pace at 2 requests/s.
+    tight = {**roomy, "state_changing_requests": 2 * 3960 + 200 + 300}
+    assert window_retry_hold(shape, limits=tight, reserved={"state_changing_requests": 300}, slices=2) == {
+        "tool_wall_seconds": 50, "http_requests": 100, "state_changing_requests": 100,
+    }
+    # Wall left: 40 s, so 80 requests.
+    short = {**roomy, "tool_wall_seconds": 1485 + 40}
+    assert window_retry_hold(shape, limits=short, reserved={}, slices=1) == {
+        "tool_wall_seconds": 40, "http_requests": 80, "state_changing_requests": 80,
+    }
+    # Nothing left in any one dimension: no retry hold at all.
+    assert window_retry_hold(shape, limits={**roomy, "tool_wall_seconds": 1485}, reserved={}, slices=1) == {}
+    # A GET-only slice holds no mutations for its retry either.
+    get_only = {"http_requests": 3960, "tool_wall_seconds": 1485}
+    assert window_retry_hold(get_only, limits=roomy, reserved={}, slices=1) == {
+        "tool_wall_seconds": 135, "http_requests": 270,
+    }
 
 
 
@@ -193,7 +240,7 @@ def _report_slice(action_id, ordinal, *, start, count, windows, required):
     )
 
 
-def _report(slices, *, windows):
+def _report(slices, *, windows, shared=False, bases=None, legacy=()):
 
     actions = [
         _report_slice(f"active.templates.r{number:02d}", index, start=start, count=count,
@@ -216,7 +263,10 @@ def _report(slices, *, windows):
                 "candidate_id": f"endpoint-{position % 2}",
             } for position in range(start, start + count)),
             {"kind": "active_template_windows", "family": "nuclei_active",
-             "windows_run": list(range(start, start + count)), "window_count": 39},
+             "windows_run": list(range(start, start + count)), "window_count": 39,
+             **({"shard_part": {"index": 0, "count": 2}} if shared else {}),
+             **({"legacy_windows_run": list(legacy)} if legacy else {}),
+             **({"bases": bases(start, count)} if bases else {})},
         )
     results = {
         action.action_id: _result_with_observation_count(action, len(observations[action.action_id]))
@@ -240,14 +290,31 @@ def test_a_thorough_host_whose_later_windows_never_ran_is_partial():
 
 
 def test_a_thorough_host_that_ran_every_window_is_complete():
-    report, family = _report([(1, 0, 2), (2, 2, 33), (3, 35, 4)], windows=True)
+    _report_body, family = _report([(1, 0, 2), (2, 2, 33), (3, 35, 4)], windows=True)
     assert family["coverage_status"] == "complete"
     assert family["template_windows"] == {"run": 39, "total": 39}
     assert family["manifest_candidates"] == 39 and family["unscheduled_candidates"] == 0
 
 
+def test_a_shards_report_names_its_part_of_the_pairs():
+    _report_body, family = _report([(1, 0, 2)], windows=False, shared=True)
+    assert family["coverage_status"] == "complete"
+    assert family["template_windows"] == {"run": 2, "total": 39, "shard_part": {"index": 0, "count": 2}}
+
+
+def test_windows_an_earlier_mapping_ran_are_listed_and_not_counted_at_a_base():
+    _report_body, family = _report(
+        [(1, 0, 2)], windows=False, legacy=(6,),
+        bases=lambda start, count: [{"base": "https://app.example.test/", "windows_run": [0, 1]}],
+    )
+    assert family["template_windows"] == {
+        "run": 2, "total": 39, "legacy_windows_run": 1,
+        "bases": [{"base": "https://app.example.test/", "run": 2, "total": 39}],
+    }
+
+
 def test_a_balanced_host_keeps_its_status_and_now_says_how_much_of_the_allowlist_ran():
-    report, family = _report([(1, 0, 2)], windows=False)
+    _report_body, family = _report([(1, 0, 2)], windows=False)
     assert family["coverage_status"] == "complete"
     assert family["template_windows"] == {"run": 2, "total": 39}
 
@@ -348,13 +415,19 @@ def test_a_sharded_scan_reports_how_much_of_the_allowlist_its_shards_ran():
     """Shards keep one position per endpoint, so each runs the allowlist's leading windows on
     its own endpoints. The merged family row says how many windows ran, as a direct Scan's
     report does: those of the shard that ran the most, of the largest allowlist."""
-    from tests.test_parallel_action_compiler import (
-        _assignments, _authority, _canonical_child_report, _children, _parent_assignment,
-        _projected_plans, _target,
-    )
     from api.scan.parallel_compiler import (
-        ParallelActionPlanCompiler, merge_parallel_action_executions,
+        ParallelActionPlanCompiler,
+        merge_parallel_action_executions,
         summarize_parallel_action_coverage,
+    )
+    from tests.test_parallel_action_compiler import (
+        _assignments,
+        _authority,
+        _canonical_child_report,
+        _children,
+        _parent_assignment,
+        _projected_plans,
+        _target,
     )
 
     execution, parent = _authority()
@@ -370,7 +443,14 @@ def test_a_sharded_scan_reports_how_much_of_the_allowlist_its_shards_ran():
         parent_work_assignment=_parent_assignment(assignments),
     )
     reports = {scan_id: _canonical_child_report(plan) for scan_id, plan in plans.items()}
-    for scan_id, windows in zip(sorted(plans)[1:], ({"run": 3, "total": 39}, {"run": 2, "total": 39})):
+    base = "https://app.example.test/"
+    # Child 1 ran windows 0-2, child 2 windows 2-3 and an out-of-range index it cannot have run.
+    for scan_id, windows in zip(sorted(plans)[1:], (
+        {"run": 3, "total": 39, "shard_part": {"index": 1, "count": 3},
+         "bases": [{"base": base, "run": 3, "total": 39, "windows_run": [0, 1, 2]}]},
+        {"run": 2, "total": 39, "shard_part": {"index": 2, "count": 3},
+         "bases": [{"base": base, "run": 3, "total": 39, "windows_run": [2, 3, 45]}]},
+    )):
         reports[scan_id]["coverage"] = {"family_coverage": [{
             "family": "nuclei_active", "selected": True, "required": True,
             "coverage_status": "complete", "batch_actions": 1, "planned_candidates": windows["run"],
@@ -380,7 +460,121 @@ def test_a_sharded_scan_reports_how_much_of_the_allowlist_its_shards_ran():
         record, child_results=reports, child_statuses=dict.fromkeys(plans, "completed"),
     )
     family, = merged["family_coverage"]
-    assert family["template_windows"] == {"run": 3, "total": 39}
-    assert summarize_parallel_action_coverage(merged)["family_coverage"][0]["template_windows"] == {
-        "run": 3, "total": 39,
+    # Distinct pairs count once (window 2 ran twice), never more than the base's windows.
+    expected = {
+        "run": 4, "total": 39, "bases": [{"base": base, "run": 4, "total": 39}], "repeated_pairs": 1,
     }
+    assert family["template_windows"] == expected
+    assert summarize_parallel_action_coverage(merged)["family_coverage"][0]["template_windows"] == expected
+
+
+FIRST, SECOND = "https://app.example.test/", "https://app.example.test:8443/"
+FULL = [(1, 0, 2), (2, 2, 33), (3, 35, 4)]
+
+
+def _first_base_only(start, count):
+    return [
+        {"base": FIRST, "windows_run": list(range(start, start + count))},
+        {"base": SECOND, "windows_run": []},
+    ]
+
+
+def test_a_second_origin_short_of_windows_makes_a_thorough_sweep_partial():
+    """Run and total count (base, window) pairs. A thorough host whose second origin ran no
+    window read 39 of 39 complete; it is 39 of 78, partial, and says one base is short."""
+    report, family = _report(FULL, windows=True, bases=_first_base_only)
+    assert family["template_windows"] == {
+        "run": 39, "total": 78,
+        "bases": [{"base": FIRST, "run": 39, "total": 39}, {"base": SECOND, "run": 0, "total": 39}],
+    }
+    assert family["coverage_status"] == "partial"
+    assert family["reason"] == "template_windows_incomplete_on_origin"
+    assert family["template_windows_incomplete_bases"] == 1
+    assert report["result"]["grade_reliable"] is False
+    assert "template_windows_incomplete_on_origin" in report["coverage"]["reasons"]
+
+
+def test_a_single_origin_that_ran_every_window_reads_39_of_39_complete():
+    _report_body, family = _report(
+        FULL, windows=True,
+        bases=lambda start, count: [{"base": FIRST, "windows_run": list(range(start, start + count))}],
+    )
+    assert family["coverage_status"] == "complete"
+    assert family["template_windows"] == {
+        "run": 39, "total": 39, "bases": [{"base": FIRST, "run": 39, "total": 39}],
+    }
+
+
+def test_a_balanced_sweep_short_on_a_base_keeps_its_status():
+    _report_body, family = _report([(1, 0, 2)], windows=False, bases=_first_base_only)
+    assert family["coverage_status"] == "complete"
+    assert family["template_windows"]["run"] == 2 and family["template_windows"]["total"] == 78
+
+
+def test_a_shards_short_base_is_not_held_to_every_window():
+    """A shard runs its own part of the endpoints; its siblings run theirs."""
+    _report_body, family = _report(FULL, windows=True, bases=_first_base_only, shared=True)
+    assert family["coverage_status"] == "complete"
+    assert family["template_windows"]["shard_part"] == {"index": 0, "count": 2}
+    # A shard lists the windows it ran at each base, for the parallel merge to union.
+    assert family["template_windows"]["bases"] == [
+        {"base": FIRST, "run": 39, "total": 39, "windows_run": list(range(39))},
+        {"base": SECOND, "run": 0, "total": 39, "windows_run": []},
+    ]
+
+
+def test_a_slice_whose_every_position_is_past_the_bases_ran_nothing_by_design():
+    """A 215-endpoint host on one origin: slice 1 runs the 39 pairs, every position of the next
+    slices maps past the base. Such a slice is not an active verifier that attempted nothing."""
+    first = _report_slice("active.templates.r01", 0, start=0, count=39, windows=False, required=True)
+    later = _report_slice("active.templates.r01.001", 1, start=39, count=50, windows=False, required=False)
+    final = plan_action("finalize.report", 2, dependencies=(first.action_id, later.action_id))
+    plan = ScanActionPlan(
+        scan_id=SCAN_ID, execution_plan_digest="b" * 64, target_binding_digest="a" * 64,
+        actions=(first, later, final),
+    )
+    observations = {
+        first.action_id: (
+            *({
+                "kind": "candidate_attempt", "family": "nuclei_active", "status": "success",
+                "attempt_id": hashlib.sha256(f"p{position}".encode()).hexdigest(),
+                "candidate_id": f"endpoint-{position}",
+            } for position in range(39)),
+            {"kind": "active_template_windows", "family": "nuclei_active",
+             "windows_run": list(range(39)), "window_count": 39,
+             "bases": [{"base": "https://app.example.test/", "windows_run": list(range(39))}]},
+        ),
+        later.action_id: (
+            *({
+                "kind": "candidate_inapplicable", "family": "nuclei_active",
+                "candidate_id": f"endpoint-{position}", "reason": "template_window_past_bases",
+            } for position in range(39, 89)),
+            {"kind": "active_template_windows", "family": "nuclei_active",
+             "windows_run": [], "window_count": 39,
+             "bases": [{"base": "https://app.example.test/", "windows_run": []}]},
+        ),
+    }
+    results = {
+        action.action_id: _result_with_observation_count(action, len(observations[action.action_id]))
+        for action in (first, later)
+    }
+    # The first slice sent its windows' traffic; the later one sent nothing.
+    counted = results[first.action_id]
+    charged = _orchestrator_result(first, status=CapabilityResultStatus.SUCCESS, charge_full=True)
+    results[first.action_id] = CapabilityResultReference(**{
+        **charged.digest_material(), "receipt_ref": charged.receipt_ref,
+        "observation_manifest_ref": counted.observation_manifest_ref,
+    })
+    report = finalize_scan_report(
+        plan=plan, target_url="https://app.example.test", action_results=results,
+        observations=observations,
+        # Candidates exist, so a slice that sent nothing would otherwise read as attempting none.
+        work_manifest_references=({
+            "kind": "candidate", "manifest_id": "44444444-4444-4444-8444-444444444444",
+            "manifest_digest": "4" * 64, "entry_count": 3, "status": "complete",
+        },),
+    )
+    assert "active_verifier_zero_attempts" not in report["coverage"]["reasons"]
+    assert "active_verifier_zero_attempts" not in report["coverage"]["grade_reliability"]["reasons"]
+    family = next(row for row in report["coverage"]["family_coverage"] if row["family"] == "nuclei_active")
+    assert family["template_windows"]["run"] == 39 and family["template_windows"]["total"] == 39

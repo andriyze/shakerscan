@@ -194,6 +194,13 @@ ACTIVE_TEMPLATE_PLANNED_GET_ONLY_WINDOWS = 26
 ACTIVE_TEMPLATE_WINDOWS_RECORD_KIND = "active_template_windows"
 #: Why a planned position past the allowlist's own windows ran nothing.
 TEMPLATE_WINDOW_BEYOND_ALLOWLIST = "template_window_beyond_allowlist"
+#: Why a sweep position past every base's windows ran nothing: each (base, window) pair it could
+#: name already runs at an earlier position (a host with more endpoints than its bases have
+#: windows).
+TEMPLATE_WINDOW_PAST_BASES = "template_window_past_bases"
+#: Why a thorough or deep Scan's active templates read partial when a sweep base -- the target's
+#: or another origin's -- ran fewer than every window.
+TEMPLATE_WINDOWS_INCOMPLETE_ON_ORIGIN = "template_windows_incomplete_on_origin"
 
 
 # What a later passive-pack attempt is reserved once finished attempts on this target have
@@ -267,6 +274,63 @@ def template_retry_wall(
         else share * _TEMPLATE_ATTEMPT_SHARE_MULTIPLE
     )
     return max(0, min(need, int(remaining_wall)))
+
+
+#: The wall a slice of further template windows (positions past a host's endpoints) holds beside
+#: its per-position share: one retry of a window the wall cut off, at the share multiple
+#: (``template_retry_wall``). Zoo run d0a8d43c8: windows send 32-102 requests (2 per second
+#: at the 120-request / 45-second position hold), so a heavy window that opened a slice -- with
+#: no earlier attempt to have left it wall -- needed about 48 s of its 45 and was cut off; with
+#: a match already reported it was not retried, and 16 of 57 hosts lost one or two windows. The
+#: slice holds the requests (and mutations) this wall paces at the positions' rate beside it
+#: (``action_plan.window_retry_hold``): without them a final slice's retry was shortened to the
+#: few requests left and never ran.
+ACTIVE_TEMPLATE_WINDOW_RETRY_SECONDS = 45 * _TEMPLATE_ATTEMPT_SHARE_MULTIPLE
+
+
+def window_template_attempt_hold(
+    sub_budget: Mapping[str, int],
+    *,
+    remaining_budget: Mapping[str, int],
+    remaining_attempts: int,
+    requested_budget: Mapping[str, int],
+    first_pass: int,
+    planned_wall_share: int,
+) -> dict[str, int]:
+    """One template-window attempt's hold, paced at the rate its position was planned at.
+
+    nuclei's rate is the attempt's requests over its wall (``agent_tools``: requests // wall).
+    ``template_attempt_wall`` front-loads the wall earlier attempts left unspent, but the
+    request hold was still an even split of what was left, so a carried wall LOWERED the rate:
+    zoo d0a8d43c8 ran a 102-request window at 1 request/s on 74 s of wall (122 requests) and
+    cut it off. Requests are carried the same way as wall, up to what the wall paces at the
+    planned rate, and every later attempt keeps its planned request share. When the requests
+    left cannot keep that pace over the wall, the wall is shortened to what they can pace
+    (never below the planned share), so the rate never falls below the planned one. The hold
+    never exceeds what the slice has left and the rate never exceeds what the even split
+    already allowed, so the slice's request and state-changing ceilings and its pacing stand.
+    """
+    budget = dict(sub_budget)
+    wall = int(budget.get("tool_wall_seconds") or 0)
+    passes = max(1, int(first_pass))
+    later = max(0, int(remaining_attempts) - 1)
+    planned_requests = int(requested_budget.get("http_requests") or 0) // passes
+    rate = max(1, planned_requests // max(1, int(planned_wall_share)))
+    if wall <= 0 or planned_requests <= 0:
+        return budget
+    for name in ("http_requests", "state_changing_requests"):
+        if name not in budget:
+            continue
+        share = int(requested_budget.get(name) or 0) // passes
+        spare = int(remaining_budget.get(name, 0)) - later * share
+        budget[name] = max(int(budget[name]), min(spare, wall * rate))
+    paced = min(
+        int(budget[name]) for name in ("http_requests", "state_changing_requests")
+        if name in budget
+    )
+    if paced // wall < rate:
+        budget["tool_wall_seconds"] = min(wall, max(int(planned_wall_share), paced // rate))
+    return budget
 
 
 def batch_attempt_capacity(

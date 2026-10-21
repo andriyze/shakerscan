@@ -135,6 +135,7 @@ def _drive(monkeypatch, *, policy, requested_budget, templates_dir=str(FIXTURES)
     async def execute(_self, context, adapter, **_kwargs):
         captured["scanner_options"] = dict(adapter._process_payload["scanner_options"])
         captured["calls"].append(dict(adapter._process_payload["scanner_options"]))
+        captured.setdefault("targets", []).append(adapter._process_payload["execution_target"])
         captured["requested_budget"] = dict(context.requested_budget)
         settled = {name: int(amount) for name, amount in context.requested_budget.items()}
         if "state_changing_requests" in settled:

@@ -19,9 +19,14 @@ from .capability_result import (
     CapabilityResultReference,
     CapabilityResultStatus,
 )
-from .contracts import SCAN_APPLICATION_SURFACE_FAMILIES
+from .contracts import SCAN_APPLICATION_SURFACE_FAMILIES, budget_sufficiency
 from .finding_evidence import template_classification, tls_finding_evidence, tls_untrusted_by_leaf_weakness
-from .external_process import ACTIVE_TEMPLATE_WINDOWS_RECORD_KIND, TEMPLATE_WINDOW_BEYOND_ALLOWLIST
+from .external_process import (
+    ACTIVE_TEMPLATE_WINDOWS_RECORD_KIND,
+    TEMPLATE_WINDOW_BEYOND_ALLOWLIST,
+    TEMPLATE_WINDOW_PAST_BASES,
+    TEMPLATE_WINDOWS_INCOMPLETE_ON_ORIGIN,
+)
 from .posture_findings import (
     CORS_PROBE_ACTIONS, OPT_IN_HEADERS, cors_findings, dns_posture_findings, open_redirect_finding,
     redact_url_queries, weak_header_findings,
@@ -2448,7 +2453,7 @@ def _windows_beyond_allowlist_only(action: Any, rows: Sequence[Any]) -> bool:
     beyond = sum(
         1 for item in rows or ()
         if isinstance(item, Mapping) and item.get("kind") == "candidate_inapplicable"
-        and item.get("reason") == TEMPLATE_WINDOW_BEYOND_ALLOWLIST
+        and item.get("reason") in {TEMPLATE_WINDOW_BEYOND_ALLOWLIST, TEMPLATE_WINDOW_PAST_BASES}
     )
     return action.capability_name == "templates.active_batch" and 0 < planned <= beyond
 
@@ -2624,6 +2629,15 @@ def finalize_scan_report(
     # The active-template windows the Scan's sweeps finished, per allowlist size: a slice
     # without a mutation hold runs the smaller GET-only allowlist, whose windows are others.
     template_windows_run: dict[int, set[int]] = {}
+    # A parallel shard's part of the (base, window) pairs, and windows resumed from attempts an
+    # earlier mapping ran (a 2.11.0 worker at an endpoint's path), credited to no base.
+    template_windows_shard: dict[str, Any] | None = None
+    template_windows_legacy: set[int] = set()
+    # Per allowlist size, the windows each sweep base finished, in the order the sweep maps
+    # positions to them; and whether a thorough or deep direct sweep holds every base to every
+    # window (a fast or balanced one runs one window per endpoint by design).
+    template_base_windows: dict[int, dict[str, set[int]]] = {}
+    template_windows_strict = False
     for action in expected_actions:
         family = _FAMILY_BY_CAPABILITY.get(action.capability_name)
         if family is None:
@@ -2634,12 +2648,33 @@ def finalize_scan_report(
                 if not isinstance(item, Mapping) or item.get("kind") != ACTIVE_TEMPLATE_WINDOWS_RECORD_KIND:
                     continue
                 count = item.get("window_count")
+                part = item.get("shard_part")
+                if isinstance(part, Mapping) and isinstance(part.get("count"), int):
+                    template_windows_shard = {"index": part.get("index"), "count": part.get("count")}
+                template_windows_legacy.update(
+                    int(index) for index in item.get("legacy_windows_run") or ()
+                    if isinstance(index, int) and not isinstance(index, bool)
+                )
                 if isinstance(count, int) and not isinstance(count, bool) and count > 0:
                     template_windows_run.setdefault(count, set()).update(
                         int(index) for index in item.get("windows_run") or ()
                         if isinstance(index, int) and not isinstance(index, bool)
                         and 0 <= index < count
                     )
+                    bases = item.get("bases")
+                    if isinstance(bases, list) and bases:
+                        per_base = template_base_windows.setdefault(count, {})
+                        for entry in bases:
+                            if isinstance(entry, Mapping) and isinstance(entry.get("base"), str):
+                                per_base.setdefault(entry["base"], set()).update(
+                                    int(index) for index in entry.get("windows_run") or ()
+                                    if isinstance(index, int) and not isinstance(index, bool)
+                                    and 0 <= index < count
+                                )
+                        profile = str(action.capability_args.get("profile") or "")
+                        template_windows_strict |= budget_sufficiency(
+                            profile.removesuffix("_batch_v1"),
+                        ) and not isinstance(item.get("shard_part"), Mapping)
         raw_slice = action.capability_args.get("slice")
         planned = (
             int(raw_slice.get("count") or 0)
@@ -2753,13 +2788,43 @@ def finalize_scan_report(
         # Informational: how much of the largest permitted active allowlist ran. A sweep runs
         # one window per attempt, so a host with fewer endpoints than windows ran a fraction.
         total = max(template_windows_run)
-        family_coverage["nuclei_active"]["template_windows"] = {
-            "run": len(template_windows_run[total]), "total": total,
-        }
+        per_base = template_base_windows.get(total) or {}
+        if per_base:
+            # Run and total count (base, window) pairs: a second origin that finished 11 of 39
+            # windows makes 50 of 78, not the 39 of 39 a union of window indices read.
+            family_coverage["nuclei_active"]["template_windows"] = {
+                "run": sum(len(windows) for windows in per_base.values()),
+                "total": total * len(per_base),
+                "bases": [
+                    {
+                        "base": base, "run": len(windows), "total": total,
+                        # A shard's own windows, so the parallel merge can count the distinct
+                        # pairs its children ran and the ones they repeated.
+                        **({"windows_run": sorted(windows)} if template_windows_shard else {}),
+                    }
+                    for base, windows in per_base.items()
+                ],
+            }
+            short = [base for base, windows in per_base.items() if len(windows) < total]
+            if template_windows_strict and short:
+                family_coverage["nuclei_active"]["_windows_short_bases"] = len(short)
+        else:
+            # A record from before sweep bases (2.11.0) or a hand-made one: window indices only.
+            family_coverage["nuclei_active"]["template_windows"] = {
+                "run": len(template_windows_run[total]), "total": total,
+            }
+        if template_windows_shard is not None:
+            # This shard ran its part of the pairs; its siblings ran the others.
+            family_coverage["nuclei_active"]["template_windows"]["shard_part"] = template_windows_shard
+        if template_windows_legacy:
+            family_coverage["nuclei_active"]["template_windows"]["legacy_windows_run"] = len(
+                template_windows_legacy,
+            )
     selected_family_gaps: list[str] = []
     for family, row in family_coverage.items():
         statuses = row.pop("_statuses")
         batch_reasons = row.pop("_reasons")
+        windows_short_bases = int(row.pop("_windows_short_bases", 0) or 0)
         if family == "sqli":
             # Every SQLi candidate the Scan left inconclusive for budget, including one still
             # waiting for a continuation no round could fund when the Scan ended (soak N55).
@@ -2883,6 +2948,14 @@ def finalize_scan_report(
             # grade computed over it is not reliable. Marking the family partial while leaving the
             # top-level rollup clean reported `coverage: complete` and `grade_reliable: true` over
             # a plan that ran a fraction of its manifest.
+            if row["required"]:
+                selected_family_gaps.append(family)
+        elif windows_short_bases:
+            # A thorough or deep sweep left a base -- the target's or another origin's -- short of
+            # every active-template window: those templates never ran there.
+            row["coverage_status"] = "partial"
+            row["reason"] = TEMPLATE_WINDOWS_INCOMPLETE_ON_ORIGIN
+            row["template_windows_incomplete_bases"] = windows_short_bases
             if row["required"]:
                 selected_family_gaps.append(family)
         elif row["unattempted_candidates"] > 0:
@@ -3238,6 +3311,11 @@ def finalize_scan_report(
         coverage_status = "partial"
         if selected_family_gaps:
             coverage_reasons = sorted(set(coverage_reasons) | {"selected_family_incomplete"})
+    if any(
+        row.get("reason") == TEMPLATE_WINDOWS_INCOMPLETE_ON_ORIGIN for row in family_coverage.values()
+    ):
+        # Named at the top as well, so a reader of the coverage summary sees which gap it is.
+        coverage_reasons = sorted(set(coverage_reasons) | {TEMPLATE_WINDOWS_INCOMPLETE_ON_ORIGIN})
     verified = sum(1 for item in findings if item.get("verified") is True)
     suspected = sum(1 for item in findings if item.get("suspected") is True)
     coverage_block = {
