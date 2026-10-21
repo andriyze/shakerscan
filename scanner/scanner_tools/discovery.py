@@ -31,6 +31,7 @@ from .frontend_http import (
     extract_frontend_http_client_bases, extract_frontend_http_requests, _js_object_keys,
 )
 from .surface_hints import corporate_surface_hints
+from . import credential_redirects
 from .common import (
     detect_spa_catch_all, get_auth_curl_args, normalize_hash_route_url, run, run_streaming,
 )
@@ -725,8 +726,8 @@ async def follow_json_links(
         async def fetch_and_extract(target_url: str, depth: int):
             async with sem:
                 try:
-                    resp = await client.get(
-                        target_url,
+                    resp = await credential_redirects.httpx_request(
+                        client, "GET", target_url,
                         headers=session_headers,
                         cookies=session_cookies
                     )
@@ -815,8 +816,8 @@ async def discover_allowed_methods(
         async def fetch_options(target_url: str):
             async with sem:
                 try:
-                    resp = await client.options(
-                        target_url,
+                    resp = await credential_redirects.httpx_request(
+                        client, "OPTIONS", target_url,
                         headers=session_headers,
                         cookies=session_cookies
                     )
@@ -3425,7 +3426,7 @@ async def probe_api_base(
             url = urllib.parse.urljoin(base_url, endpoint)
 
             try:
-                resp = await client.get(url, headers=headers)
+                resp = await credential_redirects.httpx_request(client, "GET", url, headers=headers)
                 status = resp.status_code
                 content_type = resp.headers.get("content-type", "")
                 body = resp.text[:2000] if resp.text else ""

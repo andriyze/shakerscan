@@ -19,6 +19,7 @@ import urllib.parse
 from html.parser import HTMLParser
 from typing import Any
 
+from . import credential_redirects
 from .common import get_auth_curl_args, get_auth_sqlmap_context, run
 from .exposure_markers import (
     CRITICAL_FILE_VALIDATORS,
@@ -620,6 +621,9 @@ async def dalfox_one(
         cmd.extend(["--cookie", cookie_str])
     for header in header_lines:
         cmd.extend(["--header", header])
+    # Dalfox keeps custom headers on a redirect to another host; a session-carrying run
+    # does not follow redirects at all.
+    follow_redirects = not (cookie_str or header_lines)
     if quick_mode:
         cmd.extend(["--timeout", "10", "--only-discovery", "--skip-bav"])
         timeout = 60
@@ -628,7 +632,7 @@ async def dalfox_one(
         cmd.extend([
             "--timeout", "60",
             "--delay", "50",
-            "--follow-redirects",
+            *(["--follow-redirects"] if follow_redirects else []),
             "--skip-mining-all",  # Skip mining to speed up
         ])
         if deep_domxss:
@@ -1258,7 +1262,9 @@ async def sqlmap_test_request_file(
     Returns:
         Dict with scan results
     """
-    cmd = ["sqlmap", "-r", request_file, "--batch", "--random-agent", "--answers=Y"]
+    # The request file carries the captured request's headers; sqlmap would copy them to
+    # any host a redirect names, so redirects are not followed.
+    cmd = ["sqlmap", "-r", request_file, "--batch", "--random-agent", "--answers=Y", "--ignore-redirects"]
 
     if param:
         cmd.extend(["-p", param])
@@ -1550,6 +1556,9 @@ async def sqlmap_test(
         cmd.extend(["--cookie", "; ".join(cookies)])
     if header_lines:
         cmd.extend(["--headers", "\n".join(header_lines)])
+    if cookies or header_lines:
+        # sqlmap copies every header to the host a redirect names.
+        cmd.append("--ignore-redirects")
     if quick_mode:
         cmd.extend(["--level=1", "--risk=1", "--smart", "--threads=2", "--timeout=10", "--retries=1", "--technique=EU"])
         timeout = 120
@@ -2256,7 +2265,10 @@ async def advanced_vuln_tests(
             for candidate in ssrf_candidates[:10]:
                 try:
                     test_url = _apply_payload(candidate["url"], candidate["param"], payload)
-                    async with session.get(test_url, timeout=aiohttp.ClientTimeout(total=5)) as resp:
+                    async with credential_redirects.aiohttp_request(
+                        session, "GET", test_url, timeout=aiohttp.ClientTimeout(total=5),
+                        credentials=bool(headers or cookies),
+                    ) as resp:
                         body = await resp.text()
                         results["ssrf"]["tested"] = True
                         results["ssrf"]["tested_endpoints"] += 1
@@ -2275,7 +2287,10 @@ async def advanced_vuln_tests(
                 for candidate in cmd_candidates[:10]:
                     try:
                         test_url = _apply_payload(candidate["url"], candidate["param"], payload)
-                        async with session.get(test_url, timeout=aiohttp.ClientTimeout(total=5)) as resp:
+                        async with credential_redirects.aiohttp_request(
+                            session, "GET", test_url, timeout=aiohttp.ClientTimeout(total=5),
+                            credentials=bool(headers or cookies),
+                        ) as resp:
                             body = await resp.text()
                             results["command_injection"]["tested"] = True
                             results["command_injection"]["tested_endpoints"] += 1
@@ -10234,9 +10249,9 @@ async def _filter_reachable_active_endpoints(
     async def _probe(session, full_url):
         async with sem:
             try:
-                async with session.get(
-                    full_url, timeout=aiohttp.ClientTimeout(total=timeout),
-                    allow_redirects=True, ssl=False,
+                async with credential_redirects.aiohttp_request(
+                    session, "GET", full_url, timeout=aiohttp.ClientTimeout(total=timeout), ssl=False,
+                    credentials=bool(headers or cookies),
                 ) as resp:
                     return resp.status, len(await resp.text())
             except Exception:

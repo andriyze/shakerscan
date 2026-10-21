@@ -7,6 +7,7 @@ import urllib.parse
 from contextlib import asynccontextmanager
 from typing import Any
 
+from . import credential_redirects
 from .common import run, normalize_hash_route_url
 from .unsafe_actions import (
     RISKY_INTERACTION_KEYWORDS,
@@ -1397,7 +1398,10 @@ async def detect_rate_limits(
         try:
             client_timeout = aiohttp.ClientTimeout(total=timeout)
             async with aiohttp.ClientSession(timeout=client_timeout) as session:
-                async with session.request(method, url, headers=request_headers, ssl=False) as response:
+                async with credential_redirects.aiohttp_request(
+                    session, method, url, headers=request_headers, ssl=False,
+                    credentials=credential_redirects.carries_session_headers(headers),
+                ) as response:
                     resp_headers = {k.lower(): v for k, v in response.headers.items()}
                     return {
                         "status": response.status,
@@ -1621,7 +1625,10 @@ async def test_verb_tampering(
         try:
             client_timeout = aiohttp.ClientTimeout(total=timeout)
             async with aiohttp.ClientSession(timeout=client_timeout) as session:
-                async with session.request(method, url, headers=request_headers, ssl=False) as response:
+                async with credential_redirects.aiohttp_request(
+                    session, method, url, headers=request_headers, ssl=False,
+                    credentials=credential_redirects.carries_session_headers(headers),
+                ) as response:
                     body = ""
                     try:
                         body = await response.text()
@@ -1645,7 +1652,10 @@ async def test_verb_tampering(
         try:
             client_timeout = aiohttp.ClientTimeout(total=timeout)
             async with aiohttp.ClientSession(timeout=client_timeout) as session:
-                async with session.request("TRACE", url, headers=trace_headers, ssl=False) as response:
+                async with credential_redirects.aiohttp_request(
+                    session, "TRACE", url, headers=trace_headers, ssl=False,
+                    credentials=credential_redirects.carries_session_headers(headers),
+                ) as response:
                     body = ""
                     try:
                         body = await response.text()
@@ -1728,7 +1738,10 @@ async def test_verb_tampering(
             client_timeout = aiohttp.ClientTimeout(total=timeout)
             async with aiohttp.ClientSession(timeout=client_timeout) as session:
                 # Send POST with override header to simulate DELETE/PUT
-                async with session.post(url, headers=override_request_headers, ssl=False) as response:
+                async with credential_redirects.aiohttp_request(
+                    session, "POST", url, headers=override_request_headers, ssl=False,
+                    credentials=credential_redirects.carries_session_headers(headers),
+                ) as response:
                     if response.status < 400:
                         results["override_headers_work"].append({
                             "header": header_name,

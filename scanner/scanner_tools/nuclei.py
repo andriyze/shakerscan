@@ -10,6 +10,12 @@ from .common import get_auth_curl_args, now_utc_iso, run
 from .signal_types import SEVERITY_WEIGHTS, calculate_weighted_score
 
 
+def session_redirect_args(auth_args: list[str]) -> list[str]:
+    """Nuclei keeps custom request headers on a redirect to another host, so a run that
+    carries the scan's session headers does not follow redirects."""
+    return ["-disable-redirects"] if auth_args else []
+
+
 @dataclass
 class WaveBudget:
     """
@@ -522,7 +528,8 @@ async def nuclei_scan(
         "-rate-limit", "150",
         "-concurrency", "25",
     ]
-    cmd.extend(get_auth_curl_args(auth_session))
+    _auth_args = get_auth_curl_args(auth_session)
+    cmd.extend(_auth_args + session_redirect_args(_auth_args))
 
     if quick_mode:
         cmd.extend(["-severity", "critical,high", "-tags", "cve,osint,tech,exposure", "-exclude-tags", "dos,fuzzing,bruteforce,rate-limit"])
@@ -697,7 +704,8 @@ async def nuclei_comprehensive_scan(
         "-tags", template_tags,
         "-templates", templates_dir,
     ]
-    cmd.extend(get_auth_curl_args(auth_session))
+    _auth_args = get_auth_curl_args(auth_session)
+    cmd.extend(_auth_args + session_redirect_args(_auth_args))
 
     results["statistics"]["timeout_seconds"] = scan_timeout
     out, err, rc = await run(cmd, timeout=scan_timeout)
@@ -1046,7 +1054,8 @@ async def smart_nuclei_scan(
         "-tags", ",".join(tags_list),
         "-templates", templates_dir,
     ]
-    cmd.extend(get_auth_curl_args(auth_session))
+    _auth_args = get_auth_curl_args(auth_session)
+    cmd.extend(_auth_args + session_redirect_args(_auth_args))
 
     # Exclude noisy/dangerous tags
     exclude_tags = ["dos", "rate-limit"]
@@ -1224,7 +1233,8 @@ async def _run_nuclei_wave(
         "-tags", ",".join(tags),
         "-templates", templates_dir,
     ]
-    cmd.extend(get_auth_curl_args(auth_session))
+    _auth_args = get_auth_curl_args(auth_session)
+    cmd.extend(_auth_args + session_redirect_args(_auth_args))
 
     if exclude_tags:
         cmd.extend(["-exclude-tags", ",".join(exclude_tags)])
