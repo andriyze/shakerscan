@@ -830,8 +830,8 @@ def launch_preauthorization(args: argparse.Namespace, url: str, token_file: str 
         )
     except approval.ApprovalError as exc:
         raise ClientError(f"{str(exc).rstrip('.')}. No agent was started.") from exc
-    print(f"allowed:   {', '.join(bounds)} (pre-authorization {granted['id']}"
-          + (f", until {granted['expires_at']}" if granted.get("expires_at") else "") + ")")
+    print(_shown(f"allowed:   {', '.join(bounds)} (pre-authorization {granted['id']}"
+                 + (f", until {granted['expires_at']}" if granted.get("expires_at") else "") + ")"))
     return {**env, "SHAKERSCAN_PREAUTHORIZATION_ID": str(granted["id"])}
 
 
@@ -1080,6 +1080,27 @@ def _public_hint(item: Mapping[str, object]) -> str | None:
     return None
 
 
+# Server-supplied text is written to the terminal through ``_shown`` (the filter the review
+# screens of ``shakerscan`` use for Hunt text): C0/C1 controls, DEL and bidirectional
+# overrides/isolates become "?" and invisible format characters become visible escapes, so a
+# value cannot move the cursor, rewrite a line (``\r``), retitle or clear the window, or reorder
+# what is shown. Tabs and newlines are kept only where the text is multi-line.
+_TERMINAL_CONTROL = {code: "?" for code in [*range(0x00, 0x09), *range(0x0B, 0x20), *range(0x7F, 0xA0),
+                                            *range(0x202A, 0x202F), *range(0x2066, 0x206A)]}
+_LINE_CONTROL = {**_TERMINAL_CONTROL, 0x09: " ", 0x0A: "?"}
+
+
+def _shown(value: object, *, multiline: bool = False) -> str:
+    import unicodedata
+
+    text = str(value if value is not None else "").translate(_TERMINAL_CONTROL if multiline else _LINE_CONTROL)
+    return "".join(
+        ((f"\\u{ord(ch):04x}" if ord(ch) <= 0xFFFF else f"\\U{ord(ch):08x}")
+         if unicodedata.category(ch) in {"Cf", "Zl", "Zp"} else ch)
+        for ch in text
+    )
+
+
 def _brief(value: object, limit: int = 4) -> str:
     if isinstance(value, bool):
         return "yes" if value else "no"
@@ -1088,8 +1109,8 @@ def _brief(value: object, limit: int = 4) -> str:
         more = f" (+{len(value) - limit})" if len(value) > limit else ""
         return ", ".join(items) + more if items else "none"
     if isinstance(value, Mapping):
-        return " ".join(f"{k}={_brief(v)}" for k, v in value.items() if not isinstance(v, (list, Mapping)))
-    return str(value)
+        return " ".join(f"{_shown(k)}={_brief(v)}" for k, v in value.items() if not isinstance(v, (list, Mapping)))
+    return _shown(value, multiline=True).replace("\n", "?")
 
 
 def _public_facts(item: Mapping[str, object]) -> list[str]:
@@ -1122,16 +1143,16 @@ def _public_facts(item: Mapping[str, object]) -> list[str]:
 def render_public_check(data: Mapping[str, object], target: str,
                         service: str = f"{PUBLIC_API_URL} (no saved ShakerScan credential is sent)") -> str:
     """Plain-text view of the public service's factual observations (schema 2)."""
-    lines = [f"ShakerScan Public Check\nTarget: {data.get('target') or target}"]
+    lines = [f"ShakerScan Public Check\nTarget: {_shown(data.get('target') or target)}"]
     if isinstance(data.get("checked_at"), str):
         cache = data.get("cache")
         cached = isinstance(cache, Mapping) and cache.get("hit") is True
-        lines.append(f"Checked: {data['checked_at']}" + (" (cached)" if cached else ""))
+        lines.append(f"Checked: {_shown(data['checked_at'])}" + (" (cached)" if cached else ""))
     observations = [o for o in data.get("observations") or [] if isinstance(o, Mapping)]
     if not observations:
         lines.append(json.dumps(data, indent=2, sort_keys=True))
         return "\n".join(lines)
-    hints = [(str(o.get("name") or o.get("id")), h) for o in observations if (h := _public_hint(o))]
+    hints = [(_shown(o.get("name") or o.get("id")), h) for o in observations if (h := _public_hint(o))]
     if hints:
         lines.append("\nReview:")
         lines.extend(f"  ! {name}: {hint}" for name, hint in hints)
@@ -1140,8 +1161,8 @@ def render_public_check(data: Mapping[str, object], target: str,
         members = [o for o in observations if o.get("group") == group]
         shown = False
         for item in members:
-            facts = _public_facts(item)
-            name = str(item.get("name") or item.get("id") or "observation")
+            facts = [_shown(fact) for fact in _public_facts(item)]
+            name = _shown(item.get("name") or item.get("id") or "observation")
             if not facts:
                 missing.append(name)
                 continue
@@ -1154,7 +1175,7 @@ def render_public_check(data: Mapping[str, object], target: str,
         lines.append("\nNot observed or not applicable: " + ", ".join(missing))
     for limitation in data.get("limitations") or []:
         if isinstance(limitation, str):
-            lines.append(f"Note: {limitation}")
+            lines.append(f"Note: {_shown(limitation)}")
     lines.append(f"\nService: {service}")
     return "\n".join(lines)
 
@@ -1326,7 +1347,7 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         timeout = float(args.timeout) if args.timeout is not None else float(mcp.DEFAULT_TIMEOUT_SECONDS)
         client = mcp.ArsenalClient(base_url, timeout_seconds=timeout, api_token=token)
     except (TypeError, ValueError) as exc:
-        print("\n".join(lines + [f"error:    {exc}"]))
+        print("\n".join(_shown(line) for line in lines + [f"error:    {exc}"]))
         return 2
     lines.append(
         "token:    set (sent as a bearer token, https only)"
@@ -1350,7 +1371,7 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     except mcp.MCPError as exc:
         lines.append(f"mcp:      {_with_reason(exc)}")
         ok = False
-    print("\n".join(lines))
+    print("\n".join(_shown(line) for line in lines))
     if is_loopback(url) and engine_launcher() is not None:
         # For a local engine, the launcher's own `doctor` (Docker, disk, host checks) is what
         # a curl-installed user expects from this command: hand off after the connection lines.
@@ -1628,5 +1649,5 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         return COMMANDS[args.command](args)
     except ClientError as exc:
-        sys.stderr.write(f"shakerscan: {exc}\n")
+        sys.stderr.write(f"shakerscan: {_shown(exc, multiline=True)}\n")
         return 2
