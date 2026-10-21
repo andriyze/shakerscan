@@ -598,6 +598,46 @@ export function scanFindingCountsText(counts) {
   return parts.join(' · ')
 }
 
+// Active templates run in windows of the allowlist at each sweep base (the target's own base and
+// every other origin the scan found); the finalizer records how many (base, window) pairs ran.
+// Shown on the page, and when every planned window ran the family is not called unfinished for
+// endpoints the plan left unscheduled: the templates ran at the bases, not at each endpoint.
+export function templateWindowsPresentation(coverage) {
+  const rows = Array.isArray(record(coverage).family_coverage) ? record(coverage).family_coverage : []
+  const row = record(rows.find((item) => record(item).family === 'nuclei_active'))
+  const windows = record(row.template_windows)
+  const run = finiteNumber(windows.run, null)
+  const total = finiteNumber(windows.total, null)
+  if (run === null || total === null || total <= 0) return null
+  const bases = (Array.isArray(windows.bases) ? windows.bases : [])
+    .map((item) => ({
+      base: String(record(item).base || ''),
+      run: finiteNumber(record(item).run, 0),
+      total: finiteNumber(record(item).total, 0),
+    }))
+    .filter((item) => item.base)
+  const perBase = bases.length ? ` (${bases.map((item) => `${item.base} ${item.run}/${item.total}`).join(', ')})` : ''
+  return {
+    run,
+    total,
+    complete: run >= total && bases.every((item) => item.run >= item.total),
+    bases,
+    detail: `${run} of ${total} ran${perBase}`,
+    text: `Active templates: ${run} of ${total} template windows ran${perBase}.`,
+  }
+}
+
+// The only partial reason every-window-ran outweighs: endpoints the plan never scheduled. A sweep
+// that timed out, failed or left a base short is still unfinished.
+const WINDOWS_COVER_REASONS = new Set(['manifest_entries_unscheduled'])
+
+function windowsCoverFamily(coverage, templateWindows) {
+  if (!templateWindows?.complete) return false
+  const rows = Array.isArray(record(coverage).family_coverage) ? record(coverage).family_coverage : []
+  const row = record(rows.find((item) => record(item).family === 'nuclei_active'))
+  return row.coverage_status === 'complete' || WINDOWS_COVER_REASONS.has(String(row.reason || ''))
+}
+
 export function scanResultPresentation(scan, assurance) {
   const scanRecord = record(scan)
   const report = record(scanRecord.result)
@@ -674,8 +714,12 @@ export function scanResultPresentation(scan, assurance) {
   )).filter(Boolean)
   // Families the operator selected that never reached a complete state. Naming them is what
   // turns "a selected check family is incomplete" into something a reader can act on.
+  const templateWindows = templateWindowsPresentation(coverage)
+  const windowsCovered = windowsCoverFamily(coverage, templateWindows)
   const incompleteFamilies = Array.isArray(coverage.selected_family_gaps)
-    ? coverage.selected_family_gaps.map((family) => String(family || '').replaceAll('_', ' ')).filter(Boolean)
+    ? coverage.selected_family_gaps
+      .filter((family) => !(windowsCovered && String(family) === 'nuclei_active'))
+      .map((family) => String(family || '').replaceAll('_', ' ')).filter(Boolean)
     : []
   const candidateRows = Array.isArray(coverage.family_coverage) ? coverage.family_coverage : null
   const candidateGapFamilies = candidateRows ? resolvedFamilies
@@ -737,6 +781,7 @@ export function scanResultPresentation(scan, assurance) {
     coverageIncomplete,
     coverageGapReasons,
     incompleteFamilies,
+    templateWindows,
     candidateGapFamilies,
     injectionCandidateGap,
     observedCount: findings.length,
