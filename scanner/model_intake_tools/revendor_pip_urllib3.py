@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Replace the urllib3 that pip vendors with a newer, hash-locked urllib3, vendored the way pip does it.
 
-pip 26.2.1, the newest pip, vendors urllib3 2.7.0, which carries CVE-2026-97687 and CVE-2026-97689
+pip 26.2.2, the newest pip, still vendors urllib3 2.7.0, which carries CVE-2026-97687 and CVE-2026-97689
 (fixed in 2.8.0), and the Model Intake image gate carries no waivers. The pip-audit environment has
 to keep pip (pip-api runs it on import), so the vendored copy cannot simply be deleted the way the
 vendored msgpack and setuptools are. Instead this copies the environment's own urllib3, installed
