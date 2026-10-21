@@ -169,6 +169,7 @@ class PinnedSocksProxy:
         pinned_addresses: Iterable[str] | None = None, port: int,
         max_connections: int | None = None,
         admit: Callable[[], Awaitable[None]] | None = None,
+        scheme: str | None = None,
     ) -> None:
         self.hostname = str(hostname or "").strip().lower().rstrip(".")
         self.port = int(port)
@@ -215,6 +216,12 @@ class PinnedSocksProxy:
         # A hostname target is reached by its hostname only; its address written as the host
         # is another origin (see _destination_allowed).
         self.address_literal_destinations_refused = 0
+        # With a bound scheme the first bytes a client sends must be that scheme's: a TLS
+        # record for https, plaintext for http. SOCKS carries no scheme, so the tunnel reads it:
+        # an https origin's redirect to http on the same port is refused before a byte of it
+        # reaches the target.
+        self.scheme = str(scheme).lower() if scheme else None
+        self.scheme_mismatch_refused = 0
         try:
             ipaddress.ip_address(self.hostname.strip("[]"))
             self._address_target = True
@@ -304,6 +311,7 @@ class PinnedSocksProxy:
             ],
             "refused_destinations_other": int(self.refused_destinations_other),
             "address_literal_destinations_refused": int(self.address_literal_destinations_refused),
+            "scheme_mismatch_refused": int(self.scheme_mismatch_refused),
         }
 
     def receipt(self) -> dict[str, Any]:
@@ -416,8 +424,17 @@ class PinnedSocksProxy:
                 counter = RequestCounter(
                     on_request=self._note_request if toward_target else None,
                 )
+                first = toward_target and self.scheme is not None
                 try:
                     while chunk := await source.read(65536):
+                        if first:
+                            first = False
+                            tls = chunk[:1] == b"\x16"
+                            if tls != (self.scheme == "https"):
+                                self.scheme_mismatch_refused += 1
+                                with contextlib.suppress(OSError):
+                                    writer.close()
+                                return
                         if toward_target:
                             self.bytes_to_target += len(chunk)
                             self.http_requests_observed += counter.feed(chunk)

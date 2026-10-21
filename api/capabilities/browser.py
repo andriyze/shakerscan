@@ -53,8 +53,10 @@ except ModuleNotFoundError:  # package imports in host-side tests
     from scanner.scanner_tools.url_redaction import redact_client_route, redact_url
 try:
     from scanner_tools import credential_redirects as _credential_redirects
+    from scanner_tools.destination_guard import DISABLE_WEBRTC as _DISABLE_WEBRTC
 except ModuleNotFoundError:  # package imports in host-side tests
     from scanner.scanner_tools import credential_redirects as _credential_redirects
+    from scanner.scanner_tools.destination_guard import DISABLE_WEBRTC as _DISABLE_WEBRTC
 
 
 SAFE_BROWSER_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
@@ -861,6 +863,8 @@ async def _execute_browser_action_in_context(
                 443 if parsed_origin.scheme.lower() == "https" else 80
             ),
             max_connections=prepared.max_requests,
+            # Only the bound origin's scheme crosses the tunnel (TLS for https, plaintext for http).
+            scheme=parsed_origin.scheme.lower(),
         ).start()
         responses.append({
             "kind": "browser_target_transport",
@@ -907,6 +911,8 @@ async def _execute_browser_action_in_context(
             session_header_events.origins = frozenset(_credential_redirects.bound_origins([prepared.origin]))
             context.on("request", session_header_events.observe_request)
 
+        # WebRTC sends UDP outside the pinned proxy: the page has no RTCPeerConnection.
+        await context.add_init_script(_DISABLE_WEBRTC)
         await context.add_init_script(
             "window.WebSocket = class { constructor() { throw new Error('blocked'); } };"
             "window.EventSource = class { constructor() { throw new Error('blocked'); } };"

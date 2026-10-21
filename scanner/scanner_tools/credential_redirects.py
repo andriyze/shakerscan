@@ -587,15 +587,22 @@ async def confined_session_context(browser: Any, origin_urls: Any, headers: Mapp
         return False
 
     guard = _guard.DestinationGuard(allowed)
+    # A refusal closes the connection: the page sees a network error, never a 403 that would
+    # read as the refused origin's own answer.
+    guard.proxy = _guard.GuardProxy(guard, close_on_refusal=True)
+    options = dict(context_options)
+    options["permissions"] = sorted({*(options.get("permissions") or ()), "local-network-access"})
+    options["extra_http_headers"] = {
+        **{str(k): str(v) for k, v in dict(options.get("extra_http_headers") or {}).items()},
+        **{str(k): str(v) for k, v in dict(headers or {}).items()},
+    }
     token = _guard._current.set(guard)  # a guard-enforcing new_context wrapper reads this one
     try:
-        proxy = await _guard.guarded_context_options()
-        context = await browser.new_context(
-            **{**context_options, **proxy, **local_network_access(True)},
-            extra_http_headers={str(k): str(v) for k, v in dict(headers or {}).items()},
-        )
+        context = await browser.new_context(**{**options, **await _guard.guarded_context_options()})
     finally:
         _guard._current.reset(token)
+    # WebRTC sends UDP outside any proxy: the page has no RTCPeerConnection.
+    await context.add_init_script(_guard.DISABLE_WEBRTC)
     context.on("console", events.observe_console)
     context.on("request", events.observe_request)
     context.on("close", lambda _context: guard.proxy.close() if guard.proxy is not None else None)

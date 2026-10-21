@@ -1334,7 +1334,12 @@ async def browser_fetch(
             }
     except Exception as e:
         print(f"[browser_fetch] Exception occurred, falling back to curl: {type(e).__name__}: {e}", file=sys.stderr)
-        return await curl_fallback(f"exception: {type(e).__name__}")
+        fallback = await curl_fallback(f"exception: {type(e).__name__}")
+        events = locals().get("session_header_events")
+        if events is not None and isinstance(fallback, dict):
+            # A confined browser whose page was refused (a redirect to another origin) says so.
+            fallback["session_headers"] = events.as_dict()
+        return fallback
 
 
 # =============================================================================

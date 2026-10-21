@@ -637,7 +637,10 @@ class InteractiveSession:
                 return result
 
             except Exception as e:
-                return {"success": False, "error": f"Action failed: {str(e)}", "action": action_type}
+                failed = {"success": False, "error": f"Action failed: {str(e)}", "action": action_type}
+                # A navigation refused at the confined context's proxy fails the action; it says why.
+                self._record_session_header_events(failed, events, counts_before)
+                return failed
 
     async def _apply_session_headers(self, user: str, headers: dict[str, str]) -> None:
         """Give the user's browser its session headers. A context that carries headers is
