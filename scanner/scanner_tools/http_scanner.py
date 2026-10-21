@@ -554,7 +554,9 @@ async def browser_fetch(
                 except Exception:
                     auth_cookies = []
 
-            ctx = await browser.new_context(**ctx_kwargs)
+            # The interaction guard refuses every other origin, so Local Network Access can be
+            # granted: the target's own private-network resources load.
+            ctx = await browser.new_context(**ctx_kwargs, **credential_redirects.local_network_access(True))
             session_header_events = None
             if session_headers:
                 # Session headers go to the target's origin only (registered before the guard).
@@ -1940,7 +1942,9 @@ async def interactive_browser_crawl(
                 except Exception:
                     pass
 
-            ctx = await browser.new_context(**ctx_kwargs)
+            # The interaction guard refuses every other origin, so Local Network Access can be
+            # granted: the target's own private-network resources load.
+            ctx = await browser.new_context(**ctx_kwargs, **credential_redirects.local_network_access(True))
             session_header_events = None
             if session_headers:
                 # Session headers go to the target's origin only (registered before the guard).

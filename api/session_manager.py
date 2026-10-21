@@ -45,9 +45,17 @@ try:
 except ModuleNotFoundError:  # package import layout
     from scanner.redaction import is_sensitive_key, redact_text
 try:
-    from scanner_tools.credential_redirects import bind_session_headers
+    from scanner_tools.credential_redirects import bind_session_headers, local_network_access
 except ModuleNotFoundError:  # package import layout
-    from scanner.scanner_tools.credential_redirects import bind_session_headers
+    from scanner.scanner_tools.credential_redirects import bind_session_headers, local_network_access
+
+
+def _session_destination_guard():
+    try:
+        from scanner_tools.destination_guard import current_guard
+    except ImportError:
+        return None
+    return current_guard()
 
 # A response header whose name says it carries a credential (``X-Subject-Token``, ``X-Auth-Token``,
 # ``X-Upstream-Auth``, a session or key header): withheld whatever its value looks like.
@@ -286,6 +294,9 @@ class InteractiveSession:
             # A finding retest's destination guard, when this session runs inside one: all of
             # its traffic through the guard's egress proxy (redirect hops and WebSockets too).
             **await guarded_context_options(),
+            # Local Network Access only inside a destination guard: this context otherwise lets
+            # pages load static resources from any origin.
+            **local_network_access(_session_destination_guard() is not None),
         )
         # Headers set with set_auth go to the target's origin only, never to what its pages load
         # or redirect to (registered before the page route, which hands requests on).

@@ -310,12 +310,13 @@ def _header_block(output: str) -> str:
     """The response's header block as curl prints it, ending in its blank line."""
     if not output:
         return ""
+    # The hop's stdout still ends with the probe's write-out marker, so its blank line (CRLF, or
+    # a bare LF from a server that sends one) is always there to find.
     for separator in ("\r\n\r\n", "\n\n"):
         position = output.find(separator)
         if position >= 0:
             return output[:position + len(separator)]
-    # A headers-only response (-I, or an empty body) lost its blank line to the runner's strip.
-    return output.rstrip("\r\n") + "\r\n\r\n"
+    return output
 
 
 def _without_request_body(cmd: list[str]) -> list[str]:
@@ -483,7 +484,10 @@ class SessionHeaderEvents:
       session header;
     - ``private_network_subresource_blocked``: a target page delivered by the route asked for a
       resource from another origin on a private or loopback address, and Chromium's Local
-      Network Access check refused it.
+      Network Access check refused it (contexts confined at the network layer are granted the
+      permission, ``local_network_access``);
+    - ``session_header_withheld_from_stream``, ``session_header_response_too_large`` and
+      ``cors_preflight_refused``: see ``fulfill_with_session_headers``.
     """
 
     def __init__(self) -> None:
@@ -555,22 +559,153 @@ async def _browser_fetch(route: Any, request: Any, headers: dict[str, str], orig
     return response
 
 
+# A response handed to the page is copied into the browser whole: past this size Chromium's
+# side of the transfer fails and takes the browser down with it, so a larger one is refused.
+MAX_FULFILLED_RESPONSE_BYTES = 32 * 1024 * 1024
+SESSION_HEADER_RESPONSE_TOO_LARGE = "session_header_response_too_large"
+SESSION_HEADER_WITHHELD_FROM_STREAM = "session_header_withheld_from_stream"
+CORS_PREFLIGHT_REFUSED = "cors_preflight_refused"
+_STREAM_RESOURCE_TYPES = frozenset({"eventsource", "media", "websocket"})
+# Header names a page cannot set (or the browser always adds): never part of a preflight.
+_BROWSER_SET_HEADERS = frozenset({
+    "accept-charset", "accept-encoding", "connection", "content-length", "cookie", "cookie2", "date",
+    "dnt", "expect", "host", "keep-alive", "origin", "referer", "te", "trailer", "transfer-encoding",
+    "upgrade", "user-agent", "via", "priority", "pragma", "cache-control",
+})
+_SAFELISTED_CONTENT_TYPES = frozenset({"application/x-www-form-urlencoded", "multipart/form-data", "text/plain"})
+_SIMPLE_METHODS = frozenset({"GET", "HEAD", "POST"})
+
+
+def _is_stream(request: Any, page_headers: Mapping[str, str]) -> bool:
+    """A request whose response arrives over time (EventSource, media, a WebSocket handshake):
+    fetching it whole would never hand the page anything."""
+    if str(getattr(request, "resource_type", "") or "") in _STREAM_RESOURCE_TYPES:
+        return True
+    return "text/event-stream" in str(page_headers.get("accept") or "").lower()
+
+
+def _origin_text(url: str) -> str | None:
+    key = origin_key(url)
+    if key is None:
+        return None
+    default = 443 if key[0] == "https" else 80
+    host = f"[{key[1]}]" if ":" in key[1] else key[1]
+    return f"{key[0]}://{host}" + ("" if key[2] == default else f":{key[2]}")
+
+
+def _initiator_origin(request: Any) -> str | None:
+    try:
+        frame = request.frame
+        return _origin_text(str(frame.url)) if frame is not None else None
+    except Exception:  # a worker's request has no frame
+        return None
+
+
+def _preflight_headers(method: str, page_headers: Mapping[str, str]) -> list[str] | None:
+    """The page's own non-safelisted header names when its cross-origin request needs a CORS
+    preflight, else None. Session headers the route adds are the operator's, not the page's."""
+    names = []
+    for name, value in page_headers.items():
+        lowered = str(name).lower()
+        if lowered in _BROWSER_SET_HEADERS or lowered.startswith(("sec-", "proxy-", "access-control-")):
+            continue
+        if lowered in {"accept", "accept-language", "content-language"}:
+            continue
+        if lowered == "content-type" and str(value).split(";", 1)[0].strip().lower() in _SAFELISTED_CONTENT_TYPES:
+            continue
+        names.append(lowered)
+    if method.upper() in _SIMPLE_METHODS and not names:
+        return None
+    return sorted(set(names))
+
+
+def _listed(value: Any) -> set[str]:
+    return {item.strip().lower() for item in str(value or "").split(",") if item.strip()}
+
+
+async def _cors_preflight(route: Any, url: str, origin: str, method: str, names: list[str]) -> bool:
+    """Send the preflight the page's request needs (no session header) and read its answer."""
+    headers = {"origin": origin, "access-control-request-method": method.upper(), "accept": "*/*"}
+    if names:
+        headers["access-control-request-headers"] = ",".join(names)
+    # An explicit empty body: route.fetch otherwise sends the page request's own body.
+    answer = await route.fetch(url=url, method="OPTIONS", headers=headers, post_data=b"", max_redirects=0)
+    try:
+        allowed_origin = str(answer.headers.get("access-control-allow-origin") or "").strip()
+        methods = _listed(answer.headers.get("access-control-allow-methods"))
+        allowed_headers = _listed(answer.headers.get("access-control-allow-headers"))
+        return (
+            200 <= answer.status < 300
+            and allowed_origin in {origin, "*"}
+            and (method.upper() in _SIMPLE_METHODS or method.lower() in methods or "*" in methods)
+            and ("*" in allowed_headers or set(names) <= allowed_headers)
+        )
+    finally:
+        await answer.dispose()
+
+
 async def fulfill_with_session_headers(route: Any, request: Any, headers: Mapping[str, str], origins: Any,
                                        events: SessionHeaderEvents, *, on_hop: Callable[[], bool] | None = None,
                                        **overrides: Any) -> None:
     """Answer a routed request to the bound origin with session ``headers`` (see above):
     fetched without following redirects, redirects within ``origins`` followed here for a
     subresource (``on_hop`` may refuse another hop), and the response handed to the page.
-    ``overrides`` (method, post_data) apply to the first request only."""
+    ``overrides`` (method, post_data) apply to the first request only.
+
+    What it will not do, each recorded on ``events``: a stream is passed on untouched without
+    the session header (``session_header_withheld_from_stream``); a response over
+    ``MAX_FULFILLED_RESPONSE_BYTES`` is refused (``session_header_response_too_large``); a
+    cross-origin request between bound origins whose CORS preflight is refused is not sent
+    (``cors_preflight_refused``), and its response reaches the page only if its CORS headers
+    allow the page's origin."""
+    page_headers = {str(k).lower(): str(v) for k, v in (await request.all_headers()).items()}
+    if _is_stream(request, page_headers):
+        events.record(SESSION_HEADER_WITHHELD_FROM_STREAM)
+        await route.fallback()
+        return
+    initiator = _initiator_origin(request)
+    # A CORS-mode request: what the browser reports, else what fetch, XHR and fonts use.
+    fetch_mode = page_headers.get("sec-fetch-mode") or (
+        "cors" if str(getattr(request, "resource_type", "") or "") in {"fetch", "xhr", "font"} else ""
+    )
+    cors_mode = fetch_mode == "cors" and initiator not in {None, _origin_text(request.url)}
+    method = str(overrides.get("method") or request.method).upper()
     try:
+        if cors_mode:
+            names = _preflight_headers(method, page_headers)
+            if names is not None:
+                if not await _cors_preflight(route, request.url, initiator, method, names):
+                    events.record(CORS_PREFLIGHT_REFUSED)
+                    await route.abort("accessdenied")
+                    return
+
         response = await _browser_fetch(
             route, request, dict(headers), origin_key(request.url), frozenset(origins), events,
             overrides=overrides, on_hop=on_hop,
         )
+        declared = str(response.headers.get("content-length") or "").strip()
+        too_large = declared.isdigit() and int(declared) > MAX_FULFILLED_RESPONSE_BYTES
+        if not too_large:
+            too_large = len(await response.body()) > MAX_FULFILLED_RESPONSE_BYTES
+        if too_large:
+            events.record(SESSION_HEADER_RESPONSE_TOO_LARGE)
+            await response.dispose()
+            await route.abort("failed")
+            return
+        if cors_mode and str(response.headers.get("access-control-allow-origin") or "").strip() not in {initiator, "*"}:
+            await route.abort("accessdenied")  # what the page would see: the response is not readable
+            return
     except Exception:  # the request failed as it would have in the browser
         await route.abort("failed")
         return
     await route.fulfill(response=response)
+
+
+def local_network_access(confined: bool) -> dict[str, Any]:
+    """Context options granting Chromium's Local Network Access permission, for a context whose
+    destinations are already confined (pinned proxy, destination guard, a guard that refuses
+    other origins). An unconfined context keeps Chromium's refusal."""
+    return {"permissions": ["local-network-access"]} if confined else {}
 
 
 def bound_origins(origin_urls: Any) -> set[tuple[str, str, int]]:

@@ -887,6 +887,9 @@ async def _execute_browser_action_in_context(
             accept_downloads=False,
             ignore_https_errors=True,
             service_workers="block",
+            # Every connection goes through the pinned proxy, so Local Network Access can be
+            # granted without widening where the page can reach.
+            **_credential_redirects.local_network_access(True),
         )
         # Cookie headers cannot be overridden by Playwright routing. Bind them
         # to the exact target URL; do not serialize or return browser storage.
