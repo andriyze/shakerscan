@@ -343,3 +343,39 @@ def test_a_bound_hosts_other_ports_are_not_admitted():
     assert _admits(origins, "https://api.example:443/")  # the http origin's https upgrade
     assert _admits(origins, "https://api.example:80/")  # a tunnel to the http origin's own port
     assert not _admits(origins, "https://api.example:8080/")
+
+
+def test_closing_the_guard_proxy_ends_its_open_tunnels():
+    from scanner_tools.destination_guard import DestinationGuard, GuardProxy
+
+    async def scenario():
+        closed = asyncio.Event()
+
+        async def endless(reader, writer):
+            try:
+                while True:
+                    writer.write(b"x" * 1024)
+                    await writer.drain()
+                    await asyncio.sleep(0.05)
+            except (ConnectionError, OSError):
+                closed.set()
+
+        upstream = await asyncio.start_server(endless, "127.0.0.1", 0)
+        port = upstream.sockets[0].getsockname()[1]
+        proxy = GuardProxy(DestinationGuard(lambda url: True), close_on_refusal=True)
+        proxy_url = await proxy.start()
+        reader, writer = await asyncio.open_connection("127.0.0.1", urllib.parse.urlsplit(proxy_url).port)
+        writer.write(f"CONNECT 127.0.0.1:{port} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n\r\n".encode())
+        await writer.drain()
+        await reader.readuntil(b"\r\n\r\n")
+        await reader.read(1024)  # the tunnel is carrying data
+        proxy.close()
+        await asyncio.wait_for(closed.wait(), timeout=3)
+        await asyncio.sleep(0.1)
+        lingering = [task for task in asyncio.all_tasks() if "_pump" in repr(task.get_coro())
+                     or "GuardProxy" in repr(task.get_coro())]
+        writer.close()
+        upstream.close()
+        return lingering
+
+    assert asyncio.run(scenario()) == []
