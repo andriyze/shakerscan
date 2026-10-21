@@ -10,6 +10,7 @@ from __future__ import annotations
 import math
 import re
 import urllib.parse
+from collections.abc import Callable
 
 
 _SENSITIVE_LABELS = frozenset({
@@ -124,13 +125,45 @@ def redact_path(path: str) -> str:
     return result or "/"
 
 
+def _query_items(query: str) -> list[tuple[str, bool]]:
+    """``(name, bare)`` for each query parameter, in ``parse_qsl(keep_blank_values=True)``
+    order; ``bare`` is a parameter written without ``=`` (``?<token>``)."""
+    items: list[tuple[str, bool]] = []
+    for piece in query.split("&"):
+        if not piece:
+            continue
+        name, equals, _value = piece.partition("=")
+        items.append((urllib.parse.unquote(name.replace("+", " ")), not equals))
+    return items
+
+
+_BASE64_NAME_RE = re.compile(r"[A-Za-z0-9+/ ]{16,}=*")
+_ACCESS_KEY_ID_RE = re.compile(r"(?:AKIA|ASIA)[0-9A-Z]{16}")
+
+
+def token_like_query_name(name: str, bare: bool = False) -> bool:  # noqa: ARG001 - predicate signature
+    """A query name that is itself a credential: a JWT or random token (``?<token>``), standard
+    base64 (its ``+`` read back as a space, cut at the first ``=``) or an AWS access key id."""
+    text = urllib.parse.unquote(str(name or ""))
+    if token_like_segment(text) or _ACCESS_KEY_ID_RE.fullmatch(text):
+        return True
+    if _BASE64_NAME_RE.fullmatch(text) and ("+" in text or "/" in text or " " in text or text.endswith("=")):
+        return token_like_segment(re.sub(r"[+/ =]", "", text))
+    return False
+
+
 def redact_url(
     value: str,
     *,
     query_placeholder: str = "<redacted>",
     max_length: int = 2_000,
+    secret_query_name: Callable[[str, bool], bool] = token_like_query_name,
 ) -> str:
-    """Redact one absolute or relative URL without retaining userinfo or query values."""
+    """Redact one absolute or relative URL without retaining userinfo or query values.
+
+    A query name for which ``secret_query_name(name, bare)`` holds (by default: a token-like
+    name, the form a credential used as a bare key takes) is shown as ``<redacted>`` too.
+    """
     text = str(value or "").strip()
     try:
         parsed = urllib.parse.urlsplit(text)
@@ -143,8 +176,8 @@ def redact_url(
         return (text[:start + 3] if start >= 0 else "") + authority[:200] + "/<unparsed>"
     path = redact_path(parsed.path or "/")
     query = urllib.parse.urlencode([
-        (str(name)[:200], query_placeholder)
-        for name, _item in urllib.parse.parse_qsl(parsed.query, keep_blank_values=True)
+        ("<redacted>" if secret_query_name(name, bare) else str(name)[:200], query_placeholder)
+        for name, bare in _query_items(parsed.query)
     ])
     if parsed.scheme or parsed.netloc:
         host = parsed.hostname or ""

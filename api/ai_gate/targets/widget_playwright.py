@@ -14,6 +14,11 @@ from ai_gate.budget import CHARS_PER_TOKEN_ESTIMATE, RequestBudget
 from ai_gate.targets.rest_json import as_dict, build_headers, build_url
 
 try:
+    from scanner_tools.credential_redirects import confined_session_context
+except ModuleNotFoundError:  # package import layout
+    from scanner.scanner_tools.credential_redirects import confined_session_context
+
+try:
     if not os.environ.get("PLAYWRIGHT_BROWSERS_PATH") and os.path.exists("/ms-playwright"):
         os.environ["PLAYWRIGHT_BROWSERS_PATH"] = "/ms-playwright"
     from playwright.async_api import TimeoutError as PlaywrightTimeoutError
@@ -358,7 +363,14 @@ class WidgetPlaywrightConversationTarget:
         self._browser = None
         self._context = None
         self._page = None
+        self._session_header_events = None
         self._network_events: deque[dict[str, Any]] = deque(maxlen=MAX_WIDGET_NETWORK_EVENTS)
+
+    def session_header_coverage(self) -> dict[str, Any]:
+        """What the configured headers could not reach (a page after a redirect within the
+        origin loaded without them, a private-network resource refused by the browser)."""
+        events = self._session_header_events
+        return events.as_dict() if events is not None else {"reasons": [], "counts": {}}
 
     def set_request_budget(self, request_budget: RequestBudget) -> None:
         self.request_budget = request_budget
@@ -628,6 +640,8 @@ class WidgetPlaywrightConversationTarget:
                 json.dumps(network_slice, sort_keys=True, ensure_ascii=False)
             ),
             **browser_state_evidence,
+            **({"session_header_coverage": self.session_header_coverage()}
+               if self.session_header_coverage()["reasons"] else {}),
             "notes": notes,
         }
 
@@ -652,11 +666,14 @@ class WidgetPlaywrightConversationTarget:
 
         if auth_kind == "basic_auth" and isinstance(secret, str) and ":" in secret:
             username, password = secret.split(":", 1)
-            context_kwargs["http_credentials"] = {"username": username, "password": password}
+            parsed_endpoint = urlparse(self.endpoint_url)
+            context_kwargs["http_credentials"] = {
+                "username": username, "password": password,
+                # Answer an authentication challenge from the endpoint's origin only.
+                "origin": f"{parsed_endpoint.scheme}://{parsed_endpoint.netloc}",
+            }
 
         header_overrides = {k: v for k, v in self.headers.items() if k.lower() != "cookie"}
-        if header_overrides:
-            context_kwargs["extra_http_headers"] = header_overrides
 
         auth_state = as_dict(self.metadata.get("playwright_auth_state")) or as_dict(
             self.metadata.get("widget_auth_state")
@@ -664,12 +681,19 @@ class WidgetPlaywrightConversationTarget:
         if auth_state:
             context_kwargs["storage_state"] = auth_state
 
-        self._context = await self._browser.new_context(**context_kwargs)
+        navigation_url = str(self.manifest.get("entry_url") or self.endpoint_url)
+        if header_overrides:
+            # The configured headers: the context reaches the widget page's and the endpoint's
+            # origins only, so the headers can never go anywhere else.
+            self._context, self._session_header_events = await confined_session_context(
+                self._browser, [navigation_url, self.endpoint_url], header_overrides, **context_kwargs,
+            )
+        else:
+            self._context = await self._browser.new_context(**context_kwargs)
         self._page = await self._context.new_page()
         self._page.on("request", self._record_request)
         self._page.on("response", self._record_response)
 
-        navigation_url = str(self.manifest.get("entry_url") or self.endpoint_url)
         if auth_kind == "cookie" and isinstance(secret, str) and secret.strip():
             parsed = urlparse(navigation_url)
             cookies = [

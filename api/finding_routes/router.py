@@ -45,6 +45,7 @@ try:
     from serialization import _decode_json_value, _json_object, _str_list, row_to_dict
     from scan.retest_authority import REPLAY_OUT_OF_SCOPE, admit_retest, admitted_authority_json
     from finding_detail import RELATED_SQL, build_finding_detail, related_findings, related_sql_args
+    from finding_detail.evidence_commands import current_evidence_commands
     from exposure.finding_link import related_exposures
     from list_contract import DEFAULT_LIMIT, MAX_LIMIT, SqlParams, page_params
 except ModuleNotFoundError:  # package import in host-side tests
@@ -65,6 +66,7 @@ except ModuleNotFoundError:  # package import in host-side tests
     from ..serialization import _decode_json_value, _json_object, _str_list, row_to_dict
     from ..scan.retest_authority import REPLAY_OUT_OF_SCOPE, admit_retest, admitted_authority_json
     from ..finding_detail import RELATED_SQL, build_finding_detail, related_findings, related_sql_args
+    from ..finding_detail.evidence_commands import current_evidence_commands
     from ..exposure.finding_link import related_exposures
     from ..list_contract import DEFAULT_LIMIT, MAX_LIMIT, SqlParams, page_params
 
@@ -699,6 +701,8 @@ async def get_finding(finding_id: str):
         exposures = await related_exposures(conn, finding)
 
     result = dict(finding)
+    # Stored copyable commands are rebuilt from their inputs or shown as recorded text only.
+    current_evidence_commands(result)
     # Same single proof-state the list uses, so list and detail never disagree (§7).
     result.update(finding_proof_fields(result))
     # A release's retirement is labelled as such, never read as a fix.

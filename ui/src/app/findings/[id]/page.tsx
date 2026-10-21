@@ -615,6 +615,8 @@ function FindingDetailContent() {
           ? 'No deterministic prover covers this finding type. Enable AI verification in AI settings to retest it.'
           : 'No automated retest is available for this finding type in this workspace.'
   const manualVerifyCommands = evidenceStringList(rawEvidenceObject, 'verify_commands')
+  // Commands an earlier release stored that the API could not rebuild: text only, never copied.
+  const recordedVerifyCommands = evidenceStringList(rawEvidenceObject, 'verify_commands_as_recorded')
   const aiProbePrompt = evidenceString(rawEvidenceObject, 'prompt')
   const aiResponseExcerpt = evidenceString(rawEvidenceObject, 'response_excerpt')
   const aiProbeId = evidenceString(rawEvidenceObject, 'probe_id')
@@ -988,6 +990,18 @@ function FindingDetailContent() {
                         <code className="flex-1 text-[11px] text-blue-300 break-all">{command}</code>
                         <CopyButton text={command} label="Copy verification command" />
                       </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+              {recordedVerifyCommands.length > 0 && (
+                <div data-testid="recorded-verify-commands">
+                  <p className="mb-1 text-xs text-gray-500">
+                    Verification commands as recorded by an earlier release (shown as text, not offered for copying)
+                  </p>
+                  <div className="space-y-1">
+                    {recordedVerifyCommands.map((command, idx) => (
+                      <code key={idx} className="block text-[11px] text-gray-400 break-all">{command}</code>
                     ))}
                   </div>
                 </div>

@@ -2382,6 +2382,18 @@ def _off_origin_redirect(
     return moved if moved and moved != http_origin(origin) else None
 
 
+def browser_session_header_reasons(observations: Mapping[str, Any]) -> set[str]:
+    """What an action's browser could not do with its trusted headers (a page reached by a
+    redirect within the origin loaded without them, a private-network resource refused), from
+    its ``browser_session_header_coverage`` observations. Stated in coverage; no status changes."""
+    reasons: set[str] = set()
+    for rows in (observations or {}).values():
+        for row in rows or ():
+            if isinstance(row, Mapping) and row.get("kind") == "browser_session_header_coverage":
+                reasons.update(str(item)[:100] for item in row.get("reasons") or () if str(item))
+    return reasons
+
+
 def _observed_success_response(
     observations: Mapping[str, Sequence[Mapping[str, Any]]],
     *, origins: frozenset[str],
@@ -3408,6 +3420,7 @@ def finalize_scan_report(
         | ({"placement_unavailable"} if placement_gaps else set())
         | ({"bound_origin_redirects_off_origin"}
            if application_forwarded_off_origin else set())
+        | browser_session_header_reasons(observations)
         | {f"{OMITTED_CAPABILITY_REASON}:{str(name)[:80]}" for name in omitted_capabilities or () if str(name).strip()}
     )
     coverage_action_rows = [

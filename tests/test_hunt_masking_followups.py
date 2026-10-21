@@ -110,7 +110,7 @@ ALLOWED_PLAIN_DIGESTS = {
     ("api/capabilities/authz.py", "authz_route_inventory_digest"): "canonical",
     ("api/capabilities/authz_modes.py", "verify_function_authorization"): "request",
     ("api/capabilities/authz_selected.py", "request_digest"): "canonical",
-    ("api/capabilities/browser.py", "_execute_browser_action"): "request",
+    ("api/capabilities/browser.py", "_execute_browser_action_in_context"): "request",
     ("api/capabilities/browser.py", "prepare"): "request",
     ("api/capabilities/browser_login_action.py", "prepare"): "request",
     ("api/capabilities/browser_steps.py", "browser_surface"): "redacted",

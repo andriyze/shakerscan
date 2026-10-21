@@ -35,6 +35,22 @@ _SCAN_BUDGET_FIELDS = {
 }
 
 _REASON_LABELS = {
+    "session_cross_origin_refused": (
+        "The authenticated browser reaches only the target's origin, so connections to other "
+        "origins (third-party scripts, CDNs, redirects elsewhere) were refused and not loaded"
+    ),
+    "session_navigation_redirect_refused": (
+        "The target redirected an authenticated page to another origin; the browser does not "
+        "follow it with the session, so that page was not loaded"
+    ),
+    "session_header_withheld_from_headless": (
+        "Dalfox ran without its headless browser, which sends session headers to every origin a "
+        "page loads, so DOM-based XSS was not verified in a browser for this session"
+    ),
+    "private_network_subresource_blocked": (
+        "The browser refused a target page's request to another origin on a private or loopback "
+        "address while the session header was in use, so that resource was not loaded"
+    ),
     "capability_unknown": "The action capability is not registered",
     "policy_disabled": "Disabled by scan policy",
     "insufficient_plan_budget": "Not enough admitted scan budget",

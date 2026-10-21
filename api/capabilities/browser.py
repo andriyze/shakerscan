@@ -8,6 +8,7 @@ except ModuleNotFoundError:  # package import layout
     from api.capabilities.secret_material import keyed_body_digest
 import asyncio
 import contextlib
+import dataclasses
 from dataclasses import dataclass, field
 import json
 import hashlib
@@ -50,6 +51,12 @@ try:
     from scanner_tools.url_redaction import redact_client_route, redact_url
 except ModuleNotFoundError:  # package imports in host-side tests
     from scanner.scanner_tools.url_redaction import redact_client_route, redact_url
+try:
+    from scanner_tools import credential_redirects as _credential_redirects
+    from scanner_tools.destination_guard import DISABLE_WEBRTC as _DISABLE_WEBRTC
+except ModuleNotFoundError:  # package imports in host-side tests
+    from scanner.scanner_tools import credential_redirects as _credential_redirects
+    from scanner.scanner_tools.destination_guard import DISABLE_WEBRTC as _DISABLE_WEBRTC
 
 
 SAFE_BROWSER_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
@@ -777,6 +784,29 @@ async def _execute_browser_action(
     cancelled: Cancelled,
     trusted_headers: Mapping[str, str] | None = None,
 ) -> CapabilityAdapterResult:
+    """Run one browser action. Its pinned proxy admits only the bound origin, so trusted headers
+    reach nothing else; the result says what was refused (``browser_session_header_coverage``)."""
+    events = _credential_redirects.SessionHeaderEvents()
+    result = await _execute_browser_action_in_context(
+        prepared, heartbeat=heartbeat, cancelled=cancelled, trusted_headers=trusted_headers,
+        session_header_events=events,
+    )
+    if not events.reasons():
+        return result
+    coverage = {"kind": "browser_session_header_coverage", **events.as_dict()}
+    return dataclasses.replace(
+        result, observations=(coverage, *result.observations)[:MAX_BROWSER_RESPONSE_OBSERVATIONS],
+    )
+
+
+async def _execute_browser_action_in_context(
+    prepared: PreparedBrowserAction,
+    *,
+    heartbeat: Heartbeat,
+    cancelled: Cancelled,
+    trusted_headers: Mapping[str, str] | None = None,
+    session_header_events: Any = None,
+) -> CapabilityAdapterResult:
     started = time.monotonic()
     request_count = 0
     proof_body_requests = 0
@@ -833,6 +863,8 @@ async def _execute_browser_action(
                 443 if parsed_origin.scheme.lower() == "https" else 80
             ),
             max_connections=prepared.max_requests,
+            # Only the bound origin's scheme crosses the tunnel (TLS for https, plaintext for http).
+            scheme=parsed_origin.scheme.lower(),
         ).start()
         responses.append({
             "kind": "browser_target_transport",
@@ -859,6 +891,9 @@ async def _execute_browser_action(
             accept_downloads=False,
             ignore_https_errors=True,
             service_workers="block",
+            # Every connection goes through the pinned proxy, so Local Network Access can be
+            # granted without widening where the page can reach.
+            **_credential_redirects.local_network_access(True),
         )
         # Cookie headers cannot be overridden by Playwright routing. Bind them
         # to the exact target URL; do not serialize or return browser storage.
@@ -871,6 +906,13 @@ async def _execute_browser_action(
                      "httpOnly": True, "secure": prepared.origin.startswith("https:")}
                     for key, cookie in cookies.items()
                 ])
+        if trusted_headers and session_header_events is not None:
+            context.on("console", session_header_events.observe_console)
+            session_header_events.origins = frozenset(_credential_redirects.bound_origins([prepared.origin]))
+            context.on("request", session_header_events.observe_request)
+
+        # WebRTC sends UDP outside the pinned proxy: the page has no RTCPeerConnection.
+        await context.add_init_script(_DISABLE_WEBRTC)
         await context.add_init_script(
             "window.WebSocket = class { constructor() { throw new Error('blocked'); } };"
             "window.EventSource = class { constructor() { throw new Error('blocked'); } };"
@@ -944,6 +986,9 @@ async def _execute_browser_action(
                     name.lower(): value for name, value in trusted_headers.items()
                     if name.lower() != "cookie"
                 }}
+                # Chromium carries continued headers into redirect hops; the pinned proxy admits
+                # only the target's hostname and port, so a hop elsewhere is refused before any
+                # byte of it leaves (refusals are counted below).
                 await route.continue_(headers=headers)
             else:
                 await route.continue_()
@@ -1253,6 +1298,13 @@ async def _execute_browser_action(
                 await pinned_proxy.close()
             except Exception:
                 pass
+            if trusted_headers and session_header_events is not None:
+                # Connections to anything but the bound origin, refused at the pinned proxy.
+                session_header_events.record(
+                    _credential_redirects.SESSION_CROSS_ORIGIN_REFUSED,
+                    sum(dict(getattr(pinned_proxy, "refused_destinations", {}) or {}).values())
+                    + int(getattr(pinned_proxy, "refused_destinations_other", 0) or 0),
+                )
             # Inside a Scan worker the browser's tunnel joins the Scan's request archive; the
             # archive never decides the action's outcome.
             try:
