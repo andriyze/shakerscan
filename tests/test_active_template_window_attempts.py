@@ -39,7 +39,6 @@ from scan.nuclei_template_index import nuclei_templates_directory
 from scan.work_manifests import (
     build_canonical_nuclei_template_manifest,
     build_endpoint_manifest,
-    execution_url_for_endpoint,
 )
 
 TARGET = TargetBinding(
@@ -262,13 +261,26 @@ def test_a_seed_with_a_base_path_is_where_the_windows_run(monkeypatch, bundle):
     assert {call["url"] for call in host.calls} == {"https://app.example.test/app/"}
 
 
-def test_a_slice_without_planned_windows_still_runs_each_endpoint_at_its_own_url(monkeypatch, bundle):
-    """Fast, balanced and hosts with as many endpoints as windows are unchanged."""
-    host = _Host(("/version", "/info"), sources={})
-    host.run(monkeypatch, bundle, host.action("active.templates.r01", start=0, count=2, windows=False))
-    assert [call["url"] for call in host.calls] == [
-        execution_url_for_endpoint(entry) for entry in host.endpoints.entries
+def test_a_slice_without_planned_windows_runs_its_windows_at_the_seed_too(monkeypatch, bundle):
+    """Fast, balanced, a host with as many endpoints as windows and a parallel shard plan and hold
+    one position per endpoint exactly as before, with the same attempts and the same window per
+    position; only the URL each attempt targets is the seed (or, in a shard's slice of the
+    endpoints with no seed, the origin's root) instead of the endpoint's path."""
+    host = _Host(("/version", "/info", "/"), sources={"/": "seed"})
+    action = host.action("active.templates.r01", start=0, count=3, windows=False)
+    host.run(monkeypatch, bundle, action)
+    assert "endpoint_entries" not in action.capability_args
+    assert [call["url"] for call in host.calls] == ["https://app.example.test/"] * 3
+    allowlist = _allowlist(bundle, state_changing=True)
+    assert [call["template_ids"] for call in host.calls] == [
+        active_template_window(allowlist, position).template_ids for position in range(3)
     ]
+    assert set(host.backend.attempts["active.templates.r01"]) == {
+        host.attempt_id(position) for position in range(3)
+    }
+    shard = _Host(("/version", "/info"))
+    shard.run(monkeypatch, bundle, shard.action("active.templates.r01", start=0, count=2, windows=False))
+    assert [call["url"] for call in shard.calls] == ["https://app.example.test/"] * 2
 
 
 def test_an_endpoints_own_position_keeps_its_identity_and_later_ones_are_their_own(monkeypatch, bundle):

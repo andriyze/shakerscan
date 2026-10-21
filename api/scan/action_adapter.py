@@ -4723,12 +4723,13 @@ class DatabaseNeutralScanActionDispatcher:
                                 "injection_field": str(resolved["field_name"]),
                             }
                     else:
-                        # A thorough or deep slice runs every window at the scan's seed: the
-                        # templates address the host from the base URL (window_base_endpoint).
+                        # An active sweep runs every window at the scan's seed: its templates
+                        # address the host from the base URL (window_base_endpoint). A passive
+                        # pack and a verify Scan's named checks run at each endpoint.
                         execution_target = (
-                            execution_url_for_manifest_endpoint(manifest, manifest_index)
-                            if window_endpoints is None
-                            else execution_url_for_endpoint(window_base_endpoint(manifest.entries))
+                            execution_url_for_endpoint(window_base_endpoint(manifest.entries))
+                            if windowed
+                            else execution_url_for_manifest_endpoint(manifest, manifest_index)
                         )
                     # This entry and every later one that will actually be funded.
                     remaining_attempts = 1 + sum(1 for entry in work[position:] if needs_hold(entry))

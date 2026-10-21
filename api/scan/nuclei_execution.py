@@ -155,7 +155,7 @@ def planned_endpoint_entries(
 
 
 def window_base_endpoint(entries: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
-    """The endpoint every template window of a thorough or deep slice runs at: the scan's seed.
+    """The endpoint every active-template window runs at, on every profile: the scan's seed.
 
     A window's templates address the host from nuclei's base URL: ``{{BaseURL}}/images/json``,
     and a raw ``GET /version`` is joined to the base path as well. Running window o at endpoint
@@ -163,7 +163,14 @@ def window_base_endpoint(entries: Sequence[Mapping[str, Any]]) -> dict[str, Any]
     /info and /, so misconfigured-docker asked /version/images/json and docker-daemon-exposed
     asked under /info, both got 404, and both windows counted as run with the host's two
     critical findings lost. The seed is the URL the operator scanned (an application under a base
-    path keeps it); without a seed entry, the root of the manifest's first origin.
+    path keeps it); without a seed entry (a parallel shard's slice of the endpoints), the root of
+    the manifest's first origin.
+
+    No permitted template needs a discovered endpoint's path (pinned bundle, 1,145 permitted
+    templates): none fuzzes the endpoint or appends a query to it; 550 append a path to
+    {{BaseURL}}, 495 send raw requests with absolute paths (joined to the base path), and 108 ask
+    {{BaseURL}} itself to recognise a product's page -- which a window ran on one arbitrary
+    endpoint, never on each, so the seed is where that check is meaningful.
     """
     if not entries:
         raise ValueError("active template windows need an endpoint")
