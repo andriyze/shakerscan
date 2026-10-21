@@ -98,6 +98,9 @@ def test_no_secret_named_value_reaches_any_stored_surface(
     report = _finalized(observation)
     if verified:
         assert report["findings"], label
+    [exposure] = [row for row in report["coverage"]["family_coverage"]
+                  if row["family"] == "sensitive_exposure"]
+    assert exposure["coverage_status"] == "complete", label
     surfaces = {
         "excerpt": redacted_exposure_excerpt(body, signature),
         "observation": json.dumps(observation, default=str),

@@ -62,6 +62,16 @@ except (ImportError, ModuleNotFoundError):  # top-level scan.* worker imports
 ACTION_LEASE_SCHEMA = "scan-action-lease/v1"
 _HEX_64_RE = re.compile(r"^[0-9a-f]{64}$")
 _LEASE_TOKEN_RE = re.compile(r"^[A-Za-z0-9_-]{16,256}$")
+# Skip tokens that mean the action had nothing to do: its slice was empty and its manifest
+# complete (action_adapter._empty_slice_reason), or a proof had no candidate signal to escalate.
+_NOTHING_TO_DO_SKIP_TOKENS = frozenset({
+    "not_applicable", "no_xss_candidate_observation", "no_sqli_candidate_observation",
+})
+# Skip tokens of an active template selection that left nothing to run
+# (nuclei_template_index.ActiveNucleiSelection.skip_reason).
+_TEMPLATE_SELECTION_EMPTY_SKIP_TOKENS = frozenset({
+    "no_eligible_nuclei_templates", "verify_checks_excluded", "verify_checks_need_oob_interaction",
+})
 
 
 class ScanExecutionBackendError(RuntimeError):
@@ -1048,7 +1058,7 @@ class PostgresScanExecutionBackend:
             )
         elif raw_status == "skipped":
             status = CapabilityResultStatus.SKIPPED
-            reason = self._receipt_reason(receipt, CapabilityResultReason.NOT_APPLICABLE)
+            reason = self._skip_reason(receipt)
         elif raw_status == "blocked":
             status = CapabilityResultStatus.BLOCKED
             reason = self._receipt_reason(receipt, CapabilityResultReason.ADAPTER_FAILED)
@@ -1056,6 +1066,22 @@ class PostgresScanExecutionBackend:
             status = CapabilityResultStatus.FAILED
             reason = self._receipt_reason(receipt, CapabilityResultReason.ADAPTER_FAILED)
         return status, reason
+
+    @classmethod
+    def _skip_reason(cls, receipt: CapabilityReceipt) -> CapabilityResultReason:
+        """The reason a skipped receipt settles to.
+
+        Only a skip that means "nothing to do" is not_applicable. Settling every unrecognised
+        skip token that way let a skip for a missing prerequisite (no canonical origin, no
+        authenticated principal) read as a family with nothing to examine.
+        """
+        for error in receipt.errors:
+            token = str(error or "").strip().lower().split(":", 1)[0]
+            if token in _NOTHING_TO_DO_SKIP_TOKENS:
+                return CapabilityResultReason.NOT_APPLICABLE
+            if token in _TEMPLATE_SELECTION_EMPTY_SKIP_TOKENS:
+                return CapabilityResultReason.NUCLEI_SELECTION_EMPTY
+        return cls._receipt_reason(receipt, CapabilityResultReason.PREREQUISITE_UNAVAILABLE)
 
     @staticmethod
     def _receipt_reason(

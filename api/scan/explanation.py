@@ -87,6 +87,11 @@ _REASON_LABELS = {
     "manifest_unavailable": "Required immutable work was unavailable",
     "unsupported_output_schema": "The worker returned an unsupported result format",
     "not_applicable": "The capability did not apply to this target",
+    "nuclei_selection_empty": "The scan's template policy left no template to run",
+    "prerequisite_unavailable": (
+        "A step was skipped because something it needs was missing, such as a reachable "
+        "origin or an authenticated session"
+    ),
     "source_not_published": "An optional discovery source was not published by the target",
     "declared_out_of_scope": "The target's API description declares its routes on another origin (a different host, port or scheme), outside this scan's scope",
     "declared_partly_out_of_scope": "Some routes in the target's API description are declared only on another origin (a different host, port or scheme); the rest were ingested",
@@ -112,6 +117,10 @@ _REASON_LABELS = {
     "selected_family_no_candidates": (
         "A selected check family had no candidate to test on the discovered surface; its "
         "family coverage says which"
+    ),
+    "discovery_failed": (
+        "A surface discovery step failed, so what the application exposes was never fully "
+        "examined"
     ),
     "discovery_truncated": (
         "Surface discovery was cut short by its budget, so part of the application was "
