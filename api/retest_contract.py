@@ -12,7 +12,6 @@ import asyncio
 import json
 import os
 import re
-import shlex
 import urllib.parse
 import uuid
 from dataclasses import dataclass
@@ -685,7 +684,7 @@ def build_replay_commands(inputs: dict[str, Any]) -> list[str]:
     payload = str(inputs.get("payload") or "").strip() or DEFAULT_REPLAY_PAYLOADS.get(finding_type, "test")
     marked = _sqlmap_marked_segment_urls(target_url, param, payload) if method != "POST" else None
     if marked and finding_type not in ("exposed_file", "generic_http"):
-        return [f"curl -i -k {shlex.quote(url)}" for url in marked]
+        return [f"curl -i -k {shell_word(_replay_url(url))}" for url in marked]
 
     if not target_url:
         return []

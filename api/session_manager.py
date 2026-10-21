@@ -18,6 +18,7 @@ Usage:
 """
 
 import asyncio
+import contextlib
 import base64
 import json
 import re
@@ -44,6 +45,10 @@ try:
     from redaction import is_sensitive_key, redact_text
 except ModuleNotFoundError:  # package import layout
     from scanner.redaction import is_sensitive_key, redact_text
+try:
+    from scanner_tools.credential_redirects import confined_session_context
+except ModuleNotFoundError:  # package import layout
+    from scanner.scanner_tools.credential_redirects import confined_session_context
 
 # A response header whose name says it carries a credential (``X-Subject-Token``, ``X-Auth-Token``,
 # ``X-Upstream-Auth``, a session or key header): withheld whatever its value looks like.
@@ -208,6 +213,8 @@ class InteractiveSession:
         self._playwright = None
         self._browser: Browser | None = None
         self._contexts: dict[str, BrowserContext] = {}  # user_name -> context
+        self._session_headers: dict[str, dict[str, str]] = {}  # user_name -> set_auth headers
+        self._session_header_events: dict[str, Any] = {}  # user_name -> SessionHeaderEvents
         self._pages: dict[str, Page] = {}  # user_name -> page
         self._user_allowed_origins: dict[str, set[tuple[str, str, int]]] = {}  # user_name -> allowed origins
         self._network_log: list[dict] = []
@@ -267,20 +274,33 @@ class InteractiveSession:
             "error": f"Failed to start session: {start_error or 'unknown error'}"
         }
 
-    async def _create_user_context(self, user_name: str) -> BrowserContext:
-        """Create a new browser context for a user."""
+    async def _create_user_context(
+        self, user_name: str, *, headers: dict[str, str] | None = None,
+        storage_state: dict[str, Any] | None = None,
+    ) -> BrowserContext:
+        """Create a new browser context for a user.
+
+        With session ``headers`` the context is confined at the network layer to the target's
+        origin and carries them natively (``confined_session_context``); without, it is the
+        ordinary context (a retest's destination guard still applies through its proxy)."""
         try:
             from scanner_tools.destination_guard import guarded_context_options
         except ImportError:
             async def guarded_context_options():
                 return {}
-        context = await self._browser.new_context(
-            ignore_https_errors=True,
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        options: dict[str, Any] = {
+            "ignore_https_errors": True,
+            "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            **({"storage_state": storage_state} if storage_state is not None else {}),
+        }
+        if headers:
+            context, self._session_header_events[user_name] = await confined_session_context(
+                self._browser, [self.target_url], headers, **options,
+            )
+        else:
             # A finding retest's destination guard, when this session runs inside one: all of
             # its traffic through the guard's egress proxy (redirect hops and WebSockets too).
-            **await guarded_context_options(),
-        )
+            context = await self._browser.new_context(**options, **await guarded_context_options())
 
         # Set up network interception
         page = await context.new_page()
@@ -301,7 +321,7 @@ class InteractiveSession:
             request_url = route.request.url
             # Allow data/blob/about URLs (inline resources)
             if request_url.startswith(("data:", "blob:", "about:")):
-                await route.continue_()
+                await route.fallback()
                 return
             if destination_guard is not None and not destination_guard.check(request_url):
                 await route.abort("blockedbyclient")
@@ -309,18 +329,18 @@ class InteractiveSession:
 
             # Always allow same-origin
             if self._is_in_scope(request_url):
-                await route.continue_()
+                await route.fallback()
                 return
 
             # Allow explicitly permitted origins for this user
             origin_key = self._origin_key(request_url)
             if origin_key and origin_key in self._user_allowed_origins.get(user_name, set()):
-                await route.continue_()
+                await route.fallback()
                 return
 
             # Allow cross-origin static assets to avoid breaking app rendering
             if route.request.resource_type in CROSS_ORIGIN_ALLOWED_RESOURCE_TYPES:
-                await route.continue_()
+                await route.fallback()
                 return
 
             # Block cross-origin navigation/requests by default
@@ -516,6 +536,8 @@ class InteractiveSession:
                 # Navigate to target
                 await page.goto(self.target_url, wait_until="domcontentloaded", timeout=30000)
 
+            events = self._session_header_events.get(user)
+            counts_before = dict(events.counts) if events is not None else {}
             try:
                 result = {"success": True, "action": action_type, "user": user}
 
@@ -611,10 +633,51 @@ class InteractiveSession:
                     return {"success": False, "error": f"Unknown action: {action_type}"}
 
                 self._update_activity()
+                self._record_session_header_events(result, events, counts_before)
                 return result
 
             except Exception as e:
-                return {"success": False, "error": f"Action failed: {str(e)}", "action": action_type}
+                failed = {"success": False, "error": f"Action failed: {str(e)}", "action": action_type}
+                # A navigation refused at the confined context's proxy fails the action; it says why.
+                self._record_session_header_events(failed, events, counts_before)
+                return failed
+
+    async def _apply_session_headers(self, user: str, headers: dict[str, str]) -> None:
+        """Give the user's browser its session headers. A context that carries headers is
+        confined to the target's origin; the first time headers are set, the user's context is
+        replaced by a confined one with the same cookies and storage, at the same page."""
+        self._session_headers[user] = dict(headers)
+        context = self._contexts.get(user)
+        if context is None:
+            return
+        if user in self._session_header_events:
+            await context.set_extra_http_headers(dict(headers))
+            return
+        if not headers:
+            return
+        page = self._pages.get(user)
+        current_url = page.url if page is not None else self.target_url
+        state = await context.storage_state()
+        await self._create_user_context(user, headers=dict(headers), storage_state=state)
+        await context.close()
+        if str(current_url).startswith(("http://", "https://")):
+            with contextlib.suppress(Exception):
+                await self._pages[user].goto(current_url, wait_until="domcontentloaded", timeout=30000)
+
+    @staticmethod
+    def _record_session_header_events(result: dict[str, Any], events: Any, counts_before: dict[str, int]) -> None:
+        """Say on the action's result what the session header could not reach during it: a
+        page reached by a redirect within the target was loaded without the session header,
+        or a private-network resource of another origin was refused by the browser."""
+        if events is None:
+            return
+        during = {
+            reason: count - counts_before.get(reason, 0)
+            for reason, count in events.counts.items() if count - counts_before.get(reason, 0) > 0
+        }
+        if during:
+            result["coverage_reasons"] = sorted(during)
+            result["coverage_counts"] = during
 
     async def _wait_after_form_submit(self, page: Page, start_url: str, timeout_ms: int = 6000) -> None:
         """Wait briefly for post-submit navigation/state changes without hanging on long-polling apps."""
@@ -743,9 +806,7 @@ class InteractiveSession:
 
         is_authenticated = bool("Authorization" in merged_headers or merged_cookies)
         try:
-            context = self._contexts.get(user)
-            if context:
-                await context.set_extra_http_headers(merged_headers)
+            await self._apply_session_headers(user, merged_headers)
         except Exception:
             return {
                 "success": False,
@@ -1247,7 +1308,11 @@ class InteractiveSession:
                 for e in self.state.discovered_endpoints[:20]
             ],
             "discovered_ids": self.state.discovered_ids,
-            "network_log_count": len(self._network_log)
+            "network_log_count": len(self._network_log),
+            "session_header_coverage": {
+                name: events.as_dict()
+                for name, events in self._session_header_events.items() if events.reasons()
+            },
         }
 
     async def close(self):

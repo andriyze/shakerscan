@@ -22,6 +22,7 @@ from urllib.parse import urljoin, urlparse, parse_qs, urlencode
 
 import aiohttp
 
+from . import credential_redirects
 from .common import run, get_auth_curl_args, AdaptiveRateLimiter
 
 
@@ -205,7 +206,10 @@ async def send_concurrent_requests(
                     else:
                         request_kwargs["data"] = body
 
-                async with session.request(method, url, **request_kwargs) as response:
+                async with credential_redirects.aiohttp_request(
+                    session, method, url, credentials=credential_redirects.carries_session_headers(headers),
+                    **request_kwargs,
+                ) as response:
                     result["status_code"] = response.status
                     result["headers"] = dict(response.headers)
                     try:

@@ -11,20 +11,70 @@ an instance with a certificate from a private CA is unreachable until this machi
 
 from __future__ import annotations
 
+import ipaddress
+import re
 import urllib.parse
+
+_DNS_LABEL = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?")
+# The same quoting as scanner_tools.shell_words.shell_word (this module is vendored into the
+# client on its own, so it carries a copy; a test keeps the two identical).
+_CONTROL = re.compile(r"[\x00-\x1f\x7f-\x9f]")
+_BARE = re.compile(r"[A-Za-z0-9_@%+=:,./-]+")
+
+
+def shell_word(value: object) -> str:
+    """``value`` as one shell word that sh, bash, dash, ksh, zsh and fish read back literally."""
+    text = _CONTROL.sub(lambda match: urllib.parse.quote(match.group(), safe=""), str(value))
+    if not text:
+        return "''"
+
+    def quoted(run: str) -> str:
+        if _BARE.fullmatch(run) and not run.startswith("="):
+            return run
+        return "'" + run.replace("'", "'\"'\"'") + "'"
+
+    return '"\\\\"'.join(quoted(run) if run else "" for run in text.split("\\"))
+
+
+def _host(netloc: str, hostname: str) -> str | None:
+    """``hostname`` written back as a DNS name, IPv4 address or bracketed IPv6 address."""
+    if netloc.rsplit("@", 1)[-1].startswith("["):
+        if "%" in hostname:
+            return None  # a zone id is local to one machine, and free text
+        try:
+            return f"[{ipaddress.IPv6Address(hostname).compressed}]"
+        except ValueError:
+            return None
+    try:
+        return str(ipaddress.IPv4Address(hostname))
+    except ValueError:
+        pass
+    name = hostname.lower()
+    if len(name) > 253 or not all(_DNS_LABEL.fullmatch(label) for label in name.split(".")):
+        return None
+    return name
 
 
 def redirect_origin(location: str | None, request_url: str) -> str | None:
-    """The origin a redirect points at (relative locations resolved), or None."""
+    """The origin a redirect points at (relative locations resolved), or None.
+
+    The origin is rebuilt from the parsed scheme, a strictly validated host and an integer
+    port, so it can be named in a command. Anything else in ``Location`` yields None.
+    """
     if not location:
         return None
     try:
         parts = urllib.parse.urlsplit(urllib.parse.urljoin(request_url, str(location).strip()))
+        port = parts.port
     except ValueError:
         return None
-    if parts.scheme not in {"http", "https"} or not parts.hostname:
+    scheme = parts.scheme.lower()
+    if scheme not in {"http", "https"} or not parts.hostname:
         return None
-    return f"{parts.scheme}://{parts.netloc.rsplit('@', 1)[-1]}"
+    host = _host(parts.netloc, parts.hostname)
+    if host is None:
+        return None
+    return f"{scheme}://{host}" + (f":{int(port)}" if port is not None else "")
 
 
 def redirect_explanation(status: int, location: str | None, request_url: str, *, option: str = "--url") -> str:
@@ -37,9 +87,10 @@ def redirect_explanation(status: int, location: str | None, request_url: str, *,
     )
     if target and here and target != here:
         upgrade = here.startswith("http://") and target.startswith("https://")
+        word = shell_word(target)
         return text + (
             f" {'The instance is served over HTTPS at' if upgrade else 'It points at'} {target}: "
-            f"use that address (shakerscan connect {target}, or {option} {target})."
+            f"use that address (shakerscan connect {word}, or {option} {word})."
         )
     return text + f" Use the instance's own origin (shakerscan connect <origin>, or {option} <origin>)."
 
@@ -68,5 +119,5 @@ def with_certificate_hint(message: str, reason: object) -> str:
 
 __all__ = [
     "CERTIFICATE_HINT", "certificate_hint", "redirect_explanation", "redirect_origin",
-    "with_certificate_hint",
+    "shell_word", "with_certificate_hint",
 ]
