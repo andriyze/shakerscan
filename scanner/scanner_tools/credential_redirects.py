@@ -6,10 +6,12 @@ authenticated with an API key header (``X-API-Key``, ``X-Auth-Token`` ...) or a 
 browser-session header would hand that value to whatever origin the target names in a
 ``Location`` header.
 
-The rule here matches the capability layer's ``credential_destination`` stop: a request
-carrying session material follows a redirect only while the next hop has the same scheme,
-host and port. Any other redirect is not followed; the caller receives the redirect
-response itself. Requests without session material keep the client's normal behaviour.
+A request carrying session material follows a redirect only while the next hop has the same
+scheme, host and port, or is the same host upgraded from http on port 80 to https on 443. Any
+other redirect is not followed; the caller receives the redirect response itself. Requests
+without session material keep the client's normal behaviour, and for curl, material that curl
+7.83 and later strip themselves on a cross-host redirect (``Authorization``, ``Cookie``, ``-u``,
+``--oauth2-bearer``) is left to curl.
 """
 
 from __future__ import annotations
@@ -33,9 +35,6 @@ _NEUTRAL_HEADERS = frozenset({
     "upgrade-insecure-requests", "user-agent", "x-requested-with",
 })
 
-_CURL_CREDENTIAL_OPTIONS = frozenset({
-    "-b", "--cookie", "-u", "--user", "--oauth2-bearer", "-E", "--cert", "--aws-sigv4",
-})
 _CURL_DATA_OPTIONS = frozenset({
     "-d", "--data", "--data-raw", "--data-binary", "--data-ascii", "--data-urlencode",
     "-F", "--form", "--form-string", "--json", "-T", "--upload-file",
@@ -57,9 +56,13 @@ def origin_key(url: Any) -> tuple[str, str, int] | None:
 
 
 def same_credential_origin(current_url: Any, next_url: Any) -> bool:
-    """Whether session credentials may accompany a redirect from ``current_url``."""
+    """Whether session credentials may accompany a redirect from ``current_url``: the same
+    scheme, host and port, or the same host upgraded from http on port 80 to https on 443."""
     current = origin_key(current_url)
-    return current is not None and current == origin_key(urllib.parse.urljoin(str(current_url), str(next_url)))
+    target = origin_key(urllib.parse.urljoin(str(current_url), str(next_url)))
+    if current is None or target is None:
+        return False
+    return current == target or (current == ("http", current[1], 80) and target == ("https", current[1], 443))
 
 
 def redirect_method(method: str, status: int) -> str:
@@ -85,7 +88,11 @@ def carries_session_headers(headers: Any) -> bool:
 
 async def httpx_request(client: Any, method: str, url: str, *, max_redirects: int = DEFAULT_MAX_REDIRECTS,
                         **kwargs: Any) -> Any:
-    """Send through an ``httpx.AsyncClient``, following only same-origin redirects."""
+    """Send through an ``httpx.AsyncClient``, following only same-origin redirects when the
+    request carries session headers or cookies; otherwise the client follows as configured."""
+    if not (carries_session_headers(kwargs.get("headers")) or kwargs.get("cookies")
+            or carries_session_headers(getattr(client, "headers", None))):
+        return await client.request(method, url, **kwargs)
     kwargs.pop("follow_redirects", None)
     current_url, current_method = url, method.upper()
     history: list[Any] = []
@@ -150,19 +157,65 @@ def _curl_header_name(value: str) -> str:
     return value.split(":", 1)[0].split(";", 1)[0].strip()
 
 
+# curl 7.83.0 and later drop a custom ``Authorization`` or ``Cookie`` header, ``-u`` and
+# ``--oauth2-bearer`` on a redirect to another host, port or scheme (CVE-2022-27774/27776).
+# They are not session material for curl that new; every other header and an inline ``-b``
+# cookie string are, because curl sends those to any host a redirect names.
+_CURL_SELF_PROTECTED_HEADERS = frozenset({"authorization", "cookie"})
+_CURL_SELF_PROTECTED_OPTIONS = frozenset({"-u", "--user", "--oauth2-bearer"})
+_CURL_ALWAYS_CREDENTIAL_OPTIONS = frozenset({"-E", "--cert", "--aws-sigv4"})
+_CURL_STRIPS_SINCE = (7, 83, 0)
+_curl_versions: dict[str, tuple[int, ...] | None] = {}
+
+
+def curl_version(binary: str = "curl") -> tuple[int, ...] | None:
+    """The ``curl --version`` release of ``binary`` (cached), or None when it cannot be read."""
+    if binary not in _curl_versions:
+        import re
+        import subprocess
+
+        version = None
+        try:
+            done = subprocess.run([binary, "--version"], capture_output=True, text=True, timeout=5, check=False)
+            match = re.match(r"curl (\d+)\.(\d+)\.(\d+)", done.stdout or "")
+            version = tuple(int(part) for part in match.groups()) if match else None
+        except (OSError, subprocess.SubprocessError):
+            version = None
+        _curl_versions[binary] = version
+    return _curl_versions[binary]
+
+
+def curl_strips_credentials(binary: str = "curl") -> bool:
+    version = curl_version(binary)
+    return version is not None and version >= _CURL_STRIPS_SINCE
+
+
 def curl_carries_credentials(cmd: list[str]) -> bool:
-    """Whether a curl argv sends session material (credential headers, cookies, user)."""
+    """Whether a curl argv sends session material that curl itself would copy to another host."""
+    self_protected = curl_strips_credentials(str(cmd[0])) if cmd else False
     args = list(cmd[1:])
+
+    def header_is_material(value: str) -> bool:
+        name = _curl_header_name(value)
+        if not is_session_header(name):
+            return False
+        return not (self_protected and name.lower() in _CURL_SELF_PROTECTED_HEADERS)
+
     for index, value in enumerate(args):
         if not isinstance(value, str):
             continue
-        if value in {"-H", "--header"} and index + 1 < len(args):
-            if is_session_header(_curl_header_name(str(args[index + 1]))):
+        following = str(args[index + 1]) if index + 1 < len(args) else ""
+        if value in {"-H", "--header"} and following:
+            if header_is_material(following):
                 return True
         elif value.startswith("-H") and len(value) > 2 and not value.startswith("--"):
-            if is_session_header(_curl_header_name(value[2:])):
+            if header_is_material(value[2:]):
                 return True
-        elif value in _CURL_CREDENTIAL_OPTIONS:
+        elif value in {"-b", "--cookie"} and "=" in following:
+            return True  # an inline cookie string goes to every host; a cookie file is domain-scoped
+        elif value in _CURL_ALWAYS_CREDENTIAL_OPTIONS:
+            return True
+        elif value in _CURL_SELF_PROTECTED_OPTIONS and not self_protected:
             return True
     return False
 
@@ -176,9 +229,19 @@ def curl_follows_with_credentials(cmd: list[str]) -> bool:
     )
 
 
-def _strip_location(cmd: list[str]) -> tuple[list[str], int]:
+# curl's own limit when --max-redirs is not given; a larger or unlimited (-1) value is held to it.
+CURL_MAX_REDIRECTS = 50
+# Marks where the caller's own write-out starts on stdout (the last occurrence: the response
+# before it is the target's, and may contain anything).
+_CURL_PROBE_SPLIT = "~~shakerscan-write-out-" + __import__("secrets").token_hex(8) + "~~"
+_CURL_OPTIONS_WITH_VALUE = frozenset({"-c", "--cookie-jar", "--max-redirs"})
+
+
+def _strip_location(cmd: list[str]) -> tuple[list[str], int, str | None]:
+    """``cmd`` without ``-L``, ``--max-redirs`` and ``-c`` (the limit and the jar are returned)."""
     stripped: list[str] = []
-    max_redirects = DEFAULT_MAX_REDIRECTS
+    max_redirects = CURL_MAX_REDIRECTS
+    jar = None
     skip_next = False
     for index, value in enumerate(cmd):
         if skip_next:
@@ -186,29 +249,36 @@ def _strip_location(cmd: list[str]) -> tuple[list[str], int]:
             continue
         if value in {"-L", "--location"}:
             continue
-        if value == "--max-redirs":
+        if value in _CURL_OPTIONS_WITH_VALUE and index + 1 < len(cmd):
             skip_next = True
-            try:
-                max_redirects = max(0, min(int(cmd[index + 1]), 50))
-            except (IndexError, ValueError):
-                pass
+            if value == "--max-redirs":
+                try:
+                    limit = int(cmd[index + 1])
+                except ValueError:
+                    limit = CURL_MAX_REDIRECTS
+                max_redirects = CURL_MAX_REDIRECTS if limit < 0 else min(limit, CURL_MAX_REDIRECTS)
+            else:
+                jar = str(cmd[index + 1])
             continue
         stripped.append(value)
-    return stripped, max_redirects
+    return stripped, max_redirects, jar
 
 
-def _with_probe(cmd: list[str], url_index: int, url: str) -> list[str] | None:
-    """Swap in ``url`` and add a write-out that reports the redirect on stderr."""
+def _with_probe(cmd: list[str], url_index: int, url: str, extra: list[str]) -> list[str] | None:
+    """Swap in ``url``, add ``extra`` options, and a write-out that marks where the caller's own
+    write-out starts on stdout and reports the response code and redirect on stderr."""
     argv = list(cmd)
     argv[url_index] = url
+    argv[url_index:url_index] = extra
+    url_index += len(extra)
     probe = "%{stderr}\n" + _CURL_PROBE_MARK + "%{response_code} %{redirect_url}\n"
     for index in range(len(argv) - 1, 0, -1):
         if argv[index] in {"-w", "--write-out"} and index + 1 < len(argv):
             if str(argv[index + 1]).startswith("@"):
                 return None
-            argv[index + 1] = str(argv[index + 1]) + probe
+            argv[index + 1] = _CURL_PROBE_SPLIT + str(argv[index + 1]) + probe
             return argv
-    return argv[:url_index] + ["-w", probe] + argv[url_index:]
+    return argv[:url_index] + ["-w", _CURL_PROBE_SPLIT + probe] + argv[url_index:]
 
 
 def _split_probe(stderr: str) -> tuple[str, int, str]:
@@ -236,11 +306,15 @@ def _includes_headers(cmd: list[str]) -> bool:
 
 
 def _header_block(output: str) -> str:
+    """The response's header block as curl prints it, ending in its blank line."""
+    if not output:
+        return ""
     for separator in ("\r\n\r\n", "\n\n"):
         position = output.find(separator)
         if position >= 0:
             return output[:position + len(separator)]
-    return output
+    # A headers-only response (-I, or an empty body) lost its blank line to the runner's strip.
+    return output.rstrip("\r\n") + "\r\n\r\n"
 
 
 def _without_request_body(cmd: list[str]) -> list[str]:
@@ -265,51 +339,112 @@ def _last_url_index(cmd: list[str]) -> int:
     )
 
 
+def _shows_errors(cmd: list[str]) -> bool:
+    silent = show = False
+    for value in cmd[1:]:
+        if value in {"--silent"}:
+            silent = True
+        elif value in {"--show-error"}:
+            show = True
+        elif value.startswith("-") and not value.startswith("--"):
+            silent = silent or "s" in value[1:]
+            show = show or "S" in value[1:]
+    return show or not silent
+
+
 RunHop = Callable[..., Awaitable[tuple[str, str, int]]]
 
 
 async def run_curl_same_origin(cmd: list[str], run_hop: RunHop, *, timeout: int, **run_kwargs: Any) -> tuple[str, str, int]:
-    """Run a credential-carrying ``curl -L`` hop by hop, following only same-origin redirects.
+    """Run a session-carrying ``curl -L`` hop by hop, following only same-origin redirects.
 
-    Each hop is an ordinary ``curl`` run without ``-L`` (so it is metered and archived like
-    any other request). The output matches what ``curl -L`` prints: the header blocks of
-    the followed hops when headers are included, then the final hop's output.
+    Each hop is an ordinary ``curl`` run without ``-L`` (metered and archived like any other
+    request). On the request's origin the result is what ``curl -L`` gives: the header blocks of
+    the followed hops when headers are printed, then the final response and the caller's
+    write-out; a request body dropped after 301/302/303 (the ``-X`` method kept, ``--post30x``
+    honoured) and kept after 307/308; cookies set along the way sent on the next hop and written
+    to the ``-c`` jar; exit 47 past ``--max-redirs``. A redirect to another origin is returned
+    as the response, not followed.
     """
-    base, max_redirects = _strip_location(cmd)
+    import os
+    import shutil
+    import tempfile
+
+    base, max_redirects, user_jar = _strip_location(cmd)
     url_index = _last_url_index(base)
     if url_index < 0:
-        return await run_hop(base, timeout=timeout, **run_kwargs)
+        return await run_hop(cmd, timeout=timeout, **run_kwargs)
     include_headers = _includes_headers(base)
-    method_forced = any(value in {"-X", "--request"} for value in base)
+    # curl's cookie engine (cookies received on one hop sent on the next) runs with a jar (-c)
+    # or a cookie file (-b <file>); an inline -b string alone does not start it.
+    cookie_engine = user_jar is not None or any(
+        value in {"-b", "--cookie"} and index + 1 < len(base) and "=" not in str(base[index + 1])
+        for index, value in enumerate(base)
+    )
+    jar = None
+    if cookie_engine:
+        handle, jar = tempfile.mkstemp(prefix="shakerscan-curl-", suffix=".jar")
+        os.close(handle)
+        os.unlink(jar)  # curl creates it the way it would create the caller's jar
     deadline = time.monotonic() + max(1, int(timeout))
     current_url = str(base[url_index])
     prefix: list[str] = []
     errors: list[str] = []
-    for hop in range(max_redirects + 1):
-        argv = _with_probe(base, url_index, current_url)
-        if argv is None:
-            base[url_index] = current_url
-            return await run_hop(base, timeout=timeout, **run_kwargs)
-        remaining = max(1, int(deadline - time.monotonic()))
-        out, err, rc = await run_hop(argv, timeout=remaining, **run_kwargs)
-        err, status, location = _split_probe(err)
-        if err:
-            errors.append(err)
-        if (
-            rc != 0
-            or status not in REDIRECT_STATUSES
-            or not location
-            or hop == max_redirects
-            or not same_credential_origin(current_url, location)
-        ):
-            return "".join(prefix) + out, "\n".join(errors), rc
-        if include_headers:
-            prefix.append(_header_block(out))
-        if not method_forced and status in (301, 302, 303):
-            base = _without_request_body(base)
-            url_index = _last_url_index(base)
-        current_url = urllib.parse.urljoin(current_url, location)
-    return "".join(prefix), "\n".join(errors), 1  # pragma: no cover - the loop always returns
+
+    def finish(text: str, rc: int, error: str = "") -> tuple[str, str, int]:
+        if error:
+            errors.append(error)
+        if jar is not None:
+            if user_jar is not None and os.path.exists(jar):
+                if user_jar == "-":
+                    with open(jar, encoding="utf-8", errors="ignore") as handle:
+                        text = (text + handle.read()).strip()
+                else:
+                    shutil.copyfile(jar, user_jar)
+            with contextlib.suppress(OSError):
+                os.unlink(jar)
+        return text, "\n".join(errors), rc
+
+    try:
+        for hop in range(max_redirects + 1):
+            extra: list[str] = []
+            if jar is not None:
+                extra = (["-b", jar] if hop else []) + ["-c", jar]
+            argv = _with_probe(base, url_index, current_url, extra)
+            if argv is None:
+                restored = list(cmd)
+                restored[_last_url_index(restored)] = current_url
+                out, err, rc = await run_hop(restored, timeout=timeout, **run_kwargs)
+                return finish(out, rc, err)
+            remaining = max(1, int(deadline - time.monotonic()))
+            out, err, rc = await run_hop(argv, timeout=remaining, **run_kwargs)
+            err, status, location = _split_probe(err)
+            if err:
+                errors.append(err)
+            response, _, write_out = out.rpartition(_CURL_PROBE_SPLIT)
+            if not _:
+                response, write_out = out, ""
+            follows = 300 <= status < 400 and bool(location)
+            if rc != 0 or not follows:
+                return finish(("".join(prefix) + response + write_out).strip(), rc)
+            if hop == max_redirects:
+                shown = _header_block(response) if include_headers else ""
+                message = f"curl: (47) Maximum ({max_redirects}) redirects followed" if _shows_errors(cmd) else ""
+                return finish(("".join(prefix) + shown + write_out).strip(), 47, message)
+            if not same_credential_origin(current_url, location):
+                return finish(("".join(prefix) + response + write_out).strip(), rc)
+            if include_headers:
+                prefix.append(_header_block(response))
+            if status in (301, 302, 303) and f"--post{status}" not in base or "-G" in base or "--get" in base:
+                base = _without_request_body(base)
+                url_index = _last_url_index(base)
+            current_url = urllib.parse.urljoin(current_url, location)
+        return finish("".join(prefix).strip(), 1)  # pragma: no cover - the loop always returns
+    except BaseException:
+        if jar is not None:
+            with contextlib.suppress(OSError):
+                os.unlink(jar)
+        raise
 
 
 # --- browser contexts ------------------------------------------------------------------------
@@ -357,11 +492,24 @@ async def _browser_fetch(route: Any, request: Any, headers: dict[str, str], orig
     return response
 
 
+def bound_origins(origin_urls: Any) -> set[tuple[str, str, int]]:
+    """The origins of ``origin_urls``, each http origin on port 80 with its https upgrade."""
+    origins: set[tuple[str, str, int]] = set()
+    for url in origin_urls:
+        key = origin_key(url)
+        if key is None:
+            continue
+        origins.add(key)
+        if key[0] == "http" and key[2] == 80:
+            origins.add(("https", key[1], 443))
+    return origins
+
+
 async def bind_session_headers(context: Any, origin_urls: Any, headers: Any) -> None:
     """Send ``headers`` (a mapping, or a callable returning the current one) with a context's
     requests to the origins of ``origin_urls`` only (see above). Register it before any other
     route of the context: those hand a request on with ``route.fallback()``."""
-    origins = frozenset(key for key in (origin_key(url) for url in origin_urls) if key is not None)
+    origins = frozenset(bound_origins(origin_urls))
 
     async def handler(route: Any, request: Any) -> None:
         current = headers() if callable(headers) else headers

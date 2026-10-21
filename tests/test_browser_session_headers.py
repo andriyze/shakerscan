@@ -225,3 +225,11 @@ def test_ai_widget_target_keeps_its_headers_on_the_endpoint_origin():
         asyncio.run(drive(target))
     _assert_contained(hits)
     assert "/nav-cross" in _with_secret(hits, "target")
+
+
+def test_bound_origins_include_the_same_host_https_upgrade():
+    from scanner_tools.credential_redirects import bound_origins
+
+    assert bound_origins(["http://app.example/"]) == {("http", "app.example", 80), ("https", "app.example", 443)}
+    assert bound_origins(["http://app.example:8080/"]) == {("http", "app.example", 8080)}
+    assert bound_origins(["https://app.example/"]) == {("https", "app.example", 443)}

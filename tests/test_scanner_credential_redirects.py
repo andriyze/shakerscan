@@ -277,3 +277,60 @@ def test_external_tools_with_session_headers_do_not_follow_redirects(monkeypatch
 def test_nuclei_with_session_headers_disables_redirects():
     assert nuclei.session_redirect_args(["-H", f"X-API-Key: {SECRET}"]) == ["-disable-redirects"]
     assert nuclei.session_redirect_args([]) == []
+
+
+# --- what curl already protects, and which requests keep the client's own behaviour -----------
+
+def test_curl_authorization_and_cookie_headers_rely_on_curls_own_stripping(monkeypatch):
+    from scanner_tools import credential_redirects
+
+    assert credential_redirects.curl_strips_credentials()  # this host's curl is 7.83.0 or later
+    for args in (["-H", "Authorization: Bearer x"], ["-H", "Cookie: sid=x"], ["-u", "a:b"], ["--oauth2-bearer", "x"],
+                 ["-b", "cookies.txt"]):
+        assert not credential_redirects.curl_follows_with_credentials(["curl", "-L", *args, "https://a.example/"]), args
+    for args in (["-H", "X-API-Key: x"], ["-b", "sid=x"], ["-H", "X-Auth-Token: x", "-H", "Authorization: x"]):
+        assert credential_redirects.curl_follows_with_credentials(["curl", "-L", *args, "https://a.example/"]), args
+    # A curl older than 7.83.0 copies those to another host or port: every one is material then.
+    monkeypatch.setitem(credential_redirects._curl_versions, "curl", (7, 82, 0))
+    for args in (["-H", "Authorization: Bearer x"], ["-H", "Cookie: sid=x"], ["-u", "a:b"], ["--oauth2-bearer", "x"]):
+        assert credential_redirects.curl_follows_with_credentials(["curl", "-L", *args, "https://a.example/"]), args
+    monkeypatch.setitem(credential_redirects._curl_versions, "curl", None)  # unreadable: strict
+    assert credential_redirects.curl_follows_with_credentials(["curl", "-L", "-u", "a:b", "https://a.example/"])
+
+
+def test_curl_authorization_header_is_not_sent_to_another_origin_by_curl_itself():
+    with _servers() as (target, _target_hits, collector_hits):
+        out, _err, rc = asyncio.run(common.run(
+            ["curl", "-sS", "-L", "--max-time", "5", "-H", f"Authorization: Bearer {SECRET}", f"{target}/cross"],
+            timeout=10,
+        ))
+    assert rc == 0 and "collected" in out  # followed by curl itself
+    assert _leaked(collector_hits) == []
+
+
+def test_same_host_upgrade_to_https_on_default_ports_keeps_credentials():
+    from scanner_tools.credential_redirects import same_credential_origin
+
+    assert same_credential_origin("http://a.example/x", "https://a.example/y")
+    assert same_credential_origin("http://a.example:80/x", "https://a.example:443/y")
+    assert not same_credential_origin("http://a.example:8080/", "https://a.example/")
+    assert not same_credential_origin("http://a.example/", "https://a.example:8443/")
+    assert not same_credential_origin("https://a.example/", "http://a.example/")
+    assert not same_credential_origin("http://a.example/", "https://www.a.example/")
+
+
+def test_unauthenticated_httpx_probes_keep_the_clients_redirects(mock_httpx):
+    asyncio.run(discovery.follow_json_links(TARGET, [f"{TARGET}/api/cross.json"], auth_session=None))
+    # No session material: the client follows as it always did (http->https, apex->www ...).
+    assert any("collector.attacker.example" in url for _method, url, _key in mock_httpx)
+
+
+def test_race_condition_burst_with_session_headers_stops_at_cross_origin_redirect():
+    pytest.importorskip("aiohttp")
+    from scanner_tools import race_condition_tests
+
+    with _servers() as (target, _target_hits, collector_hits):
+        asyncio.run(race_condition_tests.send_concurrent_requests(
+            f"{target}/cross", "GET", {"X-API-Key": SECRET}, None, 2, 5,
+        ))
+    assert _leaked(collector_hits) == []
