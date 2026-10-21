@@ -21,11 +21,10 @@ from dataclasses import replace
 from pathlib import Path
 
 import pytest
-
+import scan.action_adapter as action_adapter_module
 from hunt.capability_executor import CapabilityAdapterResult
 from runtime.capability_registry import CAPABILITY_REGISTRY
 from runtime.models import ScanPolicy, TargetBinding
-import scan.action_adapter as action_adapter_module
 from scan.action_adapter import DatabaseNeutralScanActionDispatcher, _batch_candidate_id
 from scan.action_plan import ScanAction, ScanActionPlan
 from scan.execution_backend import ActionLease
@@ -96,7 +95,7 @@ class _Backend:
 class _Host:
     """One endpoint manifest and template manifest; slices of it run through the adapter."""
 
-    def __init__(self, paths):
+    def __init__(self, paths, sources=None):
         self.scan_id = str(uuid.uuid4())
         self.endpoints = build_endpoint_manifest(
             scan_id=self.scan_id, target_binding_digest=TARGET.digest,
@@ -105,7 +104,7 @@ class _Host:
                 "endpoints": [{
                     "method": "GET", "scheme": "https", "host": "app.example.test", "port": 443,
                     "normalized_path": path, "concrete_path": path, "query_keys": [],
-                    "source": "web.crawl",
+                    "source": (sources or {}).get(path, "web.crawl"),
                 } for path in paths],
             },
             source_action_ids=("discover.web_crawl",),
@@ -222,12 +221,9 @@ def test_each_position_runs_its_window_on_endpoint_o_mod_e(monkeypatch, bundle):
     assert [receipt.status for receipt in receipts] == ["success"] * 3
     allowlist = _allowlist(bundle, state_changing=True)
     assert math.ceil(len(allowlist.split(",")) / ACTIVE_TEMPLATE_WINDOW_SIZE) == 39
-    urls = [call["url"] for call in host.calls]
     assert len(host.calls) == 39
-    assert urls == [
-        execution_url_for_endpoint(host.endpoints.entries[position % 2]) for position in range(39)
-    ]
-    assert len(set(urls)) == 2
+    # Every window runs at the host's base URL (no seed here: the origin's root).
+    assert {call["url"] for call in host.calls} == {"https://app.example.test/"}
     assert [call["template_ids"] for call in host.calls] == [
         active_template_window(allowlist, position).template_ids for position in range(39)
     ]
@@ -239,6 +235,40 @@ def test_each_position_runs_its_window_on_endpoint_o_mod_e(monkeypatch, bundle):
         [0, 1], list(range(2, 35)), list(range(35, 39)),
     ]
     assert {record["window_count"] for record in windows} == {39}
+
+
+def test_every_window_runs_at_the_scans_seed_url_not_a_discovered_endpoints_path(monkeypatch, bundle):
+    """A window's templates address the host from nuclei's base URL ({{BaseURL}}/images/json; a
+    raw ``GET /version`` is joined to the base path too). Zoo docker (0d8c38011): its endpoints
+    were /version, /info and /, so window 3 ran misconfigured-docker at /version/images/json and
+    window 37 ran docker-daemon-exposed under /info: both got 404, both windows counted as run,
+    and the host's two critical findings were lost. Every window now runs at the scan's seed."""
+    host = _Host(("/version", "/info", "/"), sources={"/": "seed"})
+    for number, (start, count) in enumerate(((0, 3), (3, 33), (36, 3)), start=1):
+        host.run(monkeypatch, bundle, host.action(f"active.templates.r{number:02d}", start=start, count=count))
+    assert len(host.calls) == 39
+    assert {call["url"] for call in host.calls} == {"https://app.example.test/"}
+    # Each window still ran exactly once, under its own planned position's attempt.
+    allowlist = _allowlist(bundle, state_changing=True)
+    assert [call["template_ids"] for call in host.calls] == [
+        active_template_window(allowlist, position).template_ids for position in range(39)
+    ]
+
+
+def test_a_seed_with_a_base_path_is_where_the_windows_run(monkeypatch, bundle):
+    host = _Host(("/app/", "/app/login", "/app/api"), sources={"/app/": "seed"})
+    host.run(monkeypatch, bundle, host.action("active.templates.r01", start=0, count=3))
+    host.run(monkeypatch, bundle, host.action("active.templates.r02", start=3, count=4))
+    assert {call["url"] for call in host.calls} == {"https://app.example.test/app/"}
+
+
+def test_a_slice_without_planned_windows_still_runs_each_endpoint_at_its_own_url(monkeypatch, bundle):
+    """Fast, balanced and hosts with as many endpoints as windows are unchanged."""
+    host = _Host(("/version", "/info"), sources={})
+    host.run(monkeypatch, bundle, host.action("active.templates.r01", start=0, count=2, windows=False))
+    assert [call["url"] for call in host.calls] == [
+        execution_url_for_endpoint(entry) for entry in host.endpoints.entries
+    ]
 
 
 def test_an_endpoints_own_position_keeps_its_identity_and_later_ones_are_their_own(monkeypatch, bundle):

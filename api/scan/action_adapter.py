@@ -303,6 +303,7 @@ from .nuclei_execution import (
     active_template_window_count,
     planned_endpoint_entries,
     resolve_active_scan_nuclei_options,
+    window_base_endpoint,
     window_position_candidate_id,
 )
 from .posture_findings import CORS_PROBE_ACTIONS, cors_probe_verdict
@@ -4722,9 +4723,12 @@ class DatabaseNeutralScanActionDispatcher:
                                 "injection_field": str(resolved["field_name"]),
                             }
                     else:
-                        execution_target = execution_url_for_manifest_endpoint(
-                            manifest, manifest_index if window_endpoints is None
-                            else manifest_index % window_endpoints,
+                        # A thorough or deep slice runs every window at the scan's seed: the
+                        # templates address the host from the base URL (window_base_endpoint).
+                        execution_target = (
+                            execution_url_for_manifest_endpoint(manifest, manifest_index)
+                            if window_endpoints is None
+                            else execution_url_for_endpoint(window_base_endpoint(manifest.entries))
                         )
                     # This entry and every later one that will actually be funded.
                     remaining_attempts = 1 + sum(1 for entry in work[position:] if needs_hold(entry))

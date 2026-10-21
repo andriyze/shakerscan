@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 
 # Defined beside the batch attempt costs, which the planner and the report (shipped to the
 # host by the installer, unlike this module) read; re-exported here for the adapter.
@@ -152,6 +152,33 @@ def planned_endpoint_entries(
     ):
         raise ValueError("active template positions disagree with the endpoint manifest")
     return raw
+
+
+def window_base_endpoint(entries: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    """The endpoint every template window of a thorough or deep slice runs at: the scan's seed.
+
+    A window's templates address the host from nuclei's base URL: ``{{BaseURL}}/images/json``,
+    and a raw ``GET /version`` is joined to the base path as well. Running window o at endpoint
+    o % E put a discovered endpoint's path under them: zoo docker's endpoints were /version,
+    /info and /, so misconfigured-docker asked /version/images/json and docker-daemon-exposed
+    asked under /info, both got 404, and both windows counted as run with the host's two
+    critical findings lost. The seed is the URL the operator scanned (an application under a base
+    path keeps it); without a seed entry, the root of the manifest's first origin.
+    """
+    if not entries:
+        raise ValueError("active template windows need an endpoint")
+    seeds = [
+        entry for entry in entries
+        if str(entry.get("source_tool") or "") == "seed"
+        and not entry.get("query_parameter_names") and not entry.get("body_field_names")
+    ]
+    if seeds:
+        return dict(min(seeds, key=lambda entry: int(entry.get("discovery_depth") or 0)))
+    return {
+        **dict(entries[0]), "canonical_path": "/", "query_parameter_names": [],
+        "body_field_names": [], "browser_fragment_path": None,
+        "browser_fragment_query_parameter_names": [],
+    }
 
 
 def window_position_candidate_id(
