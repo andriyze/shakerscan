@@ -385,6 +385,75 @@ def test_scanner_report_coverage_carries_the_browser_session_reasons():
     assert coverage["reasons"] == ["existing", NAV_DROP]
     assert coverage["status"] == "complete" and coverage["grade_reliable"] is True
     assert coverage["browser_session_headers"] == {NAV_DROP: 1}
+    # A dalfox run that withheld the session from its headless browser is listed the same way.
+    report["session_header_coverage"] = {"reasons": ["session_header_withheld_from_headless"],
+                                         "counts": {"session_header_withheld_from_headless": 2}}
+    scanner_mod.apply_browser_session_header_coverage(report, coverage)
+    assert "session_header_withheld_from_headless" in coverage["reasons"]
     # The http block records what the browser fetch reported.
     source = (ROOT / "scanner" / "scanner.py").read_text()
     assert '"browser_session_headers": (' in source
+
+
+def test_ai_widget_basic_auth_answers_only_the_endpoint_origin():
+    import base64
+    from ai_gate.targets.widget_playwright import WidgetPlaywrightConversationTarget
+
+    seen: list[tuple[str, str, str | None]] = []
+    ports: dict[str, int] = {}
+
+    def handler(name: str):
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self, *_args):
+                pass
+
+            def do_GET(self):  # noqa: N802
+                seen.append((name, self.path, self.headers.get("Authorization")))
+                if not self.headers.get("Authorization"):
+                    self.send_response(401)
+                    self.send_header("WWW-Authenticate", 'Basic realm="fixture"')
+                    self.send_header("Content-Length", "0")
+                    self.end_headers()
+                    return
+                # A navigation to another origin that challenges too (a navigation, so Local
+                # Network Access does not stop it first).
+                body = (f'<html>widget<script>setTimeout(() => location = '
+                        f'"http://127.0.0.1:{ports["other"]}/next", 100)</script></html>').encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+        return Handler
+
+    endpoint = ThreadingHTTPServer(("127.0.0.1", 0), handler("endpoint"))
+    other = ThreadingHTTPServer(("127.0.0.1", 0), handler("other"))
+    ports["other"] = other.server_port
+    for server in (endpoint, other):
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+    target = f"http://127.0.0.1:{endpoint.server_port}"
+
+    async def drive():
+        widget = WidgetPlaywrightConversationTarget(f"{target}/", {
+            "endpoint_url": f"{target}/",
+            "credential": {"auth_kind": "basic_auth", "secret": "fixture-user:fixture-pass"},
+            "metadata_json": {"widget_manifest": {"input_selector": "#q", "response_selector": "#a"}},
+        })
+        try:
+            await widget._ensure_browser()
+            await widget._page.wait_for_load_state("load")
+            await widget._page.wait_for_timeout(1000)
+        finally:
+            await widget.close()
+
+    try:
+        asyncio.run(drive())
+    finally:
+        for server in (endpoint, other):
+            server.shutdown()
+            server.server_close()
+    expected = "Basic " + base64.b64encode(b"fixture-user:fixture-pass").decode()
+    assert ("endpoint", "/", expected) in seen
+    assert [hit for hit in seen if hit[0] == "other"], seen  # the other origin challenged too
+    assert [hit for hit in seen if hit[0] == "other" and hit[2]] == []

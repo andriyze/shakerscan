@@ -1467,6 +1467,7 @@ def apply_browser_session_header_coverage(report: dict[str, Any], coverage: dict
     """List on the scan's coverage what the authenticated browser could not do with its session
     header (``credential_redirects.SessionHeaderEvents``); the coverage status is unchanged."""
     add_session_header_reasons(coverage, (report.get("http") or {}).get("browser_session_headers"))
+    add_session_header_reasons(coverage, report.get("session_header_coverage"))
 
 
 def assess_scan_completeness(
@@ -10156,6 +10157,13 @@ async def build_report(target: str,
                     # Process XSS results (dalfox_one returns dict with "findings" key)
                     if run_xss:
                         xss = results_by_name.get("dalfox")
+                        if isinstance(xss, dict) and xss.get("coverage_reasons"):
+                            # A session-carrying run that did not use dalfox's headless browser.
+                            recorded = report.setdefault("session_header_coverage", {"reasons": [], "counts": {}})
+                            for reason in xss["coverage_reasons"]:
+                                if reason not in recorded["reasons"]:
+                                    recorded["reasons"].append(reason)
+                                recorded["counts"][reason] = int(recorded["counts"].get(reason, 0)) + 1
                         if not isinstance(xss, Exception) and xss:
                             xss_findings = xss.get("findings", []) if isinstance(xss, dict) else xss
                             xss_completed = xss.get("scan_completed", True) if isinstance(xss, dict) else True

@@ -358,6 +358,9 @@ async def run(
                 continue
             bounded_cmd.append(value)
         cmd = bounded_cmd
+    if is_http_request and request_url and any(value in {"-L", "--location"} for value in cmd):
+        # Read (and cache) the curl release once, off the event loop.
+        await asyncio.to_thread(_credential_redirects.curl_version, str(cmd[0]))
     if is_http_request and request_url and _credential_redirects.curl_follows_with_credentials(cmd):
         # curl -L keeps every custom header on a redirect to another host. A request that
         # carries session material follows only same-origin hops (one metered run each).

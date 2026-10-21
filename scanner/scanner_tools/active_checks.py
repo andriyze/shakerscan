@@ -624,6 +624,13 @@ async def dalfox_one(
     # Dalfox keeps custom headers on a redirect to another host; a session-carrying run
     # does not follow redirects at all.
     follow_redirects = not (cookie_str or header_lines)
+    # Its headless verifier (and --deep-domxss) is a Chromium outside any proxy that adds the
+    # headers to every request a page makes, other origins included: a session-carrying run
+    # uses no headless browser, and says so.
+    headless_withheld = bool(cookie_str or header_lines)
+    if headless_withheld:
+        cmd.append("--skip-headless")
+        deep_domxss = False
     if quick_mode:
         cmd.extend(["--timeout", "10", "--only-discovery", "--skip-bav"])
         timeout = 60
@@ -651,7 +658,10 @@ async def dalfox_one(
     elif rc != 0:
         # Capture error for debugging
         error = (err or "Unknown error")[:500] if err else f"Exit code {rc}"
-    return {"findings": findings, "scan_completed": scan_completed, "error": error}
+    result = {"findings": findings, "scan_completed": scan_completed, "error": error}
+    if headless_withheld:
+        result["coverage_reasons"] = ["session_header_withheld_from_headless"]
+    return result
 
 
 _PATH_UUID_RE = re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")

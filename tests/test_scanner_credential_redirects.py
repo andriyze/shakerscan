@@ -334,3 +334,44 @@ def test_race_condition_burst_with_session_headers_stops_at_cross_origin_redirec
             f"{target}/cross", "GET", {"X-API-Key": SECRET}, None, 2, 5,
         ))
     assert _leaked(collector_hits) == []
+
+
+def test_dalfox_with_session_headers_never_runs_its_unproxied_headless_browser(monkeypatch):
+    commands: list[list[str]] = []
+
+    async def fake_run(cmd, timeout=60, **_kwargs):
+        commands.append(list(cmd))
+        return "", "", 0
+
+    monkeypatch.setattr(active_checks, "run", fake_run)
+    with_session = asyncio.run(active_checks.dalfox_one(
+        f"{TARGET}/q?x=1", quick_mode=False, auth_session=_Session(), deep_domxss=True))
+    assert "--deep-domxss" not in commands[0] and "--skip-headless" in commands[0]
+    assert with_session["coverage_reasons"] == ["session_header_withheld_from_headless"]
+    commands.clear()
+    anonymous = asyncio.run(active_checks.dalfox_one(f"{TARGET}/q?x=1", quick_mode=False, deep_domxss=True))
+    assert "--deep-domxss" in commands[0] and "--skip-headless" not in commands[0]
+    assert "coverage_reasons" not in anonymous
+
+
+def test_the_curl_version_is_read_off_the_event_loop(monkeypatch):
+    import threading
+    from scanner_tools import credential_redirects
+
+    threads: list[str] = []
+    real = credential_redirects.curl_version
+
+    def recording(binary="curl"):
+        threads.append(threading.current_thread().name)
+        return real(binary)
+
+    monkeypatch.setattr(credential_redirects, "_curl_versions", {})
+    monkeypatch.setattr(credential_redirects, "curl_version", recording)
+
+    async def scenario():
+        loop_thread = threading.current_thread().name
+        await common.run(["curl", "-sS", "-L", "--max-time", "1", "-H", "X-API-Key: x", "http://127.0.0.1:9/"], timeout=5)
+        return loop_thread
+
+    loop_thread = asyncio.run(scenario())
+    assert threads and threads[0] != loop_thread

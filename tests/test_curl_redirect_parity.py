@@ -155,3 +155,46 @@ def test_cookie_engine_matches_curl(jar_args, tmp_path):
 def test_max_redirs_matches_curl(limit, tmp_path):
     real, runner = _both(["-i", "--max-redirs", limit], "/loop", tmp_path)
     assert runner == real
+
+
+@contextmanager
+def _lf_only_server():
+    """A server that ends its header lines with a bare LF (curl prints them as received)."""
+    import socket
+
+    listener = socket.socket()
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(16)
+    stop = threading.Event()
+
+    def serve():
+        while not stop.is_set():
+            try:
+                conn, _ = listener.accept()
+            except OSError:
+                return
+            with conn:
+                request = conn.recv(65536).decode(errors="ignore")
+                path = request.split(" ", 2)[1] if " " in request else "/"
+                if path == "/lf":
+                    conn.sendall(b"HTTP/1.1 302 Found\nLocation: /final\nContent-Length: 0\nConnection: close\n\n")
+                else:
+                    conn.sendall(b"HTTP/1.1 200 OK\nContent-Length: 2\nConnection: close\n\nok")
+
+    thread = threading.Thread(target=serve, daemon=True)
+    thread.start()
+    try:
+        yield f"http://127.0.0.1:{listener.getsockname()[1]}"
+    finally:
+        stop.set()
+        listener.close()
+
+
+@pytest.mark.parametrize("args", [["-i"], ["-I"], ["-D", "-"]])
+def test_lf_only_header_blocks_match_curl(args):
+    with _lf_only_server() as origin:
+        argv = ["curl", "-sS", "-L", *args, *SESSION, origin + "/lf"]
+        done = subprocess.run(argv, capture_output=True, timeout=20)
+        real = (done.stdout.decode(errors="ignore").strip(), done.returncode)
+        out, _err, rc = asyncio.run(common.run(argv, timeout=20))
+    assert (out, rc) == real
