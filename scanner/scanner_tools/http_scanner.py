@@ -555,9 +555,10 @@ async def browser_fetch(
                     auth_cookies = []
 
             ctx = await browser.new_context(**ctx_kwargs)
+            session_header_events = None
             if session_headers:
                 # Session headers go to the target's origin only (registered before the guard).
-                await credential_redirects.bind_session_headers(ctx, [url], session_headers)
+                session_header_events = await credential_redirects.bind_session_headers(ctx, [url], session_headers)
             if auth_cookies:
                 try:
                     await ctx.add_cookies(auth_cookies)
@@ -1314,6 +1315,7 @@ async def browser_fetch(
                 "websocket_endpoints": websocket_endpoints,
                 "page_urls": page_urls,
                 "crawl_stats": crawl_stats,
+                **({"session_headers": session_header_events.as_dict()} if session_header_events else {}),
                 "interaction_safety": {
                     "unsafe_methods_blocked": int(interaction_guard["blocked_count"]),
                     "cross_origin_requests_blocked": int(
@@ -1939,9 +1941,10 @@ async def interactive_browser_crawl(
                     pass
 
             ctx = await browser.new_context(**ctx_kwargs)
+            session_header_events = None
             if session_headers:
                 # Session headers go to the target's origin only (registered before the guard).
-                await credential_redirects.bind_session_headers(ctx, [url], session_headers)
+                session_header_events = await credential_redirects.bind_session_headers(ctx, [url], session_headers)
             if auth_cookies:
                 try:
                     await ctx.add_cookies(auth_cookies)
@@ -2102,6 +2105,8 @@ async def interactive_browser_crawl(
     results["captured_requests"] = captured_requests
     results["api_endpoints"] = [r for r in captured_requests if r.get("is_api")]
     results["endpoints"] = list(seen_endpoints)
+    if locals().get("session_header_events") is not None:
+        results["session_headers"] = locals()["session_header_events"].as_dict()
     if "interaction_guard" in locals():
         results["interaction_safety"] = {
             "unsafe_methods_blocked": int(interaction_guard["blocked_count"]),

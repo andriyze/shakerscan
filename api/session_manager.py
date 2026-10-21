@@ -213,6 +213,7 @@ class InteractiveSession:
         self._browser: Browser | None = None
         self._contexts: dict[str, BrowserContext] = {}  # user_name -> context
         self._session_headers: dict[str, dict[str, str]] = {}  # user_name -> set_auth headers
+        self._session_header_events: dict[str, Any] = {}  # user_name -> SessionHeaderEvents
         self._pages: dict[str, Page] = {}  # user_name -> page
         self._user_allowed_origins: dict[str, set[tuple[str, str, int]]] = {}  # user_name -> allowed origins
         self._network_log: list[dict] = []
@@ -288,7 +289,7 @@ class InteractiveSession:
         )
         # Headers set with set_auth go to the target's origin only, never to what its pages load
         # or redirect to (registered before the page route, which hands requests on).
-        await bind_session_headers(
+        self._session_header_events[user_name] = await bind_session_headers(
             context, [self.target_url], lambda: self._session_headers.get(user_name, {}),
         )
 
@@ -526,6 +527,8 @@ class InteractiveSession:
                 # Navigate to target
                 await page.goto(self.target_url, wait_until="domcontentloaded", timeout=30000)
 
+            events = self._session_header_events.get(user)
+            counts_before = dict(events.counts) if events is not None else {}
             try:
                 result = {"success": True, "action": action_type, "user": user}
 
@@ -621,10 +624,26 @@ class InteractiveSession:
                     return {"success": False, "error": f"Unknown action: {action_type}"}
 
                 self._update_activity()
+                self._record_session_header_events(result, events, counts_before)
                 return result
 
             except Exception as e:
                 return {"success": False, "error": f"Action failed: {str(e)}", "action": action_type}
+
+    @staticmethod
+    def _record_session_header_events(result: dict[str, Any], events: Any, counts_before: dict[str, int]) -> None:
+        """Say on the action's result what the session header could not reach during it: a
+        page reached by a redirect within the target was loaded without the session header,
+        or a private-network resource of another origin was refused by the browser."""
+        if events is None:
+            return
+        during = {
+            reason: count - counts_before.get(reason, 0)
+            for reason, count in events.counts.items() if count - counts_before.get(reason, 0) > 0
+        }
+        if during:
+            result["coverage_reasons"] = sorted(during)
+            result["coverage_counts"] = during
 
     async def _wait_after_form_submit(self, page: Page, start_url: str, timeout_ms: int = 6000) -> None:
         """Wait briefly for post-submit navigation/state changes without hanging on long-polling apps."""
@@ -1257,7 +1276,11 @@ class InteractiveSession:
                 for e in self.state.discovered_endpoints[:20]
             ],
             "discovered_ids": self.state.discovered_ids,
-            "network_log_count": len(self._network_log)
+            "network_log_count": len(self._network_log),
+            "session_header_coverage": {
+                name: events.as_dict()
+                for name, events in self._session_header_events.items() if events.reasons()
+            },
         }
 
     async def close(self):

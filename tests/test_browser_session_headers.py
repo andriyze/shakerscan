@@ -233,3 +233,158 @@ def test_bound_origins_include_the_same_host_https_upgrade():
     assert bound_origins(["http://app.example/"]) == {("http", "app.example", 80), ("https", "app.example", 443)}
     assert bound_origins(["http://app.example:8080/"]) == {("http", "app.example", 8080)}
     assert bound_origins(["https://app.example/"]) == {("https", "app.example", 443)}
+
+
+# --- the two costs of keeping headers on the origin are recorded, never silent ---------------
+
+NAV_DROP = "session_header_dropped_on_navigation_redirect"
+LNA_BLOCK = "private_network_subresource_blocked"
+
+
+def test_bound_context_records_a_navigation_redirect_and_a_blocked_private_subresource():
+    from scanner_tools.credential_redirects import bind_session_headers
+
+    async def drive(target: str) -> dict:
+        async with playwright_api.async_playwright() as playwright:
+            browser = await playwright.chromium.launch()
+            try:
+                context = await browser.new_context()
+                events = await bind_session_headers(context, [target], {"X-API-Key": SECRET})
+                page = await context.new_page()
+                await page.goto(target + "/nav-same", wait_until="load")
+                assert events.as_dict()["reasons"] == [NAV_DROP]
+                await page.goto(target + "/", wait_until="load")
+                await page.wait_for_timeout(500)
+                return events.as_dict()
+            finally:
+                await browser.close()
+
+    with _servers() as (target, _hits):
+        recorded = asyncio.run(drive(target))
+    assert recorded["reasons"] == sorted([NAV_DROP, LNA_BLOCK])
+    assert recorded["counts"][NAV_DROP] == 1
+    assert recorded["counts"][LNA_BLOCK] >= 2  # the image and the fetch from the other origin
+
+
+def test_authenticated_browser_fetch_reports_the_navigation_redirect(tmp_path):
+    from scanner_tools import http_scanner
+
+    with _servers() as (target, _hits):
+        redirected = asyncio.run(http_scanner.browser_fetch(
+            f"{target}/nav-same", screenshot_dir=str(tmp_path), auth_session=_Session()))
+        page = asyncio.run(http_scanner.browser_fetch(
+            f"{target}/", screenshot_dir=str(tmp_path), auth_session=_Session()))
+    assert NAV_DROP in redirected["session_headers"]["reasons"]
+    # The crawl's own guard refuses other origins first (and reports them); nothing is
+    # claimed for a request that never reached Chromium's check.
+    assert page["interaction_safety"]["cross_origin_requests_blocked"] >= 1
+    assert LNA_BLOCK not in page["session_headers"]["reasons"]
+    anonymous = None
+    with _servers() as (target, _hits):
+        anonymous = asyncio.run(http_scanner.browser_fetch(f"{target}/nav-same", screenshot_dir=str(tmp_path)))
+    assert "session_headers" not in anonymous
+
+
+def test_interactive_crawl_reports_the_navigation_redirect(tmp_path):
+    from scanner_tools import http_scanner
+
+    with _servers() as (target, _hits):
+        crawl = asyncio.run(http_scanner.interactive_browser_crawl(
+            f"{target}/nav-same", auth_session=_Session(), max_pages=1, screenshot_dir=str(tmp_path)))
+    assert NAV_DROP in crawl["session_headers"]["reasons"]
+
+
+def test_xss_proof_result_reports_both_reasons():
+    from scanner_tools import proof_of_exploit
+
+    async def drive(target: str):
+        try:
+            redirected = await proof_of_exploit.prove_xss_headless(
+                f"{target}/nav-same", "q", "x", headers={"X-API-Key": SECRET})
+            page = await proof_of_exploit.prove_xss_headless(
+                f"{target}/", "q", "x", headers={"X-API-Key": SECRET})
+            return redirected.to_dict(), page.to_dict()
+        finally:
+            browser, playwright = proof_of_exploit._browser_instance, proof_of_exploit._playwright_instance
+            proof_of_exploit._browser_instance = proof_of_exploit._playwright_instance = None
+            if browser is not None:
+                await browser.close()
+            if playwright is not None:
+                await playwright.stop()
+
+    with _servers() as (target, _hits):
+        redirected, page = asyncio.run(drive(target))
+    assert NAV_DROP in redirected["coverage_reasons"]
+    assert LNA_BLOCK in page["coverage_reasons"]
+
+
+def test_interactive_session_navigation_reports_the_redirect(tmp_path):
+    import session_manager
+
+    async def drive(target: str):
+        session = session_manager.InteractiveSession("fixture-session-2", f"{target}/", results_dir=tmp_path)
+        try:
+            assert (await session.start())["success"]
+            assert (await session.action({"action": "set_auth", "data": {"auth_header": f"Bearer {SECRET}"}}))["success"]
+            return await session.action({"action": "navigate", "data": {"url": f"{target}/nav-same"}})
+        finally:
+            await session.close()
+
+    with _servers() as (target, _hits):
+        result = asyncio.run(drive(target))
+    assert NAV_DROP in result["coverage_reasons"], result
+
+
+def test_ai_widget_records_the_navigation_redirect():
+    from ai_gate.targets.widget_playwright import WidgetPlaywrightConversationTarget
+
+    async def drive(target: str):
+        widget = WidgetPlaywrightConversationTarget(f"{target}/", {
+            "endpoint_url": f"{target}/", "headers_template": {"X-API-Key": SECRET},
+            "metadata_json": {"widget_manifest": {
+                "input_selector": "#q", "response_selector": "#a", "entry_url": f"{target}/nav-same",
+            }},
+        })
+        try:
+            await widget._ensure_browser()
+            await widget._page.wait_for_load_state("load")
+            return widget.session_header_coverage()
+        finally:
+            await widget.close()
+
+    with _servers() as (target, _hits):
+        recorded = asyncio.run(drive(target))
+    assert NAV_DROP in recorded["reasons"]
+
+
+def test_scan_coverage_lists_the_reasons_without_changing_its_status():
+    from scanner_tools.credential_redirects import add_session_header_reasons
+    sys.path.insert(0, str(ROOT))
+    from api.scan.explanation import _reason_label
+
+    coverage = {"status": "complete", "grade_reliable": True, "issues": []}
+    add_session_header_reasons(coverage, {"reasons": [NAV_DROP, LNA_BLOCK], "counts": {NAV_DROP: 2, LNA_BLOCK: 3}})
+    assert coverage["status"] == "complete" and coverage["grade_reliable"] is True
+    assert coverage["reasons"] == [LNA_BLOCK, NAV_DROP]
+    assert coverage["browser_session_headers"] == {NAV_DROP: 2, LNA_BLOCK: 3}
+    for reason in (NAV_DROP, LNA_BLOCK):
+        label = _reason_label(reason)
+        assert label and ("session" in label.lower() or "private" in label.lower()), label
+
+
+def test_scanner_report_coverage_carries_the_browser_session_reasons():
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "shaker_scanner_main_session_headers", str(ROOT / "scanner" / "scanner.py"))
+    scanner_mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(scanner_mod)
+    report = {"http": {"browser_session_headers": {"reasons": [NAV_DROP], "counts": {NAV_DROP: 1}}}}
+    coverage = {"status": "complete", "grade_reliable": True, "issues": [], "reasons": ["existing"]}
+    scanner_mod.apply_browser_session_header_coverage(report, coverage)
+    assert coverage["reasons"] == ["existing", NAV_DROP]
+    assert coverage["status"] == "complete" and coverage["grade_reliable"] is True
+    assert coverage["browser_session_headers"] == {NAV_DROP: 1}
+    # The http block records what the browser fetch reported.
+    source = (ROOT / "scanner" / "scanner.py").read_text()
+    assert '"browser_session_headers": (' in source

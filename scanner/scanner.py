@@ -28,6 +28,7 @@ from scanner_tools.common import (
     snapshot_subprocess_receipts,
 )
 from scanner_tools.copy_commands import exposed_file_verify_commands
+from scanner_tools.credential_redirects import add_session_header_reasons
 try:
     from constants import (
         resolve_active_enrichment_limits,
@@ -1460,6 +1461,12 @@ async def sqlmap_test(url: str, quick_mode: bool = False, aggressive: bool = Fal
 
 
 
+
+
+def apply_browser_session_header_coverage(report: dict[str, Any], coverage: dict[str, Any]) -> None:
+    """List on the scan's coverage what the authenticated browser could not do with its session
+    header (``credential_redirects.SessionHeaderEvents``); the coverage status is unchanged."""
+    add_session_header_reasons(coverage, (report.get("http") or {}).get("browser_session_headers"))
 
 
 def assess_scan_completeness(
@@ -5820,6 +5827,9 @@ async def build_report(target: str,
                 "browser_failed": bool(browser_fetch_error),
                 "discovery_truncated": bool(discovery_truncation_reasons),
                 "truncation_reasons": list(discovery_truncation_reasons),
+                "session_header_reasons": list(
+                    ((browser_res or {}).get("session_headers") or {}).get("reasons") or []
+                ),
             },
         )
 
@@ -8010,6 +8020,12 @@ async def build_report(target: str,
             "browser_fetch_error": browser_fetch_error,
             "interaction_safety": (
                 browser_res.get("interaction_safety")
+                if isinstance(browser_res, dict)
+                else None
+            ),
+            # What the authenticated browser could not do with its session header.
+            "browser_session_headers": (
+                browser_res.get("session_headers")
                 if isinstance(browser_res, dict)
                 else None
             ),
@@ -13632,6 +13648,7 @@ async def build_report(target: str,
             modules["nuclei"]["expected"] = False
             modules["nuclei"]["skipped_for_focus"] = True
         coverage["modules"] = modules
+    apply_browser_session_header_coverage(report, coverage)
     report["coverage"] = coverage
 
     # =========================================================================

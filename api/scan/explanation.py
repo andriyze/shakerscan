@@ -35,6 +35,14 @@ _SCAN_BUDGET_FIELDS = {
 }
 
 _REASON_LABELS = {
+    "session_header_dropped_on_navigation_redirect": (
+        "A page reached through a redirect within the target was loaded without the session "
+        "header (cookies still sent), so it was examined as that page shows itself without it"
+    ),
+    "private_network_subresource_blocked": (
+        "The browser refused a target page's request to another origin on a private or loopback "
+        "address while the session header was in use, so that resource was not loaded"
+    ),
     "capability_unknown": "The action capability is not registered",
     "policy_disabled": "Disabled by scan policy",
     "insufficient_plan_budget": "Not enough admitted scan budget",

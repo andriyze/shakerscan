@@ -363,7 +363,14 @@ class WidgetPlaywrightConversationTarget:
         self._browser = None
         self._context = None
         self._page = None
+        self._session_header_events = None
         self._network_events: deque[dict[str, Any]] = deque(maxlen=MAX_WIDGET_NETWORK_EVENTS)
+
+    def session_header_coverage(self) -> dict[str, Any]:
+        """What the configured headers could not reach (a page after a redirect within the
+        origin loaded without them, a private-network resource refused by the browser)."""
+        events = self._session_header_events
+        return events.as_dict() if events is not None else {"reasons": [], "counts": {}}
 
     def set_request_budget(self, request_budget: RequestBudget) -> None:
         self.request_budget = request_budget
@@ -633,6 +640,8 @@ class WidgetPlaywrightConversationTarget:
                 json.dumps(network_slice, sort_keys=True, ensure_ascii=False)
             ),
             **browser_state_evidence,
+            **({"session_header_coverage": self.session_header_coverage()}
+               if self.session_header_coverage()["reasons"] else {}),
             "notes": notes,
         }
 
@@ -676,7 +685,9 @@ class WidgetPlaywrightConversationTarget:
         self._context = await self._browser.new_context(**context_kwargs)
         if header_overrides:
             # The configured headers go to the widget page's and the endpoint's origins only.
-            await bind_session_headers(self._context, [navigation_url, self.endpoint_url], header_overrides)
+            self._session_header_events = await bind_session_headers(
+                self._context, [navigation_url, self.endpoint_url], header_overrides,
+            )
         self._page = await self._context.new_page()
         self._page.on("request", self._record_request)
         self._page.on("response", self._record_response)

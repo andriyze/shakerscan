@@ -17,6 +17,7 @@ without session material keep the client's normal behaviour, and for curl, mater
 from __future__ import annotations
 
 import contextlib
+import re
 import time
 import urllib.parse
 from collections.abc import AsyncIterator, Awaitable, Callable
@@ -467,11 +468,69 @@ async def run_curl_same_origin(cmd: list[str], run_hop: RunHop, *, timeout: int,
 
 _BROWSER_DROPPED_ON_REWRITE = frozenset({"content-type", "content-length"})
 
+# What keeping the headers on the origin costs, recorded so a result never hides it:
+SESSION_HEADER_DROPPED_ON_NAVIGATION_REDIRECT = "session_header_dropped_on_navigation_redirect"
+PRIVATE_NETWORK_SUBRESOURCE_BLOCKED = "private_network_subresource_blocked"
+# Chromium's Local Network Access refusal, as its console reports it.
+_LOCAL_NETWORK_REFUSAL = re.compile(r"Permission was denied for this request to access the `\w+` address space")
+
+
+class SessionHeaderEvents:
+    """Counts of the two things a session-header route cannot do, for coverage and receipts:
+
+    - ``session_header_dropped_on_navigation_redirect``: a page on the origin redirected a
+      navigation within the origin; the next page was loaded with cookies but without the
+      session header;
+    - ``private_network_subresource_blocked``: a target page delivered by the route asked for a
+      resource from another origin on a private or loopback address, and Chromium's Local
+      Network Access check refused it.
+    """
+
+    def __init__(self) -> None:
+        self.counts: dict[str, int] = {
+            SESSION_HEADER_DROPPED_ON_NAVIGATION_REDIRECT: 0, PRIVATE_NETWORK_SUBRESOURCE_BLOCKED: 0,
+        }
+
+    def record(self, reason: str) -> None:
+        self.counts[reason] = self.counts.get(reason, 0) + 1
+
+    def reasons(self) -> list[str]:
+        return sorted(reason for reason, count in self.counts.items() if count)
+
+    def as_dict(self) -> dict[str, Any]:
+        return {"reasons": self.reasons(), "counts": {k: v for k, v in self.counts.items() if v}}
+
+    def observe_console(self, message: Any) -> None:
+        try:
+            text = str(message.text)
+        except Exception:  # a console message that cannot be read records nothing
+            return
+        if _LOCAL_NETWORK_REFUSAL.search(text):
+            self.record(PRIVATE_NETWORK_SUBRESOURCE_BLOCKED)
+
+
+def add_session_header_reasons(coverage: dict[str, Any], recorded: Any) -> None:
+    """List recorded session-header reasons (and their counts) on a coverage block. They
+    describe what the authenticated browser could not do; they change no status."""
+    if not isinstance(coverage, dict) or not isinstance(recorded, dict):
+        return
+    reasons = [str(item) for item in recorded.get("reasons") or [] if str(item)]
+    if not reasons:
+        return
+    coverage["reasons"] = sorted(set(coverage.get("reasons") or []) | set(reasons))
+    counts = coverage.setdefault("browser_session_headers", {})
+    for reason, count in dict(recorded.get("counts") or {}).items():
+        counts[str(reason)] = int(counts.get(str(reason), 0)) + int(count or 0)
+
 
 async def _browser_fetch(route: Any, request: Any, headers: dict[str, str], origin: tuple[str, str, int] | None,
-                         origins: frozenset) -> Any:
+                         origins: frozenset, events: SessionHeaderEvents) -> Any:
     response = await route.fetch(headers=headers, max_redirects=0)
     if request.is_navigation_request():
+        location = response.headers.get("location")
+        if 300 <= response.status < 400 and location:
+            if origin_key(urllib.parse.urljoin(request.url, location.strip())) in origins:
+                events.record(SESSION_HEADER_DROPPED_ON_NAVIGATION_REDIRECT)
         return response
     url, method = request.url, request.method.upper()
     for _hop in range(DEFAULT_MAX_REDIRECTS):
@@ -505,11 +564,15 @@ def bound_origins(origin_urls: Any) -> set[tuple[str, str, int]]:
     return origins
 
 
-async def bind_session_headers(context: Any, origin_urls: Any, headers: Any) -> None:
+async def bind_session_headers(context: Any, origin_urls: Any, headers: Any) -> SessionHeaderEvents:
     """Send ``headers`` (a mapping, or a callable returning the current one) with a context's
     requests to the origins of ``origin_urls`` only (see above). Register it before any other
-    route of the context: those hand a request on with ``route.fallback()``."""
+    route of the context: those hand a request on with ``route.fallback()``. The returned
+    events count what the route could not do, for the caller's coverage."""
     origins = frozenset(bound_origins(origin_urls))
+    events = SessionHeaderEvents()
+    with contextlib.suppress(Exception):
+        context.on("console", events.observe_console)
 
     async def handler(route: Any, request: Any) -> None:
         current = headers() if callable(headers) else headers
@@ -522,10 +585,11 @@ async def bind_session_headers(context: Any, origin_urls: Any, headers: Any) -> 
         merged = {name: value for name, value in merged.items() if name.lower() not in lowered}
         merged.update({str(name): str(value) for name, value in dict(current).items()})
         try:
-            response = await _browser_fetch(route, request, merged, origin, origins)
+            response = await _browser_fetch(route, request, merged, origin, origins, events)
         except Exception:  # the request failed as it would have in the browser
             await route.abort("failed")
             return
         await route.fulfill(response=response)
 
     await context.route("**/*", handler)
+    return events
