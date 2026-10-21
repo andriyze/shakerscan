@@ -43,6 +43,23 @@ def test_managed_profile_auth_replaces_prior_identity_and_records_server_binding
 
     context = _Context()
     session._contexts["user1"] = context
+    confined: list = []
+
+    async def storage_state():
+        return {"cookies": [], "origins": []}
+
+    async def close():
+        context.closed = True
+
+    context.storage_state, context.close = storage_state, close
+
+    async def create_confined(user, *, headers=None, storage_state=None):
+        # The first session header replaces the context by a network-confined one.
+        confined.append((user, headers, storage_state))
+        session._contexts[user] = _Context()
+        session._pages[user] = type("Page", (), {"url": "about:blank"})()
+
+    session._create_user_context = create_confined
     page = type("Page", (), {"url": "https://app.example.test/account"})()
 
     result = asyncio.run(session._handle_set_auth(page, "user1", {
@@ -55,8 +72,8 @@ def test_managed_profile_auth_replaces_prior_identity_and_records_server_binding
     user = session.state.users["user1"]
     assert result["success"] is True
     assert context.cleared is True
-    # The context's session-header route reads these; they are never set context-wide.
-    assert context.headers is None
+    assert confined == [("user1", {"Authorization": "Bearer new"}, {"cookies": [], "origins": []})]
+    assert context.closed is True
     assert session._session_headers["user1"] == {"Authorization": "Bearer new"}
     assert user.headers == {"Authorization": "Bearer new"}
     assert user.cookies == {}

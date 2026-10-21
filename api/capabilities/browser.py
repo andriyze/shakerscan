@@ -782,8 +782,8 @@ async def _execute_browser_action(
     cancelled: Cancelled,
     trusted_headers: Mapping[str, str] | None = None,
 ) -> CapabilityAdapterResult:
-    """Run one browser action. Trusted headers go to the bound origin only, and the result says
-    what they could not reach (``browser_session_header_coverage``)."""
+    """Run one browser action. Its pinned proxy admits only the bound origin, so trusted headers
+    reach nothing else; the result says what was refused (``browser_session_header_coverage``)."""
     events = _credential_redirects.SessionHeaderEvents()
     result = await _execute_browser_action_in_context(
         prepared, heartbeat=heartbeat, cancelled=cancelled, trusted_headers=trusted_headers,
@@ -902,17 +902,10 @@ async def _execute_browser_action_in_context(
                      "httpOnly": True, "secure": prepared.origin.startswith("https:")}
                     for key, cookie in cookies.items()
                 ])
-        header_origins = _credential_redirects.bound_origins([prepared.origin])
         if trusted_headers and session_header_events is not None:
             context.on("console", session_header_events.observe_console)
-
-        def allow_redirect_hop() -> bool:
-            # A redirect followed for a subresource is one more request of this action.
-            nonlocal request_count
-            if request_count >= prepared.max_requests:
-                return False
-            request_count += 1
-            return True
+            session_header_events.origins = frozenset(_credential_redirects.bound_origins([prepared.origin]))
+            context.on("request", session_header_events.observe_request)
 
         await context.add_init_script(
             "window.WebSocket = class { constructor() { throw new Error('blocked'); } };"
@@ -952,18 +945,11 @@ async def _execute_browser_action_in_context(
                             if name.lower() != "cookie"
                         }}
                         headers["content-type"] = str(prepared.content_type)
-                        if trusted_headers:
-                            # Fetched here, so a redirect never carries the trusted headers.
-                            await _credential_redirects.fulfill_with_session_headers(
-                                route, request, headers, header_origins, session_header_events,
-                                on_hop=allow_redirect_hop, method=prepared.method, post_data=prepared.body,
-                            )
-                        else:
-                            await route.continue_(
-                                method=prepared.method,
-                                post_data=prepared.body,
-                                headers=headers,
-                            )
+                        await route.continue_(
+                            method=prepared.method,
+                            post_data=prepared.body,
+                            headers=headers,
+                        )
                         return
                 elif request.method.upper() not in SAFE_BROWSER_METHODS:
                     if not isinstance(prepared, PreparedBrowserInteraction) or not prepared.max_state_changing_requests:
@@ -994,12 +980,10 @@ async def _execute_browser_action_in_context(
                     name.lower(): value for name, value in trusted_headers.items()
                     if name.lower() != "cookie"
                 }}
-                # Continuing with the headers would carry them into every redirect hop, which
-                # the pinned proxy admits to the target's address written as another origin.
-                await _credential_redirects.fulfill_with_session_headers(
-                    route, request, headers, header_origins, session_header_events,
-                    on_hop=allow_redirect_hop,
-                )
+                # Chromium carries continued headers into redirect hops; the pinned proxy admits
+                # only the target's hostname and port, so a hop elsewhere is refused before any
+                # byte of it leaves (refusals are counted below).
+                await route.continue_(headers=headers)
             else:
                 await route.continue_()
 
@@ -1308,6 +1292,13 @@ async def _execute_browser_action_in_context(
                 await pinned_proxy.close()
             except Exception:
                 pass
+            if trusted_headers and session_header_events is not None:
+                # Connections to anything but the bound origin, refused at the pinned proxy.
+                session_header_events.record(
+                    _credential_redirects.SESSION_CROSS_ORIGIN_REFUSED,
+                    sum(dict(getattr(pinned_proxy, "refused_destinations", {}) or {}).values())
+                    + int(getattr(pinned_proxy, "refused_destinations_other", 0) or 0),
+                )
             # Inside a Scan worker the browser's tunnel joins the Scan's request archive; the
             # archive never decides the action's outcome.
             try:

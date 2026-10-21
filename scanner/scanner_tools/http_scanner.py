@@ -554,13 +554,14 @@ async def browser_fetch(
                 except Exception:
                     auth_cookies = []
 
-            # The interaction guard refuses every other origin, so Local Network Access can be
-            # granted: the target's own private-network resources load.
-            ctx = await browser.new_context(**ctx_kwargs, **credential_redirects.local_network_access(True))
             session_header_events = None
             if session_headers:
-                # Session headers go to the target's origin only (registered before the guard).
-                session_header_events = await credential_redirects.bind_session_headers(ctx, [url], session_headers)
+                # Session headers: the context reaches the target's origin only.
+                ctx, session_header_events = await credential_redirects.confined_session_context(
+                    browser, [url], session_headers, **ctx_kwargs,
+                )
+            else:
+                ctx = await browser.new_context(**ctx_kwargs)
             if auth_cookies:
                 try:
                     await ctx.add_cookies(auth_cookies)
@@ -1942,13 +1943,14 @@ async def interactive_browser_crawl(
                 except Exception:
                     pass
 
-            # The interaction guard refuses every other origin, so Local Network Access can be
-            # granted: the target's own private-network resources load.
-            ctx = await browser.new_context(**ctx_kwargs, **credential_redirects.local_network_access(True))
             session_header_events = None
             if session_headers:
-                # Session headers go to the target's origin only (registered before the guard).
-                session_header_events = await credential_redirects.bind_session_headers(ctx, [url], session_headers)
+                # Session headers: the context reaches the target's origin only.
+                ctx, session_header_events = await credential_redirects.confined_session_context(
+                    browser, [url], session_headers, **ctx_kwargs,
+                )
+            else:
+                ctx = await browser.new_context(**ctx_kwargs)
             if auth_cookies:
                 try:
                     await ctx.add_cookies(auth_cookies)

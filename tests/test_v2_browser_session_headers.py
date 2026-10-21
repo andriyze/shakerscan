@@ -31,7 +31,7 @@ from api.runtime.models import TargetBinding  # noqa: E402
 
 SECRET = "fixture-trusted-header-not-a-real-credential"
 HOST = "target.fixture.invalid"
-NAV_DROP = "session_header_dropped_on_navigation_redirect"
+NAV_REFUSED = "session_navigation_redirect_refused"
 
 
 @contextmanager
@@ -122,13 +122,17 @@ def test_subresource_redirects_keep_the_header_on_the_origin_only():
     assert (f"{HOST}:{port}", "/api/final", SECRET) in hits
 
 
-def test_a_navigation_redirect_within_the_origin_is_recorded_on_the_result():
+def test_a_same_origin_redirect_keeps_the_header_and_a_refused_hop_is_recorded():
     with _server() as (port, hits):
-        result = _run(port, "/nav-same")
-    assert result.status == "success", result
-    assert (f"{HOST}:{port}", "/landed", None) in hits  # the browser's own hop, without the header
-    coverage = [row for row in result.observations if row.get("kind") == "browser_session_header_coverage"]
-    assert coverage and NAV_DROP in coverage[0]["reasons"], result.observations
+        same = _run(port, "/nav-same")
+    assert same.status == "success", same
+    assert (f"{HOST}:{port}", "/landed", SECRET) in hits  # Chromium carries it within the origin
+    with _server() as (port, hits):
+        cross = _run(port, "/nav-cross")
+    coverage = [row for row in cross.observations if row.get("kind") == "browser_session_header_coverage"]
+    assert coverage, cross.observations
+    assert "session_cross_origin_refused" in coverage[0]["reasons"]
+    assert "session_navigation_redirect_refused" in coverage[0]["reasons"]
 
 
 def test_scan_coverage_reads_the_browser_session_reasons():
@@ -136,9 +140,9 @@ def test_scan_coverage_reads_the_browser_session_reasons():
 
     observations = {
         "web.browser_crawl:1": ({"kind": "browser_navigation"},
-                                {"kind": "browser_session_header_coverage", "reasons": [NAV_DROP],
-                                 "counts": {NAV_DROP: 1}}),
+                                {"kind": "browser_session_header_coverage", "reasons": [NAV_REFUSED],
+                                 "counts": {NAV_REFUSED: 1}}),
         "web.probe:1": ({"kind": "http_response"},),
     }
-    assert browser_session_header_reasons(observations) == {NAV_DROP}
+    assert browser_session_header_reasons(observations) == {NAV_REFUSED}
     assert browser_session_header_reasons({}) == set()

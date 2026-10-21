@@ -18,6 +18,7 @@ Usage:
 """
 
 import asyncio
+import contextlib
 import base64
 import json
 import re
@@ -45,17 +46,9 @@ try:
 except ModuleNotFoundError:  # package import layout
     from scanner.redaction import is_sensitive_key, redact_text
 try:
-    from scanner_tools.credential_redirects import bind_session_headers, local_network_access
+    from scanner_tools.credential_redirects import confined_session_context
 except ModuleNotFoundError:  # package import layout
-    from scanner.scanner_tools.credential_redirects import bind_session_headers, local_network_access
-
-
-def _session_destination_guard():
-    try:
-        from scanner_tools.destination_guard import current_guard
-    except ImportError:
-        return None
-    return current_guard()
+    from scanner.scanner_tools.credential_redirects import confined_session_context
 
 # A response header whose name says it carries a credential (``X-Subject-Token``, ``X-Auth-Token``,
 # ``X-Upstream-Auth``, a session or key header): withheld whatever its value looks like.
@@ -281,28 +274,33 @@ class InteractiveSession:
             "error": f"Failed to start session: {start_error or 'unknown error'}"
         }
 
-    async def _create_user_context(self, user_name: str) -> BrowserContext:
-        """Create a new browser context for a user."""
+    async def _create_user_context(
+        self, user_name: str, *, headers: dict[str, str] | None = None,
+        storage_state: dict[str, Any] | None = None,
+    ) -> BrowserContext:
+        """Create a new browser context for a user.
+
+        With session ``headers`` the context is confined at the network layer to the target's
+        origin and carries them natively (``confined_session_context``); without, it is the
+        ordinary context (a retest's destination guard still applies through its proxy)."""
         try:
             from scanner_tools.destination_guard import guarded_context_options
         except ImportError:
             async def guarded_context_options():
                 return {}
-        context = await self._browser.new_context(
-            ignore_https_errors=True,
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        options: dict[str, Any] = {
+            "ignore_https_errors": True,
+            "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            **({"storage_state": storage_state} if storage_state is not None else {}),
+        }
+        if headers:
+            context, self._session_header_events[user_name] = await confined_session_context(
+                self._browser, [self.target_url], headers, **options,
+            )
+        else:
             # A finding retest's destination guard, when this session runs inside one: all of
             # its traffic through the guard's egress proxy (redirect hops and WebSockets too).
-            **await guarded_context_options(),
-            # Local Network Access only inside a destination guard: this context otherwise lets
-            # pages load static resources from any origin.
-            **local_network_access(_session_destination_guard() is not None),
-        )
-        # Headers set with set_auth go to the target's origin only, never to what its pages load
-        # or redirect to (registered before the page route, which hands requests on).
-        self._session_header_events[user_name] = await bind_session_headers(
-            context, [self.target_url], lambda: self._session_headers.get(user_name, {}),
-        )
+            context = await self._browser.new_context(**options, **await guarded_context_options())
 
         # Set up network interception
         page = await context.new_page()
@@ -641,6 +639,28 @@ class InteractiveSession:
             except Exception as e:
                 return {"success": False, "error": f"Action failed: {str(e)}", "action": action_type}
 
+    async def _apply_session_headers(self, user: str, headers: dict[str, str]) -> None:
+        """Give the user's browser its session headers. A context that carries headers is
+        confined to the target's origin; the first time headers are set, the user's context is
+        replaced by a confined one with the same cookies and storage, at the same page."""
+        self._session_headers[user] = dict(headers)
+        context = self._contexts.get(user)
+        if context is None:
+            return
+        if user in self._session_header_events:
+            await context.set_extra_http_headers(dict(headers))
+            return
+        if not headers:
+            return
+        page = self._pages.get(user)
+        current_url = page.url if page is not None else self.target_url
+        state = await context.storage_state()
+        await self._create_user_context(user, headers=dict(headers), storage_state=state)
+        await context.close()
+        if str(current_url).startswith(("http://", "https://")):
+            with contextlib.suppress(Exception):
+                await self._pages[user].goto(current_url, wait_until="domcontentloaded", timeout=30000)
+
     @staticmethod
     def _record_session_header_events(result: dict[str, Any], events: Any, counts_before: dict[str, int]) -> None:
         """Say on the action's result what the session header could not reach during it: a
@@ -783,9 +803,7 @@ class InteractiveSession:
 
         is_authenticated = bool("Authorization" in merged_headers or merged_cookies)
         try:
-            context = self._contexts.get(user)
-            if context:
-                self._session_headers[user] = dict(merged_headers)
+            await self._apply_session_headers(user, merged_headers)
         except Exception:
             return {
                 "success": False,

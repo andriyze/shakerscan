@@ -35,21 +35,13 @@ _SCAN_BUDGET_FIELDS = {
 }
 
 _REASON_LABELS = {
-    "session_header_dropped_on_navigation_redirect": (
-        "A page reached through a redirect within the target was loaded without the session "
-        "header (cookies still sent), so it was examined as that page shows itself without it"
+    "session_cross_origin_refused": (
+        "The authenticated browser reaches only the target's origin, so connections to other "
+        "origins (third-party scripts, CDNs, redirects elsewhere) were refused and not loaded"
     ),
-    "session_header_response_too_large": (
-        "A response on the target's origin was larger than a browser page can be handed with the "
-        "session header (32 MB), so it was refused"
-    ),
-    "session_header_withheld_from_stream": (
-        "A streamed response (event stream or media) was loaded without the session header, so "
-        "it shows what the target sends without the session"
-    ),
-    "cors_preflight_refused": (
-        "The target refused the CORS preflight of a cross-origin request between its bound "
-        "origins, so the request was not sent, as a browser would not send it"
+    "session_navigation_redirect_refused": (
+        "The target redirected an authenticated page to another origin; the browser does not "
+        "follow it with the session, so that page was not loaded"
     ),
     "session_header_withheld_from_headless": (
         "Dalfox ran without its headless browser, which sends session headers to every origin a "

@@ -14,9 +14,9 @@ from ai_gate.budget import CHARS_PER_TOKEN_ESTIMATE, RequestBudget
 from ai_gate.targets.rest_json import as_dict, build_headers, build_url
 
 try:
-    from scanner_tools.credential_redirects import bind_session_headers
+    from scanner_tools.credential_redirects import confined_session_context
 except ModuleNotFoundError:  # package import layout
-    from scanner.scanner_tools.credential_redirects import bind_session_headers
+    from scanner.scanner_tools.credential_redirects import confined_session_context
 
 try:
     if not os.environ.get("PLAYWRIGHT_BROWSERS_PATH") and os.path.exists("/ms-playwright"):
@@ -682,12 +682,14 @@ class WidgetPlaywrightConversationTarget:
             context_kwargs["storage_state"] = auth_state
 
         navigation_url = str(self.manifest.get("entry_url") or self.endpoint_url)
-        self._context = await self._browser.new_context(**context_kwargs)
         if header_overrides:
-            # The configured headers go to the widget page's and the endpoint's origins only.
-            self._session_header_events = await bind_session_headers(
-                self._context, [navigation_url, self.endpoint_url], header_overrides,
+            # The configured headers: the context reaches the widget page's and the endpoint's
+            # origins only, so the headers can never go anywhere else.
+            self._context, self._session_header_events = await confined_session_context(
+                self._browser, [navigation_url, self.endpoint_url], header_overrides, **context_kwargs,
             )
+        else:
+            self._context = await self._browser.new_context(**context_kwargs)
         self._page = await self._context.new_page()
         self._page.on("request", self._record_request)
         self._page.on("response", self._record_response)

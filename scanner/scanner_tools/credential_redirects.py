@@ -452,51 +452,49 @@ async def run_curl_same_origin(cmd: list[str], run_hop: RunHop, *, timeout: int,
 # --- browser contexts ------------------------------------------------------------------------
 #
 # Playwright's ``extra_http_headers`` add the headers to every request a page makes, other
-# origins and redirect hops included, and a route that continues a request with extra headers
-# carries them into its redirects too (redirect hops never reach a route handler). A context
-# that carries session headers therefore fetches each request to the target's origin itself
-# (``route.fetch`` with the context's cookies, proxy and TLS settings, redirects not followed),
-# with the headers added, and hands the response to the page:
+# origins and redirect hops included, and a route cannot keep them off a redirect hop (hops never
+# reach a route handler). A browser context that carries session headers is therefore confined
+# at the network layer instead: all of its traffic goes through a local egress proxy
+# (``destination_guard.GuardProxy``) that admits only the bound origins -- scheme, host and
+# port, or the same host upgraded from http on port 80 to https on 443 -- and refuses any other
+# connection before it is made. The headers are then the context's own extra headers, so
+# Chromium keeps its streaming, CORS (credentials, preflights), cookie, size and Local Network
+# Access behaviour, and a header can only ever reach a bound origin:
 #
-# - a non-redirect response is the response;
-# - a redirect of a fetch, script or other subresource is followed here while it stays on the
-#   origin, with the headers; a redirect elsewhere is returned for the browser to follow, and a
-#   hop the browser follows carries no session header;
-# - a redirect of a navigation is returned for the browser to follow (the page's URL must be
-#   the URL that answered). Its next hop has the context's cookies but not the session header.
+# - an HTTPS (or WebSocket) connection elsewhere is a CONNECT the proxy refuses before any
+#   request byte is sent;
+# - a plain-HTTP request elsewhere reaches only the local proxy, which refuses it unforwarded.
 #
-# Requests to any other origin are passed on untouched. Cookies keep their own domain scoping.
+# The cost is that a header-carrying context cannot load another origin at all (a CDN, a
+# third-party script, a redirect to another site): each refusal is counted. A context that
+# carries only cookies (domain-scoped by the browser) is not confined.
 
-_BROWSER_DROPPED_ON_REWRITE = frozenset({"content-type", "content-length"})
-
-# What keeping the headers on the origin costs, recorded so a result never hides it:
-SESSION_HEADER_DROPPED_ON_NAVIGATION_REDIRECT = "session_header_dropped_on_navigation_redirect"
+SESSION_CROSS_ORIGIN_REFUSED = "session_cross_origin_refused"
+SESSION_NAVIGATION_REDIRECT_REFUSED = "session_navigation_redirect_refused"
 PRIVATE_NETWORK_SUBRESOURCE_BLOCKED = "private_network_subresource_blocked"
 # Chromium's Local Network Access refusal, as its console reports it.
 _LOCAL_NETWORK_REFUSAL = re.compile(r"Permission was denied for this request to access the `\w+` address space")
 
 
 class SessionHeaderEvents:
-    """Counts of the two things a session-header route cannot do, for coverage and receipts:
+    """What a header-carrying, network-confined browser context could not do, for coverage:
 
-    - ``session_header_dropped_on_navigation_redirect``: a page on the origin redirected a
-      navigation within the origin; the next page was loaded with cookies but without the
-      session header;
-    - ``private_network_subresource_blocked``: a target page delivered by the route asked for a
-      resource from another origin on a private or loopback address, and Chromium's Local
-      Network Access check refused it (contexts confined at the network layer are granted the
-      permission, ``local_network_access``);
-    - ``session_header_withheld_from_stream``, ``session_header_response_too_large`` and
-      ``cors_preflight_refused``: see ``fulfill_with_session_headers``.
+    - ``session_cross_origin_refused``: a connection to an origin outside the bound ones (a
+      third-party resource, a redirect hop, a navigation) refused at the context's proxy;
+    - ``session_navigation_redirect_refused``: of those, a navigation a bound origin redirected
+      to another origin, so the page it pointed at was not loaded;
+    - ``private_network_subresource_blocked``: Chromium's Local Network Access check refused a
+      request (contexts confined this way are granted the permission, so this is recorded only
+      where it still happens).
     """
 
-    def __init__(self) -> None:
-        self.counts: dict[str, int] = {
-            SESSION_HEADER_DROPPED_ON_NAVIGATION_REDIRECT: 0, PRIVATE_NETWORK_SUBRESOURCE_BLOCKED: 0,
-        }
+    def __init__(self, origins: Any = ()) -> None:
+        self.counts: dict[str, int] = {}
+        self.origins = frozenset(origins)
 
-    def record(self, reason: str) -> None:
-        self.counts[reason] = self.counts.get(reason, 0) + 1
+    def record(self, reason: str, count: int = 1) -> None:
+        if count > 0:
+            self.counts[reason] = self.counts.get(reason, 0) + int(count)
 
     def reasons(self) -> list[str]:
         return sorted(reason for reason, count in self.counts.items() if count)
@@ -511,6 +509,16 @@ class SessionHeaderEvents:
             return
         if _LOCAL_NETWORK_REFUSAL.search(text):
             self.record(PRIVATE_NETWORK_SUBRESOURCE_BLOCKED)
+
+    def observe_request(self, request: Any) -> None:
+        """A navigation hop a bound origin redirected to an origin the proxy will refuse."""
+        try:
+            hop = request.redirected_from is not None and request.is_navigation_request()
+            url = str(request.url)
+        except Exception:
+            return
+        if hop and self.origins and not _admits(self.origins, url):
+            self.record(SESSION_NAVIGATION_REDIRECT_REFUSED)
 
 
 def add_session_header_reasons(coverage: dict[str, Any], recorded: Any) -> None:
@@ -527,187 +535,6 @@ def add_session_header_reasons(coverage: dict[str, Any], recorded: Any) -> None:
         counts[str(reason)] = int(counts.get(str(reason), 0)) + int(count or 0)
 
 
-async def _browser_fetch(route: Any, request: Any, headers: dict[str, str], origin: tuple[str, str, int] | None,
-                         origins: frozenset, events: SessionHeaderEvents, *,
-                         overrides: dict[str, Any] | None = None, on_hop: Callable[[], bool] | None = None) -> Any:
-    overrides = dict(overrides or {})
-    response = await route.fetch(headers=headers, max_redirects=0, **overrides)
-    if request.is_navigation_request():
-        location = response.headers.get("location")
-        if 300 <= response.status < 400 and location:
-            if origin_key(urllib.parse.urljoin(request.url, location.strip())) in origins:
-                events.record(SESSION_HEADER_DROPPED_ON_NAVIGATION_REDIRECT)
-        return response
-    url, method = request.url, str(overrides.get("method") or request.method).upper()
-    for _hop in range(DEFAULT_MAX_REDIRECTS):
-        location = response.headers.get("location")
-        if response.status not in REDIRECT_STATUSES or not location:
-            return response
-        next_url = urllib.parse.urljoin(url, location.strip())
-        if origin_key(next_url) not in origins or (on_hop is not None and not on_hop()):
-            return response
-        next_method = redirect_method(method, response.status)
-        options: dict[str, Any] = {"url": next_url, "method": next_method, "max_redirects": 0}
-        if next_method != method:
-            headers = {k: v for k, v in headers.items() if k.lower() not in _BROWSER_DROPPED_ON_REWRITE}
-            options["post_data"] = b""
-        elif "post_data" in overrides:
-            options["post_data"] = overrides["post_data"]
-        await response.dispose()
-        response = await route.fetch(headers=headers, **options)
-        url, method = next_url, next_method
-    return response
-
-
-# A response handed to the page is copied into the browser whole: past this size Chromium's
-# side of the transfer fails and takes the browser down with it, so a larger one is refused.
-MAX_FULFILLED_RESPONSE_BYTES = 32 * 1024 * 1024
-SESSION_HEADER_RESPONSE_TOO_LARGE = "session_header_response_too_large"
-SESSION_HEADER_WITHHELD_FROM_STREAM = "session_header_withheld_from_stream"
-CORS_PREFLIGHT_REFUSED = "cors_preflight_refused"
-_STREAM_RESOURCE_TYPES = frozenset({"eventsource", "media", "websocket"})
-# Header names a page cannot set (or the browser always adds): never part of a preflight.
-_BROWSER_SET_HEADERS = frozenset({
-    "accept-charset", "accept-encoding", "connection", "content-length", "cookie", "cookie2", "date",
-    "dnt", "expect", "host", "keep-alive", "origin", "referer", "te", "trailer", "transfer-encoding",
-    "upgrade", "user-agent", "via", "priority", "pragma", "cache-control",
-})
-_SAFELISTED_CONTENT_TYPES = frozenset({"application/x-www-form-urlencoded", "multipart/form-data", "text/plain"})
-_SIMPLE_METHODS = frozenset({"GET", "HEAD", "POST"})
-
-
-def _is_stream(request: Any, page_headers: Mapping[str, str]) -> bool:
-    """A request whose response arrives over time (EventSource, media, a WebSocket handshake):
-    fetching it whole would never hand the page anything."""
-    if str(getattr(request, "resource_type", "") or "") in _STREAM_RESOURCE_TYPES:
-        return True
-    return "text/event-stream" in str(page_headers.get("accept") or "").lower()
-
-
-def _origin_text(url: str) -> str | None:
-    key = origin_key(url)
-    if key is None:
-        return None
-    default = 443 if key[0] == "https" else 80
-    host = f"[{key[1]}]" if ":" in key[1] else key[1]
-    return f"{key[0]}://{host}" + ("" if key[2] == default else f":{key[2]}")
-
-
-def _initiator_origin(request: Any) -> str | None:
-    try:
-        frame = request.frame
-        return _origin_text(str(frame.url)) if frame is not None else None
-    except Exception:  # a worker's request has no frame
-        return None
-
-
-def _preflight_headers(method: str, page_headers: Mapping[str, str]) -> list[str] | None:
-    """The page's own non-safelisted header names when its cross-origin request needs a CORS
-    preflight, else None. Session headers the route adds are the operator's, not the page's."""
-    names = []
-    for name, value in page_headers.items():
-        lowered = str(name).lower()
-        if lowered in _BROWSER_SET_HEADERS or lowered.startswith(("sec-", "proxy-", "access-control-")):
-            continue
-        if lowered in {"accept", "accept-language", "content-language"}:
-            continue
-        if lowered == "content-type" and str(value).split(";", 1)[0].strip().lower() in _SAFELISTED_CONTENT_TYPES:
-            continue
-        names.append(lowered)
-    if method.upper() in _SIMPLE_METHODS and not names:
-        return None
-    return sorted(set(names))
-
-
-def _listed(value: Any) -> set[str]:
-    return {item.strip().lower() for item in str(value or "").split(",") if item.strip()}
-
-
-async def _cors_preflight(route: Any, url: str, origin: str, method: str, names: list[str]) -> bool:
-    """Send the preflight the page's request needs (no session header) and read its answer."""
-    headers = {"origin": origin, "access-control-request-method": method.upper(), "accept": "*/*"}
-    if names:
-        headers["access-control-request-headers"] = ",".join(names)
-    # An explicit empty body: route.fetch otherwise sends the page request's own body.
-    answer = await route.fetch(url=url, method="OPTIONS", headers=headers, post_data=b"", max_redirects=0)
-    try:
-        allowed_origin = str(answer.headers.get("access-control-allow-origin") or "").strip()
-        methods = _listed(answer.headers.get("access-control-allow-methods"))
-        allowed_headers = _listed(answer.headers.get("access-control-allow-headers"))
-        return (
-            200 <= answer.status < 300
-            and allowed_origin in {origin, "*"}
-            and (method.upper() in _SIMPLE_METHODS or method.lower() in methods or "*" in methods)
-            and ("*" in allowed_headers or set(names) <= allowed_headers)
-        )
-    finally:
-        await answer.dispose()
-
-
-async def fulfill_with_session_headers(route: Any, request: Any, headers: Mapping[str, str], origins: Any,
-                                       events: SessionHeaderEvents, *, on_hop: Callable[[], bool] | None = None,
-                                       **overrides: Any) -> None:
-    """Answer a routed request to the bound origin with session ``headers`` (see above):
-    fetched without following redirects, redirects within ``origins`` followed here for a
-    subresource (``on_hop`` may refuse another hop), and the response handed to the page.
-    ``overrides`` (method, post_data) apply to the first request only.
-
-    What it will not do, each recorded on ``events``: a stream is passed on untouched without
-    the session header (``session_header_withheld_from_stream``); a response over
-    ``MAX_FULFILLED_RESPONSE_BYTES`` is refused (``session_header_response_too_large``); a
-    cross-origin request between bound origins whose CORS preflight is refused is not sent
-    (``cors_preflight_refused``), and its response reaches the page only if its CORS headers
-    allow the page's origin."""
-    page_headers = {str(k).lower(): str(v) for k, v in (await request.all_headers()).items()}
-    if _is_stream(request, page_headers):
-        events.record(SESSION_HEADER_WITHHELD_FROM_STREAM)
-        await route.fallback()
-        return
-    initiator = _initiator_origin(request)
-    # A CORS-mode request: what the browser reports, else what fetch, XHR and fonts use.
-    fetch_mode = page_headers.get("sec-fetch-mode") or (
-        "cors" if str(getattr(request, "resource_type", "") or "") in {"fetch", "xhr", "font"} else ""
-    )
-    cors_mode = fetch_mode == "cors" and initiator not in {None, _origin_text(request.url)}
-    method = str(overrides.get("method") or request.method).upper()
-    try:
-        if cors_mode:
-            names = _preflight_headers(method, page_headers)
-            if names is not None:
-                if not await _cors_preflight(route, request.url, initiator, method, names):
-                    events.record(CORS_PREFLIGHT_REFUSED)
-                    await route.abort("accessdenied")
-                    return
-
-        response = await _browser_fetch(
-            route, request, dict(headers), origin_key(request.url), frozenset(origins), events,
-            overrides=overrides, on_hop=on_hop,
-        )
-        declared = str(response.headers.get("content-length") or "").strip()
-        too_large = declared.isdigit() and int(declared) > MAX_FULFILLED_RESPONSE_BYTES
-        if not too_large:
-            too_large = len(await response.body()) > MAX_FULFILLED_RESPONSE_BYTES
-        if too_large:
-            events.record(SESSION_HEADER_RESPONSE_TOO_LARGE)
-            await response.dispose()
-            await route.abort("failed")
-            return
-        if cors_mode and str(response.headers.get("access-control-allow-origin") or "").strip() not in {initiator, "*"}:
-            await route.abort("accessdenied")  # what the page would see: the response is not readable
-            return
-    except Exception:  # the request failed as it would have in the browser
-        await route.abort("failed")
-        return
-    await route.fulfill(response=response)
-
-
-def local_network_access(confined: bool) -> dict[str, Any]:
-    """Context options granting Chromium's Local Network Access permission, for a context whose
-    destinations are already confined (pinned proxy, destination guard, a guard that refuses
-    other origins). An unconfined context keeps Chromium's refusal."""
-    return {"permissions": ["local-network-access"]} if confined else {}
-
-
 def bound_origins(origin_urls: Any) -> set[tuple[str, str, int]]:
     """The origins of ``origin_urls``, each http origin on port 80 with its https upgrade."""
     origins: set[tuple[str, str, int]] = set()
@@ -721,27 +548,55 @@ def bound_origins(origin_urls: Any) -> set[tuple[str, str, int]]:
     return origins
 
 
-async def bind_session_headers(context: Any, origin_urls: Any, headers: Any) -> SessionHeaderEvents:
-    """Send ``headers`` (a mapping, or a callable returning the current one) with a context's
-    requests to the origins of ``origin_urls`` only (see above). Register it before any other
-    route of the context: those hand a request on with ``route.fallback()``. The returned
-    events count what the route could not do, for the caller's coverage."""
+def local_network_access(confined: bool) -> dict[str, Any]:
+    """Context options granting Chromium's Local Network Access permission, only for a context
+    confined at the network layer (its proxy admits nothing but its bound origins)."""
+    return {"permissions": ["local-network-access"]} if confined else {}
+
+
+def _admits(origins: frozenset, url: str) -> bool:
+    """Whether the confining proxy may connect for ``url``. A CONNECT is presented as
+    ``https://host:port/`` and carries no scheme of its own (TLS, or a WebSocket tunnel), so it
+    is admitted for any bound origin on that host and port."""
+    key = origin_key(url)
+    if key is None:
+        return False
+    if key in origins:
+        return True
+    return key[0] == "https" and any((host, port) == (key[1], key[2]) for _scheme, host, port in origins)
+
+
+async def confined_session_context(browser: Any, origin_urls: Any, headers: Mapping[str, str],
+                                   **context_options: Any) -> tuple[Any, SessionHeaderEvents]:
+    """A browser context whose traffic reaches only the bound origins of ``origin_urls`` (see
+    above), with ``headers`` as its own extra headers. A destination guard already in force (a
+    retest's) still applies: a destination must pass both. Returns the context and the events
+    counting what it refused."""
+    from . import destination_guard as _guard
+
     origins = frozenset(bound_origins(origin_urls))
-    events = SessionHeaderEvents()
-    with contextlib.suppress(Exception):
-        context.on("console", events.observe_console)
+    events = SessionHeaderEvents(origins)
+    outer = _guard.current_guard()
 
-    async def handler(route: Any, request: Any) -> None:
-        current = headers() if callable(headers) else headers
-        origin = origin_key(request.url)
-        if not current or origin is None or origin not in origins:
-            await route.fallback()
-            return
-        merged = dict(await request.all_headers())
-        lowered = {str(name).lower() for name in current}
-        merged = {name: value for name, value in merged.items() if name.lower() not in lowered}
-        merged.update({str(name): str(value) for name, value in dict(current).items()})
-        await fulfill_with_session_headers(route, request, merged, origins, events)
+    def allowed(url: str) -> bool:
+        if outer is not None and not outer.check(url):
+            return False
+        if _admits(origins, url):
+            return True
+        events.record(SESSION_CROSS_ORIGIN_REFUSED)
+        return False
 
-    await context.route("**/*", handler)
-    return events
+    guard = _guard.DestinationGuard(allowed)
+    token = _guard._current.set(guard)  # a guard-enforcing new_context wrapper reads this one
+    try:
+        proxy = await _guard.guarded_context_options()
+        context = await browser.new_context(
+            **{**context_options, **proxy, **local_network_access(True)},
+            extra_http_headers={str(k): str(v) for k, v in dict(headers or {}).items()},
+        )
+    finally:
+        _guard._current.reset(token)
+    context.on("console", events.observe_console)
+    context.on("request", events.observe_request)
+    context.on("close", lambda _context: guard.proxy.close() if guard.proxy is not None else None)
+    return context, events

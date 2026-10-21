@@ -1,19 +1,22 @@
-"""Browser contexts send session headers only to the target's origin.
+"""Browser contexts that carry session headers reach only the target's origin.
 
 Playwright's ``extra_http_headers`` (and ``set_extra_http_headers``) add the headers to every
 request a page makes: an image or script from another origin, and every redirect hop, including
-one to another origin. A Scan authenticated with an API-key or bearer header therefore handed it
-to any origin the target's page loaded or redirected to.
+one to another origin, which no route handler sees. A context carrying session headers is
+therefore confined at the network layer: its proxy admits only the bound origins, so the headers
+(attached natively) can never leave for another origin.
 
 Two loopback servers, in a real headless Chromium: the target on ``127.0.0.1`` and another
 origin on ``localhost`` (a different port). The target's page loads an image and a fetch from the
 other origin, and has same-origin and cross-origin redirects for navigations and for fetches. The
-target receives the header on its own requests (a same-origin fetch redirect included); the
-other origin never receives it. Each browser entry point that carries session headers is run.
+target receives the header on its own requests (same-origin redirects included); the other origin
+receives nothing, and the refusals are recorded. Each browser entry point that carries session
+headers is run.
 """
 from __future__ import annotations
 
 import asyncio
+import contextlib
 from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -105,8 +108,13 @@ def _with_secret(hits, server: str) -> list[str]:
 
 
 def _assert_contained(hits) -> None:
-    assert [hit for hit in hits if hit[0] == "other"], ("the page never reached the other origin", hits)
-    assert _with_secret(hits, "other") == []
+    # The other origin is refused at the context's proxy: nothing reaches it, header or not.
+    assert [hit for hit in hits if hit[0] == "other"] == [], hits
+
+
+REFUSED = "session_cross_origin_refused"
+NAV_REFUSED = "session_navigation_redirect_refused"
+LNA_BLOCK = "private_network_subresource_blocked"
 
 
 class _Session:
@@ -116,40 +124,48 @@ class _Session:
         return {"headers": {"X-API-Key": SECRET}, "cookies": {}}
 
 
-def test_bound_context_sends_headers_to_the_target_origin_only():
-    from scanner_tools.credential_redirects import bind_session_headers
+def test_confined_context_sends_headers_to_the_target_origin_only():
+    from scanner_tools.credential_redirects import confined_session_context
 
-    async def drive(target: str) -> None:
+    async def drive(target: str) -> dict:
         async with playwright_api.async_playwright() as playwright:
             browser = await playwright.chromium.launch()
             try:
-                context = await browser.new_context()
-                await bind_session_headers(context, [target], {"X-API-Key": SECRET})
+                context, events = await confined_session_context(browser, [target], {"X-API-Key": SECRET})
                 page = await context.new_page()
                 await page.goto(target + "/", wait_until="networkidle")
                 assert await page.evaluate("window.appLoaded") is True
                 await page.goto(target + "/nav-same", wait_until="networkidle")
                 assert page.url.endswith("/landed")
-                await page.goto(target + "/nav-cross", wait_until="networkidle")
-                assert "/nav-landed" in page.url
+                # The hop is refused at the proxy (a plain-HTTP refusal is the proxy's 403).
+                with contextlib.suppress(playwright_api.Error):
+                    response = await page.goto(target + "/nav-cross", wait_until="networkidle")
+                    assert response is None or response.status == 403
+                await context.close()
+                return events.as_dict()
             finally:
                 await browser.close()
 
     with _servers() as (target, hits):
-        asyncio.run(drive(target))
+        recorded = asyncio.run(drive(target))
     _assert_contained(hits)
     secret_paths = _with_secret(hits, "target")
-    for path in ("/", "/app.js", "/api/same", "/api/final", "/nav-same", "/nav-cross"):
+    # Same-origin redirects keep the header natively, for navigations and subresources.
+    for path in ("/", "/app.js", "/api/same", "/api/final", "/nav-same", "/landed", "/nav-cross"):
         assert path in secret_paths, (path, hits)
+    assert recorded["counts"][REFUSED] >= 3  # the image, the fetch, the redirect hops
+    assert recorded["counts"][NAV_REFUSED] == 1
+    assert LNA_BLOCK not in recorded["counts"]
 
 
 def test_xss_browser_proof_keeps_its_headers_on_the_target():
     from scanner_tools import proof_of_exploit
 
-    async def drive(target: str) -> None:
+    async def drive(target: str) -> list:
         try:
-            for start in (f"{target}/", f"{target}/nav-cross"):
-                await proof_of_exploit.prove_xss_headless(start, "q", "x", headers={"X-API-Key": SECRET})
+            return [(await proof_of_exploit.prove_xss_headless(
+                start, "q", "x", headers={"X-API-Key": SECRET})).to_dict()
+                for start in (f"{target}/", f"{target}/nav-cross")]
         finally:
             # The proof keeps one browser per event loop; close it with this loop.
             browser, playwright = proof_of_exploit._browser_instance, proof_of_exploit._playwright_instance
@@ -160,31 +176,39 @@ def test_xss_browser_proof_keeps_its_headers_on_the_target():
                 await playwright.stop()
 
     with _servers() as (target, hits):
-        asyncio.run(drive(target))
+        page, redirected = asyncio.run(drive(target))
     _assert_contained(hits)
     assert "/" in _with_secret(hits, "target")
+    assert REFUSED in page["coverage_reasons"]
+    assert NAV_REFUSED in redirected["coverage_reasons"]
 
 
 @pytest.mark.parametrize("crawl", ["browser_fetch", "interactive_browser_crawl"])
 def test_authenticated_browser_crawl_keeps_its_headers_on_the_target(crawl, tmp_path):
     from scanner_tools import http_scanner
 
+    results = []
     with _servers() as (target, hits):
         for start in (f"{target}/", f"{target}/nav-cross"):
             if crawl == "browser_fetch":
-                asyncio.run(http_scanner.browser_fetch(start, screenshot_dir=str(tmp_path), auth_session=_Session()))
+                results.append(asyncio.run(http_scanner.browser_fetch(
+                    start, screenshot_dir=str(tmp_path), auth_session=_Session())))
             else:
-                asyncio.run(http_scanner.interactive_browser_crawl(
+                results.append(asyncio.run(http_scanner.interactive_browser_crawl(
                     start, auth_session=_Session(), max_pages=2, screenshot_dir=str(tmp_path),
-                ))
+                )))
     _assert_contained(hits)
     assert "/" in _with_secret(hits, "target")
+    assert REFUSED in results[1]["session_headers"]["reasons"]
+    with _servers() as (target, hits):
+        anonymous = asyncio.run(http_scanner.browser_fetch(f"{target}/nav-same", screenshot_dir=str(tmp_path)))
+    assert "session_headers" not in anonymous  # a context without session headers is not confined
 
 
-def test_interactive_session_set_auth_keeps_the_header_on_the_target(tmp_path):
+def test_interactive_session_set_auth_confines_the_session(tmp_path):
     import session_manager
 
-    async def drive(target: str) -> None:
+    async def drive(target: str):
         session = session_manager.InteractiveSession("fixture-session", f"{target}/", results_dir=tmp_path)
         try:
             started = await session.start()
@@ -193,38 +217,44 @@ def test_interactive_session_set_auth_keeps_the_header_on_the_target(tmp_path):
             assert result["success"], result
             await session.action({"action": "navigate", "data": {"url": f"{target}/"}})
             await asyncio.sleep(0.5)
-            await session.action({"action": "navigate", "data": {"url": f"{target}/nav-cross"}})
+            redirected = await session.action({"action": "navigate", "data": {"url": f"{target}/nav-cross"}})
+            return redirected, await session.get_state()
         finally:
             await session.close()
 
     with _servers() as (target, hits):
-        asyncio.run(drive(target))
-    _assert_contained(hits)
+        redirected, state = asyncio.run(drive(target))
+    # Before set_auth the session is an ordinary one and may load the other origin's image;
+    # with the header it is confined, and the other origin never sees the header.
+    assert _with_secret(hits, "other") == [], hits
     assert "/" in _with_secret(hits, "target")
+    assert redirected.get("coverage_reasons") and NAV_REFUSED in redirected["coverage_reasons"], redirected
+    assert REFUSED in state["session_header_coverage"]["default"]["reasons"]
 
 
-def test_ai_widget_target_keeps_its_headers_on_the_endpoint_origin():
+def test_ai_widget_target_keeps_its_headers_on_its_origins():
     from ai_gate.targets.widget_playwright import WidgetPlaywrightConversationTarget
 
-    async def drive(target: str) -> None:
+    async def drive(target: str):
         widget = WidgetPlaywrightConversationTarget(f"{target}/", {
             "endpoint_url": f"{target}/", "headers_template": {"X-API-Key": SECRET},
-            # The widget page redirects to the other origin: its next hop must not carry the header.
+            # The widget page redirects to the other origin: refused at the context's proxy.
             "metadata_json": {"widget_manifest": {
                 "input_selector": "#q", "response_selector": "#a", "entry_url": f"{target}/nav-cross",
             }},
         })
         try:
-            await widget._ensure_browser()
-            await widget._page.wait_for_load_state("load")
-            await widget._page.wait_for_timeout(500)
+            with contextlib.suppress(Exception):
+                await widget._ensure_browser()
+            return widget.session_header_coverage()
         finally:
             await widget.close()
 
     with _servers() as (target, hits):
-        asyncio.run(drive(target))
+        recorded = asyncio.run(drive(target))
     _assert_contained(hits)
     assert "/nav-cross" in _with_secret(hits, "target")
+    assert NAV_REFUSED in recorded["reasons"]
 
 
 def test_bound_origins_include_the_same_host_https_upgrade():
@@ -235,141 +265,18 @@ def test_bound_origins_include_the_same_host_https_upgrade():
     assert bound_origins(["https://app.example/"]) == {("https", "app.example", 443)}
 
 
-# --- the two costs of keeping headers on the origin are recorded, never silent ---------------
-
-NAV_DROP = "session_header_dropped_on_navigation_redirect"
-LNA_BLOCK = "private_network_subresource_blocked"
-
-
-def test_bound_context_records_a_navigation_redirect_and_a_blocked_private_subresource():
-    from scanner_tools.credential_redirects import bind_session_headers
-
-    async def drive(target: str) -> dict:
-        async with playwright_api.async_playwright() as playwright:
-            browser = await playwright.chromium.launch()
-            try:
-                context = await browser.new_context()
-                events = await bind_session_headers(context, [target], {"X-API-Key": SECRET})
-                page = await context.new_page()
-                await page.goto(target + "/nav-same", wait_until="load")
-                assert events.as_dict()["reasons"] == [NAV_DROP]
-                await page.goto(target + "/", wait_until="load")
-                await page.wait_for_timeout(500)
-                return events.as_dict()
-            finally:
-                await browser.close()
-
-    with _servers() as (target, _hits):
-        recorded = asyncio.run(drive(target))
-    assert recorded["reasons"] == sorted([NAV_DROP, LNA_BLOCK])
-    assert recorded["counts"][NAV_DROP] == 1
-    assert recorded["counts"][LNA_BLOCK] >= 2  # the image and the fetch from the other origin
-
-
-def test_authenticated_browser_fetch_reports_the_navigation_redirect(tmp_path):
-    from scanner_tools import http_scanner
-
-    with _servers() as (target, _hits):
-        redirected = asyncio.run(http_scanner.browser_fetch(
-            f"{target}/nav-same", screenshot_dir=str(tmp_path), auth_session=_Session()))
-        page = asyncio.run(http_scanner.browser_fetch(
-            f"{target}/", screenshot_dir=str(tmp_path), auth_session=_Session()))
-    assert NAV_DROP in redirected["session_headers"]["reasons"]
-    # The crawl's own guard refuses other origins first (and reports them); nothing is
-    # claimed for a request that never reached Chromium's check.
-    assert page["interaction_safety"]["cross_origin_requests_blocked"] >= 1
-    assert LNA_BLOCK not in page["session_headers"]["reasons"]
-    anonymous = None
-    with _servers() as (target, _hits):
-        anonymous = asyncio.run(http_scanner.browser_fetch(f"{target}/nav-same", screenshot_dir=str(tmp_path)))
-    assert "session_headers" not in anonymous
-
-
-def test_interactive_crawl_reports_the_navigation_redirect(tmp_path):
-    from scanner_tools import http_scanner
-
-    with _servers() as (target, _hits):
-        crawl = asyncio.run(http_scanner.interactive_browser_crawl(
-            f"{target}/nav-same", auth_session=_Session(), max_pages=1, screenshot_dir=str(tmp_path)))
-    assert NAV_DROP in crawl["session_headers"]["reasons"]
-
-
-def test_xss_proof_result_reports_both_reasons():
-    from scanner_tools import proof_of_exploit
-
-    async def drive(target: str):
-        try:
-            redirected = await proof_of_exploit.prove_xss_headless(
-                f"{target}/nav-same", "q", "x", headers={"X-API-Key": SECRET})
-            page = await proof_of_exploit.prove_xss_headless(
-                f"{target}/", "q", "x", headers={"X-API-Key": SECRET})
-            return redirected.to_dict(), page.to_dict()
-        finally:
-            browser, playwright = proof_of_exploit._browser_instance, proof_of_exploit._playwright_instance
-            proof_of_exploit._browser_instance = proof_of_exploit._playwright_instance = None
-            if browser is not None:
-                await browser.close()
-            if playwright is not None:
-                await playwright.stop()
-
-    with _servers() as (target, _hits):
-        redirected, page = asyncio.run(drive(target))
-    assert NAV_DROP in redirected["coverage_reasons"]
-    assert LNA_BLOCK in page["coverage_reasons"]
-
-
-def test_interactive_session_navigation_reports_the_redirect(tmp_path):
-    import session_manager
-
-    async def drive(target: str):
-        session = session_manager.InteractiveSession("fixture-session-2", f"{target}/", results_dir=tmp_path)
-        try:
-            assert (await session.start())["success"]
-            assert (await session.action({"action": "set_auth", "data": {"auth_header": f"Bearer {SECRET}"}}))["success"]
-            return await session.action({"action": "navigate", "data": {"url": f"{target}/nav-same"}})
-        finally:
-            await session.close()
-
-    with _servers() as (target, _hits):
-        result = asyncio.run(drive(target))
-    assert NAV_DROP in result["coverage_reasons"], result
-
-
-def test_ai_widget_records_the_navigation_redirect():
-    from ai_gate.targets.widget_playwright import WidgetPlaywrightConversationTarget
-
-    async def drive(target: str):
-        widget = WidgetPlaywrightConversationTarget(f"{target}/", {
-            "endpoint_url": f"{target}/", "headers_template": {"X-API-Key": SECRET},
-            "metadata_json": {"widget_manifest": {
-                "input_selector": "#q", "response_selector": "#a", "entry_url": f"{target}/nav-same",
-            }},
-        })
-        try:
-            await widget._ensure_browser()
-            await widget._page.wait_for_load_state("load")
-            return widget.session_header_coverage()
-        finally:
-            await widget.close()
-
-    with _servers() as (target, _hits):
-        recorded = asyncio.run(drive(target))
-    assert NAV_DROP in recorded["reasons"]
-
-
 def test_scan_coverage_lists_the_reasons_without_changing_its_status():
     from scanner_tools.credential_redirects import add_session_header_reasons
     sys.path.insert(0, str(ROOT))
-    from api.scan.explanation import _reason_label
+    from api.scan.explanation import _REASON_LABELS
 
     coverage = {"status": "complete", "grade_reliable": True, "issues": []}
-    add_session_header_reasons(coverage, {"reasons": [NAV_DROP, LNA_BLOCK], "counts": {NAV_DROP: 2, LNA_BLOCK: 3}})
+    add_session_header_reasons(coverage, {"reasons": [REFUSED, NAV_REFUSED], "counts": {REFUSED: 2, NAV_REFUSED: 1}})
     assert coverage["status"] == "complete" and coverage["grade_reliable"] is True
-    assert coverage["reasons"] == [LNA_BLOCK, NAV_DROP]
-    assert coverage["browser_session_headers"] == {NAV_DROP: 2, LNA_BLOCK: 3}
-    for reason in (NAV_DROP, LNA_BLOCK):
-        label = _reason_label(reason)
-        assert label and ("session" in label.lower() or "private" in label.lower()), label
+    assert coverage["reasons"] == [REFUSED, NAV_REFUSED]
+    assert coverage["browser_session_headers"] == {REFUSED: 2, NAV_REFUSED: 1}
+    for reason in (REFUSED, NAV_REFUSED, LNA_BLOCK, "session_header_withheld_from_headless"):
+        assert reason in _REASON_LABELS
 
 
 def test_scanner_report_coverage_carries_the_browser_session_reasons():
@@ -379,12 +286,12 @@ def test_scanner_report_coverage_carries_the_browser_session_reasons():
         "shaker_scanner_main_session_headers", str(ROOT / "scanner" / "scanner.py"))
     scanner_mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(scanner_mod)
-    report = {"http": {"browser_session_headers": {"reasons": [NAV_DROP], "counts": {NAV_DROP: 1}}}}
+    report = {"http": {"browser_session_headers": {"reasons": [REFUSED], "counts": {REFUSED: 1}}}}
     coverage = {"status": "complete", "grade_reliable": True, "issues": [], "reasons": ["existing"]}
     scanner_mod.apply_browser_session_header_coverage(report, coverage)
-    assert coverage["reasons"] == ["existing", NAV_DROP]
+    assert coverage["reasons"] == ["existing", REFUSED]
     assert coverage["status"] == "complete" and coverage["grade_reliable"] is True
-    assert coverage["browser_session_headers"] == {NAV_DROP: 1}
+    assert coverage["browser_session_headers"] == {REFUSED: 1}
     # A dalfox run that withheld the session from its headless browser is listed the same way.
     report["session_header_coverage"] = {"reasons": ["session_header_withheld_from_headless"],
                                          "counts": {"session_header_withheld_from_headless": 2}}
@@ -455,5 +362,6 @@ def test_ai_widget_basic_auth_answers_only_the_endpoint_origin():
             server.server_close()
     expected = "Basic " + base64.b64encode(b"fixture-user:fixture-pass").decode()
     assert ("endpoint", "/", expected) in seen
-    assert [hit for hit in seen if hit[0] == "other"], seen  # the other origin challenged too
+    # The credential is a header too, so the widget's context reaches its origins only: the other
+    # origin is refused at the proxy, and Chromium's credentials answer the endpoint's origin only.
     assert [hit for hit in seen if hit[0] == "other" and hit[2]] == []

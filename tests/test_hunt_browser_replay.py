@@ -70,20 +70,8 @@ def test_replay_retains_steps_confines_credentials_and_closes_context(monkeypatc
 
     class Route:
         def __init__(self, method, url):
-            async def all_headers():
-                return {}
-            self.request = SimpleNamespace(method=method, url=url, headers={}, resource_type="document",
-                                           frame=None, all_headers=all_headers,
-                                           is_navigation_request=lambda: True)
+            self.request = SimpleNamespace(method=method, url=url, headers={})
         async def continue_(self, **kwargs): continued.append((self.request.url, kwargs))
-        # A request carrying the worker's headers is fetched by the route and fulfilled,
-        # so no redirect hop can carry them.
-        async def fetch(self, **kwargs):
-            continued.append((self.request.url, kwargs))
-            async def body():
-                return b""
-            return SimpleNamespace(status=200, headers={}, body=body)
-        async def fulfill(self, **kwargs): pass
         async def abort(self, reason): aborted.append(self.request.url)
 
     class Locator:
