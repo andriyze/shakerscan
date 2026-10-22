@@ -1532,7 +1532,8 @@ class HuntRunService:
                     # with the record and says nothing changed; anything else is refused, so a
                     # new debrief is never silently dropped.
                     if row["status"] in {"completed", "budget_exhausted"} and (
-                        _decode_json(row.get("final_debrief"), {}) == debrief
+                        {key: _decode_json(row.get("final_debrief"), {}).get(key)
+                         for key in debrief} == debrief
                     ):
                         return {**public_hunt_run(row), "already_terminal": True}
                     raise HTTPException(
@@ -1554,6 +1555,8 @@ class HuntRunService:
                         status_code=409,
                         detail="Hunt has reserved or running actions",
                     )
+                from .saved_actions import retain_hunt_action_safely
+                debrief["saved_action"] = await retain_hunt_action_safely(connection, dict(row))
                 row = await connection.fetchrow(
                     """UPDATE hunt_runs
                        SET status = CASE

@@ -60,8 +60,8 @@ one.
 mapping and then testing. Never lower `max_http_requests` below what discovery needs: one
 `web.crawl` and one `web.content_discover` reserve about 370 requests together, and an agent that
 set 300, then 180, skipped content discovery and missed every exposed `/.env`, `/.git` and backup
-file. The start response's `budget_warnings` names every limit you lowered below what a capability in
-the manifest reserves; when it is not empty, start again with the profile defaults (or ask the
+file. The start response's `budget_warnings` names limits below what a capability in
+the manifest actually reserves, including profile defaults; when it is not empty, use the profile defaults (or ask the
 operator for a budget raise) before you test. A warning with `restart_fixes_it: false` is above even
 the profile's start maximum: only a budget raise the person approves can let that capability run.
 Map first, then narrow.
@@ -387,7 +387,11 @@ or no useful authorized action fits the remaining budget. An exhausted optional 
 stop work that uses other remaining dimensions. Preserve observations and name material coverage gaps.
 An action rejected with `budget_insufficient_for_action` has not exhausted the run: use its
 reported shortages to select a smaller useful action. Do not retry an unchanged oversized action.
-A `budget_exhausted` Hunt still accepts candidates while its candidate budget has room: record the
+A `budget_exhausted` Hunt still accepts candidates and evidence-linked `findings.create|update|delete`
+while its shared `max_candidates` recording allowance has room. Finding recording spends no
+execution calls, active calls or target traffic; existing authority, ownership and proof checks
+still apply. Use an absolute finding URL when cited evidence covers multiple services; a relative
+path follows its single evidenced service, including its scheme and port. Record the
 leads the gathered evidence supports before finishing. Finishing keeps the `budget_exhausted` status
 but closes the record: afterwards every candidate write (record, correct, expire) is refused with 409. `hosts_attempted` counts distinct hosts: once
 a network action on a host has settled, later network actions on that host do not charge it again.
@@ -424,6 +428,14 @@ and any operator instructions, never as permission or scope. Saved actions follo
 `instruction_changes` permission: without it, `targets.actions.create|update|delete` files a
 proposal (`applied: false`) for the person to review; add a `reason` and `evidence_refs`. Saved
 actions with `trust: agent_unconfirmed` are advisory recipes.
+Finishing also retains up to 16 distinct completed, reusable network steps as one target saved
+action, or proposes it for review under the same permissions. Metadata opt-out skips retention.
+This does not change operator instructions. Session references become required parameters for a
+future Hunt; masked inputs, request bodies, transient captures and SSH commands are excluded.
+Read `final_debrief.saved_action`: `saved`, `proposed`, `skipped` or `not_saved` reports the outcome.
+For `proposed`, tell the operator to use `shakerscan knowledge review`; for `not_saved`, report it
+instead of claiming the recipe was retained. The finish retry is idempotent. Use explicit
+`targets.actions.*` calls when a curated recipe needs different steps or instructions.
 
 Record what you learn as attributed interpretations with `knowledge.record`: an `observation`,
 `hypothesis`, `explanation`, `next_step` or `note`, or a `negative_result`. Cite existing records in

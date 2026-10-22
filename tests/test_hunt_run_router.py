@@ -743,7 +743,9 @@ def test_budget_exhausted_hunt_accepts_debrief_without_erasing_stop_reason():
                 return {"actions": False, "reservations": False}
             assert "'budget_exhausted'" in query
             assert "COALESCE(stop_reason, 'budget_exhausted')" in query
-            assert json.loads(args[1]) == {
+            persisted_debrief = json.loads(args[1])
+            assert persisted_debrief.pop('saved_action')['status'] in {'skipped', 'not_saved'}
+            assert persisted_debrief == {
                 "summary": "Budget ended after the useful checks.",
                 "next_actions": ["Increase only the HTTP request ceiling."],
             }

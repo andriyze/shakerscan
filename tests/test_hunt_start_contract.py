@@ -41,7 +41,7 @@ def test_passive_hunt_contract_is_explicit_and_resolves_lowered_budget():
     assert contract.budgets == {"max_duration_seconds": 900, "max_http_requests": 500}
     assert contract.resolved_budget["max_duration_seconds"] == 900
     assert contract.resolved_budget["max_http_requests"] == 500
-    assert contract.resolved_budget["max_capability_calls"] == 80
+    assert contract.resolved_budget["max_capability_calls"] == 300
     assert contract.resolved_budget["max_active_actions"] == 0
     assert contract.resolved_budget["max_state_changing_requests"] == 0
     assert contract.resolved_budget["max_tcp_ports"] == 0
@@ -144,14 +144,14 @@ def test_budget_overrides_can_lower_but_not_raise_profile_limits():
     with pytest.raises(HuntStartContractError, match="exceeds the fast Hunt profile ceiling"):
         normalize_hunt_start_payload(_payload(
             budget_profile="fast",
-            budgets={"max_http_requests": 501},
+            budgets={"max_http_requests": 5_001},
         ))
     contract = normalize_hunt_start_payload(_payload(
         budget_profile="fast",
         budgets={"max_http_requests": 250},
     ))
     assert contract.resolved_budget["max_http_requests"] == 250
-    assert contract.resolved_budget["max_duration_seconds"] == 900
+    assert contract.resolved_budget["max_duration_seconds"] == 3_600
 
 
 def test_zeroable_hunt_dimensions_accept_zero_but_mandatory_dimensions_do_not():

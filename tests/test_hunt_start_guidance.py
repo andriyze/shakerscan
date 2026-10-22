@@ -102,13 +102,29 @@ def _every_capability(kind="web"):
             if spec.planner_visible and spec.hunt_executor is not None and kind in spec.target_kinds]
 
 
-def test_a_start_at_the_profile_defaults_warns_about_nothing_whatever_the_manifest():
-    """D49: every start warned that collections.replay_active reserves 2000 state-changing requests
-    (balanced allows 20) and fast's browser crawl, sqli.verify and templates.scan exceed fast's
-    maxima: limits no allowed start setting can meet. Those calls ask for a budget raise instead."""
+def test_defaults_disclose_capabilities_that_need_an_operator_budget_raise():
+    """An unchanged profile is not evidence that every admitted capability fits its ceilings."""
     for profile in HUNT_BUDGET_PROFILES:
         started = {**_started({}, profile=profile), "capabilities": _every_capability()}
-        assert start_budget_warnings(started) == [], profile
+        warnings = start_budget_warnings(started)
+        assert warnings, profile
+        assert all(item['restart_fixes_it'] is False for item in warnings)
+        assert all('only a budget raise' in item['message'] for item in warnings)
+
+
+def test_verifier_warnings_use_the_execution_hold_instead_of_the_registry_floor():
+    warnings = start_budget_warnings(_started({'max_duration_seconds': 400}, 'sqli.verify'))
+    assert warnings[0]['reserves'] == 540
+
+
+def test_every_profile_funds_mapping_then_both_full_verifiers():
+    from api import agent_tools
+    for name, profile in HUNT_BUDGET_PROFILES.items():
+        holds = [agent_tools.canonical_hunt_scanner_budget(capability, budget_profile=name)
+                 for capability in ('web.crawl', 'web.content_discover', 'sqli.verify', 'xss.verify')]
+        assert sum(hold.get('http_requests', 0) for hold in holds) <= profile.max_http_requests
+        assert sum(hold.get('tool_wall_seconds', 0) for hold in holds) <= profile.max_duration_seconds
+        assert profile.max_active_actions >= profile.max_capability_calls
 
 
 def test_a_lowered_limit_names_the_start_maximum_when_a_restart_cannot_fix_it():

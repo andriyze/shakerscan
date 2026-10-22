@@ -83,6 +83,15 @@ export function HuntResults({ hunt }: { hunt: HuntV2 }) {
           {debrief.next_actions.map(action => <li key={action}>{action}</li>)}
         </ul>
       </div>}
+      {debrief?.saved_action?.status === 'saved' && <p className="mt-4 text-sm text-emerald-300">
+        Saved {debrief.saved_action.step_count} reusable steps in this target’s Actions.
+      </p>}
+      {debrief?.saved_action?.status === 'proposed' && <p className="mt-4 text-sm text-amber-300">
+        Proposed {debrief.saved_action.step_count} reusable steps. Review with <code>shakerscan knowledge review</code>.
+      </p>}
+      {debrief?.saved_action?.status === 'not_saved' && <p role="alert" className="mt-4 text-sm text-amber-300">
+        Could not retain reusable actions. The Hunt debrief was saved. You can save selected steps from the target’s Actions.
+      </p>}
       {summary && <details className="mt-4 text-xs text-gray-400">
         <summary className="cursor-pointer text-gray-500 hover:text-gray-300">Factual run record</summary>
         <div className="mt-2 grid grid-cols-2 gap-2 sm:grid-cols-3">

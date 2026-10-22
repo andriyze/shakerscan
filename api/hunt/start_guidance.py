@@ -8,11 +8,9 @@ start response names, in ``budget_warnings``, every capability in the manifest t
 limits leave unable to run even once, and the cost of mapping a web target once (one crawl and one
 content discovery), so the planner can restart with a workable budget or ask the person.
 
-Only limits a start can change are named (D49): a limit left at its profile default is the most a
-start allows, so a reservation above it is not warned about at start (every start used to repeat
-``collections.replay_active`` 2000 > ``max_state_changing_requests`` 20); calling that capability
-raises a ``budget.raise`` request the person can allow. A lowered limit is named; when even the
-profile's start maximum is below the reservation, the warning says so instead of "start again".
+Warnings use the executor's actual profile-specific reservation, including when the default
+cannot fit it. When even the profile's start maximum is below the reservation, the warning
+names the required operator-approved raise instead of suggesting an ineffective restart.
 
 Verification. ``verification`` names the candidate families ``candidate.verify`` can prove on
 this target kind (D27), so no attempt is spent on a family no verifier accepts.
@@ -40,13 +38,21 @@ def _ledger_limits(budget: Mapping[str, Any]) -> dict[str, tuple[str, int]]:
     return {ledger: (names[index], int(budget.get(names[index]) or 0)) for ledger, index in positions.items()}
 
 
-def _costs(capabilities: Any) -> dict[str, dict[str, int]]:
+def _costs(capabilities: Any, profile_name: str, target_kind: str) -> dict[str, dict[str, int]]:
     costs: dict[str, dict[str, int]] = {}
     for item in capabilities or ():
         if not isinstance(item, Mapping) or not isinstance(item.get("budget_cost"), Mapping):
             continue
-        costs[str(item.get("name"))] = {
-            str(key): int(value) for key, value in item["budget_cost"].items()
+        name = str(item.get("name"))
+        selected = item["budget_cost"]
+        from runtime.capability_registry import CAPABILITY_REGISTRY
+        spec = CAPABILITY_REGISTRY.require(name)
+        if spec.hunt_executor == "worker_scanner":
+            from agent_tools import canonical_hunt_scanner_budget
+            selected = canonical_hunt_scanner_budget(name, budget_profile=profile_name,
+                                                      device_target=target_kind == "device")
+        costs[name] = {
+            str(key): int(value) for key, value in selected.items()
             if isinstance(value, int) and not isinstance(value, bool) and value > 0
         }
     return costs
@@ -60,7 +66,7 @@ def start_budget_warnings(result: Mapping[str, Any]) -> list[dict[str, Any]]:
     profile_name = str(result.get("budget_profile") or "balanced")
     profile = HUNT_BUDGET_PROFILES.get(profile_name)
     limits = _ledger_limits(budget)
-    costs = _costs(result.get("capabilities"))
+    costs = _costs(result.get("capabilities"), profile_name, str(result.get("target_kind") or "web"))
     warnings: list[dict[str, Any]] = []
     for capability, cost in sorted(costs.items()):
         for ledger, amount in sorted(cost.items()):
@@ -69,10 +75,6 @@ def start_budget_warnings(result: Mapping[str, Any]) -> list[dict[str, Any]]:
             if not limit_name or limit <= 0 or amount <= limit:
                 continue
             default = int(getattr(profile, limit_name, 0) or 0) if profile else 0
-            if limit >= default:
-                # D49: not lowered. The profile's start maximum is below this reservation, so no
-                # allowed start setting meets it; a call asks the person for a budget raise.
-                continue
             fits = amount <= default
             warnings.append({
                 "code": "budget_below_capability_reservation",

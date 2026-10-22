@@ -168,8 +168,8 @@ _CONTEXTS = [
 ]
 
 
-@pytest.mark.parametrize("profile", [None, "fast", "balanced"])
-def test_fast_balanced_and_unprofiled_hunts_keep_every_registry_hold(profile):
+@pytest.mark.parametrize("profile", [None])
+def test_unprofiled_historical_hunts_keep_every_registry_hold(profile):
     for spec in CAPABILITY_REGISTRY.for_hunt_executor("worker_scanner"):
         expected = dict(spec.budget_cost)
         if spec.name == "templates.scan":
@@ -334,7 +334,7 @@ def test_the_worker_accepts_the_current_hold_and_a_call_admitted_before_it_exist
     ) == (THOROUGH_SQLI, REGISTRY_SQLI)
     assert agent_tools.hunt_scanner_dispatch_budgets(
         "sqli.verify", budget_profile="balanced",
-    ) == (REGISTRY_SQLI,)
+    ) == (THOROUGH_SQLI, REGISTRY_SQLI)
     assert agent_tools.hunt_scanner_dispatch_budgets(
         "xss.verify", budget_profile="thorough", deep_domxss=True,
     ) == (REGISTRY_XSS,)
@@ -511,9 +511,9 @@ def _scanner_admission(profile, name, values, *, budget=None, used=None, device=
     ("thorough", "xss.verify", {"path": "/#/search?q=1"}, THOROUGH_XSS),
     ("thorough", "xss.verify", {"path": "/search?q=1#results"}, THOROUGH_XSS),
     ("thorough", "sqli.verify", {"path": "/item?id=1#details"}, THOROUGH_SQLI),
-    ("balanced", "sqli.verify", {"path": "/item?id=1"}, REGISTRY_SQLI),
-    ("balanced", "xss.verify", {"path": "/search?q=1"}, REGISTRY_XSS),
-    ("fast", "xss.verify", {"path": "/search?q=1"}, REGISTRY_XSS),
+    ("balanced", "sqli.verify", {"path": "/item?id=1"}, THOROUGH_SQLI),
+    ("balanced", "xss.verify", {"path": "/search?q=1"}, THOROUGH_XSS),
+    ("fast", "xss.verify", {"path": "/search?q=1"}, THOROUGH_XSS),
 ])
 def test_admission_reserves_the_hold_of_the_hunt_profile(profile, name, values, expected):
     charges = _scanner_admission(profile, name, values)
@@ -569,9 +569,14 @@ def test_the_thorough_hold_on_a_device_would_be_refused_by_the_device_policy():
     ("sqli.verify", {"path": "/item?id=1"}, {}, {"tool_wall_seconds": 13_860}, THOROUGH_SQLI),
     ("xss.verify", {"path": "/search?q=1"}, {"max_http_requests": 1_800}, {}, THOROUGH_XSS),
 ])
-def test_a_thorough_hold_the_ledger_cannot_fund_steps_down_to_the_registry_hold(
+def test_new_calls_require_the_useful_hold_instead_of_falling_back_to_short_timeouts(
     name, values, budget, used, expected,
 ):
+    if expected in (REGISTRY_SQLI, REGISTRY_XSS):
+        with pytest.raises(HTTPException) as refusal:
+            _scanner_admission("thorough", name, values, budget=budget, used=used)
+        assert refusal.value.detail['reason_code'] in {'budget_insufficient_for_action', 'budget_exhausted'}
+        return
     charges = _scanner_admission("thorough", name, values, budget=budget, used=used)
     assert {key: charges[key] for key in expected} == expected
 

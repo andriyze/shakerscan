@@ -91,7 +91,17 @@ export interface HuntV2 {
     candidate_ids: string[]
     evidence_ids: string[]
   }
-  final_debrief?: { summary?: string; next_actions?: string[] }
+  final_debrief?: {
+    summary?: string
+    next_actions?: string[]
+    saved_action?: {
+      status: 'saved' | 'proposed' | 'skipped' | 'not_saved'
+      action_id?: string
+      proposal_id?: string
+      step_count?: number
+      reason?: string
+    }
+  }
   stop_reason?: string | null
   queued_scan?: { scan_id: string; job_id?: string; status: string; ui_url?: string }
   created_at?: string

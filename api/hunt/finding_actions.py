@@ -46,7 +46,8 @@ def _bounded_text(value: Any, label: str, *, maximum: int, required: bool = Fals
     return str(redact_text(text)) if text else None
 
 
-def _finding_url(target_url: str, path: Any, observed_urls: Sequence[str] = ()) -> str:
+def _finding_url(target_url: str, path: Any, observed_urls: Sequence[str] = (),
+                 admitted_origins: Sequence[str] = ()) -> str:
     value = str(path or "").strip()
     if not value:
         return target_url
@@ -60,14 +61,25 @@ def _finding_url(target_url: str, path: Any, observed_urls: Sequence[str] = ()) 
                 raise ValueError("userinfo is not allowed")
             return parsed.scheme.lower(), parsed.hostname, parsed.port or ({"http": 80, "https": 443}.get(parsed.scheme.lower()))
         observed = {origin(url) for url in observed_urls if urllib.parse.urlsplit(url).hostname == base.hostname}
-        if base.scheme not in {"http", "https"} and not urllib.parse.urlsplit(value).scheme:
-            if len(observed) != 1:
+        admitted = {origin(url) for url in admitted_origins if urllib.parse.urlsplit(url).hostname == base.hostname}
+        supplied = urllib.parse.urlsplit(value)
+        if not supplied.scheme and not supplied.netloc:
+            # A relative location belongs to the cited service, which may differ from
+            # the inventory's default port. Never silently attach :8443 evidence to :443.
+            matching = {origin(url) for url in observed_urls
+                        if urllib.parse.urlsplit(url).hostname == base.hostname
+                        and urllib.parse.urlsplit(url).path == supplied.path}
+            services = matching or observed
+            if len(services) > 1 or (not services and base.scheme not in {"http", "https"}):
                 raise HuntFindingActionError("Use an absolute URL for an evidenced HTTP service")
-            scheme, host, port = next(iter(observed))
-            host = f"[{host}]" if host and ":" in host else host
-            target_url = f"{scheme}://{host}:{port}/"
+            if services:
+                scheme, host, port = next(iter(services))
+                host = f"[{host}]" if host and ":" in host else host
+                default_port = {"http": 80, "https": 443}.get(scheme)
+                suffix = f":{port}" if port != default_port else ""
+                target_url = f"{scheme}://{host}{suffix}/"
         resolved = urllib.parse.urlsplit(urllib.parse.urljoin(target_url, value))
-        permitted = origin(urllib.parse.urlunsplit(resolved)) in {origin(target_url), *observed}
+        permitted = origin(urllib.parse.urlunsplit(resolved)) in {origin(target_url), *observed, *admitted}
     except HuntFindingActionError:
         raise
     except ValueError as exc:
@@ -128,13 +140,13 @@ async def _refuse_operator_decided(conn: Any, finding_id: uuid.UUID) -> None:
 
 async def _locked_run(conn: Any, hunt_id: uuid.UUID) -> Any:
     run = await conn.fetchrow(
-        """SELECT id, status, target_kind, target_id, device_target_id, context_pack, notes
+        """SELECT id, status, completed_at, target_kind, target_id, device_target_id, context_pack, notes
            FROM hunt_runs WHERE id=$1 FOR UPDATE""",
         hunt_id,
     )
     if run is None:
         raise HuntFindingActionError("Hunt not found")
-    if str(run["status"]) not in {"active", "awaiting_planner"}:
+    if dict(run).get("completed_at") is not None or str(run["status"]) not in {"active", "awaiting_planner", "budget_exhausted"}:
         raise HuntFindingActionError(f"Hunt is {run['status']}")
     return run
 
@@ -204,13 +216,17 @@ async def create_hunt_finding(
                 values=values.get("evidence_action_ids") or (),
             )
             target_url = _target_url(run)
+            context = run["context_pack"]
+            context = json.loads(context) if isinstance(context, str) else dict(context or {})
+            admitted_origins = (context.get("target") or {}).get("origins") or ()
             service_evidence = await conn.fetch(
                 """SELECT DISTINCT url FROM http_transactions
                    WHERE hunt_run_id=$1 AND hunt_action_id=ANY($2::uuid[])
                      AND status_code IS NOT NULL AND error IS NULL""",
                 hunt_uuid, [uuid.UUID(value) for value in evidence_action_ids],
             )
-            finding_url = _finding_url(target_url, values.get("path"), [row["url"] for row in service_evidence])
+            finding_url = _finding_url(target_url, values.get("path"),
+                                       [row["url"] for row in service_evidence], admitted_origins)
             fingerprint = hashlib.sha256(
                 json.dumps(
                     {
@@ -237,6 +253,7 @@ async def create_hunt_finding(
                        title, description, severity, tool, url, evidence, notes,
                        source, status
                    ) VALUES ($1,$2,$3,$4,$5,$6,$7,'hunt',$8,$9::jsonb,$10,'deep_hunt','active')
+                   ON CONFLICT DO NOTHING
                    RETURNING id, status, created_at""",
                 run["target_id"],
                 run["device_target_id"],
@@ -249,7 +266,21 @@ async def create_hunt_finding(
                 json.dumps(evidence),
                 notes,
             )
-            await _refresh_counts(conn, run)
+            created = row is not None
+            if not created:
+                row = await conn.fetchrow(
+                    """SELECT id, status, created_at, last_verified_at, verification_count FROM findings
+                       WHERE fingerprint=$1 AND hunt_run_id=$2
+                         AND target_id IS NOT DISTINCT FROM $3
+                         AND device_target_id IS NOT DISTINCT FROM $4""",
+                    fingerprint, hunt_uuid, run["target_id"], run["device_target_id"],
+                )
+                if row is None:
+                    raise HuntFindingActionError("Finding identity conflicts with an existing record")
+                if row["last_verified_at"] is not None or int(row["verification_count"] or 0) > 0:
+                    raise HuntFindingActionError(f"Existing finding {row['id']} has verification history; read it instead")
+            if created:
+                await _refresh_counts(conn, run)
     return {
         "ok": True,
         "status": "success",
@@ -257,9 +288,10 @@ async def create_hunt_finding(
         "finding_status": str(row["status"]),
         "proof_state": "unverified",
         "authoritative": False,
+        "created": created,
         "observation": {
             "kind": "finding_mutation",
-            "operation": "created",
+            "operation": "created" if created else "existing",
             "finding_id": str(row["id"]),
             "status": str(row["status"]),
             "proof_state": "unverified",

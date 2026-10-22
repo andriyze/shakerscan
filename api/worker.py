@@ -19067,19 +19067,8 @@ async def process_agent_scanner_tool_job(job_data: dict[str, Any]) -> None:
 
 
 def _worker_hunt_ledger_limits(budget: Mapping[str, Any]) -> dict[str, int]:
-    return {
-        "agent_actions": int(budget.get("max_capability_calls") or 0),
-        "active_actions": int(budget.get("max_active_actions") or 0),
-        "http_requests": int(budget.get("max_http_requests") or 0),
-        "tcp_ports_attempted": int(budget.get("max_tcp_ports") or 0),
-        "browser_actions": int(budget.get("max_browser_actions") or 0),
-        "state_changing_requests": int(budget.get("max_state_changing_requests") or 0),
-        "tool_wall_seconds": int(budget.get("max_duration_seconds") or 0),
-        "device_fragility_points": int(budget.get("max_device_fragility_points") or 0),
-        "hosts_attempted": int(budget.get("max_hosts") or 0),
-        "udp_ports_attempted": int(budget.get("max_udp_ports") or 0),
-        "oob_interactions": int(budget.get("max_oob_interactions") or 0),
-    }
+    from hunt.start_contract import hunt_ledger_limits
+    return hunt_ledger_limits(budget)
 
 
 def _worker_json_object(value: Any) -> dict[str, Any]:
