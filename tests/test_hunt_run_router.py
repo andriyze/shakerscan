@@ -744,7 +744,7 @@ def test_budget_exhausted_hunt_accepts_debrief_without_erasing_stop_reason():
             assert "'budget_exhausted'" in query
             assert "COALESCE(stop_reason, 'budget_exhausted')" in query
             persisted_debrief = json.loads(args[1])
-            assert persisted_debrief.pop('saved_action')['status'] in {'skipped', 'not_saved'}
+            assert persisted_debrief.pop('saved_action') == {'status': 'saved', 'step_count': 1}
             assert persisted_debrief == {
                 "summary": "Budget ended after the useful checks.",
                 "next_actions": ["Increase only the HTTP request ceiling."],
@@ -771,7 +771,12 @@ def test_budget_exhausted_hunt_accepts_debrief_without_erasing_stop_reason():
             return []
 
     connection = Connection()
-    result = asyncio.run(HuntRunService(lambda: _Pool(connection)).finish(
+    retained = []
+    async def retain(conn, run):
+        assert conn is connection and run['status'] == 'budget_exhausted'
+        retained.append(run['id'])
+        return {'status': 'saved', 'step_count': 1}
+    result = asyncio.run(HuntRunService(lambda: _Pool(connection), finish_retainer=retain).finish(
         hunt_id,
         summary="Budget ended after the useful checks.",
         next_actions=["Increase only the HTTP request ceiling."],
@@ -781,6 +786,7 @@ def test_budget_exhausted_hunt_accepts_debrief_without_erasing_stop_reason():
     assert result["stop_reason"] == "budget_exhausted:http_requests"
     assert result["final_debrief"]["summary"].startswith("Budget ended")
     assert connection.cleared_http_captures is True
+    assert retained == [uuid.UUID(hunt_id)]
 
 
 @pytest.mark.parametrize("source", ["action", "reservation"])

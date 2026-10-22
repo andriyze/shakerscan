@@ -84,6 +84,10 @@ import closure, module-size and documentation gates are checked.
 
 The SaaS gateway does not implement these finding writes or carry separate Hunt profile limits;
 these fixes belong to the shared engine. No SaaS source change or deployment is included. The
-branch starts from the existing release lab-fix head, preserving that work. Full-suite validation
-of this new branch remains for lab/CI: lab-01 was unreachable during this audit, and no full suite
-was started on the Mac.
+branch starts from the existing release lab-fix head, preserving that work. Full suites run on
+lab-01 through the serialized, memory-aware runner; results are retained against their exact
+commit SHA. The first full run identified a finish-hook dependency cycle, missing documentation
+and writer-inventory entries, and stale expectations for the superseded budgets and fallback.
+The hook is now supplied by API composition to keep product modules acyclic. Dispatch regression
+coverage asserts that a shortfall starts no worker, then an operator amendment lets the same
+action key execute with the full useful hold. No full suite was started on the Mac.

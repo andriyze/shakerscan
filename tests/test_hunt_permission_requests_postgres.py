@@ -608,7 +608,7 @@ def test_a_withheld_capability_raises_capability_enable_and_the_grant_binds_stan
     policy = json.loads(run(env, env.run(hunt))["policy_json"])
     assert policy["active_testing"] is True and "xss.verify" in policy["allowed_capabilities"]
     assert policy["approval_receipt_id"] == approval
-    assert json.loads(run(env, env.run(hunt))["budget_json"])["max_active_actions"] == 4
+    assert json.loads(run(env, env.run(hunt))["budget_json"])["max_active_actions"] == 80
     with pytest.raises(HTTPException) as remember:
         run(env, env.decide(hunt, request, scope="target", key="decision-remember"))
     assert remember.value.status_code == 409  # already granted; capability flags have no remember

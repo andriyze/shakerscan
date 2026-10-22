@@ -853,11 +853,14 @@ async def signal_hunt_jobs(
 class HuntRunService:
     """Own read/list/finish/cancel/resume persistence for canonical Hunts."""
 
-    def __init__(self, pool_provider, redis_provider=None):
+    def __init__(self, pool_provider, redis_provider=None, *, finish_retainer=None):
         self._pool_provider = pool_provider
         # Optional so existing construction and tests are unchanged; without it a cancellation
         # still stops the Hunt and its scans, it simply cannot reach worker-placed capability jobs.
         self._redis_provider = redis_provider
+        # The API composition supplies target persistence; the run service must not import
+        # target routers back through their asset/migration dependency on this service.
+        self._finish_retainer = finish_retainer
 
     def _pool(self):
         pool = self._pool_provider()
@@ -1555,8 +1558,8 @@ class HuntRunService:
                         status_code=409,
                         detail="Hunt has reserved or running actions",
                     )
-                from .saved_actions import retain_hunt_action_safely
-                debrief["saved_action"] = await retain_hunt_action_safely(connection, dict(row))
+                if self._finish_retainer is not None:
+                    debrief["saved_action"] = await self._finish_retainer(connection, dict(row))
                 row = await connection.fetchrow(
                     """UPDATE hunt_runs
                        SET status = CASE
