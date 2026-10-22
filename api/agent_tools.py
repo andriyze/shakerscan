@@ -378,8 +378,8 @@ EXTERNAL_VERIFICATION_FLOORS: dict[str, dict[str, int]] = {
     "dalfox": {"http_requests": 400, "tool_wall_seconds": 120},
     "sqlmap": {"http_requests": 900, "tool_wall_seconds": 300},
 }
-# Per-call holds of the largest Hunt budget profile (thorough). Fast and balanced Hunts reserve
-# the registry hold (sqli.verify 900 requests / 300 s, xss.verify 400 / 120 s), and the argv
+# Useful per-call holds for every Hunt profile. The older registry holds (sqli.verify
+# 900 requests / 300 s, xss.verify 400 / 120 s) remain accepted for already-queued work. The argv
 # paces a call the same way on every profile: sqlmap BEUT at --delay 1 with one thread (about
 # 1 request/s), Dalfox at --delay 1000 ms with 3 workers (about 3.3 requests/s). At that pace a
 # one-field sqlmap negative (about 432 requests) needs 441-475 s, and Dalfox about 1,300 requests
@@ -908,9 +908,8 @@ def canonical_hunt_scanner_budget(
 ) -> dict[str, int]:
     """Admission ceiling for the exact server-owned Hunt scanner selection.
 
-    A thorough Hunt reserves ``HUNT_THOROUGH_SCANNER_HOLDS`` for ``sqli.verify`` and
-    ``xss.verify``. Every other profile and the passive ``templates.scan`` pack keep the registry
-    hold, and so do:
+    Every named Hunt profile reserves ``HUNT_THOROUGH_SCANNER_HOLDS`` for ``sqli.verify``
+    and ``xss.verify``. Unprofiled historical work keeps the registry hold, and so do:
 
     - a call against a device target, whose fragility allowance is charged one point per held
       request and which is not given a longer paced call;
@@ -925,7 +924,7 @@ def canonical_hunt_scanner_budget(
         return budget
     tier = HUNT_THOROUGH_SCANNER_HOLDS.get(capability_name)
     if (
-        budget_profile == "thorough"
+        budget_profile in {"fast", "balanced", "thorough"}
         and tier is not None
         and not device_target
         and not (capability_name == "xss.verify" and deep_domxss)
@@ -958,9 +957,9 @@ def hunt_scanner_dispatch_budgets(
 ) -> tuple[dict[str, int], ...]:
     """The holds a Hunt scanner call may run at, the current one first.
 
-    The second is the registry hold. Admission steps down to it when the Hunt's remaining ledger
-    cannot fund the current one, and a call admitted before per-profile holds existed reserved
-    it. The worker accepts either, and verifies the action digest against the one reserved.
+    The second is the registry hold for a call admitted before profile holds changed. Only
+    the current hold is used for new admission. The worker verifies the action digest against
+    whichever hold the already-queued action reserved.
     """
     current = canonical_hunt_scanner_budget(
         capability_name, budget_profile=budget_profile, deep_domxss=deep_domxss,
@@ -976,18 +975,11 @@ def affordable_hunt_scanner_hold(
     limits: Mapping[str, int],
     used: Mapping[str, Any],
 ) -> dict[str, int]:
-    """The first candidate hold the remaining ledger can fund, else the first (current) one.
-
-    Only the ledger dimensions are compared. When none fits, the current hold is returned, so
-    the refusal states what the current hold needs.
-    """
-    for candidate in candidates:
-        if all(
-            int(used.get(name) or 0) + int(amount) <= int(limits[name])
-            for name, amount in candidate.items()
-            if name in limits
-        ):
-            return dict(candidate)
+    """The current useful hold; admission reports any shortage through the canonical ledger."""
+    # Older queued actions may still own the registry hold, which the worker accepts.
+    # New actions must request the useful execution envelope. Admission raises the normal
+    # budget request when it does not fit; silently reverting to the old timeouts spends
+    # traffic on the same incomplete checks these longer holds were introduced to fix.
     return dict(candidates[0])
 
 

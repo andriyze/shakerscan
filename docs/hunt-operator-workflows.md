@@ -81,6 +81,24 @@ supporting images, inventing credentials or silently substituting a different im
 
 ## Operator budget extensions
 
+Hunt profiles leave room for mapping and repeated verification: fast allows 5,000 HTTP requests
+and 80 calls, balanced 20,000 and 300, thorough 100,000 and 1,500. These are ceilings, not promised
+traffic. Current SQLi and XSS calls reserve their useful paced execution envelopes on all three
+profiles; insufficient headroom asks for a budget raise instead of silently shortening the call.
+Start warnings use the actual executor reservation, even when a profile default is too small.
+
+Evidence-linked finding recording shares `max_candidates` with candidate records and remains
+available on an unfinished exhausted Hunt. It does not spend target traffic or execution calls.
+Finding locations keep the evidenced service's scheme and port; use an absolute URL when the
+evidence spans multiple services. Retrying a creation with the same Hunt, title and URL returns
+the existing unverified record without overwriting it.
+
+On finish, the server retains up to 16 completed reusable network steps in one target action.
+Existing `instruction_changes` delegation allows saving; otherwise it files a proposal for
+`shakerscan knowledge review`. The metadata opt-out skips retention. Operator instructions stay
+separate. The debrief's `saved_action` field reports saving, proposal, skip or failure. This
+requires finishing the Hunt; a disconnected planner does not finish automatically.
+
 The Hunt UI now offers **Extend this Hunt's budget** for unfinished active, awaiting-planner and
 budget-exhausted runs. An explicit operator edit sets a new **total**, not a delta. Startup profiles
 remain convenient defaults; this endpoint can increase their limits, including total TCP attempts

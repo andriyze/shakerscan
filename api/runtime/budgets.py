@@ -21,6 +21,7 @@ BUDGET_DIMENSIONS = frozenset({
     "active_actions",
     "device_fragility_points",
     "oob_interactions",
+    "candidates",
 })
 
 

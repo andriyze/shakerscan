@@ -421,7 +421,7 @@ async def execute_hunt_capability(
     name = str(capability_name or "").strip().lower()
     # State before schema: a call on a finished Hunt is refused for that reason, whatever its
     # input. Only an idempotent replay of an action the Hunt already recorded stays answerable.
-    await _require_executable_hunt_or_recorded_action(hunt_id, request.idempotency_key)
+    await _require_executable_hunt_or_recorded_action(hunt_id, request.idempotency_key, capability_name=name)
     try:
         return await HUNT_ACTION_SERVICE.execute(
             name,
@@ -1576,10 +1576,13 @@ async def _hunt_confirmed_shell_dispatch(
     }
 
 
-async def _require_executable_hunt_or_recorded_action(hunt_id: str, idempotency_key: str) -> None:
+async def _require_executable_hunt_or_recorded_action(
+    hunt_id: str, idempotency_key: str, *, capability_name: str = "",
+) -> None:
+    from hunt.recording import recording_run_allowed
     async with _pool().acquire() as conn:
         run = await _hunt_run_or_404(conn, hunt_id)
-        if run["status"] in {"active", "awaiting_planner"}:
+        if run["status"] in {"active", "awaiting_planner"} or recording_run_allowed(dict(run), capability_name):
             return
         recorded = await conn.fetchrow(
             "SELECT id FROM hunt_actions WHERE id=$1 AND hunt_run_id=$2",
@@ -1591,19 +1594,8 @@ async def _require_executable_hunt_or_recorded_action(hunt_id: str, idempotency_
 
 
 def _hunt_ledger_limits(budget: Mapping[str, Any]) -> dict[str, int]:
-    return {
-        "agent_actions": int(budget.get("max_capability_calls") or 0),
-        "active_actions": int(budget.get("max_active_actions") or 0),
-        "http_requests": int(budget.get("max_http_requests") or 0),
-        "tcp_ports_attempted": int(budget.get("max_tcp_ports") or 0),
-        "browser_actions": int(budget.get("max_browser_actions") or 0),
-        "state_changing_requests": int(budget.get("max_state_changing_requests") or 0),
-        "tool_wall_seconds": int(budget.get("max_duration_seconds") or 0),
-        "device_fragility_points": int(budget.get("max_device_fragility_points") or 0),
-        "hosts_attempted": int(budget.get("max_hosts") or 0),
-        "udp_ports_attempted": int(budget.get("max_udp_ports") or 0),
-        "oob_interactions": int(budget.get("max_oob_interactions") or 0),
-    }
+    from hunt.start_contract import hunt_ledger_limits
+    return hunt_ledger_limits(budget)
 
 
 def _hunt_nonexecuting_actual(
@@ -1647,10 +1639,13 @@ async def _resume_parked_action(
     ``permission_required``. Denied, expired or withdrawn: the action settles ``blocked`` with
     ``permission_<status>`` and replays as such.
     """
+    from hunt.recording import recording_run_allowed
     summary = _hunt_json(existing_action["result_summary"], {})
     outcome, parked_request = await parked_outcome(conn, dict(run), action_id, summary)
-    if outcome == "pending" and str(run["status"]) not in {"active", "awaiting_planner"}:
-        # A stopped Hunt (budget_exhausted) cannot admit anything until the request is decided.
+    if (outcome == "pending" and str(run["status"]) not in {"active", "awaiting_planner"}
+            and not recording_run_allowed(dict(run), existing_action["capability_name"])):
+        # An exhausted Hunt may recheck recording headroom after an operator's amendment;
+        # target execution still waits for a decision or a resumed Hunt.
         assert parked_request is not None
         raise permission_required(parked_request, action_id, summary)
     if outcome in {"granted", "pending"}:
@@ -1676,6 +1671,7 @@ async def _execute_hunt_capability_lifecycle(
     request: HuntCapabilityRequest,
     lifecycle: HuntActionLifecycle,
 ):
+    from hunt.recording import evidence_recording, recording_run_allowed
     prepared_network = None
     network_target = None
     network_policy = None
@@ -1832,7 +1828,7 @@ async def _execute_hunt_capability_lifecycle(
                             ).public_dict(),
                             "result": existing_summary,
                         }
-                    if run["status"] not in {"active", "awaiting_planner"}:
+                    if run["status"] not in {"active", "awaiting_planner"} and not recording_run_allowed(dict(run), name):
                         raise HuntRefusal("hunt_not_runnable", f"Hunt is {run['status']}")
                     policy = _hunt_json(run["policy_json"], {})
                     context = _hunt_json(run["context_pack"], {})
@@ -2273,9 +2269,10 @@ async def _execute_hunt_capability_lifecycle(
                                 charges[transport_dimension] = 1
                     if writes_http:
                         charges["state_changing_requests"] = 1
-                    charges["agent_actions"] = 1
-                    if requires_call_approval:
-                        charges["active_actions"] = 1
+                    if not evidence_recording(name):
+                        charges["agent_actions"] = 1
+                        if requires_call_approval:
+                            charges["active_actions"] = 1
                     if spec.hunt_executor == "worker_replay":
                         from hunt.replay_selection import select_hunt_replay
                         selected_replay = await select_hunt_replay(conn, run=run, context=context,
@@ -2421,7 +2418,7 @@ async def _execute_hunt_capability_lifecycle(
                             )
                             used.update(reserved_used)
                             await conn.execute(
-                                "UPDATE hunt_runs SET budget_used_json=$2, status='active', "
+                                "UPDATE hunt_runs SET budget_used_json=$2, status=CASE WHEN status='budget_exhausted' THEN status ELSE 'active' END, "
                                 "updated_at=NOW() WHERE id=$1",
                                 run["id"],
                                 json.dumps(used),

@@ -8,7 +8,7 @@ collections.
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, replace
+from dataclasses import asdict, dataclass, fields, replace
 import ipaddress
 import os
 import re
@@ -115,19 +115,28 @@ class HuntBudget:
             "hosts_attempted": self.max_hosts,
             "udp_ports_attempted": self.max_udp_ports,
             "oob_interactions": self.max_oob_interactions,
+            "candidates": self.max_candidates,
         }
 
 
 HUNT_BUDGET_PROFILES: Mapping[str, HuntBudget] = {
-    "fast": HuntBudget(900, 20, 500, 4, 20, 4, 100, 20, 4, 20, 50, 100, 10),
+    # Leave room for mapping, repeated paced verification and recording its results.
+    # Active calls share the total-call ceiling; traffic and device permissions stay separate.
+    "fast": HuntBudget(3_600, 80, 5_000, 80, 100, 20, 100, 20, 4, 20, 50, 100, 10),
     "balanced": HuntBudget(
-        3_600, 80, 5_000, 20, 100, 20, 1_200, 200, 20, 100, 500, 1_000, 50,
+        14_400, 300, 20_000, 300, 500, 100, 1_200, 200, 20, 100, 500, 1_000, 50,
     ),
     "thorough": HuntBudget(
-        14_400, 300, 20_000, 80, 500, 100, 10_000, 1_000, 80, 500, 5_000,
+        86_400, 1_500, 100_000, 1_500, 2_000, 500, 10_000, 1_000, 80, 500, 5_000,
         5_000, 200,
     ),
 }
+
+
+def hunt_ledger_limits(budget: Mapping[str, Any]) -> dict[str, int]:
+    """One ledger projection for API admission, workers and partial historical budgets."""
+    return HuntBudget(**{field.name: int(budget.get(field.name) or 0)
+                         for field in fields(HuntBudget)}).ledger_limits()
 
 ZEROABLE_HUNT_BUDGET_DIMENSIONS = frozenset({
     "max_active_actions",
@@ -145,7 +154,7 @@ HUNT_BUDGET_DIMENSION_LABELS: Mapping[str, str] = {
     "max_capability_calls": "Maximum capability calls",
     "max_http_requests": "Maximum HTTP requests",
     "max_active_actions": "Maximum approval-gated actions",
-    "max_candidates": "Maximum candidates",
+    "max_candidates": "Maximum candidate and finding records",
     "max_verifications": "Maximum deterministic verifications",
     "max_tcp_ports": "Maximum TCP ports",
     "max_browser_actions": "Maximum browser actions",
@@ -245,6 +254,9 @@ def hunt_start_public_contract() -> dict[str, Any]:
         "target_actions": {
             "url_template":"/targets/{target_id}/actions","max_actions":32,
             "auto_load_at_start":True,"snapshot_context_path":"target_actions",
+            "auto_retain_at_finish":True,
+            "auto_retain_permission":"instruction_changes saves; otherwise proposes; metadata_changes opt-out skips",
+            "completion_result_path":"final_debrief.saved_action",
             "execution":"Read a recipe, then invoke each canonical step through the saved Hunt manifest.",
             "grants_authority":False,
         },
