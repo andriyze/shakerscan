@@ -1,9 +1,9 @@
-"""A thorough Hunt's sqli.verify runs through admission, the queue and the worker at its own hold.
+"""Profiled sqli.verify runs through admission, the queue and the worker at its useful hold.
 
 Admission reserves the thorough hold, the API waits for the reserved wall, and the worker
 re-derives the same hold from the Hunt row, verifies the action digest against it and hands the
-process the same wall. A thorough call the remaining ledger cannot fund at the longer hold is
-admitted at the registry hold and runs at it. A call admitted at the registry hold, the only hold
+process the same wall. A call the remaining ledger cannot fund waits for an operator raise
+instead of silently shortening its wall. A call admitted at the registry hold, the only hold
 before per-profile holds existed, still dispatches after the upgrade and runs at that hold.
 
 Labelled doubles, and only these: Redis (an in-memory dictionary; the queue hands the job straight
@@ -164,7 +164,7 @@ async def _reservation(pool, hunt, key):
     return action["status"], dict(row), decode
 
 
-@pytest.mark.parametrize("profile,wall", [("thorough", 540), ("balanced", 300)])
+@pytest.mark.parametrize("profile,wall", [("fast", 540), ("balanced", 540), ("thorough", 540)])
 def test_the_hunt_profile_sizes_the_hold_the_wait_and_the_process_wall(stack, profile, wall):
     async def scenario():
         hunt, standing = await _active_hunt(stack.pool, profile)
@@ -188,23 +188,42 @@ def test_the_hunt_profile_sizes_the_hold_the_wait_and_the_process_wall(stack, pr
     stack.loop.run_until_complete(scenario())
 
 
-def test_a_thorough_hold_the_ledger_cannot_fund_steps_down_and_runs_at_the_registry_hold(stack):
-    """A thorough Hunt with 500 s of wall cannot fund the 540 s hold. The call is admitted at
-    the registry hold instead of refused, and the worker accepts and runs it at that hold."""
+def test_an_unfunded_useful_hold_waits_for_a_raise_then_dispatches_with_the_same_key(stack):
+    """A 500 s total cannot fund a 540 s call. No worker starts until the operator raises it;
+    retrying the same parked key then reserves and runs the full envelope exactly once."""
     async def scenario():
+        from fastapi import HTTPException
+        from hunt.budget_amendments import HuntBudgetAmendmentRequest
+        from hunt.run_service import HuntRunService
         hunt, standing = await _active_hunt(stack.pool, "thorough", max_duration_seconds=500)
         stack.state["scope_receipt_id"] = str(standing["scope_receipt_id"])
-        result = await _call(stack, hunt, "stepped-sqli-0001")
+        key = "useful-sqli-0001"
+        result = await _call(stack, hunt, key)
+        assert isinstance(result, HTTPException)
+        assert result.detail["reason_code"] == "budget_insufficient_for_action"
+        assert result.detail["shortages"] == {"tool_wall_seconds": 40}
+        assert result.detail["permission_request"]["kind"] == "budget.raise"
+        assert stack.waits == stack.workers == stack.processes == []
+        async with stack.pool.acquire() as conn:
+            assert await conn.fetchval("SELECT status FROM hunt_actions WHERE hunt_run_id=$1", hunt["id"]) == "awaiting_permission"
+            assert await conn.fetchval("SELECT count(*) FROM budget_reservations WHERE owner_id=$1", str(hunt["id"])) == 0
+            used = await conn.fetchval("SELECT budget_used_json FROM hunt_runs WHERE id=$1", hunt["id"])
+            assert all(value == 0 for value in json.loads(used).values())
+        await HuntRunService(lambda: stack.pool).amend_budget(str(hunt["id"]), HuntBudgetAmendmentRequest(
+            limits={"max_duration_seconds": 600}, expected_revision=0, operator_confirmed=True,
+            idempotency_key="operator-funds-useful-verifier", resume=False,
+        ))
+        result = await _call(stack, hunt, key)
         assert not isinstance(result, Exception), getattr(result, "detail", result)
         assert result["action_result"]["status"] == "success", result
-        status, reservation, decode = await _reservation(stack.pool, hunt, "stepped-sqli-0001")
+        status, reservation, decode = await _reservation(stack.pool, hunt, key)
         assert status == "completed" and reservation["status"] == "committed"
         requested = decode(reservation["requested_json"])
-        assert requested["http_requests"] == 900 and requested["tool_wall_seconds"] == 300
-        assert stack.waits == [300_000]
+        assert requested["http_requests"] == 900 and requested["tool_wall_seconds"] == 540
+        assert stack.waits == [540_000]
         (process,) = stack.processes
-        assert process["timeout_ms"] == 300_000
-        assert process["hard_budget"] == {"http_requests": 900, "tool_wall_seconds": 300}
+        assert process["timeout_ms"] == process["plan_timeout_ms"] == 540_000
+        assert process["hard_budget"] == {"http_requests": 900, "tool_wall_seconds": 540}
 
     stack.loop.run_until_complete(scenario())
 

@@ -115,8 +115,8 @@ def test_non_ssh_credentials_never_retain_network_budgets_without_discovery():
 
 def test_hunt_budget_profile_is_bounded():
     contract = _contract("api", budget_profile="fast")
-    assert contract.resolved_budget_object.max_capability_calls == 20
-    assert contract.resolved_budget_object.max_candidates == 20
+    assert contract.resolved_budget_object.max_capability_calls == 80
+    assert contract.resolved_budget_object.max_candidates == 100
 
 
 def test_zero_ceiling_removes_capabilities_that_require_that_dimension():

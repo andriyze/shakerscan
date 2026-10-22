@@ -914,6 +914,7 @@ try:
         hunt_run_or_404 as _hunt_run_or_404,
         public_hunt_run as _hunt_public,
     )
+    from hunt.saved_actions import retain_hunt_action_safely
     from hunt.briefing import with_live_briefing as _hunt_with_live_briefing
 except ModuleNotFoundError:
     from api.hunt.action_dispatcher import (
@@ -983,6 +984,7 @@ except ModuleNotFoundError:
         hunt_run_or_404 as _hunt_run_or_404,
         public_hunt_run as _hunt_public,
     )
+    from api.hunt.saved_actions import retain_hunt_action_safely
     from api.hunt.briefing import with_live_briefing as _hunt_with_live_briefing
 try:
     from runtime.budget_reservations import DurableBudgetReservation
@@ -13454,7 +13456,7 @@ async def _start_hunt_v2(contract: HuntStartContract) -> dict[str, Any]:
     return {**started, **started_permissions}
 
 
-_hunt_run_service = HuntRunService(lambda: db_pool, get_redis)
+_hunt_run_service = HuntRunService(lambda: db_pool, get_redis, finish_retainer=retain_hunt_action_safely)
 configure_hunt_run_router(
     lambda: _hunt_run_service,
     start_handler=_start_hunt_v2,
