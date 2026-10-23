@@ -2307,7 +2307,7 @@ async def _execute_hunt_capability_lifecycle(
                     # device traffic envelope above, which counts every connection the action makes.
                     if is_network and prepared_network is not None:
                         charges = distinct_charge(context, prepared_network, charges)
-                    elif name == "tls.inspect":
+                    if name == "tls.inspect":
                         # One port, whatever its handshakes; nothing more on a port already attempted.
                         tls_port = _tls_admission_pair(run, context, policy, request.input)
                         charges = distinct_port_charge(context, frozenset({tls_port} if tls_port else ()),
