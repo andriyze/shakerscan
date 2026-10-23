@@ -480,10 +480,13 @@ maps what a Scan runs.
   handler, HTML body, SVG/CSS/JSON/URL-path) and selects context-specific payloads; canary-based
   reflection detection; browser proof for GET reflections and HTML-like POST/PUT/PATCH response
   reflections; hash-route testing; static DOM-XSS source-to-sink analysis over JS files. In a Scan,
-  the `xss` family runs Dalfox over the ranked candidates (URL-fragment parameters included),
-  verifies request-collection fields when state-changing HTTP is allowed, and proves reflections in
-  a browser. The context-aware tester and the static DOM-XSS analysis are detector modules no Scan
-  family runs, and no Scan action looks for stored XSS.
+  the `xss` family runs Dalfox over the ranked query candidates of GET routes and proves the
+  reflections it finds in a browser. When state-changing HTTP is allowed, Dalfox also tests body
+  candidates from the OpenAPI spec, known endpoints and requests the browser saw the application
+  send, and a request verifier tests request-collection fields. A URL fragment never reaches the
+  server, so a fragment candidate goes straight to a browser attempt without a Dalfox signal. The
+  context-aware tester and the static DOM-XSS analysis are detector modules no Scan family runs,
+  and no Scan action looks for stored XSS.
 - **SQLi** (`active_checks.py`): `sqlmap`-based testing that is **DBMS-aware** (SQLite, MySQL,
   PostgreSQL, MSSQL, Oracle) — it fingerprints the database, then chooses DBMS-specific payloads,
   techniques, and optional data-extraction chaining. Supports out-of-band (blind) detection via
@@ -552,23 +555,27 @@ and invitations. `business_logic` is a planned family and a Scan refuses it.
 ### Template & infra
 
 Nuclei template checks (`nuclei.py`). A Scan runs the six-template reviewed read-only passive pack
-and, opt-in, the active pack. Detector modules no Scan family runs: infrastructure-leak checks
-(`infrastructure_checks.py`) for CI/CD config, cloud buckets, registries, k8s/terraform artifacts,
-and critical checks (`critical_checks.py`) for default creds, directory listing, and verbose error
-pages. A Scan finds directory listings and verbose error pages with `sensitive_exposure` instead.
+and, opt-in, the active pack in 30-template windows; a `fast` or `balanced` Scan of a host with few
+endpoints runs only some windows (see the
+[OWASP coverage matrix](owasp-coverage-matrix.md#active-nuclei-pack)). Detector modules no Scan
+family runs: infrastructure-leak checks (`infrastructure_checks.py`) for CI/CD config, cloud
+buckets, registries, k8s/terraform artifacts, and critical checks (`critical_checks.py`) for
+default creds, directory listing, and verbose error pages. A Scan finds directory listings and
+verbose error pages with `sensitive_exposure` instead.
 
 Infrastructure detector modules also cover SSH authentication posture; SMTP STARTTLS, banner, MX,
 and safe open-relay checks; VPN, RDP/VNC, IoT, industrial-protocol, and database-service exposure;
 IP/ASN and domain intelligence; third-party vendor resources; webhook signature bypass;
 package-manager and backup artifacts; container registries; and Kubernetes/Terraform/cloud-storage
-exposure. They are not Scan families and no Scan runs them. A Scan's baseline collects only
-informational domain-registration and address-ownership context (`infrastructure.inspect`), never
-findings. The SMTP
-check contacts each MX host (or the target itself when it has none) only after resolving it once
-and judging every address under the scan's destination policy (the target's environment and
-`SHAKERSCAN_PRIVATE_NETWORK_TARGETS`, with the web scope guard's address classes); every probe
-connects to an admitted address (tried in answer order) and the cipher probe keeps the MX name as
-SNI. A process a worker launches for a Scan reads an empty or missing
+exposure. They are not Scan families and no Scan runs them. Connected-device posture runs its own
+SSH checks on discovered SSH ports (see [Connected-device posture](#connected-device-posture)). A
+Scan's baseline collects only informational domain-registration and address-ownership context
+(`infrastructure.inspect`), never findings. The SMTP check contacts each MX host (or the target
+itself when it has none) only after resolving it once and judging every address under the scan's
+destination policy (the target's environment and `SHAKERSCAN_PRIVATE_NETWORK_TARGETS`, with the
+web scope guard's address classes); every probe connects to an admitted address (tried in answer
+order) and the cipher probe keeps the MX name as SNI.
+A process a worker launches for a Scan reads an empty or missing
 `SHAKERSCAN_PRIVATE_NETWORK_TARGETS` as `refuse` (a fleet worker cannot know what the admitting
 deployment chose); fleet and broker worker Compose files pass the setting and
 `SHAKERSCAN_NAT64_PREFIXES`. A refused or single-label MX host (a Docker service name) is listed
@@ -686,8 +693,9 @@ business impact. The nine implemented chain types (`CHAIN_TEMPLATES`) are
 `idor_to_data_breach`, `lfi_to_credential_theft`, `cors_to_data_theft`,
 `weak_jwt_to_impersonation`, `xxe_to_data_exfil`, and `deserialization_to_rce`. A chain forms only
 from findings of its types. A Scan has no generic check for SSRF, file inclusion, JWT, XXE or
-deserialization, so those chains form only from a Nuclei product-template finding or a finding
-recorded another way.
+deserialization. The file-inclusion and JWT chains can form from a Nuclei product-template finding
+or a finding recorded another way. No template in a Scan can match SSRF, XXE or deserialization, so
+those three chains form only from a finding recorded another way.
 Partial chains can be surfaced with `include_partial_attack_chains: true`.
 
 **Coverage tracking**: `/scans/{id}/actions`, `/capabilities`, and `/coverage` expose the plan digest,
