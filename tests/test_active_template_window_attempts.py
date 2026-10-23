@@ -487,7 +487,7 @@ def test_the_planned_windows_match_the_pinned_bundle():
 
 
 # The template bundle both planned window counts were measured on (1,146 permitted templates
-# with state-changing HTTP; 713 GET-only once default logins need that permission), in the
+# with state-changing HTTP; 707 GET-only once login attempts need that permission), in the
 # scanner image built from it.
 MEASURED_BUNDLE_COMMIT = "2935d63aebd1f5f4a3c8e87c6e7f5c47f689b115"
 MEASURED_BUNDLE_SHA256 = "20aff7085b5c1771a8f7a28624009359a1cedab924c9ad7836078ca07e28de39"

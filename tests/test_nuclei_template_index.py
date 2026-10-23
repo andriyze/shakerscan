@@ -13,6 +13,17 @@ verbatim from the pinned ProjectDiscovery bundle:
   ``/heapdump`` and ``/actuator/heapdump``, which a Scan never requests
 * ``broken-template.yaml`` -- deliberately malformed YAML (parse error)
 
+``tests/fixtures/nuclei_templates_credentials`` holds real templates of the same bundle, copied
+verbatim, that send only GET requests and either try a login or change state by GET:
+
+* ``CVE-2020-24285``, ``CVE-2024-28987`` -- template ``variables`` username/password in a Basic
+  ``Authorization`` header
+* ``CVE-2024-20439``, ``CVE-2021-26294`` -- a literal Basic ``user:password`` pair
+* ``CVE-2026-8181`` -- an extracted administrator name signed in as with password ``x``
+* ``CVE-2025-0674`` -- ``GET /json_data/set_pwd?...&pass=admin1234`` sets the admin password
+* ``CVE-2023-29298`` -- ``inPassword=foo`` sent to a hashing method: neither
+* ``github-personal-access`` -- a token found in the page, sent to its issuer: neither
+
 Tests that write templates into ``tmp_path`` use synthetic unit fixtures.
 """
 
@@ -29,6 +40,7 @@ from capabilities.exposure_probe import is_never_requested
 from scan import nuclei_template_index
 from scan.nuclei_template_index import (
     NEVER_REQUESTED_TEMPLATE_IDS,
+    STATE_CHANGING_GET_TEMPLATE_IDS,
     build_nuclei_method_index,
     clear_index_cache,
     nuclei_templates_directory,
@@ -36,6 +48,7 @@ from scan.nuclei_template_index import (
 )
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures" / "nuclei_templates"
+CREDENTIAL_FIXTURES = Path(__file__).resolve().parent / "fixtures" / "nuclei_templates_credentials"
 
 
 @pytest.fixture(autouse=True)
@@ -348,6 +361,31 @@ _CREDENTIAL_FORMS = {
     "other-header-payload": ("exposure", "  - method: GET\n    path:\n      - '{{BaseURL}}/'\n"
                              "    headers:\n      X-Forwarded-Host: '{{host}}'\n"
                              "    payloads:\n      host:\n        - example.test\n", False),
+    # A payload put into a structured request's body.
+    "structured-body": ("exposure", "  - method: GET\n    path:\n      - '{{BaseURL}}/session'\n"
+                        "    body: 'name={{username}}&secret={{password}}'\n"
+                        "    payloads:\n      username:\n        - admin\n      password:\n        - admin\n", True),
+    # A request's own variables, not a payload list, put into a header.
+    "request-variables": ("exposure", "  - method: GET\n    path:\n      - '{{BaseURL}}/api'\n"
+                          "    variables:\n      api_user: admin\n      api_pass: admin\n"
+                          "    headers:\n      Authorization: \"Basic {{base64(api_user + ':' + api_pass)}}\"\n", True),
+    # A username and password put into a raw request line's query string.
+    "raw-query": ("exposure", "  - raw:\n      - |\n        GET /login.cgi?user={{username}}&pwd={{password}} HTTP/1.1\n"
+                  "        Host: {{Hostname}}\n"
+                  "    payloads:\n      username:\n        - admin\n      password:\n        - admin\n", True),
+    # ... and into a structured path's query string.
+    "path-query": ("exposure", "  - method: GET\n    path:\n      - '{{BaseURL}}/login?u={{user}}&p={{pass}}'\n"
+                   "    payloads:\n      user:\n        - admin\n      pass:\n        - admin\n", True),
+    # A literal user:password pair inside a Basic header expression.
+    "literal-basic-expression": ("exposure", "  - raw:\n      - |\n        GET /admin HTTP/1.1\n"
+                                 "        Host: {{Hostname}}\n"
+                                 "        Authorization: Basic {{base64('admin:admin')}}\n", True),
+    # A Basic header that carries only a token found earlier names no account.
+    "basic-token-only": ("exposure", "  - method: GET\n    path:\n      - '{{BaseURL}}/'\n"
+                         "    extractors:\n      - type: regex\n        name: token\n        internal: true\n"
+                         "        regex:\n          - 'tok_[a-z0-9]{8}'\n"
+                         "  - raw:\n      - |\n        GET /me HTTP/1.1\n        Host: {{Hostname}}\n"
+                         "        Authorization: Basic {{base64(token + ':')}}\n", False),
 }
 
 
@@ -381,6 +419,49 @@ def test_a_verify_scan_runs_a_default_login_check_only_with_state_changing_permi
     assert authorized.credential_level_count == 1
 
 
+#: The verbatim credential fixtures: credential-level, changes state by GET (reviewed), or neither.
+_CREDENTIAL_FIXTURE_CLASSES = {
+    "cve-2020-24285": "credential_level",
+    "cve-2024-28987": "credential_level",
+    "cve-2024-20439": "credential_level",
+    "cve-2021-26294": "credential_level",
+    "cve-2026-8181": "credential_level",
+    "cve-2025-0674": "changes_state_by_get",
+    "cve-2023-29298": "neither",
+    "github-personal-access": "neither",
+}
+
+
+def test_real_templates_that_sign_in_or_change_state_by_get_need_the_state_changing_permission():
+    index = build_nuclei_method_index(str(CREDENTIAL_FIXTURES))
+    by_id = {record.template_id: record for record in index.templates}
+    assert set(by_id) == set(_CREDENTIAL_FIXTURE_CLASSES)
+    for template_id, kind in _CREDENTIAL_FIXTURE_CLASSES.items():
+        record = by_id[template_id]
+        assert record.methods == frozenset({"GET"}), template_id
+        assert record.credential_level is (kind == "credential_level"), template_id
+        assert record.state_changing is (kind != "neither"), template_id
+    plain = resolve_active_nuclei_selection(str(CREDENTIAL_FIXTURES), allow_state_changing_http=False)
+    authorized = resolve_active_nuclei_selection(str(CREDENTIAL_FIXTURES), allow_state_changing_http=True)
+    assert set(plain.template_ids) == {"cve-2023-29298", "github-personal-access"}
+    assert set(authorized.template_ids) == set(_CREDENTIAL_FIXTURE_CLASSES)
+    assert plain.credential_level_count == authorized.credential_level_count == 5
+    assert plain.state_changing_count == 6
+
+
+def test_a_get_reviewed_as_changing_state_runs_only_with_the_permission():
+    assert "cve-2025-0674" in STATE_CHANGING_GET_TEMPLATE_IDS
+    plain = resolve_active_nuclei_selection(
+        str(CREDENTIAL_FIXTURES), allow_state_changing_http=False, allow_exploit_classes=True,
+        only_template_ids="cve-2025-0674")
+    assert plain.skip is True and plain.verify_selection["excluded"] == {
+        "cve-2025-0674": "needs_state_changing_http"}
+    authorized = resolve_active_nuclei_selection(
+        str(CREDENTIAL_FIXTURES), allow_state_changing_http=True, allow_exploit_classes=True,
+        only_template_ids="cve-2025-0674")
+    assert authorized.template_ids == ("cve-2025-0674",) and authorized.includes_state_changing
+
+
 def test_the_reviewed_passive_pack_holds_no_default_login():
     # Hunt and the passive family run only this pack, whatever their permissions.
     from scan.work_manifests import CANONICAL_PASSIVE_NUCLEI_TEMPLATES
@@ -389,9 +470,13 @@ def test_the_reviewed_passive_pack_holds_no_default_login():
 
 
 #: Templates in the pinned bundle's active selection that send only GET or HEAD requests but
-#: are credential-level (tagged default-login, or sending a username or password payload in a
-#: header or body). Before 2.11.1 they ran without the state-changing permission.
-PINNED_BUNDLE_GET_ONLY_CREDENTIAL_LEVEL = 47
+#: are credential-level: tagged default-login, a value named like a username or password (a
+#: payload, a variable or an extracted value) sent in a header, the body or the query string, or
+#: a literal Basic ``user:password`` pair. Before 2.11.1 they ran without the state-changing
+#: permission; so did the GETs reviewed as changing state (``STATE_CHANGING_GET_TEMPLATE_IDS``).
+PINNED_BUNDLE_GET_ONLY_CREDENTIAL_LEVEL = 52
+#: The GET-only selection without the permission: 760 GETs before 2.11.1, 53 of them now behind it.
+PINNED_BUNDLE_GET_ONLY_SELECTION = 707
 
 
 def test_pinned_bundle_default_logins_run_only_with_state_changing_permission():
@@ -412,6 +497,16 @@ def test_pinned_bundle_default_logins_run_only_with_state_changing_permission():
     }
     assert len(moved) == PINNED_BUNDLE_GET_ONLY_CREDENTIAL_LEVEL
     assert "tomcat-default-login" in moved
+    assert {"cve-2020-24285", "cve-2024-28987", "cve-2024-20439", "cve-2021-26294",
+            "cve-2026-8181"} <= moved
+    # Each reviewed state-changing GET is in the bundle's selection, sends only GET and is not
+    # already held back as a login attempt, so the list names exactly what it adds.
+    for template_id in STATE_CHANGING_GET_TEMPLATE_IDS:
+        record = by_id[template_id]
+        assert template_id in selected and record.methods == frozenset({"GET"})
+        assert not record.credential_level and record.state_changing
+    assert not STATE_CHANGING_GET_TEMPLATE_IDS & set(plain.template_ids)
+    assert len(plain.template_ids) == PINNED_BUNDLE_GET_ONLY_SELECTION
     assert not {
         template_id for template_id in plain.template_ids if by_id[template_id].credential_level}
     assert plain.credential_level_count == authorized.credential_level_count

@@ -13,10 +13,14 @@ selection by the methods it actually issues, so the executor can:
 
 * run only GET/HEAD templates when ``allow_state_changing_http`` is not granted;
 * additionally run non-GET templates when it is granted;
-* treat a credential-level template -- a default login, which can lock the accounts it
-  tries -- as needing that permission whatever its method: one tagged ``default-login``, or
-  one that puts a payload named like a username or password into a header or body
-  (``tomcat-default-login`` sends its password list by GET in an ``Authorization`` header);
+* treat a credential-level template -- a login attempt, which can lock the account it
+  tries -- as needing that permission whatever its method: one tagged ``default-login``; one
+  that sends a value named like a username or password (a payload, a variable or an extracted
+  value) in a header, the body or the query string (``tomcat-default-login`` sends its password
+  list by GET in an ``Authorization`` header); or one whose Basic ``Authorization`` header holds
+  a literal ``user:password`` pair;
+* treat the GET templates reviewed as changing state (``STATE_CHANGING_GET_TEMPLATE_IDS``) the
+  same way;
 * always exclude ``intrusive`` (destructive) templates -- Scan policy has no
   dangerous/destructive tier that could authorize them (the ``intrusive`` risk
   tier in ``scan.authorization`` is a per-action dangerous-approval concept that
@@ -38,6 +42,7 @@ allowlist and ``-id`` would otherwise resurrect them.
 
 from __future__ import annotations
 
+import base64
 from dataclasses import dataclass
 import os
 import re
@@ -71,19 +76,28 @@ _DEFAULT_TAGS = ("exposure", "misconfig", "auth-bypass", "default-login")
 # excluded even if a bundle update hides the path from the request expansion below; a test
 # pins this set to what that expansion finds in the pinned bundle.
 NEVER_REQUESTED_TEMPLATE_IDS = frozenset({"springboot-heapdump"})
+# Reviewed templates of the pinned bundle whose GET requests change server state. They need the
+# state-changing permission like a non-GET template; a test pins each to a GET-only template of
+# the pinned bundle's selection that is not already credential-level.
+STATE_CHANGING_GET_TEMPLATE_IDS = frozenset({
+    "cve-2025-0674",  # GET /json_data/set_pwd?lev=2&pass=admin1234 sets the admin password
+})
 # The request target of a raw request: the token after the method, past any ``@`` annotations.
 _RAW_TARGET_RE = re.compile(r"\s*(?:@[^\n]*\n\s*)*\S+[ \t]+(\S+)")
 _PLACEHOLDER_RE = re.compile(r"\{\{\s*([^{}]*?)\s*\}\}")
 # A raw request's ``@`` annotations and request line; what follows is its headers and body.
 _RAW_REQUEST_LINE_RE = re.compile(r"\s*(?:@[^\n]*\n\s*)*[^\n]*")
-# A payload set is named like a username or password when one word of its name is one of
-# these (``username``, ``pass``, ``aem_user``, ``os_password``, ``adminPassword``).
+# A payload, variable or extracted value is named like a username or password when one word of
+# its name is one of these (``username``, ``pass``, ``aem_user``, ``os_password``, ``adminPassword``).
 _CREDENTIAL_NAME_WORDS = frozenset({
     "user", "users", "username", "usernames", "login", "logins",
     "pass", "passwd", "password", "passwords", "pwd", "pw",
 })
 _NAME_WORD_RE = re.compile(r"[A-Z]?[a-z0-9]+|[A-Z]+(?![a-z])")
 _IDENTIFIER_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+# A Basic ``Authorization`` header line of a raw request, and the quoted literals of an expression.
+_BASIC_AUTH_RE = re.compile(r"(?im)^[ \t]*authorization[ \t]*:[ \t]*basic[ \t]+(\S.*?)[ \t]*$")
+_QUOTED_RE = re.compile(r"'([^']*)'|\"([^\"]*)\"")
 CREDENTIAL_LEVEL_TAG = "default-login"
 
 
@@ -107,15 +121,18 @@ class _TemplateRecord:
     # Requests a path ``is_never_requested`` refuses, in a path, a raw request line, or once a
     # payload or variable value is put into one.
     never_requested: bool = False
-    # Tries logins: tagged ``default-login``, or puts a payload named like a username or
-    # password into a header or body. A login attempt can lock the account it tries, so it
+    # Tries logins (``_tries_login``). A login attempt can lock the account it tries, so it
     # needs the state-changing permission even when every request is a GET.
     credential_level: bool = False
 
     @property
     def state_changing(self) -> bool:
-        """Needs ``allow_state_changing_http``: a non-GET/HEAD method, or credential-level."""
-        return bool(self.methods - _SAFE_METHODS) or self.credential_level
+        """Needs ``allow_state_changing_http``: a non-GET/HEAD method, credential-level, or a
+        GET reviewed as changing state."""
+        return (
+            bool(self.methods - _SAFE_METHODS) or self.credential_level
+            or self.template_id in STATE_CHANGING_GET_TEMPLATE_IDS
+        )
 
 
 @dataclass(frozen=True)
@@ -313,25 +330,70 @@ def _references(text: Any, names: frozenset[str]) -> bool:
     )
 
 
-def _sends_credential_payload(document: Mapping[str, Any]) -> bool:
-    """Whether a request puts a payload named like a username or password into a header or
-    body: a raw request's text after its request line, or a structured request's ``headers``
-    and ``body``. A payload used only in a path enumerates, it does not sign in."""
+def _credential_names(document: Mapping[str, Any]) -> frozenset[str]:
+    """The template's payloads, variables and extracted values named like a username or password."""
+    requests = document.get("http") or document.get("requests") or []
+    requests = [request for request in requests if isinstance(request, Mapping)] if isinstance(requests, list) else []
+    names: list[Any] = []
+    for source in (document.get("variables"), *(request.get(key) for request in requests
+                                                 for key in ("payloads", "variables"))):
+        names.extend(source if isinstance(source, Mapping) else ())
+    for request in requests:
+        extractors = request.get("extractors") if isinstance(request.get("extractors"), list) else []
+        names.extend(extractor.get("name") for extractor in extractors if isinstance(extractor, Mapping))
+    return frozenset(str(name) for name in names if name and _credential_named(name))
+
+
+def _query(target: str) -> str:
+    return target.split("?", 1)[1] if "?" in target else ""
+
+
+def _literal_pair(value: str) -> bool:
+    """Whether a Basic header value holds a literal ``user:password`` pair: base64 text that
+    decodes to one, or a quoted literal holding one inside a ``{{...}}`` expression."""
+    if "{{" in value:
+        return any(
+            ":" in literal.strip(":") for match in _QUOTED_RE.finditer(value)
+            for literal in (match.group(1) or match.group(2) or "",)
+        )
+    token = value.split()[0]
+    try:
+        decoded = base64.b64decode(token + "=" * (-len(token) % 4), validate=True).decode("utf-8")
+    except (ValueError, UnicodeDecodeError):
+        return False
+    return ":" in decoded.strip(":")
+
+
+def _tries_login(document: Mapping[str, Any]) -> bool:
+    """Whether a request sends a value named like a username or password -- a payload, a
+    variable or an extracted value -- in a header, the body or the query string, or a literal
+    ``user:password`` pair in a Basic ``Authorization`` header. A name used only in a path
+    enumerates, it does not sign in; a token alone in a Basic header names no account."""
     requests = document.get("http") or document.get("requests") or []
     if not isinstance(requests, list):
         return False
+    names = _credential_names(document)
     for request in requests:
-        if not isinstance(request, Mapping) or not isinstance(request.get("payloads"), Mapping):
+        if not isinstance(request, Mapping):
             continue
-        names = frozenset(str(name) for name in request["payloads"] if _credential_named(name))
-        if not names:
-            continue
-        raws = request.get("raw") if isinstance(request.get("raw"), list) else []
+        raws = [str(raw) for raw in request.get("raw") or ()] if isinstance(request.get("raw"), list) else []
         headers = request.get("headers") if isinstance(request.get("headers"), Mapping) else {}
-        sent = [str(raw)[_RAW_REQUEST_LINE_RE.match(str(raw)).end():] for raw in raws]
-        sent.extend(str(value) for value in headers.values())
-        sent.append(str(request.get("body") or ""))
-        if any(_references(text, names) for text in sent):
+        paths = [str(path) for path in request.get("path") or ()] if isinstance(request.get("path"), list) else []
+        after_line = [raw[_RAW_REQUEST_LINE_RE.match(raw).end():] for raw in raws]
+        sent = [*after_line, *(str(value) for value in headers.values()), str(request.get("body") or "")]
+        sent.extend(_query(path) for path in paths)
+        sent.extend(
+            _query(match.group(1)) for match in map(_RAW_TARGET_RE.match, raws) if match
+        )
+        if names and any(_references(text, names) for text in sent):
+            return True
+        basic = [match.group(1) for text in after_line for match in _BASIC_AUTH_RE.finditer(text)]
+        basic.extend(
+            str(value).strip()[len("basic"):].strip() for name, value in headers.items()
+            if str(name).strip().lower() == "authorization"
+            and str(value).strip().lower().startswith("basic ")
+        )
+        if any(_literal_pair(value) for value in basic):
             return True
     return False
 
@@ -416,7 +478,7 @@ def build_nuclei_method_index(templates_dir: str) -> NucleiMethodIndex:
                 never_requested=_requests_never_requested_path(
                     document, templates_dir, dirpath, payload_files),
                 credential_level=(
-                    CREDENTIAL_LEVEL_TAG in tags or _sends_credential_payload(document)),
+                    CREDENTIAL_LEVEL_TAG in tags or _tries_login(document)),
             )
             prior = records.get(template_id)
             if prior is not None:
