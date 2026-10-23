@@ -33,7 +33,8 @@ URL's query, not a body). What changes:
   other candidate its holds cannot fund. The checks that send from the worker itself (the SQLi
   and XSS request verifiers, the SQLi proof, the NoSQLi check and the XSS browser proof) wait
   the same pace before each request to the endpoint (``PacedSignInTransport``) and hold a pace
-  a request on top of their share of the wall; a Scan part runs one action at a time, so the
+  a request on top of their share of the wall (the browser proof's one submission waits it out
+  of its share, and is charged it); a Scan part runs one action at a time, so the
   endpoint sees one request per pace from whichever of them is running. Such an attempt runs
   only when what the slice has left paces all of it (a sign-in form's SQLi proof 8 requests,
   ``paced_check_hold``); otherwise it waits for a later action rather than running short, and a

@@ -862,9 +862,14 @@ class _SignInChecks:
             transport, endpoint, pace_seconds=pace_seconds(children=self.children),
         )
 
+    @property
+    def pace(self) -> int:
+        """The least delay between two requests to the endpoint, for this Scan part."""
+        return pace_seconds(children=self.children)
+
     async def wait(self) -> None:
         """The pace before an attempt that sends the endpoint one request of its own."""
-        await PacedSignInTransport.wait(pace_seconds(children=self.children))
+        await PacedSignInTransport.wait(self.pace)
 
     def record(
         self, head: Mapping[str, Any], endpoint: SignInEndpoint, sent: int, *, short: bool,
@@ -2496,6 +2501,7 @@ class DatabaseNeutralScanActionDispatcher:
                 sign_in_checks.endpoint(execution_url, str(resolved_request.get("method") or ""))
                 if body_fields else None
             )
+            paced = 0
             if sign_in is not None:
                 if sign_in_checks.spent(sign_in):
                     attempted += 1
@@ -2505,6 +2511,20 @@ class DatabaseNeutralScanActionDispatcher:
                         family="xss_browser_proof", manifest_index=manifest_index,
                     ))
                     continue
+                # The wait is the attempt's own wall: it comes out of the attempt's share and is
+                # charged with it, so the slice keeps to its wall; a share that cannot hold it
+                # waits for a later action.
+                paced = sign_in_checks.pace
+                share = int(sub_budget.get("tool_wall_seconds") or 0)
+                if share <= paced:
+                    observations.append(sign_in_checks.deferred(
+                        sign_in, attempt_id=attempt_id, candidate_id=candidate_id,
+                        family="xss_browser_proof",
+                        available_wall_seconds=remaining.get("tool_wall_seconds", 0),
+                        manifest_index=manifest_index,
+                    ))
+                    continue
+                sub_budget = {**sub_budget, "tool_wall_seconds": share - paced}
                 await sign_in_checks.wait()
             adapter = XSSBrowserProofAdapter(prepared, trusted_headers=proof_headers)
             specification = CAPABILITY_REGISTRY.require(action.capability_name)
@@ -2522,11 +2542,14 @@ class DatabaseNeutralScanActionDispatcher:
                 str(item.get("proof_state")) for item in attempt_observations
                 if item.get("proof_state")
             ), "not_proven")
+            charged = dict(result.actual_budget)
+            if paced:
+                charged["tool_wall_seconds"] = int(charged.get("tool_wall_seconds") or 0) + paced
             bundled = ({
                 "kind": "candidate_attempt", "attempt_id": attempt_id,
                 "candidate_id": candidate_id, "family": "xss_browser_proof",
                 "status": result.status, "proof_state": proof_state,
-                "budget_consumed": dict(result.actual_budget),
+                "budget_consumed": charged,
             }, *attempt_observations)
             if sign_in is not None:
                 bundled = (sign_in_checks.record(
@@ -2537,7 +2560,7 @@ class DatabaseNeutralScanActionDispatcher:
             attempt = {
                 "attempt_id": attempt_id, "candidate_id": candidate_id,
                 "status": result.status, "timed_out": bool(result.timed_out),
-                "budget_consumed": dict(result.actual_budget),
+                "budget_consumed": charged,
                 "observations": bundled, "errors": tuple(result.errors),
                 "proof_state": proof_state,
             }
@@ -2550,7 +2573,7 @@ class DatabaseNeutralScanActionDispatcher:
             attempted += 1
             observations.extend(bundled)
             errors.extend(str(item) for item in result.errors)
-            for name, amount in result.actual_budget.items():
+            for name, amount in charged.items():
                 consumed[name] = min(
                     int(action.requested_budget.get(name, 0)),
                     consumed.get(name, 0) + int(amount),

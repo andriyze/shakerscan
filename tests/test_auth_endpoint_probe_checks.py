@@ -691,6 +691,71 @@ def test_the_browser_proof_waits_the_pace_before_each_submission(monkeypatch):
     assert [head["sign_in_endpoint_received"] for head in heads] == [1, 2, 3]
 
 
+def _browser_proof(monkeypatch, *, wall=2):
+    """The browser runtime is a stand-in: one submission and ``wall`` seconds an attempt; the
+    holds it ran with are recorded."""
+    held: list[dict] = []
+
+    async def execute(_self, context, adapter, **_kwargs):
+        held.append(dict(context.requested_budget))
+        return types.SimpleNamespace(
+            status="success", timed_out=False, errors=(),
+            observations=({"kind": "xss_browser_proof", "proof_state": "not_proven"},),
+            actual_budget={"browser_actions": 2, "http_requests": 3, "state_changing_requests": 1,
+                           "tool_wall_seconds": wall},
+        )
+
+    monkeypatch.setattr(action_adapter_module.CapabilityExecutor, "execute", execute)
+    return held
+
+
+def test_the_browser_proof_pace_comes_out_of_its_wall_and_is_charged(monkeypatch):
+    """The wait before the submission ran outside the attempt: neither held against what the slice
+    had left nor charged, so each sign-in variant could run a pace past the action's wall."""
+    _record_pace(monkeypatch)
+    held = _browser_proof(monkeypatch, wall=2)
+    budget = {"http_requests": 300, "state_changing_requests": 300, "tool_wall_seconds": 90}
+    receipts, _candidates = _run("xss.browser_prove_batch", options=SIGN_IN, budget=budget)
+    (receipt,) = receipts
+    # Each attempt's share of what the slice has left (2 s and the pace charged per attempt),
+    # less the pace it waits first.
+    assert [hold["tool_wall_seconds"] for hold in held] == [
+        (90 - index * (2 + PACE)) // (3 - index) - PACE for index in range(3)
+    ]
+    heads = _heads(receipts)
+    assert [head["budget_consumed"]["tool_wall_seconds"] for head in heads] == [2 + PACE] * 3
+    assert receipt.budget_consumed["tool_wall_seconds"] == 3 * (2 + PACE)
+
+
+def test_a_browser_proof_whose_share_cannot_hold_the_pace_waits(monkeypatch):
+    """A slice of one pace: no attempt's share holds the wait and a second of browser time."""
+    waits = _record_pace(monkeypatch)
+    held = _browser_proof(monkeypatch)
+    budget = {"http_requests": 300, "state_changing_requests": 300, "tool_wall_seconds": PACE}
+    receipts, candidates = _run("xss.browser_prove_batch", options=SIGN_IN, budget=budget)
+    (receipt,) = receipts
+    deferred = [item for item in receipt.observations if item.get("kind") == "candidate_deferred"]
+    assert held == [] and waits == [] and _heads(receipts) == []
+    assert len(deferred) == 3 and {item["reason"] for item in deferred} == {AUTH_ENDPOINT_PACE_UNFUNDED}
+    assert receipt.status == "partial"
+
+
+def test_browser_proofs_over_many_actions_stop_at_the_endpoint_set(monkeypatch):
+    """Ten proof actions over the three variants (thirty attempts): the endpoint receives the 8
+    submissions its set holds, and every later attempt is closed without one."""
+    waits = _record_pace(monkeypatch)
+    _browser_proof(monkeypatch)
+    receipts, _candidates = _run("xss.browser_prove_batch", options=SIGN_IN, slices=[(0, 3)] * 10)
+    heads = _heads(receipts)
+    assert len(heads) == 30
+    assert sum(head["sign_in_endpoint_requests"] for head in heads) == 8 == len(waits)
+    assert probe_set_requests("xss.browser_prove_batch", 4) == 8
+    closed = [head for head in heads if not head["sign_in_endpoint_requests"]]
+    assert len(closed) == 22 and {head["inconclusive_reason"] for head in closed} == {
+        AUTH_ENDPOINT_PROBE_LIMITED,
+    }
+
+
 @pytest.mark.parametrize("capability", ["sqli.request_verify_batch", "xss.request_verify_batch"])
 def test_the_request_verifiers_pace_the_sign_in_request_of_the_profile(monkeypatch, capability):
     """The profile's own sign-in request, mutated field by field: each request waits the pace."""
