@@ -1308,8 +1308,11 @@ def build_candidate_manifest(
 
     # Keep only the best bounded set while visiting potentially large endpoint
     # manifests.  The heap key makes a higher score and, on ties, a lower
-    # content-addressed candidate ID better.  Observation order is irrelevant.
-    selected: list[tuple[tuple[int, int], dict[str, Any]]] = []
+    # content-addressed candidate ID better.  Two bodies posted to one action (a login
+    # page's form and a sidebar widget) are one candidate ID with one score: the order
+    # they were met in breaks that tie (the earlier is better), so the heap never compares
+    # two candidates themselves, which raised TypeError and failed the whole plan.
+    selected: list[tuple[tuple[int, int], int, dict[str, Any]]] = []
     candidate_count = 0
     unsupported_path_operations = False
     for endpoint in endpoint_manifest.entries:
@@ -1358,7 +1361,7 @@ def build_candidate_manifest(
                 int(candidate["score"]),
                 -int(str(candidate["candidate_id"]), 16),
             )
-            row = (heap_key, candidate)
+            row = (heap_key, -candidate_count, candidate)
             if len(selected) < limit:
                 heapq.heappush(selected, row)
             elif heap_key > selected[0][0]:
@@ -1370,12 +1373,12 @@ def build_candidate_manifest(
                 int(candidate["score"]),
                 -int(str(candidate["candidate_id"]), 16),
             )
-            row = (heap_key, candidate)
+            row = (heap_key, -candidate_count, candidate)
             if len(selected) < limit:
                 heapq.heappush(selected, row)
             elif heap_key > selected[0][0]:
                 heapq.heapreplace(selected, row)
-    entries = [row[1] for row in selected]
+    entries = [row[2] for row in selected]
     entries.sort(key=lambda item: (-int(item["score"]), item["candidate_id"]))
     truncated = candidate_count > limit
     return ScanWorkManifest(
