@@ -152,3 +152,34 @@ def test_the_summary_grader_reads_a_score_given_as_text_and_skips_one_it_cannot_
     assert graded["cvss_metrics"]["scores"] == expected
     assert graded["cvss_metrics"]["maximum"] == expected[0]
     assert "2 issue(s) found" in graded["summary"]
+
+
+@pytest.mark.parametrize("owasp,cwe,soc2", [
+    (["A03:2021 - Injection", "A05:2025 - Injection"], ["CWE-79", "CWE-80"], ["CC6.1"]),
+    ({"2021": "A03:2021 - Injection"}, "CWE-79", [{"criterion": "CC6.1"}]),
+    (3, 79, "CC6.1"),
+])
+def test_the_summary_grader_accepts_owasp_and_cwe_that_are_not_text(owasp, cwe, soc2):
+    # Unit fixtures: a finding whose owasp, cwe or soc2 is a list, a mapping or a number made the
+    # grader raise, so the merge kept a shard's summary. Only text labels are collected.
+    from grading import grade
+
+    graded = grade({"target": "https://example.test", "result": {}, "findings": [
+        {"title": "Finding A", "severity": "medium", "cvss_score": 6.1, "cwe": cwe,
+         "owasp": owasp, "soc2": soc2, "url": "https://example.test/a"},
+        {"title": "Finding B", "severity": "low", "cvss_score": 3.0, "cwe": "CWE-693",
+         "owasp": "A05:2021 - Security Misconfiguration", "url": "https://example.test/"},
+    ]})
+    assert "2 issue(s) found" in graded["summary"]
+    assert graded["cvss_metrics"]["maximum"] == 6.1
+    compliance = graded["compliance"]
+    assert "A05:2021 - Security Misconfiguration" in compliance["owasp_top10"]
+    assert all(isinstance(label, str) for label in compliance["owasp_top10"])
+    assert all(isinstance(label, str) for label in compliance["soc2_criteria"])
+    assert "CWE-693" in compliance["cwe_ids"]
+    if isinstance(owasp, list):
+        assert set(owasp) <= set(compliance["owasp_top10"])
+        assert {"CWE-79", "CWE-80"} <= set(compliance["cwe_ids"])
+    if isinstance(cwe, int):
+        # A bare CWE number is still printed, as before.
+        assert "79" in compliance["cwe_ids"]

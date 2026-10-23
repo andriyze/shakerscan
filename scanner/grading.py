@@ -364,6 +364,17 @@ def _cvss_score(finding: dict[str, Any]) -> float:
     return number if math.isfinite(number) else 0
 
 
+def _labels(value: Any, *, numbers: bool = False) -> list[str]:
+    """A finding's OWASP, CWE or SOC 2 labels as text: one string, or the strings of a list (and
+    with ``numbers``, a bare CWE number). Anything else (a mapping) carries no label the summary
+    can print, and must not fail the grade."""
+    items = value if isinstance(value, (list, tuple)) else [value]
+    labels = [item.strip() for item in items if isinstance(item, str) and item.strip()]
+    if numbers:
+        labels.extend(str(item) for item in items if isinstance(item, int) and not isinstance(item, bool))
+    return labels
+
+
 def grade(report: dict[str, Any]) -> dict[str, Any]:
     """Calculate security grade for a scan report.
 
@@ -629,21 +640,19 @@ def grade(report: dict[str, Any]) -> dict[str, Any]:
     raw_cvss_scores = []
     for finding in findings:
         cvss = _cvss_score(finding)
+        owasp_labels = _labels(finding.get("owasp"))
         if cvss > 0:
             raw_cvss_scores.append(cvss)
-            owasp_cat = finding.get("owasp", "")[:8] if finding.get("owasp") else ""
+            owasp_cat = owasp_labels[0][:8] if owasp_labels else ""
             weight = OWASP_WEIGHT.get(owasp_cat, 1.0)
             weighted_cvss = min(10.0, cvss * weight)
             cvss_scores.append(weighted_cvss)
 
-        if finding.get("cwe"):
-            compliance_issues["cwe"].add(finding["cwe"])
-        if finding.get("owasp"):
-            compliance_issues["owasp"].add(finding["owasp"])
+        compliance_issues["cwe"].update(_labels(finding.get("cwe"), numbers=True))
+        compliance_issues["owasp"].update(owasp_labels)
         soc2_criteria = finding.get("soc2", [])
         if isinstance(soc2_criteria, list):
-            for criteria in soc2_criteria:
-                compliance_issues["soc2"].add(criteria)
+            compliance_issues["soc2"].update(_labels(soc2_criteria))
 
     avg_cvss = round(sum(raw_cvss_scores) / len(raw_cvss_scores), 1) if raw_cvss_scores else 0
     max_cvss = max(raw_cvss_scores) if raw_cvss_scores else 0
