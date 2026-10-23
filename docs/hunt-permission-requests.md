@@ -260,10 +260,12 @@ Rules for bounds:
        per-counter replay protection and is rate-limited.
      - **Security key:** a FIDO2 USB or NFC key over CTAP2 from the client (python-fido2). The
        RP ID is the gateway host, the challenge covers the request-set digest, and the gateway
-       verifies the person's registered credential. User verification (the key's PIN) is
-       required, as at login (`passkeys.py:55-68`). Platform authenticators (Touch ID, Windows
-       Hello, synced passkeys) are **not** reachable from a pip-installed CLI without a signed
-       native helper, so v1 does not offer them.
+       verifies the person's registered credential. User verification follows the challenge's
+       `userVerification`: `required` (the key's PIN, as at login, `passkeys.py:55-68`), or
+       `discouraged` when the gateway requires a touch for each decision (user presence only).
+       Without `--method` the client uses a plugged-in key when the gateway offers one. Platform
+       authenticators (Touch ID, Windows Hello, synced passkeys) are **not** reachable from a
+       pip-installed CLI without a signed native helper, so v1 does not offer them.
    - The token alone never approves: it must be a valid connection **and** belong to a person
      with the operator or admin role who passes step-up.
    - **Who may approve whose request (owner decision 8).** Any person with the operator or admin
@@ -771,9 +773,16 @@ The guarantee is "no stored secret" and a bounded, revocable, audited window. Th
 per-approval proof is a step-up code or key touch the agent never sees. On OSS `--watch` is the
 same loop, and each keypress is the confirmation.
 
-**Security keys.** CTAP2 over USB or NFC through python-fido2 when it is installed beside the
-client (`pipx inject shakerscan fido2`); without it the client says so and offers `--method totp`.
-Platform authenticators are not reachable from a pip-installed command.
+**Security keys.** CTAP2 over USB or NFC through python-fido2, a dependency of the client since
+0.11.2 (before, `pipx inject shakerscan fido2`); without it the client says so. With several keys
+plugged in, the client lists them and asks which one. Platform authenticators are not reachable
+from a pip-installed command.
+
+**A touch for each decision.** A gateway may require a security-key touch for every decision from a
+terminal (its administrator's choice). Its challenges then offer `methods: ["security_key"]` with
+`userVerification: "discouraged"`, a code or browser proof is refused, and `begin` with purpose
+`approver_session` answers 403 `touch_required`: `approve --watch` then opens no session and asks
+for one touch per decision (`allow a[l]l N shown` sends every shown request as one set, one touch).
 
 **Knowledge-review decisions (`purpose: knowledge_decision`).** Accepting an instruction or
 saved-action proposal, confirming a target's agent-written instructions and turning a target's
@@ -876,6 +885,37 @@ characters), and records that person as `proposed_by`, `decided_by`, `recorded_b
 (`local-operator`, `operator:...-api`). It removes both headers from every request, key or no
 key, and takes the key out of its own process environment at startup, so no process the API
 starts inherits it. A comma-separated list of keys is accepted for a rotation. The identity is attribution only: what a person may do is decided at the gateway.
+
+**Person decisions (`purpose: person_decision`).** Some ordinary API writes record a decision only
+a person should make (a Hunt's budget amendment, a target's standing authorization, a credential
+grant, a wider Hunt permission, ...). A gateway that requires a security-key touch for them refuses
+such a write sent with a token alone: HTTP 403 with `x-shakerscan-step-up: required` and `{"detail":
+{"error": "person_decision_required", "decision": <kind>, "summary": <plain words>, "proof":
+"security_key", "message"}}` (an active submission is first sent on; only the engine's refusal for
+want of the target's authorization becomes that answer, with `"submission"`). The client completes
+it in the person's terminal (`scripts/person_decision.py`):
+- `begin` carries `"person_decision": {"method", "path" (with its query, as sent), "body" (the exact
+  body bytes, base64url without padding)}` and may leave `account` empty: the person is the one
+  the token acts for. The challenge adds `document` (the set document: `purpose`, `account`,
+  `origin`, and `person_decision`: `schema_version: "shakerscan-person-decision/v1"`, `method`, the
+  percent-decoded `path`, `query`, `body_sha256`, `token_id`, `person_id`, `decision`, `summary`)
+  and `decision: {kind, summary}`. Before asking the key, the client checks that the document
+  names its request (method, decoded path, query, body digest, origin), that `set_digest` is the
+  SHA-256 of the canonical document, and that the WebAuthn challenge is SHA-256(nonce || set
+  digest).
+- `finish` with a `security_key` proof answers `"person_decision": {"decision", "grant",
+  "header": "x-shakerscan-person-proof", "expires_at"}`: one use, at most 120 seconds, for that
+  request through that token. The client sends the same request once more, the same bytes and the
+  same Idempotency-Key, with `X-ShakerScan-Person-Proof: <grant>`.
+- Without an interactive terminal (stdin and stdout), or inside `shakerscan agent`, the client
+  never begins one and never opens a key: it prints the decision and the person's command and
+  exits 3. The MCP adapter answers `outcome: person_decision_required` with `decision`, `summary`
+  and `command`.
+- `GET /_enterprise/person-decisions?after=<n>` (a token, read-only) lists the person decisions
+  recently made through any connection acting for the same person: `made` (`with_token`,
+  `proved`, `refused`), `outcome`, `method`, `path`, `decision`, `connection`, `at`, `id`; `after`
+  in the answer is where the next read starts. `approve --watch` prints each as a line; a gateway
+  without the route is left alone.
 
 ## PR split
 
