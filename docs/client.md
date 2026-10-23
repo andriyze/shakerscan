@@ -449,11 +449,12 @@ raised state-changing requests 20 -> 40 (safety ceiling) for Hunt 3f2a91c0-…
 
   On an open-source engine, or a gateway that does not require the touch, they are sent as they
   are.
-- **What a touch proves.** A person was at the key. A program running as your own computer user
-  could change this client, or start a request of its own the moment you expect to touch; a key
-  has no display. Touch only for a prompt you started, and read the decision it names. Running an
-  agent as another computer user, or in a container, with its own connection, keeps your client,
-  token file and key out of its reach.
+- **What a touch proves.** A person was at the key: presence, not identity (anyone at a plugged-in
+  key can touch it). A program running as your own computer user could change this client, or
+  start a request of its own the moment you expect to touch, so the key blinks for its request; a
+  key has no display. Touch only for a prompt you started, and read the decision it names. Running
+  an agent as another computer user, or in a container, with its own connection, keeps your
+  client, token file and key out of its reach.
 - **Keys.** A USB FIDO2 key (a YubiKey 5, for example) over python-fido2. Touch ID, Windows Hello
   and synced passkeys are out of reach of a terminal client, and Windows is not supported for the
   touch in this release. On Linux, install your distribution's FIDO udev rules (the `libfido2` or
