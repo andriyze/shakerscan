@@ -312,7 +312,8 @@ A value that does not fit (over 1000 characters, a list over 100 items, an inval
 rather than truncated. Put
 the attribute that distinguishes this issue in the locus (for a file exposure, its `path`).
 Verification re-executes the first of `route`, `url` or `path` in the locus; `paths` only
-distinguishes candidates. A
+distinguishes candidates. On a network target also put the service it was found on in `origin`
+(`http://host:port`, the target's own host): verification runs on that service. A
 second record with the same identity and the same title or claim merges its evidence
 (`outcome: merged`); a different claim becomes its own candidate and never replaces a stored one.
 A merge never rewrites title, claim or severity: it lists them in `unapplied_fields`, so correct

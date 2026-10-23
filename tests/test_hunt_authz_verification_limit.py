@@ -23,7 +23,7 @@ from fastapi import HTTPException
 import pytest
 from hunt.action_replay import execution_started_from_budget, replay_observations
 from hunt.candidate_verification_preflight import (
-    CandidateVerificationRefused, web_candidate_preflight,
+    CandidateVerificationRefused, verification_service_origin, web_candidate_preflight,
 )
 from hunt.device_traffic import reserve_device_traffic
 from hunt.distinct_accounting import distinct_charge
@@ -104,7 +104,7 @@ class AdmissionStore:
         if "FROM hunt_actions" in sql:
             return self.actions.get(str(args[0]))
         if "FROM targets" in sql:
-            return {"url": "https://fixture.example.test", "is_active": True}
+            return {"url": self.run["context_pack"]["target"]["url"], "is_active": True}
         if "FROM investigation_candidates" in sql:
             return dict(self.candidate)
         raise AssertionError(sql)
@@ -202,6 +202,7 @@ def admission(store, **overrides):
         "execution_started_from_budget": execution_started_from_budget,
         "distinct_charge": distinct_charge, "distinct_port_charge": distinct_port_charge,
         "web_candidate_preflight": web_candidate_preflight,
+        "verification_service_origin": verification_service_origin,
         "CandidateVerificationRefused": CandidateVerificationRefused,
         "admit_action_credentials": admit_action_credentials,
         "HuntCredentialRefusal": HuntCredentialRefusal,
@@ -384,3 +385,25 @@ def test_contract_path_locus_is_admitted_for_verification():
     asyncio.run(call(store, name="candidate.verify"))
     assert store.run["budget_used_json"]["verifications"] == 1 and len(store.actions) == 1
 
+
+@pytest.mark.parametrize("locus,admitted", [
+    ({"method": "GET", "path": "/.env", "origin": "http://10.10.10.100:8000"}, True),
+    ({"method": "GET", "url": "http://10.10.10.100:8000/.env"}, True),
+    ({"method": "GET", "path": "/.env"}, False),
+    ({"method": "GET", "path": "/.env", "origin": "http://10.10.10.99:8000"}, False),
+])
+def test_a_network_candidate_must_name_its_service_on_the_target_host(locus, admitted):
+    """A network target is ``host://H``; the verifier needs the HTTP service the candidate names."""
+    store = AdmissionStore()
+    store.run["target_kind"] = "network"
+    store.run["context_pack"] = {"target": {"url": "host://10.10.10.100", "origins": []}}
+    store.candidate = {"status": "new", "family": "data_exposure", "canonical_locus": locus}
+    if admitted:
+        asyncio.run(call(store, name="candidate.verify"))
+        assert store.run["budget_used_json"]["verifications"] == 1 and len(store.actions) == 1
+        return
+    with pytest.raises(HTTPException) as error:
+        asyncio.run(call(store, name="candidate.verify"))
+    assert error.value.status_code == 422
+    assert error.value.detail["reason_code"] == "verification_service_unresolved"
+    assert store.run["budget_used_json"] == {"verifications": 0} and not store.actions

@@ -232,6 +232,9 @@ def test_every_wall_has_a_closed_code_or_a_stated_reason_for_none():
 
 def test_the_preflight_and_resume_walls_are_coded_where_they_are_raised():
     assert preflight_reason_code("verification_route_unresolved") == "verification_route_unresolved"
+    assert preflight_reason_code(
+        "verification_service_unresolved: on a network target the candidate names ..."
+    ) == "verification_service_unresolved"
     assert preflight_reason_code("verification bridge supports ['bola'], not 'ai'") == "verification_family_unsupported"
     assert preflight_reason_code(
         "mass_assignment verification requires an explicitly evidenced POST create operation"

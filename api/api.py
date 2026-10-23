@@ -872,7 +872,8 @@ try:
     )
     from hunt.device_policy import DeviceHuntPolicyState
     from hunt.candidate_verification_preflight import (
-        CandidateVerificationRefused, VERIFIABLE_FAMILIES, web_candidate_preflight,
+        CandidateVerificationRefused, VERIFIABLE_FAMILIES, verification_service_origin,
+        web_candidate_preflight,
     )
     from hunt import prior_knowledge as hunt_prior_knowledge
     from capabilities.inline import (
@@ -942,7 +943,8 @@ except ModuleNotFoundError:
     )
     from api.hunt.device_policy import DeviceHuntPolicyState
     from api.hunt.candidate_verification_preflight import (
-        CandidateVerificationRefused, VERIFIABLE_FAMILIES, web_candidate_preflight,
+        CandidateVerificationRefused, VERIFIABLE_FAMILIES, verification_service_origin,
+        web_candidate_preflight,
     )
     from api.hunt import prior_knowledge as hunt_prior_knowledge
     from api.capabilities.inline import (
@@ -14004,6 +14006,12 @@ async def _verify_suspected_finding_workflow_unlocked(
                 detail="verification_route_unresolved: finding has no concrete protected route to "
                 "re-execute (ambiguous evidence locus); it stays SUSPECTED",
             )
+        try:  # a network target names a host: the proof runs on the finding's own service
+            service_origin = verification_service_origin(
+                {"canonical_locus": {"url": str(finding["url"] or "")}}, target_url,
+            )
+        except CandidateVerificationRefused as exc:
+            raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
         _, _, _, finding_method, _, _, _ = _finding_family_route_method(finding)
         # Family-dispatched workflow build (raises 422 on insufficient inputs -> stays suspected).
         workflow, object_route, method, extra_metadata = await _agent_verification_workflow_for(
@@ -14048,7 +14056,9 @@ async def _verify_suspected_finding_workflow_unlocked(
         if workflow.get("principal_variables"):
             dispatch_params["principal_variables"] = workflow["principal_variables"]
     try:
-        result = await _arsenal_dispatch_workflow(dispatch_params, approval_receipt_id)
+        result = await _arsenal_dispatch_workflow(
+            dispatch_params, approval_receipt_id, service_origin=service_origin,
+        )
     except HTTPException as exc:
         return {"finding_id": str(finding_uuid), "verified": False, "hypothesis_id": hypothesis_id,
                 "error": exc.detail}
@@ -14105,6 +14115,10 @@ async def _verify_web_candidate_workflow_unlocked(
         )
         if not target or not target["is_active"]:
             raise HTTPException(status_code=404, detail="Active target not found")
+        try:  # a network target names a host: the proof runs on the service the candidate names
+            service_origin = verification_service_origin(dict(candidate), str(target["url"]))
+        except CandidateVerificationRefused as exc:
+            raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
         workflow, object_route, method, extra_metadata = await _agent_verification_workflow_for(
             conn, candidate["target_id"], family, route, method_hint,
         )
@@ -14154,7 +14168,9 @@ async def _verify_web_candidate_workflow_unlocked(
         if workflow.get("principal_variables"):
             dispatch_params["principal_variables"] = workflow["principal_variables"]
     try:
-        result = await _arsenal_dispatch_workflow(dispatch_params, approval_receipt_id)
+        result = await _arsenal_dispatch_workflow(
+            dispatch_params, approval_receipt_id, service_origin=service_origin,
+        )
     except HTTPException as exc:
         async with db_pool.acquire() as conn:
             await conn.execute(

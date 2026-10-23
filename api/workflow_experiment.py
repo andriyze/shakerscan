@@ -1016,7 +1016,12 @@ def normalize_workflow(target_url: str, raw: Any) -> dict[str, Any]:
     if not minimum_steps <= len(steps) <= MAX_WORKFLOW_STEPS:
         raise WorkflowContractError(
             f"workflow_requires_{minimum_steps}_to_{MAX_WORKFLOW_STEPS}_steps")
-    target_origin = _origin(target_url)
+    try:
+        target_origin = _origin(target_url)
+    except ExperimentContractError as exc:
+        # A network target's ``host://`` URL names no HTTP service: the dispatch answers this
+        # as a 422 invalid_workflow, not as an unhandled fault.
+        raise WorkflowContractError(str(exc)) from exc
     labels: set[str] = set()
     principal_variables = _normalize_principal_variables(payload.get("principal_variables"))
     declared: set[str] = {item["name"] for item in principal_variables}

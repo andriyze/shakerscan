@@ -46,6 +46,7 @@ from .candidate_evidence import CandidateEvidenceError, resolve_candidate_eviden
 from .candidate_verification_preflight import (
     STATE_CHANGING_VERIFY_FAMILIES,
     CandidateVerificationRefused,
+    verification_service_origin,
     web_candidate_preflight,
 )
 from .action_replay import execution_started_from_budget, replay_observations
@@ -1914,6 +1915,8 @@ async def _execute_hunt_capability_lifecycle(
                             # they must cost nothing.
                             try:
                                 web_candidate_preflight(dict(candidate_record))
+                                # A network target names a host; the candidate names the service.
+                                verification_service_origin(dict(candidate_record), current_locator)
                             except CandidateVerificationRefused as exc:
                                 code = preflight_reason_code(exc.detail)
                                 if code is None:

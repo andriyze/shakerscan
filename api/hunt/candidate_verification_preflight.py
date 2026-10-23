@@ -92,6 +92,60 @@ def verification_route(locus: Mapping[str, Any], context: Mapping[str, Any]) -> 
     return raw if raw and raw != "/" else None
 
 
+# A network target is registered as ``host://H``: it names a host, not an HTTP service.
+SERVICE_UNRESOLVED = (
+    "verification_service_unresolved: on a network target the candidate names the HTTP service "
+    "it was found on, in its locus origin (http(s)://host[:port] on the target's host) or an "
+    "absolute url"
+)
+
+
+def _host_key(host: Any) -> str:
+    text = str(host or "").strip().lower()
+    return text[1:-1] if text.startswith("[") and text.endswith("]") else text.rstrip(".")
+
+
+def _service_origin(raw: str, *, bare: bool) -> tuple[str, str]:
+    """``(origin, host)`` of an absolute http(s) URL; ``bare`` also refuses a path or query."""
+    try:
+        parsed = urllib.parse.urlsplit(raw)
+        port = parsed.port
+    except ValueError:
+        raise CandidateVerificationRefused(422, SERVICE_UNRESOLVED) from None
+    if (parsed.scheme.lower() not in {"http", "https"} or not parsed.hostname
+            or parsed.username is not None or parsed.password is not None or port == 0
+            or any(ch.isspace() or ord(ch) < 32 or ch == "\\" for ch in raw)
+            or (bare and (parsed.path not in {"", "/"} or parsed.query or parsed.fragment))):
+        raise CandidateVerificationRefused(422, SERVICE_UNRESOLVED)
+    host = _host_key(parsed.hostname)
+    netloc = f"[{host}]" if ":" in host else host
+    return f"{parsed.scheme.lower()}://{netloc}" + (f":{port}" if port is not None else ""), host
+
+
+def verification_service_origin(candidate: Mapping[str, Any], target_url: str) -> str | None:
+    """The HTTP service a candidate on a network target is verified on; None for a URL target.
+
+    A ``host://H`` target names no HTTP service of its own, so the proof runs on the one the
+    candidate names: its locus ``origin``, or the origin of an absolute ``url`` or ``route``.
+    Every one it names must be the same http(s) service on exactly host H; anything else is
+    refused before any budget or traffic.
+    """
+    target = urllib.parse.urlsplit(str(target_url or "").strip())
+    if target.scheme.lower() != "host":
+        return None
+    locus = _mapping(candidate.get("canonical_locus"))
+    named = [
+        _service_origin(str(locus[key]).strip(), bare=key == "origin")
+        for key in ("origin", "url", "route")
+        if isinstance(locus.get(key), str) and str(locus[key]).strip()
+        and (key == "origin" or "://" in str(locus[key]))
+    ]
+    origins = {origin for origin, _host in named}
+    if len(origins) != 1 or any(host != _host_key(target.hostname) for _origin, host in named):
+        raise CandidateVerificationRefused(422, SERVICE_UNRESOLVED)
+    return origins.pop()
+
+
 def web_candidate_preflight(candidate: Mapping[str, Any]) -> tuple[str, str, str]:
     """Return ``(family, route, method_hint)`` or raise ``CandidateVerificationRefused``."""
     if str(candidate.get("status") or "") == "verified":

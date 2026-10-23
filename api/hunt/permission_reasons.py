@@ -100,6 +100,7 @@ REASON_CODES: Mapping[str, ReasonSpec] = {
     # Verification preflight (agent-resolvable, recorded so the attempt is visible).
     "verification_family_unsupported": ReasonSpec(422),
     "verification_route_unresolved": ReasonSpec(422),
+    "verification_service_unresolved": ReasonSpec(422),
     "verification_method_unsupported": ReasonSpec(422),
     # Another verifier still held the finding after the bounded wait (D40): retry, nothing ran.
     "verification_in_progress": ReasonSpec(409),

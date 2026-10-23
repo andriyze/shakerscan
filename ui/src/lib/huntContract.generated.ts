@@ -235,7 +235,7 @@ export const HUNT_START_CONTRACT = {
         "workflow"
       ]
     },
-    "verification_route": "candidate.verify re-executes one concrete route, taken from the first of the verification_route_keys present in the locus; identity_only_location_keys distinguish candidates but never resolve a route (otherwise 422 verification_route_unresolved, at no budget cost).",
+    "verification_route": "candidate.verify re-executes one concrete route, taken from the first of the verification_route_keys present in the locus; identity_only_location_keys distinguish candidates but never resolve a route (otherwise 422 verification_route_unresolved, at no budget cost). On a network target, which names a host and no HTTP service, the locus also names the service the candidate was found on: origin (http(s)://host[:port] on the target's host) or an absolute url; the proof runs there (otherwise 422 verification_service_unresolved, at no budget cost).",
     "verification_route_keys": [
       "route",
       "url",
@@ -379,7 +379,8 @@ export const HUNT_START_CONTRACT = {
     "verification_family_unsupported",
     "verification_in_progress",
     "verification_method_unsupported",
-    "verification_route_unresolved"
+    "verification_route_unresolved",
+    "verification_service_unresolved"
   ],
   "policy_derived_zeros": {
     "mutation_disabled": [
