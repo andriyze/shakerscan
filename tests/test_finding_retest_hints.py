@@ -278,3 +278,94 @@ def test_bulk_retest_skips_each_finding_with_the_reason_it_has_no_retest(monkeyp
     assert result["queued"] == [] and result["status"] == "blocked"
     # The batch's audit row names every reason.
     assert blocked[0]["blocked_by"] == sorted(set(reasons.values()))
+
+
+#: A Hunt's verified XSS proof, as the Hunt stores it (``hunt/deterministic_findings.py``): the
+#: page with the tested parameter and the payload's digest, no candidate to rebuild it from.
+_HUNT_XSS_EVIDENCE = {
+    "schema_version": "hunt-deterministic-finding/v1", "authoritative": True, "proof_state": "verified",
+    "finding_verdict": "verified", "canonical_capability": "xss.verify",
+    "proof_contract": "xss_browser_proof/v1", "method": "GET", "url": "https://app.fixture.invalid/search?q=",
+    "path": "/search", "param": "q", "payload_sha256": "0" * 64, "proof_producer": "browser",
+}
+HUNT_RUN = uuid.UUID(int=7)
+#: Findings a Hunt proved or reported: run the Hunt again, from the terminal. A Scan prover would
+#: judge them with another oracle (its own payload and check), whatever their tool maps to.
+HUNT_PROVEN_ROWS = [
+    _row("playwright", "Verified cross-site scripting", source="deep_hunt", hunt_run_id=HUNT_RUN,
+         url="https://app.fixture.invalid/search?q=", evidence=_HUNT_XSS_EVIDENCE),
+    _row("dalfox", "Verified cross-site scripting", source="deep_hunt", hunt_run_id=HUNT_RUN,
+         url="https://app.fixture.invalid/search?q=",
+         evidence={**_HUNT_XSS_EVIDENCE, "proof_contract": "dalfox_browser_or_alert_execution/v1"}),
+    _row("smart_authz", "Verified broken object authorization", source="deep_hunt", hunt_run_id=HUNT_RUN,
+         evidence={"schema_version": "hunt-deterministic-finding/v1", "proof_state": "verified"}),
+    _row("hunt", "Order export readable by another customer", source="deep_hunt", hunt_run_id=HUNT_RUN,
+         evidence={"schema_version": "hunt-finding-evidence/v1", "proof_state": "unverified"}),
+    # The Hunt's proof evidence alone (a row a Hunt's proof replaced), without the Hunt source.
+    _row("playwright", "Verified cross-site scripting", evidence=_HUNT_XSS_EVIDENCE),
+]
+
+
+@pytest.mark.parametrize("ai", [{}, AI_READY])
+@pytest.mark.parametrize("row", HUNT_PROVEN_ROWS, ids=["playwright", "dalfox", "authz", "agent", "evidence"])
+def test_a_finding_a_hunt_proved_is_checked_again_by_the_hunt(monkeypatch, ai, row):
+    assert _hints(monkeypatch, row, ai=ai) == {
+        "retest_supported": False, "retest_type": None, "retest_modes": [],
+        "retest_unsupported_reason": HUNT, "retest_active": False,
+    }
+    _install(monkeypatch, row, ai)
+    monkeypatch.setattr(findings_router, "get_redis", lambda: _Redis())
+
+    async def never(*_args, **_kwargs):
+        raise AssertionError("nothing is queued")
+
+    monkeypatch.setattr(findings_router, "enqueue_finding_retest", never)
+    monkeypatch.setattr(findings_router, "_validate_approval_receipt_for_action", never)
+    for override in (None, "xss"):
+        with pytest.raises(HTTPException) as refused:
+            asyncio.run(findings_router.retest_finding(
+                str(FINDING), findings_router.FindingRetestRequest(finding_type=override), mode=None))
+        assert refused.value.detail["reason"] == HUNT
+        assert refused.value.detail["message"].endswith("Run the Hunt again to check it.")
+    # The finding page shows the same words, never "run a new Scan" for a verified Hunt proof.
+    detail = asyncio.run(findings_router.get_finding(str(FINDING)))
+    assert detail["retest_unsupported_message"] == refused.value.detail["message"]
+
+
+def test_an_earlier_scanners_dalfox_finding_keeps_its_xss_retest(monkeypatch):
+    row = _row("dalfox", "Reflected XSS in q", evidence={"param": "q", "method": "GET"})
+    hints = _hints(monkeypatch, row)
+    assert (hints["retest_supported"], hints["retest_type"]) == (True, "xss")
+
+
+#: sqlmap names a URL path segment ``#1*`` and keeps the URL with the marker.
+_PATH_MARKED = _row("sqlmap", "Potential SQL injection", url="https://app.fixture.invalid/products/1*",
+                    evidence={"param": "#1*", "method": "GET"})
+
+
+def test_a_sql_injection_sqlmap_found_in_a_path_segment_offers_no_retest(monkeypatch):
+    """The retest would decline it without sending anything, so the button says why instead."""
+    _install(monkeypatch, _PATH_MARKED, {})
+    result = asyncio.run(findings_router.get_finding(str(FINDING)))
+    assert (result["retest_supported"], result["retest_unsupported_reason"]) == (False, "retest_by_rescan_only")
+    assert "path segment" in result["retest_unsupported_message"]
+    assert "#1*" in result["retest_unsupported_message"]
+    assert "authoriz" not in result["retest_unsupported_message"].lower()
+    monkeypatch.setattr(findings_router, "get_redis", lambda: _Redis())
+
+    async def never(*_args, **_kwargs):
+        raise AssertionError("nothing is queued")
+
+    monkeypatch.setattr(findings_router, "enqueue_finding_retest", never)
+    monkeypatch.setattr(findings_router, "_validate_approval_receipt_for_action", never)
+    with pytest.raises(HTTPException) as refused:
+        asyncio.run(findings_router.retest_finding(str(FINDING), None, mode=None))
+    assert refused.value.detail["reason"] == "retest_by_rescan_only"
+    assert refused.value.detail["message"] == result["retest_unsupported_message"]
+
+
+def test_a_sql_injection_sqlmap_found_in_a_query_parameter_keeps_its_retest(monkeypatch):
+    row = _row("sqlmap", "Potential SQL injection", url="https://app.fixture.invalid/product?id=1",
+               evidence={"param": "id", "method": "GET"})
+    hints = _hints(monkeypatch, row)
+    assert (hints["retest_supported"], hints["retest_type"]) == (True, "sqli")

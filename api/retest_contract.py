@@ -568,6 +568,30 @@ def _hunt_finding(finding: Mapping[str, Any]) -> bool:
     return _hunt_promotion(finding) or bool(finding.get("hunt_run_id"))
 
 
+# The evidence a Hunt stores on the findings it proves or reports (``hunt/deterministic_findings``,
+# ``hunt/authz_findings``, ``hunt/finding_actions``).
+_HUNT_EVIDENCE_SCHEMAS = ("hunt-deterministic-finding/", "hunt-finding-evidence/")
+
+
+def _hunt_proven(finding: Mapping[str, Any]) -> bool:
+    """Whether the finding is a Hunt's own: stored by a Hunt (``deep_hunt``), or carrying the
+    evidence a Hunt's proof wrote. Its proof is the Hunt's, so a Scan prover, with its own payload
+    and check, would judge it by another oracle: it is checked again by running the Hunt again."""
+    evidence = parse_json_field(finding.get("evidence"))
+    return (
+        str(finding.get("source") or "").strip().lower() == "deep_hunt"
+        or str(evidence.get("schema_version") or "").startswith(_HUNT_EVIDENCE_SCHEMAS)
+    )
+
+
+def _sqlmap_path_marker(finding: Mapping[str, Any]) -> str | None:
+    """The marker (``#1*``) of a point sqlmap found in a URL path segment, or None. A retest sends
+    its input only in query and form parameters, so it would decline such a point unsent."""
+    evidence = parse_json_field(finding.get("evidence"))
+    param = str(finding.get("param") or evidence.get("param") or evidence.get("parameter") or "").strip()
+    return param if _SQLMAP_URI_MARKER.fullmatch(param) else None
+
+
 def retest_refusal_reason(finding: Mapping[str, Any], retest_type: str | None) -> str | None:
     """Why a finding is not retested, or None when its retest type has a prover: Model Intake
     findings are re-checked by their own scan, a Hunt finding of a family no prover covers by
@@ -575,8 +599,12 @@ def retest_refusal_reason(finding: Mapping[str, Any], retest_type: str | None) -
     finding with no retest type at all (an earlier Hunt's ``autonomous_agent`` row) is a Hunt
     finding too; a Scan finding a Hunt only linked keeps its own check's reason. A proven Scan
     finding whose request cannot be sent again as its proof sent it (``proof_retest``) is checked
-    again by a new Scan, whatever type the request names."""
-    if proof_retest_request(finding)[1] is not None:
+    again by a new Scan, whatever type the request names; so is a point sqlmap found in a URL path
+    segment. A finding a Hunt proved or reported (``_hunt_proven``) is checked again by running
+    the Hunt again, whatever prover its tool maps to."""
+    if _hunt_proven(finding):
+        return RETEST_REASON_HUNT
+    if proof_retest_request(finding)[1] is not None or _sqlmap_path_marker(finding):
         return RETEST_REASON_RESCAN_ONLY
     if retest_type_has_prover(retest_type):
         return None
@@ -589,9 +617,23 @@ def retest_refusal_reason(finding: Mapping[str, Any], retest_type: str | None) -
 
 
 def retest_refusal_message(finding: Mapping[str, Any]) -> str | None:
-    """Why a proven Scan finding's request cannot be sent again, in words, or None."""
+    """Why a finding is not retested here, in words, or None: a Hunt's own finding, a proven Scan
+    finding's gap, or a point sqlmap found in a URL path segment."""
+    if _hunt_proven(finding):
+        return (
+            "This finding is a Hunt's own, and a retest here would judge it by a different check. "
+            "Run the Hunt again to check it."
+        )
     gap = proof_retest_request(finding)[1]
-    return PROOF_RETEST_GAPS[gap] if gap else None
+    if gap:
+        return PROOF_RETEST_GAPS[gap]
+    marker = _sqlmap_path_marker(finding)
+    if marker:
+        return (
+            f"The injection point is a URL path segment (sqlmap marker {marker}), and a retest sends "
+            "its input only in query and form parameters. Run a new Scan to check it again."
+        )
+    return None
 
 
 def retest_sends_active_requests(retest_type: str | None, *, ai_tier_available: bool) -> bool:

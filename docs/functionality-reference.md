@@ -1516,9 +1516,11 @@ its title chooses only for a finding with no tool or with one of the earlier sca
 sent attack input, by whole words. A finding with no prover of its own, or only the AI tier
 (`generic_http`, `2fa_bypass`, which can never conclude), has no retest and says why in
 `retest_unsupported_reason`: `retest_needs_template_replay` (a Nuclei template finding),
-`retest_exposure_by_rescan` (an exposure-probe finding), `retest_by_hunt_rerun` (a Hunt finding of
-a family no prover covers: run the Hunt again) or `retest_by_rescan_only` (headers, cookies, CORS,
-TLS, DNS, takeover, GraphQL, authorization and earlier posture findings: run a new Scan). Finding
+`retest_exposure_by_rescan` (an exposure-probe finding), `retest_by_hunt_rerun` (a Hunt's own
+finding, its verified XSS and authorization proofs included, which a Scan prover would judge by a
+different check, or a Hunt finding of a family no prover covers: run the Hunt again) or
+`retest_by_rescan_only` (headers, cookies, CORS, TLS, DNS, takeover, GraphQL, authorization and
+earlier posture findings, and a point sqlmap found in a URL path segment: run a new Scan). Finding
 detail, `POST /findings/{id}/retest`, bulk retest and the automatic retest after a Scan apply the
 same rule. A verified SQL injection, NoSQL injection or browser-executed XSS finding is retested by
 the check that proved it, with the request it proved: the route on the site the proof recorded
