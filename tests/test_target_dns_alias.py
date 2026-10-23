@@ -42,8 +42,7 @@ class AliasConn(_Conn):
             count = 0
             for row in self.approvals:
                 context = json.loads(row["action_context"])
-                if (row["status"] == "active" and context.get("derived_for") == args[3]
-                        and context.get("target_id") == args[0]
+                if (row["status"] == "active" and context.get("derived_for") == args[2]
                         and context.get("derived_from_approval_receipt_id") not in active):
                     row["status"] = "revoked"
                     count += 1

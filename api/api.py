@@ -11069,9 +11069,6 @@ async def _submit_scan(
     approval_receipt_id = (
         request.approval_receipt_id or execution_options.approval_receipt_id
     )
-    # Whether the caller named a receipt; without one, admission uses the target's standing
-    # authorization (and records a credential-tier receipt for a credentialed scan, below).
-    caller_supplied_receipt = bool(approval_receipt_id)
     normalized_target, dns_fallback, alias_target_id, approval_receipt_id = (
         await target_dns_alias.prepare_scan_dns_alias(
             db_pool, normalized_target,
@@ -11343,17 +11340,16 @@ async def _submit_scan(
                 require_target_binding=durable_approval_required,
                 require_expiry=durable_approval_required,
             )
-            if (
-                approval_context
-                and not caller_supplied_receipt
-                and (credential_refs or browser_login_refs)
-            ):
-                # Admitted on the standing authorization: record a credential-tier receipt for
-                # this credentialed scan, as New Scan does, instead of binding it to the active-tier
-                # standing receipt. Who may start it is unchanged (the standing authorization was
-                # just validated); an inherited or otherwise non-derivable one stays bound as before.
+            if approval_context and (credential_refs or browser_login_refs):
+                # Admitted on the standing authorization, named or not: record a credential-tier
+                # receipt for this credentialed scan, as New Scan does, instead of binding it to
+                # the active-tier standing receipt, so the tier on record does not depend on how
+                # the client spelled the request. Who may start it is unchanged (the standing
+                # authorization was just validated); an inherited, bounded or otherwise
+                # non-derivable receipt derives nothing and stays bound as before.
                 derived_receipt_id = await target_authorization.derive_credential_scan_receipt(
                     conn, target_id=target_id, standing_receipt_id=approval_receipt_id,
+                    scan_id=scan_id,
                 )
                 if derived_receipt_id:
                     approval_context = await _validate_approval_receipt_for_action(

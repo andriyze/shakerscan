@@ -68,6 +68,18 @@ class CredentialResolutionAuthority:
             )
 
 
+async def _derived_receipt_outlived_its_source(conn: Any, item: Any, target: TargetBinding) -> bool:
+    try:
+        from .. import target_authorization
+    except ImportError:  # runtime is a top-level package
+        import target_authorization
+    if target_authorization.derived_credential_scan_context(item) is None:
+        return False
+    return not await target_authorization.derived_credential_scan_source_is_current(
+        conn, item, expected_target_id=target.target_id or None,
+    )
+
+
 async def validate_worker_credential_authority(
     conn: Any,
     *,
@@ -91,7 +103,7 @@ async def validate_worker_credential_authority(
     row = await conn.fetchrow(
         """SELECT a.scope_receipt_id, a.risk_tier, a.confirmations, a.approved_by,
                   a.denial_reason, a.expires_at, a.action_name, a.status, a.revoked_at,
-                  s.target_id, s.verdict
+                  a.action_context, s.target_id, s.verdict
            FROM approval_receipts a
            JOIN scope_receipts s ON s.id=a.scope_receipt_id
            WHERE a.id=$1""",
@@ -162,6 +174,12 @@ async def validate_worker_credential_authority(
             approval_receipt_id=approval_uuid)
         if not inherited:
             raise CredentialResolutionError("credential approval target changed")
+    if await _derived_receipt_outlived_its_source(conn, item, target):
+        # A credential-tier receipt derived for one Scan from the target's standing
+        # authorization ends with that authorization, whether or not a revocation reached it.
+        raise CredentialResolutionError(
+            "credential approval receipt's source authorization no longer stands"
+        )
     receipt_action = str(item.get("action_name") or "").strip()
     expected_action = str(action_name or "").strip()
     if not expected_action:
