@@ -20,9 +20,10 @@ import agent_tools
 from runtime.models import ScanPolicy
 from scan.action_plan import ScanActionPlan
 from scan.auth_endpoint_probe import (
-    AUTH_ENDPOINT_MIN_ATTEMPT_REQUESTS, AUTH_ENDPOINT_PACE_UNFUNDED, AUTH_ENDPOINT_PROBE_LIMITED,
-    AUTH_ENDPOINT_PROBE_REQUESTS, AUTH_ENDPOINT_SECONDS_PER_REQUEST, auth_endpoint_hold,
-    normalize_path, probe_set_requests, routing_digests, sign_in_endpoint_for, sign_in_endpoints,
+    AUTH_ENDPOINT_MIN_ATTEMPT_REQUESTS, AUTH_ENDPOINT_PACE_UNFUNDED, AUTH_ENDPOINT_PROBE_HEADROOM,
+    AUTH_ENDPOINT_PROBE_LIMITED, AUTH_ENDPOINT_PROBE_REQUESTS, AUTH_ENDPOINT_SECONDS_PER_REQUEST,
+    auth_endpoint_hold, normalize_path, probe_set_requests, routing_digests, sign_in_endpoint_for,
+    sign_in_endpoints,
 )
 from scan.sqli_concurrency import CANDIDATE_CONCURRENCY_ARG
 from scan.sqli_stages import SQLI_TECHNIQUE_NEGATIVE_COST
@@ -43,10 +44,13 @@ def _for(url, endpoints, method="POST"):
 
 # --- which requests are the sign-in endpoint ----------------------------------------------------
 
-def test_the_probe_sets_hold_the_whole_level_two_ladder_and_a_bounded_xss_set():
-    # sqlmap's measured cost to a negative verdict at level 2 / risk 2, per tested field.
-    assert AUTH_ENDPOINT_PROBE_REQUESTS["sqli.verify_batch"] == sum(SQLI_TECHNIQUE_NEGATIVE_COST.values()) == 473
-    assert probe_set_requests("sqli.verify_batch", 2) == 946
+def test_the_probe_sets_hold_twice_the_level_two_ladder_and_a_bounded_xss_set():
+    # Twice sqlmap's measured cost to a negative verdict at level 2 / risk 2, per tested field: a
+    # real sign-in costs more per unit than the plain fixture the ladder was measured on.
+    assert AUTH_ENDPOINT_PROBE_HEADROOM == 2
+    assert sum(SQLI_TECHNIQUE_NEGATIVE_COST.values()) == 473
+    assert AUTH_ENDPOINT_PROBE_REQUESTS["sqli.verify_batch"] == 2 * 473 == 946
+    assert probe_set_requests("sqli.verify_batch", 2) == 1_892
     assert probe_set_requests("xss.verify_batch", 2) == 128
     assert probe_set_requests("xss.verify_batch", 9) == probe_set_requests("xss.verify_batch", 4)
 
@@ -165,8 +169,8 @@ def test_an_attempt_holds_what_the_probe_set_has_left_at_the_lockout_safe_pace()
     assert AUTH_ENDPOINT_SECONDS_PER_REQUEST == 3
     hold = auth_endpoint_hold(body, capability_name="sqli.verify_batch", received=0, parameters=2)
     assert hold == {"http_requests": 140, "state_changing_requests": 140, "tool_wall_seconds": 420}
-    late = auth_endpoint_hold(body, capability_name="sqli.verify_batch", received=900, parameters=2)
-    assert late["http_requests"] == 46
+    late = auth_endpoint_hold(body, capability_name="sqli.verify_batch", received=1_850, parameters=2)
+    assert late["http_requests"] == 42
     # Across parallel children the pace is divided among them.
     split = auth_endpoint_hold(body, capability_name="sqli.verify_batch", received=0, parameters=2, children=2)
     assert split["http_requests"] == 70
@@ -394,21 +398,72 @@ def test_one_probe_set_is_shared_by_every_candidate_on_the_endpoint(capability, 
 def test_continuation_rounds_draw_from_the_same_probe_set_and_stop_when_it_is_spent():
     capability, tool, parser = SQLI
     receipts, rounds, _record = _slice(capability, tool=tool, parser=parser, sent=10_000,
-                                       options={"login_url": LOGIN}, rounds=5, routes=DEFAULT_ROUTES[:1],
+                                       options={"login_url": LOGIN}, rounds=8, routes=DEFAULT_ROUTES[:1],
                                        budget={"http_requests": 6_000, "state_changing_requests": 6_000,
                                                "tool_wall_seconds": 900})
     sent = [sum(call["reserved"]["http_requests"] for call in _sent_to(calls, LOGIN)) for calls in rounds]
-    # The fake spends each unit's whole hold: 900 of 946 after three rounds, and what is left
-    # cannot conclude the next unit (boolean over one field, 87), so the candidate is closed.
-    assert sent == [300, 300, 300, 0, 0]
+    # The fake spends each unit's whole hold: 1,800 of 1,892 after six rounds (union, boolean and
+    # error on both fields), and what is left cannot conclude the next unit (time-based over one
+    # field, 189), so the candidate is closed.
+    assert sent == [300] * 6 + [0, 0]
     assert sum(sent) <= probe_set_requests(capability, 2)
-    for receipt in receipts[3:]:
+    for receipt in receipts[6:]:
         (closed,) = [item for item in receipt.observations if item.get("kind") == "candidate_attempt"]
         assert closed["verdict"] == "inconclusive"
         assert closed["inconclusive_reason"] == AUTH_ENDPOINT_PROBE_LIMITED
-        assert closed["sign_in_endpoint_received"] == 900
+        assert closed["sign_in_endpoint_received"] == 1_800
         assert "resume_wall_seconds" not in closed
         assert receipt.status == "success"
+
+
+def _overspending(overspend):
+    """A fake sqlmap whose every unit settles negative after ``overspend`` times its measured cost."""
+
+    def factory(tool, parser, *, sent, record):
+        calls: list[dict] = []
+
+        async def process_runner(payload, *, heartbeat):
+            reserved = dict(payload["_reserved_budget"])
+            options = dict(payload["scanner_options"])
+            calls.append({"target": payload["execution_target"], "reserved": reserved, "options": options})
+            await asyncio.sleep(0)
+            cost = SQLI_TECHNIQUE_NEGATIVE_COST[str(options["technique"])]
+            count = min(math.ceil(cost * overspend), int(reserved["http_requests"]))
+            return {
+                "status": "success",
+                "elapsed_seconds": max(1, min(int(reserved["tool_wall_seconds"]), math.ceil(count * 3.45))),
+                "typed_output": {"parser": parser, "records": [], "errors": []},
+                "settlement": {"mode": "exact", "actual": count, "observed_minimum": count},
+                "process_enforcement": _enforcement(tool, parser, {
+                    name: reserved[name] for name in ("http_requests", "tool_wall_seconds")
+                }),
+            }
+
+        process_runner.enforces_request_gate = True
+        return process_runner, calls
+
+    return factory
+
+
+def test_a_sign_in_form_whose_units_cost_more_than_measured_still_runs_every_unit():
+    """Real sign-in pages cost more per unit than the plain fixture the ladder was measured on.
+
+    A two-field form whose second field is injectable only by time-based blind: with every unit
+    10% over its measured cost, the probe set (2x the measured ladder) still funds T on it.
+    """
+    capability, tool, parser = SQLI
+    receipts, (calls,), _record = _slice(capability, tool=tool, parser=parser, sent=0,
+                                         options={"login_url": LOGIN}, routes=DEFAULT_ROUTES[:1],
+                                         runner=_overspending(1.1))
+    units = [(call["options"]["technique"], tuple(call["options"].get("injection_fields") or ()))
+             for call in _sign_in_calls(calls)]
+    assert ("T", ("password",)) in units and ("T", ("username",)) in units, units
+    assert len(units) == 8
+    (head,) = _heads(receipts[0])
+    assert head.get("inconclusive_reason") != AUTH_ENDPOINT_PROBE_LIMITED
+    assert head["sign_in_endpoint_received"] == 2 * sum(
+        math.ceil(cost * 1.1) for cost in SQLI_TECHNIQUE_NEGATIVE_COST.values()
+    )
 
 
 def _answering_in(latency, *, sent):

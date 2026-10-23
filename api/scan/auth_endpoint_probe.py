@@ -34,10 +34,15 @@ URL's query, not a body). What changes:
 * one probe set per endpoint and verifier across the Scan: every candidate on the endpoint (a
   declared request, the crawled form with its hidden fields, a JSON variant), every slice and
   every continuation round draws from it (a parallel child holds its own). Per tested field, at
-  most four: sqlmap's whole level-2 ladder, 473 requests, its measured cost to a negative verdict
-  (union 53, boolean 87, error 144, time 189: ``sqli_stages.SQLI_TECHNIQUE_NEGATIVE_COST``), and
-  64 for Dalfox, which reported a verified reflection within 18 requests on a reflecting
-  two-field sign-in form in the scanner image;
+  most four, sized from measured runs with ``AUTH_ENDPOINT_PROBE_HEADROOM`` (2x) headroom:
+  sqlmap 946 requests, twice its level-2 ladder's measured cost to a negative verdict (union 53,
+  boolean 87, error 144, time 189: 473, ``sqli_stages.SQLI_TECHNIQUE_NEGATIVE_COST``). A plain
+  two-field fixture in the scanner image cost exactly that ladder (946 for both fields), and a
+  real sign-in costs more per unit (a JSON sign-in's union unit sent 316 requests on one field
+  against the 53 measured), so a set of one ladder would leave the last technique of the last
+  field (time-based blind, the one that finds a blind sign-in injection) unfunded after a slight
+  overspend anywhere before it. Dalfox gets 64 per field: it reported a verified reflection
+  within 18 requests (12 in a later run) on a reflecting two-field sign-in form;
 * verdicts: Dalfox stops at its first verified finding, and a Dalfox attempt that verified nothing
   is inconclusive, never negative, since it sent a bounded part of its payloads; sqlmap concludes
   as anywhere else inside the probe set, and a candidate whose probe set is spent before its
@@ -73,9 +78,11 @@ AUTH_ENDPOINT_PACE_UNFUNDED = "auth_endpoint_pace_unfunded"
 AUTH_ENDPOINT_PROBE_PROFILE = "auth_endpoint"
 AUTH_ENDPOINT_MAX_REQUESTS_PER_MINUTE = 20
 AUTH_ENDPOINT_SECONDS_PER_REQUEST = 60 // AUTH_ENDPOINT_MAX_REQUESTS_PER_MINUTE
+#: The probe sets hold at least this many times what a verdict was measured to cost.
+AUTH_ENDPOINT_PROBE_HEADROOM = 2
 #: Requests one tested field of the sign-in endpoint may receive from each verifier, per Scan.
 AUTH_ENDPOINT_PROBE_REQUESTS: Mapping[str, int] = {
-    "sqli.verify_batch": sum(SQLI_TECHNIQUE_NEGATIVE_COST.values()),
+    "sqli.verify_batch": AUTH_ENDPOINT_PROBE_HEADROOM * sum(SQLI_TECHNIQUE_NEGATIVE_COST.values()),
     "xss.verify_batch": 64,
 }
 #: Below this an attempt cannot run even a technique's baseline and first payloads.
@@ -366,7 +373,7 @@ def auth_endpoint_hold(
 
 __all__ = [
     "AUTH_ACTION_IDS", "AUTH_ENDPOINT_MAX_PARAMETERS", "AUTH_ENDPOINT_MAX_REQUESTS_PER_MINUTE",
-    "AUTH_ENDPOINT_MIN_ATTEMPT_REQUESTS", "AUTH_ENDPOINT_PACE_UNFUNDED",
+    "AUTH_ENDPOINT_MIN_ATTEMPT_REQUESTS", "AUTH_ENDPOINT_PACE_UNFUNDED", "AUTH_ENDPOINT_PROBE_HEADROOM",
     "AUTH_ENDPOINT_PROBE_LIMITED", "AUTH_ENDPOINT_PROBE_PROFILE", "AUTH_ENDPOINT_PROBE_REQUESTS",
     "AUTH_ENDPOINT_SECONDS_PER_REQUEST", "SIGN_IN_METHODS", "SignInEndpoint", "auth_endpoint_hold",
     "normalize_path", "pace_seconds", "pace_wall_seconds", "parallel_children",
