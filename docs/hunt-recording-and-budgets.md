@@ -71,7 +71,10 @@ the target's metadata opt-out skips it. The outcome is reported in `final_debrie
 - Each target has one rolling retained-checks proposal. A later finish updates it in place,
   keeps one copy of each step and the newest 16, leaves out steps a saved action already holds or
   that the operator rejected in the latest rejected retained proposal, and rebases it onto the
-  current saved actions. Accepting it saves one saved action as an operator write.
+  current saved actions. Accepting it saves one saved action as an operator write. Because later
+  finishes change it in place, an accept must name the `methodology_sha256` of the text the
+  person reviewed (`shakerscan knowledge review` sends it); without it the accept is refused with
+  `proposal_review_required`, and a digest of older text with `proposal_text_mismatch`.
 - It is not counted against the pending proposals Hunts or operators may file, so a planner keeps
   its whole proposal allowance.
 - A finish reads the Hunt's newest 2,000 completed actions in the order they ran.

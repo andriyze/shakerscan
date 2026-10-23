@@ -182,6 +182,8 @@ def test_finishes_share_one_rolling_proposal_outside_the_planner_quota(monkeypat
                     {'method': 'GET', 'path': '/health', 'origin': 'https://other.fixture.test'},
                 ])
                 assert outcome['status'] == 'proposed' and outcome['step_count'] == 2, outcome
+                first_text_sha = await conn.fetchval(
+                    'SELECT methodology_sha256 FROM target_instruction_proposals WHERE id=$1', UUID(outcome['proposal_id']))
                 second, again = await _finished_hunt(client, conn, target, [
                     {'capability': 'web.crawl', 'origin': origin},
                     {'capability': 'javascript.analyze', 'path': '/static/app.js'},
@@ -198,6 +200,14 @@ def test_finishes_share_one_rolling_proposal_outside_the_planner_quota(monkeypat
                 assert [step['capability'] for step in body['steps']] == ['http.request', 'web.crawl', 'javascript.analyze']
                 text = json.dumps(body)
                 assert 'redacted' not in text and 'letmein' not in text and 'other.fixture' not in text
+                # It changes in place, so accepting it must name the reviewed text.
+                blind = await client.post(f"/targets/{target}/instruction-proposals/{outcome['proposal_id']}/accept",
+                                          json={})
+                assert blind.status_code == 422 and 'proposal_review_required' in blind.text, blind.text
+                stale_review = await client.post(
+                    f"/targets/{target}/instruction-proposals/{outcome['proposal_id']}/accept",
+                    json={'methodology_sha256': first_text_sha})
+                assert stale_review.status_code == 409 and 'proposal_text_mismatch' in stale_review.text
                 # A rejected step is not proposed again; a new one starts the next rolling proposal.
                 rejected = await client.post(f"/targets/{target}/instruction-proposals/{outcome['proposal_id']}/reject",
                                              json={'note': 'not these'})

@@ -488,6 +488,12 @@ async def accept_proposal(conn: Any, target_id: Any, proposal_id: str, *, actor:
                           note: str | None = None, reviewed_sha256: str | None = None) -> dict[str, Any]:
     async with conn.transaction():
         row, proposal = await _locked_proposal(conn, target_id, proposal_id)
+        if reviewed_sha256 is None and proposal['proposed_by'] == RETAINED_PROPOSER:
+            # A later finish updates this proposal in place, so accepting it names the text reviewed.
+            raise HTTPException(422, {'error': 'proposal_review_required', 'message': (
+                'Accept the retained-checks proposal with the methodology_sha256 of the text you '
+                'reviewed: a later finish may have added steps to it since (shakerscan knowledge '
+                'review sends it).')})
         if reviewed_sha256 is not None and reviewed_sha256 != proposal['methodology_sha256']:
             raise HTTPException(409, {'error': 'proposal_text_mismatch',
                                       'message': 'This proposal is not the text that was reviewed.'})
