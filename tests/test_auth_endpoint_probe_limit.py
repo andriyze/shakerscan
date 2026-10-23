@@ -430,8 +430,9 @@ def test_continuation_rounds_draw_from_the_same_probe_set_and_stop_when_it_is_sp
         assert receipt.status == "success"
 
 
-def _overspending(overspend):
-    """A fake sqlmap whose every unit settles negative after ``overspend`` times its measured cost."""
+def _overspending(overspend, *, content_types=None):
+    """A fake sqlmap whose every unit settles negative after ``overspend`` times its measured cost
+    (``content_types`` names another multiple for a body of that content type)."""
 
     def factory(tool, parser, *, sent, record):
         calls: list[dict] = []
@@ -443,7 +444,8 @@ def _overspending(overspend):
                           "job": payload["job_id"]})
             await asyncio.sleep(0)
             cost = SQLI_TECHNIQUE_NEGATIVE_COST[str(options["technique"])]
-            count = min(math.ceil(cost * overspend), int(reserved["http_requests"]))
+            factor = (content_types or {}).get(options.get("content_type"), overspend)
+            count = min(math.ceil(cost * factor), int(reserved["http_requests"]))
             return {
                 "status": "success",
                 "elapsed_seconds": max(1, min(int(reserved["tool_wall_seconds"]), math.ceil(count * 3.45))),
@@ -561,6 +563,29 @@ def test_variants_of_one_form_keep_their_own_units_without_a_sign_in_profile():
     assert len(ran) == 3, sorted(ran)
     for (names, _content_type), done in ran.items():
         assert done == {(technique, field) for technique in "UBET" for field in names}, (names, done)
+
+
+def test_a_variant_whose_sibling_concluded_still_shares_the_next_round_with_the_others():
+    """Round 0 concludes the JSON variant (its units settle in a few requests) and leaves both form
+    variants unfinished. Round 1 carries the JSON one and splits its hold between the two forms: the
+    first form is not handed the whole round because the one after it has the concluded variant's
+    candidate id."""
+    capability, tool, parser = SQLI
+    budgets = {
+        0: {"http_requests": 6_000, "state_changing_requests": 6_000, "tool_wall_seconds": 3_000},
+        1: {"http_requests": 6_000, "state_changing_requests": 6_000, "tool_wall_seconds": 900},
+    }
+    receipts, (_first, later), _record = _slice(
+        capability, tool=tool, parser=parser, sent=0, options={}, routes=SIGN_IN_ROUTES[:3], rounds=2,
+        budgets=budgets, backend_type=_StoredOnce,
+        runner=_overspending(1.0, content_types={"application/json": 0.02}),
+    )
+    carried = [item for item in receipts[1].observations
+               if item.get("kind") == "candidate_attempt" and item.get("carried_from")]
+    assert len(carried) == 1, carried
+    assert {len(call["options"]["body_field_names"]) for call in later} == {2, 4}, later
+    assert later[0]["reserved"]["http_requests"] <= 6_000 // 2
+    assert later[0]["reserved"]["tool_wall_seconds"] <= 900 // 2
 
 
 def test_the_first_entry_of_a_candidate_id_keeps_the_attempt_id_earlier_builds_checkpointed():
