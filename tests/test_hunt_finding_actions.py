@@ -220,7 +220,7 @@ def test_network_finding_accepts_an_evidenced_same_asset_service(path):
 def test_relative_network_finding_requires_an_unambiguous_evidenced_service():
     with pytest.raises(HuntFindingActionError, match="absolute URL"):
         _finding_url("host://tv.test", "/status", ["http://tv.test:8081/", "https://tv.test:8443/"])
-    assert _finding_url("https://tv.test", "https://tv.test:443/status") == "https://tv.test:443/status"
+    assert _finding_url("https://tv.test", "https://tv.test:443/status") == "https://tv.test/status"
 
 
 @pytest.mark.parametrize("path", ["http://other.test:8081/a", "http://tv.test:8082/a", "http://user:secret@tv.test:8081/a", "//other.test/a"])
@@ -333,3 +333,30 @@ def test_finding_capabilities_cannot_accept_verification_or_proof_fields():
             "verified": True,
             "proof_state": "verified",
         })
+
+
+@pytest.mark.parametrize("target,observed,path,expected", [
+    ("https://example.test", (), "HTTPS://EXAMPLE.TEST/x", "https://example.test/x"),
+    ("https://example.test", (), "https://example.test:443/x", "https://example.test/x"),
+    ("https://Example.Test:443", (), "/x", "https://example.test/x"),
+    ("http://example.test", (), "http://example.test.:80/x?a=1", "http://example.test/x?a=1"),
+    ("2001:db8::5", ("http://[2001:db8::5]:8080/x",), "http://[2001:0DB8:0::5]:8080/x", "http://[2001:db8::5]:8080/x"),
+    ("host://tv.test", ("https://TV.test:8443/a",), "/Admin/Page", "https://tv.test:8443/Admin/Page"),
+])
+def test_a_finding_location_is_stored_in_one_canonical_spelling(target, observed, path, expected):
+    """Scheme and host in lower case, a default port left out, the path as written."""
+    assert _finding_url(target, path, observed) == expected
+
+
+@pytest.mark.parametrize("path", ["https://example.test:0/x", "http://example.test:0/x", "https://example.test:65536/x"])
+def test_an_invalid_port_is_refused(path):
+    with pytest.raises(HuntFindingActionError):
+        _finding_url("https://example.test", path)
+
+
+def test_a_finding_spelled_differently_is_the_same_record():
+    connection = _Connection(target_url="https://example.test")
+    first = _create(connection, evidence_action_id=uuid.uuid4(), path="https://example.test/admin")
+    for spelling in ("HTTPS://EXAMPLE.TEST/admin", "https://example.test:443/admin", "/admin"):
+        again = _create(connection, evidence_action_id=uuid.uuid4(), path=spelling)
+        assert again["created"] is False and again["finding_id"] == first["finding_id"], spelling

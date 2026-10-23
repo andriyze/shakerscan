@@ -74,7 +74,12 @@ def _origin(url: Any) -> tuple[str, str | None, int | None]:
     host = _host_key(parsed.hostname)
     if scheme not in _HTTP_PORTS or not host:
         raise ValueError("an origin is an http(s) URL with a host")
-    return scheme, host, parsed.port or _HTTP_PORTS[scheme]
+    port = parsed.port  # ValueError above 65535
+    if port is None:
+        return scheme, host, _HTTP_PORTS[scheme]
+    if port <= 0:
+        raise ValueError("an origin's port is between 1 and 65535")
+    return scheme, host, port
 
 
 def _origin_root(origin: tuple[str, str | None, int | None]) -> str:
@@ -168,9 +173,10 @@ def _finding_url(target_url: str, path: Any, observed_urls: Sequence[str] = (),
         raise HuntFindingActionError("Finding path must remain on the Hunt target origin") from exc
     if not permitted:
         raise HuntFindingActionError("Finding path must remain on the Hunt target origin")
-    return urllib.parse.urlunsplit(
-        (resolved.scheme, resolved.netloc, resolved.path or "/", resolved.query, "")
-    )
+    # One spelling per location, so a repeated finding has the same fingerprint: the canonical
+    # origin (lower-case scheme and host, a default port left out) and the path as written.
+    return _origin_root(_origin(resolved_url))[:-1] + (resolved.path or "/") + (
+        f"?{resolved.query}" if resolved.query else "")
 
 
 async def _require_evidence_actions(
