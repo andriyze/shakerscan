@@ -2359,18 +2359,9 @@ async def asm_test(target_id: str, request: AsmTestRequest = None):
         target = await conn.fetchrow("SELECT url, scan_options FROM targets WHERE id = $1", uuid.UUID(target_id))
         if not target:
             raise HTTPException(status_code=404, detail="Target not found")
-        _active_ids = await _asm_active_scan_ids(conn, target_id)
-        if _active_ids:
-            raise HTTPException(
-                status_code=409,
-                detail=(
-                    f"Target already has an active scan ({_active_ids[0]}); wait for it to "
-                    "finish before queueing another ASM action. It may be a hidden "
-                    "ASM batch or recon scan — open it via the 'view scan' link on "
-                    "the coverage advisor, the 'ASM activity' panel on this page, or enable "
-                    "'Show ASM/internal scans' on the Scans page."
-                ),
-            )
+        _active_scans = await _asm_active_scans(conn, target_id)
+        if _active_scans:
+            raise HTTPException(status_code=409, detail=_asm_active_scan_conflict(_active_scans))
         coverage = await asm_inventory.coverage_summary(conn, target_id)
         if coverage["total"] == 0:
             raise HTTPException(status_code=400, detail="No endpoints in inventory yet; run a scan or coverage recon first")
@@ -2442,18 +2433,9 @@ async def asm_recon(target_id: str, request: AsmReconRequest = None):
         target = await conn.fetchrow("SELECT url, scan_options FROM targets WHERE id = $1", uuid.UUID(target_id))
         if not target:
             raise HTTPException(status_code=404, detail="Target not found")
-        _active_ids = await _asm_active_scan_ids(conn, target_id)
-        if _active_ids:
-            raise HTTPException(
-                status_code=409,
-                detail=(
-                    f"Target already has an active scan ({_active_ids[0]}); wait for it to "
-                    "finish before queueing another ASM action. It may be a hidden "
-                    "ASM batch or recon scan — open it via the 'view scan' link on "
-                    "the coverage advisor, the 'ASM activity' panel on this page, or enable "
-                    "'Show ASM/internal scans' on the Scans page."
-                ),
-            )
+        _active_scans = await _asm_active_scans(conn, target_id)
+        if _active_scans:
+            raise HTTPException(status_code=409, detail=_asm_active_scan_conflict(_active_scans))
         base_opts = _clear_asm_approval_context(
             _decode_target_scan_options(target["scan_options"])
         )
@@ -4227,6 +4209,22 @@ _ASM_SCAN_ROLES = frozenset({asm_inventory.ASM_BATCH_ROLE, asm_inventory.ASM_REC
 def _asm_active_scan_kind(scan_role: Any) -> str:
     """``asm`` for an ASM batch/recon scan (hidden from the Scans list), else ``scan``."""
     return "asm" if str(scan_role or "") in _ASM_SCAN_ROLES else "scan"
+
+
+def _asm_active_scan_conflict(active_scans: list[dict[str, Any]]) -> str:
+    """Why an ASM action cannot be queued now, naming the blocking scan by its kind."""
+    blocker = active_scans[0]
+    message = (
+        f"Target already has an active scan ({blocker['id']}); wait for it to finish before "
+        "queueing another ASM action."
+    )
+    if _asm_active_scan_kind(blocker.get("scan_role")) == "asm":
+        message += (
+            " It is an ASM batch or recon scan, hidden from the Scans list: open it via the "
+            "'view scan' link on the coverage advisor, the 'ASM activity' panel on this page, "
+            "or enable 'Show ASM/internal scans' on the Scans page."
+        )
+    return message
 
 
 async def _asm_scheduler_state(

@@ -95,3 +95,30 @@ def test_the_scheduler_state_has_no_kind_without_an_active_scan(template_databas
     state = asyncio.run(run())
     assert state["active_scan_ids"] == [] and state["active_scan_kind"] is None
     assert "active_scan_kind" not in state["decision"]
+
+
+@pytest.mark.parametrize("route,role,hidden", [
+    ("asm_test", "standalone", False), ("asm_recon", "standalone", False),
+    ("asm_test", "asm_batch", True), ("asm_recon", "asm_recon", True),
+])
+def test_the_active_scan_conflict_calls_only_an_asm_scan_hidden(template_database, monkeypatch, route, role, hidden):
+    from fastapi import HTTPException
+
+    from targets import router as targets_router
+
+    async def run():
+        async with scan_database(template_database) as pool:
+            monkeypatch.setattr(targets_router, "_pool", lambda: pool)
+            monkeypatch.setattr(targets_router, "get_redis", lambda *a, **k: object())
+            async with pool.acquire() as conn:
+                target_id = await _target(conn)
+                blocker = await _scan(conn, target_id, role, started=T0)
+            with pytest.raises(HTTPException) as refused:
+                await getattr(targets_router, route)(target_id)
+            return blocker, refused.value
+
+    blocker, refused = asyncio.run(run())
+    assert refused.status_code == 409
+    assert blocker in refused.detail and "already has an active scan" in refused.detail
+    assert ("hidden" in refused.detail) is hidden
+    assert ("ASM batch or recon scan" in refused.detail) is hidden
