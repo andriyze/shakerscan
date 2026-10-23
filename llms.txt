@@ -44,7 +44,7 @@ Source-of-truth and safety rules:
 - [Acceptable use policy](https://shakerscan.com/acceptable-use): Authorized targets, prohibited activity, unsafe techniques, and enforcement.
 - [Security policy](https://shakerscan.com/security-policy): Vulnerability reporting and security-testing boundaries for ShakerScan-owned surfaces.
 - [Vulnerability disclosure](https://shakerscan.com/vulnerability-disclosure): Controlling research authorization and reporting policy.
-- [Apache 2.0 license](https://raw.githubusercontent.com/andriyze/shakerscan/main/LICENSE): Open-source license terms.
+- [GNU AGPL-3.0 license](https://raw.githubusercontent.com/andriyze/shakerscan/main/LICENSE): Open-source license terms.
 
 ## Optional
 
