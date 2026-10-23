@@ -390,11 +390,14 @@ so it resolves exactly as the submission will.
 Permission and work are reported separately: the scan page's Testing tile names the active
 families that ran, or warns that active testing was allowed but no active family was selected.
 Without state-changing HTTP, `nuclei_active` runs only templates whose every request is a GET or
-HEAD, and never a template that tries logins: one tagged `default-login`, or one that puts a
-payload named like a username or password into a header or body, needs that permission even when
-it sends only GETs, because a login attempt can lock the account it tries. A verify Scan lists such
-a check as `credential_level_needs_state_changing_http`, and the step's receipt counts the
-selection (`template_selection`: matched, selected, state-changing, `default_login`, excluded).
+HEAD, and never a template that tries logins: one tagged `default-login`, one that sends a value
+named like a username or password (a payload, a variable or an extracted value) in a header, the
+body or the query string, or one whose Basic `Authorization` header holds a literal
+`user:password` pair needs that permission even when it sends only GETs, because a login attempt
+can lock the account it tries. So does a reviewed GET that changes state (one sets a device's
+admin password). A verify Scan lists such a check as `credential_level_needs_state_changing_http`
+or `needs_state_changing_http`, and the step's receipt counts the selection (`template_selection`:
+matched, selected, state-changing, `default_login`, excluded).
 
 **DNS posture over a limited forwarder.** `dns.inspect` asks the system resolver first. When a
 query times out and the bound host is a public name on public addresses, the same query is retried
@@ -1502,13 +1505,17 @@ vendors, AI surfaces, MCP tools, model artifacts, scans, and findings, with asse
 **Verification & retest**: deterministic provers exist for xss, sqli, nosqli, ssrf, path_traversal,
 open_redirect, cors, command_injection, ssti, xxe, jwt, idor, bola, and exposed_file. A finding is
 retested only by the prover of its own kind of check, chosen by its tool (`RETEST_TOOL_TYPE_MAP`);
-its title chooses only for a finding with no tool or with a tool of the scanner before the current
-Scan, by whole words. Any other finding has no retest and says why in `retest_unsupported_reason`:
-`retest_needs_template_replay` (a Nuclei template finding), `retest_exposure_by_rescan` (an
-exposure-probe finding) or `retest_by_rescan_only` (headers, cookies, CORS, TLS, DNS, takeover,
-GraphQL and authorization findings): run a new Scan to check it again. `GET /findings/{id}` also
-returns `retest_active`, true when the retest may send active requests (a prover's payloads, an
-AI Gate probe, or the AI tier's requests when an AI verifier is configured). A prover retests a finding that already exists; it does not mean a Scan
+its title chooses only for a finding with no tool or with one of the earlier scanner's checks that
+sent attack input, by whole words. A finding with no prover of its own, or only the AI tier
+(`generic_http`, `2fa_bypass`, which can never conclude), has no retest and says why in
+`retest_unsupported_reason`: `retest_needs_template_replay` (a Nuclei template finding),
+`retest_exposure_by_rescan` (an exposure-probe finding), `retest_by_hunt_rerun` (a Hunt finding of
+a family no prover covers: run the Hunt again) or `retest_by_rescan_only` (headers, cookies, CORS,
+TLS, DNS, takeover, GraphQL, authorization and earlier posture findings: run a new Scan). Finding
+detail, `POST /findings/{id}/retest`, bulk retest and the automatic retest after a Scan apply the
+same rule. `GET /findings/{id}` also returns `retest_active`, true when the retest may send
+active requests (a prover's payloads, an AI Gate probe, or the AI tier's requests when an AI
+verifier is configured). A prover retests a finding that already exists; it does not mean a Scan
 looks for that class (see the [OWASP coverage matrix](owasp-coverage-matrix.md)). Retests are
 slot-limited (`RETEST_MAX_PARALLEL`) with a watchdog and auto-retest-on-scan-complete policy.
 
