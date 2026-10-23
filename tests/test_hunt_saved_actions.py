@@ -36,6 +36,9 @@ REUSABLE = [
     ("browser.navigate", {"origin": "https://app.test", "path": "/dashboard", "wait_until": "load"}),
     ("xss.verify", {"path": "/search", "severity": "medium"}),
     ("tls.inspect", {"origin": "https://app.test"}),
+    ("http.request", {"method": "GET", "path": "/api/v1/users/42"}),
+    ("http.request", {"method": "GET", "path": "/docs/getting-started"}),
+    ("device.http.probe", {"method": "GET", "path": "/cgi-bin/status.cgi", "origin_port": 80}),
 ]
 
 NOT_REUSABLE = [
@@ -63,6 +66,26 @@ NOT_REUSABLE = [
     ("http.request", {"method": "GET", "path": "/", "capture": [{"name": "csrf", "from": "body"}]}),
     ("browser.login_check", {"origin": "https://app.test", "profile_ref": str(uuid4())}),
     ("artifact.inspect", {"path": "/backup.sql", "search_terms": ["password"]}),
+    # A GET that acts: device controls and web state changes the crawler's words do not name.
+    ("device.http.probe", {"method": "GET", "path": "/goform/reboot", "origin_port": 80}),
+    ("device.http.probe", {"method": "GET", "path": "/api/system/restart", "origin_port": 80}),
+    ("device.http.probe", {"method": "GET", "path": "/shutdown", "origin_port": 80}),
+    ("device.http.probe", {"method": "GET", "path": "/cgi-bin/firmware_upgrade.cgi", "origin_port": 80}),
+    ("device.http.probe", {"method": "GET", "path": "/apply.cgi", "origin_port": 80}),
+    ("http.request", {"method": "GET", "path": "/admin/reboot"}),
+    ("http.request", {"method": "GET", "path": "/api/cart/checkout"}),
+    ("http.request", {"method": "GET", "path": "/api/transfer"}),
+    # Attack payloads: quotes, command substitution, dot segments.
+    ("http.request", {"method": "GET", "path": "/api/users/1'OR'1'='1"}),
+    ("http.request", {"method": "GET", "path": "/$(id)"}),
+    ("http.request", {"method": "GET", "path": "/index.php/../../../../etc/passwd"}),
+    ("javascript.analyze", {"path": "/static/./app.js"}),
+    # Short tokens and credential segments the ledger keeps.
+    ("http.request", {"method": "GET", "path": "/verify-email/MTIzNDU2Nzg5MA"}),
+    ("http.request", {"method": "GET", "path": "/activate/3f2a9c1b"}),
+    ("http.request", {"method": "GET", "path": "/r/ab12CD34ef56GH78"}),
+    ("http.request", {"method": "GET", "path": "/u/4821/pin/4821"}),
+    ("http.request", {"method": "GET", "path": "/p/7Hq2xK9m"}),
     # Any origin other than the Hunt target's own host, such as a granted destination.
     ("http.request", {"method": "GET", "path": "/health", "origin": "https://other.test"}),
     ("web.crawl", {"origin": "https://api.app.test"}),
@@ -92,7 +115,9 @@ def test_nothing_secret_or_off_host_reaches_a_proposed_recipe():
     steps, evidence = recipe_steps(rows, HOST)
     text = json.dumps(steps)
     for value in ("redacted", "letmein", "4821", "9f8e7d6c", "7c1f9a2b", "Zx9Qp2Lm", "other.test",
-                  "api.app.test", "hunter2", "session_ref", "as_principal", "headers", "?"):
+                  "api.app.test", "hunter2", "session_ref", "as_principal", "headers", "?", "reboot",
+                  "restart", "shutdown", "firmware", "apply", "checkout", "transfer", "'", "$(", "..",
+                  "MTIzNDU2", "3f2a9c1b", "ab12CD34", "pin", "7Hq2xK9m"):
         assert value not in text, value
     assert len(steps) == len(REUSABLE) and len(evidence) == len(REUSABLE)
 

@@ -9,9 +9,12 @@ proposals or saved actions a planner may write, and there is never more than one
 A step is proposed only when every field it carries is on its capability's allowlist
 (``RETAINED_STEP_FIELDS``) and none carries a query value, request header, request body, browser
 input, session or credential reference, or an origin other than the Hunt target's own host. The
-inputs are read as the action ledger stored them; a path with a query, a redaction marker, a
-token-like or credential-labelled segment, or a word that names an action (log out, delete,
-reset...) is left out, as is any step whose recorded input no longer validates. No step runs
+inputs are read as the action ledger stored them. A path is left out when it has a query, a
+redaction marker, a character outside letters, digits and ``/ _ . ~ -`` (quotes, ``$( )``,
+encoded values), a dot segment, a token-like or letter-and-digit code segment, a word that names
+a credential (token, pin, otp...) or a word that names an action (log out, delete, reboot,
+firmware, apply, checkout, transfer, activate...), as is any step whose recorded input no longer
+validates. No step runs
 here; reusing one still runs the canonical capability under the new Hunt's scope, approvals,
 credentials and budget.
 """
@@ -27,11 +30,11 @@ from uuid import UUID
 from fastapi import HTTPException
 
 try:
-    from scanner_tools.unsafe_actions import navigation_url_is_safe
-    from scanner_tools.url_redaction import redact_path
+    from scanner_tools.unsafe_actions import contains_risky_keyword, path_may_change_state, semantic_text
+    from scanner_tools.url_redaction import is_sensitive_label, redact_path
 except ModuleNotFoundError:  # package import in host-side tests
-    from scanner.scanner_tools.unsafe_actions import navigation_url_is_safe
-    from scanner.scanner_tools.url_redaction import redact_path
+    from scanner.scanner_tools.unsafe_actions import contains_risky_keyword, path_may_change_state, semantic_text
+    from scanner.scanner_tools.url_redaction import is_sensitive_label, redact_path
 
 from .finding_actions import http_origin, hunt_target_host, hunt_target_locator
 
@@ -60,7 +63,21 @@ RETAINED_STEP_FIELDS: Mapping[str, frozenset[str]] = {
 }
 _READ_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
 _MARKERS = ("***", "redacted", "withheld")
-_PLAIN_PATH = re.compile(r"/[A-Za-z0-9/_.~:@!$&'()*+,;=-]{0,1999}")
+# Letters, digits and ``/ _ . ~ -`` only: no quote, ``$( )``, ``;``, ``=``, ``@``, ``:``, ``%`` or
+# other character a payload or an encoded value needs.
+_PLAIN_PATH = re.compile(r"/[A-Za-z0-9/_.~-]{0,1999}")
+# Words that make a GET act rather than read, beyond the crawler's interaction words: device
+# controls and web state changes. A path naming one is never proposed as a read.
+RETAINED_ACTION_WORDS = (
+    "reboot", "restart", "shutdown", "shut down", "power off", "poweroff", "halt", "firmware",
+    "upgrade", "downgrade", "flash", "factory", "apply", "commit", "goform", "exec", "execute", "cmd",
+    "command", "shell", "install", "uninstall", "restore", "backup", "rollback", "deploy", "publish",
+    "set", "enable", "toggle", "trigger", "checkout", "transfer", "pay", "payment", "purchase", "buy",
+    "send", "withdraw", "deposit", "add", "activate", "activation", "subscribe", "invite", "accept",
+    "decline", "unlock", "vote", "follow", "unfollow", "import", "upload",
+)
+# Words that name a credential or a one-time value, beyond the redaction's own labels.
+_CREDENTIAL_WORDS = frozenset({"pin", "passcode", "passwd", "pwd", "otp", "mfa", "2fa", "totp"})
 _LIMIT_ACTIONS = 2_000
 
 
@@ -81,15 +98,29 @@ def _plain_value(value: Any) -> bool:
     return not any(marker in lowered for marker in _MARKERS) and value.isprintable()
 
 
+def _opaque(part: str) -> bool:
+    """A run of letters and digits that alternates between them at least twice (``3f2a9c1b``,
+    ``MTIzNDU2Nzg5MA``): an identifier or code, not a route word (``v1``, ``Category12``)."""
+    kinds = [character.isdigit() for character in part if character.isalnum()]
+    return sum(left != right for left, right in zip(kinds, kinds[1:])) >= 2
+
+
 def _plain_path(path: Any) -> bool:
-    """A route with no query, fragment, encoded or masked part, credential-shaped segment or
-    action word: the same request is safe to propose for another read of the target."""
+    """A route with no query, fragment, encoded, masked or dot segment, no credential word or
+    token-like value, and no word that names an action: the same request is safe to propose for
+    another read of the target."""
+    if not isinstance(path, str) or _PLAIN_PATH.fullmatch(path) is None:
+        return False
+    segments = path.split("/")[1:]
+    if any(segment in {"", ".", ".."} for segment in segments[:-1]) or segments[-1] in {".", ".."}:
+        return False
+    words = semantic_text(path).split()
     return (
-        isinstance(path, str)
-        and _PLAIN_PATH.fullmatch(path) is not None
-        and not path.startswith("//")
-        and redact_path(path) == path
-        and navigation_url_is_safe(path)
+        redact_path(path) == path
+        and not path_may_change_state(path)
+        and not contains_risky_keyword((path,), RETAINED_ACTION_WORDS)
+        and not any(is_sensitive_label(word) or word in _CREDENTIAL_WORDS for word in words)
+        and not any(_opaque(part) for part in re.split(r"[/_.~-]", path))
     )
 
 
