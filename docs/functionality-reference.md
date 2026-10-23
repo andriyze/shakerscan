@@ -1530,7 +1530,9 @@ the destination guard); the browser check loads the payload page in a headless b
 ordinary request of the page and judges it as the browser proof does (the proof's attribute on the
 page, or a console or dialog message that is exactly its marker; nothing else the page logs or
 shows counts), letting only same-origin reads leave the page. Reproduced is still vulnerable; not reproduced with every request
-answered is likely fixed; a refusal, an unanswered request or a missing browser is inconclusive.
+answered is likely fixed; a refusal, an unanswered request, an unavailable service (a 408, 429,
+502, 503 or 504 answer, or a 404, 410 or server error to every request) or a missing browser is
+inconclusive.
 When the request cannot be rebuilt exactly (a path segment, a templated route, a request body, a
 recorded request whose values were not kept, a masked value, a fragment or another page), or the
 finding is a potential injection from a request differential (which keeps no route), the reason is

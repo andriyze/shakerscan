@@ -16,8 +16,9 @@ Otherwise the same check runs again:
   retest's destination guard with its session headers confined to the finding's origin.
 
 The verdict follows the check: reproduced is still vulnerable; not reproduced, with every request
-answered, is likely fixed; a refusal, a failed request or a missing browser is inconclusive, and
-the finding stays open. Nothing here escalates to the AI tier.
+answered, is likely fixed; a refusal, a failed request, an unavailable service (``_unavailable``)
+or a missing browser is inconclusive, and the finding stays open. Nothing here escalates to the
+AI tier.
 """
 
 from __future__ import annotations
@@ -56,6 +57,35 @@ _BUDGETS: dict[str, dict[str, int]] = {
 }
 _REFUSALS = frozenset({"authentication_required", "target_refused"})
 _LIKELY_FIXED = "The check that proved the finding sent the same request again and did not reproduce it."
+# Answers that say the service, not a fix, decided what the check saw. One of these anywhere (down,
+# overloaded, rate-limiting) leaves the check's comparisons meaningless; so does a missing page or
+# a server error when every request met one. A check that reproduces still proves the finding.
+_UNAVAILABLE = frozenset({408, 429, 502, 503, 504})
+_MISSING = frozenset({404, 410})
+
+
+def _unavailable(statuses: Any) -> int | None:
+    """The status that makes a check's answers unusable, or None."""
+    answered = [int(item) for item in statuses if item]
+    blocking = next((item for item in answered if item in _UNAVAILABLE), None)
+    if blocking is not None:
+        return blocking
+    if answered and all(item in _MISSING or item >= 500 for item in answered):
+        return answered[0]
+    return None
+
+
+def _unavailable_reason(status: int) -> str:
+    if status == 429:
+        what = f"asked the retest to slow down (HTTP {status})"
+    elif status in _UNAVAILABLE:
+        what = f"was unavailable (HTTP {status})"
+    elif status in _MISSING:
+        what = f"answered every request with HTTP {status} (no such page)"
+    else:
+        what = f"answered every request with a server error (HTTP {status})"
+    return (f"The target {what}, so the check that proved the finding could not compare its "
+            "answers: nothing was reproduced or ruled out, and the finding stays open.")
 
 
 def _result(
@@ -100,6 +130,8 @@ class RetestFetchTransport:
 
     def __init__(self, fetch: Callable[..., Awaitable[Mapping[str, Any]]]) -> None:
         self._fetch = fetch
+        # Every answer's status (0 when none came), for ``_unavailable``.
+        self.statuses: list[int] = []
 
     async def send(self, request: Any, *, target: Any, timeout_seconds: float, follow_redirects: bool) -> Any:
         try:
@@ -113,6 +145,7 @@ class RetestFetchTransport:
             timeout=max(1, math.ceil(timeout_seconds)), follow_redirects=follow_redirects,
         )
         status = int(response.get("status_code") or 0)
+        self.statuses.append(status)
         error = _error_code(response)
         return ReplayTransportResult(
             status_code=status if 100 <= status <= 599 else None,
@@ -173,7 +206,8 @@ async def _differential_check(
     async def heartbeat() -> None:
         return None
 
-    adapter = _adapter(request, target_id, RetestFetchTransport(fetch))
+    transport = RetestFetchTransport(fetch)
+    adapter = _adapter(request, target_id, transport)
     result = await adapter.execute(heartbeat=heartbeat, cancelled=cancelled)
     observations = [dict(item) for item in result.observations]
     verified = next((item for item in observations if item.get("proof_state") == "verified"), None)
@@ -193,6 +227,10 @@ async def _differential_check(
         return refusal, proof
     if result.status != "success" or result.errors or not observations:
         return "failed", proof
+    unavailable = _unavailable(transport.statuses)
+    if unavailable is not None:
+        proof["unavailable_status"] = unavailable
+        return "unavailable", proof
     return "not_reproduced", proof
 
 
@@ -293,17 +331,26 @@ async def _browser_check(
     """The proof's own payload and oracle in a headless browser, after one ordinary request."""
     ordinary = _payload_url(request, "shakerscan")
     baseline = await poe.fetch_with_capture(ordinary, timeout=12)
-    if not int(baseline.get("status_code") or 0):
+    status = int(baseline.get("status_code") or 0)
+    if not status:
         return "failed", {"errors": [_error_code(baseline)]}
     refused = poe.baseline_refusal(ordinary, baseline)
     if refused:
-        return refused, {"baseline_status": int(baseline.get("status_code") or 0)}
+        return refused, {"baseline_status": status}
+    if status in _UNAVAILABLE:
+        return "unavailable", {"baseline_status": status, "unavailable_status": status}
     if not await poe.headless_browser_available():
         return "no_browser", {}
-    return await _marker_check(
+    outcome, proof = await _marker_check(
         _payload_url(request, request.payload or ""), xss_proof_marker(request.candidate_id),
         poe=poe, headers=auth_headers, cancelled=cancelled,
     )
+    proof["baseline_status"] = status
+    unavailable = _unavailable((status, proof.get("navigation_status")))
+    if outcome == "not_reproduced" and unavailable is not None:
+        proof["unavailable_status"] = unavailable
+        return "unavailable", proof
+    return outcome, proof
 
 
 async def run_proof_retest(
@@ -354,6 +401,10 @@ async def run_proof_retest(
         return _result(status="completed", result_status="still_vulnerable", verdict="exploited",
                        reason="The check that proved the finding sent the same request again and reproduced it.",
                        confidence=0.95, proof=proof, artifacts=artifacts, **common)
+    if outcome == "unavailable":
+        return _result(status="completed", result_status="inconclusive", verdict="inconclusive",
+                       reason=_unavailable_reason(int(proof["unavailable_status"])),
+                       proof=proof, artifacts=artifacts, **common)
     if outcome == "left_origin":
         return _result(status="completed", result_status="inconclusive", verdict="inconclusive",
                        reason="The page sent the browser to another site, so the browser check that "

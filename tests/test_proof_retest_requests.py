@@ -540,6 +540,63 @@ def test_a_proven_injection_whose_retest_requests_get_no_answer_is_inconclusive(
     assert result["proof"]["errors"]
 
 
+
+@pytest.mark.parametrize("row", [_sqli(), _nosqli()], ids=["sqli", "nosqli"])
+@pytest.mark.parametrize("statuses,shown", [
+    ((503,), 503), ((502,), 502), ((504,), 504), ((429,), 429),
+    # Answered at first, then rate-limited: the pairs compare a refusal with an answer.
+    ((200, 429), 429),
+    # Every request met a missing page or a server error.
+    ((404,), 404), ((410,), 410), ((500,), 500),
+])
+def test_a_proven_injection_retested_against_an_unavailable_service_is_inconclusive(row, statuses, shown):
+    """A service in maintenance, rate-limiting or no longer serving the route reproduces nothing,
+    and that is no evidence of a fix."""
+    from worker_handlers.proof_replay import run_proof_retest
+
+    sent = []
+
+    async def answer(url, **_kwargs):
+        status = statuses[min(len(sent), len(statuses) - 1)]
+        sent.append(url)
+        return {"status_code": status, "headers": {}, "body": "<p>Service unavailable</p>", "final_url": url,
+                "elapsed_ms": 3}
+
+    poe = types.SimpleNamespace(fetch_with_capture=answer, start_scan_session=lambda *_a, **_k: None,
+                                end_scan_session=lambda *_a, **_k: None)
+    verification = _verification(row, "http://shop.fixture.invalid")
+    result = asyncio.run(run_proof_retest(
+        verification, infer_retest_inputs(verification), poe=poe, replay_commands=[], ladder=[],
+        cancelled=lambda: False))
+    assert sent
+    assert (result["verdict"], result["result_status"]) == ("inconclusive", "inconclusive")
+    assert result["artifacts"]["outcome"] == "unavailable"
+    assert f"HTTP {shown}" in result["verdict_reason"]
+    assert "stays open" in result["verdict_reason"]
+
+
+@pytest.mark.parametrize("row", [_sqli(), _nosqli()], ids=["sqli", "nosqli"])
+def test_a_fixed_route_that_answers_its_control_is_likely_fixed_whatever_its_payloads_get(row):
+    """Only an unavailable service is ruled out: a control answered 200 and payloads answered
+    with a client or server error is the fixed route's answer."""
+    from worker_handlers.proof_replay import run_proof_retest
+
+    sent = []
+
+    async def answer(url, **_kwargs):
+        status = 200 if not sent else 400
+        sent.append(url)
+        return {"status_code": status, "headers": {}, "body": "<p>ok</p>" if status == 200 else "bad request",
+                "final_url": url, "elapsed_ms": 3}
+
+    poe = types.SimpleNamespace(fetch_with_capture=answer, start_scan_session=lambda *_a, **_k: None,
+                                end_scan_session=lambda *_a, **_k: None)
+    verification = _verification(row, "http://shop.fixture.invalid")
+    result = asyncio.run(run_proof_retest(
+        verification, infer_retest_inputs(verification), poe=poe, replay_commands=[], ladder=[],
+        cancelled=lambda: False))
+    assert result["verdict"] == "likely_fixed", result["verdict_reason"]
+
 def test_the_worker_sends_nothing_for_a_proven_finding_it_cannot_rebuild(monkeypatch):
     import worker
     from scanner_tools import proof_of_exploit
@@ -619,13 +676,20 @@ def _browser_poe(*, available: bool, proven: bool, status: int = 200):
     return poe, calls, contexts
 
 
-@pytest.mark.parametrize("available,proven,status,verdict", [
-    (True, True, 200, "exploited"),
-    (True, False, 200, "likely_fixed"),
-    (False, False, 200, "inconclusive"),
-    (True, False, 401, "inconclusive"),
+@pytest.mark.parametrize("available,proven,status,verdict,browses", [
+    (True, True, 200, "exploited", True),
+    (True, False, 200, "likely_fixed", True),
+    (False, False, 200, "inconclusive", False),
+    (True, False, 401, "inconclusive", False),
+    # Unavailable or rate-limited: the payload page is not even loaded.
+    (True, False, 503, "inconclusive", False),
+    (True, False, 429, "inconclusive", False),
+    # A page that answers 404 may still run the payload; if it does not, nothing is ruled out.
+    (True, True, 404, "exploited", True),
+    (True, False, 404, "inconclusive", True),
+    (True, False, 500, "inconclusive", True),
 ])
-def test_a_browser_proof_is_retested_with_its_own_payload_in_a_browser(available, proven, status, verdict):
+def test_a_browser_proof_is_retested_with_its_own_payload_in_a_browser(available, proven, status, verdict, browses):
     from worker_handlers.proof_replay import run_proof_retest
 
     row = _xss()
@@ -641,7 +705,10 @@ def test_a_browser_proof_is_retested_with_its_own_payload_in_a_browser(available
     # placed in the page's query exactly as the browser proof places it.
     assert calls[0] == ("fetch", "http://shop.fixture.invalid/search?q=shakerscan")
     browsed = [call for call in calls if call[0] == "browser"]
-    if available and status == 200:
+    if verdict == "inconclusive" and status not in (200, 401):
+        assert f"HTTP {status}" in result["verdict_reason"]
+        assert result["artifacts"]["outcome"] == "unavailable"
+    if browses:
         sent = "http://shop.fixture.invalid/search?" + urllib.parse.urlencode({"q": _xss_payload(CANDIDATE)})
         assert browsed == [("browser", sent)]
         assert all(context.closed for context in contexts)
