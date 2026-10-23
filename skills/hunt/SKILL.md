@@ -67,10 +67,10 @@ file. The start response's `budget_warnings` names each capability the limits le
 even once. At a profile's defaults the usual web work (log in, crawl, discover content, verify,
 record) draws none; a default warning names a safety ceiling such as TCP ports or state-changing
 requests. If you lowered a limit and the warning says `restart_fixes_it: true`, start again without
-lowering it. Ask the operator for a budget raise only when your plan needs the capability a warning
-or a refusal names (for example `ports.discover` on `fast`); otherwise carry on. A warning with
-`restart_fixes_it: false` is above even the profile's start maximum: only a budget raise the person
-approves can let that capability run. Map first, then narrow.
+lowering it. Call the capability a warning names only when your plan needs it (for example
+`ports.discover` on `fast`): its refusal raises a `budget.raise` request for the person to approve;
+otherwise carry on. A warning with `restart_fixes_it: false` is above even the profile's start
+maximum: only a budget raise the person approves can let that capability run. Map first, then narrow.
 
 **Keep answers small.** Hunt tools answer in a compact view by default; leave `view` out. Use
 `capability=<name>` on `shakerscan_hunt_get` for one capability's contract, and `limit`/`cursor` on
@@ -283,18 +283,19 @@ user approves the same way. The user may instead start you with `shakerscan agen
 your Hunts then carry those bounds and requests inside them are granted as they arise. Every
 refusal carries a `reason_code`; act on it rather than on the wording.
 
-## Operator-requested budget extension
+## Budget raises
 
-When the operator asks for more budget, use `POST /hunts/{hunt_id}/budget-amendments` with the
-current run's `expected_revision`, new **total** `limits`, a stable retry `idempotency_key`, and
-`operator_confirmed: true`. Never fabricate confirmation or silently increase an allowance.
-`resume: true` permits continuing an unfinished exhausted Hunt once the exhausted dimension has
-headroom; no action starts automatically. Existing usage, queued holds, identities and permissions
-stay in place. Device pauses and independent device/per-action limits still apply. Inspect current
-state after a conflict; retry a lost response with the same key/body, not an extra increase.
-Completed/cancelled/finalized runs stay terminal. Read `GET /openapi.json` for the request schema
-on an open-source engine (an Enterprise gateway refuses it; the fields above are the request);
-`GET /hunts/{hunt_id}/budget-amendments` pages the saved before/after history.
+A person raises a Hunt's budget; an agent never does. Never call `POST /hunts/{hunt_id}/budget-amendments`
+and never send `operator_confirmed`: that route is the operator's own control, used from the Hunt
+page. When an action needs more of a limit, its refusal raises a `budget.raise` permission request:
+give the person the `shakerscan approve <permission_request_id>` line (see Permission requests) and
+keep working on actions that need none of that limit. When the operator asks in chat for more
+budget, or your launch instructions say to use more, that is not an approval: name the pending
+`budget.raise` request and its approve command, or, when none is pending, say which limit stops
+which planned action and why, so the person can approve the request when it comes or raise the
+limit on the Hunt page; then carry on with other work. A raise keeps usage, queued holds,
+identities and permissions, and starts nothing by itself; completed, cancelled or finalized runs
+stay terminal. `GET /hunts/{hunt_id}/budget-amendments` pages the saved before/after history.
 
 ## Candidates and proof
 

@@ -103,7 +103,8 @@ def start_budget_warnings(result: Mapping[str, Any]) -> list[dict[str, Any]]:
                     f"reserves for one call, so {capability} can never run in this Hunt"
                     + (
                         f" (the {profile_name} profile default is {default}). Start again without "
-                        "lowering it, or ask the person for a budget raise."
+                        "lowering it; during the Hunt, calling it raises a budget.raise request for "
+                        "the person to approve."
                         if fits else
                         f". Even the {profile_name} start maximum, {default}, is below that, so "
                         "starting again cannot fix it; only a budget raise the person approves "

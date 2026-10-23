@@ -63,7 +63,9 @@ origin. Model Intake artifacts remain exact-subject targets.
 
 - Never scan a target without ownership or explicit authorization.
 - Active Scan policy and active Hunt capabilities require explicit target authorization. A larger
-  budget changes ceilings only; it does not grant active permission.
+  budget changes ceilings only; it does not grant active permission. A person raises a Hunt's
+  budget (approving its `budget.raise` request, or on the Hunt page); an agent never calls
+  `POST /hunts/{id}/budget-amendments` or sends `operator_confirmed`.
 - Hunt is one target-kind-aware workflow. Confirm authorization for the exact web or device target;
   keep immutable scope, worker-only credentials, device fragility/circuit-breaker controls, and
   separately confirmed SSH plans intact.
