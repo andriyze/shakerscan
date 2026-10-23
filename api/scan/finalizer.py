@@ -1280,6 +1280,8 @@ def _findings_for_action(
                 evidence={
                     "candidate_id": item.get("candidate_id"),
                     "request_ref_id": item.get("request_ref_id"),
+                    # Where the route was proved, so a retest sends it to the same site.
+                    **({"origin": item["origin"]} if item.get("origin") else {}),
                     "method": item.get("method"),
                     "field_path": item.get("field_path"),
                     "request_class": item.get("request_class"),
@@ -1412,6 +1414,7 @@ def _findings_for_action(
                 evidence={
                     "candidate_id": item.get("candidate_id"),
                     "request_ref_id": item.get("request_ref_id"),
+                    **({"origin": item["origin"]} if item.get("origin") else {}),
                     "method": item.get("method"),
                     "field_path": item.get("field_path"),
                     "request_class": item.get("request_class"),

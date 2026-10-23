@@ -291,6 +291,11 @@ class ReplayRequest:
     # (``header:cookie``, ``query:token``, ``body:password``), names only.
     captured_withheld: tuple[str, ...] = ()
 
+    def origin(self) -> str:
+        """``scheme://host[:port]`` the request goes to: value-free, no user information."""
+        parsed = urllib.parse.urlsplit(self.url)
+        return f"{parsed.scheme.lower()}://{parsed.netloc.rpartition('@')[2].lower()}"
+
     def wire_dict(self) -> dict[str, Any]:
         """Worker-only exact request. Never return this object through a public API."""
         return {

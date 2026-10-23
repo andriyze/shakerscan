@@ -330,6 +330,7 @@ class NoSQLiVerifyAdapter:
                         observations.append({
                             "kind": "nosqli_proof",
                             "canonical_path": self.candidate.get("canonical_path"),
+                            "origin": self.request.origin(),
                             "candidate_id": self.candidate.get("candidate_id"),
                             "request_ref_id": self.candidate.get("request_ref_id"),
                             "method": self.request.method,
@@ -368,6 +369,7 @@ class NoSQLiVerifyAdapter:
                     # and a verified injection that cannot say where it is is not
                     # actionable.
                     "canonical_path": self.candidate.get("canonical_path"),
+                    "origin": self.request.origin(),
                     "candidate_id": self.candidate.get("candidate_id"),
                     "request_ref_id": self.candidate.get("request_ref_id"),
                     "method": self.request.method,
