@@ -541,26 +541,32 @@ def retest_type_has_prover(retest_type: str | None) -> bool:
     return retest_type in SUPPORTED_RETEST_TYPES and retest_type not in AI_ONLY_RETEST_TYPES
 
 
-def _hunt_finding(finding: Mapping[str, Any]) -> bool:
+def _hunt_promotion(finding: Mapping[str, Any]) -> bool:
+    """Whether a Hunt produced the finding: its tool, its source or its evidence says so."""
     evidence = parse_json_field(finding.get("evidence"))
     return bool(
         str(finding.get("tool") or "").strip().lower() in HUNT_FINDING_TOOLS
         or str(finding.get("source") or "").strip().lower() == "autonomous"
-        or finding.get("hunt_run_id")
         or isinstance(evidence.get("autonomous_workflow"), dict)
     )
+
+
+def _hunt_finding(finding: Mapping[str, Any]) -> bool:
+    return _hunt_promotion(finding) or bool(finding.get("hunt_run_id"))
 
 
 def retest_refusal_reason(finding: Mapping[str, Any], retest_type: str | None) -> str | None:
     """Why a finding is not retested, or None when its retest type has a prover: Model Intake
     findings are re-checked by their own scan, a Hunt finding of a family no prover covers by
-    running the Hunt again, any other by a new Scan (``retest_unsupported_reason``)."""
+    running the Hunt again, any other by a new Scan (``retest_unsupported_reason``). A Hunt's own
+    finding with no retest type at all (an earlier Hunt's ``autonomous_agent`` row) is a Hunt
+    finding too; a Scan finding a Hunt only linked keeps its own check's reason."""
     if retest_type_has_prover(retest_type):
         return None
     tool = str(finding.get("tool") or "").strip().lower()
     if tool == "model_intake":
         return RETEST_REASON_MODEL_INTAKE
-    if retest_type and _hunt_finding(finding):
+    if _hunt_promotion(finding) or (retest_type and _hunt_finding(finding)):
         return RETEST_REASON_HUNT
     return retest_unsupported_reason(tool)
 

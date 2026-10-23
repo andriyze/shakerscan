@@ -147,11 +147,22 @@ AI_ONLY_ROWS = [
     (_row("", "2FA bypass via OTP reuse", source="autonomous"), HUNT),
     (_row("", "2FA bypass via OTP reuse", hunt_run_id=uuid.UUID(int=7)), HUNT),
 ]
+#: Hunt findings whose tool and title give no retest type at all (an earlier Hunt's provisional
+#: ``autonomous_agent`` rows): run the Hunt again, not a new Scan.
+HUNT_ROWS_WITHOUT_A_TYPE = [
+    (_row("autonomous_agent", "Order history readable by another customer"), HUNT),
+    (_row("", "Order history readable by another customer", source="autonomous"), HUNT),
+    (_row("", "Order history readable by another customer", evidence=_HUNT_EVIDENCE), HUNT),
+    # A Hunt link alone does not make a Scan finding a Hunt finding.
+    (_row("", "Order history readable by another customer", hunt_run_id=uuid.UUID(int=7)),
+     "retest_by_rescan_only"),
+]
 
 
 @pytest.mark.parametrize("ai", [{}, AI_READY])
 @pytest.mark.parametrize("row,reason", [
     *AI_ONLY_ROWS,
+    *HUNT_ROWS_WITHOUT_A_TYPE,
     # A Scan finding a Hunt later verified keeps its own check's reason: no Hunt family applies.
     (_row("nuclei", "Apache Tomcat Manager Default Login", hunt_run_id=uuid.UUID(int=7)),
      "retest_needs_template_replay"),
@@ -164,7 +175,7 @@ def test_a_finding_only_the_ai_tier_could_retest_is_not_offered_a_retest(monkeyp
 
 
 @pytest.mark.parametrize("row,override,reason", [
-    *((row, None, reason) for row, reason in AI_ONLY_ROWS),
+    *((row, None, reason) for row, reason in (*AI_ONLY_ROWS, *HUNT_ROWS_WITHOUT_A_TYPE)),
     # An explicit AI-only type cannot conclude either, whatever the finding.
     (_row("shakerscan_browser_proof", "Verified cross-site scripting"), "generic_http", "retest_by_rescan_only"),
     (_row("nuclei", "Apache Tomcat Manager Default Login"), "2fa_bypass", "retest_needs_template_replay"),
