@@ -2536,9 +2536,9 @@ for the profile contract, invocation, limits and acceptance gates.
 | `recon` | recon | passive | False | low | True | `legacy_discovery` | `discovery` | Crawl, API/HAR/OpenAPI discovery, and passive surface refresh. |
 | `recon_active` | recon | discovery | True | medium | False | `recon_active` | `discovery` | Authorized active recon from bundled authored lists: DNS name enumeration and virtual-host discovery under a declared apex (the target is the apex or its www name; needs subdomain discovery; virtual hosts not on a shared edge), and parameter discovery on observed routes. Wildcard, catch-all and random-parameter controls; leads only, never findings or proof. |
 | `sensitive_exposure` | passive | disclosure | False | medium | False | `exposure_probe_batch` | `active_endpoint_attempt_v1` | Read-only verified exposure checks: secrets in env, actuator, OpenAPI and config files, VCS metadata, backups, debug pages, metrics, and listings. |
-| `sqli` | active | injection | True | medium | True | `legacy_active_loop` | `active_endpoint_attempt_v1` | SQL injection probes and proof/extraction depth. |
+| `sqli` | active | injection | True | medium | True | `legacy_active_loop` | `active_endpoint_attempt_v1` | SQL injection verification with sqlmap and a differential proof; no data extraction. |
 | `ssrf` | active | server_side | True | high | False | `none` | `planned_high_risk_attempt` | Server-side request forgery checks. Planned and permission-gated. |
-| `xss` | active | client | True | medium | True | `legacy_active_loop` | `active_endpoint_attempt_v1` | Reflected, stored, and DOM XSS probes. |
+| `xss` | active | client | True | medium | True | `legacy_active_loop` | `active_endpoint_attempt_v1` | Reflected XSS, and DOM XSS through URL-fragment parameters, proven in a browser. No stored-XSS check. |
 
 ### Command Arsenal
 

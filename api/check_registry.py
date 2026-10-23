@@ -112,7 +112,7 @@ CHECK_REGISTRY: tuple[CheckFamilySpec, ...] = (
         emits_endpoint_telemetry=True,
         scanner_focus_order=10,
         runnable=True,
-        description="SQL injection probes and proof/extraction depth.",
+        description="SQL injection verification with sqlmap and a differential proof; no data extraction.",
     ),
     CheckFamilySpec(
         name="xss",
@@ -139,7 +139,7 @@ CHECK_REGISTRY: tuple[CheckFamilySpec, ...] = (
         emits_endpoint_telemetry=True,
         scanner_focus_order=20,
         runnable=True,
-        description="Reflected, stored, and DOM XSS probes.",
+        description="Reflected XSS, and DOM XSS through URL-fragment parameters, proven in a browser. No stored-XSS check.",
     ),
     CheckFamilySpec(
         name="bola",
