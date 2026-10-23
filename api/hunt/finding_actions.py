@@ -26,10 +26,12 @@ _SEVERITIES = frozenset({"critical", "high", "medium", "low", "info"})
 _STATUSES = frozenset({"active", "resolved"})
 _EDITABLE_FIELDS = frozenset({"title", "description", "severity", "notes", "status"})
 # The bytes a Hunt's finding records may hold, counted as stored (title, description, notes, URL
-# and evidence document). Each field is bounded in characters only, so one finding can hold about
-# 145 KB of multi-byte text; at a generous record allowance that is gigabytes per Hunt. A write
-# that would pass the bound is refused like any input error: nothing is charged and the Hunt keeps
-# running. About 2,000 findings of the largest size fit, or tens of thousands of typical ones.
+# and evidence document, in UTF-8). Each field is bounded in characters only, so the largest
+# finding is about 40 KB of ASCII text and about 155 KB of four-byte characters; at a generous
+# record allowance that is gigabytes per Hunt. A write that would pass the bound is refused like
+# any input error: nothing is charged and the Hunt keeps running. About 1,650 findings of the
+# largest ASCII size fit, about 430 of the largest four-byte size, and tens of thousands of
+# typical findings of a few kilobytes (tests/test_hunt_finding_actions.py checks the counts).
 MAX_FINDING_BYTES_PER_HUNT = 64 * 1024 * 1024
 _STORED_FINDING_BYTES_SQL = """SELECT COALESCE(SUM(
         COALESCE(octet_length(title),0) + COALESCE(octet_length(description),0)
@@ -463,7 +465,7 @@ async def create_hunt_finding(
             if existing is not None:
                 return _existing_finding(existing, evidence_action_ids)
             await _require_finding_room(conn, hunt_uuid, _record_bytes(
-                title, description, notes, finding_url, json.dumps(evidence)))
+                title, description, notes, finding_url, json.dumps(evidence, ensure_ascii=False)))
             row = await conn.fetchrow(
                 """INSERT INTO findings (
                        target_id, device_target_id, hunt_run_id, fingerprint,
@@ -619,7 +621,7 @@ async def update_hunt_finding(
             evidence["hunt_mutations"] = audit[-100:]
             await _require_finding_room(conn, hunt_uuid, _record_bytes(
                 *(updates.get(column, finding[column]) for column in ("title", "description", "notes", "url")),
-                json.dumps(evidence)), replacing=finding_uuid)
+                json.dumps(evidence, ensure_ascii=False)), replacing=finding_uuid)
             assignments = []
             params: list[Any] = [finding_uuid, hunt_uuid]
             status_parameter: int | None = None

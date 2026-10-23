@@ -484,3 +484,38 @@ def test_a_created_finding_without_a_path_is_stored_on_its_evidenced_service():
     # The same finding named with its path is the same record.
     again = _create(connection, evidence_action_id=uuid.uuid4(), path="https://example.test:8443/admin")
     assert again["created"] is False
+
+
+def _counted_size(character: str) -> int:
+    """The bytes a create of the largest finding in ``character`` is checked against the bound."""
+    sizes = []
+
+    async def room(conn, hunt_uuid, size, *, replacing=None):
+        sizes.append(size)
+
+    original = finding_actions._require_finding_room
+    finding_actions._require_finding_room = room
+    try:
+        connection = _Connection(target_url="https://example.test")
+        asyncio.run(create_hunt_finding(_Pool(connection), hunt_id=connection.hunt_id, action_id=uuid.uuid4(), values={
+            "title": character * 300, "description": character * 20_000, "severity": "high",
+            "notes": character * 8_000, "path": "/" + character * 1_999,
+            "evidence_summary": character * 8_000,
+            "evidence_action_ids": [str(uuid.uuid4()) for _ in range(50)],
+        }))
+    finally:
+        finding_actions._require_finding_room = original
+    stored = connection.insert_args
+    # The check counts the evidence document as PostgreSQL stores it (UTF-8), like stored rows.
+    assert sizes == [sum(len(str(value).encode()) for value in (stored[4], stored[5], stored[7], stored[9]) if value)
+                     + len(json.dumps(json.loads(stored[8]), ensure_ascii=False).encode())]
+    return sizes[0]
+
+
+def test_the_documented_count_of_largest_findings_matches_the_bound():
+    from pathlib import Path
+    text = " ".join((Path(__file__).resolve().parents[1] / "docs/hunt-recording-and-budgets.md")
+                    .read_text(encoding="utf-8").split())
+    for character in ("a", "\U0001F600"):
+        fits = finding_actions.MAX_FINDING_BYTES_PER_HUNT // _counted_size(character)
+        assert f"about {fits // 10 * 10:,}" in text, (character, fits)

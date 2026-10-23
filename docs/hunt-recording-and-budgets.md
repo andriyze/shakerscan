@@ -49,10 +49,11 @@ candidate records, through the shared ledger.
 - Creating a finding the Hunt already recorded with the same title and location returns that
   record unchanged, including one with verification history, and says whether newly cited
   evidence was attached (`evidence_attached`); `findings.update` attaches it.
-- A Hunt's findings hold at most 64 MiB as stored (title, description, notes, URL and evidence
-  document). A create or update that would pass it is refused with a message naming the limit;
-  nothing is written or charged and the Hunt keeps running. About 2,000 findings of the largest
-  size fit, or tens of thousands of typical ones.
+- A Hunt's findings hold at most 64 MiB as stored in UTF-8 (title, description, notes, URL and
+  evidence document). A create or update that would pass it is refused with a message naming the
+  limit; nothing is written or charged and the Hunt keeps running. The largest finding is about
+  40 KB of ASCII text, so about 1,650 of them fit, or about 155 KB of four-byte characters, so
+  about 430 fit; typical findings of a few kilobytes fit by the tens of thousands.
 
 ## Finish proposals
 
