@@ -1240,8 +1240,10 @@ the live `/session*` OpenAPI contract.
 When an AI provider is configured (`AI_URL` / `AI_API_KEY` / `AI_MODEL`), ShakerScan adds
 cross-finding correlation and an overall risk assessment to DAST reports, and can run AI-driven retest
 verification of findings (`AI_VERIFY_*`). The AI retest tier generates an exploitation plan and
-replays it (optionally via a browser), and can downgrade false positives — but deterministic proof of
-exploitation blocks any downgrade.
+replays it (optionally via a browser). Its verdict is at most `inconclusive`: a model's reading is not
+the check that produced the finding, so an AI "likely fixed" or "false positive" is recorded as an
+inconclusive result with the model's text as the note (the model's own verdict stays in the
+retest's artifacts), and it never closes a finding or refutes a Hunt candidate.
 
 ### 11.5 AI Operations Router
 

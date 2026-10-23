@@ -147,7 +147,8 @@ def test_result_status_mapping_for_supported_verdicts():
     assert _result_status_for_verdict("unknown") == "error"
 
 
-def test_ai_likely_fixed_upgrades_error_to_completed():
+def test_ai_likely_fixed_is_at_most_inconclusive_with_the_models_note():
+    # Only the check that produced a finding can say it is fixed; a model's reading cannot.
     result = {
         "status": "failed",
         "result_status": "error",
@@ -159,9 +160,12 @@ def test_ai_likely_fixed_upgrades_error_to_completed():
 
     assert merged["status"] == "completed"
     assert merged["verification_mode"] == "ai_driven"
-    assert merged["verdict"] == "likely_fixed"
-    assert merged["result_status"] == "likely_fixed"
-    assert merged["confidence"] == 0.81
+    assert merged["verdict"] == "inconclusive"
+    assert merged["result_status"] == "inconclusive"
+    assert merged["verdict_reason"].endswith("No repro")
+    assert merged["confidence"] is None
+    assert merged["artifacts"]["ai_verdict"] == "likely_fixed"
+    assert merged["artifacts"]["ai_confidence"] == 0.81
 
 
 def test_ai_inconclusive_upgrades_error_to_completed_inconclusive():
@@ -352,7 +356,9 @@ def test_ai_timeout_over_low_conf_no_proof_stays_inconclusive():
     assert merged["result_status"] == "inconclusive"
 
 
-def test_high_confidence_ai_false_positive_classifies_as_false_positive():
+def test_high_confidence_ai_false_positive_is_at_most_inconclusive():
+    # A model's "false positive" would close the finding (and refute a Hunt candidate); it is
+    # recorded as the note of an inconclusive result instead.
     result = {
         "status": "completed",
         "result_status": "inconclusive",
@@ -361,8 +367,21 @@ def test_high_confidence_ai_false_positive_classifies_as_false_positive():
     }
     ai_result = {"verdict": "false_positive", "confidence": 0.88, "reasoning": "Vendor static asset"}
     merged = _merge_ai_result_into_retest_result(result, ai_result)
-    assert merged["verdict"] == "false_positive"
-    assert merged["confidence"] == 0.88
+    assert merged["verdict"] == "inconclusive"
+    assert merged["result_status"] == "inconclusive"
+    assert merged["verdict_reason"].endswith("Vendor static asset")
+    assert merged["artifacts"]["ai_verdict"] == "false_positive"
+
+
+def test_ai_verdicts_that_do_not_close_a_finding_are_kept():
+    for verdict, status in (("likely_vulnerable", "inconclusive"), ("inconclusive", "inconclusive"),
+                            ("blocked_by_security", "inconclusive")):
+        merged = _merge_ai_result_into_retest_result(
+            {"status": "completed", "result_status": "inconclusive", "verdict": "inconclusive"},
+            {"verdict": verdict, "confidence": 0.9, "reasoning": "model text"},
+        )
+        assert (merged["verdict"], merged["result_status"]) == (verdict, status)
+        assert merged["verdict_reason"] == "model text" and merged["confidence"] == 0.9
 
 
 def test_low_confidence_ai_false_positive_downgraded_to_inconclusive():

@@ -336,6 +336,8 @@ from worker_handlers.retest_outcome import (  # noqa: F401 - re-exported
     _detect_security_block_text,
     classify_retest_outcome,
     _result_status_for_verdict,
+    AI_CAPPED_VERDICTS,
+    ai_retest_outcome,
     replay_refusal,
 )
 from worker_handlers.retest_authority import (
@@ -5139,15 +5141,6 @@ def _merge_ai_result_into_retest_result(result: dict[str, Any], ai_result: dict[
         ai_result = {**ai_result, "verdict": "likely_vulnerable"}
 
     ai_confidence = ai_result.get("confidence")
-    ai_high_conf = isinstance(ai_confidence, (int, float)) and float(ai_confidence) >= FALSE_POSITIVE_MIN_CONFIDENCE
-
-    # An AI "false_positive" only stands when it is high-confidence. A timeout,
-    # error, or low-confidence AI guess (which surfaces as false_positive or
-    # inconclusive) must not stamp the finding as a terminal false positive —
-    # downgrade it to inconclusive so it stays active and retryable.
-    if ai_verdict == "false_positive" and not ai_high_conf:
-        ai_verdict = "inconclusive"
-        ai_result = {**ai_result, "verdict": "inconclusive"}
 
     # Only replace deterministic outcomes when they were inconclusive or failed.
     # A strong deterministic conclusion (exploited / likely_fixed / likely_vulnerable
@@ -5157,13 +5150,16 @@ def _merge_ai_result_into_retest_result(result: dict[str, Any], ai_result: dict[
 
     result["status"] = "completed"
     result["verification_mode"] = "ai_driven"
-    result["verdict"] = ai_verdict
-    result["verdict_reason"] = ai_result.get("reasoning", "")
-    result["confidence"] = ai_confidence
-    result["result_status"] = _result_status_for_verdict(ai_verdict)
+    # The AI tier is at most inconclusive: it never marks a finding fixed or a false positive.
+    result["verdict"], result["result_status"], result["verdict_reason"] = ai_retest_outcome(
+        ai_verdict, ai_result.get("reasoning"))
+    capped = ai_verdict in AI_CAPPED_VERDICTS
+    result["confidence"] = None if capped else ai_confidence
     artifacts = result.get("artifacts") if isinstance(result.get("artifacts"), dict) else {}
     artifacts = dict(artifacts)
     artifacts["ai_step_results"] = list(ai_result.get("step_results") or [])
+    if capped:
+        artifacts.update(ai_verdict=ai_verdict, ai_confidence=ai_confidence)
     result["artifacts"] = artifacts
     return _enforce_verdict_invariants(result)
 
