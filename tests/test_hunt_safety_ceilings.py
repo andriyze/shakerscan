@@ -291,6 +291,19 @@ def test_tls_handshakes_count_as_the_one_port_they_attempt():
     assert port_accounting.tls_pair(web, "http://app.test") is None
 
 
+def test_a_tls_inspect_records_its_port_only_after_a_handshake():
+    pair = (ADDRESS, 443)
+    assert port_accounting.tls_attempted_pairs(pair, {"execution_started": True}) == (pair,)
+    # Refused before any handshake (scope, policy, an origin it cannot bind): nothing is recorded,
+    # so a later fingerprint or check of that port is still charged.
+    for result in ({"execution_started": False}, {"ok": False, "error": "refused"}, {}, None):
+        assert port_accounting.tls_attempted_pairs(pair, result) == ()
+    assert port_accounting.tls_attempted_pairs(None, {"execution_started": True}) == ()
+    router = (ROOT / "api/hunt/interaction_router.py").read_text(encoding="utf-8")
+    assert "pairs=tls_attempted_pairs(tls_attempted_pair, result))" in router
+    assert "pairs=[tls_attempted_pair]" not in router
+
+
 def test_admission_charges_tls_and_network_actions_their_distinct_ports():
     source = (ROOT / "api/hunt/interaction_router.py").read_text(encoding="utf-8")
     assert "charges = distinct_charge(context, prepared_network, charges)" in source

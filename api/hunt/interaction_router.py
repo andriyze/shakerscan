@@ -51,7 +51,9 @@ from .candidate_verification_preflight import (
 from .action_replay import execution_started_from_budget, replay_observations
 from .candidate_bytes import correction_bytes, require_candidate_room, sighting_bytes
 from .distinct_accounting import distinct_charge
-from .port_accounting import distinct_port_charge, record_attempted_pairs, tls_pair, tls_port_usage
+from .port_accounting import (
+    distinct_port_charge, record_attempted_pairs, tls_attempted_pairs, tls_pair, tls_port_usage,
+)
 from .boundary_handoff import compile_candidate_boundary_handoff
 from .boundary_discovery import discover_hunt_boundaries
 from .knowledge import KnowledgeQueryError, MAX_QUERY_ROWS, query_knowledge_page
@@ -3576,8 +3578,8 @@ async def _execute_hunt_capability_lifecycle(
                             locked["id"],
                             json.dumps(current_used),
                         )
-                    if tls_attempted_pair is not None and isinstance(result, Mapping) and result.get("execution_started"):
-                        await record_attempted_pairs(conn, hunt_id=locked["id"], run=locked, pairs=[tls_attempted_pair])
+                    await record_attempted_pairs(conn, hunt_id=locked["id"], run=locked,
+                                                 pairs=tls_attempted_pairs(tls_attempted_pair, result))
                     if isinstance(receipt_payload, dict):
                         receipt_payload["receipt_id"] = str(receipt_id)
                         receipt_payload["budget_reservation_id"] = (

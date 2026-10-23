@@ -240,8 +240,17 @@ def tls_port_usage(result: Mapping[str, Any], reserved: Mapping[str, int]) -> di
     return {**result, "budget_consumed": usage, "execution_started": attempts > 0}
 
 
+def tls_attempted_pairs(pair: Pair | None, result: Any) -> tuple[Pair, ...]:
+    """The pair a settled ``tls.inspect`` records as attempted: its port, once a handshake was
+    attempted. One refused before any handshake records nothing, so a later check of that port
+    is still charged."""
+    if pair is None or not isinstance(result, Mapping) or result.get("execution_started") is not True:
+        return ()
+    return (pair,)
+
+
 __all__ = [
     "CONTEXT_KEY", "DIMENSION", "FRAGILITY", "action_pairs", "attempted_pairs", "bound_distinct_ports",
     "command_pairs", "distinct_port_charge", "measured_pairs", "observed_open_pairs",
-    "record_attempted_pairs", "tls_pair", "tls_port_usage",
+    "record_attempted_pairs", "tls_attempted_pairs", "tls_pair", "tls_port_usage",
 ]
