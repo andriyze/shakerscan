@@ -215,3 +215,33 @@ def test_device_put_missing_write_authority_is_rejected_before_reservation():
         asyncio.run(admit(store, values={"method": "PUT", "path": "/pairing/start", "json_body": {}}))
     assert not store.actions
     assert store.run["budget_used_json"].get("state_changing_requests", 0) == 0
+
+
+def test_a_device_sweep_of_attempted_ports_keeps_its_fragility_and_matches_the_worker_hold():
+    """Ports are charged once per Hunt, but every connection still stresses the device: the
+    fragility envelope counts all of them, and the worker rebuilds the same hold."""
+    from hunt.distinct_accounting import bound_distinct_usage
+    from hunt.port_accounting import CONTEXT_KEY
+    store = DeviceStore()
+    store.run["context_pack"].update({CONTEXT_KEY: {"192.0.2.10": "80-81"},
+                                      "hosts_attempted_addresses": ["192.0.2.10"]})
+    values = {"ports": [80, 81]}
+    asyncio.run(admit(store, "ports.discover", values))
+    (action,) = store.actions.values()
+    used = store.run["budget_used_json"]
+    assert used.get("tcp_ports_attempted", 0) == 0 and used.get("hosts_attempted", 0) == 0
+    assert used["device_fragility_points"] == 2
+    # The worker's reconstruction: the estimate, the call units, the device envelope, then the
+    # distinct hold, which must equal what admission reserved.
+    spec = CAPABILITY_REGISTRY.require("ports.discover")
+    target, _ = web_hunt_target(store.run, store.run["context_pack"], store.run["policy_json"])
+    policy = ScanPolicy(active_testing=True, network_discovery=True, approval_receipt_id="receipt")
+    prepared = network_capability_adapter("ports.discover").prepare(target=target, args=values, policy=policy)
+    limits = {"agent_actions", "active_actions", "tcp_ports_attempted", "hosts_attempted", "tool_wall_seconds",
+              "device_fragility_points", "http_requests", "browser_actions"}
+    requested = {key: int(value) for key, value in prepared.estimated_budget.items() if key in limits}
+    requested.update(agent_actions=1, active_actions=1)
+    reserve_device_traffic(store.run, spec, requested)
+    admitted = {key: value for key, value in used.items() if value}
+    rebuilt, _prepared, _attempted = bound_distinct_usage(requested, prepared, admitted, store.run["context_pack"])
+    assert rebuilt == admitted

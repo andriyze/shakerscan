@@ -273,7 +273,7 @@ def test_worker_network_job_adopts_and_records_the_distinct_host_hold():
     assert adopt < job.index("build_network_execution(prepared=prepared")
     assert "record_attempted_usage(conn, hunt_id=hunt_id, run=locked, attempted=attempted" in job
     admission = Path(router.__file__).read_text(encoding="utf-8")
-    assert "charges = distinct_charge(context, prepared_network, {" in admission
+    assert "charges = distinct_charge(context, prepared_network, charges)" in admission
     from hunt import distinct_accounting
     combined = Path(distinct_accounting.__file__).read_text(encoding="utf-8")
     assert "bound_distinct_hosts(requested_budget, prepared, reserved, context)" in combined

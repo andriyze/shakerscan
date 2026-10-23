@@ -2163,10 +2163,10 @@ async def _execute_hunt_capability_lifecycle(
                             )
                         except (CapabilityInputError, ValueError) as exc:
                             raise HTTPException(status_code=422, detail=str(exc)) from exc
-                        charges = distinct_charge(context, prepared_network, {
+                        charges = {
                             key: int(value) for key, value in prepared_network.estimated_budget.items()
                             if key in limits
-                        })
+                        }
                     elif is_browser:
                         authority_context = _hunt_json(run["context_pack"], {})
                         target_context = (
@@ -2288,11 +2288,6 @@ async def _execute_hunt_capability_lifecycle(
                                     None,
                                 )
                                 charges[transport_dimension] = 1
-                    if name == "tls.inspect":
-                        # One port per Hunt: its handshakes cost nothing more on a port already attempted.
-                        tls_port = _tls_admission_pair(run, context, policy, request.input)
-                        charges = distinct_port_charge(context, frozenset({tls_port} if tls_port else ()),
-                                                       {**charges, "tcp_ports_attempted": 1})
                     if writes_http:
                         charges["state_changing_requests"] = 1
                     if not evidence_recording(name):
@@ -2308,6 +2303,15 @@ async def _execute_hunt_capability_lifecycle(
                         if name == "collections.replay_active":
                             charges["state_changing_requests"] = selected_replay.writes
                     reserve_device_traffic(run, spec, charges)
+                    # Hosts and ports are charged once per Hunt (hunt/distinct_accounting.py), after the
+                    # device traffic envelope above, which counts every connection the action makes.
+                    if is_network and prepared_network is not None:
+                        charges = distinct_charge(context, prepared_network, charges)
+                    elif name == "tls.inspect":
+                        # One port, whatever its handshakes; nothing more on a port already attempted.
+                        tls_port = _tls_admission_pair(run, context, policy, request.input)
+                        charges = distinct_port_charge(context, frozenset({tls_port} if tls_port else ()),
+                                                       {**charges, "tcp_ports_attempted": 1})
                     if is_device_adapter or (run["device_target_id"] and spec.placement_requirements.get("network_reachability")):
                         try:
                             await require_device_admission(

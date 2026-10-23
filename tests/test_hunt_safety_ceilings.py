@@ -293,7 +293,7 @@ def test_tls_handshakes_count_as_the_one_port_they_attempt():
 
 def test_admission_charges_tls_and_network_actions_their_distinct_ports():
     source = (ROOT / "api/hunt/interaction_router.py").read_text(encoding="utf-8")
-    assert "charges = distinct_charge(context, prepared_network, {" in source
+    assert "charges = distinct_charge(context, prepared_network, charges)" in source
     assert "tls_port = _tls_admission_pair(run, context, policy, request.input)" in source
     assert "operation=inspect_tls_port," in source
     worker = (ROOT / "api/worker.py").read_text(encoding="utf-8")
