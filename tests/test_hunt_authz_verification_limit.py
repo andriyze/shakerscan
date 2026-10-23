@@ -221,6 +221,7 @@ def admission(store, **overrides):
         "preflight_reason_code", "budget_refusal", "verification_budget_refusal",
         "MAX_ADMISSION_ATTEMPTS", "record_grant_use", "_resume_parked_action", "granted_destination",
         "Any", "parked_outcome", "close_parked_action", "permission_required",
+        "ARTIFACT_READ_CAPABILITIES", "artifact_origin_required", "service_origin_changed",
     ):
         context.setdefault(helper, getattr(real_router, helper))
     context.setdefault("settle_refusal", settle_refusal)

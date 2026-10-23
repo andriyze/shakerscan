@@ -1545,6 +1545,7 @@ export const HUNT_START_CONTRACT = {
       "description": "Read one small redacted byte window from a target-bound public client artifact. Reserves two requests: the second is spent only when tab-separated rows need the resource's head read to tell a database dump from plain text (once per resource; a failed read is retried once). Both requests share the 30-second wall-time reservation.",
       "input": {
         "fields": [
+          "origin",
           "path",
           "offset",
           "max_bytes",
@@ -1577,6 +1578,7 @@ export const HUNT_START_CONTRACT = {
       "description": "Statically analyze one bounded target JavaScript artifact for routes, source maps, client sinks, and decoded JWT claims without exposing token values.",
       "input": {
         "fields": [
+          "origin",
           "path",
           "max_bytes"
         ],

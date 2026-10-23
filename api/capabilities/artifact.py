@@ -641,6 +641,16 @@ def _validated(version: str | None) -> str | None:
     return version if version is not None and version.split("/", 1)[1].strip("/") else None
 
 
+def _read_base(target_url: str, args: Mapping[str, Any]) -> str:
+    """The service a read goes to: the ``origin`` the call names, else the target's own URL.
+
+    A network target's URL is a placeholder for its host, not an HTTP service, so a read there
+    names the service. The binding still decides: an origin outside it is refused unsent.
+    """
+    origin = args.get("origin")
+    return origin.strip() if isinstance(origin, str) and origin.strip() else target_url
+
+
 async def _fetch_artifact(
     target_url: str,
     *,
@@ -680,6 +690,7 @@ async def inspect_target_artifact(
     target: TargetBinding,
     transaction_recorder: Callable[[dict[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
+    target_url = _read_base(target_url, args)
     path = str(args.get("path") or "")
     offset = max(0, int(args.get("offset") or 0))
     length = max(1, min(MAX_INSPECT_BYTES, int(args.get("max_bytes") or MAX_PUBLIC_TEXT)))
@@ -801,6 +812,7 @@ async def analyze_target_javascript(
     target: TargetBinding,
     transaction_recorder: Callable[[dict[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
+    target_url = _read_base(target_url, args)
     path = str(args.get("path") or "")
     length = max(1, min(MAX_JAVASCRIPT_BYTES, int(args.get("max_bytes") or MAX_JAVASCRIPT_BYTES)))
     result, private = await _fetch_artifact(

@@ -88,7 +88,10 @@ from .permission_subjects import (
 from .verification_credentials import HuntCredentialScope, hunt_credential_scope
 from .device_policy import DeviceHuntPolicyState
 from .device_traffic import reserve_device_traffic, require_device_admission, settle_device_traffic
-from .service_binding import collection_uses_service_origin
+from .service_binding import (
+    ARTIFACT_READ_CAPABILITIES, artifact_origin_required, collection_uses_service_origin,
+    service_origin_changed,
+)
 from .target_binding import web_hunt_target
 from .capability_reservations import hunt_capability_action_digest, hunt_capability_lease_seconds, terminalize_hunt_capability
 from .capability_executor import CapabilityExecutionContext, CapabilityExecutor
@@ -2046,9 +2049,15 @@ async def _execute_hunt_capability_lifecycle(
                     # HTTP-capable capability that accepts an origin (http.request and
                     # the scanner capabilities), not only http.request.
                     uses_service_origin = False
+                    if name in ARTIFACT_READ_CAPABILITIES and request.input.get("origin") is None:
+                        # A network target names a host, not a service: a read there names one,
+                        # refused here at no cost rather than as an out-of-binding read.
+                        original, read_base = web_hunt_target(run, context, policy)
+                        if service_origin_changed(original, read_base):
+                            raise HTTPException(status_code=422, detail=artifact_origin_required(name))
                     if request.input.get("origin") is not None and (
                         name in {"http.request", "tls.inspect", "auth.session.establish", "authz.verify"}
-                        or is_scanner or is_browser
+                        or name in ARTIFACT_READ_CAPABILITIES or is_scanner or is_browser
                     ):
                         original, _ = web_hunt_target(run, context, policy)
                         if is_scanner and (refused := scanner_destination_refusal(original, request.input["origin"])):

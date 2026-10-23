@@ -57,6 +57,18 @@ def collection_target(run: Mapping[str, Any], context: Mapping[str, Any],
     return replace(target, allowed_origins=tuple(normalized))
 
 
+# Capabilities that read one target artifact; their ``origin`` is checked like http.request's.
+ARTIFACT_READ_CAPABILITIES = frozenset({"artifact.inspect", "javascript.analyze"})
+
+
+def artifact_origin_required(name: str) -> str:
+    return (
+        f"{name} needs origin here: this target names a host and no HTTP service of its own. "
+        "Name the service to read from, for example http://<target host>:<port> (the same "
+        "origin http.request uses)."
+    )
+
+
 def service_origin_changed(target: TargetBinding, origin: Any) -> bool:
     return origin is not None and _origin_key(origin) not in {_origin_key(o) for o in target.allowed_origins}
 

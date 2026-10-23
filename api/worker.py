@@ -22036,6 +22036,7 @@ async def process_canonical_http_capability_job(job_data: dict[str, Any]) -> Non
             operation = execute_artifact
             adapter_type = ArtifactInspectionExecutionAdapter
             redacted_execution = {
+                **({"origin": redact_url(str(public_input["origin"]))} if public_input.get("origin") else {}),
                 "path": redact_url(str(public_input.get("path") or "")),
                 "offset": int(public_input.get("offset") or 0),
                 "max_bytes": int(public_input.get("max_bytes") or 0) or None,

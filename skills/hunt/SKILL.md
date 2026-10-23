@@ -178,7 +178,8 @@ Choose the next smallest action that can answer or falsify a useful hypothesis:
 - For a client bundle, prefer `javascript.analyze` for compact routes, source-map references,
   sink signals, and decoded JWT claims. Use `artifact.inspect` only for one necessary redacted
   byte window. Neither capability returns discovered token values, and neither justifies using a
-  discovered credential.
+  discovered credential. Both take `origin` like `http.request`; a network target needs it, since
+  it names a host and no HTTP service.
 - If a technique needs authority the user did not grant, skip that technique while using the
   methodology's compatible parts. Ask for additional authority only when needed for the objective;
   never enable active, network, credential, direct-origin, state-changing, or OOB permission merely

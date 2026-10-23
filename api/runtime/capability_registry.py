@@ -494,6 +494,19 @@ _SERVICE_ORIGIN_PROPERTY: Mapping[str, Any] = {
 }
 
 
+# The service an artifact read goes to. A network target names a host and no HTTP service of
+# its own, so a read there names one; elsewhere it defaults to the target's own service.
+_ARTIFACT_ORIGIN_PROPERTY: Mapping[str, Any] = {
+    **_SERVICE_ORIGIN_PROPERTY,
+    "description": (
+        "HTTP(S) service origin on the same authorized target host, as for http.request; "
+        "defaults to the target's own service. Required on a network target, which names a "
+        "host and no HTTP service. Another port needs the Hunt's active-testing authority; a "
+        "different host is never admitted."
+    ),
+}
+
+
 def _http_principal_schema(
     properties: Mapping[str, Any] | None = None, *, required: tuple[str, ...] = (),
 ) -> Mapping[str, Any]:
@@ -1403,6 +1416,7 @@ CAPABILITY_REGISTRY = CapabilityRegistry(
                 "worker_private_result": True,
             },
             _schema({
+                "origin": _ARTIFACT_ORIGIN_PROPERTY,
                 "path": {"type": "string", "minLength": 1, "maxLength": 4_000},
                 "offset": {"type": "integer", "minimum": 0, "maximum": 16_777_216},
                 "max_bytes": {"type": "integer", "minimum": 1, "maximum": 16_384},
@@ -1427,6 +1441,7 @@ CAPABILITY_REGISTRY = CapabilityRegistry(
                 "worker_private_result": True,
             },
             _schema({
+                "origin": _ARTIFACT_ORIGIN_PROPERTY,
                 "path": {"type": "string", "minLength": 1, "maxLength": 4_000},
                 "max_bytes": {"type": "integer", "minimum": 1, "maximum": 262_144},
             }, required=("path",)),
