@@ -1,5 +1,9 @@
 """A per-Hunt bound on the bytes its candidate writes store.
 
+It applies to the Hunt's own candidate writes (create, boundary-draft sighting, correction); a
+candidate the server makes from an authorization proposal is not refused by it, though its bytes
+count toward the bound.
+
 Candidates share ``max_candidates`` (one record per call) with findings, and every field is bounded
 in characters only: a create or sighting stores a candidate row and an observation row, which with
 four-byte characters at every limit (title, claim, evidence list, locus, and the 20,000-character

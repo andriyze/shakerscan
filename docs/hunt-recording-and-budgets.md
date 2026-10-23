@@ -54,10 +54,11 @@ candidate records, through the shared ledger.
   limit; nothing is written or charged and the Hunt keeps running. The largest finding is about
   40 KB of ASCII text, so about 1,650 of them fit, or about 155 KB of four-byte characters, so
   about 430 fit; typical findings of a few kilobytes fit by the tens of thousands.
-- A Hunt's candidate records hold at most 256 MiB as stored in UTF-8 (each write's candidate row
-  and observation: title, claim, evidence references, locus and context). A create, sighting or
-  correction that would pass it is refused with `candidate_bytes_limit` and a message naming the
-  limit; nothing is written or charged and the Hunt keeps running. About 1,030 candidates of the
+- A Hunt's candidate writes stop at 256 MiB of its candidate records as stored in UTF-8 (each
+  write's candidate row and observation: title, claim, evidence references, locus and context). A
+  create, boundary-draft sighting or correction that would pass it is refused with
+  `candidate_bytes_limit` and a message naming the limit; nothing is written or charged and the
+  Hunt keeps running. About 1,030 candidates of the
   largest size fit (four-byte characters at every limit, about 260 KB each); a typical candidate
   of a kilobyte or two fits by the hundred thousand.
 
@@ -125,7 +126,7 @@ So a paced investigation reaches the end of its duration before any of these lim
 
 These are ceilings, not promised traffic: every call stays paced by its executor. An
 `http.request` refused before it sends anything (a scope or approval refusal) is charged the
-second it took, not its 15-second hold. A paced Dalfox or sqlmap verification whose own request
+wall it took, at least a second, not its 15-second hold. A paced Dalfox or sqlmap verification whose own request
 log is missing is charged its rate (4 and 2 requests a second) over the seconds it ran plus its
 workers' first requests, never less than the proxy saw and never more than its hard bound. Two
 charges are not a pace an investigation keeps up and are not covered: a call admitted but refused
@@ -155,9 +156,10 @@ raise continues it.
 Every other limit, a safety ceiling or a call, traffic or record limit, refuses only the actions
 that need more of it. The refusal names the dimension (`error` `budget_exhausted:<dimension>`,
 `reason_code` `budget_exhausted`, or `budget_insufficient_for_action` while some is left), the
-action waits for a `budget.raise` request a person approves (`shakerscan approve <request-id>` or
-the Hunt page), and the Hunt keeps its status: the planner and every action that needs none of
-that dimension carry on, and an approval re-admits the waiting action through full admission. A
+action waits for a `budget.raise` request the person approves with
+`shakerscan approve <request-id>` (or they raise the limit on the Hunt page), and the Hunt keeps
+its status: the planner and every action that needs none of that dimension carry on, and once the
+limit has room the action's retry with the same key goes through full admission. A
 dimension whose permission is off is 0 for the Hunt and is refused with
 `budget_dimension_needs_permission`; a raise cannot grant it. The ceiling values are unchanged:
 
@@ -191,7 +193,8 @@ recording draw no start warning. A remaining default warning names a safety ceil
 only when the planned work needs that capability (`ports.discover` on `fast`, for example). Start
 warnings cost a collection replay by the least it can reserve (one request) and cost a manifest
 capability the registry does not know from its manifest entry. The profiles apply to new Hunts;
-raising a running Hunt's limits stays an operator-approved budget amendment.
+a running Hunt's limits are raised only by a person: an approved `budget.raise` request or an
+amendment on the Hunt page. An agent never amends its own budget.
 
 ## Tests
 
@@ -202,5 +205,7 @@ proposal allowance, finish idempotence) and by unit tests of the location, reten
 rules. Retention is tested on the output of the ledger's real redaction. The budget test settles
 real calls (`http.request` with and without redirects, `candidate.verify`, an eight-step
 `browser.interact`, `browser.login_check`, a 25-request replay) against the real ledger on every
-profile and requires the duration to refuse first. Completed target responses in these tests are
-labelled fixtures; the tests send no target traffic.
+profile and requires the duration to refuse first. A used-up ceiling is settled through the real
+refusal, ledger and port accounting in unit tests and through API admission in a PostgreSQL test,
+which requires the Hunt to stay active and admit a request that needs no port. Completed target
+responses in these tests are labelled fixtures; the tests send no target traffic.

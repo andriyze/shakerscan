@@ -393,7 +393,7 @@ expires, the target changes or is deactivated, the user cancels, a circuit break
 or no useful authorized action fits the remaining budget. Only the duration running out ends a Hunt
 as `budget_exhausted`. Any other used-up limit, a safety ceiling included, refuses only the actions
 that need it (`budget_exhausted:<dimension>` with a `budget.raise` request the person approves); the
-Hunt stays active, so keep doing the work that needs none of that dimension. Preserve observations
+Hunt keeps running, so keep doing the work that needs none of that dimension. Preserve observations
 and name material coverage gaps.
 An action rejected with `budget_insufficient_for_action` has not exhausted the run: use its
 reported shortages to select a smaller useful action. Do not retry an unchanged oversized action.

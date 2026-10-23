@@ -99,8 +99,8 @@ safety ceilings keep their values: TCP ports (100 / 1,200 / 10,000), state-chang
 switches and approvals that turn them on. A used-up ceiling, like any used-up limit but the
 duration, refuses only the actions that need it, each waiting for a `budget.raise` request you
 approve, and the Hunt keeps running; only the duration running out stops a Hunt as
-`budget_exhausted`. Ports and hosts are charged once per Hunt, so inspecting a port a sweep already
-reached costs no TCP allowance. At the defaults, logging in, mapping a web application
+`budget_exhausted`. Ports and hosts are charged once per Hunt where the action names them, so
+inspecting a port a sweep already reached costs no TCP allowance. At the defaults, logging in, mapping a web application
 and verifying what it finds needs no budget raise. SQLi and XSS calls reserve their useful paced
 execution envelopes on all three profiles; insufficient headroom asks for a budget raise instead of
 silently shortening the call. Start warnings use the actual executor reservation.
@@ -108,8 +108,8 @@ silently shortening the call. Start warnings use the actual executor reservation
 Evidence-linked finding recording shares `max_candidates` with candidate records and remains
 available on an unfinished exhausted Hunt. It does not spend target traffic or execution calls,
 and a full allowance or a refused write never stops the Hunt; a refused write spends nothing. A
-Hunt's findings hold at most 64 MiB and its candidate records 256 MiB; a write past either is
-refused and nothing is charged. Finding
+Hunt's findings hold at most 64 MiB, and its candidate writes stop at 256 MiB of candidate
+records; a write past either is refused and nothing is charged. Finding
 locations keep the evidenced service's scheme and port and are stored in one spelling (lower-case
 scheme and host, no default port). A relative path stays on the target's own service when that
 service is evidenced, and otherwise follows the single evidenced service on the target host; a
@@ -128,7 +128,8 @@ is not counted against the proposals a Hunt may file. A step is proposed only wh
 on its capability's allowlist and carries no query value, header, body, browser input, session,
 credential or origin on another host, and only when its path names no action (log out, reboot,
 firmware, checkout...), credential or code and carries no payload character or dot segment.
-Accepting it saves one saved action. The debrief's `saved_action` field reports `proposed`,
+Accepting it saves one saved action and must name the digest of the text you reviewed
+(`shakerscan knowledge review` sends it). The debrief's `saved_action` field reports `proposed`,
 `updated`, `unchanged`, `skipped` or `not_saved`. This requires finishing the Hunt; a disconnected
 planner does not finish automatically.
 
