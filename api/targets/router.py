@@ -2359,18 +2359,9 @@ async def asm_test(target_id: str, request: AsmTestRequest = None):
         target = await conn.fetchrow("SELECT url, scan_options FROM targets WHERE id = $1", uuid.UUID(target_id))
         if not target:
             raise HTTPException(status_code=404, detail="Target not found")
-        _active_ids = await _asm_active_scan_ids(conn, target_id)
-        if _active_ids:
-            raise HTTPException(
-                status_code=409,
-                detail=(
-                    f"Target already has an active scan ({_active_ids[0]}); wait for it to "
-                    "finish before queueing another ASM action. It may be a hidden "
-                    "ASM batch or recon scan — open it via the 'view scan' link on "
-                    "the coverage advisor, the 'ASM activity' panel on this page, or enable "
-                    "'Show ASM/internal scans' on the Scans page."
-                ),
-            )
+        _active_scans = await _asm_active_scans(conn, target_id)
+        if _active_scans:
+            raise HTTPException(status_code=409, detail=_asm_active_scan_conflict(_active_scans))
         coverage = await asm_inventory.coverage_summary(conn, target_id)
         if coverage["total"] == 0:
             raise HTTPException(status_code=400, detail="No endpoints in inventory yet; run a scan or coverage recon first")
@@ -2442,18 +2433,9 @@ async def asm_recon(target_id: str, request: AsmReconRequest = None):
         target = await conn.fetchrow("SELECT url, scan_options FROM targets WHERE id = $1", uuid.UUID(target_id))
         if not target:
             raise HTTPException(status_code=404, detail="Target not found")
-        _active_ids = await _asm_active_scan_ids(conn, target_id)
-        if _active_ids:
-            raise HTTPException(
-                status_code=409,
-                detail=(
-                    f"Target already has an active scan ({_active_ids[0]}); wait for it to "
-                    "finish before queueing another ASM action. It may be a hidden "
-                    "ASM batch or recon scan — open it via the 'view scan' link on "
-                    "the coverage advisor, the 'ASM activity' panel on this page, or enable "
-                    "'Show ASM/internal scans' on the Scans page."
-                ),
-            )
+        _active_scans = await _asm_active_scans(conn, target_id)
+        if _active_scans:
+            raise HTTPException(status_code=409, detail=_asm_active_scan_conflict(_active_scans))
         base_opts = _clear_asm_approval_context(
             _decode_target_scan_options(target["scan_options"])
         )
@@ -2546,7 +2528,9 @@ async def asm_improve(target_id: str, request: AsmImproveRequest = None):
         )
         if not target:
             raise HTTPException(status_code=404, detail="Target not found")
-        active_scan_ids = await _asm_active_scan_ids(conn, target_id)
+        active_scans = await _asm_active_scans(conn, target_id)
+        active_scan_ids = [row["id"] for row in active_scans]
+        active_scan_roles = [row["scan_role"] for row in active_scans]
         active = len(active_scan_ids)
         coverage = await asm_inventory.coverage_summary(conn, target_id)
         cfg = asm_inventory.merge_asm_config(_decode_asm_config(target["asm_config"]))
@@ -2569,7 +2553,10 @@ async def asm_improve(target_id: str, request: AsmImproveRequest = None):
             uuid.UUID(target_id),
         )
         attempt_counts = {str(rw["status"]): int(rw["count"] or 0) for rw in attempts}
-        rec = _asm_recommendation(coverage, claimable=claimable, active_scans=active, active_scan_ids=active_scan_ids, last_attempt_counts=attempt_counts)
+        rec = _asm_recommendation(
+            coverage, claimable=claimable, active_scans=active, active_scan_ids=active_scan_ids,
+            last_attempt_counts=attempt_counts, active_scan_roles=active_scan_roles,
+        )
         if rec["next_action"] == "wait":
             return {
                 "action": "wait",
@@ -2812,7 +2799,9 @@ async def asm_gaps(target_id: str):
         cfg = asm_inventory.merge_asm_config(_decode_asm_config(cfg_row["asm_config"] if cfg_row else {}))
         claimable = await asm_inventory.claimable_count(conn, target_id, stale_days=cfg["stale_days"])
         scheduler_state = await _asm_scheduler_state(conn, r, target_id, stale_days=cfg["stale_days"])
-        active_scan_ids = await _asm_active_scan_ids(conn, target_id)
+        active_scans = await _asm_active_scans(conn, target_id)
+        active_scan_ids = [row["id"] for row in active_scans]
+        active_scan_roles = [row["scan_role"] for row in active_scans]
         active = len(active_scan_ids)
         by_auth_rows = await conn.fetch(
             """
@@ -2971,6 +2960,7 @@ async def asm_gaps(target_id: str):
         active_scans=active,
         active_scan_ids=active_scan_ids,
         last_attempt_counts=attempt_counts,
+        active_scan_roles=active_scan_roles,
     )
     recommended_campaigns = _asm_recommended_campaigns(
         coverage=coverage,
@@ -4189,22 +4179,52 @@ def _decode_target_scan_options(raw) -> dict:
     return decoded if isinstance(decoded, dict) else {}
 
 
-async def _asm_active_scan_ids(conn, target_id: str) -> list[str]:
-    """IDs of the active scans blocking ASM actions on this target.
+async def _asm_active_scans(conn, target_id: str) -> list[dict[str, Any]]:
+    """The active scans blocking ASM actions on this target, with their ``scan_role``.
 
-    The blocking scan is usually a Continuous-ASM batch/recon row, which is hidden
-    from the /scans list by default — so callers surface the id here, letting the
-    UI link the otherwise-invisible "a scan is already active" scan.
+    The blocking scan may be a Continuous-ASM batch/recon row, which is hidden from the /scans
+    list by default, or an ordinary scan; callers surface the id and role so the UI can link it
+    and say which kind it is. A parallel scan's shards follow their parent, so the scan the
+    operator started is linked first.
     """
     rows = await conn.fetch(
         """
-        SELECT id FROM scans
+        SELECT id, scan_role FROM scans
         WHERE target_id = $1 AND status IN ('pending', 'queued', 'running')
-        ORDER BY started_at DESC NULLS LAST
+        ORDER BY (scan_role = 'shard') NULLS FIRST, started_at DESC NULLS LAST
         """,
         uuid.UUID(target_id),
     )
-    return [str(r["id"]) for r in rows]
+    return [{"id": str(r["id"]), "scan_role": r["scan_role"]} for r in rows]
+
+
+async def _asm_active_scan_ids(conn, target_id: str) -> list[str]:
+    """IDs of the active scans blocking ASM actions on this target (see ``_asm_active_scans``)."""
+    return [row["id"] for row in await _asm_active_scans(conn, target_id)]
+
+
+_ASM_SCAN_ROLES = frozenset({asm_inventory.ASM_BATCH_ROLE, asm_inventory.ASM_RECON_ROLE})
+
+
+def _asm_active_scan_kind(scan_role: Any) -> str:
+    """``asm`` for an ASM batch/recon scan (hidden from the Scans list), else ``scan``."""
+    return "asm" if str(scan_role or "") in _ASM_SCAN_ROLES else "scan"
+
+
+def _asm_active_scan_conflict(active_scans: list[dict[str, Any]]) -> str:
+    """Why an ASM action cannot be queued now, naming the blocking scan by its kind."""
+    blocker = active_scans[0]
+    message = (
+        f"Target already has an active scan ({blocker['id']}); wait for it to finish before "
+        "queueing another ASM action."
+    )
+    if _asm_active_scan_kind(blocker.get("scan_role")) == "asm":
+        message += (
+            " It is an ASM batch or recon scan, hidden from the Scans list: open it via the "
+            "'view scan' link on the coverage advisor, the 'ASM activity' panel on this page, "
+            "or enable 'Show ASM/internal scans' on the Scans page."
+        )
+    return message
 
 
 async def _asm_scheduler_state(
@@ -4229,7 +4249,8 @@ async def _asm_scheduler_state(
 
     cfg = asm_inventory.merge_asm_config(_decode_asm_config(target["asm_config"]))
     effective_stale_days = stale_days if stale_days is not None else cfg["stale_days"]
-    active_scan_ids = await _asm_active_scan_ids(conn, target_id)
+    active_scans = await _asm_active_scans(conn, target_id)
+    active_scan_ids = [row["id"] for row in active_scans]
     claimable = await asm_inventory.claimable_count(
         conn,
         target_id,
@@ -4261,12 +4282,14 @@ async def _asm_scheduler_state(
     if active_scan_ids:
         public_decision["active_scan_id"] = active_scan_ids[0]
         public_decision["active_scan_ids"] = active_scan_ids
+        public_decision["active_scan_kind"] = _asm_active_scan_kind(active_scans[0]["scan_role"])
     metadata = _decode_json_value(target["metadata_json"]) or {}
     persisted = metadata.get("asm_last_decision") if isinstance(metadata, dict) else None
     return {
         "decision": public_decision,
         "last_decision": persisted if isinstance(persisted, dict) else None,
         "active_scan_ids": active_scan_ids,
+        "active_scan_kind": _asm_active_scan_kind(active_scans[0]["scan_role"]) if active_scans else None,
         "claimable": claimable,
         "tested_today": tested_today,
         "daily_cap_remaining": public_decision.get("daily_cap_remaining"),
@@ -4345,6 +4368,7 @@ def _asm_recommendation(
     active_scans: int = 0,
     active_scan_ids: list[str] | None = None,
     last_attempt_counts: dict[str, int] | None = None,
+    active_scan_roles: list[Any] | None = None,
 ) -> dict[str, Any]:
     """Small, stable decision model for UI/API/AI callers.
 
@@ -4373,6 +4397,12 @@ def _asm_recommendation(
         if active_scan_ids:
             active_blocker["scan_id"] = active_scan_ids[0]
             active_blocker["scan_ids"] = active_scan_ids
+            if active_scan_roles:
+                # Only an ASM batch/recon scan is hidden from the Scans list; an ordinary DAST
+                # scan blocking the target must not be labelled as one.
+                kind = _asm_active_scan_kind(active_scan_roles[0])
+                active_blocker["scan_kind"] = kind
+                active_blocker["hidden_from_scans_list"] = kind == "asm"
         blockers.append(active_blocker)
     if auth_missing > 0:
         blockers.append({"kind": "auth_missing", "count": auth_missing, "message": "Some authenticated endpoints need credentials before they can be replayed."})

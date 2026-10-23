@@ -307,7 +307,9 @@ async def old_grouped(conn: Any, router: Any, *, include_inactive: bool = False,
         query += f" AND UPPER(t.last_grade) = UPPER(${len(params)})"
     if has_findings is not None:
         query += " AND t.active_findings_count > 0" if has_findings else " AND t.active_findings_count = 0"
-    query += " ORDER BY t.root_domain, t.is_root DESC, t.url"
+    # Members in the database's URL order, as the API reads them: a Python sort compares
+    # codepoints, which differs from a glibc collation (en_US.utf8 ignores '.').
+    query += " ORDER BY t.root_domain, t.url"
     rows = router._dedupe_canonical_target_rows(await conn.fetch(query, *params))
     target_ids = [row["id"] for row in rows]
     investigator = await grouped_list.investigator_counts(conn, target_ids)
@@ -319,15 +321,20 @@ async def old_grouped(conn: Any, router: Any, *, include_inactive: bool = False,
             "investigator_verified_count": 0, "investigator_suspected_count": 0}))
         return data
 
-    grouped: dict[str, dict] = {}
+    members: dict[str, list[tuple[bool, dict]]] = {}
     for row in rows:
         rd = row["root_domain"] or "unknown"
-        group = grouped.setdefault(rd, {"root_domain": rd, "root_target": None, "subdomains": []})
-        data = attach(router._public_target_row(row))
-        if row["is_root"]:
-            group["root_target"] = data
-        else:
-            group["subdomains"].append(data)
+        members.setdefault(rd, []).append((bool(row["is_root"]), attach(router._public_target_row(row))))
+    grouped: dict[str, dict] = {}
+    for rd, items in members.items():
+        # The last root in URL order is the group's root; every other target of the domain, another
+        # root of it included (an app of the same host on another port), is a member in URL order.
+        root_index = max((index for index, (is_root, _data) in enumerate(items) if is_root), default=None)
+        grouped[rd] = {
+            "root_domain": rd,
+            "root_target": items[root_index][1] if root_index is not None else None,
+            "subdomains": [data for index, (_is_root, data) in enumerate(items) if index != root_index],
+        }
     result = []
     for data in grouped.values():
         root = data["root_target"]

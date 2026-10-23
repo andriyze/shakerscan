@@ -1,4 +1,6 @@
 import assert from 'node:assert/strict'
+import fs from 'node:fs'
+import path from 'node:path'
 import test from 'node:test'
 
 import {
@@ -19,6 +21,7 @@ import {
   scanLogEntry,
   scanPhasePresentation,
   scanResultPresentation,
+  templateWindowsPresentation,
   blockerSeverityPhrase,
   scanFindingCounts,
   scanFindingCountsText,
@@ -706,4 +709,111 @@ test('active templates short of every window at a scanned origin read as an oper
   assert.deepEqual(result.coverageGapReasons, [
     'Active templates did not all run at one of the scanned origins (the target or another origin the scan discovered), so some checks never ran there',
   ])
+})
+
+// A thorough scan ran every active-template window (39/39) while 17 of 73 endpoints were never
+// scheduled; the page said "nuclei active did not finish" and showed no window count.
+function windowsScan(row, gaps = ['nuclei_active', 'nuclei_passive', 'sqli', 'xss']) {
+  return {
+    status: 'completed',
+    options: { scan_execution_plan: {
+      budget_profile: 'thorough', policy: { active_testing: true },
+      resolved_families: ['recon', 'nuclei_passive', 'nuclei_active', 'xss', 'sqli'],
+    } },
+    result: {
+      findings: [],
+      result: { risk_score: 20, risk_grade: 'F', grade_reliable: false },
+      coverage: {
+        selected_family_gaps: gaps,
+        family_coverage: [{
+          family: 'nuclei_active', planned_candidates: 56, attempted_candidates: 56,
+          manifest_candidates: 73, unscheduled_candidates: 17, coverage_status: 'partial', ...row,
+        }],
+      },
+    },
+  }
+}
+
+test('every planned active-template window ran: the window count shows and the family is not unfinished', () => {
+  const result = scanResultPresentation(windowsScan({
+    reason: 'manifest_entries_unscheduled',
+    template_windows: { run: 39, total: 39, bases: [{ base: 'http://192.0.2.10:8000/', run: 39, total: 39 }] },
+  }), { band: 'moderate', label: 'Moderate coverage' })
+  assert.deepEqual(result.incompleteFamilies, ['nuclei passive', 'sqli', 'xss'])
+  assert.deepEqual(result.templateWindows, {
+    run: 39, total: 39, complete: true,
+    bases: [{ base: 'http://192.0.2.10:8000/', run: 39, total: 39 }],
+    detail: '39 of 39 ran (http://192.0.2.10:8000/ 39/39)',
+    text: 'Active templates: 39 of 39 template windows ran (http://192.0.2.10:8000/ 39/39).',
+  })
+})
+
+test('a stored report whose only gap was the windowed sweep names no unexplained gap', () => {
+  const scan = windowsScan({
+    reason: 'manifest_entries_unscheduled',
+    template_windows: { run: 39, total: 39, bases: [{ base: 'http://192.0.2.10:8000/', run: 39, total: 39 }] },
+  }, ['nuclei_active'])
+  scan.result.coverage.reasons = ['selected_family_incomplete']
+  const result = scanResultPresentation(scan, { band: 'moderate', label: 'Moderate coverage' })
+  assert.deepEqual(result.incompleteFamilies, [])
+  assert.deepEqual(result.coverageGapReasons, [])
+  // Another family still unfinished keeps the reason.
+  const other = windowsScan({
+    reason: 'manifest_entries_unscheduled',
+    template_windows: { run: 39, total: 39, bases: [{ base: 'http://192.0.2.10:8000/', run: 39, total: 39 }] },
+  }, ['nuclei_active', 'sqli'])
+  other.result.coverage.reasons = ['selected_family_incomplete']
+  const kept = scanResultPresentation(other, { band: 'moderate', label: 'Moderate coverage' })
+  assert.deepEqual(kept.incompleteFamilies, ['sqli'])
+  assert.equal(kept.coverageGapReasons.length, 1)
+})
+
+test('active templates short of their windows stay unfinished and say how many ran per origin', () => {
+  const result = scanResultPresentation(windowsScan({
+    reason: 'template_windows_incomplete_on_origin',
+    template_windows: { run: 50, total: 78, bases: [
+      { base: 'https://a.example/', run: 39, total: 39 },
+      { base: 'https://b.example/', run: 11, total: 39 },
+    ] },
+  }), { band: 'moderate', label: 'Moderate coverage' })
+  assert.ok(result.incompleteFamilies.includes('nuclei active'))
+  assert.equal(result.templateWindows.complete, false)
+  assert.equal(
+    result.templateWindows.text,
+    'Active templates: 50 of 78 template windows ran (https://a.example/ 39/39, https://b.example/ 11/39).',
+  )
+})
+
+test('all windows ran but the sweep itself did not finish: still unfinished', () => {
+  const result = scanResultPresentation(windowsScan({
+    reason: 'action_incomplete',
+    template_windows: { run: 39, total: 39, bases: [{ base: 'https://a.example/', run: 39, total: 39 }] },
+  }), { band: 'moderate', label: 'Moderate coverage' })
+  assert.ok(result.incompleteFamilies.includes('nuclei active'))
+})
+
+test('the scan page shows the window count in its run details', () => {
+  assert.match(scanPage, /data-testid="template-windows"/)
+  assert.match(scanPage, /resultPresentation\.templateWindows\.detail/)
+})
+
+test('a record without bases (2.11.0) still shows run of total; no record shows nothing', () => {
+  const coverage = { family_coverage: [{ family: 'nuclei_active', template_windows: { run: 6, total: 39 } }] }
+  assert.deepEqual(templateWindowsPresentation(coverage), {
+    run: 6, total: 39, complete: false, bases: [], detail: '6 of 39 ran', text: 'Active templates: 6 of 39 template windows ran.',
+  })
+  assert.equal(templateWindowsPresentation({ family_coverage: [{ family: 'nuclei_active' }] }), null)
+  assert.equal(templateWindowsPresentation({}), null)
+})
+
+const scanPage = fs.readFileSync(path.join(import.meta.dirname, '../app/scans/[id]/page.tsx'), 'utf8')
+
+test('a sign-in endpoint probed only within its lockout-safe ceiling is named as a coverage limit', () => {
+  const result = scanResultPresentation({
+    result: { findings: [], result: {}, coverage: { reasons: ['auth_endpoint_probe_limited'], family_coverage: [] } },
+  }, { band: 'moderate', label: 'Moderate coverage' })
+  assert.equal(result.coverageGapReasons.length, 1)
+  assert.match(result.coverageGapReasons[0], /sign-in endpoint .* lockout-safe/)
+  // Each check there draws from a set of its own.
+  assert.match(result.coverageGapReasons[0], /a bounded set of probes for each check/)
 })

@@ -400,6 +400,29 @@ def _pairs(values: Sequence[str], *, label: str) -> dict[str, str]:
     return result
 
 
+# `--credential-ref SLOT=ID` takes the short slot names the help documents as aliases of the
+# start contract's fields (primary -> primary_credential_profile_id); the full names still work.
+CREDENTIAL_REF_SLOTS = {
+    "primary": "primary_credential_profile_id",
+    "secondary": "secondary_credential_profile_id",
+    "service": "service_credential_profile_id",
+    "web": "web_credential_profile_id",
+    "ssh": "ssh_credential_profile_id",
+    "oauth": "oauth_credential_profile_id",
+    "authorization_header": "authorization_header_credential_id",
+    "cookie": "cookie_credential_id",
+}
+
+
+def _credential_refs(values: Sequence[str]) -> dict[str, str]:
+    aliased = []
+    for raw in values:
+        name, separator, value = str(raw).partition("=")
+        name = name.strip()
+        aliased.append(f"{CREDENTIAL_REF_SLOTS.get(name, name)}{separator}{value}")
+    return _pairs(aliased, label="credential reference")
+
+
 def _openapi_schema(client: ApiClient, name: str) -> Mapping[str, Any]:
     contract = client.get("/openapi.json")
     try:
@@ -503,7 +526,7 @@ def _hunt_start_payload(args: argparse.Namespace, contract: Mapping[str, Any]) -
             "scope_receipt_id": args.scope_receipt_id,
         },
         "budgets": budgets,
-        "credential_refs": _pairs(args.credential_ref, label="credential reference"),
+        "credential_refs": _credential_refs(args.credential_ref),
         "capabilities": list(dict.fromkeys(args.capability)),
         "request_collection_ids": list(dict.fromkeys(args.collection_id)),
         "skill_ids": list(dict.fromkeys(args.skill_id)),
@@ -1126,7 +1149,14 @@ def build_parser() -> argparse.ArgumentParser:
     hunt_start.add_argument("--approval-receipt-id")
     hunt_start.add_argument("--scope-receipt-id")
     hunt_start.add_argument("--budget", action="append", default=[], metavar="NAME=VALUE")
-    hunt_start.add_argument("--credential-ref", action="append", default=[], metavar="SLOT=ID")
+    hunt_start.add_argument(
+        "--credential-ref", action="append", default=[], metavar="SLOT=ID",
+        help=(
+            "attach a credential profile (repeatable). SLOT is "
+            + ", ".join(CREDENTIAL_REF_SLOTS)
+            + " or the full field name (primary_credential_profile_id, ...)"
+        ),
+    )
     hunt_start.add_argument("--capability", action="append", default=[])
     hunt_start.add_argument("--collection-id", action="append", default=[])
     hunt_start.add_argument(

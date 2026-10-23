@@ -17,6 +17,7 @@ old authorization no longer matches and the target is authorized again). The dan
 """
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
 import json
 import urllib.parse
 import uuid
@@ -410,6 +411,184 @@ async def authorize_target(
     return public_authorization(row, {"id": receipt["receipt_id"], "verdict": receipt["verdict"]})
 
 
+# A credentialed Scan admitted on the target's standing authorization is bound to a
+# credential-tier receipt derived from it, as New Scan records one. The derived receipt names its
+# source, the source's tier and the Scan it was recorded for. It lives only as long as that
+# source: every revocation path ends it (``revoke_derived_credential_scan_receipts``), and the
+# running-scan check and the worker's credential gate refuse it once the source no longer stands
+# (``derived_credential_scan_source_is_current``). The submission validator refuses it for any
+# other submission, and ``approval_policy.approval_covers_risk`` reads it as covering the Scan's
+# credentials and its source's tier, never more.
+CREDENTIAL_SCAN_DERIVATION = "credential_scan"
+CREDENTIAL_SCAN_ACTION_NAME = "scan.submit"
+# The bound only limits a receipt whose source outlived it; the source's revocation ends it
+# first. It is generous on purpose: a scan queued behind the licensed slots, or one that runs
+# continuation rounds for hours, must not lose its credentials to its own receipt's expiry, and
+# the retests the Scan queues when it finishes are bound to the same receipt. Seven days is the
+# longest bounded approval the UI creates.
+CREDENTIAL_SCAN_RECEIPT_LIFETIME = timedelta(days=7)
+
+
+def derived_credential_scan_context(approval: Any) -> Mapping[str, Any] | None:
+    """The action context of a derived credential-scan receipt, else None."""
+    context = _json(_row(approval).get("action_context")) or {}
+    if not isinstance(context, Mapping) or context.get("derived_for") != CREDENTIAL_SCAN_DERIVATION:
+        return None
+    return context
+
+
+def derived_credential_scan_source(approval: Any) -> str | None:
+    """The standing receipt id a derived credential-scan receipt came from, else None."""
+    context = derived_credential_scan_context(approval)
+    if context is None:
+        return None
+    return str(context.get("derived_from_approval_receipt_id") or "") or None
+
+
+async def derived_credential_scan_source_is_current(
+    conn: Any, approval: Any, *, expected_target_id: Any = None,
+) -> bool:
+    """True while the standing authorization a derived receipt came from still stands.
+
+    The target is the one the receipt names, so a caller that has no target id fails closed
+    rather than skipping the check; a caller that has one must name the same target. The source
+    must be an active standing authorization that the target's current authorization accepts.
+    """
+    context = derived_credential_scan_context(approval)
+    if context is None:
+        return False
+    try:
+        target_uuid = uuid.UUID(str(context.get("target_id") or ""))
+        source_uuid = uuid.UUID(str(context.get("derived_from_approval_receipt_id") or ""))
+    except (TypeError, ValueError):
+        return False
+    if expected_target_id and str(expected_target_id) != str(target_uuid):
+        return False
+    source = _row(await conn.fetchrow(
+        "SELECT status, revoked_at, approved_by, denial_reason, action_name, risk_tier, expires_at "
+        "FROM approval_receipts WHERE id=$1",
+        source_uuid,
+    ))
+    if (
+        not source
+        or source.get("status") != "active"
+        or source.get("revoked_at") is not None
+        or not source.get("approved_by")
+        or source.get("denial_reason")
+        or source.get("action_name") != STANDING_ACTION_NAME
+        or source.get("risk_tier") not in STANDING_RISK_TIERS
+        or source.get("expires_at") is not None
+    ):
+        return False
+    return await standing_authorization_is_current(conn, target_uuid, source_uuid)
+
+
+async def derive_credential_scan_receipt(
+    conn: Any, *, target_id: Any, standing_receipt_id: Any, scan_id: Any = None,
+    now: datetime | None = None,
+) -> str | None:
+    """A credential-tier receipt for one credentialed Scan, from the target's standing authorization.
+
+    Returns None, deriving nothing, unless ``standing_receipt_id`` is the target's own current
+    standing authorization (active, approved, not inherited from another target): the caller then
+    keeps the standing receipt exactly as before. The derived receipt has the source's scope,
+    approver and confirmations, the ``credential`` tier, and a bounded expiry, and names its
+    source, the source's tier and the Scan (``scan_id``); it widens nothing the standing
+    authorization did not already cover for this Scan (a standing authorization covers the
+    target's selected credentials, ``approval_policy.approval_covers_risk``).
+    """
+    try:
+        target_uuid = uuid.UUID(str(target_id))
+        standing_uuid = uuid.UUID(str(standing_receipt_id))
+        scan_uuid = uuid.UUID(str(scan_id)) if scan_id is not None else None
+    except (TypeError, ValueError):
+        return None
+    # Locked, so a revocation running at the same time cannot be raced into a fresh receipt: the
+    # revocation waits for this transaction and then revokes what it derived, or this waits for
+    # the revocation and then reads the source as revoked.
+    source = _row(await conn.fetchrow(
+        """
+        SELECT a.id, a.status, a.approved_by, a.risk_tier, a.action_name, a.denial_reason,
+               a.confirmations, a.scope_receipt_id, a.expires_at, s.target_id AS scope_target_id
+          FROM approval_receipts a
+          JOIN scope_receipts s ON s.id = a.scope_receipt_id
+         WHERE a.id = $1
+           FOR UPDATE OF a
+        """,
+        standing_uuid,
+    ))
+    if (
+        not source
+        or source.get("status") != "active"
+        or not source.get("approved_by")
+        or source.get("denial_reason")
+        or source.get("action_name") != STANDING_ACTION_NAME
+        or source.get("risk_tier") not in STANDING_RISK_TIERS
+        or source.get("expires_at") is not None
+        or str(source.get("scope_target_id") or "") != str(target_uuid)
+    ):
+        return None
+    if not await standing_authorization_is_current(conn, target_uuid, standing_uuid):
+        return None
+    confirmations = [str(item) for item in (_json(source.get("confirmations")) or []) if str(item)]
+    if "confirm_authorized" not in confirmations:
+        return None
+    expires_at = (now or datetime.now(timezone.utc)) + CREDENTIAL_SCAN_RECEIPT_LIFETIME
+    row = _row(await conn.fetchrow(
+        """
+        INSERT INTO approval_receipts
+            (scope_receipt_id, risk_tier, confirmations, action_name, action_context,
+             approved_by, denial_reason, expires_at)
+        VALUES ($1,'credential',$2::jsonb,$3,$4::jsonb,$5,NULL,$6)
+        RETURNING id
+        """,
+        source["scope_receipt_id"],
+        json.dumps(confirmations),
+        CREDENTIAL_SCAN_ACTION_NAME,
+        json.dumps({
+            "target_id": str(target_uuid),
+            "derived_for": CREDENTIAL_SCAN_DERIVATION,
+            "derived_from_approval_receipt_id": str(standing_uuid),
+            "source_risk_tier": str(source["risk_tier"]),
+            **({"scan_id": str(scan_uuid)} if scan_uuid is not None else {}),
+        }, sort_keys=True),
+        source["approved_by"],
+        expires_at,
+    ))
+    return str(row["id"]) if row.get("id") else None
+
+
+async def revoke_derived_credential_scan_receipts(
+    conn: Any, *, revoked_by: str, reason: str,
+) -> int:
+    """Revoke every derived credential-scan receipt whose source is no longer active.
+
+    Keyed on the source, not on a target: a receipt derived under an application service from an
+    alias of its host's authorization is filed under the service, and revoking the host's
+    authorization (which revokes the alias) must end it too. Returns how many were revoked.
+    """
+    result = await conn.execute(
+        """
+        -- revoke derived credential-scan receipts
+        UPDATE approval_receipts d
+           SET status='revoked', revoked_at=NOW(), revoked_by=$1, revocation_reason=$2
+         WHERE d.status = 'active'
+           AND d.action_context->>'derived_for' = $3
+           AND NOT EXISTS (
+               SELECT 1 FROM approval_receipts s
+                WHERE s.id::text = d.action_context->>'derived_from_approval_receipt_id'
+                  AND s.status = 'active')
+        """,
+        revoked_by,
+        reason[:2000],
+        CREDENTIAL_SCAN_DERIVATION,
+    )
+    try:
+        return int(str(result).split()[-1])
+    except (ValueError, IndexError):
+        return 0
+
+
 async def revoke_target_authorization(
     conn: Any, target_id: Any, *, revoked_by: str, reason: str
 ) -> int:
@@ -459,6 +638,8 @@ async def revoke_target_authorization(
         reason[:2000],
         STANDING_ACTION_NAME,
     )
+    # Not counted: they are Scan-bound copies of the authorizations counted above.
+    await revoke_derived_credential_scan_receipts(conn, revoked_by=revoked_by, reason=reason)
     count = 0
     for value in (result, derived):
         try:

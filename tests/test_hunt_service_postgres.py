@@ -18,6 +18,7 @@ DSN = os.environ.get("ASSURANCE_TEST_DATABASE_URL")
 pytestmark = pytest.mark.skipif(not DSN, reason="requires disposable PostgreSQL")
 
 from tests.disposable_postgres import require_disposable_database
+from tests.receipt_pg_schema import receipt_schema_sql
 from api.runtime import auth_session_store as sessions
 from api.runtime.credential_resolver import CredentialResolutionError
 from api.runtime.credential_store import PostgresCredentialProfileStore
@@ -52,12 +53,7 @@ def test_device_schema_session_roundtrip_and_graph_owner(monkeypatch, kind):
             await conn.execute("""CREATE TABLE hunt_runs (
                 id UUID PRIMARY KEY,target_id UUID,device_target_id UUID,target_kind TEXT,
                 status TEXT,completed_at TIMESTAMPTZ,context_pack JSONB,policy_json JSONB)""")
-            await conn.execute("""CREATE TABLE scope_receipts (
-                id TEXT PRIMARY KEY,target_id UUID,verdict TEXT);
-                CREATE TABLE approval_receipts (
-                id UUID PRIMARY KEY,scope_receipt_id TEXT,risk_tier TEXT,confirmations JSONB,
-                approved_by TEXT,denial_reason TEXT,expires_at TIMESTAMPTZ,
-                action_name TEXT,status TEXT,revoked_at TIMESTAMPTZ)""")
+            await conn.execute(receipt_schema_sql())
             credentials = PostgresCredentialProfileStore()
             await credentials.ensure_schema(conn)
             store = sessions.PostgresAuthSessionStore()
@@ -83,10 +79,12 @@ def test_device_schema_session_roundtrip_and_graph_owner(monkeypatch, kind):
                 ) VALUES($1,$2,$3,$4,'active',$5::jsonb,$6::jsonb)""",
                                owner, None if kind == "device" else target_id, target_id if kind == "device" else None,
                                kind, json.dumps(context), json.dumps(policy))
-            await conn.execute("INSERT INTO scope_receipts VALUES('scope',$1,'allowed')", target_id)
-            await conn.execute("""INSERT INTO approval_receipts VALUES (
-                $1,'scope','active','["confirm_authorized"]','fixture',NULL,NULL,
-                'target.authorization','active',NULL)""", approval_id)
+            await conn.execute(
+                "INSERT INTO scope_receipts(id,target_id,verdict) VALUES('scope',$1,'allowed')", target_id)
+            await conn.execute("""INSERT INTO approval_receipts(
+                id,scope_receipt_id,risk_tier,confirmations,approved_by,action_name,status
+                ) VALUES($1,'scope','active','["confirm_authorized"]','fixture',
+                'target.authorization','active')""", approval_id)
             metadata = await store.create(conn, owner_kind="hunt", owner_id=owner, target=target,
                 profile_id=profile_id, profile_version=1, principal_slot="primary", principal_label="Fixture", auth_kind="json_login",
                 compatible_capabilities=["http.request", "auth.session.refresh"], headers={"Cookie": "session=synthetic"},

@@ -114,7 +114,9 @@ def certificate_hint(reason: object) -> str:
 def with_certificate_hint(message: str, reason: object) -> str:
     """``message`` followed by the certificate remedy when ``reason`` is a TLS verification failure."""
     hint = certificate_hint(reason)
-    return f"{message}. Hint: {hint}" if hint else message
+    if not hint or hint in message:  # an adapter that already wrapped the reason said it once
+        return message
+    return f"{message}. Hint: {hint}"
 
 
 __all__ = [

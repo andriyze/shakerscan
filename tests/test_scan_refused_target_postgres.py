@@ -9,6 +9,7 @@ import pytest
 from fastapi import HTTPException
 
 from targets.asset_migration import BoundConnectionPool
+from tests.receipt_pg_schema import receipt_schema_sql
 from tests.test_target_asset_migration_postgres import database
 from tests.test_target_asset_psl_postgres import _converted
 from tests.test_target_asset_inputs_postgres import encryption
@@ -82,7 +83,7 @@ def test_a_refused_receipt_keeps_its_blocked_audit_row_but_no_target(monkeypatch
         asyncpg = _real_asyncpg()
         async with database() as conn:
             await _converted(conn)
-            await conn.execute("CREATE TABLE IF NOT EXISTS approval_receipts (id UUID PRIMARY KEY)")
+            await conn.execute(receipt_schema_sql())
             await conn.execute("""
                 CREATE TABLE IF NOT EXISTS command_results (
                     id UUID PRIMARY KEY DEFAULT gen_random_uuid(), command TEXT NOT NULL,

@@ -8,6 +8,7 @@ from uuid import UUID, uuid4
 import pytest
 from cryptography.fernet import Fernet
 
+from tests.receipt_pg_schema import receipt_schema_sql
 from tests.test_authenticated_assurance_postgres import exercise, write, DSN
 from authenticated_assurance.jobs import ValidationJobs, SCHEMA_SQL, ACTION_NAME
 from authenticated_assurance.job_lifecycle import stop_request, claim_request
@@ -65,14 +66,13 @@ async def prepare(pool, store, config, fixture, monkeypatch):
     async with pool.acquire() as conn:
         await PostgresBudgetReservationStore().ensure_schema(conn)
         await conn.execute(SCHEMA_SQL)
-        await conn.execute("""CREATE TABLE scope_receipts(id UUID PRIMARY KEY, target_id UUID, verdict TEXT);
-            CREATE TABLE approval_receipts(id UUID PRIMARY KEY, scope_receipt_id UUID, risk_tier TEXT,
-            confirmations JSONB, approved_by TEXT, denial_reason TEXT, expires_at TIMESTAMPTZ,
-            action_name TEXT, status TEXT, revoked_at TIMESTAMPTZ)""")
-        await conn.execute("INSERT INTO scope_receipts VALUES($1,$2,'allowed')", scope_id, config.target_id)
-        await conn.execute("""INSERT INTO approval_receipts VALUES($1,$2,'credential',
-            '["confirm_authorized"]','fixture',NULL,$3,$4,'active',NULL)""",
-            approval_id, scope_id, datetime.now(timezone.utc)+timedelta(minutes=5), ACTION_NAME)
+        await conn.execute(receipt_schema_sql())
+        await conn.execute("INSERT INTO scope_receipts(id,target_id,verdict) VALUES($1,$2,'allowed')",
+            str(scope_id), config.target_id)
+        await conn.execute("""INSERT INTO approval_receipts(id,scope_receipt_id,risk_tier,confirmations,
+            approved_by,expires_at,action_name,status) VALUES($1,$2,'credential','["confirm_authorized"]',
+            'fixture',$3,$4,'active')""",
+            approval_id, str(scope_id), datetime.now(timezone.utc)+timedelta(minutes=5), ACTION_NAME)
         await conn.execute("UPDATE targets SET url=$2 WHERE id=$1", config.target_id, origin)
         await conn.execute("UPDATE credential_profile_bindings SET allowed_capabilities='[\"http.request\"]'::jsonb WHERE profile_id=$1", config.credential_reference)
         await conn.execute("""UPDATE credential_profile_versions SET encrypted_secret=$2, encrypted_metadata=$3

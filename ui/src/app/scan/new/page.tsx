@@ -210,11 +210,35 @@ export default function NewScanPage() {
   ) / 60) + 15
   const includeFamilies = familyPreset === 'custom' ? customFamilies : []
   const excludeFamilies: string[] = []
+  // Until the server's preview answers, the contract's preset (with what it adds on this budget
+  // profile: active templates on thorough and deep) stands in for the resolved set.
+  const presetFamilies = (preset: 'passive' | 'standard_active') => {
+    const additions = scanContract?.family_preset_profile_additions?.[preset]?.[budgetProfile] ?? (
+      preset === 'standard_active' && (budgetProfile === 'thorough' || budgetProfile === 'deep') ? ['nuclei_active'] : []
+    )
+    const base = scanContract?.family_presets?.[preset] ?? (
+      preset === 'standard_active'
+        ? ['recon', 'nuclei_passive', 'xss', 'sqli', 'sensitive_exposure']
+        : ['recon', 'nuclei_passive', 'sensitive_exposure']
+    )
+    const chosen = new Set([...base, ...additions])
+    const order = scanContract?.families?.map((family) => family.name) ?? [...base, ...additions]
+    return order.filter((name) => chosen.has(name))
+  }
   const resolvedFamilies = contractPreview?.resolved_families ?? (
-    familyPreset === 'standard_active'
-      ? ['recon', 'nuclei_passive', 'xss', 'sqli', 'sensitive_exposure']
-      : familyPreset === 'passive' ? ['recon', 'nuclei_passive', 'sensitive_exposure'] : customFamilies
+    familyPreset === 'custom' ? customFamilies : presetFamilies(familyPreset)
   )
+
+  // The ceilings that change which families resolve (a request or mutation ceiling lowered far
+  // below the profile's leaves the active templates out of the standard set), as whole numbers.
+  const previewCeilings = (['max_http_requests', 'max_state_changing_requests'] as const).reduce<Record<string, number>>(
+    (chosen, key) => {
+      const value = (limits[key] || '').trim()
+      if (/^\d+$/.test(value) && Number.isSafeInteger(Number(value))) chosen[key] = Number(value)
+      return chosen
+    }, {},
+  )
+  const previewCeilingsKey = JSON.stringify(previewCeilings)
 
   useEffect(() => {
     let cancelled = false
@@ -223,6 +247,7 @@ export default function NewScanPage() {
     setContractPreview(null)
     setContractPreviewLoading(true)
     const timer = window.setTimeout(() => {
+      const advanced = JSON.parse(previewCeilingsKey) as Record<string, number>
       previewScanContract({
         preset: familyPreset,
         budget_profile: budgetProfile,
@@ -233,12 +258,13 @@ export default function NewScanPage() {
         network_discovery: networkDiscovery,
         subdomain_discovery: subdomainDiscovery,
         execution_topology: topology === 'parallel' ? 'parallel' : 'single_worker',
+        ...(Object.keys(advanced).length ? { advanced } : {}),
       })
         .then((preview) => { if (!cancelled) { setContractPreview(preview); setContractPreviewError(null); setContractPreviewLoading(false) } })
         .catch((cause) => { if (!cancelled) { setContractPreview(null); setContractPreviewError(cause instanceof Error ? cause.message : 'Preview unavailable'); setContractPreviewLoading(false) } })
     }, 150)
     return () => { cancelled = true; window.clearTimeout(timer) }
-  }, [familyPreset, budgetProfile, customFamilies, activeTesting, allowStateChanging, networkDiscovery, subdomainDiscovery, topology])
+  }, [familyPreset, budgetProfile, customFamilies, activeTesting, allowStateChanging, networkDiscovery, subdomainDiscovery, topology, previewCeilingsKey])
 
   /** Searchable choices for one lane; incompatible profiles stay visible with the reason. */
   function slotOptions(lane: 'primary' | 'secondary'): ComboboxOption[] {
@@ -712,7 +738,7 @@ export default function NewScanPage() {
               <div className="mt-3 grid gap-2 md:grid-cols-3">
                 {([
                   ['passive', 'Passive', 'Recon, reviewed passive templates and verified exposure checks'],
-                  ['standard_active', 'Standard active', 'Passive coverage plus XSS and SQLi'],
+                  ['standard_active', 'Standard active', 'Passive coverage plus XSS and SQLi; on thorough and deep also the active templates'],
                   ['custom', 'Custom', 'Choose an exact family set'],
                 ] as const).map(([value, label, description]) => (
                   <label key={value} className={`rounded-sm border p-3 ${familyPreset === value ? 'border-blue-500 bg-blue-500/10' : 'border-gray-800'}`}>

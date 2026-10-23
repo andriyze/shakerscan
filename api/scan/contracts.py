@@ -71,6 +71,95 @@ SCAN_FAMILY_PRESETS: Mapping[str, tuple[str, ...]] = {
     "standard_active": ("recon", "nuclei_passive", "xss", "sqli", "sensitive_exposure"),
     "custom": (),
 }
+# Families a preset adds on a budget profile. The thorough and deep profiles hold the wall to run
+# every active-template window, so their standard active set runs the active templates too; a
+# fast or balanced one does not, and an operator adds them there with include_families. The
+# sweep holds thousands of requests at admission (and one mutation for each when state-changing
+# HTTP is allowed), so a Scan whose operator lowered the request or mutation ceiling below its
+# floor (``standard_active_template_floors``) keeps the standard set without them, and is
+# admitted exactly as before; naming nuclei_active still adds them.
+SCAN_FAMILY_PRESET_PROFILE_ADDITIONS: Mapping[str, Mapping[str, tuple[str, ...]]] = {
+    "standard_active": {"thorough": ("nuclei_active",), "deep": ("nuclei_active",)},
+}
+# A lowered request ceiling keeps the active templates down to this many times the sweep's own
+# admission hold. On a bare target admission refuses the sweep below about 4,450 requests (the hold
+# plus the Scan's mandatory admission traffic); a Scan's sign-ins and collection replays add to that
+# traffic, so the preset keeps twice the hold rather than its measured edge.
+STANDARD_ACTIVE_TEMPLATE_HEADROOM = 2
+# A lowered mutation ceiling keeps them down to this percentage of the sweep's mutation hold. The
+# sweep is the only mutation the Scan holds at admission, so admission refuses it only below the
+# hold itself (4,000, with sign-ins and collection replays too); twice the hold would be above
+# thorough's own 6,000, so a ceiling lowered from it by one mutation dropped the sweep the profile's
+# own ceiling runs. A quarter above the hold (5,000) stays under every profile that adds them.
+STANDARD_ACTIVE_TEMPLATE_MUTATION_PERCENT = 125
+_ACTIVE_TEMPLATE_SWEEP = "templates.active_batch"
+
+
+def standard_active_template_floors(*, state_changing_allowed: bool) -> dict[str, int]:
+    """The least lowered ceilings at which the standard active set keeps the active templates."""
+    try:
+        from runtime.capability_registry import CAPABILITY_REGISTRY
+    except ModuleNotFoundError:  # package import in host-side tests
+        from ..runtime.capability_registry import CAPABILITY_REGISTRY
+    hold = CAPABILITY_REGISTRY.require(_ACTIVE_TEMPLATE_SWEEP).budget_cost
+    floors = {"max_http_requests": STANDARD_ACTIVE_TEMPLATE_HEADROOM * int(hold["http_requests"])}
+    if state_changing_allowed:
+        floors["max_state_changing_requests"] = (
+            STANDARD_ACTIVE_TEMPLATE_MUTATION_PERCENT * int(hold["state_changing_requests"]) // 100
+        )
+    return floors
+
+
+def scan_family_preset_families(
+    preset: str, budget_profile: str | None, *, lowered_request_ceiling: bool = False,
+) -> tuple[str, ...]:
+    """The families ``preset`` selects on ``budget_profile``, in canonical family order.
+
+    ``lowered_request_ceiling``: the Scan's ceilings were lowered below what the profile's
+    additions hold at admission (``_ceiling_below_template_floor``), so none is added.
+    """
+    additions = () if lowered_request_ceiling else SCAN_FAMILY_PRESET_PROFILE_ADDITIONS.get(
+        preset, {},
+    ).get(str(budget_profile or "balanced").strip().lower(), ())
+    chosen = set(SCAN_FAMILY_PRESETS[preset]) | set(additions)
+    return tuple(family for family in SCAN_V2_FAMILY_NAMES if family in chosen)
+
+
+def _ceiling_below_template_floor(
+    profile: str, advanced: Mapping[str, Any] | None, *, state_changing_allowed: bool,
+) -> bool:
+    """Whether ``advanced`` lowers a request (or, when used, mutation) ceiling below its floor.
+
+    A ceiling counts as the budget resolves it: an unset mutation ceiling follows a lowered
+    request ceiling (``_resolve_budget``). Only a ceiling lowered below the profile's own and
+    below ``standard_active_template_floors`` drops the addition; the profile's own ceilings
+    admit the sweep as they are.
+    """
+    budget = BUDGET_PROFILES.get(profile)
+    if budget is None or not isinstance(advanced, Mapping):
+        return False
+
+    def given(name: str) -> int | None:
+        value = advanced.get(name)
+        if value is None or isinstance(value, bool):
+            return None
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return None
+
+    http = given("max_http_requests")
+    effective = {"max_http_requests": http if http is not None else int(budget.max_http_requests)}
+    if state_changing_allowed:
+        mutations = given("max_state_changing_requests")
+        effective["max_state_changing_requests"] = mutations if mutations is not None else min(
+            int(budget.max_state_changing_requests), effective["max_http_requests"],
+        )
+    floors = standard_active_template_floors(state_changing_allowed=state_changing_allowed)
+    return any(
+        value < int(getattr(budget, name)) and value < floors[name]
+        for name, value in effective.items()
+    )
 # The minimum candidates a profile's ROOT plan executes per family when the target
 # offers them. These are what the profile can actually run at the measured cost of
 # an attempt (an external XSS candidate holds 200 s, a SQLi candidate 180 s), not a
@@ -254,6 +343,18 @@ def public_scan_contract() -> dict[str, Any]:
         "family_presets": {
             name: list(families) for name, families in SCAN_FAMILY_PRESETS.items()
         },
+        # What a preset adds on a budget profile (standard_active runs the active templates on
+        # thorough and deep).
+        "family_preset_profile_additions": {
+            preset: {profile: list(families) for profile, families in additions.items()}
+            for preset, additions in SCAN_FAMILY_PRESET_PROFILE_ADDITIONS.items()
+        },
+        # Below these lowered ceilings a preset's profile additions are left out (the mutation
+        # ceiling counts only when state-changing HTTP is allowed).
+        "family_preset_addition_floors": {
+            preset: standard_active_template_floors(state_changing_allowed=True)
+            for preset in SCAN_FAMILY_PRESET_PROFILE_ADDITIONS
+        },
         "passive_coverage": {
             "description": (
                 "Every passive Scan runs the target baseline, surface discovery, "
@@ -330,6 +431,30 @@ def bind_scan_scope_receipt(
     if contract.policy.scope_receipt_id and scope_id != contract.policy.scope_receipt_id:
         raise ValueError("validated scope receipt conflicts with the Scan contract")
     policy = replace(contract.policy, scope_receipt_id=scope_id)
+    plan = ScanExecutionPlan(
+        policy=policy,
+        budget_profile=contract.budget_profile,
+        budget=contract.budget,
+        family_preset=contract.execution_plan.family_preset,
+        requested_families=contract.execution_plan.requested_families,
+        resolved_families=contract.execution_plan.resolved_families,
+    )
+    return replace(contract, policy=policy, execution_plan=plan)
+
+
+def bind_scan_approval_receipt(
+    contract: ResolvedScanContract, replaced_receipt_id: str | None, approval_receipt_id: str,
+) -> ResolvedScanContract:
+    """Rebind a contract resolved with ``replaced_receipt_id`` to ``approval_receipt_id``.
+
+    Admission replaces the standing receipt a credentialed Scan resolved with by the
+    credential-tier receipt derived from it; the plan is rebuilt so its digest names the receipt
+    the Scan runs under. A contract resolved with another receipt (or none) is left as it is.
+    """
+    current = contract.policy.approval_receipt_id
+    if not replaced_receipt_id or current != str(replaced_receipt_id):
+        return contract
+    policy = replace(contract.policy, approval_receipt_id=str(approval_receipt_id))
     plan = ScanExecutionPlan(
         policy=policy,
         budget_profile=contract.budget_profile,
@@ -497,7 +622,12 @@ def resolve_scan_contract(
         raise ValueError("scan family preset must be passive, standard_active, or custom")
     if preset == "standard_active" and not active_testing:
         raise ValueError("standard_active preset requires active_testing")
-    preset_defaults = set(SCAN_FAMILY_PRESETS[preset])
+    preset_defaults = set(scan_family_preset_families(
+        preset, profile, lowered_request_ceiling=_ceiling_below_template_floor(
+            profile, advanced,
+            state_changing_allowed=bool(policy_data.get("allow_state_changing_http", False)),
+        ),
+    ))
     resolved = tuple(
         family for family in SCAN_V2_FAMILY_NAMES
         if family in ((preset_defaults | set(include)) - set(exclude))

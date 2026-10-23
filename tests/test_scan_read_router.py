@@ -59,6 +59,48 @@ def test_family_preview_resolves_standard_active_without_ai_or_implicit_families
     assert preview["ai_used"] is False
 
 
+def test_family_preview_resolves_with_the_scans_lowered_ceilings_as_its_submission_does():
+    """The preview reads the request and mutation ceilings the Scan will be submitted with: a
+    ceiling that drops the active templates from the standard set drops them from the preview."""
+    import pytest
+    from fastapi import HTTPException
+    from pydantic import ValidationError
+
+    from api.scan.contracts import resolve_scan_contract
+
+    for limits, runs_active_templates in (
+        ({"max_http_requests": 3_000}, False), ({"max_http_requests": 59_999}, True), (None, True),
+    ):
+        preview = asyncio.run(read_router.preview_scan_contract(read_router.ScanFamilyPreviewRequest(
+            preset="standard_active", budget_profile="thorough", active_testing=True, advanced=limits,
+        )))
+        assert ("nuclei_active" in preview["resolved_families"]) is runs_active_templates, limits
+        submitted = resolve_scan_contract(
+            budget_profile="thorough", policy={"preset": "standard_active", "active_testing": True},
+            advanced=limits,
+        )
+        assert preview["resolved_families"] == list(submitted.execution_plan.resolved_families)
+    mutations = asyncio.run(read_router.preview_scan_contract(read_router.ScanFamilyPreviewRequest(
+        preset="standard_active", budget_profile="thorough", active_testing=True,
+        allow_state_changing_http=True, advanced={"max_state_changing_requests": 2_000},
+    )))
+    assert "nuclei_active" not in mutations["resolved_families"]
+    # Only those two ceilings are read, and one above the profile's is refused as on submission.
+    with pytest.raises(ValidationError):
+        read_router.ScanFamilyPreviewRequest(advanced={"max_workers": 1})
+    with pytest.raises(HTTPException) as refused:
+        asyncio.run(read_router.preview_scan_contract(read_router.ScanFamilyPreviewRequest(
+            budget_profile="thorough", active_testing=True, advanced={"max_http_requests": 70_000},
+        )))
+    assert refused.value.status_code == 422
+    # New Scan's preview call sends the ceilings typed under Advanced, and asks again when they change.
+    page = (ROOT / "ui/src/app/scan/new/page.tsx").read_text()
+    call = page[page.index("previewScanContract({"):page.index("}, [familyPreset, budgetProfile")]
+    assert "{ advanced }" in call
+    assert "'max_http_requests', 'max_state_changing_requests'" in page
+    assert "topology, previewCeilingsKey])" in page
+
+
 def test_scan_detail_reuses_router_owned_public_projection():
     source = api_tree_source()
 

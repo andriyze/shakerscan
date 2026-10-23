@@ -207,3 +207,6 @@ async def revoke_dns_alias_lineage(conn: Any, approval: Any, *, revoked_by: str,
         uuid.UUID(str(context["target_id"])), revoked_by, reason,
         target_authorization.STANDING_ACTION_NAME, uuid.UUID(str(source_id)), str(source_id),
     )
+    await target_authorization.revoke_derived_credential_scan_receipts(
+        conn, revoked_by=revoked_by, reason=reason,
+    )

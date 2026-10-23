@@ -2140,7 +2140,16 @@ export interface AsmRecommendation {
   next_action: 'recon' | 'test' | 'wait'
   label: string
   reason: string
-  blockers: Array<{ kind: string; count: number; message: string; scan_id?: string; scan_ids?: string[] }>
+  blockers: Array<{
+    kind: string
+    count: number
+    message: string
+    scan_id?: string
+    scan_ids?: string[]
+    /** `asm` for an ASM batch/recon scan, `scan` for any other. */
+    scan_kind?: 'asm' | 'scan'
+    hidden_from_scans_list?: boolean
+  }>
 }
 
 export interface AsmSchedulerDecision {
@@ -2156,12 +2165,14 @@ export interface AsmSchedulerDecision {
   recorded_at?: string
   active_scan_id?: string
   active_scan_ids?: string[]
+  active_scan_kind?: 'asm' | 'scan'
 }
 
 export interface AsmSchedulerState {
   decision?: AsmSchedulerDecision | null
   last_decision?: AsmSchedulerDecision | null
   active_scan_ids?: string[]
+  active_scan_kind?: 'asm' | 'scan' | null
   claimable?: number
   tested_today?: number
   daily_cap_remaining?: number | null
@@ -4296,6 +4307,8 @@ export async function previewScanContract(request: {
   network_discovery: boolean
   subdomain_discovery: boolean
   execution_topology: 'single_worker' | 'parallel'
+  /** The Scan's lowered ceilings: one far below the profile's leaves the active templates out of the standard set. */
+  advanced?: { max_http_requests?: number; max_state_changing_requests?: number }
 }): Promise<ScanContractPreview> {
   const res = await fetch(`${API_URL}/scan/contracts/preview`, {
     method: 'POST',

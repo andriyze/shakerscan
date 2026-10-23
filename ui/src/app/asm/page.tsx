@@ -76,6 +76,7 @@ import {
 } from '@/components/ui'
 import { ApprovalReceiptField } from '@/components/ApprovalReceiptField'
 import { featureEnabled, featureUnavailableReason } from '@/lib/workspaceCapabilities'
+import { activeScanLinkLabel, activeScanNote } from '@/lib/asmActiveScan'
 
 interface AsmFilters {
   [key: string]: string | number | undefined
@@ -999,6 +1000,7 @@ function CoverageAdvisorCard({
   const decision = scheduler?.decision
   const lastDecision = scheduler?.last_decision
   const activeScanId = decision?.active_scan_id || scheduler?.active_scan_ids?.[0] || lastDecision?.active_scan_id
+  const activeScanKind = decision?.active_scan_kind || scheduler?.active_scan_kind
   const activeApprovalMissing = next === 'test' && !approvalReceiptId.trim()
 
   return (
@@ -1057,7 +1059,7 @@ function CoverageAdvisorCard({
                         <Link href={`/scans/${b.scan_id}`} className="text-blue-400 underline hover:text-blue-300">
                           view scan
                         </Link>
-                        <span className="text-gray-500"> (ASM batch/recon — hidden from the Scans list)</span>
+                        {activeScanNote(b) ? <span className="text-gray-500"> ({activeScanNote(b)})</span> : null}
                       </>
                     ) : null}
                   </span>
@@ -1093,7 +1095,7 @@ function CoverageAdvisorCard({
                 )}
                 {activeScanId && (
                   <Link href={`/scans/${activeScanId}`} className="mt-1 inline-flex text-blue-400 underline hover:text-blue-300">
-                    View active ASM scan
+                    {activeScanLinkLabel(activeScanKind)}
                   </Link>
                 )}
               </div>
@@ -1370,6 +1372,7 @@ function ActivityCard({
   const decision = schedulerState?.decision
   const lastDecision = schedulerState?.last_decision
   const activeScanId = decision?.active_scan_id || schedulerState?.active_scan_ids?.[0] || lastDecision?.active_scan_id
+  const activeScanKind = decision?.active_scan_kind || schedulerState?.active_scan_kind
   const decisionLabel = decision?.action
     ? `${decision.action}${decision.blocked_by ? ` · blocked by ${decision.blocked_by.replace(/_/g, ' ')}` : ''}`
     : 'No live decision'
@@ -1433,7 +1436,7 @@ function ActivityCard({
           </div>
           {activeScanId && (
             <Link href={`/scans/${activeScanId}`} className="mt-2 inline-flex text-xs text-blue-400 underline hover:text-blue-300">
-              View active ASM scan
+              {activeScanLinkLabel(activeScanKind)}
             </Link>
           )}
         </div>

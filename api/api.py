@@ -573,6 +573,7 @@ try:
         ResolvedScanContract,
         SCAN_AUTHENTICATION_KEYS,
         SCAN_V2_FAMILY_NAMES,
+        bind_scan_approval_receipt,
         bind_scan_fan_out,
         bind_scan_scope_receipt,
         resolve_scan_contract,
@@ -701,6 +702,7 @@ except ModuleNotFoundError:
         ResolvedScanContract,
         SCAN_AUTHENTICATION_KEYS,
         SCAN_V2_FAMILY_NAMES,
+        bind_scan_approval_receipt,
         bind_scan_fan_out,
         bind_scan_scope_receipt,
         resolve_scan_contract,
@@ -11340,6 +11342,37 @@ async def _submit_scan(
                 require_target_binding=durable_approval_required,
                 require_expiry=durable_approval_required,
             )
+            if approval_context and (credential_refs or browser_login_refs):
+                # Admitted on the standing authorization, named or not: record a credential-tier
+                # receipt for this credentialed scan, as New Scan does, instead of binding it to
+                # the active-tier standing receipt, so the tier on record does not depend on how
+                # the client spelled the request. Who may start it is unchanged (the standing
+                # authorization was just validated); an inherited, bounded or otherwise
+                # non-derivable receipt derives nothing and stays bound as before.
+                derived_receipt_id = await target_authorization.derive_credential_scan_receipt(
+                    conn, target_id=target_id, standing_receipt_id=approval_receipt_id,
+                    scan_id=scan_id,
+                )
+                if derived_receipt_id:
+                    approval_context = await _validate_approval_receipt_for_action(
+                        conn,
+                        derived_receipt_id,
+                        target_url=normalized_target,
+                        target_id=target_id,
+                        action_name=credential_action_name,
+                        risk_tier="credential",
+                        always_require_receipt=True,
+                        require_target_binding=True,
+                        require_expiry=True,
+                        admit_derived_credential_receipt=True,
+                    )
+                    scan_contract = bind_scan_approval_receipt(
+                        scan_contract, approval_receipt_id, derived_receipt_id,
+                    )
+                    if options_payload["scan_policy"].get("approval_receipt_id") == approval_receipt_id:
+                        options_payload["scan_policy"]["approval_receipt_id"] = derived_receipt_id
+                    approval_receipt_id = derived_receipt_id
+                    execution_options.approval_receipt_id = derived_receipt_id
             if approval_context:
                 options_payload.update(approval_context)
                 scan_contract = bind_scan_scope_receipt(
@@ -15205,6 +15238,7 @@ async def _validate_approval_receipt_for_action(
     require_expiry: bool = False,
     created_not_before: datetime | str | None = None,
     expires_no_later_than: datetime | str | None = None,
+    admit_derived_credential_receipt: bool = False,
 ) -> dict[str, Any] | None:
     async def _deny(
         reason: str,
@@ -15257,6 +15291,19 @@ async def _validate_approval_receipt_for_action(
         )
     if not approval.get("approved_by") or approval.get("denial_reason"):
         await _deny("approval_receipt_is_denial", "Approval receipt is not an approval", approval_ref=approval_ref)
+    if (
+        target_authorization.derived_credential_scan_source(approval) is not None
+        and not admit_derived_credential_receipt
+    ):
+        # Derived from the target's standing authorization for one credentialed Scan; it is
+        # credential tier, so reusing it elsewhere would cover more than that authorization did.
+        await _deny(
+            "approval_receipt_derived_for_one_scan",
+            "This credential-tier receipt was recorded for one scan admitted on the target's "
+            "standing authorization and authorizes nothing else; submit without a receipt to use "
+            "the standing authorization again",
+            approval_ref=approval_ref,
+        )
     approved_risk = str(approval.get("risk_tier") or "active")
     if not approval_covers_risk(approval, str(risk_tier or "active")):
         await _deny(

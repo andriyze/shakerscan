@@ -12,6 +12,7 @@ from typing import Any, Mapping, Sequence
 
 from . import scoring
 from .assessment import mark_unexamined_coverage, withhold_unexamined_grade
+from .auth_endpoint_probe import AUTH_ENDPOINT_PACE_UNFUNDED, AUTH_ENDPOINT_PROBE_LIMITED
 from .action_plan import ScanActionPlan
 from .capability_result import (
     BUDGET_EXHAUSTION_REASONS,
@@ -2606,6 +2607,24 @@ def _auxiliary_check_coverage(entries: Sequence[Mapping[str, Any]]) -> dict[str,
     }
 
 
+def _sign_in_limited_variant(item: Mapping[str, Any]) -> tuple[str, str]:
+    """(which variant, its sign-in endpoint) of a record the sign-in endpoint's limit left
+    without a verdict.
+
+    A variant is its candidate id and manifest position: the variants of one form share a
+    candidate id, and the verifier and the proof of one variant name different attempt ids (each
+    its family's), so neither id alone counts a variant once. A record without a position (an
+    earlier build's) is its attempt id.
+    """
+    position = item.get("manifest_index")
+    candidate = str(item.get("candidate_id") or "")
+    if candidate and isinstance(position, int) and not isinstance(position, bool):
+        variant = f"{candidate}:{position}"
+    else:
+        variant = str(item.get("attempt_id") or candidate)
+    return variant, str(item.get("sign_in_endpoint") or "")
+
+
 def _family_action_reason(action: Any, result: Any) -> str:
     """The reason one verifier action contributes to its family's coverage.
 
@@ -2900,7 +2919,8 @@ def finalize_scan_report(
             # manifest holds more entries than its slices cover has work that was never attempted,
             # and comparing attempts with slices alone reports that as complete coverage.
             "_manifest_entries": {}, "_scheduled_entries": {}, "_slow_endpoints": [],
-            "_refused_candidates": [],
+            "_refused_candidates": [], "_sign_in_limited": [],
+            "_proofs_attempted": set(), "_proofs_pace_unfunded": {},
             "proof_escalation": {
                 "actions": 0, "attempted_candidates": 0,
                 "_statuses": [], "_reasons": [],
@@ -2920,6 +2940,26 @@ def finalize_scan_report(
             proof["_statuses"].append(result.status.value)
             if result.reason_code is not None:
                 proof["_reasons"].append(result.reason_code.value)
+            # A proof the sign-in endpoint's probe set left without a verdict is named too.
+            row["_sign_in_limited"].extend(
+                _sign_in_limited_variant(item)
+                for item in observations.get(action.action_id, ())
+                if isinstance(item, Mapping)
+                and item.get("kind") in {"candidate_attempt", "candidate_deferred"}
+                and item.get("inconclusive_reason") == AUTH_ENDPOINT_PROBE_LIMITED
+            )
+            # So is a proof the slice's wall could not pace at the sign-in endpoint's lockout-safe
+            # rate, unless another proof action attempted it: nothing proved or refuted it.
+            row["_proofs_attempted"].update(attempts)
+            for item in observations.get(action.action_id, ()):
+                if (
+                    isinstance(item, Mapping) and item.get("kind") == "candidate_deferred"
+                    and item.get("reason") == AUTH_ENDPOINT_PACE_UNFUNDED
+                    and str(item.get("attempt_id") or "")
+                ):
+                    row["_proofs_pace_unfunded"].setdefault(
+                        str(item["attempt_id"]), _sign_in_limited_variant(item),
+                    )
         else:
             row["batch_actions"] += 1
             # Endpoints a template batch could not finish inside its wall even on a retry
@@ -2940,6 +2980,15 @@ def finalize_scan_report(
                         str(item["inconclusive_reason"]),
                         str(item.get("url") or item.get("candidate_id") or ""),
                     ))
+                # The credential profile's own sign-in endpoint got its bounded probe set
+                # (auth_endpoint_probe): named, so the limit is visible, not a silent gap. Counted
+                # by variant (_sign_in_limited_variant).
+                if (
+                    isinstance(item, Mapping)
+                    and item.get("kind") in {"candidate_attempt", "candidate_deferred"}
+                    and item.get("inconclusive_reason") == AUTH_ENDPOINT_PROBE_LIMITED
+                ):
+                    row["_sign_in_limited"].append(_sign_in_limited_variant(item))
             row["planned_candidates"] += max(0, planned - inapplicable)
             row["attempted_candidates"] += len(attempts)
             row["_statuses"].append(result.status.value)
@@ -3000,6 +3049,11 @@ def finalize_scan_report(
             short = [base for base, windows in per_base.items() if len(windows) < total]
             if template_windows_strict and short:
                 family_coverage["nuclei_active"]["_windows_short_bases"] = len(short)
+            if not short and template_windows_shard is None:
+                # Every (base, window) pair ran: the active templates run at the sweep's bases,
+                # not at each endpoint, so endpoints the plan left without a position are not
+                # work it skipped (a position past bases x windows runs nothing).
+                family_coverage["nuclei_active"]["_windows_cover_unscheduled"] = True
         else:
             # A record from before sweep bases (2.11.0) or a hand-made one: window indices only.
             family_coverage["nuclei_active"]["template_windows"] = {
@@ -3017,6 +3071,7 @@ def finalize_scan_report(
         statuses = row.pop("_statuses")
         batch_reasons = row.pop("_reasons")
         windows_short_bases = int(row.pop("_windows_short_bases", 0) or 0)
+        windows_cover_unscheduled = bool(row.pop("_windows_cover_unscheduled", False))
         if family == "sqli":
             # Every SQLi candidate the Scan left inconclusive for budget, including one still
             # waiting for a continuation no round could fund when the Scan ended (soak N55).
@@ -3029,6 +3084,18 @@ def finalize_scan_report(
             if outcomes:
                 row["budget_inconclusive_candidates"] = outcomes
                 row["_slow_endpoints"].extend(item["url"] for item in outcomes)
+        sign_in_limited = row.pop("_sign_in_limited", [])
+        proofs_attempted = row.pop("_proofs_attempted", set())
+        proofs_paced_out = [
+            limited for attempt_id, limited in row.pop("_proofs_pace_unfunded", {}).items()
+            if attempt_id not in proofs_attempted
+        ]
+        sign_in_limited.extend(proofs_paced_out)
+        if sign_in_limited:
+            row["sign_in_probe_limited"] = {
+                "endpoints": sorted({endpoint for _candidate, endpoint in sign_in_limited if endpoint}),
+                "candidates": len({candidate for candidate, _endpoint in sign_in_limited}),
+            }
         refused = row.pop("_refused_candidates")
         for reason in sorted(_REFUSAL_REASONS):
             named = sorted({candidate for kind, candidate in refused if kind == reason and candidate})
@@ -3082,7 +3149,9 @@ def finalize_scan_report(
             proof["status"] = "failed"
             proof["reason"] = (sorted(set(proof_reasons)) or ["proof_incomplete"])[0]
         proof_broke = proof_broke or proof["status"] == "failed" or (
+            # A proof the sign-in endpoint's pace held back did not break: it is named below.
             proof["status"] == "partial" and not proof["attempted_candidates"]
+            and not proofs_paced_out
         )
         row["unattempted_candidates"] = max(
             0, row["planned_candidates"] - row["attempted_candidates"],
@@ -3142,7 +3211,7 @@ def finalize_scan_report(
                 row["reason"] = next(iter(incomplete_reasons))
             if row["required"]:
                 selected_family_gaps.append(family)
-        elif row["unscheduled_candidates"] > 0:
+        elif row["unscheduled_candidates"] > 0 and not windows_cover_unscheduled:
             row["coverage_status"] = "partial"
             row["reason"] = "manifest_entries_unscheduled"
             # A REQUIRED family that left work unscheduled has not covered its surface, so the
@@ -3179,6 +3248,14 @@ def finalize_scan_report(
         elif proof_broke:
             row["coverage_status"] = "partial"
             row["reason"] = "proof_escalation_failed"
+            if row["required"]:
+                selected_family_gaps.append(family)
+        elif row.get("sign_in_probe_limited"):
+            # A candidate on the credential profile's own sign-in endpoint that its lockout-safe
+            # probe set left inconclusive has no verdict, so the family did not examine its
+            # surface to completion, and a grade over it is not reliable.
+            row["coverage_status"] = "partial"
+            row["reason"] = AUTH_ENDPOINT_PROBE_LIMITED
             if row["required"]:
                 selected_family_gaps.append(family)
         else:
@@ -3557,6 +3634,8 @@ def finalize_scan_report(
         coverage_status = "partial"
         if selected_family_gaps:
             coverage_reasons = sorted(set(coverage_reasons) | {"selected_family_incomplete"})
+    if any(row.get("sign_in_probe_limited") for row in family_coverage.values()):
+        coverage_reasons = sorted(set(coverage_reasons) | {AUTH_ENDPOINT_PROBE_LIMITED})
     if any(
         row.get("reason") == TEMPLATE_WINDOWS_INCOMPLETE_ON_ORIGIN for row in family_coverage.values()
     ):

@@ -423,6 +423,17 @@ jobs:
             shakerscan-scanner:release-candidate \
             -m pytest -q -p no:cacheprovider tests/test_nuclei_template_index.py
 
+      - name: Verify the sign-in probe finds a login form's reflection inside its probe set
+        shell: bash
+        run: |
+          # Dalfox exists only in the scanner image, so the probe's argv runs there against a
+          # loopback login fixture; outside the image the test skips.
+          docker run --rm --network none --entrypoint python \
+            -e PYTHONPATH=/src/api:/src/scanner:/src \
+            -v "$PWD:/src:ro" -w /src \
+            shakerscan-scanner:release-candidate \
+            -m pytest -q -p no:cacheprovider tests/test_auth_endpoint_probe_tools.py
+
       - name: Enforce candidate-image external wire ceilings
         env:
           CANDIDATE_SHA: ${{ needs.meta.outputs.candidate_sha }}

@@ -109,6 +109,10 @@ _SUCCESS = frozenset({"success", "succeeded", "completed"})
 MINIMUM_STAGE_WALL_SECONDS = 20
 # Matches the minimum delay of the paced batch attempt the worker builds.
 _MINIMUM_DELAY_SECONDS = 0.05
+# A stage paced at a floor of its endpoint's own (the credential profile's sign-in endpoint,
+# auth_endpoint_probe) records it: what that stage measures is that endpoint's latency, not the
+# target's, so it paces only the same candidate's next stage.
+PACED_FLOOR_RECORD_KEY = "paced_floor_ms"
 # A unit the wall killed after it had already sent more than its predicted cost is assumed to
 # need half again what it sent, so a chain that keeps underestimating it grows geometrically
 # instead of being granted a few more seconds each round.
@@ -305,8 +309,9 @@ def prior_stages(
             wall = int(consumed.get("tool_wall_seconds") or 0)
             delay = float(record.get("delay_ms") or 0) / 1_000
             measured = max(0.0, wall / sent - delay) if sent > 0 and wall > 0 else None
-            if measured is not None:
-                # Any candidate's stage measured the same target's response time.
+            if measured is not None and not record.get(PACED_FLOOR_RECORD_KEY):
+                # Any candidate's stage measured the same target's response time, except one
+                # paced at its own endpoint's floor: that measured the one endpoint.
                 source_target_latency = measured
             key = wanted.get(str(item.get("attempt_id") or ""))
             if key is None:
@@ -685,6 +690,7 @@ async def run_staged_sqli_attempt(
     round_wall_ceiling: int | None = None,
     scan_wall_share: int | None = None,
     last_chance: bool = False,
+    minimum_delay_seconds: float | None = None,
 ) -> StagedAttempt:
     """Verify one candidate unit by unit from what earlier checkpoints left unsettled.
 
@@ -698,10 +704,18 @@ async def run_staged_sqli_attempt(
     next technique that can. ``last_chance`` is the Scan's final attempt at the next unit: its
     hold cannot fund the unit's negative verdict but can a positive. The stage guard still
     refuses a hold no larger than one the unit already ran out of (the planner sizes a last
-    chance above it).
+    chance above it). ``minimum_delay_seconds`` is the floor the worker paces this candidate's
+    requests at when its endpoint has one of its own (the sign-in endpoint's lockout-safe pace):
+    each stage is paced, recorded and held at it, so the latency a stage measures is the
+    target's, and a stage holds no more requests than its wall paces at that floor.
     """
     fields = tuple(dict.fromkeys(str(item) for item in fields or ())) or None
     count = max(1, int(field_count or (len(fields) if fields else 1)))
+    paced_floor = (
+        float(minimum_delay_seconds)
+        if minimum_delay_seconds is not None and float(minimum_delay_seconds) > _MINIMUM_DELAY_SECONDS
+        else 0.0
+    )
     remaining = {name: max(0, int(amount)) for name, amount in budget.items()}
     consumed: dict[str, int] = {name: 0 for name in budget}
     # Resumed inside the same action (audit L001): the stages it already ran were sent under
@@ -817,9 +831,19 @@ async def run_staged_sqli_attempt(
             errors.append("timeout")
             break
         stage_budget = {name: amount for name, amount in remaining.items() if amount > 0}
+        if paced_floor:
+            # One request per floor of the stage's wall at most: a stage that spent more than the
+            # floor per request leaves a remainder its own pacing alone would run faster.
+            for name in ("http_requests", "state_changing_requests"):
+                if name in stage_budget:
+                    stage_budget[name] = max(1, min(
+                        int(stage_budget[name]), int(wall // paced_floor),
+                    ))
+        # The delay the worker's argv gets for this stage (agent_tools._batch_attempt_pacing with
+        # the same floor), so what the stage measures below is the target's latency.
         delay, _ceiling = paced_request_delay(
             int(stage_budget.get("http_requests", 1)), wall,
-            minimum_seconds=_MINIMUM_DELAY_SECONDS, latency_seconds=latency,
+            minimum_seconds=max(_MINIMUM_DELAY_SECONDS, paced_floor), latency_seconds=latency,
         )
         probing = plan.probe and (plan.technique, plan.field_name) == (
             technique, field_name,
@@ -871,7 +895,9 @@ async def run_staged_sqli_attempt(
         took = int(spent.get("tool_wall_seconds", 0))
         if sent > 0 and took > 0:
             latency = max(0.0, took / sent - delay)
-            if measured is not None:
+            if measured is not None and not paced_floor:
+                # The slice sizes its slots from the target's latency; a stage paced at its own
+                # endpoint's floor measured that endpoint only.
                 measured(latency)
         sample = rate_sample(status=status, timed_out=stage_killed, sent=sent, wall=took)
         if sample is not None:
@@ -882,6 +908,7 @@ async def run_staged_sqli_attempt(
             "delay_ms": int(round(delay * 1_000)),
             "measured_latency_ms": int(round(latency * 1_000)),
             "field_count": 1 if field_name is not None else count,
+            **({PACED_FLOOR_RECORD_KEY: int(round(paced_floor * 1_000))} if paced_floor else {}),
         }
         stage_observations = (record, *(
             dict(item) for item in getattr(result, "observations", ()) or ()
@@ -994,8 +1021,12 @@ def sqli_budget_outcomes(
     """Every SQLi candidate the Scan left inconclusive for budget, for the report.
 
     ``rows_in_plan_order`` are the observations of every SQLi verifier action in plan order;
-    the latest record of a candidate stands. Each outcome separates what was settled from what
-    was not, so no reader takes an untested technique for a refuted one:
+    the latest record of a candidate attempt stands. Outcomes are per attempt: the variants of
+    one form (declared, crawled with its hidden fields, JSON) share a candidate id but are
+    attempts of their own, each with its own fields and settled units. A record without an
+    attempt id (written by an earlier build) belongs to the attempt of its candidate it follows.
+    Each outcome separates what was settled from what was not, so no reader takes an untested
+    technique for a refuted one:
 
     * ``refuted_techniques`` -- every unit settled negative;
     * ``inconclusive_techniques`` -- judged unfundable (``verdict_exceeds_budget``);
@@ -1009,38 +1040,46 @@ def sqli_budget_outcomes(
     verdicts: dict[str, Mapping[str, Any]] = {}
     urls: dict[str, str] = {}
     settled: dict[str, set[tuple[str, str | None]]] = {}
+    candidate_of: dict[str, str] = {}
+    last_attempt: dict[str, str] = {}
     for row in rows_in_plan_order:
         if not isinstance(row, Mapping):
             continue
         candidate = str(row.get("candidate_id") or "")
         if not candidate:
             continue
+        attempt = str(row.get("attempt_id") or "")
+        if attempt:
+            last_attempt[candidate] = attempt
+        key = attempt or last_attempt.get(candidate) or candidate
+        candidate_of.setdefault(key, candidate)
         kind = row.get("kind")
         if row.get("url"):
-            urls.setdefault(candidate, str(row["url"]))
+            urls.setdefault(key, str(row["url"]))
         if kind == STAGE_RECORD_KIND:
             if _status(row.get("status")) in _SUCCESS and not row.get("timed_out"):
                 field_name = row.get("field")
-                settled.setdefault(candidate, set()).add(
+                settled.setdefault(key, set()).add(
                     (str(row.get("technique") or ""), str(field_name) if field_name else None),
                 )
             continue
         if row.get("carried_from"):
             continue
         if kind in {"candidate_attempt", "candidate_deferred"} and row.get("family", "sqli") == "sqli":
-            latest[candidate] = row
+            latest[key] = row
             if not row.get("verdict") and not row.get("inconclusive_techniques"):
-                verdicts.pop(candidate, None)
+                verdicts.pop(key, None)
         elif kind == INCONCLUSIVE_RECORD_KIND:
-            verdicts[candidate] = row
+            verdicts[key] = row
     outcomes: list[dict[str, Any]] = []
-    for candidate, row in latest.items():
-        verdict = verdicts.get(candidate)
+    for key, row in latest.items():
+        candidate = candidate_of[key]
+        verdict = verdicts.get(key)
         unfinished = bool(row.get("resume_wall_seconds")) and str(row.get("status") or "") != "success"
         if verdict is None and not unfinished:
             continue
         field_count = max(1, int(row.get("field_count") or (verdict or {}).get("field_count") or 1))
-        units = settled.get(candidate, set())
+        units = settled.get(key, set())
         refuted = [
             technique for technique in SQLI_TECHNIQUE_STAGES
             if (technique, None) in units
@@ -1055,7 +1094,9 @@ def sqli_budget_outcomes(
             # drop out of the report between the two lists.
             unfundable = [item for item in SQLI_TECHNIQUE_STAGES if item not in refuted]
         outcome = {
-            "candidate_id": candidate, "url": urls.get(candidate, ""),
+            "candidate_id": candidate,
+            **({"attempt_id": key} if key != candidate else {}),
+            "url": urls.get(key, ""),
             "reason": (
                 "verdict_exceeds_budget" if closed or not unfinished else "scan_budget_exhausted"
             ),

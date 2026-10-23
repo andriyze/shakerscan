@@ -33,6 +33,7 @@ from runtime.request_shape import (
     json_field_leaf_name, nested_json_body, public_request_body_shape,
 )
 from scan.negative_control import is_negative_control_url
+from scan.auth_endpoint_probe import AUTH_ENDPOINT_PROBE_PROFILE, AUTH_ENDPOINT_SECONDS_PER_REQUEST
 from scan.external_process import (
     BATCH_ATTEMPT_FLOORS,
     BATCH_ATTEMPT_REQUEST_HEADROOM,
@@ -502,6 +503,74 @@ _AGENT_FFUF_WORDLIST_SOURCES: dict[str, tuple[str, ...]] = {
 }
 
 
+# A crawl that carries a session also starts at the scan's seeds on its own origin (the page the
+# sign-in landed on and the GET seed endpoints): an area behind a sign-in is often linked from
+# nowhere the target's root reaches (E1-N3). Each seed is a plain path joined to the crawl's own
+# origin, so a seed can never name another host; katana splits a list flag on commas, so a seed
+# holds none. A seed that is not such a path is left out, never fatal to the crawl. The target
+# keeps its whole time box (``_fit_crawl_inputs``).
+MAX_CRAWL_SEED_PATHS = 20
+_CRAWL_SEED_PATH = re.compile(r"/(?!/)[A-Za-z0-9\-._~!$&'()*+;=:@%/]{0,2047}")
+# The shortest share of the browser crawl's box worth giving the target and one seed each.
+_CRAWL_INPUT_MIN_SECONDS = {"katana": 10, "katana_headless": 15}
+
+
+def crawl_seed_path_is_plain(path: Any) -> bool:
+    """Whether ``path`` can be a crawl seed: a plain, already percent-encoded path."""
+    return isinstance(path, str) and _CRAWL_SEED_PATH.fullmatch(path) is not None
+
+
+def _crawl_seed_urls(url: str, opts: Mapping[str, Any]) -> list[str]:
+    raw = opts.get("crawl_seed_paths") or ()
+    if not raw:
+        return []
+    if not isinstance(raw, (list, tuple)) or len(raw) > MAX_CRAWL_SEED_PATHS:
+        raise AgentToolError(f"a crawl takes at most {MAX_CRAWL_SEED_PATHS} seed paths")
+    parsed = urllib.parse.urlsplit(url)
+    origin = urllib.parse.urlunsplit((parsed.scheme, parsed.netloc, "", "", ""))
+    urls: list[str] = []
+    for value in raw:
+        if not crawl_seed_path_is_plain(value):
+            continue
+        seed = origin + value
+        if seed != url and seed not in urls:
+            urls.append(seed)
+    return urls
+
+
+def _crawl_inputs(url: str, opts: Mapping[str, Any]) -> list[str]:
+    inputs = ["-u", url]
+    for seed in _crawl_seed_urls(url, opts):
+        inputs += ["-u", seed]
+    return inputs
+
+
+def _fit_crawl_inputs(argv: list[str], duration: int, *, scanner: str) -> tuple[int, int]:
+    """Fit the crawl's ``-u`` inputs to its time box; return (inputs, seconds each).
+
+    ``-crawl-duration`` bounds each input, not the run. The static crawl runs its inputs side by
+    side (``-parallelism`` one per input), each for the whole box, so the run ends with the box:
+    the target's own crawl keeps the time it had alone, and the process's one rate limiter and
+    the hard request ceiling are shared. While seeds are busy the target gets its share of that
+    rate (one of the inputs), and the requests a seed that finishes does not use return to it.
+    Fewer inputs at a time would not raise the target's share inside the box: each later input
+    would start when an earlier one ended and run its own whole box, so the run would outlast
+    the box (in the scanner image, 20 seeds at ``-parallelism 2`` ran 142 s of a 60 s box). The
+    browser crawl runs one input at a time in one browser (its memory bound is the process
+    tree's), so it adds only its first seed and the target keeps half of the box; a box too small
+    to halve keeps the target alone.
+    """
+    positions = [index for index, value in enumerate(argv) if value == "-u"]
+    if scanner == "katana":
+        _replace_argv_value(argv, "-parallelism", len(positions))
+        return len(positions), max(1, duration)
+    allowed = 2 if duration // 2 >= _CRAWL_INPUT_MIN_SECONDS[scanner] else 1
+    for index in reversed(positions[allowed:]):
+        del argv[index:index + 2]
+    inputs = min(len(positions), allowed)
+    return inputs, max(1, duration // inputs)
+
+
 def _tmpl_katana(url: str, opts: dict[str, Any]) -> list[str]:
     # Same-origin crawl + JS endpoint extraction. Read-only (GET only; form auto-fill stays OFF),
     # bounded: depth 2, 30s wall cap, 5 req/s, field-scope fqdn (same HOST only — never crosses
@@ -518,7 +587,7 @@ def _tmpl_katana(url: str, opts: dict[str, Any]) -> list[str]:
     # actually builds its API calls from. Endpoints extracted this way are observed in the
     # application's own served code -- the same epistemic standing as -js-crawl output --
     # never invented by the scanner.
-    return ["-u", url, "-js-crawl", "-jsluice", "-kb-endpoints",
+    return [*_crawl_inputs(url, opts), "-js-crawl", "-jsluice", "-kb-endpoints",
             "-depth", "2", "-concurrency", "5", "-parallelism", "1",
             "-max-domain-pages", str(_KATANA_MAX_DOMAIN_PAGES),
             "-max-response-size", str(_KATANA_MAX_RESPONSE_BYTES),
@@ -543,7 +612,7 @@ def _tmpl_katana_headless(url: str, opts: dict[str, Any]) -> list[str]:
     # endpoints. -no-sandbox is required to run Chromium as the container's user; the
     # page is untrusted content, but it is the same content the scanner already
     # fetches, and egress stays pinned by the proxy build_scanner_argv attaches.
-    return ["-u", url, "-headless", "-no-sandbox",
+    return [*_crawl_inputs(url, opts), "-headless", "-no-sandbox",
             "-system-chrome-path", _SYSTEM_CHROME_PATH,
             "-headless-options", _BROWSER_HEADLESS_OPTIONS,
             "-xhr-extraction", "-js-crawl", "-jsluice", "-kb-endpoints",
@@ -639,6 +708,12 @@ def _tmpl_dalfox(url: str, opts: dict[str, Any]) -> list[str]:
     # and return its verdict inside that reservation.
     headless = opts.get("deep_domxss") is True
     delay_ms, workers = ("0", "10") if headless else ("1000", "3")
+    # The credential profile's own sign-in endpoint (scan/auth_endpoint_probe.py): one worker, so
+    # the batch pacing is the endpoint's whole rate, Dalfox's own payloads for the request's
+    # body, and a stop at the first verified finding (every request there is a failed sign-in).
+    auth_probe = opts.get("probe_profile") == AUTH_ENDPOINT_PROBE_PROFILE and not headless
+    if auth_probe:
+        workers = "1"
     args = (["url", url, "--format", "jsonl", "--silence", "--no-color",
              "--timeout", "8", "--delay", delay_ms, "--worker", workers,
              "--skip-bav", "--skip-grepping", "--skip-mining-all",
@@ -653,7 +728,13 @@ def _tmpl_dalfox(url: str, opts: dict[str, Any]) -> list[str]:
     query_pairs = urllib.parse.parse_qsl(
         urllib.parse.urlsplit(url).query, keep_blank_values=True,
     )
-    if len(query_pairs) == 1 and re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9_.\[\]-]{0,63}", query_pairs[0][0]):
+    injection = _injection_body(opts)
+    # A body candidate verifies its body's fields: a pair in its URL's query (an action that routes
+    # by its query, index.php?route=account/login) is not the parameter it names, and Dalfox's
+    # custom-payload mode would put every payload there and leave the body untested.
+    if injection is None and len(query_pairs) == 1 and re.fullmatch(
+        r"[A-Za-z0-9_][A-Za-z0-9_.\[\]-]{0,63}", query_pairs[0][0],
+    ):
         args.extend(["--skip-discovery", "-p", query_pairs[0][0]])
         if not headless:
             # This is a verifier of one known parameter, not an open-ended
@@ -663,12 +744,15 @@ def _tmpl_dalfox(url: str, opts: dict[str, Any]) -> list[str]:
                 "--custom-payload", "/app/payloads/xss/hunt-verify.txt",
                 "--only-custom-payload",
             ])
-    injection = _injection_body(opts)
     if injection is not None:
         method, body, fields = injection
         args += ["-X", method, "-d", body]
         for name in fields:
             args += ["-p", name]
+    if auth_probe:
+        # The first verified finding settles the candidate; the rest would be further failed
+        # sign-ins. An unverified reflection does not stop it.
+        args += ["--limit-result", "1", "--limit-result-type", "v"]
     return args
 
 
@@ -684,6 +768,8 @@ def _tmpl_sqlmap(url: str, opts: dict[str, Any]) -> list[str]:
     technique = str(opts.get("technique") or "BEUT").strip().upper()
     if technique not in SQLMAP_TECHNIQUES:
         technique = "BEUT"
+    # The credential profile's own sign-in endpoint keeps this ladder; only its pace and its
+    # probe set differ (scan/auth_endpoint_probe.py, the delay floor in build_enforced_scanner_plan).
     args = ["-u", url, "--batch", "--technique", technique, "--level", "2", "--risk", "2",
             "--threads", "1", "--timeout", "8", "--retries", "0", "--delay", "1",
             "--flush-session", "--output-dir", "/tmp/shakerscan-sqlmap",
@@ -1283,6 +1369,22 @@ def _batch_attempt_pacing(
     )
 
 
+def _auth_probe_minimum(options: Mapping[str, Any], minimum_seconds: float) -> float:
+    """The least delay between requests: the lockout-safe pace on a sign-in endpoint probe.
+
+    A parallel child of a split Scan paces the endpoint slower (``probe_pace_seconds``); nothing
+    paces it faster than one request per ``AUTH_ENDPOINT_SECONDS_PER_REQUEST``.
+    """
+    if options.get("probe_profile") != AUTH_ENDPOINT_PROBE_PROFILE:
+        return minimum_seconds
+    raw = options.get("probe_pace_seconds")
+    pace = (
+        float(raw) if isinstance(raw, (int, float)) and not isinstance(raw, bool) and raw > 0
+        else 0.0
+    )
+    return max(minimum_seconds, float(AUTH_ENDPOINT_SECONDS_PER_REQUEST), min(pace, 600.0))
+
+
 def _replace_argv_value(argv: list[str], flag: str, value: Any) -> None:
     try:
         index = argv.index(flag)
@@ -1433,7 +1535,8 @@ def build_enforced_scanner_plan(
         rate = max(1, min(_KATANA_MAX_RATE_PER_SECOND, (http - 1) // max(1, duration)))
         _replace_argv_value(argv, "-rate-limit", rate)
         _replace_argv_value(argv, "-concurrency", rate)
-        _replace_argv_value(argv, "-crawl-duration", f"{duration}s")
+        inputs, per_input = _fit_crawl_inputs(argv, duration, scanner=scanner)
+        _replace_argv_value(argv, "-crawl-duration", f"{per_input}s")
         timeout_seconds = duration + shutdown_grace
         timeout_ms = timeout_seconds * 1_000
         # One initial token plus the rate for each elapsed second.
@@ -1447,6 +1550,7 @@ def build_enforced_scanner_plan(
             "startup_burst": 1, "redirects": 0, "form_fill": False,
             "depth": 2, "concurrency": rate,
             "shutdown_grace_seconds": shutdown_grace,
+            **({"inputs": inputs, "input_duration_seconds": per_input} if inputs > 1 else {}),
         }
     elif scanner == "katana_headless":
         http = int(reservation.get("http_requests") or 0)
@@ -1490,7 +1594,8 @@ def build_enforced_scanner_plan(
             raise AgentToolError(
                 "headless crawl requires a reservation covering one bounded second"
             )
-        _replace_argv_value(argv, "-crawl-duration", f"{duration}s")
+        inputs, per_input = _fit_crawl_inputs(argv, duration, scanner=scanner)
+        _replace_argv_value(argv, "-crawl-duration", f"{per_input}s")
         timeout_seconds = duration + shutdown_grace
         timeout_ms = timeout_seconds * 1_000
         hard = {
@@ -1505,6 +1610,7 @@ def build_enforced_scanner_plan(
             "shutdown_grace_seconds": shutdown_grace,
             "browser": "system_chromium",
             "browser_profile_seeded": bool(chrome_data_dir),
+            **({"inputs": inputs, "input_duration_seconds": per_input} if inputs > 1 else {}),
         }
     elif scanner == "ffuf":
         wordlist_path = str(runtime.get("ffuf_wordlist") or "")
@@ -1639,7 +1745,7 @@ def build_enforced_scanner_plan(
         dalfox_workers = 10 if deep_domxss else 3
         if batch_attempt and http >= 1:
             delay_seconds, affordable = _batch_attempt_pacing(
-                http, wall, minimum_seconds=0.05,
+                http, wall, minimum_seconds=_auth_probe_minimum(internal_options, 0.05),
             )
             _replace_argv_value(argv, "--delay", str(max(1, int(delay_seconds * 1_000))))
             hard = {"http_requests": affordable, "tool_wall_seconds": wall}
@@ -1686,7 +1792,8 @@ def build_enforced_scanner_plan(
         delay_seconds = 1.0
         if batch_attempt and http >= 1:
             delay_seconds, affordable = _batch_attempt_pacing(
-                http, wall, minimum_seconds=0.05, latency_seconds=measured_latency,
+                http, wall, minimum_seconds=_auth_probe_minimum(internal_options, 0.05),
+                latency_seconds=measured_latency,
             )
             _replace_argv_value(argv, "--delay", f"{delay_seconds:.3f}")
             hard = {"http_requests": affordable, "tool_wall_seconds": wall}

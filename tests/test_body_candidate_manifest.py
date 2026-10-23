@@ -242,3 +242,111 @@ def test_a_body_candidate_resolves_when_a_replayed_request_shares_its_route():
     assert request["content_type"] == "application/x-www-form-urlencoded"
     assert request["field_name"] == "username"
     assert request["body_field_names"] == ["password", "username"]
+
+
+# Two bodies posted to one action (a login page's form and a sidebar widget, a search form seen
+# twice): both are endpoints of their own (the identity names the body), and the same route,
+# method and anchoring field make them one candidate id with one score.
+_SAME_ACTION_FORMS = {
+    "a login page and a sidebar widget": ("/wp-login.php", "web.crawl", (
+        ["log", "pwd", "rememberme", "wp-submit", "redirect_to", "testcookie"],
+        ["log", "pwd", "rememberme", "wp-submit", "redirect_to"],
+    )),
+    "a login page and a header box": ("/login", "web.browser_crawl", (
+        ["username", "password", "_csrf"], ["username", "password", "_csrf", "return_to"],
+    )),
+    "a search form seen twice": ("/search", "web.crawl", (["q", "category"], ["q"])),
+}
+
+
+def _crawled_forms(path, source, bodies):
+    from api.scan.surface_manifest import build_scan_surface_manifest
+    from api.scan.work_manifests import build_endpoint_manifest
+    from tests.test_scan_continuation import _target
+
+    target = _target()
+    empty = {"status": "success", "observations": []}
+    routes = {"status": "success", "observations": [
+        {"kind": "discovered_route", "method": "POST", "url": f"https://app.example.test{path}",
+         "content_type": "application/x-www-form-urlencoded", "body_field_names": list(fields)}
+        for fields in bodies
+    ]}
+    surface = build_scan_surface_manifest(
+        target_url="https://app.example.test", target=target, options={},
+        collection_replay=empty, subdomains=empty, probe=empty,
+        crawl=routes if source == "web.crawl" else empty,
+        browser=routes if source == "web.browser_crawl" else empty,
+        content=empty, max_endpoints=100,
+    )
+    return build_endpoint_manifest(
+        scan_id="00000000-0000-4000-8000-0000000000d2", target_binding_digest=target.digest,
+        surface_manifest=surface, source_action_ids=(f"discover.{source.split('.')[1]}",),
+        auth_lane="anonymous",
+    )
+
+
+@pytest.mark.parametrize("case", sorted(_SAME_ACTION_FORMS))
+def test_two_bodies_of_one_action_that_tie_on_score_are_both_candidates(case):
+    """Building the candidate manifest compared the two variants' candidate dicts when their score
+    and id tied, and raised TypeError: admission, continuation planning and the parallel fan-out
+    of a scan allowed state-changing requests failed to plan any verifier for the target."""
+    path, source, bodies = _SAME_ACTION_FORMS[case]
+    endpoints = _crawled_forms(path, source, bodies)
+    posts = [entry for entry in endpoints.entries if entry["method"] == "POST"]
+    assert sorted(tuple(entry["body_field_names"]) for entry in posts) == sorted(
+        tuple(sorted(fields)) for fields in bodies
+    )
+    first = build_candidate_manifest(endpoints, source_action_ids=("discover.crawl",),
+                                     maximum=100, allow_state_changing_http=True)
+    variants = [entry for entry in first.entries if entry.get("body_field_names")]
+    assert len(variants) == 2 and len({entry["candidate_id"] for entry in variants}) == 1
+    assert len({entry["score"] for entry in variants}) == 1
+    assert sorted(tuple(entry["body_field_names"]) for entry in variants) == sorted(
+        tuple(sorted(fields)) for fields in bodies
+    )
+    # The same endpoints always make the same manifest, its variants in the same order.
+    again = build_candidate_manifest(endpoints, source_action_ids=("discover.crawl",),
+                                     maximum=100, allow_state_changing_http=True)
+    assert again.reference().manifest_digest == first.reference().manifest_digest
+    # Without mutation authority a body is no candidate, as before.
+    assert not [entry for entry in build_candidate_manifest(
+        endpoints, source_action_ids=("discover.crawl",), maximum=100,
+        allow_state_changing_http=False,
+    ).entries if entry.get("body_field_names")]
+
+
+def test_a_full_manifest_keeps_the_variant_it_met_first_when_two_tie():
+    """At the candidate limit a tie is never better than what the manifest holds: the variant met
+    first stays, the other is left out, and the manifest says it was cut."""
+    endpoints = _crawled_forms(*_SAME_ACTION_FORMS["a search form seen twice"])
+    posts = [entry for entry in endpoints.entries if entry["method"] == "POST"]
+    full = build_candidate_manifest(endpoints, source_action_ids=("discover.crawl",),
+                                    maximum=100, allow_state_changing_http=True)
+    body_count = len([entry for entry in full.entries if entry.get("body_field_names")])
+    limited = build_candidate_manifest(endpoints, source_action_ids=("discover.crawl",),
+                                       maximum=len(full.entries) - 1,
+                                       allow_state_changing_http=True)
+    kept = [entry for entry in limited.entries if entry.get("body_field_names")]
+    assert body_count == 2 and len(kept) == 1
+    assert kept[0]["body_field_names"] == posts[0]["body_field_names"]
+    assert limited.status == "partial" and limited.reason_code == "candidate_limit_reached"
+
+
+def test_a_better_candidate_met_later_evicts_the_variant_met_last():
+    """A full manifest that meets a better candidate drops the tied variant it met last."""
+    declared = _endpoint(content_type="application/x-www-form-urlencoded",
+                         body_field_names=["password", "username"])
+    widget = _endpoint(content_type="application/x-www-form-urlencoded",
+                       body_field_names=["password", "remember", "username"])
+    better = _endpoint(method="GET", canonical_path="/items", query_parameter_names=["id"],
+                       content_type=None, body_field_names=[])
+    every = build_candidate_manifest(_manifest([declared, widget, better]),
+                                     source_action_ids=("discover.crawl",), maximum=3,
+                                     allow_state_changing_http=True)
+    variants = [entry for entry in every.entries if entry["body_field_names"]]
+    assert len(variants) == 2 and len({(entry["candidate_id"], entry["score"]) for entry in variants}) == 1
+    assert max(entry["score"] for entry in every.entries) > variants[0]["score"]
+    kept = build_candidate_manifest(_manifest([declared, widget, better]),
+                                    source_action_ids=("discover.crawl",), maximum=2,
+                                    allow_state_changing_http=True)
+    assert [tuple(entry["body_field_names"]) for entry in kept.entries] == [(), ("password", "username")]

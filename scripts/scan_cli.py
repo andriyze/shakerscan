@@ -42,9 +42,11 @@ class ScanCliError(RuntimeError):
         self.api_detail = api_detail
 
 
-def _parser() -> argparse.ArgumentParser:
+def _parser(prog: str | None = None) -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="scanner.sh scan",
+        # The command the operator typed: ``scanner.sh scan`` from a source checkout, the
+        # client's ``shakerscan scan`` when it runs this file.
+        prog=prog or "scanner.sh scan",
         description=(
             "Submit one deterministic V2 Scan. Policy selects permission and families; "
             "the budget profile supplies hard ceilings."
@@ -61,7 +63,11 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--subdomain-discovery", action="store_true")
     parser.add_argument(
         "--include-family", action="append", default=[], metavar="NAME[,NAME]",
-        help="Add server-advertised Scan families to the preset the policy implies",
+        help=(
+            "Add server-advertised Scan families to the preset the policy implies "
+            "(the standard active set runs the active templates, nuclei_active, on the "
+            "thorough and deep profiles; add them here for fast or balanced)"
+        ),
     )
     parser.add_argument(
         "--exclude-family", action="append", default=[], metavar="NAME[,NAME]",
@@ -391,8 +397,41 @@ def _payload(args: argparse.Namespace) -> dict[str, Any]:
     }
 
 
-def main(argv: list[str] | None = None) -> int:
-    parser = _parser()
+_CEILING_FLAGS = (
+    ("max_http_requests", "--max-http-requests"),
+    ("max_state_changing_requests", "--max-state-changing-requests"),
+)
+
+
+def _active_template_hint(args: argparse.Namespace, contract: dict[str, Any]) -> str:
+    """Why a Scan with active testing runs no active templates, and how to add them."""
+    if args.budget_profile not in {"thorough", "deep"}:
+        return ("Active templates (nuclei_active) are not in this set; add "
+                "--include-family nuclei_active to run them (the standard active set "
+                "runs them on --budget-profile thorough or deep).")
+    # On thorough and deep the standard set runs them unless a ceiling was lowered below its floor
+    # (the contract's family_preset_addition_floors).
+    floors = (contract.get("family_preset_addition_floors") or {}).get("standard_active") or {}
+    advanced = getattr(args, "_advanced", {}) or {}
+    below = [
+        f"{flag} {int(advanced[name]):,} is below the floor of {int(floors[name]):,}"
+        for name, flag in _CEILING_FLAGS
+        if isinstance(advanced.get(name), int) and isinstance(floors.get(name), int)
+        and advanced[name] < floors[name]
+        and (name != "max_state_changing_requests" or args.allow_state_changing_http)
+    ]
+    reason = (
+        "a ceiling lowered below the standard active set's floor for them leaves them out of it "
+        f"({'; '.join(below)})" if below else
+        "a lowered request or mutation ceiling leaves them out of the standard active set"
+    )
+    return (f"Active templates (nuclei_active) are not in this set: {reason}. Raise the "
+            "ceiling, or add --include-family nuclei_active to ask for them anyway (admission "
+            "refuses them when the ceiling cannot hold their sweep).")
+
+
+def main(argv: list[str] | None = None, prog: str | None = None) -> int:
+    parser = _parser(prog)
     args = parser.parse_args(argv)
     if args.target == "help":
         # `scan help` is a request for this text, never a scan of a host named "help".
@@ -429,6 +468,11 @@ def main(argv: list[str] | None = None) -> int:
                 if args.idempotency_key else {}
             ),
         }
+        resolved = [str(item) for item in response.get("resolved_families") or () if str(item)]
+        if resolved:
+            result["resolved_families"] = resolved
+            if response.get("family_preset"):
+                result["family_preset"] = str(response["family_preset"])
         # The name submitted had no address record and the engine scanned its www/apex twin.
         # Say so: the scan is running against a different name than the one typed.
         notice = str(response.get("notice") or "").strip()
@@ -446,6 +490,17 @@ def main(argv: list[str] | None = None) -> int:
             print(f"Scan ID: {scan_id}")
             print(f"Status: {status}")
             print(f"Plan: deterministic Scan · {args.budget_profile} budget · active testing {'on' if args.active_testing else 'off'}")
+            if resolved:
+                preset = f" ({result['family_preset']})" if result.get("family_preset") else ""
+                print(f"Families: {', '.join(resolved)}{preset}")
+                if (
+                    args.active_testing and "nuclei_active" not in resolved
+                    and "nuclei_active" not in args.exclude_family
+                ):
+                    # The standard active set (here and in New Scan) runs the active templates on
+                    # thorough and deep only; say how to add them rather than leave the operator
+                    # to find out from the report. Not when they were excluded on purpose.
+                    print(_active_template_hint(args, contract))
             print(f"View progress at: {result['ui_url']}")
         return 0
     except ScanCliError as exc:

@@ -77,13 +77,27 @@ def token_like_segment(segment: str) -> bool:
     return has_digit and has_alpha and _entropy_bits(text) >= _TOKEN_MIN_ENTROPY_BITS
 
 
+def _decoded(text: str) -> str:
+    """``text`` with its percent-encoding undone, repeatedly (``%256C`` is ``%6C`` is ``l``)."""
+    for _ in range(3):
+        decoded = urllib.parse.unquote(text)
+        if decoded == text:
+            break
+        text = decoded
+    return text
+
+
 def path_may_change_state(path: str) -> bool:
     """Whether a GET of ``path`` may act rather than read: an action word in it (the crawler's
-    interaction words, the broadest list) or a token-like segment."""
-    text = str(path or "")
-    if contains_risky_keyword((text,), RISKY_INTERACTION_KEYWORDS):
-        return True
-    return any(token_like_segment(segment) for segment in text.split("/") if segment)
+    interaction words, the broadest list) or a token-like segment. The path is read as written
+    and percent-decoded, so ``/%6Cogout`` names the action ``/logout`` does."""
+    raw = str(path or "")
+    for text in dict.fromkeys((raw, _decoded(raw))):
+        if contains_risky_keyword((text,), RISKY_INTERACTION_KEYWORDS):
+            return True
+        if any(token_like_segment(segment) for segment in text.split("/") if segment):
+            return True
+    return False
 
 
 def navigation_exclusion_expression(keywords: tuple[str, ...] = RISKY_NAVIGATION_KEYWORDS) -> str:
