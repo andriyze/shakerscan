@@ -231,6 +231,8 @@ def test_the_documented_bound_is_the_sum_of_the_largest_probe_sets():
         flat = re.sub(r"\s+", " ", text)
         assert "4,352" in flat and "3 h 38 min" in flat
         assert "4,224" not in flat and "4,040" not in flat
+        # What the bound leaves out is stated: the active templates are not paced or counted.
+        assert "default-login" in flat
 
 
 #: What each check sends to a four-field variant: the proof's longest proof, the NoSQLi check's

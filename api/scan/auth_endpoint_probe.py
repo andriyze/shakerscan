@@ -65,7 +65,9 @@ URL's query, not a body). What changes:
   verifiers and these checks: 3,784 sqlmap, 256 Dalfox, 112 SQLi proof, 96 NoSQLi, 48 for each
   request verifier and 8 XSS browser proof requests (4,352, at the pace above about 3 h 38 min);
   each parallel child holds its own, so a Scan split into N parts may send N times that, at the
-  same combined pace;
+  same combined pace. The active templates are outside this bound: they are neither paced nor
+  counted on the endpoint, so a template for a product whose sign-in path is the profile's own (a
+  ``default-login`` template) may send its sign-in attempts there too;
 * verdicts: Dalfox stops at its first verified finding, and a Dalfox attempt that verified nothing
   is inconclusive, never negative, since it sent a bounded part of its payloads: it sends its whole
   payload set to a body whether or not a field reflects (1,347 requests for a two-field form in

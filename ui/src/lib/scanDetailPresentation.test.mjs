@@ -814,4 +814,6 @@ test('a sign-in endpoint probed only within its lockout-safe ceiling is named as
   }, { band: 'moderate', label: 'Moderate coverage' })
   assert.equal(result.coverageGapReasons.length, 1)
   assert.match(result.coverageGapReasons[0], /sign-in endpoint .* lockout-safe/)
+  // Each check there draws from a set of its own.
+  assert.match(result.coverageGapReasons[0], /a bounded set of probes for each check/)
 })
