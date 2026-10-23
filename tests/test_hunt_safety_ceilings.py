@@ -291,6 +291,28 @@ def test_tls_handshakes_count_as_the_one_port_they_attempt():
     assert port_accounting.tls_pair(web, "http://app.test") is None
 
 
+def test_ports_that_do_not_add_up_to_the_estimate_keep_the_full_charge():
+    """A ``-p`` list identifies the charge only when its pairs are the whole estimate: an action
+    that names fewer ports than it is charged (another flag adds more), or names one address
+    twice, keeps its full charge however many named ports were attempted."""
+    from runtime.models import PreparedCommand, PreparedExecution
+    attempted = {port_accounting.CONTEXT_KEY: {ADDRESS: "22,80"}}
+
+    def prepared(commands, estimate):
+        return PreparedExecution("ports.discover", "naabu", "1", tuple(
+            PreparedCommand("naabu", ("-p", ports, "-host", address), address) for address, ports in commands),
+            {"tcp_ports_attempted": estimate}, "digest", {}, "v1")
+    fewer = prepared([(ADDRESS, "22,80")], 1_000)
+    twice = prepared([(ADDRESS, "22,80"), (ADDRESS, "22,80")], 4)
+    exact = prepared([(ADDRESS, "22,80")], 2)
+    for action, estimate in ((fewer, 1_000), (twice, 4)):
+        assert port_accounting.action_pairs(action) == frozenset()
+        assert distinct_charge(attempted, action, {"tcp_ports_attempted": estimate}) == {
+            "tcp_ports_attempted": estimate}
+    assert distinct_charge(attempted, exact, {"tcp_ports_attempted": 2, "tool_wall_seconds": 5}) == {
+        "tool_wall_seconds": 5}
+
+
 def test_a_tls_inspect_records_its_port_only_after_a_handshake():
     pair = (ADDRESS, 443)
     assert port_accounting.tls_attempted_pairs(pair, {"execution_started": True}) == (pair,)
