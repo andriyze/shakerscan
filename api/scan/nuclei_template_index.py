@@ -16,9 +16,9 @@ selection by the methods it actually issues, so the executor can:
 * treat a credential-level template -- a login attempt, which can lock the account it
   tries -- as needing that permission whatever its method: one tagged ``default-login``; one
   that sends a value named like a username or password (a payload, a variable or an extracted
-  value) in a header, the body or the query string (``tomcat-default-login`` sends its password
-  list by GET in an ``Authorization`` header); or one whose Basic ``Authorization`` header holds
-  a literal ``user:password`` pair;
+  value) in a header or the body, or one named like a password in the query string
+  (``tomcat-default-login`` sends its password list by GET in an ``Authorization`` header); or
+  one whose Basic ``Authorization`` header holds a literal ``user:password`` pair;
 * treat the GET templates reviewed as changing state (``STATE_CHANGING_GET_TEMPLATE_IDS``) the
   same way;
 * always exclude ``intrusive`` (destructive) templates -- Scan policy has no
@@ -76,12 +76,24 @@ _DEFAULT_TAGS = ("exposure", "misconfig", "auth-bypass", "default-login")
 # excluded even if a bundle update hides the path from the request expansion below; a test
 # pins this set to what that expansion finds in the pinned bundle.
 NEVER_REQUESTED_TEMPLATE_IDS = frozenset({"springboot-heapdump"})
-# Reviewed templates of the pinned bundle whose GET requests change server state. They need the
-# state-changing permission like a non-GET template; a test pins each to a GET-only template of
-# the pinned bundle's selection that is not already credential-level.
+# GET templates of the pinned bundle reviewed as changing server state. They need the
+# state-changing permission like a non-GET template. The review read every GET-only template of
+# the default selection whose request path, query or description names an action (set, save,
+# register, reset, restore, create, add, delete, install, ...), and the GET templates the query
+# rule below no longer holds back. A check that only signs in as a fixed account without a
+# password (an authentication bypass) does not change state and is not listed. A test pins
+# each id to a GET-only template of the bundle that is not already credential-level, and the
+# bundle digest below to the one the image pins, so a bundle update fails until it is reviewed.
 STATE_CHANGING_GET_TEMPLATE_IDS = frozenset({
     "cve-2025-0674",  # GET /json_data/set_pwd?lev=2&pass=admin1234 sets the admin password
+    "cve-2024-43919",  # yarpp_pro_set_display_types.php sets the plugin's display types
+    "cve-2024-5910",  # /OS/startup/restore/restoreAdmin.php restores the default admin password
+    "cve-2024-9989",  # admin-ajax.php ...&method_name=register&param1=admin registers as "admin"
+    "cnvd-2023-72138",  # /api/v1/user/save?...&Username=...&Role=... adds an administrator
 })
+STATE_CHANGING_GET_REVIEWED_BUNDLE_SHA256 = (
+    "20aff7085b5c1771a8f7a28624009359a1cedab924c9ad7836078ca07e28de39"
+)
 # The request target of a raw request: the token after the method, past any ``@`` annotations.
 _RAW_TARGET_RE = re.compile(r"\s*(?:@[^\n]*\n\s*)*\S+[ \t]+(\S+)")
 _PLACEHOLDER_RE = re.compile(r"\{\{\s*([^{}]*?)\s*\}\}")
@@ -89,10 +101,11 @@ _PLACEHOLDER_RE = re.compile(r"\{\{\s*([^{}]*?)\s*\}\}")
 _RAW_REQUEST_LINE_RE = re.compile(r"\s*(?:@[^\n]*\n\s*)*[^\n]*")
 # A payload, variable or extracted value is named like a username or password when one word of
 # its name is one of these (``username``, ``pass``, ``aem_user``, ``os_password``, ``adminPassword``).
-_CREDENTIAL_NAME_WORDS = frozenset({
-    "user", "users", "username", "usernames", "login", "logins",
-    "pass", "passwd", "password", "passwords", "pwd", "pw",
-})
+# In a header or the body either kind is a credential; in the query string only a password is: a
+# username or user id alone there looks an account up, it signs in as nobody.
+_USERNAME_NAME_WORDS = frozenset({"user", "users", "username", "usernames", "login", "logins"})
+_PASSWORD_NAME_WORDS = frozenset({"pass", "passwd", "password", "passwords", "pwd", "pw"})
+_CREDENTIAL_NAME_WORDS = _USERNAME_NAME_WORDS | _PASSWORD_NAME_WORDS
 _NAME_WORD_RE = re.compile(r"[A-Z]?[a-z0-9]+|[A-Z]+(?![a-z])")
 _IDENTIFIER_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 # A Basic ``Authorization`` header line of a raw request, and the quoted literals of an expression.
@@ -313,9 +326,9 @@ def _filled(target: str, fill: Mapping[str, str]) -> str:
     return _PLACEHOLDER_RE.sub(lambda match: fill.get(match.group(1), ""), target)
 
 
-def _credential_named(name: Any) -> bool:
+def _credential_named(name: Any, words: frozenset[str] = _CREDENTIAL_NAME_WORDS) -> bool:
     return any(
-        word.lower() in _CREDENTIAL_NAME_WORDS
+        word.lower() in words
         for part in re.split(r"[^A-Za-z0-9]+", str(name))
         for word in _NAME_WORD_RE.findall(part)
     )
@@ -349,11 +362,17 @@ def _query(target: str) -> str:
 
 
 def _literal_pair(value: str) -> bool:
-    """Whether a Basic header value holds a literal ``user:password`` pair: base64 text that
-    decodes to one, or a quoted literal holding one inside a ``{{...}}`` expression."""
+    """Whether a Basic header value holds a literal credential.
+
+    Base64 text decodes to one when it is ``user:password`` with either side set: a user with an
+    empty password (``admin:``) and a password alone (``:admin``, for a device that asks only for
+    one) are default logins too; ``:`` names nothing. Inside a ``{{...}}`` expression a quoted
+    literal is one only when it holds both sides (``'admin:admin'``): a fixed API user name
+    joined to a token found earlier (``'api:' + token``) sends no password of that user."""
     if "{{" in value:
         return any(
-            ":" in literal.strip(":") for match in _QUOTED_RE.finditer(value)
+            all(literal.partition(":")[::2]) and ":" in literal
+            for match in _QUOTED_RE.finditer(value)
             for literal in (match.group(1) or match.group(2) or "",)
         )
     token = value.split()[0]
@@ -361,18 +380,21 @@ def _literal_pair(value: str) -> bool:
         decoded = base64.b64decode(token + "=" * (-len(token) % 4), validate=True).decode("utf-8")
     except (ValueError, UnicodeDecodeError):
         return False
-    return ":" in decoded.strip(":")
+    user, colon, password = decoded.partition(":")
+    return bool(colon and (user or password))
 
 
 def _tries_login(document: Mapping[str, Any]) -> bool:
     """Whether a request sends a value named like a username or password -- a payload, a
-    variable or an extracted value -- in a header, the body or the query string, or a literal
-    ``user:password`` pair in a Basic ``Authorization`` header. A name used only in a path
-    enumerates, it does not sign in; a token alone in a Basic header names no account."""
+    variable or an extracted value -- in a header or the body, one named like a password in the
+    query string, or a literal credential in a Basic ``Authorization`` header (``_literal_pair``).
+    A name used only in a path, or a username alone in the query string, looks an account up; it
+    does not sign in. A token alone in a Basic header names no account."""
     requests = document.get("http") or document.get("requests") or []
     if not isinstance(requests, list):
         return False
     names = _credential_names(document)
+    password_names = frozenset(name for name in names if _credential_named(name, _PASSWORD_NAME_WORDS))
     for request in requests:
         if not isinstance(request, Mapping):
             continue
@@ -381,11 +403,13 @@ def _tries_login(document: Mapping[str, Any]) -> bool:
         paths = [str(path) for path in request.get("path") or ()] if isinstance(request.get("path"), list) else []
         after_line = [raw[_RAW_REQUEST_LINE_RE.match(raw).end():] for raw in raws]
         sent = [*after_line, *(str(value) for value in headers.values()), str(request.get("body") or "")]
-        sent.extend(_query(path) for path in paths)
-        sent.extend(
+        queries = [_query(path) for path in paths]
+        queries.extend(
             _query(match.group(1)) for match in map(_RAW_TARGET_RE.match, raws) if match
         )
         if names and any(_references(text, names) for text in sent):
+            return True
+        if password_names and any(_references(query, password_names) for query in queries):
             return True
         basic = [match.group(1) for text in after_line for match in _BASIC_AUTH_RE.finditer(text)]
         basic.extend(

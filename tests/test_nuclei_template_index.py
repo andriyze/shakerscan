@@ -21,6 +21,18 @@ verbatim, that send only GET requests and either try a login or change state by 
 * ``CVE-2024-20439``, ``CVE-2021-26294`` -- a literal Basic ``user:password`` pair
 * ``CVE-2026-8181`` -- an extracted administrator name signed in as with password ``x``
 * ``CVE-2025-0674`` -- ``GET /json_data/set_pwd?...&pass=admin1234`` sets the admin password
+* ``CVE-2024-43919`` -- ``GET .../yarpp_pro_set_display_types.php?...`` sets the plugin's display
+  types
+* ``CVE-2024-5910`` -- ``GET /OS/startup/restore/restoreAdmin.php`` restores the default admin
+  password
+* ``CVE-2024-9989`` -- ``GET .../admin-ajax.php?...&method_name=register&param1=admin`` calls the
+  plugin's register method for user ``admin``
+* ``CNVD-2023-72138`` -- ``GET /api/v1/user/save?...&Username={{user}}...`` adds an administrator
+  (outside the default tags)
+* ``CVE-2013-4982`` -- a payload username and password in the query string: a login attempt (low
+  severity, outside the default selection)
+* ``CVE-2024-33939`` -- a payload user id in the query string reads that user's progress: neither
+  (medium severity, outside the default selection)
 * ``CVE-2023-29298`` -- ``inPassword=foo`` sent to a hashing method: neither
 * ``github-personal-access`` -- a token found in the page, sent to its issuer: neither
 
@@ -376,12 +388,33 @@ _CREDENTIAL_FORMS = {
     # ... and into a structured path's query string.
     "path-query": ("exposure", "  - method: GET\n    path:\n      - '{{BaseURL}}/login?u={{user}}&p={{pass}}'\n"
                    "    payloads:\n      user:\n        - admin\n      pass:\n        - admin\n", True),
+    # A password alone in the query string is still a login attempt.
+    "password-only-query": ("exposure", "  - method: GET\n    path:\n      - '{{BaseURL}}/unlock?pin={{password}}'\n"
+                            "    payloads:\n      password:\n        - '0000'\n", True),
+    # A username alone in the query string looks the account up; it signs in as nobody.
+    "username-only-query": ("exposure", "  - method: GET\n    path:\n      - '{{BaseURL}}/api/users?name={{username}}'\n"
+                            "    payloads:\n      username:\n        - admin\n", False),
+    # ... and so does a user id in a raw request line's query string.
+    "raw-user-id-query": ("exposure", "  - raw:\n      - |\n        GET /progress?user_id={{user}} HTTP/1.1\n"
+                          "        Host: {{Hostname}}\n"
+                          "    payloads:\n      user:\n        - '1'\n", False),
     # A literal Basic user:password pair (admin:admin) in a structured request's header.
     "structured-literal-basic": ("exposure", "  - method: GET\n    path:\n      - '{{BaseURL}}/manager'\n"
                                  "    headers:\n      Authorization: 'Basic YWRtaW46YWRtaW4='\n", True),
     # A literal Basic value that decodes to no pair is not a credential.
     "structured-basic-no-pair": ("exposure", "  - method: GET\n    path:\n      - '{{BaseURL}}/manager'\n"
                                  "    headers:\n      Authorization: 'Basic YWRtaW4='\n", False),
+    # A literal Basic user with an empty password (admin:) is a default login.
+    "literal-basic-empty-password": ("exposure", "  - method: GET\n    path:\n      - '{{BaseURL}}/manager'\n"
+                                     "    headers:\n      Authorization: 'Basic YWRtaW46'\n", True),
+    # ... and so is a literal password with an empty user (:admin), as a device that asks only
+    # for a password takes it.
+    "literal-basic-password-only": ("exposure", "  - raw:\n      - |\n        GET /cgi-bin/status HTTP/1.1\n"
+                                    "        Host: {{Hostname}}\n"
+                                    "        Authorization: Basic OmFkbWlu\n", True),
+    # A literal Basic value of an empty user and password (:) names no account.
+    "literal-basic-empty-pair": ("exposure", "  - method: GET\n    path:\n      - '{{BaseURL}}/manager'\n"
+                                 "    headers:\n      Authorization: 'Basic Og=='\n", False),
     # A literal user:password pair inside a Basic header expression.
     "literal-basic-expression": ("exposure", "  - raw:\n      - |\n        GET /admin HTTP/1.1\n"
                                  "        Host: {{Hostname}}\n"
@@ -392,7 +425,35 @@ _CREDENTIAL_FORMS = {
                          "        regex:\n          - 'tok_[a-z0-9]{8}'\n"
                          "  - raw:\n      - |\n        GET /me HTTP/1.1\n        Host: {{Hostname}}\n"
                          "        Authorization: Basic {{base64(token + ':')}}\n", False),
+    # A fixed API user name joined to a token found earlier sends no password of that user.
+    "basic-api-user-token": ("exposure", "  - method: GET\n    path:\n      - '{{BaseURL}}/'\n"
+                             "    extractors:\n      - type: regex\n        name: token\n        internal: true\n"
+                             "        regex:\n          - 'key-[a-z0-9]{8}'\n"
+                             "  - raw:\n      - |\n        GET /v3/domains HTTP/1.1\n        Host: {{Hostname}}\n"
+                             "        Authorization: Basic {{base64('api:' + token)}}\n", False),
 }
+
+
+#: Every word that names a value like a username or like a password. A value whose name holds
+#: either kind of word is a credential in a header or the body; in the query string only a
+#: password is (a username alone there looks an account up).
+_USERNAME_WORDS = ("user", "users", "username", "usernames", "login", "logins")
+_PASSWORD_WORDS = ("pass", "passwd", "password", "passwords", "pwd", "pw")
+
+
+@pytest.mark.parametrize("name", [*(f"{prefix}{word}" for word in (*_USERNAME_WORDS, *_PASSWORD_WORDS)
+                                    for prefix in ("", "admin_"))])
+@pytest.mark.parametrize("place", ["header", "query"])
+def test_each_credential_word_names_a_credential_payload(tmp_path, name, place):
+    # Synthetic unit fixtures: a payload of that name, sent in a header or the query string.
+    sent = ("    headers:\n      X-Check: '{{" + name + "}}'\n" if place == "header" else "")
+    path = "{{BaseURL}}/check" + ("?v={{" + name + "}}" if place == "query" else "")
+    body = f"  - method: GET\n    path:\n      - '{path}'\n{sent}    payloads:\n      {name}:\n        - admin\n"
+    _write_template(tmp_path, "http/word.yaml",
+                    _CREDENTIAL_TEMPLATE.format(template_id="word-check", tags="exposure", body=body))
+    (record,) = build_nuclei_method_index(str(tmp_path)).templates
+    is_password = name.removeprefix("admin_") in _PASSWORD_WORDS
+    assert record.credential_level is (place == "header" or is_password)
 
 
 @pytest.mark.parametrize("template_id", sorted(_CREDENTIAL_FORMS))
@@ -432,10 +493,19 @@ _CREDENTIAL_FIXTURE_CLASSES = {
     "cve-2024-20439": "credential_level",
     "cve-2021-26294": "credential_level",
     "cve-2026-8181": "credential_level",
+    "cve-2013-4982": "credential_level",
     "cve-2025-0674": "changes_state_by_get",
+    "cve-2024-43919": "changes_state_by_get",
+    "cve-2024-5910": "changes_state_by_get",
+    "cve-2024-9989": "changes_state_by_get",
+    "cnvd-2023-72138": "changes_state_by_get",
     "cve-2023-29298": "neither",
+    "cve-2024-33939": "neither",
     "github-personal-access": "neither",
 }
+#: Fixtures outside the default severities and tags: only a verify Scan of exactly that template
+#: requests them.
+_OUTSIDE_DEFAULT_SELECTION = {"cve-2013-4982", "cnvd-2023-72138", "cve-2024-33939"}
 
 
 def test_real_templates_that_sign_in_or_change_state_by_get_need_the_state_changing_permission():
@@ -450,22 +520,55 @@ def test_real_templates_that_sign_in_or_change_state_by_get_need_the_state_chang
     plain = resolve_active_nuclei_selection(str(CREDENTIAL_FIXTURES), allow_state_changing_http=False)
     authorized = resolve_active_nuclei_selection(str(CREDENTIAL_FIXTURES), allow_state_changing_http=True)
     assert set(plain.template_ids) == {"cve-2023-29298", "github-personal-access"}
-    assert set(authorized.template_ids) == set(_CREDENTIAL_FIXTURE_CLASSES)
+    assert set(authorized.template_ids) == set(_CREDENTIAL_FIXTURE_CLASSES) - _OUTSIDE_DEFAULT_SELECTION
     assert plain.credential_level_count == authorized.credential_level_count == 5
-    assert plain.state_changing_count == 6
+    assert plain.state_changing_count == 9
 
 
-def test_a_get_reviewed_as_changing_state_runs_only_with_the_permission():
-    assert "cve-2025-0674" in STATE_CHANGING_GET_TEMPLATE_IDS
+@pytest.mark.parametrize("template_id", sorted(
+    template_id for template_id, kind in _CREDENTIAL_FIXTURE_CLASSES.items() if kind == "changes_state_by_get"))
+def test_a_get_reviewed_as_changing_state_runs_only_with_the_permission(template_id):
+    assert template_id in STATE_CHANGING_GET_TEMPLATE_IDS
     plain = resolve_active_nuclei_selection(
         str(CREDENTIAL_FIXTURES), allow_state_changing_http=False, allow_exploit_classes=True,
-        only_template_ids="cve-2025-0674")
+        only_template_ids=template_id)
     assert plain.skip is True and plain.verify_selection["excluded"] == {
-        "cve-2025-0674": "needs_state_changing_http"}
+        template_id: "needs_state_changing_http"}
     authorized = resolve_active_nuclei_selection(
         str(CREDENTIAL_FIXTURES), allow_state_changing_http=True, allow_exploit_classes=True,
-        only_template_ids="cve-2025-0674")
-    assert authorized.template_ids == ("cve-2025-0674",) and authorized.includes_state_changing
+        only_template_ids=template_id)
+    assert authorized.template_ids == (template_id,) and authorized.includes_state_changing
+
+
+@pytest.mark.parametrize("template_id,reason", [
+    ("cve-2013-4982", "credential_level_needs_state_changing_http"),
+    ("cve-2024-33939", None),
+])
+def test_a_verify_scan_holds_back_a_password_in_the_query_but_not_a_user_lookup(template_id, reason):
+    plain = resolve_active_nuclei_selection(
+        str(CREDENTIAL_FIXTURES), allow_state_changing_http=False, only_template_ids=template_id)
+    assert plain.verify_selection["excluded"] == ({template_id: reason} if reason else {})
+    assert plain.template_ids == (() if reason else (template_id,))
+
+
+#: The reviewed state-changing GETs (``STATE_CHANGING_GET_TEMPLATE_IDS``). Four are in the pinned
+#: bundle's default selection; CNVD-2023-72138 is outside it, and a verify Scan can request it.
+_REVIEWED_STATE_CHANGING_GETS = {
+    "cve-2025-0674": True, "cve-2024-43919": True, "cve-2024-5910": True, "cve-2024-9989": True,
+    "cnvd-2023-72138": False,
+}
+
+
+def test_the_state_changing_get_review_names_its_templates_and_the_bundle_it_read():
+    from scan.work_manifests import CANONICAL_NUCLEI_TEMPLATE_BUNDLE_SHA256
+
+    assert STATE_CHANGING_GET_TEMPLATE_IDS == frozenset(_REVIEWED_STATE_CHANGING_GETS)
+    # A bundle bump fails here, on any host, until its selection is reviewed again.
+    assert nuclei_template_index.STATE_CHANGING_GET_REVIEWED_BUNDLE_SHA256 == (
+        CANONICAL_NUCLEI_TEMPLATE_BUNDLE_SHA256)
+    dockerfile = (Path(__file__).parents[1] / "scanner" / "Dockerfile").read_text()
+    assert ("ARG NUCLEI_TEMPLATES_SHA256="
+            f"{nuclei_template_index.STATE_CHANGING_GET_REVIEWED_BUNDLE_SHA256}") in dockerfile
 
 
 def test_the_reviewed_passive_pack_holds_no_default_login():
@@ -477,12 +580,14 @@ def test_the_reviewed_passive_pack_holds_no_default_login():
 
 #: Templates in the pinned bundle's active selection that send only GET or HEAD requests but
 #: are credential-level: tagged default-login, a value named like a username or password (a
-#: payload, a variable or an extracted value) sent in a header, the body or the query string, or
-#: a literal Basic ``user:password`` pair. Before 2.11.1 they ran without the state-changing
-#: permission; so did the GETs reviewed as changing state (``STATE_CHANGING_GET_TEMPLATE_IDS``).
+#: payload, a variable or an extracted value) sent in a header or the body, a password-named value
+#: in the query string, or a literal Basic ``user:password`` pair. Before 2.11.1 they ran without
+#: the state-changing permission; so did the GETs reviewed as changing state
+#: (``STATE_CHANGING_GET_TEMPLATE_IDS``).
 PINNED_BUNDLE_GET_ONLY_CREDENTIAL_LEVEL = 52
-#: The GET-only selection without the permission: 760 GETs before 2.11.1, 53 of them now behind it.
-PINNED_BUNDLE_GET_ONLY_SELECTION = 707
+#: The GET-only selection without the permission: 760 GETs before 2.11.1, 56 of them now behind it
+#: (52 login attempts and the 4 reviewed state-changing GETs of the default selection).
+PINNED_BUNDLE_GET_ONLY_SELECTION = 704
 
 
 def test_pinned_bundle_default_logins_run_only_with_state_changing_permission():
@@ -505,12 +610,14 @@ def test_pinned_bundle_default_logins_run_only_with_state_changing_permission():
     assert "tomcat-default-login" in moved
     assert {"cve-2020-24285", "cve-2024-28987", "cve-2024-20439", "cve-2021-26294",
             "cve-2026-8181"} <= moved
-    # Each reviewed state-changing GET is in the bundle's selection, sends only GET and is not
-    # already held back as a login attempt, so the list names exactly what it adds.
-    for template_id in STATE_CHANGING_GET_TEMPLATE_IDS:
+    # Each reviewed state-changing GET is in the bundle, sends only GET and is not already held
+    # back as a login attempt, so the list names exactly what it adds; the review says which are
+    # in the default selection.
+    for template_id, in_selection in _REVIEWED_STATE_CHANGING_GETS.items():
         record = by_id[template_id]
-        assert template_id in selected and record.methods == frozenset({"GET"})
-        assert not record.credential_level and record.state_changing
+        assert (template_id in selected) is in_selection, template_id
+        assert record.methods == frozenset({"GET"}), template_id
+        assert not record.credential_level and record.state_changing, template_id
     assert not STATE_CHANGING_GET_TEMPLATE_IDS & set(plain.template_ids)
     assert len(plain.template_ids) == PINNED_BUNDLE_GET_ONLY_SELECTION
     # The reviewed pack Hunt and the passive family run, whatever their permissions, holds no
@@ -530,8 +637,8 @@ def test_pinned_bundle_default_logins_run_only_with_state_changing_permission():
 def test_a_shared_template_id_is_credential_level_when_any_template_carrying_it_is(tmp_path, login_first):
     # Synthetic unit fixtures: `-id` runs both, so the GET default login keeps the id behind
     # the permission even though its sibling only reads a page, whichever is read first.
-    tags = ("default-login", "exposure") if login_first else ("exposure", "default-login")
-    for name, tags in zip(("a", "b"), tags):
+    order = ("default-login", "exposure") if login_first else ("exposure", "default-login")
+    for name, tags in zip(("a", "b"), order):
         _write_template(tmp_path, f"http/{name}/shared.yaml", _CREDENTIAL_TEMPLATE.format(
             template_id="shared-login", tags=tags,
             body="  - method: GET\n    path:\n      - '{{BaseURL}}/" + name + "'\n"))

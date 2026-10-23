@@ -391,11 +391,14 @@ Permission and work are reported separately: the scan page's Testing tile names 
 families that ran, or warns that active testing was allowed but no active family was selected.
 Without state-changing HTTP, `nuclei_active` runs only templates whose every request is a GET or
 HEAD, and never a template that tries logins: one tagged `default-login`, one that sends a value
-named like a username or password (a payload, a variable or an extracted value) in a header, the
-body or the query string, or one whose Basic `Authorization` header holds a literal
-`user:password` pair needs that permission even when it sends only GETs, because a login attempt
-can lock the account it tries. So does a reviewed GET that changes state (one sets a device's
-admin password). A verify Scan lists such a check as `credential_level_needs_state_changing_http`
+named like a username or password (a payload, a variable or an extracted value) in a header or
+the body, or one named like a password in the query string, or one whose Basic `Authorization`
+header holds a literal credential (`admin:admin`, `admin:` or `:admin`) needs that permission
+even when it sends only GETs, because a login attempt can lock the account it tries. So does a
+GET reviewed as changing state (`STATE_CHANGING_GET_TEMPLATE_IDS`: it sets a device password,
+restores a default admin password, changes a plugin's settings, registers a user or adds an
+administrator). A check that names an account but sends no password (an authentication bypass)
+runs without it. A verify Scan lists such a check as `credential_level_needs_state_changing_http`
 or `needs_state_changing_http`, and the step's receipt counts the selection (`template_selection`:
 matched, selected, state-changing, `default_login`, excluded).
 
