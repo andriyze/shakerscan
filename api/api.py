@@ -14221,7 +14221,9 @@ async def _verify_web_candidate_workflow_unlocked(
                 "exploited" if verified_finding_id else str(proof.get("verdict") or candidate_status),
                 "Server-owned family proof completed",
                 family,
-                str(target["url"]),
+                # Where the proof ran: a network target's service, never its host:// locator, so
+                # a later retest of this record reads a URL it can request.
+                service_origin or str(target["url"]),
                 json.dumps(proof_observation),
                 1.0 if verified_finding_id else None,
                 str(candidate["verifier_contract_id"] or f"web.{family}"),

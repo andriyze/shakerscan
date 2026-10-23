@@ -189,3 +189,13 @@ def test_each_profile_covers_its_duration_at_the_derived_pace():
         assert profile.max_browser_actions >= 32 * duration and profile.max_http_requests >= 128 * duration
         # Recording costs no traffic and no wall: at least one record per call a Hunt can make.
         assert profile.max_candidates >= profile.max_capability_calls
+
+
+def test_a_network_candidate_verification_counts_its_http_envelope():
+    """Admission adds the verifier's HTTP envelope on a network target too: its candidate is
+    verified on the HTTP service it names, so the pace counts those requests there as well."""
+    envelope = web_candidate_budget("bola")["http_requests"]
+    for kind in ("web", "api", "network"):
+        ceiling = budget_pace.call_ceiling("candidate.verify", profile="fast", target_kind=kind)
+        assert ceiling["http_requests"] == envelope, kind
+    assert "http_requests" not in budget_pace.call_ceiling("candidate.verify", profile="fast", target_kind="device")

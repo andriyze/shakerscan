@@ -128,3 +128,42 @@ def test_web_verifier_refuses_exactly_as_admission_does(monkeypatch, candidate, 
     with pytest.raises(preflight.CandidateVerificationRefused) as refused:
         preflight.web_candidate_preflight(candidate)
     assert (refused.value.status_code, refused.value.detail) == (status, error.detail)
+
+
+# --- A network target's candidate names the service it is verified on --------------------------
+
+@pytest.mark.parametrize("locus,target,expected", [
+    # A URL target keeps verifying on its own URL.
+    ({"path": "/.env", "origin": "http://198.51.100.10:8000"}, "https://app.test", None),
+    ({"path": "/.env", "origin": "http://198.51.100.10:8000"}, "host://198.51.100.10",
+     "http://198.51.100.10:8000"),
+    ({"url": "http://198.51.100.10:8000/.env"}, "host://198.51.100.10", "http://198.51.100.10:8000"),
+    # The same service written two ways: the scheme's default port, an IPv6 literal, a host's case.
+    ({"origin": "http://198.51.100.10", "url": "http://198.51.100.10:80/.env"},
+     "host://198.51.100.10", "http://198.51.100.10"),
+    ({"origin": "https://198.51.100.10:443/", "url": "https://198.51.100.10/.env"},
+     "host://198.51.100.10", "https://198.51.100.10"),
+    ({"origin": "http://[0:0:0:0:0:0:0:1]:8000", "url": "http://[::1]:8000/.env"}, "host://[::1]",
+     "http://[::1]:8000"),
+    ({"origin": "http://[::1]:8000"}, "host://[0::1]", "http://[::1]:8000"),
+    ({"origin": "http://Box.Example.Test.:8000"}, "host://box.example.test", "http://box.example.test:8000"),
+])
+def test_the_service_a_network_candidate_names(locus, target, expected):
+    assert preflight.verification_service_origin(_candidate(locus), target) == expected
+
+
+@pytest.mark.parametrize("locus", [
+    {"path": "/.env"},  # names no service
+    {"origin": "http://198.51.100.11:8000"},  # another host
+    {"origin": "http://198.51.100.10:8000", "url": "http://198.51.100.10:9000/.env"},  # two services
+    {"origin": "http://198.51.100.10", "url": "https://198.51.100.10/.env"},  # two schemes
+    {"origin": "ftp://198.51.100.10"},
+    {"origin": "http://198.51.100.10:8000/admin"},  # an origin carries no path
+    {"origin": "http://user@198.51.100.10:8000"},
+    {"origin": "http://198.51.100.10:0"},
+])
+def test_a_network_candidate_without_one_service_on_its_host_is_refused(locus):
+    with pytest.raises(preflight.CandidateVerificationRefused) as refused:
+        preflight.verification_service_origin(_candidate(locus), "host://198.51.100.10")
+    assert refused.value.status_code == 422
+    assert refused.value.detail.startswith("verification_service_unresolved")

@@ -389,16 +389,16 @@ def test_contract_path_locus_is_admitted_for_verification():
 
 
 @pytest.mark.parametrize("locus,admitted", [
-    ({"method": "GET", "path": "/.env", "origin": "http://10.10.10.100:8000"}, True),
-    ({"method": "GET", "url": "http://10.10.10.100:8000/.env"}, True),
+    ({"method": "GET", "path": "/.env", "origin": "http://198.51.100.10:8000"}, True),
+    ({"method": "GET", "url": "http://198.51.100.10:8000/.env"}, True),
     ({"method": "GET", "path": "/.env"}, False),
-    ({"method": "GET", "path": "/.env", "origin": "http://10.10.10.99:8000"}, False),
+    ({"method": "GET", "path": "/.env", "origin": "http://198.51.100.11:8000"}, False),
 ])
 def test_a_network_candidate_must_name_its_service_on_the_target_host(locus, admitted):
     """A network target is ``host://H``; the verifier needs the HTTP service the candidate names."""
     store = AdmissionStore()
     store.run["target_kind"] = "network"
-    store.run["context_pack"] = {"target": {"url": "host://10.10.10.100", "origins": []}}
+    store.run["context_pack"] = {"target": {"url": "host://198.51.100.10", "origins": []}}
     store.candidate = {"status": "new", "family": "data_exposure", "canonical_locus": locus}
     if admitted:
         asyncio.run(call(store, name="candidate.verify"))

@@ -537,10 +537,15 @@ def test_the_workflow_dispatch_says_whether_a_credential_refusal_followed_traffi
 # verifier built its proof workflow from that URL, so every data_exposure, auth_bypass or bola
 # verification on a network Hunt failed with ``adapter_fault:ExperimentContractError`` before any
 # request, and was charged as an uncertain run (24 requests, 180 s, a verification and an active
-# action). The candidate names its service (``canonical_locus.origin``); the proof now runs there.
+# action). The candidate names its service (``canonical_locus.origin``), a suspected finding its
+# URL; the proof runs there, and what it proves is recorded on that service.
 
-HOST_TARGET = "host://10.10.10.100"
-SERVICE = "http://10.10.10.100:8000"
+HOST = "198.51.100.10"
+HOST_TARGET = f"host://{HOST}"
+SERVICE = f"http://{HOST}:8000"
+# Unit fixture: a synthetic provider-shaped secret (the same shape the workflow tests use), served
+# by the loopback service below so the real family proof can verify the exposure.
+EXPOSED_ENV = b"APP_ENV=production\nSTRIPE_SECRET_KEY=sk_live_acme4f8a2b3cQ7xR1nW9\n"
 
 
 class StopAfterRouting(Exception):
@@ -548,76 +553,120 @@ class StopAfterRouting(Exception):
 
 
 class NetworkHuntDatabase(HuntDatabase):
-    """A network Hunt whose target row is ``host://10.10.10.100``."""
+    """A network Hunt whose target row is ``host://<host>``.
 
-    def __init__(self, locus):
+    Besides the Hunt's own rows it keeps what the verifier and the promotion write (findings,
+    verification records, candidate updates), so a test reads where a proven finding landed.
+    """
+
+    def __init__(self, locus, *, host=HOST, finding=None):
         super().__init__()
+        self.target_url = f"host://{host}"
         self.run["target_kind"] = "network"
         self.run["context_pack"] = {
-            "target": {"url": HOST_TARGET, "kind": "network", "origins": []},
-            "authorized_target_addresses": ["10.10.10.100"],
+            "target": {"url": self.target_url, "kind": "network", "origins": []},
+            "authorized_target_addresses": [host],
         }
         self.candidate = {
             "id": CANDIDATE, "target_id": TARGET, "status": "new", "family": "data_exposure",
             "title": "Unauthenticated .env disclosure", "claimed_severity": "critical",
             "verifier_contract_id": None, "verification_context": {}, "canonical_locus": locus,
         }
+        # A suspected finding to verify instead of a candidate (POST /findings/{id}/verify).
+        self.finding = finding
         self.candidate_updates = []
+        self.findings_created = []
+        self.verification_records = []
+        self.findings_resolved = []
+        self.hypothesis = None
+
+    async def fetchval(self, query, *args):
+        if "FROM investigation_candidates" in query:
+            return self.finding is None
+        if "INSERT INTO findings" in query:
+            self.findings_created.append({"target_id": args[0], "url": args[7]})
+            return uuid.uuid4()
+        if "INSERT INTO finding_verifications" in query:
+            self.verification_records.append({"target_url": args[8], "verdict": args[5]})
+            return uuid.uuid4()
+        return await super().fetchval(query, *args)
 
     async def fetch(self, query, *args):
         if "FROM target_endpoint" in query:
             return []  # no protected endpoints or deny expectations recorded
+        if "FROM findings" in query:
+            return []  # no earlier finding covers this vulnerability
         return await super().fetch(query, *args)
 
     async def fetchrow(self, query, *args):
         if "FROM targets" in query:
-            return {"id": TARGET, "url": HOST_TARGET, "is_active": True, "discovery_source": "manual"}
+            return {"id": TARGET, "url": self.target_url, "is_active": True,
+                    "discovery_source": "manual"}
         if "FROM hypotheses" in query:
+            return self.hypothesis
+        if "FROM research_decisions" in query or "FROM findings WHERE target_id" in query:
             return None
+        if "FROM findings WHERE id" in query:
+            return self.finding
         return await super().fetchrow(query, *args)
 
     async def execute(self, query, *args):
         if "UPDATE investigation_candidates" in query:
-            self.candidate_updates.append(query)
+            self.candidate_updates.append((query, args))
+            return "UPDATE 1"
+        if query.lstrip().startswith("UPDATE findings SET status='resolved'"):
+            self.findings_resolved.append(args[0])
+            return "UPDATE 1"
+        if any(marker in query for marker in (
+            "INSERT INTO evidence_instances", "UPDATE evidence_instances", "UPDATE hypotheses",
+            "UPDATE tool_receipts",
+        )):
             return "UPDATE 1"
         return await super().execute(query, *args)
 
 
-def _verify_on_network_target(monkeypatch, locus):
-    """The real execute_hunt_capability -> api.py verifier -> _arsenal_dispatch_workflow."""
+def _network_verification_doubles(monkeypatch, database, runtime=None):
+    """Wire the real verifier and workflow dispatch to ``database``.
+
+    Doubles (labelled): the database itself, the standing approval, the credential lookup (no
+    credential attached: the proof reads as anonymous), the hypothesis upsert, and the receipt,
+    evidence and command-result writers, which keep the request they were given. The workflow
+    runtime, the family proof and the finding promotion are the real ones unless ``runtime``
+    replaces the runtime.
+    """
     import sys
 
     # The router module api.py dispatches through (its import layout decides which object).
     arsenal = sys.modules[api_module._arsenal_dispatch_workflow.__module__]
-    database = NetworkHuntDatabase(locus)
+    recorded = {"receipts": [], "evidence": []}
 
-    async def run_or_404(conn, hunt_id, for_update=False):
-        return deepcopy(database.run)
-
-    async def principals(conn, target, slots, **kwargs):  # labelled double: no credential attached
+    async def principals(conn, target, slots, **kwargs):
         return {} if kwargs.get("select_only") else {"anonymous": {}}
 
-    async def approval(*args, **kwargs):  # labelled double: the standing approval validates
+    async def approval(*args, **kwargs):
         return {"scope_receipt_id": "scope"}
 
-    async def upsert(conn, request):  # labelled double
-        return {"hypothesis": {"id": str(uuid.uuid4())}}
+    async def upsert(conn, request):
+        hypothesis_id = uuid.uuid4()
+        database.hypothesis = {
+            "id": hypothesis_id, "target_id": TARGET, "source": request.source,
+            "family": request.family, "title": request.title,
+            "severity_guess": request.severity_guess, "description": None,
+            "metadata_json": request.metadata_json,
+        }
+        return {"hypothesis": {"id": str(hypothesis_id)}}
 
-    async def settle_refusal(*_args, refusal, **_kwargs):
-        # Labelled double: the refusal's own record transaction is covered by
-        # tests/test_hunt_permission_requests_postgres.py; here the answer and the charge matter.
-        raise refusal
+    async def record_receipt(conn, request):
+        recorded["receipts"].append(request)
+        return {"tool_receipt": {"id": str(uuid.uuid4())}}
 
-    runtime_bases = []
+    async def record_evidence(conn, request):
+        recorded["evidence"].append(request)
+        return {"evidence_instance": {"id": str(uuid.uuid4())}}
 
-    async def runtime(base_url, payload, normalized, contexts, cancel):
-        runtime_bases.append(base_url)
-        raise StopAfterRouting(base_url)
+    async def record_command(conn, **fields):
+        return {"id": str(uuid.uuid4())}
 
-    monkeypatch.setattr(router, "_pool", lambda: database)
-    monkeypatch.setattr(router, "_hunt_run_or_404", run_or_404)
-    monkeypatch.setattr(router, "settle_refusal", settle_refusal)
-    monkeypatch.setattr(router, "_verify_suspected_finding_workflow", api_module._verify_suspected_finding_workflow)
     monkeypatch.setattr(api_module, "db_pool", database)
     monkeypatch.setenv("AI_OPS_ROUTER_EXECUTE_ENABLED", "false")
     monkeypatch.setattr(api_module, "_resolve_workflow_principal_contexts", principals)
@@ -626,7 +675,39 @@ def _verify_on_network_target(monkeypatch, locus):
     monkeypatch.setattr(arsenal, "_pool_provider", lambda: database)
     monkeypatch.setitem(arsenal._deps, "_active_workflow_cancellations", lambda: {})
     monkeypatch.setitem(arsenal._deps, "_resolve_workflow_principal_contexts", lambda: principals)
-    monkeypatch.setitem(arsenal._deps, "_execute_workflow_runtime", lambda: runtime)
+    monkeypatch.setitem(arsenal._deps, "_record_tool_receipt", lambda: record_receipt)
+    monkeypatch.setitem(arsenal._deps, "_record_evidence_instance", lambda: record_evidence)
+    monkeypatch.setitem(arsenal._deps, "_record_command_result", lambda: record_command)
+    if runtime is not None:
+        monkeypatch.setitem(arsenal._deps, "_execute_workflow_runtime", lambda: runtime)
+    return recorded
+
+
+def _verify_on_network_target(monkeypatch, locus, *, database=None, runtime=None):
+    """The real execute_hunt_capability -> api.py verifier -> _arsenal_dispatch_workflow."""
+    database = database or NetworkHuntDatabase(locus)
+
+    async def run_or_404(conn, hunt_id, for_update=False):
+        return deepcopy(database.run)
+
+    async def settle_refusal(*_args, refusal, **_kwargs):
+        # Labelled double: the refusal's own record transaction is covered by
+        # tests/test_hunt_permission_requests_postgres.py; here the answer and the charge matter.
+        raise refusal
+
+    runtime_bases = []
+
+    async def stop_at_runtime(base_url, payload, normalized, contexts, cancel):
+        runtime_bases.append(base_url)
+        raise StopAfterRouting(base_url)
+
+    monkeypatch.setattr(router, "_pool", lambda: database)
+    monkeypatch.setattr(router, "_hunt_run_or_404", run_or_404)
+    monkeypatch.setattr(router, "settle_refusal", settle_refusal)
+    monkeypatch.setattr(router, "_verify_suspected_finding_workflow", api_module._verify_suspected_finding_workflow)
+    recorded = _network_verification_doubles(
+        monkeypatch, database, runtime=stop_at_runtime if runtime is None else runtime,
+    )
     before = dict(database.run["budget_used_json"])
     request = router.HuntCapabilityRequest(
         idempotency_key="verify-network-0001", input={"candidate_id": str(CANDIDATE)},
@@ -639,11 +720,11 @@ def _verify_on_network_target(monkeypatch, locus):
     used = database.run["budget_used_json"]
     delta = {key: used.get(key, 0) - before.get(key, 0)
              for key in set(used) | set(before) if used.get(key, 0) != before.get(key, 0)}
-    return database, raised, delta, runtime_bases
+    return database, raised, delta, runtime_bases, recorded
 
 
 def test_a_network_candidate_is_verified_on_the_service_it_names(web_hunt, monkeypatch):
-    database, _raised, _delta, bases = _verify_on_network_target(
+    database, _raised, _delta, bases, _recorded = _verify_on_network_target(
         monkeypatch, {"path": "/.env", "method": "GET", "origin": SERVICE},
     )
     # Both proof runs would go to the evidenced service, never to the host:// placeholder.
@@ -654,12 +735,12 @@ def test_a_network_candidate_is_verified_on_the_service_it_names(web_hunt, monke
 
 @pytest.mark.parametrize("locus", [
     {"path": "/.env", "method": "GET"},  # names no service
-    {"path": "/.env", "method": "GET", "origin": "http://10.10.10.99:8000"},  # another host
-    {"path": "/.env", "method": "GET", "origin": "ftp://10.10.10.100"},  # not HTTP
-    {"path": "/.env", "method": "GET", "origin": SERVICE, "url": "http://10.10.10.100:9000/.env"},
+    {"path": "/.env", "method": "GET", "origin": "http://198.51.100.11:8000"},  # another host
+    {"path": "/.env", "method": "GET", "origin": f"ftp://{HOST}"},  # not HTTP
+    {"path": "/.env", "method": "GET", "origin": SERVICE, "url": f"http://{HOST}:9000/.env"},
 ])
 def test_a_network_candidate_without_one_named_service_is_refused_free(web_hunt, monkeypatch, locus):
-    database, raised, delta, bases = _verify_on_network_target(monkeypatch, locus)
+    database, raised, delta, bases, _recorded = _verify_on_network_target(monkeypatch, locus)
     assert bases == [] and delta == {}
     assert raised is not None and raised.status_code == 422
     assert raised.detail["reason_code"] == "verification_service_unresolved"
@@ -682,35 +763,125 @@ def test_the_verifier_refuses_a_network_candidate_without_its_service_before_any
     assert exc.value.status_code == 422
     assert str(exc.value.detail).startswith("verification_service_unresolved")
     assert database.candidate_updates == []
-    # Inside a Hunt that refusal is marked as made before traffic, so it is charged nothing.
-    with pytest.raises(VerificationRefused), refused_before_traffic():
-        raise exc.value
 
 
-def test_the_service_origin_is_resolved_only_for_network_targets():
-    from hunt.candidate_verification_preflight import (
-        CandidateVerificationRefused, verification_service_origin,
+# --- The real proof on a loopback service: where a verified network finding lands --------------
+
+async def _serving_exposed_env(scenario):
+    """A real HTTP service on 127.0.0.1 that serves ``/.env``; returns (result, requested paths)."""
+    from aiohttp import web
+
+    requested = []
+
+    async def exposed(request):
+        requested.append(request.path)
+        return web.Response(body=EXPOSED_ENV, content_type="text/plain")
+
+    app = web.Application()
+    app.router.add_get("/.env", exposed)
+    runner = web.AppRunner(app, shutdown_timeout=1)
+    await runner.setup()
+    site = web.TCPSite(runner, "127.0.0.1", 0)
+    await site.start()
+    try:
+        base = f"http://127.0.0.1:{site._server.sockets[0].getsockname()[1]}"
+        return await scenario(base), requested
+    finally:
+        await runner.cleanup()
+
+
+def _verify_candidate_live(monkeypatch, locus_for, *, host="127.0.0.1"):
+    """candidate.verify through the real Hunt lifecycle, verifier, dispatch, workflow runtime,
+    family proof and promotion, against the loopback service. Doubles: see
+    _network_verification_doubles; the reservations come from the web_hunt fixture."""
+    outcome = {}
+
+    async def scenario(base):
+        database = NetworkHuntDatabase(locus_for(base), host=host)
+
+        def run_in_thread():
+            outcome["result"] = _verify_on_network_target(
+                monkeypatch, None, database=database, runtime=api_module._execute_workflow_runtime,
+            )
+
+        # The Hunt lifecycle runs its own event loop (asyncio.run), so it runs beside this one.
+        await asyncio.get_running_loop().run_in_executor(None, run_in_thread)
+        return base
+
+    base, requested = asyncio.run(_serving_exposed_env(scenario))
+    return base, requested, outcome["result"]
+
+
+def test_a_verified_network_candidate_is_recorded_on_the_service_it_was_found_on(
+    web_hunt, monkeypatch,
+):
+    base, requested, (database, raised, delta, _bases, recorded) = _verify_candidate_live(
+        monkeypatch, lambda base: {"path": "/.env", "method": "GET", "origin": base},
     )
+    assert raised is None
+    # Two independent runs read the exposure from the named service.
+    assert requested == ["/.env", "/.env"]
+    # The finding, its evidence and the verification record name that service, never the
+    # host:// locator; the receipt keeps the target and records the service it ran on.
+    assert database.findings_created == [{"target_id": TARGET, "url": f"{base}/.env"}]
+    (evidence,) = recorded["evidence"]
+    assert evidence.concrete_url == base
+    assert database.verification_records == [{"target_url": base, "verdict": "exploited"}]
+    (receipt,) = recorded["receipts"]
+    assert receipt.target_scope["target_url"] == "host://127.0.0.1"
+    assert receipt.target_scope["service_origin"] == base
+    final_query, final_args = database.candidate_updates[-1]
+    assert "latest_verification_id" in final_query and final_args[1] == "verified"
+    assert delta["verifications"] == 1
 
-    named = {"canonical_locus": {"origin": SERVICE}}
-    assert verification_service_origin(named, "https://example.test") is None
-    assert verification_service_origin(named, HOST_TARGET) == SERVICE
-    assert verification_service_origin(
-        {"canonical_locus": {"url": "HTTP://10.10.10.100:8000/.env"}}, HOST_TARGET,
-    ) == SERVICE
-    assert verification_service_origin(
-        {"canonical_locus": {"origin": "https://[::1]:8443"}}, "host://[::1]",
-    ) == "https://[::1]:8443"
-    for origin in ("http://user@10.10.10.100:8000", "http://10.10.10.100:0", "http://10.10.10.100:8000/x"):
-        with pytest.raises(CandidateVerificationRefused):
-            verification_service_origin({"canonical_locus": {"origin": origin}}, HOST_TARGET)
+
+def _suspected_finding(url):
+    return {
+        "id": CANDIDATE, "target_id": TARGET, "tool": "autonomous_agent", "source": "autonomous",
+        "status": "active", "last_verification_verdict": None, "url": url, "method": "GET",
+        "title": "Unauthenticated .env disclosure", "severity": "critical",
+        "evidence": json.dumps({"family": "data_exposure", "method": "GET", "route": "/.env"}),
+    }
 
 
-def test_a_workflow_on_a_host_url_is_a_contract_refusal_not_a_fault():
-    from workflow_experiment import WorkflowContractError, normalize_workflow
+def _verify_suspected_live(monkeypatch, *, host):
+    """POST /findings/{id}/verify's verifier on a suspected finding of a network target."""
+    outcome = {}
 
-    workflow = api_module._materialize_dataexposure_verification_workflow("/.env", include_owner_baseline=False)
-    payload = {key: workflow[key] for key in ("proof_family", "steps", "assertions")}
-    with pytest.raises(WorkflowContractError, match="target_url_must_be_absolute_http"):
-        normalize_workflow(HOST_TARGET, payload)
-    assert normalize_workflow(SERVICE, payload)["steps"]
+    async def scenario(base):
+        database = NetworkHuntDatabase({}, host=host, finding=_suspected_finding(f"{base}/.env"))
+        recorded = _network_verification_doubles(monkeypatch, database)
+
+        def run_in_thread():
+            try:
+                outcome["result"] = asyncio.run(api_module._verify_suspected_finding_workflow(
+                    CANDIDATE, APPROVAL, created_by="operator:fixture", autonomous=False,
+                ))
+            except HTTPException as exc:
+                outcome["raised"] = exc
+
+        await asyncio.get_running_loop().run_in_executor(None, run_in_thread)
+        outcome.update(database=database, recorded=recorded)
+        return base
+
+    base, requested = asyncio.run(_serving_exposed_env(scenario))
+    return base, requested, outcome
+
+
+def test_a_suspected_network_finding_is_verified_on_its_own_service(monkeypatch):
+    base, requested, outcome = _verify_suspected_live(monkeypatch, host="127.0.0.1")
+    assert "raised" not in outcome
+    assert outcome["result"]["verified"] is True
+    assert requested == ["/.env", "/.env"]
+    database = outcome["database"]
+    assert database.findings_created == [{"target_id": TARGET, "url": f"{base}/.env"}]
+    (evidence,) = outcome["recorded"]["evidence"]
+    assert evidence.concrete_url == base
+
+
+def test_a_suspected_finding_on_another_host_is_refused_before_any_request(monkeypatch):
+    # The target is host://127.0.0.2; the finding's URL names a service on 127.0.0.1.
+    _base, requested, outcome = _verify_suspected_live(monkeypatch, host="127.0.0.2")
+    assert outcome["raised"].status_code == 422
+    assert str(outcome["raised"].detail).startswith("verification_service_unresolved")
+    assert requested == [] and outcome["database"].findings_created == []

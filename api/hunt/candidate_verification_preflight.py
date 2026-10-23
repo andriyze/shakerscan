@@ -19,6 +19,10 @@ try:
     import family_proof
 except ModuleNotFoundError:  # package import in host-side tests
     from .. import family_proof
+try:
+    from scanner_tools.host_names import HostNameError, canonical_host
+except ModuleNotFoundError:  # package import in host-side tests
+    from scanner.scanner_tools.host_names import HostNameError, canonical_host
 
 # Families the server-owned family-proof bridge can re-execute.
 VERIFIABLE_FAMILIES: frozenset[str] = frozenset({
@@ -101,25 +105,35 @@ SERVICE_UNRESOLVED = (
 
 
 def _host_key(host: Any) -> str:
-    text = str(host or "").strip().lower()
-    return text[1:-1] if text.startswith("[") and text.endswith("]") else text.rstrip(".")
+    """The host the HTTP client connects to (IP literals in canonical form), or "" for none."""
+    try:
+        return canonical_host(host)
+    except HostNameError:
+        return ""
 
 
 def _service_origin(raw: str, *, bare: bool) -> tuple[str, str]:
-    """``(origin, host)`` of an absolute http(s) URL; ``bare`` also refuses a path or query."""
+    """``(origin, host)`` of an absolute http(s) URL; ``bare`` also refuses a path or query.
+
+    The origin is written the way the client connects: canonical host, and no port when it is
+    the scheme's default, so ``http://h`` and ``http://h:80/x`` name the same service.
+    """
     try:
         parsed = urllib.parse.urlsplit(raw)
         port = parsed.port
     except ValueError:
         raise CandidateVerificationRefused(422, SERVICE_UNRESOLVED) from None
-    if (parsed.scheme.lower() not in {"http", "https"} or not parsed.hostname
+    scheme = parsed.scheme.lower()
+    host = _host_key(parsed.hostname)
+    if (scheme not in {"http", "https"} or not host
             or parsed.username is not None or parsed.password is not None or port == 0
             or any(ch.isspace() or ord(ch) < 32 or ch == "\\" for ch in raw)
             or (bare and (parsed.path not in {"", "/"} or parsed.query or parsed.fragment))):
         raise CandidateVerificationRefused(422, SERVICE_UNRESOLVED)
-    host = _host_key(parsed.hostname)
     netloc = f"[{host}]" if ":" in host else host
-    return f"{parsed.scheme.lower()}://{netloc}" + (f":{port}" if port is not None else ""), host
+    if port is not None and port != (443 if scheme == "https" else 80):
+        netloc = f"{netloc}:{port}"
+    return f"{scheme}://{netloc}", host
 
 
 def verification_service_origin(candidate: Mapping[str, Any], target_url: str) -> str | None:
@@ -141,7 +155,8 @@ def verification_service_origin(candidate: Mapping[str, Any], target_url: str) -
         and (key == "origin" or "://" in str(locus[key]))
     ]
     origins = {origin for origin, _host in named}
-    if len(origins) != 1 or any(host != _host_key(target.hostname) for _origin, host in named):
+    target_host = _host_key(target.hostname)
+    if len(origins) != 1 or not target_host or any(host != target_host for _origin, host in named):
         raise CandidateVerificationRefused(422, SERVICE_UNRESOLVED)
     return origins.pop()
 
