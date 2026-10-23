@@ -18,7 +18,16 @@ import pytest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "api"))
 
 from check_registry import CHECK_REGISTRY  # noqa: E402
-from scan.contracts import SCAN_V2_FAMILY_NAMES, resolve_scan_contract  # noqa: E402
+from scan.contracts import (  # noqa: E402
+    BUDGET_SUFFICIENCY_PROFILES,
+    SCAN_V2_FAMILY_NAMES,
+    resolve_scan_contract,
+)
+from scan.external_process import (  # noqa: E402
+    ACTIVE_TEMPLATE_PLANNED_GET_ONLY_WINDOWS,
+    ACTIVE_TEMPLATE_PLANNED_WINDOWS,
+)
+from scan.nuclei_execution import ACTIVE_TEMPLATE_WINDOW_SIZE  # noqa: E402
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -108,3 +117,18 @@ def test_matrix_does_not_mark_a_category_covered_by_a_refused_family(family, row
     )
     for row in rows:
         assert _matrix_status(row) == "❌", row
+
+
+def test_matrix_says_how_much_of_the_active_pack_a_scan_runs():
+    """The matrix sizes the active pack, so it must also say a Scan may run only part of it."""
+    text = _flat(MATRIX)
+    assert f"Each endpoint attempt runs one {ACTIVE_TEMPLATE_WINDOW_SIZE}-template window." in text
+    assert (
+        f"({ACTIVE_TEMPLATE_PLANNED_GET_ONLY_WINDOWS} GET-only, "
+        f"{ACTIVE_TEMPLATE_PLANNED_WINDOWS} with state-changing HTTP)"
+    ) in text
+    assert BUDGET_SUFFICIENCY_PROFILES == {"thorough", "deep"}, (
+        "the profiles that run every active-template window changed: update the matrix"
+    )
+    assert "`thorough` and `deep` Scans run every window." in text
+    assert "`nuclei_active.template_windows`" in text

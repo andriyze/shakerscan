@@ -25,15 +25,8 @@ A row does not count:
   `lfi`, `rce` (alias `command_injection`) and `business_logic`, and also `auth`,
   `endpoint_security`, `headers`, `jwt` and `mass_assignment` (header checks run in the baseline
   instead);
-- single Nuclei templates for named products. The active pack selects high and critical templates
-  tagged `exposure`, `misconfig`, `auth-bypass` or `default-login` from the pinned,
-  checksum-verified template bundle, and runs without out-of-band callbacks. On the pinned bundle
-  (nuclei-templates `2935d63a`) that is 760 GET-only templates, or 1,145 when state-changing HTTP
-  is allowed. Some of them also carry another tag. Of those that can match, 11 are tagged `rce`
-  (19 with state-changing HTTP), 11 `lfi` (15), 5 `jwt` and 2 `sqli` (24), all written for named
-  products or CVEs. None can match SSRF (both SSRF templates need callbacks), SSTI, XXE or
-  deserialization. A verify Scan can also run the CVE checks a candidate names (A06). A row is
-  not marked covered for any of these product templates;
+- single Nuclei templates for named products (see [Active Nuclei pack](#active-nuclei-pack)). A
+  row is not marked covered for any of them;
 - Hunt, AI Gate and Model Intake.
 
 **Defaults.** The `passive` preset runs `recon`, `nuclei_passive` and `sensitive_exposure`.
@@ -62,6 +55,26 @@ application at all. Use proof state, current coverage, and `risk_and_assurance/v
 run-specific claims. A Scan's `resolved_families` names the families selected for it; the scan
 page's Testing tile names the active families that ran.
 
+### Active Nuclei pack
+
+`nuclei_active` selects high and critical templates tagged `exposure`, `misconfig`, `auth-bypass`
+or `default-login` from the pinned, checksum-verified template bundle, and runs them without
+out-of-band callbacks. On the pinned bundle (nuclei-templates `2935d63a`) that is 760 GET-only
+templates, or 1,145 when state-changing HTTP is allowed.
+
+A Scan does not always run the whole pack. Each endpoint attempt runs one 30-template window. A
+`fast` or `balanced` Scan (`balanced` is the default) runs one window per endpoint in its active
+manifest, so a host with fewer endpoints than windows (26 GET-only, 39 with state-changing HTTP)
+runs only part of the pack: a host with five endpoints runs about 150 of the 760 GET-only
+templates. `thorough` and `deep` Scans run every window. A Scan split into parallel parts runs one
+window per endpoint in each part. `nuclei_active.template_windows` on the result says how many
+windows ran.
+
+Some templates in the pack also carry another tag. Of those that can match, 11 are tagged `rce`
+(19 with state-changing HTTP), 11 `lfi` (15), 5 `jwt` and 2 `sqli` (24), all written for named
+products or CVEs. None can match SSRF (both SSRF templates need callbacks), SSTI, XXE or
+deserialization. A verify Scan can also run the CVE checks a candidate names (A06).
+
 ## OWASP Top 10 (2021)
 
 | ID | Category | Status | What a Scan checks | Not covered by a Scan |
@@ -71,8 +84,8 @@ page's Testing tile names the active families that ran.
 | A03 | Injection | 🟡 | SQL injection with sqlmap (`sqli`). Reflected XSS, and DOM XSS through URL-fragment parameters, proven in a browser (`xss`). MongoDB-style operator injection (`nosqli`, opt-in). Inputs: query parameters found by discovery or declared in the target's OpenAPI spec or in known endpoints, and templated GET path segments (SQL injection only). Request body fields, from the spec, known endpoints, requests the crawl saw the application send, or request collections, are tested only when state-changing HTTP is allowed. | Command injection, SSTI, XXE, LDAP, XPath, CRLF, host-header, SSI/ESI, CSV/formula and RFI have no generic check. Stored XSS: a Scan does not submit the HTML forms it crawls or look for a payload on a later page. Without state-changing HTTP no body field is tested, even from a request collection. |
 | A04 | Insecure Design | ❌ | — | `business_logic` is planned; a Scan refuses it. Race-condition and price or coupon probes are not run. Much of this category is out of reach for black-box testing. |
 | A05 | Security Misconfiguration | ✅ | Every Scan: missing or weak CSP, HSTS, Referrer-Policy and Permissions-Policy, and a weak X-Frame-Options value; CORS probes for a reflected origin, the `null` origin and a wildcard with credentials. The six-template reviewed passive Nuclei pack (Git config and credentials, missing security headers, OpenAPI, server-status, web.config). `sensitive_exposure` (default): `.env`, `.git`, actuator, API specs with secrets, config and backup files, debug pages, metrics, directory listings, GraphQL introspection, verbose error pages. Active Nuclei `misconfig` and `exposure` templates (opt-in). Subdomain takeover when subdomain discovery is allowed. | Default credentials only through opt-in Nuclei `default-login` templates. No risky-HTTP-method check. No cloud bucket, Kubernetes, Terraform or container-registry checks. No SAML checks. |
-| A06 | Vulnerable & Outdated Components | 🟡 | Nuclei templates for named products (`nuclei_active`, opt-in, high and critical, the four tags above). A verify Scan runs up to ten CVE checks that the vulnerability data names for a candidate ([service intelligence](service-intelligence.md)). Technology and version fingerprints list candidate advisories under Exposure → Services; these are leads, not findings. | No JavaScript library CVE check. No finding from a version number alone. Outside a verify Scan, CVE templates without one of the four tags do not run. |
-| A07 | Identification & Authentication Failures | 🟡 | Session cookies without `HttpOnly` or `Secure` (baseline). Nuclei `default-login` and `auth-bypass` templates (`nuclei_active`, opt-in). Default-login templates that use POST or another non-GET method run only with state-changing HTTP permission. GET-only ones run with active testing alone and still send credentials, most of them as HTTP Basic auth (47 of the pack's 306 on the pinned bundle). | No JWT, OAuth/OIDC, session-fixation, brute-force, rate-limit, 2FA-bypass or SAML checks. |
+| A06 | Vulnerable & Outdated Components | 🟡 | Nuclei templates for named products (`nuclei_active`, opt-in, high and critical, the four tags above; a `fast` or `balanced` Scan of a small host runs only part of them, see [Active Nuclei pack](#active-nuclei-pack)). A verify Scan runs up to ten CVE checks that the vulnerability data names for a candidate ([service intelligence](service-intelligence.md)). Technology and version fingerprints list candidate advisories under Exposure → Services; these are leads, not findings. | No JavaScript library CVE check. No finding from a version number alone. Outside a verify Scan, CVE templates without one of the four tags do not run. |
+| A07 | Identification & Authentication Failures | 🟡 | Session cookies without `HttpOnly` or `Secure` (baseline). Nuclei `default-login` and `auth-bypass` templates (`nuclei_active`, opt-in). Default-login templates that use POST or another non-GET method run only with state-changing HTTP permission. GET-only ones run with active testing alone and still send credentials, most of them as HTTP Basic auth (47 of the pack's 306 on the pinned bundle). A `fast` or `balanced` Scan of a small host runs only some of these templates ([Active Nuclei pack](#active-nuclei-pack)). | No JWT, OAuth/OIDC, session-fixation, brute-force, rate-limit, 2FA-bypass or SAML checks. |
 | A08 | Software & Data Integrity Failures | ❌ | — | Deserialization, ViewState and prototype-pollution probes are not run. No SRI or unsigned-update check. |
 | A09 | Security Logging & Monitoring Failures | 🟡 | Exposed metrics and actuator endpoints, and error pages that show stack traces (`sensitive_exposure`, default). | Whether the application logs, alerts or detects attacks cannot be seen from outside. No CRLF log-injection check. |
 | A10 | SSRF | ❌ | — | No Scan family. `ssrf` is registered as planned and a Scan refuses it. A Scan sends no out-of-band callbacks (Nuclei runs with `-no-interactsh`), so no SSRF template can match. |
