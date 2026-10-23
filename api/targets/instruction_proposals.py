@@ -30,7 +30,7 @@ from pydantic import BaseModel, ConfigDict, Field, StrictInt, ValidationError, f
 
 from .metadata_row import target_metadata_row as _target
 from .skill import TargetSkillWrite, read_target_skill, write_target_skill
-from .actions import (TargetActionWrite, _invisible, find_action, read_target_actions, review_text,
+from .actions import (MAX_STEPS, TargetActionWrite, _invisible, find_action, read_target_actions, review_text,
                       validated_recipe, write_target_action)
 
 try:
@@ -59,6 +59,9 @@ LIST_LIMIT = 100
 DEFAULT_INSTRUCTION_TITLE = 'Target instructions'
 ACCEPT_SOURCE = 'operator:instruction-proposal'
 ACTION_ACCEPT_SOURCE = 'operator:saved-action-proposal'
+# The one rolling proposal of steps retained when Hunts finish (refresh_retained_proposal). It is
+# never counted against the pending proposals Hunts or operators may file.
+RETAINED_PROPOSER = 'hunt:retained-checks'
 
 
 CONTROL_CHARACTERS = re.compile(r'[\x00-\x08\x0b-\x1f\x7f-\x9f]')
@@ -294,8 +297,9 @@ async def _check_pending_quota(conn: Any, target_id: Any, proposed_by: str, kind
     # Hunts and operators have separate pending quotas per kind, so Hunts cannot crowd out
     # operators, and saved-action proposals cannot crowd out instruction proposals.
     pending = await conn.fetchval("""SELECT count(*) FROM target_instruction_proposals
-        WHERE target_id=$1 AND status='pending' AND kind=$3 AND (proposed_by LIKE 'hunt:%') = $2""",
-                                  target_id, proposed_by.startswith('hunt:'), kind)
+        WHERE target_id=$1 AND status='pending' AND kind=$3 AND (proposed_by LIKE 'hunt:%') = $2
+          AND proposed_by <> $4""",
+                                  target_id, proposed_by.startswith('hunt:'), kind, RETAINED_PROPOSER)
     if pending >= MAX_PENDING_PER_TARGET:
         raise HTTPException(429, {
             'error': 'pending_proposal_limit', 'limit': MAX_PENDING_PER_TARGET,
@@ -376,6 +380,83 @@ async def create_action_proposal(conn: Any, target_id: Any, operation: str, *, e
         return public_proposal(saved, actions)
 
 
+def _step_identity(step: Any) -> str:
+    return json.dumps([step.get('capability'), step.get('input')], sort_keys=True)
+
+
+async def refresh_retained_proposal(conn: Any, target_id: Any, *, steps: list[dict[str, Any]],
+                                    evidence_refs: list[str], hunt_run_id: Any, name: str, instructions: str,
+                                    merge: Any) -> dict[str, Any]:
+    """File, or update in place, the target's one pending proposal of steps retained at Hunt finish.
+
+    Never writes a saved action. The proposal keeps one copy of each step (``merge`` decides the
+    order and the bound), leaves out steps a saved action already holds or the operator rejected
+    in the latest decided retained proposal, and is rebased onto the
+    current saved actions each time it changes. Concurrent finishes on one target serialize on a
+    transaction lock; the caller already holds the target row (KEY SHARE), and the proposal row is
+    locked after it, the order operator accepts and rejects take.
+    """
+    row = await _target(conn, target_id)
+    await conn.execute("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", f'retained-checks:{row["id"]}')
+    pending = await conn.fetchrow("""SELECT * FROM target_instruction_proposals
+        WHERE target_id=$1 AND proposed_by=$2 AND status='pending' AND kind='saved_action'
+        ORDER BY created_at, id LIMIT 1 FOR UPDATE""", row['id'], RETAINED_PROPOSER)
+    actions = await read_target_actions(conn, row['id'])
+    saved = [step for action in actions['actions'] for step in action.get('steps') or []]
+    # A step the operator rejected in the latest decided retained proposal is not proposed again.
+    rejected = await conn.fetchrow("""SELECT action_body FROM target_instruction_proposals
+        WHERE target_id=$1 AND proposed_by=$2 AND status='rejected' AND kind='saved_action'
+        ORDER BY decided_at DESC NULLS LAST, created_at DESC LIMIT 1""", row['id'], RETAINED_PROPOSER)
+    if rejected is not None:
+        saved.extend((_action_body(rejected) or {}).get('steps') or [])
+    previous = list((_action_body(pending) or {}).get('steps') or []) if pending is not None else []
+    merged = merge(previous, steps, saved=saved, limit=MAX_STEPS)
+    body = text = None
+    while merged:
+        # The oldest steps give way first when the recipe would not fit a saved action or a review.
+        try:
+            body, _ = validated_recipe(TargetActionWrite(
+                name=name, instructions=instructions, steps=merged, parameters={},
+                expected_revision=actions['revision']))
+            text = review_text(body)
+        except (HTTPException, ValidationError):
+            body = None
+        if body is not None and len(text) <= MAX_SAVED_ACTION_REVIEW_CHARACTERS:
+            break
+        merged, body = merged[1:], None
+    if body is None:
+        return {'status': 'skipped', 'reason': 'steps_already_saved' if not merged else 'recipe_too_large',
+                'proposal_id': str(pending['id']) if pending is not None else None}
+    old_refs = pending['evidence_refs'] if pending is not None else []
+    old_refs = json.loads(old_refs) if isinstance(old_refs, str) else list(old_refs or [])
+    refs = list(dict.fromkeys([*old_refs, *evidence_refs]))
+    unknown = set(await _unknown_evidence(conn, row['id'], refs))
+    refs = [ref for ref in refs if ref not in unknown][-MAX_EVIDENCE_REFS:]
+    reason = ('Steps that completed in finished Hunts on this target, retained for reuse. Accepting saves '
+              'them as one saved action; each step still runs under a later Hunt\u2019s own scope, '
+              'approvals, credentials and budget.')
+    title = _action_title('create', name)
+    before = {_step_identity(step) for step in previous}
+    result = {'step_count': len(merged), 'added_steps': sum(_step_identity(step) not in before for step in merged),
+              'review': 'shakerscan knowledge review'}
+    if pending is not None:
+        if _action_body(pending) == body and int(pending['base_revision']) == int(actions['revision']):
+            return {**result, 'status': 'unchanged', 'proposal_id': str(pending['id'])}
+        saved_row = await conn.fetchrow("""UPDATE target_instruction_proposals
+            SET base_revision=$2, title=$3, methodology=$4, methodology_sha256=$5, reason=$6,
+                evidence_refs=$7::jsonb, hunt_run_id=$8, action_body=$9::jsonb
+            WHERE id=$1 RETURNING *""", pending['id'], actions['revision'], title, text, _sha(text), reason,
+            json.dumps(refs), hunt_run_id, json.dumps(body))
+        return {**result, 'status': 'updated', 'proposal_id': str(saved_row['id'])}
+    saved_row = await conn.fetchrow("""INSERT INTO target_instruction_proposals(
+            target_id, base_revision, base_sha256, title, methodology, methodology_sha256,
+            reason, evidence_refs, proposed_by, hunt_run_id, kind, action_operation, action_id, action_body)
+        VALUES ($1,$2,NULL,$3,$4,$5,$6,$7::jsonb,$8,$9,'saved_action','create',NULL,$10::jsonb) RETURNING *""",
+        row['id'], actions['revision'], title, text, _sha(text), reason, json.dumps(refs), RETAINED_PROPOSER,
+        hunt_run_id, json.dumps(body))
+    return {**result, 'status': 'proposed', 'proposal_id': str(saved_row['id'])}
+
+
 async def _current(conn: Any, target_id: Any, kind: str) -> dict[str, Any]:
     if kind == 'saved_action':
         return await read_target_actions(conn, target_id)
@@ -407,6 +488,12 @@ async def accept_proposal(conn: Any, target_id: Any, proposal_id: str, *, actor:
                           note: str | None = None, reviewed_sha256: str | None = None) -> dict[str, Any]:
     async with conn.transaction():
         row, proposal = await _locked_proposal(conn, target_id, proposal_id)
+        if reviewed_sha256 is None and proposal['proposed_by'] == RETAINED_PROPOSER:
+            # A later finish updates this proposal in place, so accepting it names the text reviewed.
+            raise HTTPException(422, {'error': 'proposal_review_required', 'message': (
+                'Accept the retained-checks proposal with the methodology_sha256 of the text you '
+                'reviewed: a later finish may have added steps to it since (shakerscan knowledge '
+                'review sends it).')})
         if reviewed_sha256 is not None and reviewed_sha256 != proposal['methodology_sha256']:
             raise HTTPException(409, {'error': 'proposal_text_mismatch',
                                       'message': 'This proposal is not the text that was reviewed.'})
@@ -644,6 +731,7 @@ async def post_rebase_instruction_proposal(target_id: str, proposal_id: str, req
 
 __all__ = [
     'INSTRUCTION_PROPOSAL_SCHEMA_SQL', 'MAX_PENDING_PER_TARGET', 'MAX_PROPOSALS_PER_HUNT', 'ProposalText',
-    'ActionProposalNote', 'accept_proposal', 'create_action_proposal', 'create_proposal', 'is_stale', 'list_proposals', 'pending_count', 'public_proposal',
-    'rebase_proposal', 'reject_proposal', 'router', 'unified_diff',
+    'ActionProposalNote', 'RETAINED_PROPOSER', 'accept_proposal', 'create_action_proposal', 'create_proposal',
+    'is_stale', 'list_proposals', 'pending_count', 'public_proposal', 'rebase_proposal',
+    'refresh_retained_proposal', 'reject_proposal', 'router', 'unified_diff',
 ]

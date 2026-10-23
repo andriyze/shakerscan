@@ -25,7 +25,7 @@ belong in Git history or immutable release notes rather than the active document
 - [Hunt investigation evaluation](hunt-investigation-evaluation.md)
 - [Hunt HTTP writes](hunt-http-writes.md) — authorized state-changing HTTP workflow execution.
 - [Operator-complete Hunt implementation](hunt-operator-workflows.md)
-- [Hunt persistence and budget audit](hunt-persistence-and-budget-audit.md) — root causes and regression boundaries.
+- [Hunt recording and budgets](hunt-recording-and-budgets.md) — finding locations and recording, finish proposals, budget profiles.
 - [Hunt authorization proof completion](hunt-proof-completion.md)
 - [Hunt review integrity](hunt-review-integrity.md)
 - [Hunt boundary context](hunt-boundary-context.md) — read-only candidate/evidence inspection.

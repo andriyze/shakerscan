@@ -95,10 +95,12 @@ export interface HuntV2 {
     summary?: string
     next_actions?: string[]
     saved_action?: {
-      status: 'saved' | 'proposed' | 'skipped' | 'not_saved'
+      // 'saved' appears only on debriefs written before finishing became proposal-only.
+      status: 'proposed' | 'updated' | 'unchanged' | 'skipped' | 'not_saved' | 'saved'
       action_id?: string
       proposal_id?: string
       step_count?: number
+      added_steps?: number
       reason?: string
     }
   }

@@ -326,7 +326,8 @@ def test_multi_dimension_extension_keeps_disabled_permissions_and_original_snaps
     conn = Connection(run_row(kind, status="active", stop_reason=None))
     before = deepcopy(conn.row)
     result = apply(conn, request(limits={"max_http_requests": before["budget_json"]["max_http_requests"] + 20_000,
-                                       "max_capability_calls": 5000}, resume=False))
+                                       "max_capability_calls": before["budget_json"]["max_capability_calls"] + 5000},
+                                 resume=False))
     assert result["status"] == "active" and result["authority_changed"] is False
     assert conn.row["context_pack"]["hunt_start_contract"] == before["context_pack"]["hunt_start_contract"]
     assert conn.row["policy_json"] == {**before["policy_json"], "budget": result["budget"]}

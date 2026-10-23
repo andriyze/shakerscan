@@ -536,7 +536,7 @@ def process_rate_bound(proof: Mapping[str, Any]) -> dict[str, int] | None:
     inputs = proof.get("inputs") if isinstance(proof.get("inputs"), Mapping) else {}
     rate = _non_negative_integer(inputs.get("rate_per_second"))
     if not rate:
-        return None
+        return paced_worker_rate_bound(proof)
     burst = next((
         value for value in (
             _non_negative_integer(inputs.get(name))
@@ -544,6 +544,27 @@ def process_rate_bound(proof: Mapping[str, Any]) -> dict[str, int] | None:
         ) if value is not None
     ), rate)
     return {"rate_per_second": rate, "startup_burst": max(1, burst)}
+
+
+# Paced verifiers whose workers each wait the delay between requests: Dalfox (3 workers at
+# --delay 1000 ms, measured about 3.3 requests a second) and sqlmap (one thread at --delay 1,
+# measured about 1). One request a second of headroom is added.
+_PACED_WORKER_TOOLS = frozenset({"dalfox", "sqlmap"})
+
+
+def paced_worker_rate_bound(proof: Mapping[str, Any]) -> dict[str, int] | None:
+    """The rate a full, paced Dalfox or sqlmap verification is held to: its workers at its delay.
+
+    Derived from the proof's own inputs (``workers`` or ``threads``, ``delay_ms``), so the plan and
+    its digest are unchanged. Headless Dalfox and batch attempts keep their hard bound.
+    """
+    inputs = proof.get("inputs") if isinstance(proof.get("inputs"), Mapping) else {}
+    workers = _non_negative_integer(inputs.get("workers", inputs.get("threads")))
+    delay_ms = _non_negative_integer(inputs.get("delay_ms"))
+    if (str(proof.get("tool_name") or "") not in _PACED_WORKER_TOOLS or inputs.get("profile") != "full"
+            or inputs.get("headless") is True or not workers or not delay_ms):
+        return None
+    return {"rate_per_second": -(-workers * 1_000 // delay_ms) + 1, "startup_burst": workers}
 
 
 def validate_enforcement_receipt(

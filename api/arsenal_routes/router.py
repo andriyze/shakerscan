@@ -88,7 +88,7 @@ try:
     from research_agent import RISK_TIER_ORDER
     from retest_contract import current_replay_commands, infer_type_from_title_tool
     from serialization import row_to_dict
-    from workflow_experiment import WorkflowContractError, normalize_workflow, validate_principal_contexts
+    from workflow_experiment import WorkflowContractError, normalize_workflow, validate_principal_contexts, workflow_traffic
     from ai_targets import router as _ai_targets
     from exposure import router as _exposure
     from finding_exceptions import router as _finding_exceptions
@@ -108,7 +108,7 @@ except ModuleNotFoundError:  # package import in host-side tests
     from ..research_agent import RISK_TIER_ORDER
     from ..retest_contract import current_replay_commands, infer_type_from_title_tool
     from ..serialization import row_to_dict
-    from ..workflow_experiment import WorkflowContractError, normalize_workflow, validate_principal_contexts
+    from ..workflow_experiment import WorkflowContractError, normalize_workflow, validate_principal_contexts, workflow_traffic
     from ..ai_targets import router as _ai_targets
     from ..exposure import router as _exposure
     from ..finding_exceptions import router as _finding_exceptions
@@ -8484,6 +8484,7 @@ async def _arsenal_dispatch_workflow(p: dict[str, Any], approval_receipt_id: str
         "findings_created": 1 if promotion and promotion.get("status") == "created" else 0,
         "verified_findings_created": 1 if promotion else 0,
         "proof_state": "verified" if promotion else "unverified_workflow_signal",
+        "traffic": workflow_traffic(executed, replayed, materialization, normalized["steps"]),
     }
 
 

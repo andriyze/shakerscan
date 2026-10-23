@@ -645,6 +645,10 @@ def test_hunt_run_terminal_transitions_are_idempotent_and_state_guarded():
         async def execute(self, query, *args):
             if "status='awaiting_permission'" in query:
                 return "UPDATE 0"  # parked actions settle with the finished Hunt
+            if "FOR KEY SHARE OF targets" in query:
+                assert args == (uuid.UUID(hunt_id),)
+                self.locks.append("target")
+                return "SELECT 1"
             assert query == "UPDATE hunt_actions SET private_http_result=NULL WHERE hunt_run_id=$1"
             assert args == (uuid.UUID(hunt_id),)
             self.cleared_http_captures = True
@@ -732,9 +736,11 @@ def test_budget_exhausted_hunt_accepts_debrief_without_erasing_stop_reason():
     class Connection:
         def __init__(self):
             self.cleared_http_captures = False
+            self.locks = []
 
         async def fetchrow(self, query, *args):
             if query.startswith("SELECT * FROM hunt_runs"):
+                self.locks.append("hunt")
                 return _row(
                     id=uuid.UUID(hunt_id), status="budget_exhausted",
                     stop_reason="budget_exhausted:http_requests",
@@ -744,7 +750,7 @@ def test_budget_exhausted_hunt_accepts_debrief_without_erasing_stop_reason():
             assert "'budget_exhausted'" in query
             assert "COALESCE(stop_reason, 'budget_exhausted')" in query
             persisted_debrief = json.loads(args[1])
-            assert persisted_debrief.pop('saved_action') == {'status': 'saved', 'step_count': 1}
+            assert persisted_debrief.pop('saved_action') == {'status': 'proposed', 'step_count': 1}
             assert persisted_debrief == {
                 "summary": "Budget ended after the useful checks.",
                 "next_actions": ["Increase only the HTTP request ceiling."],
@@ -758,6 +764,10 @@ def test_budget_exhausted_hunt_accepts_debrief_without_erasing_stop_reason():
         async def execute(self, query, *args):
             if "status='awaiting_permission'" in query:
                 return "UPDATE 0"  # parked actions settle with the finished Hunt
+            if "FOR KEY SHARE OF targets" in query:
+                assert args == (uuid.UUID(hunt_id),)
+                self.locks.append("target")
+                return "SELECT 1"
             assert query == "UPDATE hunt_actions SET private_http_result=NULL WHERE hunt_run_id=$1"
             assert args == (uuid.UUID(hunt_id),)
             self.cleared_http_captures = True
@@ -775,7 +785,7 @@ def test_budget_exhausted_hunt_accepts_debrief_without_erasing_stop_reason():
     async def retain(conn, run):
         assert conn is connection and run['status'] == 'budget_exhausted'
         retained.append(run['id'])
-        return {'status': 'saved', 'step_count': 1}
+        return {'status': 'proposed', 'step_count': 1}
     result = asyncio.run(HuntRunService(lambda: _Pool(connection), finish_retainer=retain).finish(
         hunt_id,
         summary="Budget ended after the useful checks.",
@@ -787,6 +797,9 @@ def test_budget_exhausted_hunt_accepts_debrief_without_erasing_stop_reason():
     assert result["final_debrief"]["summary"].startswith("Budget ended")
     assert connection.cleared_http_captures is True
     assert retained == [uuid.UUID(hunt_id)]
+    # Lock order: the target row (KEY SHARE, all a proposal insert needs), then the Hunt row, as
+    # operator retractions and decisions take them; the reverse order could deadlock with them.
+    assert connection.locks == ["target", "hunt"]
 
 
 @pytest.mark.parametrize("source", ["action", "reservation"])

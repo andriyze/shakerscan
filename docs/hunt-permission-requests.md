@@ -143,8 +143,9 @@ parked action:  awaiting_permission
 
 - The Hunt's own status never changes because of a request.
 - Other actions keep running, and the Hunt clock does not pause.
-- `budget_exhausted` stays the only Hunt-level stop. A `budget.raise` grant clears it through
-  `resume=true`.
+- `budget_exhausted` stays the only Hunt-level stop, and from 2.11.1 only the duration
+  (`max_duration_seconds`) running out sets it; any other used-up limit refuses only the actions
+  that need it. A `budget.raise` grant clears it through `resume=true`.
 - `public_hunt_run` exposes `pending_permission_requests`.
 
 ## Catalogue of request kinds

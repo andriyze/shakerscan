@@ -8,7 +8,7 @@ import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "api"))
 
-from hunt.start_contract import HuntStartContractError, normalize_hunt_start_payload
+from hunt.start_contract import HUNT_BUDGET_PROFILES, HuntStartContractError, normalize_hunt_start_payload
 
 
 def _payload(**overrides):
@@ -41,7 +41,7 @@ def test_passive_hunt_contract_is_explicit_and_resolves_lowered_budget():
     assert contract.budgets == {"max_duration_seconds": 900, "max_http_requests": 500}
     assert contract.resolved_budget["max_duration_seconds"] == 900
     assert contract.resolved_budget["max_http_requests"] == 500
-    assert contract.resolved_budget["max_capability_calls"] == 300
+    assert contract.resolved_budget["max_capability_calls"] == HUNT_BUDGET_PROFILES["balanced"].max_capability_calls
     assert contract.resolved_budget["max_active_actions"] == 0
     assert contract.resolved_budget["max_state_changing_requests"] == 0
     assert contract.resolved_budget["max_tcp_ports"] == 0
@@ -144,7 +144,7 @@ def test_budget_overrides_can_lower_but_not_raise_profile_limits():
     with pytest.raises(HuntStartContractError, match="exceeds the fast Hunt profile ceiling"):
         normalize_hunt_start_payload(_payload(
             budget_profile="fast",
-            budgets={"max_http_requests": 5_001},
+            budgets={"max_http_requests": HUNT_BUDGET_PROFILES["fast"].max_http_requests + 1},
         ))
     contract = normalize_hunt_start_payload(_payload(
         budget_profile="fast",

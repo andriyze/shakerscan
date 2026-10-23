@@ -187,8 +187,9 @@ def test_a_verifier_refusal_before_traffic_reports_no_execution():
     result = _execute(_verify_adapter(operation))
     assert result.status == "blocked"
     assert result.execution_started is False
-    assert "active_actions" not in result.actual_budget
-    assert "http_requests" not in result.actual_budget
+    # Released explicitly (an omitted dimension would keep its hold); only the call is charged.
+    assert result.actual_budget.get("active_actions", 0) == 0
+    assert result.actual_budget.get("http_requests", 0) == 0
 
 
 def test_an_uncertain_verifier_block_still_charges_the_full_hold():

@@ -19905,7 +19905,7 @@ def _worker_terminal_network_result(
 from hunt.target_binding import web_hunt_target as _worker_hunt_web_target
 from hunt.dispatch_authority import HuntDispatchRejected, dispatch_http_request_authority, dispatch_http_target, dispatch_replay_authority, dispatch_scope_binding, require_dispatchable, settle_rejected_dispatch, settle_rejected_replay_dispatch
 from hunt.device_traffic import reserve_device_traffic, require_worker_device_policy, settle_device_traffic, require_device_admission, record_device_traffic
-from hunt.host_accounting import bound_distinct_hosts, record_attempted_hosts
+from hunt.distinct_accounting import bound_distinct_usage, record_attempted_usage
 
 
 async def _revalidate_hunt_action_authority(
@@ -21354,7 +21354,7 @@ async def process_canonical_network_capability_job(job_data: dict[str, Any]) -> 
                 ).requires_active_approval:
                     requested_budget["active_actions"] = 1
                 reserve_device_traffic(run, agent_tools.CAPABILITY_REGISTRY.require(capability_name), requested_budget)
-                requested_budget, prepared, attempted_hosts = bound_distinct_hosts(requested_budget, prepared, stored.record.requested, context)
+                requested_budget, prepared, attempted = bound_distinct_usage(requested_budget, prepared, stored.record.requested, context)
                 recomputed_digest = hunt_capability_action_digest(
                     hunt_id=hunt_id,
                     action_id=action_id,
@@ -21443,7 +21443,7 @@ async def process_canonical_network_capability_job(job_data: dict[str, Any]) -> 
             pool=db_pool,run=run,target=target,policy=policy,target_url=target_url,
             revalidate=_revalidate_hunt_action_authority,capability_input=capability_input,
             redis=redis_client,action_id=action_id,worker_id=worker_id,command_runner=run_streaming,
-            max_stdout_bytes=_AGENT_TOOL_OUTPUT_BYTES,max_stderr_bytes=min(_AGENT_TOOL_OUTPUT_BYTES, 20_000))
+            max_stdout_bytes=_AGENT_TOOL_OUTPUT_BYTES,max_stderr_bytes=min(_AGENT_TOOL_OUTPUT_BYTES, 20_000),command_usage=attempted.command_usage)
         execution = await _dispatch_registered_hunt_adapter(
             hunt_id=str(hunt_id),
             action_id=str(action_id),
@@ -21566,7 +21566,7 @@ async def process_canonical_network_capability_job(job_data: dict[str, Any]) -> 
                     hunt_id,
                     json.dumps(current_used),
                 )
-                await record_attempted_hosts(conn, hunt_id=hunt_id, run=locked, hosts=attempted_hosts, reserved=latest.record.requested, actual=terminal.actual)
+                await record_attempted_usage(conn, hunt_id=hunt_id, run=locked, attempted=attempted, reserved=latest.record.requested, actual=terminal.actual, observations=observations)
                 action_result = {
                     "status": status,
                     "ok": status == "success",
