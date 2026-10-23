@@ -1,7 +1,9 @@
 """Decisions only a person makes, from the person's own terminal.
 
 ``shakerscan targets authorize <url-or-id>`` records a target's standing authorization for active
-testing ("I own or am authorized to test this target"); ``targets unauthorize`` withdraws it.
+testing ("I own or am authorized to test this target"); ``targets unauthorize`` withdraws it. A
+target is named by its URL, by its id (a connected device's id too: a device is authorized the
+same way), or as ``host://<address>`` for a host (network) target.
 ``shakerscan hunt budget raise <hunt> --limit NAME=N|+N`` raises a Hunt's budget.
 
 They are ordinary API writes. On an Enterprise gateway whose administrator requires a
@@ -62,7 +64,8 @@ def add_parser(commands: Any, connection: Any) -> None:
     )
     connection(targets)
     targets.add_argument("action", choices=("authorize", "unauthorize"))
-    targets.add_argument("target", help="the target's URL (https://app.example.com) or its id")
+    targets.add_argument("target", help="the target's URL (https://app.example.com), its id (a device's id too), "
+                                        "or host://<address> for a host target")
     targets.add_argument("--reason", help="unauthorize: why it is withdrawn (recorded)")
     targets.add_argument("--json", action="store_true", help="print the instance's answer as JSON")
 
@@ -76,10 +79,11 @@ def _client(url: str, timeout: float | None):
 
 
 def _exit(v2: Any, exc: Exception) -> int:
-    """The product CLI's error JSON, exit 3 for a person's decision this shell cannot ask for."""
+    """The product CLI's error JSON; for a person's decision the one line it is (exit 3 when this
+    shell cannot ask for it, 130 for Ctrl-C at the touch, 1 when the touch failed, as
+    ``shakerscan api`` and ``scan`` exit)."""
     if isinstance(exc, v2.CliError):
-        print(json.dumps(exc.public_dict(), sort_keys=True), file=sys.stderr)
-        return {"person_decision_required": 3, "person_decision_cancelled": 130}.get(exc.error_type, 2)
+        return v2.person_decision_exit(exc)
     print(f"shakerscan: {exc}", file=sys.stderr)
     return 2
 
@@ -101,12 +105,36 @@ def target_url(value: str) -> str:
 
 
 def find_target(client: Any, value: str, *, create: bool) -> dict[str, Any]:
-    """The target for a URL or id: registered on the instance (``create``: registered now, as
-    adding it does; never an authorization) or found among the registered ones."""
+    """The target for a URL, an id or ``host://<address>``: registered on the instance
+    (``create``: registered now, as adding it does; never an authorization) or found among the
+    registered ones. An id the targets do not hold may be a connected device's, which is
+    authorized under the same route."""
     if UUID.fullmatch(value.strip()):
-        found = client.request("GET", f"/targets/{value.strip().lower()}")
-        return dict(found) if isinstance(found, Mapping) else {"id": value.strip().lower()}
-    url = target_url(value)
+        identifier = value.strip().lower()
+        try:
+            found = client.request("GET", f"/targets/{identifier}")
+        except Exception as exc:
+            if getattr(exc, "http_status", None) != 404:
+                raise
+            device = client.request("GET", f"/devices/{identifier}")
+            if not isinstance(device, Mapping):
+                raise
+            return {"id": identifier, "url": str(device.get("primary_locator") or ""),
+                    "name": str(device.get("name") or ""), "device": True}
+        return dict(found) if isinstance(found, Mapping) else {"id": identifier}
+    text = value.strip()
+    if text.lower().startswith("host://"):
+        locator = text[len("host://"):].strip()
+        if not locator or any(ch.isspace() for ch in locator):
+            raise DecisionError("name a host target as host://<address>")
+        if create:
+            created = client.request("POST", "/targets/hosts", payload={"locator": locator})
+            if not isinstance(created, Mapping) or not created.get("id"):
+                raise DecisionError("the instance registered no host target for that address")
+            return dict(created)
+        url = "host://" + locator
+    else:
+        url = target_url(value)
     if create:
         created = client.request("POST", "/targets", payload={"url": url})
         if not isinstance(created, Mapping) or not created.get("id"):
@@ -255,14 +283,16 @@ def touch_lines(client: Any) -> list[str]:
     here (python-fido2, a key plugged in). Opening no key: nothing blinks."""
     approve = helper("_hunt_approve")
     try:
-        feed = client.request_json("GET", approve.PERSON_FEED_PATH)
-    except Exception:  # an older gateway, or an engine: the route is not there
-        feed = None
-    if isinstance(feed, Mapping) and feed.get("schema_version") == approve.PERSON_FEED_SCHEMA:
-        state = ("required for person decisions from terminals" if feed.get("touch_required") is True
+        me = client.request_json("GET", approve.ME_PATH)
+    except Exception:  # an engine, or no answer
+        me = None
+    if isinstance(me, Mapping) and "person_decision_proof" in me:
+        state = ("required for person decisions from terminals" if me.get("person_decision_proof") is True
                  else "not required (the administrator's switch is off)")
+    elif isinstance(me, Mapping):
+        state = "not offered by this gateway (an older Enterprise gateway)"
     else:
-        state = "unknown (this gateway does not say)"
+        state = "unknown (this instance does not say)"
     unready = approve.security_key_readiness()
     if unready:
         key = unready

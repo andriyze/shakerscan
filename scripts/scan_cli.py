@@ -298,15 +298,16 @@ def _scan_person_decision(url: str, data: bytes, method: str, detail: dict[str, 
 
 def _touch_confirms(api_url: str) -> bool:
     """Whether an Enterprise gateway requires the person's security-key touch to authorize a
-    target from a terminal (its person-decision feed says so): that touch is then the
-    confirmation, and the local question is not asked twice."""
+    target from a terminal (its description of itself, GET /_enterprise/me, says so): that touch
+    is then the confirmation, and the local question is not asked twice. An open-source engine or
+    an older gateway says nothing of it, and the question is asked as before."""
     if not _bearer_token() or not api_url.startswith("https://"):
         return False
     try:
-        feed = _request_json(api_url.rstrip("/") + "/_enterprise/person-decisions")
+        me = _request_json(api_url.rstrip("/") + "/_enterprise/me")
     except ScanCliError:
         return False
-    return feed.get("schema_version") == "shakerscan-person-decisions/v1" and feed.get("touch_required") is True
+    return isinstance(me, dict) and me.get("person_decision_proof") is True
 
 
 def _confirm_active(args: argparse.Namespace) -> None:

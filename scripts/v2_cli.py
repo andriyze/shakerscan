@@ -53,6 +53,24 @@ class CliError(RuntimeError):
         return result
 
 
+# A person's decision a command could not complete: 3, this shell cannot ask for it (refused,
+# nothing ran); 130, the person pressed Ctrl-C at the touch; 1, the touch failed (as `shakerscan
+# api` and `shakerscan scan` exit). Nothing changed in any of them.
+PERSON_DECISION_EXITS = {"person_decision_required": 3, "person_decision_cancelled": 130, "person_decision_failed": 1}
+
+
+def person_decision_exit(exc: CliError) -> int:
+    """Report a CliError and give the exit status: a person's decision as its one line (in an
+    agent's shell, the decision and the command the person runs), anything else as the CLI's
+    error JSON (exit 2)."""
+    code = PERSON_DECISION_EXITS.get(exc.error_type)
+    if code is None:
+        print(json.dumps(exc.public_dict(), sort_keys=True), file=sys.stderr)
+        return 2
+    print(f"shakerscan: {exc}", file=sys.stderr)
+    return code
+
+
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
     """Never replay an authenticated request against another origin.
 
@@ -1628,10 +1646,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(json.dumps(result, indent=2, sort_keys=True))
         return _hunt_call_exit(args, result)
     except CliError as exc:
-        print(json.dumps(exc.public_dict(), sort_keys=True), file=sys.stderr)
-        # 3: a person's decision this shell cannot ask for; refused, nothing ran. 130: the
-        # person pressed Ctrl-C at the touch; nothing changed.
-        return {"person_decision_required": 3, "person_decision_cancelled": 130}.get(exc.error_type, 2)
+        return person_decision_exit(exc)
 
 
 def _hunt_call_exit(args: argparse.Namespace, result: Any) -> int:

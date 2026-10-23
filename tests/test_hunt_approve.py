@@ -90,9 +90,13 @@ class Gateway:
         if path.startswith(approval.FEED_PATH + "?"):
             # A gateway that does not pass the cross-Hunt feed refuses it as an unknown route.
             return 403, {"detail": "route not allowed"}
+        if path == approval.ME_PATH:
+            # A gateway before the person-decision feed describes itself without
+            # person_decision_proof (as an older Enterprise gateway does).
+            return 200, {"user": {"auth": "token"}}
         if path.startswith(approval.PERSON_FEED_PATH):
-            # A gateway before the person-decision feed: the proxy refuses the unknown route.
-            return 403, {"detail": "route not allowed"}
+            # Never asked: the proxy of such a gateway refuses the unknown route and audits it.
+            raise AssertionError("an older gateway's person-decision feed is never read")
         if path.startswith(f"/hunts/{HUNT}/permission-requests?status=pending"):
             return 200, {"requests": [item for item in self.requests.values() if item["status"] == "pending"]}
         if path.startswith("/hunts?status="):

@@ -25,15 +25,26 @@ and every command of this client completes it the same way, in the person's own 
 4. ``finish`` answers a one-time grant valid for that request through this connection;
 5. the request is sent again, once, unchanged, with the ``X-ShakerScan-Person-Proof`` header.
 
-A refused submission (a scan, Hunt start or retest of a target nobody authorized: the refusal
-carries ``submission``) started nothing: once the person has authorized the target, the same
-request runs when sent again with the same Idempotency-Key.
+A refused submission (a scan, Hunt start, retest or network scan of a target nobody authorized:
+the refusal carries ``submission`` and the ``target_id``) started nothing. The person's decision
+is the target's authorization, never the submission itself: in the person's own terminal the
+touch authorizes the target and the same request is sent once more; anywhere else the command the
+person is given is ``shakerscan targets authorize <target>``, and whoever sent the submission
+sends it again (with the same Idempotency-Key) only after the person says they decided, so the
+work never runs twice.
 
-Without an interactive terminal (stdin a terminal, and stdout or stderr one to ask on), or inside
-an agent that ``shakerscan agent`` launched (SHAKERSCAN_AGENT_NAME), it never prompts and never
-opens a key: it raises PersonDecisionRefused, one line that names the decision and the command the
-person runs in their own terminal, and the command exits 3 (refused, nothing ran). No option skips
-the touch. Ctrl-C at the touch cancels it (PersonDecisionCancelled, exit 130); nothing changes.
+Without an interactive terminal, or inside an agent that ``shakerscan agent`` launched
+(SHAKERSCAN_AGENT_NAME), it never prompts and never opens a key: it raises PersonDecisionRefused,
+one line that names the decision and the command the person runs in their own terminal, and the
+command exits 3 (refused, nothing ran). An interactive terminal is stdin a terminal and stdout or
+stderr a terminal to ask on: ``shakerscan scan ... --json | jq`` in the person's own terminal
+still asks, on stderr, while input piped into the command (``echo body | shakerscan api ... -``)
+never counts as the person. No option skips the touch. Ctrl-C at the touch cancels it
+(PersonDecisionCancelled, exit 130); nothing changes.
+
+With no key plugged in, the touch waits for one to be inserted ("Insert your security key"), for
+a bounded time within the challenge's life, instead of failing; over SSH, where a key plugged into
+another computer cannot arrive, it says so at once.
 
 The decision is shown whole, wrapped, never cut: the gateway offers no proof for a summary longer
 than a terminal shows (MAX_SUMMARY), and this client refuses to ask for a touch for one either.
@@ -48,6 +59,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import re
 import shlex
 import sys
 import textwrap
@@ -159,10 +171,16 @@ def summary_lines(text: Any) -> list[str]:
 # ---- the person's command --------------------------------------------------------------------
 
 
-def person_command(method: str, path: str, body: bytes | None) -> str:
+_UUID = re.compile(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}")
+
+
+def person_command(method: str, path: str, body: bytes | None, detail: Mapping[str, Any] | None = None) -> str:
     """The command the person runs in their own terminal to make this decision: the dedicated
     command where there is one (a budget raise, a target's authorization), else exactly this
-    request through ``shakerscan api``."""
+    request through ``shakerscan api``. For a refused submission (``detail`` names a
+    ``submission``) it is always the target's authorization, by the ``target_id`` the gateway
+    names, and never the submission itself: the person would otherwise run the agent's scan or
+    retest as their own, and it would run twice."""
     route = urllib.parse.urlsplit(path).path
     parts = [part for part in route.split("/") if part]
     try:
@@ -170,6 +188,17 @@ def person_command(method: str, path: str, body: bytes | None) -> str:
     except (ValueError, UnicodeDecodeError):
         payload = None
     payload = payload if isinstance(payload, dict) else None
+    detail = detail if isinstance(detail, Mapping) else {}
+    named = str(detail.get("target_id") or "")
+    if detail.get("submission") and _UUID.fullmatch(named):
+        return f"shakerscan targets authorize {named.lower()}"
+    if method == "POST" and route == "/targets" and payload and isinstance(payload.get("url"), str) \
+            and payload.get("authorized_by") is not None:
+        # Registered first, then authorized on its own (the gateway names its environment then).
+        return f"shakerscan targets authorize {shlex.quote(payload['url'])}"
+    if method == "POST" and route == "/targets/hosts" and payload and isinstance(payload.get("locator"), str) \
+            and payload.get("approved_by") is not None:
+        return f"shakerscan targets authorize {shlex.quote('host://' + payload['locator'])}"
     if method == "POST" and len(parts) == 3 and parts[0] == "hunts" and parts[2] == "budget-amendments" and payload:
         limits = payload.get("limits") if isinstance(payload.get("limits"), dict) else {}
         pairs = [f"--limit {shlex.quote(f'{key}={value}')}" for key, value in sorted(limits.items())
@@ -187,6 +216,12 @@ def person_command(method: str, path: str, body: bytes | None) -> str:
         return f"shakerscan targets authorize {shlex.quote(payload['target_id'])}"
     if method == "POST" and len(parts) == 3 and parts[0] == "targets" and parts[2] in {"scan", "network-scans"}:
         return f"shakerscan targets authorize {shlex.quote(parts[1])}"
+    if method == "POST" and len(parts) == 3 and parts[0] == "devices" and parts[2] == "scan":
+        # A device is authorized under the same route as a target (its id).
+        return f"shakerscan targets authorize {shlex.quote(parts[1])}"
+    if detail.get("submission"):
+        # A retest whose target the gateway did not name: never the retest itself.
+        return "shakerscan targets authorize <the target's URL or id>"
     text = body.decode("utf-8", "replace") if body else ""
     return "shakerscan api " + " ".join(shlex.quote(part) for part in (method, path, *([text] if text else [])))
 
@@ -194,7 +229,8 @@ def person_command(method: str, path: str, body: bytes | None) -> str:
 def refusal_line(detail: Mapping[str, Any], command: str) -> str:
     """One line for an agent's tool call: the decision (whole, as the gateway said it), that
     nothing changed, the person's command (its body made inert: it may carry any bytes), and, for
-    a refused submission, that the same request runs once the target is authorized."""
+    a refused submission, not to send it again until the person said the target is
+    authorized."""
     summary = _inert(detail.get("summary") or detail.get("decision") or "a person's decision", MAX_SUMMARY)
     line = (
         f"person decision required: {summary}. Nothing was changed. The person runs this in their "
@@ -205,11 +241,11 @@ def refusal_line(detail: Mapping[str, Any], command: str) -> str:
     return line
 
 
-# A refused submission started nothing: the same request (same Idempotency-Key) runs once the
-# person has authorized the target.
+# A refused submission started nothing. It is sent again only after the person said they
+# authorized the target (same Idempotency-Key), so the work never runs twice.
 SUBMISSION_AGAIN = (
-    ". Nothing was started either: once the person has authorized the target, send this same "
-    "request again (with the same Idempotency-Key)"
+    ". Nothing was started either. Do not send this request again until the person says the "
+    "target is authorized; then send it once, with the same Idempotency-Key"
 )
 
 
@@ -258,7 +294,7 @@ def json_poster(api_url: str, token: str | None, *, opener: Any = None, timeout:
 
 
 def _refused(status: int, body: Any) -> PersonDecisionError:
-    text = _approve()._detail_text(body)
+    text = _approve()._detail_text(body, 1200)
     code = str(body.get("error") or "refused") if isinstance(body, Mapping) else "refused"
     return PersonDecisionError(f"the gateway refused the touch ({code}, HTTP {status}): {text}; nothing was changed")
 
@@ -306,8 +342,8 @@ def check_challenge(challenge: Mapping[str, Any], *, origin: str, method: str, p
 def complete(post: Post, *, origin: str, method: str, path: str, body: bytes, detail: Mapping[str, Any],
              terminal: Any = None, assertion: Callable[..., dict] | None = None) -> str:
     """Ask the person, at this terminal, for one touch for exactly this request; the grant.
-    ``detail`` is the refusal; the person is shown only what the challenge signs."""
-    del detail  # the refusal's words are not what the key signs
+    ``detail`` is the refusal: its words are never shown as the decision (the person is shown
+    only what the challenge signs), it only names the command to run where the key is."""
     approve = _approve()
     terminal = terminal or approve.Terminal()
     if sys.platform == "win32" and assertion is None:
@@ -321,14 +357,14 @@ def complete(post: Post, *, origin: str, method: str, path: str, body: bytes, de
         raise PersonDecisionError("this request is too large for a security-key proof; make it in the browser")
     try:
         return _touch(post, approve, terminal, origin=origin, method=method, path=path, body=body,
-                      assertion=assertion)
+                      assertion=assertion, detail=detail)
     except KeyboardInterrupt:
         terminal.say("")
         raise PersonDecisionCancelled("cancelled; nothing was changed") from None
 
 
 def _touch(post: Post, approve: Any, terminal: Any, *, origin: str, method: str, path: str, body: bytes,
-           assertion: Callable[..., dict] | None) -> str:
+           assertion: Callable[..., dict] | None, detail: Mapping[str, Any] | None = None) -> str:
     # Begin first: the gateway says whether a key is registered at all, and whether it can name
     # the decision, before the person is asked to plug anything in.
     status, challenge = post(BEGIN_PATH, {
@@ -345,15 +381,18 @@ def _touch(post: Post, approve: Any, terminal: Any, *, origin: str, method: str,
     terminal.say("This needs your decision (your administrator requires a security-key touch):")
     for line in summary_lines(shown):
         terminal.say(line)
-    if assertion is None and (unready := approve.security_key_readiness()):
+    # A key that is only not plugged in yet is waited for by the assertion; python-fido2 missing,
+    # or a key out of reach over SSH, cannot be helped by waiting.
+    if assertion is None and (unready := approve.security_key_readiness(waiting=True)):
         if approve.remote_session():
-            unready += f": {_inert(person_command(method, path, body), 4 * MAX_BODY)}"
+            unready += f": {_inert(person_command(method, path, body, detail), 4 * MAX_BODY)}"
         raise PersonDecisionError(f"{unready}; nothing was changed")
     sign = assertion or approve.security_key_assertion
     try:
         # The key is chosen (when several can answer) before the person is told to touch.
         credential = sign(challenge["webauthn"], origin.rstrip("/"), terminal,
-                          prompt="Touch your security key to approve (Ctrl-C to cancel)...")
+                          prompt="Touch your security key to approve (Ctrl-C to cancel)...",
+                          insert_seconds=insert_seconds(challenge))
     except approve.ApprovalError as exc:
         raise PersonDecisionError(f"{exc}; nothing was changed") from exc
     status, result = post(FINISH_PATH, {
@@ -367,12 +406,32 @@ def _touch(post: Post, approve: Any, terminal: Any, *, origin: str, method: str,
     return granted["grant"]
 
 
+# How long the touch waits for a key to be inserted: within the challenge's own life (the
+# gateway's expires_at), leaving time for the touch itself.
+INSERT_SECONDS = 60.0
+TOUCH_RESERVE_SECONDS = 30.0
+
+
+def insert_seconds(challenge: Mapping[str, Any], now: float | None = None) -> float:
+    """At most INSERT_SECONDS, and never so long that the challenge expires before the touch."""
+    import datetime
+    import time
+
+    text = str(challenge.get("expires_at") or "")
+    try:
+        expires = datetime.datetime.fromisoformat(text.replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return INSERT_SECONDS
+    left = expires - (time.time() if now is None else now) - TOUCH_RESERVE_SECONDS
+    return max(5.0, min(INSERT_SECONDS, left))
+
+
 def handle(post: Post, *, origin: str, method: str, path: str, body: bytes | None, detail: Mapping[str, Any],
            resend: Callable[[str], Any], terminal: Any = None, environ: Mapping[str, str] | None = None,
            assertion: Callable[..., dict] | None = None) -> Any:
     """The refused request, completed: in an interactive terminal one touch and one resend (its
     answer is returned, whatever it is); anywhere else PersonDecisionRefused."""
-    command = person_command(method, path, body)
+    command = person_command(method, path, body, detail)
     stdin = getattr(terminal, "stdin", None)
     stdout = getattr(terminal, "stdout", None)
     if not interactive(stdin, stdout, environ, stdout if terminal is not None else None):

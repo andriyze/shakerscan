@@ -309,9 +309,10 @@ with the Python client in their own terminal, `shakerscan hunt budget raise <hun
 <name>=<total>` (or `=+<more>`); then carry on with other work. If a call answers
 `person_decision_required`, name the command it gives and do not retry the request or look for
 another way to make the same decision. The one exception is a refused start (the answer names a
-`submission`: a Hunt start, scan or retest of a target nobody authorized yet): nothing was started,
-so once the person tells you they authorized the target, send the same start again, once, with the
-same idempotency key. A raise keeps usage, queued holds, identities and
+`submission`: a Hunt start, scan, retest or network scan of a target nobody authorized yet):
+nothing was started, and the command it names authorizes the target only. Do not send the start
+again until the person tells you they authorized the target; then send it once, with the same
+idempotency key. A raise keeps usage, queued holds, identities and
 permissions, and starts nothing by itself; completed, cancelled or finalized runs stay terminal.
 `GET /hunts/{hunt_id}/budget-amendments` pages the saved before/after history.
 

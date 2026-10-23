@@ -169,13 +169,34 @@ def _inert(text: str) -> str:
                    or unicodedata.category(ch) in {"Cf", "Zl", "Zp"} else ch for ch in text)
 
 
-def _detail_text(body: Any) -> str:
+def _detail_text(body: Any, limit: int = 400) -> str:
     if isinstance(body, Mapping):
         for key in ("message", "detail", "error"):
             if isinstance(body.get(key), str) and body[key].strip():
-                return _inert(body[key].strip()[:400])
-        return _inert(json.dumps(dict(body), sort_keys=True)[:400])
-    return _inert(str(body or "no detail")[:400])
+                return _inert(body[key].strip()[:limit])
+        return _inert(json.dumps(dict(body), sort_keys=True)[:limit])
+    return _inert(str(body or "no detail")[:limit])
+
+
+# What an Enterprise gateway says of itself to a connection's token: every gateway serves it.
+ME_PATH = "/_enterprise/me"
+
+
+def gateway_features(send: Send) -> dict[str, bool]:
+    """What an Enterprise gateway says of itself (GET /_enterprise/me): ``known`` (it answered),
+    ``names_approver`` (it reports ``person_decision_proof``: it takes an approval with no sign-in
+    name, the approver being the person the token acts for, and serves the person-decision feed)
+    and ``touch_required`` (its administrator requires a security-key touch for person decisions
+    from terminals). Read instead of probing a route an older gateway refuses, which would write
+    a refusal into its audit log on every command."""
+    try:
+        status, body = send("GET", ME_PATH)
+    except ApprovalError:
+        status, body = None, None
+    if not isinstance(status, int) or not _ok(status) or not isinstance(body, Mapping):
+        return {"known": False, "names_approver": False, "touch_required": False}
+    return {"known": True, "names_approver": "person_decision_proof" in body,
+            "touch_required": body.get("person_decision_proof") is True}
 
 
 # --- reading requests --------------------------------------------------------------------------
@@ -702,13 +723,12 @@ class StepUp:
         self.method = method.replace("-", "_") if method else None
 
     def _names_no_approver(self) -> bool:
-        """Whether this gateway predates the approver it names itself (gateway 0.2.0-beta.46):
-        it does not serve the person-decision feed either."""
-        try:
-            status, _ = self.send("GET", PERSON_FEED_PATH)
-        except ApprovalError:
-            return False
-        return status in {404, 405}
+        """Whether this gateway predates an approval that names its own approver: it refuses an
+        empty sign-in name as request_invalid (422), and its own description of itself (GET
+        /_enterprise/me, which every Enterprise gateway serves to a token) does not report
+        ``person_decision_proof``. Anything but a gateway that says it is newer counts as older,
+        so the person is asked for the name rather than left with a refusal."""
+        return not gateway_features(self.send)["names_approver"]
 
     def _account(self) -> str:
         if not self.account:
@@ -866,8 +886,9 @@ REMOTE_NO_KEY = (
 
 
 def _no_device() -> str:
-    """No key found: over SSH, where the key is; on Linux, whether one is plugged in that this
-    user cannot open."""
+    """No key found: over SSH, where the key is; on Linux, that a plugged-in key may be one this
+    user cannot open (said as a possibility: a laptop's own keyboard or touchpad is a HID device
+    too, so an unreadable node does not mean a key is there)."""
     if remote_session():
         return REMOTE_NO_KEY
     text = "no USB security key found; insert it and run the command again"
@@ -875,23 +896,61 @@ def _no_device() -> str:
         import glob
         nodes = glob.glob("/dev/hidraw*")
         if nodes and not any(os.access(node, os.R_OK | os.W_OK) for node in nodes):
-            text += (" (USB devices are plugged in that this user cannot open: install your "
-                     "distribution's FIDO udev rules, the libfido2 or yubikey-manager package, or log "
-                     "in at the desktop; over SSH a key on your laptop is out of reach)")
+            text += (" (if your key is plugged in, this user may not be allowed to open it: install "
+                     "your distribution's FIDO udev rules, the libfido2 or yubikey-manager package, or "
+                     "log in at the desktop; over SSH a key on your laptop is out of reach)")
     return text
 
 
-def security_key_readiness() -> str:
-    """Why no key could answer here (python-fido2 missing, no key plugged in), or ""."""
+def security_key_readiness(*, waiting: bool = False) -> str:
+    """Why no key could answer here (python-fido2 missing, no key plugged in), or "". With
+    ``waiting``, a key that is only not plugged in yet is no reason in a local terminal (the
+    assertion waits for it to be inserted); over SSH it still is (it cannot arrive)."""
     try:
         from fido2.hid import CtapHidDevice
     except ImportError:
         return _no_fido2()
+    if waiting and not remote_session():
+        return ""
     try:
         found = next(iter(CtapHidDevice.list_devices()), None)
     except Exception:  # no HID access, or a platform the library does not serve
         found = None
     return "" if found is not None else _no_device()
+
+
+# While waiting for a key to be inserted: how often the USB devices are listed again.
+INSERT_POLL_SECONDS = 0.5
+
+
+def wait_for_key(list_devices: Callable[[], Any], terminal: "Terminal", seconds: float,
+                 *, sleep: Callable[[float], None] | None = None,
+                 clock: Callable[[], float] | None = None) -> list[Any]:
+    """The plugged-in keys, after waiting up to ``seconds`` for one to be inserted (a key kept on
+    a keyring costs no second run of the command); the person is told once, and Ctrl-C cancels.
+    None in time: ApprovalError."""
+    sleep = sleep or time.sleep
+    clock = clock or time.monotonic
+    try:
+        devices = list(list_devices())
+    except Exception:
+        devices = []
+    if devices:
+        return devices
+    if remote_session():
+        raise ApprovalError(REMOTE_NO_KEY)
+    terminal.say(f"Insert your security key (Ctrl-C to cancel; waiting up to {int(seconds)} seconds)...")
+    deadline = clock() + max(0.0, seconds)
+    while clock() < deadline:
+        sleep(INSERT_POLL_SECONDS)
+        try:
+            devices = list(list_devices())
+        except Exception:
+            devices = []
+        if devices:
+            return devices
+    raise ApprovalError(f"no USB security key was inserted within {int(seconds)} seconds; nothing was "
+                        "decided (insert it and run the command again)")
 
 
 def security_keys_present() -> bool:
@@ -1025,7 +1084,8 @@ def key_failure(exc: BaseException) -> str:
 
 
 def security_key_assertion(webauthn: Mapping[str, Any], origin: str, terminal: Terminal, *,
-                           prompt: str = "Touch your security key.") -> dict[str, Any]:
+                           prompt: str = "Touch your security key.",
+                           insert_seconds: float = 60.0) -> dict[str, Any]:
     """A WebAuthn assertion from a USB/NFC security key over CTAP2 (python-fido2).
 
     Platform authenticators (Touch ID, Windows Hello, synced passkeys) are not reachable from a
@@ -1043,9 +1103,8 @@ def security_key_assertion(webauthn: Mapping[str, Any], origin: str, terminal: T
     except ImportError as exc:
         raise ApprovalError(_no_fido2() + "; or approve with a TOTP code where the gateway offers one "
                             "(--method totp)") from exc
-    devices = list(CtapHidDevice.list_devices())
-    if not devices:
-        raise ApprovalError(_no_device())
+    # A key not plugged in yet is waited for (bounded, within the challenge's life).
+    devices = wait_for_key(CtapHidDevice.list_devices, terminal, insert_seconds)
     # Asked silently first, so the key that blinks is one that can answer, and the person picks
     # among those before being told to touch.
     candidates, why = eligible_devices(devices, webauthn)
@@ -1452,7 +1511,10 @@ def _watch(send: Send, terminal: Terminal, *, enterprise: bool, origin: str, hun
             terminal.say(f"approver session open until {answer.get('expires_at') or f'{seconds // 60} minutes from now'} "
                          "(held in this process only; Ctrl-C ends it)")
         account = stepup.account
-    decisions_elsewhere = PersonDecisionFeed(send) if enterprise else None
+    # Only a gateway that says it serves the feed is read (an older one would audit a refusal).
+    decisions_elsewhere = (
+        PersonDecisionFeed(send) if enterprise and gateway_features(send)["names_approver"] else None
+    )
     deadline = time.monotonic() + seconds
     seen: set[str] = set()
     retry: list[dict[str, Any]] = []
@@ -1622,8 +1684,8 @@ _DECISION_WORDS = {
 class PersonDecisionFeed:
     """``GET /_enterprise/person-decisions``: decisions only a person should make, made through
     any connection that acts for the same person (made with a token, proved by a key touch, or
-    refused), for --watch to print as lines. A gateway without the route is read once and left
-    alone."""
+    refused), for --watch to print as lines. Read only on a gateway that reports it serves it
+    (gateway_features); one that answers without the feed's schema is left alone after that."""
 
     def __init__(self, send: Send) -> None:
         self.send, self.after, self.supported = send, None, True
