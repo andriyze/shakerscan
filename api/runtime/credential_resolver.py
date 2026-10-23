@@ -70,12 +70,18 @@ class CredentialResolutionAuthority:
 
 async def _derived_receipt_outlived_its_source(conn: Any, item: Any, target: TargetBinding) -> bool:
     try:
-        from .. import target_authorization
-    except ImportError:  # runtime is a top-level package
-        import target_authorization
-    if target_authorization.derived_credential_scan_context(item) is None:
+        from target_authorization import (
+            derived_credential_scan_context,
+            derived_credential_scan_source_is_current,
+        )
+    except ModuleNotFoundError:
+        from ..target_authorization import (
+            derived_credential_scan_context,
+            derived_credential_scan_source_is_current,
+        )
+    if derived_credential_scan_context(item) is None:
         return False
-    return not await target_authorization.derived_credential_scan_source_is_current(
+    return not await derived_credential_scan_source_is_current(
         conn, item, expected_target_id=target.target_id or None,
     )
 
