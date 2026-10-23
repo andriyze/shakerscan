@@ -428,6 +428,9 @@ def test_the_feed_lines_say_how_each_decision_was_made():
                                             "connection": "laptop\x1b[2J"})
     assert proved.split("] ", 1)[1].startswith("decided by key touch: authorize a target")
     assert "\x1b" not in proved
+    failed = approval.person_decision_line({"at": when, "made": "proved", "outcome": "security_key_409",
+                                            "decision": "budget.raise", "connection": "x"})
+    assert "proved by key touch, not applied (the engine answered HTTP 409)" in failed
 
 
 def test_the_watch_asks_a_touch_per_decision_when_no_session_opens(monkeypatch):
@@ -798,6 +801,9 @@ def test_doctor_says_whether_a_touch_is_required_and_could_happen_here(monkeypat
         "schema_version": approval.PERSON_FEED_SCHEMA, "touch_required": True, "decisions": [], "after": 0})
     assert decisions.touch_lines(client) == [
         "touch:    required for person decisions from terminals", "key:      no USB security key found; insert it"]
+    off = types.SimpleNamespace(request_json=lambda method, path: {
+        "schema_version": approval.PERSON_FEED_SCHEMA, "touch_required": False, "decisions": [], "after": 0})
+    assert decisions.touch_lines(off)[0] == "touch:    not required (the administrator's switch is off)"
     gone = types.SimpleNamespace(request_json=lambda method, path: (_ for _ in ()).throw(OSError("404")))
     assert decisions.touch_lines(gone)[0] == "touch:    unknown (this gateway does not say)"
 
@@ -875,3 +881,39 @@ def test_allow_all_decides_every_request_shown_one_touch_per_fifty(monkeypatch):
     assert code == 0 and len(finishes) == 2, "50, then the 51st: every request shown was decided"
     assert {item["status"] for item in gateway.requests.values()} == {"granted"}
     assert "allow a[l]l 51 shown" in text
+
+
+def test_a_key_that_fails_at_the_touch_is_explained_not_dumped(monkeypatch):
+    """Round-1 usability: python-fido2's errors have no readable text of their own; what reached
+    the person was an enum tuple. The assertion path says it in plain words."""
+
+    class Timeout(Exception):
+        code = types.SimpleNamespace(name="TIMEOUT")
+        cause = types.SimpleNamespace(code=types.SimpleNamespace(name="USER_ACTION_TIMEOUT"))
+
+        def __str__(self):
+            return "(<ERR.TIMEOUT: 5>, CtapError(USER_ACTION_TIMEOUT))"
+
+    class Client:
+        def __init__(self, device, user_interaction=None, **kwargs):
+            pass
+
+        def get_assertion(self, options):
+            raise Timeout()
+
+    keys = [types.SimpleNamespace(descriptor=types.SimpleNamespace(product_name="YubiKey"))]
+    for name, module in {
+        "fido2": types.ModuleType("fido2"),
+        "fido2.client": types.SimpleNamespace(Fido2Client=Client, UserInteraction=object,
+                                              DefaultClientDataCollector=lambda origin: origin),
+        "fido2.hid": types.SimpleNamespace(CtapHidDevice=types.SimpleNamespace(list_devices=lambda: iter(keys))),
+        "fido2.webauthn": types.SimpleNamespace(
+            PublicKeyCredentialDescriptor=lambda **k: k, PublicKeyCredentialRequestOptions=lambda **k: k,
+            PublicKeyCredentialType=types.SimpleNamespace(PUBLIC_KEY="public-key"),
+            UserVerificationRequirement=lambda value: value),
+    }.items():
+        monkeypatch.setitem(sys.modules, name, module)
+    terminal = approval.Terminal(io.StringIO(), io.StringIO())
+    with pytest.raises(approval.ApprovalError) as failed:
+        approval.security_key_assertion({"challenge": "AA", "userVerification": "discouraged"}, ORIGIN, terminal)
+    assert str(failed.value) == "the security key did not sign: no touch in time"

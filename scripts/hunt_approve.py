@@ -1607,7 +1607,12 @@ def person_decision_line(item: Mapping[str, Any]) -> str:
     via = _inert(str(item.get("connection") or "another connection")[:100])
     made = item.get("made")
     if made == "proved":
-        head = "decided by key touch"
+        # Written once the engine answered: `security_key`, or `security_key_<status>` when it
+        # refused the request the person touched for (nothing was decided then).
+        outcome = str(item.get("outcome") or "")
+        refused = outcome.startswith("security_key_")
+        head = ("proved by key touch, not applied (the engine answered HTTP "
+                f"{_inert(outcome[13:])[:10]})" if refused else "decided by key touch")
     elif made == "refused":
         head = "refused, a key touch is required"
     else:
