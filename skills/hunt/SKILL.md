@@ -308,7 +308,10 @@ person can approve the request when it comes or raise the limit themselves: on t
 with the Python client in their own terminal, `shakerscan hunt budget raise <hunt_id> --limit
 <name>=<total>` (or `=+<more>`); then carry on with other work. If a call answers
 `person_decision_required`, name the command it gives and do not retry the request or look for
-another way to make the same decision. A raise keeps usage, queued holds, identities and
+another way to make the same decision. The one exception is a refused start (the answer names a
+`submission`: a Hunt start, scan or retest of a target nobody authorized yet): nothing was started,
+so once the person tells you they authorized the target, send the same start again, once, with the
+same idempotency key. A raise keeps usage, queued holds, identities and
 permissions, and starts nothing by itself; completed, cancelled or finalized runs stay terminal.
 `GET /hunts/{hunt_id}/budget-amendments` pages the saved before/after history.
 

@@ -701,6 +701,15 @@ class StepUp:
         self.account = (account or "").strip() or None
         self.method = method.replace("-", "_") if method else None
 
+    def _names_no_approver(self) -> bool:
+        """Whether this gateway predates the approver it names itself (gateway 0.2.0-beta.46):
+        it does not serve the person-decision feed either."""
+        try:
+            status, _ = self.send("GET", PERSON_FEED_PATH)
+        except ApprovalError:
+            return False
+        return status in {404, 405}
+
     def _account(self) -> str:
         if not self.account:
             self.account = self.terminal.line("Your ShakerScan Enterprise sign-in name: ").strip()
@@ -746,7 +755,13 @@ class StepUp:
             try:
                 challenge = post("")
             except GatewayRefused as exc:
+                # A token that acts for nobody (account_required), or a gateway from before the
+                # approver was named (it refuses the empty name as request_invalid): ask for it.
+                # A gateway that names the approver refuses request_invalid for another reason,
+                # which is said as it is.
                 if exc.status != 422 or exc.code not in {"account_required", "request_invalid"}:
+                    raise
+                if exc.code == "request_invalid" and not self._names_no_approver():
                     raise
                 challenge = post(self._account())
             named = challenge.get("account")
@@ -836,8 +851,25 @@ def _no_fido2() -> str:
             "carry it), or pipx inject shakerscan fido2 (or pip install fido2)")
 
 
+def remote_session(environ: Mapping[str, str] | None = None) -> bool:
+    """Whether this terminal is a remote (SSH) session, where a key plugged into the computer the
+    person connects from is out of reach."""
+    environ = os.environ if environ is None else environ
+    return bool((environ.get("SSH_CONNECTION") or environ.get("SSH_TTY") or "").strip())
+
+
+REMOTE_NO_KEY = (
+    "no USB security key found: this terminal is a remote (SSH) session, and a key plugged into the "
+    "computer you connect from is out of reach here; run the command on that computer, with a "
+    "connection of its own that acts for you"
+)
+
+
 def _no_device() -> str:
-    """No key found: and, on Linux, whether one is plugged in that this user cannot open."""
+    """No key found: over SSH, where the key is; on Linux, whether one is plugged in that this
+    user cannot open."""
+    if remote_session():
+        return REMOTE_NO_KEY
     text = "no USB security key found; insert it and run the command again"
     if sys.platform.startswith("linux"):
         import glob
@@ -1529,6 +1561,13 @@ def _watch(send: Send, terminal: Terminal, *, enterprise: bool, origin: str, hun
     return 0
 
 
+# Refusals a touch-mode watch never asks again for: retrying them cannot succeed in this watch.
+FINAL_REFUSALS = frozenset({
+    "security_key_not_registered", "security_key_unavailable", "person_unknown", "account_unknown",
+    "role_insufficient", "stepup_locked", "token_invalid",
+})
+
+
 def _touch_decision(terminal: Terminal, seen: set[str], retry: list[dict[str, Any]],
                     requests: Sequence[Mapping[str, Any]], run: Callable[[], Any]) -> bool:
     """One decision of a touch-mode watch: a touch that fails (no touch in time, the wrong key,
@@ -1543,6 +1582,12 @@ def _touch_decision(terminal: Terminal, seen: set[str], retry: list[dict[str, An
         reason = "touch cancelled"
     except (OutcomeUnknown, RequestGone):
         raise
+    except GatewayRefused as exc:
+        if exc.code in FINAL_REFUSALS:
+            # Asking again cannot help (no key registered, the person or account gone, locked
+            # out): said once, and the watch ends instead of asking on every poll.
+            raise
+        reason = f"not decided: {_inert(str(exc))[:300]}"
     except ApprovalError as exc:
         reason = f"not decided: {_inert(str(exc))[:300]}"
     for request in requests:
@@ -1604,6 +1649,7 @@ def person_decision_line(item: Mapping[str, Any]) -> str:
     kind = str(item.get("decision") or "")
     what = _DECISION_WORDS.get(kind, _inert(kind[:60]) or "a person's decision")
     where = _inert(f"{item.get('method') or ''} {item.get('path') or ''}".strip()[:200])
+    said = _inert(str(item.get("summary") or ""))[:300]
     via = _inert(str(item.get("connection") or "another connection")[:100])
     made = item.get("made")
     if made == "proved":
@@ -1619,6 +1665,9 @@ def person_decision_line(item: Mapping[str, Any]) -> str:
         outcome = str(item.get("outcome") or "")
         refused = outcome.startswith("unproven_")
         head = "made with a token, no touch" + (f" (the engine answered HTTP {_inert(outcome[9:])[:10]})" if refused else "")
+    if said:
+        # The gateway's own words for what was decided (every limit a raise set, the host).
+        return f"[{when}] {head}: {said} via connection {via}"
     return f"[{when}] {head}: {what} ({where}) via connection {via}"
 
 

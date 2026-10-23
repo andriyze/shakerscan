@@ -11,16 +11,23 @@ connection's token. The gateway then refuses such a request::
 
 and every command of this client completes it the same way, in the person's own terminal only:
 
-1. it shows the decision in the gateway's words;
-2. ``POST /_enterprise/approvals/begin`` with purpose ``person_decision`` and the exact request
+1. ``POST /_enterprise/approvals/begin`` with purpose ``person_decision`` and the exact request
    (method, path with its query, the body bytes) answers a WebAuthn challenge over a document that
    binds that request. The client checks the document names this request (method, path, query,
    SHA-256 of the body), that the set digest is the document's, and that the challenge is
-   SHA-256(nonce || set digest);
+   SHA-256(nonce || set digest). A gateway that cannot name the decision in full, or a person with
+   no key registered, is refused here, before anything is asked of a key;
+2. it shows the decision in the words the challenge signs (the document's summary), and only
+   those;
 3. the person touches a security key registered to their account (user presence; python-fido2
-   over USB; no PIN unless the gateway asks for one);
+   over USB; no PIN unless the gateway asks for one). Without a key here it says so, and over SSH
+   it names the command to run on the computer the key is plugged into;
 4. ``finish`` answers a one-time grant valid for that request through this connection;
 5. the request is sent again, once, unchanged, with the ``X-ShakerScan-Person-Proof`` header.
+
+A refused submission (a scan, Hunt start or retest of a target nobody authorized: the refusal
+carries ``submission``) started nothing: once the person has authorized the target, the same
+request runs when sent again with the same Idempotency-Key.
 
 Without an interactive terminal (stdin a terminal, and stdout or stderr one to ask on), or inside
 an agent that ``shakerscan agent`` launched (SHAKERSCAN_AGENT_NAME), it never prompts and never
@@ -186,12 +193,24 @@ def person_command(method: str, path: str, body: bytes | None) -> str:
 
 def refusal_line(detail: Mapping[str, Any], command: str) -> str:
     """One line for an agent's tool call: the decision (whole, as the gateway said it), that
-    nothing changed, the person's command (its body made inert: it may carry any bytes)."""
+    nothing changed, the person's command (its body made inert: it may carry any bytes), and, for
+    a refused submission, that the same request runs once the target is authorized."""
     summary = _inert(detail.get("summary") or detail.get("decision") or "a person's decision", MAX_SUMMARY)
-    return (
+    line = (
         f"person decision required: {summary}. Nothing was changed. The person runs this in their "
         f"own terminal and touches their security key: {_inert(command, 4 * MAX_BODY)}"
     )
+    if detail.get("submission"):
+        line += SUBMISSION_AGAIN
+    return line
+
+
+# A refused submission started nothing: the same request (same Idempotency-Key) runs once the
+# person has authorized the target.
+SUBMISSION_AGAIN = (
+    ". Nothing was started either: once the person has authorized the target, send this same "
+    "request again (with the same Idempotency-Key)"
+)
 
 
 # ---- the touch -------------------------------------------------------------------------------
@@ -286,7 +305,9 @@ def check_challenge(challenge: Mapping[str, Any], *, origin: str, method: str, p
 
 def complete(post: Post, *, origin: str, method: str, path: str, body: bytes, detail: Mapping[str, Any],
              terminal: Any = None, assertion: Callable[..., dict] | None = None) -> str:
-    """Ask the person, at this terminal, for one touch for exactly this request; the grant."""
+    """Ask the person, at this terminal, for one touch for exactly this request; the grant.
+    ``detail`` is the refusal; the person is shown only what the challenge signs."""
+    del detail  # the refusal's words are not what the key signs
     approve = _approve()
     terminal = terminal or approve.Terminal()
     if sys.platform == "win32" and assertion is None:
@@ -298,26 +319,18 @@ def complete(post: Post, *, origin: str, method: str, path: str, body: bytes, de
         )
     if len(body or b"") > MAX_BODY:
         raise PersonDecisionError("this request is too large for a security-key proof; make it in the browser")
-    summary = str(detail.get("summary") or detail.get("decision") or "a person's decision")
-    if len(summary) > MAX_SUMMARY:
-        raise PersonDecisionError("this decision is too long to show in a terminal; make it in the browser; "
-                                  "nothing was changed")
-    if assertion is None and (unready := approve.security_key_readiness()):
-        # Before begin: no challenge is issued (and audited) for a touch that cannot happen here.
-        raise PersonDecisionError(f"{unready}; nothing was changed")
-    terminal.say("This needs your decision (your administrator requires a security-key touch):")
-    for line in summary_lines(summary):
-        terminal.say(line)
     try:
         return _touch(post, approve, terminal, origin=origin, method=method, path=path, body=body,
-                      detail=detail, assertion=assertion)
+                      assertion=assertion)
     except KeyboardInterrupt:
         terminal.say("")
         raise PersonDecisionCancelled("cancelled; nothing was changed") from None
 
 
 def _touch(post: Post, approve: Any, terminal: Any, *, origin: str, method: str, path: str, body: bytes,
-           detail: Mapping[str, Any], assertion: Callable[..., dict] | None) -> str:
+           assertion: Callable[..., dict] | None) -> str:
+    # Begin first: the gateway says whether a key is registered at all, and whether it can name
+    # the decision, before the person is asked to plug anything in.
     status, challenge = post(BEGIN_PATH, {
         "schema_version": "shakerscan-approval-begin/v1", "purpose": "person_decision", "origin": origin.rstrip("/"),
         "person_decision": {"method": method, "path": path, "body": _b64url(body or b"")},
@@ -328,11 +341,14 @@ def _touch(post: Post, approve: Any, terminal: Any, *, origin: str, method: str,
     shown = document["person_decision"].get("summary")
     if not isinstance(shown, str) or not shown or len(shown) > MAX_SUMMARY:
         raise PersonDecisionError("the gateway's challenge does not say the decision in full; nothing was changed")
-    if shown != detail.get("summary"):
-        # What the key signs is the document's summary; show it whole if it says something else.
-        terminal.say("It is signed as:")
-        for line in summary_lines(shown):
-            terminal.say(line)
+    # Only what the key signs is shown (the document's summary), never the refusal's words.
+    terminal.say("This needs your decision (your administrator requires a security-key touch):")
+    for line in summary_lines(shown):
+        terminal.say(line)
+    if assertion is None and (unready := approve.security_key_readiness()):
+        if approve.remote_session():
+            unready += f": {_inert(person_command(method, path, body), 4 * MAX_BODY)}"
+        raise PersonDecisionError(f"{unready}; nothing was changed")
     sign = assertion or approve.security_key_assertion
     try:
         # The key is chosen (when several can answer) before the person is told to touch.

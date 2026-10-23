@@ -552,11 +552,9 @@ def test_every_limit_of_a_raise_is_shown_whole_and_never_cut(monkeypatch):
 
 
 def test_a_decision_too_long_to_show_is_never_touched_for():
-    gateway = ScriptedGateway()
+    # What counts is what the challenge signs (the refusal's words are never shown): a signed
+    # summary longer than a terminal shows is never touched for.
     signer = Signer()
-    with pytest.raises(decision.PersonDecisionError, match="too long to show"):
-        _complete(gateway, {**REFUSAL["detail"], "summary": "x" * (decision.MAX_SUMMARY + 1)}, signer)
-    assert gateway.begun == [] and signer.asked == []
     signed_long = ScriptedGateway(tamper=lambda d: d["person_decision"].update(summary="y" * 1001))
     with pytest.raises(decision.PersonDecisionError, match="in full"):
         _complete(signed_long, REFUSAL["detail"], signer)
@@ -592,13 +590,21 @@ def test_the_agents_line_carries_no_terminal_control_bytes():
     assert "\x1b" not in line and "\x07" not in line and "shakerscan api POST" in line
 
 
-def test_no_challenge_is_begun_when_no_key_can_answer_here(monkeypatch):
+def test_the_gateway_is_asked_first_then_the_key_and_the_decision_is_shown_either_way(monkeypatch):
+    """Usability review: a person with no key registered and none plugged in was told to insert one
+    first, and learned only after inserting it that none was registered. The gateway is asked
+    first (it refuses an account with no key, or a decision it cannot name); the key after."""
     monkeypatch.setattr(approval, "security_key_readiness", lambda: "no USB security key found; insert it")
+    monkeypatch.delenv("SSH_CONNECTION", raising=False)
+    monkeypatch.delenv("SSH_TTY", raising=False)
     gateway = ScriptedGateway()
-    with pytest.raises(decision.PersonDecisionError, match="no USB security key found"):
+    out = io.StringIO()
+    with pytest.raises(decision.PersonDecisionError, match="no USB security key found") as raised:
         decision.complete(gateway.post, origin=ORIGIN, method="POST", path=AMENDMENT, body=b"{}",
-                          detail=REFUSAL["detail"], terminal=approval.Terminal(io.StringIO(), io.StringIO()))
-    assert gateway.begun == []
+                          detail=REFUSAL["detail"], terminal=approval.Terminal(io.StringIO(), out))
+    assert len(gateway.begun) == 1
+    assert SUMMARY[:40] in out.getvalue(), "what the person would have touched for"
+    assert "shakerscan hunt budget raise" not in str(raised.value), "named only over SSH"
 
 
 def test_ctrl_c_at_the_touch_cancels_it_and_exits_130(gateway, monkeypatch, capsys):
@@ -766,8 +772,11 @@ def test_an_approval_names_no_account_and_takes_the_one_the_gateway_answers():
     sent = []
 
     def send(method, path, payload=None, headers=None, *, timeout=None):
+        if method == "GET":
+            # The person-decision feed: served by a gateway that names the approver itself.
+            return (404, {"detail": "Not Found"}) if old[0] else (200, {"decisions": []})
         sent.append(payload)
-        if not payload["account"] and old[0]:
+        if not payload["account"] and (old[0] or invalid[0]):
             return 422, {"schema_version": "shakerscan-approval-error/v1", "error": "request_invalid",
                          "message": "invalid approval request fields"}
         account = payload["account"] or "sso:00u1example"
@@ -775,7 +784,7 @@ def test_an_approval_names_no_account_and_takes_the_one_the_gateway_answers():
         return 200, {"schema_version": "shakerscan-approval-challenge/v1", "approval_id": "apv_1",
                      "set_digest": approval.set_digest(document), "methods": ["security_key"], "account": account}
 
-    old = [False]
+    old, invalid = [False], [False]
     stepup = approval.StepUp(send, ORIGIN, approval.Terminal(io.StringIO(), io.StringIO()))
     challenge, _ = stepup.begin("permission_decision", body)
     assert sent[0]["account"] == "" and stepup.account == "sso:00u1example" and len(sent) == 1
@@ -789,6 +798,13 @@ def test_an_approval_names_no_account_and_takes_the_one_the_gateway_answers():
     stepup = approval.StepUp(send, ORIGIN, Asks(io.StringIO(), io.StringIO()))
     stepup.begin("permission_decision", body)
     assert [item["account"] for item in sent] == ["", "alice"] and stepup.account == "alice"
+    # A gateway that names the approver itself refuses an invalid request for another reason:
+    # said as it is, and no name is asked for.
+    old[0], invalid[0], sent[:] = False, True, []
+    stepup = approval.StepUp(send, ORIGIN, Asks(io.StringIO(), io.StringIO()))
+    with pytest.raises(approval.GatewayRefused) as refused:
+        stepup.begin("permission_decision", body)
+    assert refused.value.code == "request_invalid" and [item["account"] for item in sent] == [""]
 
 
 def test_doctor_says_whether_a_touch_is_required_and_could_happen_here(monkeypatch):
@@ -917,3 +933,114 @@ def test_a_key_that_fails_at_the_touch_is_explained_not_dumped(monkeypatch):
     with pytest.raises(approval.ApprovalError) as failed:
         approval.security_key_assertion({"challenge": "AA", "userVerification": "discouraged"}, ORIGIN, terminal)
     assert str(failed.value) == "the security key did not sign: no touch in time"
+
+
+# ---- round 3: what the person is shown, where the key is, what happens after a refusal ---------
+
+
+def test_the_person_is_shown_only_what_the_key_signs(monkeypatch):
+    """Security review: when the refusal's words and the signed document's differed, both were
+    printed and the touch went on. Only the signed words are shown now."""
+    gateway = ScriptedGateway()
+    signed = "Raise HTTP requests 500 -> 900 for Hunt 3f2a91c0… on honey.example.com"
+
+    def signs(document):
+        document["person_decision"]["summary"] = signed
+
+    gateway.tamper = signs
+    out = io.StringIO()
+    signer = Signer()
+    grant = decision.complete(gateway.post, origin=ORIGIN, method="POST", path=AMENDMENT, body=b"{}",
+                              detail=REFUSAL["detail"], terminal=approval.Terminal(io.StringIO(), out),
+                              assertion=signer)
+    assert grant == "apv_grant_1" and len(signer.asked) == 1
+    text = out.getvalue()
+    assert signed in text and SUMMARY not in text and "signed as" not in text
+
+
+def test_over_ssh_the_key_is_said_to_be_elsewhere_with_the_command_to_run_there(monkeypatch):
+    monkeypatch.setenv("SSH_CONNECTION", "203.0.113.5 50000 198.51.100.7 22")
+    monkeypatch.setattr(approval, "security_key_readiness", approval._no_device)
+    gateway = ScriptedGateway()
+    with pytest.raises(decision.PersonDecisionError) as raised:
+        decision.complete(gateway.post, origin=ORIGIN, method="POST", path=AMENDMENT,
+                          body=json.dumps(RAISE).encode(), detail=REFUSAL["detail"],
+                          terminal=approval.Terminal(io.StringIO(), io.StringIO()))
+    text = str(raised.value)
+    assert "remote (SSH) session" in text and "the computer you connect from" in text
+    assert f"shakerscan hunt budget raise {HUNT} --limit max_state_changing_requests=40" in text
+    assert approval.remote_session({"SSH_TTY": "/dev/pts/3"}) and not approval.remote_session({})
+
+
+def test_a_refused_start_says_the_same_request_runs_once_the_target_is_authorized():
+    """Usability review: an agent told 'do not retry' after a refused scan or Hunt start stalled
+    after the person authorized the target."""
+    refused = {**REFUSAL["detail"], "decision": "target.authorize", "submission": "hunt",
+               "summary": "Authorize app.example.com for active testing (to run this Hunt)"}
+    command = decision.person_command("POST", "/hunts", json.dumps({"target_id": TARGET}).encode())
+    line = decision.refusal_line(refused, command)
+    assert f"shakerscan targets authorize {TARGET}" in line
+    assert "send this same request again (with the same Idempotency-Key)" in line
+    plain = decision.refusal_line(REFUSAL["detail"], "shakerscan hunt budget raise x")
+    assert "same request again" not in plain
+    message = email.message.Message()
+    message["x-shakerscan-step-up"] = "required"
+    error = urllib.error.HTTPError(ORIGIN + "/hunts", 403, "Forbidden", message, io.BytesIO(b""))
+    mapped = mcp._person_decision_error(error, json.dumps({"detail": refused}), "POST", "/hunts",
+                                        json.dumps({"target_id": TARGET}).encode())
+    data = json.loads(mapped.data)["detail"]
+    assert data["recovery"] == mcp.PERSON_DECISION_SUBMISSION_RECOVERY and data["submission"] == "hunt"
+    assert "same idempotency key" in str(mapped) and "do not retry" not in str(mapped)
+    other = mcp._person_decision_error(error, json.dumps(REFUSAL), "POST", AMENDMENT, b"{}")
+    assert json.loads(other.data)["detail"]["recovery"] == mcp.PERSON_DECISION_RECOVERY
+    assert "submission" not in json.loads(other.data)["detail"]
+
+
+@pytest.mark.parametrize("code", sorted(approval.FINAL_REFUSALS))
+def test_a_touch_mode_watch_ends_when_asking_again_cannot_help(code):
+    """Usability review: after security_key_not_registered (and the like) the watch put the
+    request back and began again on every poll."""
+    seen, retry = {"r-1"}, []
+
+    def run():
+        raise approval.GatewayRefused("no key", code=code, status=403)
+
+    terminal = approval.Terminal(io.StringIO(), io.StringIO())
+    with pytest.raises(approval.GatewayRefused):
+        approval._touch_decision(terminal, seen, retry, [{"id": "r-1"}], run)
+    assert retry == []
+
+
+def test_a_feed_line_says_what_was_decided_in_the_gateways_words():
+    line = approval.person_decision_line({
+        "at": 1792772519, "made": "with_token", "outcome": "unproven", "decision": "budget.raise",
+        "method": "POST", "path": AMENDMENT, "connection": "work-laptop",
+        "summary": "Raise state-changing requests to 41 (safety ceiling) for Hunt 3f2a91c0…\x1b[2J",
+    })
+    assert "made with a token, no touch: Raise state-changing requests to 41 (safety ceiling)" in line
+    assert "via connection work-laptop" in line and "\x1b" not in line and "POST " not in line
+
+
+def test_a_target_registered_before_a_refused_touch_is_said_to_stay_registered(gateway, monkeypatch, capsys):
+    """Usability review: `targets authorize <url>` registers the target before the touch, so a
+    refusal or Ctrl-C there left a registered, unauthorized target while it said nothing changed."""
+    decisions = _client_module(monkeypatch, gateway)
+    monkeypatch.setenv("SHAKERSCAN_API_TOKEN", "token-1")
+    at_a_terminal(monkeypatch, stdin=False, stdout=False)
+    import shakerscan.cli as cli
+
+    monkeypatch.setattr(cli, "apply_connection", lambda args: ORIGIN)
+    original = gateway.open
+
+    def created(request, timeout=None):
+        if request.get_method() == "POST" and urllib.parse.urlsplit(request.full_url).path == "/targets":
+            gateway.sent.append({"method": "POST", "url": request.full_url, "data": request.data, "headers": {}})
+            return _Response({"id": TARGET, "url": "https://app.example.com/", "status": "created"})
+        return original(request, timeout)
+
+    gateway.open = created
+    args = types.SimpleNamespace(action="authorize", target="app.example.com", reason=None, json=False,
+                                 timeout=None, url=None, token_file=None)
+    assert decisions.cmd_targets(args) == 3
+    err = capsys.readouterr().err
+    assert "was registered as a target just now and stays registered, not authorized" in err

@@ -143,6 +143,7 @@ def cmd_targets(args: argparse.Namespace) -> int:
 
     url = apply_connection(args)
     v2, client = _client(url, args.timeout)
+    target: dict[str, Any] = {}
     try:
         target = find_target(client, args.target, create=args.action == "authorize")
         identifier = str(target.get("id") or "")
@@ -169,7 +170,13 @@ def cmd_targets(args: argparse.Namespace) -> int:
             line = (f"withdrew the authorization of {_named(target)}" if revoked
                     else f"{_named(target)} had no standing authorization")
     except (v2.CliError, DecisionError) as exc:
-        return _exit(v2, exc)
+        code = _exit(v2, exc)
+        if args.action == "authorize" and target.get("status") == "created":
+            # Registered just now (an ordinary add, before any decision): "nothing was changed"
+            # above is about the authorization, which was not recorded.
+            print(f"note: {_named(target)} was registered as a target just now and stays registered, "
+                  "not authorized", file=sys.stderr)
+        return code
     print(json.dumps(answer, indent=2, sort_keys=True) if args.json else line)
     return 0
 
