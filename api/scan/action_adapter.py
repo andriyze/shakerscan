@@ -1544,6 +1544,7 @@ class DatabaseNeutralScanActionDispatcher:
         *,
         managed_cancellation: bool = False,
         target: TargetBinding | None = None,
+        execution_record: Mapping[str, Any] | None = None,
     ) -> CapabilityReceipt:
         started = datetime.now(timezone.utc)
         result = await CapabilityExecutor().execute(
@@ -1567,7 +1568,12 @@ class DatabaseNeutralScanActionDispatcher:
             consumed=result.actual_budget,
             partial=result.partial,
             timed_out=result.timed_out,
-            redacted_execution=result.redacted_execution,
+            # ``execution_record``: what the dispatcher decided before the run (a template
+            # selection's counts), kept beside the executor's own record.
+            redacted_execution=(
+                {**dict(result.redacted_execution or {}), **dict(execution_record)}
+                if execution_record else result.redacted_execution
+            ),
         )
 
     def _prepared_inline(
@@ -4529,6 +4535,7 @@ class DatabaseNeutralScanActionDispatcher:
         args: dict[str, Any] = dict(primary.capability_args())
         scanner_options: dict[str, Any] = {}
         requested_budget = dict(action.requested_budget)
+        execution_record: dict[str, Any] = {}
         if action.capability_name in {"web.crawl", "web.browser_crawl"} and (
             primary.headers()
             or (tool == "katana_headless" and self.options.get("auth_browser_storage"))
@@ -4564,8 +4571,11 @@ class DatabaseNeutralScanActionDispatcher:
                         and requested_budget.get("state_changing_requests", 0) > 0
                     ),
                 )
+                if resolved.selection_telemetry:
+                    execution_record["template_selection"] = dict(resolved.selection_telemetry)
                 if resolved.skip_reason:
-                    return self._skip(action, resolved.skip_reason)
+                    return self._skip(action, resolved.skip_reason,
+                                      template_selection=resolved.selection_telemetry)
                 args.update(resolved.capability_args)
                 scanner_options.update(resolved.worker_options)
                 # Reuse the same reservation-derived pacing as a batch attempt,
@@ -4631,6 +4641,7 @@ class DatabaseNeutralScanActionDispatcher:
         )
         return await self._execute_adapter(
             action, adapter, heartbeat, managed_cancellation=True,
+            execution_record=execution_record,
         )
 
     async def _external_batch(

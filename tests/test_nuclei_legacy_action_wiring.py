@@ -165,3 +165,28 @@ def test_legacy_nuclei_post_only_pack_without_mutation_hold_records_gap(monkeypa
     assert receipt.status == "skipped"
     assert "no_eligible_nuclei_templates" in receipt.errors
     assert captured == {}
+
+
+def test_a_legacy_action_records_what_its_selection_held_back(monkeypatch):
+    # Like an active batch, the step's receipt counts the selection, so a default login held
+    # back for want of the state-changing permission is visible on the run.
+    receipt, _captured, _action = _drive(monkeypatch, authorized=False)
+    assert receipt.status == "success"
+    assert receipt.redacted_execution["template_selection"] == {
+        "matched": 6, "selected": 1, "get_only": 1, "state_changing": 3, "default_login": 2,
+        "includes_state_changing": False, "intrusive_excluded": 1, "never_requested_excluded": 1,
+    }
+    authorized, _captured, _action = _drive(monkeypatch, authorized=True, mutation_hold=100)
+    assert authorized.redacted_execution["template_selection"]["includes_state_changing"] is True
+    assert authorized.redacted_execution["template_selection"]["selected"] == 4
+
+
+def test_a_legacy_action_of_default_logins_alone_records_why_nothing_ran(monkeypatch, tmp_path):
+    destination = tmp_path / "http" / "tomcat-default-login.yaml"
+    destination.parent.mkdir()
+    shutil.copyfile(next(FIXTURES.rglob("tomcat-default-login.yaml")), destination)
+    receipt, captured, _action = _drive(monkeypatch, authorized=False, templates_dir=tmp_path)
+    assert receipt.status == "skipped" and captured == {}
+    assert "no_eligible_nuclei_templates" in receipt.errors
+    assert receipt.redacted_execution["template_selection"]["default_login"] == 1
+    assert receipt.redacted_execution["template_selection"]["selected"] == 0
