@@ -57,7 +57,7 @@ without saying why.
 
 Paced SQLi negative checks had already been measured at roughly 441–475 seconds, above the
 300-second floor. Paced XSS checks needed roughly 390–430 seconds, above the 120-second floor.
-The existing reviewed envelopes (SQLi: 900 requests/540 seconds; XSS: 1,800/480) now apply to all
+The longer envelopes (SQLi: 900 requests/540 seconds; XSS: 1,800/480) now apply to all
 named profiles, with existing device/headless exceptions retained. New calls do not silently fall
 back; old queued reservations and their digests remain executable as originally admitted.
 
@@ -95,9 +95,9 @@ Finishing now proposes reusable steps for review and never writes a recipe, what
 delegates; the metadata opt-out skips it. Each target has one rolling retained-checks proposal: a
 later finish updates it in place, keeps one copy of each step (the newest 16), leaves out steps a
 saved action already holds or the operator rejected in the last decided one, and rebases it onto
-the current saved actions. It is not counted
-against the pending proposals Hunts or operators may file, so it never crowds out a planner's own
-proposals, and accepting it saves one saved action as an operator write.
+the current saved actions. It is not counted against the pending proposals Hunts or operators may
+file, so it never crowds out a planner's own proposals, and accepting it saves one saved action as
+an operator write.
 
 A step is proposed only when every input field is on its capability's allowlist (origins, paths,
 read methods, wordlists and a few display options). A step carrying a query value, request header
