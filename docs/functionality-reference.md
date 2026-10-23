@@ -1525,8 +1525,10 @@ the check that proved it, with the request it proved: the route on the site the 
 (else the scanned target's site) with the tested query parameter set as the Scan set it, or the
 page with the browser proof's own payload, checked against the payload digest the finding kept.
 The SQL and NoSQL checks run over the retest's HTTP client (session headers, request limits and
-the destination guard); the browser check runs the payload in a headless browser after one
-ordinary request of the page. Reproduced is still vulnerable; not reproduced with every request
+the destination guard); the browser check loads the payload page in a headless browser after one
+ordinary request of the page and judges it as the browser proof does (the proof's attribute on the
+page, or a console or dialog message that is exactly its marker; nothing else the page logs or
+shows counts), letting only same-origin reads leave the page. Reproduced is still vulnerable; not reproduced with every request
 answered is likely fixed; a refusal, an unanswered request or a missing browser is inconclusive.
 When the request cannot be rebuilt exactly (a path segment, a templated route, a request body, a
 recorded request whose values were not kept, a masked value, a fragment or another page), or the

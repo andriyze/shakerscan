@@ -8,7 +8,12 @@ Otherwise the same check runs again:
 * SQL and NoSQL injection: the Scan's own adapters (``sqli.prove_batch``, ``nosqli.verify_batch``)
   over that request, through the retest's HTTP client, so the retest's session headers, request
   limits and destination guard apply to every request;
-* XSS: the same payload, in a headless browser, after one ordinary request shows the page answers.
+* XSS: the same payload in a headless browser, after one ordinary request shows the page answers,
+  judged by the browser proof's own oracle (``capabilities.xss_proof_payload``): the page's root
+  element carries the proof attribute with the candidate's marker, or a console or dialog message
+  is exactly that marker. The page is loaded as the proof loads it (DOMContentLoaded, then the same
+  settle), only same-origin GET, HEAD and OPTIONS requests leave it, and it runs under the
+  retest's destination guard with its session headers confined to the finding's origin.
 
 The verdict follows the check: reproduced is still vulnerable; not reproduced, with every request
 answered, is likely fixed; a refusal, a failed request or a missing browser is inconclusive, and
@@ -17,11 +22,22 @@ the finding stays open. Nothing here escalates to the AI tier.
 
 from __future__ import annotations
 
+import asyncio
 import math
 import time
 from typing import Any, Awaitable, Callable, Mapping
 import urllib.parse
 
+try:
+    from capabilities.xss_proof_payload import (
+        XSS_PROOF_ATTRIBUTE, XSS_PROOF_SETTLE_SECONDS, XSS_PROOF_TIMEOUT_MS, xss_proof_marker,
+        xss_proof_signal,
+    )
+except ModuleNotFoundError:  # package import in host-side tests
+    from ..capabilities.xss_proof_payload import (
+        XSS_PROOF_ATTRIBUTE, XSS_PROOF_SETTLE_SECONDS, XSS_PROOF_TIMEOUT_MS, xss_proof_marker,
+        xss_proof_signal,
+    )
 try:
     from proof_retest import PROOF_RETEST_GAPS, ProofRetestRequest, proof_retest_request
     from retest_contract import auth_context_to_headers, parse_json_field
@@ -180,14 +196,102 @@ async def _differential_check(
     return "not_reproduced", proof
 
 
+# What the browser proof lets a page send: same-origin reads, at most this many requests.
+_BROWSER_SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
+_BROWSER_MAX_REQUESTS = 50
+
+
+def _url_origin(url: str) -> tuple[str, str, int | None] | None:
+    try:
+        parsed = urllib.parse.urlsplit(str(url or ""))
+        port = parsed.port or (443 if parsed.scheme.lower() == "https" else 80)
+    except ValueError:
+        return None
+    return (parsed.scheme.lower(), (parsed.hostname or "").lower(), port)
+
+
+def _payload_url(request: ProofRetestRequest, value: str) -> str:
+    """The page with the tested parameter set to ``value``, as the browser proof builds it."""
+    parsed = urllib.parse.urlsplit(request.url)
+    pairs = [(name, value if name == request.param else item)
+             for name, item in urllib.parse.parse_qsl(parsed.query, keep_blank_values=True)]
+    return urllib.parse.urlunsplit(parsed._replace(query=urllib.parse.urlencode(pairs, doseq=True)))
+
+
+async def _marker_check(
+    url: str, marker: str, *, poe: Any, headers: Mapping[str, str] | None, cancelled: Callable[[], bool],
+) -> tuple[str, dict[str, Any]]:
+    """Load the payload page once and apply the browser proof's oracle to it."""
+    context = await poe.proof_browser_context(url, headers=dict(headers or {}) or None)
+    if context is None:
+        return "no_browser", {}
+    origin = _url_origin(url)
+    signals: list[str] = []
+    blocked = 0
+    sent = 0
+
+    async def route(handled: Any) -> None:
+        nonlocal blocked, sent
+        request = handled.request
+        if (
+            cancelled() or _url_origin(request.url) != origin
+            or str(request.method).upper() not in _BROWSER_SAFE_METHODS or sent >= _BROWSER_MAX_REQUESTS
+        ):
+            blocked += 1
+            await handled.abort("blockedbyclient")
+            return
+        sent += 1
+        await handled.continue_()
+
+    async def dialog(opened: Any) -> None:
+        if xss_proof_signal(opened.message, marker):
+            signals.append("dialog")
+        await opened.dismiss()
+
+    def console(message: Any) -> None:
+        if xss_proof_signal(message.text, marker):
+            signals.append("console")
+
+    try:
+        await context.route("**/*", route)
+        page = await context.new_page()
+        page.on("dialog", dialog)
+        page.on("console", console)
+        try:
+            response = await page.goto(url, wait_until="domcontentloaded", timeout=XSS_PROOF_TIMEOUT_MS)
+        except Exception as exc:  # no page to judge: nothing reproduced, nothing ruled out
+            return "failed", {"errors": [type(exc).__name__]}
+        await asyncio.sleep(XSS_PROOF_SETTLE_SECONDS)
+        dom = xss_proof_signal(await page.get_attribute("html", XSS_PROOF_ATTRIBUTE), marker)
+        status = int(response.status) if response is not None else 0
+        final_url = page.url
+        response_headers = dict(response.headers) if response is not None else {}
+    finally:
+        await context.close()
+    technique = (
+        "headless_xss_dialog" if "dialog" in signals else "headless_xss_console" if signals
+        else "headless_xss_dom" if dom else None
+    )
+    proof = {
+        "technique": technique, "dom_marker_executed": dom, "navigation_status": status,
+        "blocked_requests": blocked,
+    }
+    if technique:
+        return "reproduced", proof
+    if _url_origin(final_url) != origin:
+        return "left_origin", proof
+    refused = poe.baseline_refusal(url, {"status_code": status, "headers": response_headers, "final_url": final_url})
+    if refused:
+        return refused, proof
+    return "not_reproduced", proof
+
+
 async def _browser_check(
     request: ProofRetestRequest, *, poe: Any, auth_headers: Mapping[str, str] | None,
+    cancelled: Callable[[], bool],
 ) -> tuple[str, dict[str, Any]]:
-    """The proof's own payload in a headless browser, after one ordinary request of the page."""
-    parsed = urllib.parse.urlsplit(request.url)
-    pairs = [(name, "shakerscan" if name == request.param else value)
-             for name, value in urllib.parse.parse_qsl(parsed.query, keep_blank_values=True)]
-    ordinary = urllib.parse.urlunsplit(parsed._replace(query=urllib.parse.urlencode(pairs)))
+    """The proof's own payload and oracle in a headless browser, after one ordinary request."""
+    ordinary = _payload_url(request, "shakerscan")
     baseline = await poe.fetch_with_capture(ordinary, timeout=12)
     if not int(baseline.get("status_code") or 0):
         return "failed", {"errors": [_error_code(baseline)]}
@@ -196,12 +300,10 @@ async def _browser_check(
         return refused, {"baseline_status": int(baseline.get("status_code") or 0)}
     if not await poe.headless_browser_available():
         return "no_browser", {}
-    proof = await poe.prove_xss_headless(
-        request.url, request.param, request.payload or "", headers=dict(auth_headers or {}) or None,
+    return await _marker_check(
+        _payload_url(request, request.payload or ""), xss_proof_marker(request.candidate_id),
+        poe=poe, headers=auth_headers, cancelled=cancelled,
     )
-    shown = {"technique": getattr(proof, "technique", None), "evidence_type": getattr(proof, "evidence_type", None)}
-    return ("reproduced" if getattr(proof, "proven", False) else "not_reproduced"), {
-        key: value for key, value in shown.items() if value}
 
 
 async def run_proof_retest(
@@ -211,7 +313,7 @@ async def run_proof_retest(
     """The retest of a proven Scan finding, or None for any other finding.
 
     ``poe`` is the scanner's proof module (``fetch_with_capture``, ``baseline_refusal``,
-    ``headless_browser_available``, ``prove_xss_headless``, the session calls). The retest's
+    ``headless_browser_available``, ``proof_browser_context``, the session calls). The retest's
     session headers are the ones the finding's Scan was given (``auth_context``).
     """
     request, gap = proof_retest_request(verification)
@@ -231,7 +333,7 @@ async def run_proof_retest(
         pass
     try:
         if request.capability == "xss.browser_prove_batch":
-            outcome, proof = await _browser_check(request, poe=poe, auth_headers=auth_headers)
+            outcome, proof = await _browser_check(request, poe=poe, auth_headers=auth_headers, cancelled=cancelled)
         else:
             outcome, proof = await _differential_check(
                 request, target_id=str(verification.get("target_id") or "retest"),
@@ -252,6 +354,11 @@ async def run_proof_retest(
         return _result(status="completed", result_status="still_vulnerable", verdict="exploited",
                        reason="The check that proved the finding sent the same request again and reproduced it.",
                        confidence=0.95, proof=proof, artifacts=artifacts, **common)
+    if outcome == "left_origin":
+        return _result(status="completed", result_status="inconclusive", verdict="inconclusive",
+                       reason="The page sent the browser to another site, so the browser check that "
+                              "proved the finding could not run on it; the finding stays open.",
+                       proof=proof, artifacts=artifacts, **common)
     if outcome == "no_browser":
         return _result(status="completed", result_status="inconclusive", verdict="inconclusive",
                        reason="This worker has no headless browser, so the browser check that proved "

@@ -448,8 +448,49 @@ def test_the_worker_sends_nothing_for_a_proven_finding_it_cannot_rebuild(monkeyp
     assert result["artifacts"]["skipped_reason"] == "templated_path"
 
 
+class _FakePage:
+    """The few page calls the retest's browser check makes (unit fixture): the page answers
+    ``status`` and, when ``runs``, the payload sets the attribute and logs the marker."""
+
+    def __init__(self, context):
+        self.context, self.url, self.handlers = context, "", {}
+
+    def on(self, event, handler):
+        self.handlers[event] = handler
+
+    async def goto(self, url, **_kwargs):
+        self.context.calls.append(("browser", url))
+        self.url = url
+        if self.context.runs:
+            self.handlers["console"](types.SimpleNamespace(text=self.context.marker))
+        return types.SimpleNamespace(status=self.context.status, headers={})
+
+    async def get_attribute(self, _selector, name):
+        assert name == "data-shakerscan-proof"
+        return self.context.marker if self.context.runs else None
+
+
+class _FakeContext:
+    def __init__(self, calls, *, runs, status, marker):
+        self.calls, self.runs, self.status, self.marker = calls, runs, status, marker
+        self.closed = False
+
+    async def route(self, _pattern, _handler):
+        return None
+
+    async def new_page(self):
+        return _FakePage(self)
+
+    async def close(self):
+        self.closed = True
+
+
 def _browser_poe(*, available: bool, proven: bool, status: int = 200):
+    from capabilities.xss_proof_payload import xss_proof_marker
+    from scanner_tools.proof_of_exploit import baseline_refusal
+
     calls = []
+    contexts = []
 
     async def fetch(url, **_kwargs):
         calls.append(("fetch", url))
@@ -458,18 +499,17 @@ def _browser_poe(*, available: bool, proven: bool, status: int = 200):
     async def browser():
         return available
 
-    async def headless(url, param, payload, **kwargs):
-        calls.append(("browser", url, param, payload))
-        return types.SimpleNamespace(proven=proven, technique="headless_xss_console", evidence_type="dom_execution")
-
-    from scanner_tools.proof_of_exploit import baseline_refusal
+    async def context(url, *, headers=None):
+        opened = _FakeContext(calls, runs=proven, status=status, marker=xss_proof_marker(CANDIDATE))
+        contexts.append(opened)
+        return opened
 
     poe = types.SimpleNamespace(
         fetch_with_capture=fetch, baseline_refusal=baseline_refusal, headless_browser_available=browser,
-        prove_xss_headless=headless, start_scan_session=lambda *_a, **_k: None,
+        proof_browser_context=context, start_scan_session=lambda *_a, **_k: None,
         end_scan_session=lambda *_a, **_k: None,
     )
-    return poe, calls
+    return poe, calls, contexts
 
 
 @pytest.mark.parametrize("available,proven,status,verdict", [
@@ -482,7 +522,7 @@ def test_a_browser_proof_is_retested_with_its_own_payload_in_a_browser(available
     from worker_handlers.proof_replay import run_proof_retest
 
     row = _xss()
-    poe, calls = _browser_poe(available=available, proven=proven, status=status)
+    poe, calls, contexts = _browser_poe(available=available, proven=proven, status=status)
     verification = {**_verification({**row, "url": row["url"]}, "http://shop.fixture.invalid"),
                     "finding_url": row["url"], "finding_type": "xss",
                     "source_scan_target_url": "http://shop.fixture.invalid"}
@@ -490,11 +530,14 @@ def test_a_browser_proof_is_retested_with_its_own_payload_in_a_browser(available
         verification, infer_retest_inputs(verification), poe=poe, replay_commands=[], ladder=[],
         cancelled=lambda: False))
     assert result["verdict"] == verdict
-    # One ordinary request of the page (the tested value inert), then the proof's own payload.
+    # One ordinary request of the page (the tested value inert), then the proof's own payload,
+    # placed in the page's query exactly as the browser proof places it.
     assert calls[0] == ("fetch", "http://shop.fixture.invalid/search?q=shakerscan")
     browsed = [call for call in calls if call[0] == "browser"]
     if available and status == 200:
-        assert browsed == [("browser", row["url"], "q", _xss_payload(CANDIDATE))]
+        sent = "http://shop.fixture.invalid/search?" + urllib.parse.urlencode({"q": _xss_payload(CANDIDATE)})
+        assert browsed == [("browser", sent)]
+        assert all(context.closed for context in contexts)
     else:
         assert browsed == []
 
