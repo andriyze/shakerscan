@@ -543,6 +543,17 @@ def test_paced_verifiers_carry_their_rate_and_headless_dalfox_does_not():
     assert "rate_bound" not in headless.enforcement_receipt()
 
 
+def test_only_a_full_paced_run_of_a_paced_verifier_gets_the_derived_rate():
+    from scan.external_process import paced_worker_rate_bound
+    paced = {"tool_name": "dalfox", "inputs": {"profile": "full", "workers": 3, "delay_ms": 1_000, "headless": False}}
+    assert paced_worker_rate_bound(paced) == {"rate_per_second": 4, "startup_burst": 3}
+    # A headless browser's requests are not paced by --delay; a batch attempt keeps its hard bound;
+    # another tool, or an unpaced run, has no derived rate.
+    for changed in ({"headless": True}, {"profile": "batch_attempt"}, {"delay_ms": 0}, {"workers": 0}):
+        assert paced_worker_rate_bound({**paced, "inputs": {**paced["inputs"], **changed}}) is None, changed
+    assert paced_worker_rate_bound({**paced, "tool_name": "katana"}) is None
+
+
 def test_a_malformed_rate_bound_fails_the_enforcement_contract():
     crawl = _plan("katana", {"http_requests": 1_500, "tool_wall_seconds": 300})
     receipt = {**crawl.enforcement_receipt(), "rate_bound": {"rate_per_second": 0}}
