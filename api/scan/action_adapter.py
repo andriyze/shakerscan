@@ -1316,7 +1316,8 @@ class DatabaseNeutralScanActionDispatcher:
         )
 
     def _skip(self, action: ScanAction, reason: str, *,
-              verify_selection: Mapping[str, Any] | None = None) -> CapabilityReceipt:
+              verify_selection: Mapping[str, Any] | None = None,
+              template_selection: Mapping[str, Any] | None = None) -> CapabilityReceipt:
         now = datetime.now(timezone.utc).isoformat()
         return self._receipt(
             action,
@@ -1328,6 +1329,7 @@ class DatabaseNeutralScanActionDispatcher:
                 "action_id": action.action_id,
                 "execution_started": False,
                 **({"verify_selection": dict(verify_selection)} if verify_selection else {}),
+                **({"template_selection": dict(template_selection)} if template_selection else {}),
             },
         )
 
@@ -4728,6 +4730,7 @@ class DatabaseNeutralScanActionDispatcher:
         worker_template_options = dict(template_options)
         args_template_options = dict(template_options)
         verify_selection = None
+        template_selection = None
         if tool == "nuclei" and action.capability_name == "templates.active_batch":
             mutation_tier = bool(
                 self.policy.allow_state_changing_http
@@ -4742,11 +4745,13 @@ class DatabaseNeutralScanActionDispatcher:
                 allow_exploit_classes=mutation_tier,
             )
             verify_selection = resolved.verify_selection
+            template_selection = resolved.selection_telemetry
             if resolved.skip_reason:
                 # Fail closed: the active selection could not be resolved (index
                 # unavailable, or no permitted template once intrusive/non-GET
                 # exclusions apply). Record a coverage gap, never a clean result.
-                return self._skip(action, resolved.skip_reason, verify_selection=verify_selection)
+                return self._skip(action, resolved.skip_reason, verify_selection=verify_selection,
+                                  template_selection=template_selection)
             worker_template_options = dict(resolved.worker_options)
             args_template_options = dict(resolved.capability_args)
         # An active sweep runs one window of the allowlist per attempt (a verify Scan runs its
@@ -6157,6 +6162,7 @@ class DatabaseNeutralScanActionDispatcher:
                 **({"carried_from_admission": admission_source} if admission_source else {}),
                 **({"carried_count": carried_count} if extends or admission_source else {}),
                 **({"verify_selection": dict(verify_selection)} if verify_selection else {}),
+                **({"template_selection": dict(template_selection)} if template_selection else {}),
             },
         )
 

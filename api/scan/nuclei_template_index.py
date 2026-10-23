@@ -13,6 +13,10 @@ selection by the methods it actually issues, so the executor can:
 
 * run only GET/HEAD templates when ``allow_state_changing_http`` is not granted;
 * additionally run non-GET templates when it is granted;
+* treat a credential-level template -- a default login, which can lock the accounts it
+  tries -- as needing that permission whatever its method: one tagged ``default-login``, or
+  one that puts a payload named like a username or password into a header or body
+  (``tomcat-default-login`` sends its password list by GET in an ``Authorization`` header);
 * always exclude ``intrusive`` (destructive) templates -- Scan policy has no
   dangerous/destructive tier that could authorize them (the ``intrusive`` risk
   tier in ``scan.authorization`` is a per-action dangerous-approval concept that
@@ -70,6 +74,17 @@ NEVER_REQUESTED_TEMPLATE_IDS = frozenset({"springboot-heapdump"})
 # The request target of a raw request: the token after the method, past any ``@`` annotations.
 _RAW_TARGET_RE = re.compile(r"\s*(?:@[^\n]*\n\s*)*\S+[ \t]+(\S+)")
 _PLACEHOLDER_RE = re.compile(r"\{\{\s*([^{}]*?)\s*\}\}")
+# A raw request's ``@`` annotations and request line; what follows is its headers and body.
+_RAW_REQUEST_LINE_RE = re.compile(r"\s*(?:@[^\n]*\n\s*)*[^\n]*")
+# A payload set is named like a username or password when one word of its name is one of
+# these (``username``, ``pass``, ``aem_user``, ``os_password``, ``adminPassword``).
+_CREDENTIAL_NAME_WORDS = frozenset({
+    "user", "users", "username", "usernames", "login", "logins",
+    "pass", "passwd", "password", "passwords", "pwd", "pw",
+})
+_NAME_WORD_RE = re.compile(r"[A-Z]?[a-z0-9]+|[A-Z]+(?![a-z])")
+_IDENTIFIER_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+CREDENTIAL_LEVEL_TAG = "default-login"
 
 
 @dataclass(frozen=True)
@@ -92,10 +107,15 @@ class _TemplateRecord:
     # Requests a path ``is_never_requested`` refuses, in a path, a raw request line, or once a
     # payload or variable value is put into one.
     never_requested: bool = False
+    # Tries logins: tagged ``default-login``, or puts a payload named like a username or
+    # password into a header or body. A login attempt can lock the account it tries, so it
+    # needs the state-changing permission even when every request is a GET.
+    credential_level: bool = False
 
     @property
     def state_changing(self) -> bool:
-        return bool(self.methods - _SAFE_METHODS)
+        """Needs ``allow_state_changing_http``: a non-GET/HEAD method, or credential-level."""
+        return bool(self.methods - _SAFE_METHODS) or self.credential_level
 
 
 @dataclass(frozen=True)
@@ -122,9 +142,29 @@ class ActiveNucleiSelection:
     intrusive_excluded: int
     oob_excluded: int = 0
     never_requested_excluded: int = 0
+    # Credential-level templates (default logins) among the eligible ones, whether or not the
+    # permission they need was granted; they are counted in ``state_changing_count`` as well.
+    credential_level_count: int = 0
     # Verify Scans only: which requested checks ran, which did not and why, and which ran but
     # cannot give a reliable "not matched". Recorded on the step's receipt.
     verify_selection: Mapping[str, Any] | None = None
+
+    def telemetry(self) -> dict[str, Any]:
+        """The counts a step's receipt records: what matched, what ran and what was held back.
+
+        Credential-level templates are counted as ``default_login``: a receipt masks every
+        key named like credential material, and this is a count, not a secret."""
+        return {
+            "matched": self.total_matched,
+            "selected": len(self.template_ids),
+            "get_only": self.get_only_count,
+            "state_changing": self.state_changing_count,
+            "default_login": self.credential_level_count,
+            "includes_state_changing": self.includes_state_changing,
+            "intrusive_excluded": self.intrusive_excluded,
+            "never_requested_excluded": self.never_requested_excluded,
+            **({"oob_excluded": self.oob_excluded} if self.oob_excluded else {}),
+        }
 
 
 _INDEX_CACHE: dict[tuple[str, int], NucleiMethodIndex] = {}
@@ -256,6 +296,46 @@ def _filled(target: str, fill: Mapping[str, str]) -> str:
     return _PLACEHOLDER_RE.sub(lambda match: fill.get(match.group(1), ""), target)
 
 
+def _credential_named(name: Any) -> bool:
+    return any(
+        word.lower() in _CREDENTIAL_NAME_WORDS
+        for part in re.split(r"[^A-Za-z0-9]+", str(name))
+        for word in _NAME_WORD_RE.findall(part)
+    )
+
+
+def _references(text: Any, names: frozenset[str]) -> bool:
+    """Whether a ``{{...}}`` expression in ``text`` uses one of ``names`` (``{{password}}``,
+    ``{{base64(username + ':' + password)}}``)."""
+    return any(
+        names.intersection(_IDENTIFIER_RE.findall(match.group(1)))
+        for match in _PLACEHOLDER_RE.finditer(str(text))
+    )
+
+
+def _sends_credential_payload(document: Mapping[str, Any]) -> bool:
+    """Whether a request puts a payload named like a username or password into a header or
+    body: a raw request's text after its request line, or a structured request's ``headers``
+    and ``body``. A payload used only in a path enumerates, it does not sign in."""
+    requests = document.get("http") or document.get("requests") or []
+    if not isinstance(requests, list):
+        return False
+    for request in requests:
+        if not isinstance(request, Mapping) or not isinstance(request.get("payloads"), Mapping):
+            continue
+        names = frozenset(str(name) for name in request["payloads"] if _credential_named(name))
+        if not names:
+            continue
+        raws = request.get("raw") if isinstance(request.get("raw"), list) else []
+        headers = request.get("headers") if isinstance(request.get("headers"), Mapping) else {}
+        sent = [str(raw)[_RAW_REQUEST_LINE_RE.match(str(raw)).end():] for raw in raws]
+        sent.extend(str(value) for value in headers.values())
+        sent.append(str(request.get("body") or ""))
+        if any(_references(text, names) for text in sent):
+            return True
+    return False
+
+
 def _parse_ignore(templates_dir: str) -> tuple[frozenset[str], frozenset[str]]:
     path = os.path.join(templates_dir, ".nuclei-ignore")
     if yaml is None:
@@ -335,6 +415,8 @@ def build_nuclei_method_index(templates_dir: str) -> NucleiMethodIndex:
                     key in document for key in ("code", "javascript", "flow")),
                 never_requested=_requests_never_requested_path(
                     document, templates_dir, dirpath, payload_files),
+                credential_level=(
+                    CREDENTIAL_LEVEL_TAG in tags or _sends_credential_payload(document)),
             )
             prior = records.get(template_id)
             if prior is not None:
@@ -350,6 +432,7 @@ def build_nuclei_method_index(templates_dir: str) -> NucleiMethodIndex:
                     redirects=prior.redirects or record.redirects,
                     exploit_class=prior.exploit_class or record.exploit_class,
                     never_requested=prior.never_requested or record.never_requested,
+                    credential_level=prior.credential_level or record.credential_level,
                 )
             records[template_id] = record
     return NucleiMethodIndex(
@@ -428,6 +511,7 @@ def resolve_active_nuclei_selection(
     state_changing: list[str] = []
     intrusive_excluded = 0
     never_requested_excluded = 0
+    credential_level = 0
     for record in matched:
         if record.intrusive:
             # Destructive templates need more than state-changing permission, and
@@ -440,6 +524,7 @@ def resolve_active_nuclei_selection(
             continue
         if not _TEMPLATE_ID_RE.match(record.template_id):
             continue
+        credential_level += int(record.credential_level)
         if record.state_changing:
             state_changing.append(record.template_id)
         else:
@@ -456,6 +541,7 @@ def resolve_active_nuclei_selection(
             state_changing_count=len(state_changing),
             intrusive_excluded=intrusive_excluded,
             never_requested_excluded=never_requested_excluded,
+            credential_level_count=credential_level,
         )
     includes_state_changing = allow_state_changing_http and bool(state_changing)
     return ActiveNucleiSelection(
@@ -466,6 +552,7 @@ def resolve_active_nuclei_selection(
         state_changing_count=len(state_changing),
         intrusive_excluded=intrusive_excluded,
         never_requested_excluded=never_requested_excluded,
+        credential_level_count=credential_level,
     )
 
 
@@ -483,6 +570,7 @@ def _exact_selection(index: NucleiMethodIndex, exact_ids: frozenset[str], *,
     ran: list[str] = []
     unreliable: list[str] = []
     state_changing = 0
+    credential_level = 0
     for template_id in sorted(exact_ids):
         record = by_id.get(template_id)
         if record is None or not _TEMPLATE_ID_RE.match(template_id):
@@ -496,11 +584,15 @@ def _exact_selection(index: NucleiMethodIndex, exact_ids: frozenset[str], *,
             excluded[template_id] = "never_requested_path"
         elif record.exploit_class and not allow_exploit_classes:
             excluded[template_id] = "exploit_class_needs_exploit_tier"
+        elif record.credential_level and not allow_state_changing_http:
+            credential_level += 1
+            excluded[template_id] = "credential_level_needs_state_changing_http"
         elif record.state_changing and not allow_state_changing_http:
             excluded[template_id] = "needs_state_changing_http"
         else:
             ran.append(template_id)
             state_changing += int(record.state_changing)
+            credential_level += int(record.credential_level)
             if record.redirects:
                 unreliable.append(template_id)
     selection = {"requested": sorted(exact_ids), "ran": ran, "excluded": excluded,
@@ -518,5 +610,6 @@ def _exact_selection(index: NucleiMethodIndex, exact_ids: frozenset[str], *,
         oob_excluded=sum(1 for reason in excluded.values() if reason == "needs_oob_interaction"),
         never_requested_excluded=sum(
             1 for reason in excluded.values() if reason == "never_requested_path"),
+        credential_level_count=credential_level,
         verify_selection=selection,
     )

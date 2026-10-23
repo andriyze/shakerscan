@@ -389,6 +389,12 @@ the Scan's lowered ceilings (`advanced.max_http_requests`, `advanced.max_state_c
 so it resolves exactly as the submission will.
 Permission and work are reported separately: the scan page's Testing tile names the active
 families that ran, or warns that active testing was allowed but no active family was selected.
+Without state-changing HTTP, `nuclei_active` runs only templates whose every request is a GET or
+HEAD, and never a template that tries logins: one tagged `default-login`, or one that puts a
+payload named like a username or password into a header or body, needs that permission even when
+it sends only GETs, because a login attempt can lock the account it tries. A verify Scan lists such
+a check as `credential_level_needs_state_changing_http`, and the step's receipt counts the
+selection (`template_selection`: matched, selected, state-changing, `default_login`, excluded).
 
 **DNS posture over a limited forwarder.** `dns.inspect` asks the system resolver first. When a
 query times out and the bound host is a public name on public addresses, the same query is retried

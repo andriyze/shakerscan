@@ -6,6 +6,8 @@ verbatim from the pinned ProjectDiscovery bundle:
 * ``squid-analysis-report-generator`` -- GET only (exposure/high)
 * ``django-debug-exposure`` -- ``method: POST`` (exposure/high)
 * ``bloofoxcms-default-login`` -- raw-request POST (default-login/high)
+* ``tomcat-default-login`` -- raw-request GET (default-login/high) that sends payload
+  usernames and passwords in an ``Authorization`` header: a login attempt by GET
 * ``put-method-enabled`` -- raw ``PUT``, tagged ``intrusive`` (misconfig/high)
 * ``springboot-heapdump`` -- GET only (exposure,misconfig/critical), but requests
   ``/heapdump`` and ``/actuator/heapdump``, which a Scan never requests
@@ -50,6 +52,7 @@ def test_index_classifies_methods_and_intrusive_from_real_templates():
         "squid-analysis-report-generator",
         "django-debug-exposure",
         "bloofoxcms-default-login",
+        "tomcat-default-login",
         "put-method-enabled",
         "springboot-heapdump",
     }
@@ -58,6 +61,15 @@ def test_index_classifies_methods_and_intrusive_from_real_templates():
     assert not by_id["squid-analysis-report-generator"].state_changing
     assert by_id["django-debug-exposure"].state_changing  # method: POST
     assert by_id["bloofoxcms-default-login"].state_changing  # raw-request POST
+    # A default login sent by GET is still a login attempt: credential-level, so it needs the
+    # state-changing permission whatever its method.
+    tomcat = by_id["tomcat-default-login"]
+    assert tomcat.methods == frozenset({"GET"})
+    assert tomcat.credential_level and tomcat.state_changing
+    assert by_id["bloofoxcms-default-login"].credential_level
+    assert not any(by_id[name].credential_level for name in (
+        "squid-analysis-report-generator", "django-debug-exposure", "put-method-enabled",
+        "springboot-heapdump"))
     assert by_id["put-method-enabled"].intrusive  # raw PUT, tagged intrusive
     heapdump = by_id["springboot-heapdump"]
     assert heapdump.never_requested and not heapdump.state_changing and not heapdump.intrusive
@@ -75,6 +87,10 @@ def test_unauthorized_selection_excludes_post_raw_and_intrusive_templates():
     assert "django-debug-exposure" not in selection.template_ids
     assert "bloofoxcms-default-login" not in selection.template_ids
     assert "put-method-enabled" not in selection.template_ids
+    # Nor a default login that sends its passwords by GET.
+    assert "tomcat-default-login" not in selection.template_ids
+    assert selection.credential_level_count == 2
+    assert selection.state_changing_count == 3
     assert selection.intrusive_excluded == 1
     # GET-only, critical and tagged exposure/misconfig, but it requests /heapdump.
     assert "springboot-heapdump" not in selection.template_ids
@@ -91,7 +107,9 @@ def test_authorized_selection_includes_post_but_still_excludes_intrusive():
         "squid-analysis-report-generator",
         "django-debug-exposure",
         "bloofoxcms-default-login",
+        "tomcat-default-login",
     }
+    assert selection.credential_level_count == 2
     # A destructive template needs more than state-changing permission, which
     # Scan has no tier to grant, so it is excluded even when authorized.
     assert "put-method-enabled" not in selection.template_ids
@@ -293,3 +311,124 @@ def test_release_candidate_runs_the_pinned_bundle_test_in_the_scanner_image():
     assert "tests/test_nuclei_template_index.py" in script
     # The same candidate bytes are checked before the wire acceptance and publication.
     assert names.index(check["name"]) < names.index("Enforce candidate-image external wire ceilings")
+
+
+_CREDENTIAL_TEMPLATE = """id: {template_id}
+info:
+  name: synthetic unit fixture
+  severity: high
+  tags: {tags}
+http:
+{body}"""
+
+
+_CREDENTIAL_FORMS = {
+    # Tagged default-login: credential-level whatever it sends.
+    "tagged-get": ("default-login", "  - method: GET\n    path:\n      - '{{BaseURL}}/manager/html'\n", True),
+    # A username/password payload put into a header of a raw GET.
+    "raw-header": ("exposure", "  - raw:\n      - |\n        GET /admin HTTP/1.1\n        Host: {{Hostname}}\n"
+                   "        Authorization: Basic {{base64(username + ':' + password)}}\n"
+                   "    payloads:\n      username:\n        - admin\n      password:\n        - admin\n", True),
+    # ... into a structured request's header.
+    "structured-header": ("misconfig", "  - method: GET\n    path:\n      - '{{BaseURL}}/api'\n"
+                          "    headers:\n      X-Api-User: '{{user}}'\n      X-Api-Pass: '{{pass}}'\n"
+                          "    payloads:\n      user:\n        - admin\n      pass:\n        - admin\n", True),
+    # ... into a raw request's body.
+    "raw-body": ("exposure", "  - raw:\n      - |\n        GET /login HTTP/1.1\n        Host: {{Hostname}}\n\n"
+                 "        login={{admin_user}}&secret={{admin_password}}\n"
+                 "    payloads:\n      admin_user:\n        - admin\n      admin_password:\n        - admin\n", True),
+    # A username list that only names paths enumerates accounts; it signs in as nobody.
+    "username-in-path": ("exposure", "  - method: GET\n    path:\n      - '{{BaseURL}}/users/{{username}}'\n"
+                         "    payloads:\n      username:\n        - admin\n", False),
+    # ... and so does one in a raw request line.
+    "raw-username-in-path": ("exposure", "  - raw:\n      - |\n        GET /users/{{username}} HTTP/1.1\n"
+                             "        Host: {{Hostname}}\n"
+                             "    payloads:\n      username:\n        - admin\n", False),
+    # A header payload that is not named like a username or password.
+    "other-header-payload": ("exposure", "  - method: GET\n    path:\n      - '{{BaseURL}}/'\n"
+                             "    headers:\n      X-Forwarded-Host: '{{host}}'\n"
+                             "    payloads:\n      host:\n        - example.test\n", False),
+}
+
+
+@pytest.mark.parametrize("template_id", sorted(_CREDENTIAL_FORMS))
+def test_a_login_attempt_by_get_needs_the_state_changing_permission(tmp_path, template_id):
+    # Synthetic unit fixtures: one GET-only template per credential rule.
+    tags, body, credential_level = _CREDENTIAL_FORMS[template_id]
+    _write_template(tmp_path, f"http/{template_id}.yaml",
+                    _CREDENTIAL_TEMPLATE.format(template_id=template_id, tags=tags, body=body))
+    (record,) = build_nuclei_method_index(str(tmp_path)).templates
+    assert not record.methods - {"GET", "HEAD"}
+    assert record.credential_level is credential_level
+    plain = resolve_active_nuclei_selection(str(tmp_path), allow_state_changing_http=False)
+    authorized = resolve_active_nuclei_selection(str(tmp_path), allow_state_changing_http=True)
+    assert (template_id in plain.template_ids) is not credential_level
+    assert template_id in authorized.template_ids
+    assert authorized.includes_state_changing is credential_level
+    assert plain.credential_level_count == authorized.credential_level_count == int(credential_level)
+
+
+def test_a_verify_scan_runs_a_default_login_check_only_with_state_changing_permission():
+    plain = resolve_active_nuclei_selection(
+        str(FIXTURES), allow_state_changing_http=False, only_template_ids="tomcat-default-login")
+    assert plain.skip is True and plain.template_ids == ()
+    assert plain.verify_selection["excluded"] == {
+        "tomcat-default-login": "credential_level_needs_state_changing_http"}
+    authorized = resolve_active_nuclei_selection(
+        str(FIXTURES), allow_state_changing_http=True, only_template_ids="tomcat-default-login")
+    assert authorized.template_ids == ("tomcat-default-login",)
+    assert authorized.includes_state_changing is True
+    assert authorized.credential_level_count == 1
+
+
+def test_the_reviewed_passive_pack_holds_no_default_login():
+    # Hunt and the passive family run only this pack, whatever their permissions.
+    from scan.work_manifests import CANONICAL_PASSIVE_NUCLEI_TEMPLATES
+
+    assert all("default-login" not in row[4] for row in CANONICAL_PASSIVE_NUCLEI_TEMPLATES)
+
+
+#: Templates in the pinned bundle's active selection that send only GET or HEAD requests but
+#: are credential-level (tagged default-login, or sending a username or password payload in a
+#: header or body). Before 2.11.1 they ran without the state-changing permission.
+PINNED_BUNDLE_GET_ONLY_CREDENTIAL_LEVEL = 47
+
+
+def test_pinned_bundle_default_logins_run_only_with_state_changing_permission():
+    """Image test: the pinned bundle the scanner image installs (``NUCLEI_TEMPLATES``)."""
+    if "NUCLEI_TEMPLATES" not in os.environ:
+        pytest.skip("requires the pinned Nuclei template bundle of the scanner image")
+    bundle = str(nuclei_templates_directory())
+    index = nuclei_template_index._cached_index(bundle)
+    by_id = {record.template_id: record for record in index.templates}
+    tomcat = by_id["tomcat-default-login"]
+    assert tomcat.methods == frozenset({"GET"}) and tomcat.credential_level
+    plain = resolve_active_nuclei_selection(bundle, allow_state_changing_http=False)
+    authorized = resolve_active_nuclei_selection(bundle, allow_state_changing_http=True)
+    selected = set(authorized.template_ids)
+    moved = {
+        template_id for template_id in selected
+        if by_id[template_id].credential_level and not by_id[template_id].methods - {"GET", "HEAD"}
+    }
+    assert len(moved) == PINNED_BUNDLE_GET_ONLY_CREDENTIAL_LEVEL
+    assert "tomcat-default-login" in moved
+    assert not {
+        template_id for template_id in plain.template_ids if by_id[template_id].credential_level}
+    assert plain.credential_level_count == authorized.credential_level_count
+    assert authorized.credential_level_count == sum(
+        1 for template_id in selected if by_id[template_id].credential_level)
+
+
+@pytest.mark.parametrize("login_first", [True, False])
+def test_a_shared_template_id_is_credential_level_when_any_template_carrying_it_is(tmp_path, login_first):
+    # Synthetic unit fixtures: `-id` runs both, so the GET default login keeps the id behind
+    # the permission even though its sibling only reads a page, whichever is read first.
+    tags = ("default-login", "exposure") if login_first else ("exposure", "default-login")
+    for name, tags in zip(("a", "b"), tags):
+        _write_template(tmp_path, f"http/{name}/shared.yaml", _CREDENTIAL_TEMPLATE.format(
+            template_id="shared-login", tags=tags,
+            body="  - method: GET\n    path:\n      - '{{BaseURL}}/" + name + "'\n"))
+    (record,) = build_nuclei_method_index(str(tmp_path)).templates
+    assert record.methods == frozenset({"GET"}) and record.credential_level
+    plain = resolve_active_nuclei_selection(str(tmp_path), allow_state_changing_http=False)
+    assert plain.skip is True and plain.template_ids == ()

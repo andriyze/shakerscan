@@ -189,9 +189,15 @@ def test_unauthorized_active_batch_runs_only_get_templates(monkeypatch):
     assert "django-debug-exposure" not in ids       # method: POST
     assert "bloofoxcms-default-login" not in ids     # raw-request POST
     assert "put-method-enabled" not in ids           # intrusive
+    assert "tomcat-default-login" not in ids         # a default login, sent by GET
     assert options["nuclei_active_state_changing"] is False
     assert "state_changing_requests" not in captured["requested_budget"]
     assert receipt.budget_consumed.get("state_changing_requests", 0) == 0
+    # The receipt says what the selection held back and why.
+    assert receipt.redacted_execution["template_selection"] == {
+        "matched": 6, "selected": 1, "get_only": 1, "state_changing": 3, "default_login": 2,
+        "includes_state_changing": False, "intrusive_excluded": 1, "never_requested_excluded": 1,
+    }
 
 
 def test_authorized_active_batch_runs_post_templates_and_settles_mutations(monkeypatch):
@@ -212,8 +218,12 @@ def test_authorized_active_batch_runs_post_templates_and_settles_mutations(monke
     options = captured["scanner_options"]
     ids = set(options["template_ids"].split(","))
     assert {"django-debug-exposure", "bloofoxcms-default-login"} <= ids  # POST now runs
+    assert "tomcat-default-login" in ids                                 # and the GET login
     assert "put-method-enabled" not in ids                               # intrusive stays out
     assert options["nuclei_active_state_changing"] is True
+    assert receipt.redacted_execution["template_selection"]["selected"] == 4
+    assert receipt.redacted_execution["template_selection"]["default_login"] == 2
+    assert receipt.redacted_execution["template_selection"]["includes_state_changing"] is True
     sub_budget = captured["requested_budget"]
     assert sub_budget.get("state_changing_requests", 0) > 0
     assert sub_budget["state_changing_requests"] == sub_budget["http_requests"]
@@ -263,23 +273,23 @@ HOLD = {"http_requests": 120, "state_changing_requests": 120, "tool_wall_seconds
 
 def test_endpoint_attempts_rotate_through_the_whole_active_allowlist(monkeypatch):
     # Every attempt used to get the full allowlist and, cut off by its wall, ran the same
-    # first tenth of it on every endpoint. With windows of one template, three endpoints
-    # run three different templates and together cover the allowlist exactly once.
+    # first tenth of it on every endpoint. With windows of one template, one endpoint per
+    # template runs a different template each and together they cover the allowlist once.
     from scan import nuclei_execution
     full_receipt, full = _drive(monkeypatch, policy=AUTHORIZED, requested_budget=HOLD)
     allowlist = full["scanner_options"]["template_ids"].split(",")
     assert full_receipt.status == "success" and len(allowlist) >= 3
-    monkeypatch.setattr(nuclei_execution, "ACTIVE_TEMPLATE_WINDOW_SIZE", -(-len(allowlist) // 3))
-    receipt, captured = _drive(monkeypatch, policy=AUTHORIZED, requested_budget=HOLD,
-                               paths=("/", "/a", "/b"))
+    monkeypatch.setattr(nuclei_execution, "ACTIVE_TEMPLATE_WINDOW_SIZE", 1)
+    paths = tuple(f"/{index}" for index in range(len(allowlist)))
+    receipt, captured = _drive(monkeypatch, policy=AUTHORIZED, requested_budget=HOLD, paths=paths)
     assert receipt.status == "success"
     windows = [call["template_ids"].split(",") for call in captured["calls"]]
-    assert len(windows) == 3
+    assert len(windows) == len(allowlist)
     assert sorted(item for window in windows for item in window) == sorted(allowlist)
-    assert all(window for window in windows) and len({tuple(w) for w in windows}) == 3
+    assert all(window for window in windows) and len({tuple(w) for w in windows}) == len(allowlist)
     recorded = sorted(item["template_window"]["index"]
                       for item in captured["backend"].attempts["active.templates"].values())
-    assert recorded == [0, 1, 2]
+    assert recorded == list(range(len(allowlist)))
 
 
 def test_template_window_partitions_deterministically():
@@ -297,3 +307,22 @@ def test_template_window_partitions_deterministically():
         active_template_window("", 0)
     with pytest.raises(ValueError):
         active_template_window("a,b", -1)
+
+
+def test_a_bundle_of_default_logins_alone_records_why_nothing_ran(monkeypatch, tmp_path):
+    # Without the state-changing permission a GET default login is held back; the gap
+    # receipt names the reason and the count.
+    destination = tmp_path / "http" / "tomcat-default-login.yaml"
+    destination.parent.mkdir()
+    destination.write_bytes(next(FIXTURES.rglob("tomcat-default-login.yaml")).read_bytes())
+    receipt, captured = _drive(
+        monkeypatch,
+        policy=ScanPolicy(active_testing=True, approval_receipt_id="approval-1"),
+        requested_budget={"http_requests": 120, "tool_wall_seconds": 45},
+        templates_dir=str(tmp_path),
+    )
+    assert receipt.status == "skipped"
+    assert "no_eligible_nuclei_templates" in receipt.errors
+    assert "scanner_options" not in captured
+    selection = receipt.redacted_execution["template_selection"]
+    assert selection["selected"] == 0 and selection["default_login"] == 1

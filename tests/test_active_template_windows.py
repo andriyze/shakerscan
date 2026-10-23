@@ -152,13 +152,13 @@ def test_a_window_retry_hold_is_capped_by_what_the_lane_leaves_of_the_ledger():
 @pytest.mark.parametrize("profile", ["thorough", "deep"])
 def test_without_state_changing_http_a_host_plans_the_get_only_allowlists_windows(profile):
     """Without state-changing authority every position runs the GET-only allowlist, which has
-    26 windows on the pinned bundle. Planning 39 held 13 positions (1,560 requests, 585 s) that
+    24 windows on the pinned bundle. Planning 39 held 15 positions (1,800 requests, 675 s) that
     could only run nothing, and a deadline that cut them read the family as partial."""
     planned = _plan_rounds(profile, endpoints=2, state_changing=False)
     actions = [action for number in planned for action in planned[number]]
     assert {action.capability_args["manifest_entries"] for action in actions} == {
         ACTIVE_TEMPLATE_PLANNED_GET_ONLY_WINDOWS,
-    } == {26}
+    } == {24}
     covered = sorted(
         position for action in actions
         for position in range(
@@ -166,7 +166,7 @@ def test_without_state_changing_http_a_host_plans_the_get_only_allowlists_window
             action.capability_args["slice"]["start"] + action.capability_args["slice"]["count"],
         )
     )
-    assert covered == list(range(26))
+    assert covered == list(range(24))
     assert all("state_changing_requests" not in action.requested_budget for action in actions)
 
 @pytest.mark.parametrize("profile", ["fast", "balanced"])

@@ -56,6 +56,7 @@ const INCONCLUSIVE: Record<string, string> = {
   needs_redirects: 'the check follows redirects, which Scans disable, so a non-match is not reliable',
   exploit_class_needs_exploit_tier: 'the check is exploit-class and the Scan had no state-changing authority',
   needs_state_changing_http: 'the check sends non-GET requests and the Scan had no state-changing authority',
+  credential_level_needs_state_changing_http: 'the check tries default logins, which can lock accounts, and the Scan had no state-changing authority',
   intrusive: 'the check is intrusive and never runs in a Scan',
   not_in_template_bundle: 'the check is not in this release’s template bundle',
   not_every_check_requested: 'the Scan did not request every check for this CVE',

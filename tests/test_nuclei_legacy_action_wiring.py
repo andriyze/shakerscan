@@ -130,6 +130,7 @@ def test_authorized_legacy_nuclei_preserves_post_and_caps_traffic_to_mutation_ho
     options = captured["scanner_options"]
     assert set(options["template_ids"].split(",")) == {
         "squid-analysis-report-generator", "django-debug-exposure", "bloofoxcms-default-login",
+        "tomcat-default-login",
     }
     assert options["nuclei_active_state_changing"] is True
     assert "put-method-enabled" not in options["template_ids"]

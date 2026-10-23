@@ -23,6 +23,9 @@ class ActiveScanNucleiOptions:
     worker_options: Mapping[str, Any]
     skip_reason: str | None = None
     verify_selection: Mapping[str, Any] | None = None
+    # The selection's counts (matched, selected, state-changing, credential-level, excluded),
+    # recorded on the step's receipt so a held-back default login is visible.
+    selection_telemetry: Mapping[str, Any] | None = None
 
 
 def resolve_active_scan_nuclei_options(
@@ -45,6 +48,7 @@ def resolve_active_scan_nuclei_options(
         return ActiveScanNucleiOptions(
             {}, {}, selection.skip_reason or "not_applicable",
             verify_selection=selection.verify_selection,
+            selection_telemetry=selection.telemetry(),
         )
     worker_options = {
         "severity": template_options.get("severity", "high,critical"),
@@ -61,7 +65,10 @@ def resolve_active_scan_nuclei_options(
         for key in ("severity", "template_pack_digest")
         if key in template_options
     }
-    return ActiveScanNucleiOptions(capability_args, worker_options, verify_selection=selection.verify_selection)
+    return ActiveScanNucleiOptions(
+        capability_args, worker_options, verify_selection=selection.verify_selection,
+        selection_telemetry=selection.telemetry(),
+    )
 
 
 #: Active templates one attempt is given. Measured on the 2.11 scanner image (pinned
