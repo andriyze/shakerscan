@@ -86,6 +86,7 @@ NOT_REUSABLE = [
     ("http.request", {"method": "GET", "path": "/r/ab12CD34ef56GH78"}),
     ("http.request", {"method": "GET", "path": "/u/4821/pin/4821"}),
     ("http.request", {"method": "GET", "path": "/p/7Hq2xK9m"}),
+    ("http.request", {"method": "GET", "path": "/s/abcdefghIJKL.mnopqrstUVWX.yzabcdEFGH"}),  # signed-token shape
     # Any origin other than the Hunt target's own host, such as a granted destination.
     ("http.request", {"method": "GET", "path": "/health", "origin": "https://other.test"}),
     ("web.crawl", {"origin": "https://api.app.test"}),

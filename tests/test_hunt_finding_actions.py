@@ -375,6 +375,11 @@ def test_a_finding_location_is_stored_in_one_canonical_spelling(target, observed
 def test_an_invalid_port_is_refused(path):
     with pytest.raises(HuntFindingActionError):
         _finding_url("https://example.test", path)
+    # Evidence or a frozen origin on an invalid port does not admit it either.
+    with pytest.raises(HuntFindingActionError):
+        _finding_url("https://example.test", path, [path])
+    with pytest.raises(HuntFindingActionError):
+        _finding_url("host://example.test", "/x", [path])
 
 
 def test_a_finding_spelled_differently_is_the_same_record():
