@@ -350,7 +350,9 @@ class ControlPlaneExecutionAdapter(_InlineAdapter):
         # admission (D26: a verification that ran 3 s held its whole 180 s against
         # the Hunt's duration).
         if unstarted:
-            actual: dict[str, int] = {}
+            # Proven to have consumed nothing: release every hold explicitly, because the ledger
+            # keeps the hold of any dimension a settlement leaves out.
+            actual: dict[str, int] = {str(dimension): 0 for dimension in self._requested_budget}
         elif self._conservative_full_budget:
             actual = dict(self._requested_budget)
             if self._measured_wall:

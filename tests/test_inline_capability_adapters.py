@@ -432,7 +432,12 @@ def test_a_finding_record_that_already_existed_or_was_refused_spends_no_record_u
     assert _execute(specification, adapter(created), requested).actual_budget == {"candidates": 1}
     assert _execute(specification, adapter(existing), requested).actual_budget == {"candidates": 0}
     refusal = _execute(specification, adapter(refused), requested)
-    assert refusal.status == "blocked" and refusal.actual_budget == {}
+    assert refusal.status == "blocked" and refusal.execution_started is False
+    # The ledger keeps the hold of any dimension a settlement leaves out, so a refused write must
+    # release its unit explicitly.
+    from runtime.budgets import reconcile_budget_snapshot
+    for result in (refusal, _execute(specification, adapter(existing), requested)):
+        assert reconcile_budget_snapshot({"candidates": 1}, requested, result.actual_budget) == {"candidates": 0}
 
 
 def test_collection_control_adapter_refunds_wall_time_for_a_guard_block():
