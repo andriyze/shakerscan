@@ -6,6 +6,7 @@ and compliance mappings. Extracted from scanner.py for better maintainability.
 """
 from __future__ import annotations
 
+import math
 import re
 from datetime import datetime, UTC
 from typing import Any
@@ -347,6 +348,22 @@ def soc2_mapping(finding: dict[str, Any]) -> list[str]:
     return sorted(list(matched_criteria))
 
 
+def _cvss_score(finding: dict[str, Any]) -> float:
+    """A finding's CVSS score as a number: 0 when it has none (a verified XSS: CWE-79 has no
+    universal vector) or one that is not a finite number; a numeric string is read."""
+    value = finding.get("cvss_score")
+    if isinstance(value, bool) or value in (None, ""):
+        return 0
+    if isinstance(value, (int, float)):
+        number = value
+    else:
+        try:
+            number = float(str(value).strip())
+        except ValueError:
+            return 0
+    return number if math.isfinite(number) else 0
+
+
 def grade(report: dict[str, Any]) -> dict[str, Any]:
     """Calculate security grade for a scan report.
 
@@ -611,8 +628,7 @@ def grade(report: dict[str, Any]) -> dict[str, Any]:
     # Collect CVSS scores and compliance data
     raw_cvss_scores = []
     for finding in findings:
-        # A finding may carry no score (a verified XSS: CWE-79 has no universal vector).
-        cvss = finding.get("cvss_score") or 0
+        cvss = _cvss_score(finding)
         if cvss > 0:
             raw_cvss_scores.append(cvss)
             owasp_cat = finding.get("owasp", "")[:8] if finding.get("owasp") else ""

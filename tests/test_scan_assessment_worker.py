@@ -4,6 +4,8 @@ import json
 import uuid
 from datetime import datetime, timezone
 
+import pytest
+
 from tests import test_worker_scan_ai_gating as cases
 
 
@@ -129,4 +131,24 @@ def test_the_summary_grader_accepts_a_finding_without_a_cvss_score():
          "cwe": "CWE-693", "url": "https://example.test/"},
     ]})
     assert graded["cvss_metrics"] == {"average": 3.0, "maximum": 3.0, "scores": [3.0]}
+    assert "2 issue(s) found" in graded["summary"]
+
+
+@pytest.mark.parametrize("score,counted", [
+    ("7.5", 7.5), (7, 7), ("N/A", None), ("", None), ("nan", None), ("inf", None), (True, None),
+])
+def test_the_summary_grader_reads_a_score_given_as_text_and_skips_one_it_cannot_read(score, counted):
+    # Unit fixtures: a stored score may be a numeric string; an unreadable one counts as none
+    # rather than failing the grader (the merge would then keep a shard's summary).
+    from grading import grade
+
+    graded = grade({"target": "https://example.test", "result": {}, "findings": [
+        {"title": "Finding A", "severity": "medium", "cvss_score": score, "cwe": "CWE-79",
+         "url": "https://example.test/a"},
+        {"title": "Finding B", "severity": "low", "cvss_score": 3.0, "cwe": "CWE-693",
+         "url": "https://example.test/"},
+    ]})
+    expected = sorted([value for value in (counted, 3.0) if value is not None], reverse=True)
+    assert graded["cvss_metrics"]["scores"] == expected
+    assert graded["cvss_metrics"]["maximum"] == expected[0]
     assert "2 issue(s) found" in graded["summary"]
