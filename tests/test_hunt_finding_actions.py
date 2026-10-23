@@ -46,30 +46,38 @@ class _Pool:
 
 class _Connection:
     def __init__(self, *, expose_evidence: bool = True, target_url="https://example.test/app",
-                 observed_urls=(), status="active", completed_at=None, admitted_origins=()):
+                 observed_urls=(), status="active", completed_at=None, admitted_origins=(),
+                 device=False, device_results=()):
         self.hunt_id = uuid.uuid4()
         self.target_id = uuid.uuid4()
         self.finding_id = uuid.uuid4()
+        self.device = device
+        # Labelled fixture: result summaries of cited device.http.probe actions.
+        self.device_results = device_results
         self.expose_evidence = expose_evidence
         self.insert_args = None
         self.target_url, self.observed_urls = target_url, observed_urls
         self.status, self.completed_at = status, completed_at
         self.admitted_origins = admitted_origins
         self.fingerprints = set()
+        self.locks = []
 
     def transaction(self):
         return _Transaction()
 
     async def fetchrow(self, query, *args):
         if "FROM hunt_runs" in query:
+            self.locks.append("hunt")
+            target = ({"kind": "device", "locator": self.target_url} if self.device
+                      else {"url": self.target_url, "origins": self.admitted_origins})
             return {
                 "id": self.hunt_id,
                 "status": self.status,
                 "completed_at": self.completed_at,
-                "target_kind": "web",
-                "target_id": self.target_id,
-                "device_target_id": None,
-                "context_pack": {"target": {"url": self.target_url, "origins": self.admitted_origins}},
+                "target_kind": "device" if self.device else "web",
+                "target_id": None if self.device else self.target_id,
+                "device_target_id": self.target_id if self.device else None,
+                "context_pack": {"target": target},
             }
         if "INSERT INTO findings" in query:
             self.insert_args = args
@@ -85,13 +93,19 @@ class _Connection:
     async def fetch(self, query, *args):
         if "FROM http_transactions" in query:
             return [{"url": url} for url in self.observed_urls]
+        if "FROM hunt_actions" in query and "result_summary" in query:
+            assert "device.http.probe" in query
+            return [{"result_summary": summary} for summary in self.device_results]
         if "FROM hunt_actions" in query:
             return [{"id": action_id} for action_id in args[1]] if self.expose_evidence else []
         raise AssertionError(query)
 
     async def execute(self, query, *args):
-        if query.lstrip().startswith("UPDATE targets"):
+        if query.lstrip().startswith(("UPDATE targets", "UPDATE device_targets")):
             return "UPDATE 1"
+        if "FOR NO KEY UPDATE" in query:
+            self.locks.append("device_target" if "FROM device_targets" in query else "target")
+            return "SELECT 1"
         raise AssertionError(query)
 
 
@@ -192,6 +206,93 @@ def test_relative_network_finding_requires_an_unambiguous_evidenced_service():
 def test_network_finding_rejects_unevidenced_or_cross_asset_service(path):
     with pytest.raises(HuntFindingActionError):
         _finding_url("host://tv.test", path, ["http://tv.test:8081/"])
+
+
+@pytest.mark.parametrize("observed,path,expected", [
+    # The inventory's own service is among those evidenced: a relative path stays on it.
+    (("https://example.test/a", "https://example.test:8443/b"), "/other", "https://example.test/other"),
+    (("http://example.test/login", "https://example.test/login"), "/login", "https://example.test/login"),
+    # Only another service is evidenced: the relative path follows it.
+    (("https://example.test:8443/admin",), "/admin", "https://example.test:8443/admin"),
+])
+def test_a_relative_path_prefers_the_inventory_service_when_it_is_evidenced(observed, path, expected):
+    assert _finding_url("https://example.test", path, observed) == expected
+
+
+@pytest.mark.parametrize("locator,observed,path,expected", [
+    ("192.168.1.20", ("http://192.168.1.20:8080/admin",), "/admin", "http://192.168.1.20:8080/admin"),
+    ("192.168.1.20", ("http://192.168.1.20:8080/admin",), "http://192.168.1.20:8080/admin",
+     "http://192.168.1.20:8080/admin"),
+    ("router.local", ("https://router.local/status",), "/status", "https://router.local/status"),
+    ("2001:db8::5", ("http://[2001:db8::5]:8080/admin",), "/admin", "http://[2001:db8::5]:8080/admin"),
+    ("[2001:db8::5]", ("http://[2001:0db8:0::5]:8080/admin",), "/admin", "http://[2001:db8::5]:8080/admin"),
+    ("2001:db8::5", ("https://[2001:db8::5]/x",), "https://[2001:db8::5]/admin", "https://[2001:db8::5]/admin"),
+])
+def test_a_device_locator_is_a_host_whose_evidenced_service_takes_the_finding(locator, observed, path, expected):
+    assert _finding_url(locator, path, observed) == expected
+
+
+@pytest.mark.parametrize("locator,observed,path", [
+    ("192.168.1.20", ("http://192.168.1.20:8080/admin",), "http://192.168.1.21:8080/admin"),
+    ("192.168.1.20", ("http://192.168.1.20:8080/admin",), "http://192.168.1.20:8081/admin"),
+    ("192.168.1.20", (), "/admin"),
+    ("192.168.1.20", ("http://192.168.1.20:8080/", "https://192.168.1.20/"), "/admin"),
+    ("2001:db8::5", ("http://[2001:db8::5]:8080/",), "http://[2001:db8::6]:8080/admin"),
+])
+def test_a_device_finding_stays_on_an_evidenced_service_of_the_device(locator, observed, path):
+    with pytest.raises(HuntFindingActionError):
+        _finding_url(locator, path, observed)
+
+
+def test_a_device_hunt_saves_a_path_finding_on_its_evidenced_service():
+    connection = _Connection(target_url="192.168.1.20", device=True,
+                             observed_urls=("http://192.168.1.20:8080/admin",))
+    _create(connection, evidence_action_id=uuid.uuid4(), path="/admin")
+    assert connection.insert_args[0] is None and connection.insert_args[1] == connection.target_id
+    assert connection.insert_args[7] == "http://192.168.1.20:8080/admin"
+
+
+def test_a_device_http_probe_cited_as_evidence_names_its_service():
+    connection = _Connection(target_url="192.168.1.20", device=True, device_results=(
+        {"ok": True, "data": {"origin": "http://192.168.1.20:8080", "path": "/admin"}},
+        json.dumps({"ok": True, "data": {"origin": "http://192.168.1.20:8080"}}),
+        {"ok": True, "data": {"origin": 7}}, "not json", None,
+    ))
+    _create(connection, evidence_action_id=uuid.uuid4(), path="/admin")
+    assert connection.insert_args[7] == "http://192.168.1.20:8080/admin"
+
+
+@pytest.mark.parametrize("admitted", [(123,), ({"origin": "https://example.test:8443"},), ("http://[::1",),
+                                       "https://example.test:8443"])
+def test_malformed_frozen_origins_are_refused_as_input_errors(admitted):
+    connection = _Connection(target_url="https://example.test", admitted_origins=admitted)
+    with pytest.raises(HuntFindingActionError, match="frozen"):
+        _create(connection, evidence_action_id=uuid.uuid4(), path="https://example.test:8443/admin")
+
+
+def test_a_malformed_archive_url_is_ignored_rather_than_refusing_the_finding():
+    assert _finding_url("https://example.test", "/admin", ["http://[::1", "https://example.test:8443/admin"]) == (
+        "https://example.test:8443/admin")
+
+
+def test_a_host_asset_resolves_a_relative_path_like_its_absolute_url():
+    origins = ["https://tv.test:8443"]
+    assert _finding_url("host://tv.test", "https://tv.test:8443/status", [], origins) == "https://tv.test:8443/status"
+    assert _finding_url("host://tv.test", "/status", [], origins) == "https://tv.test:8443/status"
+    with pytest.raises(HuntFindingActionError, match="absolute URL"):
+        _finding_url("host://tv.test", "/status", [], ["https://tv.test:8443", "http://tv.test:8081"])
+    with pytest.raises(HuntFindingActionError):
+        _finding_url("host://tv.test", "/status", [], [])
+
+
+@pytest.mark.parametrize("device", [False, True])
+def test_a_finding_write_locks_its_target_before_its_hunt(device):
+    """Operator retractions lock the target, then the Hunt; a finding write takes the same order,
+    so the two cannot deadlock."""
+    connection = _Connection(target_url="192.168.1.20" if device else "https://example.test", device=device,
+                             observed_urls=("http://192.168.1.20:8080/admin",) if device else ())
+    _create(connection, evidence_action_id=uuid.uuid4())
+    assert connection.locks[:3] == ["target", "device_target", "hunt"]
 
 
 def test_finding_capabilities_cannot_accept_verification_or_proof_fields():

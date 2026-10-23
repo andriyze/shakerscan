@@ -8,6 +8,7 @@ only path that can promote a finding to verified.
 from __future__ import annotations
 
 import hashlib
+import ipaddress
 import json
 from typing import Any, Mapping, Sequence
 import urllib.parse
@@ -46,49 +47,126 @@ def _bounded_text(value: Any, label: str, *, maximum: int, required: bool = Fals
     return str(redact_text(text)) if text else None
 
 
+_HTTP_PORTS = {"http": 80, "https": 443}
+_RELATIVE_NEEDS_ORIGIN = "Use an absolute URL for an evidenced HTTP service"
+_FROZEN_MALFORMED = "The Hunt's frozen target origins are malformed; cite an evidenced service instead"
+
+
+def _host_key(host: Any) -> str | None:
+    """One spelling per host: lower case, unbracketed, an IPv6 address compressed."""
+    text = str(host or "").strip().lower()
+    if text.startswith("[") and text.endswith("]"):
+        text = text[1:-1]
+    try:
+        return str(ipaddress.ip_address(text))
+    except ValueError:
+        return text.rstrip(".") or None
+
+
+def _origin(url: Any) -> tuple[str, str | None, int | None]:
+    """(scheme, host, port) of an HTTP(S) URL. Raises ValueError for anything else."""
+    if not isinstance(url, str):
+        raise ValueError("an origin is a URL string")
+    parsed = urllib.parse.urlsplit(url)
+    if parsed.username or parsed.password:
+        raise ValueError("userinfo is not allowed")
+    scheme = parsed.scheme.lower()
+    host = _host_key(parsed.hostname)
+    if scheme not in _HTTP_PORTS or not host:
+        raise ValueError("an origin is an http(s) URL with a host")
+    return scheme, host, parsed.port or _HTTP_PORTS[scheme]
+
+
+def _origin_root(origin: tuple[str, str | None, int | None]) -> str:
+    scheme, host, port = origin
+    shown = f"[{host}]" if host and ":" in host else host
+    return f"{scheme}://{shown}{'' if port == _HTTP_PORTS[scheme] else f':{port}'}/"
+
+
+def _target_host(target_url: str) -> tuple[str | None, tuple[str, str | None, int | None] | None]:
+    """The Hunt target's host, and its HTTP origin when the locator is a URL.
+
+    A ``host://`` asset and a device locator (a bare host name or IP literal, IPv6 with or
+    without brackets) are hosts: they name no HTTP service of their own.
+    """
+    text = str(target_url or "").strip()
+    if text.lower().startswith("host://"):
+        return _host_key(urllib.parse.urlsplit("http://" + text[len("host://"):]).hostname), None
+    if "://" in text:
+        origin = _origin(text)
+        return origin[1], origin
+    if not text or any(character in text for character in "/?#@ "):
+        raise ValueError("the Hunt target is neither a URL nor a host")
+    return _host_key(text), None
+
+
+def _frozen_origins(values: Any) -> list[tuple[str, str | None, int | None]]:
+    """The origins frozen in the Hunt context; malformed ones refuse the write (never a 500)."""
+    if values is None:
+        return []
+    if isinstance(values, (str, bytes)) or not isinstance(values, (list, tuple)):
+        raise HuntFindingActionError(_FROZEN_MALFORMED)
+    try:
+        return [_origin(value) for value in values]
+    except ValueError as exc:
+        raise HuntFindingActionError(_FROZEN_MALFORMED) from exc
+
+
+def _evidenced(urls: Sequence[Any], host: str | None, path: str | None = None) -> set[tuple[str, str | None, int | None]]:
+    """Services on the target host that answered a cited action; an unparseable record proves none."""
+    services = set()
+    for url in urls:
+        try:
+            origin = _origin(url)
+            if origin[1] == host and (path is None or urllib.parse.urlsplit(url).path == path):
+                services.add(origin)
+        except ValueError:
+            continue
+    return services
+
+
 def _finding_url(target_url: str, path: Any, observed_urls: Sequence[str] = (),
-                 admitted_origins: Sequence[str] = ()) -> str:
+                 admitted_origins: Any = ()) -> str:
+    """The finding's location, bound to a service the Hunt may name.
+
+    A relative path takes the inventory's own service when it is among the evidenced ones (or
+    nothing is evidenced), else the single evidenced service on the target host; a host target
+    (``host://`` asset or device) with no evidence takes its single frozen origin. Several
+    candidates need an absolute URL. An absolute URL must be the inventory service, an evidenced
+    one or a frozen one, on the target host.
+    """
     value = str(path or "").strip()
     if not value:
         return target_url
     if len(value) > 2_000:
         raise HuntFindingActionError("path exceeds 2000 characters")
+    admitted_values = _frozen_origins(admitted_origins)
     try:
-        base = urllib.parse.urlsplit(target_url)
-        def origin(url: str) -> tuple[str, str | None, int | None]:
-            parsed = urllib.parse.urlsplit(url)
-            if parsed.username or parsed.password:
-                raise ValueError("userinfo is not allowed")
-            return parsed.scheme.lower(), parsed.hostname, parsed.port or ({"http": 80, "https": 443}.get(parsed.scheme.lower()))
-        observed = {origin(url) for url in observed_urls if urllib.parse.urlsplit(url).hostname == base.hostname}
-        admitted = {origin(url) for url in admitted_origins if urllib.parse.urlsplit(url).hostname == base.hostname}
+        host, base = _target_host(target_url)
+        observed = _evidenced(observed_urls, host)
+        admitted = {origin for origin in admitted_values if origin[1] == host}
         supplied = urllib.parse.urlsplit(value)
         if not supplied.scheme and not supplied.netloc:
-            # A relative location belongs to the cited service, which may differ from
-            # the inventory's default port. Never silently attach :8443 evidence to :443.
-            matching = {origin(url) for url in observed_urls
-                        if urllib.parse.urlsplit(url).hostname == base.hostname
-                        and urllib.parse.urlsplit(url).path == supplied.path}
-            services = matching or observed
-            if len(services) > 1 or (not services and base.scheme not in {"http", "https"}):
-                raise HuntFindingActionError("Use an absolute URL for an evidenced HTTP service")
-            if services:
-                scheme, host, port = next(iter(services))
-                host = f"[{host}]" if host and ":" in host else host
-                default_port = {"http": 80, "https": 443}.get(scheme)
-                suffix = f":{port}" if port != default_port else ""
-                target_url = f"{scheme}://{host}{suffix}/"
-        resolved = urllib.parse.urlsplit(urllib.parse.urljoin(target_url, value))
-        permitted = origin(urllib.parse.urlunsplit(resolved)) in {origin(target_url), *observed, *admitted}
+            # A relative location belongs to the cited service, which may differ from the
+            # inventory's default port: never silently attach :8443 evidence to :443.
+            services = _evidenced(observed_urls, host, supplied.path) or observed
+            if base is not None and (base in services or not services):
+                resolved_url = urllib.parse.urljoin(target_url, value)
+            elif len(services) == 1:
+                resolved_url = urllib.parse.urljoin(_origin_root(next(iter(services))), value)
+            elif not services and len(admitted) == 1:
+                resolved_url = urllib.parse.urljoin(_origin_root(next(iter(admitted))), value)
+            else:
+                raise HuntFindingActionError(_RELATIVE_NEEDS_ORIGIN)
+        else:
+            resolved_url = value
+        resolved = urllib.parse.urlsplit(resolved_url)
+        permitted = _origin(resolved_url) in {base, *observed, *admitted} - {None}
     except HuntFindingActionError:
         raise
     except ValueError as exc:
-        raise HuntFindingActionError("Finding path is not a valid target URL") from exc
-    if (
-        resolved.scheme.lower() not in {"http", "https"}
-        or resolved.hostname != base.hostname
-        or not permitted
-    ):
+        raise HuntFindingActionError("Finding path must remain on the Hunt target origin") from exc
+    if not permitted:
         raise HuntFindingActionError("Finding path must remain on the Hunt target origin")
     return urllib.parse.urlunsplit(
         (resolved.scheme, resolved.netloc, resolved.path or "/", resolved.query, "")
@@ -139,6 +217,18 @@ async def _refuse_operator_decided(conn: Any, finding_id: uuid.UUID) -> None:
 
 
 async def _locked_run(conn: Any, hunt_id: uuid.UUID) -> Any:
+    # Lock order: the Hunt's target row, then the Hunt row, as operator retractions and decisions
+    # take them. The target lock is FOR NO KEY UPDATE, the lock the finding-count refresh needs.
+    await conn.execute(
+        """SELECT 1 FROM targets WHERE id=(SELECT target_id FROM hunt_runs WHERE id=$1)
+           FOR NO KEY UPDATE OF targets""",
+        hunt_id,
+    )
+    await conn.execute(
+        """SELECT 1 FROM device_targets WHERE id=(SELECT device_target_id FROM hunt_runs WHERE id=$1)
+           FOR NO KEY UPDATE OF device_targets""",
+        hunt_id,
+    )
     run = await conn.fetchrow(
         """SELECT id, status, completed_at, target_kind, target_id, device_target_id, context_pack, notes
            FROM hunt_runs WHERE id=$1 FOR UPDATE""",
@@ -158,11 +248,55 @@ def _refuse_quarantined(run: Any) -> None:
         raise HuntFindingActionError(QUARANTINE_MESSAGE)
 
 
-def _target_url(run: Any) -> str:
+def _context_target(run: Any) -> Mapping[str, Any]:
     raw = run["context_pack"]
-    context = json.loads(raw) if isinstance(raw, str) else dict(raw or {})
-    target = context.get("target") if isinstance(context.get("target"), Mapping) else {}
+    try:
+        context = json.loads(raw) if isinstance(raw, str) else raw
+    except ValueError:
+        context = None
+    context = context if isinstance(context, Mapping) else {}
+    return context.get("target") if isinstance(context.get("target"), Mapping) else {}
+
+
+def _target_url(run: Any) -> str:
+    target = _context_target(run)
     return str(target.get("url") or target.get("locator") or "").strip()
+
+
+def _probe_origin(summary: Any) -> str | None:
+    """The service a cited device HTTP probe reached, from its recorded result."""
+    if isinstance(summary, str):
+        try:
+            summary = json.loads(summary)
+        except ValueError:
+            return None
+    if not isinstance(summary, Mapping):
+        return None
+    data = summary.get("data") if isinstance(summary.get("data"), Mapping) else summary
+    origin = data.get("origin")
+    return origin if isinstance(origin, str) else None
+
+
+async def _evidenced_urls(conn: Any, run: Any, hunt_uuid: uuid.UUID, evidence_action_ids: Sequence[str]) -> list[str]:
+    """URLs that answered the cited actions: their HTTP archive, and a device probe's origin."""
+    action_ids = [uuid.UUID(value) for value in evidence_action_ids]
+    rows = await conn.fetch(
+        """SELECT DISTINCT url FROM http_transactions
+           WHERE hunt_run_id=$1 AND hunt_action_id=ANY($2::uuid[])
+             AND status_code IS NOT NULL AND error IS NULL""",
+        hunt_uuid, action_ids,
+    )
+    urls = [row["url"] for row in rows]
+    if run["device_target_id"] is not None:
+        # A device HTTP probe is recorded on the action, not in the HTTP archive.
+        probes = await conn.fetch(
+            """SELECT result_summary FROM hunt_actions
+               WHERE hunt_run_id=$1 AND id=ANY($2::uuid[])
+                 AND capability_name='device.http.probe' AND status IN ('completed','partial')""",
+            hunt_uuid, action_ids,
+        )
+        urls.extend(origin for origin in (_probe_origin(row["result_summary"]) for row in probes) if origin)
+    return urls
 
 
 async def _refresh_counts(conn: Any, run: Any) -> None:
@@ -216,17 +350,12 @@ async def create_hunt_finding(
                 values=values.get("evidence_action_ids") or (),
             )
             target_url = _target_url(run)
-            context = run["context_pack"]
-            context = json.loads(context) if isinstance(context, str) else dict(context or {})
-            admitted_origins = (context.get("target") or {}).get("origins") or ()
-            service_evidence = await conn.fetch(
-                """SELECT DISTINCT url FROM http_transactions
-                   WHERE hunt_run_id=$1 AND hunt_action_id=ANY($2::uuid[])
-                     AND status_code IS NOT NULL AND error IS NULL""",
-                hunt_uuid, [uuid.UUID(value) for value in evidence_action_ids],
+            target = _context_target(run)
+            finding_url = _finding_url(
+                target_url, values.get("path"),
+                await _evidenced_urls(conn, run, hunt_uuid, evidence_action_ids),
+                target.get("origins"),
             )
-            finding_url = _finding_url(target_url, values.get("path"),
-                                       [row["url"] for row in service_evidence], admitted_origins)
             fingerprint = hashlib.sha256(
                 json.dumps(
                     {
