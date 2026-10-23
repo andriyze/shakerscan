@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import hashlib
 import math
 import uuid
 
@@ -28,7 +29,7 @@ from scan.auth_endpoint_probe import (
 from scan.sqli_concurrency import CANDIDATE_CONCURRENCY_ARG
 from scan.sqli_stages import SQLI_TECHNIQUE_NEGATIVE_COST
 from scan.verification_extension import EXTENDS_ARG
-from scan.work_manifests import build_candidate_manifest, build_endpoint_manifest
+from scan.work_manifests import ScanWorkManifestKind, build_candidate_manifest, build_endpoint_manifest
 from tests.test_body_attempt_mutation_accounting import _enforcement
 from tests.test_scan_action_adapter import TARGET, Backend, _action, _dispatcher, _lease, _noop
 
@@ -560,6 +561,33 @@ def test_variants_of_one_form_keep_their_own_units_without_a_sign_in_profile():
     assert len(ran) == 3, sorted(ran)
     for (names, _content_type), done in ran.items():
         assert done == {(technique, field) for technique in "UBET" for field in names}, (names, done)
+
+
+def test_the_first_entry_of_a_candidate_id_keeps_the_attempt_id_earlier_builds_checkpointed():
+    """An attempt a worker of an earlier build checkpointed is named by the manifest, the family
+    and the candidate id alone; the first entry with that id still is, so it resumes instead of
+    being re-sent, and only the later variants get attempt ids of their own."""
+    backends = []
+
+    class Kept(_StoredOnce):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            backends.append(self)
+
+    receipts, _rounds, _record = _slice(*SQLI[:1], tool="sqlmap", parser="sqlmap-output/v1", sent=0,
+                                        options={}, routes=SIGN_IN_ROUTES,
+                                        runner=_overspending(1.0), backend_type=Kept)
+    (manifest,) = [item for item in backends[0].manifests.values()
+                   if item.kind is ScanWorkManifestKind.CANDIDATE]
+    digest = manifest.reference().manifest_digest
+    earlier = {
+        hashlib.sha256(f"{digest}:sqli:{candidate_id}".encode()).hexdigest()
+        for candidate_id in {entry["candidate_id"] for entry in manifest.entries}
+    }
+    attempts = {item["attempt_id"] for item in receipts[0].observations
+                if item.get("kind") == "candidate_attempt"}
+    assert len(manifest.entries) == 4 and len(earlier) == 2
+    assert earlier <= attempts and len(attempts) == 4, (earlier, attempts)
 
 
 def _answering_in(latency, *, sent):
