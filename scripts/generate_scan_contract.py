@@ -70,6 +70,7 @@ export interface ScanPublicContract {{
   }}>
   family_presets: Record<'passive' | 'standard_active' | 'custom', string[]>
   family_preset_profile_additions: Record<string, Record<string, string[]>>
+  family_preset_addition_floors: Record<string, Record<string, number>>
   passive_coverage: {{
     description: string
     baseline_capabilities: string[]

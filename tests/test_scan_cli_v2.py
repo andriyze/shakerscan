@@ -364,6 +364,43 @@ def test_the_terminal_says_which_families_run_and_how_to_add_active_templates(mo
     assert "thorough" in out and "deep" in out
 
 
+def _thorough_contract(*, floors=True):
+    contract = _contract()
+    contract["advanced_limits"] = [{
+        "name": name, "minimum": 0 if name == "max_state_changing_requests" else 1,
+        "profile_ceilings": {"thorough": 60_000, "deep": 150_000},
+    } for name in scan_cli.ADVANCED_FLAGS]
+    if floors:
+        contract["family_preset_addition_floors"] = {
+            "standard_active": {"max_http_requests": 8_000, "max_state_changing_requests": 8_000}}
+    return contract
+
+
+@pytest.mark.parametrize("floors", [True, False])
+def test_a_lowered_ceiling_on_thorough_says_why_the_active_templates_are_left_out(monkeypatch, capsys, floors):
+    """On thorough the standard active set runs them; only a lowered ceiling leaves them out, so the
+    hint names that ceiling instead of telling the operator the profile runs them."""
+    response = {"scan_id": "00000000-0000-0000-0000-000000000008", "status": "queued",
+                "family_preset": "standard_active",
+                "resolved_families": ["recon", "nuclei_passive", "xss", "sqli", "sensitive_exposure"]}
+
+    def request(url, *, payload=None, idempotency_key=None):
+        return _thorough_contract(floors=floors) if payload is None else dict(response)
+
+    monkeypatch.setattr(scan_cli, "_request_json", request)
+    assert scan_cli.main([
+        "--api-url", "http://api.test:8080", "--ui-url", "http://ui.test:3000",
+        "https://example.com", "--budget-profile", "thorough", "--active-testing", "--confirm-active",
+        "--max-http-requests", "5000",
+    ]) == 0
+    out = " ".join(capsys.readouterr().out.split())
+    assert "--include-family nuclei_active" in out
+    assert "runs them on --budget-profile thorough or deep" not in out
+    assert "ceiling" in out
+    if floors:
+        assert "--max-http-requests 5,000 is below 8,000" in out
+
+
 def test_no_active_template_hint_when_they_run_are_excluded_or_testing_is_passive(monkeypatch, capsys):
     response = {
         "scan_id": "00000000-0000-0000-0000-000000000005", "status": "queued",

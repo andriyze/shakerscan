@@ -345,6 +345,12 @@ export const SCAN_PUBLIC_CONTRACT_SNAPSHOT = {
       "risk_level": "medium"
     }
   ],
+  "family_preset_addition_floors": {
+    "standard_active": {
+      "max_http_requests": 8000,
+      "max_state_changing_requests": 8000
+    }
+  },
   "family_preset_profile_additions": {
     "standard_active": {
       "deep": [
@@ -430,6 +436,7 @@ export interface ScanPublicContract {
   }>
   family_presets: Record<'passive' | 'standard_active' | 'custom', string[]>
   family_preset_profile_additions: Record<string, Record<string, string[]>>
+  family_preset_addition_floors: Record<string, Record<string, number>>
   passive_coverage: {
     description: string
     baseline_capabilities: string[]

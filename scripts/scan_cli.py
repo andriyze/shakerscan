@@ -397,6 +397,39 @@ def _payload(args: argparse.Namespace) -> dict[str, Any]:
     }
 
 
+_CEILING_FLAGS = (
+    ("max_http_requests", "--max-http-requests"),
+    ("max_state_changing_requests", "--max-state-changing-requests"),
+)
+
+
+def _active_template_hint(args: argparse.Namespace, contract: dict[str, Any]) -> str:
+    """Why a Scan with active testing runs no active templates, and how to add them."""
+    if args.budget_profile not in {"thorough", "deep"}:
+        return ("Active templates (nuclei_active) are not in this set; add "
+                "--include-family nuclei_active to run them (the standard active set "
+                "runs them on --budget-profile thorough or deep).")
+    # On thorough and deep the standard set runs them unless a ceiling was lowered below what
+    # their sweep holds at admission (the contract's family_preset_addition_floors).
+    floors = (contract.get("family_preset_addition_floors") or {}).get("standard_active") or {}
+    advanced = getattr(args, "_advanced", {}) or {}
+    below = [
+        f"{flag} {int(advanced[name]):,} is below {int(floors[name]):,}"
+        for name, flag in _CEILING_FLAGS
+        if isinstance(advanced.get(name), int) and isinstance(floors.get(name), int)
+        and advanced[name] < floors[name]
+        and (name != "max_state_changing_requests" or args.allow_state_changing_http)
+    ]
+    reason = (
+        "a ceiling below what their sweep holds at admission leaves them out of the standard "
+        f"active set ({'; '.join(below)})" if below else
+        "a lowered request or mutation ceiling leaves them out of the standard active set"
+    )
+    return (f"Active templates (nuclei_active) are not in this set: {reason}. Raise the "
+            "ceiling, or add --include-family nuclei_active to ask for them anyway (admission "
+            "refuses them when the ceiling cannot hold their sweep).")
+
+
 def main(argv: list[str] | None = None, prog: str | None = None) -> int:
     parser = _parser(prog)
     args = parser.parse_args(argv)
@@ -467,9 +500,7 @@ def main(argv: list[str] | None = None, prog: str | None = None) -> int:
                     # The standard active set (here and in New Scan) runs the active templates on
                     # thorough and deep only; say how to add them rather than leave the operator
                     # to find out from the report. Not when they were excluded on purpose.
-                    print("Active templates (nuclei_active) are not in this set; add "
-                          "--include-family nuclei_active to run them (the standard active set "
-                          "runs them on --budget-profile thorough or deep).")
+                    print(_active_template_hint(args, contract))
             print(f"View progress at: {result['ui_url']}")
         return 0
     except ScanCliError as exc:

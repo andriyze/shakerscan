@@ -229,6 +229,17 @@ export default function NewScanPage() {
     familyPreset === 'custom' ? customFamilies : presetFamilies(familyPreset)
   )
 
+  // The ceilings that change which families resolve (a request or mutation ceiling lowered far
+  // below the profile's leaves the active templates out of the standard set), as whole numbers.
+  const previewCeilings = (['max_http_requests', 'max_state_changing_requests'] as const).reduce<Record<string, number>>(
+    (chosen, key) => {
+      const value = (limits[key] || '').trim()
+      if (/^\d+$/.test(value) && Number.isSafeInteger(Number(value))) chosen[key] = Number(value)
+      return chosen
+    }, {},
+  )
+  const previewCeilingsKey = JSON.stringify(previewCeilings)
+
   useEffect(() => {
     let cancelled = false
     // Drop the previous selection's answer so the local fallback shows the new preset at once;
@@ -236,6 +247,7 @@ export default function NewScanPage() {
     setContractPreview(null)
     setContractPreviewLoading(true)
     const timer = window.setTimeout(() => {
+      const advanced = JSON.parse(previewCeilingsKey) as Record<string, number>
       previewScanContract({
         preset: familyPreset,
         budget_profile: budgetProfile,
@@ -246,12 +258,13 @@ export default function NewScanPage() {
         network_discovery: networkDiscovery,
         subdomain_discovery: subdomainDiscovery,
         execution_topology: topology === 'parallel' ? 'parallel' : 'single_worker',
+        ...(Object.keys(advanced).length ? { advanced } : {}),
       })
         .then((preview) => { if (!cancelled) { setContractPreview(preview); setContractPreviewError(null); setContractPreviewLoading(false) } })
         .catch((cause) => { if (!cancelled) { setContractPreview(null); setContractPreviewError(cause instanceof Error ? cause.message : 'Preview unavailable'); setContractPreviewLoading(false) } })
     }, 150)
     return () => { cancelled = true; window.clearTimeout(timer) }
-  }, [familyPreset, budgetProfile, customFamilies, activeTesting, allowStateChanging, networkDiscovery, subdomainDiscovery, topology])
+  }, [familyPreset, budgetProfile, customFamilies, activeTesting, allowStateChanging, networkDiscovery, subdomainDiscovery, topology, previewCeilingsKey])
 
   /** Searchable choices for one lane; incompatible profiles stay visible with the reason. */
   function slotOptions(lane: 'primary' | 'secondary'): ComboboxOption[] {

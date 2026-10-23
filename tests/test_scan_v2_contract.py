@@ -370,19 +370,36 @@ def test_the_standard_active_set_runs_the_active_templates_on_thorough_and_deep(
 
 
 @pytest.mark.parametrize("profile", ["thorough", "deep"])
-def test_a_lowered_request_ceiling_keeps_the_standard_set_without_active_templates(profile):
-    """The sweep holds thousands of requests at admission: a lowered ceiling would refuse the Scan."""
-    lowered = resolve_scan_contract(budget_profile=profile, policy={"active_testing": True},
-                                    advanced={"max_http_requests": 3_000})
-    assert "nuclei_active" not in lowered.execution_plan.resolved_families
-    mutations = resolve_scan_contract(
-        budget_profile=profile, policy={"active_testing": True, "allow_state_changing_http": True},
-        advanced={"max_state_changing_requests": 2_000}, approval_receipt_id="approval-1")
-    assert "nuclei_active" not in mutations.execution_plan.resolved_families
+def test_a_ceiling_lowered_below_twice_the_sweeps_hold_keeps_the_standard_set_without_active_templates(profile):
+    """The sweep holds 4,000 requests (and as many mutations with state-changing HTTP) at admission;
+    a ceiling lowered below twice that keeps the standard set without the active templates."""
+    from scan.contracts import standard_active_template_floors
+
+    assert standard_active_template_floors(state_changing_allowed=False) == {"max_http_requests": 8_000}
+    assert standard_active_template_floors(state_changing_allowed=True) == {
+        "max_http_requests": 8_000, "max_state_changing_requests": 8_000}
+
+    def families(policy, advanced, receipt=None):
+        return resolve_scan_contract(budget_profile=profile, policy={"active_testing": True, **policy},
+                                     advanced=advanced, approval_receipt_id=receipt).execution_plan.resolved_families
+
+    ceiling = BUDGET_PROFILES[profile].max_http_requests
+    # A ceiling lowered a little, or to twice the hold, keeps them.
+    for kept in (ceiling - 1, 10_000, 8_000):
+        assert "nuclei_active" in families({}, {"max_http_requests": kept}), kept
+    for dropped in (7_999, 4_500, 3_000):
+        assert "nuclei_active" not in families({}, {"max_http_requests": dropped}), dropped
+    state_changing = {"allow_state_changing_http": True}
+    mutations = BUDGET_PROFILES[profile].max_state_changing_requests
+    assert "nuclei_active" in families(state_changing, {"max_state_changing_requests": mutations}, "approval-1")
+    assert "nuclei_active" not in families(state_changing, {"max_state_changing_requests": 2_000}, "approval-1")
+    assert "nuclei_active" not in families(
+        state_changing, {"max_state_changing_requests": min(7_999, mutations - 1)}, "approval-1")
+    if mutations > 8_000:
+        assert "nuclei_active" in families(state_changing, {"max_state_changing_requests": 8_000}, "approval-1")
+    # A request ceiling at the hold's floor leaves the mutation ceiling at the profile's.
+    assert "nuclei_active" in families(state_changing, {"max_http_requests": max(8_000, mutations)}, "approval-1")
     # A lowered mutation ceiling without state-changing HTTP changes nothing the sweep holds.
-    get_only = resolve_scan_contract(budget_profile=profile, policy={"active_testing": True},
-                                     advanced={"max_state_changing_requests": 0})
-    assert "nuclei_active" in get_only.execution_plan.resolved_families
-    named = resolve_scan_contract(budget_profile=profile, policy={
-        "active_testing": True, "include_families": ["nuclei_active"]}, advanced={"max_http_requests": 3_000})
-    assert "nuclei_active" in named.execution_plan.resolved_families
+    assert "nuclei_active" in families({}, {"max_state_changing_requests": 0})
+    # Naming them still adds them at any ceiling.
+    assert "nuclei_active" in families({"include_families": ["nuclei_active"]}, {"max_http_requests": 3_000})
