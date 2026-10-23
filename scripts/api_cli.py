@@ -181,10 +181,12 @@ def _person_decision():
 
 
 def with_person_decision(request: urllib.request.Request, api_url: str, token: str | None, *,
-                         timeout: float, call=call) -> tuple[int, str]:
+                         timeout: float, sender=None) -> tuple[int, str]:
     """Send ``request``; when an Enterprise gateway refuses it for a person's security-key touch,
     complete the touch in the person's own terminal and send it again once (person_decision.py).
-    Without a terminal, PersonDecisionRefused (exit 3)."""
+    Without a terminal, PersonDecisionRefused (exit 3). ``sender`` defaults to this module's
+    ``call`` as it is when the request is sent."""
+    call = sender or globals()["call"]
     seen: dict = {}
     status, text = call(request, timeout=timeout, headers_out=seen)
     decision = _person_decision()
