@@ -56,8 +56,11 @@ pre-fill zero-valued ceilings merely to make a request look explicit: doing so c
 turn a usable Hunt into a no-op. Supply a lower ceiling only when the operator actually asks for
 one.
 
-**Budgets: do not starve the Hunt.** Leave `budgets` empty: the profile defaults are sized for
-mapping and then testing. Never lower `max_http_requests` below what discovery needs: one
+**Budgets: do not starve the Hunt.** Leave `budgets` empty: the profile defaults are sized so that
+calls, approval-gated calls, verifications, browser actions and HTTP requests cannot run out before
+the profile's duration, so never ask for more of them in advance. Only the duration and the safety
+ceilings (TCP ports, state-changing requests, hosts, UDP ports, out-of-band interactions, device
+fragility) can stop planned work. Never lower `max_http_requests` below what discovery needs: one
 `web.crawl` and one `web.content_discover` reserve about 370 requests together, and an agent that
 set 300, then 180, skipped content discovery and missed every exposed `/.env`, `/.git` and backup
 file. The start response's `budget_warnings` names each capability the limits leave unable to run
@@ -65,7 +68,7 @@ even once. At a profile's defaults the usual web work (log in, crawl, discover c
 record) draws none; a default warning names a safety ceiling such as TCP ports or state-changing
 requests. If you lowered a limit and the warning says `restart_fixes_it: true`, start again without
 lowering it. Ask the operator for a budget raise only when your plan needs the capability a warning
-names (for example `ports.discover` on `fast`); otherwise carry on. A warning with
+or a refusal names (for example `ports.discover` on `fast`); otherwise carry on. A warning with
 `restart_fixes_it: false` is above even the profile's start maximum: only a budget raise the person
 approves can let that capability run. Map first, then narrow.
 

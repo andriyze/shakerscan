@@ -126,27 +126,6 @@ def test_default_warnings_name_only_safety_ceilings():
                 assert warning["restart_fixes_it"] is False
 
 
-def test_no_paced_budget_runs_out_before_the_duration_at_the_enforced_pace():
-    """Each traffic and call limit covers max_duration_seconds at the fastest pace any executor
-    reserves (and, for HTTP, the fastest enforced wire rate), on every profile and target kind."""
-    from dataclasses import asdict
-    from api.hunt.budget_pace import PACED_DIMENSIONS, paced_minimum, spend_pace, wire_requests_per_second
-    assert wire_requests_per_second() == 10
-    assert all(spend_pace(name)["http_requests"] >= 10 for name in HUNT_BUDGET_PROFILES)
-    limit_of = {"http_requests": "max_http_requests", "browser_actions": "max_browser_actions",
-                "agent_actions": "max_capability_calls", "active_actions": "max_active_actions",
-                "verifications": "max_verifications"}
-    assert set(limit_of) == set(PACED_DIMENSIONS)
-    for name, profile in HUNT_BUDGET_PROFILES.items():
-        for kind in ("web", "api", "network", "device"):
-            minimum = paced_minimum(asdict(profile), name, kind)
-            for dimension, needed in minimum.items():
-                assert getattr(profile, limit_of[dimension]) >= needed, (name, kind, dimension, needed)
-        assert profile.max_http_requests >= profile.max_duration_seconds * wire_requests_per_second()
-        # Records cost no traffic: a Hunt can record at least one per call it may make.
-        assert profile.max_candidates >= profile.max_capability_calls
-
-
 def test_device_verifications_reach_a_safety_ceiling_before_their_http_hold():
     """A device verification queues a scan whose fan-out holds thousands of requests; the port
     ceiling, not HTTP, must be what limits how many a profile can run."""

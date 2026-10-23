@@ -119,29 +119,31 @@ class HuntBudget:
         }
 
 
-# Call, traffic and verification limits cover the whole duration at the fastest pace any executor
-# reserves (hunt/budget_pace.py: 10 requests, 0.3 browser actions, one call per 5 s and one
-# verification per 60 s of wall), so they cannot run out before the clock. Approval-gated calls
-# may use the whole call allowance; each one still checks its approval receipt. Records cost no
-# traffic and get at least one per call. The safety ceilings (TCP ports, state-changing requests,
-# device fragility, hosts, UDP ports, out-of-band interactions) are not paced and keep their values.
+# Call, traffic and verification limits cover the whole duration at the most one call can be
+# charged per second of the wall it settles (hunt/budget_pace.py): every call that runs settles at
+# least one second, so one call, one approval-gated call and one verification per second, a login
+# check's 32 browser actions and 128 requests per second. No paced limit runs out before the clock.
+# Approval-gated calls may use the whole call allowance; each one still checks its approval
+# receipt. Records cost no traffic and no wall and get one per call. The safety ceilings (TCP
+# ports, state-changing requests, device fragility, hosts, UDP ports, out-of-band interactions)
+# are not paced and keep their values.
 HUNT_BUDGET_PROFILES: Mapping[str, HuntBudget] = {
     "fast": HuntBudget(
-        max_duration_seconds=3_600, max_capability_calls=750, max_http_requests=40_000,
-        max_active_actions=750, max_candidates=1_000, max_verifications=60, max_tcp_ports=100,
-        max_browser_actions=1_200, max_state_changing_requests=4, max_device_fragility_points=20,
+        max_duration_seconds=3_600, max_capability_calls=3_600, max_http_requests=460_800,
+        max_active_actions=3_600, max_candidates=3_600, max_verifications=3_600, max_tcp_ports=100,
+        max_browser_actions=115_200, max_state_changing_requests=4, max_device_fragility_points=20,
         max_hosts=50, max_udp_ports=100, max_oob_interactions=10,
     ),
     "balanced": HuntBudget(
-        max_duration_seconds=14_400, max_capability_calls=3_000, max_http_requests=150_000,
-        max_active_actions=3_000, max_candidates=5_000, max_verifications=250, max_tcp_ports=1_200,
-        max_browser_actions=4_500, max_state_changing_requests=20, max_device_fragility_points=100,
+        max_duration_seconds=14_400, max_capability_calls=14_400, max_http_requests=1_843_200,
+        max_active_actions=14_400, max_candidates=14_400, max_verifications=14_400, max_tcp_ports=1_200,
+        max_browser_actions=460_800, max_state_changing_requests=20, max_device_fragility_points=100,
         max_hosts=500, max_udp_ports=1_000, max_oob_interactions=50,
     ),
     "thorough": HuntBudget(
-        max_duration_seconds=86_400, max_capability_calls=18_000, max_http_requests=900_000,
-        max_active_actions=18_000, max_candidates=20_000, max_verifications=1_500, max_tcp_ports=10_000,
-        max_browser_actions=26_000, max_state_changing_requests=80, max_device_fragility_points=500,
+        max_duration_seconds=86_400, max_capability_calls=86_400, max_http_requests=11_059_200,
+        max_active_actions=86_400, max_candidates=86_400, max_verifications=86_400, max_tcp_ports=10_000,
+        max_browser_actions=2_764_800, max_state_changing_requests=80, max_device_fragility_points=500,
         max_hosts=5_000, max_udp_ports=5_000, max_oob_interactions=200,
     ),
 }
