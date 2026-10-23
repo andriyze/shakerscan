@@ -75,17 +75,23 @@ SCAN_FAMILY_PRESETS: Mapping[str, tuple[str, ...]] = {
 # every active-template window, so their standard active set runs the active templates too; a
 # fast or balanced one does not, and an operator adds them there with include_families. The
 # sweep holds thousands of requests at admission (and one mutation for each when state-changing
-# HTTP is allowed), so a Scan whose operator lowered the request or mutation ceiling below twice
-# that hold (``standard_active_template_floors``) keeps the standard set without them, and is
+# HTTP is allowed), so a Scan whose operator lowered the request or mutation ceiling below its
+# floor (``standard_active_template_floors``) keeps the standard set without them, and is
 # admitted exactly as before; naming nuclei_active still adds them.
 SCAN_FAMILY_PRESET_PROFILE_ADDITIONS: Mapping[str, Mapping[str, tuple[str, ...]]] = {
     "standard_active": {"thorough": ("nuclei_active",), "deep": ("nuclei_active",)},
 }
-# A lowered ceiling keeps the active templates down to this many times the sweep's own admission
-# hold. On a bare target admission refuses the sweep below about 4,450 requests or 4,000 mutations
-# (the hold plus the Scan's mandatory admission traffic); a Scan's sign-ins and collection replays
-# add to that traffic, so the preset keeps twice the hold rather than its measured edge.
+# A lowered request ceiling keeps the active templates down to this many times the sweep's own
+# admission hold. On a bare target admission refuses the sweep below about 4,450 requests (the hold
+# plus the Scan's mandatory admission traffic); a Scan's sign-ins and collection replays add to that
+# traffic, so the preset keeps twice the hold rather than its measured edge.
 STANDARD_ACTIVE_TEMPLATE_HEADROOM = 2
+# A lowered mutation ceiling keeps them down to this percentage of the sweep's mutation hold. The
+# sweep is the only mutation the Scan holds at admission, so admission refuses it only below the
+# hold itself (4,000, with sign-ins and collection replays too); twice the hold would be above
+# thorough's own 6,000, so a ceiling lowered from it by one mutation dropped the sweep the profile's
+# own ceiling runs. A quarter above the hold (5,000) stays under every profile that adds them.
+STANDARD_ACTIVE_TEMPLATE_MUTATION_PERCENT = 125
 _ACTIVE_TEMPLATE_SWEEP = "templates.active_batch"
 
 
@@ -99,7 +105,7 @@ def standard_active_template_floors(*, state_changing_allowed: bool) -> dict[str
     floors = {"max_http_requests": STANDARD_ACTIVE_TEMPLATE_HEADROOM * int(hold["http_requests"])}
     if state_changing_allowed:
         floors["max_state_changing_requests"] = (
-            STANDARD_ACTIVE_TEMPLATE_HEADROOM * int(hold["state_changing_requests"])
+            STANDARD_ACTIVE_TEMPLATE_MUTATION_PERCENT * int(hold["state_changing_requests"]) // 100
         )
     return floors
 

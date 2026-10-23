@@ -2,9 +2,10 @@
 
 The active-template sweep holds 4,000 requests (and as many mutations with state-changing HTTP)
 at admission, so a Scan whose operator lowered its request or mutation ceiling far enough is
-refused at submission if the set still names them. The preset keeps them down to twice that hold
-(``standard_active_template_floors``) and drops them below it. Every ceiling at which it keeps them
-is admitted by the real admission compile; naming ``nuclei_active`` adds them at any ceiling and
+refused at submission if the set still names them. The preset keeps them down to its floors
+(``standard_active_template_floors``: twice the request hold, a quarter above the mutation hold)
+and drops them below. Every ceiling at which it keeps them is admitted by the real admission
+compile, with two sign-in profiles; naming ``nuclei_active`` adds them at any ceiling and
 admission then decides, as before.
 """
 from __future__ import annotations
@@ -17,7 +18,11 @@ from api.scan.work_manifests import build_canonical_scan_nuclei_template_manifes
 from tests.test_scan_continuation import SCAN_ID, _target
 
 HTTP = (8_000, 8_001, 10_000, 20_000, 59_999, 60_000, 100_000, 149_999)
-MUTATIONS = (4_000, 7_999, 8_000, 10_000, 14_999)
+MUTATIONS = (4_000, 4_999, 5_000, 5_001, 5_999, 6_000, 7_999, 8_000, 10_000, 14_999)
+SIGN_INS = (
+    {"profile_id": "profile-1", "scan_lane": "primary", "profile_version": 1, "auth_kind": "form_login"},
+    {"profile_id": "profile-2", "scan_lane": "secondary", "profile_version": 1, "auth_kind": "form_login"},
+)
 
 
 def _admit(contract) -> None:
@@ -27,7 +32,7 @@ def _admit(contract) -> None:
         include_active="nuclei_active" in contract.execution_plan.resolved_families,
     )
     _compile_scan_admission_action_authority(
-        scan_id=SCAN_ID, scan_contract=contract, target_binding=target,
+        scan_id=SCAN_ID, scan_contract=contract, target_binding=target, credential_refs=SIGN_INS,
         template_manifest_ref=template.reference().canonical_dict(),
     )
 
@@ -68,4 +73,19 @@ def test_the_profile_defaults_admit_the_active_templates(profile):
             approval_receipt_id="approval-1",
         )
         assert "nuclei_active" in contract.execution_plan.resolved_families
+        _admit(contract)
+
+
+@pytest.mark.parametrize("profile", ["thorough", "deep"])
+def test_a_mutation_ceiling_lowered_toward_the_floor_keeps_what_the_profiles_own_runs(profile):
+    """thorough's own mutation ceiling (6,000) runs the sweep, so lowering it by any amount down to
+    the floor keeps the sweep too, and is admitted."""
+    mutations = BUDGET_PROFILES[profile].max_state_changing_requests
+    for value in (mutations, mutations - 1, 5_999, 5_001, 5_000):
+        contract = resolve_scan_contract(
+            budget_profile=profile,
+            policy={"active_testing": True, "allow_state_changing_http": True},
+            advanced={"max_state_changing_requests": value}, approval_receipt_id="approval-1",
+        )
+        assert "nuclei_active" in contract.execution_plan.resolved_families, value
         _admit(contract)

@@ -363,9 +363,10 @@ registry family outside the nine is not run as a Scan family (read `resolved_fam
 result), and a `custom` selection with none of the nine is refused. `policy.preset`
 selects the family set: `passive` (recon, reviewed passive templates, verified exposure checks),
 `standard_active` (passive plus XSS and SQLi; on the `thorough` and `deep` budget profiles also
-`nuclei_active`, the active templates, unless the request ceiling, or with state-changing HTTP the
-mutation ceiling, is lowered below 8,000: twice what their sweep holds at admission, published as
-`family_preset_addition_floors` in `GET /scan/contracts`) or `custom` (exactly `include_families`,
+`nuclei_active`, the active templates, unless the request ceiling is lowered below 8,000 (twice
+what their sweep holds at admission) or, with state-changing HTTP, the mutation ceiling below 5,000
+(a quarter above the sweep's 4,000 mutations, under `thorough`'s own 6,000); the floors are
+published as `family_preset_addition_floors` in `GET /scan/contracts`) or `custom` (exactly `include_families`,
 from the nine above). A submission that allows active testing and names no preset resolves to `standard_active`;
 one that does not allow it resolves to `passive`. `include_families` is exact only under `custom`:
 with any other preset, named or implied, it adds to that preset, so `active_testing: true` with

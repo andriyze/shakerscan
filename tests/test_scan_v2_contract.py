@@ -370,14 +370,15 @@ def test_the_standard_active_set_runs_the_active_templates_on_thorough_and_deep(
 
 
 @pytest.mark.parametrize("profile", ["thorough", "deep"])
-def test_a_ceiling_lowered_below_twice_the_sweeps_hold_keeps_the_standard_set_without_active_templates(profile):
-    """The sweep holds 4,000 requests (and as many mutations with state-changing HTTP) at admission;
-    a ceiling lowered below twice that keeps the standard set without the active templates."""
+def test_a_ceiling_lowered_below_its_floor_keeps_the_standard_set_without_active_templates(profile):
+    """The sweep holds 4,000 requests (and as many mutations with state-changing HTTP) at admission.
+    A request ceiling lowered below twice that, or a mutation ceiling below a quarter above it
+    (under thorough's own 6,000), keeps the standard set without the active templates."""
     from scan.contracts import standard_active_template_floors
 
     assert standard_active_template_floors(state_changing_allowed=False) == {"max_http_requests": 8_000}
     assert standard_active_template_floors(state_changing_allowed=True) == {
-        "max_http_requests": 8_000, "max_state_changing_requests": 8_000}
+        "max_http_requests": 8_000, "max_state_changing_requests": 5_000}
 
     def families(policy, advanced, receipt=None):
         return resolve_scan_contract(budget_profile=profile, policy={"active_testing": True, **policy},
@@ -393,10 +394,11 @@ def test_a_ceiling_lowered_below_twice_the_sweeps_hold_keeps_the_standard_set_wi
     mutations = BUDGET_PROFILES[profile].max_state_changing_requests
     assert "nuclei_active" in families(state_changing, {"max_state_changing_requests": mutations}, "approval-1")
     assert "nuclei_active" not in families(state_changing, {"max_state_changing_requests": 2_000}, "approval-1")
-    assert "nuclei_active" not in families(
-        state_changing, {"max_state_changing_requests": min(7_999, mutations - 1)}, "approval-1")
-    if mutations > 8_000:
-        assert "nuclei_active" in families(state_changing, {"max_state_changing_requests": 8_000}, "approval-1")
+    assert "nuclei_active" not in families(state_changing, {"max_state_changing_requests": 4_999}, "approval-1")
+    # Lowered by any amount down to the floor, the mutation ceiling keeps them as the profile's own
+    # does (thorough's 6,000 is under twice the hold).
+    for kept in (mutations - 1, 5_999, 5_000):
+        assert "nuclei_active" in families(state_changing, {"max_state_changing_requests": kept}, "approval-1"), kept
     # A request ceiling at the hold's floor leaves the mutation ceiling at the profile's.
     assert "nuclei_active" in families(state_changing, {"max_http_requests": max(8_000, mutations)}, "approval-1")
     # A lowered mutation ceiling without state-changing HTTP changes nothing the sweep holds.

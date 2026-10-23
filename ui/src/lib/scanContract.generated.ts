@@ -348,7 +348,7 @@ export const SCAN_PUBLIC_CONTRACT_SNAPSHOT = {
   "family_preset_addition_floors": {
     "standard_active": {
       "max_http_requests": 8000,
-      "max_state_changing_requests": 8000
+      "max_state_changing_requests": 5000
     }
   },
   "family_preset_profile_additions": {

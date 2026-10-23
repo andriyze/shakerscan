@@ -409,20 +409,20 @@ def _active_template_hint(args: argparse.Namespace, contract: dict[str, Any]) ->
         return ("Active templates (nuclei_active) are not in this set; add "
                 "--include-family nuclei_active to run them (the standard active set "
                 "runs them on --budget-profile thorough or deep).")
-    # On thorough and deep the standard set runs them unless a ceiling was lowered below what
-    # their sweep holds at admission (the contract's family_preset_addition_floors).
+    # On thorough and deep the standard set runs them unless a ceiling was lowered below its floor
+    # (the contract's family_preset_addition_floors).
     floors = (contract.get("family_preset_addition_floors") or {}).get("standard_active") or {}
     advanced = getattr(args, "_advanced", {}) or {}
     below = [
-        f"{flag} {int(advanced[name]):,} is below {int(floors[name]):,}"
+        f"{flag} {int(advanced[name]):,} is below the floor of {int(floors[name]):,}"
         for name, flag in _CEILING_FLAGS
         if isinstance(advanced.get(name), int) and isinstance(floors.get(name), int)
         and advanced[name] < floors[name]
         and (name != "max_state_changing_requests" or args.allow_state_changing_http)
     ]
     reason = (
-        "a ceiling below what their sweep holds at admission leaves them out of the standard "
-        f"active set ({'; '.join(below)})" if below else
+        "a ceiling lowered below the standard active set's floor for them leaves them out of it "
+        f"({'; '.join(below)})" if below else
         "a lowered request or mutation ceiling leaves them out of the standard active set"
     )
     return (f"Active templates (nuclei_active) are not in this set: {reason}. Raise the "

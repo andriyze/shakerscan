@@ -372,7 +372,7 @@ def _thorough_contract(*, floors=True):
     } for name in scan_cli.ADVANCED_FLAGS]
     if floors:
         contract["family_preset_addition_floors"] = {
-            "standard_active": {"max_http_requests": 8_000, "max_state_changing_requests": 8_000}}
+            "standard_active": {"max_http_requests": 8_000, "max_state_changing_requests": 5_000}}
     return contract
 
 
@@ -397,8 +397,29 @@ def test_a_lowered_ceiling_on_thorough_says_why_the_active_templates_are_left_ou
     assert "--include-family nuclei_active" in out
     assert "runs them on --budget-profile thorough or deep" not in out
     assert "ceiling" in out
+    # The floor is named as what it is, never as what the sweep holds at admission.
+    assert "what their sweep holds" not in out
     if floors:
-        assert "--max-http-requests 5,000 is below 8,000" in out
+        assert "--max-http-requests 5,000 is below the floor of 8,000" in out
+
+
+def test_a_lowered_mutation_ceiling_names_its_own_floor(monkeypatch, capsys):
+    response = {"scan_id": "00000000-0000-0000-0000-000000000009", "status": "queued",
+                "family_preset": "standard_active",
+                "resolved_families": ["recon", "nuclei_passive", "xss", "sqli", "sensitive_exposure"]}
+
+    def request(url, *, payload=None, idempotency_key=None):
+        return _thorough_contract() if payload is None else dict(response)
+
+    monkeypatch.setattr(scan_cli, "_request_json", request)
+    assert scan_cli.main([
+        "--api-url", "http://api.test:8080", "--ui-url", "http://ui.test:3000",
+        "https://example.com", "--budget-profile", "thorough", "--active-testing", "--confirm-active",
+        "--allow-state-changing-http", "--max-state-changing-requests", "4500",
+    ]) == 0
+    out = " ".join(capsys.readouterr().out.split())
+    assert "--max-state-changing-requests 4,500 is below the floor of 5,000" in out
+    assert "--max-http-requests" not in out
 
 
 def test_no_active_template_hint_when_they_run_are_excluded_or_testing_is_passive(monkeypatch, capsys):
