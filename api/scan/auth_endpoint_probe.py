@@ -42,12 +42,17 @@ URL's query, not a body). What changes:
   against the 53 measured), so a set of one ladder would leave the last technique of the last
   field (time-based blind, the one that finds a blind sign-in injection) unfunded after a slight
   overspend anywhere before it. Dalfox gets 64 per field: it reported a verified reflection
-  within 18 requests (12 in a later run) on a reflecting two-field sign-in form;
+  within 18 requests (12 in a later run) on a reflecting two-field sign-in form. The largest set,
+  a four-field candidate's, is the most the endpoint receives per Scan part: 3,784 sqlmap and
+  256 Dalfox requests (4,040, at the pace above about 3 h 20 min); each parallel child holds its
+  own, so a Scan split into N parts may send N times that, at the same combined pace;
 * verdicts: Dalfox stops at its first verified finding, and a Dalfox attempt that verified nothing
-  is inconclusive, never negative, since it sent a bounded part of its payloads; sqlmap concludes
-  as anywhere else inside the probe set, and a candidate whose probe set is spent before its
-  verdict is inconclusive. Both are named ``auth_endpoint_probe_limited``, and coverage leaves the
-  family partial for that reason.
+  is inconclusive, never negative, since it sent a bounded part of its payloads: it sends its whole
+  payload set to a body whether or not a field reflects (1,347 requests for a two-field form in
+  the scanner image, ten times its probe set), so a sign-in form without a verified XSS leaves the
+  XSS family partial. sqlmap concludes as anywhere else inside the probe set, and a candidate
+  whose probe set is spent before its verdict is inconclusive. Both are named
+  ``auth_endpoint_probe_limited``, and coverage leaves the family partial for that reason.
 
 The probes carry placeholder values, not the profile's account, so they cannot lock out the
 account the Scan signs in with; the pace and the probe set bound what a per-address sign-in
