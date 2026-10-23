@@ -756,11 +756,9 @@ def test_browser_proofs_over_many_actions_stop_at_the_endpoint_set(monkeypatch):
     }
 
 
-@pytest.mark.parametrize("capability", ["sqli.request_verify_batch", "xss.request_verify_batch"])
-def test_the_request_verifiers_pace_the_sign_in_request_of_the_profile(monkeypatch, capability):
-    """The profile's own sign-in request, mutated field by field: each request waits the pace."""
-    waits = _record_pace(monkeypatch)
-    target = _fake_target(monkeypatch)
+def _request_verifiers(capability, *, prior=()):
+    """The request verifier over the profile's own two-field sign-in request: one action, after
+    ``prior`` actions of the same verifier that recorded (attempt id, what they sent there)."""
     request = build_replay_plan(
         ({"id": "credential-login:primary", "method": "POST", "url": f"{ORIGIN}{LOGIN}",
           "headers": {"Content-Type": "application/json"},
@@ -780,22 +778,97 @@ def test_the_request_verifiers_pace_the_sign_in_request_of_the_profile(monkeypat
     )
     candidates = build_request_candidate_manifest((request_manifest,), source_action_ids=("inputs.auth_primary",),
                                                   maximum=10)
-    action = dataclasses.replace(_action("verify.request.r01", capability, 0, capability_args={
-        "request_candidate_manifest_ref": candidates.reference().canonical_dict(),
-        "slice": {"start": 0, "count": 2}, "profile": "balanced_batch_v1",
-        "proof_policy": "deterministic_differential_required",
-    }), requested_budget=dict(BUDGET), action_digest=None)
+    args = {"request_candidate_manifest_ref": candidates.reference().canonical_dict(),
+            "slice": {"start": 0, "count": 2}, "profile": "balanced_batch_v1",
+            "proof_policy": "deterministic_differential_required"}
+    earlier = [dataclasses.replace(_action(f"verify.request.{index:03d}.r01", capability, index,
+                                           capability_args=args),
+                                   requested_budget=dict(BUDGET), action_digest=None)
+               for index in range(len(prior))]
+    action = dataclasses.replace(_action("verify.request.r01", capability, len(earlier),
+                                         capability_args=args),
+                                 requested_budget=dict(BUDGET), action_digest=None)
     plan = ScanActionPlan(scan_id=scan_id, execution_plan_digest="a" * 64,
-                          target_binding_digest=TARGET.digest, actions=(action,))
-    dispatcher = _dispatcher(plan, _StoredOnce(manifests={candidates.manifest_id: candidates}),
-                             options=SIGN_IN, policy=ScanPolicy(active_testing=True,
-                                                                approval_receipt_id="approval-1"))
+                          target_binding_digest=TARGET.digest, actions=(*earlier, action))
+    backend = _StoredOnce(manifests={candidates.manifest_id: candidates})
+    (endpoint,) = sign_in_endpoints(SIGN_IN, [], base_url=f"{ORIGIN}/")
+    for item, (attempt_id, sent) in zip(earlier, prior):
+        backend.attempts.setdefault(item.action_id, {})[attempt_id] = {
+            "attempt_id": attempt_id, "candidate_id": attempt_id, "status": "success",
+            "observations": ({"kind": "candidate_attempt", "sign_in_endpoint_key": endpoint.key,
+                              "sign_in_endpoint_requests": sent},),
+        }
+    dispatcher = _dispatcher(plan, backend, options=SIGN_IN, policy=ScanPolicy(
+        active_testing=True, approval_receipt_id="approval-1",
+    ))
     dispatcher._private_requests[request.request_id] = request
     receipt = asyncio.run(dispatcher(action, _lease(plan, action), _noop))
+    return receipt
+
+
+@pytest.mark.parametrize("capability", ["sqli.request_verify_batch", "xss.request_verify_batch"])
+def test_the_request_verifiers_pace_the_sign_in_request_of_the_profile(monkeypatch, capability):
+    """The profile's own sign-in request, mutated field by field: each request waits the pace."""
+    waits = _record_pace(monkeypatch)
+    target = _fake_target(monkeypatch)
+    receipt = _request_verifiers(capability)
     heads = [item for item in receipt.observations if item.get("kind") == "candidate_attempt"]
     assert len(target.to_sign_in()) == 4 and waits == [PACE] * 4
     assert [head["sign_in_endpoint_requests"] for head in heads] == [2, 2]
     assert heads[-1]["sign_in_endpoint_received"] == 4
+
+
+@pytest.mark.parametrize("capability", ["sqli.request_verify_batch", "xss.request_verify_batch"])
+def test_a_request_verifier_whose_set_is_spent_closes_each_field_inconclusive(monkeypatch, capability):
+    """Earlier actions of the verifier spent its set on the endpoint: each field candidate is closed
+    for the limit without a request, never left waiting for a wall it does not need."""
+    waits = _record_pace(monkeypatch)
+    target = _fake_target(monkeypatch)
+    spent = probe_set_requests(capability, 4)
+    receipt = _request_verifiers(capability, prior=[("a" * 64, spent - 20), ("b" * 64, 20)])
+    heads = [item for item in receipt.observations if item.get("kind") == "candidate_attempt"]
+    assert target.to_sign_in() == [] and waits == []
+    assert len(heads) == 2 and {head["inconclusive_reason"] for head in heads} == {AUTH_ENDPOINT_PROBE_LIMITED}
+    assert {head["sign_in_endpoint_received"] for head in heads} == {spent}
+    assert not [item for item in receipt.observations if item.get("kind") == "candidate_deferred"]
+
+
+class _Unanswered:
+    """A transport whose requests time out unanswered, or fail before an answer."""
+
+    def __init__(self, *, raises=False):
+        self.raises = raises
+        self.sent = 0
+
+    async def send(self, request, **kwargs):
+        self.sent += 1
+        if self.raises:
+            raise ConnectionError("reset before an answer")
+        return ReplayTransportResult(status_code=None, connected_address=None, error_code="timeout",
+                                     timed_out=True, final_url=request.url)
+
+
+@pytest.mark.parametrize("raises", [False, True])
+def test_a_request_to_the_endpoint_counts_whether_or_not_it_was_answered(monkeypatch, raises):
+    """A timed-out sign-in attempt still reached the endpoint's throttle: it is counted before it
+    is sent, so an unanswered or failed request never leaves the set larger than what was sent."""
+    waits = _record_pace(monkeypatch)
+    (endpoint,) = sign_in_endpoints(SIGN_IN, [], base_url=f"{ORIGIN}/")
+    inner = _Unanswered(raises=raises)
+    paced = PacedSignInTransport(inner, endpoint, pace_seconds=PACE)
+
+    async def run():
+        for _ in range(3):
+            try:
+                await paced.send(
+                    _proof_request("POST", f"{ORIGIN}{LOGIN}", b"a=1", "application/x-www-form-urlencoded"),
+                    target=TARGET, timeout_seconds=10.0, follow_redirects=False,
+                )
+            except ConnectionError:
+                pass
+
+    asyncio.run(run())
+    assert inner.sent == paced.sent == 3 and waits == [PACE] * 3
 
 
 @pytest.mark.parametrize("capability", sorted(BATCHES))

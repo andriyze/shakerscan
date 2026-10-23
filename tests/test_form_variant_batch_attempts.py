@@ -112,14 +112,16 @@ def _signals(candidates, verifier_family: str, positions, *, ids=None) -> tuple:
 
 
 def _run(monkeypatch, capability, *, statuses, signalled=(0, 1, 2), signals=None, rounds=1,
-         backend=None, manifests=None):
-    """Run ``capability`` over the three variants of one sign-in form ``rounds`` times."""
+         backend=None, manifests=None, part=None):
+    """Run ``capability`` over the three variants of one sign-in form ``rounds`` times (over the
+    manifest's ``part``, (start, count), when given)."""
     family, verifier = BATCHES[capability]
     scan_id, endpoints, candidates = manifests or _manifests()
+    start, count = part or (0, len(candidates.entries))
     args = {
         "candidate_manifest_ref": candidates.reference().canonical_dict(),
         "endpoint_manifest_ref": endpoints.reference().canonical_dict(),
-        "slice": {"start": 0, "count": len(candidates.entries)},
+        "slice": {"start": start, "count": count},
     }
     actions = []
     observations = {}
@@ -392,3 +394,37 @@ def test_a_route_seen_with_several_bodies_yields_one_finding():
     findings = [item for item in receipt.observations if item.get("kind") == "authz_surface_proof"]
     assert len(findings) == 1, findings
     assert sum(head["proof_state"] == "verified" for head in _heads(receipt)) == 3
+
+
+#: Three candidates of other routes rank before the sign-in form, and a body of another route
+#: between them: the form's three variants are positions 4, 5 and 6.
+_LEADING_ROUTES = (
+    ("GET", "/items", None, None, ["id"], "web.crawl"),
+    ("GET", "/search", None, None, ["q"], "web.crawl"),
+    ("GET", "/a/b", None, None, ["sort"], "web.crawl"),
+    ("POST", "/api/user", ["id", "name"], "application/json", [], "web.spec_ingest"),
+)
+
+
+@pytest.mark.parametrize("capability", sorted(BATCHES))
+def test_a_slice_starting_inside_a_forms_variants_names_each_by_its_manifest_position(
+    monkeypatch, capability,
+):
+    """A slice of positions 5 and 6 (the crawled form and the JSON variant): each attempt is named
+    by its manifest position, not its place in the slice. Named by the slice's offsets (0, 1), both
+    took the first variant's id, and their different statuses failed the action."""
+    manifests = _manifests(_LEADING_ROUTES + SIGN_IN_ROUTES[:3])
+    candidates = manifests[2]
+    form = [index for index, entry in enumerate(candidates.entries)
+            if entry.get("canonical_path") == "/hub/login"]
+    assert form == [4, 5, 6] and len({candidates.entries[index]["candidate_id"] for index in form}) == 1
+    family, _verifier = BATCHES[capability]
+    receipts, calls, backend, _candidates, _family, batch = _run(
+        monkeypatch, capability, statuses=["success", "partial"], signalled=tuple(form),
+        manifests=manifests, part=(5, 2),
+    )
+    (receipt,) = receipts
+    heads = _heads(receipt)
+    assert [head["attempt_id"] for head in heads] == _attempt_ids(candidates, family)[5:7]
+    assert sorted(head["status"] for head in heads) == ["partial", "success"]
+    assert len(calls) == 2 and len(backend.attempts[batch.action_id]) == 2
