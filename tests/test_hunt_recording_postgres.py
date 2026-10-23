@@ -175,6 +175,17 @@ def test_finishes_share_one_rolling_proposal_outside_the_planner_quota(monkeypat
                 assert [step['capability'] for step in body['steps']] == ['http.request', 'web.crawl', 'javascript.analyze']
                 text = json.dumps(body)
                 assert 'redacted' not in text and 'letmein' not in text and 'other.fixture' not in text
+                # A rejected step is not proposed again; a new one starts the next rolling proposal.
+                rejected = await client.post(f"/targets/{target}/instruction-proposals/{outcome['proposal_id']}/reject",
+                                             json={'note': 'not these'})
+                assert rejected.status_code == 200, rejected.text
+                _fourth, fresh = await _finished_hunt(client, conn, target, [
+                    {'capability': 'web.crawl', 'origin': origin},
+                    {'capability': 'web.content_discover', 'origin': origin, 'wordlist': 'api'}])
+                assert fresh['status'] == 'proposed' and fresh['proposal_id'] != outcome['proposal_id'], fresh
+                body = json.loads(await conn.fetchval(
+                    'SELECT action_body FROM target_instruction_proposals WHERE id=$1', UUID(fresh['proposal_id'])))
+                assert [step['capability'] for step in body['steps']] == ['web.content_discover']
                 # The planner quota still counts only the planner's own proposals.
                 with pytest.raises(Exception) as full:
                     await _check_pending_quota(conn, target, f'hunt:{first}', 'saved_action')

@@ -114,7 +114,7 @@ On finish, the server proposes the Hunt's reusable read-only and verification st
 target's one rolling retained-checks proposal for `shakerscan knowledge review`. It never saves
 them, even when the target delegates instruction changes, and the metadata opt-out skips it. The
 proposal keeps one copy of each step and the newest 16, leaves out steps a saved action already
-holds, is updated in place by later finishes, and is not counted against the proposals a Hunt may
+holds or that you rejected in the last decided one, is updated in place by later finishes, and is not counted against the proposals a Hunt may
 file. A step is proposed only when every input is on its capability's allowlist and carries no
 query value, header, body, browser input, session, credential or origin on another host.
 Accepting it saves one saved action. The debrief's `saved_action` field reports `proposed`,

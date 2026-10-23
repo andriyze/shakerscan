@@ -390,7 +390,8 @@ async def refresh_retained_proposal(conn: Any, target_id: Any, *, steps: list[di
     """File, or update in place, the target's one pending proposal of steps retained at Hunt finish.
 
     Never writes a saved action. The proposal keeps one copy of each step (``merge`` decides the
-    order and the bound), leaves out steps a saved action already holds, and is rebased onto the
+    order and the bound), leaves out steps a saved action already holds or the operator rejected
+    in the latest decided retained proposal, and is rebased onto the
     current saved actions each time it changes. Concurrent finishes on one target serialize on a
     transaction lock; the caller already holds the target row (KEY SHARE), and the proposal row is
     locked after it, the order operator accepts and rejects take.
@@ -402,6 +403,12 @@ async def refresh_retained_proposal(conn: Any, target_id: Any, *, steps: list[di
         ORDER BY created_at, id LIMIT 1 FOR UPDATE""", row['id'], RETAINED_PROPOSER)
     actions = await read_target_actions(conn, row['id'])
     saved = [step for action in actions['actions'] for step in action.get('steps') or []]
+    # A step the operator rejected in the latest decided retained proposal is not proposed again.
+    rejected = await conn.fetchrow("""SELECT action_body FROM target_instruction_proposals
+        WHERE target_id=$1 AND proposed_by=$2 AND status='rejected' AND kind='saved_action'
+        ORDER BY decided_at DESC NULLS LAST, created_at DESC LIMIT 1""", row['id'], RETAINED_PROPOSER)
+    if rejected is not None:
+        saved.extend((_action_body(rejected) or {}).get('steps') or [])
     previous = list((_action_body(pending) or {}).get('steps') or []) if pending is not None else []
     merged = merge(previous, steps, saved=saved, limit=MAX_STEPS)
     body = text = None

@@ -1,6 +1,7 @@
 # Hunt persistence and budget audit
 
-**Status:** source audit and focused regression validation; no deployment or target testing.
+**Status:** describes Hunt finding persistence, recording, finish retention and budget behaviour
+as of 2.11.1.
 
 ## Nonstandard service ports
 
@@ -93,7 +94,8 @@ from operator instructions and from ordinary execution history.
 Finishing now proposes reusable steps for review and never writes a recipe, whatever the target
 delegates; the metadata opt-out skips it. Each target has one rolling retained-checks proposal: a
 later finish updates it in place, keeps one copy of each step (the newest 16), leaves out steps a
-saved action already holds and rebases it onto the current saved actions. It is not counted
+saved action already holds or the operator rejected in the last decided one, and rebases it onto
+the current saved actions. It is not counted
 against the pending proposals Hunts or operators may file, so it never crowds out a planner's own
 proposals, and accepting it saves one saved action as an operator write.
 
