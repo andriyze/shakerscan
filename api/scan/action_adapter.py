@@ -221,8 +221,9 @@ except (ImportError, ModuleNotFoundError):
     from scanner.scanner_tools.unsafe_actions import path_may_change_state
 
 from .auth_endpoint_probe import (
-    AUTH_ACTION_IDS, AUTH_ENDPOINT_CHECK_ATTEMPT_REQUESTS, AUTH_ENDPOINT_PACE_UNFUNDED,
-    AUTH_ENDPOINT_PROBE_LIMITED, AUTH_ENDPOINT_PROBE_PROFILE, PacedSignInTransport, SignInEndpoint,
+    AUTH_ACTION_IDS, AUTH_ENDPOINT_CHECK_ATTEMPT_REQUESTS, AUTH_ENDPOINT_MAX_PARAMETERS,
+    AUTH_ENDPOINT_PACE_UNFUNDED, AUTH_ENDPOINT_PROBE_LIMITED, AUTH_ENDPOINT_PROBE_PROFILE,
+    PacedSignInTransport, SignInEndpoint,
     auth_endpoint_hold, normalize_path, pace_seconds, pace_wall_seconds, paced_check_hold,
     parallel_children, probe_parameters, probe_set_left, probe_set_spent, sign_in_endpoint_for,
     sign_in_endpoints, sign_in_page_paths,
@@ -806,23 +807,6 @@ def _no_tool_output(observations: Any) -> bool:
     )
 
 
-def _check_parameters(entries: Sequence[Mapping[str, Any]], candidate: Mapping[str, Any]) -> int:
-    """How many fields a candidate's probe set on the sign-in endpoint is sized for.
-
-    A body candidate's form fields; a private request's candidates are one per field, so the
-    request's fields are its candidates in the manifest.
-    """
-    if candidate.get("body_field_names"):
-        return probe_parameters(candidate.get("body_field_names"))
-    reference = str(candidate.get("request_ref_id") or "")
-    if candidate.get("field_path") and reference:
-        return probe_parameters([
-            entry for entry in entries
-            if str(entry.get("request_ref_id") or "") == reference and entry.get("field_path")
-        ])
-    return 1
-
-
 class _SignInChecks:
     """The pace and probe set of an in-process check's requests to the sign-in endpoint.
 
@@ -830,8 +814,14 @@ class _SignInChecks:
     send a few requests to a candidate's endpoint. On the credential profile's own sign-in
     endpoint they are held to the same pace as the sqlmap and Dalfox verifiers and draw from a
     probe set of their own across the Scan (auth_endpoint_probe), so what the endpoint may receive
-    is the sum of the probe sets.
+    is the sum of the probe sets. Each check's set is the endpoint's, sized for four fields
+    whatever variant draws from it: sized by each variant's own fields, a two-field variant's
+    NoSQLi set was spent by the crawled four-field form's attempt, and which variants a fresh Scan
+    tested came down to the manifest's order.
     """
+
+    #: Every variant on the endpoint draws from the endpoint's four-field set.
+    parameters = AUTH_ENDPOINT_MAX_PARAMETERS
 
     def __init__(
         self, capability_name: str, endpoints: Sequence[SignInEndpoint],
@@ -845,25 +835,25 @@ class _SignInChecks:
     def endpoint(self, url: str, method: str) -> SignInEndpoint | None:
         return sign_in_endpoint_for(url, method, self.endpoints) if self.endpoints else None
 
-    def spent(self, endpoint: SignInEndpoint, parameters: int) -> bool:
+    def spent(self, endpoint: SignInEndpoint) -> bool:
         return probe_set_spent(
-            self.capability_name, self.received.get(endpoint.key, 0), parameters,
+            self.capability_name, self.received.get(endpoint.key, 0), self.parameters,
         )
 
-    def short_of(self, endpoint: SignInEndpoint, parameters: int, need: int) -> bool:
+    def short_of(self, endpoint: SignInEndpoint, need: int) -> bool:
         """Whether the probe set has less left than the attempt would send."""
         return probe_set_left(
-            self.capability_name, self.received.get(endpoint.key, 0), parameters,
+            self.capability_name, self.received.get(endpoint.key, 0), self.parameters,
         ) < need
 
     def hold(
-        self, endpoint: SignInEndpoint, sub_budget: Mapping[str, int], *, parameters: int,
+        self, endpoint: SignInEndpoint, sub_budget: Mapping[str, int], *,
         available_wall_seconds: int, need: int,
     ) -> dict[str, int] | None:
         """The attempt's paced hold, or None when the slice cannot pace all ``need`` requests."""
         return paced_check_hold(
             sub_budget, capability_name=self.capability_name,
-            received=self.received.get(endpoint.key, 0), parameters=parameters,
+            received=self.received.get(endpoint.key, 0), parameters=self.parameters,
             children=self.children, available_wall_seconds=available_wall_seconds, need=need,
         )
 
@@ -2170,8 +2160,7 @@ class DatabaseNeutralScanActionDispatcher:
             # verifier's probe set on the endpoint (_SignInChecks).
             sign_in = sign_in_checks.endpoint(request.url, request.method)
             if sign_in is not None:
-                parameters = _check_parameters(manifest.entries, candidate)
-                if sign_in_checks.spent(sign_in, parameters):
+                if sign_in_checks.spent(sign_in):
                     attempted += 1
                     attempt_statuses.append({"status": "success", "timed_out": False})
                     observations.append(sign_in_checks.closed(
@@ -2179,7 +2168,7 @@ class DatabaseNeutralScanActionDispatcher:
                     ))
                     continue
                 held = sign_in_checks.hold(
-                    sign_in, sub_budget, parameters=parameters,
+                    sign_in, sub_budget,
                     available_wall_seconds=remaining.get("tool_wall_seconds", 0),
                     need=AUTH_ENDPOINT_CHECK_ATTEMPT_REQUESTS[action.capability_name],
                 )
@@ -2498,7 +2487,7 @@ class DatabaseNeutralScanActionDispatcher:
                 if body_fields else None
             )
             if sign_in is not None:
-                if sign_in_checks.spent(sign_in, probe_parameters(body_fields)):
+                if sign_in_checks.spent(sign_in):
                     attempted += 1
                     attempt_statuses.append({"status": "success", "timed_out": False})
                     observations.append(sign_in_checks.closed(
@@ -2755,8 +2744,7 @@ class DatabaseNeutralScanActionDispatcher:
             sign_in = sign_in_checks.endpoint(request.url, request.method)
             short_of_set = False
             if sign_in is not None:
-                parameters = _check_parameters(manifest.entries, candidate)
-                if sign_in_checks.spent(sign_in, parameters):
+                if sign_in_checks.spent(sign_in):
                     attempted += 1
                     attempt_statuses.append({"status": "success", "timed_out": False})
                     observations.append(sign_in_checks.closed(
@@ -2772,7 +2760,7 @@ class DatabaseNeutralScanActionDispatcher:
                     else AUTH_ENDPOINT_CHECK_ATTEMPT_REQUESTS["sqli.prove_batch"]
                 ))
                 held = sign_in_checks.hold(
-                    sign_in, sub_budget, parameters=parameters,
+                    sign_in, sub_budget,
                     available_wall_seconds=remaining.get("tool_wall_seconds", 0), need=need,
                 )
                 if held is None:
@@ -2782,7 +2770,7 @@ class DatabaseNeutralScanActionDispatcher:
                         available_wall_seconds=remaining.get("tool_wall_seconds", 0),
                     ))
                     continue
-                short_of_set = sign_in_checks.short_of(sign_in, parameters, need)
+                short_of_set = sign_in_checks.short_of(sign_in, need)
                 sub_budget = held
                 transport = sign_in_checks.transport(transport, sign_in)
             specification = CAPABILITY_REGISTRY.require(action.capability_name)
@@ -3941,8 +3929,7 @@ class DatabaseNeutralScanActionDispatcher:
             sign_in = sign_in_checks.endpoint(request.url, request.method)
             short_of_set = False
             if sign_in is not None:
-                parameters = _check_parameters(manifest.entries, candidate)
-                if sign_in_checks.spent(sign_in, parameters):
+                if sign_in_checks.spent(sign_in):
                     attempted += 1
                     attempt_statuses.append({"status": "success", "timed_out": False})
                     observations.append(sign_in_checks.closed(
@@ -3961,7 +3948,7 @@ class DatabaseNeutralScanActionDispatcher:
                     AUTH_ENDPOINT_CHECK_ATTEMPT_REQUESTS["nosqli.verify_batch"] * len(tested),
                 )
                 held = sign_in_checks.hold(
-                    sign_in, sub_budget, parameters=parameters,
+                    sign_in, sub_budget,
                     available_wall_seconds=remaining.get("tool_wall_seconds", 0), need=need,
                 )
                 if held is None:
@@ -3971,7 +3958,7 @@ class DatabaseNeutralScanActionDispatcher:
                         available_wall_seconds=remaining.get("tool_wall_seconds", 0),
                     ))
                     continue
-                short_of_set = sign_in_checks.short_of(sign_in, parameters, need)
+                short_of_set = sign_in_checks.short_of(sign_in, need)
                 sub_budget = held
                 transport = sign_in_checks.transport(transport, sign_in)
             specification = CAPABILITY_REGISTRY.require(action.capability_name)

@@ -51,13 +51,18 @@ URL's query, not a body). What changes:
   overspend anywhere before it. Dalfox gets 64 per field: it reported a verified reflection
   within 18 requests (12 in a later run) on a reflecting two-field sign-in form. Each check that
   sends from the worker gets twice what one attempt of it sends
-  (``AUTH_ENDPOINT_CHECK_ATTEMPT_REQUESTS``) per field: the SQLi proof 28 (its longest proof is
-  14 requests), the NoSQLi check 8 (four a field), each request verifier 4 (a control and a
-  mutated request) and the XSS browser proof 2 (one form submission). The largest sets, a
-  four-field candidate's, are the most the endpoint receives per Scan part: 3,784 sqlmap, 256
-  Dalfox, 112 SQLi proof, 32 NoSQLi, 16 for each request verifier and 8 XSS browser proof
-  requests (4,224, at the pace above about 3 h 31 min); each parallel child holds its own, so a
-  Scan split into N parts may send N times that, at the same combined pace;
+  (``AUTH_ENDPOINT_CHECK_ATTEMPT_REQUESTS``) per field, and a check whose attempts together test
+  every field of a variant three times that again (``AUTH_ENDPOINT_FORM_VARIANTS``): the SQLi
+  proof 28 (its longest proof is 14 requests), the NoSQLi check 24 (four a field), each request
+  verifier 12 (a control and a mutated request a field) and the XSS browser proof 2 (one form
+  submission). Their sets are the endpoint's, sized for four fields whichever variant draws from
+  them, so the three variants a Scan routinely tests of one sign-in form (the declared form, the
+  crawled form with its hidden fields, a JSON variant) fit twice over in any order. The largest
+  sets, a four-field candidate's, are the most the endpoint receives per Scan part from the
+  verifiers and these checks: 3,784 sqlmap, 256 Dalfox, 112 SQLi proof, 96 NoSQLi, 48 for each
+  request verifier and 8 XSS browser proof requests (4,352, at the pace above about 3 h 38 min);
+  each parallel child holds its own, so a Scan split into N parts may send N times that, at the
+  same combined pace;
 * verdicts: Dalfox stops at its first verified finding, and a Dalfox attempt that verified nothing
   is inconclusive, never negative, since it sent a bounded part of its payloads: it sends its whole
   payload set to a body whether or not a field reflects (1,347 requests for a two-field form in
@@ -119,12 +124,23 @@ AUTH_ENDPOINT_CHECK_MINIMUM_REQUESTS: Mapping[str, int] = {
     "xss.request_verify_batch": 2,
     "xss.browser_prove_batch": 1,
 }
+#: The variants of one sign-in form a Scan routinely tests, one candidate id with three bodies:
+#: the declared form, the crawled form with its hidden fields and a JSON variant.
+AUTH_ENDPOINT_FORM_VARIANTS = 3
+#: The in-process checks whose attempts together test every field of a variant (NoSQLi four
+#: requests a field; a request verifier a control and a mutated request for each field of the
+#: profile's sign-in request): their set holds three variants' worth, not one.
+_EVERY_FIELD_CHECKS = frozenset({
+    "nosqli.verify_batch", "sqli.request_verify_batch", "xss.request_verify_batch",
+})
 #: Requests one tested field of the sign-in endpoint may receive from each verifier, per Scan.
 AUTH_ENDPOINT_PROBE_REQUESTS: Mapping[str, int] = {
     "sqli.verify_batch": AUTH_ENDPOINT_PROBE_HEADROOM * sum(SQLI_TECHNIQUE_NEGATIVE_COST.values()),
     "xss.verify_batch": 64,
     **{
-        name: AUTH_ENDPOINT_PROBE_HEADROOM * requests
+        name: AUTH_ENDPOINT_PROBE_HEADROOM * requests * (
+            AUTH_ENDPOINT_FORM_VARIANTS if name in _EVERY_FIELD_CHECKS else 1
+        )
         for name, requests in AUTH_ENDPOINT_CHECK_ATTEMPT_REQUESTS.items()
     },
 }
@@ -500,6 +516,7 @@ __all__ = [
     "AUTH_ACTION_IDS",
     "AUTH_ENDPOINT_CHECK_ATTEMPT_REQUESTS",
     "AUTH_ENDPOINT_CHECK_MINIMUM_REQUESTS",
+    "AUTH_ENDPOINT_FORM_VARIANTS",
     "AUTH_ENDPOINT_MAX_PARAMETERS",
     "AUTH_ENDPOINT_MAX_REQUESTS_PER_MINUTE",
     "AUTH_ENDPOINT_MIN_ATTEMPT_REQUESTS",

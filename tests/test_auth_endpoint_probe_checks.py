@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import itertools
 import re
 import sys
 import types
@@ -218,17 +219,37 @@ def test_the_documented_bound_is_the_sum_of_the_largest_probe_sets():
     sets = {name: probe_set_requests(name, 4) for name in AUTH_ENDPOINT_PROBE_REQUESTS}
     assert sets == {
         "sqli.verify_batch": 3_784, "xss.verify_batch": 256, "sqli.prove_batch": 112,
-        "nosqli.verify_batch": 32, "sqli.request_verify_batch": 16, "xss.request_verify_batch": 16,
+        "nosqli.verify_batch": 96, "sqli.request_verify_batch": 48, "xss.request_verify_batch": 48,
         "xss.browser_prove_batch": 8,
     }
-    assert sum(sets.values()) == 4_224
-    # At 20 a minute: 3 h 31 min.
-    assert divmod(sum(sets.values()) * PACE // 60, 60) == (3, 31)
+    assert sum(sets.values()) == 4_352
+    # At 20 a minute: about 3 h 38 min.
+    assert divmod(round(sum(sets.values()) * PACE / 60), 60) == (3, 38)
     release = (ROOT / "docs/releases/2.11.1.md").read_text(encoding="utf-8")
     docstring = probe_module.__doc__ or ""
     for text in (release, docstring):
         flat = re.sub(r"\s+", " ", text)
-        assert "4,224" in flat and "4,040" not in flat
+        assert "4,352" in flat and "3 h 38 min" in flat
+        assert "4,224" not in flat and "4,040" not in flat
+
+
+#: What each check sends to a four-field variant: the proof's longest proof, the NoSQLi check's
+#: four a field, a request verifier's control and mutation for each of four field candidates, the
+#: browser proof's one submission.
+_FOUR_FIELD_ATTEMPT = {"sqli.prove_batch": 14, "nosqli.verify_batch": 16,
+                       "sqli.request_verify_batch": 8, "xss.request_verify_batch": 8,
+                       "xss.browser_prove_batch": 1}
+
+
+@pytest.mark.parametrize("capability", sorted(AUTH_ENDPOINT_CHECK_ATTEMPT_REQUESTS))
+def test_each_check_set_holds_the_three_variants_of_a_sign_in_form_twice(capability):
+    """The declared form, the crawled form with its hidden fields and a JSON variant draw from one
+    set: it holds an attempt of each, at four fields, twice over."""
+    assert probe_module.AUTH_ENDPOINT_FORM_VARIANTS == 3
+    assert probe_set_requests(capability, 4) >= (
+        probe_module.AUTH_ENDPOINT_PROBE_HEADROOM * probe_module.AUTH_ENDPOINT_FORM_VARIANTS
+        * _FOUR_FIELD_ATTEMPT[capability]
+    )
 
 
 # --- the transport -------------------------------------------------------------------------------
@@ -273,37 +294,65 @@ def test_every_request_a_check_sends_the_sign_in_endpoint_waits_the_pace(monkeyp
 
 
 def test_the_nosqli_check_stops_at_its_probe_set_and_never_reads_negative(monkeypatch):
-    """Four requests a field: the declared form sends 8 and the crawled form 16 of the 32 the
-    four-field set holds; the JSON variant's two-field set (16) is then spent."""
+    """Four requests a field: the three variants send 8, 16 and 8 a round, three rounds spend the
+    96 the endpoint's set holds, and a fourth closes every variant without a request."""
     _record_pace(monkeypatch)
     target = _fake_target(monkeypatch)
-    receipts, _candidates = _run("nosqli.verify_batch", options=SIGN_IN)
-    heads = _heads(receipts)
-    assert [head["sign_in_endpoint_requests"] for head in heads] == [8, 16, 0]
-    assert len(target.to_sign_in()) == 24
-    closed = heads[2]
-    assert closed["verdict"] == "inconclusive"
-    assert closed["inconclusive_reason"] == AUTH_ENDPOINT_PROBE_LIMITED
-    assert closed["sign_in_endpoint_received"] == 24
+    receipts, _candidates = _run("nosqli.verify_batch", options=SIGN_IN, slices=[(0, 3)] * 4)
+    sent = [[head["sign_in_endpoint_requests"] for head in _heads([receipt])] for receipt in receipts]
+    assert sent == [[8, 16, 8], [8, 16, 8], [8, 16, 8], [0, 0, 0]]
+    assert len(target.to_sign_in()) == 96 == probe_set_requests("nosqli.verify_batch", 4)
+    closed = _heads(receipts[3:])
+    assert all(head["verdict"] == "inconclusive" for head in closed)
+    assert {head["inconclusive_reason"] for head in closed} == {AUTH_ENDPOINT_PROBE_LIMITED}
+    assert {head["sign_in_endpoint_received"] for head in closed} == {96}
 
 
 def test_a_check_its_set_leaves_short_sends_only_what_is_left_and_is_inconclusive(monkeypatch):
-    """24 of the 32 the four-field NoSQLi set holds were sent by an earlier action: the crawled
-    form's attempt holds the 8 left, tests two of its four fields and is never read negative."""
+    """88 of the 96 the NoSQLi set holds were sent by an earlier action: the crawled form's attempt
+    holds the 8 left, tests two of its four fields and is never read negative."""
     _record_pace(monkeypatch)
     target = _fake_target(monkeypatch)
     (endpoint,) = sign_in_endpoints(SIGN_IN, [], base_url=f"{ORIGIN}/")
     earlier = {"attempt_id": "e" * 64, "candidate_id": "e" * 64, "status": "success",
                "observations": ({"kind": "candidate_attempt", "sign_in_endpoint_key": endpoint.key,
-                                 "sign_in_endpoint_requests": 24},)}
-    receipts, candidates = _run("nosqli.verify_batch", options=SIGN_IN, slices=[(0, 1), (1, 1)],
+                                 "sign_in_endpoint_requests": 88},)}
+    receipts, candidates = _run("nosqli.verify_batch", options=SIGN_IN, slices=[(1, 1)],
                                 prior=[("batch.x.000.r01", earlier)])
     assert len(candidates.entries[1]["body_field_names"]) == 4
-    (head,) = [item for item in receipts[1].observations if item.get("kind") == "candidate_attempt"]
-    assert head["sign_in_endpoint_requests"] == 8 and head["sign_in_endpoint_received"] == 32
+    (head,) = [item for item in receipts[0].observations if item.get("kind") == "candidate_attempt"]
+    assert head["sign_in_endpoint_requests"] == 8 and head["sign_in_endpoint_received"] == 96
     assert head["verdict"] == "inconclusive"
     assert head["inconclusive_reason"] == AUTH_ENDPOINT_PROBE_LIMITED
     assert len(target.to_sign_in()) == 8
+
+
+_VARIANT_SHAPES = ((["password", "username"], "application/x-www-form-urlencoded"),
+                   (["csrf_token", "password", "remember", "username"], "application/x-www-form-urlencoded"),
+                   (["password", "username"], "application/json"))
+
+
+@pytest.mark.parametrize("sources", list(itertools.permutations(
+    ("inputs.custom_endpoints", "web.crawl", "web.spec_ingest"),
+)))
+def test_a_fresh_scan_tests_every_variant_of_the_sign_in_form_in_any_order(monkeypatch, sources):
+    """The set is the endpoint's, not the variant's: whichever variant the manifest puts first, the
+    three send their whole NoSQLi attempts. A two-field variant's own set (16) was spent by the
+    crawled form's 16, so on a fresh scan up to two variants were closed without a request."""
+    from tests.test_form_variant_batch_attempts import _manifests as variant_manifests
+
+    _record_pace(monkeypatch)
+    target = _fake_target(monkeypatch)
+    routes = tuple(("POST", LOGIN, fields, content_type, [], source)
+                   for (fields, content_type), source in zip(_VARIANT_SHAPES, sources))
+    monkeypatch.setattr(sys.modules[__name__], "_manifests", lambda: variant_manifests(routes))
+    receipts, candidates = _run("nosqli.verify_batch", options=SIGN_IN)
+    heads = _heads(receipts)
+    assert [head["sign_in_endpoint_requests"] for head in heads] == [
+        4 * len(entry["body_field_names"]) for entry in candidates.entries
+    ]
+    assert not [head for head in heads if head.get("inconclusive_reason")]
+    assert len(target.to_sign_in()) == 32 and receipts[0].status == "success"
 
 
 def test_a_later_action_of_the_check_draws_from_what_the_endpoint_already_received(monkeypatch):
