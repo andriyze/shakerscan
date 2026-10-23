@@ -548,13 +548,17 @@ def _crawl_inputs(url: str, opts: Mapping[str, Any]) -> list[str]:
 def _fit_crawl_inputs(argv: list[str], duration: int, *, scanner: str) -> tuple[int, int]:
     """Fit the crawl's ``-u`` inputs to its time box; return (inputs, seconds each).
 
-    ``-crawl-duration`` bounds each input. The static crawl runs its inputs side by side
-    (``-parallelism`` one per input), each for the whole box: the target's own crawl keeps the
-    time it had alone, the process's one rate limiter and the hard request ceiling are shared,
-    and the requests a short seed does not use stay with the target. The browser crawl runs one
-    input at a time in one browser (its memory bound is the process tree's), so it adds only its
-    first seed and the target keeps half of the box; a box too small to halve keeps the target
-    alone.
+    ``-crawl-duration`` bounds each input, not the run. The static crawl runs its inputs side by
+    side (``-parallelism`` one per input), each for the whole box, so the run ends with the box:
+    the target's own crawl keeps the time it had alone, and the process's one rate limiter and
+    the hard request ceiling are shared. While seeds are busy the target gets its share of that
+    rate (one of the inputs), and the requests a seed that finishes does not use return to it.
+    Fewer inputs at a time would not raise the target's share inside the box: each later input
+    would start when an earlier one ended and run its own whole box, so the run would outlast
+    the box (in the scanner image, 20 seeds at ``-parallelism 2`` ran 142 s of a 60 s box). The
+    browser crawl runs one input at a time in one browser (its memory bound is the process
+    tree's), so it adds only its first seed and the target keeps half of the box; a box too small
+    to halve keeps the target alone.
     """
     positions = [index for index, value in enumerate(argv) if value == "-u"]
     if scanner == "katana":
