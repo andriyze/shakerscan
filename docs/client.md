@@ -53,6 +53,11 @@ from taps, so the release workflow publishes the formula there):
 brew install andriyze/shakerscan/shakerscan
 ```
 
+The Homebrew formula installs the client without python-fido2, so it cannot answer a security-key
+touch: on an Enterprise gateway whose administrator requires a touch for person decisions (and for
+every terminal approval), install the client with `pipx` or `uv tool` instead. For an open-source
+engine, or a gateway that requires no touch, the Homebrew client does the same as the others.
+
 Run without installing:
 
 ```bash
@@ -64,15 +69,16 @@ From a repository checkout the client runs the runtime scripts in place:
 
 Python 3.10 or newer. One third-party dependency since 0.11.2: python-fido2 (Yubico,
 BSD-2-Clause; it brings `cryptography`, `cffi` and `pycparser`, and `typing-extensions` on Python
-3.10), for a USB security key's touch. The package declares `fido2>=2.0,<3`, so a plain `pipx` or
-`uv tool` install resolves the newest matching releases from the package index without hashes;
+3.10), for a USB security key's touch. The package declares `fido2>=2.2,<2.3` (one minor line:
+python-fido2's API has changed between minor releases), so a plain `pipx` or `uv tool` install
+resolves the newest matching releases from the package index without hashes;
 the reviewed resolution is hash-locked in `client/requirements/runtime.lock`, and
 `pip install --require-hashes -r client/requirements/runtime.lock` installs exactly that. The client
 is no longer pure Python through `cryptography` and `cffi`: they ship wheels for the common
 platforms, and a platform without one (32-bit ARM, for example) builds them, which needs a Rust
-toolchain. The Homebrew formula installs the client without python-fido2, so a Homebrew install has
-no security-key support (it says so when asked for a touch); install with `pipx` or `uv tool` for
-it.
+toolchain. The first `uvx shakerscan mcp` downloads them too. The Homebrew formula installs the
+client without python-fido2, so a Homebrew install has no security-key support (it says so when
+asked for a touch); install with `pipx` or `uv tool` for it.
 
 ## Public checks without an engine or account
 
@@ -387,9 +393,12 @@ shakerscan hunt permissions wait 8f0c…  # JSON: granted, denied, expired, with
 - **A gateway that requires a security-key touch for each decision** (its administrator's
   choice): no approver session opens; `--watch` asks for one touch per decision, and `allow
   a[l]l N shown` decides every request it is showing (one touch per 50). A touch that fails or
-  that you cancel with Ctrl-C leaves the request pending and shows it again; the watch goes on. On such a gateway, and on
-  any gateway that offers it, `--watch` also prints a line for each decision only a person should
-  make that a connection acting for you made (with a token, by key touch, or refused).
+  that you cancel with Ctrl-C leaves the request pending and shows it again; the watch goes on,
+  except when retrying cannot help (no key registered to your account, your account no longer
+  able to decide): it then ends with the reason. On such a gateway, and on any gateway that offers
+  it, `--watch` also prints a line for each decision only a person should make that a connection
+  acting for you made (with a token, by key touch, or refused), saying what it decided in the
+  gateway's words.
 - **Open-source engine (no token).** A `y/N` at the prompt, sent to the engine's decision route.
   `--watch` says which Hunts it watches and ends with "stopped watching for permission
   requests".
@@ -476,8 +485,17 @@ raised state-changing requests 20 -> 40 (safety ceiling) for Hunt 3f2a91c0-…
   and synced passkeys are out of reach of a terminal client, and Windows is not supported for the
   touch in this release. On Linux, install your distribution's FIDO udev rules (the `libfido2` or
   `yubikey-manager` package); the client says so when a USB device is plugged in that your user
-  cannot open. On a remote machine over SSH the key is not reachable: run the same
-  command on the machine the key is plugged into, with a connection that acts for you.
+  cannot open. On a remote machine over SSH the key is not reachable: the client says so and
+  names the same command to run on the machine the key is plugged into, with a connection that
+  acts for you.
+- **What you are shown is what the key signs.** The client asks the gateway for the challenge
+  first, so a gateway that cannot name the decision in full (a target or Hunt it could not read)
+  or an account with no key registered is said before anything is asked of a key; then it shows
+  the decision exactly as the challenge states it.
+- **A refused start** (a scan, Hunt start or retest of a target nobody authorized yet) started
+  nothing. Once you have authorized the target (`shakerscan targets authorize`), the same request
+  runs when it is sent again with the same Idempotency-Key; the refusal line, the MCP adapter and
+  the Hunt skill tell an agent so.
 
 ## Secrets found on a target: `shakerscan secrets`
 
