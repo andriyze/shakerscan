@@ -626,6 +626,30 @@ def test_a_sign_in_candidate_measures_the_targets_latency_at_the_pace_it_ran():
         assert abs(call["options"]["_measured_latency_seconds"] - 1.0) <= 0.05
 
 
+def test_a_scan_split_in_two_records_the_pace_its_stages_ran_at():
+    """Two parallel parts pace the endpoint at one request per 6 s: each stage records that floor
+    and the delay its argv ran at, so it measures the target's latency (1 s), not the 3 s gap
+    between a floor of one part and the pace of two."""
+    capability, tool, parser = SQLI
+    shard = {"canonical_shard_authority": {"shard_index": 0, "shard_count": 2}}
+    receipts, (calls,), _record = _slice(
+        capability, tool=tool, parser=parser, sent=40, options={"login_url": LOGIN, **shard},
+        routes=DEFAULT_ROUTES[:1], runner=_answering_in(1.0, sent=40),
+        budget={"http_requests": 6_000, "state_changing_requests": 6_000, "tool_wall_seconds": 5_760},
+    )
+    sign_in = _sign_in_calls(calls)
+    assert len(sign_in) == 8
+    stages = [item for item in receipts[0].observations if item.get("kind") == "sqli_technique_stage"]
+    assert len(stages) == 8
+    for stage, call in zip(stages, sign_in):
+        assert call["delay"] >= 2 * AUTH_ENDPOINT_SECONDS_PER_REQUEST
+        assert stage["paced_floor_ms"] == 2 * AUTH_ENDPOINT_SECONDS_PER_REQUEST * 1_000
+        assert stage["delay_ms"] == round(call["delay"] * 1_000)
+        assert 950 <= stage["measured_latency_ms"] <= 1_050, stages
+    for call in sign_in[1:]:
+        assert abs(call["options"]["_measured_latency_seconds"] - 1.0) <= 0.05
+
+
 def test_a_stage_paced_at_its_endpoints_floor_does_not_size_the_slices_slots():
     """The slice sizes its concurrent slots from the target's latency; a stage paced at the sign-in
     floor measured that one endpoint and is not reported to it. A stage of any other candidate is."""
