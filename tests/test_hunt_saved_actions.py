@@ -42,6 +42,7 @@ REUSABLE = [
     # One letter/digit alternation is a route word; camelCase route words stay.
     ("http.request", {"method": "GET", "path": "/shop/Category12"}),
     ("http.request", {"method": "GET", "path": "/api/userProfile"}),
+    ("http.request", {"method": "GET", "path": "/api/getUserRole"}),  # 11 letters, camelCase
     ("http.request", {"method": "GET", "path": "/api/Reports/Monthly"}),
     ("http.request", {"method": "GET", "path": "/status/online"}),
 ]
@@ -56,7 +57,8 @@ ACTING_DEVICE_PATHS = (
     "/relay/on", "/relay/off", "/door/open", "/alarm/disarm", "/disk/format", "/camera/ptz/move", "/wol/wake",
 )
 # Capability tokens made of letters only: mixed case and long, or base64url-shaped.
-LETTER_TOKEN_PATHS = ("/share/AbCdEfGhIjKlMnOp", "/p/ZXhhbXBsZQ", "/s/QWxhZGRpbjpvcGVu")
+LETTER_TOKEN_PATHS = ("/share/AbCdEfGhIjKlMnOp", "/link/AbCdEfGhIjKlMnOp", "/link/AbCdEfGhIjKl", "/p/ZXhhbXBsZQ", "/p/ZXhhbXBs",
+                      "/s/QWxhZGRpbjpvcGVu")
 
 NOT_REUSABLE = [
     *(("http.request", {"method": "GET", "path": path}) for path in ACTING_HTTP_PATHS + LETTER_TOKEN_PATHS),
