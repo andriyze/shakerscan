@@ -289,8 +289,12 @@ def test_every_nosqli_variant_counts_as_attempted_in_the_report(monkeypatch):
 
 
 
-def _authz_surface(routes, *, rounds=1, backend=None):
-    """The anonymous-versus-signed-in comparison over the endpoint manifest of ``routes``."""
+def _authz_surface(routes, *, rounds=1, backend=None, public_route=False):
+    """The anonymous-versus-signed-in comparison over the endpoint manifest of ``routes``.
+
+    Every probe answers 401 anonymously and 200 signed in; with ``public_route`` the sign-in path
+    without a query answers both alike with a JSON body (an anonymous-access finding there).
+    """
     from runtime.request_replay_executor import ReplayTransportResult
 
     scan_id, endpoints, candidates = _manifests(routes)
@@ -299,9 +303,12 @@ def _authz_surface(routes, *, rounds=1, backend=None):
     class Transport:
         async def send(self, request, **_kwargs):
             sent.append((request.method, request.url))
+            public = public_route and "?" not in request.url
             return ReplayTransportResult(
-                status_code=200 if request.headers else 401, connected_address="192.0.2.10",
-                final_url=request.url, response_body=b"{}",
+                status_code=200 if request.headers or public else 401,
+                connected_address="192.0.2.10", final_url=request.url,
+                response_headers={"Content-Type": "application/json"},
+                response_body=b'{"items": ["one", "two", "three", "four"]}' if public else b"{}",
             )
 
     args = {"endpoint_manifest_ref": endpoints.reference().canonical_dict(),
@@ -364,3 +371,10 @@ def test_a_resumed_comparison_resends_nothing_for_any_entry_of_the_route():
     receipts, sent, *_rest = _authz_surface(SIGN_IN_ROUTES, rounds=2)
     assert len(sent) == 8
     assert receipts[1].redacted_execution["resumed_count"] == 4
+
+
+def test_a_route_seen_with_several_bodies_yields_one_finding():
+    (receipt,), _sent, _endpoints, _authz_action = _authz_surface(SIGN_IN_ROUTES, public_route=True)
+    findings = [item for item in receipt.observations if item.get("kind") == "authz_surface_proof"]
+    assert len(findings) == 1, findings
+    assert sum(head["proof_state"] == "verified" for head in _heads(receipt)) == 3
