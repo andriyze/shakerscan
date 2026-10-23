@@ -50,3 +50,11 @@ def test_coverage_names_the_limited_sign_in_endpoint():
     family = next(row for row in coverage["family_coverage"] if row["family"] == "sqli")
     assert family["sign_in_probe_limited"] == {"endpoints": [LOGIN], "candidates": 1}
     assert AUTH_ENDPOINT_PROBE_LIMITED in coverage["reasons"]
+    # A candidate the probe set left inconclusive is not a verdict: the family is partial for that
+    # reason, and the grade over it is not called reliable.
+    assert family["coverage_status"] == "partial"
+    assert family["reason"] == AUTH_ENDPOINT_PROBE_LIMITED
+    assert "sqli" in coverage["selected_family_gaps"]
+    assert coverage["status"] == "partial"
+    assert report["scan_metadata"]["grade_reliable"] is False
+    assert coverage["grade_reliability"]["reliable"] is False

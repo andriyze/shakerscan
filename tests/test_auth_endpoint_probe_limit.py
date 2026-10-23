@@ -1,15 +1,17 @@
-"""The credential profile's own sign-in endpoint gets a lockout-safe probe set (E1-N6).
+"""The credential profile's own sign-in endpoint gets a lockout-safe pace and one probe set (E1-N6).
 
-A balanced authenticated lab Scan sent about 1,460 injection POSTs to the Hub login it signed in
-with (938 sqlmap, 523 Dalfox). On that one endpoint each active injection verifier now runs a
-bounded probe set per parameter, at most 20 requests a minute, and coverage names the limit
-(``auth_endpoint_probe_limited``). Every other endpoint keeps its full hold. The batch tests
-drive the real batch adapter with a fake process runner; no scanner process runs.
+An authenticated balanced Scan of a test application sent about 1,460 injection requests to the
+sign-in form it used (938 sqlmap, 523 Dalfox). On that one endpoint the verifiers keep their full
+payloads but run at most 20 requests a minute, one attempt at a time, and draw from one probe set
+per verifier across every candidate and round of the Scan; coverage names the limit
+(``auth_endpoint_probe_limited``). Every other endpoint keeps its full hold. The batch tests drive
+the real batch adapter with a fake process runner (``_runner``); no scanner process runs.
 """
 from __future__ import annotations
 
 import asyncio
 import dataclasses
+import math
 import uuid
 
 import pytest
@@ -18,9 +20,12 @@ import agent_tools
 from runtime.models import ScanPolicy
 from scan.action_plan import ScanActionPlan
 from scan.auth_endpoint_probe import (
-    AUTH_ENDPOINT_PROBE_LIMITED, AUTH_ENDPOINT_PROBE_REQUESTS, AUTH_ENDPOINT_SECONDS_PER_REQUEST,
-    auth_endpoint_hold, auth_endpoint_keys, auth_endpoint_of,
+    AUTH_ENDPOINT_MIN_ATTEMPT_REQUESTS, AUTH_ENDPOINT_PACE_UNFUNDED, AUTH_ENDPOINT_PROBE_LIMITED,
+    AUTH_ENDPOINT_PROBE_REQUESTS, AUTH_ENDPOINT_SECONDS_PER_REQUEST, auth_endpoint_hold,
+    normalize_path, probe_set_requests, routing_digests, sign_in_endpoint_for, sign_in_endpoints,
 )
+from scan.sqli_concurrency import CANDIDATE_CONCURRENCY_ARG
+from scan.sqli_stages import SQLI_TECHNIQUE_NEGATIVE_COST
 from scan.verification_extension import EXTENDS_ARG
 from scan.work_manifests import build_candidate_manifest, build_endpoint_manifest
 from tests.test_body_attempt_mutation_accounting import _enforcement
@@ -28,199 +33,112 @@ from tests.test_scan_action_adapter import TARGET, Backend, _action, _dispatcher
 
 ORIGIN = "https://app.example.test"
 LOGIN = "/hub/login"
+FORM = "application/x-www-form-urlencoded"
 
 
-# --- the numbers --------------------------------------------------------------------------------
-
-def test_a_sign_in_parameter_gets_the_bounded_probe_set_at_the_lockout_safe_pace():
-    body = {"http_requests": 480, "state_changing_requests": 480, "tool_wall_seconds": 420}
-    sqli = auth_endpoint_hold(body, capability_name="sqli.verify_batch", used=0)
-    assert sqli == {"http_requests": 60, "state_changing_requests": 60, "tool_wall_seconds": 420}
-    xss = auth_endpoint_hold(
-        {"http_requests": 240, "state_changing_requests": 240, "tool_wall_seconds": 120},
-        capability_name="xss.verify_batch", used=0,
-    )
-    assert xss["http_requests"] == 32
-    # The pace: never more than one request per 3 s of wall for each candidate that runs at once.
-    assert AUTH_ENDPOINT_SECONDS_PER_REQUEST == 3
-    paced = auth_endpoint_hold({"http_requests": 160, "tool_wall_seconds": 30},
-                               capability_name="sqli.verify_batch", used=0)
-    assert paced["http_requests"] == 10
-    concurrent = auth_endpoint_hold({"http_requests": 160, "tool_wall_seconds": 60},
-                                    capability_name="sqli.verify_batch", used=0, concurrency=2)
-    assert concurrent["http_requests"] == 10
-    # What a parameter already received counts: a spent probe set funds nothing more.
-    assert auth_endpoint_hold(body, capability_name="sqli.verify_batch", used=40)["http_requests"] == 20
-    assert auth_endpoint_hold(body, capability_name="sqli.verify_batch", used=55) is None
+def _for(url, endpoints, method="POST"):
+    found = sign_in_endpoint_for(url, method, endpoints)
+    return found.label if found is not None else None
 
 
-def test_the_sign_in_endpoint_and_its_form_action_are_recognized_and_nothing_else():
-    keys = auth_endpoint_keys(
-        {"login_url": f"{ORIGIN}{LOGIN}"},
-        [{"kind": "credential_session", "endpoint_path": LOGIN, "form_action_path": "/hub/session"}],
-        base_url=f"{ORIGIN}/",
-    )
-    assert auth_endpoint_of(f"{ORIGIN}{LOGIN}", keys) == LOGIN
-    assert auth_endpoint_of(f"{ORIGIN}{LOGIN}/", keys) == LOGIN
-    assert auth_endpoint_of(f"{ORIGIN}/hub/session?next=1", keys) == "/hub/session"
-    assert auth_endpoint_of(f"{ORIGIN}/api/feedback", keys) is None
-    assert auth_endpoint_of(f"https://other.example.test{LOGIN}", keys) is None
-    relative = auth_endpoint_keys({"login_url": LOGIN}, [], base_url=f"{ORIGIN}/app/")
-    assert auth_endpoint_of(f"{ORIGIN}{LOGIN}", relative) == LOGIN
-    assert auth_endpoint_keys({}, [], base_url=f"{ORIGIN}/") == frozenset()
+# --- which requests are the sign-in endpoint ----------------------------------------------------
+
+def test_the_probe_sets_hold_the_whole_level_two_ladder_and_a_bounded_xss_set():
+    # sqlmap's measured cost to a negative verdict at level 2 / risk 2, per tested field.
+    assert AUTH_ENDPOINT_PROBE_REQUESTS["sqli.verify_batch"] == sum(SQLI_TECHNIQUE_NEGATIVE_COST.values()) == 473
+    assert probe_set_requests("sqli.verify_batch", 2) == 946
+    assert probe_set_requests("xss.verify_batch", 2) == 128
+    assert probe_set_requests("xss.verify_batch", 9) == probe_set_requests("xss.verify_batch", 4)
 
 
-@pytest.mark.parametrize("tool,flag", [("sqlmap", "--level"), ("dalfox", "--only-custom-payload")])
-def test_the_probe_profile_bounds_the_payloads(tool, flag, tmp_path):
-    tmp_path.chmod(0o700)
-    runtime = {"sqlmap_output_dir": str(tmp_path)} if tool == "sqlmap" else {}
-    options = {"_batch_attempt": True, "method": "POST", "body_field_names": ["username", "password"],
-               "injection_field": "username", "probe_profile": "auth_endpoint"}
-    plan = agent_tools.build_enforced_scanner_plan(
-        tool, f"{ORIGIN}{LOGIN}", options,
-        reserved_budget={"http_requests": 60, "state_changing_requests": 60, "tool_wall_seconds": 420},
-        pinned_proxy_url="socks5://127.0.0.1:41000", runtime_paths=runtime,
-    )
-    argv = list(plan.argv)
-    if tool == "sqlmap":
-        assert argv[argv.index("--level") + 1] == "1" and argv[argv.index("--risk") + 1] == "1"
-        assert float(argv[argv.index("--delay") + 1]) >= AUTH_ENDPOINT_SECONDS_PER_REQUEST
-    else:
-        assert flag in argv and "--custom-payload" in argv
-        assert int(argv[argv.index("--delay") + 1]) >= AUTH_ENDPOINT_SECONDS_PER_REQUEST * 1_000
-    unbounded = agent_tools.build_enforced_scanner_plan(
-        tool, f"{ORIGIN}/api/feedback", {**options, "probe_profile": None},
-        reserved_budget={"http_requests": 480, "state_changing_requests": 480, "tool_wall_seconds": 420},
-        pinned_proxy_url="socks5://127.0.0.1:41000", runtime_paths=runtime,
-    )
-    if tool == "sqlmap":
-        assert unbounded.argv[list(unbounded.argv).index("--level") + 1] == "2"
-    else:
-        assert "--only-custom-payload" not in unbounded.argv
+def test_spelling_variants_of_the_sign_in_path_are_the_same_endpoint():
+    endpoints = sign_in_endpoints({"login_url": LOGIN}, [], base_url=f"{ORIGIN}/")
+    for variant in ("/hub/login", "/hub/login/", "/hub/Login", "/HUB/LOGIN", "/hub//login",
+                    "/hub/./login", "/hub/x/../login", "/hub/login;jsessionid=1", "/hub/%6cogin",
+                    "/hub/%6Cogin"):
+        assert _for(f"{ORIGIN}{variant}", endpoints) == LOGIN, variant
+    for other in ("/hub/logins", "/hub/login/extra", "/api/feedback", "/login"):
+        assert _for(f"{ORIGIN}{other}", endpoints) is None, other
+    assert _for(f"https://other.example.test{LOGIN}", endpoints) is None
+    assert _for(f"http://app.example.test{LOGIN}", endpoints) is None
+    assert normalize_path("/Account/./Login;x=1") == normalize_path("/account//login/") == "/account/login"
+    # Case folding errs toward the endpoint: an IIS-style path is one endpoint in any case.
+    iis = sign_in_endpoints({"login_url": "/Account/Login"}, [], base_url=f"{ORIGIN}/")
+    assert _for(f"{ORIGIN}/account/login", iis) == "/Account/Login"
 
 
-# --- the batch ----------------------------------------------------------------------------------
-
-def _runner(tool, parser, *, sent):
-    calls: list[dict] = []
-
-    async def process_runner(payload, *, heartbeat):
-        reserved = dict(payload["_reserved_budget"])
-        calls.append({"target": payload["execution_target"], "reserved": reserved,
-                      "options": dict(payload["scanner_options"])})
-        count = min(sent, int(reserved["http_requests"]))
-        return {
-            "status": "success", "elapsed_seconds": 10,
-            "typed_output": {"parser": parser, "records": [], "errors": []},
-            "settlement": {"mode": "exact", "actual": count, "observed_minimum": count},
-            "process_enforcement": _enforcement(tool, parser, {
-                name: reserved[name] for name in ("http_requests", "tool_wall_seconds")
-            }),
-        }
-
-    return process_runner, calls
+def test_only_a_request_with_a_body_attempts_a_sign_in():
+    endpoints = sign_in_endpoints({"login_url": LOGIN}, [], base_url=f"{ORIGIN}/")
+    for method in ("POST", "PUT", "PATCH", "post"):
+        assert _for(f"{ORIGIN}{LOGIN}", endpoints, method) == LOGIN
+    for method in ("GET", "HEAD", "OPTIONS", ""):
+        assert _for(f"{ORIGIN}{LOGIN}?next=1", endpoints, method) is None
+        assert _for(f"{ORIGIN}{LOGIN}?ReturnUrl=%2F", endpoints, method) is None
 
 
-def _slice(capability, *, tool, parser, sent, options, extends=None, prior=()):
-    scan_id = str(uuid.uuid4())
-    endpoints = build_endpoint_manifest(
-        scan_id=scan_id, target_binding_digest=TARGET.digest,
-        surface_manifest={
-            "schema_version": "endpoint-manifest/v2", "status": "complete", "reason": None,
-            "endpoints": [{
-                "method": "POST", "scheme": "https", "host": "app.example.test", "port": 443,
-                "normalized_path": path, "concrete_path": path, "query_keys": [],
-                "content_type": "application/x-www-form-urlencoded", "body_field_names": fields,
-                "source": "inputs.custom_endpoints",
-            } for path, fields in ((LOGIN, ["username", "password"]), ("/api/feedback", ["comment"]))],
-        },
-        source_action_ids=("discover.web_crawl",),
-    )
-    candidates = build_candidate_manifest(
-        endpoints, source_action_ids=("discover.web_crawl",), maximum=10,
-        allow_state_changing_http=True,
-    )
-    count = len(candidates.entries)
-    args = {
-        "candidate_manifest_ref": candidates.reference().canonical_dict(),
-        "endpoint_manifest_ref": endpoints.reference().canonical_dict(),
-        "slice": {"start": 0, "count": count}, "profile": "balanced_batch_v1",
-        "proof_policy": "deterministic_differential_required",
-    }
-    first = dataclasses.replace(
-        _action("verify.x.r01", capability, 0, capability_args=args),
-        requested_budget={"http_requests": 6_000, "state_changing_requests": 6_000,
-                          "tool_wall_seconds": 6_000},
-        action_digest=None,
-    )
-    actions = [first]
-    action = first
-    if extends:
-        action = dataclasses.replace(
-            _action("verify.x.r02", capability, 1, capability_args={**args, EXTENDS_ARG: first.action_id}),
-            requested_budget=dict(first.requested_budget), action_digest=None,
-        )
-        actions.append(action)
-    plan = ScanActionPlan(scan_id=scan_id, execution_plan_digest="a" * 64,
-                          target_binding_digest=TARGET.digest, actions=tuple(actions))
-    backend = Backend(manifests={endpoints.manifest_id: endpoints, candidates.manifest_id: candidates})
-    dispatcher = _dispatcher(plan, backend, options=options, policy=ScanPolicy(
-        active_testing=True, allow_state_changing_http=True, approval_receipt_id="approval-1",
-    ))
-    runner, calls = _runner(tool, parser, sent=sent)
-    dispatcher.process_runner = runner
-    receipt = asyncio.run(dispatcher(first, _lease(plan, first), _noop))
-    if extends:
-        calls.clear()
-        receipt = asyncio.run(dispatcher(action, _lease(plan, action), _noop))
-    return receipt, calls, candidates
-
-
-def _sent_to(calls, path):
-    return [call for call in calls if call["target"].split("?")[0].endswith(path)]
-
-
-@pytest.mark.parametrize("capability,tool,parser", [
-    ("sqli.verify_batch", "sqlmap", "sqlmap-output/v1"),
-    ("xss.verify_batch", "dalfox", "dalfox-jsonl/v1"),
+@pytest.mark.parametrize("login_url,sign_in,others", [
+    ("/index.php?r=site/login", "/index.php?r=site/login", ["/index.php?r=product/view&id=1", "/index.php"]),
+    ("/?action=login", "/?action=login&x=1", ["/?page=item&id=3", "/"]),
+    ("/index.php?route=account/login", "/index.php?route=account%2Flogin",
+     ["/index.php?route=product/search&search=x", "/index.php?route=account/register"]),
+    ("/index.php?option=com_users&view=login", "/index.php?view=login&option=com_users&Itemid=101",
+     ["/index.php?option=com_users&view=registration", "/index.php?option=com_content"]),
+    ("/index.php?title=Special:UserLogin", "/index.php?title=Special:UserLogin&returnto=Main",
+     ["/index.php?title=Main_Page&action=edit"]),
+    ("/ucp.php?mode=login", "/ucp.php?mode=login&sid=1", ["/ucp.php?mode=register", "/posting.php?mode=post"]),
 ])
-def test_the_sign_in_endpoint_gets_the_probe_set_and_other_endpoints_their_full_hold(capability, tool, parser):
-    receipt, calls, _candidates = _slice(capability, tool=tool, parser=parser, sent=1_000,
-                                         options={"login_url": LOGIN})
-    login, other = _sent_to(calls, LOGIN), _sent_to(calls, "/api/feedback")
-    assert login and other
-    assert sum(call["reserved"]["http_requests"] for call in login) <= 2 * AUTH_ENDPOINT_PROBE_REQUESTS[capability]
-    for call in login:
-        reserved = call["reserved"]
-        assert reserved["tool_wall_seconds"] >= reserved["http_requests"] * AUTH_ENDPOINT_SECONDS_PER_REQUEST
-        assert call["options"].get("probe_profile") == "auth_endpoint"
-    assert all(call["options"].get("probe_profile") is None for call in other)
-    assert max(call["reserved"]["http_requests"] for call in other) > AUTH_ENDPOINT_PROBE_REQUESTS[capability]
-    heads = [item for item in receipt.observations
-             if item.get("kind") == "candidate_attempt" and item.get("sign_in_endpoint") == LOGIN]
-    assert len(heads) == 1  # one body candidate tests both fields (username, password)
-    for head in heads:
-        assert head["sign_in_endpoint_requests"] <= 2 * AUTH_ENDPOINT_PROBE_REQUESTS[capability]
-        assert head["verdict"] == "inconclusive"
-        assert head["inconclusive_reason"] == AUTH_ENDPOINT_PROBE_LIMITED
-        assert "resume_wall_seconds" not in head
+def test_a_front_controller_sign_in_is_keyed_on_its_routing_query(login_url, sign_in, others):
+    endpoints = sign_in_endpoints({"login_url": login_url}, [], base_url=f"{ORIGIN}/")
+    assert _for(f"{ORIGIN}{sign_in}", endpoints) is not None
+    for other in others:
+        assert _for(f"{ORIGIN}{other}", endpoints) is None, other
 
 
-def test_a_continuation_round_sends_the_spent_sign_in_parameters_nothing():
-    receipt, calls, _candidates = _slice("sqli.verify_batch", tool="sqlmap", parser="sqlmap-output/v1",
-                                         sent=1_000, options={"login_url": LOGIN}, extends=True)
-    assert not _sent_to(calls, LOGIN)
-    deferred = [item for item in receipt.observations
-                if item.get("kind") == "candidate_deferred" and item.get("reason") == AUTH_ENDPOINT_PROBE_LIMITED]
-    assert len(deferred) == 1
-    assert all(item["verdict"] == "inconclusive" for item in deferred)
+def test_a_query_that_says_where_to_go_next_does_not_route():
+    endpoints = sign_in_endpoints({"login_url": "/login?next=/dashboard&lang=en"}, [],
+                                  base_url=f"{ORIGIN}/")
+    assert _for(f"{ORIGIN}/login", endpoints) == "/login"
+    assert routing_digests("next=/x&ReturnUrl=/y&redirect_uri=z&token=abc&state=Zx9Qp2Lm7Rt4Wv8Yb3Nc") == frozenset()
+    assert routing_digests("route=account/login")
 
 
-def test_without_a_sign_in_profile_the_login_form_keeps_the_full_hold():
-    _receipt, calls, _candidates = _slice("sqli.verify_batch", tool="sqlmap", parser="sqlmap-output/v1",
-                                          sent=1_000, options={})
-    login = _sent_to(calls, LOGIN)
-    assert login and all(call["options"].get("probe_profile") is None for call in login)
+def test_the_page_is_not_the_endpoint_when_its_form_posts_elsewhere():
+    """A sign-in box on the home page posts to /session: the site search on / is not limited."""
+    observation = {"kind": "credential_session", "auth_kind": "form_login", "status": "established",
+                   "endpoint_path": "/", "form_action_path": "/session"}
+    endpoints = sign_in_endpoints({"login_url": "/"}, [observation], base_url=f"{ORIGIN}/")
+    assert _for(f"{ORIGIN}/session", endpoints) == "/session"
+    assert _for(f"{ORIGIN}/?q=shoes", endpoints) is None
+    assert _for(f"{ORIGIN}/", endpoints) is None
+    # A form that posts back to its own page: the page is the endpoint.
+    same = dict(observation, endpoint_path=LOGIN, form_action_path=LOGIN)
+    assert _for(f"{ORIGIN}{LOGIN}", sign_in_endpoints({"login_url": LOGIN}, [same], base_url=f"{ORIGIN}/")) == LOGIN
+
+
+def test_a_form_action_with_a_query_is_still_its_sign_in_endpoint():
+    recorded = {"kind": "credential_session", "auth_kind": "form_login", "status": "established",
+                "endpoint_path": "/signin", "form_action_path": "/auth", "form_action_has_query": True}
+    endpoints = sign_in_endpoints({}, [recorded], base_url=f"{ORIGIN}/")
+    assert _for(f"{ORIGIN}/auth", endpoints) == "/auth"
+    assert _for(f"{ORIGIN}/auth?step=2", endpoints) == "/auth"
+    assert _for(f"{ORIGIN}/signin", endpoints) is None
+    # A record from before the action's path was kept apart from its query.
+    legacy = dict(recorded, form_action_path="/auth?<redacted-query>")
+    legacy.pop("form_action_has_query")
+    assert _for(f"{ORIGIN}/auth", sign_in_endpoints({}, [legacy], base_url=f"{ORIGIN}/")) == "/auth"
+
+
+def test_a_json_sign_in_with_a_routing_query_is_recognized_from_its_record():
+    record = {"kind": "credential_session", "auth_kind": "json_login", "status": "established",
+              "endpoint_path": "/index.php?<redacted-query>",
+              "endpoint_routing": sorted(routing_digests("r=api/login"))}
+    endpoints = sign_in_endpoints({}, [record], base_url=f"{ORIGIN}/")
+    assert _for(f"{ORIGIN}/index.php?r=api/login", endpoints) == "/index.php"
+    assert _for(f"{ORIGIN}/index.php?r=api/orders", endpoints) is None
+    # Without its routing the record names nothing: the bare script is not the endpoint.
+    unknown = dict(record)
+    unknown.pop("endpoint_routing")
+    assert sign_in_endpoints({}, [unknown], base_url=f"{ORIGIN}/") == ()
 
 
 def test_the_sign_in_records_where_its_form_posts():
@@ -228,5 +146,333 @@ def test_the_sign_in_records_where_its_form_posts():
 
     observation = _form_login("/hub/")
     assert observation["form_action_path"] == "/hub/login"
-    keys = auth_endpoint_keys({}, [observation], base_url=f"{ORIGIN}/")
-    assert auth_endpoint_of(f"{ORIGIN}/hub/login", keys) == "/hub/login"
+    assert "form_action_has_query" not in observation
+    endpoints = sign_in_endpoints({}, [observation], base_url=f"{ORIGIN}/")
+    assert _for(f"{ORIGIN}/hub/login", endpoints) == "/hub/login"
+    routed = _form_login("/hub/", action="/index.php?route=account/login&token=Zx9Qp2Lm7Rt4Wv8Yb3Nc")
+    assert routed["form_action_path"] == "/index.php" and routed["form_action_has_query"] is True
+    assert routed["form_action_routing"] == sorted(routing_digests("route=account/login"))
+    assert "account" not in str(routed) and "Zx9Qp2" not in str(routed)  # digests only
+    endpoints = sign_in_endpoints({}, [routed], base_url=f"{ORIGIN}/")
+    assert _for(f"{ORIGIN}/index.php?route=account/login", endpoints) == "/index.php"
+    assert _for(f"{ORIGIN}/index.php?route=product/search", endpoints) is None
+
+
+# --- the hold and the pace ----------------------------------------------------------------------
+
+def test_an_attempt_holds_what_the_probe_set_has_left_at_the_lockout_safe_pace():
+    body = {"http_requests": 480, "state_changing_requests": 480, "tool_wall_seconds": 420}
+    assert AUTH_ENDPOINT_SECONDS_PER_REQUEST == 3
+    hold = auth_endpoint_hold(body, capability_name="sqli.verify_batch", received=0, parameters=2)
+    assert hold == {"http_requests": 140, "state_changing_requests": 140, "tool_wall_seconds": 420}
+    late = auth_endpoint_hold(body, capability_name="sqli.verify_batch", received=900, parameters=2)
+    assert late["http_requests"] == 46
+    # Across parallel children the pace is divided among them.
+    split = auth_endpoint_hold(body, capability_name="sqli.verify_batch", received=0, parameters=2, children=2)
+    assert split["http_requests"] == 70
+    # A wall that cannot pace a probe holds nothing: the candidate waits for a later round.
+    assert auth_endpoint_hold({"http_requests": 160, "tool_wall_seconds": 23},
+                              capability_name="sqli.verify_batch", received=0) is None
+    assert auth_endpoint_hold({"http_requests": 160, "tool_wall_seconds": 24},
+                              capability_name="sqli.verify_batch", received=0)["http_requests"] == 8
+
+
+def _plan_argv(tool, url, options, budget, tmp_path):
+    tmp_path.chmod(0o700)
+    runtime = {"sqlmap_output_dir": str(tmp_path)} if tool == "sqlmap" else {}
+    return list(agent_tools.build_enforced_scanner_plan(
+        tool, url, options, reserved_budget=budget, pinned_proxy_url="socks5://127.0.0.1:41000",
+        runtime_paths=runtime,
+    ).argv)
+
+
+BODY = {"_batch_attempt": True, "method": "POST", "body_field_names": ["username", "password"],
+        "injection_field": "username", "content_type": FORM}
+
+
+def test_sqlmap_keeps_its_level_two_ladder_on_the_sign_in_endpoint_at_the_pace(tmp_path):
+    budget = {"http_requests": 140, "state_changing_requests": 140, "tool_wall_seconds": 420}
+    argv = _plan_argv("sqlmap", f"{ORIGIN}{LOGIN}", {**BODY, "probe_profile": "auth_endpoint"}, budget, tmp_path)
+    assert argv[argv.index("--level") + 1] == "2" and argv[argv.index("--risk") + 1] == "2"
+    assert argv[argv.index("--threads") + 1] == "1"
+    assert float(argv[argv.index("--delay") + 1]) >= AUTH_ENDPOINT_SECONDS_PER_REQUEST
+
+
+def test_a_small_remaining_stage_hold_keeps_the_three_second_floor(tmp_path):
+    """A later stage holds less: its own wall/requests pace would be faster than 20 a minute."""
+    budget = {"http_requests": 50, "state_changing_requests": 50, "tool_wall_seconds": 100}
+    argv = _plan_argv("sqlmap", f"{ORIGIN}{LOGIN}", {**BODY, "probe_profile": "auth_endpoint"}, budget, tmp_path)
+    assert float(argv[argv.index("--delay") + 1]) >= AUTH_ENDPOINT_SECONDS_PER_REQUEST
+    shard = _plan_argv("sqlmap", f"{ORIGIN}{LOGIN}",
+                       {**BODY, "probe_profile": "auth_endpoint", "probe_pace_seconds": 6}, budget, tmp_path)
+    assert float(shard[shard.index("--delay") + 1]) >= 6
+    dalfox = _plan_argv("dalfox", f"{ORIGIN}{LOGIN}", {**BODY, "probe_profile": "auth_endpoint"},
+                        {"http_requests": 30, "state_changing_requests": 30, "tool_wall_seconds": 60}, tmp_path)
+    assert int(dalfox[dalfox.index("--delay") + 1]) >= AUTH_ENDPOINT_SECONDS_PER_REQUEST * 1_000
+
+
+def test_dalfox_tests_the_body_of_the_sign_in_request_and_stops_at_its_first_proof(tmp_path):
+    budget = {"http_requests": 128, "state_changing_requests": 128, "tool_wall_seconds": 420}
+    argv = _plan_argv("dalfox", f"{ORIGIN}{LOGIN}", {**BODY, "probe_profile": "auth_endpoint"}, budget, tmp_path)
+    # Its custom-payload mode puts the payloads in the URL's query and leaves the body alone.
+    assert "--only-custom-payload" not in argv and "--custom-payload" not in argv
+    assert "--skip-discovery" not in argv
+    assert argv[argv.index("-X") + 1] == "POST" and "-d" in argv
+    assert argv[argv.index("--worker") + 1] == "1"
+    assert int(argv[argv.index("--delay") + 1]) >= AUTH_ENDPOINT_SECONDS_PER_REQUEST * 1_000
+    assert argv[argv.index("--limit-result") + 1] == "1"
+    assert argv[argv.index("--limit-result-type") + 1] == "v"
+    other = _plan_argv("dalfox", f"{ORIGIN}/api/feedback", BODY,
+                       {"http_requests": 240, "state_changing_requests": 240, "tool_wall_seconds": 120}, tmp_path)
+    assert "--limit-result" not in other and other[other.index("--worker") + 1] == "3"
+
+
+@pytest.mark.parametrize("profile", [None, "auth_endpoint"])
+def test_a_body_candidate_on_a_routed_action_keeps_dalfox_on_its_body(profile, tmp_path):
+    """One routing pair in the action's query is not the parameter a body candidate verifies."""
+    argv = _plan_argv("dalfox", f"{ORIGIN}/index.php?route=account/login", {**BODY, "probe_profile": profile},
+                      {"http_requests": 128, "state_changing_requests": 128, "tool_wall_seconds": 420}, tmp_path)
+    assert "--skip-discovery" not in argv and "--only-custom-payload" not in argv
+    assert [argv[index + 1] for index, value in enumerate(argv) if value == "-p"] == ["username", "password"]
+
+
+# --- the batch ----------------------------------------------------------------------------------
+
+def _runner(tool, parser, *, sent, record):
+    calls: list[dict] = []
+
+    async def process_runner(payload, *, heartbeat):
+        reserved = dict(payload["_reserved_budget"])
+        options = dict(payload["scanner_options"])
+        call = {"target": payload["execution_target"], "reserved": reserved, "options": options}
+        calls.append(call)
+        sign_in = bool(options.get("probe_profile"))
+        record["running"] += 1
+        record["sign_in"] += sign_in
+        record["peak"] = max(record["peak"], record["running"])
+        record["sign_in_peak"] = max(record["sign_in_peak"], record["sign_in"])
+        await asyncio.sleep(0.005)
+        record["running"] -= 1
+        record["sign_in"] -= sign_in
+        count = min(sent, int(reserved["http_requests"]))
+        return {
+            # A slow target (3.45 s a request), so a concurrent slice keeps its slots open.
+            "status": "success",
+            "elapsed_seconds": max(1, min(int(reserved["tool_wall_seconds"]), math.ceil(count * 3.45))),
+            "typed_output": {"parser": parser, "records": [], "errors": []},
+            "settlement": {"mode": "exact", "actual": count, "observed_minimum": count},
+            "process_enforcement": _enforcement(tool, parser, {
+                name: reserved[name] for name in ("http_requests", "tool_wall_seconds")
+            }),
+        }
+
+    process_runner.enforces_request_gate = True
+    return process_runner, calls
+
+
+SIGN_IN_ROUTES = (
+    ("POST", LOGIN, ["password", "username"], FORM, [], "inputs.custom_endpoints"),
+    ("POST", LOGIN, ["csrf_token", "password", "remember", "username"], FORM, [], "web.crawl"),
+    ("POST", LOGIN, ["password", "username"], "application/json", [], "web.spec_ingest"),
+    ("GET", LOGIN, None, None, ["next"], "web.crawl"),
+)
+DEFAULT_ROUTES = (
+    ("POST", LOGIN, ["username", "password"], FORM, [], "inputs.custom_endpoints"),
+    ("POST", "/api/feedback", ["comment"], FORM, [], "inputs.custom_endpoints"),
+)
+LARGE = {"http_requests": 6_000, "state_changing_requests": 6_000, "tool_wall_seconds": 6_000}
+
+
+def _slice(capability, *, tool, parser, sent, options, routes=DEFAULT_ROUTES, rounds=1, budget=None,
+           concurrency=None, measured=False):
+    scan_id = str(uuid.uuid4())
+    endpoints = build_endpoint_manifest(
+        scan_id=scan_id, target_binding_digest=TARGET.digest,
+        surface_manifest={
+            "schema_version": "endpoint-manifest/v2", "status": "complete", "reason": None,
+            "endpoints": [{
+                "method": method, "scheme": "https", "host": "app.example.test", "port": 443,
+                "normalized_path": path, "concrete_path": path, "query_keys": query,
+                "content_type": content_type, "body_field_names": fields, "source": source,
+            } for method, path, fields, content_type, query, source in routes],
+        },
+        source_action_ids=("discover.web_crawl",),
+    )
+    candidates = build_candidate_manifest(
+        endpoints, source_action_ids=("discover.web_crawl",), maximum=20,
+        allow_state_changing_http=True,
+    )
+    args = {
+        "candidate_manifest_ref": candidates.reference().canonical_dict(),
+        "endpoint_manifest_ref": endpoints.reference().canonical_dict(),
+        "slice": {"start": 0, "count": len(candidates.entries)}, "profile": "balanced_batch_v1",
+        "proof_policy": "deterministic_differential_required",
+        **({CANDIDATE_CONCURRENCY_ARG: concurrency} if concurrency else {}),
+    }
+    actions = []
+    for index in range(rounds):
+        actions.append(dataclasses.replace(
+            _action(f"verify.x.r0{index + 1}", capability, index, capability_args={
+                **args, **({EXTENDS_ARG: actions[-1].action_id} if actions else {}),
+            }),
+            requested_budget=dict(budget or LARGE), action_digest=None,
+        ))
+    plan = ScanActionPlan(scan_id=scan_id, execution_plan_digest="a" * 64,
+                          target_binding_digest=TARGET.digest, actions=tuple(actions))
+    backend = Backend(manifests={endpoints.manifest_id: endpoints, candidates.manifest_id: candidates})
+    if measured:
+        # A stage another candidate finished on this slow target: concurrent slots open at once.
+        from tests.test_sqli_concurrent_candidates import _measured_on_target
+        _measured_on_target(backend, actions[0].action_id)
+    dispatcher = _dispatcher(plan, backend, options=options, policy=ScanPolicy(
+        active_testing=True, allow_state_changing_http=True, approval_receipt_id="approval-1",
+    ))
+    record = {"running": 0, "sign_in": 0, "peak": 0, "sign_in_peak": 0}
+    runner, calls = _runner(tool, parser, sent=sent, record=record)
+    dispatcher.process_runner = runner
+    receipts, per_round = [], []
+    for action in actions:
+        before = len(calls)
+        receipts.append(asyncio.run(dispatcher(action, _lease(plan, action), _noop)))
+        per_round.append(calls[before:])
+    return receipts, per_round, record
+
+
+def _sent_to(calls, path):
+    return [call for call in calls if call["target"].split("?")[0].endswith(path)]
+
+
+def _sign_in_calls(calls):
+    return [call for call in calls if call["options"].get("probe_profile")]
+
+
+def _heads(receipt):
+    return [item for item in receipt.observations
+            if item.get("kind") == "candidate_attempt" and item.get("sign_in_endpoint")]
+
+
+SQLI = ("sqli.verify_batch", "sqlmap", "sqlmap-output/v1")
+XSS = ("xss.verify_batch", "dalfox", "dalfox-jsonl/v1")
+
+
+@pytest.mark.parametrize("capability,tool,parser", [SQLI, XSS])
+def test_the_sign_in_endpoint_gets_its_pace_and_other_endpoints_their_full_hold(capability, tool, parser):
+    receipts, (calls,), _record = _slice(capability, tool=tool, parser=parser, sent=10_000,
+                                         options={"login_url": LOGIN})
+    login, other = _sent_to(calls, LOGIN), _sent_to(calls, "/api/feedback")
+    assert login and other
+    for call in login:
+        reserved = call["reserved"]
+        assert reserved["tool_wall_seconds"] >= reserved["http_requests"] * AUTH_ENDPOINT_SECONDS_PER_REQUEST
+        assert call["options"].get("probe_profile") == "auth_endpoint"
+    assert sum(call["reserved"]["http_requests"] for call in login) <= probe_set_requests(capability, 2)
+    assert all(call["options"].get("probe_profile") is None for call in other)
+    # The other endpoint keeps the batch's own pace, faster than the sign-in pace.
+    assert any(call["reserved"]["tool_wall_seconds"] < call["reserved"]["http_requests"] * 3 for call in other)
+    heads = _heads(receipts[0])
+    assert {head["sign_in_endpoint"] for head in heads} == {LOGIN}
+    assert all(head["sign_in_endpoint_requests"] > 0 for head in heads)
+
+
+@pytest.mark.parametrize("capability,tool,parser", [SQLI, XSS])
+def test_one_probe_set_is_shared_by_every_candidate_on_the_endpoint(capability, tool, parser):
+    """The declared form, the crawled form with hidden fields and a JSON variant: one endpoint."""
+    receipts, (calls,), _record = _slice(capability, tool=tool, parser=parser, sent=10_000,
+                                         options={"login_url": LOGIN}, routes=SIGN_IN_ROUTES)
+    sign_in = _sign_in_calls(calls)
+    assert len({tuple(call["options"]["body_field_names"]) for call in sign_in}) >= 2
+    total = sum(call["reserved"]["http_requests"] for call in sign_in)
+    # At most the largest candidate's probe set (four fields), not one probe set per candidate.
+    assert total <= probe_set_requests(capability, 4), total
+    # The query candidate on the sign-in page attempts no sign-in: its own full hold.
+    page = [call for call in _sent_to(calls, LOGIN) if "next=" in call["target"]]
+    assert page and all(call["options"].get("probe_profile") is None for call in page)
+    received = [head["sign_in_endpoint_received"] for head in _heads(receipts[0])]
+    assert len(received) == 3 and received == sorted(received) and received[-1] == total
+
+
+def test_continuation_rounds_draw_from_the_same_probe_set_and_stop_when_it_is_spent():
+    capability, tool, parser = SQLI
+    receipts, rounds, _record = _slice(capability, tool=tool, parser=parser, sent=10_000,
+                                       options={"login_url": LOGIN}, rounds=5, routes=DEFAULT_ROUTES[:1],
+                                       budget={"http_requests": 6_000, "state_changing_requests": 6_000,
+                                               "tool_wall_seconds": 900})
+    sent = [sum(call["reserved"]["http_requests"] for call in _sent_to(calls, LOGIN)) for calls in rounds]
+    # The fake spends each unit's whole hold: 900 of 946 after three rounds, and what is left
+    # cannot conclude the next unit (boolean over one field, 87), so the candidate is closed.
+    assert sent == [300, 300, 300, 0, 0]
+    assert sum(sent) <= probe_set_requests(capability, 2)
+    for receipt in receipts[3:]:
+        (closed,) = [item for item in receipt.observations if item.get("kind") == "candidate_attempt"]
+        assert closed["verdict"] == "inconclusive"
+        assert closed["inconclusive_reason"] == AUTH_ENDPOINT_PROBE_LIMITED
+        assert closed["sign_in_endpoint_received"] == 900
+        assert "resume_wall_seconds" not in closed
+        assert receipt.status == "success"
+
+
+def test_a_wall_too_short_to_pace_a_probe_leaves_the_candidate_for_a_later_round():
+    """Eight parallel children pace the endpoint at one request per 24 s; a 120 s hold paces 5."""
+    capability, tool, parser = XSS
+    shard = {"canonical_shard_authority": {"shard_index": 0, "shard_count": 8}}
+    receipts, (calls,), _record = _slice(
+        capability, tool=tool, parser=parser, sent=10_000, options={"login_url": LOGIN, **shard},
+        routes=DEFAULT_ROUTES[:1],
+        budget={"http_requests": 240, "state_changing_requests": 240, "tool_wall_seconds": 120},
+    )
+    assert not _sent_to(calls, LOGIN)
+    deferred = [item for item in receipts[0].observations if item.get("kind") == "candidate_deferred"]
+    assert len(deferred) == 1
+    assert deferred[0]["reason"] == AUTH_ENDPOINT_PACE_UNFUNDED
+    assert "verdict" not in deferred[0] and deferred[0].get("inconclusive_reason") is None
+    assert deferred[0]["resume_wall_seconds"] == AUTH_ENDPOINT_MIN_ATTEMPT_REQUESTS * AUTH_ENDPOINT_SECONDS_PER_REQUEST * 8
+    assert receipts[0].status == "partial"
+    assert not any(item.get("inconclusive_reason") == AUTH_ENDPOINT_PROBE_LIMITED
+                   for item in receipts[0].observations)
+
+
+def test_a_dalfox_attempt_that_verified_nothing_is_inconclusive_never_negative():
+    capability, tool, parser = XSS
+    receipts, (_calls,), _record = _slice(capability, tool=tool, parser=parser, sent=3,
+                                          options={"login_url": LOGIN}, routes=DEFAULT_ROUTES[:1])
+    (head,) = _heads(receipts[0])
+    assert head["sign_in_endpoint_requests"] == 3
+    assert head["verdict"] == "inconclusive" and head["inconclusive_reason"] == AUTH_ENDPOINT_PROBE_LIMITED
+
+
+def test_sign_in_candidates_of_a_concurrent_slice_run_one_at_a_time_at_the_pace():
+    """Two candidates on the endpoint never overlap, so the endpoint sees one attempt's pace."""
+    capability, tool, parser = SQLI
+    routes = SIGN_IN_ROUTES[:2] + (("GET", "/search", None, None, ["q"], "web.crawl"),
+                                   ("GET", "/items", None, None, ["id"], "web.crawl"))
+    # Each fake stage settles in 20 requests, so both sign-in candidates fit the probe set.
+    receipts, (calls,), record = _slice(capability, tool=tool, parser=parser, sent=20,
+                                        options={"login_url": LOGIN}, routes=routes, concurrency=2,
+                                        measured=True)
+    assert record["peak"] == 2, "the slice runs candidates concurrently"
+    assert len({call["target"] + str(call["options"].get("body_field_names")) for call in _sign_in_calls(calls)}) == 2
+    assert record["sign_in_peak"] == 1
+    for call in _sign_in_calls(calls):
+        reserved = call["reserved"]
+        assert reserved["http_requests"] * AUTH_ENDPOINT_SECONDS_PER_REQUEST <= reserved["tool_wall_seconds"]
+    assert receipts[0].redacted_execution["candidate_concurrency"]["bound"] == 2
+
+
+def test_a_parallel_child_divides_the_pace_by_its_siblings():
+    capability, tool, parser = SQLI
+    shard = {"canonical_shard_authority": {"shard_index": 0, "shard_count": 2}}
+    _receipts, (calls,), _record = _slice(capability, tool=tool, parser=parser, sent=10_000,
+                                          options={"login_url": LOGIN, **shard}, routes=DEFAULT_ROUTES[:1])
+    assert _sent_to(calls, LOGIN)
+    for call in _sent_to(calls, LOGIN):
+        reserved = call["reserved"]
+        assert reserved["http_requests"] * 2 * AUTH_ENDPOINT_SECONDS_PER_REQUEST <= reserved["tool_wall_seconds"]
+        assert call["options"]["probe_pace_seconds"] == 2 * AUTH_ENDPOINT_SECONDS_PER_REQUEST
+
+
+def test_without_a_sign_in_profile_the_login_form_keeps_the_full_hold():
+    receipts, (calls,), _record = _slice("sqli.verify_batch", tool="sqlmap", parser="sqlmap-output/v1",
+                                         sent=1_000, options={})
+    login = _sent_to(calls, LOGIN)
+    assert login and all(call["options"].get("probe_profile") is None for call in login)
+    assert not _heads(receipts[0])

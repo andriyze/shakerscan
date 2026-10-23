@@ -307,14 +307,14 @@ def test_an_anonymous_crawl_keeps_its_single_input(fixture_app):
 
 # --- the page the sign-in landed on -------------------------------------------------------------
 
-def _form_login(location):
+def _form_login(location, *, action="/hub/login"):
     from capabilities.auth import TargetBoundSessionCredential, establish_target_bound_http_session
     from tests.test_auth_session_capability import TARGET as AUTH_TARGET, _private_response
 
     async def request_executor(origin, args, **kwargs):
         if args["method"] == "GET":
             response = _private_response(200, body=(
-                '<form action="/hub/login" method="post">'
+                f'<form action="{action.replace("&", "&amp;")}" method="post">'
                 '<input name="username"><input type="password" name="password"></form>'))
         else:
             response = _private_response(

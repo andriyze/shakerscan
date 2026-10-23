@@ -695,7 +695,8 @@ def _tmpl_dalfox(url: str, opts: dict[str, Any]) -> list[str]:
     headless = opts.get("deep_domxss") is True
     delay_ms, workers = ("0", "10") if headless else ("1000", "3")
     # The credential profile's own sign-in endpoint (scan/auth_endpoint_probe.py): one worker, so
-    # the batch pacing is the endpoint's whole rate, and only the reviewed verification set.
+    # the batch pacing is the endpoint's whole rate, Dalfox's own payloads for the request's
+    # body, and a stop at the first verified finding (every request there is a failed sign-in).
     auth_probe = opts.get("probe_profile") == AUTH_ENDPOINT_PROBE_PROFILE and not headless
     if auth_probe:
         workers = "1"
@@ -713,7 +714,13 @@ def _tmpl_dalfox(url: str, opts: dict[str, Any]) -> list[str]:
     query_pairs = urllib.parse.parse_qsl(
         urllib.parse.urlsplit(url).query, keep_blank_values=True,
     )
-    if len(query_pairs) == 1 and re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9_.\[\]-]{0,63}", query_pairs[0][0]):
+    injection = _injection_body(opts)
+    # A body candidate verifies its body's fields: a pair in its URL's query (an action that routes
+    # by its query, index.php?route=account/login) is not the parameter it names, and Dalfox's
+    # custom-payload mode would put every payload there and leave the body untested.
+    if injection is None and len(query_pairs) == 1 and re.fullmatch(
+        r"[A-Za-z0-9_][A-Za-z0-9_.\[\]-]{0,63}", query_pairs[0][0],
+    ):
         args.extend(["--skip-discovery", "-p", query_pairs[0][0]])
         if not headless:
             # This is a verifier of one known parameter, not an open-ended
@@ -723,16 +730,15 @@ def _tmpl_dalfox(url: str, opts: dict[str, Any]) -> list[str]:
                 "--custom-payload", "/app/payloads/xss/hunt-verify.txt",
                 "--only-custom-payload",
             ])
-    injection = _injection_body(opts)
     if injection is not None:
         method, body, fields = injection
         args += ["-X", method, "-d", body]
         for name in fields:
             args += ["-p", name]
-    if auth_probe and "--only-custom-payload" not in args:
-        args.extend([
-            "--custom-payload", "/app/payloads/xss/hunt-verify.txt", "--only-custom-payload",
-        ])
+    if auth_probe:
+        # The first verified finding settles the candidate; the rest would be further failed
+        # sign-ins. An unverified reflection does not stop it.
+        args += ["--limit-result", "1", "--limit-result-type", "v"]
     return args
 
 
@@ -748,10 +754,9 @@ def _tmpl_sqlmap(url: str, opts: dict[str, Any]) -> list[str]:
     technique = str(opts.get("technique") or "BEUT").strip().upper()
     if technique not in SQLMAP_TECHNIQUES:
         technique = "BEUT"
-    # The credential profile's own sign-in endpoint runs sqlmap's level-1, risk-1 payloads only
-    # (scan/auth_endpoint_probe.py): a bounded probe set per parameter, not the whole ladder.
-    level = "1" if opts.get("probe_profile") == AUTH_ENDPOINT_PROBE_PROFILE else "2"
-    args = ["-u", url, "--batch", "--technique", technique, "--level", level, "--risk", level,
+    # The credential profile's own sign-in endpoint keeps this ladder; only its pace and its
+    # probe set differ (scan/auth_endpoint_probe.py, the delay floor in build_enforced_scanner_plan).
+    args = ["-u", url, "--batch", "--technique", technique, "--level", "2", "--risk", "2",
             "--threads", "1", "--timeout", "8", "--retries", "0", "--delay", "1",
             "--flush-session", "--output-dir", "/tmp/shakerscan-sqlmap",
             # -t logs every HTTP transaction sqlmap sends. The worker binds it into the
@@ -1359,10 +1364,19 @@ def _batch_attempt_pacing(
 
 
 def _auth_probe_minimum(options: Mapping[str, Any], minimum_seconds: float) -> float:
-    """The least delay between requests: the lockout-safe pace on a sign-in endpoint probe."""
-    if options.get("probe_profile") == AUTH_ENDPOINT_PROBE_PROFILE:
-        return max(minimum_seconds, float(AUTH_ENDPOINT_SECONDS_PER_REQUEST))
-    return minimum_seconds
+    """The least delay between requests: the lockout-safe pace on a sign-in endpoint probe.
+
+    A parallel child of a split Scan paces the endpoint slower (``probe_pace_seconds``); nothing
+    paces it faster than one request per ``AUTH_ENDPOINT_SECONDS_PER_REQUEST``.
+    """
+    if options.get("probe_profile") != AUTH_ENDPOINT_PROBE_PROFILE:
+        return minimum_seconds
+    raw = options.get("probe_pace_seconds")
+    pace = (
+        float(raw) if isinstance(raw, (int, float)) and not isinstance(raw, bool) and raw > 0
+        else 0.0
+    )
+    return max(minimum_seconds, float(AUTH_ENDPOINT_SECONDS_PER_REQUEST), min(pace, 600.0))
 
 
 def _replace_argv_value(argv: list[str], flag: str, value: Any) -> None:

@@ -3198,6 +3198,14 @@ def finalize_scan_report(
             row["reason"] = "proof_escalation_failed"
             if row["required"]:
                 selected_family_gaps.append(family)
+        elif row.get("sign_in_probe_limited"):
+            # A candidate on the credential profile's own sign-in endpoint that its lockout-safe
+            # probe set left inconclusive has no verdict, so the family did not examine its
+            # surface to completion, and a grade over it is not reliable.
+            row["coverage_status"] = "partial"
+            row["reason"] = AUTH_ENDPOINT_PROBE_LIMITED
+            if row["required"]:
+                selected_family_gaps.append(family)
         else:
             row["coverage_status"] = "complete"
             row["reason"] = "no_candidates" if no_candidates else None

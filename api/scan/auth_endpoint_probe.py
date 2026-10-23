@@ -2,56 +2,162 @@
 
 This is a lockout-safety ceiling on one endpoint, not a budget cut: budgets stay generous. Every
 other endpoint, and every fast, balanced, thorough or deep plan, keeps its full verification
-budget; no plan changes. It applies only to the sign-in endpoint (and the form's action) of a
-credential profile the Scan carries, the one URL where an active injection verifier's requests
-are failed sign-ins against the account the Scan itself signs in with.
-One balanced lab Scan sent about 1,460 injection POSTs to honey's Hub login (938 sqlmap, 523
-Dalfox) and took 51 minutes instead of 8; an application with account lockout or a per-address
-sign-in throttle would have locked the account the Scan was signing in with.
+budget; no plan changes. It applies only to the sign-in endpoint of a credential profile the
+Scan carries (its login, second-user login or OAuth token request, and the form's action), the
+one request where an active injection verifier's probes are failed sign-in attempts from the
+scanner's address. One authenticated balanced Scan of a test application sent about 1,460
+injection requests to the sign-in form it used (938 sqlmap, 523 Dalfox) and took 51 minutes
+instead of 8; an application with a per-address sign-in throttle or lockout would have refused
+the scanner for the rest of the Scan.
 
-On that endpoint each active injection verifier gets a bounded probe set per parameter instead
-of the whole technique ladder, at a lockout-safe pace, and the coverage says so
-(``auth_endpoint_probe_limited``):
+Which requests are the sign-in endpoint (``sign_in_endpoints``, ``sign_in_endpoint_for``): a
+request that carries a body (POST, PUT, PATCH) to the endpoint's origin and path, compared after
+normalization (percent-decoding, dot segments, repeated slashes and ``;`` parameters removed,
+case folded), and, when the sign-in URL routes by its query (``index.php?route=account/login``),
+carrying those routing pairs. A query pair that only says where to go next (``next``,
+``ReturnUrl``) or carries a token does not route. A GET to the sign-in page (``/login?next=``)
+attempts no sign-in and is not limited; a page whose form posts elsewhere is not the endpoint,
+its action is.
+
+On that endpoint the verifiers keep their full payloads: sqlmap its level-2, risk-2 ladder and
+Dalfox its own discovery and payloads for the request's body (its custom-payload mode tests the
+URL's query, not a body). What changes:
 
 * pace: at most ``AUTH_ENDPOINT_MAX_REQUESTS_PER_MINUTE`` (20) requests a minute to the endpoint,
-  one every 3 seconds. The reviewed verifier paces are 60 a minute for sqlmap (``--delay 1``,
-  one thread) and about 180 for Dalfox (1 s delay, 3 workers); a third of the slower one keeps a
-  candidate's traffic below the sign-in throttles applications commonly apply per address;
-* probes: sqlmap runs its level-1, risk-1 payloads (``probe_profile=auth_endpoint``) within 60
-  requests per parameter, enough for its boolean- and error-based checks of one field, which
-  confirm an obvious login injection in well under a hundred requests; Dalfox runs the reviewed
-  verification set (four vectors in four encodings) within 32 requests per parameter. Honey's
-  two-field login then receives at most 184 injection requests (120 + 64) instead of 1,461.
+  one every 3 seconds, a third of sqlmap's reviewed single-call pace (60 a minute). A slice runs
+  one attempt on the endpoint at a time; each attempt holds at most one request per 3 s of its
+  wall and is paced no faster (sqlmap one thread, Dalfox one worker, a 3 s delay floor). A Scan
+  split across parallel children paces the endpoint by the number of children, so siblings that
+  reach it at the same time stay inside the rate together. A slice whose hold cannot pace even
+  ``AUTH_ENDPOINT_MIN_ATTEMPT_REQUESTS`` leaves the candidate for a later round, exactly like any
+  other candidate its holds cannot fund;
+* one probe set per endpoint and verifier across the Scan: every candidate on the endpoint (a
+  declared request, the crawled form with its hidden fields, a JSON variant), every slice and
+  every continuation round draws from it (a parallel child holds its own). Per tested field, at
+  most four: sqlmap's whole level-2 ladder, 473 requests, its measured cost to a negative verdict
+  (union 53, boolean 87, error 144, time 189: ``sqli_stages.SQLI_TECHNIQUE_NEGATIVE_COST``), and
+  64 for Dalfox, which reported a verified reflection within 18 requests on a reflecting
+  two-field sign-in form in the scanner image;
+* verdicts: Dalfox stops at its first verified finding, and a Dalfox attempt that verified nothing
+  is inconclusive, never negative, since it sent a bounded part of its payloads; sqlmap concludes
+  as anywhere else inside the probe set, and a candidate whose probe set is spent before its
+  verdict is inconclusive. Both are named ``auth_endpoint_probe_limited``, and coverage leaves the
+  family partial for that reason.
 
-The numbers bound each parameter's requests across the Scan, its continuation rounds included:
-a candidate whose probe set is spent is inconclusive (``auth_endpoint_probe_limited``), never
-extended and never called negative.
+The probes carry placeholder values, not the profile's account, so they cannot lock out the
+account the Scan signs in with; the pace and the probe set bound what a per-address sign-in
+throttle sees from the scanner.
 """
 from __future__ import annotations
 
+from dataclasses import dataclass
+import hashlib
+import json
+import posixpath
 from typing import Any, Iterable, Mapping
 import urllib.parse
 
+try:
+    from scanner_tools.url_redaction import is_sensitive_label, redact_path, token_like_segment
+except ModuleNotFoundError:  # package import layout
+    from scanner.scanner_tools.url_redaction import (
+        is_sensitive_label, redact_path, token_like_segment,
+    )
+
+from .sqli_stages import SQLI_TECHNIQUE_NEGATIVE_COST
+
 AUTH_ENDPOINT_PROBE_LIMITED = "auth_endpoint_probe_limited"
+#: A candidate on the sign-in endpoint whose hold cannot pace a probe: left for a later round,
+#: like any candidate its slice cannot fund, with no verdict.
+AUTH_ENDPOINT_PACE_UNFUNDED = "auth_endpoint_pace_unfunded"
 AUTH_ENDPOINT_PROBE_PROFILE = "auth_endpoint"
 AUTH_ENDPOINT_MAX_REQUESTS_PER_MINUTE = 20
 AUTH_ENDPOINT_SECONDS_PER_REQUEST = 60 // AUTH_ENDPOINT_MAX_REQUESTS_PER_MINUTE
-#: Requests one parameter of the sign-in endpoint may receive from each verifier, per Scan.
+#: Requests one tested field of the sign-in endpoint may receive from each verifier, per Scan.
 AUTH_ENDPOINT_PROBE_REQUESTS: Mapping[str, int] = {
-    "sqli.verify_batch": 60,
-    "xss.verify_batch": 32,
+    "sqli.verify_batch": sum(SQLI_TECHNIQUE_NEGATIVE_COST.values()),
+    "xss.verify_batch": 64,
 }
-#: Below this an attempt cannot run even the bounded probe set's baseline and first payloads.
+#: Below this an attempt cannot run even a technique's baseline and first payloads.
 AUTH_ENDPOINT_MIN_ATTEMPT_REQUESTS = 8
 #: The sign-in actions whose observations name the endpoint and the form's action.
 AUTH_ACTION_IDS = ("inputs.auth_primary", "inputs.auth_secondary")
 #: Hydrated worker-private options that name a sign-in endpoint.
 _ENDPOINT_OPTIONS = ("login_url", "user2_login_url", "oauth_token_url")
+#: A sign-in request carries its credentials in a body.
+SIGN_IN_METHODS = frozenset({"POST", "PUT", "PATCH"})
+#: A body candidate tests every field of its form; at most this many count toward its probe set.
+AUTH_ENDPOINT_MAX_PARAMETERS = 4
+#: Query keys that say where to go after the sign-in, or carry client state, never which route.
+_NON_ROUTING_KEYS = frozenset({
+    "back", "continue", "dest", "destination", "forward", "from", "goto", "hl", "lang",
+    "language", "locale", "next", "redir", "redirect", "redirect_to", "redirect_uri",
+    "redirect_url", "redirectto", "redirecturl", "ref", "referer", "referrer", "return",
+    "return_to", "return_url", "returnto", "returnurl", "service", "success_url", "target",
+    "to", "url",
+})
 
 
-def _key(url: str) -> tuple[str, str, int, str] | None:
+def normalize_path(path: str) -> str:
+    """One spelling of a request path for comparing it with the sign-in endpoint.
+
+    Each segment loses its ``;`` parameters (``;jsessionid=``) and is percent-decoded; dot
+    segments and repeated slashes are removed and the result is case folded. Folding errs toward
+    the endpoint on servers that treat ``/Account/Login`` and ``/account/login`` as one.
+    """
+    segments = [
+        urllib.parse.unquote(segment.split(";", 1)[0])
+        for segment in str(path or "").split("/")
+    ]
+    joined = "/" + "/".join(segment for segment in segments if segment)
+    normalized = posixpath.normpath(joined) if joined != "/" else "/"
+    if not normalized.startswith("/"):
+        normalized = "/" + normalized
+    return normalized.replace("//", "/").casefold()
+
+
+def _pair_digest(key: str, value: str) -> str:
+    return hashlib.sha256(f"{key}={value}".encode("utf-8", "replace")).hexdigest()[:16]
+
+
+def routing_digests(query: str) -> frozenset[str]:
+    """Digests of the query pairs that route a request (``route=account/login``).
+
+    Only digests are recorded, never query values. A key that names a credential, a token-like
+    value, and the keys that only say where to go next do not route.
+    """
+    pairs = urllib.parse.parse_qsl(str(query or ""), keep_blank_values=True)
+    return frozenset(
+        _pair_digest(key, value) for key, value in pairs
+        if key and key.casefold() not in _NON_ROUTING_KEYS and not is_sensitive_label(key)
+        and not token_like_segment(value)
+    )
+
+
+@dataclass(frozen=True)
+class SignInEndpoint:
+    """The sign-in endpoint of a credential profile the Scan carries."""
+
+    scheme: str
+    host: str
+    port: int
+    path: str
+    routing: frozenset[str] = frozenset()
+    #: The redacted public path, for records.
+    label: str = ""
+
+    @property
+    def key(self) -> str:
+        """A stable id for counting what the endpoint received across the Scan."""
+        canonical = json.dumps(
+            [self.scheme, self.host, self.port, self.path, sorted(self.routing)],
+            separators=(",", ":"),
+        )
+        return hashlib.sha256(canonical.encode()).hexdigest()[:16]
+
+
+def _origin(parsed: urllib.parse.SplitResult) -> tuple[str, str, int] | None:
     try:
-        parsed = urllib.parse.urlsplit(str(url or ""))
         port = parsed.port
     except ValueError:
         return None
@@ -59,41 +165,109 @@ def _key(url: str) -> tuple[str, str, int, str] | None:
     host = str(parsed.hostname or "").lower().rstrip(".")
     if scheme not in {"http", "https"} or not host:
         return None
-    path = parsed.path.rstrip("/") or "/"
-    return scheme, host, port or (443 if scheme == "https" else 80), path
+    return scheme, host, port or (443 if scheme == "https" else 80)
 
 
-def auth_endpoint_keys(
+def _endpoint(url: str, *, routing: frozenset[str] | None = None) -> SignInEndpoint | None:
+    try:
+        parsed = urllib.parse.urlsplit(str(url or ""))
+    except ValueError:
+        return None
+    origin = _origin(parsed)
+    if origin is None:
+        return None
+    return SignInEndpoint(
+        *origin, normalize_path(parsed.path),
+        routing_digests(parsed.query) if routing is None else routing,
+        redact_path(parsed.path or "/"),
+    )
+
+
+def _recorded(item: Mapping[str, Any], field: str, *, base: str) -> SignInEndpoint | None:
+    """The endpoint a sign-in observation recorded in ``field``, or None when it cannot say.
+
+    The record holds the redacted path (``?<redacted-query>`` after it when the request had a
+    query) and the query's routing digests beside it. A redacted segment names nothing. The page's
+    query of unknown routing names nothing either (the profile's own URL still does); a form
+    action's query of unknown routing leaves its path as the endpoint.
+    """
+    raw = str(item.get(field) or "")
+    path, _, query = raw.partition("?")
+    if not path.startswith("/") or "<redacted" in path:
+        return None
+    stem = field.removesuffix("_path")
+    digests = item.get(f"{stem}_routing")
+    if isinstance(digests, (list, tuple)) and all(isinstance(value, str) for value in digests):
+        routing = frozenset(digests)
+    elif (query or item.get(f"{stem}_has_query")) and field == "endpoint_path":
+        return None
+    else:
+        routing = frozenset()
+    return _endpoint(urllib.parse.urljoin(base, path), routing=routing)
+
+
+def sign_in_endpoints(
     options: Mapping[str, Any], observations: Iterable[Mapping[str, Any]], *, base_url: str,
-) -> frozenset[tuple[str, str, int, str]]:
+) -> tuple[SignInEndpoint, ...]:
     """The sign-in endpoints of the credential profiles this Scan carries, on ``base_url``."""
-    keys: set[tuple[str, str, int, str]] = set()
     base = str(base_url or "").rstrip("/") + "/"
-    for name in _ENDPOINT_OPTIONS:
-        value = str(options.get(name) or "").strip()
-        key = _key(urllib.parse.urljoin(base, value)) if value else None
-        if key is not None:
-            keys.add(key)
+    endpoints: dict[str, SignInEndpoint] = {}
+    pages_posting_elsewhere: set[str] = set()
     for item in observations:
         if not isinstance(item, Mapping) or item.get("kind") != "credential_session":
             continue
-        for field in ("endpoint_path", "form_action_path"):
-            path = str(item.get(field) or "")
-            if path.startswith("/") and "<redacted" not in path:
-                key = _key(urllib.parse.urljoin(base, path.split("?", 1)[0]))
-                if key is not None:
-                    keys.add(key)
-    return frozenset(keys)
+        page = _recorded(item, "endpoint_path", base=base)
+        action = _recorded(item, "form_action_path", base=base)
+        if action is not None:
+            endpoints.setdefault(action.key, action)
+            if page is not None and page.key != action.key:
+                # The form posts elsewhere: the page is where it is shown, not where it signs in.
+                pages_posting_elsewhere.add(page.key)
+        elif page is not None:
+            endpoints.setdefault(page.key, page)
+    for key in pages_posting_elsewhere:
+        endpoints.pop(key, None)
+    for name in _ENDPOINT_OPTIONS:
+        value = str(options.get(name) or "").strip()
+        endpoint = _endpoint(urllib.parse.urljoin(base, value)) if value else None
+        if endpoint is not None and endpoint.key not in pages_posting_elsewhere:
+            endpoints.setdefault(endpoint.key, endpoint)
+    return tuple(endpoints.values())
 
 
-def auth_endpoint_of(url: str, keys: frozenset[tuple[str, str, int, str]]) -> str | None:
-    """The sign-in endpoint path ``url`` targets, or None for any other endpoint."""
-    key = _key(url)
-    return key[3] if key is not None and key in keys else None
+def sign_in_endpoint_for(
+    url: str, method: str, endpoints: Iterable[SignInEndpoint],
+) -> SignInEndpoint | None:
+    """The sign-in endpoint a request attempts, or None for any other request.
+
+    Only a request that carries a body is a sign-in attempt; a GET to the sign-in page is not.
+    """
+    if str(method or "").upper() not in SIGN_IN_METHODS:
+        return None
+    try:
+        parsed = urllib.parse.urlsplit(str(url or ""))
+    except ValueError:
+        return None
+    origin = _origin(parsed)
+    if origin is None:
+        return None
+    path = normalize_path(parsed.path)
+    digests = frozenset(
+        _pair_digest(key, value)
+        for key, value in urllib.parse.parse_qsl(parsed.query, keep_blank_values=True)
+    )
+    return next((
+        item for item in endpoints
+        if (item.scheme, item.host, item.port, item.path) == (*origin, path)
+        and item.routing <= digests
+    ), None)
 
 
-#: A body candidate tests every field of its form; at most this many count toward its probe set.
-AUTH_ENDPOINT_MAX_PARAMETERS = 4
+def parallel_children(options: Mapping[str, Any]) -> int:
+    """How many parallel children of this Scan may reach the endpoint at once (1 when unsplit)."""
+    shard = options.get("canonical_shard_authority")
+    count = shard.get("shard_count") if isinstance(shard, Mapping) else None
+    return int(count) if isinstance(count, int) and not isinstance(count, bool) and count > 1 else 1
 
 
 def probe_parameters(body_field_names: Iterable[Any] | None) -> int:
@@ -101,48 +275,71 @@ def probe_parameters(body_field_names: Iterable[Any] | None) -> int:
     return max(1, min(AUTH_ENDPOINT_MAX_PARAMETERS, len(list(body_field_names or ()))))
 
 
-def auth_endpoint_hold(
-    sub_budget: Mapping[str, int], *, capability_name: str, used: int, concurrency: int = 1,
-    parameters: int = 1,
-) -> dict[str, int] | None:
-    """The attempt's hold on the sign-in endpoint, or None when its probe set is spent.
+def probe_set_requests(capability_name: str, parameters: int = 1) -> int:
+    """The requests the endpoint's probe set holds for a candidate with ``parameters`` fields."""
+    counted = max(1, min(AUTH_ENDPOINT_MAX_PARAMETERS, int(parameters)))
+    return int(AUTH_ENDPOINT_PROBE_REQUESTS.get(capability_name, 0)) * counted
 
-    Requests are at most what the parameter has left of its probe set, and at most one per
-    ``AUTH_ENDPOINT_SECONDS_PER_REQUEST`` of the attempt's wall for every candidate that may run
-    at once, so the batch's own pacing (wall / requests) never exceeds the lockout-safe rate.
+
+def probe_set_left(capability_name: str, received: int, parameters: int = 1) -> int:
+    """What the endpoint's probe set has left after the endpoint received ``received``."""
+    return max(0, probe_set_requests(capability_name, parameters) - max(0, int(received)))
+
+
+def probe_set_spent(
+    capability_name: str, received: int, parameters: int = 1, *, next_need: int = 0,
+) -> bool:
+    """Whether the endpoint can fund no further attempt for this candidate.
+
+    ``next_need`` is what the candidate's next unit needs for its verdict (a SQLi technique over
+    one field): a probe set with less left than that cannot conclude it either.
     """
-    allowance = probe_set_requests(capability_name, parameters) - max(0, int(used))
-    wall = int(sub_budget.get("tool_wall_seconds") or 0)
-    paced = wall // (AUTH_ENDPOINT_SECONDS_PER_REQUEST * max(1, int(concurrency)))
-    requests = min(allowance, int(sub_budget.get("http_requests") or 0), paced)
-    if requests < AUTH_ENDPOINT_MIN_ATTEMPT_REQUESTS:
+    return probe_set_left(capability_name, received, parameters) < max(
+        AUTH_ENDPOINT_MIN_ATTEMPT_REQUESTS, int(next_need or 0),
+    )
+
+
+def pace_seconds(*, children: int = 1) -> int:
+    """The least delay between two of an attempt's requests to the sign-in endpoint."""
+    return AUTH_ENDPOINT_SECONDS_PER_REQUEST * max(1, int(children))
+
+
+def pace_wall_seconds(*, children: int = 1) -> int:
+    """The least attempt wall that paces ``AUTH_ENDPOINT_MIN_ATTEMPT_REQUESTS``."""
+    return AUTH_ENDPOINT_MIN_ATTEMPT_REQUESTS * pace_seconds(children=children)
+
+
+def auth_endpoint_hold(
+    sub_budget: Mapping[str, int], *, capability_name: str, received: int, parameters: int = 1,
+    children: int = 1,
+) -> dict[str, int] | None:
+    """The attempt's hold on the sign-in endpoint, or None when its wall cannot pace a probe.
+
+    Requests are at most what the endpoint's probe set has left and at most one per
+    ``pace_seconds`` of the attempt's wall, so the attempt's own pacing (wall / requests) never
+    exceeds the lockout-safe rate. The caller checks ``probe_set_spent`` first.
+    """
+    paced = max(0, int(sub_budget.get("tool_wall_seconds") or 0)) // pace_seconds(children=children)
+    if paced < AUTH_ENDPOINT_MIN_ATTEMPT_REQUESTS:
         return None
+    requests = min(
+        probe_set_left(capability_name, received, parameters),
+        int(sub_budget.get("http_requests") or 0), paced,
+    )
     hold = dict(sub_budget)
     hold["http_requests"] = requests
     if "state_changing_requests" in hold:
         hold["state_changing_requests"] = min(int(hold["state_changing_requests"]), requests)
-        if hold["state_changing_requests"] < requests:
-            hold["http_requests"] = hold["state_changing_requests"]
+        hold["http_requests"] = hold["state_changing_requests"]
     return hold
 
 
-def probe_set_requests(capability_name: str, parameters: int = 1) -> int:
-    """The requests a candidate's probe set holds: the per-parameter set times its parameters."""
-    return int(AUTH_ENDPOINT_PROBE_REQUESTS.get(capability_name, 0)) * max(1, int(parameters))
-
-
-def probe_set_spent(capability_name: str, used: int, parameters: int = 1) -> bool:
-    """Whether a candidate that has received ``used`` requests can run no further attempt."""
-    return (
-        probe_set_requests(capability_name, parameters) - int(used)
-        < AUTH_ENDPOINT_MIN_ATTEMPT_REQUESTS
-    )
-
-
 __all__ = [
-    "AUTH_ACTION_IDS", "AUTH_ENDPOINT_MAX_REQUESTS_PER_MINUTE", "AUTH_ENDPOINT_MIN_ATTEMPT_REQUESTS",
+    "AUTH_ACTION_IDS", "AUTH_ENDPOINT_MAX_PARAMETERS", "AUTH_ENDPOINT_MAX_REQUESTS_PER_MINUTE",
+    "AUTH_ENDPOINT_MIN_ATTEMPT_REQUESTS", "AUTH_ENDPOINT_PACE_UNFUNDED",
     "AUTH_ENDPOINT_PROBE_LIMITED", "AUTH_ENDPOINT_PROBE_PROFILE", "AUTH_ENDPOINT_PROBE_REQUESTS",
-    "AUTH_ENDPOINT_MAX_PARAMETERS", "AUTH_ENDPOINT_SECONDS_PER_REQUEST", "auth_endpoint_hold",
-    "auth_endpoint_keys", "auth_endpoint_of", "probe_parameters", "probe_set_requests",
-    "probe_set_spent",
+    "AUTH_ENDPOINT_SECONDS_PER_REQUEST", "SIGN_IN_METHODS", "SignInEndpoint", "auth_endpoint_hold",
+    "normalize_path", "pace_seconds", "pace_wall_seconds", "parallel_children",
+    "probe_parameters", "probe_set_left", "probe_set_requests", "probe_set_spent",
+    "routing_digests", "sign_in_endpoint_for", "sign_in_endpoints",
 ]

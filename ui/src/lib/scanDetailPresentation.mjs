@@ -290,7 +290,7 @@ const COVERAGE_REASON_LABELS = {
   application_surface_not_examined: 'No selected check family examines the application itself; the selected families only probe fixed, well-known locations',
   selected_family_no_candidates: 'A selected check family had nothing to test on the discovered surface',
   template_windows_incomplete_on_origin: 'Active templates did not all run at one of the scanned origins (the target or another origin the scan discovered), so some checks never ran there',
-  auth_endpoint_probe_limited: "The attached credential profile's own sign-in endpoint received only a bounded, lockout-safe set of injection probes per parameter (at most 20 requests a minute), so those parameters were not fully tested",
+  auth_endpoint_probe_limited: "The attached credential profile's own sign-in endpoint is tested at a lockout-safe pace (at most 20 requests a minute) within one bounded set of injection probes, and a check there ended without a verdict",
 }
 
 // What a family's slow endpoint could not finish: the template pack, or an exposure probe that

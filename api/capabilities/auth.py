@@ -252,6 +252,25 @@ def _landing_path(response: WorkerPrivateHTTPResponse, *, origin: str) -> str | 
     return path
 
 
+def _sign_in_request_record(endpoint_path: str, action_path: str | None) -> dict[str, Any]:
+    """The sign-in request's public record: routing digests of the page, and the form's action."""
+    try:
+        from scan.auth_endpoint_probe import routing_digests
+    except ModuleNotFoundError:  # package import layout
+        from api.scan.auth_endpoint_probe import routing_digests
+    record: dict[str, Any] = {}
+    page = urllib.parse.urlsplit(endpoint_path)
+    if page.query:
+        record["endpoint_routing"] = sorted(routing_digests(page.query))
+    if action_path is not None:
+        action = urllib.parse.urlsplit(action_path)
+        record["form_action_path"] = redact_path(action.path or "/")
+        if action.query:
+            record["form_action_has_query"] = True
+            record["form_action_routing"] = sorted(routing_digests(action.query))
+    return record
+
+
 def _endpoint_args(
     endpoint_url: str,
     *,
@@ -689,10 +708,13 @@ async def establish_target_bound_http_session(
         )
         if landing:
             observation["landing_path"] = landing
-        if credential.auth_kind == "form_login":
-            # Where the form posts, which may differ from the page: a verifier's probes to it are
-            # sign-in attempts too (scan/auth_endpoint_probe.py). The redacted public path only.
-            observation["form_action_path"] = _public_action
+        # Where the sign-in request went, for the verifiers' lockout-safe limit on it
+        # (scan/auth_endpoint_probe.py): the page's query routing and, for a form, where it posts,
+        # which may differ from the page. The redacted public path, and only digests of the
+        # query's routing pairs, never its values.
+        observation.update(_sign_in_request_record(
+            endpoint_path, action_path if credential.auth_kind == "form_login" else None,
+        ))
         expires_at, refresh_after = _session_timing(
             latest, now=established_at,
         )
