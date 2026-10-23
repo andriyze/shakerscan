@@ -115,7 +115,7 @@ covers the whole duration at the most one call can be charged per second of that
   rate or delay: Nuclei at 10 requests per second, katana at 5, the headless crawler at 10 of
   egress, Dalfox about 3 and sqlmap about 1.
 
-So no budget but the duration ends a paced investigation:
+So a paced investigation reaches the end of its duration before any of these limits:
 
 | Profile | Duration | Calls | HTTP requests | Verifications | Browser actions | Approval-gated calls | Records |
 |---|---|---|---|---|---|---|---|
@@ -144,6 +144,47 @@ that turn them on. Records cost no traffic and no wall and get one per call.
 profile (a device target and a headless `deep_domxss` call keep the registry holds). A call the
 remaining budget cannot fund is refused with a budget request a person can grant, never started at
 a shorter hold; a call admitted at an older hold runs at the hold it reserved.
+
+## When a limit is used up
+
+Only the duration ends a Hunt. When `max_duration_seconds` is used up, a call that needs wall time
+is refused and the Hunt becomes `budget_exhausted` (stop reason
+`budget_exhausted:tool_wall_seconds`); it still records findings and candidates, and a person's
+raise continues it.
+
+Every other limit, a safety ceiling or a call, traffic or record limit, refuses only the actions
+that need more of it. The refusal names the dimension (`error` `budget_exhausted:<dimension>`,
+`reason_code` `budget_exhausted`, or `budget_insufficient_for_action` while some is left), the
+action waits for a `budget.raise` request a person approves (`shakerscan approve <request-id>` or
+the Hunt page), and the Hunt keeps its status: the planner and every action that needs none of
+that dimension carry on, and an approval re-admits the waiting action through full admission. A
+dimension whose permission is off is 0 for the Hunt and is refused with
+`budget_dimension_needs_permission`; a raise cannot grant it. The ceiling values are unchanged:
+
+| Used-up ceiling | `fast` / `balanced` / `thorough` | Refused | Hunt status |
+|---|---|---|---|
+| State-changing requests | 4 / 20 / 80 | `http.request` with a write method, `browser.workflow`, `browser.login_check`, `collections.replay_active`, a mutating `candidate.verify`, any call that reserves writes | keeps running |
+| TCP ports | 100 / 1,200 / 10,000 | `ports.discover`, `service.fingerprint`, `service.nse_check`, `tls.inspect`, `ssh.connect` / `ssh.exec`, `device.service.verify`, a device TCP service verification | keeps running |
+| Hosts | 50 / 500 / 5,000 | `ports.discover`, `service.fingerprint`, `service.nse_check`, `service.snmp.inspect`, `subdomains.discover`, `ssh.connect` / `ssh.exec` | keeps running |
+| UDP ports | 100 / 1,000 / 5,000 | `service.snmp.inspect`, `device.service.verify` and a device UDP service verification | keeps running |
+| Out-of-band interactions | 10 / 50 / 200 | calls that reserve out-of-band callbacks | keeps running |
+| Device fragility | 20 / 100 / 500 | device probes, scans, service checks and SSH, and on a device Hunt the web and network calls that reserve fragility for their traffic | keeps running |
+| Duration | 3,600 / 14,400 / 86,400 s | every call that runs | `budget_exhausted` |
+
+Hosts and TCP ports are counted once per Hunt where the action names them. A network action
+whose commands name one address per host reserves only the hosts this Hunt has not attempted.
+`ports.discover` with listed ports, a range or a listed profile, `service.fingerprint`,
+`service.nse_check` and `tls.inspect` reserve only the ports this Hunt has not attempted, so
+fingerprinting or inspecting a port a sweep already reached needs no new allowance. A `top_100` or
+`top_1000` sweep does not name its ports and is charged all of them; the open ports it reports
+count as attempted. A `tls.inspect` is one port, whatever handshakes it makes. Attempted ports are
+remembered in a bounded record; a port it cannot hold is charged again. A mutating
+`candidate.verify` reserves 12 state-changing and 24 requests and is charged what its workflow
+sent (both runs and the create probe); a verification that reports no count (a device
+verification, an error, a browser step) keeps its whole hold.
+
+A Hunt that ended `budget_exhausted` on another dimension under an earlier release keeps that
+status and resumes as before once that dimension has room.
 
 At the defaults, logging in, mapping a web application, discovering content, verifying and
 recording draw no start warning. A remaining default warning names a safety ceiling and matters

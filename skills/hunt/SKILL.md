@@ -58,9 +58,9 @@ one.
 
 **Budgets: do not starve the Hunt.** Leave `budgets` empty: the profile defaults are sized so that
 calls, approval-gated calls, verifications, browser actions and HTTP requests cannot run out before
-the profile's duration, so never ask for more of them in advance. Only the duration and the safety
-ceilings (TCP ports, state-changing requests, hosts, UDP ports, out-of-band interactions, device
-fragility) can stop planned work. Never lower `max_http_requests` below what discovery needs: one
+the profile's duration, so never ask for more of them in advance. Only the duration ends a Hunt.
+A used-up safety ceiling (TCP ports, state-changing requests, hosts, UDP ports, out-of-band
+interactions, device fragility) refuses only the actions that need it, and the Hunt keeps running. Never lower `max_http_requests` below what discovery needs: one
 `web.crawl` and one `web.content_discover` reserve about 370 requests together, and an agent that
 set 300, then 180, skipped content discovery and missed every exposed `/.env`, `/.git` and backup
 file. The start response's `budget_warnings` names each capability the limits leave unable to run
@@ -389,8 +389,11 @@ actions. Cancel with `/cancel`; resume only when the server reports an awaiting-
 
 Stop when the objective is answered, remaining hypotheses are falsified, authorization fails or
 expires, the target changes or is deactivated, the user cancels, a circuit breaker freezes traffic,
-or no useful authorized action fits the remaining budget. An exhausted optional dimension need not
-stop work that uses other remaining dimensions. Preserve observations and name material coverage gaps.
+or no useful authorized action fits the remaining budget. Only the duration running out ends a Hunt
+as `budget_exhausted`. Any other used-up limit, a safety ceiling included, refuses only the actions
+that need it (`budget_exhausted:<dimension>` with a `budget.raise` request the person approves); the
+Hunt stays active, so keep doing the work that needs none of that dimension. Preserve observations
+and name material coverage gaps.
 An action rejected with `budget_insufficient_for_action` has not exhausted the run: use its
 reported shortages to select a smaller useful action. Do not retry an unchanged oversized action.
 A `budget_exhausted` Hunt still accepts candidates and evidence-linked `findings.create|update|delete`
@@ -409,8 +412,10 @@ attach the new evidence with `findings.update`. Record the
 leads the gathered evidence supports before finishing. Finishing keeps the `budget_exhausted` status
 but closes the record: afterwards every candidate write (record, correct, expire) is refused with 409. `hosts_attempted` counts distinct hosts: once
 a network action on a host has settled, later network actions on that host do not charge it again.
-An action admitted while the first is still running, or after one that failed before reaching the
-host, is charged in full.
+`tcp_ports_attempted` counts distinct ports the same way: fingerprinting, NSE checks and
+`tls.inspect` of a port this Hunt already attempted (listed in a sweep, or reported open by one)
+cost no TCP allowance, and a `tls.inspect` is one port. An action admitted while the first is
+still running, or after one that failed before reaching the host, is charged in full.
 
 Store no hidden chain-of-thought. Durable records should contain objectives, capability calls,
 receipts, observations, bounded notes, candidates, and the final debrief.

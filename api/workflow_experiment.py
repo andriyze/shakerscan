@@ -6,7 +6,7 @@ import hashlib
 import json
 import re
 import time
-from typing import Any, Awaitable, Callable
+from typing import Any, Awaitable, Callable, Mapping, Sequence
 from urllib.parse import urljoin
 try:
     from capabilities.secret_material import keyed_response_digest
@@ -1334,6 +1334,27 @@ def _restoration_verified(
     return True
 
 
+def workflow_traffic(
+    executed: Mapping[str, Any], replayed: Mapping[str, Any], materialization: Mapping[str, Any],
+    steps: Sequence[Mapping[str, Any]],
+) -> dict[str, int] | None:
+    """The requests a server-run proof workflow sent: both runs and its create-surface probe.
+
+    Every probe request (a create and its cleanup) changes state. A workflow with a browser step
+    sends requests no run counts, so it reports none and its verification keeps its whole hold.
+    """
+    if any(step.get("kind") != "http" for step in steps):
+        return None
+    probe = int(materialization.get("request_count") or 0) + int(materialization.get("cleanup_request_count") or 0)
+    runs = [run for run in (executed, replayed) if run.get("request_count") is not None]
+    if not runs or any(not isinstance(run.get("state_changing_request_count"), int) for run in runs):
+        return None
+    return {
+        "http_requests": probe + sum(int(run["request_count"]) for run in runs),
+        "state_changing_requests": probe + sum(int(run["state_changing_request_count"]) for run in runs),
+    }
+
+
 async def execute_workflow(
     target_url: str,
     raw: Any,
@@ -1375,6 +1396,7 @@ async def execute_workflow(
         })
     observations: list[dict[str, Any]] = []
     request_count = 0
+    state_changing_request_count = 0
     mutation_succeeded = False
     started = time.monotonic()
     timeout = httpx.Timeout(min(workflow["timeout_seconds"], 15))
@@ -1483,6 +1505,7 @@ async def execute_workflow(
                     })
                     request = client.build_request(step["method"], url, params=query, headers=headers, cookies=cookies, json=json_body, data=form_body)
                     request_count += 1
+                    state_changing_request_count += step["method"] in {"POST", "PUT", "PATCH", "DELETE"}
                     request_started = time.perf_counter()
                     http_response = await client.send(request, stream=True)
                     try:
@@ -1594,6 +1617,7 @@ async def execute_workflow(
         "expected_signal": workflow["expected_signal"],
         "falsifier": workflow["falsifier"],
         "request_count": request_count,
+        "state_changing_request_count": state_changing_request_count,
         "step_count": len(observations),
         "principal_receipts": receipts,
         "principal_variable_receipts": principal_variable_receipts,

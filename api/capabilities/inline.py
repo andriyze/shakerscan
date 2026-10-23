@@ -162,7 +162,9 @@ class _MeasuredObservationExecutionAdapter(_InlineAdapter):
             if isinstance(result.get("budget_consumed"), Mapping)
             else {}
         )
-        execution_started = any(
+        # An operation may say whether it reached the target when its measured dimensions cannot
+        # (a Hunt's TLS handshakes to a port it already attempted reserve and report no port).
+        execution_started = result["execution_started"] if isinstance(result.get("execution_started"), bool) else any(
             int(measured.get(dimension) or 0) > 0
             for dimension in (
                 "http_requests", "tcp_ports_attempted", "hosts_attempted",

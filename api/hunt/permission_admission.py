@@ -27,7 +27,7 @@ from .permission_store import (
 )
 from .permission_subjects import complete_destination_subject, credential_use_refusal
 from .recording import evidence_recording
-from .verification_budget import record_budget_shortage, reservation_exhausted
+from .verification_budget import clock_exhausted, record_budget_shortage, reservation_exhausted
 
 PARKABLE_RUN_STATUSES = frozenset({"active", "awaiting_planner", "budget_exhausted"})
 MAX_ADMISSION_ATTEMPTS = 4
@@ -66,8 +66,10 @@ def budget_refusal(
 ) -> HuntRefusal:
     """A coded budget refusal; grantable as ``budget.raise`` when the dimension is amendable.
 
-    ``stops_hunt`` False (recording a finding) refuses only this action: the refusal carries no
-    budget state, so settlement never marks the Hunt exhausted and its testing carries on.
+    A used-up limit refuses only the actions that need it: the Hunt keeps its status and other
+    work carries on. Only the clock running out ends the Hunt (``record_budget_shortage``), which
+    settlement applies from the refusal's budget state. ``stops_hunt`` False (recording a finding)
+    carries no budget state, so even an exhausted clock refuses only that write.
     """
     from .budget_amendments import amendable_dimensions
 
@@ -90,10 +92,13 @@ def budget_refusal(
             "grant it.", extra=extra, error=legacy,
         )
     else:
+        ends = stops_hunt and clock_exhausted(limits, used, shortages)
         refusal = HuntRefusal(
             code,
             message or f"The Hunt's {budget_key} limit ({limit}) does not cover this action, which needs a "
-            f"total of {needed}. A person can raise it for this Hunt (a permission request is raised).",
+            f"total of {needed}. A person can raise it for this Hunt (a permission request is raised). "
+            + ("Its duration is used up, so the Hunt stops until a person raises it." if ends else
+               "The Hunt keeps running: actions that do not need this limit continue."),
             extra=extra, error=legacy,
             subject={"dimension": budget_key, "ledger_dimension": dimension, "limit": limit},
         )

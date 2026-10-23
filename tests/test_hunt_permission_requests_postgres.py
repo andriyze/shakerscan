@@ -291,8 +291,9 @@ def test_budget_refusal_parks_the_action_and_a_grant_readmits_the_same_key_throu
     assert parked["status"] == "awaiting_permission"
     assert json.loads(parked["result_summary"])["permission_request_id"] == detail["permission_request"]["id"]
     assert run(env, env.conn.fetchval("SELECT COUNT(*) FROM budget_reservations")) == 0
-    stopped = run(env, env.run(hunt))
-    assert stopped["status"] == "budget_exhausted" and stopped["stop_reason"] == "budget_exhausted:agent_actions"
+    # Only the clock ends a Hunt: a used-up call limit refuses this action and the Hunt keeps running.
+    running = run(env, env.run(hunt))
+    assert running["status"] == "active" and running["stop_reason"] is None
 
     # Retry while pending: the same answer, nothing changes.
     with pytest.raises(HTTPException) as again:
@@ -307,7 +308,7 @@ def test_budget_refusal_parks_the_action_and_a_grant_readmits_the_same_key_throu
     assert decided["request"]["status"] == "granted" and decided["grant"]["kind"] == "budget.raise"
     amendment = run(env, env.conn.fetchrow("SELECT * FROM hunt_budget_amendments WHERE hunt_run_id=$1", hunt["id"]))
     assert json.loads(amendment["limits_after"])["max_capability_calls"] == 2
-    assert amendment["status_before"] == "budget_exhausted" and amendment["status_after"] == "awaiting_planner"
+    assert amendment["status_before"] == "active" and amendment["status_after"] == "active"
 
     # The same key, the same input: re-admitted under the same action id, with a reservation.
     assert run(env, env.call(hunt, "budget-key-0001")) == "admitted"
@@ -357,6 +358,20 @@ def test_other_actions_continue_while_one_waits_and_the_hunt_clock_runs(env):
     assert run(env, env.call(hunt, "small-0001")) == "admitted"
     assert run(env, env.action(hunt, "small-0001"))["status"] == "reserved"
     assert run(env, env.action(hunt, "big-0001"))["status"] == "awaiting_permission"
+
+
+def test_a_used_up_safety_ceiling_refuses_what_needs_it_and_the_hunt_keeps_working(env):
+    """Live, before: a used-up TCP port ceiling stopped the Hunt and its next read-only request."""
+    hunt = run(env, env.hunt(budget={"max_tcp_ports": 10}, used={"tcp_ports_attempted": 10},
+                             policy={"allowed_capabilities": ["http.request", "tls.inspect"]}))
+    with pytest.raises(HTTPException) as refused:
+        run(env, env.call(hunt, "tls-0001", name="tls.inspect", values={}))
+    assert _detail(refused)["error"] == "budget_exhausted:tcp_ports_attempted"
+    after = run(env, env.run(hunt))
+    assert after["status"] == "active" and after["stop_reason"] is None
+    # A request that needs no TCP port allowance is admitted in the same Hunt.
+    assert run(env, env.call(hunt, "read-0001")) == "admitted"
+    assert run(env, env.action(hunt, "read-0001"))["status"] == "reserved"
 
 
 # ---------------------------------------------------------------------------------------------

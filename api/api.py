@@ -14222,6 +14222,7 @@ async def _verify_web_candidate_workflow_unlocked(
             "novelty_gate": proof.get("novelty_gate"),
         },
         "superseded_suspected": False,
+        "traffic": result.get("traffic"),
     }
 
 

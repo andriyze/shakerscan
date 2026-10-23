@@ -96,7 +96,11 @@ These are ceilings, not promised traffic: every call stays paced by its executor
 calls may use the whole call allowance because each one still checks its approval receipt. The
 safety ceilings keep their values: TCP ports (100 / 1,200 / 10,000), state-changing requests
 (4 / 20 / 80), hosts, UDP ports, out-of-band interactions and device fragility, as do the policy
-switches and approvals that turn them on. At the defaults, logging in, mapping a web application
+switches and approvals that turn them on. A used-up ceiling, like any used-up limit but the
+duration, refuses only the actions that need it, each waiting for a `budget.raise` request you
+approve, and the Hunt keeps running; only the duration running out stops a Hunt as
+`budget_exhausted`. Ports and hosts are charged once per Hunt, so inspecting a port a sweep already
+reached costs no TCP allowance. At the defaults, logging in, mapping a web application
 and verifying what it finds needs no budget raise. SQLi and XSS calls reserve their useful paced
 execution envelopes on all three profiles; insufficient headroom asks for a budget raise instead of
 silently shortening the call. Start warnings use the actual executor reservation.

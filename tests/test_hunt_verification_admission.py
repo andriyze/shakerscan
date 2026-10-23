@@ -32,8 +32,12 @@ def test_oversized_action_leaves_budget_for_smaller_work():
     assert reserve_budget_snapshot({"http_requests": 100}, {"http_requests": 90}, {"http_requests": 1})["http_requests"] == 91
 
 
-def test_genuinely_exhausted_budget_still_stops_run():
+def test_a_used_up_traffic_limit_refuses_the_action_but_only_the_clock_stops_the_run():
     db = DB()
     result = asyncio.run(record_budget_shortage(db, hunt_id="h1", limits={"http_requests": 100}, used={"http_requests": 100}, shortages={"http_requests": 1}))
     assert not result["retryable_with_smaller_action"]
-    assert len(db.updates) == 1
+    assert result["error"] == "budget_exhausted:http_requests"
+    assert not db.updates
+    result = asyncio.run(record_budget_shortage(db, hunt_id="h1", limits={"tool_wall_seconds": 100}, used={"tool_wall_seconds": 100}, shortages={"tool_wall_seconds": 1}))
+    assert not result["retryable_with_smaller_action"]
+    assert len(db.updates) == 1 and db.updates[0][1] == ("h1", "budget_exhausted:tool_wall_seconds")
