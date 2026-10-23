@@ -611,7 +611,8 @@ def grade(report: dict[str, Any]) -> dict[str, Any]:
     # Collect CVSS scores and compliance data
     raw_cvss_scores = []
     for finding in findings:
-        cvss = finding.get("cvss_score", 0)
+        # A finding may carry no score (a verified XSS: CWE-79 has no universal vector).
+        cvss = finding.get("cvss_score") or 0
         if cvss > 0:
             raw_cvss_scores.append(cvss)
             owasp_cat = finding.get("owasp", "")[:8] if finding.get("owasp") else ""

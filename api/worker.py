@@ -16611,7 +16611,8 @@ async def process_scan_merge_job(job_data: dict):
     # SUMMARY block matches the union grade (it was showing the stale shard summary,
     # e.g. top-level F/32 but result.summary still "D (58/100) - 19 issues").
     if _graded_block is not None:
-        for _k in ("summary", "notes", "remediation", "cvss_metrics", "compliance"):
+        # Not "compliance": the legacy grader's narrative must not replace the report's own block.
+        for _k in ("summary", "notes", "remediation", "cvss_metrics"):
             if _graded_block.get(_k) is not None:
                 merged["result"][_k] = _graded_block[_k]
         merged["result"]["score_policy"] = scan_scoring.SCORE_POLICY
