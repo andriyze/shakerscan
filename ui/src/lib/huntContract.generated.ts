@@ -371,6 +371,7 @@ export const HUNT_START_CONTRACT = {
     "secret_try_destination_denied",
     "secret_try_rate_limited",
     "secret_try_unrelated_target",
+    "sqli_injection_point_missing",
     "ssh_exec_not_allowed",
     "ssh_host_key_untrusted",
     "state_changing_http_not_allowed",

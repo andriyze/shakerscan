@@ -241,7 +241,9 @@ Choose the next smallest action that can answer or falsify a useful hypothesis:
   Give `sqli.verify` the input to test: a query parameter (`/reports?filter=x`), or a path
   segment marked with `*` (`/products/1*`); a bare path is refused. A long action (`sqli.verify`
   holds up to 20 minutes) may answer `outcome: running`: do other work, then call it again with the
-  same key and input to collect it (`shakerscan_hunt_get` lists the ones not collected yet).
+  same key and input to collect it (`shakerscan_hunt_get` lists the ones not collected yet). A
+  running action keeps its wall reservation until it settles: on a `fast` Hunt (3,600 s) three
+  `sqli.verify` in flight hold all of it, and other calls wait for a budget raise.
 - Prefer passive inventory and prior evidence, then focused probes, then active capabilities when
   the approval and expected evidence justify their budget and risk.
 - Compare principals for authorization hypotheses. Principal references are not proof of identity

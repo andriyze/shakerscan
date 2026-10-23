@@ -2104,7 +2104,7 @@ async def _execute_hunt_capability_lifecycle(
                             urllib.parse.urljoin(sqli_base, sqli_path) if sqli_path else sqli_base,
                             request.input,
                         )):
-                            raise HTTPException(status_code=422, detail=refusal)
+                            raise HuntRefusal("sqli_injection_point_missing", refusal)
                     requires_call_approval = (
                         spec.requires_active_approval
                         or writes_http or workflow_http

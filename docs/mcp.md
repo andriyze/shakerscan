@@ -194,7 +194,13 @@ most `SHAKERSCAN_MCP_ACTION_WAIT_SECONDS` (default 120); any other client gets a
 `SHAKERSCAN_MCP_CALL_SECONDS` (default 45, at most 55). The bound matters because a client keeps
 the agent's step open while any of its calls runs, and OpenCode starts nothing else meanwhile: a
 verifier that runs for twenty minutes (`sqli.verify`) answers `outcome: "running"` after two, and
-the agent works on and collects it later. A crawl or content discovery still settles within. The
+the agent works on and collects it later. An action that ends within the wait settles in the call
+(`web.crawl` and content discovery hold 75 s); one whose `budget_cost.tool_wall_seconds` is longer
+(`ports.discover`, `web.browser_crawl`, `candidate.verify`, `browser.login_check`,
+`templates.scan`, `service.nse_check`, `sqli.verify`, `xss.verify`) may answer running. A running
+action keeps its wall reservation until it settles, so several in flight can hold a short Hunt's
+whole duration (on `fast`, three `sqli.verify`); a call the rest cannot fund asks for a budget
+raise until one settles. The
 engine answers the first request only when the action is done, so that request ends 10 seconds
 before the call's wait does, and a replay of the same key learns the recorded action's state. An
 action still running then is returned as a normal result with `outcome: "running"` and its

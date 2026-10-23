@@ -178,12 +178,11 @@ def test_the_call_bound_stays_below_a_60_second_client_timeout(monkeypatch, seco
 
 # --- A long verifier never holds the agent's step ---------------------------------------------
 #
-# A Hunt of 2026-10-23: three sqli.verify calls each ran their whole 540 s wall. The client sent
-# a progress token, so the adapter kept the call open (with progress every 10 s) for up to 900 s,
-# and OpenCode starts nothing else while a call of its step is open: the Hunt sat idle for 27
-# minutes. A progress client is now held at most DEFAULT_ACTION_WAIT_SECONDS; a longer action
-# answers outcome=running with its key, the agent works on, and shakerscan_hunt_get lists what it
-# has not collected yet.
+# A client that sends a progress token was kept in the call (with progress every 10 s) for up to
+# 900 s, and OpenCode starts nothing else while a call of its step is open, so a Hunt did nothing
+# else while a verifier ran its whole wall. A progress client is now held at most
+# DEFAULT_ACTION_WAIT_SECONDS; a longer action answers outcome=running with its key, the agent
+# works on, and shakerscan_hunt_get lists what it has not collected yet.
 
 VERIFY = dict(ARGUMENTS, capability_name="sqli.verify", input={"path": "/reports?filter=x"},
               idempotency_key="key-verify-1")

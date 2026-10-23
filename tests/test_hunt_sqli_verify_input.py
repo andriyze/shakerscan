@@ -1,12 +1,12 @@
 """A Hunt sqli.verify names the input sqlmap tests, or it is refused before anything is reserved.
 
-A Hunt of 2026-10-23 on the honey target: two of three ``sqli.verify`` calls named a bare path
-(``/search``, ``/reports``). sqlmap, given a URL with no parameter and no body, answers its own
-"do you want to try URI injections in the target URL itself?" with yes under ``--batch`` and
-injects into the path, so each call spent its hold (measured with the pinned sqlmap and the
-Hunt's argv: 515 requests) testing the path and never the page's parameter (``q``,
-``filter``). Admission now refuses such a call with how to name the input; the worker refuses a
-queued one before sqlmap starts (tests/test_hunt_thorough_scanner_dispatch_postgres.py).
+Given a URL with no parameter and no body, sqlmap answers its own "do you want to try URI
+injections in the target URL itself?" with yes under ``--batch`` and injects into the path. A
+call naming a bare path (``/search``, ``/reports``) therefore spent its hold (measured with the
+pinned sqlmap and the Hunt's argv: about 515 requests) testing the path and never the page's
+parameter (``q``, ``filter``). Admission refuses such a call with how to name the input; the
+worker refuses a queued one before sqlmap starts
+(tests/test_hunt_thorough_scanner_dispatch_postgres.py).
 """
 from __future__ import annotations
 
@@ -96,12 +96,16 @@ def test_admission_refuses_a_path_with_no_input_before_reserving(path):
     with pytest.raises(HTTPException) as refused:
         _admit(path)
     assert refused.value.status_code == 422
-    assert refused.value.detail == NO_INJECTION_POINT
+    assert refused.value.detail["reason_code"] == "sqli_injection_point_missing"
+    assert refused.value.detail["message"] == NO_INJECTION_POINT
+    # Recorded as a refused attempt (settle_refusal), with nothing reserved or charged.
+    assert refused.value.recorded and refused.value.kind is None
 
 
 def test_admission_refuses_no_path_on_a_target_url_with_no_parameter():
-    with pytest.raises(HTTPException, match="needs an input to test"):
+    with pytest.raises(HTTPException) as refused:
         _admit(None)
+    assert refused.value.detail["reason_code"] == "sqli_injection_point_missing"
 
 
 @pytest.mark.parametrize("path,target_url", [
@@ -118,6 +122,8 @@ def test_admission_reserves_a_call_that_names_its_input(path, target_url):
 def test_a_finished_hunt_proposes_no_sqli_step_it_could_not_run_again():
     from hunt.saved_actions import retained_step
 
-    # A retained step carries no query, so a sqli.verify step would name no input.
+    # A retained step carries no query (tests/test_hunt_saved_actions.py), so a sqli.verify step
+    # would name no input.
     assert retained_step("sqli.verify", {"path": "/search"}, "app.test") is None
+    assert retained_step("sqli.verify", {"path": "/search?q=%3Credacted%3E"}, "app.test") is None
     assert retained_step("http.request", {"method": "GET", "path": "/search"}, "app.test") is not None
