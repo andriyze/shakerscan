@@ -130,8 +130,9 @@ def test_no_paced_budget_runs_out_before_the_duration_at_the_enforced_pace():
     """Each traffic and call limit covers max_duration_seconds at the fastest pace any executor
     reserves (and, for HTTP, the fastest enforced wire rate), on every profile and target kind."""
     from dataclasses import asdict
-    from api.hunt.budget_pace import PACED_DIMENSIONS, paced_minimum, wire_requests_per_second
+    from api.hunt.budget_pace import PACED_DIMENSIONS, paced_minimum, spend_pace, wire_requests_per_second
     assert wire_requests_per_second() == 10
+    assert all(spend_pace(name)["http_requests"] >= 10 for name in HUNT_BUDGET_PROFILES)
     limit_of = {"http_requests": "max_http_requests", "browser_actions": "max_browser_actions",
                 "agent_actions": "max_capability_calls", "active_actions": "max_active_actions",
                 "verifications": "max_verifications"}
