@@ -601,8 +601,9 @@ export function scanFindingCountsText(counts) {
 
 // Active templates run in windows of the allowlist at each sweep base (the target's own base and
 // every other origin the scan found); the finalizer records how many (base, window) pairs ran.
-// Shown on the page, and when every planned window ran the family is not called unfinished for
-// endpoints the plan left unscheduled: the templates ran at the bases, not at each endpoint.
+// Shown on the page. When every pair ran, the finalizer no longer calls the family unfinished for
+// endpoints the plan left unscheduled (the templates ran at the bases, not at each endpoint);
+// the page reads a report stored before that the same way.
 export function templateWindowsPresentation(coverage) {
   const rows = Array.isArray(record(coverage).family_coverage) ? record(coverage).family_coverage : []
   const row = record(rows.find((item) => record(item).family === 'nuclei_active'))
@@ -709,14 +710,20 @@ export function scanResultPresentation(scan, assurance) {
   const posturePenalty = finiteNumber(result.posture_penalty, null)
   const policyVersion = Number(scorePolicy.match(/^risk_and_assurance\/v(\d+)$/)?.[1] || 0)
   const coverage = record(report.coverage)
-  const coverageReasons = Array.isArray(coverage.reasons) ? coverage.reasons : []
-  const coverageWarnings = coverageReasons.map((reason) => (
-    String(reason || '').replaceAll('_', ' ')
-  )).filter(Boolean)
   // Families the operator selected that never reached a complete state. Naming them is what
   // turns "a selected check family is incomplete" into something a reader can act on.
   const templateWindows = templateWindowsPresentation(coverage)
   const windowsCovered = windowsCoverFamily(coverage, templateWindows)
+  // A report stored before the finalizer judged a windowed sweep by its (base, window) pairs
+  // still names the sweep as its only unfinished family; that reason then explains nothing.
+  const windowsOnlyGap = windowsCovered && Array.isArray(coverage.selected_family_gaps)
+    && coverage.selected_family_gaps.length > 0
+    && coverage.selected_family_gaps.every((family) => String(family) === 'nuclei_active')
+  const coverageReasons = (Array.isArray(coverage.reasons) ? coverage.reasons : [])
+    .filter((reason) => !(windowsOnlyGap && String(reason) === 'selected_family_incomplete'))
+  const coverageWarnings = coverageReasons.map((reason) => (
+    String(reason || '').replaceAll('_', ' ')
+  )).filter(Boolean)
   const incompleteFamilies = Array.isArray(coverage.selected_family_gaps)
     ? coverage.selected_family_gaps
       .filter((family) => !(windowsCovered && String(family) === 'nuclei_active'))

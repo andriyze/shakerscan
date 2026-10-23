@@ -711,8 +711,8 @@ test('active templates short of every window at a scanned origin read as an oper
   ])
 })
 
-// E1 O3: scan f215ce1f ran every active-template window (39/39) while 17 of 73 endpoints were
-// never scheduled; the page said "nuclei active did not finish" and showed no window count.
+// A thorough scan ran every active-template window (39/39) while 17 of 73 endpoints were never
+// scheduled; the page said "nuclei active did not finish" and showed no window count.
 function windowsScan(row, gaps = ['nuclei_active', 'nuclei_passive', 'sqli', 'xss']) {
   return {
     status: 'completed',
@@ -737,15 +737,35 @@ function windowsScan(row, gaps = ['nuclei_active', 'nuclei_passive', 'sqli', 'xs
 test('every planned active-template window ran: the window count shows and the family is not unfinished', () => {
   const result = scanResultPresentation(windowsScan({
     reason: 'manifest_entries_unscheduled',
-    template_windows: { run: 39, total: 39, bases: [{ base: 'http://10.10.10.100:8000/', run: 39, total: 39 }] },
+    template_windows: { run: 39, total: 39, bases: [{ base: 'http://192.0.2.10:8000/', run: 39, total: 39 }] },
   }), { band: 'moderate', label: 'Moderate coverage' })
   assert.deepEqual(result.incompleteFamilies, ['nuclei passive', 'sqli', 'xss'])
   assert.deepEqual(result.templateWindows, {
     run: 39, total: 39, complete: true,
-    bases: [{ base: 'http://10.10.10.100:8000/', run: 39, total: 39 }],
-    detail: '39 of 39 ran (http://10.10.10.100:8000/ 39/39)',
-    text: 'Active templates: 39 of 39 template windows ran (http://10.10.10.100:8000/ 39/39).',
+    bases: [{ base: 'http://192.0.2.10:8000/', run: 39, total: 39 }],
+    detail: '39 of 39 ran (http://192.0.2.10:8000/ 39/39)',
+    text: 'Active templates: 39 of 39 template windows ran (http://192.0.2.10:8000/ 39/39).',
   })
+})
+
+test('a stored report whose only gap was the windowed sweep names no unexplained gap', () => {
+  const scan = windowsScan({
+    reason: 'manifest_entries_unscheduled',
+    template_windows: { run: 39, total: 39, bases: [{ base: 'http://192.0.2.10:8000/', run: 39, total: 39 }] },
+  }, ['nuclei_active'])
+  scan.result.coverage.reasons = ['selected_family_incomplete']
+  const result = scanResultPresentation(scan, { band: 'moderate', label: 'Moderate coverage' })
+  assert.deepEqual(result.incompleteFamilies, [])
+  assert.deepEqual(result.coverageGapReasons, [])
+  // Another family still unfinished keeps the reason.
+  const other = windowsScan({
+    reason: 'manifest_entries_unscheduled',
+    template_windows: { run: 39, total: 39, bases: [{ base: 'http://192.0.2.10:8000/', run: 39, total: 39 }] },
+  }, ['nuclei_active', 'sqli'])
+  other.result.coverage.reasons = ['selected_family_incomplete']
+  const kept = scanResultPresentation(other, { band: 'moderate', label: 'Moderate coverage' })
+  assert.deepEqual(kept.incompleteFamilies, ['sqli'])
+  assert.equal(kept.coverageGapReasons.length, 1)
 })
 
 test('active templates short of their windows stay unfinished and say how many ran per origin', () => {

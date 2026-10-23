@@ -3011,6 +3011,11 @@ def finalize_scan_report(
             short = [base for base, windows in per_base.items() if len(windows) < total]
             if template_windows_strict and short:
                 family_coverage["nuclei_active"]["_windows_short_bases"] = len(short)
+            if not short and template_windows_shard is None:
+                # Every (base, window) pair ran: the active templates run at the sweep's bases,
+                # not at each endpoint, so endpoints the plan left without a position are not
+                # work it skipped (a position past bases x windows runs nothing).
+                family_coverage["nuclei_active"]["_windows_cover_unscheduled"] = True
         else:
             # A record from before sweep bases (2.11.0) or a hand-made one: window indices only.
             family_coverage["nuclei_active"]["template_windows"] = {
@@ -3028,6 +3033,7 @@ def finalize_scan_report(
         statuses = row.pop("_statuses")
         batch_reasons = row.pop("_reasons")
         windows_short_bases = int(row.pop("_windows_short_bases", 0) or 0)
+        windows_cover_unscheduled = bool(row.pop("_windows_cover_unscheduled", False))
         if family == "sqli":
             # Every SQLi candidate the Scan left inconclusive for budget, including one still
             # waiting for a continuation no round could fund when the Scan ended (soak N55).
@@ -3159,7 +3165,7 @@ def finalize_scan_report(
                 row["reason"] = next(iter(incomplete_reasons))
             if row["required"]:
                 selected_family_gaps.append(family)
-        elif row["unscheduled_candidates"] > 0:
+        elif row["unscheduled_candidates"] > 0 and not windows_cover_unscheduled:
             row["coverage_status"] = "partial"
             row["reason"] = "manifest_entries_unscheduled"
             # A REQUIRED family that left work unscheduled has not covered its surface, so the

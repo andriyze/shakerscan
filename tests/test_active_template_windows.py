@@ -13,6 +13,8 @@ adapter half is ``test_active_template_window_attempts.py``.
 
 from __future__ import annotations
 
+import dataclasses
+
 import hashlib
 from dataclasses import replace
 
@@ -240,13 +242,22 @@ def _report_slice(action_id, ordinal, *, start, count, windows, required):
     )
 
 
-def _report(slices, *, windows, shared=False, bases=None, legacy=()):
+def _report(slices, *, windows, shared=False, bases=None, legacy=(), manifest_entries=None):
 
     actions = [
         _report_slice(f"active.templates.r{number:02d}", index, start=start, count=count,
                       windows=windows, required=index == 0)
         for index, (number, start, count) in enumerate(slices)
     ]
+    if manifest_entries is not None:
+        # A host with more endpoints than the sweep has (base, window) pairs.
+        actions = [
+            dataclasses.replace(action, capability_args={
+                **action.capability_args, "manifest_entries": manifest_entries,
+                "endpoint_entries": manifest_entries,
+            }, action_digest=None)
+            for action in actions
+        ]
     final = plan_action("finalize.report", len(actions), dependencies=tuple(a.action_id for a in actions))
     plan = ScanActionPlan(
         scan_id=SCAN_ID, execution_plan_digest="b" * 64, target_binding_digest="a" * 64,
@@ -503,6 +514,32 @@ def test_a_single_origin_that_ran_every_window_reads_39_of_39_complete():
     assert family["template_windows"] == {
         "run": 39, "total": 39, "bases": [{"base": FIRST, "run": 39, "total": 39}],
     }
+
+
+def test_a_sweep_that_ran_every_pair_is_complete_with_endpoints_left_unscheduled():
+    """The active templates run at the sweep's bases, not at each endpoint: a host with 73
+    endpoints whose 39 windows all ran at its one base examined it, though the plan scheduled
+    fewer positions than endpoints. The family is complete and the grade reliable, so the scan
+    page and the report agree."""
+    report, family = _report(
+        FULL, windows=True, manifest_entries=73,
+        bases=lambda start, count: [{"base": FIRST, "windows_run": list(range(start, start + count))}],
+    )
+    assert family["unscheduled_candidates"] == 34
+    assert family["template_windows"]["run"] == family["template_windows"]["total"] == 39
+    assert family["coverage_status"] == "complete" and family["reason"] is None
+    assert "nuclei_active" not in report["coverage"]["selected_family_gaps"]
+    assert report["result"]["grade_reliable"] is True
+
+
+def test_a_sweep_short_of_pairs_with_endpoints_left_unscheduled_stays_partial():
+    report, family = _report(
+        [(1, 0, 2), (2, 2, 33)], windows=True, manifest_entries=73,
+        bases=lambda start, count: [{"base": FIRST, "windows_run": list(range(start, start + count))}],
+    )
+    assert family["coverage_status"] == "partial"
+    assert family["reason"] == "manifest_entries_unscheduled"
+    assert "nuclei_active" in report["coverage"]["selected_family_gaps"]
 
 
 def test_a_balanced_sweep_short_on_a_base_keeps_its_status():
