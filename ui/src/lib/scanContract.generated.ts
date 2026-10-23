@@ -275,7 +275,7 @@ export const SCAN_PUBLIC_CONTRACT_SNAPSHOT = {
         "authz.verify"
       ],
       "default_enabled": false,
-      "description": "Multi-user object authorization comparisons. Requires Lab/deep policy and two auth contexts.",
+      "description": "Multi-user object authorization comparisons. A Scan needs active testing and two distinct credential profiles that allow authz.verify; a focused Continuous ASM batch also needs Lab/deep policy.",
       "label": "BOLA / IDOR",
       "name": "bola",
       "requires_active_testing": true,

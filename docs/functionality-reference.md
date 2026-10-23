@@ -2521,7 +2521,7 @@ for the profile contract, invocation, limits and acceptance gates.
 |---|---|---|---|---|---|---|---|---|
 | `auth` | active | access_control | True | medium | True | `asm_endpoint_batch` | `active_endpoint_attempt_v1` | Read-only authenticated-vs-anonymous access checks for focused ASM endpoint batches. |
 | `authz_surface` | active | access_control | True | high | False | `authz_surface_verify_batch` | `active_endpoint_attempt_v1` | Deterministic BFLA proof via anonymous vs authenticated route access differential. |
-| `bola` | active | access_control | True | high | True | `asm_endpoint_batch` | `active_endpoint_attempt_v1` | Multi-user object authorization comparisons. Requires Lab/deep policy and two auth contexts. |
+| `bola` | active | access_control | True | high | True | `asm_endpoint_batch` | `active_endpoint_attempt_v1` | Multi-user object authorization comparisons. A Scan needs active testing and two distinct credential profiles that allow authz.verify; a focused Continuous ASM batch also needs Lab/deep policy. |
 | `business_logic` | active | workflow | True | high | False | `none` | `planned_workflow_attempt` | Workflow/business-logic testing. Planned for AI/manual-assisted campaigns. |
 | `endpoint_security` | passive | endpoint_surface | False | low | True | `endpoint_scoped_surface` | `endpoint_surface_attempt_v1` | Target-wide API data exposure, webhook signature, and approval/authorization checks over the discovered endpoint inventory. |
 | `graphql` | active | api | True | medium | False | `graphql_verify_batch` | `active_endpoint_attempt_v1` | Bounded read-only GraphQL checks over GET: field suggestions and missing alias or duplicate-field limits on discovered GraphQL endpoints. |

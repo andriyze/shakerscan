@@ -172,7 +172,11 @@ CHECK_REGISTRY: tuple[CheckFamilySpec, ...] = (
         emits_endpoint_telemetry=True,
         scanner_focus_order=40,
         runnable=True,
-        description="Multi-user object authorization comparisons. Requires Lab/deep policy and two auth contexts.",
+        description=(
+            "Multi-user object authorization comparisons. A Scan needs active testing and two "
+            "distinct credential profiles that allow authz.verify; a focused Continuous ASM batch "
+            "also needs Lab/deep policy."
+        ),
     ),
     CheckFamilySpec(
         name="auth",
