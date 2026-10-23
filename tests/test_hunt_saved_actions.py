@@ -189,3 +189,63 @@ def test_finish_retention_never_writes_a_saved_action_directly():
              for node in ast.walk(ast.parse(source.read_text())) if isinstance(node, ast.Call)}
     assert "write_target_action" not in calls and "create_action_proposal" not in calls
     assert "refresh_retained_proposal" in calls
+
+
+class SqliteConn:
+    """Unit fixture: runs the production SQL text on SQLite (``$n`` becomes ``?n``), so a test
+    exercises the query's own filter and order rather than a hand-written stand-in."""
+
+    def __init__(self, schema):
+        import sqlite3
+        self.db = sqlite3.connect(":memory:")
+        self.db.row_factory = sqlite3.Row
+        self.db.executescript(schema)
+
+    def _run(self, query, args):
+        import re
+        from uuid import UUID
+        return self.db.execute(re.sub(r"\$(\d+)", r"?\1", query),
+                               [str(value) if isinstance(value, UUID) else value for value in args])
+
+    async def fetch(self, query, *args):
+        return [dict(row) for row in self._run(query, args).fetchall()]
+
+    async def fetchval(self, query, *args):
+        row = self._run(query, args).fetchone()
+        return None if row is None else row[0]
+
+
+def _retention_fixture(monkeypatch, conn, captured):
+    from targets import hunt_authority, instruction_proposals
+
+    async def authority(*args, lock=False):
+        return {"id": uuid4(), "url": "https://app.test", "is_active": True, "metadata_json": {}}
+
+    async def refresh(conn, target_id, *, steps, evidence_refs, **kwargs):
+        captured.update(steps=steps, evidence=evidence_refs)
+        return {"status": "proposed", "proposal_id": "proposal-1", "step_count": len(steps)}
+    monkeypatch.setattr(hunt_authority, "authority_row", authority)
+    monkeypatch.setattr(instruction_proposals, "refresh_retained_proposal", refresh)
+
+
+def test_finish_proposes_the_newest_completed_steps_and_returns_the_proposal_outcome(monkeypatch):
+    """A long Hunt has more completed actions than one finish reads: it reads the newest, in the
+    order they ran, so the rolling proposal's newest steps are the Hunt's newest steps."""
+    from hunt.saved_actions import _LIMIT_ACTIONS
+    conn = SqliteConn("""CREATE TABLE hunt_actions (id TEXT, hunt_run_id TEXT, capability_name TEXT,
+        status TEXT, input_summary TEXT, completed_at INTEGER)""")
+    hunt = uuid4()
+    total = _LIMIT_ACTIONS + 100
+    for index in range(total):
+        row = ledger("http.request", {"method": "GET", "path": f"/items/{index}"})
+        conn.db.execute("INSERT INTO hunt_actions VALUES (?,?,?,?,?,?)", (str(row["id"]), str(hunt),
+                        "http.request", "completed", json.dumps(row["input_summary"]), index))
+    captured = {}
+    _retention_fixture(monkeypatch, conn, captured)
+    run = {"id": hunt, "target_id": uuid4(), "context_pack": {"target": {"url": "https://app.test"}}}
+    result = asyncio.run(retain_hunt_action(conn, run))
+    assert result == {"status": "proposed", "proposal_id": "proposal-1", "step_count": _LIMIT_ACTIONS}
+    paths = [step["input"]["path"] for step in captured["steps"]]
+    assert paths == [f"/items/{index}" for index in range(total - _LIMIT_ACTIONS, total)]
+    assert len(captured["evidence"]) == _LIMIT_ACTIONS
+

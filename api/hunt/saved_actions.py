@@ -213,12 +213,14 @@ async def retain_hunt_action(conn: Any, run: Mapping) -> dict | None:
         host, _origin = hunt_target_host(hunt_target_locator(run))
     except ValueError:
         return {"status": "skipped", "reason": "target_host_unknown"}
+    # The newest completed actions, read back in the order they ran: the rolling proposal keeps
+    # the newest steps, so a long Hunt's latest work is never cut off by its earliest.
     actions = await conn.fetch(
         """SELECT id, capability_name, status, input_summary FROM hunt_actions
            WHERE hunt_run_id=$1 AND status='completed'
-           ORDER BY completed_at, id LIMIT $2""", run["id"], _LIMIT_ACTIONS,
+           ORDER BY completed_at DESC, id DESC LIMIT $2""", run["id"], _LIMIT_ACTIONS,
     )
-    steps, evidence = recipe_steps([dict(action) for action in actions], host)
+    steps, evidence = recipe_steps([dict(action) for action in reversed(actions)], host)
     if not steps:
         return {"status": "skipped", "reason": "no_reusable_steps"}
     return await refresh_retained_proposal(
