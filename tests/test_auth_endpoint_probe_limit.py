@@ -288,7 +288,7 @@ LARGE = {"http_requests": 6_000, "state_changing_requests": 6_000, "tool_wall_se
 
 
 def _slice(capability, *, tool, parser, sent, options, routes=DEFAULT_ROUTES, rounds=1, budget=None,
-           concurrency=None, measured=False, runner=None):
+           concurrency=None, measured=False, runner=None, budgets=None):
     scan_id = str(uuid.uuid4())
     endpoints = build_endpoint_manifest(
         scan_id=scan_id, target_binding_digest=TARGET.digest,
@@ -319,7 +319,7 @@ def _slice(capability, *, tool, parser, sent, options, routes=DEFAULT_ROUTES, ro
             _action(f"verify.x.r0{index + 1}", capability, index, capability_args={
                 **args, **({EXTENDS_ARG: actions[-1].action_id} if actions else {}),
             }),
-            requested_budget=dict(budget or LARGE), action_digest=None,
+            requested_budget=dict((budgets or {}).get(index) or budget or LARGE), action_digest=None,
         ))
     plan = ScanActionPlan(scan_id=scan_id, execution_plan_digest="a" * 64,
                           target_binding_digest=TARGET.digest, actions=tuple(actions))
@@ -568,6 +568,29 @@ def test_a_wall_too_short_to_pace_a_probe_leaves_the_candidate_for_a_later_round
     assert receipts[0].status == "partial"
     assert not any(item.get("inconclusive_reason") == AUTH_ENDPOINT_PROBE_LIMITED
                    for item in receipts[0].observations)
+
+
+def test_a_pace_unfunded_slice_says_its_wall_stopped_it_and_a_later_round_funds_it():
+    """The slice's wall is what could not pace the candidate: it states a timeout (never an
+    unfunded plan or an adapter failure), and a round with the wall it asked for runs it."""
+    capability, tool, parser = XSS
+    shard = {"canonical_shard_authority": {"shard_index": 0, "shard_count": 8}}
+    short = {"http_requests": 240, "state_changing_requests": 240, "tool_wall_seconds": 120}
+    funded = {"http_requests": 240, "state_changing_requests": 240,
+              "tool_wall_seconds": AUTH_ENDPOINT_MIN_ATTEMPT_REQUESTS * AUTH_ENDPOINT_SECONDS_PER_REQUEST * 8}
+    receipts, (first, later), _record = _slice(
+        capability, tool=tool, parser=parser, sent=3, options={"login_url": LOGIN, **shard},
+        routes=DEFAULT_ROUTES[:1], rounds=2, budgets={0: short, 1: funded},
+    )
+    assert not _sent_to(first, LOGIN)
+    assert receipts[0].status == "partial"
+    assert receipts[0].errors[0] == "timed_out"
+    assert receipts[0].timed_out is True
+    (call,) = _sent_to(later, LOGIN)
+    assert call["options"]["probe_profile"] == "auth_endpoint"
+    assert call["reserved"]["http_requests"] == AUTH_ENDPOINT_MIN_ATTEMPT_REQUESTS
+    (head,) = _heads(receipts[1])
+    assert head["sign_in_endpoint_requests"] == 3
 
 
 def test_a_dalfox_attempt_that_verified_nothing_is_inconclusive_never_negative():

@@ -542,6 +542,22 @@ def test_a_sweep_short_of_pairs_with_endpoints_left_unscheduled_stays_partial():
     assert "nuclei_active" in report["coverage"]["selected_family_gaps"]
 
 
+def test_a_shard_that_ran_every_pair_keeps_its_unscheduled_endpoints_for_the_merge():
+    """A parallel shard reports its own part of the pairs; whether the parts together examined
+    the host is the merge's call, so a shard's report keeps endpoints its plan left without a
+    position as unscheduled work, even when its own windows covered every pair."""
+    report, family = _report(
+        FULL, windows=True, manifest_entries=73, shared=True,
+        bases=lambda start, count: [{"base": FIRST, "windows_run": list(range(start, start + count))}],
+    )
+    assert family["template_windows"]["run"] == family["template_windows"]["total"] == 39
+    assert family["template_windows"]["shard_part"] == {"index": 0, "count": 2}
+    assert family["unscheduled_candidates"] == 34
+    assert family["coverage_status"] == "partial"
+    assert family["reason"] == "manifest_entries_unscheduled"
+    assert "nuclei_active" in report["coverage"]["selected_family_gaps"]
+
+
 def test_a_balanced_sweep_short_on_a_base_keeps_its_status():
     _report_body, family = _report([(1, 0, 2)], windows=False, bases=_first_base_only)
     assert family["coverage_status"] == "complete"

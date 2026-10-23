@@ -415,6 +415,28 @@ def test_the_credential_gate_refuses_a_derived_receipt_whose_source_no_longer_st
     asyncio.run(run())
 
 
+def test_a_derived_receipt_checked_for_another_target_is_not_current(template_database):
+    """The receipt names its target: a check made for any other target fails, though the source
+    still stands for the receipt's own."""
+    async def run():
+        async with scan_database(template_database) as pool:
+            scan = await _scan(pool)
+            async with pool.acquire() as conn:
+                derived = await target_authorization.derive_credential_scan_receipt(
+                    conn, target_id=scan.target_id, standing_receipt_id=scan.policy.approval_receipt_id)
+                row = await conn.fetchrow("SELECT * FROM approval_receipts WHERE id=$1",
+                                          uuid.UUID(str(derived)))
+                other = await conn.fetchval(
+                    "INSERT INTO targets(url) VALUES('http://other.test') RETURNING id")
+                assert await target_authorization.derived_credential_scan_source_is_current(
+                    conn, row, expected_target_id=scan.target_id)
+                assert not await target_authorization.derived_credential_scan_source_is_current(
+                    conn, row, expected_target_id=other)
+                assert not await target_authorization.derived_credential_scan_source_is_current(
+                    conn, row, expected_target_id=str(uuid.uuid4()))
+    asyncio.run(run())
+
+
 def test_the_generic_approval_revoke_route_ends_the_derived_receipt(template_database, monkeypatch):
     import arsenal_routes.router as arsenal
 
