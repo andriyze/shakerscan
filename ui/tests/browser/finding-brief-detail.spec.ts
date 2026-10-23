@@ -98,7 +98,9 @@ test('a proven candidate-titled finding reads as proven, masks redacted values a
   await expect(page.getByText('<redacted>', { exact: false })).toHaveCount(0)
   await expect(page.getByText('/rest/products/search?q=•••', { exact: true })).toBeVisible()
   await expect(page.locator('a[title="Open in new tab"]').first()).toHaveAttribute('href', 'https://shop.fixture.invalid/rest/products/search?q=')
-  await expect(page.getByText('No deterministic prover covers this finding type', { exact: false })).toHaveCount(0)
+  // A proven finding without a replay says its proof stands, not that it needs a new Scan.
+  await expect(page.getByText('has no single-request retest', { exact: false })).toHaveCount(0)
+  await expect(page.getByText('the scan-time proof above still stands', { exact: false })).toBeVisible()
   const select = page.getByLabel('Analyst verdict')
   const card = page.locator('#triage')
   const [selectBox, cardBox] = [await select.boundingBox(), await card.boundingBox()]

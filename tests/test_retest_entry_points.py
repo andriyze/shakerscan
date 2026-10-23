@@ -150,3 +150,66 @@ def test_a_slot_wait_requeue_keeps_the_approval_an_earlier_engine_put_in_the_mes
     payload.update({"approval_receipt_id": approval, "scope_receipt_id": scope})
     asyncio.run(worker.process_finding_retest_job(payload))
     assert queued and queued[0]["approval_receipt_id"] == approval and queued[0]["scope_receipt_id"] == scope
+
+
+def test_automatic_retests_after_a_scan_skip_findings_only_the_ai_tier_could_answer(monkeypatch):
+    """Unit fixtures: a Deep Hunt promotion (generic_http) and an earlier scanner's 2FA bypass have
+    no deterministic prover, so their automatic retest could never conclude; a reflected XSS
+    still reaches admission."""
+    import dataclasses
+
+    def row(title, tool):
+        return {"id": uuid.uuid4(), "title": title, "tool": tool, "severity": "high", "status": "active",
+                "url": "https://app.fixture.invalid/search?q=1", "target_url": "https://app.fixture.invalid",
+                "evidence": {}, "target_id": None, "scan_id": None, "verification_count": 0,
+                "last_verification_verdict": None}
+
+    hunt = row("Verified stored cross-site scripting", "autonomous_workflow")
+    twofa = row("2FA bypass via OTP reuse", "")
+    xss = row("Verified cross-site scripting", "dalfox")
+
+    class Conn:
+        async def fetchrow(self, _query, *_args):
+            return {"options": "{}"}
+
+        async def fetch(self, _query, *_args):
+            return [hunt, twofa, xss]
+
+        async def fetchval(self, _query, *_args):
+            return None
+
+        async def execute(self, query, *_args):
+            raise AssertionError(f"nothing is queued: {query[:40]}")
+
+    class Pool:
+        def acquire(self):
+            class _Acquire:
+                async def __aenter__(self):
+                    return Conn()
+
+                async def __aexit__(self, *_exc):
+                    return False
+            return _Acquire()
+
+    admitted = []
+
+    async def admit(_conn, **kwargs):
+        admitted.append(kwargs["destination"])
+        return None, {"error": "outside the fixture scope"}
+
+    async def running(_conn, _scan_id):
+        return False
+
+    policy = dataclasses.replace(
+        worker.VerificationPolicy.from_env(overrides={}), auto_retest_enabled=True,
+        auto_retest_max_per_scan=5, verification_min_severity="low")
+    monkeypatch.setattr(worker.VerificationPolicy, "from_env", classmethod(lambda cls, overrides=None: policy))
+    monkeypatch.setattr(worker, "_load_runtime_ai_settings", lambda: {})
+    monkeypatch.setattr(worker, "db_pool", Pool())
+    monkeypatch.setattr(worker, "get_redis", lambda: object())
+    monkeypatch.setattr(worker, "scan_stopped_by_authority", running)
+    monkeypatch.setattr(worker, "admit_retest", admit)
+    counts = asyncio.run(worker.queue_auto_retests_for_scan(
+        str(uuid.uuid4()), None, "https://app.fixture.invalid"))
+    assert counts == {"queued": 0, "skipped": 3}
+    assert admitted == ["https://app.fixture.invalid/search?q=1"]

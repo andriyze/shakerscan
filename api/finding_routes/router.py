@@ -38,10 +38,10 @@ try:
     from evidence_storage import hydrate_evidence_content, public_evidence_object
     from evidence_triage import redact_finding_evidence as _redact_finding_evidence
     from retest_contract import (
-        AI_ONLY_RETEST_TYPES, SUPPORTED_RETEST_TYPES, build_replay_commands,
+        SUPPORTED_RETEST_TYPES, build_replay_commands,
         build_retest_job_payload, extract_auth_context, infer_type_from_title_tool,
         normalize_retest_type, parse_json_field, retest_sends_active_requests,
-        retest_unsupported_reason, validate_retest_job_payload,
+        retest_refusal_reason, validate_retest_job_payload,
     )
     from serialization import _decode_json_value, _json_object, _str_list, row_to_dict
     from scan.retest_authority import REPLAY_OUT_OF_SCOPE, admit_retest, admitted_authority_json
@@ -60,10 +60,10 @@ except ModuleNotFoundError:  # package import in host-side tests
     from ..evidence_storage import hydrate_evidence_content, public_evidence_object
     from ..evidence_triage import redact_finding_evidence as _redact_finding_evidence
     from ..retest_contract import (
-        AI_ONLY_RETEST_TYPES, SUPPORTED_RETEST_TYPES, build_replay_commands,
+        SUPPORTED_RETEST_TYPES, build_replay_commands,
         build_retest_job_payload, extract_auth_context, infer_type_from_title_tool,
         normalize_retest_type, parse_json_field, retest_sends_active_requests,
-        retest_unsupported_reason, validate_retest_job_payload,
+        retest_refusal_reason, validate_retest_job_payload,
     )
     from ..serialization import _decode_json_value, _json_object, _str_list, row_to_dict
     from ..scan.retest_authority import REPLAY_OUT_OF_SCOPE, admit_retest, admitted_authority_json
@@ -734,26 +734,22 @@ async def get_finding(finding_id: str):
     else:
         evidence = parse_json_field(result.get("evidence"))
         retest_type = infer_retest_type(result, evidence)
-        tool = str(result.get("tool") or "").lower()
-        if retest_type:
+        refusal = retest_refusal_reason(result, retest_type)
+        if refusal is None:
             result["retest_supported"] = True
             result["retest_type"] = retest_type
-            result["retest_modes"] = (
-                ["tiered", "ai"] if retest_type in AI_ONLY_RETEST_TYPES
-                else ["tiered", "deterministic", "ai"]
-            )
+            result["retest_modes"] = ["tiered", "deterministic", "ai"]
             result["retest_active"] = retest_sends_active_requests(
                 retest_type, ai_tier_available=_ai_verifier_ready(),
             )
         else:
-            # No prover of this finding's kind of check. The AI tier is not offered alone: it
-            # can never mark a finding fixed, so an AI-only retest could not conclude.
+            # No prover of this finding's kind of check, or only the AI tier (generic_http,
+            # 2fa_bypass). The AI tier is not offered alone: it can never mark a finding fixed,
+            # so an AI-only retest could not conclude.
             result["retest_supported"] = False
             result["retest_type"] = None
             result["retest_modes"] = []
-            result["retest_unsupported_reason"] = (
-                "model_intake" if tool == "model_intake" else retest_unsupported_reason(tool)
-            )
+            result["retest_unsupported_reason"] = refusal
 
     return result
 
@@ -773,6 +769,11 @@ _RETEST_UNSUPPORTED_MESSAGES = {
     ),
     "retest_exposure_by_rescan": "Run a new Scan to check this exposure again.",
     "retest_by_rescan_only": "This finding has no single-request retest; run a new Scan to check it again.",
+    "retest_by_hunt_rerun": "This Hunt finding has no single-request retest; run the Hunt again to check it.",
+    "model_intake": (
+        "Model Intake findings cannot be retested via HTTP replay; re-run the Model Intake scan "
+        "for this artifact instead."
+    ),
 }
 
 
@@ -820,27 +821,17 @@ async def retest_finding(
             override_request_body=request.request_body,
         )
 
-        if not retest_inputs.get("finding_type"):
-            tool = str(finding_data.get("tool") or "").lower()
-            if tool == "model_intake":
-                raise HTTPException(
-                    status_code=400,
-                    detail={
-                        "error": "unsupported_finding_type",
-                        "reason": "model_intake",
-                        "message": "Model Intake findings cannot be retested via HTTP replay; re-run the Model Intake scan for this artifact instead.",
-                    },
-                )
-            # No prover of this finding's kind of check, and the AI tier alone can never
-            # conclude (it is at most inconclusive), so nothing is queued.
-            reason = retest_unsupported_reason(tool)
+        refusal = retest_refusal_reason(finding_data, retest_inputs.get("finding_type"))
+        if refusal is not None:
+            # No prover of this finding's kind of check, or only the AI tier, which alone can
+            # never conclude (it is at most inconclusive): nothing is queued.
             raise HTTPException(
                 status_code=400,
                 detail={
                     "error": "unsupported_finding_type",
-                    "reason": reason,
-                    "message": _RETEST_UNSUPPORTED_MESSAGES[reason],
-                    "supported_types": list(SUPPORTED_RETEST_TYPES),
+                    "reason": refusal,
+                    "message": _RETEST_UNSUPPORTED_MESSAGES[refusal],
+                    **({} if refusal == "model_intake" else {"supported_types": list(SUPPORTED_RETEST_TYPES)}),
                 },
             )
 
@@ -1095,12 +1086,9 @@ async def bulk_retest_findings(request: FindingsBulkRetestRequest):
                 override_type=request.finding_type,
             )
 
-            if not retest_inputs.get("finding_type"):
-                tool = str(finding_data.get("tool") or "").lower()
-                skipped.append({
-                    "finding_id": str(finding_data["id"]),
-                    "reason": "model_intake" if tool == "model_intake" else retest_unsupported_reason(tool),
-                })
+            refusal = retest_refusal_reason(finding_data, retest_inputs.get("finding_type"))
+            if refusal is not None:
+                skipped.append({"finding_id": str(finding_data["id"]), "reason": refusal})
                 continue
             if not retest_inputs.get("target_url"):
                 skipped.append({

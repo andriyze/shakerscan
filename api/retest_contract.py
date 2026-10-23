@@ -432,10 +432,15 @@ PRE_V2_TITLE_INFERENCE_TOOLS: frozenset[str] = frozenset({
 PRE_V2_TITLE_INFERENCE_TOOL_PREFIXES: tuple[str, ...] = ("jwt_", "graphql_")
 
 # Why a finding has no retest. A template finding needs its own template replayed; an exposure,
-# a header, TLS, DNS, takeover, GraphQL or authorization finding is checked again by a Scan.
+# a header, TLS, DNS, takeover, GraphQL or authorization finding is checked again by a Scan; a
+# Hunt finding whose family has no deterministic prover, by running the Hunt again.
 RETEST_REASON_RESCAN_ONLY = "retest_by_rescan_only"
 RETEST_REASON_TEMPLATE_REPLAY = "retest_needs_template_replay"
 RETEST_REASON_EXPOSURE = "retest_exposure_by_rescan"
+RETEST_REASON_HUNT = "retest_by_hunt_rerun"
+RETEST_REASON_MODEL_INTAKE = "model_intake"
+# Tools a Hunt or Deep Hunt promotion stores on its findings.
+HUNT_FINDING_TOOLS: frozenset[str] = frozenset({"autonomous_workflow", "autonomous_agent"})
 _RETEST_REASON_BY_TOOL: dict[str, str] = {
     "nuclei": RETEST_REASON_TEMPLATE_REPLAY,
     "shakerscan_exposure_probe": RETEST_REASON_EXPOSURE,
@@ -521,6 +526,37 @@ def _title_has(title: str, *phrases: str) -> bool:
 def retest_unsupported_reason(tool: str | None) -> str:
     """Why a finding without a retest type is not retested (see ``_RETEST_REASON_BY_TOOL``)."""
     return _RETEST_REASON_BY_TOOL.get(str(tool or "").strip().lower(), RETEST_REASON_RESCAN_ONLY)
+
+
+def retest_type_has_prover(retest_type: str | None) -> bool:
+    """Whether a retest type has a deterministic prover. The AI-only types (``generic_http``,
+    ``2fa_bypass``) have none, and an AI verdict is at most inconclusive, so a retest of one could
+    never conclude."""
+    return retest_type in SUPPORTED_RETEST_TYPES and retest_type not in AI_ONLY_RETEST_TYPES
+
+
+def _hunt_finding(finding: Mapping[str, Any]) -> bool:
+    evidence = parse_json_field(finding.get("evidence"))
+    return bool(
+        str(finding.get("tool") or "").strip().lower() in HUNT_FINDING_TOOLS
+        or str(finding.get("source") or "").strip().lower() == "autonomous"
+        or finding.get("hunt_run_id")
+        or isinstance(evidence.get("autonomous_workflow"), dict)
+    )
+
+
+def retest_refusal_reason(finding: Mapping[str, Any], retest_type: str | None) -> str | None:
+    """Why a finding is not retested, or None when its retest type has a prover: Model Intake
+    findings are re-checked by their own scan, a Hunt finding of a family no prover covers by
+    running the Hunt again, any other by a new Scan (``retest_unsupported_reason``)."""
+    if retest_type_has_prover(retest_type):
+        return None
+    tool = str(finding.get("tool") or "").strip().lower()
+    if tool == "model_intake":
+        return RETEST_REASON_MODEL_INTAKE
+    if retest_type and _hunt_finding(finding):
+        return RETEST_REASON_HUNT
+    return retest_unsupported_reason(tool)
 
 
 def retest_sends_active_requests(retest_type: str | None, *, ai_tier_available: bool) -> bool:

@@ -58,6 +58,7 @@ from retest_contract import (
     mark_candidate_inconclusive,
     normalize_retest_type,
     parse_json_field,
+    retest_type_has_prover,
     path_segment_retest_result,
     retest_queue_binding_matches,
     stale_retest_should_requeue as _stale_retest_should_requeue,
@@ -6831,7 +6832,9 @@ async def queue_auto_retests_for_scan(scan_id: str, target_id: str | None, targe
             finding_type = inferred.get("finding_type")
             effective_target = inferred.get("target_url") or target_url or ""
 
-            if finding_type not in SUPPORTED_RETEST_TYPES or not effective_target:
+            # An AI-only type (generic_http, 2fa_bypass) has no prover, and the AI tier alone is
+            # at most inconclusive: such a retest could never conclude.
+            if not retest_type_has_prover(finding_type) or not effective_target:
                 skipped += 1
                 continue
             # Bound to the target's authorization and the Scan's approval; a retest whose replay

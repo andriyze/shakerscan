@@ -615,7 +615,9 @@ function FindingDetailContent() {
           ? 'This template finding has no single-request retest. Run a new Scan to check it again.'
           : finding?.retest_unsupported_reason === 'retest_exposure_by_rescan'
             ? 'Run a new Scan to check this exposure again.'
-            : 'This finding has no single-request retest. Run a new Scan to check it again.'
+            : finding?.retest_unsupported_reason === 'retest_by_hunt_rerun'
+              ? 'This Hunt finding has no single-request retest. Run the Hunt again to check it.'
+              : 'This finding has no single-request retest. Run a new Scan to check it again.'
   const manualVerifyCommands = evidenceStringList(rawEvidenceObject, 'verify_commands')
   // Commands an earlier release stored that the API could not rebuild: text only, never copied.
   const recordedVerifyCommands = evidenceStringList(rawEvidenceObject, 'verify_commands_as_recorded')
