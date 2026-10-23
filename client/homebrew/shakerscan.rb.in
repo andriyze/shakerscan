@@ -9,8 +9,10 @@ class Shakerscan < Formula
 
   depends_on "python@3.13"
 
-  # Pure Python with no dependencies: install the package tree and a launcher that runs it with
-  # the formula's interpreter. No virtualenv and no build backend at install time.
+  # Pure Python: install the package tree and a launcher that runs it with the formula's
+  # interpreter. No virtualenv and no build backend at install time. The client's one dependency,
+  # python-fido2 (a USB security key's touch), is not installed here; the client says so when a
+  # touch is asked for.
   def install
     libexec.install "src/shakerscan"
     python = Formula["python@3.13"].opt_bin/"python3.13"
