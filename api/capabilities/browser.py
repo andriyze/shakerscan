@@ -7,6 +7,7 @@ try:
 except ModuleNotFoundError:  # package import layout
     from api.capabilities.secret_material import keyed_body_digest
 import asyncio
+import base64
 import contextlib
 import dataclasses
 from dataclasses import dataclass, field
@@ -18,6 +19,7 @@ import re
 import sys
 import time
 import uuid
+import zlib
 from http.cookies import SimpleCookie
 from typing import Any, Mapping
 import urllib.parse
@@ -1389,20 +1391,69 @@ def _observation_url(value: str) -> str:
     return redact_url(str(value or ""), max_length=2_000)
 
 
+# The most of a refused write's body (or of what a compressed body expands to) searched for the
+# proof's marker. A larger body cannot be told apart, so it counts as carrying the marker.
+_MARKER_SEARCH_BYTES = 1_048_576
+_BASE64URL = bytes.maketrans(b"+/", b"-_")
+
+
+def _marker_forms(marker: str) -> frozenset[bytes]:
+    """The byte runs a value carrying ``marker`` contains in the encodings a page applies before
+    it writes: as text (URL, form and JSON encoding leave the marker's letters, digits, ``_`` and
+    ``-`` as they are), hexadecimal, UTF-16, and base64 or base64url at each of the three byte
+    alignments the marker can start at (the whole 3-byte groups it fills encode the same way
+    whatever surrounds it)."""
+    raw = marker.encode()
+    forms = {raw, raw.hex().encode(), raw.hex().upper().encode(),
+             marker.encode("utf-16-le"), marker.encode("utf-16-be")}
+    for start in range(3):
+        whole = raw[start:start + (len(raw) - start) // 3 * 3]
+        if len(whole) >= 9:
+            encoded = base64.b64encode(whole)
+            forms.update((encoded, encoded.translate(_BASE64URL)))
+    return frozenset(forms)
+
+
+def _decoded_views(data: bytes) -> list[bytes]:
+    """``data``, what it reads as once percent-decoded (up to twice: a page may encode every
+    byte, and the browser may encode that again), and, when it is gzip, zlib or raw deflate,
+    what it expands to (bounded)."""
+    views = [data]
+    for _ in range(2):
+        decoded = urllib.parse.unquote_to_bytes(views[-1])
+        if decoded == views[-1]:
+            break
+        views.append(decoded)
+    for wbits in (47, -15):  # 47: gzip or zlib header; -15: raw deflate
+        try:
+            expanded = zlib.decompressobj(wbits).decompress(data, _MARKER_SEARCH_BYTES)
+        except zlib.error:
+            continue
+        if expanded:
+            views.append(expanded)
+            break
+    return views
+
+
 def _carries_marker(request: Any, marker: str) -> bool:
     """Whether a refused write carries the XSS proof's marker, in its URL or its body.
 
-    The marker is letters, digits, ``_`` and ``-``, which URL, form and JSON encoding leave as
-    they are. A body that cannot be read counts as carrying it, so a write the proof cannot
-    tell apart keeps the negative incomplete.
+    The marker is searched as text and in the common encodings a page applies before it writes
+    (``_marker_forms``), in the URL and the body as sent, percent-decoded and decompressed. A
+    body that cannot be read, or is larger than the search window, counts as carrying it, so a
+    write the proof cannot tell apart keeps the negative incomplete. A page that transforms the
+    payload further (encrypts or hashes it) before writing it is not told apart.
     """
-    if marker in urllib.parse.unquote(str(getattr(request, "url", "") or "")):
-        return True
+    forms = _marker_forms(marker)
     try:
         body = request.post_data_buffer or b""
     except Exception:  # noqa: BLE001 - an unreadable body is not evidence of a page-only write
         return True
-    return marker.encode() in bytes(body)
+    body = bytes(body)
+    if len(body) > _MARKER_SEARCH_BYTES:
+        return True
+    url = str(getattr(request, "url", "") or "").encode("utf-8", "replace")
+    return any(form in view for data in (url, body) for view in _decoded_views(data) for form in forms)
 
 
 def _proof_request_url(value: str) -> str:

@@ -2,18 +2,19 @@
 leaves the negative result incomplete. The page's own writes (socket polling, telemetry)
 are outside the attempt, like off-origin subresources.
 
-A Hunt of 2026-10-23 on an OWASP Juice Shop target: a fragment proof of
-``/#/search?query=test`` ran all 44 same-origin reads and came back not proven, but the page's
-own Engine.IO long-polling POSTs (``/socket.io/?EIO=...&transport=polling``, no payload) were
-refused during the settle, and the Hunt reported the proof partial with
-``browser_request_blocked:state_changing_method``. A single-page application that polls or sends
-telemetry could never get a complete negative. Unit fixtures: the browser is a scripted double.
+A fragment proof of a single-page application (``/#/search?query=test``) ran every same-origin
+read and came back not proven, but the page's own Engine.IO long-polling POSTs
+(``/socket.io/?EIO=...&transport=polling``, no payload) were refused during the settle, and the
+Hunt reported the proof partial with ``browser_request_blocked:state_changing_method``. A page
+that polls or sends telemetry could never get a complete negative. Unit fixtures: the browser is
+a scripted double.
 """
 from __future__ import annotations
 
 import asyncio
 import sys
 import types
+import urllib.parse
 
 import pytest
 
@@ -31,13 +32,13 @@ def _browser_module():
     return sys.modules[fragment_xss_proof.XSSBrowserProofAdapter.__module__]
 
 
-def _result(*, reasons, payload_write_blocked):
+def _result(*, reasons, payload_write_blocked, proofs=1):
     proof = {"kind": "xss_browser_proof", "proof_state": "not_proven"}
     if payload_write_blocked is not None:
         proof["payload_write_blocked"] = payload_write_blocked
     return CapabilityAdapterResult(
         status="success",
-        observations=(proof, *({
+        observations=(*([proof] * proofs), *({
             "kind": "browser_request_blocked", "reason": reason, "method": "POST",
             "url": "https://app.example.test/socket.io/",
         } for reason in reasons)),
@@ -61,6 +62,27 @@ def test_blocked_payload_write_or_unknown_stays_partial(flag):
     ))
     assert result.status == "partial" and result.partial is True
     assert result.errors == ("browser_request_blocked:state_changing_method",)
+
+
+def test_every_proof_must_say_no_refused_write_carried_its_payload():
+    clear = {"kind": "xss_browser_proof", "proof_state": "not_proven", "payload_write_blocked": False}
+    for other in ({**clear, "payload_write_blocked": True}, {"kind": "xss_browser_proof"}):
+        result = _normalize_hunt_browser_xss_result(CapabilityAdapterResult(
+            status="success",
+            observations=(clear, other, {"kind": "browser_request_blocked",
+                                         "reason": "state_changing_method"}),
+            actual_budget={"browser_actions": 2}, execution_started=True,
+            parser_version="xss-browser-proof/v1",
+        ))
+        assert result.status == "partial", other
+    assert _normalize_hunt_browser_xss_result(_result(
+        reasons=("state_changing_method",), payload_write_blocked=False, proofs=2,
+    )).status == "success"
+    # No proof observation at all: nothing says the writes were the page's own.
+    assert _normalize_hunt_browser_xss_result(CapabilityAdapterResult(
+        status="success", observations=({"kind": "browser_request_blocked", "reason": "state_changing_method"},),
+        actual_budget={"browser_actions": 2}, execution_started=True, parser_version="xss-browser-proof/v1",
+    )).status == "partial"
 
 
 def test_page_writes_do_not_hide_an_exhausted_request_budget():
@@ -204,15 +226,81 @@ class _Request:
         return self._body
 
 
-def test_the_marker_is_found_in_every_encoding_a_write_can_carry():
-    _carries_marker = _browser_module()._carries_marker
+MARKER = "shakerscan_xss_0123abcd-ef0"
+PAYLOAD = (
+    '<img src=x onerror="document.documentElement.setAttribute(\'data-shakerscan-proof\','
+    f"'{MARKER}');console.log('{MARKER}')\">"
+)
 
-    marker = "shakerscan_xss_0123abcd-ef0"
-    assert _carries_marker(_Request(f"https://a.test/api?q=%3Cimg%20{marker}%3E"), marker)
-    assert _carries_marker(_Request("https://a.test/api", ('{"q":"<img %s>"}' % marker).encode()), marker)
-    assert _carries_marker(_Request("https://a.test/api", f"q=%3Cimg+{marker}%3E".encode()), marker)
-    assert not _carries_marker(_Request("https://a.test/socket.io/?EIO=4&transport=polling", b"40"), marker)
-    assert not _carries_marker(_Request("https://a.test/telemetry", None), marker)
-    # A body the proof cannot read is not evidence of a page-only write.
-    assert _carries_marker(_Request("https://a.test/api", unreadable=True), marker)
 
+def _carries(url, body=b"", **kwargs):
+    return _browser_module()._carries_marker(_Request(url, body, **kwargs), MARKER)
+
+
+def test_the_marker_is_found_as_text_in_a_url_form_or_json_write():
+    assert _carries(f"https://a.test/api?q=%3Cimg%20{MARKER}%3E")
+    assert _carries("https://a.test/api", ('{"q":"<img %s>"}' % MARKER).encode())
+    assert _carries("https://a.test/api", f"q=%3Cimg+{MARKER}%3E".encode())
+    assert _carries("https://a.test/api", urllib.parse.quote(urllib.parse.quote(PAYLOAD)).encode())
+
+
+def _every_byte_encoded(text):
+    return "".join(f"%{byte:02X}" for byte in text.encode())
+
+
+def test_the_marker_is_found_when_every_byte_of_the_write_is_percent_encoded():
+    # An encoder that escapes every byte (and the browser's own encoding of that, once more).
+    encoded = _every_byte_encoded(PAYLOAD)
+    assert MARKER not in encoded
+    assert _carries(f"https://a.test/api?d={encoded}")
+    assert _carries("https://a.test/api", encoded.encode())
+    assert _carries("https://a.test/api", urllib.parse.quote(encoded).encode())
+    utf16 = PAYLOAD.encode("utf-16-le").decode("latin-1")
+    assert _carries("https://a.test/api", _every_byte_encoded(utf16).encode())
+
+
+@pytest.mark.parametrize("prefix", ["", "a", "ab", "abc", '{"state":"'])
+def test_the_marker_is_found_when_the_page_base64_encodes_what_it_writes(prefix):
+    import base64
+
+    for encode in (base64.b64encode, base64.urlsafe_b64encode):
+        encoded = encode((prefix + PAYLOAD).encode())
+        assert _carries("https://a.test/api", encoded), (prefix, encode)
+        assert _carries("https://a.test/api", b'{"blob":"' + encoded + b'"}')
+        assert _carries("https://a.test/api", b"blob=" + urllib.parse.quote(encoded).encode())
+        assert _carries(f"https://a.test/api?s={urllib.parse.quote(encoded.decode())}")
+    # A JSON serializer that escapes "/" in the base64 text: the marker's runs never hold one.
+    assert _carries("https://a.test/api", base64.b64encode((prefix + PAYLOAD).encode()).replace(b"/", b"\\/"))
+
+
+def test_the_marker_is_found_in_hex_utf16_and_compressed_writes():
+    import gzip
+    import zlib
+
+    raw = (MARKER + PAYLOAD).encode()
+    assert _carries("https://a.test/api", raw.hex().encode())
+    assert _carries("https://a.test/api", PAYLOAD.encode("utf-16-le"))
+    assert _carries("https://a.test/api", PAYLOAD.encode("utf-16-be"))
+    assert _carries("https://a.test/api", gzip.compress(raw))
+    assert _carries("https://a.test/api", zlib.compress(raw))
+    deflate = zlib.compressobj(wbits=-15)
+    assert _carries("https://a.test/api", deflate.compress(raw) + deflate.flush())
+
+
+def test_a_page_write_without_the_marker_is_the_pages_own():
+    assert not _carries("https://a.test/socket.io/?EIO=4&transport=polling", b"40")
+    assert not _carries("https://a.test/socket.io/?EIO=4&transport=polling&sid=Zx9Qp2", b"2")
+    assert not _carries("https://a.test/telemetry", None)
+    assert not _carries("https://a.test/telemetry", b'{"event":"view","path":"/#/search"}')
+    import gzip
+
+    assert not _carries("https://a.test/telemetry", gzip.compress(b'{"event":"view"}'))
+
+
+def test_a_write_the_proof_cannot_read_counts_as_carrying_the_payload():
+    # A body the proof cannot read, or one larger than it searches, is not evidence of a
+    # page-only write.
+    assert _carries("https://a.test/api", unreadable=True)
+    window = _browser_module()._MARKER_SEARCH_BYTES
+    assert _carries("https://a.test/api", b"x" * (window + 1))
+    assert not _carries("https://a.test/api", b"x" * window)

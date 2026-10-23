@@ -63,13 +63,16 @@ def _normalize_hunt_browser_xss_result(
         if isinstance(item, dict) and item.get("kind") == "browser_request_blocked"
     }
     benign = set(_BENIGN_BLOCK_REASONS)
-    if any(
-        item.get("kind") == "xss_browser_proof" and item.get("payload_write_blocked") is False
-        for item in result.observations if isinstance(item, dict)
-    ):
+    write_flags = [
+        item.get("payload_write_blocked")
+        for item in result.observations
+        if isinstance(item, dict) and item.get("kind") == "xss_browser_proof"
+    ]
+    if write_flags and all(flag is False for flag in write_flags):
         # The proof is read-only and refuses every write. Writes the page sent on its own
-        # (socket polling, telemetry), none carrying the payload, are outside the attempt;
-        # a proof that does not say (an older receipt) stays partial.
+        # (socket polling, telemetry), none carrying the payload, are outside the attempt; a
+        # proof that does not say (an older receipt), or any proof that refused a write carrying
+        # its payload, stays partial.
         benign.add("state_changing_method")
     material = tuple(sorted(reason for reason in reasons - benign if reason))
     if not material:
