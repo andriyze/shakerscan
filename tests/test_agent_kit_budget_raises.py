@@ -1,8 +1,8 @@
 """An agent never raises its own Hunt budget; a person does, by approving the budget.raise request.
 
-Live: told by the Hunt skill to post a budget amendment "when the operator asks", an agent read
-its launch instruction as that request and raised its own state-changing ceiling from 20 to 41
-while its budget.raise request was still pending. The agent kit (the skills, AGENTS.md, the MCP
+Before 2.11.1 the Hunt skill told agents to post a budget amendment "when the operator asks", and
+an agent read its launch instruction as that request and raised its own state-changing ceiling
+from 20 to 41 while its budget.raise request was still pending. The agent kit (the skills, AGENTS.md, the MCP
 server's tool descriptions and instructions, and the hints the engine returns to agents) must never
 tell an agent to post a budget amendment or to set ``operator_confirmed``. The route itself stays:
 the Hunt page uses it.

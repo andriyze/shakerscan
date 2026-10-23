@@ -361,7 +361,7 @@ def test_other_actions_continue_while_one_waits_and_the_hunt_clock_runs(env):
 
 
 def test_a_used_up_safety_ceiling_refuses_what_needs_it_and_the_hunt_keeps_working(env):
-    """Live, before: a used-up TCP port ceiling stopped the Hunt and its next read-only request."""
+    """Before 2.11.1 a used-up TCP port ceiling stopped the Hunt and its next read-only request."""
     hunt = run(env, env.hunt(budget={"max_tcp_ports": 10}, used={"tcp_ports_attempted": 10},
                              policy={"allowed_capabilities": ["http.request", "tls.inspect"]}))
     with pytest.raises(HTTPException) as refused:
