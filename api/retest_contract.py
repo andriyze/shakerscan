@@ -573,18 +573,22 @@ def retest_sends_active_requests(retest_type: str | None, *, ai_tier_available: 
     return retest_type not in PASSIVE_RETEST_TYPES or ai_tier_available
 
 
-def infer_type_from_title_tool(title: str | None, tool: str | None) -> str | None:
+def infer_type_from_title_tool(
+    title: str | None, tool: str | None, *, title_for_any_tool: bool = False,
+) -> str | None:
     """Infer a retest type from a finding's tool, and for an earlier scanner's tool its title.
 
     Single source of truth for both the API retest endpoint and the worker
     (auto-retest + retest execution) so the two never disagree on whether a
     finding is retestable. A tool in ``RETEST_TOOL_TYPE_MAP`` names its prover. Title guessing
     runs only when ``title_inference_allowed(tool)`` and matches whole words; any other tool
-    gets no retest type (``retest_unsupported_reason`` says why).
+    gets no retest type (``retest_unsupported_reason`` says why). ``title_for_any_tool`` guesses
+    from the title whatever the tool: for asking which kind of check a finding is (linking a
+    Hunt hypothesis to it), never for choosing the prover that replays it.
     """
     title = str(title or "").lower()
     tool = str(tool or "").strip().lower()
-    guess = title_inference_allowed(tool)
+    guess = title_for_any_tool or title_inference_allowed(tool)
 
     # NoSQL injection routes to the dedicated NoSQLi prover (operator-injection
     # differential), NOT the SQLi prover. This guard runs BEFORE the generic

@@ -266,3 +266,22 @@ def test_title_guessing_runs_only_for_the_earlier_scanners_tools():
     assert not title_inference_allowed("an_unknown_tool")
     assert infer_type_from_title_tool("SQL injection in id", "an_unknown_tool") is None
     assert retest_unsupported_reason("an_unknown_tool") == RESCAN
+
+
+@pytest.mark.parametrize("family,tool,title", [
+    ("sqli", "nuclei", "Acme CMS 2.1 - SQL Injection"),
+    ("nosqli", "nuclei", "Acme API - NoSQL Injection"),
+    ("xss", "nuclei", "Acme Forum - Reflected Cross-Site Scripting"),
+])
+def test_a_hunt_hypothesis_still_links_a_template_finding_of_its_family(family, tool, title):
+    # Linking a hypothesis to a finding asks which family the finding is, not which prover may
+    # replay it: a template's title still says that, whole words only.
+    from arsenal_routes.router import _hypothesis_family_matches_finding
+
+    finding = {"title": title, "tool": tool, "evidence": {}}
+    assert infer_type_from_title_tool(title, tool) is None
+    assert _hypothesis_family_matches_finding({"family": family}, finding) is True
+    other = "xss" if family != "xss" else "sqli"
+    assert _hypothesis_family_matches_finding({"family": other}, finding) is False
+    assert _hypothesis_family_matches_finding(
+        {"family": "sqli"}, {"title": "Resource enforced by policy", "tool": tool, "evidence": {}}) is False
