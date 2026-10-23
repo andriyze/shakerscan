@@ -446,6 +446,9 @@ def test_an_update_that_grows_a_finding_past_the_byte_bound_is_refused():
     # Several services evidenced: the inventory's own when it is among them...
     ("https://example.test", ("https://example.test/a", "https://example.test:8443/b"), (),
      "https://example.test/a"),
+    # ...even when another service has more of the evidence.
+    ("https://example.test", ("https://example.test/a", "http://example.test:8081/b", "http://example.test:8081/c"),
+     (), "https://example.test/a"),
     # ...else the service most of the evidence came from, a tie to the first by scheme and port.
     ("https://example.test", ("http://example.test:8081/a", "https://example.test:8443/b",
                               "https://example.test:8443/c"), (), "https://example.test:8443/"),
