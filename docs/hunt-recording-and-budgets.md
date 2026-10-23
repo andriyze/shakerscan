@@ -147,8 +147,10 @@ their values: TCP ports (100 / 1,200 / 10,000), state-changing requests (4 / 20 
 ports, out-of-band interactions and device fragility, as do the policy switches and approvals
 that turn them on. Records cost no traffic and no wall and get one per call.
 
-`sqli.verify` reserves 900 requests / 540 s and `xss.verify` 1,800 requests / 480 s on every
-profile (a device target and a headless `deep_domxss` call keep the registry holds). A call the
+`sqli.verify` reserves 1,800 requests / 1,200 s and `xss.verify` 1,800 requests / 480 s on every
+profile (a device target and a headless `deep_domxss` call keep the registry holds). One sqli.verify
+input with no injection was measured to cost up to 516 requests, about 570 s at sqlmap's pace of
+about one request a second; the hold is twice that. A call the
 remaining budget cannot fund is refused with a budget request a person can grant, never started at
 a shorter hold; a call admitted at an older hold runs at the hold it reserved.
 

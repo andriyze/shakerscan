@@ -164,7 +164,7 @@ async def _reservation(pool, hunt, key):
     return action["status"], dict(row), decode
 
 
-@pytest.mark.parametrize("profile,wall", [("fast", 540), ("balanced", 540), ("thorough", 540)])
+@pytest.mark.parametrize("profile,wall", [("fast", 1_200), ("balanced", 1_200), ("thorough", 1_200)])
 def test_the_hunt_profile_sizes_the_hold_the_wait_and_the_process_wall(stack, profile, wall):
     async def scenario():
         hunt, standing = await _active_hunt(stack.pool, profile)
@@ -176,20 +176,20 @@ def test_the_hunt_profile_sizes_the_hold_the_wait_and_the_process_wall(stack, pr
         assert status == "completed"
         assert reservation["status"] == "committed"
         requested = decode(reservation["requested_json"])
-        assert requested["http_requests"] == 900 and requested["tool_wall_seconds"] == wall
+        assert requested["http_requests"] == 1_800 and requested["tool_wall_seconds"] == wall
         # The API waits for the reserved wall (plus its 30-second margin), counted from enqueue.
         assert stack.waits == [wall * 1_000]
         (process,) = stack.processes
         assert process["timeout_ms"] == wall * 1_000
         assert process["_reserved_budget"]["tool_wall_seconds"] == wall
         assert process["plan_timeout_ms"] == wall * 1_000
-        assert process["hard_budget"] == {"http_requests": 900, "tool_wall_seconds": wall}
+        assert process["hard_budget"] == {"http_requests": 1_800, "tool_wall_seconds": wall}
 
     stack.loop.run_until_complete(scenario())
 
 
 def test_an_unfunded_useful_hold_waits_for_a_raise_then_dispatches_with_the_same_key(stack):
-    """A 500 s total cannot fund a 540 s call. No worker starts until the operator raises it;
+    """A 500 s total cannot fund a 1,200 s call. No worker starts until the operator raises it;
     retrying the same parked key then reserves and runs the full envelope exactly once."""
     async def scenario():
         from fastapi import HTTPException
@@ -201,7 +201,7 @@ def test_an_unfunded_useful_hold_waits_for_a_raise_then_dispatches_with_the_same
         result = await _call(stack, hunt, key)
         assert isinstance(result, HTTPException)
         assert result.detail["reason_code"] == "budget_insufficient_for_action"
-        assert result.detail["shortages"] == {"tool_wall_seconds": 40}
+        assert result.detail["shortages"] == {"tool_wall_seconds": 700}
         assert result.detail["permission_request"]["kind"] == "budget.raise"
         assert stack.waits == stack.workers == stack.processes == []
         async with stack.pool.acquire() as conn:
@@ -210,7 +210,7 @@ def test_an_unfunded_useful_hold_waits_for_a_raise_then_dispatches_with_the_same
             used = await conn.fetchval("SELECT budget_used_json FROM hunt_runs WHERE id=$1", hunt["id"])
             assert all(value == 0 for value in json.loads(used).values())
         await HuntRunService(lambda: stack.pool).amend_budget(str(hunt["id"]), HuntBudgetAmendmentRequest(
-            limits={"max_duration_seconds": 600}, expected_revision=0, operator_confirmed=True,
+            limits={"max_duration_seconds": 1_300}, expected_revision=0, operator_confirmed=True,
             idempotency_key="operator-funds-useful-verifier", resume=False,
         ))
         result = await _call(stack, hunt, key)
@@ -219,11 +219,11 @@ def test_an_unfunded_useful_hold_waits_for_a_raise_then_dispatches_with_the_same
         status, reservation, decode = await _reservation(stack.pool, hunt, key)
         assert status == "completed" and reservation["status"] == "committed"
         requested = decode(reservation["requested_json"])
-        assert requested["http_requests"] == 900 and requested["tool_wall_seconds"] == 540
-        assert stack.waits == [540_000]
+        assert requested["http_requests"] == 1_800 and requested["tool_wall_seconds"] == 1_200
+        assert stack.waits == [1_200_000]
         (process,) = stack.processes
-        assert process["timeout_ms"] == process["plan_timeout_ms"] == 540_000
-        assert process["hard_budget"] == {"http_requests": 900, "tool_wall_seconds": 540}
+        assert process["timeout_ms"] == process["plan_timeout_ms"] == 1_200_000
+        assert process["hard_budget"] == {"http_requests": 1_800, "tool_wall_seconds": 1_200}
 
     stack.loop.run_until_complete(scenario())
 

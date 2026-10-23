@@ -1304,7 +1304,7 @@ claim for that planner. It meters every executable capability.
 
 A scanner call's hold depends on the Hunt's budget profile only for `sqli.verify` and `xss.verify`,
 whose paced argv cannot finish inside the registry wall. On every named profile (`fast`, `balanced`,
-`thorough`), `sqli.verify` reserves 900 requests / 540 s and `xss.verify` 1,800 requests / 480 s. A
+`thorough`), `sqli.verify` reserves 1,800 requests / 1,200 s and `xss.verify` 1,800 requests / 480 s. A
 call against a device target (its fragility allowance is charged one point per held request) and a
 headless `deep_domxss` call keep the registry holds (900 / 300 s and 400 / 120 s). An `xss.verify`
 the worker routes to the pinned browser runs within the browser prover's own limits under either
