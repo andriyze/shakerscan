@@ -428,3 +428,59 @@ def test_an_update_that_grows_a_finding_past_the_byte_bound_is_refused():
     with pytest.raises(HuntFindingActionError, match="limit per Hunt"):
         _update(connection, description="\u00e9" * 20_000)
     assert connection.updated is None
+
+
+# A finding created without a path (the usual case: the planner names the evidence, not a path) is
+# located by the same rules as one with a path: the evidenced service, one spelling, the Hunt's host.
+@pytest.mark.parametrize("target,observed,admitted,expected", [
+    # The single evidenced service takes the finding, with the path its evidence names.
+    ("https://example.test", ("https://example.test:8443/admin",), (), "https://example.test:8443/admin"),
+    ("https://example.test/app", ("https://example.test/app/login",), (), "https://example.test/app/login"),
+    # Several evidenced paths on that service: its root.
+    ("https://example.test", ("https://example.test:8443/a", "https://example.test:8443/b"), (),
+     "https://example.test:8443/"),
+    # Nothing evidenced: the inventory's own location, in its one spelling.
+    ("HTTPS://EXAMPLE.TEST:443", (), (), "https://example.test/"),
+    ("https://Example.Test/app", (), (), "https://example.test/app"),
+    ("https://example.test", ("https://other.test/x",), (), "https://example.test/"),
+    # Several services evidenced: the inventory's own when it is among them...
+    ("https://example.test", ("https://example.test/a", "https://example.test:8443/b"), (),
+     "https://example.test/a"),
+    # ...else the service most of the evidence came from, a tie to the first by scheme and port.
+    ("https://example.test", ("http://example.test:8081/a", "https://example.test:8443/b",
+                              "https://example.test:8443/c"), (), "https://example.test:8443/"),
+    ("https://example.test", ("https://example.test:8443/b", "http://example.test:8081/a"), (),
+     "http://example.test:8081/a"),
+    # A host asset or device locator is a host: its evidenced service takes the finding.
+    ("host://10.0.0.5", ("http://10.0.0.5:8080/login",), (), "http://10.0.0.5:8080/login"),
+    ("192.168.1.20", ("http://192.168.1.20:8080",), (), "http://192.168.1.20:8080/"),
+    ("[2001:db8::5]", ("http://[2001:0db8::5]:8080/x",), (), "http://[2001:db8::5]:8080/x"),
+    # ...or, with nothing evidenced, its frozen origin (the first of several).
+    ("host://tv.test", (), ("https://tv.test:8443",), "https://tv.test:8443/"),
+    ("host://tv.test", (), ("https://tv.test:8443", "http://tv.test:8081"), "https://tv.test:8443/"),
+    # Evidence on another host never moves a finding off the Hunt's host.
+    ("host://tv.test", ("https://other.test/x",), ("http://tv.test:8081",), "http://tv.test:8081/"),
+])
+def test_a_finding_without_a_path_takes_the_evidenced_service(target, observed, admitted, expected):
+    for path in (None, "", "   "):
+        assert _finding_url(target, path, observed, admitted) == expected
+
+
+@pytest.mark.parametrize("target,observed", [
+    ("host://10.0.0.5", ()),
+    ("192.168.1.20", ("http://192.168.1.21:8080/",)),
+])
+def test_a_finding_without_a_path_or_a_service_is_refused_with_a_hint(target, observed):
+    with pytest.raises(HuntFindingActionError, match="absolute URL") as refused:
+        _finding_url(target, None, observed)
+    assert "evidence" in str(refused.value)
+
+
+def test_a_created_finding_without_a_path_is_stored_on_its_evidenced_service():
+    connection = _Connection(target_url="https://example.test",
+                             observed_urls=("https://example.test:8443/admin",))
+    _create(connection, evidence_action_id=uuid.uuid4(), path=None)
+    assert connection.insert_args[7] == "https://example.test:8443/admin"
+    # The same finding named with its path is the same record.
+    again = _create(connection, evidence_action_id=uuid.uuid4(), path="https://example.test:8443/admin")
+    assert again["created"] is False

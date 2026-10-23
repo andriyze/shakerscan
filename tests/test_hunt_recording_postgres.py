@@ -95,6 +95,13 @@ def test_api_records_nondefault_service_after_execution_budget_exhaustion(monkey
                 # The existing record returned unchanged spent no record unit.
                 assert after['candidates'] == 1
                 assert all(after[key] == value for key, value in used.items())
+                # A finding created without a path is located on the service its evidence came from.
+                unnamed = await client.post(f'/hunts/{hunt}/capabilities/findings.create', json={
+                    'idempotency_key': 'ports-create-unnamed',
+                    'input': {key: value for key, value in values.items() if key != 'path'} | {'title': 'Unnamed'}})
+                assert unnamed.status_code == 200, unnamed.text
+                assert await conn.fetchval("SELECT url FROM findings WHERE hunt_run_id=$1 AND title='Unnamed'",
+                                           hunt) == service + path
                 finished = await client.post(f'/hunts/{hunt}/finish', json={'summary': 'Done', 'next_actions': []})
                 assert finished.status_code == 200, finished.text
                 outcome = finished.json()['final_debrief']['saved_action']

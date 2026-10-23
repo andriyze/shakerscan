@@ -61,6 +61,10 @@ def _bounded_text(value: Any, label: str, *, maximum: int, required: bool = Fals
 _HTTP_PORTS = {"http": 80, "https": 443}
 _RELATIVE_NEEDS_ORIGIN = "Use an absolute URL for an evidenced HTTP service"
 _FROZEN_MALFORMED = "The Hunt's frozen target origins are malformed; cite an evidenced service instead"
+_UNNAMED_NEEDS_SERVICE = (
+    "This Hunt's target is a host and no cited evidence came from one of its HTTP services: cite "
+    "evidence from the service the finding is on, or give its absolute URL as path"
+)
 
 
 def _host_key(host: Any) -> str | None:
@@ -141,6 +145,44 @@ def _evidenced(urls: Sequence[Any], host: str | None, path: str | None = None) -
     return services
 
 
+def _canonical(url: str) -> str:
+    """One spelling per location: the canonical origin (lower-case scheme and host, a default port
+    left out) and the path and query as written."""
+    parts = urllib.parse.urlsplit(url)
+    return _origin_root(_origin(url))[:-1] + (parts.path or "/") + (f"?{parts.query}" if parts.query else "")
+
+
+def _unnamed_location(target_url: str, host: str | None, base: tuple[str, str | None, int | None] | None,
+                      observed_urls: Sequence[Any], admitted: Sequence[tuple[str, str | None, int | None]]) -> str:
+    """Where a finding created without a path is located, by the rules a relative path follows.
+
+    The evidenced service takes it, with the path its evidence names (its root when the evidence
+    names several): the single evidenced service on the Hunt's host, else the inventory's own when
+    it is among them, else the one most of the evidence came from (a tie goes to the first by
+    scheme, then port). Nothing evidenced: the inventory's own location, or for a host target
+    (``host://`` asset or device) its first frozen origin. A host with neither is refused.
+    """
+    paths: dict[tuple[str, str | None, int | None], set[str]] = {}
+    for url in observed_urls:
+        try:
+            origin = _origin(url)
+        except ValueError:
+            continue
+        if origin[1] == host:
+            paths.setdefault(origin, set()).add(urllib.parse.urlsplit(url).path or "/")
+    if paths:
+        service = (next(iter(paths)) if len(paths) == 1 else base if base in paths
+                   else min(paths, key=lambda origin: (-len(paths[origin]), origin[0], origin[2] or 0)))
+        evidenced = paths[service]
+        return _origin_root(service)[:-1] + (next(iter(evidenced)) if len(evidenced) == 1 else "/")
+    if base is not None:
+        return _canonical(target_url)
+    frozen = [origin for origin in admitted if origin[1] == host]
+    if frozen:
+        return _origin_root(frozen[0])
+    raise HuntFindingActionError(_UNNAMED_NEEDS_SERVICE)
+
+
 def _finding_url(target_url: str, path: Any, observed_urls: Sequence[str] = (),
                  admitted_origins: Any = ()) -> str:
     """The finding's location, bound to a service the Hunt may name.
@@ -149,16 +191,16 @@ def _finding_url(target_url: str, path: Any, observed_urls: Sequence[str] = (),
     nothing is evidenced), else the single evidenced service on the target host; a host target
     (``host://`` asset or device) with no evidence takes its single frozen origin. Several
     candidates need an absolute URL. An absolute URL must be the inventory service, an evidenced
-    one or a frozen one, on the target host.
+    one or a frozen one, on the target host. No path at all is located by ``_unnamed_location``.
     """
     value = str(path or "").strip()
-    if not value:
-        return target_url
     if len(value) > 2_000:
         raise HuntFindingActionError("path exceeds 2000 characters")
     admitted_values = _frozen_origins(admitted_origins)
     try:
         host, base = _target_host(target_url)
+        if not value:
+            return _unnamed_location(target_url, host, base, observed_urls, admitted_values)
         observed = _evidenced(observed_urls, host)
         admitted = {origin for origin in admitted_values if origin[1] == host}
         supplied = urllib.parse.urlsplit(value)
@@ -176,7 +218,6 @@ def _finding_url(target_url: str, path: Any, observed_urls: Sequence[str] = (),
                 raise HuntFindingActionError(_RELATIVE_NEEDS_ORIGIN)
         else:
             resolved_url = value
-        resolved = urllib.parse.urlsplit(resolved_url)
         permitted = _origin(resolved_url) in {base, *observed, *admitted} - {None}
     except HuntFindingActionError:
         raise
@@ -184,10 +225,8 @@ def _finding_url(target_url: str, path: Any, observed_urls: Sequence[str] = (),
         raise HuntFindingActionError("Finding path must remain on the Hunt target origin") from exc
     if not permitted:
         raise HuntFindingActionError("Finding path must remain on the Hunt target origin")
-    # One spelling per location, so a repeated finding has the same fingerprint: the canonical
-    # origin (lower-case scheme and host, a default port left out) and the path as written.
-    return _origin_root(_origin(resolved_url))[:-1] + (resolved.path or "/") + (
-        f"?{resolved.query}" if resolved.query else "")
+    # One spelling per location, so a repeated finding has the same fingerprint.
+    return _canonical(resolved_url)
 
 
 async def _require_evidence_actions(

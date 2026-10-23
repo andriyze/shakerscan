@@ -18,6 +18,15 @@ A finding's location is bound to a service the Hunt may name on its own target h
   brackets) are hosts, not services: a relative path takes the single evidenced service on that
   host, a cited device HTTP probe names the service it reached, and a `host://` asset with no
   evidence and one frozen origin resolves a relative path on that origin.
+- A finding created without a path follows the same rules. The single evidenced service on the
+  target host takes it, with the path its evidence names (the service's root when the evidence
+  names several paths): `https://example.test` with evidence only from
+  `https://example.test:8443/admin` records `https://example.test:8443/admin`. Among several
+  evidenced services the inventory's own takes it when it is one of them, otherwise the one most
+  of the evidence came from (a tie goes to the first by scheme, then port). With no evidenced
+  service it takes the inventory's own location, or a `host://` asset's or device's first frozen
+  origin; a host with neither is refused with a message to cite the service's evidence or give
+  an absolute URL. That refusal is an input error: nothing is charged.
 - The stored location has one spelling: the scheme and host in lower case, a default port left
   out and the path and query as written. `HTTPS://EXAMPLE.TEST:443/x` is stored as
   `https://example.test/x`. A port outside 1-65535 is refused.
