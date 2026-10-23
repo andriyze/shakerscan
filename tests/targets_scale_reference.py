@@ -325,11 +325,16 @@ async def old_grouped(conn: Any, router: Any, *, include_inactive: bool = False,
         group = grouped.setdefault(rd, {"root_domain": rd, "root_target": None, "subdomains": []})
         data = attach(router._public_target_row(row))
         if row["is_root"]:
+            # The last root in URL order is the group's root; another root of the same domain
+            # (an app of the same host on another port) is a member (E1-N2).
+            if group["root_target"] is not None:
+                group["subdomains"].append(group["root_target"])
             group["root_target"] = data
         else:
             group["subdomains"].append(data)
     result = []
     for data in grouped.values():
+        data["subdomains"].sort(key=lambda item: item["url"])
         root = data["root_target"]
         data["subdomain_count"] = len(data["subdomains"])
         data["total_count"] = data["subdomain_count"] + (1 if root else 0)
