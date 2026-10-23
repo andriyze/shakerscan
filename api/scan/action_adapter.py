@@ -5466,6 +5466,12 @@ class DatabaseNeutralScanActionDispatcher:
                             round_wall_ceiling=round_wall_ceiling,
                             scan_wall_share=scan_wall_share,
                             last_chance=last_chance,
+                            # The sign-in endpoint's pace is the floor the worker's argv runs
+                            # at; the stages record and hold it (latency measured, not drift).
+                            minimum_delay_seconds=(
+                                pace_seconds(children=sign_in_children)
+                                if sign_in is not None else None
+                            ),
                         )
                     else:
                         run_attempt = functools.partial(

@@ -284,7 +284,7 @@ LARGE = {"http_requests": 6_000, "state_changing_requests": 6_000, "tool_wall_se
 
 
 def _slice(capability, *, tool, parser, sent, options, routes=DEFAULT_ROUTES, rounds=1, budget=None,
-           concurrency=None, measured=False):
+           concurrency=None, measured=False, runner=None):
     scan_id = str(uuid.uuid4())
     endpoints = build_endpoint_manifest(
         scan_id=scan_id, target_binding_digest=TARGET.digest,
@@ -328,7 +328,7 @@ def _slice(capability, *, tool, parser, sent, options, routes=DEFAULT_ROUTES, ro
         active_testing=True, allow_state_changing_http=True, approval_receipt_id="approval-1",
     ))
     record = {"running": 0, "sign_in": 0, "peak": 0, "sign_in_peak": 0}
-    runner, calls = _runner(tool, parser, sent=sent, record=record)
+    runner, calls = (runner or _runner)(tool, parser, sent=sent, record=record)
     dispatcher.process_runner = runner
     receipts, per_round = [], []
     for action in actions:
@@ -409,6 +409,90 @@ def test_continuation_rounds_draw_from_the_same_probe_set_and_stop_when_it_is_sp
         assert closed["sign_in_endpoint_received"] == 900
         assert "resume_wall_seconds" not in closed
         assert receipt.status == "success"
+
+
+def _answering_in(latency, *, sent):
+    """A fake sqlmap on a target answering in ``latency`` s, paced by the delay its argv gets."""
+
+    def factory(tool, parser, *, sent=sent, record):
+        calls: list[dict] = []
+
+        async def process_runner(payload, *, heartbeat):
+            reserved = dict(payload["_reserved_budget"])
+            options = dict(payload["scanner_options"])
+            # The delay the worker's sqlmap argv gets (build_enforced_scanner_plan).
+            delay, _ = agent_tools._batch_attempt_pacing(
+                int(reserved["http_requests"]), int(reserved["tool_wall_seconds"]),
+                minimum_seconds=agent_tools._auth_probe_minimum(options, 0.05),
+                latency_seconds=float(options.get("_measured_latency_seconds") or 0.0),
+            )
+            calls.append({"target": payload["execution_target"], "reserved": reserved,
+                          "options": options, "delay": delay})
+            await asyncio.sleep(0)
+            count = min(sent, int(reserved["http_requests"]))
+            return {
+                "status": "success",
+                "elapsed_seconds": max(1, min(int(reserved["tool_wall_seconds"]),
+                                              round(count * (delay + latency)))),
+                "typed_output": {"parser": parser, "records": [], "errors": []},
+                "settlement": {"mode": "exact", "actual": count, "observed_minimum": count},
+                "process_enforcement": _enforcement(tool, parser, {
+                    name: reserved[name] for name in ("http_requests", "tool_wall_seconds")
+                }),
+            }
+
+        process_runner.enforces_request_gate = True
+        return process_runner, calls
+
+    return factory
+
+
+def test_a_sign_in_candidate_measures_the_targets_latency_at_the_pace_it_ran():
+    """The sign-in pace (3 s) binds where the batch pace would be faster: the stage records that
+    delay, so what it measures is the target's latency (1 s here), not the gap between the two
+    delays, and the next stage is paced from the true latency."""
+    capability, tool, parser = SQLI
+    receipts, (calls,), _record = _slice(
+        capability, tool=tool, parser=parser, sent=40, options={"login_url": LOGIN},
+        routes=DEFAULT_ROUTES[:1], runner=_answering_in(1.0, sent=40),
+        # A wall that paces the hold a little slower than the floor (about 3.3 s a request).
+        budget={"http_requests": 6_000, "state_changing_requests": 6_000, "tool_wall_seconds": 2_880},
+    )
+    sign_in = _sign_in_calls(calls)
+    assert len(sign_in) == 8
+    # The first stage is paced slower than the floor; the latency credit then reaches it.
+    assert sign_in[0]["delay"] > AUTH_ENDPOINT_SECONDS_PER_REQUEST
+    assert any(call["delay"] == AUTH_ENDPOINT_SECONDS_PER_REQUEST for call in sign_in[1:])
+    stages = [item for item in receipts[0].observations if item.get("kind") == "sqli_technique_stage"]
+    assert len(stages) == 8
+    for stage, call in zip(stages, sign_in):
+        assert call["delay"] >= AUTH_ENDPOINT_SECONDS_PER_REQUEST
+        assert stage["delay_ms"] == round(call["delay"] * 1_000)
+        assert 950 <= stage["measured_latency_ms"] <= 1_050, stages
+    for call in sign_in[1:]:
+        assert abs(call["options"]["_measured_latency_seconds"] - 1.0) <= 0.05
+
+
+def test_a_sign_in_candidates_latency_is_not_the_targets():
+    """Another candidate on the target is not paced from what the sign-in endpoint measured."""
+    from scan.sqli_stages import STAGE_RECORD_KIND, prior_stages, stage_attempt_id
+
+    def stage(candidate, technique, *, wall, extra):
+        return {
+            "attempt_id": stage_attempt_id(candidate, technique), "candidate_id": candidate,
+            "status": "success", "timed_out": False,
+            "budget_consumed": {"http_requests": 40, "tool_wall_seconds": wall},
+            "observations": ({"kind": STAGE_RECORD_KIND, "technique": technique, "delay_ms": 3_000,
+                              **extra},),
+        }
+
+    sign_in = stage("a" * 64, "U", wall=200, extra={"paced_floor_ms": 3_000})
+    assert prior_stages([("verify.x.r01", [sign_in])], "b" * 64).latency_seconds is None
+    # Its own next stage is paced from it.
+    assert prior_stages([("verify.x.r01", [sign_in])], "a" * 64).latency_seconds == pytest.approx(2.0)
+    # A stage of any other candidate still gives the target's latency.
+    other = stage("c" * 64, "U", wall=160, extra={})
+    assert prior_stages([("verify.x.r01", [sign_in, other])], "b" * 64).latency_seconds == pytest.approx(1.0)
 
 
 def test_a_wall_too_short_to_pace_a_probe_leaves_the_candidate_for_a_later_round():
