@@ -25,6 +25,17 @@ _SEVERITIES = frozenset({"critical", "high", "medium", "low", "info"})
 # or an accepted risk is an operator's triage decision (targets/interpretation_routes.py).
 _STATUSES = frozenset({"active", "resolved"})
 _EDITABLE_FIELDS = frozenset({"title", "description", "severity", "notes", "status"})
+# The bytes a Hunt's finding records may hold, counted as stored (title, description, notes, URL
+# and evidence document). Each field is bounded in characters only, so one finding can hold about
+# 145 KB of multi-byte text; at a generous record allowance that is gigabytes per Hunt. A write
+# that would pass the bound is refused like any input error: nothing is charged and the Hunt keeps
+# running. About 2,000 findings of the largest size fit, or tens of thousands of typical ones.
+MAX_FINDING_BYTES_PER_HUNT = 64 * 1024 * 1024
+_STORED_FINDING_BYTES_SQL = """SELECT COALESCE(SUM(
+        COALESCE(octet_length(title),0) + COALESCE(octet_length(description),0)
+        + COALESCE(octet_length(notes),0) + COALESCE(octet_length(url),0)
+        + COALESCE(octet_length(evidence::text),0)),0)
+    FROM findings WHERE hunt_run_id=$1 AND ($2::uuid IS NULL OR id<>$2)"""
 
 
 class HuntFindingActionError(ValueError):
@@ -305,6 +316,33 @@ async def _evidenced_urls(conn: Any, run: Any, hunt_uuid: uuid.UUID, evidence_ac
     return urls
 
 
+def _record_bytes(*values: Any) -> int:
+    return sum(len(str(value).encode("utf-8")) for value in values if value is not None)
+
+
+async def _require_finding_room(conn: Any, hunt_uuid: uuid.UUID, size: int, *,
+                                replacing: uuid.UUID | None = None) -> None:
+    """Refuse a write that would take this Hunt's findings past ``MAX_FINDING_BYTES_PER_HUNT``."""
+    stored = int(await conn.fetchval(_STORED_FINDING_BYTES_SQL, hunt_uuid, replacing) or 0)
+    if stored + size > MAX_FINDING_BYTES_PER_HUNT:
+        raise HuntFindingActionError(
+            f"This Hunt's findings hold {stored:,} bytes; this {size:,}-byte record would pass the "
+            f"{MAX_FINDING_BYTES_PER_HUNT:,}-byte limit per Hunt. Record a shorter finding or add to an "
+            "existing one with findings.update; nothing was written and the Hunt keeps running."
+        )
+
+
+async def _existing_by_fingerprint(conn: Any, run: Any, hunt_uuid: uuid.UUID, fingerprint: str) -> Any:
+    return await conn.fetchrow(
+        """SELECT id, status, created_at, last_verified_at, verification_count, evidence
+           FROM findings
+           WHERE fingerprint=$1 AND hunt_run_id=$2
+             AND target_id IS NOT DISTINCT FROM $3
+             AND device_target_id IS NOT DISTINCT FROM $4""",
+        fingerprint, hunt_uuid, run["target_id"], run["device_target_id"],
+    )
+
+
 async def _refresh_counts(conn: Any, run: Any) -> None:
     if run["target_id"] is not None:
         await conn.execute(
@@ -382,6 +420,11 @@ async def create_hunt_finding(
                 "source_action_ids": evidence_action_ids,
                 "hunt_id": str(hunt_uuid),
             }
+            existing = await _existing_by_fingerprint(conn, run, hunt_uuid, fingerprint)
+            if existing is not None:
+                return _existing_finding(existing, evidence_action_ids)
+            await _require_finding_room(conn, hunt_uuid, _record_bytes(
+                title, description, notes, finding_url, json.dumps(evidence)))
             row = await conn.fetchrow(
                 """INSERT INTO findings (
                        target_id, device_target_id, hunt_run_id, fingerprint,
@@ -401,15 +444,8 @@ async def create_hunt_finding(
                 json.dumps(evidence),
                 notes,
             )
-            if row is None:
-                existing = await conn.fetchrow(
-                    """SELECT id, status, created_at, last_verified_at, verification_count, evidence
-                       FROM findings
-                       WHERE fingerprint=$1 AND hunt_run_id=$2
-                         AND target_id IS NOT DISTINCT FROM $3
-                         AND device_target_id IS NOT DISTINCT FROM $4""",
-                    fingerprint, hunt_uuid, run["target_id"], run["device_target_id"],
-                )
+            if row is None:  # created concurrently since the lookup above
+                existing = await _existing_by_fingerprint(conn, run, hunt_uuid, fingerprint)
                 if existing is None:
                     raise HuntFindingActionError("Finding identity conflicts with an existing record")
                 return _existing_finding(existing, evidence_action_ids)
@@ -520,7 +556,7 @@ async def update_hunt_finding(
                 values=values.get("evidence_action_ids") or (),
             )
             finding = await conn.fetchrow(
-                """SELECT id, evidence, last_verified_at, verification_count
+                """SELECT id, evidence, last_verified_at, verification_count, title, description, notes, url
                    FROM findings
                    WHERE id=$1 AND hunt_run_id=$2 FOR UPDATE""",
                 finding_uuid,
@@ -542,6 +578,9 @@ async def update_hunt_finding(
                 "fields": sorted(updates),
             })
             evidence["hunt_mutations"] = audit[-100:]
+            await _require_finding_room(conn, hunt_uuid, _record_bytes(
+                *(updates.get(column, finding[column]) for column in ("title", "description", "notes", "url")),
+                json.dumps(evidence)), replacing=finding_uuid)
             assignments = []
             params: list[Any] = [finding_uuid, hunt_uuid]
             status_parameter: int | None = None

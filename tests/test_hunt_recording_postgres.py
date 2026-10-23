@@ -43,7 +43,7 @@ def test_api_records_nondefault_service_after_execution_budget_exhaustion(monkey
                 row = await conn.fetchrow('SELECT policy_json,budget_json FROM hunt_runs WHERE id=$1', hunt)
                 policy, budget = json.loads(row['policy_json']), json.loads(row['budget_json'])
                 policy.update(active_testing=True, approval_receipt_id=str(receipt),
-                    scope_receipt_id='scope-fixture', allowed_capabilities=['findings.create'])
+                    scope_receipt_id='scope-fixture', allowed_capabilities=['findings.create', 'findings.update'])
                 used = {'agent_actions': budget['max_capability_calls'],
                     'active_actions': budget['max_active_actions'], 'http_requests': budget['max_http_requests'],
                     'tool_wall_seconds': budget['max_duration_seconds']}
@@ -72,6 +72,22 @@ def test_api_records_nondefault_service_after_execution_budget_exhaustion(monkey
                 assert duplicate.status_code == 200, duplicate.text
                 assert duplicate.json()['result']['created'] is False
                 assert duplicate.json()['result']['evidence_attached'] is True
+                assert await conn.fetchval('SELECT count(*) FROM findings WHERE hunt_run_id=$1', hunt) == 1
+                # A write past the per-Hunt byte bound is refused; the Hunt and its ledger are unchanged.
+                import importlib
+                findings_module = importlib.import_module('hunt.finding_actions')
+                stored = await conn.fetchval(findings_module._STORED_FINDING_BYTES_SQL, hunt, None)
+                bound = findings_module.MAX_FINDING_BYTES_PER_HUNT
+                monkeypatch.setattr(findings_module, 'MAX_FINDING_BYTES_PER_HUNT', int(stored) + 10)
+                bounded = await client.post(f'/hunts/{hunt}/capabilities/findings.create',
+                    json={'idempotency_key': 'ports-create-bounded', 'input': {**values, 'title': 'Second observation'}})
+                assert bounded.status_code == 422 and 'limit per Hunt' in bounded.text, bounded.text
+                grown = await client.post(f'/hunts/{hunt}/capabilities/findings.update', json={
+                    'idempotency_key': 'ports-update-bounded', 'input': {
+                        'finding_id': saved.json()['result']['finding_id'], 'description': 'x' * 5_000,
+                        'evidence_action_ids': [str(evidence)]}})
+                assert grown.status_code == 422 and 'limit per Hunt' in grown.text, grown.text
+                monkeypatch.setattr(findings_module, 'MAX_FINDING_BYTES_PER_HUNT', bound)
                 assert await conn.fetchval('SELECT count(*) FROM findings WHERE hunt_run_id=$1', hunt) == 1
                 row = await conn.fetchrow('SELECT status,budget_used_json FROM hunt_runs WHERE id=$1', hunt)
                 assert row['status'] == 'budget_exhausted'

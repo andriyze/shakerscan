@@ -6,9 +6,11 @@ import uuid
 
 import pytest
 
+from api.hunt import finding_actions
 from api.hunt.finding_actions import (
     HuntFindingActionError,
     create_hunt_finding,
+    update_hunt_finding,
     _finding_url,
 )
 from api.runtime.capability_registry import (
@@ -63,6 +65,9 @@ class _Connection:
         self.admitted_origins = admitted_origins
         self.fingerprints = set()
         self.locks = []
+        # Labelled fixture: the bytes this Hunt's other finding records already hold.
+        self.stored_bytes = 0
+        self.updated = None
 
     def transaction(self):
         return _Transaction()
@@ -88,10 +93,26 @@ class _Connection:
             self.fingerprints.add(args[3])
             self.stored_evidence = args[8]
             return {"id": self.finding_id, "status": "active", "created_at": None}
+        if "UPDATE findings SET" in query:
+            self.updated = args
+            return {"id": self.finding_id, "status": "active"}
+        if "FROM findings" in query and "FOR UPDATE" in query:
+            return {"id": self.finding_id, "evidence": self.stored_evidence or "{}", "last_verified_at": None,
+                    "verification_count": 0, "title": "Exposed token", "description": "d" * 100,
+                    "notes": None, "url": "https://example.test/admin"}
+        if "FROM findings" in query and "fingerprint=" in query and args[0] not in self.fingerprints:
+            return None
         if "FROM findings" in query:
             return {"id": self.finding_id, "status": "active", "created_at": None,
                     "last_verified_at": "verified" if self.verification_count else None,
                     "verification_count": self.verification_count, "evidence": self.stored_evidence}
+        raise AssertionError(query)
+
+    async def fetchval(self, query, *args):
+        if "octet_length" in query:
+            return self.stored_bytes
+        if "FROM target_interpretations" in query:
+            return None
         raise AssertionError(query)
 
     async def fetch(self, query, *args):
@@ -360,3 +381,42 @@ def test_a_finding_spelled_differently_is_the_same_record():
     for spelling in ("HTTPS://EXAMPLE.TEST/admin", "https://example.test:443/admin", "/admin"):
         again = _create(connection, evidence_action_id=uuid.uuid4(), path=spelling)
         assert again["created"] is False and again["finding_id"] == first["finding_id"], spelling
+
+
+def _update(connection, **values):
+    return asyncio.run(update_hunt_finding(
+        _Pool(connection), hunt_id=connection.hunt_id, action_id=uuid.uuid4(),
+        values={"finding_id": str(connection.finding_id), "evidence_action_ids": [str(uuid.uuid4())], **values},
+    ))
+
+
+def test_a_finding_past_the_hunt_byte_bound_is_refused_and_nothing_is_written():
+    """The bound refuses the write only: it names the limit and says the Hunt keeps running."""
+    connection = _Connection()
+    connection.stored_bytes = finding_actions.MAX_FINDING_BYTES_PER_HUNT - 100
+    with pytest.raises(HuntFindingActionError, match="limit per Hunt") as refused:
+        _create(connection, evidence_action_id=uuid.uuid4())
+    assert "keeps running" in str(refused.value)
+    assert connection.insert_args is None
+    connection.stored_bytes = finding_actions.MAX_FINDING_BYTES_PER_HUNT - 4_000
+    assert _create(connection, evidence_action_id=uuid.uuid4())["created"] is True
+
+
+def test_a_repeated_finding_is_returned_even_when_the_byte_bound_is_reached():
+    connection = _Connection()
+    first = _create(connection, evidence_action_id=uuid.uuid4())
+    connection.stored_bytes = finding_actions.MAX_FINDING_BYTES_PER_HUNT
+    again = _create(connection, evidence_action_id=uuid.uuid4())
+    assert again["created"] is False and again["finding_id"] == first["finding_id"]
+
+
+def test_an_update_that_grows_a_finding_past_the_byte_bound_is_refused():
+    connection = _Connection()
+    _create(connection, evidence_action_id=uuid.uuid4())
+    # The record being replaced is not counted twice: only the other records' bytes are stored.
+    connection.stored_bytes = finding_actions.MAX_FINDING_BYTES_PER_HUNT - 6_000
+    assert _update(connection, description="shorter")["status"] == "success"
+    connection.updated = None
+    with pytest.raises(HuntFindingActionError, match="limit per Hunt"):
+        _update(connection, description="\u00e9" * 20_000)
+    assert connection.updated is None
