@@ -1520,7 +1520,20 @@ sent attack input, by whole words. A finding with no prover of its own, or only 
 a family no prover covers: run the Hunt again) or `retest_by_rescan_only` (headers, cookies, CORS,
 TLS, DNS, takeover, GraphQL, authorization and earlier posture findings: run a new Scan). Finding
 detail, `POST /findings/{id}/retest`, bulk retest and the automatic retest after a Scan apply the
-same rule. `GET /findings/{id}` also returns `retest_active`, true when the retest may send
+same rule. A verified SQL injection, NoSQL injection or browser-executed XSS finding is retested by
+the check that proved it, with the request it proved: the route on the site the proof recorded
+(else the scanned target's site) with the tested query parameter set as the Scan set it, or the
+page with the browser proof's own payload, checked against the payload digest the finding kept.
+The SQL and NoSQL checks run over the retest's HTTP client (session headers, request limits and
+the destination guard); the browser check runs the payload in a headless browser after one
+ordinary request of the page. Reproduced is still vulnerable; not reproduced with every request
+answered is likely fixed; a refusal, an unanswered request or a missing browser is inconclusive.
+When the request cannot be rebuilt exactly (a path segment, a templated route, a request body, a
+recorded request whose values were not kept, a masked value, a fragment or another page), or the
+finding is a potential injection from a request differential (which keeps no route), the reason is
+`retest_by_rescan_only` and `retest_unsupported_message` says what is missing. A replay URL that
+names no site is refused as `replay_url_unresolved`, never as out of scope.
+`GET /findings/{id}` also returns `retest_active`, true when the retest may send
 active requests (a prover's payloads, an AI Gate probe, or the AI tier's requests when an AI
 verifier is configured). Its `retest_modes` are `tiered` (the prover, then the AI tier when it
 is inconclusive) and `deterministic`; the AI tier alone (`mode=ai`) is not offered, because its
