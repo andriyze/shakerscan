@@ -661,7 +661,7 @@ pre-authorized …") and exits 2. There is no fallback.
    ```json
    {"schema_version": "shakerscan-approval-begin/v1",
     "purpose": "permission_decision | preauthorization | approver_session | knowledge_decision",
-    "account": "<the sign-in name the person typed>",
+    "account": "<the sign-in name the person typed, or empty>",
     "origin": "https://<gateway public origin>",
     "decisions": [{"hunt_id": "…", "request_id": "…", "subject_digest": "<64 hex>",
                    "decision": "allow | deny", "scope": "hunt | target", "choice": {"total": 1000}}],
@@ -671,7 +671,11 @@ pre-authorized …") and exits 2. There is no fallback.
    Exactly one of `decisions`, `preauthorization`, `session`, matching `purpose`. The gateway
    checks the token, that `account` is a person with the operator or admin role (any such person,
    not only the token's owner: owner decision 8), that `origin` is its public URL, and for decisions
-   that each request is pending with that `subject_digest` (read from the engine). It answers:
+   that each request is pending with that `subject_digest` (read from the engine). An empty
+   `account` (client 0.11.2) names the person the token acts for; the challenge's `account` then
+   names them, and the set digest is computed with it. A gateway that needs a name answers 422
+   (`account_required` for a token that acts for nobody, `request_invalid` before this), and the
+   client asks for one. It answers:
    ```json
    {"schema_version": "shakerscan-approval-challenge/v1", "approval_id": "<opaque>",
     "set_digest": "<64 hex>", "methods": ["totp", "security_key"], "expires_at": "<ISO 8601>",
@@ -774,9 +778,12 @@ per-approval proof is a step-up code or key touch the agent never sees. On OSS `
 same loop, and each keypress is the confirmation.
 
 **Security keys.** CTAP2 over USB or NFC through python-fido2, a dependency of the client since
-0.11.2 (before, `pipx inject shakerscan fido2`); without it the client says so. With several keys
-plugged in, the client lists them and asks which one. Platform authenticators are not reachable
-from a pip-installed command.
+0.11.2 (before, `pipx inject shakerscan fido2`); without it the client says so. Before a touch the
+client asks each plugged-in key silently (user presence off) whether it holds one of the
+challenge's `allowCredentials`, and with `userVerification: "required"` whether it has a PIN; only
+keys that can answer are offered, and with several the person picks one before the touch. A key
+error is said in plain words. Platform authenticators are not reachable from a pip-installed
+command.
 
 **A touch for each decision.** A gateway may require a security-key touch for every decision from a
 terminal (its administrator's choice). Its challenges then offer `methods: ["security_key"]` with
@@ -907,10 +914,12 @@ it in the person's terminal (`scripts/person_decision.py`):
   "header": "x-shakerscan-person-proof", "expires_at"}`: one use, at most 120 seconds, for that
   request through that token. The client sends the same request once more, the same bytes and the
   same Idempotency-Key, with `X-ShakerScan-Person-Proof: <grant>`.
-- Without an interactive terminal (stdin and stdout), or inside `shakerscan agent`, the client
-  never begins one and never opens a key: it prints the decision and the person's command and
-  exits 3. The MCP adapter answers `outcome: person_decision_required` with `decision`, `summary`
-  and `command`.
+- Without an interactive terminal (stdin, and stdout or stderr to ask on), or inside `shakerscan
+  agent`, the client never begins one and never opens a key: it prints the decision and the
+  person's command and exits 3. It never begins one either when no key could answer here
+  (python-fido2 missing, no key plugged in), and it shows `summary` whole: a summary over 1,000
+  characters is never touched for. Ctrl-C at the touch exits 130, nothing changed. The MCP adapter
+  answers `outcome: person_decision_required` with `decision`, `summary` and `command`.
 - `GET /_enterprise/person-decisions?after=<n>` (a token, read-only) lists the person decisions
   recently made through any connection acting for the same person: `made` (`with_token`,
   `proved`, `refused`), `outcome`, `method`, `path`, `decision`, `connection`, `at`, `id`; `after`

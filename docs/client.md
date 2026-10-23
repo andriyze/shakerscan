@@ -63,11 +63,16 @@ From a repository checkout the client runs the runtime scripts in place:
 `PYTHONPATH=client/src python -m shakerscan …`.
 
 Python 3.10 or newer. One third-party dependency since 0.11.2: python-fido2 (Yubico,
-BSD-2-Clause; it brings `cryptography`, `cffi` and `pycparser`), for a USB security key's touch.
-Its reviewed resolution is hash-locked in `client/requirements/runtime.lock`; install exactly that
-with `pip install --require-hashes -r client/requirements/runtime.lock`. The Homebrew formula
-installs the client without it: a security-key touch there needs python-fido2 beside the formula's
-Python.
+BSD-2-Clause; it brings `cryptography`, `cffi` and `pycparser`, and `typing-extensions` on Python
+3.10), for a USB security key's touch. The package declares `fido2>=2.0,<3`, so a plain `pipx` or
+`uv tool` install resolves the newest matching releases from the package index without hashes;
+the reviewed resolution is hash-locked in `client/requirements/runtime.lock`, and
+`pip install --require-hashes -r client/requirements/runtime.lock` installs exactly that. The client
+is no longer pure Python through `cryptography` and `cffi`: they ship wheels for the common
+platforms, and a platform without one (32-bit ARM, for example) builds them, which needs a Rust
+toolchain. The Homebrew formula installs the client without python-fido2, so a Homebrew install has
+no security-key support (it says so when asked for a touch); install with `pipx` or `uv tool` for
+it.
 
 ## Public checks without an engine or account
 
@@ -364,10 +369,15 @@ shakerscan hunt permissions list        # JSON: the pending requests, as the ser
 shakerscan hunt permissions wait 8f0c…  # JSON: granted, denied, expired, withdrawn or still_pending
 ```
 
-- **Enterprise (a token).** You name your account and prove it with your TOTP code, typed at the
-  prompt, or a USB/NFC security key (`--method security_key`). Without `--method` the client uses a
-  plugged-in security key when the gateway offers one, else the code as before; several plugged-in
-  keys are listed and you pick the one registered to your account. The key is asked for what the
+- **Enterprise (a token).** The approver is the person the connection's token acts for, named by
+  the gateway (`--account` names someone else, and a token that acts for nobody needs it; a gateway
+  that does not name one is answered by asking, as before). You prove it with your TOTP code, typed
+  at the prompt, or a USB/NFC security key (`--method security_key`). Without `--method` the client
+  uses a plugged-in security key when the gateway offers one and the key holds one of your
+  credentials (asked silently, without a touch; with a PIN when the gateway asks for one), else
+  the code as before; when several plugged-in keys can answer, you pick one before being asked to
+  touch. A key error is said in plain words (not registered to your account, no touch in time, no
+  PIN set). The key is asked for what the
   gateway asks: its PIN when the gateway requires user verification, a touch alone when it does
   not. The proof goes to the gateway's step-up routes, which decide in your name; the token alone
   never approves. A gateway that does not serve those routes yet gets an exact error and nothing
@@ -376,7 +386,8 @@ shakerscan hunt permissions wait 8f0c…  # JSON: granted, denied, expired, with
   does not protect against).
 - **A gateway that requires a security-key touch for each decision** (its administrator's
   choice): no approver session opens; `--watch` asks for one touch per decision, and `allow
-  a[l]l N shown` decides every request it is showing with one touch. On such a gateway, and on
+  a[l]l N shown` decides every request it is showing (one touch per 50). A touch that fails or
+  that you cancel with Ctrl-C leaves the request pending and shows it again; the watch goes on. On such a gateway, and on
   any gateway that offers it, `--watch` also prints a line for each decision only a person should
   make that a connection acting for you made (with a token, by key touch, or refused).
 - **Open-source engine (no token).** A `y/N` at the prompt, sent to the engine's decision route.
@@ -420,19 +431,25 @@ and every command of this client completes it the same way:
 ```text
 $ shakerscan hunt budget raise 3f2a91c0-… --limit max_state_changing_requests=40
 This needs your decision (your administrator requires a security-key touch):
-  Raise state-changing requests 20 -> 40 (safety ceiling) for Hunt 3f2a91c0… (honey.example.com)
+  Raise state-changing requests 20 -> 40 (safety ceiling) for Hunt 3f2a91c0… on honey.example.com
 Touch your security key to approve (Ctrl-C to cancel)...
 done; decided by alice (security-key touch)
 raised state-changing requests 20 -> 40 (safety ceiling) for Hunt 3f2a91c0-…
 ```
 
-- **In your own terminal** (stdin and stdout both a terminal): the client shows the decision, asks
+- **In your own terminal** (stdin a terminal, and stdout or stderr one: `--json | jq` still asks,
+  on stderr): the client shows the decision whole (every limit a raise sets, the whole host; a
+  decision too long for a terminal is never touched for), asks
   the gateway for a challenge bound to exactly that request (method, path and query, SHA-256 of the
   body bytes, this connection, the person it acts for), checks the binding, asks for one touch of
   a security key registered to your account (user presence; no PIN unless the gateway asks), and
   sends the same request once more with the one-time grant (`X-ShakerScan-Person-Proof`, valid two
   minutes, for that request only). `shakerscan api`, `shakerscan scan`, the Hunt, knowledge and
-  secrets commands and the commands below all do this.
+  secrets commands and the commands below all do this. Ctrl-C at the touch cancels it: nothing is
+  changed, and the command exits with status 130. `shakerscan scan --active-testing` does not ask
+  its own "Type 'yes'" as well when the gateway requires the touch: the touch is the confirmation.
+  `shakerscan doctor` says whether the gateway requires the touch and whether one could happen
+  here (python-fido2, a key plugged in), without asking the key anything.
 - **Anywhere else** (an agent's tool call, a pipe, a script, or inside `shakerscan agent`): it
   never prompts and never asks a key anything. It prints one line, `person decision required:
   <the decision>. Nothing was changed. The person runs this in their own terminal and touches
@@ -458,7 +475,8 @@ raised state-changing requests 20 -> 40 (safety ceiling) for Hunt 3f2a91c0-…
 - **Keys.** A USB FIDO2 key (a YubiKey 5, for example) over python-fido2. Touch ID, Windows Hello
   and synced passkeys are out of reach of a terminal client, and Windows is not supported for the
   touch in this release. On Linux, install your distribution's FIDO udev rules (the `libfido2` or
-  `yubikey-manager` package). On a remote machine over SSH the key is not reachable: run the same
+  `yubikey-manager` package); the client says so when a USB device is plugged in that your user
+  cannot open. On a remote machine over SSH the key is not reachable: run the same
   command on the machine the key is plugged into, with a connection that acts for you.
 
 ## Secrets found on a target: `shakerscan secrets`
