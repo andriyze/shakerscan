@@ -223,10 +223,13 @@ operation ID, request/response schema digest, and component-schema digest is che
 `scripts/generate_public_api_contract.py` also generates the six release-critical UI client surfaces
 (Scan, Hunt, credentials, request collections, evidence, and Model Intake) from that same live
 OpenAPI document. `GET /hunts/contract` remains the runtime Hunt policy/budget discovery endpoint.
-The canonical action compiler currently implements `recon`, `nuclei`, `xss`, `sqli`, and `bola`.
-An unsupported registry family is rejected rather than accepted as a successful no-op. Explicit
-XSS, SQLi, or BOLA inclusion requires active permission; BOLA additionally requires two distinct
-credential profiles whose scopes allow `authz.verify`.
+The canonical action compiler implements eleven families: `recon`, `nuclei_passive`,
+`nuclei_active`, `xss`, `sqli`, `bola`, `sensitive_exposure`, `nosqli`, `authz_surface`, `graphql`
+and `recon_active` (`SCAN_V2_FAMILY_NAMES` in `api/scan/contracts.py`). Any other registry family,
+including the planned `ssrf`, `lfi`, `rce` and `business_logic`, is rejected rather than accepted as
+a successful no-op. Every family except `recon`, `nuclei_passive` and `sensitive_exposure` requires
+active permission; BOLA additionally requires two distinct credential profiles whose scopes allow
+`authz.verify`, and `authz_surface` requires one.
 
 ### Historical compatibility records
 
@@ -357,13 +360,13 @@ per seed plus the controls and ten listing follow-ups on top of its endpoint sha
 wordlist is 125 entries.
 
 **Family presets and the active default.** The canonical Scan families are `recon`, `nuclei_passive`,
-`nuclei_active`, `xss`, `sqli`, `bola`, `sensitive_exposure`, `nosqli` and `authz_surface`
-(`api/scan/contracts.py`), and only these run. A name outside the check registry is rejected; a
-registry family outside the nine is not run as a Scan family (read `resolved_families` on the
-result), and a `custom` selection with none of the nine is refused. `policy.preset`
+`nuclei_active`, `xss`, `sqli`, `bola`, `sensitive_exposure`, `nosqli`, `authz_surface`, `graphql`
+and `recon_active` (`api/scan/contracts.py`), and only these run. A name outside the check registry
+is rejected, a registry family outside the eleven is refused ("families are not implemented by
+canonical Scan"), and a `custom` selection with none of the eleven is refused. `policy.preset`
 selects the family set: `passive` (recon, reviewed passive templates, verified exposure checks),
-`standard_active` (passive plus XSS and SQLi) or `custom` (exactly `include_families`, from the nine
-above). A submission that allows active testing and names no preset resolves to `standard_active`;
+`standard_active` (passive plus XSS and SQLi) or `custom` (exactly `include_families`, from the
+eleven above). A submission that allows active testing and names no preset resolves to `standard_active`;
 one that does not allow it resolves to `passive`. `include_families` is exact only under `custom`:
 with any other preset, named or implied, it adds to that preset, so `active_testing: true` with
 `include_families: ["sensitive_exposure"]` runs the standard active set (XSS and SQLi included);
