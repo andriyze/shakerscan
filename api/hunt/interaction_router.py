@@ -2407,7 +2407,7 @@ async def _execute_hunt_capability_lifecycle(
                             # forever, even after the budget was raised.
                             raise budget_refusal(
                                 run, limits=limits, used=used, shortages=exc.shortages,
-                                charges=charges,
+                                charges=charges, stops_hunt=not evidence_recording(name),
                             ) from exc
                         else:
                             durable_reservation = await durable_store.persist_transition(
@@ -2432,7 +2432,7 @@ async def _execute_hunt_capability_lifecycle(
                         except BudgetExceeded as exc:
                             raise budget_refusal(
                                 run, limits=limits, used=used, shortages=exc.shortages,
-                                charges=charges,
+                                charges=charges, stops_hunt=not evidence_recording(name),
                             ) from exc
                         else:
                             used.update(reserved_used)

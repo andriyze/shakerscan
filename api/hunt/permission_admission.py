@@ -26,6 +26,7 @@ from .permission_store import (
     expire_due, load_request, public_request, raise_request, recent_denial, record_event,
 )
 from .permission_subjects import complete_destination_subject, credential_use_refusal
+from .recording import evidence_recording
 from .verification_budget import record_budget_shortage, reservation_exhausted
 
 PARKABLE_RUN_STATUSES = frozenset({"active", "awaiting_planner", "budget_exhausted"})
@@ -61,8 +62,13 @@ def permission_required(request: Mapping[str, Any], action_id: Any, refusal_deta
 def budget_refusal(
     run: Mapping[str, Any], *, limits: Mapping[str, int], used: Mapping[str, Any],
     shortages: Mapping[str, int], charges: Mapping[str, int], message: str | None = None,
+    stops_hunt: bool = True,
 ) -> HuntRefusal:
-    """A coded budget refusal; grantable as ``budget.raise`` when the dimension is amendable."""
+    """A coded budget refusal; grantable as ``budget.raise`` when the dimension is amendable.
+
+    ``stops_hunt`` False (recording a finding) refuses only this action: the refusal carries no
+    budget state, so settlement never marks the Hunt exhausted and its testing carries on.
+    """
     from .budget_amendments import amendable_dimensions
 
     exhausted = reservation_exhausted(limits, used, shortages)
@@ -92,7 +98,9 @@ def budget_refusal(
             subject={"dimension": budget_key, "ledger_dimension": dimension, "limit": limit},
         )
     refusal.display = {"needed_total": needed, "proposed_total": max(needed, limit * 2)}  # type: ignore[attr-defined]
-    refusal.budget_state = {"limits": dict(limits), "used": dict(used), "shortages": dict(shortages)}  # type: ignore[attr-defined]
+    refusal.budget_state = (  # type: ignore[attr-defined]
+        {"limits": dict(limits), "used": dict(used), "shortages": dict(shortages)} if stops_hunt else None
+    )
     return refusal
 
 
@@ -185,7 +193,8 @@ async def settle_refusal(
                 raise refusal
             run = dict(row)
             budget_state = getattr(refusal, "budget_state", None)
-            if budget_state:
+            # Recording evidence never stops a Hunt: a full record allowance refuses that write.
+            if budget_state and not evidence_recording(name):
                 await record_budget_shortage(conn, hunt_id=run["id"], **budget_state)
                 run = dict(await conn.fetchrow("SELECT * FROM hunt_runs WHERE id=$1", hunt_uuid))
             refusal = await credential_use_refusal(conn, run, refusal)
