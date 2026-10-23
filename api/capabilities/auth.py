@@ -689,6 +689,10 @@ async def establish_target_bound_http_session(
         )
         if landing:
             observation["landing_path"] = landing
+        if credential.auth_kind == "form_login":
+            # Where the form posts, which may differ from the page: a verifier's probes to it are
+            # sign-in attempts too (scan/auth_endpoint_probe.py). The redacted public path only.
+            observation["form_action_path"] = _public_action
         expires_at, refresh_after = _session_timing(
             latest, now=established_at,
         )

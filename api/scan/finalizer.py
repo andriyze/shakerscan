@@ -12,6 +12,7 @@ from typing import Any, Mapping, Sequence
 
 from . import scoring
 from .assessment import mark_unexamined_coverage, withhold_unexamined_grade
+from .auth_endpoint_probe import AUTH_ENDPOINT_PROBE_LIMITED
 from .action_plan import ScanActionPlan
 from .capability_result import (
     BUDGET_EXHAUSTION_REASONS,
@@ -2900,7 +2901,7 @@ def finalize_scan_report(
             # manifest holds more entries than its slices cover has work that was never attempted,
             # and comparing attempts with slices alone reports that as complete coverage.
             "_manifest_entries": {}, "_scheduled_entries": {}, "_slow_endpoints": [],
-            "_refused_candidates": [],
+            "_refused_candidates": [], "_sign_in_limited": [],
             "proof_escalation": {
                 "actions": 0, "attempted_candidates": 0,
                 "_statuses": [], "_reasons": [],
@@ -2939,6 +2940,16 @@ def finalize_scan_report(
                     row["_refused_candidates"].append((
                         str(item["inconclusive_reason"]),
                         str(item.get("url") or item.get("candidate_id") or ""),
+                    ))
+                # The credential profile's own sign-in endpoint got its bounded probe set
+                # (auth_endpoint_probe): named, so the limit is visible, not a silent gap.
+                if (
+                    isinstance(item, Mapping)
+                    and item.get("kind") in {"candidate_attempt", "candidate_deferred"}
+                    and item.get("inconclusive_reason") == AUTH_ENDPOINT_PROBE_LIMITED
+                ):
+                    row["_sign_in_limited"].append((
+                        str(item.get("candidate_id") or ""), str(item.get("sign_in_endpoint") or ""),
                     ))
             row["planned_candidates"] += max(0, planned - inapplicable)
             row["attempted_candidates"] += len(attempts)
@@ -3029,6 +3040,12 @@ def finalize_scan_report(
             if outcomes:
                 row["budget_inconclusive_candidates"] = outcomes
                 row["_slow_endpoints"].extend(item["url"] for item in outcomes)
+        sign_in_limited = row.pop("_sign_in_limited", [])
+        if sign_in_limited:
+            row["sign_in_probe_limited"] = {
+                "endpoints": sorted({endpoint for _candidate, endpoint in sign_in_limited if endpoint}),
+                "candidates": len({candidate for candidate, _endpoint in sign_in_limited}),
+            }
         refused = row.pop("_refused_candidates")
         for reason in sorted(_REFUSAL_REASONS):
             named = sorted({candidate for kind, candidate in refused if kind == reason and candidate})
@@ -3557,6 +3574,8 @@ def finalize_scan_report(
         coverage_status = "partial"
         if selected_family_gaps:
             coverage_reasons = sorted(set(coverage_reasons) | {"selected_family_incomplete"})
+    if any(row.get("sign_in_probe_limited") for row in family_coverage.values()):
+        coverage_reasons = sorted(set(coverage_reasons) | {AUTH_ENDPOINT_PROBE_LIMITED})
     if any(
         row.get("reason") == TEMPLATE_WINDOWS_INCOMPLETE_ON_ORIGIN for row in family_coverage.values()
     ):

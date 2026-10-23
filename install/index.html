@@ -666,6 +666,7 @@ download "$REPO_RAW_BASE/api/scan/capability_result.py" "$INSTALL_DIR/api/scan/c
 download "$REPO_RAW_BASE/api/scan/continuation.py" "$INSTALL_DIR/api/scan/continuation.py"
 download "$REPO_RAW_BASE/api/scan/execution.py" "$INSTALL_DIR/api/scan/execution.py"
 download "$REPO_RAW_BASE/api/scan/external_process.py" "$INSTALL_DIR/api/scan/external_process.py"
+download "$REPO_RAW_BASE/api/scan/auth_endpoint_probe.py" "$INSTALL_DIR/api/scan/auth_endpoint_probe.py"
 download "$REPO_RAW_BASE/api/scan/finalizer.py" "$INSTALL_DIR/api/scan/finalizer.py"
 download "$REPO_RAW_BASE/api/scan/finding_evidence.py" "$INSTALL_DIR/api/scan/finding_evidence.py"
 download "$REPO_RAW_BASE/api/scan/posture_findings.py" "$INSTALL_DIR/api/scan/posture_findings.py"

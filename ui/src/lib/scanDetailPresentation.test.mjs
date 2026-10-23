@@ -787,3 +787,11 @@ test('a record without bases (2.11.0) still shows run of total; no record shows 
 })
 
 const scanPage = fs.readFileSync(path.join(import.meta.dirname, '../app/scans/[id]/page.tsx'), 'utf8')
+
+test('a sign-in endpoint probed only within its lockout-safe ceiling is named as a coverage limit', () => {
+  const result = scanResultPresentation({
+    result: { findings: [], result: {}, coverage: { reasons: ['auth_endpoint_probe_limited'], family_coverage: [] } },
+  }, { band: 'moderate', label: 'Moderate coverage' })
+  assert.equal(result.coverageGapReasons.length, 1)
+  assert.match(result.coverageGapReasons[0], /sign-in endpoint .* lockout-safe/)
+})

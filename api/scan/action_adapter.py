@@ -220,6 +220,11 @@ try:
 except (ImportError, ModuleNotFoundError):
     from scanner.scanner_tools.unsafe_actions import path_may_change_state
 
+from .auth_endpoint_probe import (
+    AUTH_ACTION_IDS, AUTH_ENDPOINT_PROBE_LIMITED, AUTH_ENDPOINT_PROBE_PROFILE,
+    auth_endpoint_hold, auth_endpoint_keys, auth_endpoint_of, probe_parameters, probe_set_spent,
+)
+
 try:
     from redaction import redact_text
 except (ImportError, ModuleNotFoundError):
@@ -4336,6 +4341,27 @@ class DatabaseNeutralScanActionDispatcher:
         primary = resolve_scan_http_principal(
             self.options, lane="primary", capability_name=legacy_capability,
         )
+        # The credential profile's own sign-in endpoint (and its form action) gets a bounded,
+        # lockout-safe probe set per parameter (auth_endpoint_probe, E1-N6); what each of its
+        # parameters already received in this slice's chain counts against it.
+        auth_keys: frozenset = frozenset()
+        auth_used: dict[str, int] = {}
+        if tool in {"sqlmap", "dalfox"} and manifest_kind is ScanWorkManifestKind.CANDIDATE:
+            planned_ids = {item.action_id for item in self.plan.actions}
+            sign_ins = [
+                item
+                for auth_action in AUTH_ACTION_IDS if auth_action in planned_ids
+                for item in await self._observations(auth_action)
+            ]
+            auth_keys = auth_endpoint_keys(self.options, sign_ins, base_url=self.target_url)
+            for _source, records in [(action.action_id, tuple(completed.values())), *lineage_attempts]:
+                for record in records:
+                    record_observations = record.get("observations") or () if isinstance(record, Mapping) else ()
+                    head = record_observations[0] if record_observations else None
+                    used = head.get("sign_in_endpoint_requests") if isinstance(head, Mapping) else None
+                    if isinstance(used, int) and not isinstance(used, bool):
+                        key = str(record.get("candidate_id") or "")
+                        auth_used[key] = max(auth_used.get(key, 0), used)
         # A template sweep attempt that hits its wall before the tool reported anything examined
         # nothing: on a CPU- or network-starved host every endpoint of a slice could die that way
         # and the batch reported zero findings with every candidate "attempted". Such an endpoint
@@ -4523,6 +4549,31 @@ class DatabaseNeutralScanActionDispatcher:
                         {"url": redact_url(execution_target),
                          "method": body_request.get("method", "GET"), **verdict},
                     )
+            if row.get("auth_endpoint"):
+                # What this parameter of the sign-in endpoint has now received across the chain.
+                head = dict(attempt_observations[0])
+                received = auth_used.get(candidate_id, 0) + int(
+                    dict(result.actual_budget).get("http_requests", 0) or 0
+                )
+                auth_used[candidate_id] = received
+                # Named sign_in_*: a key with an "auth" segment is withheld from receipts.
+                head["sign_in_endpoint"] = str(row["auth_endpoint"])
+                head["sign_in_endpoint_requests"] = received
+                if proof_state != "verified" and probe_set_spent(
+                    action.capability_name, received, int(row.get("auth_parameters") or 1),
+                ):
+                    # The probe set is spent: inconclusive, never extended, never negative.
+                    head.update({
+                        "verdict": "inconclusive",
+                        "inconclusive_reason": AUTH_ENDPOINT_PROBE_LIMITED,
+                    })
+                    for key in (
+                        "resume_wall_seconds", "resume_technique", "resume_field",
+                        "remaining_requests", "remaining_wall_seconds", "last_chance_wall_seconds",
+                        "resume_probe", "resume_unconfirmed",
+                    ):
+                        head.pop(key, None)
+                attempt_observations = (head, *attempt_observations[1:])
             refusals = [
                 str(item).split(":", 1)[0] for item in result.errors or () if is_refusal_error(item)
             ]
@@ -4877,6 +4928,10 @@ class DatabaseNeutralScanActionDispatcher:
                             if windowed
                             else execution_url_for_manifest_endpoint(manifest, manifest_index)
                         )
+                    auth_endpoint = (
+                        auth_endpoint_of(execution_target, auth_keys) if auth_keys else None
+                    )
+                    auth_parameters = probe_parameters(body_request.get("body_field_names"))
                     # This entry and every later one that will actually be funded.
                     remaining_attempts = 1 + sum(1 for entry in work[position:] if needs_hold(entry))
                     # What the slice has neither consumed nor lent to a running candidate.
@@ -5082,6 +5137,29 @@ class DatabaseNeutralScanActionDispatcher:
                         sub_budget["tool_wall_seconds"] = max(
                             int(sub_budget["tool_wall_seconds"]), stage_need + own_spent,
                         )
+                    if auth_endpoint is not None:
+                        # Lockout-safety ceiling on this one endpoint, never a budget cut elsewhere.
+                        limited = auth_endpoint_hold(
+                            sub_budget, capability_name=action.capability_name,
+                            used=auth_used.get(candidate_id, 0),
+                            concurrency=concurrency_bound if request_gate is not None else 1,
+                            parameters=auth_parameters,
+                        )
+                        if limited is None:
+                            # Its probe set on the sign-in endpoint is spent (or the attempt's
+                            # wall cannot pace one): inconclusive, and nothing more is sent there.
+                            observations.append({
+                                "kind": "candidate_deferred",
+                                "candidate_id": candidate_id,
+                                "family": family,
+                                "reason": AUTH_ENDPOINT_PROBE_LIMITED,
+                                "verdict": "inconclusive",
+                                "inconclusive_reason": AUTH_ENDPOINT_PROBE_LIMITED,
+                                "sign_in_endpoint": auth_endpoint,
+                                "sign_in_endpoint_requests": auth_used.get(candidate_id, 0),
+                            })
+                            continue
+                        sub_budget = limited
                     if not sub_budget.get("http_requests") or not sub_budget.get("tool_wall_seconds"):
                         if candidates.running:
                             position -= 1
@@ -5111,6 +5189,8 @@ class DatabaseNeutralScanActionDispatcher:
                         frozen_addresses=self.target.allowed_addresses,
                     )
                     scanner_options = {"_batch_attempt": True, **body_request}
+                    if auth_endpoint is not None:
+                        scanner_options["probe_profile"] = AUTH_ENDPOINT_PROBE_PROFILE
                     args = dict(primary.capability_args())
                     args.update(body_request)
                     if tool == "nuclei":
@@ -5248,6 +5328,7 @@ class DatabaseNeutralScanActionDispatcher:
                         "attempt_id": attempt_id, "candidate_id": candidate_id,
                         "retry_round": retry_round, "execution_target": execution_target,
                         "body_request": body_request, "sub_budget": dict(sub_budget),
+                        "auth_endpoint": auth_endpoint, "auth_parameters": auth_parameters,
                     }
                     if concurrent:
                         # The candidate's records keep its place in the slice whenever it finishes.

@@ -33,6 +33,7 @@ from runtime.request_shape import (
     json_field_leaf_name, nested_json_body, public_request_body_shape,
 )
 from scan.negative_control import is_negative_control_url
+from scan.auth_endpoint_probe import AUTH_ENDPOINT_PROBE_PROFILE, AUTH_ENDPOINT_SECONDS_PER_REQUEST
 from scan.external_process import (
     BATCH_ATTEMPT_FLOORS,
     BATCH_ATTEMPT_REQUEST_HEADROOM,
@@ -693,6 +694,11 @@ def _tmpl_dalfox(url: str, opts: dict[str, Any]) -> list[str]:
     # and return its verdict inside that reservation.
     headless = opts.get("deep_domxss") is True
     delay_ms, workers = ("0", "10") if headless else ("1000", "3")
+    # The credential profile's own sign-in endpoint (scan/auth_endpoint_probe.py): one worker, so
+    # the batch pacing is the endpoint's whole rate, and only the reviewed verification set.
+    auth_probe = opts.get("probe_profile") == AUTH_ENDPOINT_PROBE_PROFILE and not headless
+    if auth_probe:
+        workers = "1"
     args = (["url", url, "--format", "jsonl", "--silence", "--no-color",
              "--timeout", "8", "--delay", delay_ms, "--worker", workers,
              "--skip-bav", "--skip-grepping", "--skip-mining-all",
@@ -723,6 +729,10 @@ def _tmpl_dalfox(url: str, opts: dict[str, Any]) -> list[str]:
         args += ["-X", method, "-d", body]
         for name in fields:
             args += ["-p", name]
+    if auth_probe and "--only-custom-payload" not in args:
+        args.extend([
+            "--custom-payload", "/app/payloads/xss/hunt-verify.txt", "--only-custom-payload",
+        ])
     return args
 
 
@@ -738,7 +748,10 @@ def _tmpl_sqlmap(url: str, opts: dict[str, Any]) -> list[str]:
     technique = str(opts.get("technique") or "BEUT").strip().upper()
     if technique not in SQLMAP_TECHNIQUES:
         technique = "BEUT"
-    args = ["-u", url, "--batch", "--technique", technique, "--level", "2", "--risk", "2",
+    # The credential profile's own sign-in endpoint runs sqlmap's level-1, risk-1 payloads only
+    # (scan/auth_endpoint_probe.py): a bounded probe set per parameter, not the whole ladder.
+    level = "1" if opts.get("probe_profile") == AUTH_ENDPOINT_PROBE_PROFILE else "2"
+    args = ["-u", url, "--batch", "--technique", technique, "--level", level, "--risk", level,
             "--threads", "1", "--timeout", "8", "--retries", "0", "--delay", "1",
             "--flush-session", "--output-dir", "/tmp/shakerscan-sqlmap",
             # -t logs every HTTP transaction sqlmap sends. The worker binds it into the
@@ -1345,6 +1358,13 @@ def _batch_attempt_pacing(
     )
 
 
+def _auth_probe_minimum(options: Mapping[str, Any], minimum_seconds: float) -> float:
+    """The least delay between requests: the lockout-safe pace on a sign-in endpoint probe."""
+    if options.get("probe_profile") == AUTH_ENDPOINT_PROBE_PROFILE:
+        return max(minimum_seconds, float(AUTH_ENDPOINT_SECONDS_PER_REQUEST))
+    return minimum_seconds
+
+
 def _replace_argv_value(argv: list[str], flag: str, value: Any) -> None:
     try:
         index = argv.index(flag)
@@ -1705,7 +1725,7 @@ def build_enforced_scanner_plan(
         dalfox_workers = 10 if deep_domxss else 3
         if batch_attempt and http >= 1:
             delay_seconds, affordable = _batch_attempt_pacing(
-                http, wall, minimum_seconds=0.05,
+                http, wall, minimum_seconds=_auth_probe_minimum(internal_options, 0.05),
             )
             _replace_argv_value(argv, "--delay", str(max(1, int(delay_seconds * 1_000))))
             hard = {"http_requests": affordable, "tool_wall_seconds": wall}
@@ -1752,7 +1772,8 @@ def build_enforced_scanner_plan(
         delay_seconds = 1.0
         if batch_attempt and http >= 1:
             delay_seconds, affordable = _batch_attempt_pacing(
-                http, wall, minimum_seconds=0.05, latency_seconds=measured_latency,
+                http, wall, minimum_seconds=_auth_probe_minimum(internal_options, 0.05),
+                latency_seconds=measured_latency,
             )
             _replace_argv_value(argv, "--delay", f"{delay_seconds:.3f}")
             hard = {"http_requests": affordable, "tool_wall_seconds": wall}
