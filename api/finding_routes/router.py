@@ -738,7 +738,9 @@ async def get_finding(finding_id: str):
         if refusal is None:
             result["retest_supported"] = True
             result["retest_type"] = retest_type
-            result["retest_modes"] = ["tiered", "deterministic", "ai"]
+            # Not "ai": the AI tier alone is at most inconclusive, so it could never conclude.
+            # Tiered runs it after the prover; the API still takes mode=ai.
+            result["retest_modes"] = ["tiered", "deterministic"]
             result["retest_active"] = retest_sends_active_requests(
                 retest_type, ai_tier_available=_ai_verifier_ready(),
             )

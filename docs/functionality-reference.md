@@ -1518,9 +1518,11 @@ TLS, DNS, takeover, GraphQL, authorization and earlier posture findings: run a n
 detail, `POST /findings/{id}/retest`, bulk retest and the automatic retest after a Scan apply the
 same rule. `GET /findings/{id}` also returns `retest_active`, true when the retest may send
 active requests (a prover's payloads, an AI Gate probe, or the AI tier's requests when an AI
-verifier is configured). A prover retests a finding that already exists; it does not mean a Scan
-looks for that class (see the [OWASP coverage matrix](owasp-coverage-matrix.md)). Retests are
-slot-limited (`RETEST_MAX_PARALLEL`) with a watchdog and auto-retest-on-scan-complete policy.
+verifier is configured). Its `retest_modes` are `tiered` (the prover, then the AI tier when it
+is inconclusive) and `deterministic`; the AI tier alone (`mode=ai`) is not offered, because its
+verdict is at most inconclusive. A prover retests a finding that already exists; it does not mean
+a Scan looks for that class (see the [OWASP coverage matrix](owasp-coverage-matrix.md)). Retests
+are slot-limited (`RETEST_MAX_PARALLEL`) with a watchdog and auto-retest-on-scan-complete policy.
 
 ---
 

@@ -88,6 +88,14 @@ def test_an_xss_retest_sends_active_requests(monkeypatch, ai):
     assert hints["retest_active"] is True and hints["retest_unsupported_reason"] is None
 
 
+@pytest.mark.parametrize("ai", [{}, AI_READY])
+def test_a_finding_with_a_prover_is_not_offered_an_ai_only_retest(monkeypatch, ai):
+    # The AI tier is at most inconclusive, so a retest of the AI tier alone could never conclude;
+    # tiered runs it after the prover.
+    hints = _hints(monkeypatch, _row("shakerscan_browser_proof", "Verified cross-site scripting"), ai=ai)
+    assert hints["retest_modes"] == ["tiered", "deterministic"]
+
+
 def test_an_exposed_file_retest_is_active_only_when_the_ai_tier_can_run(monkeypatch):
     row = _row("exposed_files", "Exposed file: /.git/config")
     plain = _hints(monkeypatch, row)

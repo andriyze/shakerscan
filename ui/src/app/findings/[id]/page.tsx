@@ -589,10 +589,10 @@ function FindingDetailContent() {
   const retestSupported = finding?.retest_supported !== false
   const deviceFinding = finding ? getFindingSourceType(finding) === 'Device' : false
   const retestModes = finding?.retest_modes
+  // No "AI only": an AI verdict is at most inconclusive, so the AI tier alone cannot conclude.
   const dastRetestOptions = [
     { value: 'tiered', label: 'Tiered' },
     { value: 'deterministic', label: 'Deterministic only' },
-    { value: 'ai', label: 'AI only' },
   ].filter((option) => !retestModes || retestModes.includes(option.value))
   const retestOptions = isAiFinding
     ? [
