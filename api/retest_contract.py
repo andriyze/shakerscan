@@ -404,29 +404,35 @@ RETEST_TOOL_TYPE_MAP: dict[str, str] = {
 }
 
 # Title guessing runs only for a finding with no tool or with a tool the scanner stored before
-# the current Scan (its ``normalize_finding`` names; a test pins the list to them). A current
-# tool that is not in the map above has no prover of its kind of check: a title naming "Remote
-# Code Execution", "JWT" or "Path Traversal" in a template's name sent attack payloads to the
-# finding's URL and called the result a retest.
+# the current Scan (its ``normalize_finding`` names; a test pins the two lists below to them). A
+# current tool that is not in the map above has no prover of its kind of check: a title naming
+# "Remote Code Execution", "JWT" or "Path Traversal" in a template's name sent attack payloads to
+# the finding's URL and called the result a retest. Of the earlier tools, only checks that sent
+# attack input have their title guessed: it names what they injected.
 PRE_V2_TITLE_INFERENCE_TOOLS: frozenset[str] = frozenset({
-    "account_enumeration", "api_security", "approval_checks", "asn_discovery", "backup_file",
-    "blind_ssrf", "bruteforce_protection", "business_logic", "cache_poisoning", "cicd_exposure",
-    "client_side", "cloud_bucket", "cloud_scanner", "cloud_ssrf", "container_registry",
-    "cookies_analyzer", "cors_check", "cors_scanner", "csp_evaluator", "csrf_testing",
-    "ct_monitor", "data_exposure", "default_credentials", "deserialization",
-    "directory_listing", "dns_policy", "domain_intelligence", "file_upload",
-    "graphql_batch_attack", "graphql_depth_attack", "graphql_vulnerability",
-    "hash_route_dom_xss", "host_header_injection", "http_headers", "http_methods",
-    "http_smuggling", "http_verb_tampering", "injection_extra", "input_validation",
-    "ip_reputation", "js_dependency", "js_secret", "jwt_vulnerability", "kubernetes_exposure",
-    "ldap_injection", "mass_assignment", "missing_rate_limit", "network_services",
-    "oauth_vulnerability", "open_redirect", "package_exposure", "password_policy",
-    "password_reset", "path_traversal", "race_condition", "rate_limiting", "redirect_check",
-    "schemathesis", "security_txt", "session_management", "session_vulnerability",
-    "smart_auth", "smtp_scanner", "ssh_scanner", "sslyze", "ssrf", "ssti", "stored_xss",
-    "subdomain_takeover_advanced", "terraform_exposure", "timing_attack", "tls_config",
-    "typosquatting", "waf_detection", "waf_detector", "webhook_checks", "xpath_injection",
-    "xxe_injection", "zone_transfer",
+    "api_security", "approval_checks", "blind_ssrf", "business_logic", "cache_poisoning",
+    "client_side", "cloud_ssrf", "cors_check", "cors_scanner", "default_credentials",
+    "deserialization", "file_upload", "graphql_batch_attack", "graphql_depth_attack",
+    "graphql_vulnerability", "hash_route_dom_xss", "host_header_injection", "http_smuggling",
+    "http_verb_tampering", "injection_extra", "jwt_vulnerability", "ldap_injection",
+    "mass_assignment", "oauth_vulnerability", "open_redirect", "password_reset",
+    "path_traversal", "race_condition", "session_management", "session_vulnerability",
+    "smart_auth", "ssrf", "ssti", "stored_xss", "timing_attack", "webhook_checks",
+    "xpath_injection", "xxe_injection",
+})
+# The earlier posture and exposure checks: their titles name a header, a file, a library or a
+# secret's kind ("Missing X-XSS-Protection header", "Hardcoded Secret in JavaScript: JWT"), never
+# what a prover could replay, so they are not guessed and are checked again by a new Scan.
+PRE_V2_POSTURE_TOOLS: frozenset[str] = frozenset({
+    "account_enumeration", "asn_discovery", "backup_file", "bruteforce_protection",
+    "cicd_exposure", "cloud_bucket", "cloud_scanner", "container_registry", "cookies_analyzer",
+    "csp_evaluator", "csrf_testing", "ct_monitor", "data_exposure", "directory_listing",
+    "dns_policy", "domain_intelligence", "http_headers", "http_methods", "input_validation",
+    "ip_reputation", "js_dependency", "js_secret", "kubernetes_exposure", "missing_rate_limit",
+    "network_services", "package_exposure", "password_policy", "rate_limiting",
+    "redirect_check", "schemathesis", "security_txt", "smtp_scanner", "ssh_scanner", "sslyze",
+    "subdomain_takeover_advanced", "terraform_exposure", "tls_config", "typosquatting",
+    "waf_detection", "waf_detector", "zone_transfer",
 })
 # The earlier scanner also named JWT and GraphQL findings after their check (``jwt_<kind>``).
 PRE_V2_TITLE_INFERENCE_TOOL_PREFIXES: tuple[str, ...] = ("jwt_", "graphql_")

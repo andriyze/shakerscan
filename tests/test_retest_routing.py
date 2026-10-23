@@ -19,6 +19,7 @@ import pytest
 
 from capabilities.exposure_probe import EXPOSURE_PROOF_CONTRACTS
 from retest_contract import (
+    PRE_V2_POSTURE_TOOLS,
     PRE_V2_TITLE_INFERENCE_TOOLS,
     RETEST_TOOL_TYPE_MAP,
     infer_type_from_title_tool,
@@ -143,9 +144,17 @@ EARLIER_TITLES = [
     ("", "IDOR on /api/orders/{id}", "idor", None),
     ("exposed_files", "Exposed file: id_rsa (confidence: high)", "exposed_file", None),
     ("forced_browsing", "Accessible Sensitive File: /wp-config.php", "exposed_file", None),
-    ("backup_file", "Accessible Backup File: /dump.sql", "exposed_file", None),
+    ("forced_browsing", "Accessible Backup File: /dump.sql", "exposed_file", None),
     ("", "Exposed file: .env", "exposed_file", None),
     ("api_security", "Sensitive data exposed in API response", None, RESCAN),
+    # An earlier posture or exposure check names a header, a file, a library or a secret's kind,
+    # never the kind of attack a prover replays: its title is not guessed.
+    ("http_headers", "Missing X-XSS-Protection header", None, RESCAN),
+    ("js_secret", "Hardcoded Secret in JavaScript: JWT token", None, RESCAN),
+    ("js_dependency", "Vulnerable JavaScript Library: jquery 1.8.1 (XSS)", None, RESCAN),
+    ("input_validation", "Input not validated: possible RCE", None, RESCAN),
+    ("backup_file", "Exposed Backup File: /jwt.key.bak", None, RESCAN),
+    ("csp_evaluator", "CSP allows inline script (XSS risk)", None, RESCAN),
     # Substrings of other words never route: "rce" in "enforced", "force" and "source".
     ("http_headers", "HSTS not enforced", None, RESCAN),
     ("bruteforce_protection", "Brute-force protection absent", None, RESCAN),
@@ -243,7 +252,15 @@ def _legacy_scanner_tools() -> set[str]:
 def test_title_guessing_runs_only_for_the_earlier_scanners_tools():
     legacy = _legacy_scanner_tools()
     # Shared with the current Scan, so never guessed; and the tools that name a prover directly.
-    assert PRE_V2_TITLE_INFERENCE_TOOLS == frozenset(legacy - CURRENT_TOOLS - set(RETEST_TOOL_TYPE_MAP))
+    # The rest are split: checks that sent attack input, whose title names what they injected,
+    # and posture or exposure checks, whose title names a header, file, library or secret.
+    assert PRE_V2_TITLE_INFERENCE_TOOLS | PRE_V2_POSTURE_TOOLS == frozenset(
+        legacy - CURRENT_TOOLS - set(RETEST_TOOL_TYPE_MAP))
+    assert not PRE_V2_TITLE_INFERENCE_TOOLS & PRE_V2_POSTURE_TOOLS
+    for tool in PRE_V2_POSTURE_TOOLS:
+        assert not title_inference_allowed(tool), tool
+        assert infer_type_from_title_tool("Reflected XSS, SQL injection and RCE via JWT", tool) is None
+        assert retest_unsupported_reason(tool) == RESCAN
     assert title_inference_allowed("") and title_inference_allowed(None)
     assert title_inference_allowed("jwt_none_algorithm") and title_inference_allowed("graphql_batching")
     assert not title_inference_allowed("an_unknown_tool")
