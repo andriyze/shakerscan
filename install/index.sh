@@ -641,6 +641,7 @@ download "$REPO_RAW_BASE/scripts/fleet_acceptance.py" "$INSTALL_DIR/scripts/flee
 download "$REPO_RAW_BASE/scripts/scan_cli.py" "$INSTALL_DIR/scripts/scan_cli.py"
 download "$REPO_RAW_BASE/scripts/v2_cli.py" "$INSTALL_DIR/scripts/v2_cli.py"
 download "$REPO_RAW_BASE/scripts/hunt_approve.py" "$INSTALL_DIR/scripts/hunt_approve.py"
+download "$REPO_RAW_BASE/scripts/person_decision.py" "$INSTALL_DIR/scripts/person_decision.py"
 download "$REPO_RAW_BASE/scripts/redirect_hint.py" "$INSTALL_DIR/scripts/redirect_hint.py"
 download "$REPO_RAW_BASE/scripts/rebuild_scan_report.py" "$INSTALL_DIR/scripts/rebuild_scan_report.py"
 download "$REPO_RAW_BASE/scripts/model_intake_runner_cli.py" "$INSTALL_DIR/scripts/model_intake_runner_cli.py"

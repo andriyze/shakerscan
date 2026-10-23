@@ -172,6 +172,14 @@ def _approval_send(client: "ApiClient"):
     return send
 
 
+def _person_decision():
+    try:
+        import person_decision
+    except ModuleNotFoundError:
+        from scripts import person_decision
+    return person_decision
+
+
 def _launch_bounds() -> tuple[list[str], str | None]:
     """``shakerscan agent --allow``: the person's bounds and the gateway pre-authorization id."""
     try:
@@ -207,10 +215,16 @@ class ApiClient:
         idempotency_key: str | None = None,
         headers: Mapping[str, str] | None = None,
         timeout: float | None = None,
+        _person_proof: str | None = None,
     ) -> Any:
-        """``timeout`` (seconds) overrides this client's own for one request."""
+        """``timeout`` (seconds) overrides this client's own for one request. A request an
+        Enterprise gateway refuses for a person's security-key touch is completed in the person's
+        own terminal and sent again once (person_decision.py)."""
         body = None
+        headers_in = headers
         headers = {"Accept": "application/json", **dict(headers or {}), **self._auth_headers()}
+        if _person_proof:
+            headers[_person_decision().PROOF_HEADER] = _person_proof
         if payload is not None:
             body = json.dumps(payload, separators=(",", ":")).encode("utf-8")
             if len(body) > MAX_REQUEST_BYTES:
@@ -235,6 +249,11 @@ class ApiClient:
             message, detail = _safe_api_error(
                 raw, fallback=f"API returned HTTP {exc.code}"
             )
+            if _person_proof is None and _person_decision().required(exc.code, exc.headers, detail):
+                return self._person_decision(
+                    method, path, body or b"", detail,
+                    payload=payload, idempotency_key=idempotency_key, headers=headers_in, timeout=timeout,
+                )
             raise CliError(
                 message,
                 error_type="api_error",
@@ -259,6 +278,24 @@ class ApiClient:
             return json.loads(raw)
         except json.JSONDecodeError as exc:
             raise CliError("ShakerScan API returned invalid JSON") from exc
+
+    def _person_decision(self, method: str, path: str, body: bytes, detail: Mapping[str, Any], **again: Any) -> Any:
+        """A person's decision the gateway wants a security-key touch for: one touch and one
+        resend of exactly this request in the person's terminal; elsewhere a refusal naming the
+        person's command (exit 3)."""
+        decision = _person_decision()
+        parsed = urllib.parse.urlsplit(self.base_url)
+        try:
+            return decision.handle(
+                decision.json_poster(self.base_url, self.api_token),
+                origin=f"{parsed.scheme}://{parsed.netloc}", method=method, path=path, body=body, detail=detail,
+                resend=lambda grant: self.request(method, path, _person_proof=grant, **again),
+            )
+        except decision.PersonDecisionRefused as exc:
+            raise CliError(exc.line, error_type="person_decision_required", http_status=403,
+                           api_detail={**exc.detail, "command": exc.command}) from None
+        except decision.PersonDecisionError as exc:
+            raise CliError(str(exc), error_type="person_decision_failed", http_status=403, api_detail=detail) from None
 
     def get(self, path: str) -> Any:
         return self.request("GET", path)
@@ -1590,7 +1627,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _hunt_call_exit(args, result)
     except CliError as exc:
         print(json.dumps(exc.public_dict(), sort_keys=True), file=sys.stderr)
-        return 2
+        # 3: a person's decision this shell cannot ask for; refused, nothing ran.
+        return 3 if exc.error_type == "person_decision_required" else 2
 
 
 def _hunt_call_exit(args: argparse.Namespace, result: Any) -> int:

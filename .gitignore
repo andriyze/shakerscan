@@ -89,5 +89,6 @@ client/build/
 client/src/shakerscan/_mcp.py
 client/src/shakerscan/_v2_cli.py
 client/src/shakerscan/_hunt_approve.py
+client/src/shakerscan/_person_decision.py
 client/src/shakerscan/_redirect_hint.py
 client/src/shakerscan/_build.json

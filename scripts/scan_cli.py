@@ -9,6 +9,7 @@ import os
 import sys
 from typing import Any, Iterable
 import urllib.error
+import urllib.parse
 import urllib.request
 
 
@@ -183,16 +184,27 @@ def _opener() -> urllib.request.OpenerDirector:
     return urllib.request.build_opener(_NoRedirect())
 
 
+def _person_decision():
+    try:
+        import person_decision
+    except ModuleNotFoundError:
+        from scripts import person_decision
+    return person_decision
+
+
 def _request_json(
     url: str,
     *,
     payload: dict[str, Any] | None = None,
     idempotency_key: str | None = None,
+    _person_proof: str | None = None,
 ) -> dict[str, Any]:
     headers = {
         "Accept": "application/json",
         "User-Agent": "shakerscan-cli/scan-start-v2",
     }
+    if _person_proof:
+        headers[_person_decision().PROOF_HEADER] = _person_proof
     token = _bearer_token()
     if token:
         if not url.startswith("https://"):
@@ -224,6 +236,10 @@ def _request_json(
         except (json.JSONDecodeError, UnicodeDecodeError):
             error = {}
         detail = error.get("detail") if isinstance(error, dict) else None
+        if _person_proof is None and _person_decision().required(exc.code, exc.headers, detail):
+            # An Enterprise gateway wants the person's security-key touch for this submission
+            # (authorizing its target for active testing): asked in the person's own terminal.
+            return _scan_person_decision(url, data or b"", method, detail, payload, idempotency_key)
         api_detail = detail
         if isinstance(detail, dict):
             detail = detail.get("message") or detail.get("error") or detail
@@ -253,6 +269,27 @@ def _request_json(
     if not isinstance(decoded, dict):
         raise ScanCliError("ShakerScan API returned an invalid object")
     return decoded
+
+
+def _scan_person_decision(url: str, data: bytes, method: str, detail: dict[str, Any],
+                          payload: dict[str, Any] | None, idempotency_key: str | None) -> dict[str, Any]:
+    decision = _person_decision()
+    parts = urllib.parse.urlsplit(url)
+    origin = f"{parts.scheme}://{parts.netloc}"
+    path = parts.path + (f"?{parts.query}" if parts.query else "")
+    try:
+        return decision.handle(
+            decision.json_poster(origin, _bearer_token()), origin=origin, method=method, path=path,
+            body=data, detail=detail,
+            resend=lambda grant: _request_json(url, payload=payload, idempotency_key=idempotency_key,
+                                               _person_proof=grant),
+        )
+    except decision.PersonDecisionRefused as exc:
+        error = ScanCliError(exc.line, http_status=403, api_detail={**exc.detail, "command": exc.command})
+        error.exit_code = decision.EXIT_REFUSED
+        raise error from None
+    except decision.PersonDecisionError as exc:
+        raise ScanCliError(str(exc), http_status=403, api_detail=detail) from None
 
 
 def _confirm_active(args: argparse.Namespace) -> None:
@@ -526,7 +563,7 @@ def main(argv: list[str] | None = None, prog: str | None = None) -> int:
             )
         else:
             print(f"Error: {exc}", file=sys.stderr)
-        return 1
+        return getattr(exc, "exit_code", 1)
 
 
 if __name__ == "__main__":

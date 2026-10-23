@@ -39,7 +39,7 @@ from ._vendored import helper, kit_sources, load
 INSTALL_ONE_LINER = "curl -fsSL https://install.shakerscan.com | sh"
 CLIENT_COMMANDS = (
     "connect", "disconnect", "agent", "api", "scan", "check", "mcp", "hunt", "approve", "deny", "knowledge",
-    "secrets", "record", "doctor", "version",
+    "secrets", "targets", "record", "doctor", "version",
 )
 AGENTS = ("codex", "claude", "opencode", "pi")
 CONNECT_PATH = "/_enterprise/connect/"
@@ -1276,7 +1276,8 @@ def cmd_mcp(args: argparse.Namespace) -> int:
 HUNT_HELP_NOTE = """\
 shakerscan hunt [--url URL] [--token-file FILE] [--timeout SECONDS] <subcommand> ...
   The connection options may come before or after the subcommand; --timeout is the number of
-  seconds to wait for each API answer (default 60). The runtime Hunt CLI's own help follows.
+  seconds to wait for each API answer (default 60). `shakerscan hunt budget raise <hunt> --limit
+  NAME=N|+N` raises a Hunt's budget (a person's decision). The runtime Hunt CLI's own help follows.
 """
 
 
@@ -1288,6 +1289,11 @@ def cmd_hunt(args: argparse.Namespace) -> int:
     if rest and rest[0] in ("-h", "--help"):
         sys.stdout.write(HUNT_HELP_NOTE + "\n")
         sys.stdout.flush()
+    if rest[:2] == ["budget", "raise"]:
+        # A person's decision, in the person's own terminal (decisions.py).
+        from .decisions import hunt_budget_raise
+
+        return hunt_budget_raise(rest[2:], url, args.timeout)
     timeout = ["--timeout", str(args.timeout)] if args.timeout is not None else []
     return int(load("_v2_cli").main(["--api-url", url, *timeout, "hunt", *rest]))
 
@@ -1382,8 +1388,15 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     return 0 if ok else 1
 
 
+def cmd_targets(args: argparse.Namespace) -> int:
+    from .decisions import cmd_targets as run
+
+    return run(args)
+
+
 COMMANDS = {
     "version": cmd_version,
+    "targets": cmd_targets,
     "mcp": cmd_mcp,
     "hunt": cmd_hunt,
     "approve": cmd_approval,
@@ -1602,8 +1615,10 @@ def build_parser() -> argparse.ArgumentParser:
     connection(secrets)
     secrets.add_argument("args", nargs=argparse.REMAINDER,
                          help="list | revoke | reactivate | expiry | grant | ungrant | promote | reveal ...")
+    from .decisions import add_parser as add_targets_parser
     from .record import add_parser as add_record_parser
 
+    add_targets_parser(commands, connection)
     add_record_parser(commands, connection)
     doctor = commands.add_parser(
         "doctor",

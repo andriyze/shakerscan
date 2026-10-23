@@ -90,6 +90,9 @@ class Gateway:
         if path.startswith(approval.FEED_PATH + "?"):
             # A gateway that does not pass the cross-Hunt feed refuses it as an unknown route.
             return 403, {"detail": "route not allowed"}
+        if path.startswith(approval.PERSON_FEED_PATH):
+            # A gateway before the person-decision feed: the proxy refuses the unknown route.
+            return 403, {"detail": "route not allowed"}
         if path.startswith(f"/hunts/{HUNT}/permission-requests?status=pending"):
             return 200, {"requests": [item for item in self.requests.values() if item["status"] == "pending"]}
         if path.startswith("/hunts?status="):
@@ -275,7 +278,7 @@ def _fake_fido2(monkeypatch, *, device=True):
     webauthn.PublicKeyCredentialDescriptor = Descriptor
     webauthn.PublicKeyCredentialRequestOptions = Options
     webauthn.PublicKeyCredentialType = types.SimpleNamespace(PUBLIC_KEY="public-key")
-    webauthn.UserVerificationRequirement = types.SimpleNamespace(REQUIRED="required")
+    webauthn.UserVerificationRequirement = lambda value: f"uv:{value}"
     for name, module in {"fido2": types.ModuleType("fido2"), "fido2.client": client, "fido2.hid": hid,
                          "fido2.webauthn": webauthn}.items():
         monkeypatch.setitem(sys.modules, name, module)
