@@ -1,12 +1,15 @@
 """A crawl that carries a session starts from every in-scope seed, not only the target (E1-N3).
 
-The lab's Halvern Hub is reachable only from its own seeds: nothing on ``/`` links to ``/hub/``,
-and ``/hub/`` answers only with the session. The signed-in crawl and browser crawl carried the
-session but started at ``/`` alone, so nothing behind the sign-in was crawled. They now also
-start at the scan's GET seed endpoints on the crawl's origin (depth 0 in the endpoint manifest:
-seeds, known endpoints, collection requests) and at the page the sign-in landed on, within the
-crawl's own reservation: the time box is shared among the inputs, and inputs a box cannot give a
-useful share are left out. Action paths (sign-out, delete, one-time tokens) are never a seed.
+A signed-in area is often reachable only from its own seeds: in the fixture app nothing on ``/``
+links to ``/hub/``, and ``/hub/`` answers only with the session. The signed-in crawl and browser
+crawl carried the session but started at ``/`` alone, so nothing behind the sign-in was crawled.
+They now also start at the page the sign-in landed on and at the scan's GET seed endpoints on
+the crawl's origin (depth 0 in the endpoint manifest: seeds, known endpoints, collection
+requests), pages before API routes, within the crawl's own reservation. The target keeps its
+whole time box: the static crawl runs its inputs side by side under its one rate limiter, and
+the browser crawl adds at most one seed, so the target keeps half of its box. Action paths
+(sign-out, delete, one-time tokens, also percent-encoded), route templates and the profile's own
+sign-in page are never a seed, and a seed the crawler cannot take is left out, never fatal.
 
 The end-to-end test runs the real dispatcher and the real enforced crawler plan against a
 fixture app on loopback; the crawler is a labelled fixture (``FixtureCrawler``) that follows the
@@ -45,48 +48,81 @@ def _value(argv, flag):
     return argv[argv.index(flag) + 1]
 
 
-@pytest.mark.parametrize("tool", ["katana", "katana_headless"])
-def test_seed_paths_become_crawl_inputs_on_the_crawl_origin_within_its_box(tool):
-    budget = {"http_requests": 3_000, "tool_wall_seconds": 600}
+def _seconds(argv):
+    return int(_value(argv, "-crawl-duration").rstrip("s"))
+
+
+# Reservations the compiler and allocator give the two crawls of an active Scan (static, browser).
+PROFILE_CRAWLS = {
+    "fast": ({"http_requests": 500, "tool_wall_seconds": 150}, {"http_requests": 600, "tool_wall_seconds": 150}),
+    "balanced": ({"http_requests": 2_000, "tool_wall_seconds": 360}, {"http_requests": 2_000, "tool_wall_seconds": 360}),
+    "thorough": ({"http_requests": 3_000, "tool_wall_seconds": 600}, {"http_requests": 2_400, "tool_wall_seconds": 400}),
+}
+
+
+@pytest.mark.parametrize("profile", sorted(PROFILE_CRAWLS))
+def test_the_static_crawl_keeps_its_whole_box_beside_twenty_seeds(profile):
+    budget = PROFILE_CRAWLS[profile][0]
+    seeds = [f"/s{index}/" for index in range(agent_tools.MAX_CRAWL_SEED_PATHS)]
     alone = agent_tools.build_enforced_scanner_plan(
-        tool, "http://app.test:8000/", {}, reserved_budget=budget,
+        "katana", "http://app.test:8000/", {}, reserved_budget=budget,
         pinned_proxy_url=PROXY, trusted_headers=SESSION,
     )
     seeded = agent_tools.build_enforced_scanner_plan(
-        tool, "http://app.test:8000/", {"crawl_seed_paths": ["/hub/", "/hub/login", "/hub/"]},
+        "katana", "http://app.test:8000/", {"crawl_seed_paths": seeds},
         reserved_budget=budget, pinned_proxy_url=PROXY, trusted_headers=SESSION,
     )
-    assert _inputs(list(alone.argv)) == ["http://app.test:8000/"]
-    assert _inputs(list(seeded.argv)) == [
-        "http://app.test:8000/", "http://app.test:8000/hub/", "http://app.test:8000/hub/login",
-    ]
-    whole = int(_value(list(alone.argv), "-crawl-duration").rstrip("s"))
-    share = int(_value(list(seeded.argv), "-crawl-duration").rstrip("s"))
-    assert share == whole // 3
-    # The same reservation and the same ceiling: more inputs share the box, never a larger one.
+    argv = list(seeded.argv)
+    assert _inputs(argv) == ["http://app.test:8000/", *(f"http://app.test:8000{seed}" for seed in seeds)]
+    # Side by side, each for the whole box: the target's crawl time is what it was alone.
+    assert _seconds(argv) == _seconds(list(alone.argv))
+    assert _value(argv, "-parallelism") == str(len(seeds) + 1)
+    assert _value(list(alone.argv), "-parallelism") == "1"
+    # One rate limiter and the same ceiling: the seeds share the target's requests, never add any.
+    assert _value(argv, "-rate-limit") == _value(list(alone.argv), "-rate-limit")
     assert seeded.hard_budget_dict == alone.hard_budget_dict
     assert seeded.timeout_ms == alone.timeout_ms
 
 
-@pytest.mark.parametrize("tool,wall,kept", [("katana", 25, 2), ("katana_headless", 42, 2)])
-def test_a_box_too_small_for_every_seed_keeps_the_target_and_the_first_seeds(tool, wall, kept):
-    plan = agent_tools.build_enforced_scanner_plan(
-        tool, "https://app.test/", {"crawl_seed_paths": ["/a", "/b", "/c", "/d"]},
-        reserved_budget={"http_requests": 3_000, "tool_wall_seconds": wall},
+@pytest.mark.parametrize("profile", sorted(PROFILE_CRAWLS))
+def test_the_browser_crawl_adds_one_seed_and_keeps_half_its_box(profile):
+    budget = PROFILE_CRAWLS[profile][1]
+    alone = agent_tools.build_enforced_scanner_plan(
+        "katana_headless", "http://app.test:8000/", {}, reserved_budget=budget,
         pinned_proxy_url=PROXY, trusted_headers=SESSION,
     )
-    assert _inputs(list(plan.argv)) == ["https://app.test/", "https://app.test/a", "https://app.test/b"][:kept]
+    seeded = agent_tools.build_enforced_scanner_plan(
+        "katana_headless", "http://app.test:8000/", {"crawl_seed_paths": [f"/s{i}/" for i in range(20)]},
+        reserved_budget=budget, pinned_proxy_url=PROXY, trusted_headers=SESSION,
+    )
+    argv = list(seeded.argv)
+    # One input at a time in one browser: the first seed only, the target first, half each.
+    assert _inputs(argv) == ["http://app.test:8000/", "http://app.test:8000/s0/"]
+    assert _value(argv, "-parallelism") == "1"
+    assert _seconds(argv) >= _seconds(list(alone.argv)) // 2
+    assert seeded.hard_budget_dict == alone.hard_budget_dict
+    assert seeded.timeout_ms == alone.timeout_ms
+
+
+def test_a_browser_box_too_small_to_halve_keeps_the_target_alone():
+    plan = agent_tools.build_enforced_scanner_plan(
+        "katana_headless", "https://app.test/", {"crawl_seed_paths": ["/a"]},
+        reserved_budget={"http_requests": 3_000, "tool_wall_seconds": 25},
+        pinned_proxy_url=PROXY, trusted_headers=SESSION,
+    )
+    assert _inputs(list(plan.argv)) == ["https://app.test/"]
 
 
 @pytest.mark.parametrize("seed", [
     "http://evil.test/", "//evil.test/x", "hub", "/a,b", "/a b", "/a?x=1", "/a#b", "/a\\b", "/" + "a" * 2_100,
-])
-def test_a_seed_that_is_not_a_plain_path_on_the_crawl_origin_is_refused(seed):
-    with pytest.raises(agent_tools.AgentToolError):
-        agent_tools.build_scanner_argv(
-            "katana", "https://app.test/", {"crawl_seed_paths": [seed]},
-            pinned_proxy_url=PROXY, trusted_headers=SESSION,
-        )
+    "/café/", "/users/<id>", 7, None,
+], ids=lambda value: repr(value)[:24])
+def test_a_seed_that_is_not_a_plain_path_on_the_crawl_origin_is_left_out(seed):
+    _binary, argv, _timeout = agent_tools.build_scanner_argv(
+        "katana", "https://app.test/", {"crawl_seed_paths": [seed, "/ok/"]},
+        pinned_proxy_url=PROXY, trusted_headers=SESSION,
+    )
+    assert _inputs(argv) == ["https://app.test/", "https://app.test/ok/"]
 
 
 def test_too_many_seeds_are_refused():
@@ -259,9 +295,9 @@ def _crawl(port, *, capability, signed_in, seeds, landing=None):
         worker_id="broker:worker-1", lease_seconds=60, attempt=1,
     )
     try:
-        asyncio.run(dispatcher(action, lease, lambda: asyncio.sleep(0)))
-    except Exception:  # the fixture's output is not a real crawl's; the requests are the result
-        pass
+        captured["receipt"] = asyncio.run(dispatcher(action, lease, lambda: asyncio.sleep(0)))
+    except Exception as exc:  # the fixture's output is not a real crawl's; the requests are the result
+        captured["error"] = type(exc).__name__
     return captured
 
 
@@ -277,7 +313,8 @@ HUB_SEEDS = [
 def test_the_signed_in_crawl_reaches_the_hub_from_its_seeds_with_the_session(fixture_app, capability):
     captured = _crawl(fixture_app, capability=capability, signed_in=True,
                       seeds=[*HUB_SEEDS, ("GET", "/hub/", "known_endpoints")])
-    assert captured["scanner_options"]["crawl_seed_paths"] == ["/hub/", "/hub/login"]
+    # The profile's own sign-in page is not a seed: a GET there may end the session.
+    assert captured["scanner_options"]["crawl_seed_paths"] == ["/hub/"]
     requested = {path for path, signed_in in _FixtureApp.log if signed_in}
     assert {"/hub/", "/hub/orders", "/hub/orders/7"} <= requested
     # Never a sign-out with the session, neither as a seed nor as a followed link.
@@ -287,8 +324,35 @@ def test_the_signed_in_crawl_reaches_the_hub_from_its_seeds_with_the_session(fix
 def test_the_page_the_sign_in_landed_on_is_a_seed(fixture_app):
     captured = _crawl(fixture_app, capability="web.crawl", signed_in=True, seeds=HUB_SEEDS,
                       landing="/hub/")
-    assert captured["scanner_options"]["crawl_seed_paths"] == ["/hub/", "/hub/login"]
+    assert captured["scanner_options"]["crawl_seed_paths"] == ["/hub/"]
     assert "/hub/orders/7" in {path for path, signed_in in _FixtureApp.log if signed_in}
+
+
+def test_seeds_the_crawler_cannot_take_are_left_out_and_the_crawl_still_runs(fixture_app):
+    captured = _crawl(fixture_app, capability="web.crawl", signed_in=True, seeds=[
+        ("GET", "/hub/", "known_endpoints"), ("GET", "/café/", "known_endpoints"),
+        ("GET", "/users/<id>", "known_endpoints"), ("GET", "/users/:id", "known_endpoints"),
+        ("GET", "/hub/%6Cogout", "known_endpoints"), ("GET", "/hub/account/%64elete", "known_endpoints"),
+    ])
+    seeds = captured["scanner_options"]["crawl_seed_paths"]
+    # A non-ASCII page is percent-encoded; templates and encoded action words are never seeds.
+    assert seeds == ["/caf%C3%A9/", "/hub/"]
+    # The crawl ran with them: no adapter fault before the process, which was started.
+    receipt = captured.get("receipt")
+    assert "argv" in captured
+    assert receipt is None or not any("adapter_fault" in str(item) for item in receipt.errors)
+    assert _inputs(captured["argv"])[1:] == [captured["execution_target"].rstrip("/") + seed for seed in seeds]
+    assert "/hub/%6Cogout" not in {path for path, _signed_in in _FixtureApp.log}
+
+
+def test_the_landing_page_and_pages_come_before_api_routes(fixture_app):
+    captured = _crawl(fixture_app, capability="web.crawl", signed_in=True, landing="/hub/home", seeds=[
+        ("GET", "/api/v1/orders", "collections.replay"), ("GET", "/api/v1/users", "collections.replay"),
+        ("GET", "/hub/", "known_endpoints"), ("GET", "/about", "seed"), ("GET", "/data.json", "known_endpoints"),
+    ])
+    assert captured["scanner_options"]["crawl_seed_paths"] == [
+        "/hub/home", "/about", "/hub/", "/api/v1/orders", "/api/v1/users", "/data.json",
+    ]
 
 
 def test_without_seeds_the_signed_in_crawl_never_reaches_the_hub(fixture_app):
@@ -345,8 +409,20 @@ def test_a_sign_in_redirect_records_the_landing_path(location, landing):
 
 @pytest.mark.parametrize("location", [
     None, "https://elsewhere.test/hub/", "/hub/logout", "/hub/confirm/9f8e7d6c5b4a39281706f5e4d3c2b1a0",
+    "/hub/%6Cogout", "/hub/account/%64elete", "/hub/%256Cogout",
 ])
 def test_no_landing_path_for_another_origin_an_action_or_a_token(location):
     observation = _form_login(location)
     assert observation["status"] == "established"
     assert "landing_path" not in observation
+
+
+@pytest.mark.parametrize("path", [
+    "/hub/%6Cogout", "/hub/%6cogout", "/hub/account/%64elete", "/hub/%256Cogout", "/hub/log%2Dout",
+    "/hub/%73ign%20out",
+])
+def test_a_percent_encoded_action_word_is_still_an_action(path):
+    from scanner_tools.unsafe_actions import path_may_change_state
+
+    assert path_may_change_state(path)
+    assert not path_may_change_state("/hub/catalog%20page")

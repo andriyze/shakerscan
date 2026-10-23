@@ -222,8 +222,9 @@ except (ImportError, ModuleNotFoundError):
 
 from .auth_endpoint_probe import (
     AUTH_ACTION_IDS, AUTH_ENDPOINT_PACE_UNFUNDED, AUTH_ENDPOINT_PROBE_LIMITED,
-    AUTH_ENDPOINT_PROBE_PROFILE, auth_endpoint_hold, pace_seconds, pace_wall_seconds,
-    parallel_children, probe_parameters, probe_set_spent, sign_in_endpoint_for, sign_in_endpoints,
+    AUTH_ENDPOINT_PROBE_PROFILE, auth_endpoint_hold, normalize_path, pace_seconds,
+    pace_wall_seconds, parallel_children, probe_parameters, probe_set_spent, sign_in_endpoint_for,
+    sign_in_endpoints, sign_in_page_paths,
 )
 
 try:
@@ -600,6 +601,21 @@ def _sqli_fields(
             return tuple(fields), len(fields)
     query = urllib.parse.urlsplit(str(execution_target or "")).query
     return None, max(1, len(urllib.parse.parse_qsl(query, keep_blank_values=True)))
+
+
+# Sources and path shapes of an API route rather than a page: a crawl seeded there finds few links.
+_API_SEED_SOURCES = frozenset({"collections.replay", "web.spec_ingest"})
+_DATA_FILE_SUFFIXES = (".json", ".xml", ".csv", ".txt", ".yaml", ".yml", ".js", ".map")
+
+
+def _api_route(path: str, source: Any) -> bool:
+    """Whether a seed is an API route or a data file rather than a page."""
+    segments = [segment.casefold() for segment in str(path or "").split("/") if segment]
+    return (
+        str(source or "") in _API_SEED_SOURCES
+        or bool(segments) and segments[0] in {"api", "rest", "graphql", "v1", "v2", "v3"}
+        or str(path or "").casefold().endswith(_DATA_FILE_SUFFIXES)
+    )
 
 
 def _next_unit_requests(head: Mapping[str, Any]) -> int:
@@ -3903,45 +3919,65 @@ class DatabaseNeutralScanActionDispatcher:
 
         The page the primary sign-in landed on, then every GET seed of the scan's endpoint
         manifest (depth 0: seeds, known endpoints, collection requests) on the crawl's own origin
-        and lane, in path order. A path that may act (sign-out, delete, a one-time token) or that
-        is a route template is never a seed.
+        and lane: pages before API routes (an imported collection's routes, a path under
+        ``/api/`` or naming a data file), each group in path order. A path is percent-encoded
+        where the crawler needs it (``/café/``). Never a seed: a path that may act (sign-out,
+        delete, a one-time token, also percent-encoded), a route template (``{int}``, ``:id``,
+        ``<id>``), the profile's own sign-in page (a GET there may end the session), or a path
+        the crawler cannot take.
         """
         parsed = urllib.parse.urlsplit(execution_target)
         scheme = parsed.scheme.lower()
         host = str(parsed.hostname or "").lower().rstrip(".")
         port = parsed.port or (443 if scheme == "https" else 80)
         own_path = parsed.path or "/"
+        sessions = [
+            item for item in await self._observations("inputs.auth_primary")
+            if isinstance(item, Mapping) and item.get("kind") == "credential_session"
+        ]
+        sign_in_pages = sign_in_page_paths(self.options, sessions, base_url=self.target_url)
         paths: list[str] = []
 
-        def usable(path: Any) -> bool:
-            return (
-                isinstance(path, str) and path.startswith("/") and not path.startswith("//")
-                and path != own_path and path not in paths
-                and not any(mark in path for mark in "{}?#,\\ ")
-                and not path_may_change_state(path)
-            )
-
-        for item in await self._observations("inputs.auth_primary"):
-            if (
-                isinstance(item, Mapping) and item.get("kind") == "credential_session"
-                and item.get("status") == "established"
-                and usable(item.get("landing_path"))
+        def seed_path(path: Any) -> str | None:
+            if not isinstance(path, str) or not path.startswith("/") or path.startswith("//"):
+                return None
+            if any(mark in path for mark in "{}<>?#,\\ ") or any(
+                segment.startswith(":") for segment in path.split("/")
             ):
-                paths.append(str(item["landing_path"]))
+                return None
+            encoded = urllib.parse.quote(path, safe="/-._~!$&'()*+;=:@%")
+            if (
+                encoded == own_path or encoded in paths
+                or not agent_tools.crawl_seed_path_is_plain(encoded)
+                or path_may_change_state(encoded)
+                or normalize_path(encoded) in sign_in_pages
+            ):
+                return None
+            return encoded
+
+        for item in sessions:
+            landing = seed_path(item.get("landing_path")) if item.get("status") == "established" else None
+            if landing:
+                paths.append(landing)
         manifest = await self._work_manifest(
             action, "endpoint_manifest_ref", ScanWorkManifestKind.ENDPOINT,
         )
-        seeded = sorted({
-            str(entry.get("canonical_path") or "")
-            for entry in (manifest.entries if manifest is not None else ())
-            if entry.get("method") == "GET"
-            and int(entry.get("discovery_depth") or 0) == 0
-            and str(entry.get("scheme") or "") == scheme
-            and str(entry.get("host") or "") == host
-            and int(entry.get("port") or 0) == port
-            and entry.get("auth_lane") in (None, "anonymous", "primary")
-        })
-        paths.extend(path for path in seeded if usable(path))
+        seeded: dict[str, bool] = {}
+        for entry in (manifest.entries if manifest is not None else ()):
+            if (
+                entry.get("method") == "GET"
+                and int(entry.get("discovery_depth") or 0) == 0
+                and str(entry.get("scheme") or "") == scheme
+                and str(entry.get("host") or "") == host
+                and int(entry.get("port") or 0) == port
+                and entry.get("auth_lane") in (None, "anonymous", "primary")
+            ):
+                path = str(entry.get("canonical_path") or "")
+                seeded[path] = seeded.get(path, False) or _api_route(path, entry.get("source_tool"))
+        for path in sorted(seeded, key=lambda item: (seeded[item], item)):
+            usable = seed_path(path)
+            if usable:
+                paths.append(usable)
         return paths[:agent_tools.MAX_CRAWL_SEED_PATHS]
 
     async def _external(self, action: ScanAction, heartbeat: ActionHeartbeat) -> CapabilityReceipt:

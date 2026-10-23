@@ -503,16 +503,21 @@ _AGENT_FFUF_WORDLIST_SOURCES: dict[str, tuple[str, ...]] = {
 }
 
 
-# A crawl that carries a session also starts at the scan's seeds on its own origin (the GET seed
-# endpoints and the page the sign-in landed on): an area behind a sign-in is often linked from
+# A crawl that carries a session also starts at the scan's seeds on its own origin (the page the
+# sign-in landed on and the GET seed endpoints): an area behind a sign-in is often linked from
 # nowhere the target's root reaches (E1-N3). Each seed is a plain path joined to the crawl's own
 # origin, so a seed can never name another host; katana splits a list flag on commas, so a seed
-# holds none. The crawl's time box is shared among its inputs (``_fit_crawl_inputs``).
+# holds none. A seed that is not such a path is left out, never fatal to the crawl. The target
+# keeps its whole time box (``_fit_crawl_inputs``).
 MAX_CRAWL_SEED_PATHS = 20
 _CRAWL_SEED_PATH = re.compile(r"/(?!/)[A-Za-z0-9\-._~!$&'()*+;=:@%/]{0,2047}")
-# The shortest share of the time box worth giving one input; seeds a box cannot fund at this
-# share are left out, the target itself always kept.
+# The shortest share of the browser crawl's box worth giving the target and one seed each.
 _CRAWL_INPUT_MIN_SECONDS = {"katana": 10, "katana_headless": 15}
+
+
+def crawl_seed_path_is_plain(path: Any) -> bool:
+    """Whether ``path`` can be a crawl seed: a plain, already percent-encoded path."""
+    return isinstance(path, str) and _CRAWL_SEED_PATH.fullmatch(path) is not None
 
 
 def _crawl_seed_urls(url: str, opts: Mapping[str, Any]) -> list[str]:
@@ -525,10 +530,9 @@ def _crawl_seed_urls(url: str, opts: Mapping[str, Any]) -> list[str]:
     origin = urllib.parse.urlunsplit((parsed.scheme, parsed.netloc, "", "", ""))
     urls: list[str] = []
     for value in raw:
-        path = str(value) if isinstance(value, str) else ""
-        if not _CRAWL_SEED_PATH.fullmatch(path):
-            raise AgentToolError("a crawl seed must be a plain path on the crawl's own origin")
-        seed = origin + path
+        if not crawl_seed_path_is_plain(value):
+            continue
+        seed = origin + value
         if seed != url and seed not in urls:
             urls.append(seed)
     return urls
@@ -542,15 +546,21 @@ def _crawl_inputs(url: str, opts: Mapping[str, Any]) -> list[str]:
 
 
 def _fit_crawl_inputs(argv: list[str], duration: int, *, scanner: str) -> tuple[int, int]:
-    """Share the crawl's time box among its ``-u`` inputs; return (inputs, seconds each).
+    """Fit the crawl's ``-u`` inputs to its time box; return (inputs, seconds each).
 
-    Katana crawls one input at a time (``-parallelism 1``) and ``-crawl-duration`` bounds each,
-    so N inputs at the whole box would run N boxes. Each gets an equal share instead, and inputs
-    past the number of useful shares are dropped (the target, first, is always kept). The rate
-    limiter is the process's own, so the hard request ceiling is unchanged.
+    ``-crawl-duration`` bounds each input. The static crawl runs its inputs side by side
+    (``-parallelism`` one per input), each for the whole box: the target's own crawl keeps the
+    time it had alone, the process's one rate limiter and the hard request ceiling are shared,
+    and the requests a short seed does not use stay with the target. The browser crawl runs one
+    input at a time in one browser (its memory bound is the process tree's), so it adds only its
+    first seed and the target keeps half of the box; a box too small to halve keeps the target
+    alone.
     """
     positions = [index for index, value in enumerate(argv) if value == "-u"]
-    allowed = max(1, duration // _CRAWL_INPUT_MIN_SECONDS[scanner])
+    if scanner == "katana":
+        _replace_argv_value(argv, "-parallelism", len(positions))
+        return len(positions), max(1, duration)
+    allowed = 2 if duration // 2 >= _CRAWL_INPUT_MIN_SECONDS[scanner] else 1
     for index in reversed(positions[allowed:]):
         del argv[index:index + 2]
     inputs = min(len(positions), allowed)

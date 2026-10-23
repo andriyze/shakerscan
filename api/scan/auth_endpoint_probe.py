@@ -235,6 +235,30 @@ def sign_in_endpoints(
     return tuple(endpoints.values())
 
 
+def sign_in_page_paths(
+    options: Mapping[str, Any], observations: Iterable[Mapping[str, Any]], *, base_url: str,
+) -> frozenset[str]:
+    """Every normalized path of the profiles' sign-in pages and requests, on any origin.
+
+    For leaving them out of a session-carrying crawl's seeds: a GET of a sign-in page may end
+    the session the crawl carries.
+    """
+    base = str(base_url or "").rstrip("/") + "/"
+    paths: set[str] = set()
+    for name in _ENDPOINT_OPTIONS:
+        value = str(options.get(name) or "").strip()
+        if value:
+            paths.add(normalize_path(urllib.parse.urlsplit(urllib.parse.urljoin(base, value)).path))
+    for item in observations:
+        if not isinstance(item, Mapping) or item.get("kind") != "credential_session":
+            continue
+        for field in ("endpoint_path", "form_action_path"):
+            path = str(item.get(field) or "").partition("?")[0]
+            if path.startswith("/") and "<redacted" not in path:
+                paths.add(normalize_path(path))
+    return frozenset(paths)
+
+
 def sign_in_endpoint_for(
     url: str, method: str, endpoints: Iterable[SignInEndpoint],
 ) -> SignInEndpoint | None:
@@ -341,5 +365,5 @@ __all__ = [
     "AUTH_ENDPOINT_SECONDS_PER_REQUEST", "SIGN_IN_METHODS", "SignInEndpoint", "auth_endpoint_hold",
     "normalize_path", "pace_seconds", "pace_wall_seconds", "parallel_children",
     "probe_parameters", "probe_set_left", "probe_set_requests", "probe_set_spent",
-    "routing_digests", "sign_in_endpoint_for", "sign_in_endpoints",
+    "routing_digests", "sign_in_endpoint_for", "sign_in_endpoints", "sign_in_page_paths",
 ]
