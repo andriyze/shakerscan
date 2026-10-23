@@ -376,6 +376,12 @@ _CREDENTIAL_FORMS = {
     # ... and into a structured path's query string.
     "path-query": ("exposure", "  - method: GET\n    path:\n      - '{{BaseURL}}/login?u={{user}}&p={{pass}}'\n"
                    "    payloads:\n      user:\n        - admin\n      pass:\n        - admin\n", True),
+    # A literal Basic user:password pair (admin:admin) in a structured request's header.
+    "structured-literal-basic": ("exposure", "  - method: GET\n    path:\n      - '{{BaseURL}}/manager'\n"
+                                 "    headers:\n      Authorization: 'Basic YWRtaW46YWRtaW4='\n", True),
+    # A literal Basic value that decodes to no pair is not a credential.
+    "structured-basic-no-pair": ("exposure", "  - method: GET\n    path:\n      - '{{BaseURL}}/manager'\n"
+                                 "    headers:\n      Authorization: 'Basic YWRtaW4='\n", False),
     # A literal user:password pair inside a Basic header expression.
     "literal-basic-expression": ("exposure", "  - raw:\n      - |\n        GET /admin HTTP/1.1\n"
                                  "        Host: {{Hostname}}\n"
@@ -507,6 +513,12 @@ def test_pinned_bundle_default_logins_run_only_with_state_changing_permission():
         assert not record.credential_level and record.state_changing
     assert not STATE_CHANGING_GET_TEMPLATE_IDS & set(plain.template_ids)
     assert len(plain.template_ids) == PINNED_BUNDLE_GET_ONLY_SELECTION
+    # The reviewed pack Hunt and the passive family run, whatever their permissions, holds no
+    # login attempt and nothing else that needs the state-changing permission.
+    from scan.work_manifests import CANONICAL_PASSIVE_NUCLEI_TEMPLATES
+
+    pack = [str(row[0]).lower() for row in CANONICAL_PASSIVE_NUCLEI_TEMPLATES]
+    assert all(template_id in by_id and not by_id[template_id].state_changing for template_id in pack)
     assert not {
         template_id for template_id in plain.template_ids if by_id[template_id].credential_level}
     assert plain.credential_level_count == authorized.credential_level_count

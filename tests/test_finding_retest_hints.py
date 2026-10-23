@@ -138,11 +138,14 @@ _HUNT_EVIDENCE = {
 #: Findings whose retest type has no deterministic prover (generic_http, 2fa_bypass): Hunt and Deep
 #: Hunt promotions, and an earlier scanner's 2FA bypass. The AI tier alone can never conclude.
 AI_ONLY_ROWS = [
-    (_row("autonomous_workflow", "Verified stored cross-site scripting", source="autonomous"), HUNT),
+    # Each Hunt marker alone: the tool, the evidence, the source, the Hunt that verified it.
+    (_row("autonomous_workflow", "Verified stored cross-site scripting"), HUNT),
     (_row("autonomous_workflow", "Verified server-side request forgery", source="autonomous",
           evidence=_HUNT_EVIDENCE), HUNT),
     (_row("", "Server-side request forgery in fetch", evidence=_HUNT_EVIDENCE), HUNT),
     (_row("", "2FA bypass via OTP reuse"), "retest_by_rescan_only"),
+    (_row("", "2FA bypass via OTP reuse", source="autonomous"), HUNT),
+    (_row("", "2FA bypass via OTP reuse", hunt_run_id=uuid.UUID(int=7)), HUNT),
 ]
 
 
