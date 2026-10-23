@@ -1,6 +1,6 @@
 """Several web apps on one host (different ports) all appear in their domain group (PostgreSQL).
 
-E1-N2: "Add targets" registers each app of an IP host (http://10.10.10.100:8000, :3000, ...) as a
+E1-N2: "Add targets" registers each app of an IP host (http://192.0.2.10:8000, :3000, ...) as a
 root target of the same root domain. ``/targets/grouped`` kept only the last root in URL order and
 dropped the others, so the Coverage page never listed five of six apps, even with an endpoint
 inventory ("0 targets with a persistent inventory" while two had 73 and 134 endpoints). Every
@@ -25,7 +25,7 @@ from tests.test_scan_local_revocation_postgres import scan_database  # noqa: E40
 pytest_plugins = ["tests.test_scan_local_revocation_postgres"]
 from list_contract import Page  # noqa: E402
 
-HOST = "10.10.10.100"
+HOST = "192.0.2.10"
 PORTS = (1, 3000, 5002, 8000, 9001, 9002, 9999)
 
 

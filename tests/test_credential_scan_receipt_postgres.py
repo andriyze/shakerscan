@@ -1,8 +1,8 @@
 """A credentialed Scan admitted on the target's standing authorization records a credential-tier
 receipt, as New Scan does (PostgreSQL).
 
-E1 O2: a credentialed scan from the terminal was bound to the target's standing active-tier
-receipt, while New Scan in the UI creates a bounded credential-tier receipt. The submission now
+A credentialed scan from the terminal was bound to the target's standing active-tier receipt,
+while New Scan in the UI creates a bounded credential-tier receipt. The submission now
 derives a credential-tier receipt from the standing authorization (``derive_credential_scan_receipt``)
 and binds the scan to it. Who may start the scan is unchanged (it still needs the standing
 authorization); the derived receipt ends with the authorization it came from and authorizes no
