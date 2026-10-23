@@ -103,7 +103,10 @@ class HttpRequestExecutionAdapter(_InlineAdapter):
         self.result = result
         execution_started = isinstance(result.get("request"), Mapping)
         followed = max(0, int(result.get("hops_followed") or 0))
-        actual = self._wall_budget(started, execution_started=execution_started)
+        # The wall it took, at least a second, whether or not a request was sent: a request
+        # refused before sending (scope, approval) is charged that second rather than leaving the
+        # whole hold on the clock, as an omitted dimension would.
+        actual = self._wall_budget(started, execution_started=True)
         if "http_requests" in self._requested_budget:
             actual["http_requests"] = min(
                 int(self._requested_budget["http_requests"]),

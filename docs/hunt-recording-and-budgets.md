@@ -123,7 +123,9 @@ So no budget but the duration ends a paced investigation:
 | `balanced` | 14,400 s | 14,400 | 1,843,200 | 14,400 | 460,800 | 14,400 | 14,400 |
 | `thorough` | 86,400 s | 86,400 | 11,059,200 | 86,400 | 2,764,800 | 86,400 | 86,400 |
 
-These are ceilings, not promised traffic: every call stays paced by its executor. Two charges are
+These are ceilings, not promised traffic: every call stays paced by its executor. An
+`http.request` refused before it sends anything (a scope or approval refusal) is charged the
+second it took, not its 15-second hold. Two charges are
 not a pace an investigation keeps up and are not covered: a call admitted but refused before it
 starts is charged one call and no wall, and a scanner whose traffic the proxy cannot count is
 charged its tightest proven bound, which for Dalfox and sqlmap is the whole hold even when the run
