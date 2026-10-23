@@ -123,6 +123,16 @@ SCAN_TITLES = [
 # current Scan. Title guessing still routes them, by whole words only.
 EARLIER_TITLES = [
     ("", "SQL Injection in id parameter", "sqli", None),
+    # A database's name is a whole word of its own: "sql" is not one inside "mysql".
+    ("", "MySQL Injection in id", "sqli", None),
+    ("", "PostgreSQL injection", "sqli", None),
+    ("", "MSSQL injection in search", "sqli", None),
+    ("", "SQLite injection in sort", "sqli", None),
+    ("", "Oracle injection in id", "sqli", None),
+    ("injection_extra", "Blind MySQL injection (time based)", "sqli", None),
+    # Without an injection, a database name chooses nothing.
+    ("", "MySQL server version disclosed", None, RESCAN),
+    ("", "Oracle WebLogic console exposed", None, RESCAN),
     ("", "NoSQL Injection Vulnerability", "nosqli", None),
     ("smart_sqli", "NoSQL Injection in username", "nosqli", None),
     ("", "Command Injection in cmd parameter", "command_injection", None),

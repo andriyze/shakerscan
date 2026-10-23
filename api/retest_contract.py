@@ -627,7 +627,11 @@ def infer_type_from_title_tool(
 
     if _title_has(title, "xss", "cross-site scripting", "cross site scripting"):
         return "xss"
-    if (_title_has(title, "sql") and re.search(r"(?<![a-z0-9])inject", title)) or _title_has(title, "sqli"):
+    # A database's name is a word of its own ("sql" is not a whole word inside "mysql").
+    if (
+        _title_has(title, "sql", "mysql", "postgresql", "mssql", "sqlite", "oracle")
+        and re.search(r"(?<![a-z0-9])inject", title)
+    ) or _title_has(title, "sqli"):
         return "sqli"
     if _title_has(title, "ssrf", "server-side request forgery", "server side request forgery"):
         return "ssrf"
