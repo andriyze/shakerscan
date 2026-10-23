@@ -302,3 +302,40 @@ def test_an_unmeasured_charge_never_falls_below_what_the_proxy_saw_or_rises_abov
 
     long_run = _unmeasured_run(requested=requested, enforcement=enforcement, elapsed=600)
     assert long_run.actual_budget["http_requests"] == 100
+
+
+def _dalfox_run(*, elapsed, settlement):
+    """xss.verify through the real plan's enforcement receipt; the process result is a fixture."""
+    import agent_tools
+    requested = {"http_requests": 1_800, "tool_wall_seconds": 480}
+    plan = agent_tools.build_enforced_scanner_plan(
+        "dalfox", "https://app.example.test/search?q=1", {}, reserved_budget=requested,
+        pinned_address="192.0.2.20", pinned_proxy_url="socks5://127.0.0.1:43123")
+    specification = CAPABILITY_REGISTRY.require("xss.verify")
+
+    async def process_runner(payload, *, heartbeat):
+        return {"status": "success", "elapsed_seconds": elapsed, "typed_output": {"records": []},
+                "settlement": settlement, "process_enforcement": plan.enforcement_receipt()}
+    return asyncio.run(CapabilityExecutor().execute(
+        CapabilityExecutionContext(specification=specification, target=TARGET, requested_budget=requested),
+        ScannerExecutionAdapter(specification=specification, process_payload={"tool_name": "dalfox"},
+                                process_runner=process_runner, requested_budget=requested, redacted_execution={}),
+        heartbeat=lambda: asyncio.sleep(0), cancelled=lambda: False,
+    ))
+
+
+def test_an_xss_verification_without_its_har_is_charged_its_paced_rate_not_its_hard_bound():
+    """A Dalfox run whose HAR is missing that ended in 3 s was charged the whole 1,800-request
+    bound; its launch is paced (3 workers at --delay 1000), so 4 a second over the 3 seconds it
+    ran plus the workers' first requests bounds what it sent."""
+    unmeasured = {"mode": "unavailable", "actual": None, "observed_minimum": 0}
+    short = _dalfox_run(elapsed=3, settlement=unmeasured)
+    assert short.actual_budget["http_requests"] == 4 * 3 + 3
+    assert short.redacted_execution["wire_telemetry"]["http_charge_basis"] == "rate_time_bound"
+    # What the proxy saw is never undercut, and the hard bound is never passed.
+    seen = _dalfox_run(elapsed=3, settlement={**unmeasured, "observed_minimum": 40})
+    assert seen.actual_budget["http_requests"] == 40
+    assert _dalfox_run(elapsed=480, settlement=unmeasured).actual_budget["http_requests"] == 1_800
+    # The HAR's exact count still settles exactly.
+    exact = _dalfox_run(elapsed=3, settlement={"mode": "exact", "actual": 9})
+    assert exact.actual_budget["http_requests"] == 9

@@ -125,11 +125,13 @@ So no budget but the duration ends a paced investigation:
 
 These are ceilings, not promised traffic: every call stays paced by its executor. An
 `http.request` refused before it sends anything (a scope or approval refusal) is charged the
-second it took, not its 15-second hold. Two charges are
-not a pace an investigation keeps up and are not covered: a call admitted but refused before it
-starts is charged one call and no wall, and a scanner whose traffic the proxy cannot count is
-charged its tightest proven bound, which for Dalfox and sqlmap is the whole hold even when the run
-ended early.
+second it took, not its 15-second hold. A paced Dalfox or sqlmap verification whose own request
+log is missing is charged its rate (4 and 2 requests a second) over the seconds it ran plus its
+workers' first requests, never less than the proxy saw and never more than its hard bound. Two
+charges are not a pace an investigation keeps up and are not covered: a call admitted but refused
+before it starts is charged one call and no wall, and a scanner whose traffic the proxy cannot
+count and whose launch sets no request rate (headless Dalfox, for one) is charged its hard bound
+even when the run ended early.
 
 The approval-gated call ceiling (`max_active_actions`) is the call ceiling, up from 4 / 20 / 80
 in 2.11.0: any call can need an approval (a session, a principal, a write), and each such call

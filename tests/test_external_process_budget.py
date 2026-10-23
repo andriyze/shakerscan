@@ -524,6 +524,25 @@ def test_rate_limited_plans_carry_the_rate_their_settlement_is_bounded_by():
     assert "rate_bound" not in passive.enforcement_receipt()
 
 
+def test_paced_verifiers_carry_their_rate_and_headless_dalfox_does_not():
+    reserved = {"http_requests": 1_800, "tool_wall_seconds": 480}
+    paced = _plan("dalfox", reserved)
+    receipt = validate_enforcement_receipt(paced.enforcement_receipt(), reserved=reserved)
+    workers = int(paced.argv[paced.argv.index("--worker") + 1])
+    delay_ms = int(paced.argv[paced.argv.index("--delay") + 1])
+    assert receipt["rate_bound"] == {"rate_per_second": 4, "startup_burst": workers}
+    # Above what the argv lets the workers send in a second (measured about 3.3).
+    assert receipt["rate_bound"]["rate_per_second"] > workers * 1_000 / delay_ms
+    sqlmap = _plan("sqlmap", {"http_requests": 900, "tool_wall_seconds": 540})
+    assert sqlmap.enforcement_receipt()["rate_bound"] == {"rate_per_second": 2, "startup_burst": 1}
+    assert sqlmap.argv[sqlmap.argv.index("--threads") + 1] == "1"
+    assert sqlmap.argv[sqlmap.argv.index("--delay") + 1] == "1"
+    headless = agent_tools.build_enforced_scanner_plan(
+        "dalfox", TARGET, {"deep_domxss": True}, reserved_budget={"http_requests": 400, "tool_wall_seconds": 120},
+        pinned_address=PIN, pinned_proxy_url=PROXY)
+    assert "rate_bound" not in headless.enforcement_receipt()
+
+
 def test_a_malformed_rate_bound_fails_the_enforcement_contract():
     crawl = _plan("katana", {"http_requests": 1_500, "tool_wall_seconds": 300})
     receipt = {**crawl.enforcement_receipt(), "rate_bound": {"rate_per_second": 0}}

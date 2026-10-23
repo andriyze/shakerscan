@@ -21,7 +21,9 @@ time rounded up. A paced limit therefore cannot run out before the clock when it
 
 Two charges are not a pace an investigation keeps up, and are not covered: a call admitted but
 refused before it starts is charged one call and no wall, and a process whose traffic the proxy
-cannot count is charged its tightest proven bound, which for Dalfox and sqlmap is the whole hold.
+cannot count and whose launch sets no request rate (headless Dalfox) is charged its hard bound.
+Paced Dalfox and sqlmap without their request log are charged their rate over the seconds they ran
+(``scan.external_process.paced_worker_rate_bound``), which the pace covers.
 Recording a finding or candidate reserves no wall and no traffic. The safety ceilings
 (state-changing requests, TCP ports, hosts, UDP ports, out-of-band interactions, device
 fragility) and every approval are deliberately not derived from pace. ``HUNT_BUDGET_PROFILES`` in
