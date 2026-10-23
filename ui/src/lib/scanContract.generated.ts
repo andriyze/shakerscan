@@ -250,7 +250,7 @@ export const SCAN_PUBLIC_CONTRACT_SNAPSHOT = {
         "xss.request_verify_batch"
       ],
       "default_enabled": false,
-      "description": "Reflected, stored, and DOM XSS probes.",
+      "description": "Reflected XSS, and DOM XSS through URL-fragment parameters, proven in a browser. No stored-XSS check.",
       "label": "Cross-site Scripting",
       "name": "xss",
       "requires_active_testing": true,
@@ -263,7 +263,7 @@ export const SCAN_PUBLIC_CONTRACT_SNAPSHOT = {
         "sqli.request_verify_batch"
       ],
       "default_enabled": false,
-      "description": "SQL injection probes and proof/extraction depth.",
+      "description": "SQL injection verification with sqlmap and a differential proof; no data extraction.",
       "label": "SQL Injection",
       "name": "sqli",
       "requires_active_testing": true,
@@ -275,7 +275,7 @@ export const SCAN_PUBLIC_CONTRACT_SNAPSHOT = {
         "authz.verify"
       ],
       "default_enabled": false,
-      "description": "Multi-user object authorization comparisons. Requires Lab/deep policy and two auth contexts.",
+      "description": "Multi-user object authorization comparisons. A Scan needs active testing and two distinct credential profiles that allow authz.verify; a focused Continuous ASM batch also needs Lab/deep policy.",
       "label": "BOLA / IDOR",
       "name": "bola",
       "requires_active_testing": true,
