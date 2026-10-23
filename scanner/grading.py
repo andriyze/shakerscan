@@ -352,14 +352,14 @@ def _cvss_score(finding: dict[str, Any]) -> float:
     """A finding's CVSS score as a number: 0 when it has none (a verified XSS: CWE-79 has no
     universal vector) or one that is not a finite number; a numeric string is read."""
     value = finding.get("cvss_score")
-    if isinstance(value, bool) or value in (None, ""):
+    if isinstance(value, bool):
         return 0
     if isinstance(value, (int, float)):
         number = value
     else:
         try:
-            number = float(str(value).strip())
-        except ValueError:
+            number = float(value)
+        except (TypeError, ValueError):
             return 0
     return number if math.isfinite(number) else 0
 

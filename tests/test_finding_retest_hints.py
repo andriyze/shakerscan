@@ -150,7 +150,12 @@ AI_ONLY_ROWS = [
 
 
 @pytest.mark.parametrize("ai", [{}, AI_READY])
-@pytest.mark.parametrize("row,reason", AI_ONLY_ROWS)
+@pytest.mark.parametrize("row,reason", [
+    *AI_ONLY_ROWS,
+    # A Scan finding a Hunt later verified keeps its own check's reason: no Hunt family applies.
+    (_row("nuclei", "Apache Tomcat Manager Default Login", hunt_run_id=uuid.UUID(int=7)),
+     "retest_needs_template_replay"),
+])
 def test_a_finding_only_the_ai_tier_could_retest_is_not_offered_a_retest(monkeypatch, ai, row, reason):
     assert _hints(monkeypatch, row, ai=ai) == {
         "retest_supported": False, "retest_type": None, "retest_modes": [],
