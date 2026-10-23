@@ -341,6 +341,30 @@ def bind_scan_scope_receipt(
     return replace(contract, policy=policy, execution_plan=plan)
 
 
+def bind_scan_approval_receipt(
+    contract: ResolvedScanContract, replaced_receipt_id: str | None, approval_receipt_id: str,
+) -> ResolvedScanContract:
+    """Rebind a contract resolved with ``replaced_receipt_id`` to ``approval_receipt_id``.
+
+    Admission replaces the standing receipt a credentialed Scan resolved with by the
+    credential-tier receipt derived from it; the plan is rebuilt so its digest names the receipt
+    the Scan runs under. A contract resolved with another receipt (or none) is left as it is.
+    """
+    current = contract.policy.approval_receipt_id
+    if not replaced_receipt_id or current != str(replaced_receipt_id):
+        return contract
+    policy = replace(contract.policy, approval_receipt_id=str(approval_receipt_id))
+    plan = ScanExecutionPlan(
+        policy=policy,
+        budget_profile=contract.budget_profile,
+        budget=contract.budget,
+        family_preset=contract.execution_plan.family_preset,
+        requested_families=contract.execution_plan.requested_families,
+        resolved_families=contract.execution_plan.resolved_families,
+    )
+    return replace(contract, policy=policy, execution_plan=plan)
+
+
 def _tool_wall_follows_duration(profile: str, advanced: Mapping[str, Any] | None) -> bool:
     """Whether a lowered duration also lowers this Scan's tool wall (thorough and deep only)."""
     advanced = advanced if isinstance(advanced, Mapping) else {}
