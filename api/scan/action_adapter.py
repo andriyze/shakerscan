@@ -3115,13 +3115,24 @@ class DatabaseNeutralScanActionDispatcher:
         seed_urls = {f"{base_origin}{path}" for path in SENSITIVE_SEED_PATHS}
         seed_urls.update(url for url, _headers in graphql_seeds)
         window = endpoints.entries[start:min(len(endpoints.entries), start + count)]
-        for entry in window:
+        # A route seen with several bodies is an endpoint entry per body, all at one URL: the URL
+        # is read once, and each further entry is its own attempt that shares that read (its
+        # attempt id names its manifest position; the URL's first entry keeps its earlier id).
+        queued: set[str] = set()
+        repeated: list[tuple[str, str]] = []
+        for index, entry in enumerate(window, start=start):
             try:
                 url = execution_url_for_endpoint(entry)
             except (ScanWorkManifestError, KeyError):
                 continue
             if url in seed_urls or is_never_requested(url):
                 continue
+            if url in queued:
+                repeated.append((url, hashlib.sha256(
+                    f"{manifest_digest}:exposure:{url}:entry:{index}".encode()
+                ).hexdigest()))
+                continue
+            queued.add(url)
             probes.append((url, "discovered_endpoint"))
             # A discovered GraphQL route is also read with the fixed introspection document.
             if is_graphql_endpoint_url(url):
@@ -3416,6 +3427,25 @@ class DatabaseNeutralScanActionDispatcher:
                 "retry_timeout_seconds": round(retry_wait, 2) if retry_wait else None,
             })
         observations.extend(slow_probes)
+        # Each further entry of a URL read once shares that read's outcome; it sends nothing and
+        # carries no evidence of its own, so the URL yields one finding. A URL never read leaves
+        # its further entries unattempted too.
+        read = {
+            str(item.get("attempt_id")): item for item in observations
+            if isinstance(item, Mapping) and item.get("kind") == "candidate_attempt"
+        }
+        shared = 0
+        for url, attempt_id in repeated:
+            first = read.get(hashlib.sha256(f"{manifest_digest}:exposure:{url}".encode()).hexdigest())
+            if first is None:
+                continue
+            shared += 1
+            observations.append({
+                "kind": "candidate_attempt", "attempt_id": attempt_id,
+                "candidate_id": attempt_id[:32], "family": "sensitive_exposure",
+                "status": first.get("status"), "proof_state": first.get("proof_state"),
+                "budget_consumed": {}, "shared_attempt_id": first.get("attempt_id"),
+            })
         unattempted = max(0, len(probes) - attempted)
         consumed["tool_wall_seconds"] = min(
             wall_ceiling, max(1, len(probes)),
@@ -3439,6 +3469,7 @@ class DatabaseNeutralScanActionDispatcher:
                 "slice": {"start": start, "count": count},
                 "probe_count": len(probes), "attempted_count": attempted,
                 "resumed_count": resumed, "unattempted_count": unattempted,
+                "shared_read_count": shared,
                 "retried_count": len(deferred), "timed_out_count": len(slow_probes),
                 "indistinguishable_from_absent": indistinguishable,
                 "soft_404_controls_requested": absent_bodies is not None,

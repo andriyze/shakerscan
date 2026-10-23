@@ -428,3 +428,97 @@ def test_a_slice_starting_inside_a_forms_variants_names_each_by_its_manifest_pos
     assert [head["attempt_id"] for head in heads] == _attempt_ids(candidates, family)[5:7]
     assert sorted(head["status"] for head in heads) == ["partial", "success"]
     assert len(calls) == 2 and len(backend.attempts[batch.action_id]) == 2
+
+
+_PRIVATE_KEY = (b"-----BEGIN RSA PRIVATE KEY-----\n"
+                b"MIIEowIBAAKCAQEA7vbqajDw4o6gJy8UtmIbkcpnkO3Kwc4qsEnSZp/TR+fQi62F\n"
+                b"-----END RSA PRIVATE KEY-----\n")
+
+
+def _exposure(routes, *, part, rounds=1, disclosed=False):
+    """The exposure sweep over a window of the endpoint manifest of ``routes`` (no seed paths:
+    the window does not start the manifest). Every URL answers 404, or, with ``disclosed``, the
+    sign-in path without a query serves a private key."""
+    from runtime.request_replay_executor import ReplayTransportResult
+
+    scan_id, endpoints, candidates = _manifests(routes)
+    sent: list[tuple[str, str]] = []
+
+    class Transport:
+        async def send(self, request, **_kwargs):
+            sent.append((request.method, request.url))
+            served = disclosed and request.url.endswith("/hub/login")
+            return ReplayTransportResult(
+                status_code=200 if served else 404, connected_address="192.0.2.10",
+                final_url=request.url, response_headers={"content-type": "text/plain"},
+                response_body=_PRIVATE_KEY if served else b"not found", elapsed_ms=5,
+            )
+
+    start, count = part
+    action = dataclasses.replace(
+        _action("verify.exposure.r01", "exposure.verify_batch", 0, capability_args={
+            "endpoint_manifest_ref": endpoints.reference().canonical_dict(),
+            "slice": {"start": start, "count": count},
+        }),
+        requested_budget={"http_requests": 400, "tool_wall_seconds": 400}, action_digest=None,
+    )
+    plan = ScanActionPlan(scan_id=scan_id, execution_plan_digest="a" * 64,
+                          target_binding_digest=TARGET.digest, actions=(action,))
+    backend = _StoredOnce(manifests={endpoints.manifest_id: endpoints,
+                                     candidates.manifest_id: candidates})
+    dispatcher = _dispatcher(plan, backend, policy=ScanPolicy(active_testing=True))
+    dispatcher._scan_replay_transport = lambda *_args, **_kwargs: Transport()
+    receipts = [asyncio.run(dispatcher(action, _lease(plan, action), _noop)) for _ in range(rounds)]
+    return receipts, sent, endpoints
+
+
+def test_each_entry_of_a_url_seen_with_several_bodies_is_one_exposure_get_and_its_own_attempt():
+    """Two bodies of the sign-in route and its sign-in page: the sign-in URL is read once, and each
+    entry is its own attempt. The sweep read the URL once per entry under one attempt id, so it sent
+    a duplicate GET and the report counted two of three entries."""
+    from api.scan.action_plan import ScanActionPlan as PackagePlan
+    from api.scan.finalizer import finalize_scan_report
+    from tests.test_auth_endpoint_probe_coverage import ORIGIN
+    from tests.test_scan_finalizer import _result_with_observation_count
+    from tests.test_scan_orchestrator import SCAN_ID
+    from tests.test_scan_orchestrator import _action as plan_action
+
+    (receipt,), sent, endpoints = _exposure(SIGN_IN_ROUTES, part=(1, 3))
+    window = endpoints.entries[1:4]
+    assert [entry["method"] for entry in window] == ["POST", "POST", "GET"]
+    assert sorted(url for _method, url in sent) == [f"{ORIGIN}/hub/login", f"{ORIGIN}/hub/login?next=1"]
+    heads = _heads(receipt)
+    assert len(heads) == 3 and len({head["attempt_id"] for head in heads}) == 3, heads
+    digest = endpoints.reference().manifest_digest
+    # The URL's first entry keeps the attempt id earlier builds checkpointed it under.
+    assert _sha(f"{digest}:exposure:{ORIGIN}/hub/login") in {head["attempt_id"] for head in heads}
+    rows = tuple(receipt.observations)
+    batch = dataclasses.replace(
+        plan_action("verify.exposure.r01", 0, capability_name="exposure.verify_batch"),
+        capability_args={"slice": {"start": 1, "count": 3}, "manifest_entries": 4},
+        output_schema="exposure-probe-batch/v1", action_digest=None,
+    )
+    final = plan_action("finalize.report", 1, dependencies=(batch.action_id,))
+    plan = PackagePlan(scan_id=SCAN_ID, execution_plan_digest="b" * 64,
+                       target_binding_digest="a" * 64, actions=(batch, final))
+    report = finalize_scan_report(
+        plan=plan, target_url=ORIGIN,
+        action_results={batch.action_id: _result_with_observation_count(batch, len(rows))},
+        observations={batch.action_id: rows},
+    )
+    family = next(row for row in report["coverage"]["family_coverage"]
+                  if row["family"] == "sensitive_exposure")
+    assert family["attempted_candidates"] == 3 and family["unattempted_candidates"] == 0, family
+
+
+def test_a_resumed_exposure_sweep_reads_no_url_again_for_any_entry():
+    receipts, sent, _endpoints = _exposure(SIGN_IN_ROUTES, part=(1, 3), rounds=2)
+    assert len(sent) == 2
+    assert len(_heads(receipts[1])) == 3 and len({head["attempt_id"] for head in _heads(receipts[1])}) == 3
+
+
+def test_a_url_seen_with_several_bodies_yields_one_exposure_finding():
+    (receipt,), _sent, _endpoints = _exposure(SIGN_IN_ROUTES, part=(1, 3), disclosed=True)
+    proofs = [item for item in receipt.observations if item.get("kind") == "sensitive_exposure_proof"]
+    assert len(proofs) == 1, proofs
+    assert sum(head["proof_state"] == "verified" for head in _heads(receipt)) == 2
