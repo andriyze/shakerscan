@@ -229,6 +229,20 @@ def test_a_verifier_signal_escalates_only_the_variant_that_produced_it(monkeypat
 
 
 @pytest.mark.parametrize("capability", ["sqli.prove_batch", "xss.browser_prove_batch"])
+def test_the_first_variants_signal_escalates_only_the_first_variant(monkeypatch, capability):
+    """The first variant keeps the attempt id an earlier build shared; the verifier recorded its
+    siblings under their own ids, so its signal is the first variant's alone."""
+    receipts, calls, _backend, candidates, _family, _batch = _run(
+        monkeypatch, capability, statuses=["success"], signalled=(0,),
+    )
+    declared = candidates.entries[0]
+    expected = (tuple(sorted(declared["body_field_names"])),
+                "json" if "json" in str(declared.get("content_type") or "") else "form")
+    assert [variant for variant, _status in calls] == [expected]
+    assert receipts[0].redacted_execution["eligible_count"] == 1
+
+
+@pytest.mark.parametrize("capability", ["sqli.prove_batch", "xss.browser_prove_batch"])
 def test_a_signal_recorded_under_the_shared_attempt_of_an_earlier_build_escalates_every_variant(
     monkeypatch, capability,
 ):

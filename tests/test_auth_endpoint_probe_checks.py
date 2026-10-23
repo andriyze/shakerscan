@@ -280,6 +280,25 @@ def test_the_nosqli_check_stops_at_its_probe_set_and_never_reads_negative(monkey
     assert closed["sign_in_endpoint_received"] == 24
 
 
+def test_a_check_its_set_leaves_short_sends_only_what_is_left_and_is_inconclusive(monkeypatch):
+    """24 of the 32 the four-field NoSQLi set holds were sent by an earlier action: the crawled
+    form's attempt holds the 8 left, tests two of its four fields and is never read negative."""
+    _record_pace(monkeypatch)
+    target = _fake_target(monkeypatch)
+    (endpoint,) = sign_in_endpoints(SIGN_IN, [], base_url=f"{ORIGIN}/")
+    earlier = {"attempt_id": "e" * 64, "candidate_id": "e" * 64, "status": "success",
+               "observations": ({"kind": "candidate_attempt", "sign_in_endpoint_key": endpoint.key,
+                                 "sign_in_endpoint_requests": 24},)}
+    receipts, candidates = _run("nosqli.verify_batch", options=SIGN_IN, slices=[(0, 1), (1, 1)],
+                                prior=[("batch.x.000.r01", earlier)])
+    assert len(candidates.entries[1]["body_field_names"]) == 4
+    (head,) = [item for item in receipts[1].observations if item.get("kind") == "candidate_attempt"]
+    assert head["sign_in_endpoint_requests"] == 8 and head["sign_in_endpoint_received"] == 32
+    assert head["verdict"] == "inconclusive"
+    assert head["inconclusive_reason"] == AUTH_ENDPOINT_PROBE_LIMITED
+    assert len(target.to_sign_in()) == 8
+
+
 def test_a_later_action_of_the_check_draws_from_what_the_endpoint_already_received(monkeypatch):
     _record_pace(monkeypatch)
     target = _fake_target(monkeypatch)
