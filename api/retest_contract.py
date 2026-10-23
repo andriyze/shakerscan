@@ -392,7 +392,58 @@ RETEST_TOOL_TYPE_MAP: dict[str, str] = {
     # Autonomous workflow findings carry the exact family in evidence. This
     # generic fallback keeps legacy records retestable when that field is absent.
     "autonomous_workflow": "generic_http",
+    # The current Scan's provers, and Hunt's browser proof: each is replayed by the prover of
+    # its own kind of check, whatever its title says.
+    "shakerscan_browser_proof": "xss",
+    "playwright": "xss",
+    "request_xss_differential": "xss",
+    "shakerscan_sqli_proof": "sqli",
+    "request_sqli_differential": "sqli",
+    "shakerscan_nosqli_verify": "nosqli",
+    "shakerscan_redirect_probe": "open_redirect",
 }
+
+# Title guessing runs only for a finding with no tool or with a tool the scanner stored before
+# the current Scan (its ``normalize_finding`` names; a test pins the list to them). A current
+# tool that is not in the map above has no prover of its kind of check: a title naming "Remote
+# Code Execution", "JWT" or "Path Traversal" in a template's name sent attack payloads to the
+# finding's URL and called the result a retest.
+PRE_V2_TITLE_INFERENCE_TOOLS: frozenset[str] = frozenset({
+    "account_enumeration", "api_security", "approval_checks", "asn_discovery", "backup_file",
+    "blind_ssrf", "bruteforce_protection", "business_logic", "cache_poisoning", "cicd_exposure",
+    "client_side", "cloud_bucket", "cloud_scanner", "cloud_ssrf", "container_registry",
+    "cookies_analyzer", "cors_check", "cors_scanner", "csp_evaluator", "csrf_testing",
+    "ct_monitor", "data_exposure", "default_credentials", "deserialization",
+    "directory_listing", "dns_policy", "domain_intelligence", "file_upload",
+    "graphql_batch_attack", "graphql_depth_attack", "graphql_vulnerability",
+    "hash_route_dom_xss", "host_header_injection", "http_headers", "http_methods",
+    "http_smuggling", "http_verb_tampering", "injection_extra", "input_validation",
+    "ip_reputation", "js_dependency", "js_secret", "jwt_vulnerability", "kubernetes_exposure",
+    "ldap_injection", "mass_assignment", "missing_rate_limit", "network_services",
+    "oauth_vulnerability", "open_redirect", "package_exposure", "password_policy",
+    "password_reset", "path_traversal", "race_condition", "rate_limiting", "redirect_check",
+    "schemathesis", "security_txt", "session_management", "session_vulnerability",
+    "smart_auth", "smtp_scanner", "ssh_scanner", "sslyze", "ssrf", "ssti", "stored_xss",
+    "subdomain_takeover_advanced", "terraform_exposure", "timing_attack", "tls_config",
+    "typosquatting", "waf_detection", "waf_detector", "webhook_checks", "xpath_injection",
+    "xxe_injection", "zone_transfer",
+})
+# The earlier scanner also named JWT and GraphQL findings after their check (``jwt_<kind>``).
+PRE_V2_TITLE_INFERENCE_TOOL_PREFIXES: tuple[str, ...] = ("jwt_", "graphql_")
+
+# Why a finding has no retest. A template finding needs its own template replayed; an exposure,
+# a header, TLS, DNS, takeover, GraphQL or authorization finding is checked again by a Scan.
+RETEST_REASON_RESCAN_ONLY = "retest_by_rescan_only"
+RETEST_REASON_TEMPLATE_REPLAY = "retest_needs_template_replay"
+RETEST_REASON_EXPOSURE = "retest_exposure_by_rescan"
+_RETEST_REASON_BY_TOOL: dict[str, str] = {
+    "nuclei": RETEST_REASON_TEMPLATE_REPLAY,
+    "shakerscan_exposure_probe": RETEST_REASON_EXPOSURE,
+}
+# Retests whose prover sends only what the Scan's own check sent: a plain GET of the exposed
+# file, or a GET with an Origin header. Every other prover sends attack payloads, a forged token
+# or a request as another principal, and the AI tier may send requests of its own choosing.
+PASSIVE_RETEST_TYPES: frozenset[str] = frozenset({"exposed_file", "cors"})
 
 DEFAULT_REPLAY_PAYLOADS: dict[str, str] = {
     "xss": "<script>alert(1)</script>",
@@ -449,64 +500,102 @@ def normalize_retest_type(value: str | None) -> str | None:
     return RETEST_TYPE_ALIASES.get(str(value).strip().lower())
 
 
+def title_inference_allowed(tool: str | None) -> bool:
+    """Whether a finding's title may choose its retest: no tool, or an earlier scanner's tool."""
+    name = str(tool or "").strip().lower()
+    return (
+        not name
+        or name in PRE_V2_TITLE_INFERENCE_TOOLS
+        or name.startswith(PRE_V2_TITLE_INFERENCE_TOOL_PREFIXES)
+    )
+
+
+def _title_has(title: str, *phrases: str) -> bool:
+    """Whether a lower-cased title holds one of the phrases as whole words (``rce`` is not in
+    ``source`` or ``enforced``)."""
+    return any(
+        re.search(rf"(?<![a-z0-9]){re.escape(phrase)}(?![a-z0-9])", title) for phrase in phrases
+    )
+
+
+def retest_unsupported_reason(tool: str | None) -> str:
+    """Why a finding without a retest type is not retested (see ``_RETEST_REASON_BY_TOOL``)."""
+    return _RETEST_REASON_BY_TOOL.get(str(tool or "").strip().lower(), RETEST_REASON_RESCAN_ONLY)
+
+
+def retest_sends_active_requests(retest_type: str | None, *, ai_tier_available: bool) -> bool:
+    """Whether a retest of this type may send active requests: a prover's payloads, or the AI
+    tier's own requests when an AI verifier is configured. None for a finding with no retest."""
+    if not retest_type:
+        return False
+    return retest_type not in PASSIVE_RETEST_TYPES or ai_tier_available
+
+
 def infer_type_from_title_tool(title: str | None, tool: str | None) -> str | None:
-    """Infer a retest type from a finding's title/tool.
+    """Infer a retest type from a finding's tool, and for an earlier scanner's tool its title.
 
     Single source of truth for both the API retest endpoint and the worker
     (auto-retest + retest execution) so the two never disagree on whether a
-    finding is retestable.
+    finding is retestable. A tool in ``RETEST_TOOL_TYPE_MAP`` names its prover. Title guessing
+    runs only when ``title_inference_allowed(tool)`` and matches whole words; any other tool
+    gets no retest type (``retest_unsupported_reason`` says why).
     """
     title = str(title or "").lower()
-    tool = str(tool or "").lower()
+    tool = str(tool or "").strip().lower()
+    guess = title_inference_allowed(tool)
 
     # NoSQL injection routes to the dedicated NoSQLi prover (operator-injection
     # differential), NOT the SQLi prover. This guard runs BEFORE the generic
     # "sql"+"inject" title check below (note "sql" is a substring of "nosql", so
     # without this guard a NoSQL finding would misroute to sqli and report a false
     # "likely_fixed"). Tool match is also handled here for nosql tools.
-    if "nosql" in title or "no sql" in title or tool in ("nosql_injection", "smart_nosql", "nosqli"):
+    if tool in ("nosql_injection", "smart_nosql", "nosqli"):
         return "nosqli"
-
     mapped = RETEST_TOOL_TYPE_MAP.get(tool)
+    if (guess or mapped == "sqli") and _title_has(title, "nosql", "no sql", "nosqli"):
+        return "nosqli"
     if mapped:
         return mapped
+    if not guess:
+        return None
 
-    if "xss" in title or "cross-site scripting" in title:
+    if _title_has(title, "xss", "cross-site scripting", "cross site scripting"):
         return "xss"
-    if ("sql" in title and "inject" in title) or "sqli" in title:
+    if (_title_has(title, "sql") and re.search(r"(?<![a-z0-9])inject", title)) or _title_has(title, "sqli"):
         return "sqli"
-    if "ssrf" in title or "server-side request forgery" in title:
+    if _title_has(title, "ssrf", "server-side request forgery", "server side request forgery"):
         return "ssrf"
-    if any(k in title for k in ("path traversal", "local file inclusion", "directory traversal", "lfi", "../")):
+    if "../" in title or _title_has(
+        title, "path traversal", "local file inclusion", "directory traversal", "lfi",
+    ):
         return "path_traversal"
-    if "open redirect" in title or "url redirect" in title:
+    if _title_has(title, "open redirect", "url redirect"):
         return "open_redirect"
-    if "cors" in title:
+    if _title_has(title, "cors"):
         return "cors"
-    if "2fa bypass" in title or "mfa bypass" in title:
+    if _title_has(title, "2fa bypass", "mfa bypass"):
         return "2fa_bypass"
-    if "command injection" in title or "rce" in title or "remote code execution" in title:
+    if _title_has(title, "command injection", "rce", "remote code execution"):
         return "command_injection"
-    if "ssti" in title or "template injection" in title:
+    if _title_has(title, "ssti", "template injection"):
         return "ssti"
-    if "xxe" in title or "xml external entity" in title:
+    if _title_has(title, "xxe", "xml external entity"):
         return "xxe"
-    if "jwt" in title:
+    if _title_has(title, "jwt"):
         return "jwt"
-    if "bola" in title or "broken object level" in title:
+    if _title_has(title, "bola", "broken object level"):
         return "bola"
     # BFLA / broken access control -> cross_user_access (bola) prover.
-    if any(k in title for k in (
-        "broken function level", "broken function-level", "bfla",
+    if _title_has(
+        title, "broken function level", "broken function-level", "bfla",
         "broken access control", "function level authorization",
-        "function-level authorization", "missing function level access")):
+        "function-level authorization", "missing function level access",
+    ):
         return "bola"
-    if "idor" in title or "insecure direct object" in title:
+    if _title_has(title, "idor", "insecure direct object"):
         return "idor"
     if (
-        "exposed file" in title
-        or "file exposed" in title          # "Sensitive file exposed: X" harvest wording
-        or "sensitive file" in title
+        _title_has(title, "exposed file", "file exposed", "sensitive file")  # "Sensitive file exposed: X"
         or (title.startswith("accessible ") and ":" in title)
     ):
         return "exposed_file"

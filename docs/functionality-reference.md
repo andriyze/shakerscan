@@ -1499,12 +1499,18 @@ vendors, AI surfaces, MCP tools, model artifacts, scans, and findings, with asse
 **Dashboard & queue**: `/dashboard` (active/critical counts, average score, running scans),
 `/queue/stats`, and `/queue/clear`.
 
-**Verification & retest**: deterministic provers exist for xss, sqli, ssrf, path_traversal,
-open_redirect, cors, command_injection, ssti, xxe, jwt, idor, bola, and exposed_file; others can be
-replayed by the AI tier. A prover retests a finding that already exists; it does not mean a Scan
+**Verification & retest**: deterministic provers exist for xss, sqli, nosqli, ssrf, path_traversal,
+open_redirect, cors, command_injection, ssti, xxe, jwt, idor, bola, and exposed_file. A finding is
+retested only by the prover of its own kind of check, chosen by its tool (`RETEST_TOOL_TYPE_MAP`);
+its title chooses only for a finding with no tool or with a tool of the scanner before the current
+Scan, by whole words. Any other finding has no retest and says why in `retest_unsupported_reason`:
+`retest_needs_template_replay` (a Nuclei template finding), `retest_exposure_by_rescan` (an
+exposure-probe finding) or `retest_by_rescan_only` (headers, cookies, CORS, TLS, DNS, takeover,
+GraphQL and authorization findings): run a new Scan to check it again. `GET /findings/{id}` also
+returns `retest_active`, true when the retest may send active requests (a prover's payloads, an
+AI Gate probe, or the AI tier's requests when an AI verifier is configured). A prover retests a finding that already exists; it does not mean a Scan
 looks for that class (see the [OWASP coverage matrix](owasp-coverage-matrix.md)). Retests are
-slot-limited (`RETEST_MAX_PARALLEL`) with a watchdog and
-auto-retest-on-scan-complete policy.
+slot-limited (`RETEST_MAX_PARALLEL`) with a watchdog and auto-retest-on-scan-complete policy.
 
 ---
 
