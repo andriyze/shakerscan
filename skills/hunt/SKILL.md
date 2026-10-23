@@ -397,7 +397,9 @@ A `budget_exhausted` Hunt still accepts candidates and evidence-linked `findings
 while its shared `max_candidates` recording allowance has room. Finding recording spends no
 execution calls, active calls or target traffic; existing authority, ownership and proof checks
 still apply. A full recording allowance refuses only that write (a person can raise it); it never
-stops the Hunt. Use an absolute finding URL when cited evidence covers several services; a relative
+stops the Hunt, and a refused write spends nothing. A Hunt's findings hold at most 64 MiB of text:
+a write past it is refused, so keep descriptions to what the evidence shows or add to an existing
+finding with `findings.update`. Use an absolute finding URL when cited evidence covers several services; a relative
 path stays on the target's own service when it is evidenced, and otherwise follows the single
 evidenced service on the target host, including its scheme and port (a device's address or name
 is that host). Creating a finding this Hunt already recorded with the same title and location

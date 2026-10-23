@@ -81,15 +81,16 @@ supporting images, inventing credentials or silently substituting a different im
 
 ## Operator budget extensions
 
-Hunt profiles are sized so that no call or traffic budget runs out before the profile's duration
-at the fastest pace any executor is held to (10 requests per second on the wire, 0.3 browser actions,
-one call per five seconds and one verification per minute of reserved wall):
+Hunt profiles are sized so that no call, verification, browser or HTTP budget runs out before the
+profile's duration. Every call that runs is charged at least one second of the duration, and each
+limit covers the duration at the most one call can be charged in that second (one call and one
+verification; 32 browser actions and 128 requests, a login check's charge):
 
 | Profile | Duration | Calls | HTTP requests | Verifications | Browser actions | Approval-gated calls | Records |
 |---|---|---|---|---|---|---|---|
-| `fast` | 1 h | 750 | 40,000 | 60 | 1,200 | 750 | 1,000 |
-| `balanced` | 4 h | 3,000 | 150,000 | 250 | 4,500 | 3,000 | 5,000 |
-| `thorough` | 24 h | 18,000 | 900,000 | 1,500 | 26,000 | 18,000 | 20,000 |
+| `fast` | 1 h | 3,600 | 460,800 | 3,600 | 115,200 | 3,600 | 3,600 |
+| `balanced` | 4 h | 14,400 | 1,843,200 | 14,400 | 460,800 | 14,400 | 14,400 |
+| `thorough` | 24 h | 86,400 | 11,059,200 | 86,400 | 2,764,800 | 86,400 | 86,400 |
 
 These are ceilings, not promised traffic: every call stays paced by its executor. Approval-gated
 calls may use the whole call allowance because each one still checks its approval receipt. The
@@ -102,8 +103,10 @@ silently shortening the call. Start warnings use the actual executor reservation
 
 Evidence-linked finding recording shares `max_candidates` with candidate records and remains
 available on an unfinished exhausted Hunt. It does not spend target traffic or execution calls,
-and a full allowance refuses only that write: it never stops the Hunt. Finding locations keep the
-evidenced service's scheme and port. A relative path stays on the target's own service when that
+and a full allowance or a refused write never stops the Hunt; a refused write spends nothing. A
+Hunt's findings hold at most 64 MiB; a write past it is refused and nothing is charged. Finding
+locations keep the evidenced service's scheme and port and are stored in one spelling (lower-case
+scheme and host, no default port). A relative path stays on the target's own service when that
 service is evidenced, and otherwise follows the single evidenced service on the target host; a
 device locator or `host://` asset is a host. Use an absolute URL when the evidence spans several
 services. Creating a finding the Hunt already recorded with the same title and URL returns the
@@ -114,9 +117,11 @@ On finish, the server proposes the Hunt's reusable read-only and verification st
 target's one rolling retained-checks proposal for `shakerscan knowledge review`. It never saves
 them, even when the target delegates instruction changes, and the metadata opt-out skips it. The
 proposal keeps one copy of each step and the newest 16, leaves out steps a saved action already
-holds or that you rejected in the last decided one, is updated in place by later finishes, and is not counted against the proposals a Hunt may
-file. A step is proposed only when every input is on its capability's allowlist and carries no
-query value, header, body, browser input, session, credential or origin on another host.
+holds or that you rejected in the latest rejected one, is updated in place by later finishes, and
+is not counted against the proposals a Hunt may file. A step is proposed only when every input is
+on its capability's allowlist and carries no query value, header, body, browser input, session,
+credential or origin on another host, and only when its path names no action (log out, reboot,
+firmware, checkout...), credential or code and carries no payload character or dot segment.
 Accepting it saves one saved action. The debrief's `saved_action` field reports `proposed`,
 `updated`, `unchanged`, `skipped` or `not_saved`. This requires finishing the Hunt; a disconnected
 planner does not finish automatically.
