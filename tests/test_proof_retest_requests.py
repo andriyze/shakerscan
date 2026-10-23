@@ -120,6 +120,14 @@ GAPS = [
     (_xss(payload_sha256="0" * 64), "payload_unknown"),
     (_xss(candidate_id=None), "payload_unknown"),
     (_xss(parameter_name=None, execution_sink={}), "no_parameter"),
+    # The tested parameter twice: which one the proof set is ambiguous.
+    (_xss("http://shop.fixture.invalid/search?q=%3Credacted%3E&q=%3Credacted%3E"), "not_query"),
+    # An authority clients read differently (userinfo, a backslash, a space) names no site.
+    (_xss("http://user:secret@shop.fixture.invalid/search?q=%3Credacted%3E"), "no_origin"),
+    (_xss("http://evil.fixture.invalid\\@shop.fixture.invalid/search?q=%3Credacted%3E"), "no_origin"),
+    (_xss("http://shop.fixture.invalid\\evil.fixture.invalid/search?q=%3Credacted%3E"), "no_origin"),
+    (_xss("http://shop.fixture.invalid evil/search?q=%3Credacted%3E"), "no_origin"),
+    (_sqli(target="http://user@shop.fixture.invalid"), "no_origin"),
 ]
 
 
@@ -540,6 +548,33 @@ def test_a_proven_injection_whose_retest_requests_get_no_answer_is_inconclusive(
     assert result["proof"]["errors"]
 
 
+
+
+@pytest.mark.parametrize("row", [_sqli(), _nosqli()], ids=["sqli", "nosqli"])
+@pytest.mark.parametrize("status,location,refused", [
+    (302, "/login?next=/product", "authentication_required"),
+    (401, None, "authentication_required"),
+    (403, None, "target_refused"),
+])
+def test_a_proven_injection_whose_control_the_target_refused_says_so(row, status, location, refused):
+    """A signed-out control (a sign-in redirect, a 401) or a plain 403 is a refusal: the retest is
+    inconclusive and says the target refused it, never that requests went unanswered."""
+    from worker_handlers.proof_replay import run_proof_retest
+
+    async def refuse(url, **_kwargs):
+        headers = {"Location": location} if location else {}
+        final = f"http://shop.fixture.invalid{location}" if location else url
+        return {"status_code": status, "headers": headers, "body": "", "final_url": final, "elapsed_ms": 3}
+
+    poe = types.SimpleNamespace(fetch_with_capture=refuse, start_scan_session=lambda *_a, **_k: None,
+                                end_scan_session=lambda *_a, **_k: None)
+    verification = _verification(row, "http://shop.fixture.invalid")
+    result = asyncio.run(run_proof_retest(
+        verification, infer_retest_inputs(verification), poe=poe, replay_commands=[], ladder=[],
+        cancelled=lambda: False))
+    assert (result["verdict"], result["artifacts"]["outcome"]) == ("inconclusive", refused)
+    assert result["verdict_reason"].startswith("The target refused the retest's baseline request")
+    assert ("asked for credentials" in result["verdict_reason"]) is (refused == "authentication_required")
 
 @pytest.mark.parametrize("row", [_sqli(), _nosqli()], ids=["sqli", "nosqli"])
 @pytest.mark.parametrize("statuses,shown", [
