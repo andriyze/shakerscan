@@ -1,4 +1,4 @@
 # The base install's runtime dependencies (client/pyproject.toml [project] dependencies).
 # It must list exactly what the package declares; scripts/release_sbom.py fails otherwise.
 # Lock: uv pip compile client/requirements/runtime.txt --python-version 3.10 --universal --generate-hashes --output-file client/requirements/runtime.lock
-fido2>=2.0,<3
+fido2>=2.2,<2.3

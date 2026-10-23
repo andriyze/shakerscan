@@ -21,7 +21,8 @@ classifiers = [
 ]
 # python-fido2 (Yubico, BSD-2-Clause): a USB security key's touch for terminal approvals and the
 # decisions an Enterprise gateway asks a touch for. Hash-locked in client/requirements/runtime.lock.
-dependencies = ["fido2>=2.0,<3"]
+# One minor line: the client follows python-fido2's API, which has changed between minor releases.
+dependencies = ["fido2>=2.2,<2.3"]
 
 [project.optional-dependencies]
 # `shakerscan record`: a recorded Chromium (then `python -m playwright install chromium`).
