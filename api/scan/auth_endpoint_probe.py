@@ -34,7 +34,10 @@ URL's query, not a body). What changes:
   and XSS request verifiers, the SQLi proof, the NoSQLi check and the XSS browser proof) wait
   the same pace before each request to the endpoint (``PacedSignInTransport``) and hold a pace
   a request on top of their share of the wall; a Scan part runs one action at a time, so the
-  endpoint sees one request per pace from whichever of them is running;
+  endpoint sees one request per pace from whichever of them is running. Such an attempt runs
+  only when what the slice has left paces all of it (a sign-in form's SQLi proof 8 requests,
+  ``paced_check_hold``); otherwise it waits for a later action rather than running short, and a
+  proof no action could pace is named in coverage like one the probe set left without a verdict;
 * one probe set per endpoint and verifier across the Scan: every candidate on the endpoint (a
   declared request, the crawled form with its hidden fields, a JSON variant), every slice and
   every continuation round draws from it (a parallel child holds its own). Per tested field, at
@@ -415,29 +418,35 @@ def auth_endpoint_hold(
 
 def paced_check_hold(
     sub_budget: Mapping[str, int], *, capability_name: str, received: int, parameters: int = 1,
-    children: int = 1, available_wall_seconds: int,
+    children: int = 1, available_wall_seconds: int, need: int = 0,
 ) -> dict[str, int] | None:
     """The hold of an in-process check's attempt on the sign-in endpoint, or None when what the
-    slice has left cannot pace the check's least attempt.
+    slice has left cannot pace the whole attempt.
 
-    Its requests are at most what the check's probe set has left. Each of them waits the pace
-    first (``PacedSignInTransport``), so the attempt's wall is its share plus one pace a request,
-    from what the slice has left (``available_wall_seconds``), and at least one pace and one
-    second a request.
+    ``need`` is what the attempt sends when it runs to its end (a sign-in form's SQLi proof 8, any
+    other 14, the NoSQLi check four a field). The slice must pace all of it, from its request
+    share and from its wall at one pace and one second a request; otherwise the attempt waits for
+    a later action instead of running short: a SQLi proof cut to its error pair never sends the
+    pair that proves a blind sign-in injection, and would read like a finished one. Its requests
+    are at most what the check's probe set has left; a set that leaves the attempt short of
+    ``need`` still runs it, and the batch marks it inconclusive. Each request waits the pace first
+    (``PacedSignInTransport``), so the attempt's wall is its share plus one pace a request, from
+    what the slice has left (``available_wall_seconds``), and at least one pace and one second a
+    request.
     """
     pace = pace_seconds(children=children)
     available = max(0, int(available_wall_seconds))
-    limits = [
-        probe_set_left(capability_name, received, parameters),
-        int(sub_budget.get("http_requests") or 0),
-        available // (pace + 1),
-    ]
-    if "state_changing_requests" in sub_budget:
-        limits.append(int(sub_budget.get("state_changing_requests") or 0))
-    requests = min(limits)
-    if requests < AUTH_ENDPOINT_CHECK_MINIMUM_REQUESTS.get(
+    least = AUTH_ENDPOINT_CHECK_MINIMUM_REQUESTS.get(
         capability_name, AUTH_ENDPOINT_MIN_ATTEMPT_REQUESTS,
-    ):
+    )
+    # What the slice can pace: its request share and its wall.
+    funded = [int(sub_budget.get("http_requests") or 0), available // (pace + 1)]
+    if "state_changing_requests" in sub_budget:
+        funded.append(int(sub_budget.get("state_changing_requests") or 0))
+    if min(funded) < max(least, int(need or 0)):
+        return None
+    requests = min(min(funded), probe_set_left(capability_name, received, parameters))
+    if requests < least:
         return None
     share = max(0, int(sub_budget.get("tool_wall_seconds") or 0))
     hold = dict(sub_budget)

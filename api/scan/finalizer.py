@@ -12,7 +12,7 @@ from typing import Any, Mapping, Sequence
 
 from . import scoring
 from .assessment import mark_unexamined_coverage, withhold_unexamined_grade
-from .auth_endpoint_probe import AUTH_ENDPOINT_PROBE_LIMITED
+from .auth_endpoint_probe import AUTH_ENDPOINT_PACE_UNFUNDED, AUTH_ENDPOINT_PROBE_LIMITED
 from .action_plan import ScanActionPlan
 from .capability_result import (
     BUDGET_EXHAUSTION_REASONS,
@@ -2902,6 +2902,7 @@ def finalize_scan_report(
             # and comparing attempts with slices alone reports that as complete coverage.
             "_manifest_entries": {}, "_scheduled_entries": {}, "_slow_endpoints": [],
             "_refused_candidates": [], "_sign_in_limited": [],
+            "_proofs_attempted": set(), "_proofs_pace_unfunded": {},
             "proof_escalation": {
                 "actions": 0, "attempted_candidates": 0,
                 "_statuses": [], "_reasons": [],
@@ -2932,6 +2933,19 @@ def finalize_scan_report(
                 and item.get("kind") in {"candidate_attempt", "candidate_deferred"}
                 and item.get("inconclusive_reason") == AUTH_ENDPOINT_PROBE_LIMITED
             )
+            # So is a proof the slice's wall could not pace at the sign-in endpoint's lockout-safe
+            # rate, unless another proof action attempted it: nothing proved or refuted it.
+            row["_proofs_attempted"].update(attempts)
+            for item in observations.get(action.action_id, ()):
+                if (
+                    isinstance(item, Mapping) and item.get("kind") == "candidate_deferred"
+                    and item.get("reason") == AUTH_ENDPOINT_PACE_UNFUNDED
+                    and str(item.get("attempt_id") or "")
+                ):
+                    row["_proofs_pace_unfunded"].setdefault(str(item["attempt_id"]), (
+                        str(item.get("attempt_id") or item.get("candidate_id") or ""),
+                        str(item.get("sign_in_endpoint") or ""),
+                    ))
         else:
             row["batch_actions"] += 1
             # Endpoints a template batch could not finish inside its wall even on a retry
@@ -3060,6 +3074,12 @@ def finalize_scan_report(
                 row["budget_inconclusive_candidates"] = outcomes
                 row["_slow_endpoints"].extend(item["url"] for item in outcomes)
         sign_in_limited = row.pop("_sign_in_limited", [])
+        proofs_attempted = row.pop("_proofs_attempted", set())
+        proofs_paced_out = [
+            limited for attempt_id, limited in row.pop("_proofs_pace_unfunded", {}).items()
+            if attempt_id not in proofs_attempted
+        ]
+        sign_in_limited.extend(proofs_paced_out)
         if sign_in_limited:
             row["sign_in_probe_limited"] = {
                 "endpoints": sorted({endpoint for _candidate, endpoint in sign_in_limited if endpoint}),
@@ -3118,7 +3138,9 @@ def finalize_scan_report(
             proof["status"] = "failed"
             proof["reason"] = (sorted(set(proof_reasons)) or ["proof_incomplete"])[0]
         proof_broke = proof_broke or proof["status"] == "failed" or (
+            # A proof the sign-in endpoint's pace held back did not break: it is named below.
             proof["status"] == "partial" and not proof["attempted_candidates"]
+            and not proofs_paced_out
         )
         row["unattempted_candidates"] = max(
             0, row["planned_candidates"] - row["attempted_candidates"],

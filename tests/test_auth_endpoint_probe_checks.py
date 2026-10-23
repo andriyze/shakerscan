@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import re
+import sys
 import types
 from pathlib import Path
 
@@ -28,6 +29,7 @@ from runtime.request_replay_executor import ReplayTransportResult
 from scan.action_plan import ScanActionPlan
 from scan.auth_endpoint_probe import (
     AUTH_ENDPOINT_CHECK_ATTEMPT_REQUESTS,
+    AUTH_ENDPOINT_PACE_UNFUNDED,
     AUTH_ENDPOINT_PROBE_LIMITED,
     AUTH_ENDPOINT_PROBE_REQUESTS,
     AUTH_ENDPOINT_SECONDS_PER_REQUEST,
@@ -37,7 +39,12 @@ from scan.auth_endpoint_probe import (
 )
 from scan.work_manifests import build_request_candidate_manifest, build_request_manifest
 
-from tests.test_auth_endpoint_probe_limit import LOGIN, ORIGIN, _StoredOnce
+from tests.test_auth_endpoint_probe_limit import (
+    LOGIN,
+    ORIGIN,
+    SIGN_IN_ROUTES,
+    _StoredOnce,
+)
 from tests.test_form_variant_batch_attempts import BATCHES, _manifests, _signals
 from tests.test_scan_action_adapter import TARGET, _action, _dispatcher, _lease, _noop
 
@@ -350,6 +357,244 @@ def test_a_spent_proof_set_closes_every_variant_without_a_request(monkeypatch):
     family = next(row for row in report["coverage"]["family_coverage"] if row["family"] == "sqli")
     assert family["sign_in_probe_limited"] == {"endpoints": [LOGIN], "candidates": 3}
     assert AUTH_ENDPOINT_PROBE_LIMITED in report["coverage"]["reasons"]
+
+
+# --- an attempt the slice's wall cannot pace in full --------------------------------------------
+
+class _PacedClock:
+    """The pace consumes wall: each pace wait advances a fake clock by its seconds and each answer
+    of the sign-in form by 0.2 s, and the checks read their elapsed wall from that clock."""
+
+    def __init__(self, monkeypatch):
+        import capabilities.nosqli_verify as nosqli_module
+        import capabilities.sqli_proof as proof_module
+
+        self.now = 1_000.0
+        clock = types.SimpleNamespace(monotonic=lambda: self.now)
+        for module in (proof_module, nosqli_module):
+            monkeypatch.setattr(module, "time", clock)
+
+        async def wait(seconds):
+            self.now += float(seconds)
+
+        monkeypatch.setattr(probe_module, "pace_wait", wait, raising=False)
+        form = _SignInForm()
+        original = form.send
+
+        async def send(request, **kwargs):
+            self.now += 0.2
+            return await original(request, **kwargs)
+
+        form.send = send
+        self.target = form
+        monkeypatch.setattr(
+            action_adapter_module.DatabaseNeutralScanActionDispatcher, "_scan_replay_transport",
+            lambda _self, _action, **_kwargs: form,
+        )
+
+
+_SCHEMAS = {"sqli.verify_batch": "sqli-batch/v1", "sqli.prove_batch": "sqli-proof-batch/v1",
+            "nosqli.verify_batch": "nosqli-batch/v1"}
+
+
+def _family_report(family, *settled):
+    """The report over batch actions, each (capability, its records, the status it settled with);
+    the first is the family's verifier."""
+    import hashlib
+    import uuid
+
+    from api.runtime.observation_manifests import ObservationManifest
+    from api.scan.action_plan import ScanActionPlan as PackagePlan
+    from api.scan.capability_result import (
+        CapabilityResultReason,
+        CapabilityResultStatus,
+    )
+    from api.scan.finalizer import finalize_scan_report
+    from tests.test_scan_orchestrator import SCAN_ID, _result
+    from tests.test_scan_orchestrator import _action as plan_action
+
+    actions, results, observations = [], {}, {}
+    for index, (capability, rows, status) in enumerate(settled):
+        action = dataclasses.replace(
+            plan_action(f"batch.{index}.r01", index, capability_name=capability,
+                        dependencies=tuple(item.action_id for item in actions)),
+            capability_args={"slice": {"start": 0, "count": 3}, "manifest_entries": 3},
+            output_schema=_SCHEMAS[capability], action_digest=None,
+        )
+        actions.append(action)
+        outcome = CapabilityResultStatus(status)
+        base = _result(action, status=outcome, reason=(
+            None if outcome is CapabilityResultStatus.SUCCESS
+            else CapabilityResultReason.INSUFFICIENT_PLAN_BUDGET
+        ))
+        content = b"{}\n" * len(rows)
+        manifest = ObservationManifest(
+            manifest_id=str(uuid.uuid5(uuid.NAMESPACE_URL, f"paced:{action.action_id}:{len(rows)}")),
+            owner_id=SCAN_ID, action_id=action.action_id, capability_name=action.capability_name,
+            output_schema=action.output_schema, observation_count=len(rows),
+            content_sha256=hashlib.sha256(content).hexdigest(), size_bytes=len(content),
+            object_key=f"scans/{SCAN_ID}/{action.action_id}.jsonl",
+        ).reference()
+        results[action.action_id] = type(base)(**{
+            **base.digest_material(), "receipt_ref": base.receipt_ref,
+            "observation_manifest_ref": manifest,
+        })
+        observations[action.action_id] = tuple(rows)
+    final = plan_action("finalize.report", len(actions),
+                        dependencies=tuple(item.action_id for item in actions))
+    plan = PackagePlan(scan_id=SCAN_ID, execution_plan_digest="b" * 64,
+                       target_binding_digest="a" * 64, actions=(*actions, final))
+    report = finalize_scan_report(plan=plan, target_url=ORIGIN, action_results=results,
+                                  observations=observations)
+    return next(row for row in report["coverage"]["family_coverage"] if row["family"] == family), report
+
+
+def _proof_report(candidates, proof_rows, status):
+    """The SQLi family over a verifier that flagged all three variants and the proof action."""
+    return _family_report(
+        "sqli", ("sqli.verify_batch", _signals(candidates, "sqli", {0, 1, 2}), "success"),
+        ("sqli.prove_batch", proof_rows, status),
+    )
+
+
+#: A sign-in form's proof is an error pair and a bypass pair (8 requests); a sign-in endpoint
+#: whose path names no sign-in runs the error, boolean and timing pairs (14).
+NOT_A_SIGN_IN_PATH = "/hub/enter"
+
+
+def _routes_at(path):
+    return tuple((method, path, fields, content_type, query, source)
+                 for method, _path, fields, content_type, query, source in SIGN_IN_ROUTES[:3])
+
+
+@pytest.mark.parametrize(("path", "proof"), [(LOGIN, 8), (NOT_A_SIGN_IN_PATH, 14)])
+@pytest.mark.parametrize("short_by", [1, 4])
+def test_a_proof_the_wall_cannot_pace_in_full_waits_instead_of_running_short(
+    monkeypatch, path, proof, short_by,
+):
+    """The slice's wall paces fewer requests than the proof sends (one pace and one second each):
+    the proof waits, sends nothing, and never reads complete. Cutting a sign-in form's proof to its
+    error pair would never send the bypass pair that proves a blind sign-in injection."""
+    from tests.test_form_variant_batch_attempts import _manifests as variant_manifests
+
+    _PacedClock(monkeypatch)
+    held = _holds(monkeypatch)
+    monkeypatch.setattr(sys.modules[__name__], "_manifests",
+                        lambda: variant_manifests(_routes_at(path)))
+    wall = (proof - short_by) * (PACE + 1) + PACE
+    receipts, candidates = _run("sqli.prove_batch", options={"login_url": path}, budget={
+        "http_requests": 600, "state_changing_requests": 600, "tool_wall_seconds": wall,
+    })
+    (receipt,) = receipts
+    deferred = [item for item in receipt.observations if item.get("kind") == "candidate_deferred"]
+    assert held == [] and _heads(receipts) == []
+    assert len(deferred) == 3 and {item["reason"] for item in deferred} == {AUTH_ENDPOINT_PACE_UNFUNDED}
+    assert receipt.status == "partial"
+    family, report = _proof_report(candidates, receipt.observations, "partial")
+    assert family["proof_escalation"]["status"] != "complete"
+    assert family["coverage_status"] == "partial"
+    assert family["reason"] == AUTH_ENDPOINT_PROBE_LIMITED
+    assert family["sign_in_probe_limited"] == {"endpoints": [path], "candidates": 3}
+    assert AUTH_ENDPOINT_PROBE_LIMITED in report["coverage"]["reasons"]
+
+
+@pytest.mark.parametrize(("wall", "sent"), [(48, [8]), (72, [8, 8]), (100, [8, 8, 8])])
+def test_the_wall_the_pace_consumes_funds_whole_proofs_and_leaves_the_rest_waiting(
+    monkeypatch, wall, sent,
+):
+    """With the pace taking its seconds from the slice: each proof that runs sends all 8 of its
+    requests, the slice's wall funds as many as it can pace, and the others wait. A proof the wall
+    cut to its error pair was recorded as a finished proof, and the report read it complete."""
+    clock = _PacedClock(monkeypatch)
+    held = _holds(monkeypatch)
+    receipts, candidates = _run("sqli.prove_batch", options=SIGN_IN, budget={
+        "http_requests": 24, "state_changing_requests": 24, "tool_wall_seconds": wall,
+    })
+    (receipt,) = receipts
+    heads = _heads(receipts)
+    assert [head["sign_in_endpoint_requests"] for head in heads] == sent
+    assert len(clock.target.to_sign_in()) == sum(sent)
+    assert all(hold["http_requests"] >= 8 for hold in held)
+    deferred = [item for item in receipt.observations if item.get("kind") == "candidate_deferred"]
+    assert len(deferred) == 3 - len(sent)
+    assert receipt.status == ("success" if len(sent) == 3 else "partial")
+    family, _report = _proof_report(candidates, receipt.observations, receipt.status)
+    if len(sent) == 3:
+        assert family["coverage_status"] == "complete"
+        assert family["proof_escalation"]["status"] == "complete"
+    else:
+        assert family["coverage_status"] == "partial"
+        assert family["sign_in_probe_limited"]["candidates"] == 3 - len(sent)
+
+
+@pytest.mark.parametrize("capability", ["sqli.prove_batch", "nosqli.verify_batch"])
+@pytest.mark.parametrize("wall", [8, 12, 20, 31, 40])
+def test_no_hold_on_the_sign_in_endpoint_outlasts_what_the_slice_has_left(monkeypatch, capability, wall):
+    """Every attempt that runs holds no more wall than the slice has left, sends what it needs in
+    full (a NoSQLi attempt four a field), and one the slice cannot pace waits."""
+    from tests.test_form_variant_batch_attempts import _attempt_ids
+
+    clock = _PacedClock(monkeypatch)
+    held = _holds(monkeypatch)
+    receipts, candidates = _run(capability, options=SIGN_IN, budget={
+        "http_requests": 600, "state_changing_requests": 600, "tool_wall_seconds": wall,
+    })
+    heads = _heads(receipts)
+    deferred = [item for receipt in receipts for item in receipt.observations
+                if item.get("kind") == "candidate_deferred"]
+    assert len(heads) + len(deferred) == 3
+    entry_of = dict(zip(_attempt_ids(candidates, BATCHES[capability][0]), candidates.entries))
+    ran = [head for head in heads if head.get("budget_consumed")]
+    assert len(ran) == len(held)
+    spent = 0
+    for hold, head in zip(held, ran):
+        assert hold["tool_wall_seconds"] <= wall - spent
+        assert hold["tool_wall_seconds"] >= hold["http_requests"] * (PACE + 1)
+        # What the attempt needs in full, never fewer: a sign-in form's proof 8, NoSQLi four a field.
+        fields = entry_of[head["attempt_id"]]["body_field_names"]
+        assert head["sign_in_endpoint_requests"] == (
+            8 if capability == "sqli.prove_batch" else 4 * len(fields)
+        )
+        spent += int(head["budget_consumed"]["tool_wall_seconds"])
+    for head in heads:
+        if head not in ran:
+            assert head["sign_in_endpoint_requests"] == 0
+            assert head["inconclusive_reason"] == AUTH_ENDPOINT_PROBE_LIMITED
+    assert len(clock.target.to_sign_in()) == sum(head["sign_in_endpoint_requests"] for head in heads)
+    if wall < 8 * (PACE + 1):
+        assert heads == [] and len(deferred) == 3
+
+
+def test_the_paced_hold_funds_the_whole_attempt_or_nothing():
+    """The slice's request share and its wall at a pace and a second a request must reach the
+    attempt's need; the probe set alone may leave it short (the batch then marks it inconclusive)."""
+    budget = {"http_requests": 200, "state_changing_requests": 200, "tool_wall_seconds": 60}
+    hold = probe_module.paced_check_hold(
+        budget, capability_name="sqli.prove_batch", received=0, parameters=4,
+        available_wall_seconds=32, need=8,
+    )
+    assert hold is not None and hold["http_requests"] == 8 and hold["tool_wall_seconds"] == 32
+    for available in (16, 28, 31):
+        assert probe_module.paced_check_hold(
+            budget, capability_name="sqli.prove_batch", received=0, parameters=4,
+            available_wall_seconds=available, need=8,
+        ) is None
+    assert probe_module.paced_check_hold(
+        budget, capability_name="sqli.prove_batch", received=0, parameters=4,
+        available_wall_seconds=55, need=14,
+    ) is None
+    # A split Scan paces slower: the same wall funds half as many requests.
+    assert probe_module.paced_check_hold(
+        budget, capability_name="sqli.prove_batch", received=0, parameters=4, children=2,
+        available_wall_seconds=55, need=8,
+    ) is None
+    # The probe set leaves 5: the attempt runs with them, short of its need.
+    left = probe_module.probe_set_requests("sqli.prove_batch", 4) - 5
+    short = probe_module.paced_check_hold(
+        budget, capability_name="sqli.prove_batch", received=left, parameters=4,
+        available_wall_seconds=60, need=8,
+    )
+    assert short is not None and short["http_requests"] == 5
 
 
 def test_the_browser_proof_waits_the_pace_before_each_submission(monkeypatch):

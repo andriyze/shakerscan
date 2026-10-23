@@ -858,12 +858,13 @@ class _SignInChecks:
 
     def hold(
         self, endpoint: SignInEndpoint, sub_budget: Mapping[str, int], *, parameters: int,
-        available_wall_seconds: int,
+        available_wall_seconds: int, need: int,
     ) -> dict[str, int] | None:
+        """The attempt's paced hold, or None when the slice cannot pace all ``need`` requests."""
         return paced_check_hold(
             sub_budget, capability_name=self.capability_name,
             received=self.received.get(endpoint.key, 0), parameters=parameters,
-            children=self.children, available_wall_seconds=available_wall_seconds,
+            children=self.children, available_wall_seconds=available_wall_seconds, need=need,
         )
 
     def transport(self, transport: Any, endpoint: SignInEndpoint) -> PacedSignInTransport:
@@ -2180,6 +2181,7 @@ class DatabaseNeutralScanActionDispatcher:
                 held = sign_in_checks.hold(
                     sign_in, sub_budget, parameters=parameters,
                     available_wall_seconds=remaining.get("tool_wall_seconds", 0),
+                    need=AUTH_ENDPOINT_CHECK_ATTEMPT_REQUESTS[action.capability_name],
                 )
                 if held is None:
                     observations.append(sign_in_checks.deferred(
@@ -2762,9 +2764,16 @@ class DatabaseNeutralScanActionDispatcher:
                         family="sqli_proof",
                     ))
                     continue
+                # An authentication form's proof is an error pair and a bypass pair (8); any
+                # other runs the error, boolean and timing pairs (14). The slice paces all of it
+                # or the proof waits: one cut short reads like a finished proof.
+                need = min(int(sub_budget.get("http_requests") or 0), (
+                    8 if str(proof_candidate.get("request_class") or "") == "safe_authentication"
+                    else AUTH_ENDPOINT_CHECK_ATTEMPT_REQUESTS["sqli.prove_batch"]
+                ))
                 held = sign_in_checks.hold(
                     sign_in, sub_budget, parameters=parameters,
-                    available_wall_seconds=remaining.get("tool_wall_seconds", 0),
+                    available_wall_seconds=remaining.get("tool_wall_seconds", 0), need=need,
                 )
                 if held is None:
                     observations.append(sign_in_checks.deferred(
@@ -2773,12 +2782,6 @@ class DatabaseNeutralScanActionDispatcher:
                         available_wall_seconds=remaining.get("tool_wall_seconds", 0),
                     ))
                     continue
-                # An authentication form's proof is an error pair and a bypass pair (8); any
-                # other runs the error, boolean and timing pairs (14).
-                need = min(int(sub_budget.get("http_requests") or 0), (
-                    8 if str(proof_candidate.get("request_class") or "") == "safe_authentication"
-                    else AUTH_ENDPOINT_CHECK_ATTEMPT_REQUESTS["sqli.prove_batch"]
-                ))
                 short_of_set = sign_in_checks.short_of(sign_in, parameters, need)
                 sub_budget = held
                 transport = sign_in_checks.transport(transport, sign_in)
@@ -3947,18 +3950,8 @@ class DatabaseNeutralScanActionDispatcher:
                         family="nosqli",
                     ))
                     continue
-                held = sign_in_checks.hold(
-                    sign_in, sub_budget, parameters=parameters,
-                    available_wall_seconds=remaining.get("tool_wall_seconds", 0),
-                )
-                if held is None:
-                    observations.append(sign_in_checks.deferred(
-                        sign_in, attempt_id=attempt_id, candidate_id=candidate_id,
-                        family="nosqli",
-                        available_wall_seconds=remaining.get("tool_wall_seconds", 0),
-                    ))
-                    continue
-                # Four requests a field, over the anchor and every declared field.
+                # Four requests a field, over the anchor and every declared field; the slice paces
+                # all of them or the check waits.
                 tested = dict.fromkeys([
                     str(candidate.get("field_path") or candidate.get("parameter_name") or ""),
                     *(str(item) for item in candidate.get("body_field_names") or ()),
@@ -3967,6 +3960,17 @@ class DatabaseNeutralScanActionDispatcher:
                     int(sub_budget.get("http_requests") or 0),
                     AUTH_ENDPOINT_CHECK_ATTEMPT_REQUESTS["nosqli.verify_batch"] * len(tested),
                 )
+                held = sign_in_checks.hold(
+                    sign_in, sub_budget, parameters=parameters,
+                    available_wall_seconds=remaining.get("tool_wall_seconds", 0), need=need,
+                )
+                if held is None:
+                    observations.append(sign_in_checks.deferred(
+                        sign_in, attempt_id=attempt_id, candidate_id=candidate_id,
+                        family="nosqli",
+                        available_wall_seconds=remaining.get("tool_wall_seconds", 0),
+                    ))
+                    continue
                 short_of_set = sign_in_checks.short_of(sign_in, parameters, need)
                 sub_budget = held
                 transport = sign_in_checks.transport(transport, sign_in)
