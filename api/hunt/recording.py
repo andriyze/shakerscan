@@ -16,3 +16,8 @@ def evidence_recording(name: str) -> bool:
 def recording_run_allowed(run: Mapping, name: str) -> bool:
     return (run.get("status") == "budget_exhausted"
             and run.get("completed_at") is None and evidence_recording(name))
+
+
+def recorded_charge(result: Mapping) -> dict[str, int] | None:
+    """A finding write that returned an existing record unchanged wrote nothing: release its unit."""
+    return {"candidates": 0} if result.get("created") is False else None

@@ -1671,7 +1671,7 @@ async def _execute_hunt_capability_lifecycle(
     request: HuntCapabilityRequest,
     lifecycle: HuntActionLifecycle,
 ):
-    from hunt.recording import evidence_recording, recording_run_allowed
+    from hunt.recording import evidence_recording, recorded_charge, recording_run_allowed
     prepared_network = None
     network_target = None
     network_policy = None
@@ -2817,6 +2817,10 @@ async def _execute_hunt_capability_lifecycle(
                 ),
                 blocked_exceptions=(HTTPException,),
                 conservative_full_budget=True,
+                # A refused write rolled back before recording anything, and an existing record
+                # returned unchanged wrote nothing: neither spends a record unit.
+                unstarted_exceptions=(HTTPException,),
+                settle=recorded_charge,
             )
             capability_execution = await dispatch_registered_adapter(
                 finding_adapter,

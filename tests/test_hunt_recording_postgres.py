@@ -71,11 +71,13 @@ def test_api_records_nondefault_service_after_execution_budget_exhaustion(monkey
                     json={'idempotency_key': 'ports-create-duplicate', 'input': values})
                 assert duplicate.status_code == 200, duplicate.text
                 assert duplicate.json()['result']['created'] is False
+                assert duplicate.json()['result']['evidence_attached'] is True
                 assert await conn.fetchval('SELECT count(*) FROM findings WHERE hunt_run_id=$1', hunt) == 1
                 row = await conn.fetchrow('SELECT status,budget_used_json FROM hunt_runs WHERE id=$1', hunt)
                 assert row['status'] == 'budget_exhausted'
                 after = json.loads(row['budget_used_json'])
-                assert after['candidates'] == 2
+                # The existing record returned unchanged spent no record unit.
+                assert after['candidates'] == 1
                 assert all(after[key] == value for key, value in used.items())
                 finished = await client.post(f'/hunts/{hunt}/finish', json={'summary': 'Done', 'next_actions': []})
                 assert finished.status_code == 200, finished.text

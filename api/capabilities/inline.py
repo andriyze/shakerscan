@@ -300,6 +300,7 @@ class ControlPlaneExecutionAdapter(_InlineAdapter):
         conservative_full_budget: bool = False,
         unstarted_exceptions: tuple[type[BaseException], ...] = (),
         measured_wall: bool = False,
+        settle: Callable[[Mapping[str, Any]], Mapping[str, int] | None] | None = None,
     ) -> None:
         super().__init__(
             specification=specification,
@@ -308,6 +309,8 @@ class ControlPlaneExecutionAdapter(_InlineAdapter):
             redacted_execution=redacted_execution,
         )
         self._blocked_exceptions = blocked_exceptions
+        # Corrects the settled charge from a completed result (an existing record wrote nothing).
+        self._settle = settle
         self._conservative_full_budget = conservative_full_budget
         # With a conservative traffic hold, still settle wall time to what elapsed (verification).
         self._measured_wall = measured_wall
@@ -354,6 +357,12 @@ class ControlPlaneExecutionAdapter(_InlineAdapter):
                 actual.update(self._wall_budget(started, execution_started=True))
         else:
             actual = self._wall_budget(started, execution_started=succeeded)
+        if self._settle is not None and self.blocked_exception is None:
+            correction = self._settle(result) or {}
+            actual.update({
+                key: min(int(value), int(self._requested_budget.get(key) or 0))
+                for key, value in correction.items() if key in self._requested_budget
+            })
         status = (
             "blocked"
             if self.blocked_exception is not None

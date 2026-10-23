@@ -406,6 +406,35 @@ def test_control_adapter_preserves_a_typed_finding_observation():
     },)
 
 
+def test_a_finding_record_that_already_existed_or_was_refused_spends_no_record_unit():
+    from fastapi import HTTPException
+    from hunt.recording import recorded_charge
+
+    specification = CAPABILITY_REGISTRY.require("findings.create")
+    requested = {"candidates": 1}
+
+    def adapter(operation):
+        return ControlPlaneExecutionAdapter(
+            specification=specification, operation=operation, requested_budget=requested,
+            redacted_execution={}, blocked_exceptions=(HTTPException,), conservative_full_budget=True,
+            unstarted_exceptions=(HTTPException,), settle=recorded_charge,
+        )
+
+    async def created():
+        return {"ok": True, "status": "success", "finding_id": "finding-1", "created": True}
+
+    async def existing():
+        return {"ok": True, "status": "success", "finding_id": "finding-1", "created": False}
+
+    async def refused():
+        raise HTTPException(status_code=422, detail="Use an absolute URL for an evidenced HTTP service")
+
+    assert _execute(specification, adapter(created), requested).actual_budget == {"candidates": 1}
+    assert _execute(specification, adapter(existing), requested).actual_budget == {"candidates": 0}
+    refusal = _execute(specification, adapter(refused), requested)
+    assert refusal.status == "blocked" and refusal.actual_budget == {}
+
+
 def test_collection_control_adapter_refunds_wall_time_for_a_guard_block():
     specification = CAPABILITY_REGISTRY.require("collections.select")
     requested = {"agent_actions": 1, "tool_wall_seconds": 5}

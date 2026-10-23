@@ -395,21 +395,19 @@ async def create_hunt_finding(
                 json.dumps(evidence),
                 notes,
             )
-            created = row is not None
-            if not created:
-                row = await conn.fetchrow(
-                    """SELECT id, status, created_at, last_verified_at, verification_count FROM findings
+            if row is None:
+                existing = await conn.fetchrow(
+                    """SELECT id, status, created_at, last_verified_at, verification_count, evidence
+                       FROM findings
                        WHERE fingerprint=$1 AND hunt_run_id=$2
                          AND target_id IS NOT DISTINCT FROM $3
                          AND device_target_id IS NOT DISTINCT FROM $4""",
                     fingerprint, hunt_uuid, run["target_id"], run["device_target_id"],
                 )
-                if row is None:
+                if existing is None:
                     raise HuntFindingActionError("Finding identity conflicts with an existing record")
-                if row["last_verified_at"] is not None or int(row["verification_count"] or 0) > 0:
-                    raise HuntFindingActionError(f"Existing finding {row['id']} has verification history; read it instead")
-            if created:
-                await _refresh_counts(conn, run)
+                return _existing_finding(existing, evidence_action_ids)
+            await _refresh_counts(conn, run)
     return {
         "ok": True,
         "status": "success",
@@ -417,15 +415,59 @@ async def create_hunt_finding(
         "finding_status": str(row["status"]),
         "proof_state": "unverified",
         "authoritative": False,
-        "created": created,
+        "created": True,
         "observation": {
             "kind": "finding_mutation",
-            "operation": "created" if created else "existing",
+            "operation": "created",
             "finding_id": str(row["id"]),
             "status": str(row["status"]),
             "proof_state": "unverified",
         },
     }
+
+
+def _existing_finding(row: Any, evidence_action_ids: Sequence[str]) -> dict[str, Any]:
+    """This Hunt already recorded a finding with this title and location: return it unchanged.
+
+    Nothing is written (no record unit is spent). When the call cited evidence the record does not
+    hold, the answer says so and names the write that attaches it.
+    """
+    raw = row["evidence"]
+    try:
+        stored = json.loads(raw) if isinstance(raw, str) else raw
+    except ValueError:
+        stored = None
+    stored = stored if isinstance(stored, Mapping) else {}
+    attached = set(evidence_action_ids) <= {str(value) for value in stored.get("source_action_ids") or ()}
+    verified = row["last_verified_at"] is not None or int(row["verification_count"] or 0) > 0
+    result: dict[str, Any] = {
+        "ok": True,
+        "status": "success",
+        "finding_id": str(row["id"]),
+        "finding_status": str(row["status"]),
+        # A record with deterministic verification history is not described as unverified here;
+        # read it for its current proof state.
+        "proof_state": None if verified else "unverified",
+        "verification_history": verified,
+        "authoritative": False,
+        "created": False,
+        "evidence_attached": attached,
+        "observation": {
+            "kind": "finding_mutation",
+            "operation": "existing",
+            "finding_id": str(row["id"]),
+            "status": str(row["status"]),
+        },
+    }
+    if not attached:
+        result["message"] = (
+            f"This Hunt already recorded finding {row['id']} with this title and location; it is "
+            "returned unchanged and the newly cited evidence was not attached. "
+            + ("It has verification history, so a Hunt cannot change it; cite it instead."
+               if verified else
+               "Call findings.update with this finding_id and evidence_action_ids to attach it.")
+        )
+    return result
 
 
 async def update_hunt_finding(

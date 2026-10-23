@@ -47,13 +47,15 @@ class _Pool:
 class _Connection:
     def __init__(self, *, expose_evidence: bool = True, target_url="https://example.test/app",
                  observed_urls=(), status="active", completed_at=None, admitted_origins=(),
-                 device=False, device_results=()):
+                 device=False, device_results=(), verification_count=0):
         self.hunt_id = uuid.uuid4()
         self.target_id = uuid.uuid4()
         self.finding_id = uuid.uuid4()
         self.device = device
         # Labelled fixture: result summaries of cited device.http.probe actions.
         self.device_results = device_results
+        self.verification_count = verification_count
+        self.stored_evidence = None
         self.expose_evidence = expose_evidence
         self.insert_args = None
         self.target_url, self.observed_urls = target_url, observed_urls
@@ -84,10 +86,12 @@ class _Connection:
             if args[3] in self.fingerprints:
                 return None
             self.fingerprints.add(args[3])
+            self.stored_evidence = args[8]
             return {"id": self.finding_id, "status": "active", "created_at": None}
         if "FROM findings" in query:
             return {"id": self.finding_id, "status": "active", "created_at": None,
-                    "last_verified_at": None, "verification_count": 0}
+                    "last_verified_at": "verified" if self.verification_count else None,
+                    "verification_count": self.verification_count, "evidence": self.stored_evidence}
         raise AssertionError(query)
 
     async def fetch(self, query, *args):
@@ -169,11 +173,28 @@ def test_two_services_with_the_same_path_need_an_explicit_origin():
 
 def test_duplicate_creation_returns_the_existing_finding_without_overwriting_it():
     connection = _Connection()
-    first = _create(connection, evidence_action_id=uuid.uuid4())
+    evidence = uuid.uuid4()
+    first = _create(connection, evidence_action_id=evidence)
     second = _create(connection, evidence_action_id=uuid.uuid4())
     assert first["finding_id"] == second["finding_id"]
     assert first["created"] is True and second["created"] is False
     assert second["observation"]["operation"] == "existing"
+    # The record is returned unchanged and says the newly cited evidence was not attached.
+    assert second["evidence_attached"] is False and "findings.update" in second["message"]
+    assert json.loads(connection.stored_evidence)["source_action_ids"] == [str(evidence)]
+    same = _create(connection, evidence_action_id=evidence)
+    assert same["created"] is False and same["evidence_attached"] is True and "message" not in same
+
+
+def test_a_duplicate_of_a_verified_finding_returns_it_instead_of_refusing():
+    connection = _Connection()
+    _create(connection, evidence_action_id=uuid.uuid4())
+    connection.verification_count = 1
+    again = _create(connection, evidence_action_id=uuid.uuid4())
+    assert again["created"] is False and again["finding_id"] == str(connection.finding_id)
+    assert again["verification_history"] is True and again["proof_state"] is None
+    assert again["evidence_attached"] is False and "verification history" in again["message"]
+    assert "findings.update" not in again["message"]
 
 
 def test_unfinished_exhausted_hunt_can_persist_evidence_but_finished_hunt_cannot():
