@@ -67,7 +67,8 @@ ACTING_HTTP_PATHS = (
     "/api/reboots", "/api/rebootnow", "/api/reboot2", "/api/factoryreset", "/api/powercycle",
     "/api/power/cycle", "/api/keys/rotate", "/api/gpio/17/high", "/api/output/1/low", "/api/impersonate",
     "/api/db/seed", "/api/payout", "/api/subscription/renew", "/api/selfdestruct", "/api/users/deleteall",
-    "/api/hardreset", "/api/rebooting", "/api/forcelogout", "/api/keys/regenerate",
+    "/api/hardreset", "/api/rebooting", "/api/forcelogout", "/api/keys/regenerate", "/api/door/open2",
+    "/api/jobs/run2",
 )
 ACTING_DEVICE_PATHS = (
     "/relay/on", "/relay/off", "/door/open", "/alarm/disarm", "/disk/format", "/camera/ptz/move", "/wol/wake",
