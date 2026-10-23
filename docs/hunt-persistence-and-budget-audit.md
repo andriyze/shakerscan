@@ -60,16 +60,26 @@ Completed execution actions were durable, but target recipes were only written w
 explicitly invoked `targets.actions.create`. Completion had no retention step. This is separate
 from operator instructions and from ordinary execution history.
 
-Finishing now retains up to 16 distinct completed, reusable network steps in one target recipe.
-The target's current permissions are read under lock: instruction delegation saves directly,
-otherwise the existing review-proposal path applies; metadata opt-out prevents either write.
-Bodies, masked material, transient captures and SSH commands are excluded. Session references
-become required parameters with no saved session defaults. Reuse still invokes the canonical
-capabilities and their new Hunt's scope, credentials, approvals and budgets.
+Finishing now proposes reusable steps for review and never writes a recipe, whatever the target
+delegates; the metadata opt-out skips it. Each target has one rolling retained-checks proposal: a
+later finish updates it in place, keeps one copy of each step (the newest 16), leaves out steps a
+saved action already holds and rebases it onto the current saved actions. It is not counted
+against the pending proposals Hunts or operators may file, so it never crowds out a planner's own
+proposals, and accepting it saves one saved action as an operator write.
 
-The finish operation reports its retention result in `final_debrief.saved_action` and the UI.
-Retries create no duplicate recipe or proposal. An optional retention failure preserves the
-debrief and reports `not_saved`. The planner still needs to finish; this change adds no background
+A step is proposed only when every input field is on its capability's allowlist (origins, paths,
+read methods, wordlists and a few display options). A step carrying a query value, request header
+or body, browser input, capture, session or credential reference, or an origin on another host is
+left out entirely, as is a path with a redaction marker, a token-shaped or credential-labelled
+segment, or a word that names an action such as log out or delete. The filter reads inputs as the
+action ledger stores them, after its redaction, and is tested against that redaction's real output.
+Reuse still invokes the canonical capabilities under a new Hunt's scope, credentials, approvals and
+budgets.
+
+The finish operation reports its outcome in `final_debrief.saved_action` and the UI. Retries
+create no second proposal. An optional retention failure preserves the debrief and reports
+`not_saved`. The finish takes the target row (KEY SHARE) before the Hunt row, the order operator
+retractions and decisions use. The planner still needs to finish; this change adds no background
 planner or automatic completion after disconnection.
 
 ## Validation and scope

@@ -427,7 +427,7 @@ export const HUNT_START_CONTRACT = {
   "target_actions": {
     "auto_load_at_start": true,
     "auto_retain_at_finish": true,
-    "auto_retain_permission": "instruction_changes saves; otherwise proposes; metadata_changes opt-out skips",
+    "auto_retain_permission": "always proposes for operator review, never saves; one rolling proposal per target; metadata_changes opt-out skips",
     "completion_result_path": "final_debrief.saved_action",
     "execution": "Read a recipe, then invoke each canonical step through the saved Hunt manifest.",
     "grants_authority": false,

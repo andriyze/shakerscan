@@ -255,7 +255,7 @@ def hunt_start_public_contract() -> dict[str, Any]:
             "url_template":"/targets/{target_id}/actions","max_actions":32,
             "auto_load_at_start":True,"snapshot_context_path":"target_actions",
             "auto_retain_at_finish":True,
-            "auto_retain_permission":"instruction_changes saves; otherwise proposes; metadata_changes opt-out skips",
+            "auto_retain_permission":"always proposes for operator review, never saves; one rolling proposal per target; metadata_changes opt-out skips",
             "completion_result_path":"final_debrief.saved_action",
             "execution":"Read a recipe, then invoke each canonical step through the saved Hunt manifest.",
             "grants_authority":False,

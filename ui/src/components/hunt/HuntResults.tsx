@@ -86,8 +86,11 @@ export function HuntResults({ hunt }: { hunt: HuntV2 }) {
       {debrief?.saved_action?.status === 'saved' && <p className="mt-4 text-sm text-emerald-300">
         Saved {debrief.saved_action.step_count} reusable steps in this target’s Actions.
       </p>}
-      {debrief?.saved_action?.status === 'proposed' && <p className="mt-4 text-sm text-amber-300">
-        Proposed {debrief.saved_action.step_count} reusable steps. Review with <code>shakerscan knowledge review</code>.
+      {(debrief?.saved_action?.status === 'proposed' || debrief?.saved_action?.status === 'updated') && <p className="mt-4 text-sm text-amber-300">
+        Proposed {debrief.saved_action.added_steps ?? debrief.saved_action.step_count} reusable steps in this target’s retained-checks proposal ({debrief.saved_action.step_count} in all). Review with <code>shakerscan knowledge review</code>.
+      </p>}
+      {debrief?.saved_action?.status === 'unchanged' && <p className="mt-4 text-sm text-gray-400">
+        This Hunt’s reusable steps are already in this target’s retained-checks proposal.
       </p>}
       {debrief?.saved_action?.status === 'not_saved' && <p role="alert" className="mt-4 text-sm text-amber-300">
         Could not retain reusable actions. The Hunt debrief was saved. You can save selected steps from the target’s Actions.

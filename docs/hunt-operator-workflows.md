@@ -93,11 +93,16 @@ Finding locations keep the evidenced service's scheme and port; use an absolute 
 evidence spans multiple services. Retrying a creation with the same Hunt, title and URL returns
 the existing unverified record without overwriting it.
 
-On finish, the server retains up to 16 completed reusable network steps in one target action.
-Existing `instruction_changes` delegation allows saving; otherwise it files a proposal for
-`shakerscan knowledge review`. The metadata opt-out skips retention. Operator instructions stay
-separate. The debrief's `saved_action` field reports saving, proposal, skip or failure. This
-requires finishing the Hunt; a disconnected planner does not finish automatically.
+On finish, the server proposes the Hunt's reusable read-only and verification steps in the
+target's one rolling retained-checks proposal for `shakerscan knowledge review`. It never saves
+them, even when the target delegates instruction changes, and the metadata opt-out skips it. The
+proposal keeps one copy of each step and the newest 16, leaves out steps a saved action already
+holds, is updated in place by later finishes, and is not counted against the proposals a Hunt may
+file. A step is proposed only when every input is on its capability's allowlist and carries no
+query value, header, body, browser input, session, credential or origin on another host.
+Accepting it saves one saved action. The debrief's `saved_action` field reports `proposed`,
+`updated`, `unchanged`, `skipped` or `not_saved`. This requires finishing the Hunt; a disconnected
+planner does not finish automatically.
 
 The Hunt UI now offers **Extend this Hunt's budget** for unfinished active, awaiting-planner and
 budget-exhausted runs. An explicit operator edit sets a new **total**, not a delta. Startup profiles

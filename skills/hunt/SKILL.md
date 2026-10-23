@@ -428,13 +428,15 @@ and any operator instructions, never as permission or scope. Saved actions follo
 `instruction_changes` permission: without it, `targets.actions.create|update|delete` files a
 proposal (`applied: false`) for the person to review; add a `reason` and `evidence_refs`. Saved
 actions with `trust: agent_unconfirmed` are advisory recipes.
-Finishing also retains up to 16 distinct completed, reusable network steps as one target saved
-action, or proposes it for review under the same permissions. Metadata opt-out skips retention.
-This does not change operator instructions. Session references become required parameters for a
-future Hunt; masked inputs, request bodies, transient captures and SSH commands are excluded.
-Read `final_debrief.saved_action`: `saved`, `proposed`, `skipped` or `not_saved` reports the outcome.
-For `proposed`, tell the operator to use `shakerscan knowledge review`; for `not_saved`, report it
-instead of claiming the recipe was retained. The finish retry is idempotent. Use explicit
+Finishing also proposes this Hunt's reusable read-only and verification steps for the operator to
+review; it never saves them, whatever the target delegates, and the metadata opt-out skips it. They
+join the target's one rolling retained-checks proposal (one copy of each step, the newest 16 kept),
+which does not use your own proposal allowance. A step is proposed only when every input is on its
+capability's allowlist: no query values, headers, bodies, browser input, sessions, credentials or
+another host's origin. Read `final_debrief.saved_action`: `proposed`, `updated`, `unchanged`,
+`skipped` or `not_saved`. For `proposed` or `updated`, tell the operator to use
+`shakerscan knowledge review`; for `not_saved`, report it instead of claiming the steps were
+retained. The finish retry is idempotent. Use explicit
 `targets.actions.*` calls when a curated recipe needs different steps or instructions.
 
 Record what you learn as attributed interpretations with `knowledge.record`: an `observation`,

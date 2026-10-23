@@ -1,63 +1,166 @@
+"""Which settled Hunt steps a finish proposes for reuse, fed through the real input redaction.
+
+Every input below goes through ``_hunt_redacted_capability_input`` with the API's own payload
+redaction wired in, exactly as the action ledger stores it, so the retention filter is tested
+against what it really reads. Every value is a synthetic fixture, never a real secret.
+"""
 import asyncio
 import json
 from uuid import uuid4
 
 import pytest
 
-from api.hunt.saved_actions import recipe_steps, retain_hunt_action
+import api.api  # noqa: F401 - wires the API's payload redaction into the Hunt router
+from hunt import interaction_router
+from hunt.saved_actions import (
+    RETAINED_STEP_FIELDS, merge_retained_steps, recipe_steps, retain_hunt_action, retained_step,
+)
+
+HOST = "app.test"
 
 
-def action(name='http.request', values=None, status='completed'):
-    return {'id': uuid4(), 'capability_name': name, 'status': status,
-            'input_summary': {'input': values or {'method': 'GET', 'path': '/health',
-                                                  'origin': 'https://app.test:8443'}}}
+def ledger(name, values, status="completed"):
+    """One hunt_actions row as admission records it: the redacted planner input."""
+    return {"id": uuid4(), "capability_name": name, "status": status,
+            "input_summary": {"schema_version": "hunt-capability-input-summary/v1",
+                              "input": interaction_router._hunt_redacted_capability_input(name, values)}}
 
 
-def test_recipe_keeps_the_service_port_and_deduplicates_completed_steps():
-    first = action()
-    steps, parameters, evidence = recipe_steps([first, action(), action(status='partial')])
-    assert steps == [{'capability': 'http.request', 'input': first['input_summary']['input']}]
-    assert parameters == {} and evidence == [str(first['id'])]
+REUSABLE = [
+    ("http.request", {"method": "GET", "path": "/health", "origin": "https://app.test:8443"}),
+    ("http.request", {"method": "HEAD", "path": "/static/app.css"}),
+    ("web.crawl", {"origin": "https://app.test"}),
+    ("web.content_discover", {"origin": "https://app.test", "wordlist": "common"}),
+    ("web.probe", {}),
+    ("javascript.analyze", {"path": "/static/app.js"}),
+    ("browser.navigate", {"origin": "https://app.test", "path": "/dashboard", "wait_until": "load"}),
+    ("xss.verify", {"path": "/search", "severity": "medium"}),
+    ("tls.inspect", {"origin": "https://app.test"}),
+]
+
+NOT_REUSABLE = [
+    # Query values: the ledger keeps the names and masks the values as %3Credacted%3E.
+    ("http.request", {"method": "GET", "path": "/api/items?id=5&sort=asc", "origin": "https://app.test"}),
+    ("sqli.verify", {"path": "/product?id=1"}),
+    ("browser.navigate", {"origin": "https://app.test", "path": "/search?q=hunter2"}),
+    ("http.request", {"method": "GET", "path": "/items", "query": {"reset": "9f8e7d6c5b4a39281706f5e4d3c2b1a0"}}),
+    # Request headers and bodies, kept verbatim or reduced to a shape by the ledger.
+    ("http.request", {"method": "GET", "path": "/debug", "headers": {"X-Debug-Auth": "letmein-2026"}}),
+    ("http.request", {"method": "POST", "path": "/login", "form_body": {"user": "a", "pin": "4821"}}),
+    ("http.request", {"method": "POST", "path": "/api/items", "json_body": {"name": "x"}}),
+    ("http.request", {"method": "DELETE", "path": "/api/items/1"}),
+    # A token in the path that the ledger does not recognise as one.
+    ("http.request", {"method": "GET", "path": "/reset/7c1f9a2b3c4d5e6f7a8b9c0d1e2f3a4b"}),
+    ("http.request", {"method": "GET", "path": "/invite/Zx9Qp2Lm7Rt4Wv8Yb3Nc"}),
+    ("http.request", {"method": "GET", "path": "/logout"}),
+    # Browser input values, sessions, credentials and capture state.
+    ("browser.interact", {"path": "/login", "steps": [{"action": "fill", "selector": "#pin", "value": "4821"}]}),
+    ("browser.workflow", {"path": "/settings", "steps": [{"action": "fill", "selector": "#name", "value": "x"}]}),
+    ("browser.navigate", {"path": "/account", "session_ref": str(uuid4())}),
+    ("http.request", {"method": "GET", "path": "/account", "session_ref": str(uuid4())}),
+    ("web.crawl", {"origin": "https://app.test", "as_principal": "primary"}),
+    ("http.request", {"method": "GET", "path": "/me", "as_principal": "primary"}),
+    ("http.request", {"method": "GET", "path": "/", "capture": [{"name": "csrf", "from": "body"}]}),
+    ("browser.login_check", {"origin": "https://app.test", "profile_ref": str(uuid4())}),
+    ("artifact.inspect", {"path": "/backup.sql", "search_terms": ["password"]}),
+    # Any origin other than the Hunt target's own host, such as a granted destination.
+    ("http.request", {"method": "GET", "path": "/health", "origin": "https://other.test"}),
+    ("web.crawl", {"origin": "https://api.app.test"}),
+    # Control-plane, recipe and shell steps.
+    ("findings.create", {"title": "x"}),
+    ("targets.actions.create", {"name": "x"}),
+    ("ssh.exec", {"command": "id"}),
+]
 
 
-def test_current_sessions_become_required_parameters_and_are_never_saved_as_defaults():
-    session = str(uuid4())
-    steps, parameters, _ = recipe_steps([action(values={'method': 'GET', 'path': '/account', 'session_ref': session})])
-    assert steps[0]['input']['session_ref'] == {'$parameter': 'session_1'}
-    assert parameters['session_1']['type'] == 'string'
-    assert session not in json.dumps([steps, parameters])
+def test_reusable_steps_survive_the_real_ledger_redaction_unchanged():
+    for name, values in REUSABLE:
+        row = ledger(name, values)
+        step = retained_step(name, row["input_summary"]["input"], HOST)
+        assert step == {"capability": name, "input": values}, (name, values, row["input_summary"])
 
 
-@pytest.mark.parametrize('row', [
-    action('findings.create'), action('targets.actions.create'), action('ssh.exec'),
-    action(values={'path': '/?key=***'}), action(values={'path': '/', 'body': 'private input'}),
-    action(values={'path': '/', 'capture': True}), action(status='failed'),
-])
-def test_unsettled_control_plane_secret_or_transient_material_is_not_a_recipe(row):
-    assert recipe_steps([row]) == ([], {}, [])
+@pytest.mark.parametrize("name,values", NOT_REUSABLE)
+def test_steps_carrying_values_sessions_or_other_origins_are_never_proposed(name, values):
+    row = ledger(name, values)
+    assert retained_step(name, row["input_summary"]["input"], HOST) is None, row["input_summary"]
+    assert recipe_steps([row], HOST) == ([], [])
 
 
-def test_recipe_respects_the_existing_sixteen_step_bound():
-    rows = [action(values={'method': 'GET', 'path': f'/route-{index}'}) for index in range(30)]
-    steps, _, evidence = recipe_steps(rows)
-    assert len(steps) == len(evidence) == 16
+def test_nothing_secret_or_off_host_reaches_a_proposed_recipe():
+    rows = [ledger(name, values) for name, values in REUSABLE + NOT_REUSABLE]
+    steps, evidence = recipe_steps(rows, HOST)
+    text = json.dumps(steps)
+    for value in ("redacted", "letmein", "4821", "9f8e7d6c", "7c1f9a2b", "Zx9Qp2Lm", "other.test",
+                  "api.app.test", "hunter2", "session_ref", "as_principal", "headers", "?"):
+        assert value not in text, value
+    assert len(steps) == len(REUSABLE) and len(evidence) == len(REUSABLE)
 
 
-@pytest.mark.parametrize('summary', ['null', '{broken', [], {'input': []}])
+def test_a_failed_or_partial_action_is_not_a_step():
+    for status in ("failed", "partial", "blocked", "running"):
+        assert recipe_steps([ledger("web.crawl", {"origin": "https://app.test"}, status=status)], HOST) == ([], [])
+
+
+def test_the_allowlist_names_only_fields_that_carry_no_values_or_credentials():
+    forbidden = {"headers", "query", "json_body", "form_body", "capture", "request_bindings", "session_ref",
+                 "primary_session_ref", "secondary_session_ref", "as_principal", "principal_binding_digest",
+                 "profile_ref", "steps", "search_terms", "via_address", "body", "selector", "value"}
+    for name, fields in RETAINED_STEP_FIELDS.items():
+        assert not fields & forbidden, name
+
+
+@pytest.mark.parametrize("summary", ["null", "{broken", [], {"input": []}, {"input": "x"}])
 def test_a_malformed_historical_summary_does_not_lose_other_reusable_steps(summary):
-    bad = {**action(), 'input_summary': summary}
-    good = action()
-    steps, _, evidence = recipe_steps([bad, good])
-    assert len(steps) == 1 and evidence == [str(good['id'])]
+    bad = {**ledger("web.crawl", {"origin": "https://app.test"}), "input_summary": summary}
+    good = ledger("javascript.analyze", {"path": "/static/app.js"})
+    steps, evidence = recipe_steps([bad, good], HOST)
+    assert len(steps) == 1 and evidence == [str(good["id"])]
 
 
-def test_metadata_opt_out_prevents_automatic_saved_action_writes(monkeypatch):
+def test_identical_steps_are_proposed_once():
+    rows = [ledger("web.crawl", {"origin": "https://app.test"}) for _ in range(3)]
+    steps, evidence = recipe_steps(rows, HOST)
+    assert len(steps) == 1 and evidence == [str(rows[0]["id"])]
+
+
+def test_a_device_locator_is_the_host_a_step_must_stay_on():
+    row = ledger("http.request", {"method": "GET", "path": "/status", "origin": "http://[2001:db8::5]:8080"})
+    assert recipe_steps([row], "2001:db8::5")[0]
+    assert recipe_steps([row], "2001:db8::6") == ([], [])
+    probe = ledger("device.http.probe", {"method": "GET", "path": "/status", "origin_port": 8080})
+    assert recipe_steps([probe], "2001:db8::5")[0]
+
+
+def test_the_rolling_proposal_keeps_one_copy_of_each_step_and_the_newest_when_full():
+    def step(index):
+        return {"capability": "javascript.analyze", "input": {"path": f"/static/{index}.js"}}
+    previous = [{**step(index), "description": ""} for index in range(3)]  # as a stored recipe holds them
+    merged = merge_retained_steps(previous, [step(2), step(3), step(0)], saved=[{**step(1), "description": ""}],
+                                  limit=16)
+    assert merged == [step(0), step(2), step(3)]
+    merged = merge_retained_steps([step(index) for index in range(16)], [step(16), step(17)], saved=[], limit=16)
+    assert merged == [step(index) for index in range(2, 18)]
+
+
+def test_metadata_opt_out_prevents_any_retention(monkeypatch):
     from targets import hunt_authority
+
     async def authority(*args, lock=False):
-        assert lock is True
-        return {'id': uuid4(), 'url': 'host://app.test', 'is_active': True,
-                'metadata_json': {'hunt_authority': {'target_url': 'host://app.test',
-                                'metadata_changes': False, 'instruction_changes': True}}}
-    monkeypatch.setattr(hunt_authority, 'authority_row', authority)
-    result = asyncio.run(retain_hunt_action(object(), {'id': uuid4(), 'target_id': uuid4()}))
-    assert result == {'status': 'skipped', 'reason': 'target_metadata_changes_disabled'}
+        assert lock is False, "finish holds the target row already; retention never takes a row lock"
+        return {"id": uuid4(), "url": "host://app.test", "is_active": True,
+                "metadata_json": {"hunt_authority": {"target_url": "host://app.test",
+                                  "metadata_changes": False, "instruction_changes": True}}}
+    monkeypatch.setattr(hunt_authority, "authority_row", authority)
+    result = asyncio.run(retain_hunt_action(object(), {"id": uuid4(), "target_id": uuid4()}))
+    assert result == {"status": "skipped", "reason": "target_metadata_changes_disabled"}
+
+
+def test_finish_retention_never_writes_a_saved_action_directly():
+    import ast
+    from pathlib import Path
+    source = Path(__file__).resolve().parents[1] / "api/hunt/saved_actions.py"
+    calls = {getattr(node.func, "id", None) or getattr(node.func, "attr", None)
+             for node in ast.walk(ast.parse(source.read_text())) if isinstance(node, ast.Call)}
+    assert "write_target_action" not in calls and "create_action_proposal" not in calls
+    assert "refresh_retained_proposal" in calls

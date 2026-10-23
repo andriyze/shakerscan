@@ -1526,6 +1526,17 @@ class HuntRunService:
         async with self._pool().acquire() as connection:
             async with connection.transaction():
                 run_uuid = _uuid_or_400(hunt_id, "hunt id")
+                if self._finish_retainer is not None:
+                    # Lock order: the target row, then the Hunt row, as operator retractions and
+                    # decisions take them. KEY SHARE is all the retained proposal's insert needs
+                    # and never waits on a finding write's count refresh.
+                    await connection.execute(
+                        """SELECT 1 FROM targets
+                           WHERE id = target_asset_access_owner(
+                               (SELECT COALESCE(device_target_id, target_id) FROM hunt_runs WHERE id=$1))
+                           FOR KEY SHARE OF targets""",
+                        run_uuid,
+                    )
                 row = await hunt_run_or_404(connection, hunt_id, for_update=True)
                 debrief = {"summary": summary, "next_actions": next_actions}
                 if row.get("completed_at") is not None or row["status"] not in {

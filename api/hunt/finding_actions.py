@@ -249,7 +249,7 @@ def _refuse_quarantined(run: Any) -> None:
 
 
 def _context_target(run: Any) -> Mapping[str, Any]:
-    raw = run["context_pack"]
+    raw = dict(run).get("context_pack")
     try:
         context = json.loads(raw) if isinstance(raw, str) else raw
     except ValueError:
@@ -622,3 +622,9 @@ async def delete_hunt_finding(
             "finding_id": str(deleted["id"]),
         },
     }
+
+
+# Shared with finish retention, which keeps a proposed step on the same host as a finding.
+http_origin = _origin
+hunt_target_host = _target_host
+hunt_target_locator = _target_url
