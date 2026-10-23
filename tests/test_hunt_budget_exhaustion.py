@@ -299,6 +299,10 @@ async def test_candidates_are_recordable_after_budget_exhaustion(monkeypatch, st
         async def fetch(self, _sql, *args):
             return [{"id": action, "kind": "action", "status": "completed"}] if action in args[0] else []
 
+        async def fetchval(self, sql, *args):
+            assert "investigation_candidate_observations" in sql  # the per-Hunt byte bound
+            return 0
+
         async def execute(self, sql, *args):
             writes.append(sql)
 

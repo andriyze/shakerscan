@@ -245,3 +245,39 @@ def test_a_pending_retained_proposal_leaves_the_planner_its_whole_quota(monkeypa
                     await _check_pending_quota(conn, target, planner, 'saved_action')
                 assert getattr(full.value, 'status_code', None) == 429
     asyncio.run(scenario())
+
+
+def test_a_candidate_past_the_byte_bound_is_refused_and_the_hunt_keeps_running(monkeypatch):
+    """The stored-bytes query counts this Hunt's candidate rows and observations; a write past the
+    bound is refused with nothing written or charged and no budget state recorded."""
+    async def scenario():
+        async with startup_database() as conn:
+            app = await _prepared(conn, monkeypatch)
+            import importlib
+            bounds = importlib.import_module('hunt.candidate_bytes')
+            target = await conn.fetchval("INSERT INTO targets(url) VALUES('https://bytes.fixture.test') RETURNING id")
+            async with AsyncClient(transport=ASGITransport(app.app), base_url='http://operator') as client:
+                start = await client.post('/hunts', json={'target_id': str(target), 'target_kind': 'web',
+                    'goal': 'Inspect fixture', 'policy': {'active_testing': False}})
+                assert start.status_code in (200, 201), start.text
+                hunt = UUID(start.json()['hunt_id'])
+                evidence = await conn.fetchval("""INSERT INTO hunt_actions(hunt_run_id,capability_name,status,
+                    input_summary,completed_at) VALUES($1,'http.request','completed','{}'::jsonb,NOW()) RETURNING id""", hunt)
+
+                def body(title):
+                    return {'family': 'data_exposure', 'locus': {'path': f'/{title}'}, 'title': title,
+                            'claim': 'A fixture response showed it.', 'evidence_refs': [str(evidence)]}
+                first = await client.post(f'/hunts/{hunt}/candidates', json=body('first'))
+                assert first.status_code == 200, first.text
+                stored = await conn.fetchval(bounds.STORED_CANDIDATE_BYTES_SQL, hunt)
+                # The row and its observation, as stored.
+                assert stored >= 2 * len('firstA fixture response showed it.')
+                before = await conn.fetchrow('SELECT status,budget_used_json FROM hunt_runs WHERE id=$1', hunt)
+                monkeypatch.setattr(bounds, 'MAX_CANDIDATE_BYTES_PER_HUNT', int(stored) + 10)
+                refused = await client.post(f'/hunts/{hunt}/candidates', json=body('second'))
+                assert refused.status_code == 422 and 'candidate_bytes_limit' in refused.text, refused.text
+                after = await conn.fetchrow('SELECT status,budget_used_json FROM hunt_runs WHERE id=$1', hunt)
+                assert dict(after) == dict(before)
+                assert await conn.fetchval('SELECT count(*) FROM investigation_candidates WHERE hunt_run_id=$1', hunt) == 1
+                assert await conn.fetchval(bounds.STORED_CANDIDATE_BYTES_SQL, hunt) == stored
+    asyncio.run(scenario())

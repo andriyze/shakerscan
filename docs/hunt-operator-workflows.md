@@ -104,7 +104,8 @@ silently shortening the call. Start warnings use the actual executor reservation
 Evidence-linked finding recording shares `max_candidates` with candidate records and remains
 available on an unfinished exhausted Hunt. It does not spend target traffic or execution calls,
 and a full allowance or a refused write never stops the Hunt; a refused write spends nothing. A
-Hunt's findings hold at most 64 MiB; a write past it is refused and nothing is charged. Finding
+Hunt's findings hold at most 64 MiB and its candidate records 256 MiB; a write past either is
+refused and nothing is charged. Finding
 locations keep the evidenced service's scheme and port and are stored in one spelling (lower-case
 scheme and host, no default port). A relative path stays on the target's own service when that
 service is evidenced, and otherwise follows the single evidenced service on the target host; a

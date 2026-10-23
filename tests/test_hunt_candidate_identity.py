@@ -411,6 +411,10 @@ async def test_candidate_route_answers_409_for_a_candidate_under_verification(mo
         async def fetch(self, _sql, *args):
             return [{"id": action, "kind": "action", "status": "completed"}]
 
+        async def fetchval(self, query, *args):
+            assert "investigation_candidate_observations" in query  # the per-Hunt byte bound
+            return 0
+
         async def execute(self, query, *args):
             raise AssertionError("a refused sighting must not charge the candidate budget")
 

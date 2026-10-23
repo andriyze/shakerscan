@@ -54,6 +54,12 @@ candidate records, through the shared ledger.
   limit; nothing is written or charged and the Hunt keeps running. The largest finding is about
   40 KB of ASCII text, so about 1,650 of them fit, or about 155 KB of four-byte characters, so
   about 430 fit; typical findings of a few kilobytes fit by the tens of thousands.
+- A Hunt's candidate records hold at most 256 MiB as stored in UTF-8 (each write's candidate row
+  and observation: title, claim, evidence references, locus and context). A create, sighting or
+  correction that would pass it is refused with `candidate_bytes_limit` and a message naming the
+  limit; nothing is written or charged and the Hunt keeps running. About 1,030 candidates of the
+  largest size fit (four-byte characters at every limit, about 260 KB each); a typical candidate
+  of a kilobyte or two fits by the hundred thousand.
 
 ## Finish proposals
 

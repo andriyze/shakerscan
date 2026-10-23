@@ -49,6 +49,7 @@ from .candidate_verification_preflight import (
     web_candidate_preflight,
 )
 from .action_replay import execution_started_from_budget, replay_observations
+from .candidate_bytes import correction_bytes, require_candidate_room, sighting_bytes
 from .host_accounting import distinct_host_charge
 from .boundary_handoff import compile_candidate_boundary_handoff
 from .boundary_discovery import discover_hunt_boundaries
@@ -1221,20 +1222,22 @@ async def prepare_hunt_boundary_discovery(hunt_id: str, draft_id: str):
                 raise HTTPException(status_code=422, detail={
                     "error": "candidate_locus_invalid", "message": str(exc),
                 }) from exc
+            observation_context = {
+                "hunt_id": str(hunt_uuid),
+                "objective": run["objective"],
+                "discovery_draft_id": draft_id,
+                "boundary_source_binding": draft["source_binding"],
+                "evidence_refs_total": draft["evidence_refs_total"],
+                "provenance_omitted": draft["provenance_omitted"],
+                "authoritative": False,
+            }
+            await require_candidate_room(conn, run["id"], sighting_bytes(candidate, observation_context))
             try:
                 result = await investigation_candidates.upsert_candidate(
                     conn,
                     candidate,
                     created_by=f"hunt_boundary_discovery:{hunt_uuid}",
-                    observation_context={
-                        "hunt_id": str(hunt_uuid),
-                        "objective": run["objective"],
-                        "discovery_draft_id": draft_id,
-                        "boundary_source_binding": draft["source_binding"],
-                        "evidence_refs_total": draft["evidence_refs_total"],
-                        "provenance_omitted": draft["provenance_omitted"],
-                        "authoritative": False,
-                    },
+                    observation_context=observation_context,
                 )
             except investigation_candidates.CandidateLifecycleError as exc:
                 raise _candidate_sighting_http_error(exc) from exc
@@ -1324,10 +1327,12 @@ async def create_hunt_candidate(hunt_id: str, request: HuntCandidateRequest):
                 evidence_refs=request.evidence_refs, verifier_contract_id=request.verifier_contract_id,
                 source_kind="hunt_v2",
             )
+            observation_context = {"hunt_id": hunt_id, "objective": run["objective"]}
+            await require_candidate_room(conn, run["id"], sighting_bytes(candidate, observation_context))
             try:
                 result = await investigation_candidates.upsert_candidate(
                     conn, candidate, created_by=f"hunt_v2:{hunt_id}",
-                    observation_context={"hunt_id": hunt_id, "objective": run["objective"]},
+                    observation_context=observation_context,
                 )
             except investigation_candidates.CandidateLifecycleError as exc:
                 raise _candidate_sighting_http_error(exc) from exc
@@ -1392,6 +1397,9 @@ async def update_hunt_candidate(
                 _require_candidate_writable_hunt(run)
                 _require_unquarantined_hunt(run)
                 await _require_candidate_evidence(conn, run, request.evidence_refs)
+                await require_candidate_room(
+                    conn, run["id"], correction_bytes(request.model_dump(exclude_unset=True)),
+                )
                 result = await investigation_candidates.update_candidate_for_hunt(
                     conn,
                     hunt_run_id=str(hunt_uuid),
