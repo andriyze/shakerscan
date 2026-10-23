@@ -128,11 +128,21 @@ EARLIER_TITLES = [
     ("", "PostgreSQL injection", "sqli", None),
     ("", "MSSQL injection in search", "sqli", None),
     ("", "SQLite injection in sort", "sqli", None),
-    ("", "Oracle injection in id", "sqli", None),
+    ("", "Oracle SQL injection in id", "sqli", None),
+    ("", "PL/SQL injection in report", "sqli", None),
     ("injection_extra", "Blind MySQL injection (time based)", "sqli", None),
     # Without an injection, a database name chooses nothing.
     ("", "MySQL server version disclosed", None, RESCAN),
     ("", "Oracle WebLogic console exposed", None, RESCAN),
+    # "Oracle" alone names a vendor or a padding oracle, not a database: titles route as before.
+    ("", "Oracle injection in id", None, RESCAN),
+    ("injection_extra", "Oracle WebLogic OS Command Injection", "command_injection", None),
+    ("xxe_injection", "XML External Entity injection in Oracle BI", "xxe", None),
+    ("ldap_injection", "LDAP injection (Oracle Internet Directory)", None, RESCAN),
+    ("", "Padding oracle in session cookie allows injection of forged blocks", None, RESCAN),
+    # A database's name next to another kind of injection does not make it SQL injection.
+    ("injection_extra", "MySQL Workbench OS command injection", "command_injection", None),
+    ("", "Template injection in a PostgreSQL report", "ssti", None),
     ("", "NoSQL Injection Vulnerability", "nosqli", None),
     ("smart_sqli", "NoSQL Injection in username", "nosqli", None),
     ("", "Command Injection in cmd parameter", "command_injection", None),

@@ -515,6 +515,15 @@ def normalize_retest_type(value: str | None) -> str | None:
     return RETEST_TYPE_ALIASES.get(str(value).strip().lower())
 
 
+# Database names an earlier scanner's SQL injection title may carry instead of "SQL", and the
+# other kinds of injection a title naming one of them may be about.
+_SQL_DIALECTS = ("mysql", "postgresql", "postgres", "mssql", "sqlite")
+_OTHER_INJECTIONS = (
+    "command injection", "os command", "rce", "remote code execution", "xxe", "xml external entity",
+    "ssti", "template injection", "ldap", "xpath", "nosql", "header injection", "crlf",
+)
+
+
 def title_inference_allowed(tool: str | None) -> bool:
     """Whether a finding's title may choose its retest: no tool, or an earlier scanner's tool."""
     name = str(tool or "").strip().lower()
@@ -627,11 +636,16 @@ def infer_type_from_title_tool(
 
     if _title_has(title, "xss", "cross-site scripting", "cross site scripting"):
         return "xss"
-    # A database's name is a word of its own ("sql" is not a whole word inside "mysql").
+    # A database's name is a word of its own ("sql" is not a whole word inside "mysql"). It names
+    # SQL injection only beside no other kind of injection ("MySQL Workbench OS command
+    # injection"). "Oracle" alone names a vendor or a padding oracle; "Oracle SQL" and "PL/SQL"
+    # already hold "sql".
+    injected = re.search(r"(?<![a-z0-9])inject", title)
     if (
-        _title_has(title, "sql", "mysql", "postgresql", "mssql", "sqlite", "oracle")
-        and re.search(r"(?<![a-z0-9])inject", title)
-    ) or _title_has(title, "sqli"):
+        (_title_has(title, "sql") and injected)
+        or _title_has(title, "sqli")
+        or (_title_has(title, *_SQL_DIALECTS) and injected and not _title_has(title, *_OTHER_INJECTIONS))
+    ):
         return "sqli"
     if _title_has(title, "ssrf", "server-side request forgery", "server side request forgery"):
         return "ssrf"
