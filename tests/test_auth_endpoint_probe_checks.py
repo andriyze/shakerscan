@@ -46,7 +46,12 @@ from tests.test_auth_endpoint_probe_limit import (
     SIGN_IN_ROUTES,
     _StoredOnce,
 )
-from tests.test_form_variant_batch_attempts import BATCHES, _manifests, _report, _signals
+from tests.test_form_variant_batch_attempts import (
+    BATCHES,
+    _manifests,
+    _report,
+    _signals,
+)
 from tests.test_scan_action_adapter import TARGET, _action, _dispatcher, _lease, _noop
 
 try:
@@ -496,7 +501,7 @@ def test_the_wall_the_pace_consumes_funds_whole_proofs_and_leaves_the_rest_waiti
     deferred = [item for item in receipt.observations if item.get("kind") == "candidate_deferred"]
     assert len(deferred) == 3 - len(sent)
     assert receipt.status == ("success" if len(sent) == 3 else "partial")
-    family, _report_ = _proof_report(candidates, receipt.observations, receipt.status)
+    family, _unused = _proof_report(candidates, receipt.observations, receipt.status)
     if len(sent) == 3:
         assert family["coverage_status"] == "complete"
         assert family["proof_escalation"]["status"] == "complete"
@@ -597,7 +602,7 @@ def test_a_variant_its_verifier_and_its_proof_both_left_limited_is_one_candidate
     proof_rows = receipts[0].observations
     assert len([head for head in _heads(receipts) if head.get("inconclusive_reason")
                 == AUTH_ENDPOINT_PROBE_LIMITED]) == 3
-    family, _report_ = _report(
+    family, _unused = _report(
         "xss", ("xss.verify_batch", verifier_rows, "success", (0, 3, 3)),
         ("xss.browser_prove_batch", proof_rows, "success", (0, 3, 3)),
     )
@@ -666,7 +671,7 @@ def test_a_browser_proof_whose_share_cannot_hold_the_pace_waits(monkeypatch):
     waits = _record_pace(monkeypatch)
     held = _browser_proof(monkeypatch)
     budget = {"http_requests": 300, "state_changing_requests": 300, "tool_wall_seconds": PACE}
-    receipts, candidates = _run("xss.browser_prove_batch", options=SIGN_IN, budget=budget)
+    receipts, _candidates = _run("xss.browser_prove_batch", options=SIGN_IN, budget=budget)
     (receipt,) = receipts
     deferred = [item for item in receipt.observations if item.get("kind") == "candidate_deferred"]
     assert held == [] and waits == [] and _heads(receipts) == []

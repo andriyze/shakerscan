@@ -344,7 +344,7 @@ def test_every_nosqli_variant_counts_as_attempted_in_the_report(monkeypatch):
     """The report counts distinct attempt ids: three variants that shared one read as two
     candidates never attempted (``candidates_unattempted``)."""
     receipts, *_rest = _run(monkeypatch, "nosqli.verify_batch", statuses=["success"] * 3)
-    family, _report_ = _report(
+    family, _unused = _report(
         "nosqli", ("nosqli.verify_batch", receipts[0].observations, "success", (0, 3, 3)),
     )
     assert family["attempted_candidates"] == 3, family
@@ -405,7 +405,7 @@ def test_each_entry_of_a_route_seen_with_two_bodies_is_its_own_comparison_attemp
     digest = endpoints.reference().manifest_digest
     first = endpoints.entries[0]["route_id"]
     assert _sha(f"{digest}:authz_surface:{first}") in {head["attempt_id"] for head in heads}
-    family, _report_ = _report(
+    family, _unused = _report(
         "authz_surface", ("authz_surface.verify_batch", receipt.observations, "success", (0, 4, 4)),
     )
     assert family["attempted_candidates"] == 4 and family["unattempted_candidates"] == 0, family
@@ -515,7 +515,7 @@ def test_each_entry_of_a_url_seen_with_several_bodies_is_one_exposure_get_and_it
     digest = endpoints.reference().manifest_digest
     # The URL's first entry keeps the attempt id earlier builds checkpointed it under.
     assert _sha(f"{digest}:exposure:{ORIGIN}/hub/login") in {head["attempt_id"] for head in heads}
-    family, _report_ = _report(
+    family, _unused = _report(
         "sensitive_exposure", ("exposure.verify_batch", receipt.observations, "success", (1, 3, 4)),
     )
     assert family["attempted_candidates"] == 3 and family["unattempted_candidates"] == 0, family
