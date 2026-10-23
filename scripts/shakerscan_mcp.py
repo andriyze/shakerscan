@@ -1642,10 +1642,12 @@ def _capability_input_error(exc: MCPError, hunt_id: str, capability_name: str, s
         "input": {field: _example_value(field, properties.get(field)) for field in required},
     }
     fields = {str(key): _field_hint(value) for key, value in properties.items()}
+    # Built outside the f-string: a quote reused inside a nested f-string is Python 3.12 syntax,
+    # and the client runs on Python 3.10 and 3.11 too.
+    named = ", ".join(f"{field} ({fields.get(field, 'any')})" for field in required)
     text = (
         f"{exc.message}. {capability_name} input: "
-        + (f"required {', '.join(f'{field} ({fields.get(field, 'any')})' for field in required)}"
-           if required else "no required fields")
+        + (f"required {named}" if required else "no required fields")
         + (f"; optional {', '.join(optional)}" if optional else "")
         + ". Example call (replace the placeholder values): "
         + json.dumps(example, separators=(", ", ": "))
