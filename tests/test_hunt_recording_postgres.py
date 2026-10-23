@@ -192,3 +192,33 @@ def test_finishes_share_one_rolling_proposal_outside_the_planner_quota(monkeypat
                 assert getattr(full.value, 'status_code', None) == 429
                 assert (await client.get(f'/targets/{target}/actions')).json()['actions'] == []
     asyncio.run(scenario())
+
+
+def test_a_pending_retained_proposal_leaves_the_planner_its_whole_quota(monkeypatch):
+    """19 planner proposals and the finish's retained one are pending: the planner's 20th still
+    files, and only a 21st planner proposal is over the quota."""
+    async def scenario():
+        async with startup_database() as conn:
+            app = await _prepared(conn, monkeypatch)
+            from targets.instruction_proposals import MAX_PENDING_PER_TARGET, _check_pending_quota
+            target = await conn.fetchval("INSERT INTO targets(url) VALUES('host://quota.fixture.test') RETURNING id")
+            planner = f'hunt:{UUID(int=9)}'
+
+            async def planner_proposal(index):
+                body = {'name': f'n{index}', 'instructions': '', 'parameters': {}, 'steps': []}
+                await conn.execute("""INSERT INTO target_instruction_proposals(target_id,base_revision,title,
+                    methodology,methodology_sha256,reason,proposed_by,kind,action_operation,action_body)
+                    VALUES($1,0,'t','m',$2,'r',$3,'saved_action','create',$4::jsonb)""",
+                    target, '0' * 64, planner, json.dumps(body))
+            async with AsyncClient(transport=ASGITransport(app.app), base_url='http://operator') as client:
+                for index in range(MAX_PENDING_PER_TARGET - 1):
+                    await planner_proposal(index)
+                _hunt, outcome = await _finished_hunt(client, conn, target, [
+                    {'method': 'GET', 'path': '/health', 'origin': 'https://quota.fixture.test'}])
+                assert outcome['status'] == 'proposed', outcome
+                await _check_pending_quota(conn, target, planner, 'saved_action')  # the 20th files
+                await planner_proposal(MAX_PENDING_PER_TARGET - 1)
+                with pytest.raises(Exception) as full:
+                    await _check_pending_quota(conn, target, planner, 'saved_action')
+                assert getattr(full.value, 'status_code', None) == 429
+    asyncio.run(scenario())

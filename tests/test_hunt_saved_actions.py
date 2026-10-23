@@ -249,3 +249,20 @@ def test_finish_proposes_the_newest_completed_steps_and_returns_the_proposal_out
     assert paths == [f"/items/{index}" for index in range(total - _LIMIT_ACTIONS, total)]
     assert len(captured["evidence"]) == _LIMIT_ACTIONS
 
+
+def test_the_retained_proposal_is_not_counted_against_the_planner_pending_quota():
+    """19 planner proposals and the rolling retained one are pending: the planner's 20th files."""
+    from fastapi import HTTPException
+    from targets.instruction_proposals import MAX_PENDING_PER_TARGET, RETAINED_PROPOSER, _check_pending_quota
+    conn = SqliteConn("""CREATE TABLE target_instruction_proposals (target_id TEXT, status TEXT, kind TEXT,
+        proposed_by TEXT)""")
+    target, planner = uuid4(), f"hunt:{uuid4()}"
+    rows = [(str(target), "pending", "saved_action", planner)] * (MAX_PENDING_PER_TARGET - 1)
+    rows.append((str(target), "pending", "saved_action", RETAINED_PROPOSER))
+    conn.db.executemany("INSERT INTO target_instruction_proposals VALUES (?,?,?,?)", rows)
+    asyncio.run(_check_pending_quota(conn, target, planner, "saved_action"))  # the 20th files
+    conn.db.execute("INSERT INTO target_instruction_proposals VALUES (?,?,?,?)",
+                    (str(target), "pending", "saved_action", planner))
+    with pytest.raises(HTTPException) as full:
+        asyncio.run(_check_pending_quota(conn, target, planner, "saved_action"))
+    assert full.value.status_code == 429
