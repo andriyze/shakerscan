@@ -811,6 +811,8 @@ async def _execute_browser_action_in_context(
     started = time.monotonic()
     request_count = 0
     proof_body_requests = 0
+    # A refused write that carried the XSS proof's marker (the page's own writes do not count).
+    payload_write_blocked = False
     browser_actions = 0
     blocked: list[dict[str, Any]] = []
     responses: list[dict[str, Any]] = []
@@ -922,7 +924,7 @@ async def _execute_browser_action_in_context(
         )
 
         async def route_request(route) -> None:
-            nonlocal request_count, proof_body_requests
+            nonlocal request_count, proof_body_requests, payload_write_blocked
             request = route.request
             reason = None
             if cancelled():
@@ -961,6 +963,10 @@ async def _execute_browser_action_in_context(
                 elif request.method.upper() not in SAFE_BROWSER_METHODS:
                     if not isinstance(prepared, PreparedBrowserInteraction) or not prepared.max_state_changing_requests:
                         reason = "state_changing_method"
+                        if isinstance(prepared, PreparedXSSBrowserProof) and _carries_marker(
+                            request, prepared.marker,
+                        ):
+                            payload_write_blocked = True
                     elif request.method.upper() not in {"POST","PUT","PATCH","DELETE"}:
                         reason = "unsupported_mutation_method"
                     elif prepared.traffic_counts.get("state_changing_requests",0) >= prepared.max_state_changing_requests:
@@ -1132,6 +1138,10 @@ async def _execute_browser_action_in_context(
                 "marker_sha256": prepared.marker_sha256,
                 "event_transcript": proof_events[:20],
                 "dom_marker_executed": dom_match,
+                # The proof is read-only, so every write is refused. Only a refused write that
+                # carried the payload is part of the attempt; a page's own writes (socket
+                # polling, telemetry) are not, and leave a negative complete.
+                "payload_write_blocked": payload_write_blocked,
                 "sanitized_screenshot_sha256": screenshot_sha256,
                 "browser_build": str(getattr(browser, "version", "unknown")),
                 "same_origin": True,
@@ -1377,6 +1387,22 @@ def _is_ip_literal(value: str | None) -> bool:
 
 def _observation_url(value: str) -> str:
     return redact_url(str(value or ""), max_length=2_000)
+
+
+def _carries_marker(request: Any, marker: str) -> bool:
+    """Whether a refused write carries the XSS proof's marker, in its URL or its body.
+
+    The marker is letters, digits, ``_`` and ``-``, which URL, form and JSON encoding leave as
+    they are. A body that cannot be read counts as carrying it, so a write the proof cannot
+    tell apart keeps the negative incomplete.
+    """
+    if marker in urllib.parse.unquote(str(getattr(request, "url", "") or "")):
+        return True
+    try:
+        body = request.post_data_buffer or b""
+    except Exception:  # noqa: BLE001 - an unreadable body is not evidence of a page-only write
+        return True
+    return marker.encode() in bytes(body)
 
 
 def _proof_request_url(value: str) -> str:

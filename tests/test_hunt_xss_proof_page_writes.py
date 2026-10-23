@@ -1,0 +1,218 @@
+"""A read-only XSS proof refuses every write; only a refused write that carried the payload
+leaves the negative result incomplete. The page's own writes (socket polling, telemetry)
+are outside the attempt, like off-origin subresources.
+
+A Hunt of 2026-10-23 on an OWASP Juice Shop target: a fragment proof of
+``/#/search?query=test`` ran all 44 same-origin reads and came back not proven, but the page's
+own Engine.IO long-polling POSTs (``/socket.io/?EIO=...&transport=polling``, no payload) were
+refused during the settle, and the Hunt reported the proof partial with
+``browser_request_blocked:state_changing_method``. A single-page application that polls or sends
+telemetry could never get a complete negative. Unit fixtures: the browser is a scripted double.
+"""
+from __future__ import annotations
+
+import asyncio
+import sys
+import types
+
+import pytest
+
+from runtime.models import TargetBinding
+from hunt.capability_executor import CapabilityAdapterResult
+from hunt.fragment_xss_proof import (
+    _normalize_hunt_browser_xss_result,
+    hunt_browser_xss_proof_adapter,
+)
+
+
+def _browser_module():
+    from hunt import fragment_xss_proof
+
+    return sys.modules[fragment_xss_proof.XSSBrowserProofAdapter.__module__]
+
+
+def _result(*, reasons, payload_write_blocked):
+    proof = {"kind": "xss_browser_proof", "proof_state": "not_proven"}
+    if payload_write_blocked is not None:
+        proof["payload_write_blocked"] = payload_write_blocked
+    return CapabilityAdapterResult(
+        status="success",
+        observations=(proof, *({
+            "kind": "browser_request_blocked", "reason": reason, "method": "POST",
+            "url": "https://app.example.test/socket.io/",
+        } for reason in reasons)),
+        actual_budget={"browser_actions": 2, "http_requests": 3},
+        execution_started=True,
+        parser_version="xss-browser-proof/v1",
+    )
+
+
+def test_page_initiated_writes_do_not_make_a_negative_partial():
+    result = _normalize_hunt_browser_xss_result(_result(
+        reasons=("cross_origin", "state_changing_method"), payload_write_blocked=False,
+    ))
+    assert (result.status, result.partial, result.errors) == ("success", False, ())
+
+
+@pytest.mark.parametrize("flag", [True, None])
+def test_blocked_payload_write_or_unknown_stays_partial(flag):
+    result = _normalize_hunt_browser_xss_result(_result(
+        reasons=("state_changing_method",), payload_write_blocked=flag,
+    ))
+    assert result.status == "partial" and result.partial is True
+    assert result.errors == ("browser_request_blocked:state_changing_method",)
+
+
+def test_page_writes_do_not_hide_an_exhausted_request_budget():
+    result = _normalize_hunt_browser_xss_result(_result(
+        reasons=("state_changing_method", "request_budget_exhausted"),
+        payload_write_blocked=False,
+    ))
+    assert result.status == "partial"
+    assert result.errors == ("browser_request_blocked:request_budget_exhausted",)
+
+
+def _run_proof(monkeypatch, *, write_carries_payload: bool):
+    class FakePinnedProxy:
+        def __init__(self, **_kwargs):
+            self.socket_factory = types.SimpleNamespace(policy_receipt={})
+            self.address_attempts = {"192.0.2.10": 1}
+            self.address_connections = {"192.0.2.10": 1}
+            self.proxy_url = "socks5://127.0.0.1:41000"
+
+        async def start(self): return self
+        async def close(self): return None
+
+    # The browser module the Hunt prover runs in, whichever import layout loaded it.
+    monkeypatch.setattr(_browser_module(), "PinnedSocksProxy", FakePinnedProxy)
+    sent, aborted = [], []
+
+    class FakeRequest:
+        def __init__(self, method, url, body=None):
+            self.method, self.url, self.post_data_buffer = method, url, body
+            self.headers = {}
+
+    class FakeRoute:
+        def __init__(self, request): self.request = request
+        async def abort(self, _reason): aborted.append(self.request.method)
+        async def continue_(self, **_kw): sent.append(self.request.method)
+
+    class FakeResponse:
+        def __init__(self, url):
+            self.url, self.status, self.headers = url, 200, {"content-type": "text/html"}
+            self.request = FakeRequest("GET", url)
+
+    class FakePage:
+        def __init__(self, marker): self.url, self._marker, self.route = "about:blank", marker, None
+        def on(self, *_a): return None
+        async def goto(self, url, **_kw):
+            await self.route(FakeRoute(FakeRequest("GET", url)))
+            # socket.io long polling sends its packets upstream with POST.
+            await self.route(FakeRoute(FakeRequest(
+                "POST", "https://app.example.test/socket.io/?EIO=4&transport=polling", b"40",
+            )))
+            if write_carries_payload:
+                await self.route(FakeRoute(FakeRequest(
+                    "POST", "https://app.example.test/api/search",
+                    ('{"q":"%s"}' % self._marker).encode(),
+                )))
+            self.url = url
+            return FakeResponse(url)
+        async def get_attribute(self, *_a): return None
+
+    class FakeContext:
+        def __init__(self, page): self._page = page
+        async def route(self, _pattern, handler): self._page.route = handler
+        def on(self, *_a): return None
+        async def add_init_script(self, _s): return None
+        async def new_page(self): return self._page
+        async def close(self): return None
+
+    target = TargetBinding(
+        target_id="target-1", target_kind="web", canonical_host="app.example.test",
+        allowed_origins=("https://app.example.test",), allowed_addresses=("192.0.2.10",),
+        allowed_root_domains=("example.test",),
+    )
+    adapter = hunt_browser_xss_proof_adapter(
+        capability_name="xss.verify", spec=None, target=target,
+        execution_target="https://app.example.test/#/search?q=seed", action_id="action-1",
+    )
+    page = FakePage(adapter.prepared.marker)
+
+    class FakeBrowser:
+        version = "fake/1"
+        async def new_context(self, **_kw): return FakeContext(page)
+        async def close(self): return None
+
+    class FakeChromium:
+        async def launch(self, **_kw): return FakeBrowser()
+
+    class FakePlaywright:
+        chromium = FakeChromium()
+        async def stop(self): return None
+
+    class FakeStarter:
+        async def start(self): return FakePlaywright()
+
+    async_api = types.ModuleType("playwright.async_api")
+    async_api.TimeoutError = type("FakePlaywrightTimeout", (Exception,), {})
+    async_api.async_playwright = lambda: FakeStarter()
+    package = types.ModuleType("playwright")
+    package.async_api = async_api
+    monkeypatch.setitem(sys.modules, "playwright", package)
+    monkeypatch.setitem(sys.modules, "playwright.async_api", async_api)
+    monkeypatch.setattr(asyncio, "sleep", _no_sleep)
+
+    async def heartbeat(): return None
+    result = asyncio.run(adapter.execute(heartbeat=heartbeat, cancelled=lambda: False))
+    return result, sent, aborted
+
+
+_real_sleep = asyncio.sleep
+
+
+async def _no_sleep(_seconds, *a, **kw):
+    await _real_sleep(0)
+
+
+def test_background_socket_poll_is_refused_and_negative_is_complete(monkeypatch):
+    result, sent, aborted = _run_proof(monkeypatch, write_carries_payload=False)
+    assert sent == ["GET"] and aborted == ["POST"]  # still read-only
+    proof = next(o for o in result.observations if o.get("kind") == "xss_browser_proof")
+    assert proof["proof_state"] == "not_proven"
+    assert proof["payload_write_blocked"] is False
+    assert (result.status, result.partial, result.errors) == ("success", False, ())
+
+
+def test_refused_write_carrying_the_payload_keeps_the_negative_partial(monkeypatch):
+    result, sent, aborted = _run_proof(monkeypatch, write_carries_payload=True)
+    assert sent == ["GET"] and aborted == ["POST", "POST"]
+    proof = next(o for o in result.observations if o.get("kind") == "xss_browser_proof")
+    assert proof["payload_write_blocked"] is True
+    assert result.status == "partial"
+    assert "browser_request_blocked:state_changing_method" in result.errors
+
+
+class _Request:
+    def __init__(self, url, body=b"", unreadable=False):
+        self.url, self._body, self._unreadable = url, body, unreadable
+
+    @property
+    def post_data_buffer(self):
+        if self._unreadable:
+            raise UnicodeDecodeError("utf-8", b"\xff", 0, 1, "fixture")
+        return self._body
+
+
+def test_the_marker_is_found_in_every_encoding_a_write_can_carry():
+    _carries_marker = _browser_module()._carries_marker
+
+    marker = "shakerscan_xss_0123abcd-ef0"
+    assert _carries_marker(_Request(f"https://a.test/api?q=%3Cimg%20{marker}%3E"), marker)
+    assert _carries_marker(_Request("https://a.test/api", ('{"q":"<img %s>"}' % marker).encode()), marker)
+    assert _carries_marker(_Request("https://a.test/api", f"q=%3Cimg+{marker}%3E".encode()), marker)
+    assert not _carries_marker(_Request("https://a.test/socket.io/?EIO=4&transport=polling", b"40"), marker)
+    assert not _carries_marker(_Request("https://a.test/telemetry", None), marker)
+    # A body the proof cannot read is not evidence of a page-only write.
+    assert _carries_marker(_Request("https://a.test/api", unreadable=True), marker)
+
