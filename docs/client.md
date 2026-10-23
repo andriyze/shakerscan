@@ -71,8 +71,9 @@ Python 3.10 or newer. One third-party dependency since 0.11.2: python-fido2 (Yub
 BSD-2-Clause; it brings `cryptography`, `cffi` and `pycparser`, and `typing-extensions` on Python
 3.10), for a USB security key's touch. The package declares `fido2>=2.2,<2.3` (one minor line:
 python-fido2's API has changed between minor releases), so a plain `pipx` or `uv tool` install
-resolves the newest matching releases from the package index without hashes;
-the reviewed resolution is hash-locked in `client/requirements/runtime.lock`, and
+resolves the newest matching releases from the package index without hashes. The set a release
+was tested with is hash-locked in `client/requirements/runtime.lock` (a record of what was tested,
+not of what a plain install picks up), and
 `pip install --require-hashes -r client/requirements/runtime.lock` installs exactly that. The client
 is no longer pure Python through `cryptography` and `cffi`: they ship wheels for the common
 platforms, and a platform without one (32-bit ARM, for example) builds them, which needs a Rust
@@ -376,8 +377,10 @@ shakerscan hunt permissions wait 8f0c…  # JSON: granted, denied, expired, with
 ```
 
 - **Enterprise (a token).** The approver is the person the connection's token acts for, named by
-  the gateway (`--account` names someone else, and a token that acts for nobody needs it; a gateway
-  that does not name one is answered by asking, as before). You prove it with your TOTP code, typed
+  the gateway (`--account` names someone else, and a token that acts for nobody needs it). An
+  older gateway that needs the sign-in name refuses an approval without one; the client then
+  reads the gateway's own description of itself (`GET /_enterprise/me`) and, when it does not say
+  it names the approver, asks for the name once, as before. You prove it with your TOTP code, typed
   at the prompt, or a USB/NFC security key (`--method security_key`). Without `--method` the client
   uses a plugged-in security key when the gateway offers one and the key holds one of your
   credentials (asked silently, without a touch; with a PIN when the gateway asks for one), else
@@ -446,8 +449,10 @@ done; decided by alice (security-key touch)
 raised state-changing requests 20 -> 40 (safety ceiling) for Hunt 3f2a91c0-…
 ```
 
-- **In your own terminal** (stdin a terminal, and stdout or stderr one: `--json | jq` still asks,
-  on stderr): the client shows the decision whole (every limit a raise sets, the whole host; a
+- **In your own terminal**: stdin is a terminal, and stdout or stderr is one to ask on. `--json |
+  jq` in your own terminal still asks, on stderr; input piped into the command (`echo body |
+  shakerscan api … -`) never counts as you, even in your own terminal. The client shows the
+  decision whole (every limit a raise sets, the whole host; a
   decision too long for a terminal is never touched for), asks
   the gateway for a challenge bound to exactly that request (method, path and query, SHA-256 of the
   body bytes, this connection, the person it acts for), checks the binding, asks for one touch of
@@ -455,20 +460,30 @@ raised state-changing requests 20 -> 40 (safety ceiling) for Hunt 3f2a91c0-…
   sends the same request once more with the one-time grant (`X-ShakerScan-Person-Proof`, valid two
   minutes, for that request only). `shakerscan api`, `shakerscan scan`, the Hunt, knowledge and
   secrets commands and the commands below all do this. Ctrl-C at the touch cancels it: nothing is
-  changed, and the command exits with status 130. `shakerscan scan --active-testing` does not ask
-  its own "Type 'yes'" as well when the gateway requires the touch: the touch is the confirmation.
+  changed, and the command exits with status 130; a touch that fails exits with status 1, with the
+  reason on one line. With no key plugged in, the client says "Insert your security key" and waits
+  for one (up to a minute, within the challenge's two minutes) instead of failing; over SSH it says
+  at once that the key is out of reach. `shakerscan scan --active-testing` does not ask its own
+  "Type 'yes'" when the gateway requires the touch: the touch is the confirmation when the target
+  needs one, and a target already authorized needs none, so no question of any kind is asked.
   `shakerscan doctor` says whether the gateway requires the touch and whether one could happen
   here (python-fido2, a key plugged in), without asking the key anything.
 - **Anywhere else** (an agent's tool call, a pipe, a script, or inside `shakerscan agent`): it
   never prompts and never asks a key anything. It prints one line, `person decision required:
   <the decision>. Nothing was changed. The person runs this in their own terminal and touches
-  their security key: <command>`, and exits with status **3** (refused, nothing ran). No option
-  skips the touch. The MCP adapter answers the same refusal as `outcome:
+  their security key: <command>`, and exits with status **3** (refused, nothing ran); the Hunt
+  and target commands print that one line too, not the CLI's error JSON. No option skips the
+  touch. The MCP adapter answers the same refusal as `outcome:
   person_decision_required` with the decision and the command, and tells the agent never to retry
   it.
 - Two commands make the usual decisions directly:
   - `shakerscan targets authorize <url-or-id>` registers the target if needed and records its
-    standing authorization for active testing (never intrusive; that is made in the browser).
+    standing authorization for active testing (never intrusive; that is made in the browser). The
+    gateway names the environment the authorization is evaluated in ("in the production
+    environment", or a lab environment, which admits private and local addresses). It takes a
+    connected device's id as well (a device is authorized the same way) and `host://<address>`
+    for a host target. In an agent's shell the target is registered (an ordinary add, no
+    decision) before the authorization is refused, and stays registered.
     `shakerscan targets unauthorize <url-or-id> [--reason …]` withdraws it.
   - `shakerscan hunt budget raise <hunt> --limit NAME=N|NAME=+N [--resume]` raises limits to new
     totals (or by `+N`), reading the Hunt's budget and its revision first.
@@ -484,18 +499,22 @@ raised state-changing requests 20 -> 40 (safety ceiling) for Hunt 3f2a91c0-…
 - **Keys.** A USB FIDO2 key (a YubiKey 5, for example) over python-fido2. Touch ID, Windows Hello
   and synced passkeys are out of reach of a terminal client, and Windows is not supported for the
   touch in this release. On Linux, install your distribution's FIDO udev rules (the `libfido2` or
-  `yubikey-manager` package); the client says so when a USB device is plugged in that your user
-  cannot open. On a remote machine over SSH the key is not reachable: the client says so and
+  `yubikey-manager` package); when no key is found and a USB HID device your user cannot open is
+  present, the client says your key may be one of them. On a remote machine over SSH the key is not reachable: the client says so and
   names the same command to run on the machine the key is plugged into, with a connection that
   acts for you.
 - **What you are shown is what the key signs.** The client asks the gateway for the challenge
   first, so a gateway that cannot name the decision in full (a target or Hunt it could not read)
   or an account with no key registered is said before anything is asked of a key; then it shows
   the decision exactly as the challenge states it.
-- **A refused start** (a scan, Hunt start or retest of a target nobody authorized yet) started
-  nothing. Once you have authorized the target (`shakerscan targets authorize`), the same request
-  runs when it is sent again with the same Idempotency-Key; the refusal line, the MCP adapter and
-  the Hunt skill tell an agent so.
+- **A refused start** (a scan, Hunt start, retest or network scan of a target nobody authorized
+  yet) started nothing. The person's decision is the target's authorization, never the start
+  itself: in an agent's shell the command it names is `shakerscan targets authorize <target>`,
+  by the target id the gateway names (running the agent's own scan or retest would run the work
+  twice). The refusal line, the MCP adapter and the Hunt skill tell an agent not to send the
+  request again until the person says the target is authorized, and then to send it once, with
+  the same Idempotency-Key. In your own terminal, your own `shakerscan scan … --active-testing`
+  shows the decision, takes the touch and sends the scan once more.
 
 ## Secrets found on a target: `shakerscan secrets`
 

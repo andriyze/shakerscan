@@ -90,8 +90,13 @@ The `shakerscan` client package has one runtime dependency, installed from the p
 it rather than bundled: python-fido2 (Yubico AB, https://github.com/Yubico/python-fido2;
 BSD-2-Clause, with some files under Apache-2.0 and MPL-2.0), which talks to a USB security key, and
 its dependencies cryptography (Apache-2.0 OR BSD-3-Clause), cffi (MIT), pycparser (BSD-3-Clause)
-and, on Python 3.10, typing-extensions (PSF-2.0). The reviewed versions are pinned with hashes in
-`client/requirements/runtime.lock` and inventoried in the client's release SBOM.
+and, on Python 3.10, typing-extensions (PSF-2.0). The versions a client release was reviewed and
+tested with are pinned with hashes in `client/requirements/runtime.lock` and inventoried in the
+client's release SBOM. That lock records the tested set, not what an install picks up: `pipx
+install shakerscan` or `uv tool install shakerscan` resolves the declared range (`fido2>=2.2,<2.3`
+and whatever versions of its dependencies match) from the package index at install time, without
+hashes; `pip install --require-hashes -r client/requirements/runtime.lock` installs exactly the
+tested set.
 
 ## External services
 
