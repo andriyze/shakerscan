@@ -65,8 +65,10 @@ class _Connection:
         self.admitted_origins = admitted_origins
         self.fingerprints = set()
         self.locks = []
-        # Labelled fixture: the bytes this Hunt's other finding records already hold.
+        # Labelled fixture: the bytes this Hunt's other finding records already hold, and the bytes
+        # of the record an update replaces (counted only when the query does not exclude it).
         self.stored_bytes = 0
+        self.replaced_bytes = 0
         self.updated = None
 
     def transaction(self):
@@ -110,7 +112,7 @@ class _Connection:
 
     async def fetchval(self, query, *args):
         if "octet_length" in query:
-            return self.stored_bytes
+            return self.stored_bytes + (self.replaced_bytes if args[1] is None else 0)
         if "FROM target_interpretations" in query:
             return None
         raise AssertionError(query)
@@ -415,6 +417,7 @@ def test_an_update_that_grows_a_finding_past_the_byte_bound_is_refused():
     _create(connection, evidence_action_id=uuid.uuid4())
     # The record being replaced is not counted twice: only the other records' bytes are stored.
     connection.stored_bytes = finding_actions.MAX_FINDING_BYTES_PER_HUNT - 6_000
+    connection.replaced_bytes = 10_000
     assert _update(connection, description="shorter")["status"] == "success"
     connection.updated = None
     with pytest.raises(HuntFindingActionError, match="limit per Hunt"):
