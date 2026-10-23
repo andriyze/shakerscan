@@ -221,9 +221,10 @@ except (ImportError, ModuleNotFoundError):
     from scanner.scanner_tools.unsafe_actions import path_may_change_state
 
 from .auth_endpoint_probe import (
-    AUTH_ACTION_IDS, AUTH_ENDPOINT_PACE_UNFUNDED, AUTH_ENDPOINT_PROBE_LIMITED,
-    AUTH_ENDPOINT_PROBE_PROFILE, auth_endpoint_hold, normalize_path, pace_seconds,
-    pace_wall_seconds, parallel_children, probe_parameters, probe_set_spent, sign_in_endpoint_for,
+    AUTH_ACTION_IDS, AUTH_ENDPOINT_CHECK_ATTEMPT_REQUESTS, AUTH_ENDPOINT_PACE_UNFUNDED,
+    AUTH_ENDPOINT_PROBE_LIMITED, AUTH_ENDPOINT_PROBE_PROFILE, PacedSignInTransport, SignInEndpoint,
+    auth_endpoint_hold, normalize_path, pace_seconds, pace_wall_seconds, paced_check_hold,
+    parallel_children, probe_parameters, probe_set_left, probe_set_spent, sign_in_endpoint_for,
     sign_in_endpoints, sign_in_page_paths,
 )
 
@@ -803,6 +804,124 @@ def _no_tool_output(observations: Any) -> bool:
         isinstance(item, Mapping) and item.get("kind") == "candidate_attempt"
         for item in observations or ()
     )
+
+
+def _check_parameters(entries: Sequence[Mapping[str, Any]], candidate: Mapping[str, Any]) -> int:
+    """How many fields a candidate's probe set on the sign-in endpoint is sized for.
+
+    A body candidate's form fields; a private request's candidates are one per field, so the
+    request's fields are its candidates in the manifest.
+    """
+    if candidate.get("body_field_names"):
+        return probe_parameters(candidate.get("body_field_names"))
+    reference = str(candidate.get("request_ref_id") or "")
+    if candidate.get("field_path") and reference:
+        return probe_parameters([
+            entry for entry in entries
+            if str(entry.get("request_ref_id") or "") == reference and entry.get("field_path")
+        ])
+    return 1
+
+
+class _SignInChecks:
+    """The pace and probe set of an in-process check's requests to the sign-in endpoint.
+
+    The SQLi and XSS request verifiers, the SQLi proof, the NoSQLi check and the XSS browser proof
+    send a few requests to a candidate's endpoint. On the credential profile's own sign-in
+    endpoint they are held to the same pace as the sqlmap and Dalfox verifiers and draw from a
+    probe set of their own across the Scan (auth_endpoint_probe), so what the endpoint may receive
+    is the sum of the probe sets.
+    """
+
+    def __init__(
+        self, capability_name: str, endpoints: Sequence[SignInEndpoint],
+        received: dict[str, int], children: int,
+    ) -> None:
+        self.capability_name = capability_name
+        self.endpoints = tuple(endpoints)
+        self.received = received
+        self.children = children
+
+    def endpoint(self, url: str, method: str) -> SignInEndpoint | None:
+        return sign_in_endpoint_for(url, method, self.endpoints) if self.endpoints else None
+
+    def spent(self, endpoint: SignInEndpoint, parameters: int) -> bool:
+        return probe_set_spent(
+            self.capability_name, self.received.get(endpoint.key, 0), parameters,
+        )
+
+    def short_of(self, endpoint: SignInEndpoint, parameters: int, need: int) -> bool:
+        """Whether the probe set has less left than the attempt would send."""
+        return probe_set_left(
+            self.capability_name, self.received.get(endpoint.key, 0), parameters,
+        ) < need
+
+    def hold(
+        self, endpoint: SignInEndpoint, sub_budget: Mapping[str, int], *, parameters: int,
+        available_wall_seconds: int,
+    ) -> dict[str, int] | None:
+        return paced_check_hold(
+            sub_budget, capability_name=self.capability_name,
+            received=self.received.get(endpoint.key, 0), parameters=parameters,
+            children=self.children, available_wall_seconds=available_wall_seconds,
+        )
+
+    def transport(self, transport: Any, endpoint: SignInEndpoint) -> PacedSignInTransport:
+        return PacedSignInTransport(
+            transport, endpoint, pace_seconds=pace_seconds(children=self.children),
+        )
+
+    async def wait(self) -> None:
+        """The pace before an attempt that sends the endpoint one request of its own."""
+        await PacedSignInTransport.wait(pace_seconds(children=self.children))
+
+    def record(
+        self, head: Mapping[str, Any], endpoint: SignInEndpoint, sent: int, *, short: bool,
+    ) -> dict[str, Any]:
+        """The attempt's record with what the endpoint received; inconclusive when the probe set
+        left it short and it proved nothing."""
+        received = self.received.get(endpoint.key, 0) + max(0, int(sent))
+        self.received[endpoint.key] = received
+        # Named sign_in_*: a key with an "auth" segment is withheld from receipts.
+        record = {
+            **dict(head),
+            "sign_in_endpoint": endpoint.label,
+            "sign_in_endpoint_key": endpoint.key,
+            "sign_in_endpoint_requests": max(0, int(sent)),
+            "sign_in_endpoint_received": received,
+        }
+        if short and str(record.get("proof_state") or "") != "verified" and not record.get("verdict"):
+            record.update({
+                "verdict": "inconclusive", "inconclusive_reason": AUTH_ENDPOINT_PROBE_LIMITED,
+            })
+        return record
+
+    def closed(
+        self, endpoint: SignInEndpoint, *, attempt_id: str, candidate_id: str, family: str,
+    ) -> dict[str, Any]:
+        """A candidate whose probe set is spent: inconclusive, nothing sent, never negative."""
+        return {
+            "kind": "candidate_attempt", "attempt_id": attempt_id, "candidate_id": candidate_id,
+            "family": family, "status": "success", "proof_state": "not_proven",
+            "budget_consumed": {}, "verdict": "inconclusive",
+            "inconclusive_reason": AUTH_ENDPOINT_PROBE_LIMITED,
+            "sign_in_endpoint": endpoint.label, "sign_in_endpoint_key": endpoint.key,
+            "sign_in_endpoint_requests": 0,
+            "sign_in_endpoint_received": self.received.get(endpoint.key, 0),
+        }
+
+    def deferred(
+        self, endpoint: SignInEndpoint, *, attempt_id: str, candidate_id: str, family: str,
+        available_wall_seconds: int,
+    ) -> dict[str, Any]:
+        """A candidate the slice's wall cannot pace: left for a later action, with no verdict."""
+        return {
+            "kind": "candidate_deferred", "attempt_id": attempt_id, "candidate_id": candidate_id,
+            "family": family, "reason": AUTH_ENDPOINT_PACE_UNFUNDED,
+            "available_wall_seconds": max(0, int(available_wall_seconds)),
+            "sign_in_endpoint": endpoint.label,
+            "sign_in_endpoint_received": self.received.get(endpoint.key, 0),
+        }
 
 
 def batch_outcome(
@@ -1988,6 +2107,7 @@ class DatabaseNeutralScanActionDispatcher:
         family = "xss" if action.capability_name.startswith("xss.") else "sqli"
         manifest_digest = manifest.reference().manifest_digest
         repeated_positions = _repeated_candidate_positions(manifest.entries)
+        sign_in_checks = await self._sign_in_checks(action, load_attempts)
         started_at = datetime.now(timezone.utc).isoformat()
         observations: list[Mapping[str, Any]] = []
         errors: list[str] = []
@@ -2044,13 +2164,39 @@ class DatabaseNeutralScanActionDispatcher:
             if request is None or not authorized or short:
                 exhausted |= short
                 break
+            transport = self._scan_replay_transport(action, private=True)
+            # The credential profile's own sign-in request: paced, and drawn from this
+            # verifier's probe set on the endpoint (_SignInChecks).
+            sign_in = sign_in_checks.endpoint(request.url, request.method)
+            if sign_in is not None:
+                parameters = _check_parameters(manifest.entries, candidate)
+                if sign_in_checks.spent(sign_in, parameters):
+                    attempted += 1
+                    attempt_statuses.append({"status": "success", "timed_out": False})
+                    observations.append(sign_in_checks.closed(
+                        sign_in, attempt_id=attempt_id, candidate_id=candidate_id, family=family,
+                    ))
+                    continue
+                held = sign_in_checks.hold(
+                    sign_in, sub_budget, parameters=parameters,
+                    available_wall_seconds=remaining.get("tool_wall_seconds", 0),
+                )
+                if held is None:
+                    observations.append(sign_in_checks.deferred(
+                        sign_in, attempt_id=attempt_id, candidate_id=candidate_id, family=family,
+                        available_wall_seconds=remaining.get("tool_wall_seconds", 0),
+                    ))
+                    exhausted.add("tool_wall_seconds")
+                    continue
+                sub_budget = held
+                transport = sign_in_checks.transport(transport, sign_in)
             specification = CAPABILITY_REGISTRY.require(action.capability_name)
             adapter = RequestMutationVerificationAdapter(
                 specification=specification,
                 target=self.target,
                 request=request,
                 candidate=candidate,
-                transport=self._scan_replay_transport(action, private=True),
+                transport=transport,
                 requested_budget=sub_budget,
             )
             result = await CapabilityExecutor().execute(
@@ -2090,6 +2236,13 @@ class DatabaseNeutralScanActionDispatcher:
                 })[:20],
                 "budget_consumed": dict(result.actual_budget),
             }, *attempt_observations)
+            if sign_in is not None:
+                attempt_observations = (
+                    sign_in_checks.record(
+                        attempt_observations[0], sign_in, transport.sent, short=False,
+                    ),
+                    *attempt_observations[1:],
+                )
             attempt = {
                 "attempt_id": attempt_id,
                 "candidate_id": candidate_id,
@@ -2240,6 +2393,7 @@ class DatabaseNeutralScanActionDispatcher:
                     carried_source[finished_id] = source
         carried_count = 0
         repeated_positions = _repeated_candidate_positions(manifest.entries)
+        sign_in_checks = await self._sign_in_checks(action, load_attempts)
         started_at = datetime.now(timezone.utc).isoformat()
         observations: list[Mapping[str, Any]] = []
         errors: list[str] = []
@@ -2335,6 +2489,22 @@ class DatabaseNeutralScanActionDispatcher:
                 observations.extend(rejected["observations"])
                 errors.append(rejected["errors"][0])
                 continue
+            # The proof submits the form once: on the credential profile's own sign-in endpoint
+            # that submission waits the pace and draws from this proof's probe set there.
+            sign_in = (
+                sign_in_checks.endpoint(execution_url, str(resolved_request.get("method") or ""))
+                if body_fields else None
+            )
+            if sign_in is not None:
+                if sign_in_checks.spent(sign_in, probe_parameters(body_fields)):
+                    attempted += 1
+                    attempt_statuses.append({"status": "success", "timed_out": False})
+                    observations.append(sign_in_checks.closed(
+                        sign_in, attempt_id=attempt_id, candidate_id=candidate_id,
+                        family="xss_browser_proof",
+                    ))
+                    continue
+                await sign_in_checks.wait()
             adapter = XSSBrowserProofAdapter(prepared, trusted_headers=proof_headers)
             specification = CAPABILITY_REGISTRY.require(action.capability_name)
             result = await CapabilityExecutor().execute(
@@ -2357,6 +2527,12 @@ class DatabaseNeutralScanActionDispatcher:
                 "status": result.status, "proof_state": proof_state,
                 "budget_consumed": dict(result.actual_budget),
             }, *attempt_observations)
+            if sign_in is not None:
+                bundled = (sign_in_checks.record(
+                    bundled[0], sign_in,
+                    int(dict(result.actual_budget).get("state_changing_requests", 0) or 0),
+                    short=False,
+                ), *bundled[1:])
             attempt = {
                 "attempt_id": attempt_id, "candidate_id": candidate_id,
                 "status": result.status, "timed_out": bool(result.timed_out),
@@ -2478,6 +2654,7 @@ class DatabaseNeutralScanActionDispatcher:
                     carried_source[finished_id] = source
         carried_count = 0
         repeated_positions = _repeated_candidate_positions(manifest.entries)
+        sign_in_checks = await self._sign_in_checks(action, load_attempts)
         started_at = datetime.now(timezone.utc).isoformat()
         observations: list[Mapping[str, Any]] = []
         errors: list[str] = []
@@ -2570,6 +2747,41 @@ class DatabaseNeutralScanActionDispatcher:
             }
             if sub_budget.get("http_requests", 0) < 4:
                 break
+            transport = self._scan_replay_transport(action, private=True)
+            # The credential profile's own sign-in endpoint: each proof request waits the pace,
+            # and the proofs draw from a probe set of their own there (_SignInChecks).
+            sign_in = sign_in_checks.endpoint(request.url, request.method)
+            short_of_set = False
+            if sign_in is not None:
+                parameters = _check_parameters(manifest.entries, candidate)
+                if sign_in_checks.spent(sign_in, parameters):
+                    attempted += 1
+                    attempt_statuses.append({"status": "success", "timed_out": False})
+                    observations.append(sign_in_checks.closed(
+                        sign_in, attempt_id=attempt_id, candidate_id=candidate_id,
+                        family="sqli_proof",
+                    ))
+                    continue
+                held = sign_in_checks.hold(
+                    sign_in, sub_budget, parameters=parameters,
+                    available_wall_seconds=remaining.get("tool_wall_seconds", 0),
+                )
+                if held is None:
+                    observations.append(sign_in_checks.deferred(
+                        sign_in, attempt_id=attempt_id, candidate_id=candidate_id,
+                        family="sqli_proof",
+                        available_wall_seconds=remaining.get("tool_wall_seconds", 0),
+                    ))
+                    continue
+                # An authentication form's proof is an error pair and a bypass pair (8); any
+                # other runs the error, boolean and timing pairs (14).
+                need = min(int(sub_budget.get("http_requests") or 0), (
+                    8 if str(proof_candidate.get("request_class") or "") == "safe_authentication"
+                    else AUTH_ENDPOINT_CHECK_ATTEMPT_REQUESTS["sqli.prove_batch"]
+                ))
+                short_of_set = sign_in_checks.short_of(sign_in, parameters, need)
+                sub_budget = held
+                transport = sign_in_checks.transport(transport, sign_in)
             specification = CAPABILITY_REGISTRY.require(action.capability_name)
             # Constructing the adapter validates this candidate's request against the
             # sub-budget -- a body candidate in a slice whose reservation tier carries
@@ -2583,7 +2795,7 @@ class DatabaseNeutralScanActionDispatcher:
                     target=self.target,
                     request=request,
                     candidate=proof_candidate,
-                    transport=self._scan_replay_transport(action, private=True),
+                    transport=transport,
                     requested_budget=sub_budget,
                 )
             except SQLiProofError as exc:
@@ -2634,6 +2846,10 @@ class DatabaseNeutralScanActionDispatcher:
                 "proof_state": proof_state,
                 "budget_consumed": dict(result.actual_budget),
             }, *attempt_observations)
+            if sign_in is not None:
+                bundled = (sign_in_checks.record(
+                    bundled[0], sign_in, transport.sent, short=short_of_set,
+                ), *bundled[1:])
             attempt = {
                 "attempt_id": attempt_id, "candidate_id": candidate_id,
                 "status": result.status, "timed_out": bool(result.timed_out),
@@ -3611,6 +3827,7 @@ class DatabaseNeutralScanActionDispatcher:
         }
         manifest_digest = manifest.reference().manifest_digest
         repeated_positions = _repeated_candidate_positions(manifest.entries)
+        sign_in_checks = await self._sign_in_checks(action, load_attempts)
         started_at = datetime.now(timezone.utc).isoformat()
         observations: list[Mapping[str, Any]] = []
         errors: list[str] = []
@@ -3715,13 +3932,51 @@ class DatabaseNeutralScanActionDispatcher:
             }
             if sub_budget.get("http_requests", 0) < 4:
                 break
+            transport = self._scan_replay_transport(action, private=True)
+            # The credential profile's own sign-in endpoint: each request waits the pace, and the
+            # check draws from a probe set of its own there (_SignInChecks).
+            sign_in = sign_in_checks.endpoint(request.url, request.method)
+            short_of_set = False
+            if sign_in is not None:
+                parameters = _check_parameters(manifest.entries, candidate)
+                if sign_in_checks.spent(sign_in, parameters):
+                    attempted += 1
+                    attempt_statuses.append({"status": "success", "timed_out": False})
+                    observations.append(sign_in_checks.closed(
+                        sign_in, attempt_id=attempt_id, candidate_id=candidate_id,
+                        family="nosqli",
+                    ))
+                    continue
+                held = sign_in_checks.hold(
+                    sign_in, sub_budget, parameters=parameters,
+                    available_wall_seconds=remaining.get("tool_wall_seconds", 0),
+                )
+                if held is None:
+                    observations.append(sign_in_checks.deferred(
+                        sign_in, attempt_id=attempt_id, candidate_id=candidate_id,
+                        family="nosqli",
+                        available_wall_seconds=remaining.get("tool_wall_seconds", 0),
+                    ))
+                    continue
+                # Four requests a field, over the anchor and every declared field.
+                tested = dict.fromkeys([
+                    str(candidate.get("field_path") or candidate.get("parameter_name") or ""),
+                    *(str(item) for item in candidate.get("body_field_names") or ()),
+                ])
+                need = min(
+                    int(sub_budget.get("http_requests") or 0),
+                    AUTH_ENDPOINT_CHECK_ATTEMPT_REQUESTS["nosqli.verify_batch"] * len(tested),
+                )
+                short_of_set = sign_in_checks.short_of(sign_in, parameters, need)
+                sub_budget = held
+                transport = sign_in_checks.transport(transport, sign_in)
             specification = CAPABILITY_REGISTRY.require(action.capability_name)
             adapter = NoSQLiVerifyAdapter(
                 specification=specification,
                 target=self.target,
                 request=request,
                 candidate=proof_candidate,
-                transport=self._scan_replay_transport(action, private=True),
+                transport=transport,
                 requested_budget=sub_budget,
             )
             result = await CapabilityExecutor().execute(
@@ -3749,6 +4004,10 @@ class DatabaseNeutralScanActionDispatcher:
                 "proof_state": proof_state,
                 "budget_consumed": dict(result.actual_budget),
             }, *attempt_observations)
+            if sign_in is not None:
+                bundled = (sign_in_checks.record(
+                    bundled[0], sign_in, transport.sent, short=short_of_set,
+                ), *bundled[1:])
             attempt = {
                 "attempt_id": attempt_id, "candidate_id": candidate_id,
                 "status": result.status, "timed_out": bool(result.timed_out),
@@ -4002,6 +4261,26 @@ class DatabaseNeutralScanActionDispatcher:
                 "checkpoint_mode": "after_each_route",
                 "secret_values_visible": False,
             },
+        )
+
+    async def _sign_in_endpoints(self) -> tuple[SignInEndpoint, ...]:
+        """The sign-in endpoints of the credential profiles this Scan carries."""
+        planned_ids = {item.action_id for item in self.plan.actions}
+        sessions = [
+            item
+            for auth_action in AUTH_ACTION_IDS if auth_action in planned_ids
+            for item in await self._observations(auth_action)
+        ]
+        return sign_in_endpoints(self.options, sessions, base_url=self.target_url)
+
+    async def _sign_in_checks(self, action: ScanAction, load_attempts: Any) -> _SignInChecks:
+        """The sign-in pace and probe set an in-process check's batch action draws from."""
+        endpoints = await self._sign_in_endpoints()
+        received = (
+            await self._sign_in_requests_received(action, load_attempts) if endpoints else {}
+        )
+        return _SignInChecks(
+            action.capability_name, endpoints, received, parallel_children(self.options),
         )
 
     async def _sign_in_requests_received(
@@ -4557,13 +4836,7 @@ class DatabaseNeutralScanActionDispatcher:
         sign_in_running: set[str] = set()
         sign_in_children = parallel_children(self.options)
         if tool in {"sqlmap", "dalfox"} and manifest_kind is ScanWorkManifestKind.CANDIDATE:
-            planned_ids = {item.action_id for item in self.plan.actions}
-            sessions = [
-                item
-                for auth_action in AUTH_ACTION_IDS if auth_action in planned_ids
-                for item in await self._observations(auth_action)
-            ]
-            sign_ins = sign_in_endpoints(self.options, sessions, base_url=self.target_url)
+            sign_ins = await self._sign_in_endpoints()
             if sign_ins:
                 sign_in_received = await self._sign_in_requests_received(action, load_attempts)
         # A template sweep attempt that hits its wall before the tool reported anything examined

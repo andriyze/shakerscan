@@ -2921,6 +2921,17 @@ def finalize_scan_report(
             proof["_statuses"].append(result.status.value)
             if result.reason_code is not None:
                 proof["_reasons"].append(result.reason_code.value)
+            # A proof the sign-in endpoint's probe set left without a verdict is named too.
+            row["_sign_in_limited"].extend(
+                (
+                    str(item.get("attempt_id") or item.get("candidate_id") or ""),
+                    str(item.get("sign_in_endpoint") or ""),
+                )
+                for item in observations.get(action.action_id, ())
+                if isinstance(item, Mapping)
+                and item.get("kind") in {"candidate_attempt", "candidate_deferred"}
+                and item.get("inconclusive_reason") == AUTH_ENDPOINT_PROBE_LIMITED
+            )
         else:
             row["batch_actions"] += 1
             # Endpoints a template batch could not finish inside its wall even on a retry

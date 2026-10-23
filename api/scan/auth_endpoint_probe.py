@@ -30,7 +30,11 @@ URL's query, not a body). What changes:
   split across parallel children paces the endpoint by the number of children, so siblings that
   reach it at the same time stay inside the rate together. A slice whose hold cannot pace even
   ``AUTH_ENDPOINT_MIN_ATTEMPT_REQUESTS`` leaves the candidate for a later round, exactly like any
-  other candidate its holds cannot fund;
+  other candidate its holds cannot fund. The checks that send from the worker itself (the SQLi
+  and XSS request verifiers, the SQLi proof, the NoSQLi check and the XSS browser proof) wait
+  the same pace before each request to the endpoint (``PacedSignInTransport``) and hold a pace
+  a request on top of their share of the wall; a Scan part runs one action at a time, so the
+  endpoint sees one request per pace from whichever of them is running;
 * one probe set per endpoint and verifier across the Scan: every candidate on the endpoint (a
   declared request, the crawled form with its hidden fields, a JSON variant), every slice and
   every continuation round draws from it (a parallel child holds its own). Per tested field, at
@@ -42,17 +46,23 @@ URL's query, not a body). What changes:
   against the 53 measured), so a set of one ladder would leave the last technique of the last
   field (time-based blind, the one that finds a blind sign-in injection) unfunded after a slight
   overspend anywhere before it. Dalfox gets 64 per field: it reported a verified reflection
-  within 18 requests (12 in a later run) on a reflecting two-field sign-in form. The largest set,
-  a four-field candidate's, is the most the endpoint receives per Scan part: 3,784 sqlmap and
-  256 Dalfox requests (4,040, at the pace above about 3 h 20 min); each parallel child holds its
-  own, so a Scan split into N parts may send N times that, at the same combined pace;
+  within 18 requests (12 in a later run) on a reflecting two-field sign-in form. Each check that
+  sends from the worker gets twice what one attempt of it sends
+  (``AUTH_ENDPOINT_CHECK_ATTEMPT_REQUESTS``) per field: the SQLi proof 28 (its longest proof is
+  14 requests), the NoSQLi check 8 (four a field), each request verifier 4 (a control and a
+  mutated request) and the XSS browser proof 2 (one form submission). The largest sets, a
+  four-field candidate's, are the most the endpoint receives per Scan part: 3,784 sqlmap, 256
+  Dalfox, 112 SQLi proof, 32 NoSQLi, 16 for each request verifier and 8 XSS browser proof
+  requests (4,224, at the pace above about 3 h 31 min); each parallel child holds its own, so a
+  Scan split into N parts may send N times that, at the same combined pace;
 * verdicts: Dalfox stops at its first verified finding, and a Dalfox attempt that verified nothing
   is inconclusive, never negative, since it sent a bounded part of its payloads: it sends its whole
   payload set to a body whether or not a field reflects (1,347 requests for a two-field form in
   the scanner image, ten times its probe set), so a sign-in form without a verified XSS leaves the
-  XSS family partial. sqlmap concludes as anywhere else inside the probe set, and a candidate
-  whose probe set is spent before its verdict is inconclusive. Both are named
-  ``auth_endpoint_probe_limited``, and coverage leaves the family partial for that reason.
+  XSS family partial. sqlmap and the checks that send from the worker conclude as anywhere else
+  inside their probe sets, and a candidate whose probe set is spent (or leaves it short) before
+  its verdict is inconclusive. Both are named ``auth_endpoint_probe_limited``, and coverage leaves
+  the family partial for that reason.
 
 The probes carry placeholder values, not the profile's account, so they cannot lock out the
 account the Scan signs in with; the pace and the probe set bound what a per-address sign-in
@@ -60,6 +70,7 @@ throttle sees from the scanner.
 """
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 import hashlib
 import json
@@ -85,10 +96,34 @@ AUTH_ENDPOINT_MAX_REQUESTS_PER_MINUTE = 20
 AUTH_ENDPOINT_SECONDS_PER_REQUEST = 60 // AUTH_ENDPOINT_MAX_REQUESTS_PER_MINUTE
 #: The probe sets hold at least this many times what a verdict was measured to cost.
 AUTH_ENDPOINT_PROBE_HEADROOM = 2
+#: The most one attempt of each in-process check sends to the endpoint (per tested field for the
+#: NoSQLi check, which tests every field of a body): the SQLi proof's longest proof (a repeated
+#: error pair, then a repeated boolean pair and three timing pairs), the NoSQLi check's four
+#: requests a field, the SQLi and XSS request verifiers' control and mutated request, and the
+#: XSS browser proof's one form submission.
+AUTH_ENDPOINT_CHECK_ATTEMPT_REQUESTS: Mapping[str, int] = {
+    "sqli.prove_batch": 14,
+    "nosqli.verify_batch": 4,
+    "sqli.request_verify_batch": 2,
+    "xss.request_verify_batch": 2,
+    "xss.browser_prove_batch": 1,
+}
+#: The least an attempt of each in-process check needs to run at all.
+AUTH_ENDPOINT_CHECK_MINIMUM_REQUESTS: Mapping[str, int] = {
+    "sqli.prove_batch": 4,
+    "nosqli.verify_batch": 4,
+    "sqli.request_verify_batch": 2,
+    "xss.request_verify_batch": 2,
+    "xss.browser_prove_batch": 1,
+}
 #: Requests one tested field of the sign-in endpoint may receive from each verifier, per Scan.
 AUTH_ENDPOINT_PROBE_REQUESTS: Mapping[str, int] = {
     "sqli.verify_batch": AUTH_ENDPOINT_PROBE_HEADROOM * sum(SQLI_TECHNIQUE_NEGATIVE_COST.values()),
     "xss.verify_batch": 64,
+    **{
+        name: AUTH_ENDPOINT_PROBE_HEADROOM * requests
+        for name, requests in AUTH_ENDPOINT_CHECK_ATTEMPT_REQUESTS.items()
+    },
 }
 #: Below this an attempt cannot run even a technique's baseline and first payloads.
 AUTH_ENDPOINT_MIN_ATTEMPT_REQUESTS = 8
@@ -334,11 +369,13 @@ def probe_set_spent(
     """Whether the endpoint can fund no further attempt for this candidate.
 
     ``next_need`` is what the candidate's next unit needs for its verdict (a SQLi technique over
-    one field): a probe set with less left than that cannot conclude it either.
+    one field): a probe set with less left than that cannot conclude it either. An in-process
+    check needs at least its least attempt (``AUTH_ENDPOINT_CHECK_MINIMUM_REQUESTS``).
     """
-    return probe_set_left(capability_name, received, parameters) < max(
-        AUTH_ENDPOINT_MIN_ATTEMPT_REQUESTS, int(next_need or 0),
+    least = AUTH_ENDPOINT_CHECK_MINIMUM_REQUESTS.get(
+        capability_name, AUTH_ENDPOINT_MIN_ATTEMPT_REQUESTS,
     )
+    return probe_set_left(capability_name, received, parameters) < max(least, int(next_need or 0))
 
 
 def pace_seconds(*, children: int = 1) -> int:
@@ -376,12 +413,109 @@ def auth_endpoint_hold(
     return hold
 
 
+def paced_check_hold(
+    sub_budget: Mapping[str, int], *, capability_name: str, received: int, parameters: int = 1,
+    children: int = 1, available_wall_seconds: int,
+) -> dict[str, int] | None:
+    """The hold of an in-process check's attempt on the sign-in endpoint, or None when what the
+    slice has left cannot pace the check's least attempt.
+
+    Its requests are at most what the check's probe set has left. Each of them waits the pace
+    first (``PacedSignInTransport``), so the attempt's wall is its share plus one pace a request,
+    from what the slice has left (``available_wall_seconds``), and at least one pace and one
+    second a request.
+    """
+    pace = pace_seconds(children=children)
+    available = max(0, int(available_wall_seconds))
+    limits = [
+        probe_set_left(capability_name, received, parameters),
+        int(sub_budget.get("http_requests") or 0),
+        available // (pace + 1),
+    ]
+    if "state_changing_requests" in sub_budget:
+        limits.append(int(sub_budget.get("state_changing_requests") or 0))
+    requests = min(limits)
+    if requests < AUTH_ENDPOINT_CHECK_MINIMUM_REQUESTS.get(
+        capability_name, AUTH_ENDPOINT_MIN_ATTEMPT_REQUESTS,
+    ):
+        return None
+    share = max(0, int(sub_budget.get("tool_wall_seconds") or 0))
+    hold = dict(sub_budget)
+    hold["http_requests"] = requests
+    if "state_changing_requests" in hold:
+        hold["state_changing_requests"] = requests
+    hold["tool_wall_seconds"] = max(min(available, share + requests * pace), requests * (pace + 1))
+    return hold
+
+
+async def pace_wait(seconds: float) -> None:
+    """Wait the sign-in pace before a request to the endpoint."""
+    await asyncio.sleep(max(0.0, float(seconds)))
+
+
+class PacedSignInTransport:
+    """A replay transport that holds an in-process check's requests to the sign-in endpoint to
+    the pace, and counts them.
+
+    Each request to the endpoint waits ``pace_seconds`` first, so two never start closer than the
+    pace, whatever this Scan part sent before (its actions run one at a time). The wait comes out
+    of the request's own timeout, so the attempt keeps to the wall it holds. Requests anywhere
+    else pass unchanged. ``sent`` is how many requests went to the endpoint.
+    """
+
+    def __init__(self, transport: Any, endpoint: SignInEndpoint, *, pace_seconds: float) -> None:
+        self.transport = transport
+        self.endpoint = endpoint
+        self.pace_seconds = float(pace_seconds)
+        self.sent = 0
+
+    @staticmethod
+    async def wait(seconds: float) -> None:
+        await pace_wait(seconds)
+
+    async def send(self, request: Any, **kwargs: Any) -> Any:
+        if sign_in_endpoint_for(
+            str(getattr(request, "url", "") or ""), str(getattr(request, "method", "") or ""),
+            (self.endpoint,),
+        ) is not None:
+            await self.wait(self.pace_seconds)
+            self.sent += 1
+            if kwargs.get("timeout_seconds") is not None:
+                kwargs["timeout_seconds"] = max(
+                    0.5, float(kwargs["timeout_seconds"]) - self.pace_seconds,
+                )
+        return await self.transport.send(request, **kwargs)
+
+
 __all__ = [
-    "AUTH_ACTION_IDS", "AUTH_ENDPOINT_MAX_PARAMETERS", "AUTH_ENDPOINT_MAX_REQUESTS_PER_MINUTE",
-    "AUTH_ENDPOINT_MIN_ATTEMPT_REQUESTS", "AUTH_ENDPOINT_PACE_UNFUNDED", "AUTH_ENDPOINT_PROBE_HEADROOM",
-    "AUTH_ENDPOINT_PROBE_LIMITED", "AUTH_ENDPOINT_PROBE_PROFILE", "AUTH_ENDPOINT_PROBE_REQUESTS",
-    "AUTH_ENDPOINT_SECONDS_PER_REQUEST", "SIGN_IN_METHODS", "SignInEndpoint", "auth_endpoint_hold",
-    "normalize_path", "pace_seconds", "pace_wall_seconds", "parallel_children",
-    "probe_parameters", "probe_set_left", "probe_set_requests", "probe_set_spent",
-    "routing_digests", "sign_in_endpoint_for", "sign_in_endpoints", "sign_in_page_paths",
+    "AUTH_ACTION_IDS",
+    "AUTH_ENDPOINT_CHECK_ATTEMPT_REQUESTS",
+    "AUTH_ENDPOINT_CHECK_MINIMUM_REQUESTS",
+    "AUTH_ENDPOINT_MAX_PARAMETERS",
+    "AUTH_ENDPOINT_MAX_REQUESTS_PER_MINUTE",
+    "AUTH_ENDPOINT_MIN_ATTEMPT_REQUESTS",
+    "AUTH_ENDPOINT_PACE_UNFUNDED",
+    "AUTH_ENDPOINT_PROBE_HEADROOM",
+    "AUTH_ENDPOINT_PROBE_LIMITED",
+    "AUTH_ENDPOINT_PROBE_PROFILE",
+    "AUTH_ENDPOINT_PROBE_REQUESTS",
+    "AUTH_ENDPOINT_SECONDS_PER_REQUEST",
+    "SIGN_IN_METHODS",
+    "PacedSignInTransport",
+    "SignInEndpoint",
+    "auth_endpoint_hold",
+    "normalize_path",
+    "pace_seconds",
+    "pace_wait",
+    "pace_wall_seconds",
+    "paced_check_hold",
+    "parallel_children",
+    "probe_parameters",
+    "probe_set_left",
+    "probe_set_requests",
+    "probe_set_spent",
+    "routing_digests",
+    "sign_in_endpoint_for",
+    "sign_in_endpoints",
+    "sign_in_page_paths",
 ]
