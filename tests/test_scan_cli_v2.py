@@ -312,6 +312,8 @@ def test_the_state_changing_flag_says_it_includes_default_login_attempts():
     options = help_text[help_text.index("options:"):]
     flag_help = options[options.index("--allow-state-changing-http"):].split("--network-discovery")[0]
     assert "includes default-login attempts, which can lock accounts" in flag_help
+    # Exploit templates (a shell command or a file read in a parameter) need it too.
+    assert "and exploit templates that send attack input" in flag_help
 
 
 # A thorough scan from the terminal ran no active templates. Both entry points send the same

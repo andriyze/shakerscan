@@ -129,7 +129,9 @@ class _TemplateRecord:
     # silence is not a reliable "not matched".
     redirects: bool = False
     # Exploit-class check (rce, lfi, sqli, deserialization, ssti, xxe, code/command injection,
-    # ssrf, or a code/javascript/flow step): a verify Scan runs it only with the exploit tier.
+    # ssrf, or a code/javascript/flow step): it sends attack input (``poller_id=;curl ...;``, a
+    # ``Runtime.exec`` call) or runs a script step, so it needs the state-changing permission
+    # whatever its method, in the sweep and in a verify Scan (where that is the exploit tier).
     exploit_class: bool = False
     # Requests a path ``is_never_requested`` refuses, in a path, a raw request line, or once a
     # payload or variable value is put into one.
@@ -140,10 +142,10 @@ class _TemplateRecord:
 
     @property
     def state_changing(self) -> bool:
-        """Needs ``allow_state_changing_http``: a non-GET/HEAD method, credential-level, or a
-        GET reviewed as changing state."""
+        """Needs ``allow_state_changing_http``: a non-GET/HEAD method, credential-level,
+        exploit-class, or a GET reviewed as changing state."""
         return (
-            bool(self.methods - _SAFE_METHODS) or self.credential_level
+            bool(self.methods - _SAFE_METHODS) or self.credential_level or self.exploit_class
             or self.template_id in STATE_CHANGING_GET_TEMPLATE_IDS
         )
 
@@ -175,6 +177,8 @@ class ActiveNucleiSelection:
     # Credential-level templates (default logins) among the eligible ones, whether or not the
     # permission they need was granted; they are counted in ``state_changing_count`` as well.
     credential_level_count: int = 0
+    # Exploit-class templates among the eligible ones, counted the same way.
+    exploit_class_count: int = 0
     # Verify Scans only: which requested checks ran, which did not and why, and which ran but
     # cannot give a reliable "not matched". Recorded on the step's receipt.
     verify_selection: Mapping[str, Any] | None = None
@@ -183,13 +187,15 @@ class ActiveNucleiSelection:
         """The counts a step's receipt records: what matched, what ran and what was held back.
 
         Credential-level templates are counted as ``default_login``: a receipt masks every
-        key named like credential material, and this is a count, not a secret."""
+        key named like credential material, and this is a count, not a secret. Exploit-class
+        templates are counted as ``exploit_class``."""
         return {
             "matched": self.total_matched,
             "selected": len(self.template_ids),
             "get_only": self.get_only_count,
             "state_changing": self.state_changing_count,
             "default_login": self.credential_level_count,
+            "exploit_class": self.exploit_class_count,
             "includes_state_changing": self.includes_state_changing,
             "intrusive_excluded": self.intrusive_excluded,
             "never_requested_excluded": self.never_requested_excluded,
@@ -598,6 +604,7 @@ def resolve_active_nuclei_selection(
     intrusive_excluded = 0
     never_requested_excluded = 0
     credential_level = 0
+    exploit_class = 0
     for record in matched:
         if record.intrusive:
             # Destructive templates need more than state-changing permission, and
@@ -611,6 +618,7 @@ def resolve_active_nuclei_selection(
         if not _TEMPLATE_ID_RE.match(record.template_id):
             continue
         credential_level += int(record.credential_level)
+        exploit_class += int(record.exploit_class)
         if record.state_changing:
             state_changing.append(record.template_id)
         else:
@@ -628,6 +636,7 @@ def resolve_active_nuclei_selection(
             intrusive_excluded=intrusive_excluded,
             never_requested_excluded=never_requested_excluded,
             credential_level_count=credential_level,
+            exploit_class_count=exploit_class,
         )
     includes_state_changing = allow_state_changing_http and bool(state_changing)
     return ActiveNucleiSelection(
@@ -639,6 +648,7 @@ def resolve_active_nuclei_selection(
         intrusive_excluded=intrusive_excluded,
         never_requested_excluded=never_requested_excluded,
         credential_level_count=credential_level,
+        exploit_class_count=exploit_class,
     )
 
 
@@ -657,6 +667,7 @@ def _exact_selection(index: NucleiMethodIndex, exact_ids: frozenset[str], *,
     unreliable: list[str] = []
     state_changing = 0
     credential_level = 0
+    exploit_class = 0
     for template_id in sorted(exact_ids):
         record = by_id.get(template_id)
         if record is None or not _TEMPLATE_ID_RE.match(template_id):
@@ -669,16 +680,20 @@ def _exact_selection(index: NucleiMethodIndex, exact_ids: frozenset[str], *,
         elif _never_requested(record):
             excluded[template_id] = "never_requested_path"
         elif record.exploit_class and not allow_exploit_classes:
+            exploit_class += 1
             excluded[template_id] = "exploit_class_needs_exploit_tier"
         elif record.credential_level and not allow_state_changing_http:
             credential_level += 1
             excluded[template_id] = "credential_level_needs_state_changing_http"
         elif record.state_changing and not allow_state_changing_http:
+            # Exploit-class checks are state-changing too: the exploit tier alone does not run one.
+            exploit_class += int(record.exploit_class)
             excluded[template_id] = "needs_state_changing_http"
         else:
             ran.append(template_id)
             state_changing += int(record.state_changing)
             credential_level += int(record.credential_level)
+            exploit_class += int(record.exploit_class)
             if record.redirects:
                 unreliable.append(template_id)
     selection = {"requested": sorted(exact_ids), "ran": ran, "excluded": excluded,
@@ -697,5 +712,6 @@ def _exact_selection(index: NucleiMethodIndex, exact_ids: frozenset[str], *,
         never_requested_excluded=sum(
             1 for reason in excluded.values() if reason == "never_requested_path"),
         credential_level_count=credential_level,
+        exploit_class_count=exploit_class,
         verify_selection=selection,
     )

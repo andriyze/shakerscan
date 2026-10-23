@@ -62,7 +62,8 @@ def _parser(prog: str | None = None) -> argparse.ArgumentParser:
         "--allow-state-changing-http", action="store_true",
         help=(
             "Allow active checks whose requests can change state (with --active-testing); "
-            "includes default-login attempts, which can lock accounts"
+            "includes default-login attempts, which can lock accounts, and exploit templates "
+            "that send attack input (a shell command or a file read in a parameter)"
         ),
     )
     parser.add_argument("--network-discovery", action="store_true")

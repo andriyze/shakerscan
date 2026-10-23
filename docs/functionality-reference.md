@@ -398,9 +398,13 @@ even when it sends only GETs, because a login attempt can lock the account it tr
 GET reviewed as changing state (`STATE_CHANGING_GET_TEMPLATE_IDS`: it sets a device password,
 restores a default admin password, changes a plugin's settings, registers a user or adds an
 administrator). A check that names an account but sends no password (an authentication bypass)
-runs without it. A verify Scan lists such a check as `credential_level_needs_state_changing_http`
-or `needs_state_changing_http`, and the step's receipt counts the selection (`template_selection`:
-matched, selected, state-changing, `default_login`, excluded).
+runs without it. An exploit template needs it too, by GET or not: one tagged `rce`, `lfi`, `sqli`,
+`ssrf`, `ssti`, `xxe`, `deserialization`, `code-injection` or `cmdi`, or one that runs a code,
+JavaScript or flow step, sends attack input (a shell command in a parameter, a `Runtime.exec`
+expression in a path) whether or not it can match. A verify Scan lists such a check as
+`credential_level_needs_state_changing_http`, `exploit_class_needs_exploit_tier` or
+`needs_state_changing_http`, and the step's receipt counts the selection (`template_selection`:
+matched, selected, state-changing, `default_login`, `exploit_class`, excluded).
 
 **DNS posture over a limited forwarder.** `dns.inspect` asks the system resolver first. When a
 query times out and the bound host is a public name on public addresses, the same query is retried

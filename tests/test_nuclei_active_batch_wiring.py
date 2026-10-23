@@ -196,7 +196,7 @@ def test_unauthorized_active_batch_runs_only_get_templates(monkeypatch):
     # The receipt says what the selection held back and why.
     assert receipt.redacted_execution["template_selection"] == {
         "matched": 6, "selected": 1, "get_only": 1, "state_changing": 3, "default_login": 2,
-        "includes_state_changing": False, "intrusive_excluded": 1, "never_requested_excluded": 1,
+        "exploit_class": 0, "includes_state_changing": False, "intrusive_excluded": 1, "never_requested_excluded": 1,
     }
 
 

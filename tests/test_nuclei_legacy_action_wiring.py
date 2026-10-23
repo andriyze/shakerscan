@@ -174,7 +174,7 @@ def test_a_legacy_action_records_what_its_selection_held_back(monkeypatch):
     assert receipt.status == "success"
     assert receipt.redacted_execution["template_selection"] == {
         "matched": 6, "selected": 1, "get_only": 1, "state_changing": 3, "default_login": 2,
-        "includes_state_changing": False, "intrusive_excluded": 1, "never_requested_excluded": 1,
+        "exploit_class": 0, "includes_state_changing": False, "intrusive_excluded": 1, "never_requested_excluded": 1,
     }
     authorized, _captured, _action = _drive(monkeypatch, authorized=True, mutation_hold=100)
     assert authorized.redacted_execution["template_selection"]["includes_state_changing"] is True

@@ -34,7 +34,16 @@ verbatim, that send only GET requests and either try a login or change state by 
 * ``CVE-2024-33939`` -- a payload user id in the query string reads that user's progress: neither
   (medium severity, outside the default selection)
 * ``CVE-2023-29298`` -- ``inPassword=foo`` sent to a hashing method: neither
-* ``github-personal-access`` -- a token found in the page, sent to its issuer: neither
+* ``github-personal-access`` -- a token found in the page, sent to its issuer in a ``flow`` step:
+  exploit-class
+
+``tests/fixtures/nuclei_templates_exploit`` holds real exploit-class templates of the same bundle,
+copied verbatim, that send only GET requests:
+
+* ``CVE-2022-46169`` -- ``poller_id=;curl ...;``: a command run on the target (``rce``)
+* ``CVE-2024-28255`` -- a ``Runtime.exec`` expression in the path (``rce``)
+* ``sitecore-lfi`` -- a file read through a path parameter (``lfi``)
+* ``prest-sqli-auth-bypass`` -- a SQL expression in the path (``sqli``)
 
 Tests that write templates into ``tmp_path`` use synthetic unit fixtures.
 """
@@ -61,6 +70,7 @@ from scan.nuclei_template_index import (
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures" / "nuclei_templates"
 CREDENTIAL_FIXTURES = Path(__file__).resolve().parent / "fixtures" / "nuclei_templates_credentials"
+EXPLOIT_FIXTURES = Path(__file__).resolve().parent / "fixtures" / "nuclei_templates_exploit"
 
 
 @pytest.fixture(autouse=True)
@@ -501,7 +511,7 @@ _CREDENTIAL_FIXTURE_CLASSES = {
     "cnvd-2023-72138": "changes_state_by_get",
     "cve-2023-29298": "neither",
     "cve-2024-33939": "neither",
-    "github-personal-access": "neither",
+    "github-personal-access": "exploit_class",
 }
 #: Fixtures outside the default severities and tags: only a verify Scan of exactly that template
 #: requests them.
@@ -516,13 +526,15 @@ def test_real_templates_that_sign_in_or_change_state_by_get_need_the_state_chang
         record = by_id[template_id]
         assert record.methods == frozenset({"GET"}), template_id
         assert record.credential_level is (kind == "credential_level"), template_id
+        if kind in {"exploit_class", "neither"}:
+            assert record.exploit_class is (kind == "exploit_class"), template_id
         assert record.state_changing is (kind != "neither"), template_id
     plain = resolve_active_nuclei_selection(str(CREDENTIAL_FIXTURES), allow_state_changing_http=False)
     authorized = resolve_active_nuclei_selection(str(CREDENTIAL_FIXTURES), allow_state_changing_http=True)
-    assert set(plain.template_ids) == {"cve-2023-29298", "github-personal-access"}
+    assert set(plain.template_ids) == {"cve-2023-29298"}
     assert set(authorized.template_ids) == set(_CREDENTIAL_FIXTURE_CLASSES) - _OUTSIDE_DEFAULT_SELECTION
     assert plain.credential_level_count == authorized.credential_level_count == 5
-    assert plain.state_changing_count == 9
+    assert plain.state_changing_count == 10
 
 
 @pytest.mark.parametrize("template_id", sorted(
@@ -578,6 +590,80 @@ def test_the_reviewed_passive_pack_holds_no_default_login():
     assert all("default-login" not in row[4] for row in CANONICAL_PASSIVE_NUCLEI_TEMPLATES)
 
 
+_EXPLOIT_FIXTURE_IDS = frozenset({
+    "cve-2022-46169", "cve-2024-28255", "sitecore-lfi", "prest-sqli-auth-bypass",
+})
+
+
+def test_an_exploit_template_sent_by_get_needs_the_state_changing_permission():
+    index = build_nuclei_method_index(str(EXPLOIT_FIXTURES))
+    by_id = {record.template_id: record for record in index.templates}
+    assert set(by_id) == _EXPLOIT_FIXTURE_IDS
+    for template_id, record in by_id.items():
+        assert record.methods == frozenset({"GET"}), template_id
+        assert record.exploit_class and record.state_changing, template_id
+        assert not record.credential_level and not record.intrusive, template_id
+    plain = resolve_active_nuclei_selection(str(EXPLOIT_FIXTURES), allow_state_changing_http=False)
+    authorized = resolve_active_nuclei_selection(str(EXPLOIT_FIXTURES), allow_state_changing_http=True)
+    # Without the permission nothing of the four runs, so the sweep fails closed as a gap.
+    assert plain.skip is True and plain.template_ids == ()
+    assert plain.skip_reason == "no_eligible_nuclei_templates"
+    assert set(authorized.template_ids) == _EXPLOIT_FIXTURE_IDS
+    assert authorized.includes_state_changing is True
+    # Counted under their own name, whether or not the permission was granted.
+    assert plain.exploit_class_count == authorized.exploit_class_count == 4
+    assert plain.telemetry()["exploit_class"] == authorized.telemetry()["exploit_class"] == 4
+    assert plain.get_only_count == 0 and plain.state_changing_count == 4
+
+
+@pytest.mark.parametrize("form,header", [
+    ("tagged-rce", ""),
+    ("tagged-lfi", ""),
+    ("flow-step", "flow: http(1)\n"),
+])
+def test_a_get_template_with_an_exploit_tag_or_a_script_step_needs_the_permission(tmp_path, form, header):
+    # Synthetic unit fixtures: one GET-only template per exploit-class rule.
+    tags = {"tagged-rce": "exposure,rce", "tagged-lfi": "misconfig,lfi"}.get(form, "exposure")
+    _write_template(tmp_path, f"http/{form}.yaml", (
+        f"id: {form}\ninfo:\n  name: synthetic unit fixture\n  severity: high\n  tags: {tags}\n{header}"
+        "http:\n  - method: GET\n    path:\n      - '{{BaseURL}}/status'\n"))
+    (record,) = build_nuclei_method_index(str(tmp_path)).templates
+    assert record.methods == frozenset({"GET"}) and record.exploit_class and record.state_changing
+    plain = resolve_active_nuclei_selection(str(tmp_path), allow_state_changing_http=False)
+    authorized = resolve_active_nuclei_selection(str(tmp_path), allow_state_changing_http=True)
+    assert plain.skip is True and form not in plain.template_ids
+    assert authorized.template_ids == (form,) and authorized.includes_state_changing is True
+    assert plain.exploit_class_count == authorized.exploit_class_count == 1
+
+
+def test_a_verify_scan_runs_an_exploit_check_only_with_the_state_changing_tier():
+    # A verify Scan grants the exploit tier exactly when it has state-changing authority.
+    for allowed in (False, True):
+        selection = resolve_active_nuclei_selection(
+            str(EXPLOIT_FIXTURES), allow_state_changing_http=allowed, allow_exploit_classes=allowed,
+            only_template_ids="prest-sqli-auth-bypass")
+        assert selection.exploit_class_count == 1
+        if allowed:
+            assert selection.template_ids == ("prest-sqli-auth-bypass",)
+            assert selection.includes_state_changing is True
+        else:
+            assert selection.skip is True and selection.verify_selection["excluded"] == {
+                "prest-sqli-auth-bypass": "exploit_class_needs_exploit_tier"}
+    # Neither grant alone runs it.
+    for state_changing, exploit, reason in (
+            (True, False, "exploit_class_needs_exploit_tier"), (False, True, "needs_state_changing_http")):
+        selection = resolve_active_nuclei_selection(
+            str(EXPLOIT_FIXTURES), allow_state_changing_http=state_changing,
+            allow_exploit_classes=exploit, only_template_ids="prest-sqli-auth-bypass")
+        assert selection.template_ids == () and selection.exploit_class_count == 1
+        assert selection.verify_selection["excluded"] == {"prest-sqli-auth-bypass": reason}
+    # A check that needs a callback is not run at all, whatever the grants.
+    oob = resolve_active_nuclei_selection(
+        str(EXPLOIT_FIXTURES), allow_state_changing_http=True, allow_exploit_classes=True,
+        only_template_ids="cve-2024-28255")
+    assert oob.verify_selection["excluded"] == {"cve-2024-28255": "needs_oob_interaction"}
+
+
 #: Templates in the pinned bundle's active selection that send only GET or HEAD requests but
 #: are credential-level: tagged default-login, a value named like a username or password (a
 #: payload, a variable or an extracted value) sent in a header or the body, a password-named value
@@ -585,9 +671,22 @@ def test_the_reviewed_passive_pack_holds_no_default_login():
 #: the state-changing permission; so did the GETs reviewed as changing state
 #: (``STATE_CHANGING_GET_TEMPLATE_IDS``).
 PINNED_BUNDLE_GET_ONLY_CREDENTIAL_LEVEL = 52
-#: The GET-only selection without the permission: 760 GETs before 2.11.1, 56 of them now behind it
-#: (52 login attempts and the 4 reviewed state-changing GETs of the default selection).
-PINNED_BUNDLE_GET_ONLY_SELECTION = 704
+#: GET-only templates of the pinned bundle's active selection that are exploit-class and neither
+#: credential-level nor reviewed as changing state: 13 tagged rce, 10 lfi, 2 sqli, 2 ssrf and 41
+#: with a code, JavaScript or flow step. They also ran without the permission before 2.11.1.
+PINNED_BUNDLE_GET_ONLY_EXPLOIT_CLASS = 68
+#: Exploit-class templates among the eligible ones, whatever their method.
+PINNED_BUNDLE_EXPLOIT_CLASS = 162
+#: The GET-only selection without the permission: 760 GETs before 2.11.1, 124 of them now behind
+#: it (52 login attempts, the 4 reviewed state-changing GETs of the default selection and the 68
+#: exploit-class GETs).
+PINNED_BUNDLE_GET_ONLY_SELECTION = 636
+#: The selection with the permission: the same 1,145 templates, in the same order, as before
+#: 2.11.1 held anything back, so every window position with the permission is unchanged.
+PINNED_BUNDLE_AUTHORIZED_SELECTION = 1145
+PINNED_BUNDLE_AUTHORIZED_SELECTION_SHA256 = (
+    "49465477e3b156b3ffc717a23f0da07c8baf65a00876284f095abf1ed5361093"
+)
 
 
 def test_pinned_bundle_default_logins_run_only_with_state_changing_permission():
@@ -631,6 +730,53 @@ def test_pinned_bundle_default_logins_run_only_with_state_changing_permission():
     assert plain.credential_level_count == authorized.credential_level_count
     assert authorized.credential_level_count == sum(
         1 for template_id in selected if by_id[template_id].credential_level)
+
+
+def test_pinned_bundle_exploit_templates_run_only_with_state_changing_permission():
+    """Image test: the pinned bundle the scanner image installs (``NUCLEI_TEMPLATES``)."""
+    if "NUCLEI_TEMPLATES" not in os.environ:
+        pytest.skip("requires the pinned Nuclei template bundle of the scanner image")
+    import hashlib
+    import math
+
+    from scan.external_process import (
+        ACTIVE_TEMPLATE_PLANNED_GET_ONLY_WINDOWS, ACTIVE_TEMPLATE_PLANNED_WINDOWS,
+    )
+    from scan.nuclei_execution import ACTIVE_TEMPLATE_WINDOW_SIZE
+
+    bundle = str(nuclei_templates_directory())
+    index = nuclei_template_index._cached_index(bundle)
+    by_id = {record.template_id: record for record in index.templates}
+    plain = resolve_active_nuclei_selection(bundle, allow_state_changing_http=False)
+    authorized = resolve_active_nuclei_selection(bundle, allow_state_changing_http=True)
+    # The two the review named: a command run on the target, and a Runtime.exec call, by GET.
+    for template_id in ("cve-2022-46169", "cve-2024-28255"):
+        record = by_id[template_id]
+        assert record.methods == frozenset({"GET"}) and record.exploit_class and "rce" in record.tags
+        assert template_id in authorized.template_ids and template_id not in plain.template_ids
+    assert not {template_id for template_id in plain.template_ids if by_id[template_id].exploit_class}
+    moved = {
+        template_id for template_id in authorized.template_ids
+        if by_id[template_id].exploit_class and not by_id[template_id].methods - {"GET", "HEAD"}
+        and not by_id[template_id].credential_level
+        and template_id not in STATE_CHANGING_GET_TEMPLATE_IDS
+    }
+    assert len(moved) == PINNED_BUNDLE_GET_ONLY_EXPLOIT_CLASS
+    assert len(plain.template_ids) == PINNED_BUNDLE_GET_ONLY_SELECTION
+    assert plain.exploit_class_count == authorized.exploit_class_count == PINNED_BUNDLE_EXPLOIT_CLASS
+    assert authorized.exploit_class_count == sum(
+        1 for template_id in authorized.template_ids if by_id[template_id].exploit_class)
+    # With the permission nothing moved: the same templates in the same order, so the same
+    # windows at the same positions; without it, the GET-only allowlist has fewer windows.
+    assert len(authorized.template_ids) == PINNED_BUNDLE_AUTHORIZED_SELECTION
+    assert hashlib.sha256(",".join(authorized.template_ids).encode()).hexdigest() == (
+        PINNED_BUNDLE_AUTHORIZED_SELECTION_SHA256)
+    assert set(plain.template_ids) == {
+        template_id for template_id in authorized.template_ids if not by_id[template_id].state_changing}
+    assert ACTIVE_TEMPLATE_PLANNED_WINDOWS == math.ceil(
+        PINNED_BUNDLE_AUTHORIZED_SELECTION / ACTIVE_TEMPLATE_WINDOW_SIZE) == 39
+    assert ACTIVE_TEMPLATE_PLANNED_GET_ONLY_WINDOWS == math.ceil(
+        PINNED_BUNDLE_GET_ONLY_SELECTION / ACTIVE_TEMPLATE_WINDOW_SIZE) == 22
 
 
 @pytest.mark.parametrize("login_first", [True, False])

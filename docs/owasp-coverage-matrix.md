@@ -61,21 +61,25 @@ page's Testing tile names the active families that ran.
 
 `nuclei_active` selects high and critical templates tagged `exposure`, `misconfig`, `auth-bypass`
 or `default-login` from the pinned, checksum-verified template bundle, and runs them without
-out-of-band callbacks. On the pinned bundle (nuclei-templates `2935d63a`) that is 704 GET-only
-templates, or 1,145 when state-changing HTTP is allowed. Login attempts and GETs that change state
-need state-changing HTTP whatever their method, so the GET-only count leaves them out.
+out-of-band callbacks. On the pinned bundle (nuclei-templates `2935d63a`) that is 636 GET-only
+templates, or 1,145 when state-changing HTTP is allowed. Login attempts, GETs that change state and
+exploit templates need state-changing HTTP whatever their method, so the GET-only count leaves them
+out. An exploit template is one tagged `rce`, `lfi`, `sqli`, `ssrf`, `ssti`, `xxe`,
+`deserialization`, `code-injection` or `cmdi`, or one that runs a code, JavaScript or flow step
+(such as sending a token found in a page to its issuer): it sends attack input, for example a
+shell command in a parameter, whether or not it can match.
 
 A Scan does not always run the whole pack. Each endpoint attempt runs one 30-template window. A
 `fast` or `balanced` Scan (`balanced` is the default) runs one window per endpoint in its active
-manifest, so a host with fewer endpoints than windows (24 GET-only, 39 with state-changing HTTP)
-runs only part of the pack: a host with five endpoints runs about 150 of the 704 GET-only
+manifest, so a host with fewer endpoints than windows (22 GET-only, 39 with state-changing HTTP)
+runs only part of the pack: a host with five endpoints runs about 150 of the 636 GET-only
 templates. `thorough` and `deep` Scans run every window. A Scan split into parallel parts runs one
 window per endpoint in each part. `nuclei_active.template_windows` on the result says how many
 windows ran.
 
-Some templates in the pack also carry another tag. Of those that can match, 11 are tagged `rce`
-(19 with state-changing HTTP), 10 `lfi` (15), 5 `jwt` and 2 `sqli` (24), all written for named
-products or CVEs. None can match SSRF (both SSRF templates need callbacks), SSTI, XXE or
+Some templates in the pack also carry another tag. Of those that can match, 19 are tagged `rce`,
+15 `lfi`, 24 `sqli` and 5 `jwt`, all written for named products or CVEs; without state-changing
+HTTP only 4 of the `jwt` templates run. None can match SSRF (both SSRF templates need callbacks), SSTI, XXE or
 deserialization. A verify Scan can also run the CVE checks a candidate names (A06).
 
 ## OWASP Top 10 (2021)

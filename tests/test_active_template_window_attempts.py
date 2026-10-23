@@ -487,8 +487,8 @@ def test_the_planned_windows_match_the_pinned_bundle():
 
 
 # The template bundle both planned window counts were measured on (1,146 permitted templates
-# with state-changing HTTP; 704 GET-only once login attempts and state-changing GETs need that
-# permission), in the scanner image built from it.
+# with state-changing HTTP; 636 GET-only once login attempts, state-changing GETs and
+# exploit-class templates need that permission), in the scanner image built from it.
 MEASURED_BUNDLE_COMMIT = "2935d63aebd1f5f4a3c8e87c6e7f5c47f689b115"
 MEASURED_BUNDLE_SHA256 = "20aff7085b5c1771a8f7a28624009359a1cedab924c9ad7836078ca07e28de39"
 
@@ -500,7 +500,7 @@ def test_the_planned_windows_were_measured_on_the_bundle_the_image_pins():
     dockerfile = (Path(__file__).parents[1] / "scanner" / "Dockerfile").read_text()
     assert f"ARG NUCLEI_TEMPLATES_COMMIT={MEASURED_BUNDLE_COMMIT}" in dockerfile
     assert f"ARG NUCLEI_TEMPLATES_SHA256={MEASURED_BUNDLE_SHA256}" in dockerfile
-    assert (ACTIVE_TEMPLATE_PLANNED_WINDOWS, ACTIVE_TEMPLATE_PLANNED_GET_ONLY_WINDOWS) == (39, 24)
+    assert (ACTIVE_TEMPLATE_PLANNED_WINDOWS, ACTIVE_TEMPLATE_PLANNED_GET_ONLY_WINDOWS) == (39, 22)
 
 
 def test_a_scheme_inferred_scans_unselected_origin_is_not_a_sweep_base():
