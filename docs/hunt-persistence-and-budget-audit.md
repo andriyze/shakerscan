@@ -7,9 +7,8 @@
 The historical finding-save failures compared a finding's port with the inventory locator's
 port. A host asset (`host://example.test`) has no HTTP port, so even an absolute finding URL on
 its completed HTTP evidence's port 8081 was refused. Relative paths also failed because resolving
-them against a `host://` locator produces no usable HTTP origin. Commit `4f13435d6` already fixed
-that rejection by recognizing successful, same-Hunt HTTP evidence on the asset. That fix is in
-the release branch and in the running source inspected during this audit.
+them against a `host://` locator produces no usable HTTP origin. An earlier fix accepts a finding
+on a service when the same Hunt has successful HTTP evidence from it on that asset.
 
 Two remaining cases are fixed here. Relative paths on HTTP inventory records used the inventory
 origin even when all cited evidence was on another service: `https://example.test` plus evidence
@@ -36,12 +35,12 @@ existing active-testing and approval checks. Only these registry-declared record
 gain the unfinished-exhausted exception. Finished, failed and cancelled Hunts remain closed;
 recording does not resume traffic or reset any consumed budget.
 
-## Budget findings checked against existing tests
+## Verifier reservations and start warnings
 
-The existing tests passed while characterizing the problematic behavior: fast and balanced
-verifiers retained registry floors, an unaffordable thorough call stepped down to those floors,
-and default-profile shortages produced no start warnings. Thus passing those tests did not
-demonstrate that a useful investigation could complete.
+Before this release, fast and balanced verifiers reserved the registry floors, a thorough call the
+Hunt could not fund stepped down to those floors, and a default profile too small for a
+capability produced no start warning, so a Hunt could stop a verification before its verdict
+without saying why.
 
 Paced SQLi negative checks had already been measured at roughly 441–475 seconds, above the
 300-second floor. Paced XSS checks needed roughly 390–430 seconds, above the 120-second floor.
@@ -82,12 +81,7 @@ are labelled fixtures; the tests send no target traffic. Existing approval, prop
 reservation tests are retained and exercised. Generated contracts, inventories, installer hashes,
 import closure, module-size and documentation gates are checked.
 
-The SaaS gateway does not implement these finding writes or carry separate Hunt profile limits;
-these fixes belong to the shared engine. No SaaS source change or deployment is included. The
-branch starts from the existing release lab-fix head, preserving that work. Full suites run on
-lab-01 through the serialized, memory-aware runner; results are retained against their exact
-commit SHA. The first full run identified a finish-hook dependency cycle, missing documentation
-and writer-inventory entries, and stale expectations for the superseded budgets and fallback.
-The hook is now supplied by API composition to keep product modules acyclic. Dispatch regression
-coverage asserts that a shortfall starts no worker, then an operator amendment lets the same
-action key execute with the full useful hold. No full suite was started on the Mac.
+Target-action retention at finish is supplied by the API composition, so the Hunt run service
+does not import target persistence. A dispatch test checks that a verifier call the remaining
+budget cannot fund starts no worker until an operator amendment raises the limit; the same action
+key then runs with the full hold.
