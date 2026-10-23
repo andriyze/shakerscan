@@ -287,8 +287,21 @@ DEFAULT_ROUTES = (
 LARGE = {"http_requests": 6_000, "state_changing_requests": 6_000, "tool_wall_seconds": 6_000}
 
 
+class _StoredOnce(Backend):
+    """Checkpoints kept the way the scan database keeps them: an attempt id's first row stands, and
+    a later row for it with another candidate or status is refused (the fake above keeps the last)."""
+
+    async def checkpoint_batch_attempt(self, action_id, attempt):
+        stored = self.attempts.setdefault(action_id, {})
+        prior = stored.get(attempt["attempt_id"])
+        if prior is None:
+            stored[attempt["attempt_id"]] = dict(attempt)
+        elif (prior["candidate_id"], prior["status"]) != (attempt["candidate_id"], attempt["status"]):
+            raise RuntimeError("batch attempt checkpoint conflicts with authority")
+
+
 def _slice(capability, *, tool, parser, sent, options, routes=DEFAULT_ROUTES, rounds=1, budget=None,
-           concurrency=None, measured=False, runner=None, budgets=None):
+           concurrency=None, measured=False, runner=None, budgets=None, backend_type=Backend):
     scan_id = str(uuid.uuid4())
     endpoints = build_endpoint_manifest(
         scan_id=scan_id, target_binding_digest=TARGET.digest,
@@ -323,7 +336,7 @@ def _slice(capability, *, tool, parser, sent, options, routes=DEFAULT_ROUTES, ro
         ))
     plan = ScanActionPlan(scan_id=scan_id, execution_plan_digest="a" * 64,
                           target_binding_digest=TARGET.digest, actions=tuple(actions))
-    backend = Backend(manifests={endpoints.manifest_id: endpoints, candidates.manifest_id: candidates})
+    backend = backend_type(manifests={endpoints.manifest_id: endpoints, candidates.manifest_id: candidates})
     if measured:
         # A stage another candidate finished on this slow target: concurrent slots open at once.
         from tests.test_sqli_concurrent_candidates import _measured_on_target
@@ -425,7 +438,8 @@ def _overspending(overspend):
         async def process_runner(payload, *, heartbeat):
             reserved = dict(payload["_reserved_budget"])
             options = dict(payload["scanner_options"])
-            calls.append({"target": payload["execution_target"], "reserved": reserved, "options": options})
+            calls.append({"target": payload["execution_target"], "reserved": reserved, "options": options,
+                          "job": payload["job_id"]})
             await asyncio.sleep(0)
             cost = SQLI_TECHNIQUE_NEGATIVE_COST[str(options["technique"])]
             count = min(math.ceil(cost * overspend), int(reserved["http_requests"]))
@@ -464,6 +478,88 @@ def test_a_sign_in_form_whose_units_cost_more_than_measured_still_runs_every_uni
     assert head["sign_in_endpoint_received"] == 2 * sum(
         math.ceil(cost * 1.1) for cost in SQLI_TECHNIQUE_NEGATIVE_COST.values()
     )
+
+
+def _units_by_attempt(rounds):
+    """Each candidate attempt's body fields and the (technique, field) units dispatched for it.
+
+    A stage's job id carries its candidate attempt's id: ``<job>:<action>:<attempt[:16]>:<unit>``.
+    """
+    fields: dict[str, set] = {}
+    units: dict[str, set] = {}
+    for calls in rounds:
+        for call in _sign_in_calls(calls):
+            attempt = call["job"].split(":")[2]
+            fields.setdefault(attempt, set()).update(call["options"]["body_field_names"])
+            units.setdefault(attempt, set()).update(
+                (call["options"]["technique"], field)
+                for field in call["options"].get("injection_fields") or ()
+            )
+    return fields, units
+
+
+def test_variants_of_one_sign_in_form_draw_from_one_probe_set_across_rounds():
+    """The declared form, the crawled form with hidden fields and a JSON variant share one
+    candidate identity (route, method, the field that anchors it); each is still its own attempt.
+
+    Every unit settles negative at 1.5 times its measured cost, so the three cannot all finish
+    inside the probe set: over eight rounds the endpoint receives at most the largest candidate's
+    set, and every candidate either ran each of its units or is inconclusive for the limit.
+    """
+    capability, tool, parser = SQLI
+    over = 1.5
+    receipts, rounds, _record = _slice(capability, tool=tool, parser=parser, sent=0,
+                                       options={"login_url": LOGIN}, routes=SIGN_IN_ROUTES, rounds=8,
+                                       runner=_overspending(over), backend_type=_StoredOnce)
+    sent = sum(
+        min(math.ceil(SQLI_TECHNIQUE_NEGATIVE_COST[str(call["options"]["technique"])] * over),
+            int(call["reserved"]["http_requests"]))
+        for calls in rounds for call in _sign_in_calls(calls)
+    )
+    assert sent <= probe_set_requests(capability, 4), sent
+    # What each round starts from is what the endpoint already received.
+    for receipt, calls in zip(receipts[1:], rounds[1:]):
+        heads = [head for head in _heads(receipt) if not head.get("carried_from")]
+        if heads:
+            first = min(head["sign_in_endpoint_received"] - head["sign_in_endpoint_requests"]
+                        for head in heads)
+            assert first >= sum(
+                min(math.ceil(SQLI_TECHNIQUE_NEGATIVE_COST[str(call["options"]["technique"])] * over),
+                    int(call["reserved"]["http_requests"]))
+                for earlier in rounds[:rounds.index(calls)] for call in _sign_in_calls(earlier)
+            )
+    fields, units = _units_by_attempt(rounds)
+    final = {head["attempt_id"]: head for head in _heads(receipts[-1])}
+    assert len(final) == 3, final
+    for attempt_id, head in final.items():
+        own = fields.get(attempt_id[:16], set())
+        every_unit = {(technique, field) for technique in "UBET" for field in own}
+        if own and units[attempt_id[:16]] == every_unit:
+            continue
+        assert head.get("verdict") == "inconclusive", (sorted(units.get(attempt_id[:16], ())), head)
+        assert head.get("inconclusive_reason") == AUTH_ENDPOINT_PROBE_LIMITED
+
+
+def test_variants_of_one_form_keep_their_own_units_without_a_sign_in_profile():
+    """With no sign-in profile the same three variants are ordinary body candidates: each runs
+    every unit over its own fields, none takes another's settled unit as its own."""
+    capability, tool, parser = SQLI
+    _receipts, rounds, _record = _slice(capability, tool=tool, parser=parser, sent=0, options={},
+                                        routes=SIGN_IN_ROUTES, rounds=4, runner=_overspending(1.0),
+                                        backend_type=_StoredOnce)
+    ran: dict[tuple, set] = {}
+    for calls in rounds:
+        for call in calls:
+            names = tuple(call["options"].get("body_field_names") or ())
+            if names:
+                key = (names, call["options"].get("content_type"))
+                ran.setdefault(key, set()).update(
+                    (call["options"]["technique"], field)
+                    for field in call["options"].get("injection_fields") or ()
+                )
+    assert len(ran) == 3, sorted(ran)
+    for (names, _content_type), done in ran.items():
+        assert done == {(technique, field) for technique in "UBET" for field in names}, (names, done)
 
 
 def _answering_in(latency, *, sent):

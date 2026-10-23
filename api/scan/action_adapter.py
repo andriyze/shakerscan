@@ -494,6 +494,23 @@ def _batch_candidate_id(row: Mapping[str, Any], manifest_index: int) -> str:
     )
 
 
+def _repeated_candidate_positions(entries: Sequence[Mapping[str, Any]]) -> frozenset[int]:
+    """The manifest positions whose candidate id an earlier entry of the manifest already has.
+
+    A candidate's id is its route, method and the one field that anchors a body
+    (``work_manifests``), so the declared sign-in form, the crawled form with its hidden fields
+    and a JSON variant of it are one id with three bodies.
+    """
+    seen: set[str] = set()
+    repeated: set[int] = set()
+    for index, entry in enumerate(entries):
+        identity = _batch_candidate_id(entry, index)
+        if identity in seen:
+            repeated.add(index)
+        seen.add(identity)
+    return frozenset(repeated)
+
+
 def _template_match_identity(item: Mapping[str, Any]) -> tuple[str, str, str]:
     """What makes two template matches the same finding: template, matcher and location.
 
@@ -4399,6 +4416,25 @@ class DatabaseNeutralScanActionDispatcher:
             "templates.passive_batch": "nuclei_passive",
             "templates.active_batch": "nuclei_active",
         }[action.capability_name]
+        # Each candidate entry is its own attempt -- its own checkpoint, units and count of what
+        # it sent -- even when an earlier entry has its candidate id (variants of one form). One
+        # attempt id for the three variants of a sign-in form kept one checkpoint for all three:
+        # a later round counted one variant's requests as all the endpoint had received, and a
+        # variant took another's finished units as its own. A repeated entry's attempt names its
+        # manifest position; the first entry with an id keeps the attempt id it always had.
+        repeated_positions = (
+            _repeated_candidate_positions(manifest.entries)
+            if manifest_kind is ScanWorkManifestKind.CANDIDATE else frozenset()
+        )
+
+        def batch_attempt_id(candidate_id: str, manifest_index: int, retry_round: int) -> str:
+            key = f"{manifest_digest}:{family}:{candidate_id}"
+            if manifest_index in repeated_positions:
+                key += f":entry:{manifest_index}"
+            if retry_round:
+                key += f":retry:{retry_round}"
+            return hashlib.sha256(key.encode()).hexdigest()
+
         started_at = datetime.now(timezone.utc).isoformat()
         observations: list[Mapping[str, Any]] = []
         errors: list[str] = []
@@ -4857,11 +4893,9 @@ class DatabaseNeutralScanActionDispatcher:
                 return False
             if not window_applies(manifest_index):
                 return False
-            candidate = batch_candidate_id(row, manifest_index)
-            key = f"{manifest_digest}:{family}:{candidate}"
-            if retry_round:
-                key += f":retry:{retry_round}"
-            identity = hashlib.sha256(key.encode()).hexdigest()
+            identity = batch_attempt_id(
+                batch_candidate_id(row, manifest_index), manifest_index, retry_round,
+            )
             if identity in completed or identity in refused_final:
                 return False
             if retry_round:
@@ -4901,10 +4935,7 @@ class DatabaseNeutralScanActionDispatcher:
                     })
                     continue
                 candidate_id = batch_candidate_id(row, manifest_index)
-                attempt_key = f"{manifest_digest}:{family}:{candidate_id}"
-                if retry_round:
-                    attempt_key += f":retry:{retry_round}"
-                attempt_id = hashlib.sha256(attempt_key.encode()).hexdigest()
+                attempt_id = batch_attempt_id(candidate_id, manifest_index, retry_round)
                 # A checkpointed attempt is resumed before the position is judged: an attempt a
                 # 2.11.0 worker (or a shard under an earlier mapping) already ran keeps its
                 # records and is never re-sent, whatever the position maps to now.
