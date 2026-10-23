@@ -86,6 +86,12 @@ through Tailwind CSS at build time only), and the optional `@img/sharp-libvips-*
 used by Next.js image handling (LGPL-3.0-or-later). All other direct dependencies are under MIT,
 BSD, ISC or Apache-2.0 licences; the exact set is recorded in each release SBOM.
 
+The `shakerscan` client package has one runtime dependency, installed from the package index with
+it rather than bundled: python-fido2 (Yubico AB, https://github.com/Yubico/python-fido2;
+BSD-2-Clause, with some files under Apache-2.0 and MPL-2.0), which talks to a USB security key, and
+its dependency cryptography (Apache-2.0 OR BSD-3-Clause). The reviewed versions are pinned with
+hashes in `client/requirements/runtime.lock` and inventoried in the client's release SBOM.
+
 ## External services
 
 ShakerScan never sends callbacks to ProjectDiscovery's public Interactsh servers. Out-of-band
