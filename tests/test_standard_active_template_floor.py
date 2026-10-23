@@ -89,3 +89,17 @@ def test_a_mutation_ceiling_lowered_toward_the_floor_keeps_what_the_profiles_own
         )
         assert "nuclei_active" in contract.execution_plan.resolved_families, value
         _admit(contract)
+
+
+def test_every_floor_is_under_the_ceilings_of_the_profiles_that_add_the_templates():
+    """A floor above a profile's own ceiling would drop the sweep at a ceiling lowered by one from
+    the profile's own, which runs it."""
+    from api.scan.contracts import SCAN_FAMILY_PRESET_PROFILE_ADDITIONS, standard_active_template_floors
+
+    floors = standard_active_template_floors(state_changing_allowed=True)
+    profiles = [profile for profile, families in SCAN_FAMILY_PRESET_PROFILE_ADDITIONS["standard_active"].items()
+                if "nuclei_active" in families]
+    assert sorted(profiles) == ["deep", "thorough"]
+    for profile in profiles:
+        for name, floor in floors.items():
+            assert floor < int(getattr(BUDGET_PROFILES[profile], name)), (profile, name, floor)
