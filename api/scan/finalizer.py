@@ -2942,14 +2942,16 @@ def finalize_scan_report(
                         str(item.get("url") or item.get("candidate_id") or ""),
                     ))
                 # The credential profile's own sign-in endpoint got its bounded probe set
-                # (auth_endpoint_probe): named, so the limit is visible, not a silent gap.
+                # (auth_endpoint_probe): named, so the limit is visible, not a silent gap. Counted
+                # by attempt: the variants of one form share a candidate id.
                 if (
                     isinstance(item, Mapping)
                     and item.get("kind") in {"candidate_attempt", "candidate_deferred"}
                     and item.get("inconclusive_reason") == AUTH_ENDPOINT_PROBE_LIMITED
                 ):
                     row["_sign_in_limited"].append((
-                        str(item.get("candidate_id") or ""), str(item.get("sign_in_endpoint") or ""),
+                        str(item.get("attempt_id") or item.get("candidate_id") or ""),
+                        str(item.get("sign_in_endpoint") or ""),
                     ))
             row["planned_candidates"] += max(0, planned - inapplicable)
             row["attempted_candidates"] += len(attempts)

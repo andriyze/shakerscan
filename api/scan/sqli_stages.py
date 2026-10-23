@@ -1021,8 +1021,12 @@ def sqli_budget_outcomes(
     """Every SQLi candidate the Scan left inconclusive for budget, for the report.
 
     ``rows_in_plan_order`` are the observations of every SQLi verifier action in plan order;
-    the latest record of a candidate stands. Each outcome separates what was settled from what
-    was not, so no reader takes an untested technique for a refuted one:
+    the latest record of a candidate attempt stands. Outcomes are per attempt: the variants of
+    one form (declared, crawled with its hidden fields, JSON) share a candidate id but are
+    attempts of their own, each with its own fields and settled units. A record without an
+    attempt id (written by an earlier build) belongs to the attempt of its candidate it follows.
+    Each outcome separates what was settled from what was not, so no reader takes an untested
+    technique for a refuted one:
 
     * ``refuted_techniques`` -- every unit settled negative;
     * ``inconclusive_techniques`` -- judged unfundable (``verdict_exceeds_budget``);
@@ -1036,38 +1040,46 @@ def sqli_budget_outcomes(
     verdicts: dict[str, Mapping[str, Any]] = {}
     urls: dict[str, str] = {}
     settled: dict[str, set[tuple[str, str | None]]] = {}
+    candidate_of: dict[str, str] = {}
+    last_attempt: dict[str, str] = {}
     for row in rows_in_plan_order:
         if not isinstance(row, Mapping):
             continue
         candidate = str(row.get("candidate_id") or "")
         if not candidate:
             continue
+        attempt = str(row.get("attempt_id") or "")
+        if attempt:
+            last_attempt[candidate] = attempt
+        key = attempt or last_attempt.get(candidate) or candidate
+        candidate_of.setdefault(key, candidate)
         kind = row.get("kind")
         if row.get("url"):
-            urls.setdefault(candidate, str(row["url"]))
+            urls.setdefault(key, str(row["url"]))
         if kind == STAGE_RECORD_KIND:
             if _status(row.get("status")) in _SUCCESS and not row.get("timed_out"):
                 field_name = row.get("field")
-                settled.setdefault(candidate, set()).add(
+                settled.setdefault(key, set()).add(
                     (str(row.get("technique") or ""), str(field_name) if field_name else None),
                 )
             continue
         if row.get("carried_from"):
             continue
         if kind in {"candidate_attempt", "candidate_deferred"} and row.get("family", "sqli") == "sqli":
-            latest[candidate] = row
+            latest[key] = row
             if not row.get("verdict") and not row.get("inconclusive_techniques"):
-                verdicts.pop(candidate, None)
+                verdicts.pop(key, None)
         elif kind == INCONCLUSIVE_RECORD_KIND:
-            verdicts[candidate] = row
+            verdicts[key] = row
     outcomes: list[dict[str, Any]] = []
-    for candidate, row in latest.items():
-        verdict = verdicts.get(candidate)
+    for key, row in latest.items():
+        candidate = candidate_of[key]
+        verdict = verdicts.get(key)
         unfinished = bool(row.get("resume_wall_seconds")) and str(row.get("status") or "") != "success"
         if verdict is None and not unfinished:
             continue
         field_count = max(1, int(row.get("field_count") or (verdict or {}).get("field_count") or 1))
-        units = settled.get(candidate, set())
+        units = settled.get(key, set())
         refuted = [
             technique for technique in SQLI_TECHNIQUE_STAGES
             if (technique, None) in units
@@ -1082,7 +1094,9 @@ def sqli_budget_outcomes(
             # drop out of the report between the two lists.
             unfundable = [item for item in SQLI_TECHNIQUE_STAGES if item not in refuted]
         outcome = {
-            "candidate_id": candidate, "url": urls.get(candidate, ""),
+            "candidate_id": candidate,
+            **({"attempt_id": key} if key != candidate else {}),
+            "url": urls.get(key, ""),
             "reason": (
                 "verdict_exceeds_budget" if closed or not unfinished else "scan_budget_exhausted"
             ),

@@ -770,7 +770,7 @@ def _budget_verdict(
 def _deferred_budget_verdict(
     resume: Any, prior: Any, *, closed: bool, candidate_id: str,
     fields: Sequence[str] | None, field_count: int, ceiling: int | None,
-    scan_wall_share: int | None, execution_target: str, method: str,
+    scan_wall_share: int | None, execution_target: str, method: str, attempt_id: str,
 ) -> list[dict[str, Any]]:
     """The budget verdict of a SQLi candidate deferred before any traffic, if it has one."""
     unfundable = tuple(getattr(resume, "unfundable", ()) or ())
@@ -779,6 +779,8 @@ def _deferred_budget_verdict(
     return [{
         "url": redact_url(execution_target),
         "method": method,
+        # The variants of one form share a candidate id: the verdict names its own attempt.
+        "attempt_id": attempt_id,
         **budget_inconclusive_record(
             candidate_id=candidate_id,
             finished=prior.finished,
@@ -4748,8 +4750,10 @@ class DatabaseNeutralScanActionDispatcher:
                     attempt_observations = (
                         head,
                         *attempt_observations[1:],
+                        # Named by its attempt: the variants of one form share a candidate id.
                         {"url": redact_url(execution_target),
-                         "method": body_request.get("method", "GET"), **verdict},
+                         "method": body_request.get("method", "GET"), **verdict,
+                         "attempt_id": attempt_id},
                     )
             sign_in_key = row.get("sign_in_key")
             if sign_in_key:
@@ -5335,6 +5339,7 @@ class DatabaseNeutralScanActionDispatcher:
                         # not funded again (soak N55).
                         observations.append({
                             "kind": "candidate_deferred",
+                            "attempt_id": attempt_id,
                             "candidate_id": candidate_id,
                             "family": family,
                             "reason": "budget_inconclusive",
@@ -5345,7 +5350,7 @@ class DatabaseNeutralScanActionDispatcher:
                             candidate_id=candidate_id, fields=sqli_fields,
                             field_count=field_count, ceiling=round_wall_ceiling,
                             scan_wall_share=scan_wall_share, execution_target=execution_target,
-                            method=body_request.get("method", "GET"),
+                            method=body_request.get("method", "GET"), attempt_id=attempt_id,
                         ))
                         continue
                     if stage_need is not None and sub_budget.get("tool_wall_seconds"):
@@ -5373,11 +5378,12 @@ class DatabaseNeutralScanActionDispatcher:
                                 field_count=field_count, ceiling=round_wall_ceiling,
                                 scan_wall_share=scan_wall_share,
                                 execution_target=execution_target,
-                                method=body_request.get("method", "GET"),
+                                method=body_request.get("method", "GET"), attempt_id=attempt_id,
                             )
                             closed = any(item.get("closed") for item in verdicts)
                             observations.append({
                                 "kind": "candidate_deferred",
+                                "attempt_id": attempt_id,
                                 "candidate_id": candidate_id,
                                 "family": family,
                                 "reason": "stage_wall_unfunded",
@@ -5421,6 +5427,7 @@ class DatabaseNeutralScanActionDispatcher:
                             # the wall it needs. No verdict; the probe set is untouched.
                             observations.append({
                                 "kind": "candidate_deferred",
+                                "attempt_id": attempt_id,
                                 "candidate_id": candidate_id,
                                 "family": family,
                                 "reason": AUTH_ENDPOINT_PACE_UNFUNDED,
