@@ -233,6 +233,24 @@ def test_a_completed_run_settles_exactly_its_hold():
     assert result.actual_budget["tcp_ports_attempted"] == 10
 
 
+def test_an_snmp_inspection_settles_its_udp_ports_and_device_fragility():
+    """service.snmp.inspect reserves a UDP port per address and, on a device, ten fragility
+    points per address; both settle to the addresses it reached (they were released to 0 and 1)."""
+    store = DeviceStore()
+    store.run["budget_json"].update(max_udp_ports=10)
+    target, _ = web_hunt_target(store.run, store.run["context_pack"], store.run["policy_json"])
+    prepared = network_capability_adapter("service.snmp.inspect").prepare(target=target, args={}, policy=POLICY)
+    requested = {key: int(value) for key, value in prepared.estimated_budget.items()}
+    reserve_device_traffic(store.run, CAPABILITY_REGISTRY.require("service.snmp.inspect"), requested)
+    requested, prepared, attempted = bound_distinct_usage(requested, prepared, requested, {})
+    runner, _calls = _runner()
+    actual = dict(_execute("service.snmp.inspect", target, prepared, requested, attempted, runner).actual_budget)
+    assert actual["udp_ports_attempted"] == 1
+    asyncio.run(settle_device_traffic(store, store.run, requested, actual, status="completed",
+                                      health_observed=False))
+    assert actual["device_fragility_points"] == 10
+
+
 def test_the_worker_hands_each_command_s_usage_to_the_network_adapter():
     worker = (ROOT / "api/worker.py").read_text(encoding="utf-8")
     assert "command_usage=attempted.command_usage" in worker

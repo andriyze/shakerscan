@@ -182,7 +182,9 @@ fingerprinting or inspecting a port a sweep already reached needs no new allowan
 count as attempted. A `tls.inspect` is one port, whatever handshakes it makes. Attempted ports are
 remembered in a bounded record; a port it cannot hold is charged again. A network action stopped
 part way (cancelled after its first address, say) is charged the new hosts and ports of the
-commands that started; a command that never started is neither charged nor remembered. A mutating
+commands that started; a command that never started is neither charged nor remembered.
+`service.snmp.inspect` is charged its UDP port and, on a device, its fragility estimate for each
+address it reached. A mutating
 `candidate.verify` reserves 12 state-changing and 24 requests and is charged what its workflow
 sent (both runs and the create probe); a verification that reports no count (a device
 verification, an error, a browser step) keeps its whole hold.

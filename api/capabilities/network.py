@@ -293,7 +293,7 @@ class NetworkExecutionAdapter:
             elif dimension in planned and dimension in {"hosts_attempted", "tcp_ports_attempted"}:
                 # What the commands that started attempted, never the hold spread over them.
                 actual[dimension] = min(reserved_amount, started.get(dimension, 0))
-            elif dimension in {"hosts_attempted", "tcp_ports_attempted"}:
+            elif dimension in {"hosts_attempted", "tcp_ports_attempted", "udp_ports_attempted"}:
                 actual[dimension] = min(
                     reserved_amount,
                     (
@@ -312,6 +312,12 @@ class NetworkExecutionAdapter:
                     non_http = reserved_amount - int(prepared.estimated_budget.get("http_requests") or 0)
                     actual[dimension] = ((non_http * attempted_commands + command_count - 1) // command_count
                                          + nse_http_actual["http_requests"])
+            elif dimension == "device_fragility_points":
+                # A native estimate (SNMP): the share of the commands that started.
+                actual[dimension] = min(
+                    reserved_amount,
+                    (reserved_amount * attempted_commands + command_count - 1) // command_count,
+                )
         for dimension in planned - set(prepared.estimated_budget) - {"hosts_attempted", "tcp_ports_attempted"}:
             # Device fragility counts every connection the started commands made, including
             # ports the Hunt attempted before and so no longer holds.
