@@ -18,6 +18,7 @@ try:
     from scan.retest_authority import (
         admitted_authority_json,
         legacy_admitted_authority,
+        replay_url_is_path_only,
         parse_admitted_authority,
         retest_authority_stop_message,
     )
@@ -29,6 +30,7 @@ except ModuleNotFoundError:  # package import in host-side tests
     from ..scan.retest_authority import (
         admitted_authority_json,
         legacy_admitted_authority,
+        replay_url_is_path_only,
         parse_admitted_authority,
         retest_authority_stop_message,
     )
@@ -47,9 +49,17 @@ def _get(row: Any, key: str) -> Any:
 
 
 def retest_destination(verification: Any) -> str:
-    """The URL a retest replays first, as ``run_finding_retest`` derives it."""
+    """The URL a retest replays first, as ``run_finding_retest`` derives it.
+
+    A URL with no host (a finding that kept only a path, queued by an earlier engine) cannot be
+    sent anywhere, so the retest is bound to its target's URL instead: the authorization check
+    is then about the target, never a false "not covered" for a URL nothing is sent to.
+    """
     inputs = infer_retest_inputs(dict(verification))
-    return str(inputs.get("original_url") or inputs.get("target_url") or "")
+    replayed = str(inputs.get("original_url") or "")
+    if replay_url_is_path_only(replayed):
+        return str(inputs.get("target_url") or replayed)
+    return replayed
 
 
 async def _destination_allowed(pool: Any, admitted: dict[str, Any]) -> Callable[[str], bool] | None:

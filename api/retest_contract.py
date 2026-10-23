@@ -22,6 +22,10 @@ try:
     from scanner_tools.shell_words import shell_word
 except ModuleNotFoundError:  # package import in host-side tests
     from scanner.scanner_tools.shell_words import shell_word
+try:
+    from proof_retest import PROOF_RETEST_GAPS, proof_retest_request
+except ModuleNotFoundError:  # package import in host-side tests
+    from .proof_retest import PROOF_RETEST_GAPS, proof_retest_request
 
 from runtime.credential_store import PostgresCredentialProfileStore
 from runtime.auth_session_store import PostgresAuthSessionStore
@@ -560,7 +564,11 @@ def retest_refusal_reason(finding: Mapping[str, Any], retest_type: str | None) -
     findings are re-checked by their own scan, a Hunt finding of a family no prover covers by
     running the Hunt again, any other by a new Scan (``retest_unsupported_reason``). A Hunt's own
     finding with no retest type at all (an earlier Hunt's ``autonomous_agent`` row) is a Hunt
-    finding too; a Scan finding a Hunt only linked keeps its own check's reason."""
+    finding too; a Scan finding a Hunt only linked keeps its own check's reason. A proven Scan
+    finding whose request cannot be sent again as its proof sent it (``proof_retest``) is checked
+    again by a new Scan, whatever type the request names."""
+    if proof_retest_request(finding)[1] is not None:
+        return RETEST_REASON_RESCAN_ONLY
     if retest_type_has_prover(retest_type):
         return None
     tool = str(finding.get("tool") or "").strip().lower()
@@ -569,6 +577,12 @@ def retest_refusal_reason(finding: Mapping[str, Any], retest_type: str | None) -
     if _hunt_promotion(finding) or (retest_type and _hunt_finding(finding)):
         return RETEST_REASON_HUNT
     return retest_unsupported_reason(tool)
+
+
+def retest_refusal_message(finding: Mapping[str, Any]) -> str | None:
+    """Why a proven Scan finding's request cannot be sent again, in words, or None."""
+    gap = proof_retest_request(finding)[1]
+    return PROOF_RETEST_GAPS[gap] if gap else None
 
 
 def retest_sends_active_requests(retest_type: str | None, *, ai_tier_available: bool) -> bool:
@@ -760,6 +774,12 @@ def infer_retest_inputs(verification: dict[str, Any]) -> dict[str, Any]:
         payload = evidence.get("detail", {}).get("payload") or ""
     method = (verification.get("method") or evidence.get("method") or "GET").upper()
     request_body = verification.get("request_body") or evidence.get("body") or ""
+    # A proven Scan finding replays the request its proof sent, rebuilt from the finding (a retest
+    # queued before it was rebuilt kept the bare route and no parameter).
+    proof_request, _gap = proof_retest_request(verification)
+    if proof_request is not None:
+        original_url, param, method = proof_request.url, proof_request.param, proof_request.method
+        payload, request_body = proof_request.payload or "", ""
 
     return {
         "finding_type": finding_type,

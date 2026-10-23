@@ -2424,6 +2424,8 @@ export interface Finding {
   retest_type?: string | null
   retest_modes?: string[]
   retest_unsupported_reason?: string
+  // A proven finding whose request cannot be sent again: what is missing, in words.
+  retest_unsupported_message?: string
   // Whether the retest may send active requests (a prover's payloads or the AI tier's own).
   retest_active?: boolean
   // Per-class brief (finding-detail/v1) and related findings, from GET /findings/{id}

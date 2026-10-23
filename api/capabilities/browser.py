@@ -22,6 +22,7 @@ from http.cookies import SimpleCookie
 from typing import Any, Mapping
 import urllib.parse
 from .browser_steps import browser_steps, browser_surface, ELEMENT_DESCRIPTOR, validate_fill
+from .xss_proof_payload import xss_proof_marker, xss_proof_payload
 
 try:
     from hunt.capability_executor import CapabilityAdapterResult, Cancelled, Heartbeat
@@ -229,11 +230,8 @@ class XSSBrowserProofAdapter:
             raise BrowserCapabilityInputError("XSS proof target has no frozen address")
         parsed = urllib.parse.urlsplit(execution_url)
         normalized_method = str(method or "GET").strip().upper()
-        marker = f"shakerscan_xss_{candidate_id[:12]}"
-        payload = (
-            '<img src=x onerror="document.documentElement.setAttribute('
-            f"'data-shakerscan-proof','{marker}');console.log('{marker}')\">"
-        )
+        marker = xss_proof_marker(candidate_id)
+        payload = xss_proof_payload(candidate_id)
         body = b""
         normalized_content_type: str | None = None
         if body_field_names:

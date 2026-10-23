@@ -41,12 +41,16 @@ try:
         SUPPORTED_RETEST_TYPES, build_replay_commands,
         build_retest_job_payload, extract_auth_context, infer_type_from_title_tool,
         normalize_retest_type, parse_json_field, retest_sends_active_requests,
-        retest_refusal_reason, validate_retest_job_payload,
+        retest_refusal_message, retest_refusal_reason, validate_retest_job_payload,
     )
     from serialization import _decode_json_value, _json_object, _str_list, row_to_dict
-    from scan.retest_authority import REPLAY_OUT_OF_SCOPE, admit_retest, admitted_authority_json
+    from scan.retest_authority import (
+        REPLAY_OUT_OF_SCOPE, REPLAY_URL_UNRESOLVED, REPLAY_URL_UNRESOLVED_MESSAGE, admit_retest,
+        admitted_authority_json,
+    )
     from finding_detail import RELATED_SQL, build_finding_detail, related_findings, related_sql_args
     from finding_detail.evidence_commands import current_evidence_commands
+    from proof_retest import proof_retest_request
     from exposure.finding_link import related_exposures
     from list_contract import DEFAULT_LIMIT, MAX_LIMIT, SqlParams, page_params
 except ModuleNotFoundError:  # package import in host-side tests
@@ -63,12 +67,16 @@ except ModuleNotFoundError:  # package import in host-side tests
         SUPPORTED_RETEST_TYPES, build_replay_commands,
         build_retest_job_payload, extract_auth_context, infer_type_from_title_tool,
         normalize_retest_type, parse_json_field, retest_sends_active_requests,
-        retest_refusal_reason, validate_retest_job_payload,
+        retest_refusal_message, retest_refusal_reason, validate_retest_job_payload,
     )
     from ..serialization import _decode_json_value, _json_object, _str_list, row_to_dict
-    from ..scan.retest_authority import REPLAY_OUT_OF_SCOPE, admit_retest, admitted_authority_json
+    from ..scan.retest_authority import (
+        REPLAY_OUT_OF_SCOPE, REPLAY_URL_UNRESOLVED, REPLAY_URL_UNRESOLVED_MESSAGE, admit_retest,
+        admitted_authority_json,
+    )
     from ..finding_detail import RELATED_SQL, build_finding_detail, related_findings, related_sql_args
     from ..finding_detail.evidence_commands import current_evidence_commands
+    from ..proof_retest import proof_retest_request
     from ..exposure.finding_link import related_exposures
     from ..list_contract import DEFAULT_LIMIT, MAX_LIMIT, SqlParams, page_params
 
@@ -752,6 +760,10 @@ async def get_finding(finding_id: str):
             result["retest_type"] = None
             result["retest_modes"] = []
             result["retest_unsupported_reason"] = refusal
+            # A proven finding whose request cannot be sent again says what is missing.
+            message = retest_refusal_message(result)
+            if message:
+                result["retest_unsupported_message"] = message
 
     return result
 
@@ -832,7 +844,7 @@ async def retest_finding(
                 detail={
                     "error": "unsupported_finding_type",
                     "reason": refusal,
-                    "message": _RETEST_UNSUPPORTED_MESSAGES[refusal],
+                    "message": retest_refusal_message(finding_data) or _RETEST_UNSUPPORTED_MESSAGES[refusal],
                     **({} if refusal == "model_intake" else {"supported_types": list(SUPPORTED_RETEST_TYPES)}),
                 },
             )
@@ -1128,8 +1140,8 @@ async def bulk_retest_findings(request: FindingsBulkRetestRequest):
                 )
             except HTTPException as exc:
                 detail = exc.detail if isinstance(exc.detail, dict) else {}
-                if detail.get("error") == REPLAY_OUT_OF_SCOPE:
-                    skipped.append({"finding_id": str(finding_data["id"]), "reason": REPLAY_OUT_OF_SCOPE})
+                if detail.get("error") in (REPLAY_OUT_OF_SCOPE, REPLAY_URL_UNRESOLVED):
+                    skipped.append({"finding_id": str(finding_data["id"]), "reason": detail["error"]})
                     continue
                 if exc.status_code != 409 or detail.get("error") != "finding_retest_already_active":
                     raise
@@ -1755,6 +1767,8 @@ async def _enqueue_finding_retest_unlocked(
         conn, target_id=finding.get("target_id"), approval_receipt_id=approval_receipt_id,
         destination=inputs.get("original_url") or inputs.get("target_url"),
     )
+    if refusal == REPLAY_URL_UNRESOLVED_MESSAGE:
+        raise HTTPException(status_code=400, detail={"error": REPLAY_URL_UNRESOLVED, "message": refusal})
     if refusal is not None:
         raise HTTPException(status_code=400, detail={"error": REPLAY_OUT_OF_SCOPE, "message": refusal})
     retest_id = uuid.uuid4()
@@ -1965,6 +1979,12 @@ def extract_retest_inputs(
         override_request_body or finding.get("body") or evidence.get("body")
         or autonomous.get("request_body") or ""
     )
+    # A proven Scan finding replays exactly the request its proof sent (``proof_retest``): the
+    # route joined to its origin, the tested parameter and, for a browser proof, its payload.
+    proof_request, _gap = proof_retest_request(finding)
+    if proof_request is not None:
+        original_url, param, method = proof_request.url, proof_request.param, proof_request.method
+        payload, request_body = proof_request.payload or "", ""
 
     return {
         "finding_type": finding_type,

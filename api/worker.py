@@ -58,7 +58,7 @@ from retest_contract import (
     mark_candidate_inconclusive,
     normalize_retest_type,
     parse_json_field,
-    retest_type_has_prover,
+    retest_refusal_reason,
     path_segment_retest_result,
     retest_queue_binding_matches,
     stale_retest_should_requeue as _stale_retest_should_requeue,
@@ -340,6 +340,7 @@ from worker_handlers.retest_outcome import (  # noqa: F401 - re-exported
     ai_retest_outcome,
     replay_refusal,
 )
+from worker_handlers.proof_replay import run_proof_retest
 from worker_handlers.retest_authority import (
     ai_replay_authority_stop,
     cut_short_by_destination,
@@ -5658,6 +5659,7 @@ async def run_finding_retest(verification: dict) -> dict:
             prove_xxe,
             start_scan_session,
         )
+        from scanner_tools import proof_of_exploit
     except ImportError as e:
         replay_commands = build_replay_commands(infer_retest_inputs(verification))
         retry_class, retryable = classify_retry(str(e))
@@ -5713,6 +5715,13 @@ async def run_finding_retest(verification: dict) -> dict:
 
     if declined := path_segment_retest_result(inputs, replay_commands):
         return {**declined, "attempt_ladder": attempt_ladder}
+    # A proven Scan finding is retested by the check that proved it, with the request it proved.
+    proven = await run_proof_retest(
+        verification, inputs, poe=proof_of_exploit, replay_commands=replay_commands,
+        ladder=attempt_ladder, cancelled=action_interrupted,
+    )
+    if proven is not None:
+        return proven
     test_url = inputs.get("original_url") or inputs.get("target_url")
     if not test_url:
         return {
@@ -6833,8 +6842,9 @@ async def queue_auto_retests_for_scan(scan_id: str, target_id: str | None, targe
             effective_target = inferred.get("target_url") or target_url or ""
 
             # An AI-only type (generic_http, 2fa_bypass) has no prover, and the AI tier alone is
-            # at most inconclusive: such a retest could never conclude.
-            if not retest_type_has_prover(finding_type) or not effective_target:
+            # at most inconclusive: such a retest could never conclude. Nor could one of a proven
+            # finding whose request cannot be sent again as its proof sent it.
+            if retest_refusal_reason(finding, finding_type) is not None or not effective_target:
                 skipped += 1
                 continue
             # Bound to the target's authorization and the Scan's approval; a retest whose replay

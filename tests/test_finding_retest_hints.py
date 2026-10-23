@@ -81,9 +81,25 @@ def test_a_finding_without_its_own_prover_is_not_retested(monkeypatch, ai, tool,
     }
 
 
+def _browser_proof_row() -> dict:
+    """A browser XSS proof as the Scan records it: the page, the parameter and its candidate,
+    whose payload digest the retest checks before it sends the same payload."""
+    import hashlib
+
+    candidate = "6ff4725e740bec0e8c3c0ef856998b102a540072479f238120b39eea2e9fa35d"
+    marker = f"shakerscan_xss_{candidate[:12]}"
+    payload = ('<img src=x onerror="document.documentElement.setAttribute('
+               f"'data-shakerscan-proof','{marker}');console.log('{marker}')\">")
+    url = "https://app.fixture.invalid/search?q=%3Credacted%3E"
+    return _row("shakerscan_browser_proof", "Verified cross-site scripting", url=url, evidence={
+        "request_url": url, "parameter_name": "q", "injection_location": "query",
+        "candidate_id": candidate, "payload_sha256": hashlib.sha256(payload.encode()).hexdigest(),
+    })
+
+
 @pytest.mark.parametrize("ai", [{}, AI_READY])
 def test_an_xss_retest_sends_active_requests(monkeypatch, ai):
-    hints = _hints(monkeypatch, _row("shakerscan_browser_proof", "Verified cross-site scripting"), ai=ai)
+    hints = _hints(monkeypatch, _browser_proof_row(), ai=ai)
     assert hints["retest_supported"] is True and hints["retest_type"] == "xss"
     assert hints["retest_active"] is True and hints["retest_unsupported_reason"] is None
 
@@ -92,7 +108,7 @@ def test_an_xss_retest_sends_active_requests(monkeypatch, ai):
 def test_a_finding_with_a_prover_is_not_offered_an_ai_only_retest(monkeypatch, ai):
     # The AI tier is at most inconclusive, so a retest of the AI tier alone could never conclude;
     # tiered runs it after the prover.
-    hints = _hints(monkeypatch, _row("shakerscan_browser_proof", "Verified cross-site scripting"), ai=ai)
+    hints = _hints(monkeypatch, _browser_proof_row(), ai=ai)
     assert hints["retest_modes"] == ["tiered", "deterministic"]
 
 

@@ -607,7 +607,9 @@ function FindingDetailContent() {
     ? retestMode
     : retestOptions[0].value
   const retestUnsupportedMessage =
-    finding?.retest_unsupported_reason === 'model_intake'
+    finding?.retest_unsupported_message
+      ? finding.retest_unsupported_message
+      : finding?.retest_unsupported_reason === 'model_intake'
       ? 'Model Intake findings are re-checked by re-running the Model Intake scan for the artifact.'
       : canonicalProofVerified
         ? 'this finding type has no replay; the scan-time proof above still stands. Run a new Scan to observe it again.'
