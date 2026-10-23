@@ -11,7 +11,7 @@ import asyncio
 from datetime import datetime, timezone
 import functools
 import hashlib
-from typing import Any, Awaitable, Callable, Iterable, Mapping, Protocol, Sequence
+from typing import Any, Awaitable, Callable, Collection, Iterable, Mapping, Protocol, Sequence
 import json
 import math
 import statistics
@@ -509,6 +509,63 @@ def _repeated_candidate_positions(entries: Sequence[Mapping[str, Any]]) -> froze
             repeated.add(index)
         seen.add(identity)
     return frozenset(repeated)
+
+
+def _batch_attempt_id(
+    manifest_digest: str, family: str, candidate_id: str, manifest_index: int,
+    repeated_positions: Collection[int] = frozenset(), retry_round: int = 0,
+) -> str:
+    """The attempt id of one manifest entry in a ``family`` batch over the manifest.
+
+    The manifest, the family and the entry's candidate id name it. An entry whose candidate id an
+    earlier entry of the manifest has (``_repeated_candidate_positions``: a variant of one form)
+    also names its position, so each variant keeps its own checkpoint, units and count of what it
+    sent; the first entry with an id keeps the attempt id earlier builds checkpointed it under.
+    Every batch over a candidate manifest derives its attempt ids here.
+    """
+    key = f"{manifest_digest}:{family}:{candidate_id}"
+    if manifest_index in repeated_positions:
+        key += f":entry:{manifest_index}"
+    if retry_round:
+        key += f":retry:{retry_round}"
+    return hashlib.sha256(key.encode()).hexdigest()
+
+
+def _signalled_positions(
+    entries: Sequence[Mapping[str, Any]], *, manifest_digest: str, verifier_family: str,
+    signals: Iterable[tuple[str, str]], recorded_attempts: Collection[str],
+) -> frozenset[int]:
+    """The manifest positions a verifier's signals escalate to a proof.
+
+    ``signals`` are (verifier attempt id, candidate id) pairs, ``recorded_attempts`` every attempt
+    id the verifier's records name. Each variant of one form is its own verifier attempt, so a
+    signal escalates only the variant that produced it. A signal whose attempt id names no entry
+    of this manifest escalates every entry with its candidate id, and so does one that names the
+    first variant of a form whose other variants the verifier never recorded under their own ids:
+    an earlier build kept the variants under one attempt id, so its signal cannot say which.
+    """
+    repeated = _repeated_candidate_positions(entries)
+    identities = [_batch_candidate_id(entry, index) for index, entry in enumerate(entries)]
+    attempt_ids = [
+        _batch_attempt_id(manifest_digest, verifier_family, identity, index, repeated)
+        for index, identity in enumerate(identities)
+    ]
+    position_of = {attempt: index for index, attempt in enumerate(attempt_ids)}
+    varied = {identities[index] for index in repeated}
+    per_variant = {identities[index] for index in repeated if attempt_ids[index] in recorded_attempts}
+    positions: set[int] = set()
+    for attempt_id, candidate_id in signals:
+        index = position_of.get(attempt_id)
+        if index is not None and (
+            index in repeated or identities[index] not in varied or identities[index] in per_variant
+        ):
+            positions.add(index)
+            continue
+        identity = identities[index] if index is not None else candidate_id
+        positions.update(
+            position for position, item in enumerate(identities) if item == identity
+        )
+    return frozenset(positions)
 
 
 def _template_match_identity(item: Mapping[str, Any]) -> tuple[str, str, str]:
@@ -1928,6 +1985,7 @@ class DatabaseNeutralScanActionDispatcher:
         }
         family = "xss" if action.capability_name.startswith("xss.") else "sqli"
         manifest_digest = manifest.reference().manifest_digest
+        repeated_positions = _repeated_candidate_positions(manifest.entries)
         started_at = datetime.now(timezone.utc).isoformat()
         observations: list[Mapping[str, Any]] = []
         errors: list[str] = []
@@ -1939,9 +1997,9 @@ class DatabaseNeutralScanActionDispatcher:
         stopped_by_cancel = False
         for offset, candidate in enumerate(rows):
             candidate_id = str(candidate["candidate_id"])
-            attempt_id = hashlib.sha256(
-                f"{manifest_digest}:{family}:{candidate_id}".encode()
-            ).hexdigest()
+            attempt_id = _batch_attempt_id(
+                manifest_digest, family, candidate_id, start + offset, repeated_positions,
+            )
             prior = completed.get(attempt_id)
             if prior is not None:
                 resumed += 1
@@ -2125,28 +2183,37 @@ class DatabaseNeutralScanActionDispatcher:
         ))
         if not rows:
             return self._skip(action, self._empty_slice_reason(manifest))
-        candidate_signals: set[str] = set()
+        manifest_digest = manifest.reference().manifest_digest
+        # A signal escalates the variant whose verifier attempt produced it (_signalled_positions).
+        signals: list[tuple[str, str]] = []
+        recorded: set[str] = set()
         for dependency in proof_signal_sources(action, self.plan):
             for item in await self._observations(dependency):
+                if item.get("attempt_id"):
+                    recorded.add(str(item["attempt_id"]))
                 if (
                     str(item.get("kind") or "") in {"xss_alert", "request_body_verification"}
                     and str(item.get("candidate_id") or "")
                     and str(item.get("proof_state") or item.get("proof_status") or "")
                     not in {"not_proven", "unproven", ""}
                 ):
-                    candidate_signals.add(str(item["candidate_id"]))
+                    signals.append((str(item.get("attempt_id") or ""), str(item["candidate_id"])))
+        signalled = set(_signalled_positions(
+            manifest.entries, manifest_digest=manifest_digest, verifier_family="xss",
+            signals=signals, recorded_attempts=recorded,
+        ))
         # A URL fragment never reaches a server-side verifier, so requiring an upstream reflection
         # signal makes DOM-only XSS impossible to prove. The immutable fragment candidate itself is
         # sufficient authority for a bounded same-origin browser attempt.
-        candidate_signals.update(
-            str(candidate.get("candidate_id") or "")
-            for _index, candidate in rows
-            if candidate.get("browser_fragment_query_parameter_names")
+        signalled.update(
+            index
+            for index, candidate in rows
+            if str(candidate.get("candidate_id") or "")
+            and candidate.get("browser_fragment_query_parameter_names")
             and str(candidate.get("parameter_name") or "")
             in candidate.get("browser_fragment_query_parameter_names", ())
         )
-        candidate_signals.discard("")
-        if not candidate_signals:
+        if not signalled:
             return self._skip(action, "no_xss_candidate_observation")
         load_attempts = getattr(self.backend, "load_batch_attempts", None)
         checkpoint_attempt = getattr(self.backend, "checkpoint_batch_attempt", None)
@@ -2170,7 +2237,7 @@ class DatabaseNeutralScanActionDispatcher:
                     carried[finished_id] = item
                     carried_source[finished_id] = source
         carried_count = 0
-        manifest_digest = manifest.reference().manifest_digest
+        repeated_positions = _repeated_candidate_positions(manifest.entries)
         started_at = datetime.now(timezone.utc).isoformat()
         observations: list[Mapping[str, Any]] = []
         errors: list[str] = []
@@ -2186,11 +2253,12 @@ class DatabaseNeutralScanActionDispatcher:
         proof_headers = primary.headers() if primary.authenticated else None
         for offset, (manifest_index, candidate) in enumerate(rows):
             candidate_id = str(candidate.get("candidate_id") or "")
-            if candidate_id not in candidate_signals:
+            if manifest_index not in signalled:
                 continue
-            attempt_id = hashlib.sha256(
-                f"{manifest_digest}:xss_browser_proof:{candidate_id}".encode()
-            ).hexdigest()
+            attempt_id = _batch_attempt_id(
+                manifest_digest, "xss_browser_proof", candidate_id, manifest_index,
+                repeated_positions,
+            )
             if attempt_id in carried:
                 carried_count += 1
                 attempted += 1
@@ -2308,10 +2376,7 @@ class DatabaseNeutralScanActionDispatcher:
                     int(action.requested_budget.get(name, 0)),
                     consumed.get(name, 0) + int(amount),
                 )
-        eligible = sum(
-            str(candidate.get("candidate_id") or "") in candidate_signals
-            for _index, candidate in rows
-        )
+        eligible = sum(manifest_index in signalled for manifest_index, _candidate in rows)
         unattempted = max(0, eligible - attempted)
         _batch_status, _batch_partial, _batch_timed_out = batch_outcome(
             attempt_statuses, unattempted,
@@ -2365,9 +2430,14 @@ class DatabaseNeutralScanActionDispatcher:
         ))
         if not rows:
             return self._skip(action, self._empty_slice_reason(manifest))
-        candidate_signals: set[str] = set()
+        manifest_digest = manifest.reference().manifest_digest
+        # A signal escalates the variant whose verifier attempt produced it (_signalled_positions).
+        signals: list[tuple[str, str]] = []
+        recorded: set[str] = set()
         for dependency in proof_signal_sources(action, self.plan):
             for item in await self._observations(dependency):
+                if item.get("attempt_id"):
+                    recorded.add(str(item["attempt_id"]))
                 if (
                     str(item.get("kind") or "") in {
                         "sqli_finding", "request_body_verification", "candidate_attempt",
@@ -2376,8 +2446,12 @@ class DatabaseNeutralScanActionDispatcher:
                     and str(item.get("proof_state") or item.get("proof_status") or "")
                     not in {"not_proven", "unproven", ""}
                 ):
-                    candidate_signals.add(str(item["candidate_id"]))
-        if not candidate_signals:
+                    signals.append((str(item.get("attempt_id") or ""), str(item["candidate_id"])))
+        signalled = _signalled_positions(
+            manifest.entries, manifest_digest=manifest_digest, verifier_family="sqli",
+            signals=signals, recorded_attempts=recorded,
+        )
+        if not signalled:
             return self._skip(action, "no_sqli_candidate_observation")
         load_attempts = getattr(self.backend, "load_batch_attempts", None)
         checkpoint_attempt = getattr(self.backend, "checkpoint_batch_attempt", None)
@@ -2401,7 +2475,7 @@ class DatabaseNeutralScanActionDispatcher:
                     carried[finished_id] = item
                     carried_source[finished_id] = source
         carried_count = 0
-        manifest_digest = manifest.reference().manifest_digest
+        repeated_positions = _repeated_candidate_positions(manifest.entries)
         started_at = datetime.now(timezone.utc).isoformat()
         observations: list[Mapping[str, Any]] = []
         errors: list[str] = []
@@ -2419,11 +2493,11 @@ class DatabaseNeutralScanActionDispatcher:
             # the browser XSS proof; skip it here.
             if candidate.get("browser_fragment_path"):
                 continue
-            if candidate_id not in candidate_signals:
+            if manifest_index not in signalled:
                 continue
-            attempt_id = hashlib.sha256(
-                f"{manifest_digest}:sqli_proof:{candidate_id}".encode()
-            ).hexdigest()
+            attempt_id = _batch_attempt_id(
+                manifest_digest, "sqli_proof", candidate_id, manifest_index, repeated_positions,
+            )
             if attempt_id in carried:
                 carried_count += 1
                 attempted += 1
@@ -2579,10 +2653,7 @@ class DatabaseNeutralScanActionDispatcher:
                     int(action.requested_budget.get(name, 0)),
                     consumed.get(name, 0) + int(amount),
                 )
-        eligible = sum(
-            str(candidate.get("candidate_id") or "") in candidate_signals
-            for _index, candidate in rows
-        )
+        eligible = sum(manifest_index in signalled for manifest_index, _candidate in rows)
         unattempted = max(0, eligible - attempted)
         _batch_status, _batch_partial, _batch_timed_out = batch_outcome(
             attempt_statuses, unattempted,
@@ -3537,6 +3608,7 @@ class DatabaseNeutralScanActionDispatcher:
             if isinstance(item, Mapping)
         }
         manifest_digest = manifest.reference().manifest_digest
+        repeated_positions = _repeated_candidate_positions(manifest.entries)
         started_at = datetime.now(timezone.utc).isoformat()
         observations: list[Mapping[str, Any]] = []
         errors: list[str] = []
@@ -3581,9 +3653,9 @@ class DatabaseNeutralScanActionDispatcher:
             candidate_id = str(candidate.get("candidate_id") or "")
             if manifest_index in skipped:
                 continue
-            attempt_id = hashlib.sha256(
-                f"{manifest_digest}:nosqli:{candidate_id}".encode()
-            ).hexdigest()
+            attempt_id = _batch_attempt_id(
+                manifest_digest, "nosqli", candidate_id, manifest_index, repeated_positions,
+            )
             prior = completed.get(attempt_id)
             if prior is not None:
                 resumed += 1
@@ -3800,20 +3872,25 @@ class DatabaseNeutralScanActionDispatcher:
             await heartbeat()
             return result
 
-        comparisons: list[RouteComparison] = []
+        # Two entries of one route (a POST route seen with two bodies) are probed with the same
+        # GETs. Each entry is its own attempt (_batch_attempt_id), so the report counts both; the
+        # later one reuses the comparison this batch already made for the route and sends nothing.
+        repeated_positions = _repeated_candidate_positions(endpoints.entries)
+        compared: dict[str, RouteComparison] = {}
+        entry_heads: list[tuple[str, RouteComparison]] = []
         primary_headers = tuple(primary.headers().items())
         ordinal = start * 1000
         for manifest_index, entry in window:
             route_id = str(entry.get("route_id") or "")
-            attempt_id = hashlib.sha256(
-                f"{manifest_digest}:authz_surface:{route_id}".encode()
-            ).hexdigest()
+            attempt_id = _batch_attempt_id(
+                manifest_digest, "authz_surface", route_id, manifest_index, repeated_positions,
+            )
             prior = completed.get(attempt_id)
             if prior is not None:
                 resumed += 1
                 attempted += 1
                 attempt_statuses.append(prior)
-                comparisons.append(RouteComparison(
+                comparison = RouteComparison(
                     route_id=route_id, url=str(prior.get("url") or ""),
                     anonymous=tuple(
                         PrincipalProbe(**probe) for probe in prior.get("anonymous") or ()
@@ -3821,7 +3898,24 @@ class DatabaseNeutralScanActionDispatcher:
                     authenticated=tuple(
                         PrincipalProbe(**probe) for probe in prior.get("authenticated") or ()
                     ),
-                ))
+                )
+                compared.setdefault(route_id, comparison)
+                entry_heads.append((attempt_id, comparison))
+                continue
+            if route_id and route_id in compared:
+                comparison = compared[route_id]
+                checkpoint = {
+                    "attempt_id": attempt_id, "candidate_id": attempt_id[:32],
+                    "status": "success", "route_id": route_id, "url": comparison.url,
+                    "anonymous": [vars(probe) for probe in comparison.anonymous],
+                    "authenticated": [vars(probe) for probe in comparison.authenticated],
+                    "budget_consumed": {"http_requests": 0},
+                }
+                if not self.cancelled():
+                    await checkpoint_attempt(action.action_id, checkpoint)
+                attempt_statuses.append(checkpoint)
+                attempted += 1
+                entry_heads.append((attempt_id, comparison))
                 continue
             if self.cancelled() or consumed["http_requests"] + 4 > http_ceiling:
                 break
@@ -3846,7 +3940,8 @@ class DatabaseNeutralScanActionDispatcher:
                 route_id=route_id, url=url,
                 anonymous=tuple(anon_probes), authenticated=tuple(authed_probes),
             )
-            comparisons.append(comparison)
+            compared.setdefault(route_id, comparison)
+            entry_heads.append((attempt_id, comparison))
             checkpoint = {
                 "attempt_id": attempt_id, "candidate_id": attempt_id[:32],
                 # The durable checkpoint contract requires a terminal status.
@@ -3869,21 +3964,22 @@ class DatabaseNeutralScanActionDispatcher:
 
         # A finding needs proof the app gates function access somewhere; without an
         # established boundary a fully-public app yields nothing.
-        boundary = boundary_established(comparisons)
+        boundary = boundary_established(compared.values())
         observations: list[Mapping[str, Any]] = []
-        for comparison in comparisons:
+        reported: set[str] = set()
+        for attempt_id, comparison in entry_heads:
             proven = bfla_finding(comparison) if boundary else None
             observations.append({
                 "kind": "candidate_attempt",
-                "attempt_id": hashlib.sha256(
-                    f"{manifest_digest}:authz_surface:{comparison.route_id}".encode()
-                ).hexdigest(),
+                "attempt_id": attempt_id,
                 "candidate_id": comparison.route_id,
                 "family": "authz_surface",
                 "status": "success",
                 "proof_state": "verified" if proven else "not_proven",
             })
-            if proven is not None:
+            # One finding per route, however many entries the route has.
+            if proven is not None and comparison.route_id not in reported:
+                reported.add(comparison.route_id)
                 observations.append(proven)
         unattempted = max(0, len(window) - attempted)
         _batch_status, _batch_partial, _batch_timed_out = batch_outcome(
@@ -4428,12 +4524,10 @@ class DatabaseNeutralScanActionDispatcher:
         )
 
         def batch_attempt_id(candidate_id: str, manifest_index: int, retry_round: int) -> str:
-            key = f"{manifest_digest}:{family}:{candidate_id}"
-            if manifest_index in repeated_positions:
-                key += f":entry:{manifest_index}"
-            if retry_round:
-                key += f":retry:{retry_round}"
-            return hashlib.sha256(key.encode()).hexdigest()
+            return _batch_attempt_id(
+                manifest_digest, family, candidate_id, manifest_index, repeated_positions,
+                retry_round,
+            )
 
         started_at = datetime.now(timezone.utc).isoformat()
         observations: list[Mapping[str, Any]] = []
