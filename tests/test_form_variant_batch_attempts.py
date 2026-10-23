@@ -170,6 +170,71 @@ def _heads(receipt):
     return [item for item in receipt.observations if item.get("kind") == "candidate_attempt"]
 
 
+REPORT_ORIGIN = "https://app.example.test"
+
+
+def _report(family, *settled):
+    """(The family's coverage row, the report) over batch actions that settled as given: each
+    (capability, its records, its status, (slice start, slice count, manifest entries)), a
+    finalize action after them. Built in the flat import layout, like the dispatcher above."""
+    import hashlib
+
+    from runtime.observation_manifests import ObservationManifest
+    from scan.capability_result import (
+        CapabilityReceiptReference,
+        CapabilityResultReason,
+        CapabilityResultReference,
+        CapabilityResultStatus,
+    )
+    from scan.finalizer import finalize_scan_report
+
+    scan_id = "30000000-0000-4000-8000-0000000000e1"
+    actions, results, observations = [], {}, {}
+    for index, (capability, rows, status, (start, count, entries)) in enumerate(settled):
+        action = dataclasses.replace(
+            _action(f"batch.{index}.r01", capability, index,
+                    capability_args={"slice": {"start": start, "count": count},
+                                     "manifest_entries": entries},
+                    dependencies=tuple(item.action_id for item in actions)),
+            action_digest=None,
+        )
+        actions.append(action)
+        outcome = CapabilityResultStatus(status)
+        content = b"{}\n" * len(rows)
+        results[action.action_id] = CapabilityResultReference(
+            action_id=action.action_id, action_digest=action.action_digest,
+            capability_name=action.capability_name,
+            adapter_name=str(action.placement["adapter_name"]),
+            adapter_version=str(action.placement["adapter_version"]),
+            output_schema=action.output_schema, status=outcome,
+            partial=outcome is not CapabilityResultStatus.SUCCESS, timed_out=False,
+            reason_code=(None if outcome is CapabilityResultStatus.SUCCESS
+                         else CapabilityResultReason.INSUFFICIENT_PLAN_BUDGET),
+            receipt_ref=CapabilityReceiptReference(
+                receipt_id=str(uuid.uuid5(uuid.NAMESPACE_URL, f"receipt:{action.action_id}")),
+                receipt_hash=hashlib.sha256(action.action_id.encode()).hexdigest(),
+            ),
+            observation_manifest_ref=ObservationManifest(
+                manifest_id=str(uuid.uuid5(uuid.NAMESPACE_URL, f"report:{action.action_id}:{len(rows)}")),
+                owner_id=scan_id, action_id=action.action_id,
+                capability_name=action.capability_name, output_schema=action.output_schema,
+                observation_count=len(rows), content_sha256=hashlib.sha256(content).hexdigest(),
+                size_bytes=len(content), object_key=f"scans/{scan_id}/{action.action_id}.jsonl",
+            ).reference(),
+            budget_reserved=action.requested_budget,
+            budget_consumed={name: 0 for name in action.requested_budget},
+        )
+        observations[action.action_id] = tuple(rows)
+    final = _action("finalize.report", "scan.finalize", len(actions),
+                    dependencies=tuple(item.action_id for item in actions))
+    plan = ScanActionPlan(scan_id=scan_id, execution_plan_digest="b" * 64,
+                          target_binding_digest=TARGET.digest, actions=(*actions, final))
+    report = finalize_scan_report(plan=plan, target_url=REPORT_ORIGIN, action_results=results,
+                                  observations=observations)
+    row = next(item for item in report["coverage"]["family_coverage"] if item["family"] == family)
+    return row, report
+
+
 VARIANTS = {(("password", "username"), "form"), (("csrf_token", "password", "remember", "username"), "form"),
             (("password", "username"), "json")}
 
@@ -278,27 +343,10 @@ def test_a_signal_without_an_attempt_id_escalates_every_variant_of_its_candidate
 def test_every_nosqli_variant_counts_as_attempted_in_the_report(monkeypatch):
     """The report counts distinct attempt ids: three variants that shared one read as two
     candidates never attempted (``candidates_unattempted``)."""
-    from api.scan.action_plan import ScanActionPlan as PackagePlan
-    from api.scan.finalizer import finalize_scan_report
-    from tests.test_auth_endpoint_probe_coverage import ORIGIN
-    from tests.test_scan_finalizer import _result_with_observation_count
-    from tests.test_scan_orchestrator import SCAN_ID
-    from tests.test_scan_orchestrator import _action as plan_action
-
     receipts, *_rest = _run(monkeypatch, "nosqli.verify_batch", statuses=["success"] * 3)
-    rows = tuple(receipts[0].observations)
-    batch = dataclasses.replace(
-        plan_action("verify.nosqli.r01", 0, capability_name="nosqli.verify_batch"),
-        capability_args={"slice": {"start": 0, "count": 3}, "manifest_entries": 3},
-        output_schema="nosqli-batch/v1", action_digest=None,
+    family, _report_ = _report(
+        "nosqli", ("nosqli.verify_batch", receipts[0].observations, "success", (0, 3, 3)),
     )
-    final = plan_action("finalize.report", 1, dependencies=(batch.action_id,))
-    plan = PackagePlan(scan_id=SCAN_ID, execution_plan_digest="b" * 64,
-                       target_binding_digest="a" * 64, actions=(batch, final))
-    result = _result_with_observation_count(batch, len(rows))
-    report = finalize_scan_report(plan=plan, target_url=ORIGIN, action_results={batch.action_id: result},
-                                  observations={batch.action_id: rows})
-    family = next(row for row in report["coverage"]["family_coverage"] if row["family"] == "nosqli")
     assert family["attempted_candidates"] == 3, family
     assert family["unattempted_candidates"] == 0
     assert family["reason"] != "candidates_unattempted"
@@ -347,13 +395,6 @@ def _authz_surface(routes, *, rounds=1, backend=None, public_route=False):
 def test_each_entry_of_a_route_seen_with_two_bodies_is_its_own_comparison_attempt():
     """The sign-in route's three bodies are one route to the GET comparison: it is probed once, and
     each entry is its own attempt, so the report does not read two of them as never attempted."""
-    from api.scan.action_plan import ScanActionPlan as PackagePlan
-    from api.scan.finalizer import finalize_scan_report
-    from tests.test_auth_endpoint_probe_coverage import ORIGIN
-    from tests.test_scan_finalizer import _result_with_observation_count
-    from tests.test_scan_orchestrator import SCAN_ID
-    from tests.test_scan_orchestrator import _action as plan_action
-
     (receipt,), sent, endpoints, _authz_action = _authz_surface(SIGN_IN_ROUTES)
     assert len(endpoints.entries) == 4
     assert len({entry["route_id"] for entry in endpoints.entries}) == 2
@@ -364,22 +405,9 @@ def test_each_entry_of_a_route_seen_with_two_bodies_is_its_own_comparison_attemp
     digest = endpoints.reference().manifest_digest
     first = endpoints.entries[0]["route_id"]
     assert _sha(f"{digest}:authz_surface:{first}") in {head["attempt_id"] for head in heads}
-
-    rows = tuple(receipt.observations)
-    batch = dataclasses.replace(
-        plan_action("verify.authz_surface.r01", 0, capability_name="authz_surface.verify_batch"),
-        capability_args={"slice": {"start": 0, "count": 4}, "manifest_entries": 4},
-        output_schema="authz-surface-batch/v1", action_digest=None,
+    family, _report_ = _report(
+        "authz_surface", ("authz_surface.verify_batch", receipt.observations, "success", (0, 4, 4)),
     )
-    final = plan_action("finalize.report", 1, dependencies=(batch.action_id,))
-    plan = PackagePlan(scan_id=SCAN_ID, execution_plan_digest="b" * 64,
-                       target_binding_digest="a" * 64, actions=(batch, final))
-    report = finalize_scan_report(
-        plan=plan, target_url=ORIGIN,
-        action_results={batch.action_id: _result_with_observation_count(batch, len(rows))},
-        observations={batch.action_id: rows},
-    )
-    family = next(row for row in report["coverage"]["family_coverage"] if row["family"] == "authz_surface")
     assert family["attempted_candidates"] == 4 and family["unattempted_candidates"] == 0, family
 
 
@@ -476,12 +504,7 @@ def test_each_entry_of_a_url_seen_with_several_bodies_is_one_exposure_get_and_it
     """Two bodies of the sign-in route and its sign-in page: the sign-in URL is read once, and each
     entry is its own attempt. The sweep read the URL once per entry under one attempt id, so it sent
     a duplicate GET and the report counted two of three entries."""
-    from api.scan.action_plan import ScanActionPlan as PackagePlan
-    from api.scan.finalizer import finalize_scan_report
     from tests.test_auth_endpoint_probe_coverage import ORIGIN
-    from tests.test_scan_finalizer import _result_with_observation_count
-    from tests.test_scan_orchestrator import SCAN_ID
-    from tests.test_scan_orchestrator import _action as plan_action
 
     (receipt,), sent, endpoints = _exposure(SIGN_IN_ROUTES, part=(1, 3))
     window = endpoints.entries[1:4]
@@ -492,22 +515,9 @@ def test_each_entry_of_a_url_seen_with_several_bodies_is_one_exposure_get_and_it
     digest = endpoints.reference().manifest_digest
     # The URL's first entry keeps the attempt id earlier builds checkpointed it under.
     assert _sha(f"{digest}:exposure:{ORIGIN}/hub/login") in {head["attempt_id"] for head in heads}
-    rows = tuple(receipt.observations)
-    batch = dataclasses.replace(
-        plan_action("verify.exposure.r01", 0, capability_name="exposure.verify_batch"),
-        capability_args={"slice": {"start": 1, "count": 3}, "manifest_entries": 4},
-        output_schema="exposure-probe-batch/v1", action_digest=None,
+    family, _report_ = _report(
+        "sensitive_exposure", ("exposure.verify_batch", receipt.observations, "success", (1, 3, 4)),
     )
-    final = plan_action("finalize.report", 1, dependencies=(batch.action_id,))
-    plan = PackagePlan(scan_id=SCAN_ID, execution_plan_digest="b" * 64,
-                       target_binding_digest="a" * 64, actions=(batch, final))
-    report = finalize_scan_report(
-        plan=plan, target_url=ORIGIN,
-        action_results={batch.action_id: _result_with_observation_count(batch, len(rows))},
-        observations={batch.action_id: rows},
-    )
-    family = next(row for row in report["coverage"]["family_coverage"]
-                  if row["family"] == "sensitive_exposure")
     assert family["attempted_candidates"] == 3 and family["unattempted_candidates"] == 0, family
 
 

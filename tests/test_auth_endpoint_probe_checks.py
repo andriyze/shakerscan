@@ -46,7 +46,7 @@ from tests.test_auth_endpoint_probe_limit import (
     SIGN_IN_ROUTES,
     _StoredOnce,
 )
-from tests.test_form_variant_batch_attempts import BATCHES, _manifests, _signals
+from tests.test_form_variant_batch_attempts import BATCHES, _manifests, _report, _signals
 from tests.test_scan_action_adapter import TARGET, _action, _dispatcher, _lease, _noop
 
 try:
@@ -372,12 +372,6 @@ def test_a_later_action_of_the_check_draws_from_what_the_endpoint_already_receiv
 def test_a_spent_proof_set_closes_every_variant_without_a_request(monkeypatch):
     """An earlier proof action spent the four-field set: nothing more is sent, each variant is
     inconclusive for the limit, and the family names it."""
-    from api.scan.action_plan import ScanActionPlan as PackagePlan
-    from api.scan.finalizer import finalize_scan_report
-    from tests.test_scan_finalizer import _result_with_observation_count
-    from tests.test_scan_orchestrator import SCAN_ID
-    from tests.test_scan_orchestrator import _action as plan_action
-
     _record_pace(monkeypatch)
     target = _fake_target(monkeypatch)
     (endpoint,) = sign_in_endpoints(SIGN_IN, [], base_url=f"{ORIGIN}/")
@@ -392,21 +386,9 @@ def test_a_spent_proof_set_closes_every_variant_without_a_request(monkeypatch):
         head["verdict"] == "inconclusive" and head["inconclusive_reason"] == AUTH_ENDPOINT_PROBE_LIMITED
         for head in heads
     )
-    rows = tuple(receipts[1].observations)
-    proof = dataclasses.replace(
-        plan_action("prove.sqli.r01", 0, capability_name="sqli.prove_batch"),
-        capability_args={"slice": {"start": 0, "count": 3}, "manifest_entries": 3},
-        output_schema="sqli-proof-batch/v1", action_digest=None,
+    family, report = _report(
+        "sqli", ("sqli.prove_batch", receipts[1].observations, "success", (0, 3, 3)),
     )
-    final = plan_action("finalize.report", 1, dependencies=(proof.action_id,))
-    plan = PackagePlan(scan_id=SCAN_ID, execution_plan_digest="b" * 64,
-                       target_binding_digest="a" * 64, actions=(proof, final))
-    report = finalize_scan_report(
-        plan=plan, target_url=ORIGIN,
-        action_results={proof.action_id: _result_with_observation_count(proof, len(rows))},
-        observations={proof.action_id: rows},
-    )
-    family = next(row for row in report["coverage"]["family_coverage"] if row["family"] == "sqli")
     assert family["sign_in_probe_limited"] == {"endpoints": [LOGIN], "candidates": 3}
     assert AUTH_ENDPOINT_PROBE_LIMITED in report["coverage"]["reasons"]
 
@@ -445,64 +427,11 @@ class _PacedClock:
         )
 
 
-def _family_report(family, *settled):
-    """The report over batch actions, each (capability, its records, the status it settled with);
-    the first is the family's verifier."""
-    import hashlib
-    import uuid
-
-    from api.runtime.observation_manifests import ObservationManifest
-    from api.scan.action_plan import ScanActionPlan as PackagePlan
-    from api.scan.capability_result import (
-        CapabilityResultReason,
-        CapabilityResultStatus,
-    )
-    from api.scan.finalizer import finalize_scan_report
-    from tests.test_scan_orchestrator import SCAN_ID, _result
-    from tests.test_scan_orchestrator import _action as plan_action
-
-    actions, results, observations = [], {}, {}
-    for index, (capability, rows, status) in enumerate(settled):
-        action = dataclasses.replace(
-            plan_action(f"batch.{index}.r01", index, capability_name=capability,
-                        dependencies=tuple(item.action_id for item in actions)),
-            capability_args={"slice": {"start": 0, "count": 3}, "manifest_entries": 3},
-            output_schema=CAPABILITY_REGISTRY.require(capability).output_schema,
-            action_digest=None,
-        )
-        actions.append(action)
-        outcome = CapabilityResultStatus(status)
-        base = _result(action, status=outcome, reason=(
-            None if outcome is CapabilityResultStatus.SUCCESS
-            else CapabilityResultReason.INSUFFICIENT_PLAN_BUDGET
-        ))
-        content = b"{}\n" * len(rows)
-        manifest = ObservationManifest(
-            manifest_id=str(uuid.uuid5(uuid.NAMESPACE_URL, f"paced:{action.action_id}:{len(rows)}")),
-            owner_id=SCAN_ID, action_id=action.action_id, capability_name=action.capability_name,
-            output_schema=action.output_schema, observation_count=len(rows),
-            content_sha256=hashlib.sha256(content).hexdigest(), size_bytes=len(content),
-            object_key=f"scans/{SCAN_ID}/{action.action_id}.jsonl",
-        ).reference()
-        results[action.action_id] = type(base)(**{
-            **base.digest_material(), "receipt_ref": base.receipt_ref,
-            "observation_manifest_ref": manifest,
-        })
-        observations[action.action_id] = tuple(rows)
-    final = plan_action("finalize.report", len(actions),
-                        dependencies=tuple(item.action_id for item in actions))
-    plan = PackagePlan(scan_id=SCAN_ID, execution_plan_digest="b" * 64,
-                       target_binding_digest="a" * 64, actions=(*actions, final))
-    report = finalize_scan_report(plan=plan, target_url=ORIGIN, action_results=results,
-                                  observations=observations)
-    return next(row for row in report["coverage"]["family_coverage"] if row["family"] == family), report
-
-
 def _proof_report(candidates, proof_rows, status):
     """The SQLi family over a verifier that flagged all three variants and the proof action."""
-    return _family_report(
-        "sqli", ("sqli.verify_batch", _signals(candidates, "sqli", {0, 1, 2}), "success"),
-        ("sqli.prove_batch", proof_rows, status),
+    return _report(
+        "sqli", ("sqli.verify_batch", _signals(candidates, "sqli", {0, 1, 2}), "success", (0, 3, 3)),
+        ("sqli.prove_batch", proof_rows, status, (0, 3, 3)),
     )
 
 
@@ -567,7 +496,7 @@ def test_the_wall_the_pace_consumes_funds_whole_proofs_and_leaves_the_rest_waiti
     deferred = [item for item in receipt.observations if item.get("kind") == "candidate_deferred"]
     assert len(deferred) == 3 - len(sent)
     assert receipt.status == ("success" if len(sent) == 3 else "partial")
-    family, _report = _proof_report(candidates, receipt.observations, receipt.status)
+    family, _report_ = _proof_report(candidates, receipt.observations, receipt.status)
     if len(sent) == 3:
         assert family["coverage_status"] == "complete"
         assert family["proof_escalation"]["status"] == "complete"
@@ -668,9 +597,9 @@ def test_a_variant_its_verifier_and_its_proof_both_left_limited_is_one_candidate
     proof_rows = receipts[0].observations
     assert len([head for head in _heads(receipts) if head.get("inconclusive_reason")
                 == AUTH_ENDPOINT_PROBE_LIMITED]) == 3
-    family, _report = _family_report(
-        "xss", ("xss.verify_batch", verifier_rows, "success"),
-        ("xss.browser_prove_batch", proof_rows, "success"),
+    family, _report_ = _report(
+        "xss", ("xss.verify_batch", verifier_rows, "success", (0, 3, 3)),
+        ("xss.browser_prove_batch", proof_rows, "success", (0, 3, 3)),
     )
     assert family["sign_in_probe_limited"] == {"endpoints": [LOGIN], "candidates": 3}
 
