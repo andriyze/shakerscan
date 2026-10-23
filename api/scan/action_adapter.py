@@ -868,6 +868,7 @@ class _SignInChecks:
 
     def record(
         self, head: Mapping[str, Any], endpoint: SignInEndpoint, sent: int, *, short: bool,
+        manifest_index: int,
     ) -> dict[str, Any]:
         """The attempt's record with what the endpoint received; inconclusive when the probe set
         left it short and it proved nothing."""
@@ -880,6 +881,9 @@ class _SignInChecks:
             "sign_in_endpoint_key": endpoint.key,
             "sign_in_endpoint_requests": max(0, int(sent)),
             "sign_in_endpoint_received": received,
+            # Which variant of the candidate: coverage counts a limited variant once, whichever
+            # checks (each its own attempt id) it was limited in.
+            "manifest_index": int(manifest_index),
         }
         if short and str(record.get("proof_state") or "") != "verified" and not record.get("verdict"):
             record.update({
@@ -889,6 +893,7 @@ class _SignInChecks:
 
     def closed(
         self, endpoint: SignInEndpoint, *, attempt_id: str, candidate_id: str, family: str,
+        manifest_index: int,
     ) -> dict[str, Any]:
         """A candidate whose probe set is spent: inconclusive, nothing sent, never negative."""
         return {
@@ -899,11 +904,12 @@ class _SignInChecks:
             "sign_in_endpoint": endpoint.label, "sign_in_endpoint_key": endpoint.key,
             "sign_in_endpoint_requests": 0,
             "sign_in_endpoint_received": self.received.get(endpoint.key, 0),
+            "manifest_index": int(manifest_index),
         }
 
     def deferred(
         self, endpoint: SignInEndpoint, *, attempt_id: str, candidate_id: str, family: str,
-        available_wall_seconds: int,
+        available_wall_seconds: int, manifest_index: int,
     ) -> dict[str, Any]:
         """A candidate the slice's wall cannot pace: left for a later action, with no verdict."""
         return {
@@ -912,6 +918,7 @@ class _SignInChecks:
             "available_wall_seconds": max(0, int(available_wall_seconds)),
             "sign_in_endpoint": endpoint.label,
             "sign_in_endpoint_received": self.received.get(endpoint.key, 0),
+            "manifest_index": int(manifest_index),
         }
 
 
@@ -2165,6 +2172,7 @@ class DatabaseNeutralScanActionDispatcher:
                     attempt_statuses.append({"status": "success", "timed_out": False})
                     observations.append(sign_in_checks.closed(
                         sign_in, attempt_id=attempt_id, candidate_id=candidate_id, family=family,
+                        manifest_index=start + offset,
                     ))
                     continue
                 held = sign_in_checks.hold(
@@ -2176,6 +2184,7 @@ class DatabaseNeutralScanActionDispatcher:
                     observations.append(sign_in_checks.deferred(
                         sign_in, attempt_id=attempt_id, candidate_id=candidate_id, family=family,
                         available_wall_seconds=remaining.get("tool_wall_seconds", 0),
+                        manifest_index=start + offset,
                     ))
                     exhausted.add("tool_wall_seconds")
                     continue
@@ -2231,6 +2240,7 @@ class DatabaseNeutralScanActionDispatcher:
                 attempt_observations = (
                     sign_in_checks.record(
                         attempt_observations[0], sign_in, transport.sent, short=False,
+                        manifest_index=start + offset,
                     ),
                     *attempt_observations[1:],
                 )
@@ -2492,7 +2502,7 @@ class DatabaseNeutralScanActionDispatcher:
                     attempt_statuses.append({"status": "success", "timed_out": False})
                     observations.append(sign_in_checks.closed(
                         sign_in, attempt_id=attempt_id, candidate_id=candidate_id,
-                        family="xss_browser_proof",
+                        family="xss_browser_proof", manifest_index=manifest_index,
                     ))
                     continue
                 await sign_in_checks.wait()
@@ -2522,7 +2532,7 @@ class DatabaseNeutralScanActionDispatcher:
                 bundled = (sign_in_checks.record(
                     bundled[0], sign_in,
                     int(dict(result.actual_budget).get("state_changing_requests", 0) or 0),
-                    short=False,
+                    short=False, manifest_index=manifest_index,
                 ), *bundled[1:])
             attempt = {
                 "attempt_id": attempt_id, "candidate_id": candidate_id,
@@ -2749,7 +2759,7 @@ class DatabaseNeutralScanActionDispatcher:
                     attempt_statuses.append({"status": "success", "timed_out": False})
                     observations.append(sign_in_checks.closed(
                         sign_in, attempt_id=attempt_id, candidate_id=candidate_id,
-                        family="sqli_proof",
+                        family="sqli_proof", manifest_index=manifest_index,
                     ))
                     continue
                 # An authentication form's proof is an error pair and a bypass pair (8); any
@@ -2768,6 +2778,7 @@ class DatabaseNeutralScanActionDispatcher:
                         sign_in, attempt_id=attempt_id, candidate_id=candidate_id,
                         family="sqli_proof",
                         available_wall_seconds=remaining.get("tool_wall_seconds", 0),
+                        manifest_index=manifest_index,
                     ))
                     continue
                 short_of_set = sign_in_checks.short_of(sign_in, need)
@@ -2840,6 +2851,7 @@ class DatabaseNeutralScanActionDispatcher:
             if sign_in is not None:
                 bundled = (sign_in_checks.record(
                     bundled[0], sign_in, transport.sent, short=short_of_set,
+                    manifest_index=manifest_index,
                 ), *bundled[1:])
             attempt = {
                 "attempt_id": attempt_id, "candidate_id": candidate_id,
@@ -3934,7 +3946,7 @@ class DatabaseNeutralScanActionDispatcher:
                     attempt_statuses.append({"status": "success", "timed_out": False})
                     observations.append(sign_in_checks.closed(
                         sign_in, attempt_id=attempt_id, candidate_id=candidate_id,
-                        family="nosqli",
+                        family="nosqli", manifest_index=manifest_index,
                     ))
                     continue
                 # Four requests a field, over the anchor and every declared field; the slice paces
@@ -3956,6 +3968,7 @@ class DatabaseNeutralScanActionDispatcher:
                         sign_in, attempt_id=attempt_id, candidate_id=candidate_id,
                         family="nosqli",
                         available_wall_seconds=remaining.get("tool_wall_seconds", 0),
+                        manifest_index=manifest_index,
                     ))
                     continue
                 short_of_set = sign_in_checks.short_of(sign_in, need)
@@ -3998,6 +4011,7 @@ class DatabaseNeutralScanActionDispatcher:
             if sign_in is not None:
                 bundled = (sign_in_checks.record(
                     bundled[0], sign_in, transport.sent, short=short_of_set,
+                    manifest_index=manifest_index,
                 ), *bundled[1:])
             attempt = {
                 "attempt_id": attempt_id, "candidate_id": candidate_id,
@@ -5033,6 +5047,8 @@ class DatabaseNeutralScanActionDispatcher:
                     "sign_in_endpoint_key": str(sign_in_key),
                     "sign_in_endpoint_requests": sent,
                     "sign_in_endpoint_received": received,
+                    # Which variant: coverage counts a limited variant once across checks.
+                    "manifest_index": int(row["manifest_index"]),
                 })
                 unfinished = bool(head.get("resume_technique") or head.get("resume_wall_seconds")) or (
                     str(result.status) not in _BATCH_SUCCESS_STATUSES
@@ -5157,6 +5173,7 @@ class DatabaseNeutralScanActionDispatcher:
 
         def close_spent_sign_in(
             sign_in: Any, attempt_id: str, candidate_id: str, retry_round: int,
+            manifest_index: int,
         ) -> None:
             """Settle a candidate whose sign-in endpoint's probe set is spent: inconclusive.
 
@@ -5180,6 +5197,7 @@ class DatabaseNeutralScanActionDispatcher:
                 "sign_in_endpoint_key": sign_in.key,
                 "sign_in_endpoint_requests": 0,
                 "sign_in_endpoint_received": sign_in_received.get(sign_in.key, 0),
+                "manifest_index": int(manifest_index),
             })
 
         async def fail_attempt(
@@ -5452,7 +5470,9 @@ class DatabaseNeutralScanActionDispatcher:
                         action.capability_name, sign_in_received.get(sign_in.key, 0),
                         auth_parameters,
                     ):
-                        close_spent_sign_in(sign_in, attempt_id, candidate_id, retry_round)
+                        close_spent_sign_in(
+                            sign_in, attempt_id, candidate_id, retry_round, manifest_index,
+                        )
                         continue
                     # This entry and every later one that will actually be funded.
                     remaining_attempts = 1 + sum(1 for entry in work[position:] if needs_hold(entry))
@@ -5671,7 +5691,9 @@ class DatabaseNeutralScanActionDispatcher:
                         ),
                     ):
                         # What the probe set has left cannot conclude the candidate's next unit.
-                        close_spent_sign_in(sign_in, attempt_id, candidate_id, retry_round)
+                        close_spent_sign_in(
+                            sign_in, attempt_id, candidate_id, retry_round, manifest_index,
+                        )
                         continue
                     if sign_in is not None:
                         # Lockout-safety ceiling on this one endpoint, never a budget cut elsewhere.
@@ -5880,7 +5902,7 @@ class DatabaseNeutralScanActionDispatcher:
                         "body_request": body_request, "sub_budget": dict(sub_budget),
                         "sign_in_key": sign_in.key if sign_in is not None else None,
                         "sign_in_endpoint": sign_in.label if sign_in is not None else None,
-                        "auth_parameters": auth_parameters,
+                        "auth_parameters": auth_parameters, "manifest_index": manifest_index,
                     }
                     if concurrent:
                         # The candidate's records keep its place in the slice whenever it finishes.

@@ -442,10 +442,6 @@ class _PacedClock:
         )
 
 
-_SCHEMAS = {"sqli.verify_batch": "sqli-batch/v1", "sqli.prove_batch": "sqli-proof-batch/v1",
-            "nosqli.verify_batch": "nosqli-batch/v1"}
-
-
 def _family_report(family, *settled):
     """The report over batch actions, each (capability, its records, the status it settled with);
     the first is the family's verifier."""
@@ -468,7 +464,8 @@ def _family_report(family, *settled):
             plan_action(f"batch.{index}.r01", index, capability_name=capability,
                         dependencies=tuple(item.action_id for item in actions)),
             capability_args={"slice": {"start": 0, "count": 3}, "manifest_entries": 3},
-            output_schema=_SCHEMAS[capability], action_digest=None,
+            output_schema=CAPABILITY_REGISTRY.require(capability).output_schema,
+            action_digest=None,
         )
         actions.append(action)
         outcome = CapabilityResultStatus(status)
@@ -644,6 +641,35 @@ def test_the_paced_hold_funds_the_whole_attempt_or_nothing():
         available_wall_seconds=60, need=8,
     )
     assert short is not None and short["http_requests"] == 5
+
+
+def test_a_variant_its_verifier_and_its_proof_both_left_limited_is_one_candidate(monkeypatch):
+    """Dalfox ends inconclusive on each of the three variants, and the browser proof's spent set
+    closes each of them again: three candidates, not six. The verifier's and the proof's attempt
+    ids of one variant differ (each names its family), so counting attempt ids counted each
+    variant once per check."""
+    from tests.test_auth_endpoint_probe_limit import XSS, _slice
+
+    verified, _rounds, _record = _slice(XSS[0], tool=XSS[1], parser=XSS[2], sent=10_000,
+                                        options=SIGN_IN, routes=SIGN_IN_ROUTES[:3])
+    verifier_rows = verified[0].observations
+    assert len([head for head in verifier_rows if head.get("inconclusive_reason")
+                == AUTH_ENDPOINT_PROBE_LIMITED]) == 3
+    _record_pace(monkeypatch)
+    (endpoint,) = sign_in_endpoints(SIGN_IN, [], base_url=f"{ORIGIN}/")
+    spent = {"attempt_id": "e" * 64, "candidate_id": "e" * 64, "status": "success",
+             "observations": ({"kind": "candidate_attempt", "sign_in_endpoint_key": endpoint.key,
+                               "sign_in_endpoint_requests": probe_set_requests("xss.browser_prove_batch", 4)},)}
+    receipts, _candidates = _run("xss.browser_prove_batch", options=SIGN_IN,
+                                 prior=[("batch.x.000.r01", spent)])
+    proof_rows = receipts[0].observations
+    assert len([head for head in _heads(receipts) if head.get("inconclusive_reason")
+                == AUTH_ENDPOINT_PROBE_LIMITED]) == 3
+    family, _report = _family_report(
+        "xss", ("xss.verify_batch", verifier_rows, "success"),
+        ("xss.browser_prove_batch", proof_rows, "success"),
+    )
+    assert family["sign_in_probe_limited"] == {"endpoints": [LOGIN], "candidates": 3}
 
 
 def test_the_browser_proof_waits_the_pace_before_each_submission(monkeypatch):
