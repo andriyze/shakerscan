@@ -300,6 +300,89 @@ def test_a_retest_queued_before_its_request_was_rebuilt_is_bound_to_its_target_u
     assert retest_destination(resolvable) == "http://shop.fixture.invalid/product?id=1"
 
 
+
+OTHER = "https://other.fixture.invalid"
+
+
+def _admitted_view(row: dict, queued: dict) -> dict:
+    """The retest row the API queued, joined with its finding, as the worker reads it."""
+    return {
+        **{key: value for key, value in row.items() if key != "url"}, "finding_url": row["url"],
+        "finding_type": queued["finding_type"], "target_url": queued["target_url"],
+        "original_url": queued["original_url"], "param": queued["param"], "method": queued["method"],
+        "source_scan_target_url": row["target_url"],
+    }
+
+
+@pytest.mark.parametrize("row", [item[0] for item in REBUILT], ids=["sqli", "nosqli", "xss", "origin", "path"])
+def test_the_worker_rebuilds_the_url_the_api_admitted_whatever_target_the_caller_named(row):
+    """A caller's ``target`` is kept as the retest's target URL, but the proof's request goes to
+    the finding's own site: the URL the API admitted, which the worker rebuilds and watches."""
+    from worker_handlers.retest_authority import retest_destination
+
+    queued = findings_router.extract_retest_inputs(dict(row), override_target=OTHER)
+    admitted = queued["original_url"]
+    assert queued["target_url"] == OTHER
+    assert urllib.parse.urlsplit(admitted).hostname != "other.fixture.invalid"
+    view = _admitted_view(row, queued)
+    assert proof_retest_request(view)[0].url == admitted
+    assert infer_retest_inputs(view)["original_url"] == admitted
+    assert retest_destination(view) == admitted
+
+
+def test_a_retest_queued_with_a_bare_route_goes_to_the_site_of_the_scan_that_found_it():
+    earlier = {"tool": "shakerscan_sqli_proof", "finding_type": "sqli", "finding_url": "/product",
+               "original_url": "/product", "target_url": OTHER,
+               "source_scan_target_url": "http://shop.fixture.invalid",
+               "evidence": {"method": "GET", "field_path": "id"}}
+    assert proof_retest_request(earlier)[0].url == "http://shop.fixture.invalid/product?id=1"
+
+
+def test_a_retest_whose_finding_changed_after_it_was_admitted_sends_nothing():
+    from worker_handlers.proof_replay import run_proof_retest
+
+    queued = findings_router.extract_retest_inputs(_sqli())
+    changed = _sqli(field="sku")
+    view = _admitted_view(changed, queued)
+    assert proof_retest_request(view) == (None, "not_admitted")
+    assert infer_retest_inputs(view)["original_url"] == queued["original_url"]
+
+    async def never(*_args, **_kwargs):
+        raise AssertionError("nothing is sent")
+
+    poe = types.SimpleNamespace(fetch_with_capture=never)
+    result = asyncio.run(run_proof_retest(view, infer_retest_inputs(view), poe=poe, replay_commands=[],
+                                          ladder=[], cancelled=lambda: False))
+    assert (result["verdict"], result["artifacts"]["skipped_reason"]) == ("inconclusive", "not_admitted")
+    assert result["verdict_reason"] == PROOF_RETEST_GAPS["not_admitted"]
+
+
+def test_a_callers_request_fields_never_change_the_request_a_proof_retest_sends(monkeypatch):
+    row = {**REBUILT[0][0], "target_id": uuid.uuid4()}
+    _install(monkeypatch, row)
+    monkeypatch.setattr(findings_router, "get_redis", lambda: _Redis())
+
+    async def no_receipt(*_args, **_kwargs):
+        return None
+
+    queued = []
+
+    async def enqueue(_conn, _finding, inputs, **_kwargs):
+        queued.append(dict(inputs))
+        raise HTTPException(status_code=409, detail={"error": "stop here"})
+
+    monkeypatch.setattr(findings_router, "_validate_approval_receipt_for_action", no_receipt)
+    monkeypatch.setattr(findings_router, "enqueue_finding_retest", enqueue)
+    request = findings_router.FindingRetestRequest(
+        target=OTHER, original_url="http://evil.fixture.invalid/x", param="other", payload="' OR 1=1",
+        method="POST", request_body="a=b")
+    with pytest.raises(HTTPException):
+        asyncio.run(findings_router.retest_finding(str(FINDING), request, mode=None))
+    sent = queued[0]
+    assert (sent["original_url"], sent["param"], sent["method"]) == ("http://shop.fixture.invalid/product?id=1", "id", "GET")
+    assert (sent["payload"], sent["request_body"], sent["target_url"]) == (None, None, OTHER)
+
+
 # --- the worker ----------------------------------------------------------------------------------
 
 class _Shop(BaseHTTPRequestHandler):
@@ -364,13 +447,15 @@ def shop():
         server.server_close()
 
 
-def _verification(row: dict, origin: str) -> dict:
-    """A retest row joined with its finding, as ``process_finding_retest_job`` reads it."""
+def _verification(row: dict, origin: str, *, target: str | None = None) -> dict:
+    """A retest row joined with its finding, as ``process_finding_retest_job`` reads it: the URL
+    the API admitted (``original_url``) and the retest's target URL (a caller's ``target``)."""
+    admitted = findings_router.extract_retest_inputs({**row, "target_url": origin})["original_url"]
     return {
         "id": uuid.uuid4(), "finding_id": FINDING, "tool": row["tool"], "title": row["title"],
-        "evidence": row["evidence"], "finding_url": row["url"], "target_url": origin,
+        "evidence": row["evidence"], "finding_url": row["url"], "target_url": target or origin,
         "finding_type": "nosqli" if row["tool"] == "shakerscan_nosqli_verify" else "sqli",
-        "original_url": origin + row["url"], "param": None, "method": "GET",
+        "original_url": admitted, "param": None, "method": "GET",
         # The Scan that found it ran against this origin with exploit depth: its private target
         # is in scope for the retest's verdict.
         "source_scan_target_url": origin, "source_scan_type": "full",
@@ -408,6 +493,28 @@ def test_the_worker_retests_a_proven_injection_with_the_check_that_proved_it(mon
     assert "check that proved the finding" in fixed["verdict_reason"]
     assert fixed["has_ai_step"] is False and sent
 
+
+
+@pytest.mark.parametrize("row", [_sqli(), _nosqli()], ids=["sqli", "nosqli"])
+def test_the_worker_sends_the_proof_to_the_admitted_site_not_the_callers_target(monkeypatch, shop, row):
+    import worker
+    from scanner_tools import proof_of_exploit
+
+    _handler, origin = shop
+    monkeypatch.setattr(proof_of_exploit, "_poe_config", dataclasses.replace(proof_of_exploit._poe_config, rate_limit_ms=0))
+    sent = []
+    real_fetch = proof_of_exploit.fetch_with_capture
+
+    async def fetch(url, *args, **kwargs):
+        sent.append(url)
+        return await real_fetch(url, *args, **kwargs)
+
+    monkeypatch.setattr(proof_of_exploit, "fetch_with_capture", fetch)
+    verification = _verification(row, origin, target=OTHER)
+    result = asyncio.run(worker.run_finding_retest(verification))
+    assert result["verdict"] == "exploited", result["verdict_reason"]
+    assert result["artifacts"]["replayed_url"] == verification["original_url"]
+    assert sent and all(url.startswith(origin + "/") for url in sent)
 
 @pytest.mark.parametrize("row", [_sqli(), _nosqli()], ids=["sqli", "nosqli"])
 def test_a_proven_injection_whose_retest_requests_get_no_answer_is_inconclusive(row):

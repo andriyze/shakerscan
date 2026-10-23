@@ -8,7 +8,7 @@ finding keeps everything it needs:
   the method. When the proof was built from a crawled endpoint (no recorded private request), its
   request was a GET of that route on the target's origin with only the tested query parameter,
   set to ``1`` (``execution_url_for_endpoint``), and it is rebuilt exactly as that. The origin is
-  the one the finding recorded, else the origin of the target the Scan ran against;
+  the one the finding recorded, else the origin of the finding's own target (``_site``);
 * the browser proof records the page URL with the tested value masked, the parameter
   (``parameter_name``) and where the input went, and its payload is derived from its candidate;
   the payload is rebuilt and accepted only when its digest matches the one the finding kept.
@@ -17,6 +17,10 @@ Anything else -- a recorded private request whose values the finding does not ke
 body, a path segment, a templated route (``/products/{int}``), a masked value the request needs,
 a payload placed in a fragment or on another page -- cannot be sent the way the proof sent it, so
 the finding is checked again by a new Scan (``retest_by_rescan_only``) and the gap says why.
+
+A queued retest is sent exactly as it was admitted: the worker rebuilds the request from the
+finding on the site of the URL the API admitted, and sends nothing when the rebuilt request is not
+that URL (the finding changed after the retest was queued).
 """
 
 from __future__ import annotations
@@ -94,6 +98,11 @@ PROOF_RETEST_GAPS: dict[str, str] = {
         "The finding does not keep the payload the browser proof ran, so a retest cannot send the "
         "same input." + _AGAIN
     ),
+    # Only a queued retest (the worker's view) can meet this one.
+    "not_admitted": (
+        "The finding changed after this retest was queued: the request rebuilt from it is not the "
+        "one the retest was admitted for, so nothing was sent. Retest the finding again."
+    ),
 }
 
 
@@ -147,6 +156,20 @@ def _origin(value: Any) -> str | None:
     return f"{parsed.scheme.lower()}://{shown}" + (f":{port}" if port else "")
 
 
+def _site(record: Mapping[str, Any]) -> Any:
+    """The URL whose origin a stored route is joined to when the proof recorded no origin.
+
+    A queued retest (a retest row joined with its finding) keeps the URL the API admitted
+    (``original_url``): its site, else -- a retest queued with a bare route -- the site of the Scan
+    that found the finding (``source_scan_target_url``). Never the retest's own ``target_url``,
+    which holds a caller's ``target``. A finding row: its target's URL (``target_url``).
+    """
+    admitted = record.get("original_url")
+    if _origin(admitted):
+        return admitted
+    return record.get("source_scan_target_url") or record.get("target_url")
+
+
 def _masked(value: str) -> bool:
     return urllib.parse.unquote(value).strip().lower() in _MASKED_VALUES
 
@@ -178,7 +201,7 @@ def _differential_request(
         return None, "templated_path"
     origin = (
         _origin(stored) if parsed.scheme
-        else _origin(evidence.get("origin")) or _origin(record.get("target_url"))
+        else _origin(evidence.get("origin")) or _origin(_site(record))
     )
     if origin is None:
         return None, "no_origin"
@@ -226,16 +249,22 @@ def proof_retest_request(record: Mapping[str, Any]) -> tuple[ProofRetestRequest 
     """``(request, None)`` when a proven finding's request can be sent again exactly, ``(None,
     gap)`` when it cannot (``PROOF_RETEST_GAPS``), and ``(None, None)`` for any other finding.
 
-    ``record`` is a finding row, or a retest row joined with its finding (its URL as
-    ``finding_url``); ``target_url`` is the URL of the target the Scan ran against.
+    ``record`` is a finding row (``target_url``: its target's URL), or a retest row joined with its
+    finding (its URL as ``finding_url``, the URL the API admitted as ``original_url``). A retest row
+    whose rebuilt request is not the URL it was admitted for gets ``not_admitted``.
     """
     tool = proof_retest_tool(record)
     if tool is None:
         return None, None
     evidence = _json_object(record.get("evidence"))
     if tool == "shakerscan_browser_proof":
-        return _browser_request(record, evidence)
-    return _differential_request(tool, record, evidence)
+        request, gap = _browser_request(record, evidence)
+    else:
+        request, gap = _differential_request(tool, record, evidence)
+    admitted = str(record.get("original_url") or "").strip()
+    if request is not None and _origin(admitted) and request.url != admitted:
+        return None, "not_admitted"
+    return request, gap
 
 
 def proof_retest_gap(record: Mapping[str, Any]) -> str | None:

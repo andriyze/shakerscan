@@ -1524,7 +1524,8 @@ same rule. A verified SQL injection, NoSQL injection or browser-executed XSS fin
 the check that proved it, with the request it proved: the route on the site the proof recorded
 (else the scanned target's site) with the tested query parameter set as the Scan set it, or the
 page with the browser proof's own payload, checked against the payload digest the finding kept.
-The SQL and NoSQL checks run over the retest's HTTP client (session headers, request limits and
+The worker sends exactly the URL the API admitted: a caller's `target` does not move it, and a
+retest whose finding changed after it was queued sends nothing. The SQL and NoSQL checks run over the retest's HTTP client (session headers, request limits and
 the destination guard); the browser check loads the payload page in a headless browser after one
 ordinary request of the page and judges it as the browser proof does (the proof's attribute on the
 page, or a console or dialog message that is exactly its marker; nothing else the page logs or
