@@ -39,7 +39,9 @@ def test_unscheduled_entries_make_a_family_partial():
     assert 'row["unscheduled_candidates"] = sum(' in source
     assert 'row["reason"] = "manifest_entries_unscheduled"' in source
     # It must be checked BEFORE the complete branch, or truncation stays invisible.
-    unscheduled = source.index('elif row["unscheduled_candidates"] > 0:')
+    # (A windowed active-template sweep whose every pair ran is the one exception:
+    # tests/test_active_template_windows.py.)
+    unscheduled = source.index('elif row["unscheduled_candidates"] > 0 and not windows_cover_unscheduled:')
     complete = source.index('row["coverage_status"] = "complete"')
     assert unscheduled < complete
 
