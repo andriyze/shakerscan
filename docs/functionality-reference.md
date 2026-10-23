@@ -55,9 +55,10 @@ It covers two complementary pillars:
 - **DAST** — actively probes a running website or API for real vulnerabilities the way an attacker
   would: injection (XSS, SQL and NoSQL injection), broken access control (BOLA and function-level
   authorization, with credentials), exposed secrets and files, misconfigured TLS/headers/CORS,
-  insecure session cookies, and known product issues through reviewed Nuclei templates — then grades
-  what it finds and correlates findings into attack chains. A Scan does not test SSRF, command
-  injection, path traversal, SSTI, XXE or JWT; see the [OWASP coverage matrix](owasp-coverage-matrix.md).
+  insecure session cookies, and known product issues through Nuclei templates from a pinned,
+  checksum-verified bundle — then grades what it finds and correlates findings into attack chains.
+  A Scan has no generic check for SSRF, command injection, path traversal, SSTI, XXE or JWT; see the
+  [OWASP coverage matrix](owasp-coverage-matrix.md).
 - **AI red teaming** — attacks AI features the same way: chatbots, RAG endpoints, agents, and MCP
   tools are probed for prompt injection, sensitive-data disclosure, unsafe tool use, approval bypass,
   and RAG/MCP boundary failures. A separate **Model Intake** capability statically vets model
@@ -230,8 +231,11 @@ The canonical action compiler implements eleven families: `recon`, `nuclei_passi
 and `recon_active` (`SCAN_V2_FAMILY_NAMES` in `api/scan/contracts.py`). Any other registry family,
 including the planned `ssrf`, `lfi`, `rce` and `business_logic`, is rejected rather than accepted as
 a successful no-op. Every family except `recon`, `nuclei_passive` and `sensitive_exposure` requires
-active permission; BOLA additionally requires two distinct credential profiles whose scopes allow
-`authz.verify`, and `authz_surface` requires one.
+active permission. A Scan that names BOLA is also refused without two distinct credential profiles
+whose scopes allow `authz.verify`, and one that names `recon_active` without a target-bound approval
+receipt; its virtual-host and DNS-name discovery also need subdomain discovery and a declared apex.
+Nothing refuses an `authz_surface` Scan without credentials: the family is planned only when the
+Scan has a primary credential, and without one it is selected but does not run.
 
 ### Historical compatibility records
 
@@ -462,10 +466,12 @@ contract. The current Scan family surface is intentionally narrower than the his
 inventory. A Scan runs its eleven families (§3) and the baseline checks of headers, session cookies,
 CORS, TLS and DNS. For the checks in this section that means XSS (with the open-redirect probe), SQL
 injection, NoSQL operator injection, two-principal BOLA, function-level authorization, GraphQL
-limits, verified exposure checks and the reviewed Nuclei templates. The modules below describe
-available detector implementations; modules not yet wired to the canonical action graph remain
-compatibility/internal implementation surface, not advertised Scan coverage. The
-[OWASP coverage matrix](owasp-coverage-matrix.md) maps what a Scan runs.
+limits, verified exposure checks, the six reviewed passive Nuclei templates and the opt-in active
+Nuclei pack (a severity-and-tag selection from the pinned, checksum-verified bundle). The modules
+below describe available detector implementations; modules not yet wired to the canonical action
+graph remain compatibility/internal implementation surface, not advertised Scan coverage. Each
+subsection says which part, if any, a Scan runs. The [OWASP coverage matrix](owasp-coverage-matrix.md)
+maps what a Scan runs.
 
 ### Active injection
 
@@ -473,11 +479,16 @@ compatibility/internal implementation surface, not advertised Scan coverage. The
   custom **context-aware** tester that detects reflection context (in-script, in-attribute, event
   handler, HTML body, SVG/CSS/JSON/URL-path) and selects context-specific payloads; canary-based
   reflection detection; browser proof for GET reflections and HTML-like POST/PUT/PATCH response
-  reflections; hash-route testing; static DOM-XSS source-to-sink analysis over JS files.
+  reflections; hash-route testing; static DOM-XSS source-to-sink analysis over JS files. In a Scan,
+  the `xss` family runs Dalfox over the ranked candidates (URL-fragment parameters included),
+  verifies request-collection fields when state-changing HTTP is allowed, and proves reflections in
+  a browser. The context-aware tester and the static DOM-XSS analysis are detector modules no Scan
+  family runs, and no Scan action looks for stored XSS.
 - **SQLi** (`active_checks.py`): `sqlmap`-based testing that is **DBMS-aware** (SQLite, MySQL,
   PostgreSQL, MSSQL, Oracle) — it fingerprints the database, then chooses DBMS-specific payloads,
   techniques, and optional data-extraction chaining. Supports out-of-band (blind) detection via
-  `oob_callback_url`. A canonical Scan's `sqli.verify_batch` verifies each candidate one sqlmap
+  `oob_callback_url`. Data extraction and out-of-band detection are detector features only: a Scan
+  drops these options. A canonical Scan's `sqli.verify_batch` verifies each candidate one sqlmap
   technique at a time, cheapest first (UNION, boolean, error, then time-based only when the others
   were inconclusive), checkpoints every finished technique, and paces later techniques by the
   response time it measured. A slice its wall interrupted is continued by a verification extension
@@ -514,34 +525,45 @@ compatibility/internal implementation surface, not advertised Scan coverage. The
 - **BOLA / IDOR** (`bola_comparison.py`, `access_control_checks.py`): dual-user testing — replay the
   same endpoint as user1 and user2, normalize volatile fields (timestamps, UUIDs, nonces), and detect
   cross-user data exposure with concrete PII matching. Also forced browsing, path traversal,
-  privilege escalation, and unauthenticated-access detection.
+  privilege escalation, and unauthenticated-access detection. In a Scan, `bola` runs the dual-user
+  comparison and `authz_surface` the authenticated-versus-anonymous comparison; the forced-browsing,
+  path-traversal and privilege-escalation probes are detector modules no Scan family runs.
 
 ### Web/API security (Phase 4)
 
-File upload bypass (`file_upload_tests.py`), open redirect, host-header injection, CSRF token
-presence/reuse/randomness, HTTP method tampering, content-type switching, WebSocket auth/message
-handling (`websocket_security.py`), OAuth flow tests (`oauth_tests.py`), and a generic API-security
-sweep (`api_security.py`).
+Detector modules: file upload bypass (`file_upload_tests.py`), open redirect, host-header
+injection, CSRF token presence/reuse/randomness, HTTP method tampering, content-type switching,
+WebSocket auth/message handling (`websocket_security.py`), OAuth flow tests (`oauth_tests.py`), and a
+generic API-security sweep (`api_security.py`). A Scan runs only its own open-redirect probe, with
+`xss`; no Scan family runs the rest.
 
 ### Auth/session/crypto
 
-Weak JWT/session/cookie checks, default-credential testing (`credential_check.py`), and
-deserialization tests (`deserialization_tests.py`) for Java/PHP/Python unsafe deserialization.
+Detector modules: weak JWT/session/cookie checks, default-credential testing
+(`credential_check.py`), and deserialization tests (`deserialization_tests.py`) for Java/PHP/Python
+unsafe deserialization. No Scan family runs them. A Scan checks session cookie flags in its baseline
+and default logins only through opt-in Nuclei `default-login` templates.
 
 ### Business logic
 
-Race conditions (`race_condition_tests.py`) for checkout, coupons, balance, votes, and invitations.
+Detector module: race conditions (`race_condition_tests.py`) for checkout, coupons, balance, votes,
+and invitations. `business_logic` is a planned family and a Scan refuses it.
 
 ### Template & infra
 
-Nuclei template checks (`nuclei.py`, with a reviewed read-only passive pack); infrastructure-leak checks
-(`infrastructure_checks.py`) for CI/CD config, cloud buckets, registries, k8s/terraform artifacts;
-critical checks (`critical_checks.py`) for default creds, directory listing, and verbose error pages.
+Nuclei template checks (`nuclei.py`). A Scan runs the six-template reviewed read-only passive pack
+and, opt-in, the active pack. Detector modules no Scan family runs: infrastructure-leak checks
+(`infrastructure_checks.py`) for CI/CD config, cloud buckets, registries, k8s/terraform artifacts,
+and critical checks (`critical_checks.py`) for default creds, directory listing, and verbose error
+pages. A Scan finds directory listings and verbose error pages with `sensitive_exposure` instead.
 
-Opt-in infrastructure families also cover SSH authentication posture; SMTP STARTTLS, banner, MX, and
-safe open-relay checks; VPN, RDP/VNC, IoT, industrial-protocol, and database-service exposure; IP/ASN
-and domain intelligence; third-party vendor resources; webhook signature bypass; package-manager and
-backup artifacts; container registries; and Kubernetes/Terraform/cloud-storage exposure. The SMTP
+Infrastructure detector modules also cover SSH authentication posture; SMTP STARTTLS, banner, MX,
+and safe open-relay checks; VPN, RDP/VNC, IoT, industrial-protocol, and database-service exposure;
+IP/ASN and domain intelligence; third-party vendor resources; webhook signature bypass;
+package-manager and backup artifacts; container registries; and Kubernetes/Terraform/cloud-storage
+exposure. They are not Scan families and no Scan runs them. A Scan's baseline collects only
+informational domain-registration and address-ownership context (`infrastructure.inspect`), never
+findings. The SMTP
 check contacts each MX host (or the target itself when it has none) only after resolving it once
 and judging every address under the scan's destination policy (the target's environment and
 `SHAKERSCAN_PRIVATE_NETWORK_TARGETS`, with the web scope guard's address classes); every probe
@@ -554,7 +576,9 @@ in `skipped_hosts` with its reason and never contacted, a null MX (RFC 7505) is 
 domain that accepts no mail, and a result with no host tested grades `N/A`, never a pass.
 
 OpenAPI schemas can be supplied explicitly or discovered and exercised through Schemathesis. The
-scanner records schema/test errors as evidence rather than treating process exit as proof.
+scanner records schema/test errors as evidence rather than treating process exit as proof. A Scan
+does not run Schemathesis: `web.spec_ingest` reads the target's OpenAPI document and turns its
+operations into routes and inputs for the Scan families.
 
 Canonical focus uses `policy.include_families` / `policy.exclude_families`. The old `xss: true` and
 `sqli: true` booleans are compatibility inputs only and must not be added to new UI, CLI, skill, or
@@ -660,7 +684,10 @@ and check provenance, preserving the row ID and its triage and verification hist
 business impact. The nine implemented chain types (`CHAIN_TEMPLATES`) are
 `xss_to_account_takeover`, `sqli_to_privilege_escalation`, `ssrf_to_cloud_breach`,
 `idor_to_data_breach`, `lfi_to_credential_theft`, `cors_to_data_theft`,
-`weak_jwt_to_impersonation`, `xxe_to_data_exfil`, and `deserialization_to_rce`.
+`weak_jwt_to_impersonation`, `xxe_to_data_exfil`, and `deserialization_to_rce`. A chain forms only
+from findings of its types. A Scan has no generic check for SSRF, file inclusion, JWT, XXE or
+deserialization, so those chains form only from a Nuclei product-template finding or a finding
+recorded another way.
 Partial chains can be surfaced with `include_partial_attack_chains: true`.
 
 **Coverage tracking**: `/scans/{id}/actions`, `/capabilities`, and `/coverage` expose the plan digest,
