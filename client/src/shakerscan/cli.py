@@ -955,7 +955,9 @@ def cmd_scan(args: argparse.Namespace) -> int:
     rest = list(args.args) or ["--help"]
     if rest and rest[0] == "--":
         rest = rest[1:]
-    return int(load("_scan_cli").main(["--api-url", url, "--ui-url", scan_ui_url(url), *rest]))
+    return int(load("_scan_cli").main(
+        ["--api-url", url, "--ui-url", scan_ui_url(url), *rest], prog="shakerscan scan",
+    ))
 
 
 # --- public checks ---------------------------------------------------------------------------

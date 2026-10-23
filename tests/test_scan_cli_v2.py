@@ -385,3 +385,14 @@ def test_no_active_template_hint_when_they_run_are_excluded_or_testing_is_passiv
     assert _run_with_response(monkeypatch, ["https://example.com"], passive) == 0
     assert "--include-family nuclei_active" not in capsys.readouterr().out
 
+
+def test_the_help_names_the_command_it_was_started_as(capsys):
+    urls = ["--api-url", "http://api.test:8080", "--ui-url", "http://ui.test:3000"]
+    assert scan_cli.main([*urls, "help"], prog="shakerscan scan") == 0
+    out = capsys.readouterr().out
+    assert out.startswith("usage: shakerscan scan ") and "scanner.sh" not in out
+    with pytest.raises(SystemExit):
+        scan_cli.main([*urls, "--help"], prog="shakerscan scan")
+    assert capsys.readouterr().out.startswith("usage: shakerscan scan ")
+    assert scan_cli.main([*urls, "help"]) == 0
+    assert capsys.readouterr().out.startswith("usage: scanner.sh scan ")

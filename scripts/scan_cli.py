@@ -42,9 +42,11 @@ class ScanCliError(RuntimeError):
         self.api_detail = api_detail
 
 
-def _parser() -> argparse.ArgumentParser:
+def _parser(prog: str | None = None) -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="scanner.sh scan",
+        # The command the operator typed: ``scanner.sh scan`` from a source checkout, the
+        # client's ``shakerscan scan`` when it runs this file.
+        prog=prog or "scanner.sh scan",
         description=(
             "Submit one deterministic V2 Scan. Policy selects permission and families; "
             "the budget profile supplies hard ceilings."
@@ -395,8 +397,8 @@ def _payload(args: argparse.Namespace) -> dict[str, Any]:
     }
 
 
-def main(argv: list[str] | None = None) -> int:
-    parser = _parser()
+def main(argv: list[str] | None = None, prog: str | None = None) -> int:
+    parser = _parser(prog)
     args = parser.parse_args(argv)
     if args.target == "help":
         # `scan help` is a request for this text, never a scan of a host named "help".
@@ -433,13 +435,13 @@ def main(argv: list[str] | None = None) -> int:
                 if args.idempotency_key else {}
             ),
         }
-        # The name submitted had no address record and the engine scanned its www/apex twin.
-        # Say so: the scan is running against a different name than the one typed.
         resolved = [str(item) for item in response.get("resolved_families") or () if str(item)]
         if resolved:
             result["resolved_families"] = resolved
             if response.get("family_preset"):
                 result["family_preset"] = str(response["family_preset"])
+        # The name submitted had no address record and the engine scanned its www/apex twin.
+        # Say so: the scan is running against a different name than the one typed.
         notice = str(response.get("notice") or "").strip()
         if notice:
             result["notice"] = notice
