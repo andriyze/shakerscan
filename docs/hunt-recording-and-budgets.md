@@ -150,7 +150,9 @@ that turn them on. Records cost no traffic and no wall and get one per call.
 `sqli.verify` reserves 1,800 requests / 1,200 s and `xss.verify` 1,800 requests / 480 s on every
 profile (a device target and a headless `deep_domxss` call keep the registry holds). One sqli.verify
 input with no injection was measured to cost up to 516 requests, about 570 s at sqlmap's pace of
-about one request a second; the hold is twice that. A call the
+about one request a second; the hold is twice that. A `sqli.verify` names the input to test, a
+query parameter (`/reports?filter=x`) or a path segment marked with `*` (`/products/1*`); a path
+with neither is refused at no cost, because sqlmap would inject into the URL path itself. A call the
 remaining budget cannot fund is refused with a budget request a person can grant, never started at
 a shorter hold; a call admitted at an older hold runs at the hold it reserved.
 

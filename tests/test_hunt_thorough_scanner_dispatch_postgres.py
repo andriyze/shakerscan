@@ -138,10 +138,10 @@ def stack(monkeypatch):
     loop.close()
 
 
-async def _call(stack, hunt, key):
+async def _call(stack, hunt, key, path=PATH):
     from fastapi import HTTPException
 
-    request = stack.router.HuntCapabilityRequest(idempotency_key=key, input={"path": PATH})
+    request = stack.router.HuntCapabilityRequest(idempotency_key=key, input={"path": path})
     try:
         return await stack.router.execute_hunt_capability(str(hunt["id"]), "sqli.verify", request)
     except HTTPException as exc:
@@ -260,3 +260,28 @@ def test_a_thorough_call_admitted_at_the_registry_hold_still_runs_at_that_hold(s
         assert process["hard_budget"] == {"http_requests": 900, "tool_wall_seconds": 300}
 
     stack.loop.run_until_complete(scenario())
+
+
+def test_a_queued_call_with_no_input_to_test_is_released_at_dispatch(stack, monkeypatch):
+    """Admission refuses a path with no parameter (sqlmap would inject into the path itself). A
+    call an older API admitted anyway is refused by the worker before sqlmap starts, and its
+    hold is released: nothing is charged."""
+    # Labelled double: admission as an API without the refusal ran it.
+    monkeypatch.setattr(stack.router, "sqli_injection_point_refusal", lambda *_args: None)
+
+    async def scenario():
+        hunt, standing = await _active_hunt(stack.pool, "thorough")
+        stack.state["scope_receipt_id"] = str(standing["scope_receipt_id"])
+        result = await _call(stack, hunt, "pathonly-sqli-0001", path="/search")
+        assert stack.processes == []
+        status, reservation, decode = await _reservation(stack.pool, hunt, "pathonly-sqli-0001")
+        assert status == "blocked", (status, result)
+        assert reservation["status"] != "committed"
+        assert not any(decode(reservation["actual_json"]).values())
+        async with stack.pool.acquire() as conn:
+            used = json.loads(await conn.fetchval(
+                "SELECT budget_used_json FROM hunt_runs WHERE id=$1", hunt["id"]))
+        assert used.get("http_requests", 0) == 0 and used.get("tool_wall_seconds", 0) == 0
+
+    stack.loop.run_until_complete(scenario())
+

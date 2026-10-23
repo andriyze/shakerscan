@@ -65,7 +65,8 @@ RETAINED_STEP_FIELDS: Mapping[str, frozenset[str]] = {
     "browser.navigate": frozenset({"origin", "path", "wait_until", "timeout_ms", "max_requests"}),
     "tls.inspect": frozenset({"origin"}),
     "device.http.probe": frozenset({"method", "path", "origin_port"}),
-    "sqli.verify": frozenset({"origin", "path"}),
+    # sqli.verify is not retained: a step carries no query, and a path with no parameter is not
+    # a sqli.verify input (hunt/sqli_target.py), so the step could never run again.
     "xss.verify": frozenset({"origin", "path", "severity", "deep_domxss"}),
 }
 _READ_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})

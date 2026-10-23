@@ -19757,6 +19757,7 @@ def _worker_terminal_network_result(
 
 
 from hunt.target_binding import web_hunt_target as _worker_hunt_web_target
+from hunt.sqli_target import sqli_injection_point_refusal
 from hunt.dispatch_authority import HuntDispatchRejected, dispatch_http_request_authority, dispatch_http_target, dispatch_replay_authority, dispatch_scope_binding, require_dispatchable, settle_rejected_dispatch, settle_rejected_replay_dispatch
 from hunt.device_traffic import reserve_device_traffic, require_worker_device_policy, settle_device_traffic, require_device_admission, record_device_traffic
 from hunt.distinct_accounting import bound_distinct_usage, record_attempted_usage
@@ -20149,6 +20150,11 @@ async def process_canonical_scanner_capability_job(
                     scanner_base,
                     capability_input,
                 )
+                if capability_name == "sqli.verify" and (
+                    refusal := sqli_injection_point_refusal(execution_target, capability_input)
+                ):
+                    # Admission refuses this first; a queued call is released, never run.
+                    raise HuntDispatchRejected(refusal)
                 authorized_addresses = [
                     str(item)
                     for item in target.allowed_addresses

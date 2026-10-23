@@ -88,6 +88,7 @@ from .permission_subjects import (
 from .verification_credentials import HuntCredentialScope, hunt_credential_scope
 from .device_policy import DeviceHuntPolicyState
 from .device_traffic import reserve_device_traffic, require_device_admission, settle_device_traffic
+from .sqli_target import sqli_injection_point_refusal
 from .service_binding import (
     ARTIFACT_READ_CAPABILITIES, artifact_origin_required, collection_uses_service_origin,
     service_origin_changed,
@@ -2094,6 +2095,16 @@ async def _execute_hunt_capability_lifecycle(
                         uses_service_origin = collection_uses_service_origin(
                             original, context, request.input.get("collection_id"),
                         )
+                    if name == "sqli.verify":
+                        # A path with no parameter makes sqlmap inject into the path itself: refused
+                        # here, before anything is reserved, with how to name the input to test.
+                        _sqli_binding, sqli_base = web_hunt_target(run, context, policy)
+                        sqli_path = str(request.input.get("path") or "")
+                        if (refusal := sqli_injection_point_refusal(
+                            urllib.parse.urljoin(sqli_base, sqli_path) if sqli_path else sqli_base,
+                            request.input,
+                        )):
+                            raise HTTPException(status_code=422, detail=refusal)
                     requires_call_approval = (
                         spec.requires_active_approval
                         or writes_http or workflow_http

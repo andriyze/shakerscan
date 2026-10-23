@@ -222,6 +222,7 @@ def admission(store, **overrides):
         "MAX_ADMISSION_ATTEMPTS", "record_grant_use", "_resume_parked_action", "granted_destination",
         "Any", "parked_outcome", "close_parked_action", "permission_required",
         "ARTIFACT_READ_CAPABILITIES", "artifact_origin_required", "service_origin_changed",
+        "sqli_injection_point_refusal", "web_hunt_target", "urllib",
     ):
         context.setdefault(helper, getattr(real_router, helper))
     context.setdefault("settle_refusal", settle_refusal)
