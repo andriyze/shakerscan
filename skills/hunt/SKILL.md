@@ -416,7 +416,10 @@ a network action on a host has settled, later network actions on that host do no
 `tcp_ports_attempted` counts distinct ports the same way: fingerprinting, NSE checks and
 `tls.inspect` of a port this Hunt already attempted (listed in a sweep, or reported open by one)
 cost no TCP allowance, and a `tls.inspect` is one port. An action admitted while the first is
-still running, or after one that failed before reaching the host, is charged in full.
+still running, or after one that failed before reaching the host, is charged in full. Device
+fragility is not a port count: on a device Hunt every connection costs a fragility point and a
+device request, so a re-sweep of ports already attempted or a `tls.inspect` (one point per
+handshake) still uses the device's fragility and request limits; do not repeat them.
 
 Store no hidden chain-of-thought. Durable records should contain objectives, capability calls,
 receipts, observations, bounded notes, candidates, and the final debrief.

@@ -180,10 +180,18 @@ whose commands name one address per host reserves only the hosts this Hunt has n
 fingerprinting or inspecting a port a sweep already reached needs no new allowance. A `top_100` or
 `top_1000` sweep does not name its ports and is charged all of them; the open ports it reports
 count as attempted. A `tls.inspect` is one port, whatever handshakes it makes. Attempted ports are
-remembered in a bounded record; a port it cannot hold is charged again. A mutating
+remembered in a bounded record; a port it cannot hold is charged again. A network action stopped
+part way (cancelled after its first address, say) is charged the new hosts and ports of the
+commands that started; a command that never started is neither charged nor remembered. A mutating
 `candidate.verify` reserves 12 state-changing and 24 requests and is charged what its workflow
 sent (both runs and the create probe); a verification that reports no count (a device
 verification, an error, a browser step) keeps its whole hold.
+
+Device fragility is not a port count. It bounds how hard a device is pushed, so on a device Hunt
+every connection costs a fragility point and a device request, whether or not the port was
+attempted before: a re-sweep of 30 attempted ports needs no TCP allowance and costs 30 fragility
+points, and a `tls.inspect` costs a point per handshake (up to ten). These count against the
+Hunt's device fragility ceiling, the device's per-Hunt request limit and its daily allowance.
 
 A Hunt that ended `budget_exhausted` on another dimension under an earlier release keeps that
 status and resumes as before once that dimension has room.
@@ -207,5 +215,9 @@ real calls (`http.request` with and without redirects, `candidate.verify`, an ei
 `browser.interact`, `browser.login_check`, a 25-request replay) against the real ledger on every
 profile and requires the duration to refuse first. A used-up ceiling is settled through the real
 refusal, ledger and port accounting in unit tests and through API admission in a PostgreSQL test,
-which requires the Hunt to stay active and admit a request that needs no port. Completed target
-responses in these tests are labelled fixtures; the tests send no target traffic.
+which requires the Hunt to stay active and admit a request that needs no port. Device fragility
+is settled through real admission, the worker's reconstruction, the network adapter, the
+executor's clamp and the device settlement for a re-sweep, a partly new sweep, a fingerprint and a
+`tls.inspect`, and a run cancelled after its first address is settled through the real adapter.
+Completed target responses and scanner output in these tests are labelled fixtures; the tests
+send no target traffic.

@@ -100,7 +100,8 @@ switches and approvals that turn them on. A used-up ceiling, like any used-up li
 duration, refuses only the actions that need it, each waiting for a `budget.raise` request you
 approve, and the Hunt keeps running; only the duration running out stops a Hunt as
 `budget_exhausted`. Ports and hosts are charged once per Hunt where the action names them, so
-inspecting a port a sweep already reached costs no TCP allowance. At the defaults, logging in, mapping a web application
+inspecting a port a sweep already reached costs no TCP allowance; on a device Hunt every
+connection still costs a device fragility point and a device request. At the defaults, logging in, mapping a web application
 and verifying what it finds needs no budget raise. SQLi and XSS calls reserve their useful paced
 execution envelopes on all three profiles; insufficient headroom asks for a budget raise instead of
 silently shortening the call. Start warnings use the actual executor reservation.

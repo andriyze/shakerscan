@@ -21,6 +21,10 @@ way ``host_accounting`` charges a host once:
 Charging stays conservative where identity is unknown: a pair is recorded only after a
 settlement that measured it, so a failed or concurrent action can over-count but never
 under-count. The record is bounded; a pair it cannot hold is simply charged again.
+
+Device fragility is not a port count: it bounds how hard a device is pushed, so it counts every
+connection. A ``tls.inspect`` settles a fragility point per handshake and a sweep one per port it
+is sent, attempted before or not (``distinct_accounting.command_usage``).
 """
 from __future__ import annotations
 
@@ -31,6 +35,7 @@ from typing import Any
 
 CONTEXT_KEY = "tcp_ports_attempted_by_address"
 DIMENSION = "tcp_ports_attempted"
+FRAGILITY = "device_fragility_points"
 MAX_TRACKED_ADDRESSES = 256
 # Each address's ranges as stored ("1-1024,3306"); a record past this is not extended.
 MAX_RANGES_TEXT = 16_384
@@ -84,18 +89,25 @@ def attempted_pairs(context: Any) -> frozenset[Pair]:
     )
 
 
+def command_pairs(command: Any) -> frozenset[Pair] | None:
+    """The (address, port) pairs one prepared command is sent: its one address and its explicit
+    ``-p`` list or range, or None when it does not name them."""
+    argv = tuple(getattr(command, "argv", ()) or ())
+    address = getattr(command, "destination_address", None)
+    if not address or "-p" not in argv or argv.index("-p") + 1 >= len(argv):
+        return None
+    ports = _ports(argv[argv.index("-p") + 1])
+    return None if ports is None else frozenset((str(address), port) for port in ports)
+
+
 def action_pairs(prepared: Any) -> frozenset[Pair]:
     """(address, port) pairs a prepared network action attempts, when each charged pair is named."""
     pairs: set[Pair] = set()
     for command in getattr(prepared, "commands", ()) or ():
-        argv = tuple(getattr(command, "argv", ()) or ())
-        address = getattr(command, "destination_address", None)
-        if not address or "-p" not in argv or argv.index("-p") + 1 >= len(argv):
+        named = command_pairs(command)
+        if named is None:
             return frozenset()
-        ports = _ports(argv[argv.index("-p") + 1])
-        if ports is None:
-            return frozenset()
-        pairs.update((str(address), port) for port in ports)
+        pairs.update(named)
     estimated = int(dict(getattr(prepared, "estimated_budget", {}) or {}).get(DIMENSION) or 0)
     return frozenset(pairs) if pairs and len(pairs) == estimated else frozenset()
 
@@ -213,7 +225,8 @@ def tls_port_usage(result: Mapping[str, Any], reserved: Mapping[str, int]) -> di
 
     The handshakes all go to one (address, port) pair, so the port dimension is one when any was
     attempted, and is left out when admission reserved none (the port was already attempted).
-    Whether a handshake was attempted is kept explicitly, since the port no longer shows it.
+    Device fragility, when reserved, still counts every handshake: each is a connection to the
+    device. Whether a handshake was attempted is kept explicitly, since the port no longer shows it.
     """
     measured = result.get("budget_consumed")
     if not isinstance(measured, Mapping):
@@ -222,11 +235,13 @@ def tls_port_usage(result: Mapping[str, Any], reserved: Mapping[str, int]) -> di
     usage = {key: value for key, value in measured.items() if key != DIMENSION}
     if DIMENSION in reserved:
         usage[DIMENSION] = min(int(reserved[DIMENSION]), 1 if attempts else 0)
+    if FRAGILITY in reserved:
+        usage[FRAGILITY] = min(int(reserved[FRAGILITY]), attempts)
     return {**result, "budget_consumed": usage, "execution_started": attempts > 0}
 
 
 __all__ = [
-    "CONTEXT_KEY", "DIMENSION", "action_pairs", "attempted_pairs", "bound_distinct_ports",
-    "distinct_port_charge", "measured_pairs", "observed_open_pairs", "record_attempted_pairs",
-    "tls_pair", "tls_port_usage",
+    "CONTEXT_KEY", "DIMENSION", "FRAGILITY", "action_pairs", "attempted_pairs", "bound_distinct_ports",
+    "command_pairs", "distinct_port_charge", "measured_pairs", "observed_open_pairs",
+    "record_attempted_pairs", "tls_pair", "tls_port_usage",
 ]

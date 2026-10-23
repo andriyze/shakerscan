@@ -21443,7 +21443,7 @@ async def process_canonical_network_capability_job(job_data: dict[str, Any]) -> 
             pool=db_pool,run=run,target=target,policy=policy,target_url=target_url,
             revalidate=_revalidate_hunt_action_authority,capability_input=capability_input,
             redis=redis_client,action_id=action_id,worker_id=worker_id,command_runner=run_streaming,
-            max_stdout_bytes=_AGENT_TOOL_OUTPUT_BYTES,max_stderr_bytes=min(_AGENT_TOOL_OUTPUT_BYTES, 20_000))
+            max_stdout_bytes=_AGENT_TOOL_OUTPUT_BYTES,max_stderr_bytes=min(_AGENT_TOOL_OUTPUT_BYTES, 20_000),command_usage=attempted.command_usage)
         execution = await _dispatch_registered_hunt_adapter(
             hunt_id=str(hunt_id),
             action_id=str(action_id),
