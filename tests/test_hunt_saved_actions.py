@@ -39,9 +39,30 @@ REUSABLE = [
     ("http.request", {"method": "GET", "path": "/api/v1/users/42"}),
     ("http.request", {"method": "GET", "path": "/docs/getting-started"}),
     ("device.http.probe", {"method": "GET", "path": "/cgi-bin/status.cgi", "origin_port": 80}),
+    # One letter/digit alternation is a route word; camelCase route words stay.
+    ("http.request", {"method": "GET", "path": "/shop/Category12"}),
+    ("http.request", {"method": "GET", "path": "/api/userProfile"}),
+    ("http.request", {"method": "GET", "path": "/api/Reports/Monthly"}),
+    ("http.request", {"method": "GET", "path": "/status/online"}),
 ]
 
+# GETs that act: each names an action, so none is proposed for reuse.
+ACTING_HTTP_PATHS = (
+    "/admin/users/5/ban", "/api/cache/purge", "/api/cache/flush", "/admin/queue/clear", "/api/jobs/5/stop",
+    "/api/orders/42/refund", "/coupon/redeem", "/reward/claim", "/posts/9/like", "/db/migrate",
+    "/pr/5/merge", "/mail/resend", "/cart/empty",
+)
+ACTING_DEVICE_PATHS = (
+    "/relay/on", "/relay/off", "/door/open", "/alarm/disarm", "/disk/format", "/camera/ptz/move", "/wol/wake",
+)
+# Capability tokens made of letters only: mixed case and long, or base64url-shaped.
+LETTER_TOKEN_PATHS = ("/share/AbCdEfGhIjKlMnOp", "/p/ZXhhbXBsZQ", "/s/QWxhZGRpbjpvcGVu")
+
 NOT_REUSABLE = [
+    *(("http.request", {"method": "GET", "path": path}) for path in ACTING_HTTP_PATHS + LETTER_TOKEN_PATHS),
+    *(("device.http.probe", {"method": "GET", "path": path, "origin_port": 80}) for path in ACTING_DEVICE_PATHS),
+    # Exactly two letter/digit alternations: a code, not a route word.
+    ("http.request", {"method": "GET", "path": "/x/abc123def"}),
     # Query values: the ledger keeps the names and masks the values as %3Credacted%3E.
     ("http.request", {"method": "GET", "path": "/api/items?id=5&sort=asc", "origin": "https://app.test"}),
     ("sqli.verify", {"path": "/product?id=1"}),
@@ -118,9 +139,23 @@ def test_nothing_secret_or_off_host_reaches_a_proposed_recipe():
     for value in ("redacted", "letmein", "4821", "9f8e7d6c", "7c1f9a2b", "Zx9Qp2Lm", "other.test",
                   "api.app.test", "hunter2", "session_ref", "as_principal", "headers", "?", "reboot",
                   "restart", "shutdown", "firmware", "apply", "checkout", "transfer", "'", "$(", "..",
-                  "MTIzNDU2", "3f2a9c1b", "ab12CD34", "pin", "7Hq2xK9m"):
+                  "MTIzNDU2", "3f2a9c1b", "ab12CD34", "pin", "7Hq2xK9m", "abc123def", "AbCdEf", "ZXhhbX",
+                  "QWxhZGRp", *(f'"{path}"' for path in ACTING_HTTP_PATHS + ACTING_DEVICE_PATHS)):
         assert value not in text, value
     assert len(steps) == len(REUSABLE) and len(evidence) == len(REUSABLE)
+
+
+def test_a_retained_proposal_describes_its_steps_for_review_not_as_read_only():
+    from hunt import saved_actions
+    text = saved_actions.RETAINED_INSTRUCTIONS.lower()
+    assert "read-only" not in text and "review" in text
+    from pathlib import Path
+    root = Path(__file__).resolve().parents[1]
+    for note in ("docs/hunt-recording-and-budgets.md", "docs/hunt-operator-workflows.md", "docs/releases/2.11.1.md",
+                 "skills/hunt/SKILL.md", "api/hunt/saved_actions.py"):
+        prose = " ".join((root / note).read_text(encoding="utf-8").split()).lower()
+        for claim in ("read-only and verification steps", "never proposed as a read", "another read of the target"):
+            assert claim not in prose, (note, claim)
 
 
 def test_a_failed_or_partial_action_is_not_a_step():

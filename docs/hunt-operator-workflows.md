@@ -114,8 +114,9 @@ services. Creating a finding the Hunt already recorded with the same title and U
 existing record unchanged, spends nothing, and says whether newly cited evidence was attached
 (`findings.update` attaches it).
 
-On finish, the server proposes the Hunt's reusable read-only and verification steps in the
-target's one rolling retained-checks proposal for `shakerscan knowledge review`. It never saves
+On finish, the server proposes the Hunt's completed, replayable steps in the target's one
+rolling retained-checks proposal for `shakerscan knowledge review`; review each step before
+accepting, since a path can act on the target although its method reads. It never saves
 them, even when the target delegates instruction changes, and the metadata opt-out skips it. The
 proposal keeps one copy of each step and the newest 16, leaves out steps a saved action already
 holds or that you rejected in the latest rejected one, is updated in place by later finishes, and

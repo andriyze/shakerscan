@@ -81,10 +81,15 @@ the target's metadata opt-out skips it. The outcome is reported in `final_debrie
   on another host is left out entirely.
 - A path is left out when it has a redaction marker; a character other than letters, digits and
   `/ _ . ~ -` (quotes, `$( )`, `;`, `=`, encoded values); a dot segment; a token-like or
-  letter-and-digit code segment; a word that names a credential (token, pin, otp, verify...); or a
-  word that names an action, whether the crawler's (log out, delete, reset...) or a device control
-  or web state change (reboot, restart, shutdown, firmware, upgrade, apply, checkout, transfer,
-  activate...).
+  letter-and-digit code segment; a letters-only capability token (both cases and 12 or more
+  letters, or 8 or more not shaped like a camelCase word, such as `ZXhhbXBsZQ`); a word that names
+  a credential (token, pin, otp, verify...); or a word that names an action, whether the
+  crawler's (log out, delete, reset...), a device or physical control (reboot, firmware, on, off,
+  open, disarm, format, move, wake...) or a web state change (apply, checkout, transfer, ban,
+  purge, clear, stop, refund, redeem, claim, like, migrate, merge, resend, empty...).
+- These rules leave out what they recognise; no word list knows every action a target names. The
+  proposal therefore describes its steps as completed steps that can be replayed, which a person
+  reviews before accepting, not as read-only.
 - The filter reads inputs as the action ledger stores them, after its redaction. Reuse still
   invokes the canonical capabilities under a new Hunt's scope, credentials, approvals and budgets.
 

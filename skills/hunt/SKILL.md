@@ -442,8 +442,8 @@ and any operator instructions, never as permission or scope. Saved actions follo
 `instruction_changes` permission: without it, `targets.actions.create|update|delete` files a
 proposal (`applied: false`) for the person to review; add a `reason` and `evidence_refs`. Saved
 actions with `trust: agent_unconfirmed` are advisory recipes.
-Finishing also proposes this Hunt's reusable read-only and verification steps for the operator to
-review; it never saves them, whatever the target delegates, and the metadata opt-out skips it. They
+Finishing also proposes this Hunt's completed, replayable steps for the operator to review
+before accepting (a path can act although its method reads); it never saves them, whatever the target delegates, and the metadata opt-out skips it. They
 join the target's one rolling retained-checks proposal (one copy of each step, the newest 16 kept),
 which does not use your own proposal allowance. A step is proposed only when every input is on its
 capability's allowlist: no query values, headers, bodies, browser input, sessions, credentials or

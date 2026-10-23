@@ -11,12 +11,16 @@ A step is proposed only when every field it carries is on its capability's allow
 input, session or credential reference, or an origin other than the Hunt target's own host. The
 inputs are read as the action ledger stored them. A path is left out when it has a query, a
 redaction marker, a character outside letters, digits and ``/ _ . ~ -`` (quotes, ``$( )``,
-encoded values), a dot segment, a token-like or letter-and-digit code segment, a word that names
-a credential (token, pin, otp...) or a word that names an action (log out, delete, reboot,
-firmware, apply, checkout, transfer, activate...), as is any step whose recorded input no longer
-validates. No step runs
-here; reusing one still runs the canonical capability under the new Hunt's scope, approvals,
-credentials and budget.
+encoded values), a dot segment, a token-like or letter-and-digit code segment, a letters-only
+capability token (mixed case and long, or base64url-shaped), a word that names a credential
+(token, pin, otp...) or a word that names an action (log out, delete, reboot, firmware, apply,
+checkout, transfer, ban, purge, refund, redeem, migrate, merge, on, off, open...), as is any step
+whose recorded input no longer validates.
+
+The word list cannot know every action a target names, so the proposal does not claim its steps
+are read-only: they are steps that completed and can be replayed, which a person reviews before
+accepting. No step runs here; reusing one still runs the canonical capability under the new
+Hunt's scope, approvals, credentials and budget.
 """
 from __future__ import annotations
 
@@ -40,9 +44,10 @@ from .finding_actions import http_origin, hunt_target_host, hunt_target_locator
 
 RETAINED_ACTION_NAME = "Checks retained from finished Hunts"
 RETAINED_INSTRUCTIONS = (
-    "Read-only and verification steps that completed in earlier Hunts on this target, proposed "
-    "for reuse. Each step runs under the new Hunt's scope, policy, credentials and budget; these "
-    "steps grant no authority."
+    "Steps that completed in earlier Hunts on this target and can be replayed, proposed for reuse. "
+    "Review each step before accepting: a path can act on the target although its method reads. "
+    "Each step runs under the new Hunt's scope, policy, credentials and budget; these steps grant "
+    "no authority."
 )
 # Per capability, the only input fields a retained step may carry. A step with any other field
 # (headers, query or body values, captures, sessions, principals, browser steps, search terms)
@@ -67,7 +72,7 @@ _MARKERS = ("***", "redacted", "withheld")
 # other character a payload or an encoded value needs.
 _PLAIN_PATH = re.compile(r"/[A-Za-z0-9/_.~-]{0,1999}")
 # Words that make a GET act rather than read, beyond the crawler's interaction words: device
-# controls and web state changes. A path naming one is never proposed as a read.
+# controls and web state changes, matched as whole words. A path naming one is not proposed.
 RETAINED_ACTION_WORDS = (
     "reboot", "restart", "shutdown", "shut down", "power off", "poweroff", "halt", "firmware",
     "upgrade", "downgrade", "flash", "factory", "apply", "commit", "goform", "exec", "execute", "cmd",
@@ -75,7 +80,23 @@ RETAINED_ACTION_WORDS = (
     "set", "enable", "toggle", "trigger", "checkout", "transfer", "pay", "payment", "purchase", "buy",
     "send", "withdraw", "deposit", "add", "activate", "activation", "subscribe", "invite", "accept",
     "decline", "unlock", "vote", "follow", "unfollow", "import", "upload",
+    # Moderation, queues, jobs and caches.
+    "ban", "unban", "block", "unblock", "kick", "mute", "unmute", "suspend", "unsuspend", "promote",
+    "demote", "grant", "assign", "unassign", "purge", "flush", "clear", "empty", "drop", "truncate",
+    "stop", "kill", "pause", "resume", "retry", "rerun", "replay", "rebuild", "reindex", "sync",
+    "migrate", "merge", "close", "reopen", "archive", "unarchive", "lock", "confirm", "dismiss",
+    # Orders, rewards and social actions.
+    "refund", "redeem", "claim", "like", "unlike", "dislike", "star", "unstar", "share", "repost",
+    "retweet", "resend", "notify",
+    # Device and physical controls.
+    "on", "off", "open", "arm", "disarm", "format", "mount", "unmount", "eject", "move", "ptz",
+    "pan", "tilt", "zoom", "wake", "wol", "sleep", "dial", "call", "ring", "beep", "unpair", "pair",
 )
+# Letters only, both cases, and long or not shaped like a camelCase word: a capability token
+# (``AbCdEfGhIjKlMnOp``, base64url ``ZXhhbXBsZQ``) rather than a route word (``userProfile``).
+_CAMEL_WORD = re.compile(r"[A-Za-z][a-z]*(?:[A-Z][a-z]+)*")
+_LETTER_TOKEN_MIN = 8
+_LETTER_TOKEN_LONG = 12
 # Words that name a credential or a one-time value, beyond the redaction's own labels.
 _CREDENTIAL_WORDS = frozenset({"pin", "passcode", "passwd", "pwd", "otp", "mfa", "2fa", "totp"})
 _LIMIT_ACTIONS = 2_000
@@ -105,10 +126,17 @@ def _opaque(part: str) -> bool:
     return sum(left != right for left, right in zip(kinds, kinds[1:])) >= 2
 
 
+def _letter_token(text: str) -> bool:
+    """Letters only and both cases, and either long or not a camelCase word."""
+    if (len(text) < _LETTER_TOKEN_MIN or not text.isascii() or not text.isalpha()
+            or text.islower() or text.isupper()):
+        return False
+    return len(text) >= _LETTER_TOKEN_LONG or _CAMEL_WORD.fullmatch(text) is None
+
+
 def _plain_path(path: Any) -> bool:
     """A route with no query, fragment, encoded, masked or dot segment, no credential word or
-    token-like value, and no word that names an action: the same request is safe to propose for
-    another read of the target."""
+    token-like value, and no word that names an action, so it may be proposed for review."""
     if not isinstance(path, str) or _PLAIN_PATH.fullmatch(path) is None:
         return False
     segments = path.split("/")[1:]
@@ -120,7 +148,8 @@ def _plain_path(path: Any) -> bool:
         and not path_may_change_state(path)
         and not contains_risky_keyword((path,), RETAINED_ACTION_WORDS)
         and not any(is_sensitive_label(word) or word in _CREDENTIAL_WORDS for word in words)
-        and not any(_opaque(part) for part in re.split(r"[/_.~-]", path))
+        and not any(_opaque(part) or _letter_token(part) for part in re.split(r"[/_.~-]", path))
+        and not any(_letter_token(segment.replace("-", "").replace("_", "")) for segment in segments)
     )
 
 
