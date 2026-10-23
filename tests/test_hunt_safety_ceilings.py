@@ -374,3 +374,17 @@ def test_the_web_verification_passes_its_workflow_traffic_on():
     assert '"traffic": workflow_traffic(executed, replayed, materialization, normalized["steps"]),' in arsenal
     router = (ROOT / "api/hunt/interaction_router.py").read_text(encoding="utf-8")
     assert "settle=verification_traffic_charge," in router
+
+
+def test_every_hunt_budget_stop_goes_through_the_one_clock_rule():
+    """The admission settlement, the worker replay and the confirmed SSH queue all record a
+    shortage through ``record_budget_shortage``; nothing else marks a Hunt exhausted."""
+    writers = sorted(
+        str(path.relative_to(ROOT)) for path in (ROOT / "api").rglob("*.py")
+        if "hunt_runs SET status='budget_exhausted'" in path.read_text(encoding="utf-8")
+    )
+    assert writers == ["api/hunt/verification_budget.py"]
+    router = (ROOT / "api/hunt/interaction_router.py").read_text(encoding="utf-8")
+    ssh = router[router.index("async def confirm_hunt_shell_plan"):]
+    ssh = ssh[:ssh.index("\nasync def ", 10)]
+    assert "await record_budget_shortage(" in ssh
