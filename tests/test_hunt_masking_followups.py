@@ -99,6 +99,9 @@ ALLOWED_PLAIN_DIGESTS = {
     ("api/hunt/knowledge_continue.py", "_with_authority"): "canonical",
     ("api/hunt/knowledge_dependencies.py", "_sha"): "redacted",
     ("api/scan/action_adapter.py", "_graphql_verify_batch"): "canonical",
+    # The sign-in endpoint's id: scheme, host, port, normalized path and the routing pairs'
+    # installation-keyed digests, counted across a Scan's attempts (auth_endpoint_probe).
+    ("api/scan/auth_endpoint_probe.py", "key"): "canonical",
     # recon_active: the response digest only compares two answers inside one action and is
     # never emitted (leads carry status and length); the list digest is of our own bundled file.
     ("api/scan/recon_active_actions.py", "_signature"): "inprocess",

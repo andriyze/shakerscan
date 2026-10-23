@@ -117,14 +117,20 @@ def normalize_path(path: str) -> str:
 
 
 def _pair_digest(key: str, value: str) -> str:
-    return hashlib.sha256(f"{key}={value}".encode("utf-8", "replace")).hexdigest()[:16]
+    # Keyed by the installation (HMAC), so a published digest of a query pair the target chose
+    # is no offline oracle for its value; it still matches within the installation.
+    try:
+        from capabilities.secret_material import keyed_short_digest
+    except ModuleNotFoundError:  # package import layout
+        from ..capabilities.secret_material import keyed_short_digest
+    return keyed_short_digest(f"{key}={value}".encode("utf-8", "replace"), 16)
 
 
 def routing_digests(query: str) -> frozenset[str]:
     """Digests of the query pairs that route a request (``route=account/login``).
 
-    Only digests are recorded, never query values. A key that names a credential, a token-like
-    value, and the keys that only say where to go next do not route.
+    Only installation-keyed digests are recorded, never query values. A key that names a
+    credential, a token-like value, and the keys that only say where to go next do not route.
     """
     pairs = urllib.parse.parse_qsl(str(query or ""), keep_blank_values=True)
     return frozenset(
