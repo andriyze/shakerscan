@@ -288,8 +288,25 @@ def _scan_person_decision(url: str, data: bytes, method: str, detail: dict[str, 
         error = ScanCliError(exc.line, http_status=403, api_detail={**exc.detail, "command": exc.command})
         error.exit_code = decision.EXIT_REFUSED
         raise error from None
+    except decision.PersonDecisionCancelled as exc:
+        error = ScanCliError(str(exc))
+        error.exit_code = decision.EXIT_CANCELLED
+        raise error from None
     except decision.PersonDecisionError as exc:
         raise ScanCliError(str(exc), http_status=403, api_detail=detail) from None
+
+
+def _touch_confirms(api_url: str) -> bool:
+    """Whether an Enterprise gateway requires the person's security-key touch to authorize a
+    target from a terminal (its person-decision feed says so): that touch is then the
+    confirmation, and the local question is not asked twice."""
+    if not _bearer_token() or not api_url.startswith("https://"):
+        return False
+    try:
+        feed = _request_json(api_url.rstrip("/") + "/_enterprise/person-decisions")
+    except ScanCliError:
+        return False
+    return feed.get("schema_version") == "shakerscan-person-decisions/v1" and feed.get("touch_required") is True
 
 
 def _confirm_active(args: argparse.Namespace) -> None:
@@ -301,6 +318,13 @@ def _confirm_active(args: argparse.Namespace) -> None:
         raise ScanCliError(
             "active testing requires --confirm-active after confirming target authorization"
         )
+    if _touch_confirms(str(getattr(args, "api_url", "") or "")):
+        print(
+            f"Active testing can change target state. If {args.target} is not authorized yet, you "
+            "confirm it with a touch of your security key.",
+            file=sys.stderr,
+        )
+        return
     print(
         f"Active testing can change target state. Confirm authorization for {args.target}.",
         file=sys.stderr,

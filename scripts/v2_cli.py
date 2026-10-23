@@ -294,6 +294,8 @@ class ApiClient:
         except decision.PersonDecisionRefused as exc:
             raise CliError(exc.line, error_type="person_decision_required", http_status=403,
                            api_detail={**exc.detail, "command": exc.command}) from None
+        except decision.PersonDecisionCancelled as exc:
+            raise CliError(str(exc), error_type="person_decision_cancelled") from None
         except decision.PersonDecisionError as exc:
             raise CliError(str(exc), error_type="person_decision_failed", http_status=403, api_detail=detail) from None
 
@@ -1627,8 +1629,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _hunt_call_exit(args, result)
     except CliError as exc:
         print(json.dumps(exc.public_dict(), sort_keys=True), file=sys.stderr)
-        # 3: a person's decision this shell cannot ask for; refused, nothing ran.
-        return 3 if exc.error_type == "person_decision_required" else 2
+        # 3: a person's decision this shell cannot ask for; refused, nothing ran. 130: the
+        # person pressed Ctrl-C at the touch; nothing changed.
+        return {"person_decision_required": 3, "person_decision_cancelled": 130}.get(exc.error_type, 2)
 
 
 def _hunt_call_exit(args: argparse.Namespace, result: Any) -> int:

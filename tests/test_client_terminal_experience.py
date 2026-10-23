@@ -213,15 +213,17 @@ def _launch(monkeypatch, tmp_path, *, gateway):
         if gateway == "pre-g1":
             return 403, "operator tokens cannot use POST /_enterprise/approvals/begin"
         if path.endswith("/begin"):
-            document = approval.set_document(payload["purpose"], payload["account"], payload["origin"], payload)
+            # No account named: the person the connection's token acts for (a gateway that names the person).
+            account = payload["account"] or "alice"
+            document = approval.set_document(payload["purpose"], account, payload["origin"], payload)
             return 200, {"schema_version": "shakerscan-approval-challenge/v1", "approval_id": "apv_1",
-                         "set_digest": approval.set_digest(document), "methods": ["totp"]}
+                         "set_digest": approval.set_digest(document), "methods": ["totp"], "account": account}
         assert payload["proof"] == {"method": "totp", "code": TOTP}
         return 200, {"schema_version": "shakerscan-approval-result/v1", "decided_by": "alice",
                      "preauthorization": {"id": "pre_0042", "allow": ["budget.raise:2x"], "expires_at": "later"}}
 
     monkeypatch.setattr(v2, "_approval_send", lambda client: send)
-    monkeypatch.setattr(approval, "Terminal", lambda *a, **k: _Terminal("alice", TOTP))
+    monkeypatch.setattr(approval, "Terminal", lambda *a, **k: _Terminal(TOTP))
     launched = {}
     monkeypatch.setattr(cli.shutil, "which", lambda name: f"/usr/bin/{name}" if name == "opencode" else None)
     monkeypatch.setattr(cli.os, "chdir", lambda path: None)

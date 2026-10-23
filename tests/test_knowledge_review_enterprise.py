@@ -183,10 +183,13 @@ class FakeGateway:
                 return 422, {"schema_version": error, "error": "request_invalid",
                              "message": "invalid approval request fields"}
             identifier = f"apv_{len(self.begun) + 1:04d}"
-            digest = contract_digest(payload["account"], payload["knowledge"], payload["origin"])
+            # No account named: the person the connection's token acts for (a gateway that names the person).
+            account = payload["account"] or "carol"
+            digest = contract_digest(account, payload["knowledge"], payload["origin"])
             self.begun[identifier] = {"digest": digest, "knowledge": payload["knowledge"]}
             return 200, {"schema_version": "shakerscan-approval-challenge/v1", "approval_id": identifier,
-                         "set_digest": digest, "methods": ["totp"], "expires_at": "2026-10-10T00:03:00Z"}
+                         "set_digest": digest, "methods": ["totp"], "account": account,
+                         "expires_at": "2026-10-10T00:03:00Z"}
         begun = self.begun.pop(payload["approval_id"], None)
         if begun is None or payload["set_digest"] != begun["digest"]:
             return 404, {"schema_version": error, "error": "approval_unknown", "message": "begin again"}
@@ -264,7 +267,9 @@ def test_an_enterprise_accept_takes_the_persons_code_for_that_proposal(monkeypat
     terminal = Terminal("y")
     assert _run(gateway, terminal, "review", "--note", "covers 8443", monkeypatch=monkeypatch) == 0
     (begin,) = gateway.begins()
-    assert begin["purpose"] == "knowledge_decision" and begin["account"] == "carol"
+    # No sign-in name typed: the gateway names the person the token acts for.
+    assert begin["purpose"] == "knowledge_decision" and begin["account"] == ""
+    assert "sign-in name" not in terminal.stdout.getvalue()
     assert begin["origin"] == ORIGIN
     assert begin["knowledge"] == {"decision": "accept", "target_id": TARGET, "subject_id": PROPOSAL,
                                   "text_sha256": "f" * 64, "expected_revision": None, "reason": None, "note": "covers 8443"}

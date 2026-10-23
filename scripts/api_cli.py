@@ -240,6 +240,9 @@ def main(argv: list[str] | None = None) -> int:
         # An agent's tool call: never a prompt, never a key; the person runs the command.
         print(f"shakerscan api: {exc.line}", file=sys.stderr)
         return _person_decision().EXIT_REFUSED
+    except _person_decision().PersonDecisionCancelled as exc:
+        print(f"shakerscan api: {exc}", file=sys.stderr)
+        return _person_decision().EXIT_CANCELLED
     except _person_decision().PersonDecisionError as exc:
         print(f"shakerscan api: {exc}", file=sys.stderr)
         return 1

@@ -1379,6 +1379,10 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     except mcp.MCPError as exc:
         lines.append(f"mcp:      {_with_reason(exc)}")
         ok = False
+    if token:
+        from .decisions import touch_lines
+
+        lines.extend(touch_lines(client))
     print("\n".join(_shown(line) for line in lines))
     if is_loopback(url) and engine_launcher() is not None:
         # For a local engine, the launcher's own `doctor` (Docker, disk, host checks) is what

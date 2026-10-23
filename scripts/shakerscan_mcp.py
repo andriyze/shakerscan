@@ -247,7 +247,9 @@ def _person_decision_error(exc: urllib.error.HTTPError, detail: str, method: str
     if not decision.required(exc.code, exc.headers, parsed):
         return None
     command = decision.person_command(method, path, body)
-    summary = str(_bounded_text(parsed.get("summary") or parsed.get("decision"), 300) or "a person's decision")
+    # Whole, as the gateway said it (at most its MAX_SUMMARY): what the person will be shown.
+    summary = str(_bounded_text(parsed.get("summary") or parsed.get("decision"), decision.MAX_SUMMARY)
+                  or "a person's decision")
     return MCPError(-32002, (
         f"A person's decision is required: {summary}. Nothing was changed. Tell the user to run "
         f"`{command}` in their own terminal and touch their security key; do not retry this request."

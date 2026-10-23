@@ -298,16 +298,19 @@ refusal carries a `reason_code`; act on it rather than on the wording.
 ## Budget raises
 
 A person raises a Hunt's budget; an agent never does. Never call `POST /hunts/{hunt_id}/budget-amendments`
-and never send `operator_confirmed`: that route is the operator's own control, used from the Hunt
-page. When an action needs more of a limit, its refusal raises a `budget.raise` permission request:
-give the person the `shakerscan approve <permission_request_id>` line (see Permission requests) and
-keep working on actions that need none of that limit. When the operator asks in chat for more
-budget, or your launch instructions say to use more, that is not an approval: name the pending
-`budget.raise` request and its approve command, or, when none is pending, say which limit stops
-which planned action and why, so the person can approve the request when it comes or raise the
-limit on the Hunt page; then carry on with other work. A raise keeps usage, queued holds,
-identities and permissions, and starts nothing by itself; completed, cancelled or finalized runs
-stay terminal. `GET /hunts/{hunt_id}/budget-amendments` pages the saved before/after history.
+and never send `operator_confirmed`: that route is the person's own control. When an action needs
+more of a limit, its refusal raises a `budget.raise` permission request: give the person the
+`shakerscan approve <permission_request_id>` line (see Permission requests) and keep working on
+actions that need none of that limit. When the person asks in chat for more budget, or your launch
+instructions say to use more, that is not an approval: name the pending `budget.raise` request and
+its approve command, or, when none is pending, say which limit stops which planned action, so the
+person can approve the request when it comes or raise the limit themselves: on the Hunt page, or
+with the Python client in their own terminal, `shakerscan hunt budget raise <hunt_id> --limit
+<name>=<total>` (or `=+<more>`); then carry on with other work. If a call answers
+`person_decision_required`, name the command it gives and do not retry the request or look for
+another way to make the same decision. A raise keeps usage, queued holds, identities and
+permissions, and starts nothing by itself; completed, cancelled or finalized runs stay terminal.
+`GET /hunts/{hunt_id}/budget-amendments` pages the saved before/after history.
 
 ## Candidates and proof
 

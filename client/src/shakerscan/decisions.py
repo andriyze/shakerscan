@@ -23,17 +23,22 @@ import urllib.parse
 from collections.abc import Mapping, Sequence
 from typing import Any
 
-from ._vendored import load
+from ._vendored import helper, load
 
 UUID = re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
-LIMIT_LABELS = {
+LIMIT_LABELS = {  # every limit the engine takes, safety ceilings first
     "max_state_changing_requests": "state-changing requests",
-    "max_http_requests": "HTTP requests",
+    "max_oob_interactions": "out-of-band interactions",
     "max_tcp_ports": "TCP ports",
     "max_udp_ports": "UDP ports",
     "max_hosts": "hosts",
-    "max_oob_interactions": "out-of-band interactions",
     "max_device_fragility_points": "device fragility points",
+    "max_active_actions": "approval-gated actions",
+    "max_http_requests": "HTTP requests",
+    "max_browser_actions": "browser actions",
+    "max_capability_calls": "capability calls",
+    "max_candidates": "candidate and finding records",
+    "max_verifications": "verifications",
     "max_duration_seconds": "duration in seconds",
 }
 # Limits that bound what a Hunt may do to a target or send off it, not how long it works.
@@ -74,7 +79,7 @@ def _exit(v2: Any, exc: Exception) -> int:
     """The product CLI's error JSON, exit 3 for a person's decision this shell cannot ask for."""
     if isinstance(exc, v2.CliError):
         print(json.dumps(exc.public_dict(), sort_keys=True), file=sys.stderr)
-        return 3 if exc.error_type == "person_decision_required" else 2
+        return {"person_decision_required": 3, "person_decision_cancelled": 130}.get(exc.error_type, 2)
     print(f"shakerscan: {exc}", file=sys.stderr)
     return 2
 
@@ -118,6 +123,15 @@ def find_target(client: Any, value: str, *, create: bool) -> dict[str, Any]:
     raise DecisionError(f"no target is registered for {url}; name it by its id")
 
 
+def _os_user() -> str:
+    import getpass
+
+    try:
+        return getpass.getuser()[:60] or "the local user"
+    except Exception:  # no user name in the environment or the password database
+        return "the local user"
+
+
 def _named(target: Mapping[str, Any]) -> str:
     url = str(target.get("url") or "")
     name = str(target.get("name") or "")
@@ -136,9 +150,11 @@ def cmd_targets(args: argparse.Namespace) -> int:
             raise DecisionError("the instance answered without a target id")
         if args.action == "authorize":
             # Active testing only; an intrusive authorization is made in the browser.
+            # An Enterprise gateway writes who decided itself; an open-source engine records
+            # this computer's user.
             answer = client.request(
                 "POST", f"/targets/{identifier}/authorization",
-                payload={"approved_by": "shakerscan targets authorize", "risk_tier": "active"},
+                payload={"approved_by": f"{_os_user()} via shakerscan targets authorize", "risk_tier": "active"},
             )
             recorded = (answer or {}).get("authorization") if isinstance(answer, Mapping) else None
             who = (recorded or {}).get("approved_by") if isinstance(recorded, Mapping) else None
@@ -146,7 +162,7 @@ def cmd_targets(args: argparse.Namespace) -> int:
         else:
             answer = client.request(
                 "DELETE", f"/targets/{identifier}/authorization",
-                payload={"revoked_by": "shakerscan targets unauthorize",
+                payload={"revoked_by": f"{_os_user()} via shakerscan targets unauthorize",
                          "reason": (args.reason or "withdrawn from the terminal")[:2000]},
             )
             revoked = bool((answer or {}).get("revoked")) if isinstance(answer, Mapping) else False
@@ -214,14 +230,46 @@ def hunt_budget_raise(argv: Sequence[str], url: str, timeout: float | None = Non
     if args.json:
         print(json.dumps(answer, indent=2, sort_keys=True))
         return 0
+    order = list(LIMIT_LABELS)
     raised = "; ".join(
         f"{LIMIT_LABELS.get(name, name)} {budget.get(name)} -> {value}"
         + (" (safety ceiling)" if name in SAFETY_CEILINGS else "")
-        for name, value in sorted(totals.items())
+        for name, value in sorted(totals.items(), key=lambda item: (
+            item[0] not in SAFETY_CEILINGS, order.index(item[0]) if item[0] in order else len(order), item[0]))
     )
     status = (answer or {}).get("status") if isinstance(answer, Mapping) else None
     print(f"raised {raised} for Hunt {hunt}" + (f"; the Hunt is {status}" if status else ""))
     return 0
 
 
-__all__ = ["DecisionError", "add_parser", "cmd_targets", "find_target", "hunt_budget_raise", "target_url"]
+def touch_lines(client: Any) -> list[str]:
+    """`shakerscan doctor` on an Enterprise connection: whether the gateway requires a
+    security-key touch for person decisions from terminals, and whether a touch could happen
+    here (python-fido2, a key plugged in). Opening no key: nothing blinks."""
+    approve = helper("_hunt_approve")
+    try:
+        feed = client.request_json("GET", approve.PERSON_FEED_PATH)
+    except Exception:  # an older gateway, or an engine: the route is not there
+        feed = None
+    if isinstance(feed, Mapping) and feed.get("schema_version") == approve.PERSON_FEED_SCHEMA:
+        state = ("required for person decisions from terminals" if feed.get("touch_required") is True
+                 else "not required (the administrator's switch is off)")
+    else:
+        state = "unknown (this gateway does not say)"
+    unready = approve.security_key_readiness()
+    if unready:
+        key = unready
+    else:
+        from importlib.metadata import PackageNotFoundError, version
+
+        try:
+            fido2 = f"python-fido2 {version('fido2')}"
+        except PackageNotFoundError:
+            fido2 = "python-fido2"
+        key = f"{fido2}, a security key is plugged in (register it once under My account)"
+    return [f"touch:    {state}", f"key:      {key}"]
+
+
+__all__ = [
+    "DecisionError", "add_parser", "cmd_targets", "find_target", "hunt_budget_raise", "target_url", "touch_lines",
+]

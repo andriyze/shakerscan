@@ -386,6 +386,10 @@ def test_hunt_start_allow_on_enterprise_needs_the_persons_step_up_first(monkeypa
     client = Client({("GET", "/hunts/contract"): contract, ("POST", "/_enterprise/approvals/begin"): closed,
                      ("POST", "/hunts"): lambda payload: {"hunt_id": HUNT}}, token="token-1")
     monkeypatch.setattr(v2_cli.sys, "stdin", types.SimpleNamespace(isatty=lambda: True, readline=lambda: "alice\n"))
+    # The person's terminal: the prompts go to stderr, a terminal too.
+    terminal_err = io.StringIO()
+    terminal_err.isatty = lambda: True  # type: ignore[method-assign]
+    monkeypatch.setattr(v2_cli.sys, "stderr", terminal_err)
     args = _parse("hunt", "start", "--target-id", "t-1", "--target-kind", "web", "--allow", "budget.raise:2x")
     with pytest.raises(v2_cli.CliError) as refused:
         v2_cli._run_hunt(args, client)

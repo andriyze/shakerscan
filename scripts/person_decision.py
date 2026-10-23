@@ -22,10 +22,14 @@ and every command of this client completes it the same way, in the person's own 
 4. ``finish`` answers a one-time grant valid for that request through this connection;
 5. the request is sent again, once, unchanged, with the ``X-ShakerScan-Person-Proof`` header.
 
-Without an interactive terminal (stdin and stdout both a terminal), or inside an agent that
-``shakerscan agent`` launched (SHAKERSCAN_AGENT_NAME), it never prompts and never opens a key: it
-raises PersonDecisionRefused, one line that names the decision and the command the person runs in
-their own terminal, and the command exits 3 (refused, nothing ran). No option skips the touch.
+Without an interactive terminal (stdin a terminal, and stdout or stderr one to ask on), or inside
+an agent that ``shakerscan agent`` launched (SHAKERSCAN_AGENT_NAME), it never prompts and never
+opens a key: it raises PersonDecisionRefused, one line that names the decision and the command the
+person runs in their own terminal, and the command exits 3 (refused, nothing ran). No option skips
+the touch. Ctrl-C at the touch cancels it (PersonDecisionCancelled, exit 130); nothing changes.
+
+The decision is shown whole, wrapped, never cut: the gateway offers no proof for a summary longer
+than a terminal shows (MAX_SUMMARY), and this client refuses to ask for a touch for one either.
 
 What a touch proves: a person was at the key. A program running as the same computer user can
 change this client or start a request of its own the moment the person expects to touch; touch
@@ -37,9 +41,9 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
-import os
 import shlex
 import sys
+import textwrap
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -56,12 +60,21 @@ SET_SCHEMA = "shakerscan-approval-set/v1"
 # Exit status of a command whose request needs a person's decision it could not ask for here:
 # refused, nothing ran (the same meaning as the CI mode's 3).
 EXIT_REFUSED = 3
+# Ctrl-C at the touch: cancelled, nothing changed (the shell's own convention for SIGINT).
+EXIT_CANCELLED = 130
 MAX_BODY = 48 * 1024
+# The longest decision shown (the gateway's own bound): a longer one is never touched for.
+MAX_SUMMARY = 1000
+WRAP = 100
 TIMEOUT_SECONDS = 30.0
 
 
 class PersonDecisionError(Exception):
     """The touch could not be completed; nothing was changed. Printed without a traceback."""
+
+
+class PersonDecisionCancelled(PersonDecisionError):
+    """The person pressed Ctrl-C at the touch; nothing was changed (exit 130)."""
 
 
 class PersonDecisionRefused(PersonDecisionError):
@@ -111,19 +124,29 @@ def detail_of(raw: bytes | str | None) -> Any:
     return value.get("detail") if isinstance(value, Mapping) else None
 
 
-def interactive(stdin: Any = None, stdout: Any = None, environ: Mapping[str, str] | None = None) -> bool:
-    """A person at a terminal: stdin and stdout are both a terminal, and this is not an agent
-    that `shakerscan agent` launched. An agent's tool call has no terminal."""
-    environ = os.environ if environ is None else environ
-    if (environ.get("SHAKERSCAN_AGENT_NAME") or "").strip():
+def _tty(stream: Any) -> bool:
+    try:
+        return bool(stream.isatty())
+    except (AttributeError, ValueError):
         return False
-    for stream in (stdin or sys.stdin, stdout or sys.stdout):
-        try:
-            if not stream.isatty():
-                return False
-        except (AttributeError, ValueError):
-            return False
-    return True
+
+
+def interactive(stdin: Any = None, stdout: Any = None, environ: Mapping[str, str] | None = None,
+                stderr: Any = None) -> bool:
+    """A person at a terminal: stdin is a terminal, and stdout or stderr is one to ask on
+    (``--json | jq`` in the person's own terminal still asks, on stderr), and this is not an
+    agent that `shakerscan agent` launched. An agent's tool call has no terminal."""
+    approve = _approve()
+    if not approve.person_at_terminal(stdin or sys.stdin, environ=environ):
+        return False
+    return _tty(stdout or sys.stdout) or _tty(stderr or sys.stderr)
+
+
+def summary_lines(text: Any) -> list[str]:
+    """The decision, whole, wrapped for a terminal and indented."""
+    shown = _inert(text, MAX_SUMMARY + 1)
+    return textwrap.wrap(shown, WRAP, initial_indent="  ", subsequent_indent="    ",
+                         break_long_words=True, break_on_hyphens=False) or ["  " + shown]
 
 
 # ---- the person's command --------------------------------------------------------------------
@@ -162,11 +185,12 @@ def person_command(method: str, path: str, body: bytes | None) -> str:
 
 
 def refusal_line(detail: Mapping[str, Any], command: str) -> str:
-    """One line for an agent's tool call: the decision, that nothing changed, the person's command."""
-    summary = _inert(detail.get("summary") or detail.get("decision") or "a person's decision", 240)
+    """One line for an agent's tool call: the decision (whole, as the gateway said it), that
+    nothing changed, the person's command (its body made inert: it may carry any bytes)."""
+    summary = _inert(detail.get("summary") or detail.get("decision") or "a person's decision", MAX_SUMMARY)
     return (
         f"person decision required: {summary}. Nothing was changed. The person runs this in their "
-        f"own terminal and touches their security key: {command}"
+        f"own terminal and touches their security key: {_inert(command, 4 * MAX_BODY)}"
     )
 
 
@@ -274,8 +298,26 @@ def complete(post: Post, *, origin: str, method: str, path: str, body: bytes, de
         )
     if len(body or b"") > MAX_BODY:
         raise PersonDecisionError("this request is too large for a security-key proof; make it in the browser")
+    summary = str(detail.get("summary") or detail.get("decision") or "a person's decision")
+    if len(summary) > MAX_SUMMARY:
+        raise PersonDecisionError("this decision is too long to show in a terminal; make it in the browser; "
+                                  "nothing was changed")
+    if assertion is None and (unready := approve.security_key_readiness()):
+        # Before begin: no challenge is issued (and audited) for a touch that cannot happen here.
+        raise PersonDecisionError(f"{unready}; nothing was changed")
     terminal.say("This needs your decision (your administrator requires a security-key touch):")
-    terminal.say("  " + _inert(detail.get("summary") or detail.get("decision") or "a person's decision", 240))
+    for line in summary_lines(summary):
+        terminal.say(line)
+    try:
+        return _touch(post, approve, terminal, origin=origin, method=method, path=path, body=body,
+                      detail=detail, assertion=assertion)
+    except KeyboardInterrupt:
+        terminal.say("")
+        raise PersonDecisionCancelled("cancelled; nothing was changed") from None
+
+
+def _touch(post: Post, approve: Any, terminal: Any, *, origin: str, method: str, path: str, body: bytes,
+           detail: Mapping[str, Any], assertion: Callable[..., dict] | None) -> str:
     status, challenge = post(BEGIN_PATH, {
         "schema_version": "shakerscan-approval-begin/v1", "purpose": "person_decision", "origin": origin.rstrip("/"),
         "person_decision": {"method": method, "path": path, "body": _b64url(body or b"")},
@@ -284,13 +326,18 @@ def complete(post: Post, *, origin: str, method: str, path: str, body: bytes, de
         raise _refused(status, challenge)
     document = check_challenge(challenge, origin=origin, method=method, path=path, body=body or b"")
     shown = document["person_decision"].get("summary")
-    if isinstance(shown, str) and shown and shown != detail.get("summary"):
-        # What the key signs is the document's summary; show it if it says something else.
-        terminal.say("  signed as: " + _inert(shown, 240))
-    terminal.say("Touch your security key to approve (Ctrl-C to cancel)...")
+    if not isinstance(shown, str) or not shown or len(shown) > MAX_SUMMARY:
+        raise PersonDecisionError("the gateway's challenge does not say the decision in full; nothing was changed")
+    if shown != detail.get("summary"):
+        # What the key signs is the document's summary; show it whole if it says something else.
+        terminal.say("It is signed as:")
+        for line in summary_lines(shown):
+            terminal.say(line)
     sign = assertion or approve.security_key_assertion
     try:
-        credential = sign(challenge["webauthn"], origin.rstrip("/"), terminal, prompt="")
+        # The key is chosen (when several can answer) before the person is told to touch.
+        credential = sign(challenge["webauthn"], origin.rstrip("/"), terminal,
+                          prompt="Touch your security key to approve (Ctrl-C to cancel)...")
     except approve.ApprovalError as exc:
         raise PersonDecisionError(f"{exc}; nothing was changed") from exc
     status, result = post(FINISH_PATH, {
@@ -312,14 +359,18 @@ def handle(post: Post, *, origin: str, method: str, path: str, body: bytes | Non
     command = person_command(method, path, body)
     stdin = getattr(terminal, "stdin", None)
     stdout = getattr(terminal, "stdout", None)
-    if not interactive(stdin, stdout, environ):
+    if not interactive(stdin, stdout, environ, stdout if terminal is not None else None):
         raise PersonDecisionRefused(refusal_line(detail, command), detail=detail, command=command)
+    if terminal is None:
+        # Asked on stdout when it is the terminal, else on stderr (stdout may be a pipe to jq).
+        terminal = _approve().Terminal(sys.stdin, sys.stdout if _tty(sys.stdout) else sys.stderr)
     grant = complete(post, origin=origin, method=method, path=path, body=body or b"", detail=detail,
                      terminal=terminal, assertion=assertion)
     return resend(grant)
 
 
 __all__ = [
-    "ERROR", "EXIT_REFUSED", "PROOF_HEADER", "PersonDecisionError", "PersonDecisionRefused", "check_challenge",
-    "complete", "detail_of", "handle", "interactive", "json_poster", "person_command", "refusal_line", "required",
+    "ERROR", "EXIT_CANCELLED", "EXIT_REFUSED", "MAX_SUMMARY", "PROOF_HEADER", "PersonDecisionCancelled",
+    "PersonDecisionError", "PersonDecisionRefused", "check_challenge", "complete", "detail_of", "handle",
+    "interactive", "json_poster", "person_command", "refusal_line", "required", "summary_lines",
 ]
