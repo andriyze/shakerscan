@@ -81,17 +81,34 @@ supporting images, inventing credentials or silently substituting a different im
 
 ## Operator budget extensions
 
-Hunt profiles leave room for mapping and repeated verification: fast allows 5,000 HTTP requests
-and 80 calls, balanced 20,000 and 300, thorough 100,000 and 1,500. These are ceilings, not promised
-traffic. Current SQLi and XSS calls reserve their useful paced execution envelopes on all three
-profiles; insufficient headroom asks for a budget raise instead of silently shortening the call.
-Start warnings use the actual executor reservation, even when a profile default is too small.
+Hunt profiles are sized so that no call or traffic budget runs out before the profile's duration
+at the fastest pace any executor is held to (10 requests per second on the wire, 0.3 browser actions,
+one call per five seconds and one verification per minute of reserved wall):
+
+| Profile | Duration | Calls | HTTP requests | Verifications | Browser actions | Approval-gated calls | Records |
+|---|---|---|---|---|---|---|---|
+| `fast` | 1 h | 750 | 40,000 | 60 | 1,200 | 750 | 1,000 |
+| `balanced` | 4 h | 3,000 | 150,000 | 250 | 4,500 | 3,000 | 5,000 |
+| `thorough` | 24 h | 18,000 | 900,000 | 1,500 | 26,000 | 18,000 | 20,000 |
+
+These are ceilings, not promised traffic: every call stays paced by its executor. Approval-gated
+calls may use the whole call allowance because each one still checks its approval receipt. The
+safety ceilings keep their values: TCP ports (100 / 1,200 / 10,000), state-changing requests
+(4 / 20 / 80), hosts, UDP ports, out-of-band interactions and device fragility, as do the policy
+switches and approvals that turn them on. At the defaults, logging in, mapping a web application
+and verifying what it finds needs no budget raise. SQLi and XSS calls reserve their useful paced
+execution envelopes on all three profiles; insufficient headroom asks for a budget raise instead of
+silently shortening the call. Start warnings use the actual executor reservation.
 
 Evidence-linked finding recording shares `max_candidates` with candidate records and remains
-available on an unfinished exhausted Hunt. It does not spend target traffic or execution calls.
-Finding locations keep the evidenced service's scheme and port; use an absolute URL when the
-evidence spans multiple services. Retrying a creation with the same Hunt, title and URL returns
-the existing unverified record without overwriting it.
+available on an unfinished exhausted Hunt. It does not spend target traffic or execution calls,
+and a full allowance refuses only that write: it never stops the Hunt. Finding locations keep the
+evidenced service's scheme and port. A relative path stays on the target's own service when that
+service is evidenced, and otherwise follows the single evidenced service on the target host; a
+device locator or `host://` asset is a host. Use an absolute URL when the evidence spans several
+services. Creating a finding the Hunt already recorded with the same title and URL returns the
+existing record unchanged, spends nothing, and says whether newly cited evidence was attached
+(`findings.update` attaches it).
 
 On finish, the server proposes the Hunt's reusable read-only and verification steps in the
 target's one rolling retained-checks proposal for `shakerscan knowledge review`. It never saves

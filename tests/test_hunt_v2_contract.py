@@ -10,7 +10,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "api"))
 
 from hunt.contracts import capability_manifest
-from hunt.start_contract import normalize_hunt_start_payload
+from hunt.start_contract import HUNT_BUDGET_PROFILES, normalize_hunt_start_payload
 from runtime.capability_registry import CAPABILITY_REGISTRY
 
 
@@ -115,8 +115,9 @@ def test_non_ssh_credentials_never_retain_network_budgets_without_discovery():
 
 def test_hunt_budget_profile_is_bounded():
     contract = _contract("api", budget_profile="fast")
-    assert contract.resolved_budget_object.max_capability_calls == 80
-    assert contract.resolved_budget_object.max_candidates == 100
+    fast = HUNT_BUDGET_PROFILES["fast"]
+    assert contract.resolved_budget_object.max_capability_calls == fast.max_capability_calls
+    assert contract.resolved_budget_object.max_candidates == fast.max_candidates
 
 
 def test_zero_ceiling_removes_capabilities_that_require_that_dimension():

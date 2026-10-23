@@ -60,11 +60,14 @@ one.
 mapping and then testing. Never lower `max_http_requests` below what discovery needs: one
 `web.crawl` and one `web.content_discover` reserve about 370 requests together, and an agent that
 set 300, then 180, skipped content discovery and missed every exposed `/.env`, `/.git` and backup
-file. The start response's `budget_warnings` names limits below what a capability in
-the manifest actually reserves, including profile defaults; when it is not empty, use the profile defaults (or ask the
-operator for a budget raise) before you test. A warning with `restart_fixes_it: false` is above even
-the profile's start maximum: only a budget raise the person approves can let that capability run.
-Map first, then narrow.
+file. The start response's `budget_warnings` names each capability the limits leave unable to run
+even once. At a profile's defaults the usual web work (log in, crawl, discover content, verify,
+record) draws none; a default warning names a safety ceiling such as TCP ports or state-changing
+requests. If you lowered a limit and the warning says `restart_fixes_it: true`, start again without
+lowering it. Ask the operator for a budget raise only when your plan needs the capability a warning
+names (for example `ports.discover` on `fast`); otherwise carry on. A warning with
+`restart_fixes_it: false` is above even the profile's start maximum: only a budget raise the person
+approves can let that capability run. Map first, then narrow.
 
 **Keep answers small.** Hunt tools answer in a compact view by default; leave `view` out. Use
 `capability=<name>` on `shakerscan_hunt_get` for one capability's contract, and `limit`/`cursor` on
@@ -390,8 +393,13 @@ reported shortages to select a smaller useful action. Do not retry an unchanged 
 A `budget_exhausted` Hunt still accepts candidates and evidence-linked `findings.create|update|delete`
 while its shared `max_candidates` recording allowance has room. Finding recording spends no
 execution calls, active calls or target traffic; existing authority, ownership and proof checks
-still apply. Use an absolute finding URL when cited evidence covers multiple services; a relative
-path follows its single evidenced service, including its scheme and port. Record the
+still apply. A full recording allowance refuses only that write (a person can raise it); it never
+stops the Hunt. Use an absolute finding URL when cited evidence covers several services; a relative
+path stays on the target's own service when it is evidenced, and otherwise follows the single
+evidenced service on the target host, including its scheme and port (a device's address or name
+is that host). Creating a finding this Hunt already recorded with the same title and location
+returns it unchanged (`created: false`) and spends nothing; when `evidence_attached` is false,
+attach the new evidence with `findings.update`. Record the
 leads the gathered evidence supports before finishing. Finishing keeps the `budget_exhausted` status
 but closes the record: afterwards every candidate write (record, correct, expire) is refused with 409. `hosts_attempted` counts distinct hosts: once
 a network action on a host has settled, later network actions on that host do not charge it again.

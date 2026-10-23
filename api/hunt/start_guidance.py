@@ -8,9 +8,13 @@ start response names, in ``budget_warnings``, every capability in the manifest t
 limits leave unable to run even once, and the cost of mapping a web target once (one crawl and one
 content discovery), so the planner can restart with a workable budget or ask the person.
 
-Warnings use the executor's actual profile-specific reservation, including when the default
-cannot fit it. When even the profile's start maximum is below the reservation, the warning
-names the required operator-approved raise instead of suggesting an ineffective restart.
+Warnings use the least the executor reserves for one call on this profile (a scanner's profile
+hold, a one-request collection replay), including when the default cannot fit it. When even the
+profile's start maximum is below the reservation, the warning names the required
+operator-approved raise instead of suggesting an ineffective restart. At a profile's defaults the
+standard web workflow (``STANDARD_WEB_WORKFLOW``: log in, map, verify, record) draws no warning; a
+remaining one names a safety ceiling (ports, hosts, writes, out-of-band, device wear) that matters
+only when the planned work needs that capability.
 
 Verification. ``verification`` names the candidate families ``candidate.verify`` can prove on
 this target kind (D27), so no attempt is spent on a family no verifier accepts.
@@ -19,14 +23,25 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import fields
+import logging
 from typing import Any
 
 from .candidate_verification_preflight import public_verification_families
 from .start_contract import HUNT_BUDGET_PROFILES, HuntBudget
 
+logger = logging.getLogger(__name__)
 # One crawl and one content discovery: the least a web Hunt spends to map its target before it
 # can find exposed files, configuration and routes.
 MAPPING_CAPABILITIES = ("web.crawl", "web.content_discover")
+# Logging in, mapping a web application, checking what it exposes, verifying candidates and
+# recording the results: every profile's defaults fund all of it without a raise.
+STANDARD_WEB_WORKFLOW = (
+    "browser.login_check", "auth.session.establish", "auth.session.refresh", "web.probe", "web.crawl",
+    "web.browser_crawl", "web.content_discover", "javascript.analyze", "artifact.inspect", "http.request",
+    "browser.navigate", "browser.interact", "tls.inspect", "templates.scan", "collections.replay_safe",
+    "sqli.verify", "xss.verify", "authz.verify", "candidate.verify", "findings.create", "findings.update",
+    "knowledge.record",
+)
 MAX_WARNINGS = 12
 
 
@@ -39,18 +54,20 @@ def _ledger_limits(budget: Mapping[str, Any]) -> dict[str, tuple[str, int]]:
 
 
 def _costs(capabilities: Any, profile_name: str, target_kind: str) -> dict[str, dict[str, int]]:
+    from .budget_pace import executor_hold
+
     costs: dict[str, dict[str, int]] = {}
     for item in capabilities or ():
         if not isinstance(item, Mapping) or not isinstance(item.get("budget_cost"), Mapping):
             continue
         name = str(item.get("name"))
-        selected = item["budget_cost"]
-        from runtime.capability_registry import CAPABILITY_REGISTRY
-        spec = CAPABILITY_REGISTRY.require(name)
-        if spec.hunt_executor == "worker_scanner":
-            from agent_tools import canonical_hunt_scanner_budget
-            selected = canonical_hunt_scanner_budget(name, budget_profile=profile_name,
-                                                      device_target=target_kind == "device")
+        try:
+            selected = executor_hold(name, profile=profile_name, target_kind=target_kind, smallest=True)
+        except KeyError:
+            # The Hunt is already created: a manifest name the registry does not know is costed
+            # from its manifest entry rather than failing the start response.
+            logger.warning("start guidance: capability %s is not registered; using its manifest cost", name[:120])
+            selected = item["budget_cost"]
         costs[name] = {
             str(key): int(value) for key, value in selected.items()
             if isinstance(value, int) and not isinstance(value, bool) and value > 0
@@ -127,4 +144,4 @@ def with_start_guidance(result: Any) -> Any:
     return guided
 
 
-__all__ = ["MAPPING_CAPABILITIES", "start_budget_warnings", "with_start_guidance"]
+__all__ = ["MAPPING_CAPABILITIES", "STANDARD_WEB_WORKFLOW", "start_budget_warnings", "with_start_guidance"]

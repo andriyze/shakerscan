@@ -1234,18 +1234,18 @@ model context: ShakerScan cannot meter an external coding agent's tokens, and ma
 claim for that planner. It meters every executable capability.
 
 A scanner call's hold depends on the Hunt's budget profile only for `sqli.verify` and `xss.verify`,
-whose paced argv cannot finish inside the registry wall. On `thorough`, `sqli.verify` reserves 900
-requests / 540 s and `xss.verify` 1,800 requests / 480 s. `fast` and `balanced` keep the registry
-holds (900 / 300 s and 400 / 120 s). So do a thorough call against a device target (its fragility
-allowance is charged one point per held request) and a headless `deep_domxss` call. An `xss.verify`
+whose paced argv cannot finish inside the registry wall. On every named profile (`fast`, `balanced`,
+`thorough`), `sqli.verify` reserves 900 requests / 540 s and `xss.verify` 1,800 requests / 480 s. A
+call against a device target (its fragility allowance is charged one point per held request) and a
+headless `deep_domxss` call keep the registry holds (900 / 300 s and 400 / 120 s). An `xss.verify`
 the worker routes to the pinned browser runs within the browser prover's own limits under either
-hold and settles what it used. When a thorough Hunt's remaining ledger cannot fund the longer hold,
-the call is admitted at the registry hold rather than refused; its receipt's `budget_reserved` shows
-the hold it ran at. On every profile, including `thorough`, the capability manifest's `budget_cost`
-lists the registry hold, the smallest hold a call is admitted at. The argv and request rate are the
+hold and settles what it used. When the Hunt's remaining ledger cannot fund the hold, the call is
+refused with a budget request a person can grant rather than started at a shorter hold; its
+receipt's `budget_reserved` shows the hold it ran at. The capability manifest's `budget_cost` lists
+the registry hold. The argv and request rate are the
 same on every profile (sqlmap about 1 request/s, Dalfox about 3.3 requests/s). The process deadline,
-the worker lease and the API wait (counted from enqueue, plus 30 s) follow the reserved wall, so a
-thorough `sqli.verify` is waited on for up to 570 s and holds one of the worker's agent-tool slots
+the worker lease and the API wait (counted from enqueue, plus 30 s) follow the reserved wall, so an
+`sqli.verify` is waited on for up to 570 s and holds one of the worker's agent-tool slots
 while it runs. A call admitted before these holds existed still runs at the hold it reserved. Update
 the API and its workers together: a worker that predates these holds fails a call reserved at a
 thorough hold as a contract error and leaves the hold to reconciliation.

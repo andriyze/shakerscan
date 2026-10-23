@@ -119,16 +119,30 @@ class HuntBudget:
         }
 
 
+# Call, traffic and verification limits cover the whole duration at the fastest pace any executor
+# reserves (hunt/budget_pace.py: 10 requests, 0.3 browser actions, one call per 5 s and one
+# verification per 60 s of wall), so they cannot run out before the clock. Approval-gated calls
+# may use the whole call allowance; each one still checks its approval receipt. Records cost no
+# traffic and get at least one per call. The safety ceilings (TCP ports, state-changing requests,
+# device fragility, hosts, UDP ports, out-of-band interactions) are not paced and keep their values.
 HUNT_BUDGET_PROFILES: Mapping[str, HuntBudget] = {
-    # Leave room for mapping, repeated paced verification and recording its results.
-    # Active calls share the total-call ceiling; traffic and device permissions stay separate.
-    "fast": HuntBudget(3_600, 80, 5_000, 80, 100, 20, 100, 20, 4, 20, 50, 100, 10),
+    "fast": HuntBudget(
+        max_duration_seconds=3_600, max_capability_calls=750, max_http_requests=40_000,
+        max_active_actions=750, max_candidates=1_000, max_verifications=60, max_tcp_ports=100,
+        max_browser_actions=1_200, max_state_changing_requests=4, max_device_fragility_points=20,
+        max_hosts=50, max_udp_ports=100, max_oob_interactions=10,
+    ),
     "balanced": HuntBudget(
-        14_400, 300, 20_000, 300, 500, 100, 1_200, 200, 20, 100, 500, 1_000, 50,
+        max_duration_seconds=14_400, max_capability_calls=3_000, max_http_requests=150_000,
+        max_active_actions=3_000, max_candidates=5_000, max_verifications=250, max_tcp_ports=1_200,
+        max_browser_actions=4_500, max_state_changing_requests=20, max_device_fragility_points=100,
+        max_hosts=500, max_udp_ports=1_000, max_oob_interactions=50,
     ),
     "thorough": HuntBudget(
-        86_400, 1_500, 100_000, 1_500, 2_000, 500, 10_000, 1_000, 80, 500, 5_000,
-        5_000, 200,
+        max_duration_seconds=86_400, max_capability_calls=18_000, max_http_requests=900_000,
+        max_active_actions=18_000, max_candidates=20_000, max_verifications=1_500, max_tcp_ports=10_000,
+        max_browser_actions=26_000, max_state_changing_requests=80, max_device_fragility_points=500,
+        max_hosts=5_000, max_udp_ports=5_000, max_oob_interactions=200,
     ),
 }
 

@@ -18,9 +18,18 @@ recognize same-host origins already frozen in the Hunt context, so incomplete ar
 does not prevent recording unverified metadata. These changes neither send traffic nor confer
 authority on a service.
 
+A device locator (a bare host name or IP literal, IPv6 with or without brackets) is now a host
+like a `host://` asset: a relative path takes the single evidenced service on it, and a cited
+device HTTP probe names the service it reached. On a URL target a relative path stays on the
+inventory's own service whenever that service is among the evidenced ones. A `host://` asset with
+no evidence and one frozen origin resolves a relative path as it already accepted the absolute URL.
+Malformed frozen origins refuse the write as an input error.
+
 Separately, finding creation used an unconditional insert despite the unique target/fingerprint
 constraint. A second creation under a new action key raised a database error. It now returns the
-same Hunt's existing record without replacing its evidence, operator state or verification history.
+same Hunt's existing record unchanged, including one with verification history, without replacing
+its evidence, operator state or verification history, and says whether newly cited evidence was
+attached (`findings.update` attaches it).
 
 ## Exhausted Hunts and recording
 
@@ -33,7 +42,10 @@ Finding mutations now reserve one unit of the existing `max_candidates` allowanc
 shared durable ledger. They remain evidence-linked, Hunt-owned and unverified, and keep their
 existing active-testing and approval checks. Only these registry-declared recording capabilities
 gain the unfinished-exhausted exception. Finished, failed and cancelled Hunts remain closed;
-recording does not resume traffic or reset any consumed budget.
+recording does not resume traffic or reset any consumed budget. A full allowance refuses only the
+write (a person can raise it): the refusal carries no budget state, so it never marks the Hunt
+`budget_exhausted` or stops its testing. A refused write and a repeated creation that returns the
+existing record spend no unit.
 
 ## Verifier reservations and start warnings
 
@@ -48,11 +60,29 @@ The existing reviewed envelopes (SQLi: 900 requests/540 seconds; XSS: 1,800/480)
 named profiles, with existing device/headless exceptions retained. New calls do not silently fall
 back; old queued reservations and their digests remain executable as originally admitted.
 
-Startup ceilings now leave room for repeated work: fast 5,000 HTTP requests/80 execution calls,
-balanced 20,000/300, thorough 100,000/1,500. Duration and recording allowances grow accordingly.
-Authority-dependent network, mutation, device-fragility and OOB ceilings retain their existing
-values. These defaults affect new Hunts only. Start warnings use actual executor holds and disclose
-impossible default reservations; operator-approved raises remain required beyond a start ceiling.
+Each profile's call, traffic and verification limits now cover its whole duration at the fastest
+pace any executor reserves: 10 requests per second (Nuclei's rate limit and the headless browser's
+egress ceiling; katana is held to 5, Dalfox to about 3, sqlmap to about 1, a replay to 25 per
+minute, a device to one per second), 0.3 browser actions per second (a nine-step browser action in
+30 s), one call per five seconds (the shortest wall any call reserves) and one verification per
+60 s (`authz.verify`). So no budget but the duration ends a paced investigation early:
+
+| Profile | Duration | Calls | HTTP requests | Verifications | Browser actions | Approval-gated calls | Records |
+|---|---|---|---|---|---|---|---|
+| `fast` | 3,600 s | 750 | 40,000 | 60 | 1,200 | 750 | 1,000 |
+| `balanced` | 14,400 s | 3,000 | 150,000 | 250 | 4,500 | 3,000 | 5,000 |
+| `thorough` | 86,400 s | 18,000 | 900,000 | 1,500 | 26,000 | 18,000 | 20,000 |
+
+The approval-gated call ceiling (`max_active_actions`) rose with the call ceiling, from 4 / 20 / 80
+in 2.11.0: any call can need an approval (a session, a principal, a write), and each such call
+still checks its approval receipt, so the count is not what gates it. The other authority-dependent
+ceilings keep their values: TCP ports, state-changing requests, hosts, UDP ports, out-of-band
+interactions and device fragility. Records cost no traffic and get at least one per call. At the
+defaults, the standard web workflow (log in, map, discover content, verify, record) draws no start
+warning; a remaining default warning names a safety ceiling and matters only when the planned work
+needs that capability. Start warnings cost a collection replay by the least it can reserve (one
+request) and cost a manifest capability the registry does not know from its manifest entry. These
+defaults affect new Hunts only; operator-approved raises remain required beyond a start ceiling.
 
 ## Reusable target actions
 
