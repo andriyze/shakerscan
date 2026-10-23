@@ -327,6 +327,18 @@ def test_shakerscan_scan_asks_for_the_targets_authorization_then_queues(gateway,
                           "--active-testing", "--confirm-active"])
     assert code == 3 and signer.asked == []
     assert "shakerscan targets authorize https://new.example.com" in capsys.readouterr().err
+    # At the person's terminal --confirm-active answers only the local question, never the touch:
+    # one touch, then the same submission (bytes and Idempotency-Key) once more with the grant.
+    gateway.sent.clear()
+    at_a_terminal(monkeypatch)
+    code = scan_cli.main(["--api-url", ORIGIN, "--ui-url", ORIGIN, "https://new.example.com",
+                          "--active-testing", "--confirm-active", "--idempotency-key", "scan-key-0001"])
+    scans = [sent for sent in gateway.sent if sent["url"].endswith("/scans")]
+    assert code == 0 and len(signer.asked) == 1 and len(scans) == 2
+    assert scans[0]["data"] == scans[1]["data"]
+    assert scans[0]["headers"]["idempotency-key"] == scans[1]["headers"]["idempotency-key"] == "scan-key-0001"
+    assert "x-shakerscan-person-proof" not in scans[0]["headers"]
+    assert scans[1]["headers"]["x-shakerscan-person-proof"] == "apv_grant_1"
 
 
 # ---- the MCP adapter ---------------------------------------------------------------------------
