@@ -265,6 +265,13 @@ def complete(post: Post, *, origin: str, method: str, path: str, body: bytes, de
     """Ask the person, at this terminal, for one touch for exactly this request; the grant."""
     approve = _approve()
     terminal = terminal or approve.Terminal()
+    if sys.platform == "win32" and assertion is None:
+        # Raw USB access to a FIDO key needs administrator rights on Windows; this release does
+        # not use Windows' own WebAuthn API. Said plainly rather than failing at the key.
+        raise PersonDecisionError(
+            "a security-key touch from a terminal is not supported on Windows in this release; "
+            "make this decision in the browser; nothing was changed"
+        )
     if len(body or b"") > MAX_BODY:
         raise PersonDecisionError("this request is too large for a security-key proof; make it in the browser")
     terminal.say("This needs your decision (your administrator requires a security-key touch):")

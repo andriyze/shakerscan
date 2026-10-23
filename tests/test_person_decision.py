@@ -255,6 +255,15 @@ def test_a_challenge_not_bound_to_its_document_is_never_signed():
     assert signer.asked == []
 
 
+def test_windows_is_told_plainly_before_any_request(monkeypatch):
+    monkeypatch.setattr(decision.sys, "platform", "win32")
+    gateway = ScriptedGateway()
+    with pytest.raises(decision.PersonDecisionError, match="not supported on Windows"):
+        decision.complete(gateway.post, origin=ORIGIN, method="POST", path=AMENDMENT, body=b"{}",
+                          detail=REFUSAL["detail"], terminal=approval.Terminal(io.StringIO(), io.StringIO()))
+    assert gateway.begun == []
+
+
 # ---- the three HTTP stacks ---------------------------------------------------------------------
 
 
