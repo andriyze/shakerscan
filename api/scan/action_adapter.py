@@ -216,6 +216,11 @@ except (ImportError, ModuleNotFoundError):
     from scanner.scanner_tools.url_redaction import redact_url
 
 try:
+    from scanner_tools.unsafe_actions import path_may_change_state
+except (ImportError, ModuleNotFoundError):
+    from scanner.scanner_tools.unsafe_actions import path_may_change_state
+
+try:
     from redaction import redact_text
 except (ImportError, ModuleNotFoundError):
     from scanner.redaction import redact_text
@@ -3849,6 +3854,52 @@ class DatabaseNeutralScanActionDispatcher:
             },
         )
 
+    async def _signed_in_crawl_seeds(self, action: ScanAction, execution_target: str) -> list[str]:
+        """The paths a session-carrying crawl starts from besides ``execution_target``.
+
+        The page the primary sign-in landed on, then every GET seed of the scan's endpoint
+        manifest (depth 0: seeds, known endpoints, collection requests) on the crawl's own origin
+        and lane, in path order. A path that may act (sign-out, delete, a one-time token) or that
+        is a route template is never a seed.
+        """
+        parsed = urllib.parse.urlsplit(execution_target)
+        scheme = parsed.scheme.lower()
+        host = str(parsed.hostname or "").lower().rstrip(".")
+        port = parsed.port or (443 if scheme == "https" else 80)
+        own_path = parsed.path or "/"
+        paths: list[str] = []
+
+        def usable(path: Any) -> bool:
+            return (
+                isinstance(path, str) and path.startswith("/") and not path.startswith("//")
+                and path != own_path and path not in paths
+                and not any(mark in path for mark in "{}?#,\\ ")
+                and not path_may_change_state(path)
+            )
+
+        for item in await self._observations("inputs.auth_primary"):
+            if (
+                isinstance(item, Mapping) and item.get("kind") == "credential_session"
+                and item.get("status") == "established"
+                and usable(item.get("landing_path"))
+            ):
+                paths.append(str(item["landing_path"]))
+        manifest = await self._work_manifest(
+            action, "endpoint_manifest_ref", ScanWorkManifestKind.ENDPOINT,
+        )
+        seeded = sorted({
+            str(entry.get("canonical_path") or "")
+            for entry in (manifest.entries if manifest is not None else ())
+            if entry.get("method") == "GET"
+            and int(entry.get("discovery_depth") or 0) == 0
+            and str(entry.get("scheme") or "") == scheme
+            and str(entry.get("host") or "") == host
+            and int(entry.get("port") or 0) == port
+            and entry.get("auth_lane") in (None, "anonymous", "primary")
+        })
+        paths.extend(path for path in seeded if usable(path))
+        return paths[:agent_tools.MAX_CRAWL_SEED_PATHS]
+
     async def _external(self, action: ScanAction, heartbeat: ActionHeartbeat) -> CapabilityReceipt:
         tool_by_capability = {
             "web.probe": "httpx",
@@ -3906,6 +3957,15 @@ class DatabaseNeutralScanActionDispatcher:
         args: dict[str, Any] = dict(primary.capability_args())
         scanner_options: dict[str, Any] = {}
         requested_budget = dict(action.requested_budget)
+        if action.capability_name in {"web.crawl", "web.browser_crawl"} and (
+            primary.headers()
+            or (tool == "katana_headless" and self.options.get("auth_browser_storage"))
+        ):
+            # A crawl carrying the session also starts where the signed-in area is: the scan's
+            # seeds on this origin and the page the sign-in landed on (E1-N3).
+            seeds = await self._signed_in_crawl_seeds(action, execution_target)
+            if seeds:
+                scanner_options["crawl_seed_paths"] = seeds
         if tool == "nuclei":
             template_manifest = await self._work_manifest(
                 action, "template_manifest_ref", ScanWorkManifestKind.TEMPLATE,

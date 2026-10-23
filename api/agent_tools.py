@@ -502,6 +502,60 @@ _AGENT_FFUF_WORDLIST_SOURCES: dict[str, tuple[str, ...]] = {
 }
 
 
+# A crawl that carries a session also starts at the scan's seeds on its own origin (the GET seed
+# endpoints and the page the sign-in landed on): an area behind a sign-in is often linked from
+# nowhere the target's root reaches (E1-N3). Each seed is a plain path joined to the crawl's own
+# origin, so a seed can never name another host; katana splits a list flag on commas, so a seed
+# holds none. The crawl's time box is shared among its inputs (``_fit_crawl_inputs``).
+MAX_CRAWL_SEED_PATHS = 20
+_CRAWL_SEED_PATH = re.compile(r"/(?!/)[A-Za-z0-9\-._~!$&'()*+;=:@%/]{0,2047}")
+# The shortest share of the time box worth giving one input; seeds a box cannot fund at this
+# share are left out, the target itself always kept.
+_CRAWL_INPUT_MIN_SECONDS = {"katana": 10, "katana_headless": 15}
+
+
+def _crawl_seed_urls(url: str, opts: Mapping[str, Any]) -> list[str]:
+    raw = opts.get("crawl_seed_paths") or ()
+    if not raw:
+        return []
+    if not isinstance(raw, (list, tuple)) or len(raw) > MAX_CRAWL_SEED_PATHS:
+        raise AgentToolError(f"a crawl takes at most {MAX_CRAWL_SEED_PATHS} seed paths")
+    parsed = urllib.parse.urlsplit(url)
+    origin = urllib.parse.urlunsplit((parsed.scheme, parsed.netloc, "", "", ""))
+    urls: list[str] = []
+    for value in raw:
+        path = str(value) if isinstance(value, str) else ""
+        if not _CRAWL_SEED_PATH.fullmatch(path):
+            raise AgentToolError("a crawl seed must be a plain path on the crawl's own origin")
+        seed = origin + path
+        if seed != url and seed not in urls:
+            urls.append(seed)
+    return urls
+
+
+def _crawl_inputs(url: str, opts: Mapping[str, Any]) -> list[str]:
+    inputs = ["-u", url]
+    for seed in _crawl_seed_urls(url, opts):
+        inputs += ["-u", seed]
+    return inputs
+
+
+def _fit_crawl_inputs(argv: list[str], duration: int, *, scanner: str) -> tuple[int, int]:
+    """Share the crawl's time box among its ``-u`` inputs; return (inputs, seconds each).
+
+    Katana crawls one input at a time (``-parallelism 1``) and ``-crawl-duration`` bounds each,
+    so N inputs at the whole box would run N boxes. Each gets an equal share instead, and inputs
+    past the number of useful shares are dropped (the target, first, is always kept). The rate
+    limiter is the process's own, so the hard request ceiling is unchanged.
+    """
+    positions = [index for index, value in enumerate(argv) if value == "-u"]
+    allowed = max(1, duration // _CRAWL_INPUT_MIN_SECONDS[scanner])
+    for index in reversed(positions[allowed:]):
+        del argv[index:index + 2]
+    inputs = min(len(positions), allowed)
+    return inputs, max(1, duration // inputs)
+
+
 def _tmpl_katana(url: str, opts: dict[str, Any]) -> list[str]:
     # Same-origin crawl + JS endpoint extraction. Read-only (GET only; form auto-fill stays OFF),
     # bounded: depth 2, 30s wall cap, 5 req/s, field-scope fqdn (same HOST only — never crosses
@@ -518,7 +572,7 @@ def _tmpl_katana(url: str, opts: dict[str, Any]) -> list[str]:
     # actually builds its API calls from. Endpoints extracted this way are observed in the
     # application's own served code -- the same epistemic standing as -js-crawl output --
     # never invented by the scanner.
-    return ["-u", url, "-js-crawl", "-jsluice", "-kb-endpoints",
+    return [*_crawl_inputs(url, opts), "-js-crawl", "-jsluice", "-kb-endpoints",
             "-depth", "2", "-concurrency", "5", "-parallelism", "1",
             "-max-domain-pages", str(_KATANA_MAX_DOMAIN_PAGES),
             "-max-response-size", str(_KATANA_MAX_RESPONSE_BYTES),
@@ -543,7 +597,7 @@ def _tmpl_katana_headless(url: str, opts: dict[str, Any]) -> list[str]:
     # endpoints. -no-sandbox is required to run Chromium as the container's user; the
     # page is untrusted content, but it is the same content the scanner already
     # fetches, and egress stays pinned by the proxy build_scanner_argv attaches.
-    return ["-u", url, "-headless", "-no-sandbox",
+    return [*_crawl_inputs(url, opts), "-headless", "-no-sandbox",
             "-system-chrome-path", _SYSTEM_CHROME_PATH,
             "-headless-options", _BROWSER_HEADLESS_OPTIONS,
             "-xhr-extraction", "-js-crawl", "-jsluice", "-kb-endpoints",
@@ -1441,7 +1495,8 @@ def build_enforced_scanner_plan(
         rate = max(1, min(_KATANA_MAX_RATE_PER_SECOND, (http - 1) // max(1, duration)))
         _replace_argv_value(argv, "-rate-limit", rate)
         _replace_argv_value(argv, "-concurrency", rate)
-        _replace_argv_value(argv, "-crawl-duration", f"{duration}s")
+        inputs, per_input = _fit_crawl_inputs(argv, duration, scanner=scanner)
+        _replace_argv_value(argv, "-crawl-duration", f"{per_input}s")
         timeout_seconds = duration + shutdown_grace
         timeout_ms = timeout_seconds * 1_000
         # One initial token plus the rate for each elapsed second.
@@ -1455,6 +1510,7 @@ def build_enforced_scanner_plan(
             "startup_burst": 1, "redirects": 0, "form_fill": False,
             "depth": 2, "concurrency": rate,
             "shutdown_grace_seconds": shutdown_grace,
+            **({"inputs": inputs, "input_duration_seconds": per_input} if inputs > 1 else {}),
         }
     elif scanner == "katana_headless":
         http = int(reservation.get("http_requests") or 0)
@@ -1498,7 +1554,8 @@ def build_enforced_scanner_plan(
             raise AgentToolError(
                 "headless crawl requires a reservation covering one bounded second"
             )
-        _replace_argv_value(argv, "-crawl-duration", f"{duration}s")
+        inputs, per_input = _fit_crawl_inputs(argv, duration, scanner=scanner)
+        _replace_argv_value(argv, "-crawl-duration", f"{per_input}s")
         timeout_seconds = duration + shutdown_grace
         timeout_ms = timeout_seconds * 1_000
         hard = {
@@ -1513,6 +1570,7 @@ def build_enforced_scanner_plan(
             "shutdown_grace_seconds": shutdown_grace,
             "browser": "system_chromium",
             "browser_profile_seeded": bool(chrome_data_dir),
+            **({"inputs": inputs, "input_duration_seconds": per_input} if inputs > 1 else {}),
         }
     elif scanner == "ffuf":
         wordlist_path = str(runtime.get("ffuf_wordlist") or "")

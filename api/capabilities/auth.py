@@ -19,8 +19,10 @@ from runtime.models import TargetBinding
 
 try:
     from scanner_tools.url_redaction import redact_path
+    from scanner_tools.unsafe_actions import path_may_change_state
 except ModuleNotFoundError:
     from scanner.scanner_tools.url_redaction import redact_path
+    from scanner.scanner_tools.unsafe_actions import path_may_change_state
 
 
 SESSION_AUTH_KINDS = frozenset({
@@ -210,6 +212,44 @@ def _validate_material(credential: TargetBoundSessionCredential) -> None:
         raise SessionCredentialContractError("session credential version is invalid")
     if credential.profile_id and credential.profile_version < 1:
         raise SessionCredentialContractError("session credential version is invalid")
+
+
+_LANDING_PATH = re.compile(r"/(?!/)[A-Za-z0-9\-._~!$&'()*+;=:@%/]{0,2047}")
+
+
+def _landing_path(response: WorkerPrivateHTTPResponse, *, origin: str) -> str | None:
+    """The path a successful sign-in redirected to, when it is a plain page of the same origin.
+
+    A signed-in area is often linked from nowhere the target's root reaches; the page the sign-in
+    lands on is where a session-carrying crawl starts it (E1-N3). Only the path is kept, never a
+    query; a path on another origin, one naming an action, or one carrying a token-like segment
+    or redacted material is not recorded.
+    """
+    if response.status_code not in _SUCCESS_REDIRECTS:
+        return None
+    location = next((value for name, value in response.headers().items()
+                     if str(name).lower() == "location"), None)
+    if not location:
+        return None
+    try:
+        resolved = urllib.parse.urlsplit(urllib.parse.urljoin(
+            response.final_url or origin.rstrip("/") + "/", str(location),
+        ))
+        resolved_origin = urllib.parse.urlunsplit((
+            resolved.scheme.lower(), resolved.netloc.lower(), "", "", "",
+        ))
+    except ValueError:
+        return None
+    if _origin_key(resolved_origin) != _origin_key(origin) or resolved.username is not None:
+        return None
+    path = resolved.path or "/"
+    if (
+        not _LANDING_PATH.fullmatch(path)
+        or redact_path(path) != path
+        or path_may_change_state(path)
+    ):
+        return None
+    return path
 
 
 def _endpoint_args(
@@ -644,6 +684,11 @@ async def establish_target_bound_http_session(
             request_count=request_count,
             reason=None,
         )
+        landing = _landing_path(
+            latest, origin=action_origin if credential.auth_kind == "form_login" else origin,
+        )
+        if landing:
+            observation["landing_path"] = landing
         expires_at, refresh_after = _session_timing(
             latest, now=established_at,
         )
