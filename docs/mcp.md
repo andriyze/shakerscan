@@ -159,7 +159,7 @@ A capability runs synchronously on the engine and can take minutes (a crawl, con
 When its answer is lost -- the adapter's own request timeout, or a gateway's 502/503/504 -- the
 adapter replays the same key and unchanged input, which the engine answers with the action's
 current state without starting it again, until the action is final or
-`SHAKERSCAN_MCP_ACTION_WAIT_SECONDS` (default 900, at most 3600) passes; only then does it report
+`SHAKERSCAN_MCP_ACTION_WAIT_SECONDS` (default 120, at most 3600) passes; only then does it report
 the unknown outcome and its recovery identity. `shakerscan hunt call` does the same, bounded by
 `SHAKERSCAN_HUNT_ACTION_WAIT_SECONDS`. The adapter classifies by the HTTP status it received, never
 by the text of the reason. A definite refusal (a 4xx other than 408, 425 and 429) is never replayed
@@ -189,15 +189,21 @@ The capability request may run as long as the server's wall time for it
 (`budget_cost.tool_wall_seconds` in the Hunt manifest) plus a margin, never only the adapter's
 20-second request timeout. MCP clients usually end a request after 60 seconds, so the adapter never outlives it: a
 client that sent a progress token receives progress notifications every 10 seconds while the
-action runs (clients that reset their timeout on progress, such as OpenCode, keep waiting); any
-other client gets an answer within `SHAKERSCAN_MCP_CALL_SECONDS` (default 45, at most 55). The
+action runs (clients that reset their timeout on progress, such as OpenCode, keep waiting), for at
+most `SHAKERSCAN_MCP_ACTION_WAIT_SECONDS` (default 120); any other client gets an answer within
+`SHAKERSCAN_MCP_CALL_SECONDS` (default 45, at most 55). The bound matters because a client keeps
+the agent's step open while any of its calls runs, and OpenCode starts nothing else meanwhile: a
+verifier that runs for twenty minutes (`sqli.verify`) answers `outcome: "running"` after two, and
+the agent works on and collects it later. A crawl or content discovery still settles within. The
 engine answers the first request only when the action is done, so that request ends 10 seconds
 before the call's wait does, and a replay of the same key learns the recorded action's state. An
 action still running then is returned as a normal result with `outcome: "running"` and its
 `mcp_idempotency_key`, and the `continue` text names that key: calling the tool again with the same
 key and unchanged input collects the result, because the engine replays the recorded action and
-never runs it twice. When no answer arrives at all, the error message itself names the key to call
-again with.
+never runs it twice. `shakerscan_hunt_get` lists, as `mcp_uncollected_actions`, each action this
+adapter answered `outcome: "running"` for that no later call has collected (at most 20, each with
+its capability, key and input, or the input's digest when it is over 2 KB). When no answer arrives
+at all, the error message itself names the key to call again with.
 The runtime still revalidates target binding, approval, budgets, evidence, and proof contracts.
 Catalog/contract drift, redirects, oversized responses, unavailable APIs, and unexpected dispatch
 results fail closed. A redirect names the origin it points at and how to connect there (usually an

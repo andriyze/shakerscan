@@ -60,10 +60,18 @@ SUPPORTED_PROTOCOLS = ("2025-06-18", "2025-03-26", "2024-11-05")
 DEFAULT_API_URL = "http://127.0.0.1:8080"
 DEFAULT_TIMEOUT_SECONDS = 20.0
 # A Hunt capability runs synchronously inside its request and can take minutes (a crawl, content
-# discovery); a proxy or this client's own timeout may end the wait first. The engine answers a
-# replay of the same key and input with the action's current state, so an unknown outcome is
-# settled by replaying until the action is no longer in flight, within this bound.
-DEFAULT_ACTION_WAIT_SECONDS = 900.0
+# discovery, a verifier); a proxy or this client's own timeout may end the wait first. The engine
+# answers a replay of the same key and input with the action's current state, so an unknown
+# outcome is settled by replaying until the action is no longer in flight, within this bound.
+# It is also the longest one call holds a client that sent a progress token: an MCP client keeps
+# the agent's step open while any of its calls runs (OpenCode starts nothing else meanwhile), so a
+# verifier that runs for twenty minutes answers outcome "running" with its key after this long,
+# and the agent works on and collects it later. A crawl or content discovery still settles within.
+DEFAULT_ACTION_WAIT_SECONDS = 120.0
+# At most this many actions answered "running" and not yet collected are listed by
+# shakerscan_hunt_get, each with the input it was called with up to this size.
+MAX_UNCOLLECTED_ACTIONS = 20
+MAX_UNCOLLECTED_INPUT_BYTES = 2_048
 ACTION_POLL_SECONDS = 5.0
 # MCP clients commonly end a request after 60 s (the MCP SDK default; OpenCode; Codex). A client
 # that sent no progress token cannot be kept waiting, so its call returns outcome "running" with
@@ -517,9 +525,11 @@ HUNT_TOOLS: tuple[HuntMCPTool, ...] = (
         "Execute one capability from the Hunt's server-returned manifest. Always send hunt_id, "
         "capability_name and input, with the capability's own fields inside input (never at the "
         "top level). Example: " + CAPABILITY_CALL_EXAMPLE + ". A long capability "
-        "(content discovery, port discovery) may answer outcome=running with mcp_idempotency_key: "
-        "call again with the same idempotency_key and unchanged input to collect the result; the "
-        "server replays the recorded action and never runs it twice.",
+        "(sqli.verify, xss.verify, content or port discovery) may answer outcome=running with "
+        "mcp_idempotency_key: continue other work, then call again with the same idempotency_key "
+        "and unchanged input to collect the result; the server replays the recorded action and "
+        "never runs it twice. shakerscan_hunt_get lists the running actions not yet collected "
+        "(mcp_uncollected_actions).",
         {
             "hunt_id": {"type": "string", "format": "uuid",
                         "description": "The hunt_id shakerscan_hunt_start returned."},
@@ -1835,6 +1845,39 @@ class ArsenalClient:
         self.timeout_seconds = max(1.0, min(float(timeout_seconds), 60.0))
         self.max_response_bytes = max(1_024, min(int(max_response_bytes), MAX_RESPONSE_BYTES))
         self.opener = urllib.request.build_opener(_NoRedirect())
+        # Actions this adapter answered "running" for, by (hunt_id, idempotency_key), until a
+        # call with the same key collects them. Calls run concurrently, hence the lock.
+        self._uncollected: dict[tuple[str, str], dict[str, Any]] = {}
+        self._uncollected_lock = threading.Lock()
+
+    def _note_capability_answer(
+        self, hunt_id: str, capability_name: str, payload: Mapping[str, Any], result: Mapping[str, Any],
+    ) -> None:
+        """Remember an action answered "running" until a call with its key collects it."""
+        key = (str(hunt_id), str(payload.get("idempotency_key") or ""))
+        with self._uncollected_lock:
+            if not _in_flight(result):
+                self._uncollected.pop(key, None)
+                return
+            capability_input = payload.get("input") or {}
+            encoded = json.dumps(capability_input, sort_keys=True, separators=(",", ":"), default=str)
+            action = result.get("action_result") if isinstance(result.get("action_result"), Mapping) else {}
+            self._uncollected.pop(key, None)
+            self._uncollected[key] = {
+                "capability_name": capability_name,
+                "idempotency_key": key[1],
+                "action_id": result.get("action_id") or action.get("action_id"),
+                **({"input": capability_input} if len(encoded) <= MAX_UNCOLLECTED_INPUT_BYTES else {
+                    "input_sha256": hashlib.sha256(encoded.encode()).hexdigest(),
+                    "input_omitted": "over 2 KB: call again with the input you sent",
+                }),
+            }
+            while len(self._uncollected) > MAX_UNCOLLECTED_ACTIONS:
+                self._uncollected.pop(next(iter(self._uncollected)))
+
+    def uncollected_actions(self, hunt_id: str) -> list[dict[str, Any]]:
+        with self._uncollected_lock:
+            return [dict(item) for (hunt, _key), item in self._uncollected.items() if hunt == str(hunt_id)]
 
     def request_json(self, method: str, path: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
         body = None if payload is None else json.dumps(payload, separators=(",", ":")).encode("utf-8")
@@ -2443,6 +2486,7 @@ class ArsenalClient:
                 }
                 result = {**result, **identity_keys}
                 if not streaming_ssh:
+                    self._note_capability_answer(hunt_id, capability_name, payload, result)
                     if capability_view == "full" and result.get("idempotent_replay") is True and not _in_flight(result):
                         # Every page comes from the same source, the server's record of the action,
                         # in a projection that does not change between calls.
@@ -2487,6 +2531,13 @@ class ArsenalClient:
                 }
             if detail_capability is not None:
                 result = {**result, "capability": entry}
+            if name == "shakerscan_hunt_get" and page == 1 and isinstance(result, dict):
+                uncollected = self.uncollected_actions(str(arguments.get("hunt_id") or ""))
+                if uncollected:
+                    result = {**result, "mcp_uncollected_actions": uncollected, "mcp_uncollected_note": (
+                        "Each of these answered outcome=running and has not been collected: call "
+                        "shakerscan_hunt_capability with its capability_name, input and "
+                        "idempotency_key to read its result. Nothing runs twice.")}
             result = _bounded_answer(result, tool=name)
             return {
                 "content": [{"type": "text", "text": json.dumps(result, sort_keys=True, default=str)}],
