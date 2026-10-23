@@ -145,3 +145,25 @@ def test_the_documented_count_of_largest_candidates_matches_the_bound():
     for note in (root / "docs/hunt-recording-and-budgets.md", root / "api/hunt/candidate_bytes.py"):
         text = " ".join(note.read_text(encoding="utf-8").split())
         assert f"About {fits // 10 * 10:,}" in text, (note, fits)
+
+
+@pytest.mark.asyncio
+async def test_a_boundary_draft_past_the_byte_bound_is_refused(monkeypatch):
+    action = str(uuid.uuid4())
+    store = Store(candidate_bytes.MAX_CANDIDATE_BYTES_PER_HUNT, action)
+    upserts, _ = _patch(monkeypatch, store)
+    draft = {"draft_id": "a" * 64, "source_binding": {"origin": "https://app.test"},
+             "candidate_request": {"family": "data_exposure", "locus": {"path": "/x"}, "title": "t",
+                                   "claim": "c", "severity": "info", "evidence_refs": [action]},
+             "evidence_refs_total": 1, "evidence_refs_truncated": False, "provenance_omitted": 0}
+
+    async def discovery(_conn, *, run):
+        return {"drafts": [draft]}
+    monkeypatch.setattr(router, "discover_hunt_boundaries", discovery)
+    with pytest.raises(router.HTTPException) as refused:
+        await router.prepare_hunt_boundary_discovery(HUNT, "a" * 64)
+    assert refused.value.status_code == 422 and refused.value.detail["error"] == "candidate_bytes_limit"
+    assert upserts == [] and store.writes == []
+    store.stored = 0
+    prepared = await router.prepare_hunt_boundary_discovery(HUNT, "a" * 64)
+    assert prepared["candidate"]["outcome"] == "inserted" and len(upserts) == 1

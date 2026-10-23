@@ -373,6 +373,9 @@ async def test_server_owned_prepare_recomputes_draft_and_persists_source_binding
         async def execute(self, query, *args):
             self.executed.append((query, args))
             return "UPDATE 1"
+        async def fetchval(self, query, *args):
+            assert "investigation_candidate_observations" in query  # the per-Hunt byte bound
+            return 0
 
     store = PreparedStore()
     run = {
@@ -437,6 +440,10 @@ async def test_server_owned_prepare_reports_evidence_beyond_the_candidate_bound(
 
         async def execute(self, *_args):
             return "UPDATE 1"
+
+        async def fetchval(self, query, *_args):
+            assert "investigation_candidate_observations" in query  # the per-Hunt byte bound
+            return 0
 
     async def lookup(_conn, _hunt_id, for_update=False):
         return {**RUN, "status": "active", "objective": "test",
