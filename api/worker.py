@@ -204,7 +204,6 @@ from scan.capability_execution import (
     scan_network_capability_allocation,
     scan_parameterized_execution_candidates,
     scan_sqli_verification_capability_allocation,
-    scan_template_capability_allocation,
     scan_tls_capability_allocation,
     tls_legacy_probes_affordable,
     scan_web_crawl_capability_allocation,
@@ -9460,27 +9459,6 @@ async def _execute_scan_auth_session_capability(
     )
 
 
-def _skipped_scan_template_summary(
-    reason: str, *, capability_name: str = "templates.scan",
-) -> dict[str, Any]:
-    return {
-        "schema_version": "canonical-scan-template-execution/v1",
-        "capability_name": capability_name,
-        "enabled": False,
-        "status": "skipped",
-        "reason": str(reason)[:200],
-        "observations": [],
-        "observation_count": 0,
-        "partial": False,
-        "timed_out": False,
-        "errors": [],
-        "budget_consumed": {},
-        "receipt": {},
-        "durable_budget_settled": True,
-        "idempotent_redelivery": False,
-    }
-
-
 def _skipped_scan_tls_summary(reason: str) -> dict[str, Any]:
     return {
         "schema_version": "canonical-scan-tls-inspection-execution/v1",
@@ -10157,45 +10135,6 @@ async def _execute_scan_tls_capability(
         stored,
         idempotent_redelivery=idempotent_redelivery,
     )
-
-
-def _scan_template_summary_from_stored(
-    stored: Any,
-    *,
-    idempotent_redelivery: bool,
-    capability_name: str = "templates.scan",
-) -> dict[str, Any]:
-    receipt = dict(stored.receipt or {})
-    receipt_status = str(receipt.get("status") or "failed").strip().lower()
-    status = {
-        "succeeded": "success",
-        "success": "success",
-        "partial": "partial",
-        "blocked": "blocked",
-        "cancelled": "cancelled",
-    }.get(receipt_status, "failed")
-    observations = [
-        dict(item)
-        for item in receipt.get("observations") or []
-        if isinstance(item, Mapping)
-        and str(item.get("kind") or "") == "template_match"
-    ][:200]
-    return {
-        "schema_version": "canonical-scan-template-execution/v1",
-        "capability_name": capability_name,
-        "enabled": True,
-        "status": status,
-        "reason": None,
-        "observations": observations,
-        "observation_count": len(observations),
-        "partial": bool(receipt.get("partial")),
-        "timed_out": bool(receipt.get("timed_out")),
-        "errors": list(receipt.get("errors") or [])[:20],
-        "budget_consumed": dict(stored.record.actual),
-        "receipt": _scan_capability_receipt_reference(receipt),
-        "durable_budget_settled": bool(stored.record.terminal),
-        "idempotent_redelivery": bool(idempotent_redelivery),
-    }
 
 
 def _skipped_scan_web_probe_summary(reason: str) -> dict[str, Any]:
@@ -11183,119 +11122,6 @@ async def _execute_scan_sqli_verification_capability(
         stored,
         target_url=execution_target,
         idempotent_redelivery=idempotent_redelivery,
-    )
-
-
-async def _execute_scan_template_capability(
-    target_url: str,
-    options: Mapping[str, Any],
-    *,
-    scan_id: str,
-    job_id: str,
-    canonical_action: Any | None = None,
-    canonical_template_options: Mapping[str, Any] | None = None,
-) -> dict[str, Any]:
-    """Run canonical Nuclei once, outside the compatibility scanner process."""
-    capability_name = (
-        str(canonical_action.capability_name)
-        if canonical_action is not None else "templates.scan"
-    )
-    passive = capability_name == "templates.passive_scan"
-    family_name = "nuclei_passive" if passive else "nuclei_active"
-
-    def skipped(reason: str) -> dict[str, Any]:
-        return _skipped_scan_template_summary(
-            reason, capability_name=capability_name,
-        )
-
-    _normalized, admission = prepare_worker_dispatch(options)
-    if not admission.canonical or admission.plan is None:
-        return skipped("legacy_scan")
-    execution = build_native_scan_execution(admission.plan, options)
-    policy = admission.plan.policy
-    if execution.discovery_manifest_only:
-        return skipped("discovery_manifest_only")
-    if execution.skip_global_checks:
-        return skipped("global_checks_skipped")
-    if execution.focused_endpoints_only or execution.zero_rediscovery:
-        return skipped("assigned_endpoint_scope")
-    if execution.focused_family and execution.focused_family != family_name:
-        return skipped("focused_other_family")
-    include = set(policy.include_families)
-    exclude = set(policy.exclude_families)
-    if family_name in exclude:
-        return skipped("policy_excluded")
-    if include and family_name not in include:
-        return skipped("policy_not_included")
-    if not passive and not policy.active_testing:
-        return skipped("active_testing_not_authorized")
-    if not passive and not policy.approval_receipt_id:
-        return skipped("active_approval_missing")
-    allocation = (
-        dict(canonical_action.requested_budget)
-        if passive and canonical_action is not None
-        else scan_template_capability_allocation(
-            execution.payload()["execution_budget"]
-        )
-    )
-    if allocation is None:
-        return skipped("insufficient_fixed_profile_budget")
-
-    target = execution.target_binding
-    execution_target = scan_external_execution_target(
-        target_url, target=target,
-    )
-    parsed_target = urllib.parse.urlsplit(execution_target)
-    registered_target = urllib.parse.urlunsplit((
-        parsed_target.scheme, parsed_target.netloc, "", "", "",
-    ))
-    authorized_addresses = list(target.allowed_addresses)
-    pinned_address = agent_tools.validate_pinned_scanner_address(
-        None, authorized_addresses,
-    )
-    principal = resolve_scan_http_principal(
-        options, lane="primary", capability_name=capability_name,
-    )
-    template_options = dict(canonical_template_options or {})
-    if canonical_action is not None and not template_options:
-        raise ScanCapabilityContractError(
-            "canonical Nuclei action requires immutable template options"
-        )
-    capability_args = dict(principal.capability_args())
-    capability_args.update(template_options)
-    stored, idempotent_redelivery = await _execute_reserved_scan_capability(
-        admission=admission,
-        execution=execution,
-        scan_id=scan_id,
-        job_id=job_id,
-        capability_name=capability_name,
-        capability_args=capability_args,
-        action_id=(canonical_action.action_id if canonical_action is not None
-                   else "deterministic_baseline.templates.scan"),
-        target_binding=target,
-        reservation_limits=allocation,
-        scanner_process_payload={
-            "job_id": f"{job_id}:{capability_name}",
-            "tool_name": "nuclei",
-            "execution_target": execution_target,
-            "registered_target": registered_target,
-            "scanner_options": template_options,
-            "trusted_headers": principal.headers(),
-            "timeout_ms": int(allocation["tool_wall_seconds"]) * 1_000,
-            "pinned_address": pinned_address,
-            "authorized_addresses": authorized_addresses,
-            # Scan does not grant an additional OOB destination. Nuclei's fixed
-            # template therefore retains -no-interactsh for this capability.
-            "oob_interactsh_server": None,
-            "oob_interactsh_token": None,
-        },
-        scanner_process_runner=_execute_agent_scanner_process,
-        canonical_action=canonical_action,
-    )
-    return _scan_template_summary_from_stored(
-        stored,
-        idempotent_redelivery=idempotent_redelivery,
-        capability_name=capability_name,
     )
 
 
