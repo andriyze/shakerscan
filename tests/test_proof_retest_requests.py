@@ -409,6 +409,30 @@ def test_the_worker_retests_a_proven_injection_with_the_check_that_proved_it(mon
     assert fixed["has_ai_step"] is False and sent
 
 
+@pytest.mark.parametrize("row", [_sqli(), _nosqli()], ids=["sqli", "nosqli"])
+def test_a_proven_injection_whose_retest_requests_get_no_answer_is_inconclusive(row):
+    """A target that answers nothing reproduces nothing, and that is no evidence of a fix."""
+    from worker_handlers.proof_replay import run_proof_retest
+
+    sent = []
+
+    async def unreachable(url, **_kwargs):
+        sent.append(url)
+        return {"status_code": 0, "headers": {}, "body": "", "final_url": url, "elapsed_ms": 3,
+                "error": "curl: (7) Failed to connect to shop.fixture.invalid port 80"}
+
+    poe = types.SimpleNamespace(fetch_with_capture=unreachable, start_scan_session=lambda *_a, **_k: None,
+                                end_scan_session=lambda *_a, **_k: None)
+    verification = _verification(row, "http://shop.fixture.invalid")
+    result = asyncio.run(run_proof_retest(
+        verification, infer_retest_inputs(verification), poe=poe, replay_commands=[], ladder=[],
+        cancelled=lambda: False))
+    assert sent
+    assert (result["verdict"], result["result_status"]) == ("inconclusive", "inconclusive")
+    assert "did not all get an answer" in result["verdict_reason"]
+    assert result["proof"]["errors"]
+
+
 def test_the_worker_sends_nothing_for_a_proven_finding_it_cannot_rebuild(monkeypatch):
     import worker
     from scanner_tools import proof_of_exploit
