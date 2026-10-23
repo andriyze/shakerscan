@@ -98,7 +98,8 @@ class Env:
     def __init__(self, pool, conn, schema):
         self.pool, self.conn, self.schema = pool, conn, schema
 
-    async def hunt(self, *, budget=None, used=None, policy=None, status="active", profile="fast"):
+    async def hunt(self, *, budget=None, used=None, policy=None, status="active", profile="fast",
+                   capabilities=()):
         target = uuid.uuid4()
         await self.conn.execute("INSERT INTO targets(id,url,name) VALUES($1,$2,'fixture')", target, TARGET_URL)
         resolved = dict(vars(HUNT_BUDGET_PROFILES[profile]))
@@ -106,7 +107,7 @@ class Env:
                     "max_oob_interactions", "max_device_fragility_points", "max_active_actions"):
             resolved[key] = 0  # a passive web Hunt, as the start contract resolves it
         resolved.update(budget or {})
-        allowed = ["http.request", "web.probe", "artifact.inspect"]
+        allowed = ["http.request", "web.probe", "artifact.inspect", *capabilities]
         saved_policy = {
             "schema_version": "hunt-policy/v2", "target_kind": "web", "active_testing": False,
             "credential_access": False, "allow_state_changing_http": False, "network_discovery": False,
@@ -363,7 +364,7 @@ def test_other_actions_continue_while_one_waits_and_the_hunt_clock_runs(env):
 def test_a_used_up_safety_ceiling_refuses_what_needs_it_and_the_hunt_keeps_working(env):
     """Before 2.11.1 a used-up TCP port ceiling stopped the Hunt and its next read-only request."""
     hunt = run(env, env.hunt(budget={"max_tcp_ports": 10}, used={"tcp_ports_attempted": 10},
-                             policy={"allowed_capabilities": ["http.request", "tls.inspect"]}))
+                             capabilities=["tls.inspect"]))
     with pytest.raises(HTTPException) as refused:
         run(env, env.call(hunt, "tls-0001", name="tls.inspect", values={}))
     assert _detail(refused)["error"] == "budget_exhausted:tcp_ports_attempted"
