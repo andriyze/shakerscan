@@ -330,3 +330,23 @@ def test_a_full_manifest_keeps_the_variant_it_met_first_when_two_tie():
     assert body_count == 2 and len(kept) == 1
     assert kept[0]["body_field_names"] == posts[0]["body_field_names"]
     assert limited.status == "partial" and limited.reason_code == "candidate_limit_reached"
+
+
+def test_a_better_candidate_met_later_evicts_the_variant_met_last():
+    """A full manifest that meets a better candidate drops the tied variant it met last."""
+    declared = _endpoint(content_type="application/x-www-form-urlencoded",
+                         body_field_names=["password", "username"])
+    widget = _endpoint(content_type="application/x-www-form-urlencoded",
+                       body_field_names=["password", "remember", "username"])
+    better = _endpoint(method="GET", canonical_path="/items", query_parameter_names=["id"],
+                       content_type=None, body_field_names=[])
+    every = build_candidate_manifest(_manifest([declared, widget, better]),
+                                     source_action_ids=("discover.crawl",), maximum=3,
+                                     allow_state_changing_http=True)
+    variants = [entry for entry in every.entries if entry["body_field_names"]]
+    assert len(variants) == 2 and len({(entry["candidate_id"], entry["score"]) for entry in variants}) == 1
+    assert max(entry["score"] for entry in every.entries) > variants[0]["score"]
+    kept = build_candidate_manifest(_manifest([declared, widget, better]),
+                                    source_action_ids=("discover.crawl",), maximum=2,
+                                    allow_state_changing_http=True)
+    assert [tuple(entry["body_field_names"]) for entry in kept.entries] == [(), ("password", "username")]
