@@ -53,9 +53,11 @@ through an AI coding agent (Claude Code, Codex, OpenCode, Pi) using plain-Englis
 It covers two complementary pillars:
 
 - **DAST** — actively probes a running website or API for real vulnerabilities the way an attacker
-  would: injection (XSS, SQLi), broken access control (BOLA/IDOR), exposed secrets and files,
-  misconfigured TLS/headers/CORS, SSRF/LFI/RCE, weak auth/session/JWT, and more — then grades what it
-  finds and correlates findings into attack chains.
+  would: injection (XSS, SQL and NoSQL injection), broken access control (BOLA and function-level
+  authorization, with credentials), exposed secrets and files, misconfigured TLS/headers/CORS,
+  insecure session cookies, and known product issues through reviewed Nuclei templates — then grades
+  what it finds and correlates findings into attack chains. A Scan does not test SSRF, command
+  injection, path traversal, SSTI, XXE or JWT; see the [OWASP coverage matrix](owasp-coverage-matrix.md).
 - **AI red teaming** — attacks AI features the same way: chatbots, RAG endpoints, agents, and MCP
   tools are probed for prompt injection, sensitive-data disclosure, unsafe tool use, approval bypass,
   and RAG/MCP boundary failures. A separate **Model Intake** capability statically vets model
@@ -457,10 +459,13 @@ contract.
 
 V2 exposes only checks backed by a registered semantic capability and deterministic output/evidence
 contract. The current Scan family surface is intentionally narrower than the historical module
-inventory: passive reviewed templates plus bounded XSS, SQLi, and two-principal BOLA verification.
-The modules below describe available detector implementations; modules not yet wired to the
-canonical action graph remain compatibility/internal implementation surface, not advertised Scan
-coverage.
+inventory. A Scan runs its eleven families (§3) and the baseline checks of headers, session cookies,
+CORS, TLS and DNS. For the checks in this section that means XSS (with the open-redirect probe), SQL
+injection, NoSQL operator injection, two-principal BOLA, function-level authorization, GraphQL
+limits, verified exposure checks and the reviewed Nuclei templates. The modules below describe
+available detector implementations; modules not yet wired to the canonical action graph remain
+compatibility/internal implementation surface, not advertised Scan coverage. The
+[OWASP coverage matrix](owasp-coverage-matrix.md) maps what a Scan runs.
 
 ### Active injection
 
@@ -497,11 +502,12 @@ coverage.
   sqlmap process is still bounded by its own hold, and the request gate, not the wall, keeps
   concurrency from adding load. The receipt records the bound, the peak and the rate ceiling
   (`candidate_concurrency`).
-- **Other injection** (`injection_extra_checks.py`): SSI/ESI, prototype pollution, CSV/formula
-  injection, RFI, LDAP/XPath, XXE/XML injection.
-- **SSRF / command injection / LFI / RCE**: high-risk active families, gated behind non-safe exploit
-  level and parameterized endpoints; SSRF includes cloud-metadata and Gopher payloads
-  (`gopher_payloads.py`) with OOB verification.
+- **Other injection** (`injection_extra_checks.py`, `active_checks.py`): SSI/ESI, prototype
+  pollution, CSV/formula injection, RFI, LDAP/XPath, SSTI, XXE/XML injection. Detector modules only:
+  no Scan family runs them.
+- **SSRF / command injection / LFI / RCE** (`active_checks.py`, `gopher_payloads.py`): detector
+  modules only. The `ssrf`, `lfi` and `rce` (alias `command_injection`) families are registered as
+  planned and a Scan refuses them, so no Scan family tests for these classes.
 
 ### Access control
 
@@ -1445,7 +1451,9 @@ vendors, AI surfaces, MCP tools, model artifacts, scans, and findings, with asse
 
 **Verification & retest**: deterministic provers exist for xss, sqli, ssrf, path_traversal,
 open_redirect, cors, command_injection, ssti, xxe, jwt, idor, bola, and exposed_file; others can be
-replayed by the AI tier. Retests are slot-limited (`RETEST_MAX_PARALLEL`) with a watchdog and
+replayed by the AI tier. A prover retests a finding that already exists; it does not mean a Scan
+looks for that class (see the [OWASP coverage matrix](owasp-coverage-matrix.md)). Retests are
+slot-limited (`RETEST_MAX_PARALLEL`) with a watchdog and
 auto-retest-on-scan-complete policy.
 
 ---
