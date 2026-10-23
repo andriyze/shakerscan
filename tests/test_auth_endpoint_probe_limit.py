@@ -524,8 +524,39 @@ def test_a_sign_in_candidate_measures_the_targets_latency_at_the_pace_it_ran():
         assert call["delay"] >= AUTH_ENDPOINT_SECONDS_PER_REQUEST
         assert stage["delay_ms"] == round(call["delay"] * 1_000)
         assert 950 <= stage["measured_latency_ms"] <= 1_050, stages
+        # Marked, so what it measured paces this candidate only (prior_stages).
+        assert stage["paced_floor_ms"] == AUTH_ENDPOINT_SECONDS_PER_REQUEST * 1_000
     for call in sign_in[1:]:
         assert abs(call["options"]["_measured_latency_seconds"] - 1.0) <= 0.05
+
+
+def test_a_stage_paced_at_its_endpoints_floor_does_not_size_the_slices_slots():
+    """The slice sizes its concurrent slots from the target's latency; a stage paced at the sign-in
+    floor measured that one endpoint and is not reported to it. A stage of any other candidate is."""
+    from types import SimpleNamespace
+
+    from scan.sqli_stages import PriorStages, run_staged_sqli_attempt
+
+    async def run_stage(technique, budget, latency, field_name=None):
+        return SimpleNamespace(status="success", timed_out=False, observations=(), errors=(),
+                               actual_budget={"http_requests": 40, "tool_wall_seconds": 160})
+
+    async def checkpoint(_stage):
+        return None
+
+    def attempt(floor):
+        seen: list[float] = []
+        result = asyncio.run(run_staged_sqli_attempt(
+            candidate_attempt_id="a" * 64, candidate_id="c1",
+            budget={"http_requests": 900, "tool_wall_seconds": 6_000}, prior=PriorStages(),
+            own_action_id="verify.x.r01", run_stage=run_stage, checkpoint=checkpoint,
+            cancelled=lambda: False, measured=seen.append, minimum_delay_seconds=floor,
+        ))
+        assert result.status == "success"
+        return seen
+
+    assert attempt(float(AUTH_ENDPOINT_SECONDS_PER_REQUEST)) == []
+    assert len(attempt(None)) == 4
 
 
 def test_a_sign_in_candidates_latency_is_not_the_targets():
