@@ -86,11 +86,17 @@ the target's metadata opt-out skips it. The outcome is reported in `final_debrie
 - A path is left out when it has a redaction marker; a character other than letters, digits and
   `/ _ . ~ -` (quotes, `$( )`, `;`, `=`, encoded values); a dot segment; a token-like or
   letter-and-digit code segment; a letters-only capability token (both cases and 12 or more
-  letters, or 8 or more not shaped like a camelCase word, such as `ZXhhbXBsZQ`); a word that names
-  a credential (token, pin, otp, verify...); or a word that names an action, whether the
-  crawler's (log out, delete, reset...), a device or physical control (reboot, firmware, on, off,
-  open, disarm, format, move, wake...) or a web state change (apply, checkout, transfer, ban,
-  purge, clear, stop, refund, redeem, claim, like, migrate, merge, resend, empty...).
+  letters, or 8 or more not shaped like a camelCase word, such as `ZXhhbXBsZQ`; upper case only and
+  10 or more letters; lower case only, 16 or more letters and five consonants in a row or fewer
+  than a quarter vowels, `y` counting as a vowel; or dotted or dashed groups that read as one, such
+  as `AbCd.EfGh.IjKl`); a word that names a credential (token, pin, otp, verify...); or a word that
+  names an action, whether the crawler's (log out, delete, reset...), a device or physical control
+  (reboot, firmware, on, off, open, disarm, format, move, wake, cycle, high, low, gpio...), a web
+  state change (apply, checkout, transfer, ban, purge, clear, stop, refund, redeem, claim, like,
+  migrate, merge, resend, empty, seed, renew, payout...) or a key or identity change (rotate,
+  regenerate, impersonate...). A number does not hide one (`reboot2`), and a word that starts or
+  ends with a distinctive action stem counts as one (`reboots`, `rebootnow`, `hardreset`,
+  `factoryreset`, `selfdestruct`, `deleteall`).
 - These rules leave out what they recognise; no word list knows every action a target names. The
   proposal therefore describes its steps as completed steps that can be replayed, which a person
   reviews before accepting, not as read-only.

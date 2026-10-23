@@ -45,6 +45,17 @@ REUSABLE = [
     ("http.request", {"method": "GET", "path": "/api/getUserRole"}),  # 11 letters, camelCase
     ("http.request", {"method": "GET", "path": "/api/Reports/Monthly"}),
     ("http.request", {"method": "GET", "path": "/status/online"}),
+    # Route words that contain no action, of one case and long, compounded or grouped.
+    ("http.request", {"method": "GET", "path": "/api/healthchecks"}),
+    ("http.request", {"method": "GET", "path": "/api/accountsettings"}),
+    ("http.request", {"method": "GET", "path": "/api/notificationsettings"}),
+    ("http.request", {"method": "GET", "path": "/api/subscriptions"}),
+    ("http.request", {"method": "GET", "path": "/api/information"}),
+    ("http.request", {"method": "GET", "path": "/api/orders/amount"}),
+    ("http.request", {"method": "GET", "path": "/artifactory/api/repositories"}),
+    ("http.request", {"method": "GET", "path": "/README"}),
+    ("javascript.analyze", {"path": "/static/js/MainLayout.js"}),
+    ("javascript.analyze", {"path": "/static/js/main.min.js"}),
 ]
 
 # GETs that act: each names an action, so none is proposed for reuse.
@@ -52,13 +63,20 @@ ACTING_HTTP_PATHS = (
     "/admin/users/5/ban", "/api/cache/purge", "/api/cache/flush", "/admin/queue/clear", "/api/jobs/5/stop",
     "/api/orders/42/refund", "/coupon/redeem", "/reward/claim", "/posts/9/like", "/db/migrate",
     "/pr/5/merge", "/mail/resend", "/cart/empty",
+    # Inflected, compounded or numbered action words, and acting words of their own.
+    "/api/reboots", "/api/rebootnow", "/api/reboot2", "/api/factoryreset", "/api/powercycle",
+    "/api/power/cycle", "/api/keys/rotate", "/api/gpio/17/high", "/api/output/1/low", "/api/impersonate",
+    "/api/db/seed", "/api/payout", "/api/subscription/renew", "/api/selfdestruct", "/api/users/deleteall",
+    "/api/hardreset", "/api/rebooting", "/api/forcelogout", "/api/keys/regenerate",
 )
 ACTING_DEVICE_PATHS = (
     "/relay/on", "/relay/off", "/door/open", "/alarm/disarm", "/disk/format", "/camera/ptz/move", "/wol/wake",
 )
 # Capability tokens made of letters only: mixed case and long, or base64url-shaped.
 LETTER_TOKEN_PATHS = ("/share/AbCdEfGhIjKlMnOp", "/link/AbCdEfGhIjKlMnOp", "/link/AbCdEfGhIjKl", "/p/ZXhhbXBsZQ", "/p/ZXhhbXBs",
-                      "/s/QWxhZGRpbjpvcGVu")
+                      "/s/QWxhZGRpbjpvcGVu",
+                      # One case only, or mixed case in dotted groups.
+                      "/s/qwertzuiopasdfgh", "/s/QWERTYUIOPASDF", "/s/AbCd.EfGh.IjKl", "/s/AbCd-EfGh-IjKl")
 
 NOT_REUSABLE = [
     *(("http.request", {"method": "GET", "path": path}) for path in ACTING_HTTP_PATHS + LETTER_TOKEN_PATHS),
@@ -142,7 +160,8 @@ def test_nothing_secret_or_off_host_reaches_a_proposed_recipe():
                   "api.app.test", "hunter2", "session_ref", "as_principal", "headers", "?", "reboot",
                   "restart", "shutdown", "firmware", "apply", "checkout", "transfer", "'", "$(", "..",
                   "MTIzNDU2", "3f2a9c1b", "ab12CD34", "pin", "7Hq2xK9m", "abc123def", "AbCdEf", "ZXhhbX",
-                  "QWxhZGRp", *(f'"{path}"' for path in ACTING_HTTP_PATHS + ACTING_DEVICE_PATHS)):
+                  "QWxhZGRp", "qwertz", "QWERTY", "AbCd",
+                  *(f'"{path}"' for path in ACTING_HTTP_PATHS + ACTING_DEVICE_PATHS)):
         assert value not in text, value
     assert len(steps) == len(REUSABLE) and len(evidence) == len(REUSABLE)
 

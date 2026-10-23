@@ -12,10 +12,12 @@ input, session or credential reference, or an origin other than the Hunt target'
 inputs are read as the action ledger stored them. A path is left out when it has a query, a
 redaction marker, a character outside letters, digits and ``/ _ . ~ -`` (quotes, ``$( )``,
 encoded values), a dot segment, a token-like or letter-and-digit code segment, a letters-only
-capability token (mixed case and long, or base64url-shaped), a word that names a credential
-(token, pin, otp...) or a word that names an action (log out, delete, reboot, firmware, apply,
-checkout, transfer, ban, purge, refund, redeem, migrate, merge, on, off, open...), as is any step
-whose recorded input no longer validates.
+capability token (mixed case and long, base64url-shaped, of one case and long, or dotted groups
+that read as one), a word that names a credential (token, pin, otp...) or a word that names an
+action (log out, delete, reboot, firmware, apply, checkout, transfer, ban, purge, refund, redeem,
+migrate, merge, on, off, open, rotate, renew...), including one a number, an inflection or a
+compound carries (``reboot2``, ``reboots``, ``factoryreset``), as is any step whose recorded
+input no longer validates.
 
 The word list cannot know every action a target names, so the proposal does not claim its steps
 are read-only: they are steps that completed and can be replayed, which a person reviews before
@@ -91,12 +93,34 @@ RETAINED_ACTION_WORDS = (
     # Device and physical controls.
     "on", "off", "open", "arm", "disarm", "format", "mount", "unmount", "eject", "move", "ptz",
     "pan", "tilt", "zoom", "wake", "wol", "sleep", "dial", "call", "ring", "beep", "unpair", "pair",
+    "cycle", "gpio", "high", "low", "seed", "reseed",
+    # Keys, identities, payouts and renewals.
+    "rotate", "regenerate", "rekey", "impersonate", "sudo", "elevate", "payout", "renew", "destruct",
 )
+# Action stems also recognised inside a word, inflected or compounded (``reboots``,
+# ``rebootnow``, ``hardreset``, ``selfdestruct``, ``deleteall``): long and distinctive enough
+# that ordinary route words seldom start or end with one. A stem ending in "e" also matches its
+# inflections without it (``deleting``). Nouns and stems that end ordinary words (``artifactory``,
+# ``determinate``) only start a word (``factoryreset``, ``firmwareupdate``).
+RETAINED_ACTION_STEMS = (
+    "reboot", "restart", "shutdown", "poweroff", "powercycle", "reset", "upgrade", "downgrade",
+    "rollback", "uninstall", "delete", "remove", "destroy", "destruct", "logout", "logoff", "signout",
+    "signoff", "impersonate", "revoke", "rotate", "regenerate", "payout", "withdraw", "disarm",
+    "unlock", "truncate", "purge",
+)
+RETAINED_ACTION_PREFIXES = ("factory", "firmware", "erase", "terminate")
 # Letters only, both cases, and long or not shaped like a camelCase word: a capability token
 # (``AbCdEfGhIjKlMnOp``, base64url ``ZXhhbXBsZQ``) rather than a route word (``userProfile``).
 _CAMEL_WORD = re.compile(r"[A-Za-z][a-z]*(?:[A-Z][a-z]+)*")
 _LETTER_TOKEN_MIN = 8
 _LETTER_TOKEN_LONG = 12
+# One case only: upper case and this long (``QWERTYUIOPASDF``), or lower case, this long and
+# without the vowels of a word (``qwertzuiopasdfgh``: five consonants in a row).
+_UPPER_TOKEN_MIN = 10
+_LOWER_TOKEN_MIN = 16
+_CONSONANT_RUN = re.compile(r"[b-df-hj-np-tv-xz]{5}")
+# A trailing file extension, left out when a segment's dotted groups are read as one token.
+_EXTENSION = re.compile(r"\.[a-z0-9]{1,5}$")
 # Words that name a credential or a one-time value, beyond the redaction's own labels.
 _CREDENTIAL_WORDS = frozenset({"pin", "passcode", "passwd", "pwd", "otp", "mfa", "2fa", "totp"})
 _LIMIT_ACTIONS = 2_000
@@ -127,11 +151,31 @@ def _opaque(part: str) -> bool:
 
 
 def _letter_token(text: str) -> bool:
-    """Letters only and both cases, and either long or not a camelCase word."""
-    if (len(text) < _LETTER_TOKEN_MIN or not text.isascii() or not text.isalpha()
-            or text.islower() or text.isupper()):
+    """Letters only, and shaped like a token: both cases and either long or not a camelCase word,
+    upper case only and long, or lower case only, longer and not spelled like a word."""
+    if len(text) < _LETTER_TOKEN_MIN or not text.isascii() or not text.isalpha():
         return False
+    if text.isupper():
+        return len(text) >= _UPPER_TOKEN_MIN
+    if text.islower():
+        vowels = sum(character in "aeiouy" for character in text)
+        return len(text) >= _LOWER_TOKEN_MIN and (_CONSONANT_RUN.search(text) is not None or vowels * 4 < len(text))
     return len(text) >= _LETTER_TOKEN_LONG or _CAMEL_WORD.fullmatch(text) is None
+
+
+def _grouped_token(segment: str) -> bool:
+    """A segment whose letter groups (``AbCd.EfGh.IjKl``, ``AbCd-EfGh``) read as one token, a
+    trailing file extension left out (``MainLayout.js`` is a route word and an extension)."""
+    joined = re.sub(r"[-_.~]", "", _EXTENSION.sub("", segment))
+    return _letter_token(joined)
+
+
+def _acting_word(word: str) -> bool:
+    """A word that starts or ends with an action stem (``reboots``, ``factoryreset``)."""
+    for stem in RETAINED_ACTION_STEMS + RETAINED_ACTION_PREFIXES:
+        if word.startswith(stem[:-1] if stem.endswith("e") else stem):
+            return True
+    return any(word.endswith(stem) for stem in RETAINED_ACTION_STEMS)
 
 
 def _plain_path(path: Any) -> bool:
@@ -143,13 +187,17 @@ def _plain_path(path: Any) -> bool:
     if any(segment in {"", ".", ".."} for segment in segments[:-1]) or segments[-1] in {".", ".."}:
         return False
     words = semantic_text(path).split()
+    # Letter runs, so a number does not hide an action word (``reboot2``) from the word lists.
+    letters = " ".join(re.findall(r"[a-z]+", " ".join(words)))
     return (
         redact_path(path) == path
         and not path_may_change_state(path)
-        and not contains_risky_keyword((path,), RETAINED_ACTION_WORDS)
+        and not path_may_change_state(letters)
+        and not contains_risky_keyword((letters,), RETAINED_ACTION_WORDS)
+        and not any(_acting_word(word) for word in letters.split())
         and not any(is_sensitive_label(word) or word in _CREDENTIAL_WORDS for word in words)
         and not any(_opaque(part) or _letter_token(part) for part in re.split(r"[/_.~-]", path))
-        and not any(_letter_token(segment.replace("-", "").replace("_", "")) for segment in segments)
+        and not any(_grouped_token(segment) for segment in segments)
     )
 
 
