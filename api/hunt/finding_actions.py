@@ -160,8 +160,8 @@ def _unnamed_location(target_url: str, host: str | None, base: tuple[str, str | 
 
     The evidenced service takes it, with the path its evidence names (its root when the evidence
     names several): the single evidenced service on the Hunt's host, else the inventory's own when
-    it is among them, else the one most of the evidence came from (a tie goes to the first by
-    scheme, then port). Nothing evidenced: the inventory's own location, or for a host target
+    it is among them, else the one whose evidence names the most distinct paths (a tie goes to
+    the first by scheme, then port). Nothing evidenced: the inventory's own location, or for a host target
     (``host://`` asset or device) its first frozen origin. A host with neither is refused.
     """
     paths: dict[tuple[str, str | None, int | None], set[str]] = {}

@@ -22,8 +22,8 @@ A finding's location is bound to a service the Hunt may name on its own target h
   target host takes it, with the path its evidence names (the service's root when the evidence
   names several paths): `https://example.test` with evidence only from
   `https://example.test:8443/admin` records `https://example.test:8443/admin`. Among several
-  evidenced services the inventory's own takes it when it is one of them, otherwise the one most
-  of the evidence came from (a tie goes to the first by scheme, then port). With no evidenced
+  evidenced services the inventory's own takes it when it is one of them, otherwise the one whose
+  evidence names the most distinct paths (a tie goes to the first by scheme, then port). With no evidenced
   service it takes the inventory's own location, or a `host://` asset's or device's first frozen
   origin; a host with neither is refused with a message to cite the service's evidence or give
   an absolute URL. That refusal is an input error: nothing is charged.
