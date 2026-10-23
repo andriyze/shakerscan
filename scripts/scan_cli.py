@@ -63,7 +63,8 @@ def _parser() -> argparse.ArgumentParser:
         "--include-family", action="append", default=[], metavar="NAME[,NAME]",
         help=(
             "Add server-advertised Scan families to the preset the policy implies "
-            "(active templates, nuclei_active, are in no preset: add them here)"
+            "(the standard active set runs the active templates, nuclei_active, on the "
+            "thorough and deep profiles; add them here for fast or balanced)"
         ),
     )
     parser.add_argument(
@@ -457,12 +458,16 @@ def main(argv: list[str] | None = None) -> int:
             if resolved:
                 preset = f" ({result['family_preset']})" if result.get("family_preset") else ""
                 print(f"Families: {', '.join(resolved)}{preset}")
-                if args.active_testing and "nuclei_active" not in resolved:
-                    # The standard active set (here and in New Scan) holds no active templates
-                    # on any budget profile; say how to add them rather than leave a thorough
-                    # scan's operator to find out from the report.
+                if (
+                    args.active_testing and "nuclei_active" not in resolved
+                    and "nuclei_active" not in args.exclude_family
+                ):
+                    # The standard active set (here and in New Scan) runs the active templates on
+                    # thorough and deep only; say how to add them rather than leave the operator
+                    # to find out from the report. Not when they were excluded on purpose.
                     print("Active templates (nuclei_active) are not in this set; add "
-                          "--include-family nuclei_active to run them.")
+                          "--include-family nuclei_active to run them (the standard active set "
+                          "runs them on --budget-profile thorough or deep).")
             print(f"View progress at: {result['ui_url']}")
         return 0
     except ScanCliError as exc:

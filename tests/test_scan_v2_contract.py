@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from dataclasses import replace
+
 import os
 import sys
 
@@ -61,7 +63,9 @@ def test_contract_resolver_has_no_legacy_translation_argument():
 def test_budget_profile_changes_ceilings_not_engine_or_policy_semantics():
     fast = resolve_scan_contract(budget_profile="fast", policy={"active_testing": True})
     thorough = resolve_scan_contract(budget_profile="thorough", policy={"active_testing": True})
-    assert fast.policy == thorough.policy
+    # The one policy difference: the standard active set runs the active templates on thorough.
+    assert set(thorough.policy.include_families) - set(fast.policy.include_families) == {"nuclei_active"}
+    assert replace(fast.policy, include_families=()) == replace(thorough.policy, include_families=())
     assert fast.budget.max_http_requests < thorough.budget.max_http_requests
     assert fast.execution_plan.engine == thorough.execution_plan.engine == "scan"
     assert not hasattr(fast, "execution_scan_type")
@@ -347,3 +351,38 @@ def test_unknown_scan_family_cannot_widen_passive_admission():
             )
     finally:
         contracts_module.get_check_family = original
+
+
+@pytest.mark.parametrize("profile,runs_active_templates", [
+    ("fast", False), ("balanced", False), ("thorough", True), ("deep", True),
+])
+def test_the_standard_active_set_runs_the_active_templates_on_thorough_and_deep(profile, runs_active_templates):
+    contract = resolve_scan_contract(budget_profile=profile, policy={"active_testing": True})
+    assert ("nuclei_active" in contract.execution_plan.resolved_families) is runs_active_templates
+    named = resolve_scan_contract(budget_profile=profile, policy={
+        "active_testing": True, "preset": "standard_active"})
+    assert named.execution_plan.resolved_families == contract.execution_plan.resolved_families
+    assert "nuclei_active" not in resolve_scan_contract(
+        budget_profile=profile, policy={"active_testing": True, "exclude_families": ["nuclei_active"]},
+    ).execution_plan.resolved_families
+    passive = resolve_scan_contract(budget_profile=profile, policy={})
+    assert "nuclei_active" not in passive.execution_plan.resolved_families
+
+
+@pytest.mark.parametrize("profile", ["thorough", "deep"])
+def test_a_lowered_request_ceiling_keeps_the_standard_set_without_active_templates(profile):
+    """The sweep holds thousands of requests at admission: a lowered ceiling would refuse the Scan."""
+    lowered = resolve_scan_contract(budget_profile=profile, policy={"active_testing": True},
+                                    advanced={"max_http_requests": 3_000})
+    assert "nuclei_active" not in lowered.execution_plan.resolved_families
+    mutations = resolve_scan_contract(
+        budget_profile=profile, policy={"active_testing": True, "allow_state_changing_http": True},
+        advanced={"max_state_changing_requests": 2_000}, approval_receipt_id="approval-1")
+    assert "nuclei_active" not in mutations.execution_plan.resolved_families
+    # A lowered mutation ceiling without state-changing HTTP changes nothing the sweep holds.
+    get_only = resolve_scan_contract(budget_profile=profile, policy={"active_testing": True},
+                                     advanced={"max_state_changing_requests": 0})
+    assert "nuclei_active" in get_only.execution_plan.resolved_families
+    named = resolve_scan_contract(budget_profile=profile, policy={
+        "active_testing": True, "include_families": ["nuclei_active"]}, advanced={"max_http_requests": 3_000})
+    assert "nuclei_active" in named.execution_plan.resolved_families

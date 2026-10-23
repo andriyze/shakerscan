@@ -17,7 +17,7 @@ def _contract() -> dict:
     return {
         "schema_version": "scan-public-contract/v1",
         "families": [
-            {"name": name} for name in ("recon", "nuclei", "xss", "sqli", "bola")
+            {"name": name} for name in ("recon", "nuclei", "nuclei_active", "xss", "sqli", "bola")
         ],
         "advanced_limits": [{
             "name": name,
@@ -306,29 +306,47 @@ def test_scan_help_documents_the_active_confirmation_and_the_receipt():
     assert "standing authorization" in receipt_line.split("--idempotency-key")[0]
 
 
-# E1 O4 / item 5: a thorough scan from the terminal ran no active templates. Both entry points
-# send the same policy (the CLI implies the preset from --active-testing, New Scan names
-# "standard_active"), and that preset has never held nuclei_active on any budget profile.
+# A thorough scan from the terminal ran no active templates. Both entry points send the same
+# policy (the CLI implies the preset from --active-testing, New Scan names "standard_active"), and
+# that preset now runs the active templates on the thorough and deep profiles.
 @pytest.mark.parametrize("profile", ["fast", "balanced", "thorough", "deep"])
 def test_terminal_and_new_scan_resolve_the_same_families_for_a_profile(monkeypatch, profile):
     import sys
     from pathlib import Path
 
     sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "api"))
-    from scan.contracts import resolve_scan_contract
+    from scan.contracts import public_scan_contract, resolve_scan_contract
 
     _result, calls = _run_recording(monkeypatch, [
         "https://example.com", "--budget-profile", profile, "--active-testing", "--confirm-active", "--json",
     ])
     terminal = calls[-1][1]["policy"]
     new_scan = {"preset": "standard_active", "active_testing": True, "include_families": [], "exclude_families": []}
-    assert (
-        resolve_scan_contract(budget_profile=profile, policy=terminal).execution_plan.resolved_families
-        == resolve_scan_contract(budget_profile=profile, policy=new_scan).execution_plan.resolved_families
-    )
-    page = (Path(__file__).resolve().parents[1] / "ui/src/app/scan/new/page.tsx").read_text()
     resolved = resolve_scan_contract(budget_profile=profile, policy=new_scan).execution_plan.resolved_families
-    assert "['" + "', '".join(resolved) + "']" in page, "New Scan's local preview lists the same set"
+    assert resolve_scan_contract(budget_profile=profile, policy=terminal).execution_plan.resolved_families == resolved
+    assert ("nuclei_active" in resolved) is (profile in {"thorough", "deep"})
+    contract = public_scan_contract()
+    expected = set(contract["family_presets"]["standard_active"]) | set(
+        contract["family_preset_profile_additions"]["standard_active"].get(profile, ()))
+    assert resolved == tuple(item["name"] for item in contract["families"] if item["name"] in expected), (
+        "the public contract states what the preset resolves to on this profile")
+    # New Scan's local preview reads the same contract, with the profile's additions.
+    page = (Path(__file__).resolve().parents[1] / "ui/src/app/scan/new/page.tsx").read_text()
+    assert "family_preset_profile_additions" in page and "budgetProfile" in page
+
+
+def test_excluding_the_active_templates_on_a_thorough_scan_removes_them():
+    import sys
+    from pathlib import Path
+
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "api"))
+    from scan.contracts import resolve_scan_contract
+
+    contract = resolve_scan_contract(budget_profile="deep", policy={
+        "active_testing": True, "exclude_families": ["nuclei_active"]})
+    assert "nuclei_active" not in contract.execution_plan.resolved_families
+    passive = resolve_scan_contract(budget_profile="deep", policy={})
+    assert "nuclei_active" not in passive.execution_plan.resolved_families
 
 
 def test_the_terminal_says_which_families_run_and_how_to_add_active_templates(monkeypatch, capsys):
@@ -338,14 +356,15 @@ def test_the_terminal_says_which_families_run_and_how_to_add_active_templates(mo
         "resolved_families": ["recon", "nuclei_passive", "xss", "sqli", "sensitive_exposure"],
     }
     assert _run_with_response(monkeypatch, [
-        "https://example.com", "--budget-profile", "thorough", "--active-testing", "--confirm-active",
+        "https://example.com", "--budget-profile", "balanced", "--active-testing", "--confirm-active",
     ], response) == 0
     out = capsys.readouterr().out
     assert "Families: recon, nuclei_passive, xss, sqli, sensitive_exposure (standard_active)" in out
     assert "--include-family nuclei_active" in out
+    assert "thorough" in out and "deep" in out
 
 
-def test_no_active_template_hint_when_they_run_or_testing_is_passive(monkeypatch, capsys):
+def test_no_active_template_hint_when_they_run_are_excluded_or_testing_is_passive(monkeypatch, capsys):
     response = {
         "scan_id": "00000000-0000-0000-0000-000000000005", "status": "queued",
         "resolved_families": ["recon", "nuclei_passive", "nuclei_active", "xss", "sqli"],
@@ -354,7 +373,15 @@ def test_no_active_template_hint_when_they_run_or_testing_is_passive(monkeypatch
         "https://example.com", "--active-testing", "--confirm-active",
     ], response) == 0
     assert "--include-family nuclei_active" not in capsys.readouterr().out
+    excluded = {"scan_id": "00000000-0000-0000-0000-000000000007", "status": "queued",
+                "resolved_families": ["recon", "nuclei_passive", "xss", "sqli"]}
+    assert _run_with_response(monkeypatch, [
+        "https://example.com", "--budget-profile", "thorough", "--active-testing", "--confirm-active",
+        "--exclude-family", "nuclei_active",
+    ], excluded) == 0
+    assert "--include-family nuclei_active" not in capsys.readouterr().out
     passive = {"scan_id": "00000000-0000-0000-0000-000000000006", "status": "queued",
                "resolved_families": ["recon", "nuclei_passive", "sensitive_exposure"]}
     assert _run_with_response(monkeypatch, ["https://example.com"], passive) == 0
     assert "--include-family nuclei_active" not in capsys.readouterr().out
+

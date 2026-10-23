@@ -69,6 +69,7 @@ export interface ScanPublicContract {{
     capabilities: string[]
   }}>
   family_presets: Record<'passive' | 'standard_active' | 'custom', string[]>
+  family_preset_profile_additions: Record<string, Record<string, string[]>>
   passive_coverage: {{
     description: string
     baseline_capabilities: string[]

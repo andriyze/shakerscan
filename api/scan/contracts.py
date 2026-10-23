@@ -71,6 +71,47 @@ SCAN_FAMILY_PRESETS: Mapping[str, tuple[str, ...]] = {
     "standard_active": ("recon", "nuclei_passive", "xss", "sqli", "sensitive_exposure"),
     "custom": (),
 }
+# Families a preset adds on a budget profile. The thorough and deep profiles hold the wall to run
+# every active-template window, so their standard active set runs the active templates too; a
+# fast or balanced one does not, and an operator adds them there with include_families. The
+# sweep holds thousands of requests at admission (and one mutation for each when state-changing
+# HTTP is allowed), so a Scan whose operator lowered the request or mutation ceiling below the
+# profile's keeps the standard set without them, and is admitted exactly as before; naming
+# nuclei_active still adds them.
+SCAN_FAMILY_PRESET_PROFILE_ADDITIONS: Mapping[str, Mapping[str, tuple[str, ...]]] = {
+    "standard_active": {"thorough": ("nuclei_active",), "deep": ("nuclei_active",)},
+}
+
+
+def scan_family_preset_families(
+    preset: str, budget_profile: str | None, *, lowered_request_ceiling: bool = False,
+) -> tuple[str, ...]:
+    """The families ``preset`` selects on ``budget_profile``, in canonical family order."""
+    additions = () if lowered_request_ceiling else SCAN_FAMILY_PRESET_PROFILE_ADDITIONS.get(
+        preset, {},
+    ).get(str(budget_profile or "balanced").strip().lower(), ())
+    chosen = set(SCAN_FAMILY_PRESETS[preset]) | set(additions)
+    return tuple(family for family in SCAN_V2_FAMILY_NAMES if family in chosen)
+
+
+def _lowers_request_ceiling(
+    profile: str, advanced: Mapping[str, Any] | None, *, state_changing_allowed: bool,
+) -> bool:
+    """Whether ``advanced`` lowers the profile's request (or, when used, mutation) ceiling."""
+    budget = BUDGET_PROFILES.get(profile)
+    if budget is None or not isinstance(advanced, Mapping):
+        return False
+    limits = ["max_http_requests"] + (["max_state_changing_requests"] if state_changing_allowed else [])
+    for name in limits:
+        value = advanced.get(name)
+        if value is None or isinstance(value, bool):
+            continue
+        try:
+            if int(value) < int(getattr(budget, name)):
+                return True
+        except (TypeError, ValueError):
+            continue
+    return False
 # The minimum candidates a profile's ROOT plan executes per family when the target
 # offers them. These are what the profile can actually run at the measured cost of
 # an attempt (an external XSS candidate holds 200 s, a SQLi candidate 180 s), not a
@@ -253,6 +294,12 @@ def public_scan_contract() -> dict[str, Any]:
         "families": families,
         "family_presets": {
             name: list(families) for name, families in SCAN_FAMILY_PRESETS.items()
+        },
+        # What a preset adds on a budget profile (standard_active runs the active templates on
+        # thorough and deep).
+        "family_preset_profile_additions": {
+            preset: {profile: list(families) for profile, families in additions.items()}
+            for preset, additions in SCAN_FAMILY_PRESET_PROFILE_ADDITIONS.items()
         },
         "passive_coverage": {
             "description": (
@@ -521,7 +568,12 @@ def resolve_scan_contract(
         raise ValueError("scan family preset must be passive, standard_active, or custom")
     if preset == "standard_active" and not active_testing:
         raise ValueError("standard_active preset requires active_testing")
-    preset_defaults = set(SCAN_FAMILY_PRESETS[preset])
+    preset_defaults = set(scan_family_preset_families(
+        preset, profile, lowered_request_ceiling=_lowers_request_ceiling(
+            profile, advanced,
+            state_changing_allowed=bool(policy_data.get("allow_state_changing_http", False)),
+        ),
+    ))
     resolved = tuple(
         family for family in SCAN_V2_FAMILY_NAMES
         if family in ((preset_defaults | set(include)) - set(exclude))

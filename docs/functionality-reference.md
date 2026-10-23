@@ -362,8 +362,9 @@ wordlist is 125 entries.
 registry family outside the nine is not run as a Scan family (read `resolved_families` on the
 result), and a `custom` selection with none of the nine is refused. `policy.preset`
 selects the family set: `passive` (recon, reviewed passive templates, verified exposure checks),
-`standard_active` (passive plus XSS and SQLi) or `custom` (exactly `include_families`, from the nine
-above). A submission that allows active testing and names no preset resolves to `standard_active`;
+`standard_active` (passive plus XSS and SQLi; on the `thorough` and `deep` budget profiles also
+`nuclei_active`, the active templates, unless the request or mutation ceiling is lowered below
+the profile's) or `custom` (exactly `include_families`, from the nine above). A submission that allows active testing and names no preset resolves to `standard_active`;
 one that does not allow it resolves to `passive`. `include_families` is exact only under `custom`:
 with any other preset, named or implied, it adds to that preset, so `active_testing: true` with
 `include_families: ["sensitive_exposure"]` runs the standard active set (XSS and SQLi included);
