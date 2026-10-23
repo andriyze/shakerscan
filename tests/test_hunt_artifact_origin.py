@@ -1,12 +1,12 @@
 """artifact.inspect and javascript.analyze read from the service the call names.
 
-A Hunt of 2026-10-23 on a network target (``host://10.10.10.100``): ``http.request`` read
-``http://10.10.10.100:5002/openapi.json``, but ``artifact.inspect`` on the same file was refused
-with "scope: HTTP origin is outside the frozen target binding" and charged a request. The two
-artifact capabilities took no ``origin``, so they always read from the Hunt's registered URL, and
-a network target's URL names a host, not an HTTP service. They now take ``origin`` and check it
-exactly as ``http.request`` does: at admission (same host, active testing for another port,
-metered as active) and again at dispatch.
+On a network target (``host://H``), ``http.request`` with ``origin`` read a service's
+``/openapi.json``, but ``artifact.inspect`` on the same file was refused with "scope: HTTP origin
+is outside the frozen target binding" and charged a request. The two artifact capabilities took
+no ``origin``, so they always read from the Hunt's registered URL, and a network target's URL
+names a host, not an HTTP service. They now take ``origin`` and check it exactly as
+``http.request`` does: at admission (same host, active testing for another port, metered as
+active) and again at dispatch.
 
 The loopback tests run the real binding, input validation, dispatch check and capability against
 a real HTTP server on 127.0.0.1; the admission tests run the real admission lifecycle with the
@@ -125,8 +125,8 @@ def _store(*, kind="network", active_testing=True):
     store.run["target_kind"] = kind
     store.run["policy_json"].update(active_testing=active_testing)
     store.run["context_pack"] = (
-        {"target": {"url": "host://10.10.10.100", "origins": []},
-         "authorized_target_addresses": ["10.10.10.100"]}
+        {"target": {"url": "host://198.51.100.10", "origins": []},
+         "authorized_target_addresses": ["198.51.100.10"]}
         if kind == "network" else
         {"target": {"url": "https://fixture.example.test"},
          "authorized_target_addresses": ["192.0.2.20"]}
@@ -156,7 +156,7 @@ async def _admit(store, name, values):
 @pytest.mark.parametrize("name", sorted(ARTIFACT_READ_CAPABILITIES))
 def test_a_read_from_another_service_is_admitted_as_an_active_act(name):
     store = _store()
-    asyncio.run(_admit(store, name, {"origin": "http://10.10.10.100:5002", "path": "/openapi.json"}))
+    asyncio.run(_admit(store, name, {"origin": "http://198.51.100.10:5002", "path": "/openapi.json"}))
     assert len(store.actions) == 1
     assert store.run["budget_used_json"].get("active_actions") == 1
 
@@ -165,7 +165,7 @@ def test_a_read_from_another_service_is_admitted_as_an_active_act(name):
 def test_a_read_from_another_service_needs_active_testing(name):
     store = _store(active_testing=False)
     with pytest.raises(HTTPException) as refused:
-        asyncio.run(_admit(store, name, {"origin": "http://10.10.10.100:5002", "path": "/openapi.json"}))
+        asyncio.run(_admit(store, name, {"origin": "http://198.51.100.10:5002", "path": "/openapi.json"}))
     assert refused.value.detail["reason_code"] == "scope_other_service_port"
     assert not store.actions
 
@@ -174,7 +174,7 @@ def test_a_read_from_another_service_needs_active_testing(name):
 def test_a_read_from_another_host_is_refused_at_admission(name):
     store = _store()
     with pytest.raises(HTTPException) as refused:
-        asyncio.run(_admit(store, name, {"origin": "http://10.10.10.99:5002", "path": "/openapi.json"}))
+        asyncio.run(_admit(store, name, {"origin": "http://198.51.100.11:5002", "path": "/openapi.json"}))
     assert refused.value.detail["reason_code"] == "scope_other_host"
     assert not store.actions
 
@@ -185,7 +185,11 @@ def test_a_network_read_without_an_origin_is_refused_at_no_cost(name):
     with pytest.raises(HTTPException) as refused:
         asyncio.run(_admit(store, name, {"path": "/openapi.json"}))
     assert refused.value.status_code == 422
-    assert "needs origin" in refused.value.detail and "http.request" in refused.value.detail
+    assert refused.value.detail["reason_code"] == "artifact_origin_required"
+    message = refused.value.detail["message"]
+    assert "needs origin" in message and "http.request" in message
+    # Recorded as a refused attempt (settle_refusal), with nothing reserved or charged.
+    assert refused.value.recorded and refused.value.kind is None
     assert not store.actions and store.run["budget_used_json"].get("active_actions", 0) == 0
 
 

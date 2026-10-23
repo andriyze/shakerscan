@@ -322,6 +322,7 @@ export const HUNT_START_CONTRACT = {
     "active_replay_not_allowed",
     "approval_receipt_required",
     "approval_scope_changed",
+    "artifact_origin_required",
     "budget_above_profile_ceiling",
     "budget_dimension_needs_permission",
     "budget_exhausted",

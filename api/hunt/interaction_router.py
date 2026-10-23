@@ -2055,7 +2055,7 @@ async def _execute_hunt_capability_lifecycle(
                         # refused here at no cost rather than as an out-of-binding read.
                         original, read_base = web_hunt_target(run, context, policy)
                         if service_origin_changed(original, read_base):
-                            raise HTTPException(status_code=422, detail=artifact_origin_required(name))
+                            raise HuntRefusal("artifact_origin_required", artifact_origin_required(name))
                     if request.input.get("origin") is not None and (
                         name in {"http.request", "tls.inspect", "auth.session.establish", "authz.verify"}
                         or name in ARTIFACT_READ_CAPABILITIES or is_scanner or is_browser

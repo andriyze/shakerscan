@@ -102,6 +102,9 @@ REASON_CODES: Mapping[str, ReasonSpec] = {
     "verification_route_unresolved": ReasonSpec(422),
     "verification_service_unresolved": ReasonSpec(422),
     "verification_method_unsupported": ReasonSpec(422),
+    # Call inputs the agent corrects (recorded so the attempt is visible, at no cost): an artifact
+    # read on a target that names no HTTP service of its own.
+    "artifact_origin_required": ReasonSpec(422),
     # Another verifier still held the finding after the bounded wait (D40): retry, nothing ran.
     "verification_in_progress": ReasonSpec(409),
     # The Hunt's status could not be read during that wait: refused before traffic, not cancelled.
