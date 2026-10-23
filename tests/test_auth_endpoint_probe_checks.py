@@ -282,7 +282,8 @@ def test_every_request_a_check_sends_the_sign_in_endpoint_waits_the_pace(monkeyp
     held = _holds(monkeypatch)
     receipts, _candidates = _run(capability, options=SIGN_IN)
     sent = target.to_sign_in()
-    assert sent and len(waits) == len(sent) and set(waits) == {PACE}
+    # One before each request, and one after the action's last (_SignInChecks.settle).
+    assert sent and len(waits) == len(sent) + 1 and set(waits) == {PACE}
     heads = [head for head in _heads(receipts) if head.get("sign_in_endpoint")]
     assert {head["sign_in_endpoint"] for head in heads} == {LOGIN}
     assert sum(head["sign_in_endpoint_requests"] for head in heads) == len(sent)
@@ -686,7 +687,8 @@ def test_the_browser_proof_waits_the_pace_before_each_submission(monkeypatch):
     monkeypatch.setattr(action_adapter_module.CapabilityExecutor, "execute", execute)
     receipts, _candidates = _run("xss.browser_prove_batch", options=SIGN_IN)
     heads = _heads(receipts)
-    assert waits == [PACE] * 3
+    # One before each submission, and one after the action's last.
+    assert waits == [PACE] * 4
     assert [head["sign_in_endpoint_requests"] for head in heads] == [1, 1, 1]
     assert [head["sign_in_endpoint_received"] for head in heads] == [1, 2, 3]
 
@@ -724,7 +726,8 @@ def test_the_browser_proof_pace_comes_out_of_its_wall_and_is_charged(monkeypatch
     ]
     heads = _heads(receipts)
     assert [head["budget_consumed"]["tool_wall_seconds"] for head in heads] == [2 + PACE] * 3
-    assert receipt.budget_consumed["tool_wall_seconds"] == 3 * (2 + PACE)
+    # And the pace after the last submission.
+    assert receipt.budget_consumed["tool_wall_seconds"] == 3 * (2 + PACE) + PACE
 
 
 def test_a_browser_proof_whose_share_cannot_hold_the_pace_waits(monkeypatch):
@@ -748,7 +751,10 @@ def test_browser_proofs_over_many_actions_stop_at_the_endpoint_set(monkeypatch):
     receipts, _candidates = _run("xss.browser_prove_batch", options=SIGN_IN, slices=[(0, 3)] * 10)
     heads = _heads(receipts)
     assert len(heads) == 30
-    assert sum(head["sign_in_endpoint_requests"] for head in heads) == 8 == len(waits)
+    sending = [receipt for receipt in receipts
+               if any(head["sign_in_endpoint_requests"] for head in _heads([receipt]))]
+    assert sum(head["sign_in_endpoint_requests"] for head in heads) == 8
+    assert len(waits) == 8 + len(sending)
     assert probe_set_requests("xss.browser_prove_batch", 4) == 8
     closed = [head for head in heads if not head["sign_in_endpoint_requests"]]
     assert len(closed) == 22 and {head["inconclusive_reason"] for head in closed} == {
@@ -813,7 +819,7 @@ def test_the_request_verifiers_pace_the_sign_in_request_of_the_profile(monkeypat
     target = _fake_target(monkeypatch)
     receipt = _request_verifiers(capability)
     heads = [item for item in receipt.observations if item.get("kind") == "candidate_attempt"]
-    assert len(target.to_sign_in()) == 4 and waits == [PACE] * 4
+    assert len(target.to_sign_in()) == 4 and waits == [PACE] * 5
     assert [head["sign_in_endpoint_requests"] for head in heads] == [2, 2]
     assert heads[-1]["sign_in_endpoint_received"] == 4
 
@@ -869,6 +875,50 @@ def test_a_request_to_the_endpoint_counts_whether_or_not_it_was_answered(monkeyp
 
     asyncio.run(run())
     assert inner.sent == paced.sent == 3 and waits == [PACE] * 3
+
+
+@pytest.mark.parametrize("capability", ["sqli.prove_batch", "nosqli.verify_batch"])
+def test_a_check_leaves_the_pace_after_its_last_request_to_the_endpoint(monkeypatch, capability):
+    """Each request waits the pace before it, and the action waits it once more after its last
+    one, charged from the wall it has left: whatever this scan part sends the endpoint next (a
+    verifier process whose first request does not wait its own delay) comes a pace later."""
+    clock = _PacedClock(monkeypatch)
+    waits: list[tuple[float, int]] = []
+    original = probe_module.pace_wait
+
+    async def wait(seconds):
+        waits.append((seconds, len(clock.target.to_sign_in())))
+        await original(seconds)
+
+    monkeypatch.setattr(probe_module, "pace_wait", wait, raising=False)
+    receipts, _candidates = _run(capability, options=SIGN_IN)
+    (receipt,) = receipts
+    sent = len(clock.target.to_sign_in())
+    assert sent and len(waits) == sent + 1
+    # The last wait comes after the last request.
+    assert waits[-1] == (PACE, sent)
+    attempts = sum(int(head["budget_consumed"]["tool_wall_seconds"]) for head in _heads(receipts))
+    assert receipt.budget_consumed["tool_wall_seconds"] == attempts + PACE
+
+
+def test_the_closing_pace_is_waited_only_from_wall_the_action_has_left(monkeypatch):
+    waits = _record_pace(monkeypatch)
+    (endpoint,) = sign_in_endpoints(SIGN_IN, [], base_url=f"{ORIGIN}/")
+    checks = action_adapter_module._SignInChecks("sqli.prove_batch", (endpoint,), {}, 1)
+
+    async def close(consumed, requested):
+        await checks.settle(consumed, requested)
+        return consumed
+
+    # Nothing sent to the endpoint: nothing to wait.
+    assert asyncio.run(close({"tool_wall_seconds": 10}, {"tool_wall_seconds": 60})) == {"tool_wall_seconds": 10}
+    checks.record({"kind": "candidate_attempt"}, endpoint, 8, short=False, manifest_index=0)
+    assert asyncio.run(close({"tool_wall_seconds": 58}, {"tool_wall_seconds": 60})) == {"tool_wall_seconds": 58}
+    assert waits == []
+    assert asyncio.run(close({"tool_wall_seconds": 10}, {"tool_wall_seconds": 60})) == {
+        "tool_wall_seconds": 10 + PACE,
+    }
+    assert waits == [PACE]
 
 
 @pytest.mark.parametrize("capability", sorted(BATCHES))

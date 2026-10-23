@@ -831,6 +831,8 @@ class _SignInChecks:
         self.endpoints = tuple(endpoints)
         self.received = received
         self.children = children
+        #: What this action sent the sign-in endpoints.
+        self.sent = 0
 
     def endpoint(self, url: str, method: str) -> SignInEndpoint | None:
         return sign_in_endpoint_for(url, method, self.endpoints) if self.endpoints else None
@@ -871,6 +873,24 @@ class _SignInChecks:
         """The pace before an attempt that sends the endpoint one request of its own."""
         await PacedSignInTransport.wait(self.pace)
 
+    async def settle(
+        self, consumed: dict[str, int], requested: Mapping[str, int], *, cancelled: bool = False,
+    ) -> None:
+        """The pace after the action's last request to the endpoint, charged to the action.
+
+        Each request waits the pace before it, so nothing this action sends comes closer to the
+        one before. The next sender may not: a verifier's process can send its first request
+        without waiting its own delay. Waited only from wall the action has left, and not by a
+        cancelled action.
+        """
+        if cancelled or not self.sent or "tool_wall_seconds" not in requested:
+            return
+        spent = int(consumed.get("tool_wall_seconds", 0) or 0)
+        if int(requested["tool_wall_seconds"]) - spent < self.pace:
+            return
+        await self.wait()
+        consumed["tool_wall_seconds"] = spent + self.pace
+
     def record(
         self, head: Mapping[str, Any], endpoint: SignInEndpoint, sent: int, *, short: bool,
         manifest_index: int,
@@ -879,6 +899,7 @@ class _SignInChecks:
         left it short and it proved nothing."""
         received = self.received.get(endpoint.key, 0) + max(0, int(sent))
         self.received[endpoint.key] = received
+        self.sent += max(0, int(sent))
         # Named sign_in_*: a key with an "auth" segment is withheld from receipts.
         record = {
             **dict(head),
@@ -2292,6 +2313,10 @@ class DatabaseNeutralScanActionDispatcher:
                 cancelled=stopped_by_cancel,
             )
             batch_errors.insert(0, stated)
+        # The pace after this action's last request to a sign-in endpoint (_SignInChecks.settle).
+        await sign_in_checks.settle(
+            consumed, action.requested_budget, cancelled=self.cancelled(),
+        )
         _batch_status, _batch_partial, _batch_timed_out = batch_outcome(
             attempt_statuses, unattempted,
         )
@@ -2578,6 +2603,10 @@ class DatabaseNeutralScanActionDispatcher:
                     int(action.requested_budget.get(name, 0)),
                     consumed.get(name, 0) + int(amount),
                 )
+        # The pace after this action's last request to a sign-in endpoint (_SignInChecks.settle).
+        await sign_in_checks.settle(
+            consumed, action.requested_budget, cancelled=self.cancelled(),
+        )
         eligible = sum(manifest_index in signalled for manifest_index, _candidate in rows)
         unattempted = max(0, eligible - attempted)
         _batch_status, _batch_partial, _batch_timed_out = batch_outcome(
@@ -2897,6 +2926,10 @@ class DatabaseNeutralScanActionDispatcher:
                     int(action.requested_budget.get(name, 0)),
                     consumed.get(name, 0) + int(amount),
                 )
+        # The pace after this action's last request to a sign-in endpoint (_SignInChecks.settle).
+        await sign_in_checks.settle(
+            consumed, action.requested_budget, cancelled=self.cancelled(),
+        )
         eligible = sum(manifest_index in signalled for manifest_index, _candidate in rows)
         unattempted = max(0, eligible - attempted)
         _batch_status, _batch_partial, _batch_timed_out = batch_outcome(
@@ -4088,6 +4121,10 @@ class DatabaseNeutralScanActionDispatcher:
                     int(action.requested_budget.get(name, 0)),
                     consumed.get(name, 0) + int(amount),
                 )
+        # The pace after this action's last request to a sign-in endpoint (_SignInChecks.settle).
+        await sign_in_checks.settle(
+            consumed, action.requested_budget, cancelled=self.cancelled(),
+        )
         unattempted = max(0, len(rows) - len(skipped) - attempted)
         _batch_status, _batch_partial, _batch_timed_out = batch_outcome(
             attempt_statuses, unattempted,

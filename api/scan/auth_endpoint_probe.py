@@ -32,13 +32,15 @@ URL's query, not a body). What changes:
   ``AUTH_ENDPOINT_MIN_ATTEMPT_REQUESTS`` leaves the candidate for a later round, exactly like any
   other candidate its holds cannot fund. The checks that send from the worker itself (the SQLi
   and XSS request verifiers, the SQLi proof, the NoSQLi check and the XSS browser proof) wait
-  the same pace before each request to the endpoint (``PacedSignInTransport``) and hold a pace
-  a request on top of their share of the wall (the browser proof's one submission waits it out
-  of its share, and is charged it); a Scan part runs one action at a time, so the
-  endpoint sees one request per pace from whichever of them is running. Such an attempt runs
-  only when what the slice has left paces all of it (a sign-in form's SQLi proof 8 requests,
-  ``paced_check_hold``); otherwise it waits for a later action rather than running short, and a
-  proof no action could pace is named in coverage like one the probe set left without a verdict;
+  the same pace before each request to the endpoint (``PacedSignInTransport``), and once more
+  after an action's last request there (a verifier's process may send its first request without
+  waiting its own delay), and hold a pace a request on top of their share of the wall (the
+  browser proof's one submission waits it out of its share, and is charged it); a Scan part runs
+  one action at a time, so the endpoint sees one request per pace from whichever of them is
+  running. Such an attempt runs only when what the slice has left paces all of it (a sign-in
+  form's SQLi proof 8 requests, ``paced_check_hold``); otherwise it waits for a later action
+  rather than running short, and a proof no action could pace is named in coverage like one the
+  probe set left without a verdict;
 * one probe set per endpoint and verifier across the Scan: every candidate on the endpoint (a
   declared request, the crawled form with its hidden fields, a JSON variant), every slice and
   every continuation round draws from it (a parallel child holds its own). Per tested field, at
