@@ -934,6 +934,18 @@ it in the person's terminal (`scripts/person_decision.py`):
   (python-fido2 missing, no key plugged in), and it shows `summary` whole: a summary over 1,000
   characters is never touched for. Ctrl-C at the touch exits 130, nothing changed. The MCP adapter
   answers `outcome: person_decision_required` with `decision`, `summary` and `command`.
+- `"decision": "hunt.start"`: a Hunt start past its agent session's one safety budget (under the
+  switch the Hunts of one session share it; the session is the one `agent --allow` touched for,
+  else the connection's). Its command is that start itself (`shakerscan api POST /hunts ...`): the
+  agent does not send it again. The preauthorization challenge of `agent_launch` carries
+  `safety_budget` (`[{limit, label, total}]`), shown before the touch.
+- `"proof": "browser"`: a decision no touch from a terminal confirms yet (a device SSH plan's
+  confirmation, an authorization investigation's approval); the client never begins one and says
+  to make it in the browser.
+- `begin` with `purpose: key_check` and `"key_check": {"test": "touch", "decides": "nothing"}` is a
+  touch test (`shakerscan approve --test`): the set document carries that part, `finish` answers
+  `"key_check": {"answered": true, "decides": "nothing", "touch_required"}`, and nothing is
+  decided.
 - `GET /_enterprise/person-decisions?after=<n>` (a token, read-only) lists the person decisions
   recently made through any connection acting for the same person: `made` (`with_token`,
   `proved`, `refused`), `outcome`, `method`, `path`, `decision`, `connection`, `at`, `id`; `after`

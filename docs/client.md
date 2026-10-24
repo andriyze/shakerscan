@@ -406,44 +406,50 @@ shakerscan hunt permissions list        # JSON: the pending requests, as the ser
 shakerscan hunt permissions wait 8f0c…  # JSON: granted, denied, expired, withdrawn or still_pending
 ```
 
-- **Enterprise (a token).** The approver is the person the connection's token acts for, named by
-  the gateway (`--account` names someone else, and a token that acts for nobody needs it). The
-  client first reads the gateway's own description of itself (`GET /_enterprise/me`); an older
-  gateway that does not say it names the approver is asked with your sign-in name, which the
-  client asks for once, as before (it never sends such a gateway an empty name, which it would
-  refuse and record as a denied approval). You prove it with a USB/NFC security key
-  (`--method security_key`) or your TOTP code, typed at the prompt (`--method totp`). Without
-  `--method` the client uses the security key whenever a plugged-in key holds one of your
-  credentials for this gateway (asked silently, without a touch): one touch, no PIN, whether or
-  not its administrator requires a touch for each decision. A gateway of an earlier release asks
-  for the key's PIN as well, as at sign-in; the client then says before the PIN prompt that it is
-  the key's own PIN (the one set on the key), not your authenticator app's code, and how many PIN
-  tries the key has left: each wrong PIN costs one, three in a row need the key removed and
-  inserted again, and eight block its PIN, which only a reset (removing every credential on the
-  key, other sites' passkeys included) undoes. The TOTP code only when no key can answer here
-  (none plugged in or none of yours, or such a gateway asks for a PIN and the key has none set),
-  and for a single sign-on account the browser sign-in then; `--method totp` chooses the code. When several keys are plugged in, the first that holds one of your
-  credentials is used; you pick one only among keys that cannot be asked that way. The silent
-  check is made only for this gateway's own relying party (the same rule the assertion follows), so
-  no gateway learns what else your key holds. Without `--account`, the client says once whom it
-  approves as (the person the connection acts for). A key error is said in plain words (not registered to your account, no touch in time, no
-  PIN set). The key is asked for what the
-  gateway asks: its PIN when the gateway requires user verification, a touch alone when it does
-  not. A key that has a PIN and holds none of your credentials when asked silently is still
-  asked when the gateway wants its PIN (a passkey a browser made to need the PIN for every use is
-  found only with it). Where the gateway asks for a touch only and such a key is the only one
-  that could answer, the client says the key answers nothing to a touch alone (not registered to
-  you, or a passkey that needs its PIN) and asks for the key's PIN once, then the touch (Ctrl-C
-  cancels); with an authenticator code to fall back on it uses the code instead. Registering the
-  key for terminal approvals (My account, Passkeys, "Use it: for terminal approvals (touch)",
-  which never signs you in) makes it a touch alone. A single sign-on person who registers a key
-  under My account runs client 0.11.2 for the touch: client 0.11.1, run without `--method`, picks
-  that key and asks for its PIN (a key without a PIN fails there), so with 0.11.1 keep `--method
-  sso`. The proof goes to the gateway's step-up routes, which decide in your name; the token alone
-  never approves. A gateway that does not serve those routes yet gets an exact error and nothing
-  is decided. `--watch` opens a 30-minute approver session after one step-up; its secret is held
-  only in that process's memory (see `docs/hunt-permission-requests.md` for what that does and
-  does not protect against).
+- **Enterprise (a token).** Once: register a USB or NFC security key under My account in the
+  browser (see **Set up once** below), install the client with pipx or uv, then run `shakerscan
+  doctor` and `shakerscan approve --test` (one touch, checked by the gateway as every touch is;
+  nothing is decided, and it works whether or not your administrator requires the touch). After
+  that, `shakerscan approve <id>` shows the request and asks for one touch.
+
+  What `approve` asks for without `--method`:
+
+  | Gateway | A plugged-in key holds one of your credentials | No key here can answer |
+  |---|---|---|
+  | Its administrator requires a touch | One touch, no PIN | Refused until a registered key is plugged in (no code, no browser sign-in) |
+  | It does not require one | One touch, no PIN | Your TOTP code; for single sign-on, the browser sign-in |
+  | An earlier release (it asks the key's PIN) | The key's PIN and a touch | Your TOTP code; for single sign-on, the browser sign-in |
+
+  `--method totp` (or `security_key`, `sso`) chooses. Details:
+  - The approver is the person the connection's token acts for, named by the gateway
+    (`--account` names someone else; a token that acts for nobody needs it). An older gateway
+    that does not say it names the approver (its `GET /_enterprise/me` reports no
+    `person_decision_proof`) is asked with your sign-in name, which the client asks for once (it
+    never sends such a gateway an empty name, which it would refuse and record as a denied
+    approval). Without `--account`, the touch prompt names whom it approves as.
+  - Whether a plugged-in key holds one of your credentials is asked silently (no blink), and only
+    for this gateway's own relying party, so no gateway learns what else your key holds. With
+    several keys plugged in the first that holds one is used; you pick one only among keys that
+    cannot be asked that way.
+  - The key's PIN, where a gateway asks for it: the client says before the prompt that it is the
+    key's own PIN, not your authenticator code, and how many tries the key has left (three wrong
+    in a row need the key removed and inserted again; eight block its PIN, which only a reset,
+    removing every credential on the key, undoes). A key that has a PIN and holds none of your
+    credentials when asked silently is still asked where the gateway wants its PIN (a passkey a
+    browser made to need the PIN for every use is found only with it); where the gateway asks a
+    touch alone and only such a key could answer, the client says so and asks its PIN once, then
+    the touch, or uses your code when there is one. A key registered "for terminal approvals
+    (touch)" is a touch alone.
+  - Single sign-on: a key registered under My account answers with a touch in client 0.11.2,
+    whether or not the touch is required. With client 0.11.1 and the touch not required, run
+    `--method sso` (0.11.1 without `--method` picks the key and asks its PIN); where the touch is
+    required, 0.11.1 needs `--method security_key` with a key that has a PIN, so upgrade to 0.11.2.
+  - Key errors are said in plain words (not registered to your account, no touch in time, no PIN
+    set). The proof goes to the gateway's step-up routes, which decide in your name; the token
+    alone never approves, and a gateway without those routes gets an exact error and nothing is
+    decided. `--watch` opens a 30-minute approver session after one step-up where the gateway
+    allows one; its secret is held only in that process's memory (see
+    `docs/hunt-permission-requests.md` for what that does and does not protect against).
 - **A gateway that requires a security-key touch for each decision** (its administrator's
   choice): no approver session opens; `--watch` asks for one touch per decision ("Touch your
   security key to allow (Ctrl-C to cancel)...", or "to deny"; the result says "by alice,
@@ -518,8 +524,11 @@ and every command of this client completes it the same way.
    `/etc/udev/rules.d/70-fido-key.rules`, then `sudo udevadm control --reload-rules && sudo
    udevadm trigger`, and replug the key.
 3. Run `shakerscan doctor` with the key plugged in: it says whether your administrator requires
-   a touch and whether a key is plugged in. From then on, run your decisions in your own terminal
-   and touch the key when the command asks.
+   a touch and whether a key is plugged in. Then `shakerscan approve --test`: one touch, checked
+   by the gateway against the keys registered to you exactly as every touch is, and nothing is
+   decided ("Your security key answered for alice: a touch from this terminal works"). It works
+   whether or not the touch is required yet, so try it before your administrator turns it on.
+   From then on, run your decisions in your own terminal and touch the key when the command asks.
 
 ```text
 $ shakerscan hunt budget raise 3f2a91c0-… --limit max_state_changing_requests=40
@@ -561,7 +570,7 @@ raised state-changing requests 20 -> 40 (safety ceiling) for Hunt 3f2a91c0-…
   here (python-fido2, a key plugged in), without asking the key anything: where a touch is
   required and no key is plugged in it says to plug in the key registered to you; elsewhere "none
   plugged in" is no failure. It cannot tell which plugged-in key is registered to you (`approve`
-  checks that silently, without a blink).
+  checks that silently, without a blink); `shakerscan approve --test` asks it with one touch.
 - **Anywhere else** (an agent's tool call, a pipe, a script, or inside `shakerscan agent`): it
   never prompts and never asks a key anything. It prints one line, `person decision required:
   <the decision>. Nothing was changed. The person runs this in their own terminal and touches
@@ -631,9 +640,20 @@ raised state-changing requests 20 -> 40 (safety ceiling) for Hunt 3f2a91c0-…
   decision ("<decision>: no touch was asked (security_key_not_registered): register a USB or NFC
   security key once, ..."), and so is a request the gateway would refuse anyway (a receipt only
   an administrator may write, for example); then it shows the decision exactly as the challenge
-  states it. Two decisions are named by their ids only: confirming a Hunt's SSH plan (its commands
-  are on the Hunt page) and approving an authorization investigation (read its proposal first,
-  with the `shakerscan api GET` command the decision names).
+  states it. Two decisions are made in the browser only where the touch is required: confirming
+  a Hunt's SSH plan (its commands and their effects are on the Hunt page) and approving an
+  authorization investigation (its proposal in full is there too). A terminal is not shown what
+  they approve in full, so no touch is offered for them: the command (and the MCP adapter) says
+  to make them on the Hunt page, asks no key and exits 3.
+- **A Hunt start past its agent session's safety budget.** Where the touch is required, the Hunts
+  one agent session starts share one safety budget (state-changing requests, TCP and UDP ports,
+  hosts, out-of-band interactions, device fragility), which the one touch of `shakerscan agent
+  --allow` approves with the bounds (the command shows it before the touch: "Every Hunt this agent
+  session starts shares one safety budget: state-changing requests 40, ..."). Cancelling a Hunt
+  and starting another does not reset it. A start past what is left is your decision: the agent
+  gets one line whose command is that same start (`shakerscan api POST /hunts …`), and the agent
+  does not send it again; in your own terminal the touch starts it. A start that fits needs no
+  touch. A raise past the budget becomes the Hunt's own budget request (`shakerscan approve`).
 - **A refused start** (a scan, Hunt start, retest or network scan of a target nobody authorized
   yet) started nothing. The person's decision is the target's authorization, never the start
   itself: in an agent's shell the command it names is `shakerscan targets authorize <target-id>`,
