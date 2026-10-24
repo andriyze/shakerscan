@@ -428,9 +428,15 @@ shakerscan hunt permissions wait 8f0c…  # JSON: granted, denied, expired, with
   gateway asks: its PIN when the gateway requires user verification, a touch alone when it does
   not. A key that has a PIN and holds none of your credentials when asked silently is still
   asked when the gateway wants its PIN (a passkey a browser made to need the PIN for every use is
-  found only with it); for a touch such a passkey cannot answer, and the client says so: register
-  the key for terminal approvals (My account, Passkeys, "Use it: for terminal approvals (touch)",
-  which never signs you in). The proof goes to the gateway's step-up routes, which decide in your name; the token alone
+  found only with it). Where the gateway asks for a touch only and such a key is the only one
+  that could answer, the client says the key answers nothing to a touch alone (not registered to
+  you, or a passkey that needs its PIN) and asks for the key's PIN once, then the touch (Ctrl-C
+  cancels); with an authenticator code to fall back on it uses the code instead. Registering the
+  key for terminal approvals (My account, Passkeys, "Use it: for terminal approvals (touch)",
+  which never signs you in) makes it a touch alone. A single sign-on person who registers a key
+  under My account runs client 0.11.2 for the touch: client 0.11.1, run without `--method`, picks
+  that key and asks for its PIN (a key without a PIN fails there), so with 0.11.1 keep `--method
+  sso`. The proof goes to the gateway's step-up routes, which decide in your name; the token alone
   never approves. A gateway that does not serve those routes yet gets an exact error and nothing
   is decided. `--watch` opens a 30-minute approver session after one step-up; its secret is held
   only in that process's memory (see `docs/hunt-permission-requests.md` for what that does and
@@ -516,7 +522,7 @@ raised state-changing requests 20 -> 40 (safety ceiling) for Hunt 3f2a91c0-…
 ```
 
 - **In your own terminal**: stdin is a terminal, and stdout or stderr is one to ask on (the prompt
-  goes to stderr). `--json | jq` in your own terminal still asks; a command whose input is piped or
+  goes to stdout when it is the terminal, else to stderr). `--json | jq` in your own terminal still asks; a command whose input is piped or
   redirected (`shakerscan api … < /dev/null`, or any script feeding it) never counts as you, even in
   your own terminal. An agent's tool call has no terminal on stdin, so stdout being piped changes
   nothing for it. The client shows the
@@ -596,7 +602,9 @@ raised state-changing requests 20 -> 40 (safety ceiling) for Hunt 3f2a91c0-…
   start a request of its own the moment you expect to touch, so the key blinks for its request; a
   key has no display. Touch only for a prompt you started, and read the decision it names. Running
   an agent as another computer user, or in a container, with its own connection, keeps your
-  client, token file and key out of its reach.
+  client, token file and key out of its reach. Your client then reads no file of the agent's
+  either: a body over 1,024 characters, which the agent's refusal saves under the agent's own
+  decisions directory for `shakerscan api … @FILE`, is decided in the browser.
 - **Keys.** A USB FIDO2 key (a YubiKey 5, for example) over python-fido2. Touch ID, Windows Hello
   and synced passkeys are out of reach of a terminal client, and Windows is not supported for the
   touch in this release. On Linux, install your distribution's FIDO udev rules (the `libfido2` or
