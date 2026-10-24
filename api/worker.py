@@ -22803,6 +22803,16 @@ async def _guard_queue_lease(
                 return
 
 
+def _leased_work(job_data: dict[str, Any]) -> Any:
+    """The work one leased job runs. On the agent-tool worker a long action first takes one of
+    the long slots, so a short call always finds a worker; it waits inside the leased execution,
+    under the lease's heartbeat (hunt/agent_job_concurrency.py)."""
+    if AGENT_TOOL_ONLY_WORKER:
+        from hunt.agent_job_concurrency import in_lane
+        return in_lane(job_data, process_job)
+    return process_job(job_data)
+
+
 async def _run_job_under_lease(redis_client: Any, lease: QueueLease, job_data: dict[str, Any]) -> None:
     consumer_name = _worker_runtime_identity()
     if lease.delivery_attempts > QUEUE_MAX_DELIVERY_ATTEMPTS:
@@ -22816,10 +22826,10 @@ async def _run_job_under_lease(redis_client: Any, lease: QueueLease, job_data: d
     try:
         marker = _fleet_busy_marker(job_data)
         if lease.legacy:
-            await process_job(job_data)
+            await _leased_work(job_data)
             return
 
-        work_task = asyncio.create_task(process_job(job_data))
+        work_task = asyncio.create_task(_leased_work(job_data))
         guard_task = asyncio.create_task(_guard_queue_lease(redis_client, lease, consumer_name, work_task))
         try:
             await work_task

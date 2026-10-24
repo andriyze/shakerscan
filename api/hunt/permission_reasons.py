@@ -109,6 +109,9 @@ REASON_CODES: Mapping[str, ReasonSpec] = {
     "sqli_injection_point_missing": ReasonSpec(422),
     # Another verifier still held the finding after the bounded wait (D40): retry, nothing ran.
     "verification_in_progress": ReasonSpec(409),
+    # The Hunt already has the most long worker actions in flight (hunt/agent_job_concurrency.py):
+    # "not now", so nothing is recorded under the key, which the agent sends again later.
+    "long_actions_in_flight": ReasonSpec(429, recorded=False),
     # The Hunt's status could not be read during that wait: refused before traffic, not cancelled.
     "cancellation_state_unavailable": ReasonSpec(503),
     # SSH: codes now, requests in a later release (REQUESTABLE_KINDS).
@@ -155,7 +158,7 @@ class HuntRefusal(HTTPException):
 
     ``subject`` holds only server-resolved values used to build a permission request; it is
     never shown to the agent as is. ``extra`` adds public fields to ``detail`` (a slot, a
-    shortage table).
+    shortage table); ``headers`` go on the response (``Retry-After``).
     """
 
     def __init__(
@@ -167,6 +170,7 @@ class HuntRefusal(HTTPException):
         subject: Mapping[str, Any] | None = None,
         extra: Mapping[str, Any] | None = None,
         error: str | None = None,
+        headers: Mapping[str, str] | None = None,
     ) -> None:
         if code not in REASON_CODES:
             raise ValueError(f"unknown Hunt refusal reason code: {code}")
@@ -181,7 +185,10 @@ class HuntRefusal(HTTPException):
             "message": message,
             **self.extra,
         }
-        super().__init__(status_code=status_code or REASON_CODES[code].status, detail=detail)
+        super().__init__(
+            status_code=status_code or REASON_CODES[code].status, detail=detail,
+            headers=dict(headers) if headers else None,
+        )
 
     @property
     def kind(self) -> str | None:

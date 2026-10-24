@@ -74,6 +74,8 @@ class AdmissionStore:
         # active profile with an active binding). None attaches every selected reference.
         self.attached = None
         self.credential_uses = []
+        # Fixture: this Hunt's long worker actions holding live reservations (none by default).
+        self.long_in_flight = []
         self.run = {
             "id": HUNT, "target_id": TARGET, "device_target_id": None,
             "target_kind": "web", "status": "active",
@@ -111,6 +113,9 @@ class AdmissionStore:
 
     async def fetch(self, sql, *args):
         self.calls.append(sql)
+        if "FROM budget_reservations" in sql:
+            assert args[0] == str(HUNT)
+            return list(self.long_in_flight)
         assert "FROM credential_profiles p" in sql and "b.binding_id=$2::text" in sql, sql
         assert args[1] == str(TARGET)
         attached = self.attached if self.attached is not None else {
@@ -222,7 +227,7 @@ def admission(store, **overrides):
         "MAX_ADMISSION_ATTEMPTS", "record_grant_use", "_resume_parked_action", "granted_destination",
         "Any", "parked_outcome", "close_parked_action", "permission_required",
         "ARTIFACT_READ_CAPABILITIES", "artifact_origin_required", "service_origin_changed",
-        "sqli_injection_point_refusal", "web_hunt_target", "urllib",
+        "sqli_injection_point_refusal", "web_hunt_target", "urllib", "require_long_action_slot",
     ):
         context.setdefault(helper, getattr(real_router, helper))
     context.setdefault("settle_refusal", settle_refusal)

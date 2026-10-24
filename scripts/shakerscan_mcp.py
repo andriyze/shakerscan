@@ -187,6 +187,18 @@ def _reason_fields(detail: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
+def _in_flight_fields(detail: Mapping[str, Any]) -> dict[str, Any]:
+    """The actions a "not now" refusal names as in flight (long_actions_in_flight), bounded."""
+    listed = detail.get("in_flight")
+    if not isinstance(listed, list):
+        return {}
+    return {"in_flight": [
+        {key: _bounded_text(item[key], 200) for key in ("capability_name", "action_id")
+         if isinstance(item.get(key), str)}
+        for item in listed[:MAX_UNCOLLECTED_ACTIONS] if isinstance(item, Mapping)
+    ]}
+
+
 def _permission_wait_text(request_id: str, title: str) -> str:
     return (
         f"Waiting for the user to allow: {title}. Tell the user to run `shakerscan approve "
@@ -525,11 +537,13 @@ HUNT_TOOLS: tuple[HuntMCPTool, ...] = (
         "Execute one capability from the Hunt's server-returned manifest. Always send hunt_id, "
         "capability_name and input, with the capability's own fields inside input (never at the "
         "top level). Example: " + CAPABILITY_CALL_EXAMPLE + ". A long capability "
-        "(sqli.verify, xss.verify, content or port discovery) may answer outcome=running with "
+        "(sqli.verify, xss.verify, templates.scan, port discovery) may answer outcome=running with "
         "mcp_idempotency_key: continue other work, then call again with the same idempotency_key "
         "and unchanged input to collect the result; the server replays the recorded action and "
         "never runs it twice. shakerscan_hunt_get lists the running actions not yet collected "
-        "(mcp_uncollected_actions).",
+        "(mcp_uncollected_actions). A Hunt runs "
+        "at most two long actions at once: a third answers retry_later (long_actions_in_flight, "
+        "nothing reserved) until one settles, while short calls such as http.request still run.",
         {
             "hunt_id": {"type": "string", "format": "uuid",
                         "description": "The hunt_id shakerscan_hunt_start returned."},
@@ -1766,7 +1780,8 @@ def _capability_failure(exc: BaseException, identity: Mapping[str, Any]) -> MCPE
             f"{identity['mcp_idempotency_key']} and unchanged input."
         ), {
             "outcome": "retry_later", "http_status": status, "detail": reason,
-            "retry_after_seconds": retry_after, **identity, "recovery": RETRY_LATER_RECOVERY,
+            "retry_after_seconds": retry_after, **_reason_fields(detail), **_in_flight_fields(detail),
+            **identity, "recovery": RETRY_LATER_RECOVERY,
         }, http_status=status, retry_after=retry_after)
     # The POST may have been admitted before its response was lost.
     # Preserve recovery identity, never raw upstream error bodies or inputs.

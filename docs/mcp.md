@@ -198,10 +198,24 @@ the agent works on and collects it later. An action that ends within the wait se
 (`web.crawl` and content discovery hold 75 s); one whose `budget_cost.tool_wall_seconds` is longer
 (`ports.discover`, `web.browser_crawl`, `candidate.verify`, `browser.login_check`,
 `templates.scan`, `service.nse_check`, `sqli.verify`, `xss.verify`) may answer running. A running
-action keeps its wall reservation until it settles, so several in flight can hold a short Hunt's
-whole duration (on `fast`, three `sqli.verify`); a call the rest cannot fund asks for a budget
-raise until one settles. The
-engine answers the first request only when the action is done, so that request ends 10 seconds
+action keeps its wall reservation until it settles, so two in flight can hold most of a short
+Hunt's duration (on `fast`, two `sqli.verify` hold 2,400 of its 3,600 s); a call the remaining
+duration cannot fund asks for a budget raise, or waits for one to settle.
+
+A Hunt has at most two long actions in flight: a worker action whose wall may exceed 90 s
+(`sqli.verify`, `xss.verify`, `templates.scan`, `ports.discover`, `service.nse_check`,
+`subdomains.discover`, `web.browser_crawl`, `browser.login_check`). The agent-tool worker runs
+three actions at once and long ones in at most two of them, so a short call (`http.request`,
+`artifact.inspect`, a browser step) always finds a worker; the engine waits for a queued call only
+for its own timeout plus 30 s. A third long call is refused with HTTP 429 and reason code
+`long_actions_in_flight` (the actions in flight are listed in `in_flight`), reserving and recording
+nothing, and the adapter answers it as `outcome: "retry_later"`: collect one of the others or work
+with short calls, then send it again with the same key. Other Hunts on the same instance share the
+worker: a long action queued while theirs hold both long slots waits for one, without taking the
+slot short calls run in, and runs for what is left of its wall (one that waited past it is released
+without running). An SSH command runs on the worker that holds its session and does not count.
+
+The engine answers the first request only when the action is done, so that request ends 10 seconds
 before the call's wait does, and a replay of the same key learns the recorded action's state. An
 action still running then is returned as a normal result with `outcome: "running"` and its
 `mcp_idempotency_key`, and the `continue` text names that key: calling the tool again with the same

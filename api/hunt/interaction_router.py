@@ -89,6 +89,7 @@ from .verification_credentials import HuntCredentialScope, hunt_credential_scope
 from .device_policy import DeviceHuntPolicyState
 from .device_traffic import reserve_device_traffic, require_device_admission, settle_device_traffic
 from .sqli_target import sqli_injection_point_refusal
+from .agent_job_concurrency import require_long_action_slot
 from .service_binding import (
     ARTIFACT_READ_CAPABILITIES, artifact_origin_required, collection_uses_service_origin,
     service_origin_changed,
@@ -2413,6 +2414,9 @@ async def _execute_hunt_capability_lifecycle(
                         from .ssh_stream import require_ssh_session_available
                         require_ssh_session_available(get_redis(), base_queue=_get("AGENT_TOOL_QUEUE_NAME"),
                             hunt_id=hunt_id, session_id=request.input["session_id"])
+                    # Long worker actions take at most two of the worker's three slots; a Hunt
+                    # that already has two in flight is told to collect one first, at no cost.
+                    await require_long_action_slot(conn, run, name)
                     if durable_budget:
                         durable_action_digest = hunt_capability_action_digest(
                             hunt_id=run["id"],

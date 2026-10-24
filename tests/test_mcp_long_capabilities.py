@@ -283,3 +283,8 @@ def test_the_uncollected_list_is_bounded_and_keeps_no_large_input():
                                    _action("success"))
     assert all(item["idempotency_key"] != "key-0010" for item in client.uncollected_actions(HUNT))
     assert client.uncollected_actions("another-hunt") == []
+
+
+def test_the_tool_says_a_hunt_runs_at_most_two_long_actions():
+    description = mcp.HUNT_TOOL_BY_NAME["shakerscan_hunt_capability"].description
+    assert "at most two long actions" in description and "long_actions_in_flight" in description

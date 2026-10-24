@@ -352,6 +352,7 @@ export const HUNT_START_CONTRACT = {
     "dispatch_authority_rejected",
     "hunt_not_runnable",
     "idempotency_key_reused",
+    "long_actions_in_flight",
     "permission_denied",
     "permission_expired",
     "permission_unused",

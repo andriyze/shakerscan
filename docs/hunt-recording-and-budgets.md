@@ -156,8 +156,13 @@ with neither is refused at no cost (`sqli_injection_point_missing`), because sql
 into the URL path itself. A call the remaining budget cannot fund is refused with a budget request
 a person can grant, never started at a shorter hold; a call admitted at an older hold runs at the
 hold it reserved. Calls run side by side, and each keeps its whole wall reservation until it
-settles to the wall it ran: on `fast` (3,600 s), three `sqli.verify` calls in flight hold the whole
-duration, and another call that needs wall time waits for a budget raise or for one to settle.
+settles to the wall it ran: on `fast` (3,600 s), two `sqli.verify` calls in flight hold 2,400 s,
+and another call that needs more wall than is left waits for a budget raise or for one to settle.
+A Hunt has at most two long actions in flight (a worker action whose wall may exceed 90 s:
+`sqli.verify`, `xss.verify`, `templates.scan`, `ports.discover`, `service.nse_check`,
+`subdomains.discover`, `web.browser_crawl`, `browser.login_check`), so a short call always finds
+one of the worker's three slots; a third is refused with `long_actions_in_flight` (HTTP 429),
+reserving and recording nothing, and is sent again with the same key once one settles.
 
 ## When a limit is used up
 
