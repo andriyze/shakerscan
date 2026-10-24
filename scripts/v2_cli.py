@@ -634,7 +634,7 @@ def _start_preauthorization(
     if not preauthorization:
         try:
             granted = approval.preauthorize(
-                _approval_send(client), client.base_url, approval.Terminal(sys.stdin, sys.stderr),
+                _approval_send(client), client.base_url, approval.Terminal(sys.stdin, sys.stdout, sys.stderr),
                 payload["allow"], use="hunt_start", account=getattr(args, "account", None),
                 method=getattr(args, "method", None),
             )

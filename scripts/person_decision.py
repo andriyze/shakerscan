@@ -151,23 +151,14 @@ def detail_of(raw: bytes | str | None) -> Any:
     return value.get("detail") if isinstance(value, Mapping) else None
 
 
-def _tty(stream: Any) -> bool:
-    try:
-        return bool(stream.isatty())
-    except (AttributeError, ValueError):
-        return False
-
-
-def interactive(stdin: Any = None, stdout: Any = None, environ: Mapping[str, str] | None = None,
-                stderr: Any = None) -> bool:
-    """A person at a terminal: stdin is a terminal, and stdout or stderr is one to ask on
-    (``--json | jq`` in the person's own terminal still asks, on stderr), and this is not an
-    agent that `shakerscan agent` launched. An agent's tool call has no terminal. The same rule as
-    every other command that asks the person (hunt_approve.terminal_output: approve, --watch,
+def interactive(stdin: Any = None, stdout: Any = None, environ: Mapping[str, str] | None = None) -> bool:
+    """A person at a terminal: stdin and stdout are terminals, and this is not an agent that
+    `shakerscan agent` launched. An agent's tool call has no terminal, and a command whose output
+    is piped (``--json | jq``) is answered with the command to run without the pipe. The same rule
+    as every other command that asks the person (hunt_approve.terminal_output: approve, --watch,
     agent --allow)."""
     approve = _approve()
-    return approve.terminal_output(stdin or sys.stdin, stdout or sys.stdout, stderr or sys.stderr,
-                                   environ=environ) is not None
+    return approve.terminal_output(stdin or sys.stdin, stdout or sys.stdout, environ=environ) is not None
 
 
 def summary_lines(text: Any) -> list[str]:
@@ -542,12 +533,11 @@ def handle(post: Post, *, origin: str, method: str, path: str, body: bytes | Non
     answer is returned, whatever it is); anywhere else PersonDecisionRefused."""
     stdin = getattr(terminal, "stdin", None)
     stdout = getattr(terminal, "stdout", None)
-    if not interactive(stdin, stdout, environ, stdout if terminal is not None else None):
+    if not interactive(stdin, stdout, environ):
         command = person_command(method, path, body, detail)
         raise PersonDecisionRefused(refusal_line(detail, command), detail=detail, command=command)
     if terminal is None:
-        # Asked on stdout when it is the terminal, else on stderr (stdout may be a pipe to jq).
-        terminal = _approve().Terminal(sys.stdin, sys.stdout if _tty(sys.stdout) else sys.stderr)
+        terminal = _approve().Terminal(sys.stdin, sys.stdout)
     grant = complete(post, origin=origin, method=method, path=path, body=body or b"", detail=detail,
                      terminal=terminal, assertion=assertion)
     return resend(grant)

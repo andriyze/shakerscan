@@ -393,9 +393,11 @@ def test_hunt_start_allow_on_enterprise_needs_the_persons_step_up_first(monkeypa
                      ("GET", "/_enterprise/me"): {"user": {"auth": "token"}},
                      ("POST", "/hunts"): lambda payload: {"hunt_id": HUNT}}, token="token-1")
     monkeypatch.setattr(v2_cli.sys, "stdin", types.SimpleNamespace(isatty=lambda: True, readline=lambda: "alice\n"))
-    # The person's terminal: the prompts go to stderr, a terminal too.
-    terminal_err = io.StringIO()
+    # The person's terminal: stdout (the JSON answer) and stderr, where the prompts go.
+    terminal_out, terminal_err = io.StringIO(), io.StringIO()
+    terminal_out.isatty = lambda: True  # type: ignore[method-assign]
     terminal_err.isatty = lambda: True  # type: ignore[method-assign]
+    monkeypatch.setattr(v2_cli.sys, "stdout", terminal_out)
     monkeypatch.setattr(v2_cli.sys, "stderr", terminal_err)
     args = _parse("hunt", "start", "--target-id", "t-1", "--target-kind", "web", "--allow", "budget.raise:2x")
     with pytest.raises(v2_cli.CliError) as refused:

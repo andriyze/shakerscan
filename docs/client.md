@@ -472,11 +472,11 @@ shakerscan hunt permissions wait 8f0c…  # JSON: granted, denied, expired, with
   The engine has no accounts: anyone who can reach its API could decide, and the command says so.
 - Neither runs without an interactive terminal, so an agent cannot run it in its own shell: `approve`,
   `approve --all-pending`, `approve --watch`, `deny`, `agent --allow` and the knowledge and secrets
-  decisions ask only when their input is a terminal and so is their output or their error output
-  (the prompts then go to that terminal), the same rule as a person's decision below. Otherwise
-  they exit with status 3 (refused, nothing ran) before anything is read from the instance, shown,
-  or asked of a security key, so a harness that gives an agent's command a terminal for input only
-  never makes your key blink. Inside an agent that `shakerscan agent` started they are refused the
+  decisions ask only when their input and their output are a terminal (the prompts then go to
+  it), the same rule as a person's decision below. Otherwise they exit with status 3 (refused,
+  nothing ran) before anything is read from the instance, shown, or asked of a security key, so a
+  harness that captures an agent's command's output never makes your key blink, whatever
+  terminal it gives the command's input or errors. Inside an agent that `shakerscan agent` started they are refused the
   same way, even in its own window. The refusal ends with the command to run in your own terminal,
   with the request the agent named (`shakerscan approve 8f0c…`). Never type a code into an agent's
   chat.
@@ -521,11 +521,12 @@ touch accepted for alice (security-key touch); sending the request again...
 raised state-changing requests 20 -> 40 (safety ceiling) for Hunt 3f2a91c0-…
 ```
 
-- **In your own terminal**: stdin is a terminal, and stdout or stderr is one to ask on (the prompt
-  goes to stdout when it is the terminal, else to stderr). `--json | jq` in your own terminal still asks; a command whose input is piped or
-  redirected (`shakerscan api … < /dev/null`, or any script feeding it) never counts as you, even in
-  your own terminal. An agent's tool call has no terminal on stdin, so stdout being piped changes
-  nothing for it. The client shows the
+- **In your own terminal**: stdin and stdout are terminals (the prompt goes to stdout; `hunt start
+  --allow` asks on stderr when that is a terminal too, its stdout carrying the JSON answer). A
+  command whose output is piped or captured (`--json | jq`, `| tee log`, `> file`, an agent's tool
+  call) or whose input is piped or redirected (`shakerscan api … < /dev/null`, or any script feeding
+  it) never asks, even in your own terminal: it exits 3, nothing changed, and names the command to
+  run without the pipe. The client shows the
   decision whole (every limit a raise sets, the whole host; a
   decision too long for a terminal is never touched for), asks
   the gateway for a challenge bound to exactly that request (method, path and query, SHA-256 of the

@@ -469,29 +469,30 @@ def person_at_terminal(*streams: Any, environ: Mapping[str, str] | None = None) 
     return all(_is_tty(stream) for stream in streams)
 
 
-def terminal_output(stdin: Any, *outputs: Any, environ: Mapping[str, str] | None = None) -> Any:
-    """The stream a person is asked on, or None: the first of ``outputs`` that is a terminal, when
-    stdin is one too and this is not an agent that ``shakerscan agent`` launched. One rule for
+def terminal_output(stdin: Any, stdout: Any, *prefer: Any, environ: Mapping[str, str] | None = None) -> Any:
+    """The stream a person is asked on, or None. A person is at a terminal when stdin and stdout
+    are both terminals and this is not an agent that ``shakerscan agent`` launched: one rule for
     every command that asks the person (an approval, a watch, start bounds, a person's decision,
-    a knowledge decision): its input is their terminal and so is the output it asks on, so a
-    command whose output is captured (an agent's tool call, a harness that gives it a terminal for
-    input only) never asks and never makes a key blink, and ``--json | jq`` in the person's own
-    terminal still asks, on stderr."""
-    if not person_at_terminal(stdin, environ=environ):
+    a knowledge decision). A command whose output is captured (an agent's tool call, a harness
+    that gives it a terminal for its input and errors only, ``| jq``, ``| tee``, ``> file``)
+    never asks and never makes a key blink: it exits 3 with the command to run without the pipe.
+    The prompt goes to the first of ``prefer`` that is a terminal too (``hunt start --allow``
+    asks on stderr, its stdout carrying the JSON answer), else to stdout."""
+    if not person_at_terminal(stdin, stdout, environ=environ):
         return None
-    return next((stream for stream in outputs if _is_tty(stream)), None)
+    return next((stream for stream in prefer if _is_tty(stream)), stdout)
 
 
 class Terminal:
-    """The person's own terminal. Every prompt refuses to run without one (``require``), and every
-    prompt is written to the output that is the terminal (stdout, else stderr)."""
+    """The person's own terminal. Every prompt refuses to run without one (``require``: stdin and
+    stdout terminals), and every prompt is written to ``prompts`` when it is a terminal too, else
+    to stdout."""
 
-    def __init__(self, stdin: Any = None, stdout: Any = None, stderr: Any = None) -> None:
+    def __init__(self, stdin: Any = None, stdout: Any = None, prompts: Any = None) -> None:
         self.stdin = stdin or sys.stdin
         self.stdout = stdout or sys.stdout
-        # The other output a prompt may go to when stdout is not the terminal: the process's
-        # stderr when stdout was not named, else only the one named.
-        self.stderr = stderr if stderr is not None else (sys.stderr if stdout is None else None)
+        # Where a command whose stdout carries its answer asks instead (hunt start --allow: stderr).
+        self.prompts = prompts
         self._key_fd: int | None = None
         self._key_saved: Any = None
         self._escape = "idle"  # the escape-sequence state machine of key()
@@ -514,7 +515,7 @@ class Terminal:
                 f"{what} asks the person, and this shell belongs to an agent that `shakerscan agent` "
                 f"started; nothing was asked or decided: {run}"
             )
-        stream = terminal_output(self.stdin, self.stdout, self.stderr)
+        stream = terminal_output(self.stdin, self.stdout, *([self.prompts] if self.prompts is not None else []))
         if stream is None:
             raise NotAtTerminal(
                 f"{what} asks the person at an interactive terminal (its input and its output a "

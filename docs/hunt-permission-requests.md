@@ -642,8 +642,9 @@ client and `./scanner.sh approve` on an engine install run the same protocol.
   start tool does with its `allow` argument.
 - Every command that decides refuses to run without an interactive terminal, so a command an agent
   runs in its own tool shell cannot decide or pre-authorize anything. Since client 0.11.2 it is the
-  rule a person's decision follows: stdin a TTY and stdout or stderr a TTY to ask on (the prompts
-  go there), and not inside `shakerscan agent` (`SHAKERSCAN_AGENT_NAME`). Otherwise the command
+  rule a person's decision follows: stdin and stdout TTYs (the prompts go to stdout; `hunt start
+  --allow` asks on stderr when it is a TTY too), and not inside `shakerscan agent`
+  (`SHAKERSCAN_AGENT_NAME`). Otherwise the command
   exits 3 (refused, nothing ran; 0.11.1 exited 2) before it reads the instance, shows anything or
   asks a security key anything.
 
@@ -927,7 +928,7 @@ it in the person's terminal (`scripts/person_decision.py`):
   "header": "x-shakerscan-person-proof", "expires_at"}`: one use, at most 120 seconds, for that
   request through that token. The client sends the same request once more, the same bytes and the
   same Idempotency-Key, with `X-ShakerScan-Person-Proof: <grant>`.
-- Without an interactive terminal (stdin, and stdout or stderr to ask on), or inside `shakerscan
+- Without an interactive terminal (stdin and stdout TTYs), or inside `shakerscan
   agent`, the client never begins one and never opens a key: it prints the decision and the
   person's command and exits 3. It never begins one either when no key could answer here
   (python-fido2 missing, no key plugged in), and it shows `summary` whole: a summary over 1,000

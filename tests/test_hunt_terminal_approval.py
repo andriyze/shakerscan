@@ -19,7 +19,6 @@ from __future__ import annotations
 import contextlib
 import os
 import pty
-import select
 import signal
 import subprocess
 import sys
@@ -292,10 +291,10 @@ def _input_terminal_only(argv: list[str], env: dict[str, str], *, stderr_termina
 ], ids=["approve", "all-pending", "watch", "deny"])
 @pytest.mark.parametrize("instance", ["enterprise", "local"])
 def test_a_terminal_for_input_only_is_no_persons_terminal(tmp_path, enterprise, argv, instance):
-    """The same rule as a person's decision: the command asks only when its input is a terminal
-    and so is an output to ask on. With stdin a terminal and stdout and stderr captured it
-    refuses at once (exit 3), writes no prompt to the captured output, reads nothing of the
-    instance and decides nothing."""
+    """The same rule as a person's decision: the command asks only when its input and its output
+    are a terminal. With stdin a terminal and stdout and stderr captured it refuses at once (exit
+    3), writes no prompt to the captured output, reads nothing of the instance and decides
+    nothing."""
     if instance == "enterprise":
         stub, connection, env = enterprise("g1")
     else:
@@ -313,23 +312,27 @@ def test_a_terminal_for_input_only_is_no_persons_terminal(tmp_path, enterprise, 
     assert stub.request["status"] == "pending"
 
 
-def test_stderr_a_terminal_is_where_the_person_is_asked(tmp_path, enterprise):
-    """``shakerscan approve ... | tee log``: stdout captured, stderr the person's terminal. The
-    prompts and the outcome go to the terminal, nothing to the pipe, and the person decides."""
+@pytest.mark.parametrize("argv", [
+    ["approve", REQUEST, "--hunt", HUNT, "--account", "alice"],
+    ["approve", "--watch", "--hunt", HUNT, "--minutes", "1", "--account", "alice"],
+], ids=["approve", "watch"])
+def test_stdout_captured_is_no_persons_terminal_even_with_stderr_one(tmp_path, enterprise, argv):
+    """``shakerscan approve ... | tee log``, or a harness that gives an agent's command a terminal
+    for its input and errors and captures its output: the person is not asked (stdin and stdout
+    must be terminals). It refuses at once (exit 3) on the terminal, writes nothing to the pipe,
+    reads nothing of the instance and decides nothing, so no key blinks for it."""
     stub, connection, env = enterprise("g1")
     with stub:
-        master, proc = _input_terminal_only(
-            ["approve", *connection, REQUEST, "--hunt", HUNT, "--account", "alice"], env, stderr_terminal=True
-        )
+        master, proc = _input_terminal_only([argv[0], *connection, *argv[1:]], env, stderr_terminal=True)
         screen = _Screen(master)
-        screen.wait_for(b"TOTP code for alice", 20, lambda: proc.poll() is None)
-        os.write(master, (TOTP + "\n").encode())
         out, _ = proc.communicate(timeout=60)
         shown = screen.close()
-    assert proc.returncode == 0, (out, shown)
-    assert out == b""
-    assert f"granted: {TITLE} (by alice, terminal stepup)".encode() in shown
-    assert stub.request["status"] == "granted"
+    assert proc.returncode == 3, (out, shown)
+    assert out == b"", "nothing went to the pipe"
+    assert b"interactive terminal" in shown and b"nothing was asked or decided" in shown
+    assert b"TOTP code" not in shown
+    assert stub.seen == [], "nothing was read from or sent to the instance"
+    assert stub.request["status"] == "pending"
 
 
 PROMPT = "[d]eny  [s]kip  [q]uit: "

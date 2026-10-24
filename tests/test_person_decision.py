@@ -200,43 +200,45 @@ def test_only_the_gateways_refusal_with_its_header_is_a_persons_decision():
     assert not decision.required(403, {"x-shakerscan-step-up": "required"}, "person_decision_required")
 
 
-@pytest.mark.parametrize(("stdin", "stdout", "stderr", "agent", "expected"), [
-    (True, True, True, "", True),
-    (False, True, True, "", False),  # `yes | shakerscan ...`: a pipe is never the person
-    (True, False, False, "", False),  # output and errors captured by a tool
-    (True, False, True, "", True),  # `shakerscan scan ... --json | jq` in the person's terminal
-    (True, True, True, "claude", False),  # inside `shakerscan agent`, even in its own terminal
+@pytest.mark.parametrize(("stdin", "stdout", "agent", "expected"), [
+    (True, True, "", True),
+    (False, True, "", False),  # `yes | shakerscan ...`: a pipe is never the person
+    (True, False, "", False),  # output captured: an agent's tool call, `| jq`, `| tee`, `> file`
+    (False, False, "", False),
+    (True, True, "claude", False),  # inside `shakerscan agent`, even in its own terminal
 ])
-def test_only_a_person_at_a_terminal_is_asked(stdin, stdout, stderr, agent, expected):
-    streams = [types.SimpleNamespace(isatty=lambda value=value: value) for value in (stdin, stdout, stderr)]
-    assert decision.interactive(streams[0], streams[1], {"SHAKERSCAN_AGENT_NAME": agent}, streams[2]) is expected
+def test_only_a_person_at_a_terminal_is_asked(stdin, stdout, agent, expected):
+    """stdin and stdout terminals, and not an agent's shell: a harness that gives a command a
+    terminal for its input and errors and captures its output never gets a prompt (and a key
+    never blinks for it)."""
+    streams = [types.SimpleNamespace(isatty=lambda value=value: value) for value in (stdin, stdout)]
+    assert decision.interactive(streams[0], streams[1], {"SHAKERSCAN_AGENT_NAME": agent}) is expected
 
 
 @pytest.mark.parametrize(("stdin", "stdout", "stderr", "agent", "expected"), [
     (True, True, True, "", True),
     (False, True, True, "", False),
     (True, False, False, "", False),
-    (True, False, True, "", True),
+    (True, False, True, "", False),  # stdout captured, stderr a terminal: never asked
     (True, True, False, "", True),
     (True, True, True, "opencode", False),
 ])
 def test_approve_and_a_persons_decision_read_one_terminal_rule(monkeypatch, stdin, stdout, stderr, agent,
                                                               expected):
     """approve, --watch, agent --allow and the knowledge decisions (Terminal.require) ask the person
-    exactly when a person's decision does (interactive): input a terminal, and an output to ask
-    on. Without one, NotAtTerminal (exit 3) before anything is shown or asked of a key."""
+    exactly when a person's decision does (interactive): input and output terminals, whatever
+    stderr is. Without them, NotAtTerminal (exit 3) before anything is shown or asked of a key."""
     streams = [types.SimpleNamespace(isatty=lambda value=value: value, write=lambda text: None, flush=lambda: None)
                for value in (stdin, stdout, stderr)]
     if agent:
         monkeypatch.setenv("SHAKERSCAN_AGENT_NAME", agent)
     else:
         monkeypatch.delenv("SHAKERSCAN_AGENT_NAME", raising=False)
-    assert decision.interactive(streams[0], streams[1], {"SHAKERSCAN_AGENT_NAME": agent}, streams[2]) is expected
-    terminal = approval.Terminal(streams[0], streams[1], streams[2])
+    assert decision.interactive(streams[0], streams[1], {"SHAKERSCAN_AGENT_NAME": agent}) is expected
+    terminal = approval.Terminal(streams[0], streams[1])
     if expected:
         terminal.require("shakerscan approve")
-        # Every prompt goes to the output that is the terminal.
-        assert terminal.stdout is (streams[1] if stdout else streams[2])
+        assert terminal.stdout is streams[1], "every prompt goes to stdout"
     else:
         with pytest.raises(approval.NotAtTerminal) as refused:
             terminal.require("shakerscan approve")
@@ -244,15 +246,24 @@ def test_approve_and_a_persons_decision_read_one_terminal_rule(monkeypatch, stdi
         assert isinstance(refused.value, approval.ApprovalError)
 
 
-def test_a_terminal_named_with_one_output_asks_only_on_it(monkeypatch):
-    """Terminal(stdin, stderr), as `hunt start --allow` asks on stderr: the process's stdout is
-    not taken instead when that stream is not a terminal."""
+@pytest.mark.parametrize(("stdout", "stderr", "asked_on"), [
+    (True, True, "stderr"),  # stdout carries the JSON answer: the prompt goes to stderr
+    (True, False, "stdout"),  # `2> log`: the prompt stays where the person sees it
+    (False, True, None),  # `| jq`: refused, nothing asked
+])
+def test_hunt_start_allow_asks_on_stderr_only_when_stdout_is_a_terminal(monkeypatch, stdout, stderr, asked_on):
+    """Terminal(stdin, stdout, stderr), as `hunt start --allow` constructs it: the rule reads the
+    process's stdout like every other command; the prompt prefers stderr."""
     monkeypatch.delenv("SHAKERSCAN_AGENT_NAME", raising=False)
-    stdin = types.SimpleNamespace(isatty=lambda: True)
-    piped = types.SimpleNamespace(isatty=lambda: False)
-    monkeypatch.setattr(sys, "stdout", types.SimpleNamespace(isatty=lambda: True))
-    with pytest.raises(approval.NotAtTerminal):
-        approval.Terminal(stdin, piped).require("pre-authorizing --allow bounds")
+    streams = {name: types.SimpleNamespace(isatty=lambda value=value: value)
+               for name, value in (("stdin", True), ("stdout", stdout), ("stderr", stderr))}
+    terminal = approval.Terminal(streams["stdin"], streams["stdout"], streams["stderr"])
+    if asked_on is None:
+        with pytest.raises(approval.NotAtTerminal):
+            terminal.require("pre-authorizing --allow bounds")
+    else:
+        terminal.require("pre-authorizing --allow bounds")
+        assert terminal.stdout is streams[asked_on]
 
 
 def test_approve_without_a_terminal_exits_3_and_reads_nothing(monkeypatch, capsys):
