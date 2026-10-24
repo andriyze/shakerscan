@@ -4429,8 +4429,16 @@ class DatabaseNeutralScanActionDispatcher:
         host = str(parsed.hostname or "").lower().rstrip(".")
         port = parsed.port or (443 if scheme == "https" else 80)
         own_path = parsed.path or "/"
+        # Only an interactive primary profile (a form sign-in) has a sign-in action. A static one
+        # (a bearer token, a header, a cookie) has none, and a backend refuses to read an action
+        # its plan does not hold: the crawl then failed before it started.
+        planned_ids = {item.action_id for item in self.plan.actions}
         sessions = [
-            item for item in await self._observations("inputs.auth_primary")
+            item
+            for item in (
+                await self._observations("inputs.auth_primary")
+                if "inputs.auth_primary" in planned_ids else ()
+            )
             if isinstance(item, Mapping) and item.get("kind") == "credential_session"
         ]
         sign_in_pages = sign_in_page_paths(self.options, sessions, base_url=self.target_url)

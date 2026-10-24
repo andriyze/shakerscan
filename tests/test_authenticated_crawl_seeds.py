@@ -33,7 +33,7 @@ from runtime.capability_registry import CAPABILITY_REGISTRY
 from runtime.models import ScanPolicy, TargetBinding
 from scan.action_adapter import DatabaseNeutralScanActionDispatcher
 from scan.action_plan import ScanAction, ScanActionPlan
-from scan.execution_backend import ActionLease
+from scan.execution_backend import ActionLease, ScanExecutionBackendError
 from scan.work_manifests import build_endpoint_manifest
 
 PROXY = "socks5://127.0.0.1:41000"
@@ -217,7 +217,15 @@ def fixture_app():
     server.shutdown()
 
 
-def _crawl(port, *, capability, signed_in, seeds, landing=None):
+def _crawl(port, *, capability, signed_in, seeds, landing=None, sign_in_action=True):
+    """One crawl action dispatched over a fixture backend.
+
+    ``signed_in`` carries the session. With ``sign_in_action`` the plan holds the primary sign-in
+    the compiler creates for an interactive profile (a form sign-in), and the crawl reads its
+    session observation; without it the identity is static (a cookie, a bearer token, a header),
+    which gets no sign-in action. The backend refuses an action its plan does not hold, as the
+    local and the broker backends do.
+    """
     host = "app.fixture.test"
     target = TargetBinding(
         target_id="target-1", target_kind="web", canonical_host=host,
@@ -236,10 +244,25 @@ def _crawl(port, *, capability, signed_in, seeds, landing=None):
         source_action_ids=("inputs.seed",),
         auth_lane="primary",
     )
+    sign_in = ()
+    if signed_in and sign_in_action:
+        sign_in_spec = CAPABILITY_REGISTRY.require("auth.session.establish")
+        sign_in = (ScanAction(
+            action_id="inputs.auth_primary", stage="resolve_inputs", ordinal=0,
+            capability_name=sign_in_spec.name, capability_args={"lane": "primary"},
+            target_binding_digest=target.digest, input_binding_digest="2" * 64,
+            requested_budget={"http_requests": 4, "tool_wall_seconds": 30},
+            placement={
+                "schema_version": "scan-action-placement/v1", "eligible_backends": ["local", "broker"],
+                "requirements": dict(sign_in_spec.placement_requirements),
+                "adapter_name": sign_in_spec.adapter, "adapter_version": sign_in_spec.adapter_version,
+            },
+            dependencies=(), required=True, supporting=True, output_schema=sign_in_spec.output_schema,
+        ),)
     spec = CAPABILITY_REGISTRY.require(capability)
     action = ScanAction(
         action_id="discover.web_crawl" if capability == "web.crawl" else "discover.browser_crawl",
-        stage="discover_surface", ordinal=0, capability_name=spec.name,
+        stage="discover_surface", ordinal=len(sign_in), capability_name=spec.name,
         capability_args={"endpoint_manifest_ref": endpoints.reference().canonical_dict(), "read_only": True},
         target_binding_digest=target.digest, input_binding_digest="1" * 64,
         requested_budget={"http_requests": 3_000, "tool_wall_seconds": 600, "browser_actions": 400},
@@ -248,20 +271,24 @@ def _crawl(port, *, capability, signed_in, seeds, landing=None):
             "requirements": dict(spec.placement_requirements),
             "adapter_name": spec.adapter, "adapter_version": spec.adapter_version,
         },
-        dependencies=(), required=False, supporting=True, output_schema=spec.output_schema,
+        dependencies=tuple(item.action_id for item in sign_in), required=False, supporting=True,
+        output_schema=spec.output_schema,
     )
     plan = ScanActionPlan(scan_id=scan_id, execution_plan_digest="a" * 64,
-                          target_binding_digest=target.digest, actions=(action,))
+                          target_binding_digest=target.digest, actions=(*sign_in, action))
+    planned_ids = {item.action_id for item in plan.actions}
     observations = {"inputs.auth_primary": ({
         "kind": "credential_session", "lane": "primary", "status": "established",
         "endpoint_path": "/hub/login", **({"landing_path": landing} if landing else {}),
-    },)} if signed_in else {}
+    },)} if sign_in else {}
 
     class Backend:
         async def load_work_manifest(self, _action_id, _reference):
             return endpoints
 
         async def load_observations(self, action_id):
+            if action_id not in planned_ids:
+                raise ScanExecutionBackendError("action is absent from the persisted Scan plan")
             return observations.get(action_id, ())
 
     captured = {}
@@ -360,6 +387,21 @@ def test_without_seeds_the_signed_in_crawl_never_reaches_the_hub(fixture_app):
     captured = _crawl(fixture_app, capability="web.crawl", signed_in=True, seeds=[])
     assert "crawl_seed_paths" not in captured["scanner_options"]
     assert not any(path.startswith("/hub/") for path, _signed_in in _FixtureApp.log)
+
+
+@pytest.mark.parametrize("capability", ["web.crawl", "web.browser_crawl"])
+def test_a_static_identity_crawls_from_its_seeds_without_a_sign_in_action(fixture_app, capability):
+    """A static primary identity (here a cookie; a bearer token or a header alike) has no sign-in
+    action in the plan. The crawl read that action's session anyway, the backend refused it, and
+    both crawls failed before they started (``adapter_failed``)."""
+    captured = _crawl(fixture_app, capability=capability, signed_in=True, sign_in_action=False,
+                      seeds=[("GET", "/hub/logout", "known_endpoints"), ("GET", "/hub/", "known_endpoints")])
+    # The crawl started (the process ran), from the manifest's seeds; never from a sign-out.
+    assert "argv" in captured, captured.get("error")
+    assert captured["scanner_options"]["crawl_seed_paths"] == ["/hub/"]
+    assert _inputs(captured["argv"])[1:] == [captured["execution_target"].rstrip("/") + "/hub/"]
+    requested = {path for path, signed_in in _FixtureApp.log if signed_in}
+    assert {"/hub/", "/hub/orders"} <= requested
 
 
 def test_an_anonymous_crawl_keeps_its_single_input(fixture_app):
