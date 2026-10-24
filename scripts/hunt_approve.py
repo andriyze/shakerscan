@@ -1613,9 +1613,12 @@ def _report(terminal: Terminal, requests: Mapping[str, Mapping[str, Any]], resul
 def decide(send: Send, terminal: Terminal, requests: Sequence[Mapping[str, Any]], decision: str, *,
            enterprise: bool, origin: str, remember: bool = False, total: int | None = None,
            account: str | None = None, method: str | None = None,
-           session: Mapping[str, Any] | None = None, confirmed: bool = False) -> int:
+           session: Mapping[str, Any] | None = None, confirmed: bool = False,
+           approver: dict[str, Any] | None = None) -> int:
     """Decide ``requests`` with one proof: one step-up (or the open approver ``session``) on
-    Enterprise, one local confirmation on OSS (``confirmed``: the --watch keypress was it)."""
+    Enterprise, one local confirmation on OSS (``confirmed``: the --watch keypress was it).
+    ``approver`` receives the account the gateway named as approving (``account``), so a watch
+    names it once and passes it to every later decision."""
     if not requests:
         terminal.say("no pending permission requests")
         return 0
@@ -1636,6 +1639,8 @@ def decide(send: Send, terminal: Terminal, requests: Sequence[Mapping[str, Any]]
                        via="local confirmation")
     stepup = StepUp(send, origin, terminal, account=account, method=method)
     challenge, _ = stepup.begin("permission_decision", {"decisions": entries})
+    if approver is not None and stepup.account:
+        approver["account"] = stepup.account
     if session is not None:
         proof = {"method": "approver_session", "session_id": session["session_id"],
                  "session_secret": session["secret"]()}
@@ -1740,6 +1745,10 @@ def _watch(send: Send, terminal: Terminal, *, enterprise: bool, origin: str, hun
             terminal.say(f"approver session open until {answer.get('expires_at') or f'{seconds // 60} minutes from now'} "
                          "(held in this process only; Ctrl-C ends it)")
         account = stepup.account
+    # Who approves: named by the gateway at the first decision of a touch-mode watch (whose
+    # approver session it refused before naming anyone), then passed to every later one, so it is
+    # said once and the gateway's description is not read again for each decision.
+    approver: dict[str, Any] = {"account": account}
     # Only a gateway that says it serves the feed is read (an older one would audit a refusal).
     decisions_elsewhere = (
         PersonDecisionFeed(send) if enterprise and gateway_features(send)["names_approver"] else None
@@ -1825,7 +1834,8 @@ def _watch(send: Send, terminal: Terminal, *, enterprise: bool, origin: str, hun
                         chunk = rest[start:start + 50]
                         if not _touch_decision(terminal, seen, retry, chunk, lambda chunk=chunk: decide(
                                 send, terminal, chunk, "allow", enterprise=enterprise, origin=origin,
-                                account=account, method=method, session=None, confirmed=False)):
+                                account=approver["account"], method=method, session=None, confirmed=False,
+                                approver=approver)):
                             for item in rest[start + 50:]:
                                 seen.discard(str(item["id"]))
                                 retry.append(item)
@@ -1835,7 +1845,8 @@ def _watch(send: Send, terminal: Terminal, *, enterprise: bool, origin: str, hun
                     def one(request=request, choice=choice) -> None:
                         decide(send, terminal, [request], "deny" if choice == "d" else "allow",
                                enterprise=enterprise, origin=origin, remember=choice == "r",
-                               account=account, method=method, session=session, confirmed=not enterprise)
+                               account=approver["account"], method=method, session=session,
+                               confirmed=not enterprise, approver=approver)
                     if touch_mode:
                         _touch_decision(terminal, seen, retry, [request], one)
                     else:
