@@ -62,6 +62,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import os
 import re
 import shlex
 import sys
@@ -85,6 +86,10 @@ EXIT_REFUSED = 3
 # Ctrl-C at the touch: cancelled, nothing changed (the shell's own convention for SIGINT).
 EXIT_CANCELLED = 130
 MAX_BODY = 48 * 1024
+# The longest request body a `shakerscan api` command names inline; a longer one is saved to a
+# file the command names (``@FILE``), so neither the agent's output nor the person's shell
+# history carries a line of up to the whole body.
+INLINE_BODY = 1024
 # The longest decision shown (the gateway's own bound): a longer one is never touched for.
 MAX_SUMMARY = 1000
 WRAP = 100
@@ -175,6 +180,26 @@ def summary_lines(text: Any) -> list[str]:
 
 
 _UUID = re.compile(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}")
+_SECRET = re.compile(r"/targets/([^/]+)/discovered-secrets/([^/]+)/(state|expiry)")
+
+
+def saved_body(body: bytes) -> str | None:
+    """Where a request body too long to name inline is saved for the person's command: the
+    client's configuration directory (``$SHAKERSCAN_CONFIG_DIR`` or ``~/.config/shakerscan``),
+    ``decisions/<digest>.json``, readable by this user only; None when it cannot be written. The
+    touch still shows what the gateway reads from the body the person's command sends."""
+    base = os.environ.get("SHAKERSCAN_CONFIG_DIR") or os.path.join(os.path.expanduser("~"), ".config", "shakerscan")
+    directory = os.path.join(base, "decisions")
+    path = os.path.join(directory, hashlib.sha256(body).hexdigest()[:24] + ".json")
+    try:
+        os.makedirs(directory, mode=0o700, exist_ok=True)
+        descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0), 0o600)
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(body)
+        os.chmod(path, 0o600)
+    except OSError:
+        return None
+    return path
 
 
 def person_command(method: str, path: str, body: bytes | None, detail: Mapping[str, Any] | None = None) -> str:
@@ -225,8 +250,20 @@ def person_command(method: str, path: str, body: bytes | None, detail: Mapping[s
     if detail.get("submission"):
         # A retest whose target the gateway did not name: never the retest itself.
         return "shakerscan targets authorize <the target's URL or id>"
+    if method == "POST" and payload and (secret := _SECRET.fullmatch(route)):
+        target, reference, what = (shlex.quote(part) for part in secret.groups())
+        if secret.group(3) == "state" and payload == {"state": "active"}:
+            return f"shakerscan secrets reactivate {target} {reference}"
+        if secret.group(3) == "expiry" and set(payload) == {"days"} and type(payload["days"]) is int:
+            return f"shakerscan secrets expiry {target} {reference} --days {payload['days']}"
     text = body.decode("utf-8", "replace") if body else ""
-    return "shakerscan api " + " ".join(shlex.quote(part) for part in (method, path, *([text] if text else [])))
+    request = "shakerscan api " + " ".join(shlex.quote(part) for part in (method, path))
+    if len(text) <= INLINE_BODY:
+        return request + (" " + shlex.quote(text) if text else "")
+    saved = saved_body(body or b"")
+    if saved:
+        return f"{request} {shlex.quote('@' + saved)}"
+    return f"{request} @request.json (request.json: the {len(body or b'')}-byte JSON body this request carried)"
 
 
 def refusal_line(detail: Mapping[str, Any], command: str) -> str:
@@ -296,10 +333,16 @@ def json_poster(api_url: str, token: str | None, *, opener: Any = None, timeout:
     return post
 
 
-def _refused(status: int, body: Any) -> PersonDecisionError:
+def _refused(status: int, body: Any, *, decision: Mapping[str, Any] | None = None) -> PersonDecisionError:
+    """The gateway's refusal, in the person's words: before any touch (``decision``, the refusal
+    the request got: the decision is named, from its words, and no touch was asked), or of the
+    touch itself."""
     text = _approve()._detail_text(body, 1200)
     code = str(body.get("error") or "refused") if isinstance(body, Mapping) else "refused"
-    return PersonDecisionError(f"the gateway refused the touch ({code}, HTTP {status}): {text}; nothing was changed")
+    if decision is not None:
+        named = _inert(decision.get("summary") or decision.get("decision") or "this decision", MAX_SUMMARY)
+        return PersonDecisionError(f"{named}: no touch was asked ({code}): {text}; nothing was changed")
+    return PersonDecisionError(f"the gateway did not accept the touch ({code}, HTTP {status}): {text}; nothing was changed")
 
 
 def check_challenge(challenge: Mapping[str, Any], *, origin: str, method: str, path: str, body: bytes) -> dict:
@@ -375,7 +418,9 @@ def _touch(post: Post, approve: Any, terminal: Any, *, origin: str, method: str,
         "person_decision": {"method": method, "path": path, "body": _b64url(body or b"")},
     })
     if not 200 <= status < 300 or not isinstance(challenge, Mapping):
-        raise _refused(status, challenge)
+        # Before any touch (no key registered, a decision the gateway cannot name, ...): the
+        # decision is named from the refusal the request got, and nothing was asked of a key.
+        raise _refused(status, challenge, decision=detail or {})
     document = check_challenge(challenge, origin=origin, method=method, path=path, body=body or b"")
     shown = document["person_decision"].get("summary")
     if not isinstance(shown, str) or not shown or len(shown) > MAX_SUMMARY:
@@ -434,10 +479,10 @@ def handle(post: Post, *, origin: str, method: str, path: str, body: bytes | Non
            assertion: Callable[..., dict] | None = None) -> Any:
     """The refused request, completed: in an interactive terminal one touch and one resend (its
     answer is returned, whatever it is); anywhere else PersonDecisionRefused."""
-    command = person_command(method, path, body, detail)
     stdin = getattr(terminal, "stdin", None)
     stdout = getattr(terminal, "stdout", None)
     if not interactive(stdin, stdout, environ, stdout if terminal is not None else None):
+        command = person_command(method, path, body, detail)
         raise PersonDecisionRefused(refusal_line(detail, command), detail=detail, command=command)
     if terminal is None:
         # Asked on stdout when it is the terminal, else on stderr (stdout may be a pipe to jq).
@@ -448,7 +493,8 @@ def handle(post: Post, *, origin: str, method: str, path: str, body: bytes | Non
 
 
 __all__ = [
-    "ERROR", "EXIT_CANCELLED", "EXIT_REFUSED", "MAX_SUMMARY", "PROOF_HEADER", "PersonDecisionCancelled",
-    "PersonDecisionError", "PersonDecisionRefused", "check_challenge", "complete", "detail_of", "handle",
-    "interactive", "json_poster", "person_command", "refusal_line", "required", "summary_lines",
+    "ERROR", "EXIT_CANCELLED", "EXIT_REFUSED", "INLINE_BODY", "MAX_SUMMARY", "PROOF_HEADER",
+    "PersonDecisionCancelled", "PersonDecisionError", "PersonDecisionRefused", "check_challenge", "complete",
+    "detail_of", "handle", "interactive", "json_poster", "person_command", "refusal_line", "required",
+    "saved_body", "summary_lines",
 ]

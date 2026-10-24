@@ -26,6 +26,8 @@ METHODS = ("GET", "POST", "PUT", "PATCH", "DELETE")
 MAX_RESPONSE_BYTES = 8 * 1024 * 1024
 # An error body is only shown as the instance's message, so a short read of it is enough.
 MAX_ERROR_BYTES = 64 * 1024
+# The longest request body read from a file (`@FILE`).
+MAX_BODY_FILE_BYTES = 8 * 1024 * 1024
 
 
 class ApiCliError(RuntimeError):
@@ -79,6 +81,17 @@ def build_request(
         raise ApiCliError("a token is only ever sent over https://; the API URL is plain http")
     headers = {"Accept": "application/json", "User-Agent": "shakerscan-api-cli"}
     data = None
+    if body is not None and body.startswith("@"):
+        # `@FILE`: the body is read from a file (a JSON text never starts with "@"), as the
+        # command a person is given for a request too long to name inline.
+        try:
+            with open(os.path.expanduser(body[1:]), "rb") as handle:
+                raw = handle.read(MAX_BODY_FILE_BYTES + 1)
+        except OSError as exc:
+            raise ApiCliError(f"cannot read the request body from {body[1:]}: {exc.strerror or exc}") from exc
+        if len(raw) > MAX_BODY_FILE_BYTES:
+            raise ApiCliError("the request body file is larger than 8 MiB")
+        body = raw.decode("utf-8", "replace")
     if body is not None:
         try:
             parsed = json.loads(body)
@@ -216,7 +229,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--stream", action="store_true", help="print SSE events as they arrive; never retry")
     parser.add_argument("method", help="GET, POST, PUT, PATCH or DELETE")
     parser.add_argument("path", help="the API path, with query string if any, e.g. /findings?limit=20")
-    parser.add_argument("body", nargs="?", help="a JSON object for POST, PUT or PATCH")
+    parser.add_argument("body", nargs="?", help="a JSON object for POST, PUT or PATCH, or @FILE to read it from a file")
     args = parser.parse_args(argv)
     try:
         api_url = base_url(args.api_url)

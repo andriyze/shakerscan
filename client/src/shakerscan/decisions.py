@@ -301,7 +301,8 @@ def hunt_budget_raise(argv: Sequence[str], url: str, timeout: float | None = Non
 def touch_lines(client: Any) -> list[str]:
     """`shakerscan doctor` on an Enterprise connection: whether the gateway requires a
     security-key touch for person decisions from terminals, and whether a touch could happen
-    here (python-fido2, a key plugged in). Opening no key: nothing blinks."""
+    here (python-fido2, a key plugged in). Opening no key: nothing blinks. No lines for an
+    instance that is not an Enterprise gateway."""
     approve = helper("_hunt_approve")
     try:
         me = client.request_json("GET", approve.ME_PATH)
@@ -313,7 +314,9 @@ def touch_lines(client: Any) -> list[str]:
     elif isinstance(me, Mapping):
         state = "not offered by this gateway (an older Enterprise gateway)"
     else:
-        state = "unknown (this instance does not say)"
+        # Not an Enterprise gateway (an open-source engine answers no /_enterprise/me): the
+        # touch is no question there, so doctor says nothing of it.
+        return []
     unready = approve.security_key_readiness()
     if unready and approve.key_out_of_reach():
         key = unready

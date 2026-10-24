@@ -22,6 +22,15 @@ class Shakerscan < Formula
     SH
   end
 
+  def caveats
+    <<~EOS
+      This install cannot use a USB security key (python-fido2 is not in the formula), so it
+      cannot answer a touch. Where an Enterprise gateway requires a security key touch for
+      decisions from terminals, install the client with pipx instead:
+        pipx install shakerscan
+    EOS
+  end
+
   test do
     assert_match "shakerscan client @VERSION@", shell_output("#{bin}/shakerscan version")
     assert_match "usage: shakerscan mcp", shell_output("#{bin}/shakerscan mcp --help")
