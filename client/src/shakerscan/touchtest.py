@@ -24,8 +24,8 @@ from ._vendored import load
 
 PROMPT = "Touch your security key to test it; this decides nothing (Ctrl-C to cancel)..."
 OLDER_GATEWAY = (
-    "this Enterprise gateway has no touch test (it needs gateway 0.2.0-beta.47 or later); "
-    "`shakerscan approve <request-id>` with a pending request asks the same key"
+    "this Enterprise gateway has no touch test (an earlier release of it); `shakerscan approve "
+    "<request-id>` with a pending request asks the same key"
 )
 
 
