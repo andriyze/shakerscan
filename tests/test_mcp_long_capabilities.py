@@ -285,6 +285,75 @@ def test_the_uncollected_list_is_bounded_and_keeps_no_large_input():
     assert client.uncollected_actions("another-hunt") == []
 
 
+def test_collecting_an_action_that_is_still_running_holds_the_step_only_briefly(monkeypatch):
+    """An early collect of a twenty-minute verifier answered running only after the whole action
+    wait (120 s): the engine answers the replay at once, and the adapter kept polling it."""
+    monkeypatch.setattr(mcp, "HEARTBEAT_SECONDS", 0.05)
+    monkeypatch.setattr(mcp, "COLLECT_WAIT_SECONDS", 0.3)
+    engine = VerifierEngine(first_seconds=0.0)  # every POST is answered at once: running
+    server = mcp.MCPServer(_client(engine, action_wait_seconds=30.0))
+    server.notify = lambda message: None
+    started = time.monotonic()
+    collected = _progress_call(server, VERIFY, 1)
+    assert time.monotonic() - started < 3.0, "a collect held the agent's step for the action wait"
+    assert collected["outcome"] == "running" and collected["mcp_idempotency_key"] == "key-verify-1"
+    assert len([path for path, _body, _timeout in engine.posts if path == VERIFY_PATH]) >= 2
+
+
+def test_a_collect_still_settles_an_action_that_ends_within_the_collect_wait(monkeypatch):
+    monkeypatch.setattr(mcp, "COLLECT_WAIT_SECONDS", 5.0)
+    engine = SlowEngine([_action("running"), _action("running"), _action("success")])
+    client = _client(engine, action_wait_seconds=30.0)
+    result = client.call_tool("shakerscan_hunt_capability", dict(ARGUMENTS))["structuredContent"]
+    assert result["action_result"]["status"] == "success" and "outcome" not in result
+
+
+class RecordEngine:
+    """The engine's Hunt record: 7 actions, the oldest still running (started by an earlier
+    agent session, so this adapter holds no key for it), the newest answered running here."""
+
+    def __init__(self):
+        self.actions = [
+            {"action_id": "act-old", "capability_name": "sqli.verify", "status": "running",
+             "started_at": "2026-10-23T10:00:00Z", "idempotency_key_sha256": "a" * 64,
+             "receipt_id": None, "completed_at": None},
+            *({"action_id": f"act-{index}", "capability_name": "http.request", "status": "completed",
+               "started_at": "2026-10-23T10:01:00Z", "idempotency_key_sha256": "b" * 64,
+               "receipt_id": f"rec-{index}", "completed_at": "2026-10-23T10:01:01Z"} for index in range(5)),
+            {"action_id": "act-verify", "capability_name": "sqli.verify", "status": "reserved",
+             "started_at": "2026-10-23T10:02:00Z", "idempotency_key_sha256": "c" * 64,
+             "receipt_id": None, "completed_at": None},
+        ]
+
+    def open(self, request, timeout):
+        body = {"hunt_id": HUNT, "status": "active", "actions": self.actions, "capabilities": [
+            {"name": "sqli.verify", "input_schema": {"type": "object"},
+             "budget_cost": {"http_requests": 1_800, "tool_wall_seconds": 1_200}}]}
+        return Response(json.dumps(body).encode())
+
+
+def test_the_hunt_view_lists_every_action_still_running_on_the_server():
+    engine = RecordEngine()
+    client = _client(engine)
+    client._note_capability_answer(HUNT, "sqli.verify", {"idempotency_key": "key-verify-1", "input": {}},
+                                   {**_action("running"), "action_id": "act-verify"})
+    hunt = client.call_tool("shakerscan_hunt_get", {"hunt_id": HUNT})["structuredContent"]
+    # The oldest is not among the last five actions, and this adapter has no key for it.
+    assert "act-old" not in {item["action_id"] for item in hunt["recent_actions"]}
+    assert [item["action_id"] for item in hunt["in_flight_actions"]] == ["act-old", "act-verify"]
+    assert hunt["in_flight_actions"][0] == {
+        "action_id": "act-old", "capability_name": "sqli.verify", "status": "running",
+        "started_at": "2026-10-23T10:00:00Z", "idempotency_key_sha256": "a" * 64,
+    }
+    assert [item["action_id"] for item in hunt["mcp_uncollected_actions"]] == ["act-verify"]
+    assert "earlier session" in hunt["in_flight_note"] and "idempotency_key_sha256" in hunt["in_flight_note"]
+    # With every in-flight action known to this adapter there is nothing more to say.
+    engine.actions = engine.actions[1:]
+    hunt = client.call_tool("shakerscan_hunt_get", {"hunt_id": HUNT})["structuredContent"]
+    assert [item["action_id"] for item in hunt["in_flight_actions"]] == ["act-verify"]
+    assert "in_flight_note" not in hunt
+
+
 def test_the_tool_says_a_hunt_runs_at_most_two_long_actions():
     description = mcp.HUNT_TOOL_BY_NAME["shakerscan_hunt_capability"].description
     assert "at most two long actions" in description and "long_actions_in_flight" in description

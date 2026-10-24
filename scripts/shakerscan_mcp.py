@@ -86,6 +86,10 @@ MAX_CAPABILITY_REQUEST_SECONDS = 900.0
 # the call's wait does, so a replay still fits: it finds the recorded action and reports it
 # "running" instead of the call ending on an unanswered request.
 SETTLE_RESERVE_SECONDS = 10.0
+# A call that collects an action the engine already reports running (its first POST answered at
+# once with the in-flight state) waits at most this long for it, not the whole action wait: an
+# early collect of a twenty-minute verifier must not hold the agent's step for two minutes.
+COLLECT_WAIT_SECONDS = 10.0
 
 
 def _running_continue(key: str) -> str:
@@ -541,7 +545,7 @@ HUNT_TOOLS: tuple[HuntMCPTool, ...] = (
         "mcp_idempotency_key: continue other work, then call again with the same idempotency_key "
         "and unchanged input to collect the result; the server replays the recorded action and "
         "never runs it twice. shakerscan_hunt_get lists the running actions not yet collected "
-        "(mcp_uncollected_actions). A Hunt runs "
+        "(mcp_uncollected_actions) and every action still running (in_flight_actions). A Hunt runs "
         "at most two long actions at once: a third answers retry_later (long_actions_in_flight, "
         "nothing reserved) until one settles, while short calls such as http.request still run.",
         {
@@ -700,6 +704,10 @@ CAPABILITY_DETAIL_PROPERTY = {
 COMPACT_FIELD_BYTES = 4_096
 RECENT_ACTIONS = 5
 COMPACT_ACTION_KEYS = ("action_id", "capability_name", "status", "receipt_id", "completed_at")
+# Every action still in flight on the server is listed as well, however old: a running action
+# from an earlier agent session is collected with the key that session sent (its digest is
+# idempotency_key_sha256), and this adapter remembers only the keys it answered running for.
+IN_FLIGHT_ACTION_KEYS = ("action_id", "capability_name", "status", "started_at", "idempotency_key_sha256")
 # A bound skill's capability gaps stay: the agent reports them as coverage gaps (AGENTS.md).
 COMPACT_SKILL_KEYS = ("skill_id", "title", "support", "phase", "withheld_capabilities", "missing_capabilities")
 # A field over COMPACT_FIELD_BYTES keeps this many items of each list (outcome_summary's IDs).
@@ -833,8 +841,14 @@ def _compact_hunt(record: Any) -> Any:
                             "capability=<name> returns one full contract")
         elif key == "actions" and isinstance(value, list):
             compact["recent_actions"] = [_pick(item, COMPACT_ACTION_KEYS) for item in value[-RECENT_ACTIONS:]]
+            in_flight = [_pick(item, IN_FLIGHT_ACTION_KEYS) for item in value
+                         if isinstance(item, Mapping) and str(item.get("status") or "") in IN_FLIGHT_ACTION_STATUSES]
+            if in_flight:
+                compact["in_flight_actions"] = in_flight[-MAX_UNCOLLECTED_ACTIONS:]
             reduced[key] = (f"the last {min(len(value), RECENT_ACTIONS)} of {len(value)} as recent_actions, "
-                            "with " + ", ".join(COMPACT_ACTION_KEYS))
+                            "with " + ", ".join(COMPACT_ACTION_KEYS)
+                            + (f"; the {min(len(in_flight), MAX_UNCOLLECTED_ACTIONS)} still in flight as "
+                               "in_flight_actions" if in_flight else ""))
         elif key == "skills" and isinstance(value, list):
             compact[key] = [_pick(item, COMPACT_SKILL_KEYS) for item in value]
             reduced[key] = "each bound skill's " + ", ".join(COMPACT_SKILL_KEYS)
@@ -1955,7 +1969,9 @@ class ArsenalClient:
         The engine answers the POST only when the action is done, so a POST still blocked when
         the wait ends would leave the outcome unknown. It therefore ends a reserve before the
         wait does, and a replay of the same key, which the engine answers at once with the
-        recorded action's state, settles whether the action is running."""
+        recorded action's state, settles whether the action is running. A POST answered at once
+        with the in-flight state collects an action already running: it waits at most
+        ``COLLECT_WAIT_SECONDS`` more."""
         keepalive = _KEEPALIVE.get()
         wait = self.action_wait_seconds if keepalive else min(self.call_seconds, self.action_wait_seconds)
         deadline = time.monotonic() + wait
@@ -1977,6 +1993,9 @@ class ArsenalClient:
                 _REQUEST_TIMEOUT.reset(override)
             if isinstance(first, dict) and not _in_flight(first):
                 return first
+            if isinstance(first, dict):
+                # The engine answered at once that the action is still running: a collect.
+                deadline = min(deadline, time.monotonic() + COLLECT_WAIT_SECONDS)
             return self._settle_capability(path, payload, first, deadline=deadline)
 
     def _wait_permission(self, path: str, wait_seconds: Any) -> dict[str, Any]:
@@ -2553,6 +2572,14 @@ class ArsenalClient:
                         "Each of these answered outcome=running and has not been collected: call "
                         "shakerscan_hunt_capability with its capability_name, input and "
                         "idempotency_key to read its result. Nothing runs twice.")}
+                known = {str(item.get("action_id")) for item in uncollected}
+                if any(str(item.get("action_id")) not in known for item in result.get("in_flight_actions") or ()):
+                    result = {**result, "in_flight_note": (
+                        "in_flight_actions are still running on the server. One that is not in "
+                        "mcp_uncollected_actions was started by an earlier session: collect it with the "
+                        "idempotency_key that session sent (idempotency_key_sha256 is its SHA-256) and "
+                        "the same input, or read its result here once it settles. A Hunt runs at most "
+                        "two long actions at once.")}
             result = _bounded_answer(result, tool=name)
             return {
                 "content": [{"type": "text", "text": json.dumps(result, sort_keys=True, default=str)}],

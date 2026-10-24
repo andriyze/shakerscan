@@ -220,10 +220,15 @@ before the call's wait does, and a replay of the same key learns the recorded ac
 action still running then is returned as a normal result with `outcome: "running"` and its
 `mcp_idempotency_key`, and the `continue` text names that key: calling the tool again with the same
 key and unchanged input collects the result, because the engine replays the recorded action and
-never runs it twice. `shakerscan_hunt_get` lists, as `mcp_uncollected_actions`, each action this
-adapter answered `outcome: "running"` for that no later call has collected (at most 20, each with
-its capability, key and input, or the input's digest when it is over 2 KB). When no answer arrives
-at all, the error message itself names the key to call again with.
+never runs it twice. A collect the engine answers at once with "still running" waits at most 10
+more seconds for it, not the whole action wait. `shakerscan_hunt_get` lists, as
+`mcp_uncollected_actions`, each action this adapter answered `outcome: "running"` for that no later
+call has collected (at most 20, each with its capability, key and input, or the input's digest when
+it is over 2 KB), and as `in_flight_actions` every action the server still runs, from this session
+or an earlier one (at most 20, with its capability, status, start and `idempotency_key_sha256`: an
+earlier session's action is collected with the key that session sent, or read in the Hunt once it
+settles). When no answer arrives at all, the error message itself names the key to call again
+with.
 The runtime still revalidates target binding, approval, budgets, evidence, and proof contracts.
 Catalog/contract drift, redirects, oversized responses, unavailable APIs, and unexpected dispatch
 results fail closed. A redirect names the origin it points at and how to connect there (usually an
