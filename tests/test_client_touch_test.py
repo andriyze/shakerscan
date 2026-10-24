@@ -162,3 +162,22 @@ def test_the_touch_test_document_is_the_one_the_gateway_signs():
     document = approval.set_document("key_check", "alice", ORIGIN + "/", {"key_check": {"ignored": True}})
     assert document == {"schema_version": "shakerscan-approval-set/v1", "purpose": "key_check",
                         "account": "alice", "origin": ORIGIN, "key_check": {"test": "touch", "decides": "nothing"}}
+
+
+def test_a_finish_that_is_not_a_touch_tests_answer_is_no_success(monkeypatch, capsys):
+    """A gateway that answered the finish without saying the touch decided nothing (an answer of
+    another approval, or none) is not taken for a passed test."""
+    monkeypatch.delenv("SHAKERSCAN_AGENT_NAME", raising=False)
+    out = at_a_terminal(monkeypatch)
+
+    class Other(TouchTestGateway):
+        def __call__(self, method, path, payload=None, headers=None, **kwargs):
+            status, body = super().__call__(method, path, payload, headers, **kwargs)
+            if path == approval.FINISH_PATH:
+                body = {**body, "key_check": {"answered": True, "decides": "everything"}}
+            return status, body
+
+    status, signed = _touch_test(monkeypatch, Other())
+    assert status == 1 and len(signed) == 1
+    assert "not a touch test's" in capsys.readouterr().err
+    assert "answered for" not in out.getvalue()
