@@ -789,6 +789,10 @@ class StepUp:
                 if not isinstance(named, str) or not named.strip() or len(named) > 200:
                     raise ApprovalError("the gateway's challenge names no approver; nothing was approved")
                 self.account = named
+                # Said once: the proof asked for is this person's (a token that acts for another
+                # person than the one at the keyboard approves as that person, unless --account).
+                self.terminal.say(f"Approving as {_inert(named)[:120]}, the person this connection acts for "
+                                  "(--account NAME approves as someone else).")
         account = self.account
         document = set_document(purpose, account, self.origin, body)
         if challenge.get("set_digest") != set_digest(document):
@@ -855,11 +859,21 @@ class StepUp:
     def method_for(self, challenge: Mapping[str, Any]) -> str:
         methods = [str(item) for item in challenge.get("methods") or ()]
         webauthn = challenge.get("webauthn") if isinstance(challenge.get("webauthn"), Mapping) else None
-        return self.method or preferred_method(methods, webauthn)
+        return self.method or preferred_method(methods, webauthn, self.origin)
 
 
 def _homebrew_install() -> bool:
     return "/Cellar/shakerscan/" in os.path.realpath(__file__)
+
+
+def fido2_declared(platform: str | None = None, machine: str | None = None) -> bool:
+    """Whether the client package installs python-fido2 here (client/pyproject.toml): macOS, and
+    64-bit Linux, where its cryptography dependency publishes wheels."""
+    import platform as _platform
+
+    platform = sys.platform if platform is None else platform
+    machine = _platform.machine() if machine is None else machine
+    return platform == "darwin" or (platform.startswith("linux") and machine in {"x86_64", "aarch64"})
 
 
 def _no_fido2() -> str:
@@ -867,6 +881,10 @@ def _no_fido2() -> str:
         return ("this Homebrew install of the client has no security-key support (python-fido2 is not "
                 "in the formula): install the client with pipx (pipx install shakerscan) or uv (uv tool "
                 "install shakerscan), which carry it")
+    if not fido2_declared():
+        return ("the client installs without python-fido2 on this platform (its cryptography dependency "
+                "publishes no wheel for it, and on Windows the terminal touch is not supported yet): "
+                "pipx inject shakerscan fido2 adds it where a cryptography wheel or a Rust toolchain exists")
     return ("a security key needs python-fido2 beside the client: reinstall the client (0.11.2 and later "
             "carry it), or pipx inject shakerscan fido2 (or pip install fido2)")
 
@@ -883,14 +901,47 @@ REMOTE_NO_KEY = (
     "computer you connect from is out of reach here; run the command on that computer, with a "
     "connection of its own that acts for you"
 )
+WSL_NO_KEY = (
+    "no USB security key found: this terminal runs in WSL, which sees a USB key only when it is "
+    "passed through (usbipd attach); pass the key through, or run the command where the key is "
+    "plugged in, with a connection of its own that acts for you"
+)
+CONTAINER_NO_KEY = (
+    "no USB security key found: this terminal runs in a container, which sees a USB key only when "
+    "the container is given the device; run the command on the computer the key is plugged into, "
+    "with a connection of its own that acts for you"
+)
+
+
+def key_out_of_reach(environ: Mapping[str, str] | None = None, *, root: str = "/") -> str:
+    """Why a key plugged in by the person cannot arrive in this terminal, or "": a remote (SSH)
+    session, WSL (whose Linux sees a USB key only when it is passed through) or a container. Then
+    no key listed means none will be (the client says why at once instead of waiting for an
+    insertion). mosh and other remote shells are not recognized: the wait names them."""
+    environ = os.environ if environ is None else environ
+    if remote_session(environ):
+        return REMOTE_NO_KEY
+    if not sys.platform.startswith("linux") and root == "/":
+        return ""
+    if environ.get("WSL_DISTRO_NAME") or environ.get("WSL_INTEROP"):
+        return WSL_NO_KEY
+    try:
+        with open(os.path.join(root, "proc/sys/kernel/osrelease"), encoding="utf-8") as release:
+            if "microsoft" in release.read(200).lower():
+                return WSL_NO_KEY
+    except OSError:
+        pass
+    if any(os.path.exists(os.path.join(root, marker)) for marker in (".dockerenv", "run/.containerenv")):
+        return CONTAINER_NO_KEY
+    return ""
 
 
 def _no_device() -> str:
     """No key found: over SSH, where the key is; on Linux, that a plugged-in key may be one this
     user cannot open (said as a possibility: a laptop's own keyboard or touchpad is a HID device
     too, so an unreadable node does not mean a key is there)."""
-    if remote_session():
-        return REMOTE_NO_KEY
+    if reason := key_out_of_reach():
+        return reason
     text = "no USB security key found; insert it and run the command again"
     if sys.platform.startswith("linux"):
         import glob
@@ -910,7 +961,7 @@ def security_key_readiness(*, waiting: bool = False) -> str:
         from fido2.hid import CtapHidDevice
     except ImportError:
         return _no_fido2()
-    if waiting and not remote_session():
+    if waiting and not key_out_of_reach():
         return ""
     try:
         found = next(iter(CtapHidDevice.list_devices()), None)
@@ -937,9 +988,10 @@ def wait_for_key(list_devices: Callable[[], Any], terminal: "Terminal", seconds:
         devices = []
     if devices:
         return devices
-    if remote_session():
-        raise ApprovalError(REMOTE_NO_KEY)
-    terminal.say(f"Insert your security key (Ctrl-C to cancel; waiting up to {int(seconds)} seconds)...")
+    if reason := key_out_of_reach():
+        raise ApprovalError(reason)
+    terminal.say(f"Insert your security key (Ctrl-C to cancel; waiting up to {int(seconds)} seconds; a key "
+                 "cannot reach a terminal over mosh or another remote shell)...")
     deadline = clock() + max(0.0, seconds)
     while clock() < deadline:
         sleep(INSERT_POLL_SECONDS)
@@ -966,11 +1018,31 @@ def _credential_ids(webauthn: Mapping[str, Any] | None) -> list[bytes]:
     ]
 
 
-def probe_device(device: Any, webauthn: Mapping[str, Any] | None) -> str:
+def rp_id_valid(rp_id: str, origin: str) -> bool:
+    """Whether a WebAuthn relying party id may be used from this origin (python-fido2's own check,
+    the one its client applies to the assertion itself)."""
+    try:
+        from fido2.rpid import verify_rp_id
+    except ImportError:
+        return False
+    try:
+        return bool(rp_id) and bool(origin) and bool(verify_rp_id(rp_id, origin))
+    except Exception:
+        return False
+
+
+def probe_device(device: Any, webauthn: Mapping[str, Any] | None, origin: str = "") -> str:
     """Whether this key can answer the challenge, asked silently (user presence off, so the key
     does not wait for a touch): "yes" (it holds one of the person's keys), "no" (it holds none),
     "no_pin" (the gateway asks for the key's PIN and this key has none), or "unknown" (a key
-    that cannot be asked this way, such as a U2F-only key; the touch itself then tells)."""
+    that cannot be asked this way, such as a U2F-only key; the touch itself then tells).
+
+    Only for a relying party id valid for the connection's ``origin`` (rp_id_valid): a gateway
+    could otherwise learn, from what the client does next, whether the key holds a credential of
+    another site. Without a valid one the key is not asked, and the assertion (which checks the
+    same) refuses."""
+    if not rp_id_valid(str((webauthn or {}).get("rpId") or ""), origin):
+        return "unknown"
     try:
         from fido2.ctap import CtapError
         from fido2.ctap2 import Ctap2
@@ -1002,13 +1074,18 @@ def probe_device(device: Any, webauthn: Mapping[str, Any] | None) -> str:
     return "no"
 
 
-def eligible_devices(devices: Sequence[Any], webauthn: Mapping[str, Any] | None) -> tuple[list[Any], str]:
-    """The plugged-in keys that can answer, best first, and why none can when the list is empty."""
-    found = [(device, probe_device(device, webauthn)) for device in devices]
+def eligible_devices(devices: Sequence[Any], webauthn: Mapping[str, Any] | None,
+                     origin: str = "") -> tuple[list[Any], str]:
+    """The plugged-in keys that can answer, and why none can when the list is empty: the first
+    key that holds one of the person's credentials (any of them answers, so nobody is asked to
+    pick among keys that all can), else every key that could not be asked (the person picks)."""
+    found = [(device, probe_device(device, webauthn, origin)) for device in devices]
     holding = [device for device, status in found if status == "yes"]
     unknown = [device for device, status in found if status == "unknown"]
-    if holding or unknown:
-        return holding or unknown, ""
+    if holding:
+        return holding[:1], ""
+    if unknown:
+        return unknown, ""
     if any(status == "no_pin" for _, status in found):
         return [], ("this security key has no PIN, and this approval asks for the key's PIN: set one "
                     "(for a YubiKey: ykman fido access change-pin), or approve with --method totp where "
@@ -1017,13 +1094,13 @@ def eligible_devices(devices: Sequence[Any], webauthn: Mapping[str, Any] | None)
                 "registered, or add this one under My account in the Enterprise console")
 
 
-def preferred_method(methods: Sequence[str], webauthn: Mapping[str, Any] | None = None) -> str:
+def preferred_method(methods: Sequence[str], webauthn: Mapping[str, Any] | None = None, origin: str = "") -> str:
     """The proof to give when ``--method`` is not named: a security key when the gateway offers
     one, python-fido2 is installed and a plugged-in key can answer this challenge (holds one of
     the person's keys, with a PIN when one is asked for); else, as before, a TOTP code, then a
     key, then the browser."""
     if "security_key" in methods and security_keys_present():
-        if len(methods) == 1 or webauthn is None or _eligible_here(webauthn):
+        if len(methods) == 1 or webauthn is None or _eligible_here(webauthn, origin):
             return "security_key"
     for method in ("totp", "security_key", "sso"):
         if method in methods:
@@ -1031,10 +1108,10 @@ def preferred_method(methods: Sequence[str], webauthn: Mapping[str, Any] | None 
     return ""
 
 
-def _eligible_here(webauthn: Mapping[str, Any]) -> bool:
+def _eligible_here(webauthn: Mapping[str, Any], origin: str = "") -> bool:
     try:
         from fido2.hid import CtapHidDevice
-        return bool(eligible_devices(list(CtapHidDevice.list_devices()), webauthn)[0])
+        return bool(eligible_devices(list(CtapHidDevice.list_devices()), webauthn, origin)[0])
     except Exception:
         return False
 
@@ -1049,10 +1126,11 @@ def _device_name(device: Any) -> str:
 
 
 def choose_device(devices: Sequence[Any], terminal: Terminal) -> Any:
-    """The key to ask: the only one that can answer, or the one the person picks by number."""
+    """The key to ask: the only one that can answer, or, among keys that could not be asked
+    silently (eligible_devices), the one the person picks by number."""
     if len(devices) == 1:
         return devices[0]
-    terminal.say("Several security keys can answer:")
+    terminal.say("Several security keys are plugged in, and none could be asked which one is yours:")
     for number, device in enumerate(devices, 1):
         terminal.say(f"  {number}) {_device_name(device)}")
     answer = terminal.line(f"Which one is registered to your account? [1-{len(devices)}]: ")
@@ -1107,7 +1185,7 @@ def security_key_assertion(webauthn: Mapping[str, Any], origin: str, terminal: T
     devices = wait_for_key(CtapHidDevice.list_devices, terminal, insert_seconds)
     # Asked silently first, so the key that blinks is one that can answer, and the person picks
     # among those before being told to touch.
-    candidates, why = eligible_devices(devices, webauthn)
+    candidates, why = eligible_devices(devices, webauthn, origin)
     if not candidates:
         raise ApprovalError(why)
     device = choose_device(candidates, terminal)
@@ -1678,6 +1756,7 @@ _DECISION_WORDS = {
     "device.verify": "confirm authorization to probe a device's service",
     "secret.reactivate": "reactivate a discovered secret",
     "secret.expiry": "change a discovered secret's expiry",
+    "target.environment": "change the environment a target or device is judged in",
 }
 
 
@@ -1723,6 +1802,8 @@ def person_decision_line(item: Mapping[str, Any]) -> str:
                 f"{_inert(outcome[13:])[:10]})" if refused else "decided by key touch")
     elif made == "refused":
         head = "refused, a key touch is required"
+        if run := _refused_command(item):
+            head += f" (run in your terminal: {run})"
     else:
         outcome = str(item.get("outcome") or "")
         refused = outcome.startswith("unproven_")
@@ -1731,6 +1812,26 @@ def person_decision_line(item: Mapping[str, Any]) -> str:
         # The gateway's own words for what was decided (every limit a raise set, the host).
         return f"[{when}] {head}: {said} via connection {via}"
     return f"[{when}] {head}: {what} ({where}) via connection {via}"
+
+
+_ID = re.compile(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}")
+
+
+def _refused_command(item: Mapping[str, Any]) -> str:
+    """The command that decides a refused decision the watch shows, when the feed row says enough
+    without the request's body: a refused submission's target (the target's authorization, never
+    the agent's work), a target's own authorization, a budget raise (its limits are the agent's
+    request: named as placeholders). Else "" (the agent's own output names the command)."""
+    target = str(item.get("target_id") or "")
+    path = str(item.get("path") or "")
+    parts = [part for part in path.split("/") if part]
+    if item.get("decision") == "target.authorize" and _ID.fullmatch(target):
+        return f"shakerscan targets authorize {target.lower()}"
+    if len(parts) == 3 and parts[0] == "targets" and parts[2] == "authorization" and _ID.fullmatch(parts[1]):
+        return f"shakerscan targets authorize {parts[1].lower()}"
+    if len(parts) == 3 and parts[0] == "hunts" and parts[2] == "budget-amendments" and _ID.fullmatch(parts[1]):
+        return f"shakerscan hunt budget raise {parts[1].lower()} --limit NAME=N"
+    return ""
 
 
 class Terminated(KeyboardInterrupt):

@@ -244,8 +244,8 @@ PERSON_DECISION_SUBMISSION_RECOVERY = (
     "is the person's decision, made with a touch of their security key. Tell the user the exact "
     "command to run in their own terminal; it authorizes the target and runs nothing else. Do not "
     "send this request again until the user tells you the target is authorized; then send it "
-    "once, with the same idempotency key. Do not try another route to the same decision, and "
-    "never ask the user for a code or a key in chat. Continue other work meanwhile."
+    "once (with the same idempotency key, if it had one). Do not try another route to the same "
+    "decision, and never ask the user for a code or a key in chat. Continue other work meanwhile."
 )
 
 
@@ -264,7 +264,7 @@ def _person_decision_error(exc: urllib.error.HTTPError, detail: str, method: str
     submission = bool(parsed.get("submission"))
     after = (
         "do not send this request again until the user says the target is authorized, then send it "
-        "once with the same idempotency key."
+        "once (with the same idempotency key, if it had one)."
         if submission else "do not retry this request."
     )
     return MCPError(-32002, (

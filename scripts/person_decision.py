@@ -30,21 +30,24 @@ the refusal carries ``submission`` and the ``target_id``) started nothing. The p
 is the target's authorization, never the submission itself: in the person's own terminal the
 touch authorizes the target and the same request is sent once more; anywhere else the command the
 person is given is ``shakerscan targets authorize <target>``, and whoever sent the submission
-sends it again (with the same Idempotency-Key) only after the person says they decided, so the
-work never runs twice.
+sends it again (with the same Idempotency-Key, if it had one) only after the person says they
+decided, so the work never runs twice.
 
 Without an interactive terminal, or inside an agent that ``shakerscan agent`` launched
 (SHAKERSCAN_AGENT_NAME), it never prompts and never opens a key: it raises PersonDecisionRefused,
 one line that names the decision and the command the person runs in their own terminal, and the
 command exits 3 (refused, nothing ran). An interactive terminal is stdin a terminal and stdout or
-stderr a terminal to ask on: ``shakerscan scan ... --json | jq`` in the person's own terminal
-still asks, on stderr, while input piped into the command (``echo body | shakerscan api ... -``)
-never counts as the person. No option skips the touch. Ctrl-C at the touch cancels it
+stderr a terminal to ask on (the prompt goes to stderr): ``shakerscan scan ... --json | jq`` in
+the person's own terminal still asks, while a command whose input is piped or redirected
+(``shakerscan api ... < /dev/null``, any script feeding it) never counts as the person. An agent's
+tool call has no terminal on stdin, so stdout alone being piped changes nothing for it. No option
+skips the touch. Ctrl-C at the touch cancels it
 (PersonDecisionCancelled, exit 130); nothing changes.
 
 With no key plugged in, the touch waits for one to be inserted ("Insert your security key"), for
-a bounded time within the challenge's life, instead of failing; over SSH, where a key plugged into
-another computer cannot arrive, it says so at once.
+a bounded time within the challenge's life, instead of failing; over SSH, in WSL without the key
+passed through and in a container, where a key plugged into the computer cannot arrive, it says
+so at once.
 
 The decision is shown whole, wrapped, never cut: the gateway offers no proof for a summary longer
 than a terminal shows (MAX_SUMMARY), and this client refuses to ask for a touch for one either.
@@ -242,10 +245,10 @@ def refusal_line(detail: Mapping[str, Any], command: str) -> str:
 
 
 # A refused submission started nothing. It is sent again only after the person said they
-# authorized the target (same Idempotency-Key), so the work never runs twice.
+# authorized the target (with its Idempotency-Key, if it had one), so the work never runs twice.
 SUBMISSION_AGAIN = (
     ". Nothing was started either. Do not send this request again until the person says the "
-    "target is authorized; then send it once, with the same Idempotency-Key"
+    "target is authorized; then send it once (with the same Idempotency-Key, if it had one)"
 )
 
 
@@ -384,7 +387,7 @@ def _touch(post: Post, approve: Any, terminal: Any, *, origin: str, method: str,
     # A key that is only not plugged in yet is waited for by the assertion; python-fido2 missing,
     # or a key out of reach over SSH, cannot be helped by waiting.
     if assertion is None and (unready := approve.security_key_readiness(waiting=True)):
-        if approve.remote_session():
+        if approve.key_out_of_reach():
             unready += f": {_inert(person_command(method, path, body, detail), 4 * MAX_BODY)}"
         raise PersonDecisionError(f"{unready}; nothing was changed")
     sign = assertion or approve.security_key_assertion
@@ -402,7 +405,7 @@ def _touch(post: Post, approve: Any, terminal: Any, *, origin: str, method: str,
     granted = result.get("person_decision") if isinstance(result, Mapping) else None
     if not 200 <= status < 300 or not isinstance(granted, Mapping) or not isinstance(granted.get("grant"), str):
         raise _refused(status, result)
-    terminal.say("done; decided by " + _inert(result.get("decided_by") or "you", 120) + " (security-key touch)")
+    terminal.say("done; decided by " + _inert(result.get("decided_by") or "you", 120) + ", by security-key touch")
     return granted["grant"]
 
 

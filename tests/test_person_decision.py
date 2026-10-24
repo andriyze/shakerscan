@@ -90,6 +90,11 @@ class ScriptedGateway:
                       "budget_revision": 2}
         if path == "/scan/contracts":
             answer = {"schema_version": "scan-public-contract/v1", "families": [], "advanced_limits": []}
+        if path == "/_enterprise/me":
+            # As a gateway describes itself to a connection's token (the service account, the
+            # person it acts for, whether a touch is required).
+            answer = {"user": {"auth": "token", "display": "Laptop", "token_label": "laptop"},
+                      "acts_for_name": "alice", "person_decision_proof": True}
         return _Response(answer)
 
     # the approval routes -------------------------------------------------------------------
@@ -503,10 +508,14 @@ def test_targets_authorize_registers_then_authorizes_with_one_touch(gateway, mon
     args = types.SimpleNamespace(action="authorize", target="app.example.com", reason=None, json=False,
                                  timeout=None, url=None, token_file=None)
     assert decisions.cmd_targets(args) == 0
-    created, refused, resent = gateway.sent
+    created, me, refused, resent = gateway.sent
     assert json.loads(created["data"]) == {"url": "https://app.example.com"}
+    assert urllib.parse.urlsplit(me["url"]).path == "/_enterprise/me" and me["method"] == "GET"
     sent = json.loads(refused["data"])
-    assert sent["risk_tier"] == "active" and sent["approved_by"].endswith(" via shakerscan targets authorize")
+    # The person the connection acts for, never this computer's user (the gateway writes the
+    # person who touched over it when it requires a touch).
+    assert sent == {"approved_by": "alice via shakerscan targets authorize, service token laptop",
+                    "risk_tier": "active"}
     assert resent["headers"]["x-shakerscan-person-proof"] == "apv_grant_1" and len(signer.asked) == 1
     assert "for active testing, recorded as Alice via terminal security-key touch" in sys.stdout.getvalue()
 
@@ -696,11 +705,16 @@ def fake_fido2(monkeypatch, keys):
                 return object()
             raise FakeCtapError(FakeCtapError.ERR.NO_CREDENTIALS)
 
+    def verify_rp_id(rp_id, origin):  # python-fido2's rule for an https origin
+        host = urllib.parse.urlsplit(origin).hostname or ""
+        return origin.startswith("https://") and bool(rp_id) and (host == rp_id or host.endswith("." + rp_id))
+
     modules = {
         "fido2": types.ModuleType("fido2"),
         "fido2.ctap": types.SimpleNamespace(CtapError=FakeCtapError),
         "fido2.ctap2": types.SimpleNamespace(Ctap2=Ctap2),
         "fido2.hid": types.SimpleNamespace(CtapHidDevice=types.SimpleNamespace(list_devices=lambda: iter(keys))),
+        "fido2.rpid": types.SimpleNamespace(verify_rp_id=verify_rp_id),
     }
     for name, module in modules.items():
         monkeypatch.setitem(sys.modules, name, module)
@@ -720,27 +734,56 @@ def test_approve_prefers_the_key_only_when_a_plugged_in_key_can_answer(monkeypat
     made 0.11.2 ask for a touch that could only fail, where 0.11.1 asked for the TOTP code."""
     unrelated = key("YubiKey 5", holds=[b"other"])
     fake_fido2(monkeypatch, [unrelated])
-    assert approval.preferred_method(["totp", "security_key"], WEBAUTHN) == "totp"
+    assert approval.preferred_method(["totp", "security_key"], WEBAUTHN, ORIGIN) == "totp"
     assert unrelated.probed == 1
     fake_fido2(monkeypatch, [unrelated, key("YubiKey 5C", holds=[b"mine"])])
-    assert approval.preferred_method(["totp", "security_key"], WEBAUTHN) == "security_key"
+    assert approval.preferred_method(["totp", "security_key"], WEBAUTHN, ORIGIN) == "security_key"
     fake_fido2(monkeypatch, [key("no PIN", holds=[b"mine"], pin=False)])
-    assert approval.preferred_method(["totp", "security_key"], WEBAUTHN) == "totp"
-    assert approval.preferred_method(["totp", "security_key"], {**WEBAUTHN, "userVerification": "discouraged"}) == (
-        "security_key")
+    assert approval.preferred_method(["totp", "security_key"], WEBAUTHN, ORIGIN) == "totp"
+    assert approval.preferred_method(["totp", "security_key"], {**WEBAUTHN, "userVerification": "discouraged"},
+                                     ORIGIN) == "security_key"
     # Under the switch the key is the only method: it is asked, and says plainly why not.
-    assert approval.preferred_method(["security_key"], WEBAUTHN) == "security_key"
-    devices, why = approval.eligible_devices([unrelated], WEBAUTHN)
+    assert approval.preferred_method(["security_key"], WEBAUTHN, ORIGIN) == "security_key"
+    devices, why = approval.eligible_devices([unrelated], WEBAUTHN, ORIGIN)
     assert devices == [] and "not registered to your account" in why
-    devices, why = approval.eligible_devices([key("no PIN", holds=[b"mine"], pin=False)], WEBAUTHN)
+    devices, why = approval.eligible_devices([key("no PIN", holds=[b"mine"], pin=False)], WEBAUTHN, ORIGIN)
     assert devices == [] and "has no PIN" in why
 
 
 def test_only_the_keys_that_can_answer_are_offered_before_the_touch(monkeypatch):
     mine, spare = key("YubiKey", holds=[b"mine"]), key("YubiKey", holds=[b"other"])
     fake_fido2(monkeypatch, [spare, mine])
-    devices, _ = approval.eligible_devices([spare, mine], WEBAUTHN)
+    devices, _ = approval.eligible_devices([spare, mine], WEBAUTHN, ORIGIN)
     assert devices == [mine], "the chooser never lists a key that cannot answer"
+
+
+def test_a_key_that_holds_a_credential_is_used_without_asking_which(monkeypatch):
+    """Usability review: with two keys plugged in that both answered yes to the silent check,
+    the client still asked 'Which one is registered to your account?'. Any of them answers: the
+    first is used, and the chooser is left for keys that could not be asked."""
+    first, second = key("YubiKey 5C", holds=[b"mine"]), key("YubiKey 5 NFC", holds=[b"mine"])
+    fake_fido2(monkeypatch, [first, second])
+    devices, _ = approval.eligible_devices([first, second], WEBAUTHN, ORIGIN)
+    assert devices == [first]
+    terminal = approval.Terminal(io.StringIO(), io.StringIO())
+    assert approval.choose_device(devices, terminal) is first
+    assert terminal.stdout.getvalue() == ""
+
+
+def test_the_silent_probe_asks_a_key_only_for_this_gateways_relying_party(monkeypatch):
+    """Security review: the silent getAssertion went to whatever rpId the gateway named, so a
+    gateway could learn whether the key holds a credential of another site. The probe now asks
+    only for an rpId valid for the connection's origin (python-fido2's own rule), and without
+    one, or without the origin, the key is not asked at all."""
+    mine = key("YubiKey", holds=[b"mine"])
+    fake_fido2(monkeypatch, [mine])
+    for rp_id, origin in (("bank.example", ORIGIN), ("example.com", "http://gateway.example.com"),
+                          ("gateway.example.com", "")):
+        assert approval.probe_device(mine, {**WEBAUTHN, "rpId": rp_id}, origin) == "unknown", (rp_id, origin)
+    assert mine.probed == 0
+    assert approval.probe_device(mine, WEBAUTHN, ORIGIN) == "yes" and mine.probed == 1
+    # A parent domain the origin belongs to is valid, as for the assertion itself.
+    assert approval.probe_device(mine, {**WEBAUTHN, "rpId": "example.com"}, ORIGIN) == "yes"
 
 
 @pytest.mark.parametrize(("code", "cause", "words"), [
@@ -834,14 +877,17 @@ def test_doctor_says_whether_a_touch_is_required_and_could_happen_here(monkeypat
     from shakerscan import decisions
 
     monkeypatch.setattr(approval, "security_key_readiness", lambda: "no USB security key found; insert it")
+    monkeypatch.setattr(approval, "key_out_of_reach", lambda: "")
     monkeypatch.setattr(decisions, "helper", lambda name: approval)
     asked = []
 
     def me(answer):
         return types.SimpleNamespace(request_json=lambda method, path: asked.append(path) or answer)
 
+    # No key plugged in is no failure: a key is needed only when the administrator asks a touch.
     assert decisions.touch_lines(me({"person_decision_proof": True})) == [
-        "touch:    required for person decisions from terminals", "key:      no USB security key found; insert it"]
+        "touch:    required for person decisions from terminals",
+        "key:      none plugged in (needed only when your administrator requires a touch)"]
     off = me({"person_decision_proof": False})
     assert decisions.touch_lines(off)[0] == "touch:    not required (the administrator's switch is off)"
     older = me({"user": {"auth": "token"}})
@@ -1013,7 +1059,7 @@ def test_a_refused_start_is_sent_again_only_after_the_person_authorized_the_targ
     line = decision.refusal_line(refused, command)
     assert f"shakerscan targets authorize {TARGET}" in line
     assert "Do not send this request again until the person says the target is authorized" in line
-    assert line.endswith("then send it once, with the same Idempotency-Key")
+    assert line.endswith("then send it once (with the same Idempotency-Key, if it had one)")
     plain = decision.refusal_line(REFUSAL["detail"], "shakerscan hunt budget raise x")
     assert "same request again" not in plain
     message = email.message.Message()
@@ -1237,7 +1283,7 @@ def test_the_terminal_shows_exactly_the_signed_decision_and_nothing_more():
         "This needs your decision (your administrator requires a security-key touch):",
         *decision.summary_lines(SUMMARY),
         "Touch your security key to approve (Ctrl-C to cancel)...",
-        "done; decided by alice (security-key touch)",
+        "done; decided by alice, by security-key touch",
     ]
     assert decision.summary_lines(SUMMARY) == ["  " + SUMMARY]
 
@@ -1312,3 +1358,143 @@ def test_the_local_question_reads_the_gateways_own_description(monkeypatch):
     assert asked == [ORIGIN + "/_enterprise/me"]
     monkeypatch.setattr(scan_cli, "_request_json", lambda url, **kwargs: {"version": "older"})
     assert scan_cli._touch_confirms(ORIGIN) is False
+
+
+# ---- round 4.1 reviews ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(("environ", "files", "words"), [
+    ({"WSL_DISTRO_NAME": "Ubuntu"}, (), "runs in WSL"),
+    ({}, (("proc/sys/kernel/osrelease", "5.15.153.1-microsoft-standard-WSL2"),), "runs in WSL"),
+    ({}, ((".dockerenv", ""),), "runs in a container"),
+    ({}, (("run/.containerenv", ""),), "runs in a container"),
+    ({"SSH_TTY": "/dev/pts/3"}, (), "remote (SSH) session"),
+])
+def test_a_terminal_a_plugged_in_key_cannot_reach_says_so_at_once(tmp_path, environ, files, words):
+    """Usability review: only SSH was recognized; under WSL2 without USB passthrough or in a
+    container the client waited the full minute for a key that could never arrive."""
+    for name, text in files:
+        (tmp_path / name).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / name).write_text(text)
+    reason = approval.key_out_of_reach(environ, root=str(tmp_path))
+    assert words in reason and "acts for you" in reason
+    assert approval.key_out_of_reach({}, root=str(tmp_path / "plain")) == ""
+
+
+def test_in_wsl_an_unplugged_key_is_not_waited_for(monkeypatch):
+    monkeypatch.setattr(approval, "key_out_of_reach", lambda: approval.WSL_NO_KEY)
+    terminal = approval.Terminal(io.StringIO(), io.StringIO())
+    with pytest.raises(approval.ApprovalError, match="usbipd attach"):
+        approval.wait_for_key(lambda: [], terminal, 30, sleep=lambda s: pytest.fail("waited"))
+    # A key passed through is found and used as anywhere else.
+    assert approval.wait_for_key(lambda: ["key"], terminal, 30) == ["key"]
+
+
+def test_the_wait_names_the_remote_shells_it_cannot_recognize(monkeypatch):
+    monkeypatch.setattr(approval, "key_out_of_reach", lambda: "")
+    out = io.StringIO()
+    with pytest.raises(approval.ApprovalError):
+        approval.wait_for_key(lambda: [], approval.Terminal(io.StringIO(), out), 1, sleep=lambda s: None,
+                              clock=iter([0.0, 0.5, 2.0]).__next__)
+    assert "a key cannot reach a terminal over mosh or another remote shell" in out.getvalue()
+
+
+@pytest.mark.parametrize(("platform", "machine", "declared"), [
+    ("darwin", "arm64", True), ("darwin", "x86_64", True), ("linux", "x86_64", True), ("linux", "aarch64", True),
+    ("linux", "armv7l", False), ("linux", "i686", False), ("win32", "AMD64", False), ("freebsd14", "amd64", False),
+])
+def test_python_fido2_is_declared_only_where_cryptography_ships_wheels(platform, machine, declared):
+    """Usability review (blocker): cryptography 49 and later publish no Intel macOS wheel, so the
+    client needed a Rust toolchain on an Intel Mac. The package's markers and the client's own
+    reading of them agree: python-fido2 on macOS and 64-bit Linux, cryptography below 49 on an
+    Intel Mac, nothing elsewhere."""
+    import tomllib
+
+    from packaging.requirements import Requirement
+
+    project = tomllib.loads((ROOT / "client/pyproject.toml").read_text())["project"]
+    environment = {"sys_platform": platform, "platform_machine": machine}
+    applies = {Requirement(text).name: Requirement(text).marker.evaluate(environment)
+               for text in project["dependencies"]}
+    assert applies["fido2"] is declared
+    assert applies["cryptography"] is (platform == "darwin" and machine == "x86_64")
+    assert all(str(Requirement(text).specifier) for text in project["dependencies"])
+    assert approval.fido2_declared(platform, machine) is declared
+
+
+def test_a_platform_without_python_fido2_is_told_why(monkeypatch):
+    monkeypatch.setattr(approval, "_homebrew_install", lambda: False)
+    monkeypatch.setattr(approval, "fido2_declared", lambda: False)
+    assert "installs without python-fido2 on this platform" in approval._no_fido2()
+    monkeypatch.setattr(approval, "fido2_declared", lambda: True)
+    assert "reinstall the client" in approval._no_fido2()
+
+
+def test_targets_authorize_records_the_person_the_connection_acts_for(monkeypatch):
+    """Usability review: with the switch off the engine recorded '<local OS user> via shakerscan
+    targets authorize' (root, on a VPS). On an Enterprise connection it is the person the token
+    acts for, as the gateway names them; on an open-source engine, this computer's user."""
+    sys.path.insert(0, str(ROOT / "client" / "src"))
+    from shakerscan import decisions
+
+    monkeypatch.setattr(decisions, "helper", lambda name: approval)
+    monkeypatch.setattr(decisions, "_os_user", lambda: "root")
+
+    def client(answer):
+        def get(path):
+            assert path == approval.ME_PATH
+            if isinstance(answer, Exception):
+                raise answer
+            return answer
+        return types.SimpleNamespace(get=get)
+
+    person = {"user": {"display": "Laptop", "token_label": "andriy-mac"}, "acts_for_name": "alice"}
+    assert decisions._decider(client(person), "authorize") == (
+        "alice via shakerscan targets authorize, service token andriy-mac")
+    service = {"user": {"display": "CI", "token_label": "ci"}, "acts_for_name": None}
+    assert decisions._decider(client(service), "unauthorize") == "CI via shakerscan targets unauthorize, service token ci"
+    older = {"user": {"display": "Laptop", "subject": "laptop"}}
+    assert decisions._decider(client(older), "authorize") == "Laptop via shakerscan targets authorize"
+    assert decisions._decider(client(OSError("404")), "authorize") == "root via shakerscan targets authorize"
+    long = {"user": {"display": "x" * 300, "token_label": "y" * 300}}
+    assert len(decisions._decider(client(long), "authorize")) <= 200
+
+
+def test_a_refused_decision_in_the_watch_says_the_persons_command():
+    """Usability review: refused decisions in `approve --watch` said 'refused, a key touch is
+    required' with no command."""
+    when = 1792772519
+    submission = approval.person_decision_line({"at": when, "made": "refused", "decision": "target.authorize",
+                                                "method": "POST", "path": "/scans", "target_id": TARGET.upper(),
+                                                "connection": "agent"})
+    assert f"(run in your terminal: shakerscan targets authorize {TARGET})" in submission
+    raise_ = approval.person_decision_line({"at": when, "made": "refused", "decision": "budget.raise",
+                                            "method": "POST", "path": AMENDMENT, "connection": "agent"})
+    assert f"shakerscan hunt budget raise {HUNT} --limit NAME=N" in raise_
+    other = approval.person_decision_line({"at": when, "made": "refused", "decision": "credential.share",
+                                           "method": "POST", "path": "/credential-profiles/x/grants",
+                                           "connection": "agent"})
+    assert "run in your terminal" not in other and "refused, a key touch is required" in other
+    environment = approval.person_decision_line({"at": when, "made": "with_token", "outcome": "unproven",
+                                                 "decision": "target.environment", "connection": "agent"})
+    assert "change the environment a target or device is judged in" in environment
+
+
+def test_an_approval_says_once_whom_it_is_for():
+    """Usability review: 0.11.2 asks for no sign-in name; someone using a token that acts for
+    another person was asked for that person's proof without being told."""
+    sent = []
+
+    def send(method, path, payload=None, headers=None, *, timeout=None):
+        sent.append(path)
+        document = approval.set_document("permission_decision", "alice", ORIGIN, {"decisions": []})
+        return 200, {"schema_version": "shakerscan-approval-challenge/v1", "approval_id": "apv_1",
+                     "account": "alice", "set_digest": approval.set_digest(document)}
+
+    out = io.StringIO()
+    stepup = approval.StepUp(send, ORIGIN, approval.Terminal(io.StringIO(), out))
+    stepup.begin("permission_decision", {"decisions": []})
+    stepup.begin("permission_decision", {"decisions": []})
+    assert out.getvalue().count("Approving as alice, the person this connection acts for") == 1
+    assert "--account NAME approves as someone else" in out.getvalue()
+

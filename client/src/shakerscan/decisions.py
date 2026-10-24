@@ -160,6 +160,27 @@ def _os_user() -> str:
         return "the local user"
 
 
+def _decider(client: Any, verb: str) -> str:
+    """Who the engine records as having decided, as this command names them (at most the
+    engine's 200 characters). On an Enterprise connection: the person the token acts for, as the
+    gateway names them (``acts_for_name`` of GET /_enterprise/me), else the token's service
+    account; a gateway whose administrator requires a touch writes its own name over this. On an
+    open-source engine (no accounts): this computer's user."""
+    approve = helper("_hunt_approve")
+    try:
+        me = client.get(approve.ME_PATH)
+    except Exception:  # an open-source engine, or no answer
+        me = None
+    user = me.get("user") if isinstance(me, Mapping) else None
+    if isinstance(user, Mapping):
+        label = str(user.get("token_label") or "")[:60]
+        through = f"shakerscan targets {verb}, service token {label}" if label else f"shakerscan targets {verb}"
+        person = me.get("acts_for_name")
+        who = person if isinstance(person, str) and person.strip() else (user.get("display") or user.get("subject"))
+        return f"{str(who or 'a service token')[:100]} via {through}"[:200]
+    return f"{_os_user()} via shakerscan targets {verb}"
+
+
 def _named(target: Mapping[str, Any]) -> str:
     url = str(target.get("url") or "")
     name = str(target.get("name") or "")
@@ -178,12 +199,12 @@ def cmd_targets(args: argparse.Namespace) -> int:
         if not UUID.fullmatch(identifier):
             raise DecisionError("the instance answered without a target id")
         if args.action == "authorize":
-            # Active testing only; an intrusive authorization is made in the browser.
-            # An Enterprise gateway writes who decided itself; an open-source engine records
-            # this computer's user.
+            # Active testing only; an intrusive authorization is made in the browser. Who decided
+            # is the person the connection acts for (_decider); a gateway that requires a touch
+            # writes the person who touched over it.
             answer = client.request(
                 "POST", f"/targets/{identifier}/authorization",
-                payload={"approved_by": f"{_os_user()} via shakerscan targets authorize", "risk_tier": "active"},
+                payload={"approved_by": _decider(client, "authorize"), "risk_tier": "active"},
             )
             recorded = (answer or {}).get("authorization") if isinstance(answer, Mapping) else None
             who = (recorded or {}).get("approved_by") if isinstance(recorded, Mapping) else None
@@ -191,7 +212,7 @@ def cmd_targets(args: argparse.Namespace) -> int:
         else:
             answer = client.request(
                 "DELETE", f"/targets/{identifier}/authorization",
-                payload={"revoked_by": f"{_os_user()} via shakerscan targets unauthorize",
+                payload={"revoked_by": _decider(client, "unauthorize"),
                          "reason": (args.reason or "withdrawn from the terminal")[:2000]},
             )
             revoked = bool((answer or {}).get("revoked")) if isinstance(answer, Mapping) else False
@@ -294,7 +315,12 @@ def touch_lines(client: Any) -> list[str]:
     else:
         state = "unknown (this instance does not say)"
     unready = approve.security_key_readiness()
-    if unready:
+    if unready and approve.key_out_of_reach():
+        key = unready
+    elif unready.startswith("no USB security key found"):
+        # Not a failure: a key is needed only when the administrator requires a touch.
+        key = "none plugged in (needed only when your administrator requires a touch)"
+    elif unready:
         key = unready
     else:
         from importlib.metadata import PackageNotFoundError, version
