@@ -639,8 +639,12 @@ client and `./scanner.sh approve` on an engine install run the same protocol.
 - `--allow BOUND` (repeatable) on `shakerscan hunt start` and `shakerscan agent`;
   `--propose-allow BOUND` on `hunt start` sends `proposed_allow` (one pending request), as the MCP
   start tool does with its `allow` argument.
-- Every command that decides refuses to run without an interactive terminal (stdin a TTY), so a
-  command an agent runs in its own tool shell cannot decide or pre-authorize anything.
+- Every command that decides refuses to run without an interactive terminal, so a command an agent
+  runs in its own tool shell cannot decide or pre-authorize anything. Since client 0.11.2 it is the
+  rule a person's decision follows: stdin a TTY and stdout or stderr a TTY to ask on (the prompts
+  go there), and not inside `shakerscan agent` (`SHAKERSCAN_AGENT_NAME`). Otherwise the command
+  exits 3 (refused, nothing ran; 0.11.1 exited 2) before it reads the instance, shows anything or
+  asks a security key anything.
 
 **Which proof.** A connection with a service token is Enterprise: everything goes through the
 gateway's step-up routes and the engine's decision route is never called. A connection without a
@@ -674,9 +678,11 @@ pre-authorized …") and exits 2. There is no fallback.
    not only the token's owner: owner decision 8), that `origin` is its public URL, and for decisions
    that each request is pending with that `subject_digest` (read from the engine). An empty
    `account` (client 0.11.2) names the person the token acts for; the challenge's `account` then
-   names them, and the set digest is computed with it. A gateway that needs a name answers 422
-   (`account_required` for a token that acts for nobody, `request_invalid` before this), and the
-   client asks for one. It answers:
+   names them, and the set digest is computed with it. Client 0.11.2 sends an empty `account` only
+   to a gateway whose `GET /_enterprise/me` reports `person_decision_proof` (one that names the
+   approver); an older gateway is asked with the name the person types. A gateway that needs a
+   name answers 422 (`account_required` for a token that acts for nobody, `request_invalid`
+   before this), and the client asks for one. It answers:
    ```json
    {"schema_version": "shakerscan-approval-challenge/v1", "approval_id": "<opaque>",
     "set_digest": "<64 hex>", "methods": ["totp", "security_key"], "expires_at": "<ISO 8601>",
@@ -779,7 +785,10 @@ per-approval proof is a step-up code or key touch the agent never sees. On OSS `
 same loop, and each keypress is the confirmation.
 
 **Security keys.** CTAP2 over USB or NFC through python-fido2, a dependency of the client since
-0.11.2 (before, `pipx inject shakerscan fido2`); without it the client says so. Before a touch the
+0.11.2 (before, `pipx inject shakerscan fido2`); without it the client says so. Without
+`--method`, client 0.11.2 chooses `security_key` whenever the challenge offers it and a plugged-in
+key holds one of its `allowCredentials` (asked silently), whatever `userVerification` asks, and
+`totp` only when no key can answer; 0.11.1 chose `totp` whenever it was offered. Before a touch the
 client asks each plugged-in key silently (user presence off) whether it holds one of the
 challenge's `allowCredentials`, and with `userVerification: "required"` whether it has a PIN; only
 keys that can answer are offered, and with several the person picks one before the touch. A key

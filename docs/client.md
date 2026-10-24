@@ -72,20 +72,27 @@ Python 3.10 or newer. One third-party dependency since 0.11.2: python-fido2 (Yub
 BSD-2-Clause; it brings `cryptography`, `cffi` and `pycparser`, and `typing-extensions` on Python
 3.10), for a USB security key's touch, on macOS and on 64-bit Linux (x86-64 and ARM64): the
 platforms `cryptography` publishes wheels for, so the client installs there without a compiler,
-as it did before. On an Intel Mac `cryptography` stays below 49 (49 and later publish no Intel
+as it did before. On an Intel Mac `cryptography` stays on 48.0.x (49 and later publish no Intel
 macOS wheel); it still gets that line's security fixes only as far as 48 goes, until a client
 release says otherwise. Elsewhere (Windows, where the terminal touch is not supported yet; 32-bit
 or other Linux architectures; the BSDs) the client installs without python-fido2 and works as
 before without the touch; `pipx inject shakerscan fido2` adds it where a `cryptography` wheel or a
 Rust and OpenSSL toolchain exists.
 
-The package declares `fido2>=2.2,<2.3` (one minor line: python-fido2's API has changed between
-minor releases, so a python-fido2 fix outside that line reaches you with a client release), and a
-plain `pipx` or `uv tool` install resolves the newest matching releases from the package index
-without hashes. The set a release was tested with is hash-locked in
-`client/requirements/runtime.lock` (a record of what was tested, one set for every platform, not
-of what a plain install picks up), and `pip install --require-hashes -r
-client/requirements/runtime.lock` installs exactly that. The first `uvx shakerscan mcp` downloads
+The package declares exactly `fido2==2.2.1` (the touch path is security-sensitive, so a new
+python-fido2 release reaches you only with a client release that was checked with it) and
+`cryptography` within the releases the client's publish checks run: `>=50.0.2,<51`, or
+`>=48.0.1,<49` on an Intel Mac. A plain `pipx` or `uv tool` install resolves the newest matching
+releases from the package index without hashes. What is tested before a client is published:
+the built wheel installed from the hash-locked set in `client/requirements/runtime.lock`
+(python-fido2 2.2.1, cryptography 50.0.2, or 48.0.1 on an Intel Mac, with their dependencies;
+`pip install --require-hashes -r client/requirements/runtime.lock` installs exactly that), and the
+same wheel installed with no lock, as `pipx` does, on Linux x86-64 and Apple Silicon macOS with
+Python 3.10 and 3.12: it checks that python-fido2 2.2.1 and a cryptography 50.0.x were resolved,
+imports python-fido2's USB and CTAP2 client and verifies an ES256 signature through it. An Intel
+Mac's set is checked through the lock only (there is no Intel macOS runner), and a cryptography
+patch release after the client was published is installed untested (still within the declared
+range). The first `uvx shakerscan mcp` downloads
 `cryptography` and `cffi` too (a few megabytes); on a slow link, run it once by hand (or `uv tool
 install shakerscan`) before an agent starts it, so the agent's MCP start-up does not time out. The
 Homebrew formula installs the client without python-fido2, so a Homebrew install has no
@@ -388,15 +395,17 @@ shakerscan hunt permissions wait 8f0c…  # JSON: granted, denied, expired, with
 ```
 
 - **Enterprise (a token).** The approver is the person the connection's token acts for, named by
-  the gateway (`--account` names someone else, and a token that acts for nobody needs it). An
-  older gateway that needs the sign-in name refuses an approval without one; the client then
-  reads the gateway's own description of itself (`GET /_enterprise/me`) and, when it does not say
-  it names the approver, asks for the name once, as before. You prove it with your TOTP code, typed
-  at the prompt, or a USB/NFC security key (`--method security_key`). Without `--method` the client
-  asks for what is least work: a touch of a plugged-in security key when the gateway asks only for
-  a touch (its administrator requires one) or a key is the only proof you have, and the key holds
-  one of your credentials (asked silently, without a touch); otherwise the TOTP code, as client
-  0.11.1 does (a key the gateway asks its PIN for is no less work than a code). When several keys are plugged in, the first that holds one of your
+  the gateway (`--account` names someone else, and a token that acts for nobody needs it). The
+  client first reads the gateway's own description of itself (`GET /_enterprise/me`); an older
+  gateway that does not say it names the approver is asked with your sign-in name, which the
+  client asks for once, as before (it never sends such a gateway an empty name, which it would
+  refuse and record as a denied approval). You prove it with a USB/NFC security key
+  (`--method security_key`) or your TOTP code, typed at the prompt (`--method totp`). Without
+  `--method` the client uses the security key whenever a plugged-in key holds one of your
+  credentials for this gateway (asked silently, without a touch): a touch alone when the gateway
+  asks only for one (its administrator requires a touch), else a touch and the key's PIN, as at
+  sign-in. The TOTP code only when no key can answer here (none plugged in, none of yours, or the
+  gateway asks for a PIN and the key has none set). When several keys are plugged in, the first that holds one of your
   credentials is used; you pick one only among keys that cannot be asked that way. The silent
   check is made only for this gateway's own relying party (the same rule the assertion follows), so
   no gateway learns what else your key holds. Without `--account`, the client says once whom it
@@ -406,7 +415,8 @@ shakerscan hunt permissions wait 8f0c…  # JSON: granted, denied, expired, with
   not. A key that has a PIN and holds none of your credentials when asked silently is still
   asked when the gateway wants its PIN (a passkey a browser made to need the PIN for every use is
   found only with it); for a touch such a passkey cannot answer, and the client says so: register
-  the key again as a security key ("after my password"). The proof goes to the gateway's step-up routes, which decide in your name; the token alone
+  the key for terminal approvals (My account, Passkeys, "Use it: for terminal approvals (touch)",
+  which never signs you in). The proof goes to the gateway's step-up routes, which decide in your name; the token alone
   never approves. A gateway that does not serve those routes yet gets an exact error and nothing
   is decided. `--watch` opens a 30-minute approver session after one step-up; its secret is held
   only in that process's memory (see `docs/hunt-permission-requests.md` for what that does and
@@ -440,8 +450,14 @@ shakerscan hunt permissions wait 8f0c…  # JSON: granted, denied, expired, with
   Hunt. It reads every 3 s after a request was shown and waits longer (up to 15 s) while nothing
   new arrives.
   The engine has no accounts: anyone who can reach its API could decide, and the command says so.
-- Neither runs without an interactive terminal, so an agent cannot run it in its own shell. Never
-  type a code into an agent's chat.
+- Neither runs without an interactive terminal, so an agent cannot run it in its own shell: `approve`,
+  `approve --all-pending`, `approve --watch`, `deny`, `agent --allow` and the knowledge and secrets
+  decisions ask only when their input is a terminal and so is their output or their error output
+  (the prompts then go to that terminal), the same rule as a person's decision below. Otherwise
+  they exit with status 3 (refused, nothing ran) before anything is read from the instance, shown,
+  or asked of a security key, so a harness that gives an agent's command a terminal for input only
+  never makes your key blink. Inside an agent that `shakerscan agent` started they are refused the
+  same way, even in its own window. Never type a code into an agent's chat.
 
 Bounds set when you start an agent pre-authorize requests inside them, so they are granted as they
 arise: `shakerscan agent opencode --allow budget.raise:2x --allow capability:state-changing`
@@ -465,7 +481,7 @@ $ shakerscan hunt budget raise 3f2a91c0-… --limit max_state_changing_requests=
 This needs your decision (your administrator requires a security-key touch):
   Raise state-changing requests 20 -> 40 (safety ceiling) for Hunt 3f2a91c0… on honey.example.com
 Touch your security key to approve (Ctrl-C to cancel)...
-done; decided by alice, by security-key touch
+touch accepted for alice (security-key touch); sending the request again...
 raised state-changing requests 20 -> 40 (safety ceiling) for Hunt 3f2a91c0-…
 ```
 
@@ -480,14 +496,16 @@ raised state-changing requests 20 -> 40 (safety ceiling) for Hunt 3f2a91c0-…
   body bytes, this connection, the person it acts for), checks the binding, asks for one touch of
   a security key registered to your account (user presence; no PIN unless the gateway asks), and
   sends the same request once more with the one-time grant (`X-ShakerScan-Person-Proof`, valid two
-  minutes, for that request only). `shakerscan api`, `shakerscan scan`, the Hunt, knowledge and
+  minutes, for that request only). "touch accepted" means the gateway took your touch; what the
+  instance then did with the request (applied, or refused because, say, the Hunt's budget changed
+  meanwhile) is what the command prints next. `shakerscan api`, `shakerscan scan`, the Hunt, knowledge and
   secrets commands and the commands below all do this. Ctrl-C at the touch cancels it: nothing is
   changed, and the command exits with status 130; a touch that fails exits with status 1, with the
   reason on one line. With no key plugged in, the client says "Insert your security key" and waits
   for one (up to a minute, within the challenge's two minutes) instead of failing. Over SSH, in WSL
   (unless the key is passed through with `usbipd attach`) and in a container, where a key plugged
   into your computer cannot arrive, it says so at once; over mosh or another remote shell it cannot
-  tell, and the wait says so. `shakerscan scan --active-testing` does not ask its own
+  tell, and the end of the wait says so. `shakerscan scan --active-testing` does not ask its own
   "Type 'yes'" when the gateway requires the touch: the touch is the confirmation when the target
   needs one, and a target already authorized needs none, so no question of any kind is asked.
   `shakerscan doctor` says whether the gateway requires the touch and whether one could happen
@@ -500,7 +518,7 @@ raised state-changing requests 20 -> 40 (safety ceiling) for Hunt 3f2a91c0-…
   and target commands print that one line too, not the CLI's error JSON. The command is the
   dedicated one where there is one (`targets authorize`, `hunt budget raise`, `secrets
   reactivate|expiry`), else `shakerscan api METHOD PATH '<body>'`; a body longer than 1,024
-  characters is saved, readable by you only, under `~/.config/shakerscan/decisions/` and named as
+  characters is saved, readable by you only, for a week, under `~/.config/shakerscan/decisions/` and named as
   `@<file>` (`shakerscan api` reads a body from a file with `@`), so the line stays short and the
   body stays out of your shell history. No option skips the
   touch. The MCP adapter answers the same refusal as `outcome:
@@ -523,7 +541,11 @@ raised state-changing requests 20 -> 40 (safety ceiling) for Hunt 3f2a91c0-…
   On an open-source engine, or a gateway that does not require the touch, they are sent as they
   are.
 - **What a touch proves.** A person was at the key: presence, not identity (anyone at a plugged-in
-  key can touch it). A program running as your own computer user could change this client, or
+  key can touch it). An agent started some other way than `shakerscan agent` (Codex or Claude
+  Code registered with `shakerscan connect --codex` or `--claude` and started directly, say) whose
+  commands run in a full pseudo-terminal (input and output, as under `script`, `expect` or `tmux`)
+  looks like your terminal to the client: it gets the touch prompt, and your key blinks for its
+  request. Start agents with `shakerscan agent`, and touch only for a prompt you started. A program running as your own computer user could change this client, or
   start a request of its own the moment you expect to touch, so the key blinks for its request; a
   key has no display. Touch only for a prompt you started, and read the decision it names. Running
   an agent as another computer user, or in a container, with its own connection, keeps your
