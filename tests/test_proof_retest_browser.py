@@ -9,8 +9,12 @@ and "still vulnerable" would come from a different check than the one that found
 * a fixed page that escapes the input and logs it, or raises its own dialog, is not reproduced;
 * a page behind a sign-in is retested with the Scan's session, which reaches only its origin.
 
+It also must not depend on what ran before it in the process: a Scan's browser proof in an earlier
+event loop, another retest in the same loop (a worker's), or a browser that stopped answering.
+
 The pages are a local fixture server (unit fixtures); the retest is the real ``run_proof_retest``
-with the real proof module, its HTTP client and its headless browser.
+with the real proof module, its HTTP client and its headless browser, except where a stand-in
+Playwright (a unit fixture) never answers.
 """
 
 from __future__ import annotations
@@ -25,6 +29,8 @@ from pathlib import Path
 import shutil
 import sys
 import threading
+import time
+from typing import Any, Callable
 import urllib.parse
 import uuid
 
@@ -43,6 +49,8 @@ from retest_contract import infer_retest_inputs  # noqa: E402
 CANDIDATE = "c3d1f0a9b8e7d6c5b4a39281706f5e4d3c2b1a09f8e7d6c5b4a3928170615243"
 SESSION = "session=retest-fixture"
 OFF_ORIGIN_HITS: list[str] = []
+# A retest takes about 4 s here (a browser launch, the baseline request, the payload page).
+HANG_LIMIT_SECONDS = 90.0
 
 
 class _Pages(BaseHTTPRequestHandler):
@@ -199,3 +207,161 @@ def test_the_marker_is_the_one_the_browser_proof_looks_for():
     marker = xss_proof_marker(CANDIDATE)
     assert f"setAttribute('data-shakerscan-proof','{marker}')" in payload
     assert f"console.log('{marker}')" in payload
+
+
+# --- What ran before the retest must not matter ----------------------------------------------------
+
+
+def _finishes(work: Callable[[], Any], *, seconds: float = HANG_LIMIT_SECONDS) -> Any:
+    """``work()``'s result, run on a thread of its own: a hang fails the test, not the run."""
+    box: dict[str, Any] = {}
+
+    def run() -> None:
+        try:
+            box["result"] = work()
+        except BaseException as exc:  # noqa: BLE001 - re-raised on the test's thread
+            box["error"] = exc
+
+    thread = threading.Thread(target=run, daemon=True, name="retest-case")
+    thread.start()
+    thread.join(seconds)
+    if thread.is_alive():
+        pytest.fail(f"still waiting after {seconds:.0f} s: the retest hung")
+    if "error" in box:
+        raise box["error"]
+    return box["result"]
+
+
+def test_a_retest_after_a_scans_browser_proof_in_an_earlier_event_loop(monkeypatch, pages):
+    """The order that hung: a Scan's browser proof ran in one event loop and left its browser, as
+    ``tests/test_active_checks.py``'s POST-body XSS check does, then the retest ran in the next."""
+    from scanner_tools import active_checks, proof_of_exploit
+
+    async def the_scans_client(command, *args, **kwargs):  # the page echoes the field (unit fixture)
+        body = json.loads(command[command.index("-d") + 1])
+        return f"<html><body>{body.get('message')}</body></html>", "", 0
+
+    monkeypatch.setattr(active_checks, "run", the_scans_client)
+    monkeypatch.setattr(proof_of_exploit, "_poe_config",
+                        dataclasses.replace(proof_of_exploit._poe_config, enable_headless_xss=True))
+    endpoint = {"url": "https://example.test/contact", "method": "POST", "content_type": "application/json",
+                "body_params": ["message"], "body_template": {"message": "hello"}}
+
+    def work() -> tuple[dict, dict]:
+        scan = asyncio.run(active_checks.smart_xss_test(
+            "https://example.test", [endpoint], max_seconds=10, max_params_per_endpoint=1))
+        return scan, _retest(monkeypatch, _verification(pages, "/vuln"))
+
+    scan, retest = _finishes(work)
+    finding = scan["findings"][0]
+    assert finding["browser_proof_attempted"] is True
+    assert finding["browser_proof"]["technique"].startswith("headless_xss_response_"), finding["evidence"]
+    assert retest["verdict"] == "exploited", retest["verdict_reason"]
+    assert retest["proof"]["technique"] == "headless_xss_console"
+
+
+def test_a_workers_event_loop_runs_retest_after_retest_with_its_browser(monkeypatch, pages):
+    """A worker keeps one event loop for its life: each retest in it judges its own page."""
+    from scanner_tools import proof_of_exploit
+    from worker_handlers.proof_replay import run_proof_retest
+
+    monkeypatch.setattr(proof_of_exploit, "_poe_config",
+                        dataclasses.replace(proof_of_exploit._poe_config, rate_limit_ms=0, enable_headless_xss=True))
+
+    async def worker() -> list[dict]:
+        verdicts = []
+        for path in ("/vuln", "/fixed", "/quiet"):
+            verification = _verification(pages, path)
+            verdicts.append(await run_proof_retest(
+                verification, infer_retest_inputs(verification), poe=proof_of_exploit,
+                replay_commands=[], ladder=[], cancelled=lambda: False))
+        return verdicts
+
+    results = _finishes(lambda: asyncio.run(worker()), seconds=2 * HANG_LIMIT_SECONDS)
+    assert [result["verdict"] for result in results] == ["exploited", "likely_fixed", "exploited"]
+
+
+async def _never() -> None:
+    await asyncio.get_running_loop().create_future()
+
+
+class _UnansweringBrowser:
+    """Says it is connected, and never answers at ``hangs_at``: opening a context, routing its
+    requests, or opening a page; nor does it ever close a context (unit fixture)."""
+
+    def __init__(self, hangs_at: str):
+        self.hangs_at = hangs_at
+
+    def is_connected(self) -> bool:
+        return True
+
+    async def new_context(self, **_options):
+        if self.hangs_at == "new_context":
+            await _never()
+        return _UnansweringContext(self)
+
+    async def close(self):
+        await _never()
+
+
+class _UnansweringContext:
+    def __init__(self, browser: _UnansweringBrowser):
+        self.browser = browser
+
+    async def route(self, _pattern, _handler):
+        if self.browser.hangs_at == "route":
+            await _never()
+
+    async def new_page(self):
+        await _never()
+
+    async def close(self):
+        await _never()
+
+
+class _StandInPlaywright:
+    """``async_playwright()`` that launches only unanswering browsers (unit fixture)."""
+
+    def __init__(self, hangs_at: str):
+        self.chromium = self
+        self.hangs_at = hangs_at
+        self.launches = 0
+
+    def __call__(self):
+        return self
+
+    async def start(self):
+        return self
+
+    async def launch(self, **_options):
+        self.launches += 1
+        return _UnansweringBrowser(self.hangs_at)
+
+    async def stop(self):
+        return None
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *_args):
+        return None
+
+
+@pytest.mark.parametrize("hangs_at", ["new_context", "route", "new_page"])
+def test_a_browser_that_does_not_answer_leaves_the_retest_inconclusive(monkeypatch, pages, hangs_at):
+    import playwright.async_api as playwright_api
+    from scanner_tools import proof_of_exploit
+
+    fake = _StandInPlaywright(hangs_at)
+    monkeypatch.setattr(playwright_api, "async_playwright", fake)
+    for name in ("BROWSER_LAUNCH_TIMEOUT_SECONDS", "BROWSER_HANDOFF_TIMEOUT_SECONDS", "BROWSER_CLOSE_TIMEOUT_SECONDS"):
+        monkeypatch.setattr(proof_of_exploit, name, 0.5, raising=False)
+
+    started = time.monotonic()
+    result = _finishes(lambda: _retest(monkeypatch, _verification(pages, "/vuln")), seconds=30)
+    assert time.monotonic() - started < 30
+    assert fake.launches >= 1
+    assert result["verdict"] == "inconclusive"
+    assert result["result_status"] == "inconclusive"
+    assert "did not answer" in result["verdict_reason"]
+    assert "stays open" in result["verdict_reason"]
