@@ -22803,14 +22803,39 @@ async def _guard_queue_lease(
                 return
 
 
-def _leased_work(job_data: dict[str, Any]) -> Any:
+# Queue jobs whose result the API waits for (hunt/interaction_router.py): it counts the call's own
+# time from when the work starts, not from enqueue, so a call that waited for a slot keeps it.
+_API_AWAITED_JOB_TYPES = frozenset({
+    "canonical_scanner_capability", "canonical_browser_capability",
+    "canonical_network_capability", "canonical_http_capability",
+})
+
+
+def _mark_work_started(redis_client: Any, job_data: dict[str, Any]) -> None:
+    """Stamp when a leased Hunt capability job's work starts, after any wait for a long slot.
+
+    Scheduling metadata only: the job's durable reservation still decides whether it may run."""
+    job_id = str(job_data.get("job_id") or "").strip()
+    if redis_client is None or not job_id or job_data.get("type") not in _API_AWAITED_JOB_TYPES:
+        return
+    try:
+        redis_client.hset(f"job:{job_id}", mapping={"work_started_at": utc_now_iso()})
+    except Exception as exc:
+        print(f"[worker] work start metadata error: {type(exc).__name__}", flush=True)
+
+
+def _leased_work(job_data: dict[str, Any], redis_client: Any = None) -> Any:
     """The work one leased job runs. On the agent-tool worker a long action first takes one of
-    the long slots, so a short call always finds a worker; it waits inside the leased execution,
-    under the lease's heartbeat (hunt/agent_job_concurrency.py)."""
+    the long slots, so a short call never waits behind long actions; it waits inside the leased
+    execution, under the lease's heartbeat (hunt/agent_job_concurrency.py)."""
+    async def work(job: dict[str, Any]) -> Any:
+        _mark_work_started(redis_client, job)
+        return await process_job(job)
+
     if AGENT_TOOL_ONLY_WORKER:
         from hunt.agent_job_concurrency import in_lane
-        return in_lane(job_data, process_job)
-    return process_job(job_data)
+        return in_lane(job_data, work)
+    return work(job_data)
 
 
 async def _run_job_under_lease(redis_client: Any, lease: QueueLease, job_data: dict[str, Any]) -> None:
@@ -22826,10 +22851,10 @@ async def _run_job_under_lease(redis_client: Any, lease: QueueLease, job_data: d
     try:
         marker = _fleet_busy_marker(job_data)
         if lease.legacy:
-            await _leased_work(job_data)
+            await _leased_work(job_data, redis_client)
             return
 
-        work_task = asyncio.create_task(_leased_work(job_data))
+        work_task = asyncio.create_task(_leased_work(job_data, redis_client))
         guard_task = asyncio.create_task(_guard_queue_lease(redis_client, lease, consumer_name, work_task))
         try:
             await work_task

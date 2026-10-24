@@ -3006,6 +3006,7 @@ async def _execute_hunt_capability_lifecycle(
                 action_id=str(action_id),
                 reservation_id=durable_reservation.record.reservation_id,
                 action_digest=durable_action_digest,
+                queue_seconds=durable_lease_seconds,
             )
         elif is_browser:
             if (
@@ -3034,6 +3035,7 @@ async def _execute_hunt_capability_lifecycle(
                 action_id=str(action_id),
                 reservation_id=durable_reservation.record.reservation_id,
                 action_digest=durable_action_digest,
+                queue_seconds=durable_lease_seconds,
             )
         elif is_network:
             assert prepared_network is not None and network_target is not None and network_policy is not None
@@ -3046,7 +3048,7 @@ async def _execute_hunt_capability_lifecycle(
                 timeout_ms=max(1_000, int(prepared_network.estimated_budget.get("tool_wall_seconds") or 1) * 1_000),
                 hunt_id=str(run["id"]), action_id=str(action_id),
                 reservation_id=durable_reservation.record.reservation_id,
-                action_digest=durable_action_digest,
+                action_digest=durable_action_digest, queue_seconds=durable_lease_seconds,
             )
         elif is_scanner:
             if durable_reservation is None or durable_action_digest is None:
@@ -3065,6 +3067,7 @@ async def _execute_hunt_capability_lifecycle(
                 action_id=str(action_id),
                 reservation_id=durable_reservation.record.reservation_id,
                 action_digest=durable_action_digest,
+                queue_seconds=durable_lease_seconds,
             )
         elif name == "tls.inspect":
             # A device Hunt records a bare locator, not a "url": resolve the
@@ -3897,11 +3900,46 @@ async def _execute_hunt_capability_lifecycle(
     }
 
 
+class _WorkerResultWait:
+    """How long the API waits for one queued Hunt capability's result.
+
+    The call's own allowance, its timeout plus 30 s, counts from when a worker starts its work
+    (``work_started_at``, stamped after any wait for a long slot), not from enqueue: a short call
+    queued behind other work, or a long action waiting for one of the long slots, keeps all of
+    it. Until a worker starts it the API waits as long as its reservation could still start (the
+    admission lease, plus the same 30 s); a worker refuses a job whose lease ran out before it
+    started, and the reservation is released without a charge."""
+
+    def __init__(self, redis_client: Any, job_id: str, *, timeout_ms: int,
+                 queue_seconds: float | None = None) -> None:
+        self._loop = asyncio.get_running_loop()
+        self._redis, self._key = redis_client, f"job:{job_id}"
+        self._run_seconds = timeout_ms / 1000.0 + 30.0
+        queued = self._run_seconds if queue_seconds is None else float(queue_seconds) + 30.0
+        self._deadline = self._loop.time() + max(self._run_seconds, queued)
+        self._started = False
+        self._next_read = 0.0
+
+    def open(self) -> bool:
+        """Whether the API still waits; reads the work's start at most once a second."""
+        now = self._loop.time()
+        if not self._started and now >= self._next_read:
+            self._next_read = now + 1.0
+            try:
+                started = self._redis.hget(self._key, "work_started_at")
+            except Exception:  # metadata only: without it the wait keeps its queued bound
+                started = None
+            if started:
+                self._started = True
+                self._deadline = now + self._run_seconds
+        return now < self._deadline
+
+
 async def _enqueue_canonical_network_capability(
     *, capability_name: str, capability_input: Mapping[str, Any],
     expected_input_digest: str, expected_budget: Mapping[str, int],
     timeout_ms: int, hunt_id: str, action_id: str, reservation_id: str,
-    action_digest: str,
+    action_digest: str, queue_seconds: float | None = None,
 ) -> dict[str, Any]:
     """Queue declarative canonical work; the worker independently reconstructs its argv."""
     from .ssh_routing import route_session, seal_input, owner_available
@@ -3932,9 +3970,9 @@ async def _enqueue_canonical_network_capability(
     })
     redis_client.expire(f"job:{job_id}", max(3600, math.ceil(timeout_ms / 1000) + 300))
     enqueue_job(redis_client, queue_name, payload)
-    deadline = asyncio.get_running_loop().time() + timeout_ms / 1000.0 + 30.0
+    wait = _WorkerResultWait(redis_client, job_id, timeout_ms=timeout_ms, queue_seconds=queue_seconds)
     try:
-        while asyncio.get_running_loop().time() < deadline:
+        while wait.open():
             raw = redis_client.get(result_key)
             if raw is not None:
                 redis_client.delete(result_key)
@@ -3970,6 +4008,7 @@ async def _enqueue_canonical_http_capability(
     action_id: str,
     reservation_id: str,
     action_digest: str,
+    queue_seconds: float | None = None,
 ) -> dict[str, Any]:
     """Queue opaque session/HTTP work without credentials or target authority."""
     redis_client = get_redis()
@@ -4004,9 +4043,9 @@ async def _enqueue_canonical_http_capability(
         f"job:{job_id}", max(3600, math.ceil(timeout_ms / 1000) + 300),
     )
     enqueue_job(redis_client, _get("AGENT_TOOL_QUEUE_NAME"), payload)
-    deadline = asyncio.get_running_loop().time() + timeout_ms / 1000.0 + 30.0
+    wait = _WorkerResultWait(redis_client, job_id, timeout_ms=timeout_ms, queue_seconds=queue_seconds)
     try:
-        while asyncio.get_running_loop().time() < deadline:
+        while wait.open():
             raw = redis_client.get(result_key)
             if raw is not None:
                 redis_client.delete(result_key)
@@ -4039,7 +4078,7 @@ async def _enqueue_canonical_browser_capability(
     *, capability_name: str, capability_input: Mapping[str, Any],
     expected_input_digest: str, expected_budget: Mapping[str, int],
     timeout_ms: int, hunt_id: str, action_id: str, reservation_id: str,
-    action_digest: str,
+    action_digest: str, queue_seconds: float | None = None,
 ) -> dict[str, Any]:
     """Queue browser work carrying identity and digests, never target authority."""
     redis_client = get_redis()
@@ -4075,9 +4114,9 @@ async def _enqueue_canonical_browser_capability(
         f"job:{job_id}", max(3600, math.ceil(timeout_ms / 1000) + 300),
     )
     enqueue_job(redis_client, _get("AGENT_TOOL_QUEUE_NAME"), payload)
-    deadline = asyncio.get_running_loop().time() + timeout_ms / 1000.0 + 30.0
+    wait = _WorkerResultWait(redis_client, job_id, timeout_ms=timeout_ms, queue_seconds=queue_seconds)
     try:
-        while asyncio.get_running_loop().time() < deadline:
+        while wait.open():
             raw = redis_client.get(result_key)
             if raw is not None:
                 redis_client.delete(result_key)
@@ -4111,7 +4150,7 @@ async def _enqueue_canonical_browser_capability(
 async def _enqueue_canonical_scanner_capability(
     *, capability_name: str, capability_input: Mapping[str, Any],
     timeout_ms: int, hunt_id: str, action_id: str, reservation_id: str,
-    action_digest: str,
+    action_digest: str, queue_seconds: float | None = None,
 ) -> dict[str, Any]:
     """Queue a canonical external scanner without queue-carried target authority."""
     redis_client = get_redis()
@@ -4146,9 +4185,9 @@ async def _enqueue_canonical_scanner_capability(
         max(3600, math.ceil(timeout_ms / 1000) + 300),
     )
     enqueue_job(redis_client, _get("AGENT_TOOL_QUEUE_NAME"), payload)
-    deadline = asyncio.get_running_loop().time() + timeout_ms / 1000.0 + 30.0
+    wait = _WorkerResultWait(redis_client, job_id, timeout_ms=timeout_ms, queue_seconds=queue_seconds)
     try:
-        while asyncio.get_running_loop().time() < deadline:
+        while wait.open():
             raw = redis_client.get(result_key)
             if raw is not None:
                 redis_client.delete(result_key)

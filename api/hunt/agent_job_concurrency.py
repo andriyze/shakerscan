@@ -10,9 +10,11 @@ larger of the registry's and the one admission reserved for this call, exceeds
 fingerprint). Long actions take at most ``MAX_CONCURRENT_LONG_AGENT_JOBS`` of the
 ``MAX_CONCURRENT_AGENT_JOBS`` slots, so a short call (``http.request``, ``artifact.inspect``, a
 browser step) never waits behind them: it waits only for short work, each at most
-``LONG_ACTION_WALL_SECONDS``, or an SSH command, which takes a slot without counting as long. A
-long job leased while the long slots are taken waits inside its leased execution, so its queue
-lease keeps its heartbeat, and it does not count against the slot short work needs. Admission keeps one
+``LONG_ACTION_WALL_SECONDS``, or an SSH command, which takes a slot without counting as long. The
+API's wait for a queued call counts from when a worker starts it (``work_started_at``), and a
+short call's reservation lease (at least 90 s) still lets it start behind one short action. A long
+job leased while the long slots are taken waits inside its leased execution, so its queue lease
+keeps its heartbeat, and it does not count against the slot short work needs. Admission keeps one
 Hunt within that bound (``require_long_action_slot``), so a long job waits here only while other
 Hunts' long actions hold the long slots. Once ``MAX_WAITING_LONG_AGENT_JOBS`` long jobs wait on one
 worker, it leases nothing more, short work included, until one of them starts.

@@ -1,10 +1,12 @@
 """A long job waiting for one of the agent-tool worker's long slots keeps its queue lease.
 
 The agent-tool worker runs three leased jobs at once, a long action (sqli.verify, templates.scan,
-a port scan) in at most two of them, so a short call (http.request, artifact.inspect) always finds
-a worker (tests/test_hunt_concurrent_actions.py). A long job leased while both long slots are
-taken waits inside the worker's leased execution: its queue lease is renewed while it waits, so it
-is never reclaimed and run twice, and it does not hold the slot the short call runs in.
+a port scan) in at most two of them, so a short call (http.request, artifact.inspect) never waits
+behind long actions (tests/test_hunt_concurrent_actions.py). A long job leased while both long
+slots are taken waits inside the worker's leased execution: its queue lease is renewed while it
+waits, so it is never reclaimed and run twice, and it does not hold the slot the short call runs
+in. The worker stamps when each Hunt capability job's work starts, after that wait, because the
+API counts the call's own time from then (tests/test_hunt_worker_result_wait.py).
 
 Unit fixtures: Redis, the queue lease calls and the job handler are doubles; the worker's leased
 runner, its heartbeat guard and the scheduler are the worker's own.
@@ -79,6 +81,76 @@ def test_a_long_job_waiting_for_a_slot_keeps_its_lease_and_a_short_job_runs(monk
             await jobs.close()
 
     asyncio.run(asyncio.wait_for(scenario(), 10))  # a stalled scheduler fails, never hangs
+
+
+class _StampRedis:
+    """Labelled double: records the job hash fields the worker writes."""
+
+    def __init__(self, fail=False):
+        self.fields, self.fail = {}, fail
+
+    def hset(self, key, mapping):
+        if self.fail:
+            raise ConnectionError("redis unavailable")
+        self.fields.setdefault(key, {}).update(mapping)
+
+
+def test_work_start_is_stamped_when_the_work_starts_not_when_the_job_is_leased(monkeypatch):
+    redis = _StampRedis()
+    gates = {}
+
+    async def process(job):
+        gates[job["job_id"]] = gate = asyncio.Event()
+        await gate.wait()
+
+    monkeypatch.setattr(worker, "AGENT_TOOL_ONLY_WORKER", True)
+    monkeypatch.setattr(worker, "process_job", process)
+    monkeypatch.setattr(worker, "acknowledge_lease", lambda *_args: True)
+    monkeypatch.setattr(worker, "heartbeat_lease", lambda *_args: True)
+
+    async def dispatch(index, name):
+        await jobs.dispatch(redis, _lease(index), _job(index, name),
+                            execute=worker._run_job_under_lease, enabled=True)
+        await asyncio.sleep(0.05)
+
+    async def scenario():
+        try:
+            await dispatch(1, "sqli.verify")
+            await dispatch(2, "templates.scan")
+            await dispatch(3, "xss.verify")
+            await dispatch(4, "http.request")
+            assert set(redis.fields) == {"job:job-1", "job:job-2", "job:job-4"}
+            assert all(set(fields) == {"work_started_at"} for fields in redis.fields.values())
+            # The long job that waited for a slot is stamped when it leaves the wait.
+            gates["job-1"].set()
+            await asyncio.sleep(0.05)
+            assert "job:job-3" in redis.fields
+            for gate in gates.values():
+                gate.set()
+        finally:
+            await jobs.close()
+
+    asyncio.run(asyncio.wait_for(scenario(), 10))
+
+
+def test_the_work_start_stamp_never_fails_the_job_and_names_only_hunt_capability_jobs(monkeypatch):
+    ran = []
+
+    async def process(job):
+        ran.append(job["job_id"])
+
+    monkeypatch.setattr(worker, "AGENT_TOOL_ONLY_WORKER", False)
+    monkeypatch.setattr(worker, "process_job", process)
+    monkeypatch.setattr(worker, "acknowledge_lease", lambda *_args: True)
+    broken = _StampRedis(fail=True)
+    asyncio.run(worker._run_job_under_lease(broken, _lease(6), _job(6, "http.request")))
+    assert ran == ["job-6"]
+    # An ordinary worker stamps a Hunt capability job too (the API waits for it the same way),
+    # and nothing else.
+    redis = _StampRedis()
+    asyncio.run(worker._run_job_under_lease(redis, _lease(7), _job(7, "http.request")))
+    asyncio.run(worker._run_job_under_lease(redis, _lease(8), {"job_id": "job-8", "type": "scan"}))
+    assert set(redis.fields) == {"job:job-7"} and ran == ["job-6", "job-7", "job-8"]
 
 
 def test_an_ordinary_worker_runs_its_job_without_the_long_slots(monkeypatch):
