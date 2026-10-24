@@ -1583,15 +1583,15 @@ def test_targets_authorize_records_the_person_the_connection_acts_for(monkeypatc
         return types.SimpleNamespace(get=get)
 
     # Where the gateway requires a touch it writes the person who touched over this: the person.
-    person = {"user": {"display": "Laptop", "token_label": "andriy-mac"}, "acts_for_name": "alice",
+    person = {"user": {"display": "Laptop", "token_label": "laptop"}, "acts_for_name": "alice",
               "person_decision_proof": True}
     assert decisions._decider(client(person), "authorize") == (
-        "alice via shakerscan targets authorize, service token andriy-mac")
+        "alice via shakerscan targets authorize, service token laptop")
     # Elsewhere the engine keeps what is sent, which no person proved: the token first, and that
     # (the scanner UI showed it as the person's own decision).
     off = {**person, "person_decision_proof": False}
     assert decisions._decider(client(off), "authorize") == (
-        "alice's token andriy-mac, no security-key touch (shakerscan targets authorize)")
+        "alice's token laptop, no security-key touch (shakerscan targets authorize)")
     service = {"user": {"display": "CI", "token_label": "ci"}, "acts_for_name": None, "person_decision_proof": False}
     assert decisions._decider(client(service), "unauthorize") == (
         "service token ci (CI), no security-key touch (shakerscan targets unauthorize)")
