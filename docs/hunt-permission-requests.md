@@ -263,7 +263,8 @@ Rules for bounds:
        verifies the person's registered credential. User verification follows the challenge's
        `userVerification`: `required` (the key's PIN, as at login, `passkeys.py:55-68`), or
        `discouraged` when the gateway requires a touch for each decision (user presence only).
-       Without `--method` the client uses a plugged-in key when the gateway offers one. Platform
+       Without `--method` the client uses a plugged-in key when the gateway offers one and it
+       costs a touch only (`discouraged`) or is the person's only proof; else the code. Platform
        authenticators (Touch ID, Windows Hello, synced passkeys) are **not** reachable from a
        pip-installed CLI without a signed native helper, so v1 does not offer them.
    - The token alone never approves: it must be a valid connection **and** belong to a person
@@ -782,6 +783,8 @@ same loop, and each keypress is the confirmation.
 client asks each plugged-in key silently (user presence off) whether it holds one of the
 challenge's `allowCredentials`, and with `userVerification: "required"` whether it has a PIN; only
 keys that can answer are offered, and with several the person picks one before the touch. A key
+with a PIN that holds none of them without it is still offered when the PIN is asked for (a
+credential made to need the PIN for every use is found only with it). A key
 error is said in plain words. Platform authenticators are not reachable from a pip-installed
 command.
 

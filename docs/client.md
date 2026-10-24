@@ -54,8 +54,9 @@ brew install andriyze/shakerscan/shakerscan
 ```
 
 The Homebrew formula installs the client without python-fido2, so it cannot answer a security-key
-touch: on an Enterprise gateway whose administrator requires a touch for person decisions (and for
-every terminal approval), install the client with `pipx` or `uv tool` instead. For an open-source
+touch (`brew install` says so in its caveats): on an Enterprise gateway whose administrator requires
+a touch for person decisions (and for every terminal approval), install the client with `pipx` or
+`uv tool` instead. For an open-source
 engine, or a gateway that requires no touch, the Homebrew client does the same as the others.
 
 Run without installing:
@@ -392,23 +393,29 @@ shakerscan hunt permissions wait 8f0c…  # JSON: granted, denied, expired, with
   reads the gateway's own description of itself (`GET /_enterprise/me`) and, when it does not say
   it names the approver, asks for the name once, as before. You prove it with your TOTP code, typed
   at the prompt, or a USB/NFC security key (`--method security_key`). Without `--method` the client
-  uses a plugged-in security key when the gateway offers one and the key holds one of your
-  credentials (asked silently, without a touch; with a PIN when the gateway asks for one), else
-  the code as before. When several keys are plugged in, the first that holds one of your
+  asks for what is least work: a touch of a plugged-in security key when the gateway asks only for
+  a touch (its administrator requires one) or a key is the only proof you have, and the key holds
+  one of your credentials (asked silently, without a touch); otherwise the TOTP code, as client
+  0.11.1 does (a key the gateway asks its PIN for is no less work than a code). When several keys are plugged in, the first that holds one of your
   credentials is used; you pick one only among keys that cannot be asked that way. The silent
   check is made only for this gateway's own relying party (the same rule the assertion follows), so
   no gateway learns what else your key holds. Without `--account`, the client says once whom it
   approves as (the person the connection acts for). A key error is said in plain words (not registered to your account, no touch in time, no
   PIN set). The key is asked for what the
   gateway asks: its PIN when the gateway requires user verification, a touch alone when it does
-  not. The proof goes to the gateway's step-up routes, which decide in your name; the token alone
+  not. A key that has a PIN and holds none of your credentials when asked silently is still
+  asked when the gateway wants its PIN (a passkey a browser made to need the PIN for every use is
+  found only with it); for a touch such a passkey cannot answer, and the client says so: register
+  the key again as a security key ("after my password"). The proof goes to the gateway's step-up routes, which decide in your name; the token alone
   never approves. A gateway that does not serve those routes yet gets an exact error and nothing
   is decided. `--watch` opens a 30-minute approver session after one step-up; its secret is held
   only in that process's memory (see `docs/hunt-permission-requests.md` for what that does and
   does not protect against).
 - **A gateway that requires a security-key touch for each decision** (its administrator's
-  choice): no approver session opens; `--watch` asks for one touch per decision, and `allow
-  a[l]l N shown` decides every request it is showing (one touch per 50). A touch that fails or
+  choice): no approver session opens; `--watch` asks for one touch per decision ("Touch your
+  security key to allow (Ctrl-C to cancel)...", or "to deny"; the result says "by alice,
+  security-key touch"), and `allow a[l]l N shown` decides every request it is showing (one touch
+  per 50). A deny takes a touch too, as every decision there does. A touch that fails or
   that you cancel with Ctrl-C leaves the request pending and shows it again; the watch goes on,
   except when retrying cannot help (no key registered to your account, your account no longer
   able to decide): it then ends with the reason. On such a gateway, and on any gateway that offers
@@ -490,7 +497,12 @@ raised state-changing requests 20 -> 40 (safety ceiling) for Hunt 3f2a91c0-…
   never prompts and never asks a key anything. It prints one line, `person decision required:
   <the decision>. Nothing was changed. The person runs this in their own terminal and touches
   their security key: <command>`, and exits with status **3** (refused, nothing ran); the Hunt
-  and target commands print that one line too, not the CLI's error JSON. No option skips the
+  and target commands print that one line too, not the CLI's error JSON. The command is the
+  dedicated one where there is one (`targets authorize`, `hunt budget raise`, `secrets
+  reactivate|expiry`), else `shakerscan api METHOD PATH '<body>'`; a body longer than 1,024
+  characters is saved, readable by you only, under `~/.config/shakerscan/decisions/` and named as
+  `@<file>` (`shakerscan api` reads a body from a file with `@`), so the line stays short and the
+  body stays out of your shell history. No option skips the
   touch. The MCP adapter answers the same refusal as `outcome:
   person_decision_required` with the decision and the command, and tells the agent never to retry
   it.
@@ -519,14 +531,18 @@ raised state-changing requests 20 -> 40 (safety ceiling) for Hunt 3f2a91c0-…
 - **Keys.** A USB FIDO2 key (a YubiKey 5, for example) over python-fido2. Touch ID, Windows Hello
   and synced passkeys are out of reach of a terminal client, and Windows is not supported for the
   touch in this release. On Linux, install your distribution's FIDO udev rules (the `libfido2` or
-  `yubikey-manager` package); when no key is found and a USB HID device your user cannot open is
-  present, the client says your key may be one of them. On a remote machine over SSH the key is not reachable: the client says so and
+  `yubikey-manager` package): python-fido2 lists only the keys this user can open, so without the
+  rules a plugged-in key looks unplugged. When a device this user cannot open is a FIDO key (its
+  report descriptor, which anyone may read, names the FIDO usage page) the client says so at once
+  instead of waiting for an insertion; when its kind cannot be read, the wait and its end say your
+  key may be one of them. On a remote machine over SSH the key is not reachable: the client says so and
   names the same command to run on the machine the key is plugged into, with a connection that
   acts for you.
 - **What you are shown is what the key signs.** The client asks the gateway for the challenge
   first, so a gateway that cannot name the decision in full (a target or Hunt it could not read)
-  or an account with no key registered is said before anything is asked of a key; then it shows
-  the decision exactly as the challenge states it.
+  or an account with no key registered is said before anything is asked of a key, naming the
+  decision ("<decision>: no touch was asked (security_key_not_registered): register a USB or NFC
+  security key once, ..."); then it shows the decision exactly as the challenge states it.
 - **A refused start** (a scan, Hunt start, retest or network scan of a target nobody authorized
   yet) started nothing. The person's decision is the target's authorization, never the start
   itself: in an agent's shell the command it names is `shakerscan targets authorize <target>`,
