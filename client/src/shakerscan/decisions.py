@@ -20,6 +20,7 @@ import argparse
 import hashlib
 import json
 import re
+import shlex
 import sys
 import urllib.parse
 from collections.abc import Mapping, Sequence
@@ -160,25 +161,61 @@ def _os_user() -> str:
         return "the local user"
 
 
-def _decider(client: Any, verb: str) -> str:
-    """Who the engine records as having decided, as this command names them (at most the
-    engine's 200 characters). On an Enterprise connection: the person the token acts for, as the
-    gateway names them (``acts_for_name`` of GET /_enterprise/me), else the token's service
-    account; a gateway whose administrator requires a touch writes its own name over this. On an
-    open-source engine (no accounts): this computer's user."""
+def _me(client: Any) -> Mapping[str, Any] | None:
+    """The gateway's description of itself to this connection (GET /_enterprise/me), or None on
+    an open-source engine (no such route) or without an answer."""
     approve = helper("_hunt_approve")
     try:
         me = client.get(approve.ME_PATH)
     except Exception:  # an open-source engine, or no answer
-        me = None
-    user = me.get("user") if isinstance(me, Mapping) else None
-    if isinstance(user, Mapping):
+        return None
+    return me if isinstance(me, Mapping) and isinstance(me.get("user"), Mapping) else None
+
+
+# What the engine is told of a decision a connection's token sent without a person's touch (the
+# gateway's own audit says the same: made with a token, not proven by a person).
+UNPROVEN = "made with a token, not proven by a person"
+
+
+def _token_words(me: Mapping[str, Any]) -> str:
+    """The connection, token first: 'service token <label> for <person>' (the person the token
+    acts for, as the gateway names them), else the service account's name."""
+    user = me.get("user") if isinstance(me.get("user"), Mapping) else {}
+    label = str(user.get("token_label") or "")[:60]
+    token = f"service token {label}" if label else "a service token"
+    person = me.get("acts_for_name")
+    if isinstance(person, str) and person.strip():
+        return f"{token} for {person.strip()[:100]}"
+    account = str(user.get("display") or user.get("subject") or "")[:100]
+    return f"{token} ({account})" if account else token
+
+
+def touch_required(me: Mapping[str, Any] | None) -> bool:
+    """Whether this gateway's administrator requires a security-key touch for person decisions
+    from terminals (it then writes who decided itself)."""
+    return isinstance(me, Mapping) and me.get("person_decision_proof") is True
+
+
+def _decider(client: Any, verb: str, me: Mapping[str, Any] | None | object = ...) -> str:
+    """Who the engine records as having decided, as this command names them (at most the
+    engine's 200 characters). Where the gateway requires a touch it writes the person who touched
+    over this, so this names the person the token acts for. Elsewhere on an Enterprise connection
+    the engine keeps what is sent, which no person proved: the token first, the person it acts
+    for, and that no person proved it. On an open-source engine (no accounts): this computer's
+    user."""
+    if me is ...:
+        me = _me(client)
+    if not isinstance(me, Mapping):
+        return f"{_os_user()} via shakerscan targets {verb}"
+    through = f"shakerscan targets {verb}"
+    if touch_required(me):
+        user = me["user"]
         label = str(user.get("token_label") or "")[:60]
-        through = f"shakerscan targets {verb}, service token {label}" if label else f"shakerscan targets {verb}"
         person = me.get("acts_for_name")
         who = person if isinstance(person, str) and person.strip() else (user.get("display") or user.get("subject"))
-        return f"{str(who or 'a service token')[:100]} via {through}"[:200]
-    return f"{_os_user()} via shakerscan targets {verb}"
+        tail = f", service token {label}" if label else ""
+        return f"{str(who or 'a service token')[:100]} via {through}{tail}"[:200]
+    return f"{_token_words(me)} via {through} ({UNPROVEN})"[:200]
 
 
 def _named(target: Mapping[str, Any]) -> str:
@@ -193,6 +230,16 @@ def cmd_targets(args: argparse.Namespace) -> int:
     url = apply_connection(args)
     v2, client = _client(url, args.timeout)
     target: dict[str, Any] = {}
+    me = _me(client)
+    if args.action == "authorize" and touch_required(me) and not helper("_person_decision").interactive():
+        # Where the gateway requires a touch, an agent's shell cannot authorize: said before the
+        # target is registered, so nothing at all changes (unauthorize needs no touch).
+        decision = helper("_person_decision")
+        command = "shakerscan targets authorize " + shlex.quote(args.target.strip())
+        line = decision.refusal_line({"decision": "target.authorize",
+                                      "summary": f"Authorize {args.target.strip()} for active testing"}, command)
+        print(f"shakerscan: {line}", file=sys.stderr)
+        return decision.EXIT_REFUSED
     try:
         target = find_target(client, args.target, create=args.action == "authorize")
         identifier = str(target.get("id") or "")
@@ -204,7 +251,7 @@ def cmd_targets(args: argparse.Namespace) -> int:
             # writes the person who touched over it.
             answer = client.request(
                 "POST", f"/targets/{identifier}/authorization",
-                payload={"approved_by": _decider(client, "authorize"), "risk_tier": "active"},
+                payload={"approved_by": _decider(client, "authorize", me), "risk_tier": "active"},
             )
             recorded = (answer or {}).get("authorization") if isinstance(answer, Mapping) else None
             who = (recorded or {}).get("approved_by") if isinstance(recorded, Mapping) else None
@@ -212,7 +259,7 @@ def cmd_targets(args: argparse.Namespace) -> int:
         else:
             answer = client.request(
                 "DELETE", f"/targets/{identifier}/authorization",
-                payload={"revoked_by": _decider(client, "unauthorize"),
+                payload={"revoked_by": _decider(client, "unauthorize", me),
                          "reason": (args.reason or "withdrawn from the terminal")[:2000]},
             )
             revoked = bool((answer or {}).get("revoked")) if isinstance(answer, Mapping) else False
@@ -252,6 +299,19 @@ def _limits(values: Sequence[str], current: Mapping[str, Any]) -> dict[str, int]
     return totals
 
 
+def _raise_reason(given: str | None, me: Mapping[str, Any] | None) -> str:
+    """The amendment's reason, which the engine keeps as the person's. Where the gateway requires
+    a touch it writes its own. Elsewhere on an Enterprise connection no person proved it: the
+    connection (token first) and that, after the reason given. On an open-source engine: the
+    reason given, else that it came from the terminal."""
+    if isinstance(me, Mapping) and not touch_required(me):
+        made = f"{_token_words(me)}; {UNPROVEN}"
+        if given:
+            return f"{given.strip()[:400]} ({made})"[:500]
+        return f"Raised with {made} (shakerscan hunt budget raise)"[:500]
+    return (given or "Raised from the terminal (shakerscan hunt budget raise)")[:500]
+
+
 def hunt_budget_raise(argv: Sequence[str], url: str, timeout: float | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="shakerscan hunt budget raise",
@@ -279,7 +339,7 @@ def hunt_budget_raise(argv: Sequence[str], url: str, timeout: float | None = Non
         answer = client.request("POST", f"/hunts/{hunt}/budget-amendments", payload={
             "schema_version": "hunt-budget-amendment/v1", "limits": totals, "expected_revision": revision,
             "idempotency_key": key, "operator_confirmed": True, "resume": bool(args.resume),
-            "reason": (args.reason or "Raised from the terminal (shakerscan hunt budget raise)")[:500],
+            "reason": _raise_reason(args.reason, _me(client)),
         })
     except (v2.CliError, DecisionError) as exc:
         return _exit(v2, exc)
@@ -317,12 +377,15 @@ def touch_lines(client: Any) -> list[str]:
         # Not an Enterprise gateway (an open-source engine answers no /_enterprise/me): the
         # touch is no question there, so doctor says nothing of it.
         return []
+    required = me.get("person_decision_proof") is True
     unready = approve.security_key_readiness()
     if unready and approve.key_out_of_reach():
         key = unready
     elif unready.startswith("no USB security key found"):
-        # Not a failure: a key is needed only when the administrator requires a touch.
-        key = "none plugged in (needed only when your administrator requires a touch)"
+        # No failure where no touch is required: approvals then use the person's other step-up.
+        key = ("none plugged in: plug in the security key registered to you before you decide from this "
+               "terminal" if required else "none plugged in (not needed here: approvals then use your other "
+               "step-up)")
     elif unready:
         key = unready
     else:
@@ -332,7 +395,9 @@ def touch_lines(client: Any) -> list[str]:
             fido2 = f"python-fido2 {version('fido2')}"
         except PackageNotFoundError:
             fido2 = "python-fido2"
-        key = f"{fido2}, a security key is plugged in (register it once under My account)"
+        # Which key is registered is not asked here (that needs a challenge of the gateway's):
+        # approve checks it silently, without making a key blink.
+        key = f"{fido2}, a security key is plugged in (it answers here if it is registered to you under My account)"
     return [f"touch:    {state}", f"key:      {key}"]
 
 
