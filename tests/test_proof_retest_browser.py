@@ -10,7 +10,8 @@ and "still vulnerable" would come from a different check than the one that found
 * a page behind a sign-in is retested with the Scan's session, which reaches only its origin.
 
 It also must not depend on what ran before it in the process: a Scan's browser proof in an earlier
-event loop, another retest in the same loop (a worker's), or a browser that stopped answering.
+event loop, another retest in the same loop (a worker's), or a browser that stopped answering, also
+once the retest's context is open.
 
 The pages are a local fixture server (unit fixtures); the retest is the real ``run_proof_retest``
 with the real proof module, its HTTP client and its headless browser, except where a stand-in
@@ -20,13 +21,17 @@ Playwright (a unit fixture) never answers.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import dataclasses
 import hashlib
 import html
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
+import os
 from pathlib import Path
 import shutil
+import signal
+import subprocess
 import sys
 import threading
 import time
@@ -357,3 +362,106 @@ def test_a_browser_that_does_not_answer_leaves_the_retest_inconclusive(monkeypat
     assert result["result_status"] == "inconclusive"
     assert "did not answer" in result["verdict_reason"]
     assert "stays open" in result["verdict_reason"]
+
+
+# --- A real headless Chromium that stops answering in the middle of a retest ----------------------
+
+
+def _live_descendants() -> dict[int, str]:
+    """``{pid: command}`` of the processes still running (not zombies) that descend from this test
+    process."""
+    lister = subprocess.Popen(["ps", "-A", "-o", "pid=,ppid=,stat=,comm="], stdout=subprocess.PIPE, text=True)
+    out, _ = lister.communicate(timeout=30)
+    children: dict[int, list[tuple[int, str]]] = {}
+    for line in out.splitlines():
+        fields = line.split(None, 3)
+        if len(fields) == 4 and not fields[2].startswith("Z"):
+            children.setdefault(int(fields[1]), []).append((int(fields[0]), fields[3]))
+    found: dict[int, str] = {}
+    todo = [os.getpid()]
+    while todo:
+        for child, command in children.get(todo.pop(), ()):
+            if child not in found and child != lister.pid:
+                found[child] = command
+                todo.append(child)
+    return found
+
+
+@pytest.mark.skipif(not hasattr(signal, "SIGSTOP"), reason="stopping a process needs POSIX signals")
+@pytest.mark.parametrize("stops_before", ["context", "page"])
+def test_a_real_browser_that_stops_answering_mid_retest_leaves_it_inconclusive(monkeypatch, pages, stops_before):
+    """Chromium is stopped (SIGSTOP) right before the retest opens its context, or its page. The
+    retest is inconclusive within its bounds, although Playwright's driver takes longer than the
+    close bound to give up on a stopped Chromium; and the next retest in the same worker loop
+    launches another browser and proves the finding."""
+    from scanner_tools import proof_of_exploit
+    from worker_handlers.proof_replay import run_proof_retest
+
+    monkeypatch.setattr(proof_of_exploit, "_poe_config",
+                        dataclasses.replace(proof_of_exploit._poe_config, rate_limit_ms=0, enable_headless_xss=True))
+    # A shorter handoff keeps the case short; closing keeps its production bound.
+    monkeypatch.setattr(proof_of_exploit, "BROWSER_HANDOFF_TIMEOUT_SECONDS", 5.0)
+    bound_seconds = proof_of_exploit.BROWSER_HANDOFF_TIMEOUT_SECONDS + proof_of_exploit.BROWSER_CLOSE_TIMEOUT_SECONDS
+    before = set(_live_descendants())
+    stopped: list[int] = []
+    drivers: list[Any] = []
+
+    def stop_chromium() -> None:
+        entry = proof_of_exploit._loop_browsers[asyncio.get_running_loop()]
+        drivers.append(proof_of_exploit._driver_process(entry.starter))
+        for pid, command in _live_descendants().items():
+            if pid not in before and "chrom" in command.lower():
+                os.kill(pid, signal.SIGSTOP)
+                stopped.append(pid)
+
+    def end_stopped() -> None:
+        for pid in stopped:
+            for sig in (signal.SIGCONT, signal.SIGKILL):
+                with contextlib.suppress(ProcessLookupError):
+                    os.kill(pid, sig)
+
+    open_context, open_page = proof_of_exploit.proof_browser_context, proof_of_exploit.proof_browser_page
+
+    async def context_once_stopped(url, **options):
+        if stops_before == "context" and not stopped:
+            stop_chromium()
+        return await open_context(url, **options)
+
+    async def page_once_stopped(context, **options):
+        if stops_before == "page" and not stopped:
+            stop_chromium()
+        return await open_page(context, **options)
+
+    monkeypatch.setattr(proof_of_exploit, "proof_browser_context", context_once_stopped)
+    monkeypatch.setattr(proof_of_exploit, "proof_browser_page", page_once_stopped)
+
+    async def retest() -> tuple[dict, float]:
+        verification = _verification(pages, "/vuln")
+        started = time.monotonic()
+        result = await run_proof_retest(
+            verification, infer_retest_inputs(verification), poe=proof_of_exploit,
+            replay_commands=[], ladder=[], cancelled=lambda: False)
+        return result, time.monotonic() - started
+
+    async def worker() -> list[tuple[dict, float]]:
+        first = await retest()
+        # The stopped browser is no longer needed: end it and its driver while this loop runs, so
+        # nothing of it is left for the garbage collector to close on a closed loop.
+        end_stopped()
+        for driver in drivers:
+            if driver is not None and driver.returncode is None:
+                with contextlib.suppress(ProcessLookupError):
+                    driver.kill()
+                await asyncio.wait_for(driver.wait(), 30)
+        return [first, await retest()]
+
+    try:
+        (first, first_seconds), (second, _) = _finishes(lambda: asyncio.run(worker()))
+    finally:
+        end_stopped()
+    assert stopped, "no Chromium process to stop"
+    assert first["verdict"] == "inconclusive", first["verdict_reason"]
+    assert "did not answer" in first["verdict_reason"]
+    assert first_seconds < bound_seconds + 15  # a browser launch and the baseline request
+    assert second["verdict"] == "exploited", second["verdict_reason"]
+    assert second["proof"]["technique"] == "headless_xss_console"
