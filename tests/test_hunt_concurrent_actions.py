@@ -294,6 +294,44 @@ def test_a_dual_stack_service_fingerprint_beside_two_long_actions_leaves_short_c
     _bounded(run)
 
 
+def test_the_worker_loop_leases_a_short_job_right_after_dispatching_a_long_one_that_waits():
+    """The worker loop (worker.async_main) leases again as soon as dispatch returns, before the
+    job it dispatched has run at all: on a single host nothing in between yields. A third long job
+    has therefore not started waiting for a long slot when the next lease checks for a free slot,
+    and only its wake when it does start waiting lets the loop lease the short job queued behind
+    it. This loop has the worker's shape: lease, dispatch, lease, with nothing in between."""
+    queued = [_job("long-1", "sqli.verify"), _job("long-2", "templates.scan"),
+              _job("long-3", "xss.verify"), _job("short", "http.request")]
+    started, gates = [], {}
+
+    async def execute(redis, lease, job):
+        async def work(job):
+            started.append(job["label"])
+            gates[job["label"]] = gate = asyncio.Event()
+            await gate.wait()
+        await jobs.in_lane(job, work)
+
+    async def loop():
+        while queued:
+            job = await jobs.lease_when_ready(lambda: queued.pop(0), enabled=True)
+            await jobs.dispatch(None, None, job, execute=execute, enabled=True)
+
+    async def run():
+        worker_loop = asyncio.create_task(loop())
+        try:
+            for _ in range(200):
+                if "short" in started:
+                    break
+                await asyncio.sleep(0.005)
+            assert started == ["long-1", "long-2", "short"] and jobs._waiting == 1
+        finally:
+            for gate in gates.values():
+                gate.set()
+            worker_loop.cancel()
+            await asyncio.gather(worker_loop, return_exceptions=True)
+    _bounded(run)
+
+
 # --- Admission keeps one Hunt within the long slots ---------------------------------------------
 
 class ReservationRows:
