@@ -98,6 +98,27 @@ def _same_target(left: str, right: str) -> bool:
     return key(left) == key(right)
 
 
+# What a copy from a sentence carries after a command: an id or URL ending in one of these was
+# not meant (`... authorize <id>.` registered and authorized `https://<id>.`).
+TRAILING = ".,;:!?)]}'\"`"
+# Placeholders this client and an Enterprise gateway print where a target could not be named.
+PLACEHOLDERS = frozenset({"TARGET-ID", "TARGET-URL", "TARGET", "<TARGET>", "<TARGET-ID>"})
+
+
+def checked_target(value: str) -> str:
+    """The target as named, or DecisionError for what cannot be one: a placeholder this client
+    or a gateway printed (TARGET-ID), and a value with punctuation copied after it (an id is
+    named with what it was meant to be)."""
+    text = str(value or "").strip()
+    if text.upper() in PLACEHOLDERS:
+        raise DecisionError(f"{text} stands for the target: name it by its URL (https://app.example.com) or its id")
+    if text and text[-1] in TRAILING:
+        bare = text.rstrip(TRAILING)
+        meant = f": did you mean {bare.lower()}?" if UUID.fullmatch(bare) else ""
+        raise DecisionError(f"{text!r} ends in punctuation, which is no part of a target{meant}")
+    return text
+
+
 def target_url(value: str) -> str:
     text = str(value or "").strip()
     if not text or any(ch.isspace() for ch in text):
@@ -230,6 +251,10 @@ def cmd_targets(args: argparse.Namespace) -> int:
     url = apply_connection(args)
     v2, client = _client(url, args.timeout)
     target: dict[str, Any] = {}
+    try:
+        args.target = checked_target(args.target)
+    except DecisionError as exc:
+        return _exit(v2, exc)
     me = _me(client)
     if args.action == "authorize" and touch_required(me) and not helper("_person_decision").interactive():
         # Where the gateway requires a touch, an agent's shell cannot authorize: said before the

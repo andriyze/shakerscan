@@ -29,7 +29,7 @@ A refused submission (a scan, Hunt start, retest or network scan of a target nob
 the refusal carries ``submission`` and the ``target_id``) started nothing. The person's decision
 is the target's authorization, never the submission itself: in the person's own terminal the
 touch authorizes the target and the same request is sent once more; anywhere else the command the
-person is given is ``shakerscan targets authorize <target>``, and whoever sent the submission
+person is given is ``shakerscan targets authorize <target-id>``, and whoever sent the submission
 sends it again (with the same Idempotency-Key, if it had one) only after the person says they
 decided, so the work never runs twice.
 
@@ -292,8 +292,9 @@ def person_command(method: str, path: str, body: bytes | None, detail: Mapping[s
         return found
     if detail.get("submission") or (method == "POST" and route in {"/scans", "/hunts"}):
         # A submission whose target is not named here as one word: never the submission itself.
-        # `<target>`: a placeholder a shell cannot mistake for an open quote when pasted whole.
-        return "shakerscan targets authorize <target>"
+        # TARGET-ID: a placeholder a shell takes as one plain word when pasted whole (no quote to
+        # wait on, no `<` to read a file from), which `shakerscan targets authorize` refuses.
+        return "shakerscan targets authorize " + PLACEHOLDER
     if method == "POST" and payload and (secret := _SECRET.fullmatch(route)):
         target, reference = _word(secret.group(1)), _word(secret.group(2))
         if target and reference and secret.group(3) == "state" and payload == {"state": "active"}:
@@ -313,25 +314,26 @@ def person_command(method: str, path: str, body: bytes | None, detail: Mapping[s
 
 def refusal_line(detail: Mapping[str, Any], command: str) -> str:
     """One line for an agent's tool call: the decision (whole, as the gateway said it), that
-    nothing changed, the person's command (its body made inert: it may carry any bytes), and, for
-    a refused submission, not to send it again until the person said the target is
-    authorized."""
+    nothing changed, for a refused submission not to send it again until the person said the
+    target is authorized, and last the person's command (its body made inert: it may carry any
+    bytes), with nothing after it: a copy that takes the line's end takes no punctuation into the
+    command."""
     summary = _inert(detail.get("summary") or detail.get("decision") or "a person's decision", MAX_SUMMARY)
-    line = (
-        f"person decision required: {summary}. Nothing was changed. The person runs this in their "
-        f"own terminal and touches their security key: {_inert(command, 4 * MAX_BODY)}"
-    )
+    line = f"person decision required: {summary}. Nothing was changed."
     if detail.get("submission"):
         line += SUBMISSION_AGAIN
-    return line
+    return line + (" The person runs this in their own terminal and touches their security key: "
+                   + _inert(command, 4 * MAX_BODY))
 
 
 # A refused submission started nothing. It is sent again only after the person said they
 # authorized the target (with its Idempotency-Key, if it had one), so the work never runs twice.
 SUBMISSION_AGAIN = (
-    ". Nothing was started either. Do not send this request again until the person says the "
-    "target is authorized; then send it once (with the same Idempotency-Key, if it had one)"
+    " Nothing was started either. Do not send this request again until the person says the "
+    "target is authorized; then send it once (with the same Idempotency-Key, if it had one)."
 )
+# The target of a refused submission no value of the request names as one word.
+PLACEHOLDER = "TARGET-ID"
 
 
 # ---- the touch -------------------------------------------------------------------------------
