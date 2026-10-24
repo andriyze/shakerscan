@@ -35,6 +35,9 @@ RUN --mount=type=bind,source=scanner/apt_install.sh,target=/tmp/apt_install.sh,r
 # string-literal lexing is super-linear; one inline script with a few thousand
 # escaped quotes (every Next.js page carries one) took the crawler past 6 GiB in
 # 20 s and got it killed. gotreesitter v0.52.0 parses the same input in 40 MiB.
+# `go get` of a lift below a version some dependency requires would downgrade that
+# dependency, the tool included, so the build stops when a tool no longer resolves to
+# its pinned version.
 ARG GO_INSTALL_ATTEMPTS=4
 RUN --mount=type=cache,target=/go/pkg/mod,sharing=locked \
     --mount=type=cache,target=/root/.cache/go-build,sharing=locked \
@@ -54,7 +57,8 @@ RUN --mount=type=cache,target=/go/pkg/mod,sharing=locked \
       go get \
         github.com/getkin/kin-openapi@v0.149.0 \
         github.com/go-git/go-git/v5@v5.19.2 \
-        github.com/labstack/echo/v4@v4.15.3 \
+        github.com/klauspost/compress@v1.18.7 \
+        github.com/labstack/echo/v4@v4.16.1 \
         golang.org/x/crypto@v0.57.0 \
         golang.org/x/mod@v0.41.0 \
         golang.org/x/net@v0.60.0 \
@@ -62,6 +66,11 @@ RUN --mount=type=cache,target=/go/pkg/mod,sharing=locked \
         github.com/jackc/pgx/v5@v5.9.0 \
         google.golang.org/grpc@v1.83.2 || return 1; \
       if [ "$#" -gt 0 ]; then go get "$@" || return 1; fi; \
+      resolved_version="$(go list -mod=mod -f '{{.Module.Version}}' "${tool_package}")" || return 1; \
+      if [ "${resolved_version}" != "${tool_version}" ]; then \
+        echo "${tool_name}: the dependency lifts moved it from ${tool_version} to ${resolved_version}" >&2; \
+        exit 1; \
+      fi; \
       go build -mod=mod -trimpath -o "/go/bin/${tool_name}" "${tool_package}" || return 1; \
       cd /; \
       rm -rf "${tool_dir}"; \
