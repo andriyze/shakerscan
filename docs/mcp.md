@@ -202,18 +202,24 @@ action keeps its wall reservation until it settles, so two in flight can hold mo
 Hunt's duration (on `fast`, two `sqli.verify` hold 2,400 of its 3,600 s); a call the remaining
 duration cannot fund asks for a budget raise, or waits for one to settle.
 
-A Hunt has at most two long actions in flight: a worker action whose wall may exceed 90 s
-(`sqli.verify`, `xss.verify`, `templates.scan`, `ports.discover`, `service.nse_check`,
-`subdomains.discover`, `web.browser_crawl`, `browser.login_check`). The agent-tool worker runs
+A Hunt has at most two long actions in flight: a worker action whose wall, as the registry gives
+it or as the call reserves it, exceeds 60 s (`sqli.verify`, `xss.verify`, `templates.scan`,
+`ports.discover`, `service.fingerprint`, `service.nse_check`, `subdomains.discover`, `web.crawl`,
+`web.content_discover`, `web.browser_crawl`, `browser.login_check`). The agent-tool worker runs
 three actions at once and long ones in at most two of them, so a short call (`http.request`,
-`artifact.inspect`, a browser step) always finds a worker; the engine waits for a queued call only
-for its own timeout plus 30 s. A third long call is refused with HTTP 429 and reason code
-`long_actions_in_flight` (the actions in flight are listed in `in_flight`), reserving and recording
-nothing, and the adapter answers it as `outcome: "retry_later"`: collect one of the others or work
-with short calls, then send it again with the same key. Other Hunts on the same instance share the
-worker: a long action queued while theirs hold both long slots waits for one, without taking the
-slot short calls run in, and runs for what is left of its wall (one that waited past it is released
-without running). An SSH command runs on the worker that holds its session and does not count.
+`artifact.inspect`, a browser step) does not wait behind long actions: it waits only for short
+work, each at most 60 s, or for an SSH command, which runs on the worker that holds its session
+and takes a slot without counting as long. The engine counts a call's own time, its timeout plus
+30 s, from when a worker starts it; a call no worker starts while its reservation's lease lasts
+(at least 90 s) is released without running or a charge and ends `worker_result_timeout`. A third
+long call is refused with HTTP 429 and reason code `long_actions_in_flight` (the actions in flight
+are listed in `in_flight`), reserving and recording nothing, and the adapter answers it as
+`outcome: "retry_later"`: collect one of the others or work with short calls, then send it again
+with the same key. Other Hunts on the same instance share the worker: a long action queued while
+theirs hold both long slots waits for one, without taking the slot short calls run in, and runs
+its whole wall once it starts (one still waiting when its reservation's lease ends is released
+without running). Once eight long actions wait on one worker, it leases nothing more, short calls
+included, until one of them starts.
 
 The engine answers the first request only when the action is done, so that request ends 10 seconds
 before the call's wait does, and a replay of the same key learns the recorded action's state. An

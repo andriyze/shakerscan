@@ -1,7 +1,7 @@
 # Hunt recording, finish proposals and budgets
 
 **Status:** describes how a Hunt records findings, what finishing proposes for reuse and how the
-Hunt budget profiles are sized, as of 2.11.1.
+Hunt budget profiles are sized, as of 2.11.2.
 
 ## Finding locations
 
@@ -158,11 +158,15 @@ a person can grant, never started at a shorter hold; a call admitted at an older
 hold it reserved. Calls run side by side, and each keeps its whole wall reservation until it
 settles to the wall it ran: on `fast` (3,600 s), two `sqli.verify` calls in flight hold 2,400 s,
 and another call that needs more wall than is left waits for a budget raise or for one to settle.
-A Hunt has at most two long actions in flight (a worker action whose wall may exceed 90 s:
-`sqli.verify`, `xss.verify`, `templates.scan`, `ports.discover`, `service.nse_check`,
-`subdomains.discover`, `web.browser_crawl`, `browser.login_check`), so a short call always finds
-one of the worker's three slots; a third is refused with `long_actions_in_flight` (HTTP 429),
-reserving and recording nothing, and is sent again with the same key once one settles.
+A Hunt has at most two long actions in flight (a worker action whose wall, as the registry gives
+it or as the call reserves it, exceeds 60 s: `sqli.verify`, `xss.verify`, `templates.scan`,
+`ports.discover`, `service.fingerprint`, `service.nse_check`, `subdomains.discover`, `web.crawl`,
+`web.content_discover`, `web.browser_crawl`, `browser.login_check`), so a short call never waits
+behind long actions for one of the worker's three slots, only behind short work or an SSH
+command; a third is refused with `long_actions_in_flight` (HTTP 429), reserving and recording
+nothing, and is sent again with the same key once one settles. A call's own time counts from when
+a worker starts it, and one no worker starts within its reservation's lease is released without a
+charge.
 
 ## When a limit is used up
 
