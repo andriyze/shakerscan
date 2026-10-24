@@ -45,6 +45,10 @@ def test_a_named_parameter_marker_or_body_field_is_an_input(url, options):
 
 def test_the_refusal_says_how_to_name_the_input():
     assert "/reports?filter=x" in NO_INJECTION_POINT and "/products/1*" in NO_INJECTION_POINT
+    # Refusing a bare path must not silently drop cookie-borne injection: the refusal says which
+    # way of naming the input keeps the request's cookies tested.
+    assert "query parameter named, sqlmap also tests the request's cookies" in NO_INJECTION_POINT
+    assert "only the marked segment" in NO_INJECTION_POINT
 
 
 def _admit(path, *, target_url="https://fixture.example.test"):

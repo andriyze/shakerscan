@@ -15,10 +15,14 @@ import urllib.parse
 from collections.abc import Mapping
 from typing import Any
 
+# At its level 2, sqlmap also tests the request's cookies beside the query parameters; given a
+# segment marked with *, it tests only what is marked. A call that wants the cookies tested names
+# a query parameter, which a bare path (whose path sqlmap marked itself) also got.
 NO_INJECTION_POINT = (
     "sqli.verify needs an input to test: name the parameter in the path's query (for example "
     "/reports?filter=x), or mark the path segment to test with * (for example /products/1*). "
-    "Without either, sqlmap tests only the URL path itself."
+    "Without either, sqlmap tests only the URL path itself. With a query parameter named, sqlmap "
+    "also tests the request's cookies; a path marked with * has only the marked segment tested."
 )
 
 
