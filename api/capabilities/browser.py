@@ -22,6 +22,10 @@ from http.cookies import SimpleCookie
 from typing import Any, Mapping
 import urllib.parse
 from .browser_steps import browser_steps, browser_surface, ELEMENT_DESCRIPTOR, validate_fill
+from .xss_proof_payload import (
+    XSS_PROOF_ATTRIBUTE, XSS_PROOF_SETTLE_SECONDS, XSS_PROOF_TIMEOUT_MS, xss_proof_marker,
+    xss_proof_payload, xss_proof_signal,
+)
 
 try:
     from hunt.capability_executor import CapabilityAdapterResult, Cancelled, Heartbeat
@@ -229,11 +233,8 @@ class XSSBrowserProofAdapter:
             raise BrowserCapabilityInputError("XSS proof target has no frozen address")
         parsed = urllib.parse.urlsplit(execution_url)
         normalized_method = str(method or "GET").strip().upper()
-        marker = f"shakerscan_xss_{candidate_id[:12]}"
-        payload = (
-            '<img src=x onerror="document.documentElement.setAttribute('
-            f"'data-shakerscan-proof','{marker}');console.log('{marker}')\">"
-        )
+        marker = xss_proof_marker(candidate_id)
+        payload = xss_proof_payload(candidate_id)
         body = b""
         normalized_content_type: str | None = None
         if body_field_names:
@@ -334,7 +335,7 @@ class XSSBrowserProofAdapter:
             adapter_version=cls.adapter_version, parser_version=cls.parser_version,
             target=target, url=url, origin=origin,
             pinned_address=socket_factory.primary_address,
-            wait_until="domcontentloaded", timeout_ms=20_000, max_requests=50,
+            wait_until="domcontentloaded", timeout_ms=XSS_PROOF_TIMEOUT_MS, max_requests=50,
             marker=marker, marker_sha256=hashlib.sha256(marker.encode()).hexdigest(),
             payload_sha256=hashlib.sha256(payload.encode()).hexdigest(),
             candidate_id=candidate_id, parameter_name=parameter_name,
@@ -1028,7 +1029,7 @@ async def _execute_browser_action_in_context(
                 message = str(dialog.message or "")
                 proof_events.append({
                     "signal": "dialog",
-                    "marker_match": message == prepared.marker,
+                    "marker_match": xss_proof_signal(message, prepared.marker),
                     "message_sha256": _event_digest(proof_events, message),
                 })
                 await dialog.dismiss()
@@ -1037,7 +1038,7 @@ async def _execute_browser_action_in_context(
                 text = str(message.text or "")
                 proof_events.append({
                     "signal": "console",
-                    "marker_match": text == prepared.marker,
+                    "marker_match": xss_proof_signal(text, prepared.marker),
                     "message_sha256": _event_digest(proof_events, text),
                 })
 
@@ -1085,12 +1086,12 @@ async def _execute_browser_action_in_context(
         navigation_observations.append(navigation_observation)
         if isinstance(prepared, PreparedXSSBrowserProof):
             browser_actions = 2
-            await asyncio.sleep(1.5)
+            await asyncio.sleep(XSS_PROOF_SETTLE_SECONDS)
             await heartbeat()
             dom_marker = await page.get_attribute(
-                "html", "data-shakerscan-proof",
+                "html", XSS_PROOF_ATTRIBUTE,
             )
-            dom_match = str(dom_marker or "") == prepared.marker
+            dom_match = xss_proof_signal(dom_marker, prepared.marker)
             matched = [item for item in proof_events if item["marker_match"]]
             proven = bool(matched or dom_match)
             screenshot_sha256 = None

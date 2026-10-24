@@ -589,10 +589,10 @@ function FindingDetailContent() {
   const retestSupported = finding?.retest_supported !== false
   const deviceFinding = finding ? getFindingSourceType(finding) === 'Device' : false
   const retestModes = finding?.retest_modes
+  // No "AI only": an AI verdict is at most inconclusive, so the AI tier alone cannot conclude.
   const dastRetestOptions = [
     { value: 'tiered', label: 'Tiered' },
     { value: 'deterministic', label: 'Deterministic only' },
-    { value: 'ai', label: 'AI only' },
   ].filter((option) => !retestModes || retestModes.includes(option.value))
   const retestOptions = isAiFinding
     ? [
@@ -607,13 +607,19 @@ function FindingDetailContent() {
     ? retestMode
     : retestOptions[0].value
   const retestUnsupportedMessage =
-    finding?.retest_unsupported_reason === 'model_intake'
+    finding?.retest_unsupported_message
+      ? finding.retest_unsupported_message
+      : finding?.retest_unsupported_reason === 'model_intake'
       ? 'Model Intake findings are re-checked by re-running the Model Intake scan for the artifact.'
       : canonicalProofVerified
         ? 'this finding type has no replay; the scan-time proof above still stands. Run a new Scan to observe it again.'
-        : featureEnabled('engine_admin')
-          ? 'No deterministic prover covers this finding type. Enable AI verification in AI settings to retest it.'
-          : 'No automated retest is available for this finding type in this workspace.'
+        : finding?.retest_unsupported_reason === 'retest_needs_template_replay'
+          ? 'This template finding has no single-request retest. Run a new Scan to check it again.'
+          : finding?.retest_unsupported_reason === 'retest_exposure_by_rescan'
+            ? 'Run a new Scan to check this exposure again.'
+            : finding?.retest_unsupported_reason === 'retest_by_hunt_rerun'
+              ? 'This Hunt finding has no single-request retest. Run the Hunt again to check it.'
+              : 'This finding has no single-request retest. Run a new Scan to check it again.'
   const manualVerifyCommands = evidenceStringList(rawEvidenceObject, 'verify_commands')
   // Commands an earlier release stored that the API could not rebuild: text only, never copied.
   const recordedVerifyCommands = evidenceStringList(rawEvidenceObject, 'verify_commands_as_recorded')

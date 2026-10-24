@@ -1316,7 +1316,8 @@ class DatabaseNeutralScanActionDispatcher:
         )
 
     def _skip(self, action: ScanAction, reason: str, *,
-              verify_selection: Mapping[str, Any] | None = None) -> CapabilityReceipt:
+              verify_selection: Mapping[str, Any] | None = None,
+              template_selection: Mapping[str, Any] | None = None) -> CapabilityReceipt:
         now = datetime.now(timezone.utc).isoformat()
         return self._receipt(
             action,
@@ -1328,6 +1329,7 @@ class DatabaseNeutralScanActionDispatcher:
                 "action_id": action.action_id,
                 "execution_started": False,
                 **({"verify_selection": dict(verify_selection)} if verify_selection else {}),
+                **({"template_selection": dict(template_selection)} if template_selection else {}),
             },
         )
 
@@ -1542,6 +1544,7 @@ class DatabaseNeutralScanActionDispatcher:
         *,
         managed_cancellation: bool = False,
         target: TargetBinding | None = None,
+        execution_record: Mapping[str, Any] | None = None,
     ) -> CapabilityReceipt:
         started = datetime.now(timezone.utc)
         result = await CapabilityExecutor().execute(
@@ -1565,7 +1568,12 @@ class DatabaseNeutralScanActionDispatcher:
             consumed=result.actual_budget,
             partial=result.partial,
             timed_out=result.timed_out,
-            redacted_execution=result.redacted_execution,
+            # ``execution_record``: what the dispatcher decided before the run (a template
+            # selection's counts), kept beside the executor's own record.
+            redacted_execution=(
+                {**dict(result.redacted_execution or {}), **dict(execution_record)}
+                if execution_record else result.redacted_execution
+            ),
         )
 
     def _prepared_inline(
@@ -4527,6 +4535,7 @@ class DatabaseNeutralScanActionDispatcher:
         args: dict[str, Any] = dict(primary.capability_args())
         scanner_options: dict[str, Any] = {}
         requested_budget = dict(action.requested_budget)
+        execution_record: dict[str, Any] = {}
         if action.capability_name in {"web.crawl", "web.browser_crawl"} and (
             primary.headers()
             or (tool == "katana_headless" and self.options.get("auth_browser_storage"))
@@ -4562,8 +4571,11 @@ class DatabaseNeutralScanActionDispatcher:
                         and requested_budget.get("state_changing_requests", 0) > 0
                     ),
                 )
+                if resolved.selection_telemetry:
+                    execution_record["template_selection"] = dict(resolved.selection_telemetry)
                 if resolved.skip_reason:
-                    return self._skip(action, resolved.skip_reason)
+                    return self._skip(action, resolved.skip_reason,
+                                      template_selection=resolved.selection_telemetry)
                 args.update(resolved.capability_args)
                 scanner_options.update(resolved.worker_options)
                 # Reuse the same reservation-derived pacing as a batch attempt,
@@ -4629,6 +4641,7 @@ class DatabaseNeutralScanActionDispatcher:
         )
         return await self._execute_adapter(
             action, adapter, heartbeat, managed_cancellation=True,
+            execution_record=execution_record,
         )
 
     async def _external_batch(
@@ -4728,6 +4741,7 @@ class DatabaseNeutralScanActionDispatcher:
         worker_template_options = dict(template_options)
         args_template_options = dict(template_options)
         verify_selection = None
+        template_selection = None
         if tool == "nuclei" and action.capability_name == "templates.active_batch":
             mutation_tier = bool(
                 self.policy.allow_state_changing_http
@@ -4742,11 +4756,13 @@ class DatabaseNeutralScanActionDispatcher:
                 allow_exploit_classes=mutation_tier,
             )
             verify_selection = resolved.verify_selection
+            template_selection = resolved.selection_telemetry
             if resolved.skip_reason:
                 # Fail closed: the active selection could not be resolved (index
                 # unavailable, or no permitted template once intrusive/non-GET
                 # exclusions apply). Record a coverage gap, never a clean result.
-                return self._skip(action, resolved.skip_reason, verify_selection=verify_selection)
+                return self._skip(action, resolved.skip_reason, verify_selection=verify_selection,
+                                  template_selection=template_selection)
             worker_template_options = dict(resolved.worker_options)
             args_template_options = dict(resolved.capability_args)
         # An active sweep runs one window of the allowlist per attempt (a verify Scan runs its
@@ -6157,6 +6173,7 @@ class DatabaseNeutralScanActionDispatcher:
                 **({"carried_from_admission": admission_source} if admission_source else {}),
                 **({"carried_count": carried_count} if extends or admission_source else {}),
                 **({"verify_selection": dict(verify_selection)} if verify_selection else {}),
+                **({"template_selection": dict(template_selection)} if template_selection else {}),
             },
         )
 

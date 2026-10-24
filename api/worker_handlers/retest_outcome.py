@@ -244,3 +244,22 @@ def _result_status_for_verdict(verdict: str | None) -> str:
     if v in {"likely_vulnerable", "false_positive", "inconclusive", "blocked_by_security", "out_of_scope_internal"}:
         return "inconclusive"
     return "error"
+
+
+# An AI verdict is a model's reading of a replay, not the check that produced the finding, so it
+# never closes one: "likely fixed" and "false positive" from the AI tier become "inconclusive",
+# with the model's text kept as the note. Only the finding's own check can say it is fixed.
+AI_CAPPED_VERDICTS = frozenset({"likely_fixed", "false_positive"})
+_AI_CAPPED_REASON = (
+    "AI verification judged the finding fixed or not real; only the check that found it can "
+    "confirm that, so the result is inconclusive."
+)
+
+
+def ai_retest_outcome(verdict: Any, reasoning: Any) -> tuple[str, str, str]:
+    """(verdict, result_status, verdict_reason) of an AI-tier retest verdict: at most inconclusive."""
+    normalized = str(verdict or "").lower()
+    note = str(reasoning or "").strip()
+    if normalized in AI_CAPPED_VERDICTS:
+        return "inconclusive", "inconclusive", f"{_AI_CAPPED_REASON} Model note: {note}" if note else _AI_CAPPED_REASON
+    return normalized, _result_status_for_verdict(normalized), note

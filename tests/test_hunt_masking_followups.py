@@ -123,6 +123,9 @@ ALLOWED_PLAIN_DIGESTS = {
     # only query value); the same URL is published beside it, so the digest reveals nothing.
     ("api/capabilities/open_redirect.py", "redirect_candidates"): "canonical",
     ("api/capabilities/sqli_proof.py", "_sha256"): "request",
+    # The browser XSS proof's payload: engine-built from the candidate id and public, compared
+    # with the digest the finding kept so a retest sends the same input.
+    ("api/capabilities/xss_proof_payload.py", "sha256_text"): "request",
     ("api/capabilities/ssh_command_worker.py", "execute"): "request",
     ("api/capabilities/ssh_transport.py", "connect"): "public",
     ("api/capabilities/tls.py", "_certificate_chain_summary"): "public",

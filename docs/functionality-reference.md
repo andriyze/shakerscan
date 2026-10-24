@@ -389,6 +389,22 @@ the Scan's lowered ceilings (`advanced.max_http_requests`, `advanced.max_state_c
 so it resolves exactly as the submission will.
 Permission and work are reported separately: the scan page's Testing tile names the active
 families that ran, or warns that active testing was allowed but no active family was selected.
+Without state-changing HTTP, `nuclei_active` runs only templates whose every request is a GET or
+HEAD, and never a template that tries logins: one tagged `default-login`, one that sends a value
+named like a username or password (a payload, a variable or an extracted value) in a header or
+the body, or one named like a password in the query string, or one whose Basic `Authorization`
+header holds a literal credential (`admin:admin`, `admin:` or `:admin`) needs that permission
+even when it sends only GETs, because a login attempt can lock the account it tries. So does a
+GET reviewed as changing state (`STATE_CHANGING_GET_TEMPLATE_IDS`: it sets a device password,
+restores a default admin password, changes a plugin's settings, registers a user or adds an
+administrator). A check that names an account but sends no password (an authentication bypass)
+runs without it. An exploit template needs it too, by GET or not: one tagged `rce`, `lfi`, `sqli`,
+`ssrf`, `ssti`, `xxe`, `deserialization`, `code-injection` or `cmdi`, or one that runs a code,
+JavaScript or flow step, sends attack input (a shell command in a parameter, a `Runtime.exec`
+expression in a path) whether or not it can match. A verify Scan lists such a check as
+`credential_level_needs_state_changing_http`, `exploit_class_needs_exploit_tier` or
+`needs_state_changing_http`, and the step's receipt counts the selection (`template_selection`:
+matched, selected, state-changing, `default_login`, `exploit_class`, excluded).
 
 **DNS posture over a limited forwarder.** `dns.inspect` asks the system resolver first. When a
 query times out and the bound host is a public name on public addresses, the same query is retried
@@ -1234,8 +1250,10 @@ the live `/session*` OpenAPI contract.
 When an AI provider is configured (`AI_URL` / `AI_API_KEY` / `AI_MODEL`), ShakerScan adds
 cross-finding correlation and an overall risk assessment to DAST reports, and can run AI-driven retest
 verification of findings (`AI_VERIFY_*`). The AI retest tier generates an exploitation plan and
-replays it (optionally via a browser), and can downgrade false positives — but deterministic proof of
-exploitation blocks any downgrade.
+replays it (optionally via a browser). Its verdict is at most `inconclusive`: a model's reading is not
+the check that produced the finding, so an AI "likely fixed" or "false positive" is recorded as an
+inconclusive result with the model's text as the note (the model's own verdict stays in the
+retest's artifacts), and it never closes a finding or refutes a Hunt candidate.
 
 ### 11.5 AI Operations Router
 
@@ -1491,12 +1509,45 @@ vendors, AI surfaces, MCP tools, model artifacts, scans, and findings, with asse
 **Dashboard & queue**: `/dashboard` (active/critical counts, average score, running scans),
 `/queue/stats`, and `/queue/clear`.
 
-**Verification & retest**: deterministic provers exist for xss, sqli, ssrf, path_traversal,
-open_redirect, cors, command_injection, ssti, xxe, jwt, idor, bola, and exposed_file; others can be
-replayed by the AI tier. A prover retests a finding that already exists; it does not mean a Scan
-looks for that class (see the [OWASP coverage matrix](owasp-coverage-matrix.md)). Retests are
-slot-limited (`RETEST_MAX_PARALLEL`) with a watchdog and
-auto-retest-on-scan-complete policy.
+**Verification & retest**: deterministic provers exist for xss, sqli, nosqli, ssrf, path_traversal,
+open_redirect, cors, command_injection, ssti, xxe, jwt, idor, bola, and exposed_file. A finding is
+retested only by the prover of its own kind of check, chosen by its tool (`RETEST_TOOL_TYPE_MAP`);
+its title chooses only for a finding with no tool or with one of the earlier scanner's checks that
+sent attack input, by whole words. A finding with no prover of its own, or only the AI tier
+(`generic_http`, `2fa_bypass`, which can never conclude), has no retest and says why in
+`retest_unsupported_reason`: `retest_needs_template_replay` (a Nuclei template finding),
+`retest_exposure_by_rescan` (an exposure-probe finding), `retest_by_hunt_rerun` (a Hunt's own
+finding, its verified XSS and authorization proofs included, which a Scan prover would judge by a
+different check, or a Hunt finding of a family no prover covers: run the Hunt again) or
+`retest_by_rescan_only` (headers, cookies, CORS, TLS, DNS, takeover, GraphQL, authorization and
+earlier posture findings, and a point sqlmap found in a URL path segment: run a new Scan). Finding
+detail, `POST /findings/{id}/retest`, bulk retest and the automatic retest after a Scan apply the
+same rule. A verified SQL injection, NoSQL injection or browser-executed XSS finding is retested by
+the check that proved it, with the request it proved: the route on the site the proof recorded
+(else the scanned target's site) with the tested query parameter set as the Scan set it, or the
+page with the browser proof's own payload, checked against the payload digest the finding kept.
+The worker sends exactly the URL the API admitted: a caller's `target` does not move it, and a
+retest whose finding changed after it was queued sends nothing. The SQL and NoSQL checks run over
+the retest's HTTP client (session headers, request limits and the destination guard); the browser
+check loads the payload page in a headless browser after one ordinary request of the page and
+judges it as the browser proof does (the proof's attribute on the page, or a console or dialog
+message that is exactly its marker; nothing else the page logs or shows counts), letting only
+same-origin reads leave the page. Reproduced is still vulnerable; not reproduced with every
+request answered is likely fixed; a refusal, an unanswered request, an unavailable service (a
+408, 429, 502, 503 or 504 answer, or a 404, 410 or server error to every request) or a missing
+browser is inconclusive.
+When the request cannot be rebuilt exactly (a path segment, a templated route, a request body, a
+recorded request whose values were not kept, a masked value, a fragment or another page), or the
+finding is a potential injection from a request differential (which keeps no route), the reason is
+`retest_by_rescan_only` and `retest_unsupported_message` says what is missing. A replay URL that
+names no site is refused as `replay_url_unresolved`, never as out of scope.
+`GET /findings/{id}` also returns `retest_active`, true when the retest may send
+active requests (a prover's payloads, an AI Gate probe, or the AI tier's requests when an AI
+verifier is configured). Its `retest_modes` are `tiered` (the prover, then the AI tier when it
+is inconclusive) and `deterministic`; the AI tier alone (`mode=ai`) is not offered, because its
+verdict is at most inconclusive. A prover retests a finding that already exists; it does not mean
+a Scan looks for that class (see the [OWASP coverage matrix](owasp-coverage-matrix.md)). Retests
+are slot-limited (`RETEST_MAX_PARALLEL`) with a watchdog and auto-retest-on-scan-complete policy.
 
 ---
 

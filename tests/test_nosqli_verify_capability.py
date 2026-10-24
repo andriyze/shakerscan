@@ -128,6 +128,7 @@ def test_operator_set_differential_promotes_repeatably():
     assert proof["proof_contract"] == "nosqli_operator_differential/v1"
     assert proof["technique"] == "operator_equality_complement_differential"
     assert proof["repetitions"] == 2
+    assert proof["origin"] == "https://app.example.test"
     assert len(proof["response_pairs"]) == 2
 
 

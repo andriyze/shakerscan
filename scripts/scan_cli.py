@@ -58,7 +58,14 @@ def _parser(prog: str | None = None) -> argparse.ArgumentParser:
     )
     parser.add_argument("--target-kind", choices=("web", "api"), default="web")
     parser.add_argument("--active-testing", action="store_true")
-    parser.add_argument("--allow-state-changing-http", action="store_true")
+    parser.add_argument(
+        "--allow-state-changing-http", action="store_true",
+        help=(
+            "Allow active checks whose requests can change state (with --active-testing); "
+            "includes default-login attempts, which can lock accounts, and exploit templates "
+            "that send attack input (a shell command or a file read in a parameter)"
+        ),
+    )
     parser.add_argument("--network-discovery", action="store_true")
     parser.add_argument("--subdomain-discovery", action="store_true")
     parser.add_argument(

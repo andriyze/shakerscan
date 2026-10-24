@@ -306,6 +306,16 @@ def test_scan_help_documents_the_active_confirmation_and_the_receipt():
     assert "standing authorization" in receipt_line.split("--idempotency-key")[0]
 
 
+def test_the_state_changing_flag_says_it_includes_default_login_attempts():
+    # The Scan form says so next to its switch; the terminal flag says the same.
+    help_text = " ".join(scan_cli._parser().format_help().split())
+    options = help_text[help_text.index("options:"):]
+    flag_help = options[options.index("--allow-state-changing-http"):].split("--network-discovery")[0]
+    assert "includes default-login attempts, which can lock accounts" in flag_help
+    # Exploit templates (a shell command or a file read in a parameter) need it too.
+    assert "and exploit templates that send attack input" in flag_help
+
+
 # A thorough scan from the terminal ran no active templates. Both entry points send the same
 # policy (the CLI implies the preset from --active-testing, New Scan names "standard_active"), and
 # that preset now runs the active templates on the thorough and deep profiles.

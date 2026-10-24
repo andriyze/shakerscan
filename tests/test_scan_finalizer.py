@@ -853,6 +853,7 @@ def test_finalizer_promotes_only_repeated_deterministic_sqli_proof():
         "kind": "sqli_proof",
         "candidate_id": "candidate-sqli",
         "request_ref_id": "request-sqli",
+        "origin": "https://app.example.test",
         "method": "POST",
         "field_path": "email",
         "request_class": "safe_authentication",
@@ -879,6 +880,35 @@ def test_finalizer_promotes_only_repeated_deterministic_sqli_proof():
     assert finding["severity"] == "critical"
     assert finding["verified"] is True
     assert finding["evidence"]["canonical_capability"] == "sqli.prove_batch"
+    assert finding["evidence"]["origin"] == "https://app.example.test"
+
+
+def test_finalizer_keeps_the_site_a_nosqli_proof_was_proved_on():
+    prove = _action("prove.nosqli.0", 0, capability_name="nosqli.verify_batch")
+    final = _action("finalize.report", 1, dependencies=(prove.action_id,))
+    plan = ScanActionPlan(
+        scan_id=SCAN_ID, execution_plan_digest="b" * 64,
+        target_binding_digest="a" * 64, actions=(prove, final),
+    )
+    results = {prove.action_id: _result_with_observation_count(prove, 1)}
+    observation = {
+        "kind": "nosqli_proof", "canonical_path": "/api/users", "candidate_id": "candidate-nosqli",
+        "request_ref_id": None, "origin": "https://api.example.test", "method": "GET",
+        "field_path": "username", "request_class": "safe_read", "proof_state": "verified",
+        "finding_verdict": "verified", "proof_contract": "nosqli_operator_differential/v1",
+        "technique": "operator_equality_complement_differential", "operator": "$ne",
+        "repetitions": 2, "response_pairs": [], "session_state_discarded": False,
+    }
+    for recorded, origin in ((observation, "https://api.example.test"),
+                             ({k: v for k, v in observation.items() if k != "origin"}, None)):
+        report = finalize_scan_report(
+            plan=plan, target_url="https://app.example.test",
+            action_results=results, observations={prove.action_id: (recorded,)},
+        )
+        (finding,) = report["findings"]
+        assert finding["tool"] == "shakerscan_nosqli_verify" and finding["url"] == "/api/users"
+        # A proof recorded before the origin was kept has none, rather than a guessed one.
+        assert finding["evidence"].get("origin") == origin
 
 
 def test_finalizer_promotes_only_structured_canonical_browser_xss_proof():

@@ -1112,55 +1112,6 @@ def _stored_network_capability(
     )
 
 
-def test_template_stage_places_one_reserved_nuclei_result(monkeypatch):
-    _plan, _target, options = _authority(
-        enabled=False, network=True, budget=_external_full_budget(),
-    )
-    calls = []
-
-    async def execute_capability(**kwargs):
-        calls.append(kwargs)
-        return _stored_network_capability(
-            "templates.scan",
-            observations=[{
-                "kind": "template_match",
-                "template_id": "example-cve",
-                "name": "Example CVE",
-                "severity": "high",
-                "matched_at": "https://app.example.test/account",
-                "proof_state": "candidate",
-            }],
-            amounts={"http_requests": 3, "tool_wall_seconds": 2},
-        ), False
-
-    monkeypatch.setattr(
-        worker, "_execute_reserved_scan_capability", execute_capability,
-    )
-    summary = asyncio.run(worker._execute_scan_template_capability(
-        "https://app.example.test/account?id=1",
-        options,
-        scan_id="00000000-0000-0000-0000-000000000001",
-        job_id="job-1",
-    ))
-
-    assert len(calls) == 1
-    call = calls[0]
-    assert call["capability_name"] == "templates.scan"
-    assert call["action_id"] == "deterministic_baseline.templates.scan"
-    assert call["reservation_limits"] == {
-        "http_requests": 4_000,
-        "tool_wall_seconds": 300,
-    }
-    assert call["scanner_process_payload"]["execution_target"] == (
-        "https://app.example.test/account?id=1"
-    )
-    assert call["scanner_process_payload"]["pinned_address"] == "192.0.2.10"
-    assert call["scanner_process_payload"]["oob_interactsh_server"] is None
-    assert summary["status"] == "success"
-    assert summary["observations"][0]["proof_state"] == "candidate"
-    assert summary["receipt"]["budget_reservation_state"] == "committed"
-
-
 def test_verify_stage_places_one_reserved_xss_result(monkeypatch):
     _plan, _target, options = _authority(
         enabled=False, network=True, budget=_external_full_budget(),
@@ -1503,77 +1454,6 @@ def test_crawl_stage_runs_read_only_without_active_permission(monkeypatch):
     assert len(calls) == 1
     assert calls[0]["capability_name"] == "web.crawl"
     assert calls[0]["target_binding"].digest == _target.digest
-
-
-def test_template_stage_never_runs_without_active_permission(monkeypatch):
-    _plan, _target, options = _authority(enabled=True, network=False)
-
-    async def execute_capability(**_kwargs):
-        raise AssertionError("passive Scan launched Nuclei")
-
-    monkeypatch.setattr(
-        worker, "_execute_reserved_scan_capability", execute_capability,
-    )
-    summary = asyncio.run(worker._execute_scan_template_capability(
-        "https://app.example.test",
-        options,
-        scan_id="00000000-0000-0000-0000-000000000001",
-        job_id="job-1",
-    ))
-
-    assert summary["status"] == "skipped"
-    assert summary["reason"] == "active_testing_not_authorized"
-
-
-def test_passive_template_stage_runs_exact_read_only_profile_without_approval(
-    monkeypatch,
-):
-    _plan, target, options = _authority(enabled=True, network=False)
-    calls = []
-
-    async def execute_capability(**kwargs):
-        calls.append(kwargs)
-        return _stored_network_capability(
-            "templates.passive_scan", observations=[],
-            amounts={"http_requests": 7, "tool_wall_seconds": 1},
-        ), False
-
-    monkeypatch.setattr(
-        worker, "_execute_reserved_scan_capability", execute_capability,
-    )
-    action = SimpleNamespace(
-        action_id="passive.templates",
-        capability_name="templates.passive_scan",
-        requested_budget={"http_requests": 7, "tool_wall_seconds": 30},
-    )
-    template_options = {
-        "severity": "critical,high,medium,low,info",
-        "template_ids": (
-            "git-config,git-credentials-disclosure,"
-            "http-missing-security-headers,openapi,server-status,web-config"
-        ),
-        "template_pack_digest": "a" * 64,
-        "template_request_cost_upper_bound": 7,
-    }
-
-    summary = asyncio.run(worker._execute_scan_template_capability(
-        "https://app.example.test",
-        options,
-        scan_id="00000000-0000-0000-0000-000000000001",
-        job_id="job-1",
-        canonical_action=action,
-        canonical_template_options=template_options,
-    ))
-
-    assert summary["status"] == "success"
-    assert summary["capability_name"] == "templates.passive_scan"
-    assert len(calls) == 1
-    assert calls[0]["capability_name"] == "templates.passive_scan"
-    assert calls[0]["reservation_limits"] == action.requested_budget
-    assert calls[0]["target_binding"].digest == target.digest
-    assert calls[0]["scanner_process_payload"]["scanner_options"] == (
-        template_options
-    )
 
 
 def test_tls_stage_uses_registered_inline_capability_with_exact_hold(monkeypatch):
@@ -2128,8 +2008,6 @@ def test_placed_http_tools_bind_primary_credentials_without_public_secrets(
         (worker._execute_scan_web_crawl_capability,
          "https://app.example.test/"),
         (worker._execute_scan_content_discovery_capability,
-         "https://app.example.test/"),
-        (worker._execute_scan_template_capability,
          "https://app.example.test/"),
         (worker._execute_scan_xss_verification_capability,
          "https://app.example.test/search?q=test"),

@@ -6097,7 +6097,10 @@ def _authz_replay_plan_from_hypothesis_action(
 def _hypothesis_family_matches_finding(hypothesis: dict[str, Any], finding: dict[str, Any]) -> bool:
     raw_family = str(hypothesis.get("family") or "").strip().lower().replace("-", "_")
     evidence = _decode_json_value(finding.get("evidence")) or {}
-    inferred = str(infer_type_from_title_tool(finding.get("title"), finding.get("tool")) or "").lower()
+    # Which kind of check the finding is, from its tool or its title whatever the tool: a
+    # template's title names its family even though no prover replays it.
+    inferred = str(infer_type_from_title_tool(
+        finding.get("title"), finding.get("tool"), title_for_any_tool=True) or "").lower()
     if raw_family in {"nosql", "nosqli", "nosql_injection"}:
         return inferred == "nosqli"
     if raw_family in {"sqli", "sql", "sql_injection"}:

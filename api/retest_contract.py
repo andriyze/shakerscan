@@ -22,6 +22,10 @@ try:
     from scanner_tools.shell_words import shell_word
 except ModuleNotFoundError:  # package import in host-side tests
     from scanner.scanner_tools.shell_words import shell_word
+try:
+    from proof_retest import PROOF_RETEST_GAPS, proof_retest_request
+except ModuleNotFoundError:  # package import in host-side tests
+    from .proof_retest import PROOF_RETEST_GAPS, proof_retest_request
 
 from runtime.credential_store import PostgresCredentialProfileStore
 from runtime.auth_session_store import PostgresAuthSessionStore
@@ -392,7 +396,69 @@ RETEST_TOOL_TYPE_MAP: dict[str, str] = {
     # Autonomous workflow findings carry the exact family in evidence. This
     # generic fallback keeps legacy records retestable when that field is absent.
     "autonomous_workflow": "generic_http",
+    # The current Scan's provers, and Hunt's browser proof: each is replayed by the prover of
+    # its own kind of check, whatever its title says.
+    "shakerscan_browser_proof": "xss",
+    "playwright": "xss",
+    "request_xss_differential": "xss",
+    "shakerscan_sqli_proof": "sqli",
+    "request_sqli_differential": "sqli",
+    "shakerscan_nosqli_verify": "nosqli",
+    "shakerscan_redirect_probe": "open_redirect",
 }
+
+# Title guessing runs only for a finding with no tool or with a tool the scanner stored before
+# the current Scan (its ``normalize_finding`` names; a test pins the two lists below to them). A
+# current tool that is not in the map above has no prover of its kind of check: a title naming
+# "Remote Code Execution", "JWT" or "Path Traversal" in a template's name sent attack payloads to
+# the finding's URL and called the result a retest. Of the earlier tools, only checks that sent
+# attack input have their title guessed: it names what they injected.
+PRE_V2_TITLE_INFERENCE_TOOLS: frozenset[str] = frozenset({
+    "api_security", "approval_checks", "blind_ssrf", "business_logic", "cache_poisoning",
+    "client_side", "cloud_ssrf", "cors_check", "cors_scanner", "default_credentials",
+    "deserialization", "file_upload", "graphql_batch_attack", "graphql_depth_attack",
+    "graphql_vulnerability", "hash_route_dom_xss", "host_header_injection", "http_smuggling",
+    "http_verb_tampering", "injection_extra", "jwt_vulnerability", "ldap_injection",
+    "mass_assignment", "oauth_vulnerability", "open_redirect", "password_reset",
+    "path_traversal", "race_condition", "session_management", "session_vulnerability",
+    "smart_auth", "ssrf", "ssti", "stored_xss", "timing_attack", "webhook_checks",
+    "xpath_injection", "xxe_injection",
+})
+# The earlier posture and exposure checks: their titles name a header, a file, a library or a
+# secret's kind ("Missing X-XSS-Protection header", "Hardcoded Secret in JavaScript: JWT"), never
+# what a prover could replay, so they are not guessed and are checked again by a new Scan.
+PRE_V2_POSTURE_TOOLS: frozenset[str] = frozenset({
+    "account_enumeration", "asn_discovery", "backup_file", "bruteforce_protection",
+    "cicd_exposure", "cloud_bucket", "cloud_scanner", "container_registry", "cookies_analyzer",
+    "csp_evaluator", "csrf_testing", "ct_monitor", "data_exposure", "directory_listing",
+    "dns_policy", "domain_intelligence", "http_headers", "http_methods", "input_validation",
+    "ip_reputation", "js_dependency", "js_secret", "kubernetes_exposure", "missing_rate_limit",
+    "network_services", "package_exposure", "password_policy", "rate_limiting",
+    "redirect_check", "schemathesis", "security_txt", "smtp_scanner", "ssh_scanner", "sslyze",
+    "subdomain_takeover_advanced", "terraform_exposure", "tls_config", "typosquatting",
+    "waf_detection", "waf_detector", "zone_transfer",
+})
+# The earlier scanner also named JWT and GraphQL findings after their check (``jwt_<kind>``).
+PRE_V2_TITLE_INFERENCE_TOOL_PREFIXES: tuple[str, ...] = ("jwt_", "graphql_")
+
+# Why a finding has no retest. A template finding needs its own template replayed; an exposure,
+# a header, TLS, DNS, takeover, GraphQL or authorization finding is checked again by a Scan; a
+# Hunt finding whose family has no deterministic prover, by running the Hunt again.
+RETEST_REASON_RESCAN_ONLY = "retest_by_rescan_only"
+RETEST_REASON_TEMPLATE_REPLAY = "retest_needs_template_replay"
+RETEST_REASON_EXPOSURE = "retest_exposure_by_rescan"
+RETEST_REASON_HUNT = "retest_by_hunt_rerun"
+RETEST_REASON_MODEL_INTAKE = "model_intake"
+# Tools a Hunt or Deep Hunt promotion stores on its findings.
+HUNT_FINDING_TOOLS: frozenset[str] = frozenset({"autonomous_workflow", "autonomous_agent"})
+_RETEST_REASON_BY_TOOL: dict[str, str] = {
+    "nuclei": RETEST_REASON_TEMPLATE_REPLAY,
+    "shakerscan_exposure_probe": RETEST_REASON_EXPOSURE,
+}
+# Retests whose prover sends only what the Scan's own check sent: a plain GET of the exposed
+# file, or a GET with an Origin header. Every other prover sends attack payloads, a forged token
+# or a request as another principal, and the AI tier may send requests of its own choosing.
+PASSIVE_RETEST_TYPES: frozenset[str] = frozenset({"exposed_file", "cors"})
 
 DEFAULT_REPLAY_PAYLOADS: dict[str, str] = {
     "xss": "<script>alert(1)</script>",
@@ -449,64 +515,213 @@ def normalize_retest_type(value: str | None) -> str | None:
     return RETEST_TYPE_ALIASES.get(str(value).strip().lower())
 
 
-def infer_type_from_title_tool(title: str | None, tool: str | None) -> str | None:
-    """Infer a retest type from a finding's title/tool.
+# Database names an earlier scanner's SQL injection title may carry instead of "SQL", and the
+# other kinds of injection a title naming one of them may be about.
+_SQL_DIALECTS = ("mysql", "postgresql", "postgres", "mssql", "sqlite")
+_OTHER_INJECTIONS = (
+    "command injection", "os command", "rce", "remote code execution", "xxe", "xml external entity",
+    "ssti", "template injection", "ldap", "xpath", "nosql", "header injection", "crlf",
+)
+
+
+def title_inference_allowed(tool: str | None) -> bool:
+    """Whether a finding's title may choose its retest: no tool, or an earlier scanner's tool."""
+    name = str(tool or "").strip().lower()
+    return (
+        not name
+        or name in PRE_V2_TITLE_INFERENCE_TOOLS
+        or name.startswith(PRE_V2_TITLE_INFERENCE_TOOL_PREFIXES)
+    )
+
+
+def _title_has(title: str, *phrases: str) -> bool:
+    """Whether a lower-cased title holds one of the phrases as whole words (``rce`` is not in
+    ``source`` or ``enforced``)."""
+    return any(
+        re.search(rf"(?<![a-z0-9]){re.escape(phrase)}(?![a-z0-9])", title) for phrase in phrases
+    )
+
+
+def retest_unsupported_reason(tool: str | None) -> str:
+    """Why a finding without a retest type is not retested (see ``_RETEST_REASON_BY_TOOL``)."""
+    return _RETEST_REASON_BY_TOOL.get(str(tool or "").strip().lower(), RETEST_REASON_RESCAN_ONLY)
+
+
+def retest_type_has_prover(retest_type: str | None) -> bool:
+    """Whether a retest type has a deterministic prover. The AI-only types (``generic_http``,
+    ``2fa_bypass``) have none, and an AI verdict is at most inconclusive, so a retest of one could
+    never conclude."""
+    return retest_type in SUPPORTED_RETEST_TYPES and retest_type not in AI_ONLY_RETEST_TYPES
+
+
+def _hunt_promotion(finding: Mapping[str, Any]) -> bool:
+    """Whether a Hunt produced the finding: its tool, its source or its evidence says so."""
+    evidence = parse_json_field(finding.get("evidence"))
+    return bool(
+        str(finding.get("tool") or "").strip().lower() in HUNT_FINDING_TOOLS
+        or str(finding.get("source") or "").strip().lower() == "autonomous"
+        or isinstance(evidence.get("autonomous_workflow"), dict)
+    )
+
+
+def _hunt_finding(finding: Mapping[str, Any]) -> bool:
+    return _hunt_promotion(finding) or bool(finding.get("hunt_run_id"))
+
+
+# The evidence a Hunt stores on the findings it proves or reports (``hunt/deterministic_findings``,
+# ``hunt/authz_findings``, ``hunt/finding_actions``).
+_HUNT_EVIDENCE_SCHEMAS = ("hunt-deterministic-finding/", "hunt-finding-evidence/")
+
+
+def _hunt_proven(finding: Mapping[str, Any]) -> bool:
+    """Whether the finding is a Hunt's own: stored by a Hunt (``deep_hunt``), or carrying the
+    evidence a Hunt's proof wrote. Its proof is the Hunt's, so a Scan prover, with its own payload
+    and check, would judge it by another oracle: it is checked again by running the Hunt again."""
+    evidence = parse_json_field(finding.get("evidence"))
+    return (
+        str(finding.get("source") or "").strip().lower() == "deep_hunt"
+        or str(evidence.get("schema_version") or "").startswith(_HUNT_EVIDENCE_SCHEMAS)
+    )
+
+
+def _sqlmap_path_marker(finding: Mapping[str, Any]) -> str | None:
+    """The marker (``#1*``) of a point sqlmap found in a URL path segment, or None. A retest sends
+    its input only in query and form parameters, so it would decline such a point unsent."""
+    evidence = parse_json_field(finding.get("evidence"))
+    param = str(finding.get("param") or evidence.get("param") or evidence.get("parameter") or "").strip()
+    return param if _SQLMAP_URI_MARKER.fullmatch(param) else None
+
+
+def retest_refusal_reason(finding: Mapping[str, Any], retest_type: str | None) -> str | None:
+    """Why a finding is not retested, or None when its retest type has a prover: Model Intake
+    findings are re-checked by their own scan, a Hunt finding of a family no prover covers by
+    running the Hunt again, any other by a new Scan (``retest_unsupported_reason``). A Hunt's own
+    finding with no retest type at all (an earlier Hunt's ``autonomous_agent`` row) is a Hunt
+    finding too; a Scan finding a Hunt only linked keeps its own check's reason. A proven Scan
+    finding whose request cannot be sent again as its proof sent it (``proof_retest``) is checked
+    again by a new Scan, whatever type the request names; so is a point sqlmap found in a URL path
+    segment. A finding a Hunt proved or reported (``_hunt_proven``) is checked again by running
+    the Hunt again, whatever prover its tool maps to."""
+    if _hunt_proven(finding):
+        return RETEST_REASON_HUNT
+    if proof_retest_request(finding)[1] is not None or _sqlmap_path_marker(finding):
+        return RETEST_REASON_RESCAN_ONLY
+    if retest_type_has_prover(retest_type):
+        return None
+    tool = str(finding.get("tool") or "").strip().lower()
+    if tool == "model_intake":
+        return RETEST_REASON_MODEL_INTAKE
+    if _hunt_promotion(finding) or (retest_type and _hunt_finding(finding)):
+        return RETEST_REASON_HUNT
+    return retest_unsupported_reason(tool)
+
+
+def retest_refusal_message(finding: Mapping[str, Any]) -> str | None:
+    """Why a finding is not retested here, in words, or None: a Hunt's own finding, a proven Scan
+    finding's gap, or a point sqlmap found in a URL path segment."""
+    if _hunt_proven(finding):
+        return (
+            "This finding is a Hunt's own, and a retest here would judge it by a different check. "
+            "Run the Hunt again to check it."
+        )
+    gap = proof_retest_request(finding)[1]
+    if gap:
+        return PROOF_RETEST_GAPS[gap]
+    marker = _sqlmap_path_marker(finding)
+    if marker:
+        return (
+            f"The injection point is a URL path segment (sqlmap marker {marker}), and a retest sends "
+            "its input only in query and form parameters. Run a new Scan to check it again."
+        )
+    return None
+
+
+def retest_sends_active_requests(retest_type: str | None, *, ai_tier_available: bool) -> bool:
+    """Whether a retest of this type may send active requests: a prover's payloads, or the AI
+    tier's own requests when an AI verifier is configured. None for a finding with no retest."""
+    if not retest_type:
+        return False
+    return retest_type not in PASSIVE_RETEST_TYPES or ai_tier_available
+
+
+def infer_type_from_title_tool(
+    title: str | None, tool: str | None, *, title_for_any_tool: bool = False,
+) -> str | None:
+    """Infer a retest type from a finding's tool, and for an earlier scanner's tool its title.
 
     Single source of truth for both the API retest endpoint and the worker
     (auto-retest + retest execution) so the two never disagree on whether a
-    finding is retestable.
+    finding is retestable. A tool in ``RETEST_TOOL_TYPE_MAP`` names its prover. Title guessing
+    runs only when ``title_inference_allowed(tool)`` and matches whole words; any other tool
+    gets no retest type (``retest_unsupported_reason`` says why). ``title_for_any_tool`` guesses
+    from the title whatever the tool: for asking which kind of check a finding is (linking a
+    Hunt hypothesis to it), never for choosing the prover that replays it.
     """
     title = str(title or "").lower()
-    tool = str(tool or "").lower()
+    tool = str(tool or "").strip().lower()
+    guess = title_for_any_tool or title_inference_allowed(tool)
 
     # NoSQL injection routes to the dedicated NoSQLi prover (operator-injection
     # differential), NOT the SQLi prover. This guard runs BEFORE the generic
     # "sql"+"inject" title check below (note "sql" is a substring of "nosql", so
     # without this guard a NoSQL finding would misroute to sqli and report a false
     # "likely_fixed"). Tool match is also handled here for nosql tools.
-    if "nosql" in title or "no sql" in title or tool in ("nosql_injection", "smart_nosql", "nosqli"):
+    if tool in ("nosql_injection", "smart_nosql", "nosqli"):
         return "nosqli"
-
     mapped = RETEST_TOOL_TYPE_MAP.get(tool)
+    if (guess or mapped == "sqli") and _title_has(title, "nosql", "no sql", "nosqli"):
+        return "nosqli"
     if mapped:
         return mapped
+    if not guess:
+        return None
 
-    if "xss" in title or "cross-site scripting" in title:
+    if _title_has(title, "xss", "cross-site scripting", "cross site scripting"):
         return "xss"
-    if ("sql" in title and "inject" in title) or "sqli" in title:
+    # A database's name is a word of its own ("sql" is not a whole word inside "mysql"). It names
+    # SQL injection only beside no other kind of injection ("MySQL Workbench OS command
+    # injection"). "Oracle" alone names a vendor or a padding oracle; "Oracle SQL" and "PL/SQL"
+    # already hold "sql".
+    injected = re.search(r"(?<![a-z0-9])inject", title)
+    if (
+        (_title_has(title, "sql") and injected)
+        or _title_has(title, "sqli")
+        or (_title_has(title, *_SQL_DIALECTS) and injected and not _title_has(title, *_OTHER_INJECTIONS))
+    ):
         return "sqli"
-    if "ssrf" in title or "server-side request forgery" in title:
+    if _title_has(title, "ssrf", "server-side request forgery", "server side request forgery"):
         return "ssrf"
-    if any(k in title for k in ("path traversal", "local file inclusion", "directory traversal", "lfi", "../")):
+    if "../" in title or _title_has(
+        title, "path traversal", "local file inclusion", "directory traversal", "lfi",
+    ):
         return "path_traversal"
-    if "open redirect" in title or "url redirect" in title:
+    if _title_has(title, "open redirect", "url redirect"):
         return "open_redirect"
-    if "cors" in title:
+    if _title_has(title, "cors"):
         return "cors"
-    if "2fa bypass" in title or "mfa bypass" in title:
+    if _title_has(title, "2fa bypass", "mfa bypass"):
         return "2fa_bypass"
-    if "command injection" in title or "rce" in title or "remote code execution" in title:
+    if _title_has(title, "command injection", "rce", "remote code execution"):
         return "command_injection"
-    if "ssti" in title or "template injection" in title:
+    if _title_has(title, "ssti", "template injection"):
         return "ssti"
-    if "xxe" in title or "xml external entity" in title:
+    if _title_has(title, "xxe", "xml external entity"):
         return "xxe"
-    if "jwt" in title:
+    if _title_has(title, "jwt"):
         return "jwt"
-    if "bola" in title or "broken object level" in title:
+    if _title_has(title, "bola", "broken object level"):
         return "bola"
     # BFLA / broken access control -> cross_user_access (bola) prover.
-    if any(k in title for k in (
-        "broken function level", "broken function-level", "bfla",
+    if _title_has(
+        title, "broken function level", "broken function-level", "bfla",
         "broken access control", "function level authorization",
-        "function-level authorization", "missing function level access")):
+        "function-level authorization", "missing function level access",
+    ):
         return "bola"
-    if "idor" in title or "insecure direct object" in title:
+    if _title_has(title, "idor", "insecure direct object"):
         return "idor"
     if (
-        "exposed file" in title
-        or "file exposed" in title          # "Sensitive file exposed: X" harvest wording
-        or "sensitive file" in title
+        _title_has(title, "exposed file", "file exposed", "sensitive file")  # "Sensitive file exposed: X"
         or (title.startswith("accessible ") and ":" in title)
     ):
         return "exposed_file"
@@ -619,6 +834,12 @@ def infer_retest_inputs(verification: dict[str, Any]) -> dict[str, Any]:
         payload = evidence.get("detail", {}).get("payload") or ""
     method = (verification.get("method") or evidence.get("method") or "GET").upper()
     request_body = verification.get("request_body") or evidence.get("body") or ""
+    # A proven Scan finding replays the request its proof sent, rebuilt from the finding (a retest
+    # queued before it was rebuilt kept the bare route and no parameter).
+    proof_request, _gap = proof_retest_request(verification)
+    if proof_request is not None:
+        original_url, param, method = proof_request.url, proof_request.param, proof_request.method
+        payload, request_body = proof_request.payload or "", ""
 
     return {
         "finding_type": finding_type,

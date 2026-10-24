@@ -355,3 +355,23 @@ def test_admission_refuses_an_exploit_class_check_without_the_state_changing_tie
     verify_admission._CHECK_IDS.clear()
     assert asyncio.run(verify_admission.admit_verify_templates(
         ["cve-2021-41773"], tiered, load_snapshot=snapshot)) == {"verify_templates": ["cve-2021-41773"]}
+
+
+def test_a_verify_scan_without_state_changing_authority_never_tries_a_default_login(monkeypatch):
+    receipt, captured = _drive_verify(
+        monkeypatch, ("squid-analysis-report-generator", "tomcat-default-login"),
+        policy=ScanPolicy(active_testing=True, approval_receipt_id="approval-1"),
+        requested_budget={"http_requests": 120, "tool_wall_seconds": 45},
+    )
+    assert receipt.status == "success"
+    assert captured["scanner_options"]["template_ids"] == "squid-analysis-report-generator"
+    assert receipt.redacted_execution["verify_selection"]["excluded"] == {
+        "tomcat-default-login": "credential_level_needs_state_changing_http"}
+    authorized, granted = _drive_verify(
+        monkeypatch, ("tomcat-default-login",),
+        policy=ScanPolicy(active_testing=True, allow_state_changing_http=True, approval_receipt_id="approval-1"),
+        requested_budget={"http_requests": 120, "state_changing_requests": 120, "tool_wall_seconds": 45},
+    )
+    assert authorized.status == "success"
+    assert granted["scanner_options"]["template_ids"] == "tomcat-default-login"
+    assert granted["scanner_options"]["nuclei_active_state_changing"] is True
