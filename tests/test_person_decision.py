@@ -758,8 +758,8 @@ def test_only_the_keys_that_can_answer_are_offered_before_the_touch(monkeypatch)
 
 
 def test_a_key_that_holds_a_credential_is_used_without_asking_which(monkeypatch):
-    """Usability review: with two keys plugged in that both answered yes to the silent check,
-    the client still asked 'Which one is registered to your account?'. Any of them answers: the
+    """With two keys plugged in that both answered yes to the silent check, the client used to
+    ask 'Which one is registered to your account?'. Any of them answers: the
     first is used, and the chooser is left for keys that could not be asked."""
     first, second = key("YubiKey 5C", holds=[b"mine"]), key("YubiKey 5 NFC", holds=[b"mine"])
     fake_fido2(monkeypatch, [first, second])
@@ -771,8 +771,8 @@ def test_a_key_that_holds_a_credential_is_used_without_asking_which(monkeypatch)
 
 
 def test_the_silent_probe_asks_a_key_only_for_this_gateways_relying_party(monkeypatch):
-    """Security review: the silent getAssertion went to whatever rpId the gateway named, so a
-    gateway could learn whether the key holds a credential of another site. The probe now asks
+    """The silent getAssertion used to go to whatever rpId the gateway named, so a gateway
+    could learn whether the key holds a credential of another site. The probe now asks
     only for an rpId valid for the connection's origin (python-fido2's own rule), and without
     one, or without the origin, the key is not asked at all."""
     mine = key("YubiKey", holds=[b"mine"])
@@ -1360,7 +1360,7 @@ def test_the_local_question_reads_the_gateways_own_description(monkeypatch):
     assert scan_cli._touch_confirms(ORIGIN) is False
 
 
-# ---- round 4.1 reviews ---------------------------------------------------------------------------
+# ---- where a key can reach, where python-fido2 installs, who is recorded ----------------------
 
 
 @pytest.mark.parametrize(("environ", "files", "words"), [
@@ -1371,8 +1371,8 @@ def test_the_local_question_reads_the_gateways_own_description(monkeypatch):
     ({"SSH_TTY": "/dev/pts/3"}, (), "remote (SSH) session"),
 ])
 def test_a_terminal_a_plugged_in_key_cannot_reach_says_so_at_once(tmp_path, environ, files, words):
-    """Usability review: only SSH was recognized; under WSL2 without USB passthrough or in a
-    container the client waited the full minute for a key that could never arrive."""
+    """Only SSH used to be recognized; under WSL2 without USB passthrough or in a container the
+    client waited the full minute for a key that could never arrive."""
     for name, text in files:
         (tmp_path / name).parent.mkdir(parents=True, exist_ok=True)
         (tmp_path / name).write_text(text)
@@ -1404,8 +1404,7 @@ def test_the_wait_names_the_remote_shells_it_cannot_recognize(monkeypatch):
     ("linux", "armv7l", False), ("linux", "i686", False), ("win32", "AMD64", False), ("freebsd14", "amd64", False),
 ])
 def test_python_fido2_is_declared_only_where_cryptography_ships_wheels(platform, machine, declared):
-    """Usability review (blocker): cryptography 49 and later publish no Intel macOS wheel, so the
-    client needed a Rust toolchain on an Intel Mac. The package's markers and the client's own
+    """cryptography 49 and later publish no Intel macOS wheel, so the client would need a Rust toolchain on an Intel Mac. The package's markers and the client's own
     reading of them agree: python-fido2 on macOS and 64-bit Linux, cryptography below 49 on an
     Intel Mac, nothing elsewhere."""
     import tomllib
@@ -1431,8 +1430,8 @@ def test_a_platform_without_python_fido2_is_told_why(monkeypatch):
 
 
 def test_targets_authorize_records_the_person_the_connection_acts_for(monkeypatch):
-    """Usability review: with the switch off the engine recorded '<local OS user> via shakerscan
-    targets authorize' (root, on a VPS). On an Enterprise connection it is the person the token
+    """With the switch off the engine used to record '<local OS user> via shakerscan targets
+    authorize' (root, on a VPS). On an Enterprise connection it is the person the token
     acts for, as the gateway names them; on an open-source engine, this computer's user."""
     sys.path.insert(0, str(ROOT / "client" / "src"))
     from shakerscan import decisions
@@ -1461,8 +1460,8 @@ def test_targets_authorize_records_the_person_the_connection_acts_for(monkeypatc
 
 
 def test_a_refused_decision_in_the_watch_says_the_persons_command():
-    """Usability review: refused decisions in `approve --watch` said 'refused, a key touch is
-    required' with no command."""
+    """Refused decisions in `approve --watch` used to say 'refused, a key touch is required'
+    with no command."""
     when = 1792772519
     submission = approval.person_decision_line({"at": when, "made": "refused", "decision": "target.authorize",
                                                 "method": "POST", "path": "/scans", "target_id": TARGET.upper(),
@@ -1481,8 +1480,8 @@ def test_a_refused_decision_in_the_watch_says_the_persons_command():
 
 
 def test_an_approval_says_once_whom_it_is_for():
-    """Usability review: 0.11.2 asks for no sign-in name; someone using a token that acts for
-    another person was asked for that person's proof without being told."""
+    """The client asks for no sign-in name; someone using a token that acts for another person
+    used to be asked for that person's proof without being told."""
     sent = []
 
     def send(method, path, payload=None, headers=None, *, timeout=None):
