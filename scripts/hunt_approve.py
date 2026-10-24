@@ -1129,8 +1129,11 @@ def rp_id_valid(rp_id: str, origin: str) -> bool:
 def probe_device(device: Any, webauthn: Mapping[str, Any] | None, origin: str = "") -> str:
     """Whether this key can answer the challenge, asked silently (user presence off, so the key
     does not wait for a touch): "yes" (it holds one of the person's keys), "no" (it holds none),
-    "no_pin" (the gateway asks for the key's PIN and this key has none), or "unknown" (a key
-    that cannot be asked this way, such as a U2F-only key; the touch itself then tells).
+    "no_pin" (the gateway asks for the key's PIN and this key has none), "pin_only" (the gateway
+    asks for a touch alone, and the key has a PIN but answers nothing without it: it may hold a
+    passkey a browser made to need the PIN for every use, which the assertion then asks with its
+    PIN), or "unknown" (a key that cannot be asked this way, such as a U2F-only key; the touch
+    itself then tells).
 
     Only for a relying party id valid for the connection's ``origin`` (rp_id_valid): a gateway
     could otherwise learn, from what the client does next, whether the key holds a credential of
@@ -1170,30 +1173,47 @@ def probe_device(device: Any, webauthn: Mapping[str, Any] | None, origin: str = 
         # A credential a browser made to need the key's PIN for every use (credProtect) is not
         # found without it; the gateway asks for the PIN here, so the assertion, with it, decides.
         return "unknown"
+    if verifies:
+        # The same credential, where the gateway asks for a touch only: it is asked with its PIN
+        # (a PIN-verified assertion is user presence too), not called unregistered.
+        return "pin_only"
     return "no"
 
 
 def eligible_devices(devices: Sequence[Any], webauthn: Mapping[str, Any] | None,
                      origin: str = "") -> tuple[list[Any], str]:
-    """The plugged-in keys that can answer, and why none can when the list is empty: the first
-    key that holds one of the person's credentials (any of them answers, so nobody is asked to
-    pick among keys that all can), else every key that could not be asked (the person picks)."""
+    """The plugged-in keys that can answer, and why none can when the list is empty
+    (answering_keys, without whether the PIN is asked)."""
+    found, why, _ = answering_keys(devices, webauthn, origin)
+    return found, why
+
+
+def answering_keys(devices: Sequence[Any], webauthn: Mapping[str, Any] | None,
+                   origin: str = "") -> tuple[list[Any], str, bool]:
+    """The plugged-in keys that can answer, why none can when the list is empty, and whether they
+    are asked with their PIN where the gateway asks for a touch only: the first key that holds one
+    of the person's credentials (any of them answers, so nobody is asked to pick among keys that
+    all can), else every key that could not be asked (the person picks), else every key with a
+    PIN that answered nothing without it (asked with the PIN: a passkey made to need it for every
+    use answers then)."""
     found = [(device, probe_device(device, webauthn, origin)) for device in devices]
     holding = [device for device, status in found if status == "yes"]
     unknown = [device for device, status in found if status == "unknown"]
+    with_pin = [device for device, status in found if status == "pin_only"]
     if holding:
-        return holding[:1], ""
+        return holding[:1], "", False
     if unknown:
-        return unknown, ""
+        return unknown, "", False
+    if with_pin:
+        return with_pin, "", True
     if any(status == "no_pin" for _, status in found):
         return [], ("this security key has no PIN, and this approval asks for the key's PIN: set one "
                     "(for a YubiKey: ykman fido access change-pin), or approve with --method totp where "
-                    "the gateway offers it")
-    return [], ("the security key plugged in holds none of your keys that answer a touch: it is not "
-                "registered to your account, or it was registered as a passkey that answers only after its "
-                "PIN, which a touch does not ask; use the key you registered, or add this one under My "
-                "account in the Enterprise console (a local account: Passkeys, \"Use it: for terminal "
-                "approvals (touch)\"; single sign-on: \"Security key for terminal decisions\")")
+                    "the gateway offers it"), False
+    return [], ("the security key plugged in holds none of your keys: it is not registered to your "
+                "account; use the key you registered, or add this one under My account in the "
+                "Enterprise console (a local account: Passkeys, \"Use it: for terminal approvals "
+                "(touch)\"; single sign-on: \"Security key for terminal decisions\")"), False
 
 
 def preferred_method(methods: Sequence[str], webauthn: Mapping[str, Any] | None = None, origin: str = "") -> str:
@@ -1331,12 +1351,20 @@ def security_key_assertion(webauthn: Mapping[str, Any], origin: str, terminal: T
     devices = wait_for_key(CtapHidDevice.list_devices, terminal, insert_seconds)
     # Asked silently first, so the key that blinks is one that can answer, and the person picks
     # among those before being told to touch.
-    candidates, why = eligible_devices(devices, webauthn, origin)
+    candidates, why, with_pin = answering_keys(devices, webauthn, origin)
     if not candidates:
         raise ApprovalError(why)
     device = choose_device(candidates, terminal)
     requirement = str(webauthn.get("userVerification") or "required")
     if requirement not in {"required", "preferred", "discouraged"}:
+        requirement = "required"
+    if with_pin and requirement == "discouraged":
+        # Nothing on the key answers a touch alone: a passkey a browser made to need its PIN for
+        # every use answers with it (the gateway accepts a PIN-verified touch), so the PIN is asked
+        # once instead of the key being called unregistered.
+        terminal.say("This security key answers nothing to a touch alone: it is not registered to your account, "
+                     "or it holds a passkey that answers only after the key's PIN. To try it, enter the key's "
+                     "PIN, then touch it (Ctrl-C to cancel).")
         requirement = "required"
 
     # A touch alone (no PIN): told now, once the key is chosen. With a PIN: after it is typed.

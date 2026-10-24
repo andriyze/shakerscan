@@ -816,7 +816,10 @@ def test_approve_prefers_the_key_only_when_a_plugged_in_key_can_answer(monkeypat
     assert approval.preferred_method(["totp", "security_key"], touch, ORIGIN) == "security_key"
     # Under the switch the key is the only method: it is asked, and says plainly why not.
     assert approval.preferred_method(["security_key"], WEBAUTHN, ORIGIN) == "security_key"
-    devices, why = approval.eligible_devices([unrelated], touch, ORIGIN)
+    # A key with a PIN that answers nothing to the touch is offered with its PIN (it may hold a
+    # passkey that needs it), never chosen over the code (above); without a PIN it is refused.
+    assert approval.answering_keys([unrelated], touch, ORIGIN) == ([unrelated], "", True)
+    devices, why = approval.eligible_devices([key("spare", holds=[b"other"], pin=False)], touch, ORIGIN)
     assert devices == [] and "not registered to your account" in why
     devices, why = approval.eligible_devices([key("no PIN", holds=[b"mine"], pin=False)], WEBAUTHN, ORIGIN)
     assert devices == [] and "has no PIN" in why
@@ -1683,13 +1686,69 @@ def test_a_key_with_a_pin_that_finds_nothing_without_it_is_left_to_the_real_asse
     assert approval.probe_device(holder, WEBAUTHN, ORIGIN) == "unknown"
     devices, why = approval.eligible_devices([holder], WEBAUTHN, ORIGIN)
     assert devices == [holder] and why == ""
-    # A touch asks no PIN: such a credential cannot answer it, and the person is told both causes.
+    # A touch asks no PIN. Such a credential cannot answer one, so the key is asked once more
+    # with its PIN (one PIN, then the touch) instead of being called unregistered: a passkey-only
+    # account could approve with 0.11.1 and its PIN, and must not lose that with 0.11.2.
     touch = {**WEBAUTHN, "userVerification": "discouraged"}
-    assert approval.probe_device(holder, touch, ORIGIN) == "no"
+    assert approval.probe_device(holder, touch, ORIGIN) == "pin_only"
     devices, why = approval.eligible_devices([holder], touch, ORIGIN)
-    assert devices == []
-    assert "not registered to your account" in why and "only after its PIN" in why
+    assert devices == [holder] and why == ""
+    assert approval.answering_keys([holder], touch, ORIGIN) == ([holder], "", True)
+    # A key that holds one answers the touch alone, and is chosen before it.
+    mine = key("YubiKey 5C", holds=[b"mine"])
+    fake_fido2(monkeypatch, [holder, mine])
+    assert approval.answering_keys([holder, mine], touch, ORIGIN) == ([mine], "", False)
+    # A key with no PIN that holds nothing is not registered to the person: said plainly.
+    bare = key("Security Key", holds=[], pin=False)
+    fake_fido2(monkeypatch, [bare])
+    assert approval.probe_device(bare, touch, ORIGIN) == "no"
+    devices, why = approval.eligible_devices([bare], touch, ORIGIN)
+    assert devices == [] and "not registered to your account" in why
     assert '"Use it: for terminal approvals (touch)"' in why
+
+
+def test_a_passkey_that_answers_only_after_its_pin_is_asked_with_its_pin_once(monkeypatch):
+    """usability review: with the gateway asking for a touch only, a sign-in passkey a browser
+    made to need its PIN for every use (credProtect) found nothing silently, and 0.11.2 refused
+    with "add the key again", although the gateway accepts a PIN-verified assertion. The key is
+    now asked with its PIN, said first in plain words."""
+    holder = key("YubiKey 5", holds=[], pin=True)
+    fake_fido2(monkeypatch, [holder])
+    seen = {}
+
+    class Client:
+        def __init__(self, device, user_interaction=None, **kwargs):
+            seen["device"], self.interaction = device, user_interaction
+
+        def get_assertion(self, options):
+            seen["options"] = options
+            seen["pin"] = self.interaction.request_pin(None, "gateway.example.com")
+            inner = types.SimpleNamespace(client_data=b"{}", authenticator_data=b"a", signature=b"s", user_handle=None)
+            return types.SimpleNamespace(get_response=lambda index: types.SimpleNamespace(raw_id=b"id", response=inner))
+
+    monkeypatch.setitem(sys.modules, "fido2.client", types.SimpleNamespace(
+        Fido2Client=Client, UserInteraction=object, DefaultClientDataCollector=lambda origin: origin))
+    monkeypatch.setitem(sys.modules, "fido2.webauthn", types.SimpleNamespace(
+        PublicKeyCredentialDescriptor=lambda **k: k, PublicKeyCredentialRequestOptions=lambda **k: k,
+        PublicKeyCredentialType=types.SimpleNamespace(PUBLIC_KEY="public-key"),
+        UserVerificationRequirement=lambda value: f"uv:{value}"))
+    monkeypatch.setattr(approval, "pin_retries", lambda device: 8)
+
+    class Typed(approval.Terminal):
+        def secret(self, prompt):
+            self.stdout.write(prompt)
+            return "4321"
+
+    terminal = Typed(io.StringIO(), io.StringIO())
+    approval.security_key_assertion({**WEBAUTHN, "userVerification": "discouraged"}, ORIGIN, terminal,
+                                    prompt="Touch your security key to approve (Ctrl-C to cancel)...")
+    assert seen["device"] is holder and seen["options"]["user_verification"] == "uv:required"
+    assert seen["pin"] == "4321"
+    text = terminal.stdout.getvalue()
+    said = text.index("it holds a passkey that answers only after the key's PIN. To try it, enter the key's PIN")
+    assert said < text.index("Security key PIN (not your authenticator code): ")
+    # The touch prompt follows the PIN, not before it (the key waits for the PIN first).
+    assert "Touch your security key to approve" not in text[:said]
 
 
 def _decide_by_touch(monkeypatch, decision_word, *, touch=True):
