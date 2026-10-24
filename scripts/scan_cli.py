@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
 from typing import Any, Iterable
 import urllib.error
@@ -310,6 +311,27 @@ def _touch_confirms(api_url: str) -> bool:
     return isinstance(me, dict) and me.get("person_decision_proof") is True
 
 
+def _touch_follows(api_url: str, target: str) -> bool:
+    """Whether a security-key touch will confirm this active scan: the gateway requires one
+    (_touch_confirms) and the target the engine registers for this URL holds no standing
+    authorization yet, so the gateway refuses the scan until the person touches. The target is
+    registered (or found) as the gateway itself registers a refused scan's URL; registering is no
+    decision. An authorized target is scanned with no touch, so the local question is asked for
+    it as before; so it is when anything here cannot be read."""
+    if not _touch_confirms(api_url):
+        return False
+    base = api_url.rstrip("/")
+    try:
+        found = _request_json(base + "/targets", payload={"url": target})
+        identifier = str(found.get("id") or "") if isinstance(found, dict) else ""
+        if not re.fullmatch(r"[0-9a-fA-F]{8}-(?:[0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}", identifier):
+            return False
+        held = _request_json(f"{base}/targets/{identifier.lower()}/authorization")
+    except ScanCliError:
+        return False
+    return isinstance(held, dict) and "authorization" in held and held["authorization"] is None
+
+
 def _confirm_active(args: argparse.Namespace) -> None:
     if not args.active_testing:
         return
@@ -319,9 +341,14 @@ def _confirm_active(args: argparse.Namespace) -> None:
         raise ScanCliError(
             "active testing requires --confirm-active after confirming target authorization"
         )
-    if _touch_confirms(str(getattr(args, "api_url", "") or "")):
+    # The gateway asks a touch only for active work that carries no credential or receipt of its
+    # own (it gates what it would authorize the target for); anything else is asked here.
+    gated = not getattr(args, "credential_profile", None) and not getattr(args, "approval_receipt", None)
+    if gated and _touch_follows(str(getattr(args, "api_url", "") or ""), str(args.target)):
+        # The touch the gateway asks for authorizes the target and is the confirmation; the
+        # local question is not asked twice. A target already authorized is asked below.
         print(
-            f"Active testing can change target state. If {args.target} is not authorized yet, you "
+            f"Active testing can change target state. {args.target} is not authorized yet: you "
             "confirm it with a touch of your security key.",
             file=sys.stderr,
         )
