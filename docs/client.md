@@ -93,7 +93,13 @@ CI runners): it checks that python-fido2 2.2.1 and a cryptography 50.0.x were re
 imports python-fido2's USB and CTAP2 client and verifies an ES256 signature through it. An Intel
 Mac's set is checked through the lock only (there is no Intel macOS runner), and a cryptography
 patch release after the client was published is installed untested (still within the declared
-range). The first `uvx shakerscan mcp` downloads
+range). The hash-locked set is what the publish checks install; your `pipx` or `uv tool` install
+is pinned by version (python-fido2 exactly), not by hash. On an Intel Mac, cryptography 48.0.x
+receives no fixes after its own line: a known limitation a later client release revisits. If you
+added python-fido2 yourself with `pipx inject shakerscan fido2` (as 0.11.1 asked), upgrading to
+0.11.2 installs exactly 2.2.1; do not upgrade with `pipx upgrade --include-injected`, which can
+raise python-fido2 past the client's pin with only a pip warning (`pipx runpip shakerscan install
+fido2==2.2.1` puts it back). The first `uvx shakerscan mcp` downloads
 `cryptography` and `cffi` too (a few megabytes); on a slow link, run it once by hand (or `uv tool
 install shakerscan`) before an agent starts it, so the agent's MCP start-up does not time out. The
 Homebrew formula installs the client without python-fido2, so a Homebrew install has no
@@ -405,8 +411,12 @@ shakerscan hunt permissions wait 8f0c…  # JSON: granted, denied, expired, with
   `--method` the client uses the security key whenever a plugged-in key holds one of your
   credentials for this gateway (asked silently, without a touch): a touch alone when the gateway
   asks only for one (its administrator requires a touch), else a touch and the key's PIN, as at
-  sign-in. The TOTP code only when no key can answer here (none plugged in, none of yours, or the
-  gateway asks for a PIN and the key has none set). When several keys are plugged in, the first that holds one of your
+  sign-in. Before the PIN prompt the client says it is the key's own PIN (the one set on the
+  key), not your authenticator app's code, and how many PIN tries the key has left: each wrong PIN
+  costs one, three in a row need the key removed and inserted again, and eight block its PIN,
+  which only a reset (removing every credential on the key, other sites' passkeys included)
+  undoes. The TOTP code only when no key can answer here (none plugged in, none of yours, or the
+  gateway asks for a PIN and the key has none set); `--method totp` chooses it. When several keys are plugged in, the first that holds one of your
   credentials is used; you pick one only among keys that cannot be asked that way. The silent
   check is made only for this gateway's own relying party (the same rule the assertion follows), so
   no gateway learns what else your key holds. Without `--account`, the client says once whom it
@@ -425,7 +435,7 @@ shakerscan hunt permissions wait 8f0c…  # JSON: granted, denied, expired, with
 - **A gateway that requires a security-key touch for each decision** (its administrator's
   choice): no approver session opens; `--watch` asks for one touch per decision ("Touch your
   security key to allow (Ctrl-C to cancel)...", or "to deny"; the result says "by alice,
-  security-key touch"), and `allow a[l]l N shown` decides every request it is showing (one touch
+  security-key touch"; it says once whom it approves as), and `allow a[l]l N shown` decides every request it is showing (one touch
   per 50). A deny takes a touch too, as every decision there does. A touch that fails or
   that you cancel with Ctrl-C leaves the request pending and shows it again; the watch goes on,
   except when retrying cannot help (no key registered to your account, your account no longer
@@ -523,8 +533,11 @@ raised state-changing requests 20 -> 40 (safety ceiling) for Hunt 3f2a91c0-…
   (unless the key is passed through with `usbipd attach`) and in a container, where a key plugged
   into your computer cannot arrive, it says so at once; over mosh or another remote shell it cannot
   tell, and the end of the wait says so. `shakerscan scan --active-testing` does not ask its own
-  "Type 'yes'" when the gateway requires the touch: the touch is the confirmation when the target
-  needs one, and a target already authorized needs none, so no question of any kind is asked.
+  "Type 'yes'" when the touch follows: the gateway requires it, the scan carries no credential
+  profile or approval receipt of its own, and the target registered for the URL (registered or
+  found first, as the gateway does; registering is no decision) is not authorized yet. A target
+  already authorized is scanned with no touch, so the question is asked for it as before, and so
+  it is when any of this cannot be read.
   `shakerscan doctor` says whether the gateway requires the touch and whether one could happen
   here (python-fido2, a key plugged in), without asking the key anything: where a touch is
   required and no key is plugged in it says to plug in the key registered to you; elsewhere "none
@@ -533,7 +546,8 @@ raised state-changing requests 20 -> 40 (safety ceiling) for Hunt 3f2a91c0-…
 - **Anywhere else** (an agent's tool call, a pipe, a script, or inside `shakerscan agent`): it
   never prompts and never asks a key anything. It prints one line, `person decision required:
   <the decision>. Nothing was changed. The person runs this in their own terminal and touches
-  their security key: <command>`, and exits with status **3** (refused, nothing ran); the Hunt
+  their security key: <command>` (the command last, with nothing after it, so a copy of the line's
+  end takes no punctuation with it), and exits with status **3** (refused, nothing ran); the Hunt
   and target commands print that one line too, not the CLI's error JSON. The command is the
   dedicated one where there is one (`targets authorize`, `hunt budget raise`, `secrets
   reactivate|expiry`), else `shakerscan api METHOD PATH '<body>'`; a body longer than 1,024
@@ -547,9 +561,11 @@ raised state-changing requests 20 -> 40 (safety ceiling) for Hunt 3f2a91c0-…
   - `shakerscan targets authorize <url-or-id>` registers the target if needed and records its
     standing authorization for active testing (never intrusive; that is made in the browser). A
     gateway that requires the touch records the person who touched. Elsewhere on Enterprise the
-    engine records the connection's token first, the person it acts for, and that no person
-    proved it (`service token laptop for alice via shakerscan targets authorize (made with a
-    token, not proven by a person)`); on an open-source engine, this computer's user. The
+    engine records the connection's token first, the person it acts for, and that no touch
+    proved it (`service token laptop for alice via shakerscan targets authorize (made with the
+    token; no security-key touch proved who ran it)`), and the command says why; on an
+    open-source engine, this computer's user. A placeholder (`TARGET-ID`) or a value ending in
+    punctuation copied from a sentence is refused before anything is sent. The
     gateway names the environment the authorization is evaluated in ("in the production
     environment", or a lab environment, which admits private and local addresses). It takes a
     connected device's id as well (a device is authorized the same way) and `host://<address>`
@@ -561,7 +577,8 @@ raised state-changing requests 20 -> 40 (safety ceiling) for Hunt 3f2a91c0-…
   - `shakerscan hunt budget raise <hunt> --limit NAME=N|NAME=+N [--resume]` raises limits to new
     totals (or by `+N`), reading the Hunt's budget and its revision first. Where the gateway does
     not require the touch, the reason the engine keeps says the connection's token and that no
-    person proved it, after any `--reason` you give.
+    touch proved it, after any `--reason` you give; where it requires the touch, the gateway
+    records "Raised by <you> (terminal security-key touch)" instead of your `--reason`.
 
   On an open-source engine, or a gateway that does not require the touch, they are sent as they
   are, from any shell (on such a gateway an agent with your connection can make them too: the
@@ -597,8 +614,8 @@ raised state-changing requests 20 -> 40 (safety ceiling) for Hunt 3f2a91c0-…
   with the `shakerscan api GET` command the decision names).
 - **A refused start** (a scan, Hunt start, retest or network scan of a target nobody authorized
   yet) started nothing. The person's decision is the target's authorization, never the start
-  itself: in an agent's shell the command it names is `shakerscan targets authorize <target>`,
-  by the target id the gateway names (running the agent's own scan or retest would run the work
+  itself: in an agent's shell the command it names is `shakerscan targets authorize <target-id>`,
+  by the target id the gateway names (`TARGET-ID` when it could name none) (running the agent's own scan or retest would run the work
   twice). The refusal line, the MCP adapter and the Hunt skill tell an agent not to send the
   request again until the person says the target is authorized, and then to send it once (with
   the same Idempotency-Key, if it had one). In your own terminal, your own `shakerscan scan … --active-testing`
