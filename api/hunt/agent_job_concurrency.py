@@ -4,38 +4,43 @@ SSH log watches must not block external HTTP/scanner checks. This changes only
 scheduling of ordinary leased jobs; each handler still owns its durable claim,
 target validation, heartbeat, cancellation, budget settlement and acknowledgement.
 
-Long actions must not block short ones either. A long action (a wall over
-``LONG_ACTION_WALL_SECONDS``: a verifier, a template or port scan, a browser crawl) takes at
-most ``MAX_CONCURRENT_LONG_AGENT_JOBS`` of the ``MAX_CONCURRENT_AGENT_JOBS`` slots, so one slot
-always runs short work (``http.request``, ``artifact.inspect``, a browser step). The API waits
-for a queued short call for its own timeout plus 30 s, which long actions holding every slot
-for up to 20 minutes would use up. A long job leased while the long slots are taken waits inside
-its leased execution, so its queue lease keeps its heartbeat, and it does not count against the
-slot short work needs. Admission keeps one Hunt within that bound (``require_long_action_slot``),
-so a long job waits here only while other Hunts' long actions hold the long slots.
+Long actions must not block short ones either. A long action is a worker action whose wall, the
+larger of the registry's and the one admission reserved for this call, exceeds
+``LONG_ACTION_WALL_SECONDS`` (a verifier, a template or port scan, a crawl, a service
+fingerprint). Long actions take at most ``MAX_CONCURRENT_LONG_AGENT_JOBS`` of the
+``MAX_CONCURRENT_AGENT_JOBS`` slots, so a short call (``http.request``, ``artifact.inspect``, a
+browser step) never waits behind them: it waits only for short work, each at most
+``LONG_ACTION_WALL_SECONDS``, or an SSH command, which takes a slot without counting as long. A
+long job leased while the long slots are taken waits inside its leased execution, so its queue
+lease keeps its heartbeat, and it does not count against the slot short work needs. Admission keeps one
+Hunt within that bound (``require_long_action_slot``), so a long job waits here only while other
+Hunts' long actions hold the long slots. Once ``MAX_WAITING_LONG_AGENT_JOBS`` long jobs wait on one
+worker, it leases nothing more, short work included, until one of them starts.
 """
 from __future__ import annotations
 
 import asyncio
 import contextlib
 import functools
+import math
 from collections.abc import Awaitable, Callable, Mapping
 from typing import Any
 
 MAX_CONCURRENT_AGENT_JOBS = 3
 MAX_CONCURRENT_LONG_AGENT_JOBS = MAX_CONCURRENT_AGENT_JOBS - 1
-# A worker action whose wall may exceed this holds its slot longer than a queued short call can
-# wait for one, and outlasts the MCP adapter's progress hold (120 s, less its 10 s settle
-# reserve), so it may answer outcome=running and stay in flight while the agent works on.
-LONG_ACTION_WALL_SECONDS = 90
+# A worker action whose wall may exceed this is long. Short work shares the slot left to it, so a
+# short call queued behind one short action starts within this; its reservation lease is at least
+# 90 s from admission (hunt/capability_reservations.py), which leaves 30 s to spare, and the
+# worker refuses a job whose lease ran out before it started.
+LONG_ACTION_WALL_SECONDS = 60
 # Long jobs leased while the long slots were taken wait at most this many at once; beyond that
-# the worker leases nothing more until one of them starts.
+# the worker leases nothing more, short work included, until one of them starts.
 MAX_WAITING_LONG_AGENT_JOBS = 8
 # Executors whose Hunt actions admission reserves durably and a worker runs from the queue.
 _WORKER_EXECUTORS = frozenset({
     "worker_scanner", "worker_network", "worker_browser", "worker_auth", "worker_http",
 })
-# An SSH command runs on the worker that holds its session; it never waits for a slot.
+# An SSH command runs on the worker that holds its session; it never waits for a long slot.
 _SESSION_CAPABILITIES = frozenset({"ssh.connect", "ssh.exec", "ssh.close"})
 # Queue jobs that carry one Hunt capability. Any other agent-tool job is long only when its own
 # timeout is (a legacy agent scanner names one; a request-collection replay or an authentication
@@ -59,17 +64,37 @@ def _registry():
     return CAPABILITY_REGISTRY
 
 
+def _seconds(value: Any) -> float:
+    """A wall in seconds from a queue payload or a reservation; anything else counts as none."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return 0.0
+    return float(value) if math.isfinite(value) and value > 0 else 0.0
+
+
 @functools.cache
-def long_capability(name: str) -> bool:
-    """Whether a Hunt capability is a long worker action (see the module docstring)."""
+def _registry_wall(name: str) -> float | None:
+    """The registry wall of a worker action that takes a slot, or None for any other name."""
     try:
         spec = _registry().require(name)
     except KeyError:
-        return False
+        return None
     if spec.hunt_executor not in _WORKER_EXECUTORS or spec.name in _SESSION_CAPABILITIES:
+        return None
+    return max(int(spec.default_timeout_ms) / 1000, _seconds(spec.budget_cost.get("tool_wall_seconds")))
+
+
+def long_action(name: str, reserved_wall_seconds: Any = None) -> bool:
+    """Whether one call of a Hunt capability is a long worker action: its wall, the larger of the
+    registry's and the one admission reserved for it, exceeds ``LONG_ACTION_WALL_SECONDS``."""
+    wall = _registry_wall(str(name or "").strip().lower())
+    if wall is None:
         return False
-    wall = max(int(spec.default_timeout_ms) / 1000, float(spec.budget_cost.get("tool_wall_seconds") or 0))
-    return wall > LONG_ACTION_WALL_SECONDS
+    return max(wall, _seconds(reserved_wall_seconds)) > LONG_ACTION_WALL_SECONDS
+
+
+def long_capability(name: str) -> bool:
+    """Whether every call of a Hunt capability is a long worker action (its registry wall)."""
+    return long_action(name)
 
 
 @functools.lru_cache(maxsize=1)
@@ -77,14 +102,25 @@ def long_capabilities() -> frozenset[str]:
     return frozenset(spec.name for spec in _registry().list() if long_capability(spec.name))
 
 
+@functools.lru_cache(maxsize=1)
+def slot_capabilities() -> frozenset[str]:
+    """The Hunt capabilities a worker runs in one of its slots and that may be long."""
+    return frozenset(spec.name for spec in _registry().list() if _registry_wall(spec.name) is not None)
+
+
 def long_job(job: Any) -> bool:
     if not isinstance(job, Mapping):
         return False
     if job.get("type") in _CAPABILITY_JOB_TYPES:
-        return long_capability(str(job.get("capability_name") or "").strip().lower())
-    timeout_ms = job.get("timeout_ms")
-    return (isinstance(timeout_ms, (int, float)) and not isinstance(timeout_ms, bool)
-            and timeout_ms / 1000 > LONG_ACTION_WALL_SECONDS)
+        # The network, browser and HTTP payloads carry the reserved budget the worker checks; the
+        # scanner payload carries its reserved wall for scheduling only.
+        expected = job.get("expected_budget")
+        reserved = max(
+            _seconds(expected.get("tool_wall_seconds")) if isinstance(expected, Mapping) else 0.0,
+            _seconds(job.get("reserved_wall_seconds")),
+        )
+        return long_action(str(job.get("capability_name") or ""), reserved)
+    return _seconds(job.get("timeout_ms")) / 1000 > LONG_ACTION_WALL_SECONDS
 
 
 def _wake() -> None:
@@ -163,20 +199,27 @@ async def in_lane(job: Any, run: Callable[[Any], Awaitable[Any]]) -> Any:
         _wake()
 
 
-async def require_long_action_slot(conn: Any, run: Mapping[str, Any], name: str) -> None:
+async def require_long_action_slot(
+    conn: Any, run: Mapping[str, Any], name: str, reserved_wall_seconds: Any = None,
+) -> None:
     """Refuse a Hunt's long action while the Hunt already has the long slots' worth in flight.
 
-    Runs in admission's transaction after the Hunt row is locked, so two calls cannot both take
-    the last one. A refused call reserves and records nothing: the same key may be sent again
-    once one of them settles."""
-    if not long_capability(name):
+    A call is long by its own reserved wall (``long_action``), and so is each live reservation it
+    is counted against. Runs in admission's transaction after the Hunt row is locked, so two calls
+    cannot both take the last one. A refused call reserves and records nothing: the same key may
+    be sent again once one of them settles."""
+    if not long_action(name, reserved_wall_seconds):
         return
     rows = await conn.fetch(
         """SELECT capability_name, action_id FROM budget_reservations
            WHERE owner_kind='hunt' AND owner_id=$1 AND capability_name = ANY($2::text[])
+             AND (capability_name = ANY($3::text[])
+                  OR (jsonb_typeof(requested_json->'tool_wall_seconds') = 'number'
+                      AND (requested_json->>'tool_wall_seconds')::numeric > $4))
              AND status IN ('reserved','running') AND lease_expires_at > NOW()
            ORDER BY created_at, id""",
-        str(run["id"]), sorted(long_capabilities()),
+        str(run["id"]), sorted(slot_capabilities()), sorted(long_capabilities()),
+        LONG_ACTION_WALL_SECONDS,
     )
     if len(rows) < MAX_CONCURRENT_LONG_AGENT_JOBS:
         return
@@ -188,8 +231,8 @@ async def require_long_action_slot(conn: Any, run: Mapping[str, Any], name: str)
     raise HuntRefusal(
         "long_actions_in_flight",
         f"This Hunt already has {len(rows)} long actions in flight ({names}), the most that run "
-        "at once, so that a short call (http.request, artifact.inspect, a browser step) always "
-        "finds a worker. Nothing was reserved or recorded. Work with short capabilities or "
+        "at once, so that short calls (http.request, artifact.inspect, a browser step) do not "
+        "wait behind them. Nothing was reserved or recorded. Work with short capabilities or "
         "collect one of them (call it again with its idempotency_key and unchanged input), then "
         "send this call again with the same idempotency_key once one has settled.",
         extra={

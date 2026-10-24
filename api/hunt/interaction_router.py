@@ -2416,7 +2416,8 @@ async def _execute_hunt_capability_lifecycle(
                             hunt_id=hunt_id, session_id=request.input["session_id"])
                     # Long worker actions take at most two of the worker's three slots; a Hunt
                     # that already has two in flight is told to collect one first, at no cost.
-                    await require_long_action_slot(conn, run, name)
+                    # A call is long by the wall it is about to reserve.
+                    await require_long_action_slot(conn, run, name, charges.get("tool_wall_seconds"))
                     if durable_budget:
                         durable_action_digest = hunt_capability_action_digest(
                             hunt_id=run["id"],
@@ -4123,6 +4124,8 @@ async def _enqueue_canonical_scanner_capability(
         "type": "canonical_scanner_capability",
         "capability_name": capability_name,
         "capability_input": dict(capability_input),
+        # Scheduling only: the wall this call may run, so the worker runs a long one in a long slot.
+        "reserved_wall_seconds": math.ceil(timeout_ms / 1000),
         "hunt_id": str(hunt_id),
         "action_id": str(action_id),
         "budget_reservation_id": str(reservation_id),

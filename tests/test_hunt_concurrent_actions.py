@@ -98,8 +98,8 @@ def test_device_ssh_and_external_lanes_keep_daily_budget_and_health_checks(incom
 # The worker runs three leased jobs at once. Once an MCP call answered outcome=running instead of
 # holding the agent's step, an agent could keep three long actions in flight (two sqli.verify of
 # 1,200 s and an xss.verify): they took all three slots, and every short call it made meanwhile
-# (http.request, artifact.inspect: the API waits for its timeout plus 30 s) timed out in the queue.
-# A long job now takes one of at most two long slots; one leased while both are taken waits in its
+# (http.request, artifact.inspect) timed out in the queue. A long job (a reserved wall over a
+# minute) now takes one of at most two long slots; one leased while both are taken waits in its
 # leased execution without holding the slot short work runs in. Unit fixtures: the queue and the
 # job handlers are doubles; the scheduler is the worker's own.
 
@@ -211,10 +211,33 @@ def test_waiting_long_jobs_are_bounded():
     ({"type": "canonical_network_capability", "capability_name": "ports.discover"}, True),
     ({"type": "canonical_browser_capability", "capability_name": "browser.login_check"}, True),
     ({"type": "canonical_browser_capability", "capability_name": "browser.navigate"}, False),
-    # 75 s: settles within the MCP hold, so it may share any slot.
-    ({"type": "canonical_scanner_capability", "capability_name": "web.crawl"}, False),
+    # 75 s: longer than a short call queued behind it in the slot left to short work could wait.
+    ({"type": "canonical_scanner_capability", "capability_name": "web.crawl"}, True),
+    ({"type": "canonical_scanner_capability", "capability_name": "web.content_discover"}, True),
+    # A service fingerprint reserves 120 s per address (nmap's host timeout), 240 s on a dual-stack
+    # host; the registry's 90 s already makes it long, and its payload's reserved wall says so too.
+    ({"type": "canonical_network_capability", "capability_name": "service.fingerprint",
+      "expected_budget": {"tool_wall_seconds": 240}}, True),
+    ({"type": "canonical_network_capability", "capability_name": "service.fingerprint"}, True),
+    # 60 s: still short work.
+    ({"type": "canonical_http_capability", "capability_name": "authz.verify",
+      "expected_budget": {"tool_wall_seconds": 60}}, False),
+    # A call is long by the wall admission reserved for it, whatever the registry says.
+    ({"type": "canonical_scanner_capability", "capability_name": "web.probe"}, False),
+    ({"type": "canonical_scanner_capability", "capability_name": "web.probe",
+      "reserved_wall_seconds": 120}, True),
+    ({"type": "canonical_http_capability", "capability_name": "http.request",
+      "expected_budget": {"tool_wall_seconds": 61}}, True),
+    # A malformed reserved wall is no wall: the registry's decides.
+    ({"type": "canonical_scanner_capability", "capability_name": "web.probe",
+      "reserved_wall_seconds": True}, False),
+    ({"type": "canonical_scanner_capability", "capability_name": "web.probe",
+      "reserved_wall_seconds": "600"}, False),
+    ({"type": "canonical_scanner_capability", "capability_name": "web.probe",
+      "reserved_wall_seconds": float("nan"), "expected_budget": []}, False),
     # An SSH command runs on the worker that holds its session and never waits for a slot.
-    ({"type": "canonical_network_capability", "capability_name": "ssh.exec"}, False),
+    ({"type": "canonical_network_capability", "capability_name": "ssh.exec",
+      "expected_budget": {"tool_wall_seconds": 332}}, False),
     ({"type": "request_collection_replay", "capability_name": "collections.replay_active"}, False),
     ({"type": "agent_scanner_tool", "timeout_ms": 300_000}, True),
     ({"type": "agent_scanner_tool", "timeout_ms": 30_000}, False),
@@ -224,11 +247,51 @@ def test_which_jobs_are_long(job, long):
     assert jobs.long_job(job) is long
 
 
-def test_the_long_capabilities_are_the_worker_actions_that_can_outlast_the_mcp_hold():
+def test_the_long_capabilities_are_the_worker_actions_whose_registry_wall_exceeds_a_minute():
+    assert jobs.LONG_ACTION_WALL_SECONDS == 60
     assert jobs.long_capabilities() == {
-        "browser.login_check", "ports.discover", "service.nse_check", "sqli.verify",
-        "subdomains.discover", "templates.scan", "web.browser_crawl", "xss.verify",
+        "browser.login_check", "ports.discover", "service.fingerprint", "service.nse_check",
+        "sqli.verify", "subdomains.discover", "templates.scan", "web.browser_crawl",
+        "web.content_discover", "web.crawl", "xss.verify",
     }
+    assert jobs.long_capabilities() < jobs.slot_capabilities()
+    assert not jobs.slot_capabilities() & {"ssh.connect", "ssh.exec", "ssh.close", "candidate.verify"}
+
+
+def test_a_short_call_queued_behind_one_short_action_still_starts_within_its_reservation_lease():
+    """Short work shares the slot long actions leave, so a short call may wait for one short
+    action there. A worker refuses a job whose reservation lease ran out before it started, so
+    every short action's lease must outlast the longest short action ahead of it, with room for
+    the queue's own delay."""
+    from api.hunt.capability_reservations import hunt_capability_lease_seconds
+    from api.runtime.capability_registry import CAPABILITY_REGISTRY
+
+    short = sorted(jobs.slot_capabilities() - jobs.long_capabilities())
+    assert {"http.request", "artifact.inspect", "javascript.analyze", "authz.verify",
+            "browser.navigate", "web.probe"} <= set(short)
+    for name in short:
+        lease = hunt_capability_lease_seconds(CAPABILITY_REGISTRY.require(name).budget_cost)
+        assert lease - jobs.LONG_ACTION_WALL_SECONDS >= 30, (name, lease)
+
+
+def test_a_dual_stack_service_fingerprint_beside_two_long_actions_leaves_short_calls_a_slot():
+    """A service fingerprint reserves 240 s on a dual-stack host. Counted as short, it took the
+    slot left to short work beside two long actions, and an http.request queued behind it waited
+    for the fingerprint to end."""
+    async def run():
+        queue = Jobs()
+        for label, name in (("long-1", "sqli.verify"), ("long-2", "xss.verify")):
+            await queue.lease_and_dispatch(_job(label, name))
+        await queue.lease_and_dispatch({
+            "label": "fingerprint", "type": "canonical_network_capability",
+            "capability_name": "service.fingerprint", "expected_budget": {"tool_wall_seconds": 240}})
+        assert queue.started == ["long-1", "long-2"] and jobs._waiting == 1
+        await asyncio.wait_for(queue.lease_and_dispatch(_job("short", "http.request")), 1)
+        assert queue.started[-1] == "short"
+        for gate in queue.release.values():
+            gate.set()
+        await jobs.close()
+    _bounded(run)
 
 
 # --- Admission keeps one Hunt within the long slots ---------------------------------------------
@@ -259,7 +322,10 @@ def test_a_hunts_third_long_action_is_refused_without_anything_reserved_or_recor
     # "Not now": nothing is recorded under the key, so the same call is sent again later.
     assert not refused.value.recorded and refused.value.kind is None
     ((sql, args),) = conn.queries
-    assert args[0] == "hunt-1" and set(args[1]) == jobs.long_capabilities()
+    assert args[0] == "hunt-1" and set(args[1]) == jobs.slot_capabilities()
+    # A live reservation counts as long by its capability or by the wall it reserved.
+    assert set(args[2]) == jobs.long_capabilities() and args[3] == jobs.LONG_ACTION_WALL_SECONDS
+    assert "(requested_json->>'tool_wall_seconds')::numeric > $4" in sql
     assert "status IN ('reserved','running')" in sql and "lease_expires_at > NOW()" in sql
     assert "owner_kind='hunt'" in sql
 
@@ -269,9 +335,16 @@ def test_a_hunt_below_the_long_slots_and_any_short_call_are_admitted():
     asyncio.run(jobs.require_long_action_slot(one, {"id": "hunt-1"}, "sqli.verify"))
     full = ReservationRows([{"capability_name": "sqli.verify", "action_id": "a1"},
                             {"capability_name": "sqli.verify", "action_id": "a2"}])
-    for name in ("http.request", "artifact.inspect", "web.crawl", "candidate.verify", "ssh.exec"):
-        asyncio.run(jobs.require_long_action_slot(full, {"id": "hunt-1"}, name))
+    for name, wall in (("http.request", 15), ("artifact.inspect", 30), ("authz.verify", 60),
+                       ("browser.navigate", 30), ("candidate.verify", 180), ("ssh.exec", 332)):
+        asyncio.run(jobs.require_long_action_slot(full, {"id": "hunt-1"}, name, wall))
     assert full.queries == []  # a short call never even counts
+    # A call is long by the wall it reserves: a crawl, a fingerprint, or any worker action held
+    # longer than a minute.
+    for name, wall in (("web.crawl", 75), ("service.fingerprint", 240), ("web.probe", 120)):
+        with pytest.raises(HTTPException) as refused:
+            asyncio.run(jobs.require_long_action_slot(full, {"id": "hunt-1"}, name, wall))
+        assert refused.value.detail["reason_code"] == "long_actions_in_flight"
 
 
 def test_hunt_admission_refuses_a_third_long_action_before_reserving_it(monkeypatch):
@@ -300,3 +373,18 @@ def test_hunt_admission_refuses_a_third_long_action_before_reserving_it(monkeypa
     monkeypatch.setattr(sqli, "AdmissionStore", lambda: store)
     admitted, reserved = sqli._admit("/reports?filter=x")
     assert len(admitted.actions) == 1 and reserved[0]["tool_wall_seconds"] == 1_200
+
+
+def test_admission_classifies_the_call_by_the_wall_it_is_about_to_reserve():
+    """Structural pin for a unit run: the admission loop hands its own reserved wall to the long
+    slot check (tests/test_hunt_long_actions_postgres.py runs admission on PostgreSQL)."""
+    import ast
+    from pathlib import Path
+
+    source = (Path(__file__).resolve().parents[1] / "api/hunt/interaction_router.py").read_text()
+    lifecycle = next(node for node in ast.walk(ast.parse(source))
+                     if isinstance(node, ast.AsyncFunctionDef)
+                     and node.name == "_execute_hunt_capability_lifecycle")
+    (check,) = [call for call in ast.walk(lifecycle) if isinstance(call, ast.Call)
+                and getattr(call.func, "id", None) == "require_long_action_slot"]
+    assert ast.unparse(check) == "require_long_action_slot(conn, run, name, charges.get('tool_wall_seconds'))"

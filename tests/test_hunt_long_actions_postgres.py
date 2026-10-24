@@ -100,3 +100,28 @@ def test_another_hunts_long_actions_do_not_count_against_this_one(env):
     for key, name in (("first-0001", "xss.verify"), ("first-0002", "sqli.verify")):
         assert run(env, env.call(first, key, name=name, values=CALLS[name])) == "admitted"
     assert run(env, env.call(second, "second-0001", name="templates.scan", values=CALLS["templates.scan"])) == "admitted"
+
+
+def test_a_hold_reserved_longer_than_a_minute_counts_whatever_its_capability(env):
+    """A call is long by the wall it reserved, so a live hold of a capability the registry calls
+    short counts against the long slots once it reserved more than a minute; one that reserved a
+    minute or less does not. The rows are this Hunt's own reservations; only the reserved wall of
+    one is set to what a longer hold would be (fixture)."""
+    hunt = run(env, env.hunt(profile="balanced", budget={"max_active_actions": 50}, policy=ACTIVE,
+                             capabilities=tuple(CALLS)))
+    assert run(env, env.call(hunt, "long-0001", name="xss.verify", values=CALLS["xss.verify"])) == "admitted"
+    assert run(env, env.call(hunt, "probe-0001", name="web.probe", values={})) == "admitted"
+    # web.probe reserved its registry wall (30 s): it is short, so a second long action is admitted.
+    assert run(env, env.call(hunt, "long-0002", name="templates.scan", values=CALLS["templates.scan"])) == "admitted"
+    run(env, env.conn.execute(
+        """UPDATE budget_reservations SET status='released', lease_expires_at=NULL, finished_at=NOW()
+           WHERE owner_id=$1 AND action_id=$2""", str(hunt["id"]), _action_id(hunt, "long-0002")))
+    run(env, env.conn.execute(
+        """UPDATE budget_reservations
+              SET requested_json = jsonb_set(requested_json, '{tool_wall_seconds}', '61'::jsonb)
+            WHERE owner_id=$1 AND action_id=$2""", str(hunt["id"]), _action_id(hunt, "probe-0001")))
+    with pytest.raises(HTTPException) as refused:
+        run(env, env.call(hunt, "long-0003", name="sqli.verify", values=CALLS["sqli.verify"]))
+    assert refused.value.detail["reason_code"] == "long_actions_in_flight"
+    assert [item["capability_name"] for item in refused.value.detail["in_flight"]] == [
+        "xss.verify", "web.probe"]
