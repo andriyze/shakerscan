@@ -1267,13 +1267,41 @@ def key_failure(exc: BaseException) -> str:
     if cause_code in {"PIN_BLOCKED", "PIN_AUTH_BLOCKED"}:
         return "the key's PIN is blocked after wrong PINs: remove and insert the key, or reset its PIN"
     if cause_code == "PIN_INVALID":
-        return "the PIN was not accepted"
+        return "the PIN was not accepted (the key's own PIN, not an authenticator code; each wrong PIN costs a try)"
     if code == "CONFIGURATION_UNSUPPORTED" or cause_code in {"PIN_NOT_SET", "UNSUPPORTED_OPTION"}:
         return ("this key cannot do what the approval asks (its PIN): set a PIN on the key (for a "
                 "YubiKey: ykman fido access change-pin), or approve with --method totp where offered")
     if cause_code == "OPERATION_DENIED":
         return "the key declined"
     return "the security key did not answer as expected"
+
+
+def pin_retries(device: Any) -> int | None:
+    """How many wrong PINs the key still takes before it blocks its PIN, as the key says
+    (CTAP2 getPinRetries: a silent command, nothing blinks); None when it does not say."""
+    try:
+        from fido2.ctap2 import Ctap2
+        from fido2.ctap2.pin import ClientPin
+
+        retries = ClientPin(Ctap2(device)).get_pin_retries()[0]
+    except Exception:  # an older key, a U2F-only key, or a library without the command
+        return None
+    return retries if type(retries) is int and 0 <= retries <= 255 else None
+
+
+def pin_notice(retries: int | None) -> str:
+    """What the person is told before a security key's PIN is asked for: it is the key's own PIN
+    (the one set on the key, as at sign-in), not the 6-digit code of an authenticator app, and
+    how many tries are left; each wrong PIN costs one, and a blocked PIN is reset only by
+    resetting the key, which removes every credential on it, other sites' passkeys included."""
+    text = ("This approval asks for your security key's own PIN (the one set on the key), not your "
+            "authenticator app's code; --method totp approves with the code instead, where you enrolled one.")
+    if retries is None:
+        return text
+    if retries <= 3:
+        return (text + f" Only {retries} PIN {'try is' if retries == 1 else 'tries are'} left before the key "
+                "blocks its PIN; unblocking it resets the key and removes every credential on it.")
+    return text + f" {retries} PIN tries are left."
 
 
 def security_key_assertion(webauthn: Mapping[str, Any], origin: str, terminal: Terminal, *,
@@ -1320,7 +1348,10 @@ def security_key_assertion(webauthn: Mapping[str, Any], origin: str, terminal: T
                 terminal.say(prompt)
 
         def request_pin(self, permissions: Any, rp_id: Any) -> str:  # noqa: ARG002
-            return terminal.secret("Security key PIN: ")
+            # Said before the prompt: someone used to typing an authenticator code here (client
+            # 0.11.1 asked for one) would spend one of the key's PIN tries on it.
+            terminal.say(pin_notice(pin_retries(device)))
+            return terminal.secret("Security key PIN (not your authenticator code): ")
 
         def request_uv(self, permissions: Any, rp_id: Any) -> bool:  # noqa: ARG002
             return True
