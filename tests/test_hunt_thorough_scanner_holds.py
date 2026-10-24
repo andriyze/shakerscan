@@ -1,18 +1,19 @@
-"""A thorough Hunt's sqli.verify and xss.verify calls get a wall they can finish in.
+"""A Hunt's sqli.verify and xss.verify calls get a wall they can finish in.
 
 In measured runs, 2 of 2 sqli.verify calls timed out at 300.06 s and 300.08 s after 272 and 295
 requests, and 2 of 2 xss.verify calls timed out at 120 s after 400 requests. The argv paces
 sqlmap at about 1 request/s and Dalfox at about 3.3 requests/s on every Hunt profile, so a
-one-field sqlmap negative (about 432 requests) and one Dalfox parameter (about 1,300 requests)
-cannot finish inside the registry wall. Every profile reserved the same hold.
+one-field sqlmap negative and one Dalfox parameter (about 1,300 requests) cannot finish inside
+the registry wall. Every profile reserved the same hold.
 
-A thorough Hunt now reserves 1,800 requests / 1,200 s for sqli.verify and 1,800 requests / 480 s
-for xss.verify, with the same argv. The sqli.verify hold is twice what one injection point with no
-injection was measured to cost (up to 516 requests, about 570 s, on an endpoint that echoes the
-parameter): a 540 s wall stopped such a call at 490 requests without a verdict. Fast and balanced Hunts, the passive templates.scan pack, calls
+Every named profile (fast, balanced, thorough) now reserves 1,800 requests / 1,200 s for
+sqli.verify and 1,800 requests / 480 s for xss.verify, with the same argv. The sqli.verify hold is
+twice what one injection point with no injection was measured to cost (up to 516 requests, about
+570 s, on an endpoint that echoes the parameter): a 540 s wall stopped such a call at 490
+requests without a verdict. Unprofiled historical Hunts, the passive templates.scan pack, calls
 against a device target and headless (deep_domxss) xss.verify keep their 2.11.0 holds, plans and
-waits byte for byte. A thorough call the remaining ledger cannot fund at the longer hold is
-admitted at the registry hold, as it was before.
+waits byte for byte. A call the remaining budget cannot fund at its hold is refused with a
+budget request a person can grant, never started at a shorter hold.
 """
 from __future__ import annotations
 

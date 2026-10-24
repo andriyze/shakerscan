@@ -887,6 +887,43 @@ def test_a_suspected_finding_on_another_host_is_refused_before_any_request(monke
     assert requested == [] and outcome["database"].findings_created == []
 
 
+class CreateBasedLeadDatabase(NetworkHuntDatabase):
+    """A create-based mass_assignment lead on the network target: its collection has a
+    discovered DELETE route, so the server materializes the workflow with a create-surface
+    probe."""
+
+    def __init__(self):
+        super().__init__({"path": "/api/users", "method": "POST", "origin": SERVICE})
+        self.hypothesis = {"family": "mass_assignment",
+                           "metadata_json": {"route": "/api/users", "create_based": True}}
+
+    async def fetch(self, query, *args):
+        if "FROM target_endpoints" in query and "DELETE" in query:
+            return [{"path": "/api/users/{id}"}]
+        return await super().fetch(query, *args)
+
+
+def test_a_create_based_lead_on_a_network_target_is_probed_on_its_service(monkeypatch):
+    """The server-side materializer's create-surface probe is the one request it may send before
+    the workflow exists; on a network target it goes to the service, never to host://."""
+    database = CreateBasedLeadDatabase()
+    _network_verification_doubles(monkeypatch, database)
+    probed = []
+
+    async def probe_create_surface(target_url, collection_route, headers, cookies=None, transport=None):
+        # Labelled double for the probe's HTTP exchange: it records where it would connect.
+        probed.append((target_url, collection_route))
+        raise StopAfterRouting(target_url)
+
+    monkeypatch.setattr(api_module, "_probe_create_surface", probe_create_surface)
+    with pytest.raises(StopAfterRouting):
+        asyncio.run(api_module._arsenal_dispatch_workflow({
+            "target_id": str(TARGET), "workflow_id": str(uuid.uuid4()), "proof_family": "mass_assignment",
+            "_research_hypothesis_id": str(uuid.uuid4()),
+        }, APPROVAL, service_origin=SERVICE))
+    assert probed == [(SERVICE, "/api/users")]
+
+
 def test_a_route_the_workflow_contract_refuses_is_released_before_any_request(web_hunt, monkeypatch):
     """A candidate route such as //other-host/x fails the workflow contract before the proof runs
     (step_0_path_must_be_relative, nothing sent). The Hunt charged it as an uncertain verification
