@@ -465,3 +465,90 @@ def test_a_real_browser_that_stops_answering_mid_retest_leaves_it_inconclusive(m
     assert first_seconds < bound_seconds + 15  # a browser launch and the baseline request
     assert second["verdict"] == "exploited", second["verdict_reason"]
     assert second["proof"]["technique"] == "headless_xss_console"
+
+
+@pytest.mark.skipif(not hasattr(signal, "SIGSTOP"), reason="stopping a process needs POSIX signals")
+def test_a_retest_cancelled_while_its_stopped_browser_is_let_go_still_ends(monkeypatch, pages):
+    """Chromium is stopped (SIGSTOP) right before the retest opens its page, and the retest is
+    cancelled (an authorization hard stop, a lost lease, a worker shutdown) while its browser is
+    being let go, before the close bound runs out. The cancelled retest ends at once instead of
+    waiting forever on the let-go browser's connection; and the next retest in the same worker loop
+    launches another browser and proves the finding."""
+    from scanner_tools import proof_of_exploit
+    from worker_handlers.proof_replay import run_proof_retest
+
+    monkeypatch.setattr(proof_of_exploit, "_poe_config",
+                        dataclasses.replace(proof_of_exploit._poe_config, rate_limit_ms=0, enable_headless_xss=True))
+    # A shorter handoff keeps the case short; closing keeps its production bound.
+    monkeypatch.setattr(proof_of_exploit, "BROWSER_HANDOFF_TIMEOUT_SECONDS", 5.0)
+    before = set(_live_descendants())
+    stopped: list[int] = []
+    drivers: list[Any] = []
+    entries: list[Any] = []
+
+    def stop_chromium() -> None:
+        entry = proof_of_exploit._loop_browsers[asyncio.get_running_loop()]
+        entries.append(entry)
+        drivers.append(proof_of_exploit._driver_process(entry.starter))
+        for pid, command in _live_descendants().items():
+            if pid not in before and "chrom" in command.lower():
+                os.kill(pid, signal.SIGSTOP)
+                stopped.append(pid)
+
+    def end_stopped() -> None:
+        for pid in stopped:
+            for sig in (signal.SIGCONT, signal.SIGKILL):
+                with contextlib.suppress(ProcessLookupError):
+                    os.kill(pid, sig)
+
+    open_page = proof_of_exploit.proof_browser_page
+
+    async def page_once_stopped(context, **options):
+        if not stopped:
+            stop_chromium()
+        return await open_page(context, **options)
+
+    monkeypatch.setattr(proof_of_exploit, "proof_browser_page", page_once_stopped)
+
+    async def retest() -> dict:
+        verification = _verification(pages, "/vuln")
+        return await run_proof_retest(
+            verification, infer_retest_inputs(verification), poe=proof_of_exploit,
+            replay_commands=[], ladder=[], cancelled=lambda: False)
+
+    async def until_let_go() -> None:
+        # The let-go starts by forgetting the browser, then stops its Playwright.
+        while not entries or entries[0].browser is not None:
+            await asyncio.sleep(0.05)
+
+    async def worker() -> tuple[asyncio.Task, float | None, dict]:
+        loop = asyncio.get_running_loop()
+        first = loop.create_task(retest())
+        await asyncio.wait_for(until_let_go(), 60)
+        # Inside the stop of the let-go browser: its driver needs about 20 s to give up on a stopped
+        # Chromium, so the close bound has not run out yet.
+        await asyncio.sleep(2.0)
+        first.cancel()
+        cancelled_at = loop.time()
+        done, _ = await asyncio.wait({first}, timeout=3 * proof_of_exploit.BROWSER_CLOSE_TIMEOUT_SECONDS)
+        ended_after = loop.time() - cancelled_at if done else None
+        # The stopped browser is no longer needed: end it and its driver while this loop runs, so
+        # nothing of it is left for the garbage collector to close on a closed loop.
+        end_stopped()
+        for driver in drivers:
+            if driver is not None and driver.returncode is None:
+                with contextlib.suppress(ProcessLookupError):
+                    driver.kill()
+                await asyncio.wait_for(driver.wait(), 30)
+        return first, ended_after, await retest()
+
+    try:
+        first, ended_after, second = _finishes(lambda: asyncio.run(worker()))
+    finally:
+        end_stopped()
+    assert stopped, "no Chromium process to stop"
+    assert ended_after is not None, "the cancelled retest was still running 30 s after its cancel"
+    assert ended_after < 5.0
+    assert first.cancelled()
+    assert second["verdict"] == "exploited", second["verdict_reason"]
+    assert second["proof"]["technique"] == "headless_xss_console"
