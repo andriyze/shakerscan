@@ -50,7 +50,7 @@ ENGINE_LIMITS = [
 ]
 CLIENT_LIMITS = [
     "File-level inventory of the actual wheel and sdist, including packaged CLI/MCP modules and agent kit.",
-    "Third-party runtime dependencies of the base install (Requires-Dist without a marker, since client 0.11.2: python-fido2 for security keys) are inventoried from their reviewed, hash-locked resolution in client/requirements/runtime.lock at the source commit. They are not bundled in the archives; an install resolves the declared range from the package index at install time and can differ unless installed with --require-hashes from that lock. A Requires-Dist with any other marker fails generation.",
+    "Third-party runtime dependencies of the base install (Requires-Dist without an extra marker, since client 0.11.2: python-fido2 for security keys, on the platforms named by its environment marker) are inventoried from their reviewed, hash-locked universal resolution in client/requirements/runtime.lock at the source commit, each locked package with the platform marker it applies under. They are not bundled in the archives; an install resolves the declared range from the package index at install time and can differ unless installed with --require-hashes from that lock. A Requires-Dist whose marker names an extra together with any other condition fails generation.",
     "Each optional extra (pip install 'shakerscan[<extra>]') is inventoried from its reviewed, hash-locked resolution in client/requirements/<extra>.lock at the source commit. Extras are not bundled in the archives; an install resolves the declared range from the package index at install time and can differ unless installed with --require-hashes from that lock. Native/bundled code inside those packages (such as Playwright's driver) and browsers they download are not inventoried.",
     "Host Python, its standard library, pip/uv/pipx/Homebrew, build tools and externally launched agents are not bundled and are excluded.",
     "File hashes do not establish transitive composition of vendored code or absence of vulnerabilities.",
@@ -283,9 +283,19 @@ def package_name(name: str) -> str:
     return re.sub(r"[-_.]+", "-", name).lower()
 
 
+def marker_key(marker: str) -> str:
+    """An environment marker as one comparable string: no whitespace, double quotes (the built
+    metadata writes ``sys_platform == "darwin"`` for a source's ``sys_platform == 'darwin'``)."""
+    return "".join(marker.split()).replace("'", '"')
+
+
 def requirement_key(requirement: str) -> str:
     """``Playwright >= 1.44`` and ``playwright>=1.44`` are the same declared requirement, and so are
-    ``fido2>=2.0,<3`` and ``fido2<3,>=2.0`` (how the built metadata orders the specifiers)."""
+    ``fido2>=2.0,<3`` and ``fido2<3,>=2.0`` (how the built metadata orders the specifiers). An
+    environment marker is kept (``fido2>=2.2;sys_platform=="darwin"``), as marker_key spells it."""
+    requirement, _, marker = requirement.partition(";")
+    if marker.strip():
+        return requirement_key(requirement) + ";" + marker_key(marker)
     text = "".join(requirement.split())
     match = re.match(r"[A-Za-z0-9][A-Za-z0-9._-]*", text)
     require(match is not None, "unparseable declared requirement")
@@ -297,18 +307,19 @@ def requirement_key(requirement: str) -> str:
 
 def declared_requirements(metadata) -> tuple[list[str], dict[str, list[str]]]:
     """Requires-Dist as (base runtime dependencies, requirements grouped by optional extra). A base
-    runtime dependency has no marker; an extra's is scoped to exactly that extra. Any other marker
-    (an interpreter condition, an extra combined with another condition) is not supported."""
+    runtime dependency has no marker or an environment marker (the platforms it installs on,
+    kept in its key); an extra's is scoped to exactly that extra. A marker that names an extra
+    with any other condition is not supported."""
     runtime: list[str] = []
     extras: dict[str, list[str]] = {}
     for entry in metadata.get_all("Requires-Dist") or []:
         requirement, _, marker = str(entry).partition(";")
-        if not marker.strip():
-            runtime.append(requirement_key(requirement))
+        match = EXTRA_MARKER.fullmatch(marker) if marker.strip() else None
+        if match is None:
+            require(not re.search(r"\bextra\b", marker), "client declares runtime dependencies whose marker "
+                    "names an extra with another condition: extend stage-one SBOM resolution before publishing")
+            runtime.append(requirement_key(str(entry)))
             continue
-        match = EXTRA_MARKER.fullmatch(marker)
-        require(match is not None, "client declares runtime dependencies with a marker other than one extra: "
-                                   "extend stage-one SBOM resolution before publishing")
         extras.setdefault(match.group(2), []).append(requirement_key(requirement))
     provided = {package_name(str(name)) for name in metadata.get_all("Provides-Extra") or []}
     require(set(extras) <= provided, "Requires-Dist names an extra the package does not provide")

@@ -521,6 +521,38 @@ class ClientRuntimeDependencyTests(unittest.TestCase):
         with self.assertRaisesRegex(sbom.SBOMError, "runtime dependencies: client/requirements/runtime.txt differs"):
             self.export(FIDO2_RUNTIME, sha=self.commit())
 
+    def test_a_runtime_dependency_keeps_its_platform_marker(self):
+        """Client 0.11.2: python-fido2 only where its cryptography dependency ships wheels, and an
+        Intel Mac's cryptography capped below 49 (the last line with an Intel macOS wheel). The
+        source spells the marker with single quotes, the built metadata with double ones; one key."""
+        txt = ("fido2>=2.2,<2.3; sys_platform == 'darwin' or (sys_platform == 'linux' and platform_machine == 'x86_64')\n"
+               "cryptography<49; sys_platform == 'darwin' and platform_machine == 'x86_64'\n")
+        lock = RUNTIME_LOCK.replace(
+            "cryptography==50.0.2 \\",
+            "cryptography==48.0.1 ; sys_platform == 'darwin' \\\n"
+            f"    --hash=sha256:{FIDO2_HASH['cffi']}\n"
+            "cryptography==50.0.2 ; sys_platform == 'linux' \\",
+        )
+        self.write_locks(txt=txt, lock=lock)
+        requires = ('Requires-Dist: fido2<2.3,>=2.2; sys_platform == "darwin" or (sys_platform == "linux" and '
+                    'platform_machine == "x86_64")\n'
+                    'Requires-Dist: cryptography<49; sys_platform == "darwin" and platform_machine == "x86_64"\n')
+        docs, artifacts, entries = self.export(requires, sha=self.commit())
+        declared = artifacts[0]["declared_runtime_dependencies"]
+        self.assertEqual(declared, [
+            'cryptography<49;sys_platform=="darwin"andplatform_machine=="x86_64"',
+            'fido2<2.3,>=2.2;sys_platform=="darwin"or(sys_platform=="linux"andplatform_machine=="x86_64")',
+        ])
+        runtime = next(e for e in entries if e["scope"] == sbom.RUNTIME_SCOPE)
+        self.assertEqual(runtime["package_count"], 4)
+        document = json.loads(docs[runtime["sbom"]])
+        versions = sorted(p["versionInfo"] for p in document["packages"] if p["name"] == "cryptography")
+        self.assertEqual(versions, ["48.0.1", "50.0.2"])
+        # A source whose marker differs from the package's is refused.
+        self.write_locks(txt=txt.replace("x86_64')", "aarch64')"), lock=lock)
+        with self.assertRaisesRegex(sbom.SBOMError, "runtime.txt differs"):
+            self.export(requires, sha=self.commit())
+
     def test_runtime_is_never_an_extra_name(self):
         with self.assertRaisesRegex(sbom.SBOMError, "reserved"):
             self.export('Provides-Extra: runtime\nRequires-Dist: fido2>=2; extra == "runtime"\n')
