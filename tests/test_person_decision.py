@@ -2290,7 +2290,9 @@ def test_a_touch_mode_watch_names_the_approver_once_for_every_decision(monkeypat
             return status, {**answer, "account": "alice"}
         return original(method, path, payload, headers, timeout=timeout)
 
-    monkeypatch.setattr(approval.StepUp, "prove", lambda self, challenge: {"method": "security_key", "credential": {}})
+    named = []
+    monkeypatch.setattr(approval.StepUp, "prove", lambda self, challenge: named.append(self.named)
+                        or {"method": "security_key", "credential": {}})
     monkeypatch.setattr(approval, "security_key_readiness", lambda **_: "")
     terminal = Terminal(keys=["a", "a"])
 
@@ -2301,6 +2303,7 @@ def test_a_touch_mode_watch_names_the_approver_once_for_every_decision(monkeypat
                           poll_seconds=0.01, sleep=stop) == 0
     assert "Approving as" not in terminal.text, terminal.text
     assert begun == ["", "alice"], "the second decision names the approver the first one was given"
+    assert named == [True, True], "every decision's touch prompt names the approver the gateway gave"
     assert all(item["status"] == "granted" for item in gateway.requests.values())
 
 
