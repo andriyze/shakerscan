@@ -211,6 +211,63 @@ def test_only_a_person_at_a_terminal_is_asked(stdin, stdout, stderr, agent, expe
     assert decision.interactive(streams[0], streams[1], {"SHAKERSCAN_AGENT_NAME": agent}, streams[2]) is expected
 
 
+@pytest.mark.parametrize(("stdin", "stdout", "stderr", "agent", "expected"), [
+    (True, True, True, "", True),
+    (False, True, True, "", False),
+    (True, False, False, "", False),
+    (True, False, True, "", True),
+    (True, True, False, "", True),
+    (True, True, True, "opencode", False),
+])
+def test_approve_and_a_persons_decision_read_one_terminal_rule(monkeypatch, stdin, stdout, stderr, agent,
+                                                              expected):
+    """approve, --watch, agent --allow and the knowledge decisions (Terminal.require) ask the person
+    exactly when a person's decision does (interactive): input a terminal, and an output to ask
+    on. Without one, NotAtTerminal (exit 3) before anything is shown or asked of a key."""
+    streams = [types.SimpleNamespace(isatty=lambda value=value: value, write=lambda text: None, flush=lambda: None)
+               for value in (stdin, stdout, stderr)]
+    if agent:
+        monkeypatch.setenv("SHAKERSCAN_AGENT_NAME", agent)
+    else:
+        monkeypatch.delenv("SHAKERSCAN_AGENT_NAME", raising=False)
+    assert decision.interactive(streams[0], streams[1], {"SHAKERSCAN_AGENT_NAME": agent}, streams[2]) is expected
+    terminal = approval.Terminal(streams[0], streams[1], streams[2])
+    if expected:
+        terminal.require("shakerscan approve")
+        # Every prompt goes to the output that is the terminal.
+        assert terminal.stdout is (streams[1] if stdout else streams[2])
+    else:
+        with pytest.raises(approval.NotAtTerminal) as refused:
+            terminal.require("shakerscan approve")
+        assert "nothing was asked or decided" in str(refused.value)
+        assert isinstance(refused.value, approval.ApprovalError)
+
+
+def test_a_terminal_named_with_one_output_asks_only_on_it(monkeypatch):
+    """Terminal(stdin, stderr), as `hunt start --allow` asks on stderr: the process's stdout is
+    not taken instead when that stream is not a terminal."""
+    monkeypatch.delenv("SHAKERSCAN_AGENT_NAME", raising=False)
+    stdin = types.SimpleNamespace(isatty=lambda: True)
+    piped = types.SimpleNamespace(isatty=lambda: False)
+    monkeypatch.setattr(sys, "stdout", types.SimpleNamespace(isatty=lambda: True))
+    with pytest.raises(approval.NotAtTerminal):
+        approval.Terminal(stdin, piped).require("pre-authorizing --allow bounds")
+
+
+def test_approve_without_a_terminal_exits_3_and_reads_nothing(monkeypatch, capsys):
+    """The product CLI's approve: refused with exit 3 (nothing ran), before the instance is read."""
+    monkeypatch.delenv("SHAKERSCAN_AGENT_NAME", raising=False)
+    at_a_terminal(monkeypatch, stdin=True, stdout=False)
+    monkeypatch.setattr(sys, "stderr", io.StringIO())
+    sent = []
+    monkeypatch.setattr(v2_cli, "_approval_send", lambda client: lambda *a, **k: sent.append(a) or (200, {}))
+    monkeypatch.setenv("SHAKERSCAN_API_TOKEN", "sst_fixture_token")
+    for argv in (["approve", "r-1"], ["approve", "--all-pending"], ["approve", "--watch"], ["deny", "r-1"]):
+        assert v2_cli.main(["--api-url", ORIGIN, *argv]) == approval.EXIT_NOT_AT_TERMINAL == 3, argv
+    assert sent == [], "nothing was read from or sent to the gateway"
+    assert sys.stderr.getvalue().count("interactive terminal") == 4
+
+
 @pytest.mark.parametrize(("method", "path", "body", "command"), [
     ("POST", AMENDMENT, RAISE, f"shakerscan hunt budget raise {HUNT} --limit max_state_changing_requests=40"),
     ("POST", AMENDMENT, {**RAISE, "resume": True},

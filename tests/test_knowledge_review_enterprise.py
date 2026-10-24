@@ -153,6 +153,12 @@ class FakeGateway:
         self.seen.append((method, path, payload))
         if path == "/_enterprise/healthz":
             return (200, {"status": "ok", "mode": "enterprise"}) if self.enterprise else (404, {"detail": "Not Found"})
+        if path == "/_enterprise/me":
+            # How a gateway describes itself to a token: one that names the approver itself reports
+            # person_decision_proof; one from before the step-up routes does not.
+            if not self.enterprise:
+                return 404, {"detail": "Not Found"}
+            return 200, ({"person_decision_proof": False} if self.has_stepup else {"user": {"auth": "token"}})
         if path.startswith("/_enterprise/approvals/"):
             if not self.has_stepup:
                 return 404, {"detail": "Not Found"}
@@ -412,8 +418,9 @@ def test_allow_changes_and_review_refuse_a_pipe(monkeypatch, capsys):
     monkeypatch.setattr(v2_cli, "_approval_send", lambda client: gateway)
     monkeypatch.setenv("SHAKERSCAN_API_TOKEN", "sst_fixture_token")
     monkeypatch.setattr(sys, "stdin", io.StringIO("y\n246810\n"))
-    assert v2_cli.main(["--api-url", ORIGIN, "knowledge", "allow-changes", TARGET]) == 2
-    assert v2_cli.main(["--api-url", ORIGIN, "knowledge", "review"]) == 2
+    # Exit 3: refused, nothing ran (the same as any command that asks the person from no terminal).
+    assert v2_cli.main(["--api-url", ORIGIN, "knowledge", "allow-changes", TARGET]) == 3
+    assert v2_cli.main(["--api-url", ORIGIN, "knowledge", "review"]) == 3
     assert capsys.readouterr().err.count("interactive terminal") == 2
     assert gateway.seen == []
 

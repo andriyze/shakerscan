@@ -134,6 +134,17 @@ class OutcomeUnknown(ApprovalError):
     """The decision was sent but its outcome is not known (no answer in time): check, never resend."""
 
 
+class NotAtTerminal(ApprovalError):
+    """The command asks the person, and this is no person's terminal (its input or every output is
+    not a terminal, or the shell belongs to an agent that ``shakerscan agent`` started). Nothing
+    was asked of the person or a security key; the command exits 3 (refused, nothing ran)."""
+
+
+# Exit status of a command that asks the person and has no terminal to ask on: refused, nothing
+# ran (person_decision.EXIT_REFUSED has the same meaning).
+EXIT_NOT_AT_TERMINAL = 3
+
+
 class GatewayRefused(ApprovalError):
     """The gateway's step-up routes answered with a refusal in the contract's shape."""
 
@@ -440,6 +451,13 @@ def expected_challenge(nonce: str, digest: str) -> str:
 # --- the terminal ------------------------------------------------------------------------------
 
 
+def _is_tty(stream: Any) -> bool:
+    try:
+        return bool(stream is not None and stream.isatty())
+    except (AttributeError, ValueError):
+        return False
+
+
 def person_at_terminal(*streams: Any, environ: Mapping[str, str] | None = None) -> bool:
     """A person at a terminal: every stream given is a terminal, and this is not an agent that
     ``shakerscan agent`` launched (SHAKERSCAN_AGENT_NAME). An agent's tool call has no terminal;
@@ -447,21 +465,32 @@ def person_at_terminal(*streams: Any, environ: Mapping[str, str] | None = None) 
     environ = os.environ if environ is None else environ
     if (environ.get("SHAKERSCAN_AGENT_NAME") or "").strip():
         return False
-    for stream in streams:
-        try:
-            if not stream.isatty():
-                return False
-        except (AttributeError, ValueError):
-            return False
-    return True
+    return all(_is_tty(stream) for stream in streams)
+
+
+def terminal_output(stdin: Any, *outputs: Any, environ: Mapping[str, str] | None = None) -> Any:
+    """The stream a person is asked on, or None: the first of ``outputs`` that is a terminal, when
+    stdin is one too and this is not an agent that ``shakerscan agent`` launched. One rule for
+    every command that asks the person (an approval, a watch, start bounds, a person's decision,
+    a knowledge decision): its input is their terminal and so is the output it asks on, so a
+    command whose output is captured (an agent's tool call, a harness that gives it a terminal for
+    input only) never asks and never makes a key blink, and ``--json | jq`` in the person's own
+    terminal still asks, on stderr."""
+    if not person_at_terminal(stdin, environ=environ):
+        return None
+    return next((stream for stream in outputs if _is_tty(stream)), None)
 
 
 class Terminal:
-    """The person's own terminal. Every prompt refuses to run without one."""
+    """The person's own terminal. Every prompt refuses to run without one (``require``), and every
+    prompt is written to the output that is the terminal (stdout, else stderr)."""
 
-    def __init__(self, stdin: Any = None, stdout: Any = None) -> None:
+    def __init__(self, stdin: Any = None, stdout: Any = None, stderr: Any = None) -> None:
         self.stdin = stdin or sys.stdin
         self.stdout = stdout or sys.stdout
+        # The other output a prompt may go to when stdout is not the terminal: the process's
+        # stderr when stdout was not named, else only the one named.
+        self.stderr = stderr if stderr is not None else (sys.stderr if stdout is None else None)
         self._key_fd: int | None = None
         self._key_saved: Any = None
         self._escape = "idle"  # the escape-sequence state machine of key()
@@ -469,18 +498,24 @@ class Terminal:
         self._last_input = 0.0  # when _feed last saw a byte (a control string's quiet reset)
 
     def require(self, what: str) -> None:
+        """Refuse (NotAtTerminal, exit 3) unless a person is at this terminal: before anything is
+        read from the gateway, shown or asked of a security key. From here on every prompt goes
+        to the output that is the terminal."""
         if (os.environ.get("SHAKERSCAN_AGENT_NAME") or "").strip():
             # Inside an agent that `shakerscan agent` started (its shell may well be a terminal):
             # a plugged-in key would answer the agent's own request.
-            raise ApprovalError(
+            raise NotAtTerminal(
                 f"{what} asks the person, and this shell belongs to an agent that `shakerscan agent` "
-                "started: run it yourself in your own terminal"
+                "started: run it yourself in your own terminal; nothing was asked or decided"
             )
-        if not person_at_terminal(self.stdin):
-            raise ApprovalError(
-                f"{what} asks the person at an interactive terminal and refuses to read a pipe: run it "
-                "yourself in your own terminal, never through an agent's shell"
+        stream = terminal_output(self.stdin, self.stdout, self.stderr)
+        if stream is None:
+            raise NotAtTerminal(
+                f"{what} asks the person at an interactive terminal (its input and its output a "
+                "terminal) and refuses a pipe or captured output: run it yourself in your own "
+                "terminal, never through an agent's shell; nothing was asked or decided"
             )
+        self.stdout = stream
 
     def say(self, text: str = "") -> None:
         self.stdout.write(text + "\n")
@@ -2012,7 +2047,8 @@ def add_arguments(parser: Any, command: str) -> None:
 
 
 __all__ = [
-    "APPROVAL_SCHEMA_PREFIX", "ApprovalError", "BEGIN_PATH", "GatewayRefused", "OutcomeUnknown",
+    "APPROVAL_SCHEMA_PREFIX", "ApprovalError", "BEGIN_PATH", "EXIT_NOT_AT_TERMINAL", "GatewayRefused",
+    "NotAtTerminal", "OutcomeUnknown", "terminal_output",
     "instance_kind", "FINISH_PATH", "PREAUTHORIZATION_HEADER",
     "REVOKE_TIMEOUT_SECONDS", "RequestGone", "SESSION_REVOKE_PATH", "StepUp", "StepUpUnavailable", "Terminal", "add_arguments",
     "assertion_json", "decide", "decide_knowledge", "decision_entry", "expected_challenge", "find_request",

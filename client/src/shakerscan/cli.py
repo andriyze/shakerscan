@@ -60,6 +60,10 @@ LOOPBACK_HOSTS = {"localhost", "127.0.0.1", "::1"}
 class ClientError(Exception):
     """A configuration problem the operator can fix; reported without a traceback."""
 
+    # 3: a command that asks the person, refused because this is no person's terminal (nothing
+    # ran); every other problem exits 2.
+    exit_code = 2
+
 
 def build_source() -> str | None:
     """The source commit a packaged client was built from (``_build.json``), or None.
@@ -829,7 +833,10 @@ def launch_preauthorization(args: argparse.Namespace, url: str, token_file: str 
             url, approval.Terminal(), bounds, use="agent_launch", account=args.account, method=args.method,
         )
     except approval.ApprovalError as exc:
-        raise ClientError(f"{str(exc).rstrip('.')}. No agent was started.") from exc
+        error = ClientError(f"{str(exc).rstrip('.')}. No agent was started.")
+        if isinstance(exc, approval.NotAtTerminal):
+            error.exit_code = approval.EXIT_NOT_AT_TERMINAL
+        raise error from exc
     print(_shown(f"allowed:   {', '.join(bounds)} (pre-authorization {granted['id']}"
                  + (f", until {granted['expires_at']}" if granted.get("expires_at") else "") + ")"))
     return {**env, "SHAKERSCAN_PREAUTHORIZATION_ID": str(granted["id"])}
@@ -1671,4 +1678,4 @@ def main(argv: Sequence[str] | None = None) -> int:
         return COMMANDS[args.command](args)
     except ClientError as exc:
         sys.stderr.write(f"shakerscan: {_shown(exc, multiline=True)}\n")
-        return 2
+        return exc.exit_code

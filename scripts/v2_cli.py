@@ -1675,7 +1675,15 @@ def _run_approval(args: argparse.Namespace, client: ApiClient) -> int:
         )
     except approval.ApprovalError as exc:
         print(f"shakerscan {args.product}: {exc}", file=sys.stderr)
-        return 2
+        return _approval_exit(exc)
+
+
+def _approval_exit(exc: Exception) -> int:
+    """The exit status of a terminal decision that failed: 3 when it asks the person and this is
+    no person's terminal (refused, nothing ran: the same as a person's decision an agent's shell
+    cannot make), else 2."""
+    approval = _approval()
+    return approval.EXIT_NOT_AT_TERMINAL if isinstance(exc, approval.NotAtTerminal) else 2
 
 
 # --- knowledge review --------------------------------------------------------------------------
@@ -1995,7 +2003,7 @@ def _run_knowledge_review(args: argparse.Namespace, client: ApiClient) -> int:
         return 1 if failures else 0
     except approval.ApprovalError as exc:
         print(f"shakerscan knowledge review: {exc}", file=sys.stderr)
-        return 2
+        return _approval_exit(exc)
 
 
 # --- knowledge show | dismiss | reopen ---------------------------------------------------------
@@ -2262,7 +2270,7 @@ def _offer_refresh(args: argparse.Namespace, client: ApiClient, report: Mapping[
         return 1 if failures else 0
     except approval.ApprovalError as exc:
         print(f"shakerscan knowledge continue --refresh: {exc}", file=sys.stderr)
-        return 2
+        return _approval_exit(exc)
 
 
 _DISCOVERY_PATH = re.compile(r"^/discovery\?root_domain=[A-Za-z0-9.-]{1,253}$")
@@ -2395,7 +2403,7 @@ def _run_knowledge_release(args: argparse.Namespace, client: ApiClient) -> int:
         return 0
     except approval.ApprovalError as exc:
         print(f"shakerscan knowledge release: {exc}", file=sys.stderr)
-        return 2
+        return _approval_exit(exc)
 
 
 def _run_knowledge_releases(args: argparse.Namespace, client: ApiClient) -> int:
@@ -2465,7 +2473,7 @@ def _run_knowledge_decision(args: argparse.Namespace, client: ApiClient) -> int:
         return 0
     except approval.ApprovalError as exc:
         print(f"shakerscan knowledge {action}: {exc}", file=sys.stderr)
-        return 2
+        return _approval_exit(exc)
 
 
 REFERENCE_LIST_DEFAULT = 50
@@ -2569,7 +2577,7 @@ def _run_secrets(args: argparse.Namespace, client: ApiClient) -> int:
             status, body = send("POST", f"{path}/{action}", payload)
     except approval.ApprovalError as exc:
         print(f"shakerscan secrets {command}: {exc}", file=sys.stderr)
-        return 2
+        return _approval_exit(exc)
     if not 200 <= status < 300:
         detail = body.get("detail") if isinstance(body, Mapping) else body
         print(_shown(f"  not applied: HTTP {status}: {detail}"), file=sys.stderr)
@@ -2659,7 +2667,7 @@ def _run_allow_changes(args: argparse.Namespace, client: ApiClient) -> int:
         return 1
     except approval.ApprovalError as exc:
         print(f"{command}: {exc}", file=sys.stderr)
-        return 2
+        return _approval_exit(exc)
 
 
 if __name__ == "__main__":

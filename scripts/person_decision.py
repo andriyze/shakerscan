@@ -162,11 +162,12 @@ def interactive(stdin: Any = None, stdout: Any = None, environ: Mapping[str, str
                 stderr: Any = None) -> bool:
     """A person at a terminal: stdin is a terminal, and stdout or stderr is one to ask on
     (``--json | jq`` in the person's own terminal still asks, on stderr), and this is not an
-    agent that `shakerscan agent` launched. An agent's tool call has no terminal."""
+    agent that `shakerscan agent` launched. An agent's tool call has no terminal. The same rule as
+    every other command that asks the person (hunt_approve.terminal_output: approve, --watch,
+    agent --allow)."""
     approve = _approve()
-    if not approve.person_at_terminal(stdin or sys.stdin, environ=environ):
-        return False
-    return _tty(stdout or sys.stdout) or _tty(stderr or sys.stderr)
+    return approve.terminal_output(stdin or sys.stdin, stdout or sys.stdout, stderr or sys.stderr,
+                                   environ=environ) is not None
 
 
 def summary_lines(text: Any) -> list[str]:
