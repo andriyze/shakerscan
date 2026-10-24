@@ -383,7 +383,9 @@ def test_the_mcp_adapter_names_the_persons_command_and_never_retries(gateway, mo
 
 def test_approve_prefers_a_plugged_in_key_and_falls_back_as_before(monkeypatch):
     monkeypatch.setattr(approval, "security_keys_present", lambda: True)
-    assert approval.preferred_method(["totp", "security_key"]) == "security_key"
+    # A gateway that does not say it asks only for a touch: the code first, as before.
+    assert approval.preferred_method(["totp", "security_key"]) == "totp"
+    assert approval.preferred_method(["security_key"]) == "security_key"
     assert approval.preferred_method(["totp"]) == "totp"
     monkeypatch.setattr(approval, "security_keys_present", lambda: False)
     assert approval.preferred_method(["totp", "security_key"]) == "totp"
@@ -732,19 +734,19 @@ WEBAUTHN = {"rpId": "gateway.example.com", "challenge": "AA", "userVerification"
 def test_approve_prefers_the_key_only_when_a_plugged_in_key_can_answer(monkeypatch):
     """A Touch ID passkey on the account and an unrelated YubiKey plugged in
     made 0.11.2 ask for a touch that could only fail, where 0.11.1 asked for the TOTP code."""
+    touch = {**WEBAUTHN, "userVerification": "discouraged"}
     unrelated = key("YubiKey 5", holds=[b"other"])
     fake_fido2(monkeypatch, [unrelated])
-    assert approval.preferred_method(["totp", "security_key"], WEBAUTHN, ORIGIN) == "totp"
+    assert approval.preferred_method(["totp", "security_key"], touch, ORIGIN) == "totp"
     assert unrelated.probed == 1
     fake_fido2(monkeypatch, [unrelated, key("YubiKey 5C", holds=[b"mine"])])
-    assert approval.preferred_method(["totp", "security_key"], WEBAUTHN, ORIGIN) == "security_key"
+    assert approval.preferred_method(["totp", "security_key"], touch, ORIGIN) == "security_key"
     fake_fido2(monkeypatch, [key("no PIN", holds=[b"mine"], pin=False)])
     assert approval.preferred_method(["totp", "security_key"], WEBAUTHN, ORIGIN) == "totp"
-    assert approval.preferred_method(["totp", "security_key"], {**WEBAUTHN, "userVerification": "discouraged"},
-                                     ORIGIN) == "security_key"
+    assert approval.preferred_method(["totp", "security_key"], touch, ORIGIN) == "security_key"
     # Under the switch the key is the only method: it is asked, and says plainly why not.
     assert approval.preferred_method(["security_key"], WEBAUTHN, ORIGIN) == "security_key"
-    devices, why = approval.eligible_devices([unrelated], WEBAUTHN, ORIGIN)
+    devices, why = approval.eligible_devices([unrelated], touch, ORIGIN)
     assert devices == [] and "not registered to your account" in why
     devices, why = approval.eligible_devices([key("no PIN", holds=[b"mine"], pin=False)], WEBAUTHN, ORIGIN)
     assert devices == [] and "has no PIN" in why
@@ -895,8 +897,9 @@ def test_doctor_says_whether_a_touch_is_required_and_could_happen_here(monkeypat
     # Only the gateway's description of itself is read: an older gateway's feed route would be
     # refused and audited on every doctor run.
     assert set(asked) == {approval.ME_PATH}
+    # An instance that does not describe itself is no Enterprise gateway: nothing is said.
     gone = types.SimpleNamespace(request_json=lambda method, path: (_ for _ in ()).throw(OSError("404")))
-    assert decisions.touch_lines(gone)[0] == "touch:    unknown (this instance does not say)"
+    assert decisions.touch_lines(gone) == []
 
 
 # ---- a touch-mode watch survives a failed or cancelled touch ------------------------------------
@@ -1497,3 +1500,258 @@ def test_an_approval_says_once_whom_it_is_for():
     assert out.getvalue().count("Approving as alice, the person this connection acts for") == 1
     assert "--account NAME approves as someone else" in out.getvalue()
 
+
+
+# ---- the least work for the person, the words they are shown, where a key cannot be opened ------
+
+
+def test_with_the_switch_off_and_a_code_enrolled_the_code_is_asked_as_before(monkeypatch):
+    """Without --method the person is asked for what costs them least: a touch when the gateway
+    asks only for one (its administrator requires a touch), else the authenticator code when one
+    is enrolled, as client 0.11.1 asks (with the switch off a key also asks for its PIN)."""
+    mine = key("YubiKey 5C", holds=[b"mine"])
+    fake_fido2(monkeypatch, [mine])
+    touch = {**WEBAUTHN, "userVerification": "discouraged"}
+    assert approval.preferred_method(["totp", "security_key"], WEBAUTHN, ORIGIN) == "totp"
+    assert approval.preferred_method(["totp", "security_key"], touch, ORIGIN) == "security_key"
+    assert approval.preferred_method(["totp", "security_key"], None, ORIGIN) == "totp"
+    # A key is all the person has: it is asked (with its PIN when the gateway asks for one).
+    assert approval.preferred_method(["security_key"], WEBAUTHN, ORIGIN) == "security_key"
+    assert approval.preferred_method(["security_key", "sso"], WEBAUTHN, ORIGIN) == "security_key"
+    # --method still chooses.
+    stepup = approval.StepUp(lambda *a, **k: (200, {}), ORIGIN, approval.Terminal(io.StringIO(), io.StringIO()),
+                             method="security-key")
+    assert stepup.method_for({"methods": ["totp", "security_key"], "webauthn": WEBAUTHN}) == "security_key"
+
+
+def test_a_key_with_a_pin_that_finds_nothing_without_it_is_left_to_the_real_assertion(monkeypatch):
+    """A credential a browser made to need the key's PIN for every use (credProtect) is not found
+    by the silent check, which asks no PIN. When the gateway asks for the PIN anyway, the key is
+    not called 'not registered' on that answer: the assertion, with the PIN, decides."""
+    holder = key("YubiKey 5", holds=[], pin=True)
+    fake_fido2(monkeypatch, [holder])
+    assert approval.probe_device(holder, WEBAUTHN, ORIGIN) == "unknown"
+    devices, why = approval.eligible_devices([holder], WEBAUTHN, ORIGIN)
+    assert devices == [holder] and why == ""
+    # A touch asks no PIN: such a credential cannot answer it, and the person is told both causes.
+    touch = {**WEBAUTHN, "userVerification": "discouraged"}
+    assert approval.probe_device(holder, touch, ORIGIN) == "no"
+    devices, why = approval.eligible_devices([holder], touch, ORIGIN)
+    assert devices == []
+    assert "not registered to your account" in why and "only after its PIN" in why
+    assert 'after my password' in why
+
+
+def _decide_by_touch(monkeypatch, decision_word, *, touch=True):
+    from tests.test_hunt_approve import ORIGIN as SCRIPTED_ORIGIN
+    from tests.test_hunt_approve import Gateway, Terminal, _request
+
+    gateway = Gateway(_request(), methods=("security_key",))
+    original = gateway.__call__
+
+    def with_webauthn(method, path, payload=None, headers=None, *, timeout=None):
+        status, answer = original(method, path, payload, headers, timeout=timeout)
+        if path == approval.BEGIN_PATH and status == 200:
+            nonce = b64url(b"n" * 32)
+            answer = {**answer, "nonce": nonce, "webauthn": {
+                "challenge": approval.expected_challenge(nonce, answer["set_digest"]), "rpId": "scanner.example.com",
+                "userVerification": "discouraged" if touch else "required"}}
+        return status, answer
+
+    prompts = []
+
+    def assertion(webauthn, origin, terminal, *, prompt="", insert_seconds=60.0):
+        prompts.append(prompt)
+        terminal.say(prompt)
+        return {"id": "Y3JlZA", "rawId": "Y3JlZA", "type": "public-key", "response": {}}
+
+    monkeypatch.setattr(approval, "security_key_assertion", assertion)
+    terminal = Terminal()
+    code = approval.decide(with_webauthn, terminal, [_request()], decision_word, enterprise=True,
+                           origin=SCRIPTED_ORIGIN, account="alice")
+    return code, prompts, terminal.text
+
+
+@pytest.mark.parametrize(("word", "verb", "state"), [("allow", "allow", "granted"), ("deny", "deny", "denied")])
+def test_a_touch_says_what_it_decides_and_the_result_says_it_was_a_touch(monkeypatch, word, verb, state):
+    code, prompts, text = _decide_by_touch(monkeypatch, word)
+    assert code == 0
+    assert prompts == [f"Touch your security key to {verb} (Ctrl-C to cancel)..."]
+    assert f"{state}: " in text and "(by alice, security-key touch)" in text
+    # With the switch off a key with its PIN is said as before.
+    code, prompts, text = _decide_by_touch(monkeypatch, word, touch=False)
+    assert "(by alice, terminal stepup)" in text
+
+
+def test_several_requests_say_how_many_one_touch_decides(monkeypatch):
+    from tests.test_hunt_approve import ORIGIN as SCRIPTED_ORIGIN
+    from tests.test_hunt_approve import Gateway, Terminal, _request
+
+    second = _request(id="eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee", title="Second")
+    gateway = Gateway(_request(), second, methods=("security_key",))
+    original = gateway.__call__
+
+    def with_webauthn(method, path, payload=None, headers=None, *, timeout=None):
+        status, answer = original(method, path, payload, headers, timeout=timeout)
+        if path == approval.BEGIN_PATH and status == 200:
+            nonce = b64url(b"n" * 32)
+            answer = {**answer, "nonce": nonce, "webauthn": {
+                "challenge": approval.expected_challenge(nonce, answer["set_digest"]), "rpId": "scanner.example.com",
+                "userVerification": "discouraged"}}
+        return status, answer
+
+    prompts = []
+    monkeypatch.setattr(approval, "security_key_assertion",
+                        lambda webauthn, origin, terminal, *, prompt="", insert_seconds=60.0:
+                        prompts.append(prompt) or {"id": "Y3JlZA", "rawId": "Y3JlZA", "type": "public-key",
+                                                   "response": {}})
+    approval.decide(with_webauthn, Terminal(), [_request(), second], "allow", enterprise=True,
+                    origin=SCRIPTED_ORIGIN, account="alice")
+    assert prompts == ["Touch your security key to allow these 2 requests (Ctrl-C to cancel)..."]
+
+
+def test_no_key_registered_names_the_decision_and_asks_no_touch():
+    """Before any touch was asked, the person used to read 'the gateway refused the touch
+    (security_key_not_registered, HTTP 403)' with no word of the decision."""
+    def post(path, payload):
+        assert path == decision.BEGIN_PATH, "nothing is finished without a touch"
+        return 403, {"schema_version": "shakerscan-approval-error/v1", "error": "security_key_not_registered",
+                     "message": "register a USB or NFC security key once, in the browser, under My account"}
+
+    asked = []
+    out = io.StringIO()
+    with pytest.raises(decision.PersonDecisionError) as raised:
+        decision.complete(post, origin=ORIGIN, method="POST", path=AMENDMENT, body=json.dumps(RAISE).encode(),
+                          detail=REFUSAL["detail"], terminal=approval.Terminal(io.StringIO(), out),
+                          assertion=lambda *a, **k: asked.append(a))
+    text = str(raised.value)
+    assert asked == [] and "refused the touch" not in text
+    assert text.startswith(f"{SUMMARY}: no touch was asked (security_key_not_registered): register a USB or NFC")
+    assert text.endswith("nothing was changed")
+
+
+def test_a_touch_the_gateway_did_not_accept_is_said_as_such():
+    challenge = {}
+
+    def post(path, payload):
+        if path == decision.BEGIN_PATH:
+            gateway = ScriptedGateway()
+            status, answer = gateway.post(path, payload)
+            challenge.update(answer)
+            return status, answer
+        return 403, {"schema_version": "shakerscan-approval-error/v1", "error": "stepup_failed",
+                     "message": "the security key's signature was not accepted"}
+
+    with pytest.raises(decision.PersonDecisionError, match="the gateway did not accept the touch \\(stepup_failed"):
+        decision.complete(post, origin=ORIGIN, method="POST", path=AMENDMENT, body=json.dumps(RAISE).encode(),
+                          detail=REFUSAL["detail"], terminal=approval.Terminal(io.StringIO(), io.StringIO()),
+                          assertion=Signer())
+
+
+SECRET_REF = "5a5a5a5a-1111-4222-8333-444455556666"
+
+
+@pytest.mark.parametrize(("path", "body", "command"), [
+    (f"/targets/{TARGET}/discovered-secrets/{SECRET_REF}/state", {"state": "active"},
+     f"shakerscan secrets reactivate {TARGET} {SECRET_REF}"),
+    (f"/targets/{TARGET}/discovered-secrets/{SECRET_REF}/expiry", {"days": 30},
+     f"shakerscan secrets expiry {TARGET} {SECRET_REF} --days 30"),
+])
+def test_a_secrets_decision_names_the_secrets_command(path, body, command):
+    assert decision.person_command("POST", path, json.dumps(body).encode()) == command
+
+
+def test_a_large_request_is_named_by_a_saved_body_not_one_long_line(tmp_path, monkeypatch):
+    """A generic decision's whole body went into one `shakerscan api` line (up to about 190 KB
+    in the agent's output and the person's shell history). A body longer than INLINE_BODY is
+    saved, owner-only, and the command names the file; `shakerscan api` reads it with @."""
+    monkeypatch.setenv("SHAKERSCAN_CONFIG_DIR", str(tmp_path / "cfg"))
+    path = f"/targets/{TARGET}/hunt-authority"
+    body = json.dumps({"expected_revision": 3, "collection_ids": [TARGET] * 200}).encode()
+    command = decision.person_command("PUT", path, body)
+    assert len(command) < 300, command
+    assert command.startswith(f"shakerscan api PUT {path} @")
+    saved = Path(command.split(" @", 1)[1])
+    assert saved.read_bytes() == body
+    assert saved.parent == tmp_path / "cfg" / "decisions"
+    assert saved.stat().st_mode & 0o077 == 0
+    # The same body is one file; a short body stays inline.
+    assert decision.person_command("PUT", path, body) == command
+    small = json.dumps({"expected_revision": 3}).encode()
+    assert decision.person_command("PUT", path, small) == f"shakerscan api PUT {path} '{small.decode()}'"
+    request = api_cli.build_request("PUT", path, "@" + str(saved), api_url=ORIGIN, token=None)
+    assert json.loads(request.data) == json.loads(body)
+    with pytest.raises(api_cli.ApiCliError, match="cannot read the request body"):
+        api_cli.build_request("PUT", path, "@" + str(tmp_path / "missing.json"), api_url=ORIGIN, token=None)
+
+
+def test_a_body_that_cannot_be_saved_is_named_without_it(tmp_path, monkeypatch):
+    blocked = tmp_path / "file"
+    blocked.write_text("")
+    monkeypatch.setenv("SHAKERSCAN_CONFIG_DIR", str(blocked))  # a file: no directory can be made in it
+    body = json.dumps({"expected_revision": 3, "collection_ids": [TARGET] * 200}).encode()
+    command = decision.person_command("PUT", f"/targets/{TARGET}/hunt-authority", body)
+    assert len(command) < 400 and "@" in command and str(len(body)) in command
+
+
+def _linux_nodes(tmp_path, monkeypatch, descriptor):
+    (tmp_path / "dev").mkdir()
+    (tmp_path / "dev" / "hidraw0").write_text("")
+    if descriptor is not None:
+        where = tmp_path / "sys" / "class" / "hidraw" / "hidraw0" / "device"
+        where.mkdir(parents=True)
+        (where / "report_descriptor").write_bytes(descriptor)
+    monkeypatch.setattr(approval.sys, "platform", "linux")
+    monkeypatch.setattr(approval, "key_out_of_reach", lambda: "")
+    real_access = approval.os.access
+    monkeypatch.setattr(approval.os, "access",
+                        lambda path, mode: False if "/dev/hidraw" in str(path) else real_access(path, mode))
+    return str(tmp_path)
+
+
+FIDO_DESCRIPTOR = bytes.fromhex("06d0f10901a1010920150026ff007508954081020921150026ff00750895409102c0")
+KEYBOARD_DESCRIPTOR = bytes.fromhex("05010906a101050719e029e715002501750195088102c0")
+
+
+def test_on_linux_a_key_this_user_cannot_open_is_said_at_once(tmp_path, monkeypatch):
+    """python-fido2 skips a /dev/hidraw node it cannot open, so a plugged-in key with no udev
+    access looked unplugged: the client waited a minute for an insertion and then said none was
+    inserted. A FIDO node (its report descriptor names the FIDO usage page) that cannot be opened
+    is now said at once, with the udev remedy."""
+    root = _linux_nodes(tmp_path, monkeypatch, FIDO_DESCRIPTOR)
+    assert approval.unopenable_keys(root=root) == "fido"
+    terminal = approval.Terminal(io.StringIO(), io.StringIO())
+    with pytest.raises(approval.ApprovalError, match="a security key is plugged in that this user may not open"):
+        approval.wait_for_key(lambda: [], terminal, 30, sleep=lambda s: pytest.fail("waited"), root=root)
+    assert "udev" in approval._no_device(root=root)
+
+
+def test_on_linux_an_unreadable_device_of_unknown_kind_is_named_while_waiting(tmp_path, monkeypatch):
+    root = _linux_nodes(tmp_path, monkeypatch, None)
+    assert approval.unopenable_keys(root=root) == "maybe"
+    out = io.StringIO()
+    with pytest.raises(approval.ApprovalError) as raised:
+        approval.wait_for_key(lambda: [], approval.Terminal(io.StringIO(), out), 1, sleep=lambda s: None,
+                              clock=iter([0.0, 0.5, 2.0]).__next__, root=root)
+    assert "this user may not be allowed to open it" in out.getvalue()
+    assert "this user may not be allowed to open it" in str(raised.value)
+    # A keyboard's node is no key: not named.
+    keyboard = tmp_path / "k"
+    keyboard.mkdir()
+    assert approval.unopenable_keys(root=_linux_nodes(keyboard, monkeypatch, KEYBOARD_DESCRIPTOR)) == ""
+
+
+def test_doctor_against_an_open_source_engine_prints_no_enterprise_lines(monkeypatch):
+    sys.path.insert(0, str(ROOT / "client" / "src"))
+    from shakerscan import decisions
+
+    monkeypatch.setattr(decisions, "helper", lambda name: approval)
+    gone = types.SimpleNamespace(request_json=lambda method, path: (_ for _ in ()).throw(OSError("404")))
+    assert decisions.touch_lines(gone) == []
+
+
+def test_the_homebrew_formula_says_at_install_that_it_cannot_touch():
+    formula = (ROOT / "client" / "homebrew" / "shakerscan.rb.in").read_text()
+    assert "def caveats" in formula
+    caveats = formula.split("def caveats", 1)[1]
+    assert "security key" in caveats and "pipx install shakerscan" in caveats
