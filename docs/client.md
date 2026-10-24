@@ -69,17 +69,27 @@ From a repository checkout the client runs the runtime scripts in place:
 
 Python 3.10 or newer. One third-party dependency since 0.11.2: python-fido2 (Yubico,
 BSD-2-Clause; it brings `cryptography`, `cffi` and `pycparser`, and `typing-extensions` on Python
-3.10), for a USB security key's touch. The package declares `fido2>=2.2,<2.3` (one minor line:
-python-fido2's API has changed between minor releases), so a plain `pipx` or `uv tool` install
-resolves the newest matching releases from the package index without hashes. The set a release
-was tested with is hash-locked in `client/requirements/runtime.lock` (a record of what was tested,
-not of what a plain install picks up), and
-`pip install --require-hashes -r client/requirements/runtime.lock` installs exactly that. The client
-is no longer pure Python through `cryptography` and `cffi`: they ship wheels for the common
-platforms, and a platform without one (32-bit ARM, for example) builds them, which needs a Rust
-toolchain. The first `uvx shakerscan mcp` downloads them too. The Homebrew formula installs the
-client without python-fido2, so a Homebrew install has no security-key support (it says so when
-asked for a touch); install with `pipx` or `uv tool` for it.
+3.10), for a USB security key's touch, on macOS and on 64-bit Linux (x86-64 and ARM64): the
+platforms `cryptography` publishes wheels for, so the client installs there without a compiler,
+as it did before. On an Intel Mac `cryptography` stays below 49 (49 and later publish no Intel
+macOS wheel); it still gets that line's security fixes only as far as 48 goes, until a client
+release says otherwise. Elsewhere (Windows, where the terminal touch is not supported yet; 32-bit
+or other Linux architectures; the BSDs) the client installs without python-fido2 and works as
+before without the touch; `pipx inject shakerscan fido2` adds it where a `cryptography` wheel or a
+Rust and OpenSSL toolchain exists.
+
+The package declares `fido2>=2.2,<2.3` (one minor line: python-fido2's API has changed between
+minor releases, so a python-fido2 fix outside that line reaches you with a client release), and a
+plain `pipx` or `uv tool` install resolves the newest matching releases from the package index
+without hashes. The set a release was tested with is hash-locked in
+`client/requirements/runtime.lock` (a record of what was tested, one set for every platform, not
+of what a plain install picks up), and `pip install --require-hashes -r
+client/requirements/runtime.lock` installs exactly that. The first `uvx shakerscan mcp` downloads
+`cryptography` and `cffi` too (a few megabytes); on a slow link, run it once by hand (or `uv tool
+install shakerscan`) before an agent starts it, so the agent's MCP start-up does not time out. The
+Homebrew formula installs the client without python-fido2, so a Homebrew install has no
+security-key support (it says so when asked for a touch); install with `pipx` or `uv tool` for
+it.
 
 ## Public checks without an engine or account
 
@@ -384,8 +394,11 @@ shakerscan hunt permissions wait 8f0c…  # JSON: granted, denied, expired, with
   at the prompt, or a USB/NFC security key (`--method security_key`). Without `--method` the client
   uses a plugged-in security key when the gateway offers one and the key holds one of your
   credentials (asked silently, without a touch; with a PIN when the gateway asks for one), else
-  the code as before; when several plugged-in keys can answer, you pick one before being asked to
-  touch. A key error is said in plain words (not registered to your account, no touch in time, no
+  the code as before. When several keys are plugged in, the first that holds one of your
+  credentials is used; you pick one only among keys that cannot be asked that way. The silent
+  check is made only for this gateway's own relying party (the same rule the assertion follows), so
+  no gateway learns what else your key holds. Without `--account`, the client says once whom it
+  approves as (the person the connection acts for). A key error is said in plain words (not registered to your account, no touch in time, no
   PIN set). The key is asked for what the
   gateway asks: its PIN when the gateway requires user verification, a touch alone when it does
   not. The proof goes to the gateway's step-up routes, which decide in your name; the token alone
@@ -445,13 +458,15 @@ $ shakerscan hunt budget raise 3f2a91c0-… --limit max_state_changing_requests=
 This needs your decision (your administrator requires a security-key touch):
   Raise state-changing requests 20 -> 40 (safety ceiling) for Hunt 3f2a91c0… on honey.example.com
 Touch your security key to approve (Ctrl-C to cancel)...
-done; decided by alice (security-key touch)
+done; decided by alice, by security-key touch
 raised state-changing requests 20 -> 40 (safety ceiling) for Hunt 3f2a91c0-…
 ```
 
-- **In your own terminal**: stdin is a terminal, and stdout or stderr is one to ask on. `--json |
-  jq` in your own terminal still asks, on stderr; input piped into the command (`echo body |
-  shakerscan api … -`) never counts as you, even in your own terminal. The client shows the
+- **In your own terminal**: stdin is a terminal, and stdout or stderr is one to ask on (the prompt
+  goes to stderr). `--json | jq` in your own terminal still asks; a command whose input is piped or
+  redirected (`shakerscan api … < /dev/null`, or any script feeding it) never counts as you, even in
+  your own terminal. An agent's tool call has no terminal on stdin, so stdout being piped changes
+  nothing for it. The client shows the
   decision whole (every limit a raise sets, the whole host; a
   decision too long for a terminal is never touched for), asks
   the gateway for a challenge bound to exactly that request (method, path and query, SHA-256 of the
@@ -462,12 +477,15 @@ raised state-changing requests 20 -> 40 (safety ceiling) for Hunt 3f2a91c0-…
   secrets commands and the commands below all do this. Ctrl-C at the touch cancels it: nothing is
   changed, and the command exits with status 130; a touch that fails exits with status 1, with the
   reason on one line. With no key plugged in, the client says "Insert your security key" and waits
-  for one (up to a minute, within the challenge's two minutes) instead of failing; over SSH it says
-  at once that the key is out of reach. `shakerscan scan --active-testing` does not ask its own
+  for one (up to a minute, within the challenge's two minutes) instead of failing. Over SSH, in WSL
+  (unless the key is passed through with `usbipd attach`) and in a container, where a key plugged
+  into your computer cannot arrive, it says so at once; over mosh or another remote shell it cannot
+  tell, and the wait says so. `shakerscan scan --active-testing` does not ask its own
   "Type 'yes'" when the gateway requires the touch: the touch is the confirmation when the target
   needs one, and a target already authorized needs none, so no question of any kind is asked.
   `shakerscan doctor` says whether the gateway requires the touch and whether one could happen
-  here (python-fido2, a key plugged in), without asking the key anything.
+  here (python-fido2, a key plugged in: "none plugged in" is no failure, a key is needed only when
+  your administrator requires a touch), without asking the key anything.
 - **Anywhere else** (an agent's tool call, a pipe, a script, or inside `shakerscan agent`): it
   never prompts and never asks a key anything. It prints one line, `person decision required:
   <the decision>. Nothing was changed. The person runs this in their own terminal and touches
@@ -478,7 +496,9 @@ raised state-changing requests 20 -> 40 (safety ceiling) for Hunt 3f2a91c0-…
   it.
 - Two commands make the usual decisions directly:
   - `shakerscan targets authorize <url-or-id>` registers the target if needed and records its
-    standing authorization for active testing (never intrusive; that is made in the browser). The
+    standing authorization for active testing (never intrusive; that is made in the browser), in
+    the name of the person the connection acts for (on an open-source engine, this computer's
+    user; a gateway that requires the touch records the person who touched). The
     gateway names the environment the authorization is evaluated in ("in the production
     environment", or a lab environment, which admits private and local addresses). It takes a
     connected device's id as well (a device is authorized the same way) and `host://<address>`
@@ -512,8 +532,8 @@ raised state-changing requests 20 -> 40 (safety ceiling) for Hunt 3f2a91c0-…
   itself: in an agent's shell the command it names is `shakerscan targets authorize <target>`,
   by the target id the gateway names (running the agent's own scan or retest would run the work
   twice). The refusal line, the MCP adapter and the Hunt skill tell an agent not to send the
-  request again until the person says the target is authorized, and then to send it once, with
-  the same Idempotency-Key. In your own terminal, your own `shakerscan scan … --active-testing`
+  request again until the person says the target is authorized, and then to send it once (with
+  the same Idempotency-Key, if it had one). In your own terminal, your own `shakerscan scan … --active-testing`
   shows the decision, takes the touch and sends the scan once more.
 
 ## Secrets found on a target: `shakerscan secrets`
