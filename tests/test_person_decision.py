@@ -1732,7 +1732,7 @@ def test_a_key_with_a_pin_that_finds_nothing_without_it_is_left_to_the_real_asse
 
 
 def test_a_passkey_that_answers_only_after_its_pin_is_asked_with_its_pin_once(monkeypatch):
-    """usability review: with the gateway asking for a touch only, a sign-in passkey a browser
+    """With the gateway asking for a touch only, a sign-in passkey a browser
     made to need its PIN for every use (credProtect) found nothing silently, and 0.11.2 refused
     with "add the key again", although the gateway accepts a PIN-verified assertion. The key is
     now asked with its PIN, said first in plain words."""
