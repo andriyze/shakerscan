@@ -88,7 +88,8 @@ the built wheel installed from the hash-locked set in `client/requirements/runti
 (python-fido2 2.2.1, cryptography 50.0.2, or 48.0.1 on an Intel Mac, with their dependencies;
 `pip install --require-hashes -r client/requirements/runtime.lock` installs exactly that), and the
 same wheel installed with no lock, as `pipx` does, on Linux x86-64 and Apple Silicon macOS with
-Python 3.10 and 3.12: it checks that python-fido2 2.2.1 and a cryptography 50.0.x were resolved,
+Python 3.10, 3.12, 3.13, 3.14 and 3.15 (a 3.15 pre-release until its final release reaches the
+CI runners): it checks that python-fido2 2.2.1 and a cryptography 50.0.x were resolved,
 imports python-fido2's USB and CTAP2 client and verifies an ES256 signature through it. An Intel
 Mac's set is checked through the lock only (there is no Intel macOS runner), and a cryptography
 patch release after the client was published is installed untested (still within the declared
@@ -457,7 +458,9 @@ shakerscan hunt permissions wait 8f0c…  # JSON: granted, denied, expired, with
   they exit with status 3 (refused, nothing ran) before anything is read from the instance, shown,
   or asked of a security key, so a harness that gives an agent's command a terminal for input only
   never makes your key blink. Inside an agent that `shakerscan agent` started they are refused the
-  same way, even in its own window. Never type a code into an agent's chat.
+  same way, even in its own window. The refusal ends with the command to run in your own terminal,
+  with the request the agent named (`shakerscan approve 8f0c…`). Never type a code into an agent's
+  chat.
 
 Bounds set when you start an agent pre-authorize requests inside them, so they are granted as they
 arise: `shakerscan agent opencode --allow budget.raise:2x --allow capability:state-changing`
@@ -474,7 +477,21 @@ Hunt permissions, and a few device and secret decisions. An Enterprise gateway's
 require a touch of the person's security key for them when they come from a terminal. The gateway
 then refuses such a request sent with the connection's token alone (HTTP 403,
 `person_decision_required`, `x-shakerscan-step-up: required`, with the decision in plain words),
-and every command of this client completes it the same way:
+and every command of this client completes it the same way.
+
+**Set up once** (a YubiKey 5, or another USB or NFC FIDO2 security key; recommended):
+
+1. In the browser, sign in to the Enterprise console and open **My account**, **Passkeys**. Add
+   the key with **Use it: for terminal approvals (touch)**, and when the browser asks, choose the
+   security key (not this computer's or a phone's passkey). That key never signs you in. Single
+   sign-on accounts use My account, **Security key for terminal decisions**, after a fresh
+   sign-in at the identity provider.
+2. Install the client with `pipx install shakerscan` or `uv tool install shakerscan` (python-fido2
+   comes with it; a Homebrew install has no security-key support). On Linux, also install your
+   distribution's FIDO udev rules (the `libfido2` or `yubikey-manager` package).
+3. Run `shakerscan doctor` with the key plugged in: it says whether your administrator requires
+   a touch and whether a key is plugged in. From then on, run your decisions in your own terminal
+   and touch the key when the command asks.
 
 ```text
 $ shakerscan hunt budget raise 3f2a91c0-… --limit max_state_changing_requests=40
@@ -509,8 +526,10 @@ raised state-changing requests 20 -> 40 (safety ceiling) for Hunt 3f2a91c0-…
   "Type 'yes'" when the gateway requires the touch: the touch is the confirmation when the target
   needs one, and a target already authorized needs none, so no question of any kind is asked.
   `shakerscan doctor` says whether the gateway requires the touch and whether one could happen
-  here (python-fido2, a key plugged in: "none plugged in" is no failure, a key is needed only when
-  your administrator requires a touch), without asking the key anything.
+  here (python-fido2, a key plugged in), without asking the key anything: where a touch is
+  required and no key is plugged in it says to plug in the key registered to you; elsewhere "none
+  plugged in" is no failure. It cannot tell which plugged-in key is registered to you (`approve`
+  checks that silently, without a blink).
 - **Anywhere else** (an agent's tool call, a pipe, a script, or inside `shakerscan agent`): it
   never prompts and never asks a key anything. It prints one line, `person decision required:
   <the decision>. Nothing was changed. The person runs this in their own terminal and touches
@@ -526,20 +545,27 @@ raised state-changing requests 20 -> 40 (safety ceiling) for Hunt 3f2a91c0-…
   it.
 - Two commands make the usual decisions directly:
   - `shakerscan targets authorize <url-or-id>` registers the target if needed and records its
-    standing authorization for active testing (never intrusive; that is made in the browser), in
-    the name of the person the connection acts for (on an open-source engine, this computer's
-    user; a gateway that requires the touch records the person who touched). The
+    standing authorization for active testing (never intrusive; that is made in the browser). A
+    gateway that requires the touch records the person who touched. Elsewhere on Enterprise the
+    engine records the connection's token first, the person it acts for, and that no person
+    proved it (`service token laptop for alice via shakerscan targets authorize (made with a
+    token, not proven by a person)`); on an open-source engine, this computer's user. The
     gateway names the environment the authorization is evaluated in ("in the production
     environment", or a lab environment, which admits private and local addresses). It takes a
     connected device's id as well (a device is authorized the same way) and `host://<address>`
-    for a host target. In an agent's shell the target is registered (an ordinary add, no
-    decision) before the authorization is refused, and stays registered.
+    for a host target. Where the gateway requires the touch, an agent's shell is refused before
+    anything is registered (exit 3). In your own terminal the target is registered first (an
+    ordinary add, no decision): a touch that fails or is cancelled leaves it registered and not
+    authorized, and the command says so.
     `shakerscan targets unauthorize <url-or-id> [--reason …]` withdraws it.
   - `shakerscan hunt budget raise <hunt> --limit NAME=N|NAME=+N [--resume]` raises limits to new
-    totals (or by `+N`), reading the Hunt's budget and its revision first.
+    totals (or by `+N`), reading the Hunt's budget and its revision first. Where the gateway does
+    not require the touch, the reason the engine keeps says the connection's token and that no
+    person proved it, after any `--reason` you give.
 
   On an open-source engine, or a gateway that does not require the touch, they are sent as they
-  are.
+  are, from any shell (on such a gateway an agent with your connection can make them too: the
+  accepted risk of that setting).
 - **What a touch proves.** A person was at the key: presence, not identity (anyone at a plugged-in
   key can touch it). An agent started some other way than `shakerscan agent` (Codex or Claude
   Code registered with `shakerscan connect --codex` or `--claude` and started directly, say) whose
@@ -564,7 +590,11 @@ raised state-changing requests 20 -> 40 (safety ceiling) for Hunt 3f2a91c0-…
   first, so a gateway that cannot name the decision in full (a target or Hunt it could not read)
   or an account with no key registered is said before anything is asked of a key, naming the
   decision ("<decision>: no touch was asked (security_key_not_registered): register a USB or NFC
-  security key once, ..."); then it shows the decision exactly as the challenge states it.
+  security key once, ..."), and so is a request the gateway would refuse anyway (a receipt only
+  an administrator may write, for example); then it shows the decision exactly as the challenge
+  states it. Two decisions are named by their ids only: confirming a Hunt's SSH plan (its commands
+  are on the Hunt page) and approving an authorization investigation (read its proposal first,
+  with the `shakerscan api GET` command the decision names).
 - **A refused start** (a scan, Hunt start, retest or network scan of a target nobody authorized
   yet) started nothing. The person's decision is the target's authorization, never the start
   itself: in an agent's shell the command it names is `shakerscan targets authorize <target>`,
