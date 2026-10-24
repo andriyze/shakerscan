@@ -766,6 +766,9 @@ class StepUp:
         # What the person is told at the touch (decide() names what it decides); None: the
         # assertion's own words.
         self.prompt: str | None = None
+        # The gateway named the approver (no --account): the person this connection acts for,
+        # whom the touch prompt then names ("..., as alice").
+        self.named = False
 
     def _names_no_approver(self) -> bool:
         """Whether this gateway predates an approval that names its own approver: it refuses an
@@ -839,10 +842,11 @@ class StepUp:
                 if not isinstance(named, str) or not named.strip() or len(named) > 200:
                     raise ApprovalError("the gateway's challenge names no approver; nothing was approved")
                 self.account = named
-                # Said once: the proof asked for is this person's (a token that acts for another
-                # person than the one at the keyboard approves as that person, unless --account).
-                self.terminal.say(f"Approving as {_inert(named)[:120]}, the person this connection acts for "
-                                  "(--account NAME approves as someone else).")
+                # The proof asked for is this person's (a token that acts for another person than
+                # the one at the keyboard approves as that person, unless --account): the prompt
+                # names them at the moment of the proof ("TOTP code for alice", "Touch your
+                # security key ..., as alice"), not in a line of its own on every run.
+                self.named = True
         account = self.account
         document = set_document(purpose, account, self.origin, body)
         if challenge.get("set_digest") != set_digest(document):
@@ -904,7 +908,10 @@ class StepUp:
         nonce = str(challenge.get("nonce") or "")
         if not webauthn or not nonce or webauthn.get("challenge") != expected_challenge(nonce, challenge["set_digest"]):
             raise ApprovalError("the gateway's security-key challenge is not bound to this approval; nothing was approved")
-        told = {"prompt": self.prompt} if self.prompt else {}
+        prompt = self.prompt
+        if self.named and self.account:
+            prompt = as_approver(prompt or "Touch your security key.", self.account)
+        told = {"prompt": prompt} if prompt else {}
         return {"method": "security_key",
                 "credential": security_key_assertion(webauthn, self.origin, self.terminal, **told)}
 
@@ -912,6 +919,16 @@ class StepUp:
         methods = [str(item) for item in challenge.get("methods") or ()]
         webauthn = challenge.get("webauthn") if isinstance(challenge.get("webauthn"), Mapping) else None
         return self.method or preferred_method(methods, webauthn, self.origin)
+
+
+def as_approver(prompt: str, account: str) -> str:
+    """The touch prompt naming whom the touch approves as: "Touch your security key to allow, as
+    alice (Ctrl-C to cancel)..."."""
+    who = f", as {_inert(account)[:120]}"
+    for tail in (" (Ctrl-C to cancel)...", "."):
+        if prompt.endswith(tail):
+            return prompt[: -len(tail)] + who + tail
+    return prompt + who
 
 
 def _homebrew_install() -> bool:
@@ -1670,9 +1687,11 @@ def decide(send: Send, terminal: Terminal, requests: Sequence[Mapping[str, Any]]
         return _report(terminal, by_id, _local_decide(send, entries), decided_by="local-operator",
                        via="local confirmation")
     stepup = StepUp(send, origin, terminal, account=account, method=method)
+    stepup.named = bool(approver and approver.get("named"))
     challenge, _ = stepup.begin("permission_decision", {"decisions": entries})
     if approver is not None and stepup.account:
         approver["account"] = stepup.account
+        approver["named"] = stepup.named
     if session is not None:
         proof = {"method": "approver_session", "session_id": session["session_id"],
                  "session_secret": session["secret"]()}

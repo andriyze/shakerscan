@@ -1636,25 +1636,37 @@ def test_a_refused_decision_in_the_watch_says_the_persons_command():
     assert "change the environment a target or device is judged in" in environment
 
 
-def test_an_approval_says_once_whom_it_is_for():
+def test_an_approval_names_whom_it_is_for_at_the_proof_not_in_a_line_of_its_own(monkeypatch):
     """The client asks for no sign-in name; someone using a token that acts for another person
-    used to be asked for that person's proof without being told."""
-    sent = []
-
+    used to be asked for that person's proof without being told. The touch prompt names them
+    ("..., as alice"; a code's prompt already does: "TOTP code for alice"), instead of a line
+    'Approving as alice, ...' printed on every run."""
     def send(method, path, payload=None, headers=None, *, timeout=None):
-        sent.append(path)
         if method == "GET" and path == approval.ME_PATH:
             return 200, {"person_decision_proof": False}  # a gateway that names the approver
         document = approval.set_document("permission_decision", "alice", ORIGIN, {"decisions": []})
+        nonce = "bm9uY2U"
+        digest = approval.set_digest(document)
         return 200, {"schema_version": "shakerscan-approval-challenge/v1", "approval_id": "apv_1",
-                     "account": "alice", "set_digest": approval.set_digest(document)}
+                     "account": "alice", "set_digest": digest, "methods": ["security_key"], "nonce": nonce,
+                     "webauthn": {"challenge": approval.expected_challenge(nonce, digest), "rpId": "x"}}
 
+    told = []
+    monkeypatch.setattr(approval, "security_key_assertion",
+                        lambda webauthn, origin, terminal, **kw: told.append(kw.get("prompt")) or {})
     out = io.StringIO()
     stepup = approval.StepUp(send, ORIGIN, approval.Terminal(io.StringIO(), out))
-    stepup.begin("permission_decision", {"decisions": []})
-    stepup.begin("permission_decision", {"decisions": []})
-    assert out.getvalue().count("Approving as alice, the person this connection acts for") == 1
-    assert "--account NAME approves as someone else" in out.getvalue()
+    stepup.prompt = "Touch your security key to allow (Ctrl-C to cancel)..."
+    challenge, _ = stepup.begin("permission_decision", {"decisions": []})
+    stepup.prove(challenge)
+    assert "Approving as" not in out.getvalue()
+    assert told == ["Touch your security key to allow, as alice (Ctrl-C to cancel)..."]
+    # Named with --account: the person typed the name, nothing more is said.
+    named = approval.StepUp(send, ORIGIN, approval.Terminal(io.StringIO(), out), account="alice")
+    named.prompt = "Touch your security key to allow (Ctrl-C to cancel)..."
+    named.prove(named.begin("permission_decision", {"decisions": []})[0])
+    assert told[-1] == "Touch your security key to allow (Ctrl-C to cancel)..."
+    assert approval.as_approver("Touch your security key.", "bob") == "Touch your security key, as bob."
 
 
 
@@ -2257,7 +2269,7 @@ def test_a_touch_mode_watch_names_the_approver_once_for_every_decision(monkeypat
     """A watch started without --account printed 'Approving as alice, ...' before every decision
     (and read the gateway's description again each time): the approver session it was refused
     named nobody, and each decision began without a name. The name the first decision's challenge
-    gives is passed to every later one."""
+    gives is passed to every later one, and the touch prompt names it (no line of its own)."""
     from tests.test_hunt_approve import ORIGIN as SCRIPTED_ORIGIN
     from tests.test_hunt_approve import Gateway, Terminal, _request
 
@@ -2287,7 +2299,7 @@ def test_a_touch_mode_watch_names_the_approver_once_for_every_decision(monkeypat
 
     assert approval.watch(touch_only, terminal, enterprise=True, origin=SCRIPTED_ORIGIN,
                           poll_seconds=0.01, sleep=stop) == 0
-    assert terminal.text.count("Approving as alice, the person this connection acts for") == 1, terminal.text
+    assert "Approving as" not in terminal.text, terminal.text
     assert begun == ["", "alice"], "the second decision names the approver the first one was given"
     assert all(item["status"] == "granted" for item in gateway.requests.values())
 
