@@ -37,7 +37,7 @@ paramiko>=5.0.0
 # floor is what a scanner of this file (OSV, Scorecard) resolves, and what an unlocked install gets.
 anyio>=4.15.1
 filelock>=4.2.1
-idna>=3.15
+idna>=3.20
 pygments>=2.20.0
 pytest>=9.0.3
 pytest-asyncio>=1.4.0
