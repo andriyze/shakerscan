@@ -236,6 +236,20 @@ PERSON_DECISION_RECOVERY = (
     "try another route to the same decision, and never ask the user for a code or a key in chat; "
     "continue other work meanwhile."
 )
+# A Hunt start past its agent session's safety budget: the person's command is the start itself.
+PERSON_DECISION_START_RECOVERY = (
+    "Nothing was started: this Hunt would go past the one safety budget the user's touch approved "
+    "for this agent session, and starting it anyway is the user's decision. Tell the user the "
+    "exact command to run in their own terminal; it starts this Hunt after their touch. Do not "
+    "start it again yourself, and do not start a smaller one to get around the budget unless the "
+    "user asks; continue with the Hunt the user names once it is started."
+)
+# A decision no touch from a terminal confirms yet (proof: browser).
+PERSON_DECISION_BROWSER_RECOVERY = (
+    "This is a decision only a person makes, in the browser: no security-key touch from a "
+    "terminal confirms it yet. Tell the user to make it on the Hunt page in the browser. Do not "
+    "retry this request or try another route to the same decision; continue other work meanwhile."
+)
 # A refused start (a Hunt start, scan, retest or network scan of a target nobody authorized)
 # started nothing. The person's decision is the target's authorization (the command names the
 # target, never this start), and the start is sent again only after the person said they made it.
@@ -257,15 +271,29 @@ def _person_decision_error(exc: urllib.error.HTTPError, detail: str, method: str
     parsed = decision.detail_of(detail)
     if not decision.required(exc.code, exc.headers, parsed):
         return None
-    command = decision.person_command(method, path, body, parsed)
     # Whole, as the gateway said it (at most its MAX_SUMMARY): what the person will be shown.
     summary = str(_bounded_text(parsed.get("summary") or parsed.get("decision"), decision.MAX_SUMMARY)
                   or "a person's decision")
+    if parsed.get("proof") == "browser":
+        return MCPError(-32002, (
+            f"A person's decision is required: {summary}. Nothing was changed. The user makes it in "
+            "the browser (the Hunt page); no security-key touch from a terminal confirms it yet. Do "
+            "not retry this request."
+        ), json.dumps({"detail": {
+            "outcome": "person_decision_required", "error": decision.ERROR,
+            "decision": parsed.get("decision"), "summary": summary, "proof": "browser",
+            "recovery": PERSON_DECISION_BROWSER_RECOVERY,
+        }}), http_status=exc.code)
+    command = decision.person_command(method, path, body, parsed)
     submission = bool(parsed.get("submission"))
+    started = parsed.get("decision") == "hunt.start"
     after = (
         "do not send this request again until the user says the target is authorized, then send it "
         "once (with the same idempotency key, if it had one)."
-        if submission else "do not retry this request."
+        if submission
+        else "do not start it again yourself: the user's command starts it."
+        if started
+        else "do not retry this request."
     )
     return MCPError(-32002, (
         f"A person's decision is required: {summary}. Nothing was changed. Tell the user to run "
@@ -273,7 +301,8 @@ def _person_decision_error(exc: urllib.error.HTTPError, detail: str, method: str
     ), json.dumps({"detail": {
         "outcome": "person_decision_required", "error": decision.ERROR, "decision": parsed.get("decision"),
         "summary": summary, "command": command,
-        "recovery": PERSON_DECISION_SUBMISSION_RECOVERY if submission else PERSON_DECISION_RECOVERY,
+        "recovery": PERSON_DECISION_SUBMISSION_RECOVERY if submission
+        else PERSON_DECISION_START_RECOVERY if started else PERSON_DECISION_RECOVERY,
         **({"submission": str(parsed.get("submission"))[:20]} if submission else {}),
     }}), http_status=exc.code)
 

@@ -36,13 +36,23 @@ decided, so the work never runs twice.
 Without an interactive terminal, or inside an agent that ``shakerscan agent`` launched
 (SHAKERSCAN_AGENT_NAME), it never prompts and never opens a key: it raises PersonDecisionRefused,
 one line that names the decision and the command the person runs in their own terminal, and the
-command exits 3 (refused, nothing ran). An interactive terminal is stdin a terminal and stdout or
-stderr a terminal to ask on (the prompt goes to stderr): ``shakerscan scan ... --json | jq`` in
-the person's own terminal still asks, while a command whose input is piped or redirected
-(``shakerscan api ... < /dev/null``, any script feeding it) never counts as the person. An agent's
-tool call has no terminal on stdin, so stdout alone being piped changes nothing for it. No option
-skips the touch. Ctrl-C at the touch cancels it
-(PersonDecisionCancelled, exit 130); nothing changes.
+command exits 3 (refused, nothing ran). An interactive terminal is stdin and stdout both
+terminals (the prompt goes to stdout): a command whose input is piped or redirected
+(``shakerscan api ... < /dev/null``, any script feeding it) never counts as the person, and nor
+does one whose output is (``shakerscan scan ... --json | jq`` or ``| tee log`` in the person's own
+terminal refuses with the command to run without the pipe), the rule every command that asks the
+person follows (hunt_approve.terminal_output). No option skips the touch. Ctrl-C at the touch
+cancels it (PersonDecisionCancelled, exit 130); nothing changes.
+
+A Hunt start past its session's safety budget (decision ``hunt.start``: under the switch, the
+Hunts of one agent session share one safety budget) is the start itself: in the person's own
+terminal the touch starts it; anywhere else the person's command is that same start through
+``shakerscan api POST /hunts``, and whoever sent it does not send it again (it would start twice).
+
+A decision the gateway says no touch from a terminal confirms yet (``proof: browser``: a device
+SSH plan's confirmation, an authorization investigation's approval, whose commands or proposal a
+terminal is not shown) is never begun: the line says to make it in the browser, and the command
+exits 3.
 
 With no key plugged in, the touch waits for one to be inserted ("Insert your security key"), for
 a bounded time within the challenge's life, instead of failing; over SSH, in WSL without the key
@@ -253,6 +263,10 @@ def person_command(method: str, path: str, body: bytes | None, detail: Mapping[s
         payload = None
     payload = payload if isinstance(payload, dict) else None
     detail = detail if isinstance(detail, Mapping) else {}
+    if detail.get("decision") == HUNT_START:
+        # The person's decision is this start itself (past its session's safety budget): their
+        # own terminal sends exactly it, and the agent never sends it again.
+        return _api_command(method, path, body)
     named = str(detail.get("target_id") or "")
     if detail.get("submission") and _UUID.fullmatch(named):
         return f"shakerscan targets authorize {named.lower()}"
@@ -304,6 +318,12 @@ def person_command(method: str, path: str, body: bytes | None, detail: Mapping[s
         if target and reference and secret.group(3) == "expiry" and set(payload) == {"days"} \
                 and type(payload["days"]) is int:
             return f"shakerscan secrets expiry {target} {reference} --days {payload['days']}"
+    return _api_command(method, path, body)
+
+
+def _api_command(method: str, path: str, body: bytes | None) -> str:
+    """Exactly this request through ``shakerscan api``: its body inline when short, else saved
+    to the decisions directory and named as ``@FILE``."""
     text = body.decode("utf-8", "replace") if body else ""
     request = "shakerscan api " + " ".join(shlex.quote(part) for part in (method, path))
     if len(text) <= INLINE_BODY:
@@ -321,7 +341,11 @@ def refusal_line(detail: Mapping[str, Any], command: str) -> str:
     bytes), with nothing after it: a copy that takes the line's end takes no punctuation into the
     command."""
     summary = _inert(detail.get("summary") or detail.get("decision") or "a person's decision", MAX_SUMMARY)
+    if detail.get("proof") == BROWSER:
+        return f"person decision required: {summary}. Nothing was changed. {BROWSER_ONLY}"
     line = f"person decision required: {summary}. Nothing was changed."
+    if detail.get("decision") == HUNT_START:
+        line = f"person decision required: {summary}. {START_ONCE}"
     if detail.get("submission"):
         line += SUBMISSION_AGAIN
     return line + (" The person runs this in their own terminal and touches their security key: "
@@ -336,6 +360,18 @@ SUBMISSION_AGAIN = (
 )
 # The target of a refused submission no value of the request names as one word.
 PLACEHOLDER = "TARGET-ID"
+# A Hunt start past its session's safety budget: the person's own terminal starts it.
+HUNT_START = "hunt.start"
+START_ONCE = (
+    "Nothing was started. Do not send this start again: the person's command below starts it, "
+    "and then you continue with the Hunt it reports."
+)
+# A decision no touch from a terminal confirms yet (the gateway's `proof: browser`).
+BROWSER = "browser"
+BROWSER_ONLY = (
+    "The person makes this decision in the browser (the Hunt page shows what it approves in "
+    "full); no security-key touch from a terminal confirms it yet."
+)
 
 
 # ---- the touch -------------------------------------------------------------------------------
@@ -533,6 +569,9 @@ def handle(post: Post, *, origin: str, method: str, path: str, body: bytes | Non
     answer is returned, whatever it is); anywhere else PersonDecisionRefused."""
     stdin = getattr(terminal, "stdin", None)
     stdout = getattr(terminal, "stdout", None)
+    if detail.get("proof") == BROWSER:
+        # Never begun, at a terminal or not: the gateway offers no touch for it.
+        raise PersonDecisionRefused(refusal_line(detail, ""), detail=detail, command="")
     if not interactive(stdin, stdout, environ):
         command = person_command(method, path, body, detail)
         raise PersonDecisionRefused(refusal_line(detail, command), detail=detail, command=command)
