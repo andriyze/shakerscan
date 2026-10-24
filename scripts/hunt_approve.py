@@ -1009,14 +1009,16 @@ def key_out_of_reach(environ: Mapping[str, str] | None = None, *, root: str = "/
 # security key's HID interface declares it.
 FIDO_USAGE_PAGE = b"\x06\xd0\xf1"
 UNOPENABLE_KEY = (
-    "a security key is plugged in that this user may not open: install your distribution's FIDO "
-    "udev rules (the libfido2 or yubikey-manager package) or log in at the desktop, then run the "
-    "command again (over SSH a key on your laptop is out of reach)"
+    "a security key is plugged in that this user may not open: log in at the desktop (systemd 244 "
+    "and later let a desktop session open it), or install your distribution's FIDO udev rules "
+    "(libu2f-udev on Debian and Ubuntu, u2f-hidraw-policy on Fedora; with no desktop session, a "
+    "rule for your group: see the client guide), then run the command again (over SSH a key on "
+    "your laptop is out of reach)"
 )
 MAYBE_UNOPENABLE = (
-    " (if your key is plugged in, this user may not be allowed to open it: install your "
-    "distribution's FIDO udev rules, the libfido2 or yubikey-manager package, or log in at the "
-    "desktop; over SSH a key on your laptop is out of reach)"
+    " (if your key is plugged in, this user may not be allowed to open it: log in at the desktop, "
+    "or install your distribution's FIDO udev rules, libu2f-udev on Debian and Ubuntu or "
+    "u2f-hidraw-policy on Fedora; over SSH a key on your laptop is out of reach)"
 )
 
 

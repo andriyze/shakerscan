@@ -77,7 +77,10 @@ macOS wheel); it still gets that line's security fixes only as far as 48 goes, u
 release says otherwise. Elsewhere (Windows, where the terminal touch is not supported yet; 32-bit
 or other Linux architectures; the BSDs) the client installs without python-fido2 and works as
 before without the touch; `pipx inject shakerscan fido2` adds it where a `cryptography` wheel or a
-Rust and OpenSSL toolchain exists.
+Rust and OpenSSL toolchain exists. On a Python newer than the ones `cffi` publishes wheels for
+(3.10 to 3.15 for cffi 2.1.1), installing builds `cffi` from source, which needs a C compiler
+and the libffi headers: `pipx install --python python3.14 shakerscan` (or `uv tool install
+--python 3.14 shakerscan`) picks a Python it has wheels for.
 
 The package declares exactly `fido2==2.2.1` (the touch path is security-sensitive, so a new
 python-fido2 release reaches you only with a client release that was checked with it) and
@@ -506,8 +509,14 @@ and every command of this client completes it the same way.
    sign-on accounts use My account, **Security key for terminal decisions**, after a fresh
    sign-in at the identity provider.
 2. Install the client with `pipx install shakerscan` or `uv tool install shakerscan` (python-fido2
-   comes with it; a Homebrew install has no security-key support). On Linux, also install your
-   distribution's FIDO udev rules (the `libfido2` or `yubikey-manager` package).
+   comes with it; a Homebrew install has no security-key support). On Linux, a desktop session on systemd 244 or later (Debian 11, Ubuntu 20.04, Fedora 32
+   and later) already lets you open a FIDO key; on an older desktop install `libu2f-udev` (Debian,
+   Ubuntu) or `u2f-hidraw-policy` (Fedora, RHEL). With no desktop session (signed in over SSH to the
+   machine the key is plugged into), add a rule for a group you are in, for example for a YubiKey
+   (`plugdev` exists on Debian and Ubuntu): `KERNEL=="hidraw*", SUBSYSTEM=="hidraw",
+   ATTRS{idVendor}=="1050", MODE="0660", GROUP="plugdev"` in
+   `/etc/udev/rules.d/70-fido-key.rules`, then `sudo udevadm control --reload-rules && sudo
+   udevadm trigger`, and replug the key.
 3. Run `shakerscan doctor` with the key plugged in: it says whether your administrator requires
    a touch and whether a key is plugged in. From then on, run your decisions in your own terminal
    and touch the key when the command asks.
@@ -608,9 +617,9 @@ raised state-changing requests 20 -> 40 (safety ceiling) for Hunt 3f2a91c0-…
   decisions directory for `shakerscan api … @FILE`, is decided in the browser.
 - **Keys.** A USB FIDO2 key (a YubiKey 5, for example) over python-fido2. Touch ID, Windows Hello
   and synced passkeys are out of reach of a terminal client, and Windows is not supported for the
-  touch in this release. On Linux, install your distribution's FIDO udev rules (the `libfido2` or
-  `yubikey-manager` package): python-fido2 lists only the keys this user can open, so without the
-  rules a plugged-in key looks unplugged. When a device this user cannot open is a FIDO key (its
+  touch in this release. On Linux, python-fido2 lists only the keys this user can open, so a key
+  this user may not open (no FIDO udev rule; see **Set up once** for the rule per distribution)
+  looks unplugged. When a device this user cannot open is a FIDO key (its
   report descriptor, which anyone may read, names the FIDO usage page) the client says so at once
   instead of waiting for an insertion; when its kind cannot be read, the wait and its end say your
   key may be one of them. On a remote machine over SSH the key is not reachable: the client says so and
