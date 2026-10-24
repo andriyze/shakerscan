@@ -56,6 +56,7 @@ import math
 import os
 import re
 import select
+import shlex
 import sys
 import time
 import urllib.parse
@@ -497,23 +498,28 @@ class Terminal:
         self._utf8_left = 0  # continuation bytes still due for a UTF-8 character
         self._last_input = 0.0  # when _feed last saw a byte (a control string's quiet reset)
 
-    def require(self, what: str) -> None:
+    def require(self, what: str = "it", *, person_runs: str | None = None) -> None:
         """Refuse (NotAtTerminal, exit 3) unless a person is at this terminal: before anything is
         read from the gateway, shown or asked of a security key. From here on every prompt goes
-        to the output that is the terminal."""
+        to the output that is the terminal. ``what`` names the command where the line printed
+        does not already (it is printed after the command's own name otherwise: "it");
+        ``person_runs`` is the command the person runs in their own terminal (the request id
+        named, for an agent to pass on)."""
+        run = (f"the person runs this in their own terminal: {_inert(person_runs)}" if person_runs
+               else "run it yourself in your own terminal")
         if (os.environ.get("SHAKERSCAN_AGENT_NAME") or "").strip():
             # Inside an agent that `shakerscan agent` started (its shell may well be a terminal):
             # a plugged-in key would answer the agent's own request.
             raise NotAtTerminal(
                 f"{what} asks the person, and this shell belongs to an agent that `shakerscan agent` "
-                "started: run it yourself in your own terminal; nothing was asked or decided"
+                f"started; nothing was asked or decided: {run}"
             )
         stream = terminal_output(self.stdin, self.stdout, self.stderr)
         if stream is None:
             raise NotAtTerminal(
                 f"{what} asks the person at an interactive terminal (its input and its output a "
-                "terminal) and refuses a pipe or captured output: run it yourself in your own "
-                "terminal, never through an agent's shell; nothing was asked or decided"
+                "terminal) and refuses a pipe or captured output, never through an agent's shell; "
+                f"nothing was asked or decided: {run}"
             )
         self.stdout = stream
 
@@ -1647,7 +1653,7 @@ def watch(send: Send, terminal: Terminal, *, enterprise: bool, origin: str, hunt
     Enterprise: one step-up opens an approver session at the gateway (30 minutes at most); its
     secret lives only in this foreground process. Local OSS: every keypress is the confirmation.
     """
-    terminal.require("shakerscan approve --watch")
+    terminal.require(person_runs="shakerscan approve --watch" + (f" --hunt {shlex.quote(hunt_id)}" if hunt_id else ""))
     seconds = max(60, min(int(minutes) * 60, SESSION_SECONDS))
     opened_session: dict[str, Any] = {}
     # Installed before the step-up, so no moment leaves an opened approver session unrevoked.
@@ -2008,6 +2014,21 @@ def _revoke(send: Send, terminal: Terminal, session_id: str, held: _HeldSecret) 
 # --- the commands ------------------------------------------------------------------------------
 
 
+def _person_runs(command: str, args: Any) -> str:
+    """The approve or deny command the person runs in their own terminal, naming the pending
+    request the agent named (or every pending one)."""
+    words = [f"shakerscan {command}"]
+    if args.all_pending:
+        words.append("--all-pending")
+    elif args.request_id:
+        words.append(shlex.quote(str(args.request_id)))
+    else:
+        words.append("<request-id>")
+    if args.hunt:
+        words.append(f"--hunt {shlex.quote(str(args.hunt))}")
+    return " ".join(words)
+
+
 def run(command: str, args: Any, send: Send, *, enterprise: bool, origin: str,
         terminal: Terminal | None = None) -> int:
     """``shakerscan approve|deny`` as parsed by the product CLI; returns the exit code."""
@@ -2018,7 +2039,7 @@ def run(command: str, args: Any, send: Send, *, enterprise: bool, origin: str,
             raise ApprovalError("--watch belongs to shakerscan approve")
         return watch(send, terminal, enterprise=enterprise, origin=origin, hunt_id=args.hunt,
                      minutes=args.minutes, account=args.account, method=args.method)
-    terminal.require(f"shakerscan {command}")
+    terminal.require(person_runs=_person_runs(command, args))
     if args.all_pending:
         requests = list_pending(send, args.hunt)
     elif args.request_id:
