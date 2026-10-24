@@ -313,7 +313,8 @@ def test_a_security_key_signs_a_challenge_bound_to_the_set(monkeypatch):
     assert credential["type"] == "public-key" and credential["rawId"] == credential["id"]
     assert set(credential["response"]) == {"clientDataJSON", "authenticatorData", "signature", "userHandle"}
     assert seen["origin"] == ORIGIN and seen["options"]["rp_id"] == "scanner.example.com"
-    assert "Touch your security key." in terminal.text
+    # The prompt says what the touch decides (allow or deny, and how many).
+    assert "Touch your security key to allow (Ctrl-C to cancel)..." in terminal.text
 
 
 def test_a_security_key_needs_the_library_and_a_bound_challenge(monkeypatch):

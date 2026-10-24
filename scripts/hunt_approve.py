@@ -721,6 +721,9 @@ class StepUp:
         self.terminal = terminal
         self.account = (account or "").strip() or None
         self.method = method.replace("-", "_") if method else None
+        # What the person is told at the touch (decide() names what it decides); None: the
+        # assertion's own words.
+        self.prompt: str | None = None
 
     def _names_no_approver(self) -> bool:
         """Whether this gateway predates an approval that names its own approver: it refuses an
@@ -854,7 +857,9 @@ class StepUp:
         nonce = str(challenge.get("nonce") or "")
         if not webauthn or not nonce or webauthn.get("challenge") != expected_challenge(nonce, challenge["set_digest"]):
             raise ApprovalError("the gateway's security-key challenge is not bound to this approval; nothing was approved")
-        return {"method": "security_key", "credential": security_key_assertion(webauthn, self.origin, self.terminal)}
+        told = {"prompt": self.prompt} if self.prompt else {}
+        return {"method": "security_key",
+                "credential": security_key_assertion(webauthn, self.origin, self.terminal, **told)}
 
     def method_for(self, challenge: Mapping[str, Any]) -> str:
         methods = [str(item) for item in challenge.get("methods") or ()]
@@ -936,21 +941,57 @@ def key_out_of_reach(environ: Mapping[str, str] | None = None, *, root: str = "/
     return ""
 
 
-def _no_device() -> str:
-    """No key found: over SSH, where the key is; on Linux, that a plugged-in key may be one this
-    user cannot open (said as a possibility: a laptop's own keyboard or touchpad is a HID device
-    too, so an unreadable node does not mean a key is there)."""
+# The report-descriptor item that names the FIDO Alliance usage page (0xF1D0): every FIDO
+# security key's HID interface declares it.
+FIDO_USAGE_PAGE = b"\x06\xd0\xf1"
+UNOPENABLE_KEY = (
+    "a security key is plugged in that this user may not open: install your distribution's FIDO "
+    "udev rules (the libfido2 or yubikey-manager package) or log in at the desktop, then run the "
+    "command again (over SSH a key on your laptop is out of reach)"
+)
+MAYBE_UNOPENABLE = (
+    " (if your key is plugged in, this user may not be allowed to open it: install your "
+    "distribution's FIDO udev rules, the libfido2 or yubikey-manager package, or log in at the "
+    "desktop; over SSH a key on your laptop is out of reach)"
+)
+
+
+def unopenable_keys(*, root: str = "/") -> str:
+    """On Linux, a plugged-in key this user cannot open, which python-fido2 leaves out of its list
+    (it lists only the devices it can open, so such a key looks unplugged): "fido" when a
+    /dev/hidraw node this user may not read and write is a FIDO key (its report descriptor, which
+    sysfs lets anyone read, names the FIDO usage page), "maybe" when such a node's kind cannot be
+    read, else "" (a keyboard's or touchpad's node is not a key)."""
+    if not sys.platform.startswith("linux"):
+        return ""
+    import glob
+
+    found = ""
+    for node in sorted(glob.glob(os.path.join(root, "dev/hidraw*"))):
+        if os.access(node, os.R_OK | os.W_OK):
+            continue
+        described = os.path.join(root, "sys/class/hidraw", os.path.basename(node), "device/report_descriptor")
+        try:
+            with open(described, "rb") as handle:
+                descriptor = handle.read(4096)
+        except OSError:
+            found = found or "maybe"
+            continue
+        if FIDO_USAGE_PAGE in descriptor:
+            return "fido"
+    return found
+
+
+def _no_device(*, root: str = "/") -> str:
+    """No key found: over SSH, where the key is; on Linux, a plugged-in key this user cannot open
+    (said plainly when its node is a FIDO key, as a possibility when its kind cannot be read)."""
     if reason := key_out_of_reach():
         return reason
+    kind = unopenable_keys(root=root)
+    if kind == "fido":
+        return UNOPENABLE_KEY
     text = "no USB security key found; insert it and run the command again"
-    if sys.platform.startswith("linux"):
-        import glob
-        nodes = glob.glob("/dev/hidraw*")
-        if nodes and not any(os.access(node, os.R_OK | os.W_OK) for node in nodes):
-            text += (" (if your key is plugged in, this user may not be allowed to open it: install "
-                     "your distribution's FIDO udev rules, the libfido2 or yubikey-manager package, or "
-                     "log in at the desktop; over SSH a key on your laptop is out of reach)")
-    return text
+    return text + (MAYBE_UNOPENABLE if kind == "maybe" else "")
 
 
 def security_key_readiness(*, waiting: bool = False) -> str:
@@ -976,10 +1017,11 @@ INSERT_POLL_SECONDS = 0.5
 
 def wait_for_key(list_devices: Callable[[], Any], terminal: "Terminal", seconds: float,
                  *, sleep: Callable[[float], None] | None = None,
-                 clock: Callable[[], float] | None = None) -> list[Any]:
+                 clock: Callable[[], float] | None = None, root: str = "/") -> list[Any]:
     """The plugged-in keys, after waiting up to ``seconds`` for one to be inserted (a key kept on
     a keyring costs no second run of the command); the person is told once, and Ctrl-C cancels.
-    None in time: ApprovalError."""
+    None in time: ApprovalError. On Linux a key this user cannot open is said at once (waiting
+    cannot help), and a device of unknown kind it cannot open is named while waiting and after."""
     sleep = sleep or time.sleep
     clock = clock or time.monotonic
     try:
@@ -990,8 +1032,12 @@ def wait_for_key(list_devices: Callable[[], Any], terminal: "Terminal", seconds:
         return devices
     if reason := key_out_of_reach():
         raise ApprovalError(reason)
+    kind = unopenable_keys(root=root)
+    if kind == "fido":
+        raise ApprovalError(UNOPENABLE_KEY)
+    hint = MAYBE_UNOPENABLE if kind == "maybe" else ""
     terminal.say(f"Insert your security key (Ctrl-C to cancel; waiting up to {int(seconds)} seconds; a key "
-                 "cannot reach a terminal over mosh or another remote shell)...")
+                 f"cannot reach a terminal over mosh or another remote shell){hint}...")
     deadline = clock() + max(0.0, seconds)
     while clock() < deadline:
         sleep(INSERT_POLL_SECONDS)
@@ -1001,8 +1047,8 @@ def wait_for_key(list_devices: Callable[[], Any], terminal: "Terminal", seconds:
             devices = []
         if devices:
             return devices
-    raise ApprovalError(f"no USB security key was inserted within {int(seconds)} seconds; nothing was "
-                        "decided (insert it and run the command again)")
+    raise ApprovalError(f"no USB security key was inserted within {int(seconds)} seconds{hint}; nothing "
+                        "was decided (insert it and run the command again)")
 
 
 def security_keys_present() -> bool:
@@ -1051,9 +1097,9 @@ def probe_device(device: Any, webauthn: Mapping[str, Any] | None, origin: str = 
     except Exception:
         return "unknown"
     options = getattr(info, "options", None) or {}
-    if str((webauthn or {}).get("userVerification") or "required") == "required" and not (
-        options.get("clientPin") or options.get("uv")
-    ):
+    requirement = str((webauthn or {}).get("userVerification") or "required")
+    verifies = bool(options.get("clientPin") or options.get("uv"))
+    if requirement == "required" and not verifies:
         return "no_pin"
     ids = _credential_ids(webauthn)
     rp_id = str((webauthn or {}).get("rpId") or "")
@@ -1071,6 +1117,10 @@ def probe_device(device: Any, webauthn: Mapping[str, Any] | None, origin: str = 
                 return "unknown"
         except Exception:
             return "unknown"
+    if requirement in {"required", "preferred"} and verifies:
+        # A credential a browser made to need the key's PIN for every use (credProtect) is not
+        # found without it; the gateway asks for the PIN here, so the assertion, with it, decides.
+        return "unknown"
     return "no"
 
 
@@ -1090,16 +1140,22 @@ def eligible_devices(devices: Sequence[Any], webauthn: Mapping[str, Any] | None,
         return [], ("this security key has no PIN, and this approval asks for the key's PIN: set one "
                     "(for a YubiKey: ykman fido access change-pin), or approve with --method totp where "
                     "the gateway offers it")
-    return [], ("the security key plugged in is not registered to your account: use the key you "
-                "registered, or add this one under My account in the Enterprise console")
+    return [], ("the security key plugged in holds none of your keys that answer a touch: it is not "
+                "registered to your account, or it was registered as a passkey that answers only after its "
+                "PIN, which a touch does not ask; use the key you registered, or add this one under My "
+                "account in the Enterprise console (for a touch: \"after my password\" on a local account, "
+                "\"Security key for terminal decisions\" with single sign-on)")
 
 
 def preferred_method(methods: Sequence[str], webauthn: Mapping[str, Any] | None = None, origin: str = "") -> str:
-    """The proof to give when ``--method`` is not named: a security key when the gateway offers
-    one, python-fido2 is installed and a plugged-in key can answer this challenge (holds one of
-    the person's keys, with a PIN when one is asked for); else, as before, a TOTP code, then a
-    key, then the browser."""
-    if "security_key" in methods and security_keys_present():
+    """The proof to give when ``--method`` is not named, the least work for the person: a security
+    key when the gateway offers one, python-fido2 is installed, a plugged-in key can answer this
+    challenge (holds one of the person's keys) and the key costs only a touch (the gateway asks no
+    user verification: its administrator requires a touch) or is the only proof the person has;
+    else, as client 0.11.1, a TOTP code, then a key, then the browser. With the touch switch off
+    a key also asks for its PIN, which is no less work than a code."""
+    touch_only = isinstance(webauthn, Mapping) and str(webauthn.get("userVerification") or "") == "discouraged"
+    if "security_key" in methods and (touch_only or "totp" not in methods) and security_keys_present():
         if len(methods) == 1 or webauthn is None or _eligible_here(webauthn, origin):
             return "security_key"
     for method in ("totp", "security_key", "sso"):
@@ -1494,9 +1550,14 @@ def decide(send: Send, terminal: Terminal, requests: Sequence[Mapping[str, Any]]
         proof = {"method": "approver_session", "session_id": session["session_id"],
                  "session_secret": session["secret"]()}
     else:
+        what = "" if len(entries) == 1 else f" these {len(entries)} requests"
+        stepup.prompt = f"Touch your security key to {decision}{what} (Ctrl-C to cancel)..."
         proof = stepup.prove(challenge)
     result = stepup.finish(challenge, proof)
     via = str(result.get("decision_via") or "terminal_stepup").replace("_", " ")
+    webauthn = challenge.get("webauthn") if isinstance(challenge.get("webauthn"), Mapping) else {}
+    if proof.get("method") == "security_key" and webauthn.get("userVerification") == "discouraged":
+        via = "security-key touch"  # the gateway asked a touch only (its administrator's switch)
     return _report(terminal, by_id, list(result.get("results") or ()),
                    decided_by=str(result.get("decided_by") or stepup.account), via=via)
 
