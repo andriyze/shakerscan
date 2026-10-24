@@ -187,13 +187,15 @@ _SECRET = re.compile(r"/targets/([^/]+)/discovered-secrets/([^/]+)/(state|expiry
 def saved_body(body: bytes) -> str | None:
     """Where a request body too long to name inline is saved for the person's command: the
     client's configuration directory (``$SHAKERSCAN_CONFIG_DIR`` or ``~/.config/shakerscan``),
-    ``decisions/<digest>.json``, readable by this user only; None when it cannot be written. The
-    touch still shows what the gateway reads from the body the person's command sends."""
+    ``decisions/<digest>.json``, readable by this user only, kept a week (SAVED_SECONDS); None
+    when it cannot be written. The touch still shows what the gateway reads from the body the
+    person's command sends."""
     base = os.environ.get("SHAKERSCAN_CONFIG_DIR") or os.path.join(os.path.expanduser("~"), ".config", "shakerscan")
     directory = os.path.join(base, "decisions")
     path = os.path.join(directory, hashlib.sha256(body).hexdigest()[:24] + ".json")
     try:
         os.makedirs(directory, mode=0o700, exist_ok=True)
+        _prune_saved(directory)
         descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0), 0o600)
         with os.fdopen(descriptor, "wb") as handle:
             handle.write(body)
@@ -201,6 +203,30 @@ def saved_body(body: bytes) -> str | None:
     except OSError:
         return None
     return path
+
+
+# A saved request body is kept this long for the person's command, then removed the next time one
+# is saved.
+SAVED_SECONDS = 7 * 86400
+
+
+def _prune_saved(directory: str) -> None:
+    import time
+
+    cutoff = time.time() - SAVED_SECONDS
+    try:
+        names = os.listdir(directory)
+    except OSError:
+        return
+    for name in names:
+        if not re.fullmatch(r"[0-9a-f]{24}\.json", name):
+            continue
+        where = os.path.join(directory, name)
+        try:
+            if os.lstat(where).st_mtime < cutoff:
+                os.unlink(where)
+        except OSError:
+            pass
 
 
 def person_command(method: str, path: str, body: bytes | None, detail: Mapping[str, Any] | None = None) -> str:
@@ -451,7 +477,10 @@ def _touch(post: Post, approve: Any, terminal: Any, *, origin: str, method: str,
     granted = result.get("person_decision") if isinstance(result, Mapping) else None
     if not 200 <= status < 300 or not isinstance(granted, Mapping) or not isinstance(granted.get("grant"), str):
         raise _refused(status, result)
-    terminal.say("done; decided by " + _inert(result.get("decided_by") or "you", 120) + ", by security-key touch")
+    # The request is not applied yet: it is sent again now, and what the instance answers then
+    # (applied, or refused because something changed meanwhile) is the command's own output.
+    terminal.say("touch accepted for " + _inert(result.get("decided_by") or "you", 120)
+                 + " (security-key touch); sending the request again...")
     return granted["grant"]
 
 

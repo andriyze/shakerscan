@@ -912,7 +912,8 @@ def test_an_approval_names_no_account_and_takes_the_one_the_gateway_answers():
     stepup = approval.StepUp(send, ORIGIN, approval.Terminal(io.StringIO(), io.StringIO()))
     challenge, _ = stepup.begin("permission_decision", body)
     assert sent[0]["account"] == "" and stepup.account == "sso:00u1example" and len(sent) == 1
-    # An older gateway needs the name: asked once, as before.
+    # An older gateway needs the name: asked once, before anything is posted (an empty name would
+    # be refused and written to its audit log as a denied approval on every command).
     old[0], sent[:] = True, []
 
     class Asks(approval.Terminal):
@@ -921,7 +922,7 @@ def test_an_approval_names_no_account_and_takes_the_one_the_gateway_answers():
 
     stepup = approval.StepUp(send, ORIGIN, Asks(io.StringIO(), io.StringIO()))
     stepup.begin("permission_decision", body)
-    assert [item["account"] for item in sent] == ["", "alice"] and stepup.account == "alice"
+    assert [item["account"] for item in sent] == ["alice"] and stepup.account == "alice"
     # A gateway that names the approver itself refuses an invalid request for another reason:
     # said as it is, and no name is asked for.
     old[0], invalid[0], sent[:] = False, True, []
@@ -1343,7 +1344,8 @@ def test_the_terminal_shows_exactly_the_signed_decision_and_nothing_more():
         "This needs your decision (your administrator requires a security-key touch):",
         *decision.summary_lines(SUMMARY),
         "Touch your security key to approve (Ctrl-C to cancel)...",
-        "done; decided by alice, by security-key touch",
+        # Not "done": the request is sent again now, and its answer is the command's own output.
+        "touch accepted for alice (security-key touch); sending the request again...",
     ]
     assert decision.summary_lines(SUMMARY) == ["  " + SUMMARY]
 
@@ -1451,12 +1453,15 @@ def test_in_wsl_an_unplugged_key_is_not_waited_for(monkeypatch):
 
 
 def test_the_wait_names_the_remote_shells_it_cannot_recognize(monkeypatch):
+    """Named when the wait ends without a key, not at every local prompt."""
     monkeypatch.setattr(approval, "key_out_of_reach", lambda: "")
     out = io.StringIO()
-    with pytest.raises(approval.ApprovalError):
+    with pytest.raises(approval.ApprovalError) as ended:
         approval.wait_for_key(lambda: [], approval.Terminal(io.StringIO(), out), 1, sleep=lambda s: None,
                               clock=iter([0.0, 0.5, 2.0]).__next__)
-    assert "a key cannot reach a terminal over mosh or another remote shell" in out.getvalue()
+    assert "mosh" not in out.getvalue()
+    assert out.getvalue().startswith("Insert your security key (Ctrl-C to cancel; waiting up to 1 seconds)")
+    assert "cannot reach this terminal over mosh or another remote shell" in str(ended.value)
 
 
 @pytest.mark.parametrize(("platform", "machine", "declared"), [
@@ -1546,6 +1551,8 @@ def test_an_approval_says_once_whom_it_is_for():
 
     def send(method, path, payload=None, headers=None, *, timeout=None):
         sent.append(path)
+        if method == "GET" and path == approval.ME_PATH:
+            return 200, {"person_decision_proof": False}  # a gateway that names the approver
         document = approval.set_document("permission_decision", "alice", ORIGIN, {"decisions": []})
         return 200, {"schema_version": "shakerscan-approval-challenge/v1", "approval_id": "apv_1",
                      "account": "alice", "set_digest": approval.set_digest(document)}
@@ -1562,16 +1569,25 @@ def test_an_approval_says_once_whom_it_is_for():
 # ---- the least work for the person, the words they are shown, where a key cannot be opened ------
 
 
-def test_with_the_switch_off_and_a_code_enrolled_the_code_is_asked_as_before(monkeypatch):
-    """Without --method the person is asked for what costs them least: a touch when the gateway
-    asks only for one (its administrator requires a touch), else the authenticator code when one
-    is enrolled, as client 0.11.1 asks (with the switch off a key also asks for its PIN)."""
+def test_the_key_is_preferred_whenever_it_holds_the_persons_key_switch_on_or_off(monkeypatch):
+    """Without --method a plugged-in key that holds one of the person's keys is asked, whether the
+    gateway asks only for a touch (its administrator requires one) or also for the key's PIN (the
+    switch off): never a 6-digit code while a key can answer. The code only when no key can: none
+    holds the person's key, the key has no PIN where one is asked, or there is no challenge to
+    ask a key about."""
     mine = key("YubiKey 5C", holds=[b"mine"])
     fake_fido2(monkeypatch, [mine])
     touch = {**WEBAUTHN, "userVerification": "discouraged"}
-    assert approval.preferred_method(["totp", "security_key"], WEBAUTHN, ORIGIN) == "totp"
+    assert approval.preferred_method(["totp", "security_key"], WEBAUTHN, ORIGIN) == "security_key"
     assert approval.preferred_method(["totp", "security_key"], touch, ORIGIN) == "security_key"
     assert approval.preferred_method(["totp", "security_key"], None, ORIGIN) == "totp"
+    fake_fido2(monkeypatch, [key("YubiKey 5C", holds=[b"other"])])
+    assert approval.preferred_method(["totp", "security_key"], WEBAUTHN, ORIGIN) == "totp"
+    fake_fido2(monkeypatch, [key("no PIN", holds=[b"mine"], pin=False)])
+    assert approval.preferred_method(["totp", "security_key"], WEBAUTHN, ORIGIN) == "totp"
+    fake_fido2(monkeypatch, [])
+    assert approval.preferred_method(["totp", "security_key"], WEBAUTHN, ORIGIN) == "totp"
+    fake_fido2(monkeypatch, [mine])
     # A key is all the person has: it is asked (with its PIN when the gateway asks for one).
     assert approval.preferred_method(["security_key"], WEBAUTHN, ORIGIN) == "security_key"
     assert approval.preferred_method(["security_key", "sso"], WEBAUTHN, ORIGIN) == "security_key"
@@ -1596,7 +1612,7 @@ def test_a_key_with_a_pin_that_finds_nothing_without_it_is_left_to_the_real_asse
     devices, why = approval.eligible_devices([holder], touch, ORIGIN)
     assert devices == []
     assert "not registered to your account" in why and "only after its PIN" in why
-    assert 'after my password' in why
+    assert '"Use it: for terminal approvals (touch)"' in why
 
 
 def _decide_by_touch(monkeypatch, decision_word, *, touch=True):

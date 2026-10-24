@@ -807,6 +807,11 @@ class StepUp:
                 "account": account, "origin": self.origin, **parts,
             })
 
+        if not self.account and self._names_no_approver():
+            # A gateway from before the approver was named (it does not report
+            # person_decision_proof) refuses an empty sign-in name and audits the refusal: ask
+            # for the name first, as client 0.11.1 always did, instead of posting it empty.
+            self._account()
         if self.account:
             challenge = post(self.account)
         else:
@@ -1071,8 +1076,7 @@ def wait_for_key(list_devices: Callable[[], Any], terminal: "Terminal", seconds:
     if kind == "fido":
         raise ApprovalError(UNOPENABLE_KEY)
     hint = MAYBE_UNOPENABLE if kind == "maybe" else ""
-    terminal.say(f"Insert your security key (Ctrl-C to cancel; waiting up to {int(seconds)} seconds; a key "
-                 f"cannot reach a terminal over mosh or another remote shell){hint}...")
+    terminal.say(f"Insert your security key (Ctrl-C to cancel; waiting up to {int(seconds)} seconds){hint}...")
     deadline = clock() + max(0.0, seconds)
     while clock() < deadline:
         sleep(INSERT_POLL_SECONDS)
@@ -1082,8 +1086,12 @@ def wait_for_key(list_devices: Callable[[], Any], terminal: "Terminal", seconds:
             devices = []
         if devices:
             return devices
+    # Said only now, not at every local prompt: a key plugged into another computer never arrives
+    # over mosh or another remote shell the client cannot recognize (SSH, WSL and containers are
+    # said at once, key_out_of_reach).
     raise ApprovalError(f"no USB security key was inserted within {int(seconds)} seconds{hint}; nothing "
-                        "was decided (insert it and run the command again)")
+                        "was decided (insert it and run the command again; a key plugged into another "
+                        "computer cannot reach this terminal over mosh or another remote shell)")
 
 
 def security_keys_present() -> bool:
@@ -1178,20 +1186,27 @@ def eligible_devices(devices: Sequence[Any], webauthn: Mapping[str, Any] | None,
     return [], ("the security key plugged in holds none of your keys that answer a touch: it is not "
                 "registered to your account, or it was registered as a passkey that answers only after its "
                 "PIN, which a touch does not ask; use the key you registered, or add this one under My "
-                "account in the Enterprise console (for a touch: \"after my password\" on a local account, "
-                "\"Security key for terminal decisions\" with single sign-on)")
+                "account in the Enterprise console (a local account: Passkeys, \"Use it: for terminal "
+                "approvals (touch)\"; single sign-on: \"Security key for terminal decisions\")")
 
 
 def preferred_method(methods: Sequence[str], webauthn: Mapping[str, Any] | None = None, origin: str = "") -> str:
-    """The proof to give when ``--method`` is not named, the least work for the person: a security
-    key when the gateway offers one, python-fido2 is installed, a plugged-in key can answer this
-    challenge (holds one of the person's keys) and the key costs only a touch (the gateway asks no
-    user verification: its administrator requires a touch) or is the only proof the person has;
-    else, as client 0.11.1, a TOTP code, then a key, then the browser. With the touch switch off
-    a key also asks for its PIN, which is no less work than a code."""
-    touch_only = isinstance(webauthn, Mapping) and str(webauthn.get("userVerification") or "") == "discouraged"
-    if "security_key" in methods and (touch_only or "totp" not in methods) and security_keys_present():
-        if len(methods) == 1 or webauthn is None or _eligible_here(webauthn, origin):
+    """The proof to give when ``--method`` is not named: the security key whenever the gateway
+    offers one, python-fido2 is installed and a plugged-in key holds one of the person's keys for
+    this challenge (asked silently: nothing blinks), with the administrator's touch switch on or
+    off (off, the key asks for its PIN as at sign-in, never a 6-digit code); also when a key is the
+    only proof offered. A TOTP code only when no key can answer here (none plugged in, none
+    registered, or the gateway asks for a PIN the key has none for); then the browser.
+    ``--method totp`` still chooses the code."""
+    if "security_key" in methods and security_keys_present():
+        if "totp" in methods:
+            # Only a key that says it holds one of the person's credentials: a code is there to
+            # fall back on (and with no challenge to ask about, the code).
+            if webauthn is not None and _key_answers_here(webauthn, origin, unknown_counts=False):
+                return "security_key"
+        elif len(methods) == 1 or webauthn is None or _key_answers_here(webauthn, origin):
+            # No code to fall back on: a key that could not be asked silently (a U2F-only key,
+            # or a credential that answers only after its PIN) is tried too.
             return "security_key"
     for method in ("totp", "security_key", "sso"):
         if method in methods:
@@ -1199,12 +1214,15 @@ def preferred_method(methods: Sequence[str], webauthn: Mapping[str, Any] | None 
     return ""
 
 
-def _eligible_here(webauthn: Mapping[str, Any], origin: str = "") -> bool:
+def _key_answers_here(webauthn: Mapping[str, Any], origin: str = "", *, unknown_counts: bool = True) -> bool:
+    """Whether a plugged-in key holds one of the person's credentials for this challenge (probe
+    "yes"), or, with ``unknown_counts``, could not be asked silently (probe "unknown")."""
     try:
         from fido2.hid import CtapHidDevice
-        return bool(eligible_devices(list(CtapHidDevice.list_devices()), webauthn, origin)[0])
+        found = [probe_device(device, webauthn, origin) for device in CtapHidDevice.list_devices()]
     except Exception:
         return False
+    return "yes" in found or (unknown_counts and "unknown" in found)
 
 
 def _device_name(device: Any) -> str:

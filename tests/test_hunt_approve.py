@@ -388,7 +388,9 @@ def test_hunt_start_allow_on_enterprise_needs_the_persons_step_up_first(monkeypa
                 "budget_dimensions": []}
     closed = v2_cli.CliError("Operators cannot use POST /_enterprise/approvals/begin", error_type="api_error",
                              http_status=403, api_detail="Operators cannot use POST /_enterprise/approvals/begin")
+    # A gateway from before the terminal approval (it describes itself to a token, as every one does).
     client = Client({("GET", "/hunts/contract"): contract, ("POST", "/_enterprise/approvals/begin"): closed,
+                     ("GET", "/_enterprise/me"): {"user": {"auth": "token"}},
                      ("POST", "/hunts"): lambda payload: {"hunt_id": HUNT}}, token="token-1")
     monkeypatch.setattr(v2_cli.sys, "stdin", types.SimpleNamespace(isatty=lambda: True, readline=lambda: "alice\n"))
     # The person's terminal: the prompts go to stderr, a terminal too.
