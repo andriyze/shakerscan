@@ -2083,6 +2083,8 @@ def test_the_homebrew_formula_says_at_install_that_it_cannot_touch():
     assert "def caveats" in formula
     caveats = formula.split("def caveats", 1)[1]
     assert "security key" in caveats and "pipx install shakerscan" in caveats
+    # `brew info` shows them too, with both installers that carry python-fido2 and the check.
+    assert "uv tool install shakerscan" in caveats and "shakerscan doctor" in caveats
 
 
 # ---- one resend in every stack, quoted commands, the record, no side effect --------------------

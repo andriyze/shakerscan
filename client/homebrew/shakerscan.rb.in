@@ -26,8 +26,10 @@ class Shakerscan < Formula
     <<~EOS
       This install cannot use a USB security key (python-fido2 is not in the formula), so it
       cannot answer a touch. Where an Enterprise gateway requires a security key touch for
-      decisions from terminals, install the client with pipx instead:
+      decisions from terminals, install the client with pipx or uv instead:
         pipx install shakerscan
+        uv tool install shakerscan
+      `shakerscan doctor` says whether your gateway requires the touch.
     EOS
   end
 

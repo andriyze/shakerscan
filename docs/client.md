@@ -54,10 +54,11 @@ brew install andriyze/shakerscan/shakerscan
 ```
 
 The Homebrew formula installs the client without python-fido2, so it cannot answer a security-key
-touch (`brew install` says so in its caveats): on an Enterprise gateway whose administrator requires
-a touch for person decisions (and for every terminal approval), install the client with `pipx` or
-`uv tool` instead. For an open-source
-engine, or a gateway that requires no touch, the Homebrew client does the same as the others.
+touch (`brew install` and `brew info shakerscan` say so in its caveats, and `shakerscan doctor`
+says whether your gateway requires the touch): on an Enterprise gateway whose administrator
+requires a touch for person decisions (and for every terminal approval), install the client with
+`pipx` or `uv tool` instead. For an open-source engine, or a gateway that requires no touch, the
+Homebrew client does the same as the others.
 
 Run without installing:
 
