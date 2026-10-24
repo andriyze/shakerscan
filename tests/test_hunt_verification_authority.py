@@ -885,3 +885,37 @@ def test_a_suspected_finding_on_another_host_is_refused_before_any_request(monke
     assert outcome["raised"].status_code == 422
     assert str(outcome["raised"].detail).startswith("verification_service_unresolved")
     assert requested == [] and outcome["database"].findings_created == []
+
+
+def test_a_route_the_workflow_contract_refuses_is_released_before_any_request(web_hunt, monkeypatch):
+    """A candidate route such as //other-host/x fails the workflow contract before the proof runs
+    (step_0_path_must_be_relative, nothing sent). The Hunt charged it as an uncertain verification
+    (24 requests, 180 s, a verification and an active action); it is now refused at no cost."""
+    database, raised, delta, bases, _recorded = _verify_on_network_target(
+        monkeypatch, {"path": "//198.51.100.99/x", "method": "GET", "origin": SERVICE},
+    )
+    assert bases == [] and delta == {}
+    assert raised is not None and raised.status_code == 422
+    assert raised.detail["error"] == "invalid_workflow" and raised.detail["target_traffic_sent"] is False
+    (action,) = database.actions.values()
+    public = public_hunt_action(action)["result"]
+    assert action["status"] == "blocked" and public["execution_started"] is False
+    assert public["budget_accounting"]["charge_basis"] == "not_charged"
+    assert action["result_summary"]["violation"].startswith("step_0_path")
+    _old, reservations = web_hunt
+    (stored,) = reservations.rows.values()
+    assert not any(stored.record.actual.values())
+
+
+def test_a_contract_refusal_after_a_create_surface_probe_keeps_the_charge(web_hunt, monkeypatch):
+    database, _reservations = web_hunt
+
+    async def probed_then_refused(*args, **kwargs):
+        return {"verified": False, "error": {
+            "error": "invalid_workflow", "violation": "step_0_path_must_be_relative",
+            "target_traffic_sent": True,
+        }}
+
+    result = _verify(probed_then_refused, monkeypatch)
+    assert result["result"]["ok"] is True
+    assert database.run["budget_used_json"]["verifications"] == 1

@@ -2771,7 +2771,7 @@ async def _execute_hunt_capability_lifecycle(
             if verification_refused_before_traffic and isinstance(refusal_detail, Mapping):
                 # D34: the code stays machine-readable in the action, not a repr string.
                 result = {**result, **{
-                    key: refusal_detail[key] for key in ("reason_code", "message", "slot", "profile_id")
+                    key: refusal_detail[key] for key in ("reason_code", "message", "slot", "profile_id", "violation")
                     if key in refusal_detail
                 }, "error": str(refusal_detail.get("reason_code") or refusal_detail.get("error") or "")[:120]}
             if candidate_adapter.blocked_exception is not None:

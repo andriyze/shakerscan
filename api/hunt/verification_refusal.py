@@ -34,19 +34,25 @@ def refused_before_traffic() -> Iterator[None]:
         ) from exc
 
 
+# What the workflow dispatch raises before its proof runs: a Hunt credential refusal, and a
+# workflow that breaks the workflow contract (a scheme-relative route, an absolute URL).
+_DISPATCH_REFUSALS = frozenset({"hunt_credential_refused", "invalid_workflow"})
+
+
 def raise_returned_refusal(result: Any) -> None:
-    """Raise a credential refusal the verifier returned as a verdict, when nothing was sent (D33).
+    """Raise a refusal the verifier returned as a verdict, when nothing was sent (D33).
 
     The verifier turns every HTTPException from its dispatch into a returned verdict. A Hunt
     credential refusal raised while the dispatch resolves principals (auth_bypass resolves them
-    there, not in preflight) comes back the same way, and the Hunt reported it as a successful,
-    fully charged verification. The dispatch says whether its only possible earlier traffic, a
-    create-surface probe, ran; only an explicit ``target_traffic_sent: false`` is a refusal.
+    there, not in preflight), or a workflow the contract refuses (a candidate route such as
+    ``//other-host/x``), comes back the same way, and the Hunt reported it as a fully charged
+    verification. The dispatch says whether its only possible earlier traffic, a create-surface
+    probe, ran; only an explicit ``target_traffic_sent: false`` is a refusal.
     """
     error = result.get("error") if isinstance(result, Mapping) else None
     if (
         isinstance(error, Mapping)
-        and error.get("error") == "hunt_credential_refused"
+        and error.get("error") in _DISPATCH_REFUSALS
         and error.get("target_traffic_sent") is False
     ):
         raise VerificationRefused(status_code=422, detail=dict(error))
