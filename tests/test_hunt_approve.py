@@ -51,7 +51,7 @@ class Terminal(approval.Terminal):
         self.answers = list(answers)
         self.keys = list(keys)
 
-    def require(self, what):
+    def require(self, what="it", *, person_runs=None):
         return None
 
     def line(self, prompt):
@@ -568,7 +568,7 @@ class _PtyTerminal(approval.Terminal):
     def flush(self):
         return None
 
-    def require(self, what):
+    def require(self, what="it", *, person_runs=None):
         return None
 
     @property

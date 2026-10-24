@@ -185,7 +185,7 @@ class _Terminal:
         self.lines = list(lines)
         self.said = []
 
-    def require(self, what):
+    def require(self, what="it", *, person_runs=None):
         return None
 
     def say(self, text=""):

@@ -22,6 +22,7 @@ import email.message
 import hashlib
 import io
 import json
+import shlex
 import sys
 import types
 import urllib.error
@@ -265,7 +266,15 @@ def test_approve_without_a_terminal_exits_3_and_reads_nothing(monkeypatch, capsy
     for argv in (["approve", "r-1"], ["approve", "--all-pending"], ["approve", "--watch"], ["deny", "r-1"]):
         assert v2_cli.main(["--api-url", ORIGIN, *argv]) == approval.EXIT_NOT_AT_TERMINAL == 3, argv
     assert sent == [], "nothing was read from or sent to the gateway"
-    assert sys.stderr.getvalue().count("interactive terminal") == 4
+    lines = sys.stderr.getvalue().splitlines()
+    assert len(lines) == 4 and all("interactive terminal" in line for line in lines)
+    # The command is named once (it read "shakerscan approve: shakerscan approve asks ..."),
+    # and the line ends with the command the person runs, naming the request.
+    assert lines[0].startswith("shakerscan approve: it asks the person at an interactive terminal")
+    assert all(line.count("shakerscan approve") + line.count("shakerscan deny") == 2 for line in lines), lines
+    assert [line.rsplit(": ", 1)[1] for line in lines] == [
+        "shakerscan approve r-1", "shakerscan approve --all-pending", "shakerscan approve --watch",
+        "shakerscan deny r-1"]
 
 
 @pytest.mark.parametrize(("method", "path", "body", "command"), [
@@ -567,7 +576,7 @@ def test_targets_authorize_registers_then_authorizes_with_one_touch(gateway, mon
     args = types.SimpleNamespace(action="authorize", target="app.example.com", reason=None, json=False,
                                  timeout=None, url=None, token_file=None)
     assert decisions.cmd_targets(args) == 0
-    created, me, refused, resent = gateway.sent
+    me, created, refused, resent = gateway.sent
     assert json.loads(created["data"]) == {"url": "https://app.example.com"}
     assert urllib.parse.urlsplit(me["url"]).path == "/_enterprise/me" and me["method"] == "GET"
     sent = json.loads(refused["data"])
@@ -586,7 +595,8 @@ def test_hunt_budget_raise_reads_the_budget_and_sends_totals(gateway, monkeypatc
     code = decisions.hunt_budget_raise([HUNT, "--limit", "max_state_changing_requests=+20",
                                         "--limit", "max_http_requests=600"], ORIGIN)
     assert code == 3, "an agent's shell gets the person's command, never a prompt"
-    read, refused = gateway.sent
+    read, me, refused = gateway.sent
+    assert urllib.parse.urlsplit(me["url"]).path == "/_enterprise/me"
     body = json.loads(refused["data"])
     assert body["limits"] == {"max_state_changing_requests": 40, "max_http_requests": 600}
     assert body["expected_revision"] == 2 and body["operator_confirmed"] is True
@@ -944,12 +954,22 @@ def test_doctor_says_whether_a_touch_is_required_and_could_happen_here(monkeypat
     def me(answer):
         return types.SimpleNamespace(request_json=lambda method, path: asked.append(path) or answer)
 
-    # No key plugged in is no failure: a key is needed only when the administrator asks a touch.
+    # Where a touch is required, no key plugged in is said as what to do; elsewhere it is no
+    # failure (the line said "needed only when ..." under the line that said it is required).
     assert decisions.touch_lines(me({"person_decision_proof": True})) == [
         "touch:    required for person decisions from terminals",
-        "key:      none plugged in (needed only when your administrator requires a touch)"]
+        "key:      none plugged in: plug in the security key registered to you before you decide from this "
+        "terminal"]
     off = me({"person_decision_proof": False})
-    assert decisions.touch_lines(off)[0] == "touch:    not required (the administrator's switch is off)"
+    assert decisions.touch_lines(off) == [
+        "touch:    not required (the administrator's switch is off)",
+        "key:      none plugged in (not needed here: approvals then use your other step-up)"]
+    # A key plugged in is not said to be unregistered (doctor cannot tell which is registered).
+    monkeypatch.setattr(approval, "security_key_readiness", lambda: "")
+    ready = decisions.touch_lines(me({"person_decision_proof": True}))[1]
+    assert "a security key is plugged in (it answers here if it is registered to you under My account)" in ready
+    assert "register it once" not in ready
+    monkeypatch.setattr(approval, "security_key_readiness", lambda: "no USB security key found; insert it")
     older = me({"user": {"auth": "token"}})
     assert decisions.touch_lines(older)[0] == "touch:    not offered by this gateway (an older Enterprise gateway)"
     # Only the gateway's description of itself is read: an older gateway's feed route would be
@@ -1184,7 +1204,21 @@ def test_a_target_registered_before_a_refused_touch_is_said_to_stay_registered(g
     gateway.open = created
     args = types.SimpleNamespace(action="authorize", target="app.example.com", reason=None, json=False,
                                  timeout=None, url=None, token_file=None)
+    # In an agent's shell, where the gateway requires a touch: refused before anything is
+    # registered, so there is no note to give.
     assert decisions.cmd_targets(args) == 3
+    err = capsys.readouterr().err
+    assert "shakerscan targets authorize app.example.com" in err and "registered" not in err
+    assert [urllib.parse.urlsplit(sent["url"]).path for sent in gateway.sent] == ["/_enterprise/me"]
+    # In the person's terminal the target is registered first; a touch that fails leaves it
+    # registered, and that is said.
+    at_a_terminal(monkeypatch)
+
+    def no_key(webauthn, origin, terminal, **kwargs):
+        raise approval.ApprovalError("no USB security key was inserted within 60 seconds; nothing was decided")
+
+    monkeypatch.setattr(approval, "security_key_assertion", no_key)
+    assert decisions.cmd_targets(args) == 1
     err = capsys.readouterr().err
     assert "was registered as a target just now and stays registered, not authorized" in err
 
@@ -1539,16 +1573,28 @@ def test_targets_authorize_records_the_person_the_connection_acts_for(monkeypatc
             return answer
         return types.SimpleNamespace(get=get)
 
-    person = {"user": {"display": "Laptop", "token_label": "andriy-mac"}, "acts_for_name": "alice"}
+    # Where the gateway requires a touch it writes the person who touched over this: the person.
+    person = {"user": {"display": "Laptop", "token_label": "andriy-mac"}, "acts_for_name": "alice",
+              "person_decision_proof": True}
     assert decisions._decider(client(person), "authorize") == (
         "alice via shakerscan targets authorize, service token andriy-mac")
-    service = {"user": {"display": "CI", "token_label": "ci"}, "acts_for_name": None}
-    assert decisions._decider(client(service), "unauthorize") == "CI via shakerscan targets unauthorize, service token ci"
+    # Elsewhere the engine keeps what is sent, which no person proved: the token first, and that
+    # (the scanner UI showed it as the person's own decision).
+    off = {**person, "person_decision_proof": False}
+    assert decisions._decider(client(off), "authorize") == (
+        "service token andriy-mac for alice via shakerscan targets authorize "
+        "(made with a token, not proven by a person)")
+    service = {"user": {"display": "CI", "token_label": "ci"}, "acts_for_name": None, "person_decision_proof": False}
+    assert decisions._decider(client(service), "unauthorize") == (
+        "service token ci (CI) via shakerscan targets unauthorize (made with a token, not proven by a person)")
     older = {"user": {"display": "Laptop", "subject": "laptop"}}
-    assert decisions._decider(client(older), "authorize") == "Laptop via shakerscan targets authorize"
+    assert decisions._decider(client(older), "authorize") == (
+        "a service token (Laptop) via shakerscan targets authorize (made with a token, not proven by a person)")
     assert decisions._decider(client(OSError("404")), "authorize") == "root via shakerscan targets authorize"
-    long = {"user": {"display": "x" * 300, "token_label": "y" * 300}}
-    assert len(decisions._decider(client(long), "authorize")) <= 200
+    for proof in (True, False):
+        long = {"user": {"display": "x" * 300, "token_label": "y" * 300}, "acts_for_name": "z" * 300,
+                "person_decision_proof": proof}
+        assert len(decisions._decider(client(long), "authorize")) <= 200
 
 
 def test_a_refused_decision_in_the_watch_says_the_persons_command():
@@ -1875,3 +1921,125 @@ def test_the_homebrew_formula_says_at_install_that_it_cannot_touch():
     assert "def caveats" in formula
     caveats = formula.split("def caveats", 1)[1]
     assert "security key" in caveats and "pipx install shakerscan" in caveats
+
+
+# ---- one resend in every stack, quoted commands, the record, no side effect --------------------
+
+
+def test_shakerscan_scan_resends_once_and_never_asks_a_second_touch(gateway, monkeypatch, capsys):
+    """scan_cli's resend carries the grant and is never completed again: a resend the gateway
+    refuses once more is reported (one begin, one touch, two sends), as the product CLI does."""
+    monkeypatch.setenv("SHAKERSCAN_API_TOKEN", "token-1")
+    at_a_terminal(monkeypatch)
+    signer = Signer()
+    monkeypatch.setattr(approval, "security_key_assertion", signer)
+
+    class Forgetful(dict):
+        def pop(self, key, default=None):
+            return None  # the gateway does not take the grant
+
+    gateway.grants = Forgetful()
+    code = scan_cli.main(["--api-url", ORIGIN, "--ui-url", ORIGIN, "https://new.example.com",
+                          "--active-testing", "--confirm-active"])
+    scans = [sent for sent in gateway.sent if sent["url"].endswith("/scans")]
+    assert code != 0
+    assert len(gateway.begun) == 1 and len(signer.asked) == 1 and len(scans) == 2
+    assert scans[1]["headers"]["x-shakerscan-person-proof"] == "apv_grant_1"
+    capsys.readouterr()
+
+
+@pytest.mark.parametrize("hostile", ["$(id)", "x;touch pwned", "`id`", "a'b", "a b"])
+def test_every_value_a_persons_command_names_is_one_quoted_word(hostile):
+    """The Hunt id, a target id or URL, a secret's ids and a budget limit come from the request
+    an agent sent: each is one shell word of the command the person is given, never code."""
+    body = json.dumps({**RAISE, "limits": {"max_state_changing_requests": 40}}).encode()
+    words = shlex.split(decision.person_command("POST", f"/hunts/{hostile}/budget-amendments", body))
+    assert words[:5] == ["shakerscan", "hunt", "budget", "raise", hostile]
+    words = shlex.split(decision.person_command("POST", f"/targets/{hostile}/authorization", b"{}"))
+    assert words == ["shakerscan", "targets", "authorize", hostile]
+    scan = json.dumps({"target": hostile, "policy": {"active_testing": True}}).encode()
+    assert shlex.split(decision.person_command("POST", "/scans", scan)) == ["shakerscan", "targets", "authorize",
+                                                                          hostile]
+    secret = f"/targets/{hostile}/discovered-secrets/{hostile}/state"
+    assert shlex.split(decision.person_command("POST", secret, b'{"state": "active"}')) == [
+        "shakerscan", "secrets", "reactivate", hostile, hostile]
+    other = shlex.split(decision.person_command("PATCH", f"/targets/{hostile}", b'{"cohort": "lab"}'))
+    assert other == ["shakerscan", "api", "PATCH", f"/targets/{hostile}", '{"cohort": "lab"}']
+
+
+@pytest.mark.parametrize("hostile", ["-x", "--url=https://evil.example", "--token-file=/tmp/t"])
+def test_a_value_that_reads_as_an_option_is_never_one(hostile):
+    """A value an agent's request carried that starts with "-" would be an option of the person's
+    command (`--url=...` sends the person's connection elsewhere): the request is named whole
+    through `shakerscan api` instead (its path starts with "/"), and a refused start names the
+    target's authorization by a placeholder, never the start."""
+    body = json.dumps(RAISE).encode()
+    cases = [
+        ("POST", f"/hunts/{hostile}/budget-amendments", body, None),
+        ("POST", f"/targets/{hostile}/authorization", b"{}", None),
+        ("POST", f"/targets/{hostile}/discovered-secrets/{hostile}/state", b'{"state": "active"}', None),
+        ("POST", "/scans", json.dumps({"target": hostile, "policy": {"active_testing": True}}).encode(), None),
+        ("POST", "/hunts", json.dumps({"target_id": hostile}).encode(), {"submission": "hunt"}),
+    ]
+    for method, path, sent, detail in cases:
+        words = shlex.split(decision.person_command(method, path, sent, detail))
+        assert not any(word.startswith(hostile) for word in words), words
+        options = [word for word in words if word.startswith("-")]
+        assert set(options) <= {"--limit", "--resume", "--days"}, words
+        if path.startswith(("/scans", "/hunts")) and path in {"/scans", "/hunts"}:
+            assert words == ["shakerscan", "targets", "authorize", "<target>"], words
+
+
+def test_a_refused_retest_without_a_target_names_a_placeholder_a_shell_does_not_wait_on():
+    """The command used to read `<the target's URL or id>`: pasted whole, the apostrophe left the
+    shell waiting for a closing quote."""
+    command = decision.person_command("POST", f"/findings/{HUNT}/retest", b"{}", {"submission": "retest"})
+    assert command == "shakerscan targets authorize <target>" and "'" not in command
+
+
+def test_targets_authorize_with_the_switch_off_is_sent_and_recorded_as_the_tokens(gateway, monkeypatch, capsys):
+    """Where no touch is required an agent's shell authorizes as before (the accepted risk), and
+    the engine records the token first and that no person proved it."""
+    decisions = _client_module(monkeypatch, gateway)
+    monkeypatch.setenv("SHAKERSCAN_API_TOKEN", "token-1")
+    at_a_terminal(monkeypatch, stdin=False)
+    import shakerscan.cli as cli
+
+    monkeypatch.setattr(cli, "apply_connection", lambda args: ORIGIN)
+    gateway.refuse = False
+    original = gateway.open
+
+    def switch_off(request, timeout=None):
+        if urllib.parse.urlsplit(request.full_url).path == "/_enterprise/me":
+            gateway.sent.append({"method": "GET", "url": request.full_url, "data": None, "headers": {}})
+            return _Response({"user": {"auth": "token", "display": "Laptop", "token_label": "laptop"},
+                              "acts_for_name": "alice", "person_decision_proof": False})
+        return original(request, timeout)
+
+    gateway.open = switch_off
+    args = types.SimpleNamespace(action="authorize", target="app.example.com", reason=None, json=False,
+                                 timeout=None, url=None, token_file=None)
+    assert decisions.cmd_targets(args) == 0
+    authorized = [sent for sent in gateway.sent if sent["url"].endswith("/authorization")]
+    assert json.loads(authorized[0]["data"])["approved_by"] == (
+        "service token laptop for alice via shakerscan targets authorize (made with a token, not proven by a person)")
+    capsys.readouterr()
+
+
+def test_a_raise_records_why_and_that_no_person_proved_it_where_no_touch_is_required():
+    sys.path.insert(0, str(ROOT / "client" / "src"))
+    from shakerscan import decisions
+
+    off = {"user": {"display": "Laptop", "token_label": "laptop"}, "acts_for_name": "alice",
+           "person_decision_proof": False}
+    assert decisions._raise_reason(None, off) == (
+        "Raised with service token laptop for alice; made with a token, not proven by a person "
+        "(shakerscan hunt budget raise)")
+    assert decisions._raise_reason("the login form needs more", off) == (
+        "the login form needs more (service token laptop for alice; made with a token, not proven by a person)")
+    # Where a touch is required the gateway writes its own reason; on an open-source engine there
+    # are no tokens.
+    assert decisions._raise_reason(None, {**off, "person_decision_proof": True}) == (
+        "Raised from the terminal (shakerscan hunt budget raise)")
+    assert decisions._raise_reason("why", None) == "why"
+    assert len(decisions._raise_reason("x" * 900, off)) <= 500

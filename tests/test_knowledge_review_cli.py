@@ -119,7 +119,7 @@ class Terminal(approval.Terminal):
         super().__init__(io.StringIO(), io.StringIO())
         self.keys = list(keys)
 
-    def require(self, what: str) -> None:
+    def require(self, what: str = "it", *, person_runs: str | None = None) -> None:
         return None
 
     def key(self, prompt: str, choices: str, **_waiting: Any) -> str:
@@ -210,10 +210,11 @@ def test_an_unknown_id_or_a_pipe_decides_nothing(monkeypatch, capsys):
     with Stub(_proposal()) as stub:
         assert _review(stub, Terminal(), "--accept", REBASED, monkeypatch=monkeypatch) == 2
         assert "no pending instruction proposal" in capsys.readouterr().err
-        # The real terminal check: a pipe (an agent's tool shell) is refused before any request.
+        # The real terminal check: a pipe (an agent's tool shell) is refused before any request,
+        # with exit 3 (refused, nothing ran), as every command that asks the person.
         monkeypatch.setattr(approval, "Terminal", REAL_TERMINAL)
         monkeypatch.setattr(sys, "stdin", io.StringIO("y\n"))
-        assert v2_cli.main(["--api-url", stub.url, "knowledge", "review"]) == 2
+        assert v2_cli.main(["--api-url", stub.url, "knowledge", "review"]) == 3
         assert "interactive terminal" in capsys.readouterr().err
     assert stub.decisions() == []
 
