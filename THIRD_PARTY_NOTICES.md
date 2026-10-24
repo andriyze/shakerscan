@@ -93,12 +93,13 @@ BSD-2-Clause, with some files under Apache-2.0 and MPL-2.0), which talks to a US
 its dependencies cryptography (Apache-2.0 OR BSD-3-Clause), cffi (MIT), pycparser (BSD-3-Clause)
 and, on Python 3.10, typing-extensions (PSF-2.0). The versions a client release was reviewed and
 tested with are pinned with hashes in `client/requirements/runtime.lock` and inventoried in the
-client's release SBOM. That lock records the tested set, not what an install picks up: `pipx
-install shakerscan` or `uv tool install shakerscan` resolves the declared range (`fido2>=2.2,<2.3`,
-`cryptography<49` on an Intel Mac, and whatever versions of its dependencies match) from the
-package index at install time, without
-hashes; `pip install --require-hashes -r client/requirements/runtime.lock` installs exactly the
-tested set.
+client's release SBOM. `pipx install shakerscan` or `uv tool install shakerscan` resolves the
+declared requirements (exactly `fido2==2.2.1`; `cryptography>=50.0.2,<51`, or `>=48.0.1,<49` on an
+Intel Mac; whatever versions of their own dependencies match) from the package index at install
+time, without hashes; `pip install --require-hashes -r client/requirements/runtime.lock` installs
+exactly the locked set. Before a client is published its wheel is checked both ways: from the lock,
+and from a plain resolution on Linux x86-64 and Apple Silicon macOS (docs/client.md says what each
+check covers).
 
 ## External services
 

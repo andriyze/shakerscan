@@ -160,8 +160,60 @@ jobs:
           (cd /tmp && printf '%s\n' "$initialize" | /tmp/oldest-venv/bin/shakerscan mcp | grep -F '"serverInfo"')
           /tmp/oldest-venv/bin/shakerscan version
 
+  # What `pipx install shakerscan` and `uv tool install shakerscan` install is a resolution of the
+  # declared ranges at install time (python-fido2 exactly 2.2.1, cryptography 50.0.x), not the
+  # lock: the built wheel is also installed with no lock, as they do, on Linux x86-64 and macOS
+  # arm64 with the oldest and the build's Python, and the touch path's libraries are exercised as
+  # resolved at publish time. An Intel Mac's cryptography 48.0.x is checked through the lock only
+  # (there is no Intel macOS runner).
+  smoke-unlocked:
+    needs: build
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        python: ["3.10", "3.12"]
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
+        with:
+          python-version: ${{ matrix.python }}
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: client-dist
+          path: dist/
+      - name: The built wheel with the dependencies pip resolves today (no lock) on ${{ matrix.os }}, Python ${{ matrix.python }}
+        run: |
+          set -euo pipefail
+          python -m venv "$RUNNER_TEMP/unlocked-venv"
+          "$RUNNER_TEMP/unlocked-venv/bin/python" -m pip install --disable-pip-version-check dist/*.whl
+          (cd "$RUNNER_TEMP" && "$RUNNER_TEMP/unlocked-venv/bin/python" -I - <<'PY'
+          import platform
+          import sys
+          from importlib.metadata import version
+
+          import fido2.client, fido2.ctap2, fido2.hid, fido2.webauthn  # noqa: F401
+          from cryptography.hazmat.primitives import hashes
+          from cryptography.hazmat.primitives.asymmetric import ec
+          from fido2.cose import ES256
+
+          resolved = {name: version(name) for name in ("fido2", "cryptography", "cffi")}
+          print("resolved without the lock:", resolved, platform.system(), platform.machine(), sys.version.split()[0])
+          assert resolved["fido2"] == "2.2.1", resolved
+          assert resolved["cryptography"].split(".")[0] == "50", resolved  # the declared range here
+          # The signature path python-fido2 runs through cryptography (an ES256 assertion).
+          key = ec.generate_private_key(ec.SECP256R1())
+          signature = key.sign(b"shakerscan", ec.ECDSA(hashes.SHA256()))
+          ES256.from_cryptography_key(key.public_key()).verify(b"shakerscan", signature)
+          PY
+          )
+          (cd "$RUNNER_TEMP" && "$RUNNER_TEMP/unlocked-venv/bin/shakerscan" version)
+          (cd "$RUNNER_TEMP" && "$RUNNER_TEMP/unlocked-venv/bin/shakerscan" approve --help >/dev/null)
+
   publish:
-    needs: [build, smoke-oldest-python]
+    needs: [build, smoke-oldest-python, smoke-unlocked]
     if: github.ref_type == 'tag' || inputs.publish
     runs-on: ubuntu-latest
     environment: pypi

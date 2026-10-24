@@ -20,16 +20,19 @@ classifiers = [
   "Topic :: Security",
 ]
 # python-fido2 (Yubico, BSD-2-Clause): a USB security key's touch for terminal approvals and the
-# decisions an Enterprise gateway asks a touch for. Hash-locked in client/requirements/runtime.lock.
-# One minor line: the client follows python-fido2's API, which has changed between minor releases.
-# Only where its `cryptography` dependency ships wheels, so the client installs without a Rust
-# toolchain everywhere it installed before: macOS and 64-bit Linux (x86-64, ARM64). Windows (no
-# terminal touch yet), 32-bit and other Linux architectures and the BSDs install the client
-# without it (`pipx inject shakerscan fido2` adds it where a wheel or a toolchain exists).
-# cryptography 49 and later publish no Intel macOS wheel: an Intel Mac stays on 48.
+# decisions an Enterprise gateway asks a touch for. Exactly the reviewed release: the touch path is
+# security-sensitive, so a new python-fido2 upload is never installed unreviewed. Only where its
+# `cryptography` dependency ships wheels, so the client installs without a Rust toolchain
+# everywhere it installed before: macOS and 64-bit Linux (x86-64, ARM64). Windows (no terminal
+# touch yet), 32-bit and other Linux architectures and the BSDs install the client without it
+# (`pipx inject shakerscan fido2` adds it where a wheel or a toolchain exists).
+# cryptography within the releases the publish checks run (the hash-locked set in
+# client/requirements/runtime.lock, and what pip resolves from these ranges when it publishes):
+# 50.0.x, and 48.0.x on an Intel Mac (49 and later publish no Intel macOS wheel).
 dependencies = [
-  'fido2>=2.2,<2.3; sys_platform == "darwin" or (sys_platform == "linux" and (platform_machine == "x86_64" or platform_machine == "aarch64"))',
-  'cryptography<49; sys_platform == "darwin" and platform_machine == "x86_64"',
+  'fido2==2.2.1; sys_platform == "darwin" or (sys_platform == "linux" and (platform_machine == "x86_64" or platform_machine == "aarch64"))',
+  'cryptography>=48.0.1,<49; sys_platform == "darwin" and platform_machine == "x86_64"',
+  'cryptography>=50.0.2,<51; (sys_platform == "darwin" and platform_machine != "x86_64") or (sys_platform == "linux" and (platform_machine == "x86_64" or platform_machine == "aarch64"))',
 ]
 
 [project.optional-dependencies]

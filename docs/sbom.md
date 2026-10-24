@@ -28,8 +28,9 @@ the input file; it is never substituted for a package distribution's hash.
 
 Client releases retain actual wheel and sdist SPDX file inventories and add CycloneDX
 representations. The base install's third-party runtime dependencies (since client 0.11.2:
-python-fido2 and, on an Intel Mac, a cap on cryptography: a `Requires-Dist` with no marker or a
-platform marker, kept with the requirement) are inventoried like an extra, from
+python-fido2, pinned exactly, and cryptography within the releases the publish checks run, one
+range on an Intel Mac and one elsewhere: a `Requires-Dist` with no marker or a platform marker,
+kept with the requirement) are inventoried like an extra, from
 `client/requirements/runtime.txt` (exactly the declared dependencies) and
 `client/requirements/runtime.lock` (compiled with the same `uv pip compile … --generate-hashes`
 command), read from the clean source checkout: the bundle gains

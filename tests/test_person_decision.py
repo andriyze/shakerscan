@@ -1478,12 +1478,39 @@ def test_python_fido2_is_declared_only_where_cryptography_ships_wheels(platform,
 
     project = tomllib.loads((ROOT / "client/pyproject.toml").read_text())["project"]
     environment = {"sys_platform": platform, "platform_machine": machine}
-    applies = {Requirement(text).name: Requirement(text).marker.evaluate(environment)
-               for text in project["dependencies"]}
-    assert applies["fido2"] is declared
-    assert applies["cryptography"] is (platform == "darwin" and machine == "x86_64")
+    applying = [Requirement(text) for text in project["dependencies"]
+                if Requirement(text).marker.evaluate(environment)]
+    assert any(item.name == "fido2" for item in applying) is declared
+    # cryptography within the releases the publish checks run, where python-fido2 installs: 48.0.x
+    # on an Intel Mac (no wheel of 49 or later there), 50.0.x elsewhere; never declared otherwise.
+    from packaging.specifiers import SpecifierSet
+
+    crypto = [item.specifier for item in applying if item.name == "cryptography"]
+    intel_mac = platform == "darwin" and machine == "x86_64"
+    expected = [SpecifierSet(">=48.0.1,<49" if intel_mac else ">=50.0.2,<51")] if declared else []
+    assert crypto == expected, crypto
     assert all(str(Requirement(text).specifier) for text in project["dependencies"])
     assert approval.fido2_declared(platform, machine) is declared
+
+
+def test_python_fido2_is_pinned_to_the_reviewed_release_and_the_lock_records_what_installs():
+    """The touch path's library is exactly the reviewed python-fido2 (no later upload installs
+    unreviewed), and the hash-locked resolution records, per platform, the cryptography a plain
+    install of these ranges resolves (50.0.2; 48.0.1 on an Intel Mac)."""
+    import tomllib
+
+    from packaging.requirements import Requirement
+
+    project = tomllib.loads((ROOT / "client/pyproject.toml").read_text())["project"]
+    [fido2] = [Requirement(text) for text in project["dependencies"] if Requirement(text).name == "fido2"]
+    assert str(fido2.specifier) == "==2.2.1"
+    declared = [line for line in (ROOT / "client/requirements/runtime.txt").read_text().splitlines()
+                if line and not line.startswith("#")]
+    assert declared == project["dependencies"], "runtime.txt lists exactly what the package declares"
+    lock = (ROOT / "client/requirements/runtime.lock").read_text()
+    pinned = {line.split(" ;")[0] for line in lock.splitlines() if line[:1].isalpha()}
+    assert {"fido2==2.2.1", "cryptography==48.0.1", "cryptography==50.0.2"} <= pinned, pinned
+    assert "cryptography==48.0.1 ; platform_machine == 'x86_64' and sys_platform == 'darwin'" in lock
 
 
 def test_a_platform_without_python_fido2_is_told_why(monkeypatch):
