@@ -703,9 +703,14 @@ def _browser_poe(*, available: bool, proven: bool, status: int = 200):
         contexts.append(opened)
         return opened
 
+    async def page(opened, *, route=None):
+        if route is not None:
+            await opened.route("**/*", route)
+        return await opened.new_page()
+
     poe = types.SimpleNamespace(
         fetch_with_capture=fetch, baseline_refusal=baseline_refusal, headless_browser_available=browser,
-        proof_browser_context=context, start_scan_session=lambda *_a, **_k: None,
+        proof_browser_context=context, proof_browser_page=page, start_scan_session=lambda *_a, **_k: None,
         end_scan_session=lambda *_a, **_k: None,
     )
     return poe, calls, contexts

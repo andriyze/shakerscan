@@ -162,18 +162,10 @@ def test_xss_browser_proof_keeps_its_headers_on_the_target():
     from scanner_tools import proof_of_exploit
 
     async def drive(target: str) -> list:
-        try:
-            return [(await proof_of_exploit.prove_xss_headless(
-                start, "q", "x", headers={"X-API-Key": SECRET})).to_dict()
-                for start in (f"{target}/", f"{target}/nav-cross")]
-        finally:
-            # The proof keeps one browser per event loop; close it with this loop.
-            browser, playwright = proof_of_exploit._browser_instance, proof_of_exploit._playwright_instance
-            proof_of_exploit._browser_instance = proof_of_exploit._playwright_instance = None
-            if browser is not None:
-                await browser.close()
-            if playwright is not None:
-                await playwright.stop()
+        # The proof module keeps a browser for this event loop and closes it when the loop ends.
+        return [(await proof_of_exploit.prove_xss_headless(
+            start, "q", "x", headers={"X-API-Key": SECRET})).to_dict()
+            for start in (f"{target}/", f"{target}/nav-cross")]
 
     with _servers() as (target, hits):
         page, redirected = asyncio.run(drive(target))

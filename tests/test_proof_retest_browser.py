@@ -157,18 +157,10 @@ def _retest(monkeypatch, verification: dict) -> dict:
                         dataclasses.replace(proof_of_exploit._poe_config, rate_limit_ms=0, enable_headless_xss=True))
 
     async def run() -> dict:
-        try:
-            return await run_proof_retest(
-                verification, infer_retest_inputs(verification), poe=proof_of_exploit,
-                replay_commands=[], ladder=[], cancelled=lambda: False)
-        finally:
-            # The proof keeps one browser per event loop; close it with this loop.
-            browser, playwright = proof_of_exploit._browser_instance, proof_of_exploit._playwright_instance
-            proof_of_exploit._browser_instance = proof_of_exploit._playwright_instance = None
-            if browser is not None:
-                await browser.close()
-            if playwright is not None:
-                await playwright.stop()
+        # The proof module keeps a browser for this event loop and closes it when the loop ends.
+        return await run_proof_retest(
+            verification, infer_retest_inputs(verification), poe=proof_of_exploit,
+            replay_commands=[], ladder=[], cancelled=lambda: False)
 
     return asyncio.run(run())
 

@@ -596,13 +596,18 @@ async def confined_session_context(browser: Any, origin_urls: Any, headers: Mapp
         **{str(k): str(v) for k, v in dict(options.get("extra_http_headers") or {}).items()},
         **{str(k): str(v) for k, v in dict(headers or {}).items()},
     }
-    token = _guard._current.set(guard)  # a guard-enforcing new_context wrapper reads this one
     try:
-        context = await browser.new_context(**{**options, **await _guard.guarded_context_options()})
-    finally:
-        _guard._current.reset(token)
-    # WebRTC sends UDP outside any proxy: the page has no RTCPeerConnection.
-    await context.add_init_script(_guard.DISABLE_WEBRTC)
+        token = _guard._current.set(guard)  # a guard-enforcing new_context wrapper reads this one
+        try:
+            context = await browser.new_context(**{**options, **await _guard.guarded_context_options()})
+        finally:
+            _guard._current.reset(token)
+        # WebRTC sends UDP outside any proxy: the page has no RTCPeerConnection.
+        await context.add_init_script(_guard.DISABLE_WEBRTC)
+    except BaseException:
+        # No context for the caller (a browser that did not answer, say): its proxy stops here.
+        guard.proxy.close()
+        raise
     context.on("console", events.observe_console)
     context.on("request", events.observe_request)
     context.on("close", lambda _context: guard.proxy.close() if guard.proxy is not None else None)

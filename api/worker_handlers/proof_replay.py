@@ -16,14 +16,15 @@ Otherwise the same check runs again:
   retest's destination guard with its session headers confined to the finding's origin.
 
 The verdict follows the check: reproduced is still vulnerable; not reproduced, with every request
-answered, is likely fixed; a refusal, a failed request, an unavailable service (``_unavailable``)
-or a missing browser is inconclusive, and the finding stays open. Nothing here escalates to the
-AI tier.
+answered, is likely fixed; a refusal, a failed request, an unavailable service (``_unavailable``),
+a missing browser or one that does not answer is inconclusive, and the finding stays open. Nothing
+here escalates to the AI tier.
 """
 
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import math
 import time
 from typing import Any, Awaitable, Callable, Mapping
@@ -237,6 +238,7 @@ async def _differential_check(
 # What the browser proof lets a page send: same-origin reads, at most this many requests.
 _BROWSER_SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
 _BROWSER_MAX_REQUESTS = 50
+_BROWSER_CLOSE_SECONDS = 10.0
 
 
 def _url_origin(url: str) -> tuple[str, str, int | None] | None:
@@ -260,7 +262,10 @@ async def _marker_check(
     url: str, marker: str, *, poe: Any, headers: Mapping[str, str] | None, cancelled: Callable[[], bool],
 ) -> tuple[str, dict[str, Any]]:
     """Load the payload page once and apply the browser proof's oracle to it."""
-    context = await poe.proof_browser_context(url, headers=dict(headers or {}) or None)
+    try:
+        context = await poe.proof_browser_context(url, headers=dict(headers or {}) or None)
+    except TimeoutError:  # the proof module's BrowserUnresponsive: it has let that browser go
+        return "browser_unresponsive", {}
     if context is None:
         return "no_browser", {}
     origin = _url_origin(url)
@@ -291,8 +296,10 @@ async def _marker_check(
             signals.append("console")
 
     try:
-        await context.route("**/*", route)
-        page = await context.new_page()
+        try:
+            page = await poe.proof_browser_page(context, route=route)
+        except TimeoutError:  # BrowserUnresponsive, as above
+            return "browser_unresponsive", {}
         page.on("dialog", dialog)
         page.on("console", console)
         try:
@@ -305,7 +312,9 @@ async def _marker_check(
         final_url = page.url
         response_headers = dict(response.headers) if response is not None else {}
     finally:
-        await context.close()
+        # Bounded: a context whose browser stopped answering must not hold the retest here.
+        with contextlib.suppress(Exception):
+            await asyncio.wait_for(context.close(), _BROWSER_CLOSE_SECONDS)
     technique = (
         "headless_xss_dialog" if "dialog" in signals else "headless_xss_console" if signals
         else "headless_xss_dom" if dom else None
@@ -360,8 +369,9 @@ async def run_proof_retest(
     """The retest of a proven Scan finding, or None for any other finding.
 
     ``poe`` is the scanner's proof module (``fetch_with_capture``, ``baseline_refusal``,
-    ``headless_browser_available``, ``proof_browser_context``, the session calls). The retest's
-    session headers are the ones the finding's Scan was given (``auth_context``).
+    ``headless_browser_available``, ``proof_browser_context``, ``proof_browser_page``, the session
+    calls). The retest's session headers are the ones the finding's Scan was given
+    (``auth_context``).
     """
     request, gap = proof_retest_request(verification)
     if request is None and gap is None:
@@ -414,6 +424,11 @@ async def run_proof_retest(
         return _result(status="completed", result_status="inconclusive", verdict="inconclusive",
                        reason="This worker has no headless browser, so the browser check that proved "
                               "the finding could not run; the finding stays open.",
+                       proof=proof, artifacts=artifacts, **common)
+    if outcome == "browser_unresponsive":
+        return _result(status="completed", result_status="inconclusive", verdict="inconclusive",
+                       reason="The headless browser did not answer in time, so the browser check that "
+                              "proved the finding could not run; the finding stays open.",
                        proof=proof, artifacts=artifacts, **common)
     if outcome == "failed":
         return _result(status="completed", result_status="inconclusive", verdict="inconclusive",
