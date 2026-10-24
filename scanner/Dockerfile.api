@@ -25,6 +25,12 @@ FROM mcr.microsoft.com/playwright/python:v1.63.0-noble@sha256:72bd171a9ffc2b4b59
 RUN --mount=type=bind,source=scanner/apt_install.sh,target=/tmp/apt_install.sh,ro \
     sh /tmp/apt_install.sh ca-certificates curl jq openssl libssl3t64
 
+# The scanner runtime's Python tree below is copied over this base, which pip-installs virtualenv
+# and its dependencies. The scanner removes them before its locked install; remove them here too,
+# or the base's older filelock metadata would stay beside the scanner's locked version.
+RUN python3 -m pip uninstall -y --break-system-packages virtualenv python-discovery distlib platformdirs filelock && \
+    rm -rf /root/.cache/virtualenv /usr/local/bin/virtualenv
+
 # /app includes API modules and the shared policy/evidence code. Small static
 # fingerprint inputs remain so the API can compute the expected worker build;
 # executable scanners and Nuclei templates are deliberately absent.
@@ -128,10 +134,10 @@ RUN set -eux; \
 # Match the worker's runtime-only Python surface. The Playwright base carries
 # packaging tools that are useful for building images but are not API runtime
 # capabilities and have repeatedly produced false deployed-component findings.
-RUN python3 -m pip uninstall -y --break-system-packages virtualenv msgpack setuptools pip && \
-    rm -rf /root/.cache/virtualenv /usr/local/bin/virtualenv && \
+RUN python3 -m pip uninstall -y --break-system-packages msgpack setuptools pip && \
     rm -f /usr/local/bin/pip /usr/local/bin/pip3 /usr/local/bin/pip3.12 && \
-    python3 -c 'import importlib.util; assert importlib.util.find_spec("pip") is None; assert importlib.util.find_spec("virtualenv") is None'
+    python3 -c 'import importlib.util; assert importlib.util.find_spec("pip") is None; assert importlib.util.find_spec("virtualenv") is None' && \
+    python3 -c 'import collections, importlib.metadata as md, re; names = collections.Counter(re.sub(r"[-_.]+", "-", d.name).lower() for d in md.distributions(path=["/usr/local/lib/python3.12/dist-packages"])); twice = sorted(n for n, k in names.items() if k > 1); assert not twice, twice'
 
 # The control plane carries the same release identity environment as the
 # scanner runtime it was derived from. Docker cannot copy ENV across stages, so

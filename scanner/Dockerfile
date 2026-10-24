@@ -196,8 +196,18 @@ ENV TESTSSL_BIN=/opt/testssl.sh/testssl.sh
 # App directory
 WORKDIR /app
 
+# The Playwright base image pip-installs virtualenv and its dependencies (python-discovery,
+# distlib, platformdirs, filelock). Nothing in the runtime imports them (the Model Intake overlay
+# builds its venvs with the stdlib venv module), and they go before the locked install below:
+# virtualenv requires filelock<4, and --ignore-installed would leave the base's older filelock
+# metadata beside the locked version, where image scanners report it.
+RUN python3 -m pip uninstall -y --break-system-packages virtualenv python-discovery distlib platformdirs filelock && \
+    rm -rf /root/.cache/virtualenv /usr/local/bin/virtualenv && \
+    python3 -c 'import importlib.util; assert importlib.util.find_spec("virtualenv") is None'
+
 # Python deps for scanner. requirements.txt is the human-maintained input;
-# requirements.lock is the reviewed, reproducible release resolution.
+# requirements.lock is the reviewed, reproducible release resolution. The last check fails the
+# build when any distribution is still installed twice under /usr/local.
 COPY scanner/requirements.txt /app/requirements.txt
 COPY scanner/requirements.lock /app/requirements.lock
 RUN pip install --no-cache-dir --break-system-packages --ignore-installed --require-hashes \
@@ -205,7 +215,8 @@ RUN pip install --no-cache-dir --break-system-packages --ignore-installed --requ
     pip uninstall -y --break-system-packages msgpack setuptools && \
     rm -f /usr/lib/python3/dist-packages/distutils-precedence.pth && \
     pip check && \
-    test -z "$(python -c 'pass' 2>&1)"
+    test -z "$(python -c 'pass' 2>&1)" && \
+    python3 -c 'import collections, importlib.metadata as md, re; names = collections.Counter(re.sub(r"[-_.]+", "-", d.name).lower() for d in md.distributions(path=["/usr/local/lib/python3.12/dist-packages"])); twice = sorted(n for n, k in names.items() if k > 1); assert not twice, twice'
 
 # The Model Intake dependency locks and Firecracker guest inputs stay in the scanner image even
 # though the toolchain that consumes them lives in the Model Intake image. They are tiny, and the
@@ -341,13 +352,9 @@ RUN set -e && \
 # report those build-only components as deployed vulnerabilities.
 # The Playwright base image also ships virtualenv, whose embedded pip wheels and wheel cache vendor
 # msgpack and setuptools: the exact two findings the vulnerability gate kept reporting on the scanner
-# and API images even after the Model Intake toolchain moved out. Nothing in the runtime imports
-# virtualenv (the Model Intake overlay builds its venvs with the stdlib venv module), so remove it
-# and its caches before pip itself goes.
-RUN python3 -m pip uninstall -y --break-system-packages virtualenv && \
-    rm -rf /root/.cache/virtualenv /usr/local/bin/virtualenv && \
-    python3 -c 'import importlib.util; assert importlib.util.find_spec("virtualenv") is None' && \
-    python3 -m pip uninstall -y --break-system-packages pip && \
+# and API images even after the Model Intake toolchain moved out. It and its caches are removed
+# before the locked dependency install above; the find below proves no copy is left.
+RUN python3 -m pip uninstall -y --break-system-packages pip && \
     rm -f /usr/local/bin/pip /usr/local/bin/pip3 /usr/local/bin/pip3.12 && \
     python3 -c 'import importlib.util; assert importlib.util.find_spec("pip") is None' && \
     test -z "$(find / -path /proc -prune -o \( -iname 'msgpack*' -o -iname 'setuptools-*.dist-info' \) -print 2>/dev/null | grep -v /opt/model-intake-tools)"
