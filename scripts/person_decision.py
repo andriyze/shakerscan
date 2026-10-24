@@ -181,17 +181,26 @@ def summary_lines(text: Any) -> list[str]:
 
 
 _UUID = re.compile(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}")
+# A Hunt budget limit's name as `shakerscan hunt budget raise --limit NAME=N` takes it: lower-case
+# letters and underscores. A body with any other name is named through `shakerscan api` instead.
+_LIMIT_NAME = re.compile(r"[a-z_]{1,64}")
 _SECRET = re.compile(r"/targets/([^/]+)/discovered-secrets/([^/]+)/(state|expiry)")
+
+
+def decisions_directory() -> str:
+    """Where the client saves a person's request bodies too long to name inline, and the only
+    place ``shakerscan api ... @FILE`` reads one from: ``decisions/`` in the client's
+    configuration directory (``$SHAKERSCAN_CONFIG_DIR`` or ``~/.config/shakerscan``)."""
+    base = os.environ.get("SHAKERSCAN_CONFIG_DIR") or os.path.join(os.path.expanduser("~"), ".config", "shakerscan")
+    return os.path.join(base, "decisions")
 
 
 def saved_body(body: bytes) -> str | None:
     """Where a request body too long to name inline is saved for the person's command: the
-    client's configuration directory (``$SHAKERSCAN_CONFIG_DIR`` or ``~/.config/shakerscan``),
-    ``decisions/<digest>.json``, readable by this user only, kept a week (SAVED_SECONDS); None
-    when it cannot be written. The touch still shows what the gateway reads from the body the
-    person's command sends."""
-    base = os.environ.get("SHAKERSCAN_CONFIG_DIR") or os.path.join(os.path.expanduser("~"), ".config", "shakerscan")
-    directory = os.path.join(base, "decisions")
+    client's decisions directory (decisions_directory), ``<digest>.json``, readable by this user
+    only, kept a week (SAVED_SECONDS); None when it cannot be written. The touch still shows what
+    the gateway reads from the body the person's command sends."""
+    directory = decisions_directory()
     path = os.path.join(directory, hashlib.sha256(body).hexdigest()[:24] + ".json")
     try:
         os.makedirs(directory, mode=0o700, exist_ok=True)
@@ -271,8 +280,10 @@ def person_command(method: str, path: str, body: bytes | None, detail: Mapping[s
         found = authorize("host://" + payload["locator"])
     elif method == "POST" and len(parts) == 3 and parts[0] == "hunts" and parts[2] == "budget-amendments" and payload:
         limits = payload.get("limits") if isinstance(payload.get("limits"), dict) else {}
+        # Only plain limit names: a name from the agent's body is never an option of the person's
+        # command (`--limit --url=...=40` read as the client's own --url).
         pairs = [f"--limit {shlex.quote(f'{key}={value}')}" for key, value in sorted(limits.items())
-                 if isinstance(key, str) and type(value) is int]
+                 if isinstance(key, str) and _LIMIT_NAME.fullmatch(key) and type(value) is int]
         hunt = _word(parts[1])
         if hunt and pairs and len(pairs) == len(limits):
             resume = " --resume" if payload.get("resume") is True else ""

@@ -1832,7 +1832,55 @@ def test_a_large_request_is_named_by_a_saved_body_not_one_long_line(tmp_path, mo
     request = api_cli.build_request("PUT", path, "@" + str(saved), api_url=ORIGIN, token=None)
     assert json.loads(request.data) == json.loads(body)
     with pytest.raises(api_cli.ApiCliError, match="cannot read the request body"):
+        api_cli.build_request("PUT", path, "@" + str(saved.parent / "missing.json"), api_url=ORIGIN, token=None)
+    with pytest.raises(api_cli.ApiCliError, match="reads a request body only from"):
         api_cli.build_request("PUT", path, "@" + str(tmp_path / "missing.json"), api_url=ORIGIN, token=None)
+
+
+@pytest.mark.parametrize("name", [
+    "--url=https://evil.example/a", "Max_hosts", "max-hosts", "max hosts", "max_hosts;id", "x" * 65, "",
+    "max_hosts2",
+])
+def test_a_raise_names_its_own_command_only_when_every_limit_name_is_a_plain_word(name):
+    """A limit name from the agent's body went into the dedicated command quoted, not checked: a
+    name such as --url=https://evil.example/a became `--limit --url=...=40`, one argument that
+    reads as the client's own --url. Only names of lower-case letters and underscores (at most
+    64) get the dedicated command; any other body is named as itself through `shakerscan api`."""
+    body = json.dumps({**RAISE, "limits": {"max_hosts": 3, name: 40}}).encode()
+    command = decision.person_command("POST", AMENDMENT, body)
+    assert command.startswith(f"shakerscan api POST {AMENDMENT} "), command
+    assert "budget raise" not in command and "--limit" not in command
+    assert shlex.split(command)[4] == body.decode()
+    plain = json.dumps({**RAISE, "limits": {"m" * 64: 40, "max_hosts": 3}}).encode()
+    assert decision.person_command("POST", AMENDMENT, plain) == (
+        f"shakerscan hunt budget raise {HUNT} --limit max_hosts=3 --limit {'m' * 64}=40"
+    )
+
+
+def test_api_reads_a_body_file_only_from_the_clients_decisions_directory(tmp_path, monkeypatch):
+    """`shakerscan api ... @FILE` read any path, and any JSON file there became the request's body:
+    an agent running as another user could talk the person into sending `@~/.docker/config.json`.
+    A body is read only from the directory the client saves a person's long bodies in."""
+    monkeypatch.setenv("SHAKERSCAN_CONFIG_DIR", str(tmp_path / "cfg"))
+    monkeypatch.setenv("HOME", str(tmp_path))
+    secret = tmp_path / "config.json"
+    secret.write_text('{"auths": {"registry.example": {"auth": "c2VjcmV0"}}}')
+    decisions = tmp_path / "cfg" / "decisions"
+    decisions.mkdir(parents=True)
+    (decisions / "link.json").symlink_to(secret)
+    (decisions / "up").symlink_to(tmp_path)
+    for where in (str(secret), "~/config.json", str(decisions / "link.json"), str(decisions / "up" / "config.json"),
+                  str(decisions / ".." / ".." / "config.json")):
+        with pytest.raises(api_cli.ApiCliError, match="reads a request body only from") as refused:
+            api_cli.build_request("POST", "/targets", "@" + where, api_url=ORIGIN, token=None)
+        assert str(decisions) in str(refused.value) and "c2VjcmV0" not in str(refused.value)
+    saved = Path(decision.saved_body(b'{"expected_revision": 3}'))
+    assert saved.parent == decisions
+    request = api_cli.build_request("PUT", "/targets", "@" + str(saved), api_url=ORIGIN, token=None)
+    assert json.loads(request.data) == {"expected_revision": 3}
+    # A JSON body is still given inline, from any file the person reads themselves.
+    inline = api_cli.build_request("POST", "/targets", secret.read_text(), api_url=ORIGIN, token=None)
+    assert json.loads(inline.data)["auths"]
 
 
 def test_a_saved_body_is_removed_after_a_week(tmp_path, monkeypatch):

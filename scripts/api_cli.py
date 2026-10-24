@@ -83,9 +83,12 @@ def build_request(
     data = None
     if body is not None and body.startswith("@"):
         # `@FILE`: the body is read from a file (a JSON text never starts with "@"), as the
-        # command a person is given for a request too long to name inline.
+        # command a person is given for a request too long to name inline. Only from the
+        # directory the client saves those in: any other file a person could be talked into
+        # naming (a registry login, a cloud key) would become the request's body.
+        where = _decision_body_file(body[1:])
         try:
-            with open(os.path.expanduser(body[1:]), "rb") as handle:
+            with open(where, "rb") as handle:
                 raw = handle.read(MAX_BODY_FILE_BYTES + 1)
         except OSError as exc:
             raise ApiCliError(f"cannot read the request body from {body[1:]}: {exc.strerror or exc}") from exc
@@ -102,6 +105,19 @@ def build_request(
     if token:
         headers["Authorization"] = "Bearer " + token
     return urllib.request.Request(api_url + path, data=data, headers=headers, method=method)
+
+
+def _decision_body_file(name: str) -> str:
+    """The real path of an ``@FILE`` body inside the client's decisions directory
+    (person_decision.decisions_directory), links and ``..`` resolved; ApiCliError otherwise."""
+    directory = os.path.realpath(_person_decision().decisions_directory())
+    where = os.path.realpath(os.path.expanduser(name))
+    if os.path.dirname(where) != directory:
+        raise ApiCliError(
+            f"shakerscan api reads a request body only from {directory} (@FILE), where the client "
+            "saves a decision's body too long to show; give any other JSON body inline"
+        )
+    return where
 
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
