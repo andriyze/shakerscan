@@ -642,7 +642,8 @@ The client has its own version (`client/src/shakerscan/__init__.py`), tagged `cl
 independent of the engine release: because tool catalogues come from the live contracts, one
 client works against any engine version that serves them. A tag runs `publish-client.yml`: build
 the sdist and wheel, run the client tests, smoke the wheel (and a wheel rebuilt from the sdist) in
-a clean environment, publish to PyPI through trusted publishing (no stored token; the `pypi`
+a clean environment and again on Python 3.10 and 3.11 (every module it carries compiled, the MCP
+adapter started), publish to PyPI through trusted publishing (no stored token; the `pypi`
 environment), attach the files to a GitHub release (never marked as the repository's "latest",
 which stays the engine's), and render the Homebrew formula
 (`client/homebrew/`), pushing it to the `andriyze/homebrew-shakerscan` tap with that repository's
