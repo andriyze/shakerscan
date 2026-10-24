@@ -430,7 +430,8 @@ def touch_lines(client: Any) -> list[str]:
             fido2 = "python-fido2"
         # Which key is registered is not asked here (that needs a challenge of the gateway's):
         # approve checks it silently, without making a key blink.
-        key = f"{fido2}, a security key is plugged in (it answers here if it is registered to you under My account)"
+        key = (f"{fido2}, a security key is plugged in (test it: shakerscan approve --test, one touch, "
+               "nothing decided)")
     return [f"touch:    {state}", f"key:      {key}"]
 
 

@@ -1314,10 +1314,19 @@ def cmd_approval(args: argparse.Namespace) -> int:
     rest = list(args.args)
     if rest and rest[0] == "--":
         rest = rest[1:]
+    if args.command == "approve" and "--test" in rest:
+        # One touch of the person's key, nothing decided (touchtest.py).
+        from .touchtest import approve_test
+
+        return approve_test(rest, url, args.timeout)
     if any(token in ("-h", "--help") for token in rest):
         sys.stdout.write(f"shakerscan {args.command} [--url URL] [--token-file FILE] [--timeout SECONDS] ...\n"
                          "  Against the connected instance unless --url names another. Run it yourself, in your\n"
-                         "  own terminal: it asks you (never an agent) for the decision.\n\n")
+                         "  own terminal: it asks you (never an agent) for the decision.\n"
+                         + ("  shakerscan approve --test: one touch of your security key on an Enterprise\n"
+                            "  connection, checked by the gateway; nothing is decided.\n"
+                            if args.command == "approve" else "")
+                         + "\n")
         sys.stdout.flush()
     timeout = ["--timeout", str(args.timeout)] if args.timeout is not None else []
     return int(load("_v2_cli").main(["--api-url", url, *timeout, args.command, *rest]))
@@ -1600,7 +1609,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     for name, text in (
         ("approve", "allow a Hunt permission request in your own terminal: Enterprise with your TOTP code or "
-                    "security key, an open-source engine with a y/N; --all-pending, --watch"),
+                    "security key, an open-source engine with a y/N; --all-pending, --watch; --test: one "
+                    "touch of your security key, nothing decided"),
         ("deny", "deny a Hunt permission request in your own terminal"),
     ):
         approval = commands.add_parser(name, help=text)

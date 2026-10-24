@@ -70,7 +70,10 @@ FINISH_PATH = "/_enterprise/approvals/finish"
 SESSION_REVOKE_PATH = "/_enterprise/approvals/session/revoke"
 PREAUTHORIZATION_HEADER = "X-ShakerScan-Preauthorization"
 SET_SCHEMA = "shakerscan-approval-set/v1"
-PURPOSES = ("permission_decision", "preauthorization", "approver_session", "knowledge_decision")
+PURPOSES = ("permission_decision", "preauthorization", "approver_session", "knowledge_decision", "key_check")
+# A touch test (``shakerscan approve --test``): one touch of the person's key over a document that
+# decides nothing, on an Enterprise gateway that offers it.
+KEY_CHECK = {"test": "touch", "decides": "nothing"}
 # One knowledge-review decision, always with exactly these keys (null where they do not apply).
 KNOWLEDGE_DECISIONS = ("accept", "confirm", "allow_changes", "dismiss", "reopen", "retract", "retract_hunt", "release_marker")
 KNOWLEDGE_KEYS = ("decision", "target_id", "subject_id", "text_sha256", "expected_revision", "reason", "note")
@@ -425,6 +428,8 @@ def set_document(purpose: str, account: str, origin: str, body: Mapping[str, Any
         keys = KNOWLEDGE_KEYS + (("release_label", "released_at")
                                 if body["knowledge"].get("decision") == "release_marker" else ())
         document["knowledge"] = {key: body["knowledge"].get(key) for key in keys}
+    elif purpose == "key_check":
+        document["key_check"] = dict(KEY_CHECK)
     else:
         document["session"] = {"ttl_seconds": int(body["session"]["ttl_seconds"])}
     return document
@@ -809,7 +814,7 @@ class StepUp:
         that name. A gateway that needs a name (a token that acts for nobody, or one that predates
         this) is answered by asking for it."""
         parts = {key: value for key, value in set_document(purpose, "", self.origin, body).items()
-                 if key in {"decisions", "preauthorization", "session", "knowledge"}}
+                 if key in {"decisions", "preauthorization", "session", "knowledge", "key_check"}}
 
         def post(account: str) -> dict[str, Any]:
             return self._post(BEGIN_PATH, {
@@ -1462,11 +1467,29 @@ def preauthorize(send: Send, origin: str, terminal: Terminal, allow: Sequence[st
         terminal.say(f"  --allow {bound}")
     stepup = StepUp(send, origin, terminal, account=account, method=method)
     challenge, _ = stepup.begin("preauthorization", {"preauthorization": {"allow": bounds, "use": use}})
+    if budget := safety_budget_words(challenge.get("safety_budget")):
+        # Under the administrator's touch switch, what this one touch approves besides the bounds:
+        # the one safety budget every Hunt of the agent session shares (the gateway's words).
+        terminal.say(f"Every Hunt this agent session starts shares one safety budget: {budget}.")
+        terminal.say("A Hunt start past what is left, or a raise past it, asks you again.")
     result = stepup.finish(challenge, stepup.prove(challenge))
     grant = result.get("preauthorization") if isinstance(result.get("preauthorization"), Mapping) else {}
     if not grant.get("id"):
         raise ApprovalError("the gateway answered without a pre-authorization id; nothing was pre-authorized")
     return dict(grant)
+
+
+def safety_budget_words(lines: Any) -> str:
+    """An agent session's safety budget as the gateway named it (each ceiling's label and total),
+    in one line; "" when the gateway named none (the switch is off, or an earlier gateway)."""
+    if not isinstance(lines, list):
+        return ""
+    words = []
+    for item in lines[:6]:
+        if not isinstance(item, Mapping) or type(item.get("total")) is not int:
+            continue
+        words.append(f"{_inert(str(item.get('label') or item.get('limit') or ''))[:40]} {item['total']:,}")
+    return ", ".join(words)
 
 
 # --- knowledge-review decisions ----------------------------------------------------------------
@@ -2186,6 +2209,6 @@ __all__ = [
     "instance_kind", "FINISH_PATH", "PREAUTHORIZATION_HEADER",
     "REVOKE_TIMEOUT_SECONDS", "RequestGone", "SESSION_REVOKE_PATH", "StepUp", "StepUpUnavailable", "Terminal", "add_arguments",
     "assertion_json", "decide", "decide_knowledge", "decision_entry", "expected_challenge", "find_request",
-    "knowledge_entry", "list_pending", "preauthorize",
+    "knowledge_entry", "list_pending", "preauthorize", "safety_budget_words",
     "render_request", "run", "set_digest", "set_document", "wait_for", "watch",
 ]

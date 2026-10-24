@@ -984,7 +984,7 @@ def test_doctor_says_whether_a_touch_is_required_and_could_happen_here(monkeypat
     # A key plugged in is not said to be unregistered (doctor cannot tell which is registered).
     monkeypatch.setattr(approval, "security_key_readiness", lambda: "")
     ready = decisions.touch_lines(me({"person_decision_proof": True}))[1]
-    assert "a security key is plugged in (it answers here if it is registered to you under My account)" in ready
+    assert "a security key is plugged in (test it: shakerscan approve --test, one touch, nothing decided)" in ready
     assert "register it once" not in ready
     monkeypatch.setattr(approval, "security_key_readiness", lambda: "no USB security key found; insert it")
     older = me({"user": {"auth": "token"}})
