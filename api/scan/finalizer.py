@@ -259,8 +259,18 @@ _CANDIDATE_MANIFEST_KINDS_BY_FAMILY: Mapping[str, frozenset[str]] = {
 }
 
 
+# The crawls find the parameterized routes a candidate manifest indexes. One that settled with
+# output (complete, partial or cut short by its wall) examined the surface; one that failed, was
+# refused, skipped or cancelled did not.
+_CANDIDATE_CRAWL_CAPABILITIES = frozenset({"web.crawl", "web.browser_crawl"})
+_CRAWL_EXAMINED_STATUSES = frozenset({
+    CapabilityResultStatus.SUCCESS, CapabilityResultStatus.PARTIAL,
+    CapabilityResultStatus.TIMED_OUT,
+})
+
+
 def _unplanned_family_row(
-    family: str, manifests: Sequence[Mapping[str, Any]],
+    family: str, manifests: Sequence[Mapping[str, Any]], *, no_crawl_examined: bool = False,
 ) -> dict[str, Any]:
     """Coverage for a selected family the plan gave no action at all.
 
@@ -268,6 +278,11 @@ def _unplanned_family_row(
     continuation (correctly) planned no verifier -- and both families then vanished from
     ``family_coverage`` while the Scan read ``complete`` with no reason. The row states what
     happened: no candidates (counted from the manifests), or work that was never planned.
+
+    An empty candidate manifest shows there was nothing to test only when a crawl examined the
+    surface. When every crawl of the plan failed or never started (``no_crawl_examined``), the
+    family is a gap (``discovery_failed``): nothing was tested and nothing showed the surface
+    offered nothing.
     """
     kinds = _CANDIDATE_MANIFEST_KINDS_BY_FAMILY.get(family, frozenset())
     candidate_manifests = [
@@ -275,7 +290,9 @@ def _unplanned_family_row(
         if str(item.get("kind") or "") in kinds and item.get("status") != "cancelled"
     ]
     entries = sum(max(0, int(item.get("entry_count") or 0)) for item in candidate_manifests)
-    no_candidates = bool(candidate_manifests) and entries == 0
+    empty = bool(candidate_manifests) and entries == 0
+    discovery_failed = empty and no_crawl_examined
+    no_candidates = empty and not discovery_failed
     return {
         "family": family, "selected": True, "required": False,
         "batch_actions": 0, "planned_candidates": 0, "attempted_candidates": 0,
@@ -291,7 +308,10 @@ def _unplanned_family_row(
         # Nothing to test is a settled outcome; a selected family that did no work without
         # showing it had nothing to do is a gap.
         "coverage_status": "complete" if no_candidates else "partial",
-        "reason": "no_candidates" if no_candidates else "not_planned",
+        "reason": (
+            "no_candidates" if no_candidates
+            else "discovery_failed" if discovery_failed else "not_planned"
+        ),
     }
 
 
@@ -3275,8 +3295,20 @@ def finalize_scan_report(
         & set(_FAMILY_BY_CAPABILITY.values())
         - set(family_coverage)
     )
+    # Whether the plan crawled and none of its crawls examined the surface (each failed, was
+    # refused, skipped or cancelled): an empty candidate manifest then shows what the crawls
+    # never reached, not that the surface offered nothing to test.
+    crawl_statuses = [
+        action_results[action.action_id].status for action in expected_actions
+        if action.capability_name in _CANDIDATE_CRAWL_CAPABILITIES
+    ]
+    no_crawl_examined = bool(crawl_statuses) and not any(
+        status in _CRAWL_EXAMINED_STATUSES for status in crawl_statuses
+    )
     for family in unplanned_families:
-        row = family_coverage[family] = _unplanned_family_row(family, known_manifests)
+        row = family_coverage[family] = _unplanned_family_row(
+            family, known_manifests, no_crawl_examined=no_crawl_examined,
+        )
         if row["coverage_status"] != "complete":
             selected_family_gaps.append(family)
     # After the unplanned rows, so a check that ran while its family planned no verifier (no
