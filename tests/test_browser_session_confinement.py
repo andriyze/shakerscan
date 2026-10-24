@@ -26,6 +26,7 @@ from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 from pathlib import Path
+import re
 import resource
 import shutil
 import socket
@@ -67,7 +68,14 @@ def _handler(name: str, hits: list, ports: dict):
                 self.wfile.write(body)
 
         def _origin(self):
-            return self.headers.get("Origin") or ""
+            # Rebuilt from its parts (a literal scheme and loopback host, a numeric port), so a
+            # response header never carries request text; every page here is on loopback.
+            match = re.fullmatch(r"(https?)://(127\.0\.0\.1|localhost):(\d{1,5})", self.headers.get("Origin") or "")
+            if not match:
+                return ""
+            scheme = "https" if match.group(1) == "https" else "http"
+            host = "localhost" if match.group(2) == "localhost" else "127.0.0.1"
+            return f"{scheme}://{host}:{int(match.group(3))}"
 
         def do_OPTIONS(self):  # noqa: N802
             hits.append((name, "OPTIONS", self.path, self.headers.get("X-API-Key")))
