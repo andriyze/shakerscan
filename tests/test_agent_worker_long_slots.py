@@ -78,7 +78,7 @@ def test_a_long_job_waiting_for_a_slot_keeps_its_lease_and_a_short_job_runs(monk
         finally:
             await jobs.close()
 
-    asyncio.run(scenario())
+    asyncio.run(asyncio.wait_for(scenario(), 10))  # a stalled scheduler fails, never hangs
 
 
 def test_an_ordinary_worker_runs_its_job_without_the_long_slots(monkeypatch):

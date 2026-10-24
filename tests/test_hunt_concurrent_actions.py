@@ -109,6 +109,17 @@ def _job(label, name):
     return {"label": label, "type": job_type, "capability_name": name}
 
 
+def _bounded(scenario):
+    """Run a scheduler scenario for at most 10 s: a scheduler that stops leasing fails the test
+    instead of hanging it, and the scheduler's state is cleared whatever happened."""
+    async def run():
+        try:
+            await asyncio.wait_for(scenario(), 10)
+        finally:
+            await jobs.close()
+    asyncio.run(run())
+
+
 class Jobs:
     """Leases and dispatches jobs as the worker loop does; each job's work runs until released."""
 
@@ -152,7 +163,7 @@ def test_long_actions_take_two_slots_and_a_short_call_runs_beside_them():
             gate.set()
         await jobs.close()
         assert queue.leased == ["long-1", "long-2", "long-3", "short-1", "next"]
-    asyncio.run(run())
+    _bounded(run)
 
 
 def test_short_work_may_use_every_slot_and_long_work_never_more_than_two():
@@ -174,7 +185,7 @@ def test_short_work_may_use_every_slot_and_long_work_never_more_than_two():
         assert queue.started == ["long-0", "long-1"] and jobs._waiting == 3
         await jobs.close()
         assert (jobs._waiting, jobs._long_running, jobs._tasks) == (0, 0, set())
-    asyncio.run(run())
+    _bounded(run)
 
 
 def test_waiting_long_jobs_are_bounded():
@@ -190,7 +201,7 @@ def test_waiting_long_jobs_are_bounded():
         queue.release["long-0"].set()
         await asyncio.wait_for(blocked, 1)
         await jobs.close()
-    asyncio.run(run())
+    _bounded(run)
 
 
 @pytest.mark.parametrize("job,long", [
