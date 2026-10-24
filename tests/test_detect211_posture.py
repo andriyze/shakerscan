@@ -6,6 +6,7 @@ import asyncio
 
 from api.capabilities.open_redirect import probe_candidate, probe_url, redirect_candidates
 from api.finding_detail import build_finding_detail
+from api.finding_detail.common import q
 from api.scan.action_plan import ScanActionPlan
 from api.scan.finalizer import finalize_scan_report
 from api.scan.posture_findings import (
@@ -123,6 +124,24 @@ def test_cors_reflection_and_null_origin_with_credentials_are_high():
     assert [(f["title"], f["severity"]) for f in null] == [("CORS policy trusts the null origin", "high")]
 
 
+def test_cors_reflection_is_judged_on_the_observation_as_the_receipt_stores_it():
+    """Unit fixture: an origin-reflecting target's answer, stored through the runtime receipt
+    redactor exactly as a worker's receipt stores every observation."""
+    import api.runtime  # noqa: F401 -- importing the runtime installs its receipt redactor
+    from api.runtime import receipts
+    [observation] = _cors("baseline.cors", {
+        "access-control-allow-origin": CORS_PROBE_ORIGIN, "access-control-allow-credentials": "true"})["baseline.cors"]
+    stored = receipts.redact_receipt_value(dict(observation))
+    # The redactor renders a bare URL origin with a "/" path, so the stored header no longer
+    # spells the Origin that was sent.
+    assert stored["response"]["security_headers"]["access-control-allow-origin"] == CORS_PROBE_ORIGIN + "/"
+    findings = _report({"baseline.cors": [stored]})["findings"]
+    assert [(f["title"], f["severity"]) for f in findings] == [("CORS policy reflects any origin", "high")]
+    assert findings[0]["evidence"]["access_control_allow_origin"] == CORS_PROBE_ORIGIN
+    brief = build_finding_detail(findings[0])
+    assert brief["reproduce"]["expect"] == "access-control-allow-origin: " + CORS_PROBE_ORIGIN
+
+
 def test_cors_answers_that_grant_nothing_are_not_findings():
     assert _report(_cors("baseline.cors", {}))["findings"] == []
     assert _report(_cors("baseline.cors", {"access-control-allow-origin": "https://app.example.test"}))["findings"] == []
@@ -226,6 +245,25 @@ def test_a_proven_redirect_becomes_a_medium_finding_with_a_brief():
     assert brief["severity"]["reason"].startswith("A link on this trusted origin")
     not_proven = _probe(302, "/home")
     assert _report({"verify.redirect": [not_proven]}, capabilities={"verify.redirect": "redirect.verify_batch"})["findings"] == []
+
+
+def test_redirect_commands_send_the_canary_although_the_stored_url_is_masked():
+    """Unit fixture: a proven redirect, stored through the runtime receipt redactor, which masks
+    every query value of a URL, the probe's own canary included."""
+    import api.runtime  # noqa: F401 -- importing the runtime installs its receipt redactor
+    from api.runtime import receipts
+    sent = probe_url("https://app.example.test/go", "next")
+
+    async def send(_url):
+        return 302, {"Location": REDIRECT_CANARY_URL}
+    proof = asyncio.run(probe_candidate({"url": sent, "parameter": "next", "route_id": "r1"}, send))
+    stored = receipts.redact_receipt_value({**proof, "kind": "open_redirect_proof"})
+    assert stored["url"] == "https://app.example.test/go?next=%3Credacted%3E"
+    [finding] = _report({"verify.redirect": [stored]}, capabilities={"verify.redirect": "redirect.verify_batch"})["findings"]
+    brief = build_finding_detail(finding)
+    for step in ("reproduce", "verify"):
+        assert q(sent) in brief[step]["command"] and "redacted" not in brief[step]["command"]
+    assert brief["reproduce"]["expect"] == "location: " + REDIRECT_CANARY_URL
 
 
 def test_queries_the_deadline_cut_off_are_not_absent_records():

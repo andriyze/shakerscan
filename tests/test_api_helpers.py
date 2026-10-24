@@ -4357,6 +4357,38 @@ def test_run_due_schedules_advances_schedule_after_successful_enqueue(monkeypatc
     assert len(redis_client.hset_calls) == 1
 
 
+@pytest.mark.parametrize("parallel", [True, False])
+def test_a_scheduled_thorough_scan_keeps_the_profile_tool_wall_only_when_it_fans_out(
+    monkeypatch, parallel,
+):
+    """A lowered duration lowers a thorough Scan's tool wall, because its actions run one at a
+    time; a parallel parent's tool wall is divided among children that run at the same time,
+    each under the whole duration, so it keeps the profile's (2.11.0's children shares)."""
+    schedule = {**_due_schedule(), "scan_options": {
+        "budget_profile": "thorough", "advanced": {"max_duration_seconds": 3_600},
+        "parallel": parallel,
+    }}
+    conn = _FakeConn([schedule])
+    monkeypatch.setattr(api_module, "get_redis", lambda: _RecordingRedis())
+    monkeypatch.setattr(api_module, "_current_scan_worker_count_best_effort", lambda: 4)
+    _freeze_test_asm_target(monkeypatch)
+
+    asyncio.run(api_module.run_due_schedules(_FakePool(conn)))
+
+    args = next(args for query, args in conn.executes if "INSERT INTO scans" in query)
+    options, budget, job = json.loads(args[4]), json.loads(args[9]), json.loads(args[12])
+    wall = 10_800 if parallel else 3_600
+    assert args[6] == ("parent" if parallel else "standalone")
+    assert (budget["max_duration_seconds"], budget["max_tool_wall_seconds"]) == (3_600, wall)
+    # Every snapshot the worker reads names the same plan and budget.
+    assert options["resolved_scan_budget"] == budget
+    assert options["scan_execution_plan"]["budget"]["max_tool_wall_seconds"] == wall
+    assert options["scan_execution_plan_digest"] == job["execution_plan_digest"]
+    assert job["execution_plan"] == options["scan_execution_plan"]
+    assert options["custom_budget"]["phase4_max_seconds"] == wall
+    assert options["resolved_budget"]["phase4_max_seconds"] == wall
+
+
 def test_run_due_schedules_requires_atomic_due_occurrence_claim(monkeypatch):
     conn = _FakeConn([_due_schedule()])
     conn.claim_result = False
@@ -21242,11 +21274,24 @@ class _StopAtBinding(Exception):
     pass
 
 
+class _NoopAdmissionTransaction:
+    """Unit fixture: scan admission opens one transaction; these fakes record nothing in it."""
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *_args):
+        return False
+
+
 def test_scan_submission_passes_frozen_inferred_origins_to_target_binding(monkeypatch):
     """Drive submission through the binding construction, as the smoke Scan does."""
     target_id = uuid.uuid4()
 
     class Conn:
+        def transaction(self):  # admission runs in one transaction
+            return _NoopAdmissionTransaction()
+
         async def fetchrow(self, *_args):
             return {"id": target_id}
 
@@ -21411,6 +21456,9 @@ def _scan_submission_approval(monkeypatch, *, credential_profile_ids=None, appro
         return ["93.184.215.14"]
 
     class Conn:
+        def transaction(self):  # admission runs in one transaction
+            return _NoopAdmissionTransaction()
+
         async def fetchrow(self, query, *args):
             if query == "SELECT id FROM targets WHERE url = $1":
                 return {"id": target_id}
@@ -21478,6 +21526,89 @@ def test_a_passive_authenticated_scan_reuses_the_targets_standing_authorization(
     assert approval["risk_tier"] == "credential"
     assert approval["always_require_receipt"] is True
     assert approval["require_target_binding"] is True
+
+
+class _StopAtSurfaceManifests(Exception):
+    pass
+
+
+@pytest.mark.parametrize("parallel", [True, False])
+def test_a_submitted_thorough_scan_keeps_the_profile_tool_wall_only_when_it_fans_out(
+    monkeypatch, parallel,
+):
+    """A lowered duration lowers a thorough Scan's tool wall: its actions run one at a time. A
+    parallel parent divides its tool wall among children that run at the same time, each under
+    the whole duration, so it keeps the profile's -- a 3,600 s parent with four endpoint
+    children otherwise gave each about a third of its 2.11.0 share. Admission stops once the
+    contract the Scan is compiled and queued with is final."""
+    import target_resolution
+
+    target_id = uuid.uuid4()
+
+    async def lookup(_hostname):
+        return ["93.184.215.14"]
+
+    class Conn:
+        def transaction(self):  # admission runs in one transaction
+            return _NoopAdmissionTransaction()
+
+        async def fetchrow(self, query, *args):
+            if query == "SELECT id FROM targets WHERE url = $1":
+                return {"id": target_id}
+            return None
+
+    async def nothing(*_args, **_kwargs):
+        return None
+
+    async def collections(*_args, **_kwargs):
+        return [], [], {}
+
+    async def no_profiles(*_args, **_kwargs):
+        return []
+
+    async def freeze(**_kwargs):
+        return {
+            "canonical_host": "app.example.com", "allowed_origins": ["https://app.example.com"],
+            "allowed_addresses": ["93.184.215.14"], "allowed_root_domains": ["example.com"],
+        }
+
+    captured = {}
+
+    def surface(**kwargs):
+        captured.update(kwargs)
+        raise _StopAtSurfaceManifests
+
+    monkeypatch.setattr(target_resolution, "system_lookup", lookup)
+    monkeypatch.setattr(api_module, "db_pool", _pool_for(Conn()))
+    monkeypatch.setattr(api_module, "get_redis", lambda: object())
+    monkeypatch.setattr(api_module, "_worker_freshness_snapshot", lambda: {"available": False})
+    monkeypatch.setattr(api_module, "_current_scan_worker_count_best_effort", lambda: 4)
+    monkeypatch.setattr(api_module, "_require_approval_receipt_if_policy_enabled", nothing)
+    monkeypatch.setattr(api_module, "_require_reachable_fleet_placement", nothing)
+    monkeypatch.setattr(api_module, "_generic_collection_refs", collections)
+    monkeypatch.setattr(api_module, "_admit_generic_scan_credential_profiles", no_profiles)
+    monkeypatch.setattr(api_module, "admit_scan_browser_login_profiles", no_profiles)
+    monkeypatch.setattr(api_module, "_validate_approval_receipt_for_action", nothing)
+    monkeypatch.setattr(api_module, "_freeze_scan_target_binding", freeze)
+    monkeypatch.setattr(api_module, "_compile_scan_admission_surface_work_manifests", surface)
+    with pytest.raises(_StopAtSurfaceManifests):
+        asyncio.run(api_module._submit_scan(api_module.ScanRequest(
+            target="https://app.example.com", budget_profile="thorough",
+            policy={"active_testing": False}, advanced={"max_duration_seconds": 3_600},
+            options={"parallel": parallel},
+        )))
+    contract, options = captured["scan_contract"], captured["options"]
+    wall = 10_800 if parallel else 3_600
+    assert options["parallel"] is parallel
+    assert (contract.budget.max_duration_seconds, contract.budget.max_tool_wall_seconds) == (
+        3_600, wall,
+    )
+    # The inputs the worker reads snapshot the same plan the Scan is compiled with.
+    assert options["scan_execution_plan_digest"] == contract.execution_plan.digest
+    assert options["scan_execution_plan"] == contract.execution_plan.canonical_dict()
+    assert options["resolved_scan_budget"]["max_tool_wall_seconds"] == wall
+    assert options["custom_budget"]["phase4_max_seconds"] == wall
+    assert options["resolved_budget"]["phase4_max_seconds"] == wall
 
 
 def test_a_passive_scan_without_credentials_needs_no_authorization(monkeypatch):

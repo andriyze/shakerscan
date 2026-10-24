@@ -15,8 +15,10 @@ import urllib.parse
 
 try:
     from cryptography import x509
+    from cryptography.exceptions import UnsupportedAlgorithm
 except ModuleNotFoundError:  # minimal host-side test environments
     x509 = None
+    UnsupportedAlgorithm = ValueError
 
 try:
     from runtime.models import TargetBinding
@@ -223,6 +225,7 @@ async def inspect_tls_origin(
             if tls_object is None:
                 raise ssl.SSLError("TLS handshake produced no SSL object")
             certificate = tls_object.getpeercert(binary_form=True) or b""
+            chain, chain_captured = _certificate_chain(tls_object, certificate)
             # SSLObject access after StreamWriter.wait_closed() is backend- and
             # timing-dependent. Snapshot every proof-bearing value while the
             # connection is live; a closed object has returned None in production
@@ -231,7 +234,8 @@ async def inspect_tls_origin(
                 "protocol": tls_object.version(),
                 "cipher": tls_object.cipher(),
                 "alpn_protocol": tls_object.selected_alpn_protocol(),
-                "certificate_chain": _certificate_chain(tls_object, certificate),
+                "certificate_chain": chain,
+                "certificate_chain_captured": chain_captured,
             }, certificate
         finally:
             if writer is not None:
@@ -334,6 +338,7 @@ async def inspect_tls_origin(
                 "cipher": (best.get("cipher"), best.get("protocol"), best.get("cipher_bits")),
                 "alpn_protocol": None,
                 "certificate_chain": chain,
+                "certificate_chain_captured": True,
             }, chain[0]))
             legacy_only = True
 
@@ -422,6 +427,7 @@ async def inspect_tls_origin(
         certificate,
         hostname=str(parsed.hostname),
         chain_certificates=tuple(snapshot.get("certificate_chain") or ()),
+        chain_captured=snapshot.get("certificate_chain_captured") is True,
     )
     observation = {
         "kind": "tls_protocol",
@@ -434,10 +440,16 @@ async def inspect_tls_origin(
         "port": port,
         "status": "success",
         "protocol": snapshot.get("protocol"),
+        # Every version the server accepted, oldest first: the raw probes' legacy versions and the
+        # stdlib handshakes' modern ones. Listing only the latter showed a server that accepts
+        # TLS 1.0 as offering TLS 1.2 alone, next to a finding that says it accepts TLS 1.0.
         "supported_protocols": [
-            item["protocol"] for item in protocol_results
-            if item.get("supported") is True
-            and item.get("protocol") != "default_negotiation"
+            *(str(name) for name in legacy.get("legacy_protocols_supported") or ()),
+            *(
+                item["protocol"] for item in protocol_results
+                if item.get("supported") is True
+                and item.get("protocol") != "default_negotiation"
+            ),
         ],
         "protocol_attempts": protocol_results,
         "cipher": cipher[0] if cipher else None,
@@ -484,15 +496,34 @@ async def inspect_tls_origin(
     }
 
 
-def _certificate_chain(tls_object: Any, leaf: bytes) -> tuple[bytes, ...]:
-    """Extract the peer-provided chain when supported, retaining the leaf fallback."""
+def _peer_chain_loader(tls_object: Any) -> Any:
+    """The connection's ``get_unverified_chain``, or None when this runtime cannot read the chain.
+
+    It is public on ``SSLObject`` from Python 3.13. Python 3.10-3.12 (the worker image runs 3.12)
+    have the same method only on the wrapped ``_sslobj``; without that fallback every chain was
+    recorded as the leaf alone, so a server sending its full chain read as ``leaf_only``.
+    """
+    for owner in (tls_object, getattr(tls_object, "_sslobj", None)):
+        loader = getattr(owner, "get_unverified_chain", None)
+        if callable(loader):
+            return loader
+    return None
+
+
+def _certificate_chain(tls_object: Any, leaf: bytes) -> tuple[tuple[bytes, ...], bool]:
+    """The certificates the peer sent (leaf first) and whether they were read from the connection.
+
+    False means only the leaf is known: the observation then does not claim how many certificates
+    the server sent.
+    """
     certificates: list[bytes] = []
-    loader = getattr(tls_object, "get_unverified_chain", None)
-    if callable(loader):
+    loader = _peer_chain_loader(tls_object)
+    chain: Any = None
+    if loader is not None:
         try:
             chain = loader()
         except (OSError, ssl.SSLError, ValueError):
-            chain = ()
+            chain = None
         for item in chain or ():
             try:
                 raw = item.public_bytes() if hasattr(item, "public_bytes") else item
@@ -510,9 +541,10 @@ def _certificate_chain(tls_object: Any, leaf: bytes) -> tuple[bytes, ...]:
                     continue
             if isinstance(raw, bytes) and raw and raw not in certificates:
                 certificates.append(raw)
+    captured = bool(certificates)
     if leaf and leaf not in certificates:
         certificates.insert(0, leaf)
-    return tuple(certificates)
+    return tuple(certificates), captured
 
 
 # OpenSSL X509_V_ERR codes, named for what an operator does about them.
@@ -530,6 +562,12 @@ _TRUST_FAILURE_KINDS: Mapping[int, str] = {
     26: "invalid_purpose",
     27: "untrusted_root",           # certificate not trusted
     28: "rejected",
+    # The verifier's security level refuses an algorithm. 66 is the server's own key, checked
+    # before the chain is built; 67 is an issuer's key; 68 is the first certificate (leaf first)
+    # whose signature digest is too weak, below the trust anchor.
+    66: "weak_key",                 # EE certificate key too weak
+    67: "weak_key",                 # CA certificate key too weak
+    68: "weak_signature",           # CA signature digest algorithm too weak
 }
 
 
@@ -586,6 +624,12 @@ def _chain_details(certificates: tuple[bytes, ...]) -> list[dict[str, Any]]:
             is_ca = bool(parsed.extensions.get_extension_for_class(x509.BasicConstraints).value.ca)
         except x509.ExtensionNotFound:
             is_ca = False
+        try:
+            # Key size and signature digest name which certificate a verifier refused as too
+            # weak (codes 67/68 do not say which one).
+            strength = _key_and_signature(parsed.public_key(), parsed)
+        except (TypeError, ValueError, UnsupportedAlgorithm):
+            strength = {}
         details.append({
             "subject": parsed.subject.rfc4514_string()[:400],
             "subject_cn": _name_attribute(parsed.subject, x509.NameOID.COMMON_NAME),
@@ -596,9 +640,37 @@ def _chain_details(certificates: tuple[bytes, ...]) -> list[dict[str, Any]]:
             "expired": now > not_after,
             "self_signed": parsed.subject == parsed.issuer,
             "is_ca": is_ca,
+            **strength,
             "sha256": hashlib.sha256(raw).hexdigest(),
         })
     return details
+
+
+def _signature_hash(parsed: Any) -> str | None:
+    try:
+        return parsed.signature_hash_algorithm.name
+    except (AttributeError, ValueError, TypeError, UnsupportedAlgorithm):
+        return None
+
+
+def _key_and_signature(public_key: Any, parsed: Any) -> dict[str, Any]:
+    """Public key type and size, signature digest, and whether either is below what verifiers accept."""
+    key_type = type(public_key).__name__
+    bits = getattr(public_key, "key_size", None)
+    signature_hash = _signature_hash(parsed)
+    return {
+        "public_key_type": key_type,
+        "public_key_bits": bits,
+        "signature_hash": signature_hash,
+        "weak_signature": signature_hash in {"md5", "sha1"},
+        "weak_public_key": bool(
+            bits
+            and (
+                ("RSA" in key_type.upper() and int(bits) < 2_048)
+                or ("ELLIPTIC" in key_type.upper() and int(bits) < 224)
+            )
+        ),
+    }
 
 
 def _authority_access(parsed: Any) -> dict[str, list[str]]:
@@ -626,19 +698,20 @@ def _certificate_details(
     *,
     hostname: str,
     chain_certificates: tuple[bytes, ...] = (),
+    chain_captured: bool = True,
 ) -> dict[str, Any]:
     """Decode content-free certificate posture when the release dependency exists."""
     if not certificate or x509 is None:
         return {
             "certificate_parse_status": "unavailable",
-            **_certificate_chain_summary(chain_certificates or (certificate,)),
+            **_certificate_chain_summary(chain_certificates or (certificate,), captured=chain_captured),
         }
     try:
         parsed = x509.load_der_x509_certificate(certificate)
     except (TypeError, ValueError):
         return {
             "certificate_parse_status": "failed",
-            **_certificate_chain_summary(chain_certificates or (certificate,)),
+            **_certificate_chain_summary(chain_certificates or (certificate,), captured=chain_captured),
         }
     try:
         dns_names = tuple(parsed.extensions.get_extension_for_class(
@@ -659,12 +732,7 @@ def _certificate_details(
     if not_after is None:
         not_after = parsed.not_valid_after.replace(tzinfo=timezone.utc)
     now = datetime.now(timezone.utc)
-    public_key = parsed.public_key()
-    signature_hash = None
-    try:
-        signature_hash = parsed.signature_hash_algorithm.name
-    except (ValueError, TypeError):
-        pass
+    strength = _key_and_signature(parsed.public_key(), parsed)
     return {
         "certificate_parse_status": "parsed",
         "certificate_subject": parsed.subject.rfc4514_string(),
@@ -696,29 +764,17 @@ def _certificate_details(
         "certificate_signature_algorithm": (
             parsed.signature_algorithm_oid.dotted_string
         ),
-        "certificate_signature_hash": signature_hash,
-        "certificate_weak_signature": signature_hash in {"md5", "sha1"},
-        "certificate_public_key_type": type(public_key).__name__,
-        "certificate_public_key_bits": getattr(public_key, "key_size", None),
-        "certificate_weak_public_key": bool(
-            getattr(public_key, "key_size", 0)
-            and (
-                (
-                    "RSA" in type(public_key).__name__.upper()
-                    and int(public_key.key_size) < 2_048
-                )
-                or (
-                    "ELLIPTIC" in type(public_key).__name__.upper()
-                    and int(public_key.key_size) < 224
-                )
-            )
-        ),
-        **_certificate_chain_summary(chain_certificates or (certificate,)),
+        **{f"certificate_{key}": value for key, value in strength.items()},
+        **_certificate_chain_summary(chain_certificates or (certificate,), captured=chain_captured),
         "certificate_chain_details": _chain_details(chain_certificates or (certificate,)),
     }
 
 
-def _certificate_chain_summary(certificates: tuple[bytes, ...]) -> dict[str, Any]:
+def _certificate_chain_summary(
+    certificates: tuple[bytes, ...], *, captured: bool = True,
+) -> dict[str, Any]:
+    """Digests, count and status of the chain. ``not_captured``: only the leaf is known, so the
+    count is not what the server sent."""
     bounded = tuple(item for item in certificates[:20] if item)
     return {
         "certificate_chain_sha256": [
@@ -726,7 +782,10 @@ def _certificate_chain_summary(certificates: tuple[bytes, ...]) -> dict[str, Any
         ],
         "certificate_chain_length": len(bounded),
         "certificate_chain_status": (
-            "peer_chain" if len(bounded) > 1 else "leaf_only" if bounded else "missing"
+            "missing" if not bounded
+            else "not_captured" if not captured
+            else "peer_chain" if len(bounded) > 1
+            else "leaf_only"
         ),
     }
 

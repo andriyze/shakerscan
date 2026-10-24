@@ -35,6 +35,10 @@ except ImportError:  # pragma: no cover - flat-module fallback
     from process_memory import ProcessTreeMemoryCeiling
 
 try:
+    from . import credential_redirects as _credential_redirects
+except ImportError:  # pragma: no cover - flat scanner_tools import layout
+    import credential_redirects as _credential_redirects
+try:
     from . import http_archive_capture as _http_capture
 except ImportError:  # pragma: no cover - flat-module fallback
     import http_archive_capture as _http_capture
@@ -354,6 +358,15 @@ async def run(
                 continue
             bounded_cmd.append(value)
         cmd = bounded_cmd
+    if is_http_request and request_url and any(value in {"-L", "--location"} for value in cmd):
+        # Read (and cache) the curl release once, off the event loop.
+        await asyncio.to_thread(_credential_redirects.curl_version, str(cmd[0]))
+    if is_http_request and request_url and _credential_redirects.curl_follows_with_credentials(cmd):
+        # curl -L keeps every custom header on a redirect to another host. A request that
+        # carries session material follows only same-origin hops (one metered run each).
+        return await _credential_redirects.run_curl_same_origin(
+            cmd, run, timeout=timeout, input_text=input_text, retry=retry, cancel_check=cancel_check,
+        )
     # Version/help probes are local process checks, not target traffic. Treating
     # ``nuclei -version`` as an unmetered network invocation made every
     # enforced Fleet scan claim that Nuclei was not installed before the real

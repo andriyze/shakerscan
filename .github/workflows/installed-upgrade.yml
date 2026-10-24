@@ -2,8 +2,12 @@ name: Installed upgrade
 
 # Installs the current stable release with the real installer, gives it data, upgrades it to a
 # candidate's runtime files and exact image digests, rolls back with the pinned installer and upgrades
-# again (scripts/installed_upgrade_smoke.sh). The release candidate calls this before certifying;
-# a pull request that changes the test runs it against the newest candidate built on main.
+# again (scripts/installed_upgrade_smoke.sh). The release candidate calls this before certifying,
+# with its exact commit and images; that call is the gate. A pull request that changes the test runs
+# it against the newest candidate built on main. A pull request whose VERSION differs from that
+# candidate's (a version bump) cannot pair its own runtime files with main's images, so the lane
+# installs the candidate's commit with the pull request's test and records why
+# (scripts/upgrade_lane_candidate.sh).
 on:
   workflow_call:
     inputs:
@@ -18,6 +22,7 @@ on:
   pull_request:
     paths:
       - 'scripts/installed_upgrade_smoke.sh'
+      - 'scripts/upgrade_lane_candidate.sh'
       - '.github/workflows/installed-upgrade.yml'
 
 permissions:
@@ -45,24 +50,24 @@ jobs:
 
       - name: Download this run's candidate receipt
         if: ${{ inputs.receipt_artifact != '' }}
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
         with:
           name: ${{ inputs.receipt_artifact }}
           path: artifacts/candidate
 
+      # A pull request only: the newest candidate built on main, on a tree of its release.
       - name: Download the newest candidate built on main
         if: ${{ inputs.receipt_artifact == '' }}
         env:
           GH_TOKEN: ${{ github.token }}
           REPOSITORY: ${{ github.repository }}
+          # The files whose change runs this lane (the pull_request paths above).
+          GATE_FILES: scripts/installed_upgrade_smoke.sh
         shell: bash
         run: |
-          run_id="$(gh run list -R "$REPOSITORY" --workflow build-on-main.yml --branch main --status success \
-            --limit 1 --json databaseId --jq '.[0].databaseId')"
-          [[ "$run_id" =~ ^[0-9]+$ ]] || { echo "no successful build-on-main run" >&2; exit 1; }
-          artifact="$(gh api "repos/$REPOSITORY/actions/runs/$run_id/artifacts" \
-            --jq '[.artifacts[] | select(.name | startswith("release-candidate-uncertified-"))][0].name')"
-          gh run download "$run_id" -R "$REPOSITORY" -n "$artifact" -D artifacts/candidate
+          # shellcheck disable=SC2086 # GATE_FILES is a list of paths
+          bash scripts/upgrade_lane_candidate.sh --out artifacts/candidate \
+            --record artifacts/installed-upgrade/lane-candidate.json $GATE_FILES
 
       - name: Write the candidate image lock
         shell: bash
@@ -116,7 +121,7 @@ jobs:
 
       - name: Keep the receipt and logs
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: installed-upgrade-${{ inputs.candidate_sha || github.sha }}
           path: artifacts/installed-upgrade

@@ -8,6 +8,7 @@ import json
 from typing import Any, Mapping, Sequence
 
 from .activity import action_diagnostic_error_class
+from .finalizer import active_verifier_attempted_nothing
 from .parallel_compiler import (
     parallel_action_occurrence_id,
     summarize_parallel_action_coverage,
@@ -24,15 +25,6 @@ _TERMINAL = frozenset({
     "timed_out",
 })
 _SUCCESS = frozenset({"success"})
-_ACTIVE_VERIFIERS = frozenset({
-    "templates.scan", "xss.verify", "sqli.verify", "authz.verify",
-    "templates.active_batch", "xss.verify_batch", "sqli.verify_batch",
-    "browser.proof",
-})
-_TRAFFIC_DIMENSIONS = frozenset({
-    "http_requests", "state_changing_requests", "browser_actions",
-    "tcp_ports_attempted", "hosts_attempted",
-})
 _SCAN_BUDGET_FIELDS = {
     "max_http_requests": "http_requests",
     "max_state_changing_requests": "state_changing_requests",
@@ -43,6 +35,22 @@ _SCAN_BUDGET_FIELDS = {
 }
 
 _REASON_LABELS = {
+    "session_cross_origin_refused": (
+        "The authenticated browser reaches only the target's origin, so connections to other "
+        "origins (third-party scripts, CDNs, redirects elsewhere) were refused and not loaded"
+    ),
+    "session_navigation_redirect_refused": (
+        "The target redirected an authenticated page to another origin; the browser does not "
+        "follow it with the session, so that page was not loaded"
+    ),
+    "session_header_withheld_from_headless": (
+        "Dalfox ran without its headless browser, which sends session headers to every origin a "
+        "page loads, so DOM-based XSS was not verified in a browser for this session"
+    ),
+    "private_network_subresource_blocked": (
+        "The browser refused a target page's request to another origin on a private or loopback "
+        "address while the session header was in use, so that resource was not loaded"
+    ),
     "capability_unknown": "The action capability is not registered",
     "policy_disabled": "Disabled by scan policy",
     "insufficient_plan_budget": "Not enough admitted scan budget",
@@ -56,8 +64,9 @@ _REASON_LABELS = {
     "authentication_uncertain": "Credential authority could not be confirmed; review the identity and approval before starting new work",
     "authentication_required": (
         "The target refused the unauthenticated requests (401/403 or a redirect to sign-in), "
-        "so those candidates were not tested; to verify them, attach a credential profile "
-        "that allows these checks"
+        "so those candidates were not tested; to verify them, the scan needs a credential "
+        "profile whose allowed capabilities include these checks: attach one, or add the "
+        "checks to the attached profile (active verifiers need approved elevation)"
     ),
     "target_refused": (
         "The target refused the verifier's requests (403) without asking for credentials, for "
@@ -94,6 +103,11 @@ _REASON_LABELS = {
     "manifest_unavailable": "Required immutable work was unavailable",
     "unsupported_output_schema": "The worker returned an unsupported result format",
     "not_applicable": "The capability did not apply to this target",
+    "nuclei_selection_empty": "The scan's template policy left no template to run",
+    "prerequisite_unavailable": (
+        "A step was skipped because something it needs was missing, such as a reachable "
+        "origin or an authenticated session"
+    ),
     "source_not_published": "An optional discovery source was not published by the target",
     "declared_out_of_scope": "The target's API description declares its routes on another origin (a different host, port or scheme), outside this scan's scope",
     "declared_partly_out_of_scope": "Some routes in the target's API description are declared only on another origin (a different host, port or scheme); the rest were ingested",
@@ -119,6 +133,10 @@ _REASON_LABELS = {
     "selected_family_no_candidates": (
         "A selected check family had no candidate to test on the discovered surface; its "
         "family coverage says which"
+    ),
+    "discovery_failed": (
+        "A surface discovery step failed, so what the application exposes was never fully "
+        "examined"
     ),
     "discovery_truncated": (
         "Surface discovery was cut short by its budget, so part of the application was "
@@ -775,9 +793,12 @@ def build_scan_execution_explanation(
             seen.add(item["action_id"])
         return item
 
+    # Skipped as not applicable is a settled "nothing to do", as the report and the parallel
+    # merge count it: a required verifier with no candidate on this surface left no work undone.
     required_incomplete = [
         effective for effective in (effective_row(item) for item in required_rows)
         if effective["status"] not in _SUCCESS
+        and not (effective["status"] == "skipped" and effective.get("reason_code") == "not_applicable")
     ]
     work_manifests = _work_manifests(
         report_execution if parallel_actions else execution
@@ -786,14 +807,12 @@ def build_scan_execution_explanation(
         item["entry_count"] for item in work_manifests
         if item["kind"] == "candidate" and item["status"] != "cancelled"
     )
+    # The report's own predicate: a separate copy here named a shorter verifier set, so the page
+    # and the stored report listed different zero-attempt actions.
     zero_attempt_verifiers = [
         item for item in capability_rows
-        if candidate_count > 0
-        and item["capability_name"] in _ACTIVE_VERIFIERS
-        and item["status"] in {"success", "partial"}
-        and not any(
-            amount > 0 for name, amount in item["budget"]["consumed"].items()
-            if name in _TRAFFIC_DIMENSIONS
+        if active_verifier_attempted_nothing(
+            item["capability_name"], item["status"], item["budget"]["consumed"], candidate_count,
         )
     ]
     report_coverage = (

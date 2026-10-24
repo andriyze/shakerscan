@@ -3649,10 +3649,12 @@ async def _verify_device_control_authorization_candidate(
         locus_request = str(locus.get("request_id") or "")
         if not locus_request:
             continue
+        # A request with an import error is never sent: a capture request whose recorded path
+        # carries a credential resolves with its redacted URL and such an error.
+        replayable = [item for item in requests if isinstance(item, dict) and not item.get("error")]
         state_changing = [
-            item for item in requests
-            if isinstance(item, dict)
-            and str(item.get("method") or "").upper() in {"POST", "PUT", "PATCH", "DELETE"}
+            item for item in replayable
+            if str(item.get("method") or "").upper() in {"POST", "PUT", "PATCH", "DELETE"}
         ]
         selected = next(
             (item for item in state_changing if str(item.get("id") or "") == locus_request),
@@ -3661,7 +3663,7 @@ async def _verify_device_control_authorization_candidate(
         if selected is not None:
             imported = selected
             collection_id = str(row["id"])
-            collection_requests = [item for item in requests if isinstance(item, dict)]
+            collection_requests = replayable
             break
     if imported is None:
         return await _device_control_authorization_blocked(

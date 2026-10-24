@@ -46,6 +46,64 @@ export async function collectAcceptedTargets({ fetchPage, accept, limit, maxPage
   return { matches: matches.slice(0, limit), hasMore: hasMore || matches.length > limit, scanned, pages, filtered: Boolean(accept) }
 }
 
+/** Pages a link that names a target by URL reads at most (200-row pages: about 2000 matches). */
+export const TARGET_LINK_MAX_PAGES = 10
+
+function httpOrigin(value) {
+  if (typeof value !== 'string' || !/^https?:\/\//i.test(value)) return null
+  try { return new URL(value).origin } catch { return null }
+}
+
+function abortError() {
+  const error = new Error('The read was aborted')
+  error.name = 'AbortError'
+  return error
+}
+
+/** Why a search read failed, as a phrase for a notice (no trailing full stop). */
+export function readFailureText(error) {
+  const message = error instanceof Error ? error.message.trim().replace(/[.\s]+$/, '') : ''
+  return message || 'the search could not be completed'
+}
+
+/**
+ * The target a link names by URL: the first http(s) row with the same origin. A host search
+ * matches by substring and sorts by name, so the exact origin can sit after many other matches
+ * (an apex domain behind its subdomains); pages are read on until it is found, the inventory has
+ * no more, or `maxPages` were read. `status` is `found`, `missing` (every matching page was read),
+ * `unconfirmed` (the bound was reached with pages left) or `failed` (a page read failed, with
+ * `error` saying why). Only `missing` says the target does not exist; `unconfirmed` and `failed`
+ * prove nothing about it.
+ *
+ * `fetchPage(position)` is as for collectAcceptedTargets. An aborted `signal` stops before the
+ * next page and rejects with an AbortError, also when a read in flight fails because of it.
+ */
+export async function resolveTargetByOrigin({ fetchPage, url, maxPages = TARGET_LINK_MAX_PAGES, signal }) {
+  const origin = httpOrigin(url)
+  if (!origin) return { status: 'missing', target: null, scanned: 0 }
+  let read = 0
+  let result
+  try {
+    result = await collectAcceptedTargets({
+      fetchPage: async (position) => {
+        if (signal?.aborted) throw abortError()
+        const page = await fetchPage(position)
+        read += Array.isArray(page?.targets) ? page.targets.length : 0
+        return page
+      },
+      accept: (row) => httpOrigin(row?.url) === origin,
+      limit: 1,
+      maxPages,
+    })
+  } catch (error) {
+    if (signal?.aborted) throw abortError()
+    return { status: 'failed', target: null, scanned: read, error: readFailureText(error) }
+  }
+  if (signal?.aborted) throw abortError()
+  if (result.matches.length) return { status: 'found', target: result.matches[0], scanned: result.scanned }
+  return { status: result.hasMore ? 'unconfirmed' : 'missing', target: null, scanned: result.scanned }
+}
+
 /**
  * The line under a server-searched picker. It never claims that no target exists when it only
  * read part of the inventory: a filtered, unfinished search says how far it looked.

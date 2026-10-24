@@ -261,6 +261,25 @@ def _truthy(value: Any) -> bool:
     return str(value or "").strip().lower() == "true"
 
 
+def cors_probe_verdict(sent: str, headers: Mapping[str, Any]) -> dict[str, bool]:
+    """Whether the answer granted the Origin sent, judged on the header as received.
+
+    The probe records this with its response because the receipt redactor rewrites URL-shaped
+    values (a bare origin gains a "/" path): the stored header no longer spells the Origin sent.
+    """
+    allowed = str(headers.get("access-control-allow-origin") or "").strip()
+    return {"sent_origin_granted": bool(allowed) and allowed.lower() == sent.lower()}
+
+
+def _grants_sent_origin(sent: str, allowed: str, response: Mapping[str, Any]) -> bool:
+    verdict = response.get("cors_probe")
+    if isinstance(verdict, Mapping) and isinstance(verdict.get("sent_origin_granted"), bool):
+        return verdict["sent_origin_granted"]
+    # Recorded without the verdict: the stored header is the redactor's rendering, which adds a
+    # "/" path to the echoed probe origin (it has none of its own).
+    return allowed.lower() == sent.lower() or (sent != "null" and allowed.lower() == sent.lower() + "/")
+
+
 def cors_findings(
     action_id: str, request: Mapping[str, Any], response: Mapping[str, Any], *, make: FindingFactory,
 ) -> list[dict[str, Any]]:
@@ -276,12 +295,15 @@ def cors_findings(
     path = str(request.get("path") or "/")
     if not allowed:
         return []
-    if sent == "null" and allowed.lower() == "null":
+    granted = _grants_sent_origin(sent, allowed, response)
+    if granted:
+        allowed = sent  # the header as received; the stored copy is the redactor's rendering
+    if sent == "null" and granted:
         kind, severity, title = "cors_null_origin", ("high" if credentials else "low"), "CORS policy trusts the null origin"
         why = ("Any site can send requests from a sandboxed frame, whose Origin is null, and read the answers"
                + (" with the user's cookies: data the user can see is readable by that site." if credentials else
                   "; without credentials only what an anonymous request returns is exposed."))
-    elif sent != "null" and allowed.lower() == sent.lower():
+    elif sent != "null" and granted:
         kind, severity, title = "cors_reflected_origin", ("high" if credentials else "low"), "CORS policy reflects any origin"
         why = ("The server echoes whatever Origin it is sent, so every website is trusted"
                + (" and allowed to read responses with the user's cookies: data the user can see is readable by any site." if credentials else
@@ -363,7 +385,25 @@ def _spf_records(values: Sequence[Any]) -> list[str]:
     return [str(value).strip() for value in values if str(value).strip().lower().startswith("v=spf1")]
 
 
-def dns_posture_findings(observation: Mapping[str, Any], *, make: FindingFactory) -> list[dict[str, Any]]:
+def _dns_subject_url(host: str, target_url: str) -> str:
+    """The target's own origin when the inspected name is the target's host; otherwise the
+    name's HTTPS origin, as the takeover check names a discovered host."""
+    try:
+        parsed = urllib.parse.urlsplit(str(target_url or ""))
+        target_host = str(parsed.hostname or "").lower().rstrip(".")
+        port = parsed.port
+    except ValueError:
+        return f"https://{host}"
+    scheme = parsed.scheme.lower()
+    if scheme not in {"http", "https"} or target_host != host:
+        return f"https://{host}"
+    default = 443 if scheme == "https" else 80
+    return f"{scheme}://{host}" + ("" if port in (None, default) else f":{port}")
+
+
+def dns_posture_findings(
+    observation: Mapping[str, Any], *, make: FindingFactory, target_url: str = "",
+) -> list[dict[str, Any]]:
     """SPF, DMARC and CAA posture of a domain target from the recorded DNS answers."""
     host = str(observation.get("canonical_host") or "").lower().rstrip(".")
     records = observation.get("records") if isinstance(observation.get("records"), Mapping) else {}
@@ -373,7 +413,8 @@ def dns_posture_findings(observation: Mapping[str, Any], *, make: FindingFactory
     if not apex:
         return []  # an address or a single-label name has no mail/CA policy of its own
     is_apex = apex == host
-    url = f"https://{host}"  # as the takeover check names a host: its HTTPS origin
+    # An http-only target does not serve https://<host>/: name the origin the target is scanned at.
+    url = _dns_subject_url(host, target_url)
     # A label is judged only when its query was answered (records or an authoritative negative
     # answer recorded in record_metadata). A query that timed out or failed leaves its label with
     # an empty list too, and reading that as "no record" reported verified missing DMARC/CAA/SPF.
@@ -449,7 +490,7 @@ def dns_posture_findings(observation: Mapping[str, Any], *, make: FindingFactory
 
 __all__ = [
     "CORS_PROBE_ACTIONS", "CORS_PROBE_ORIGIN", "OPT_IN_HEADERS", "REDIRECT_CANARY_HOST", "REDIRECT_CANARY_URL",
-    "cors_findings", "dns_posture_findings", "header_value_issues", "is_redirect_parameter",
+    "cors_findings", "cors_probe_verdict", "dns_posture_findings", "header_value_issues", "is_redirect_parameter",
     "open_redirect_finding", "redact_url_queries", "redirects_to_canary", "severity_basis",
     "weak_header_findings",
 ]

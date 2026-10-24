@@ -571,7 +571,19 @@ def test_exposure_services_pages_are_the_previous_targets_and_list_v1_walks_them
         snapshot, matcher = load_service_intelligence()
         registry = canonical_registry()
         args = dict(target_kind="all", target_id=None, root_domain=None, search="")
-        legacy_ids = []
+
+        async def v1_walk(sort=None, count="none", **filters):
+            walked, bodies, cursor = [], [], None
+            while True:
+                body_ = await ss.service_page_v1(conn, lc.Page(limit=25, cursor=cursor, sort=sort, count=count),
+                                                 snapshot=snapshot, matcher=matcher, registry=registry, **filters)
+                walked.extend(body_["items"])
+                bodies.append(body_)
+                cursor = body_["next_cursor"]
+                if not body_["has_more"]:
+                    return walked, bodies
+
+        legacy = []
         for offset in range(0, 10_000, 25):
             old = await conn.fetch(ref.TARGETS_SQL + " ORDER BY kind,id LIMIT $5 OFFSET $6", "all", None, None, "",
                                    25, offset)
@@ -581,30 +593,34 @@ def test_exposure_services_pages_are_the_previous_targets_and_list_v1_walks_them
             for item, row in zip(page["targets"], old):
                 assert (item["kind"], item["locator"] if row["kind"] == "device" else None) == (
                     row["kind"], row["locator"] if row["kind"] == "device" else None)
-            legacy_ids.extend(item["id"] for item in page["targets"])
+            legacy.extend(page["targets"])
             if not page["has_more"]:
                 break
-        assert len(legacy_ids) == page["total_targets"]
-        walked, cursor = [], None
-        while True:
-            body_ = await ss.service_page_v1(conn, lc.Page(limit=25, cursor=cursor, count="exact"), snapshot=snapshot,
-                                             matcher=matcher, registry=registry, **args)
-            assert body_["total"] == len(legacy_ids) and body_["schema_version"] == page["schema_version"]
-            walked.extend(item["id"] for item in body_["items"])
-            cursor = body_["next_cursor"]
-            if not body_["has_more"]:
-                break
-        assert walked == legacy_ids
+        assert len(legacy) == page["total_targets"]
+        # list/v1 walks reach every target in the legacy order, each with the same inventory.
+        walked, bodies = await v1_walk(count="exact", **args)
+        for body_ in bodies:
+            assert body_["total"] == len(legacy) and body_["schema_version"] == page["schema_version"]
+        assert walked == legacy
         # Descending: the same targets, each page in the reverse order (the outer query keeps it).
-        walked, cursor = [], None
-        while True:
-            body_ = await ss.service_page_v1(conn, lc.Page(limit=25, cursor=cursor, sort="-kind"), snapshot=snapshot,
-                                             matcher=matcher, registry=registry, **args)
-            walked.extend(item["id"] for item in body_["items"])
-            cursor = body_["next_cursor"]
-            if not body_["has_more"]:
-                break
-        assert walked == legacy_ids[::-1]
+        walked, _ = await v1_walk(sort="-kind", **args)
+        assert walked == legacy[::-1]
+        # A connected device and its host:// target share an id. A read narrowed to one device, or
+        # to a locator, puts both on one page; each keeps its own inventory, in either direction.
+        device_id = await conn.fetchval("SELECT id FROM device_targets WHERE is_active AND primary_locator='10.66.0.4'")
+        for narrowed in (dict(args, target_id=device_id), dict(args, search="10.66.0.4")):
+            reference = await ss.service_page(conn, limit=25, offset=0, snapshot=snapshot, matcher=matcher,
+                                              registry=registry, **narrowed)
+            assert not reference["has_more"] and {"device", "web"} <= {t["kind"] for t in reference["targets"]}
+            walked, _ = await v1_walk(**narrowed)
+            assert walked == reference["targets"]
+            walked, _ = await v1_walk(sort="-kind", **narrowed)
+            assert walked == reference["targets"][::-1]
+        pair, _ = await v1_walk(**dict(args, target_id=device_id))
+        assert [(item["id"], item["kind"]) for item in pair] == [(str(device_id), "device"), (str(device_id), "web")]
+        assert pair[0]["locator"] == "10.66.0.4" and pair[0]["source_count"] == 3
+        assert {(s["transport"], s["port"]) for s in pair[0]["services"]} >= {("tcp", 22), ("tcp", 80)}
+        assert pair[1]["services"] == []
         # The device locator-change time is still computed for the page's devices.
         device = await conn.fetchrow(ss.page_targets_sql(ss.FILTERED_TARGETS_SQL + " AND kind='device' LIMIT 1"),
                                      "all", None, None, "")

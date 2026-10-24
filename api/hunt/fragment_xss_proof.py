@@ -79,6 +79,8 @@ class HuntXSSBrowserProofAdapter(XSSBrowserProofAdapter):
     """The pinned browser prover under the registry-authorized Hunt xss.verify identity."""
 
     capability_name = "xss.verify"
+    # xss.verify's registered browser alternate, not the Scan batch prover's identity.
+    adapter_name = "playwright"
 
     async def execute(self, *, heartbeat, cancelled) -> CapabilityAdapterResult:
         result = await super().execute(heartbeat=heartbeat, cancelled=cancelled)

@@ -7,7 +7,7 @@
 # scanner image. Only this image carries the ~2GB toolchain; build-only packaging machinery is
 # removed after installation so it cannot require a runtime vulnerability waiver.
 ARG SCANNER_RUNTIME_IMAGE=shakerscan-worker:local
-ARG MODEL_INTAKE_GO_BUILDER=golang:1.26.9-bookworm@sha256:d9c68c2c51161e12fd77e4c6320687c9cd86e1af1e3ad6e6cd63ff970641453c
+ARG MODEL_INTAKE_GO_BUILDER=golang:1.26.10-bookworm@sha256:632dff7351799a5a9954a48dc06670ade72ee44e8c351cdc0e5a57af2fea21af
 FROM ${MODEL_INTAKE_GO_BUILDER} AS model-intake-go-tools
 ARG TRIVY_VERSION=0.74.0
 ARG OSV_SCANNER_VERSION=2.5.1
@@ -30,7 +30,7 @@ RUN set -eux; \
 # Match metadata fields, not a shell-quoted backslash-t (which is not a tab).
 RUN set -eu; \
     for tool in trivy osv-scanner; do \
-      go version "/out/$tool" | grep -F 'go1.26.9'; \
+      go version "/out/$tool" | grep -F 'go1.26.10'; \
       go version -m "/out/$tool" > "/out/$tool.buildinfo"; \
     done; \
     check_dep() { awk -v module="$2" -v version="$3" '$1 == "dep" && $2 == module && $3 == version { found=1 } END { exit !found }' "/out/$1.buildinfo"; }; \
@@ -110,7 +110,7 @@ RUN --mount=type=bind,source=scanner/apt_install.sh,target=/tmp/apt_install.sh,r
     "/opt/model-intake-tools/pip-audit/bin/python" -c \
       'import importlib.util as u; assert u.find_spec("setuptools") is None; assert u.find_spec("pip._vendor.msgpack") is None; assert u.find_spec("pip._vendor.pkg_resources") is None'; \
     ! grep -Eq "^(msgpack|setuptools)==" "$vendor/vendor.txt"; \
-    # pip 26.2.1 vendors urllib3 2.7.0 (CVE-2026-97687, CVE-2026-97689; fixed in 2.8.0) and
+    # pip 26.2.2 still vendors urllib3 2.7.0 (CVE-2026-97687, CVE-2026-97689; fixed in 2.8.0) and
     # pip-api needs pip, so that copy is replaced with this environment's hash-locked urllib3,
     # rewritten the way pip vendors it. The pip checks below then run on the replaced copy.
     python3 /opt/model-intake-locks/revendor_pip_urllib3.py "$vendor" \

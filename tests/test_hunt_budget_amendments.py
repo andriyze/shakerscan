@@ -180,7 +180,7 @@ def test_invalid_or_permission_expanding_request_does_not_mutate(limits, match):
 def test_unrelated_extension_does_not_clear_exhaustion_and_no_resume_is_honored():
     conn = Connection()
     with pytest.raises(HTTPException, match="exhausted dimension"):
-        apply(conn, request(limits={"max_http_requests": 30_000}))
+        apply(conn, request(limits={"max_http_requests": conn.row["budget_json"]["max_http_requests"] + 10_000}))
     assert not conn.events
     assert apply(conn, request(resume=False))["status"] == "budget_exhausted"
 
@@ -191,8 +191,9 @@ def test_device_extension_preserves_health_pacing_and_freezes(freeze):
     state = row["context_pack"]["device_policy_state"]
     state.update(traffic_frozen=True, freeze_reason=freeze, consecutive_health_failures=2, requests_used=7, fragility_used=8)
     conn = Connection(row)
-    apply(conn, request(limits={"max_tcp_ports": 65_535, "max_http_requests": 40_000, "max_device_fragility_points": 1000}))
-    expected = {**state, "request_limit": 40_000, "fragility_limit": 1000}
+    larger_http = row["budget_json"]["max_http_requests"] + 20_000
+    apply(conn, request(limits={"max_tcp_ports": 65_535, "max_http_requests": larger_http, "max_device_fragility_points": 1000}))
+    expected = {**state, "request_limit": larger_http, "fragility_limit": 1000}
     assert conn.row["context_pack"]["device_policy_state"] == expected
 
 
@@ -324,7 +325,9 @@ def test_record_export_includes_bounded_budget_history(monkeypatch):
 def test_multi_dimension_extension_keeps_disabled_permissions_and_original_snapshot(kind):
     conn = Connection(run_row(kind, status="active", stop_reason=None))
     before = deepcopy(conn.row)
-    result = apply(conn, request(limits={"max_http_requests": 40000, "max_capability_calls": 5000}, resume=False))
+    result = apply(conn, request(limits={"max_http_requests": before["budget_json"]["max_http_requests"] + 20_000,
+                                       "max_capability_calls": before["budget_json"]["max_capability_calls"] + 5000},
+                                 resume=False))
     assert result["status"] == "active" and result["authority_changed"] is False
     assert conn.row["context_pack"]["hunt_start_contract"] == before["context_pack"]["hunt_start_contract"]
     assert conn.row["policy_json"] == {**before["policy_json"], "budget": result["budget"]}

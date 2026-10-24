@@ -225,6 +225,74 @@ def test_metadata_only_crud_and_rotation_never_return_secret_material(client):
     assert pool.conn.binding["is_active"] is False
 
 
+# What a blank allowlist grants an HTTP identity: the request primitive, the read-only Scan
+# producers that reach pages behind the sign-in, and the bounded browser. Every active verifier
+# still needs explicit elevation.
+HTTP_IDENTITY_DEFAULTS = (
+    "browser.navigate",
+    "collections.replay_safe",
+    "http.request",
+    "templates.passive_batch",
+    "templates.passive_scan",
+    "web.browser_crawl",
+    "web.content_discover",
+    "web.crawl",
+    "web.probe",
+    "web.spec_ingest",
+)
+
+
+@pytest.mark.parametrize("auth_kind", ["form_login", "json_login", "cookie", "bearer_token"])
+def test_a_default_http_identity_authenticates_the_scan_producers_and_the_browser(auth_kind):
+    """A credential made with the defaults must sign the crawl in, not only the baseline request.
+
+    The defaults granted only ``http.request`` (plus the session lifecycle for a sign-in form).
+    Scan applies the profile per action, so a scan that signed in successfully still crawled,
+    browser-crawled and discovered content anonymously and never reached a page behind the
+    sign-in; a Hunt's browser could not open a page with its own established session.
+    """
+    from runtime.scan_credentials import scan_credential_allows_capability
+
+    allowed = credential_api._credential_capabilities(
+        [], target_kind="web", auth_kind=auth_kind, allow_active=False,
+    )
+    for capability in ("web.crawl", "web.browser_crawl", "web.content_discover",
+                       "browser.navigate", "http.request"):
+        assert scan_credential_allows_capability(allowed, capability), capability
+    # Active verification is still an explicit, approved elevation.
+    for capability in ("xss.verify_batch", "sqli.verify_batch", "authz.verify",
+                       "collections.replay_active"):
+        assert not scan_credential_allows_capability(allowed, capability), capability
+    interactive = auth_kind in {"form_login", "json_login"}
+    assert ("auth.session.establish" in allowed) is interactive
+
+
+def test_the_capability_catalog_offers_what_scan_and_the_browser_can_authenticate(client):
+    """The catalog listed only capabilities flagged as resolving credentials server-side.
+
+    The crawlers and verifiers that Scan authenticates per action were missing, so an operator
+    building an allowlist could not find the capabilities that make a Scan authenticated.
+    """
+    http, _ = client
+    catalog = http.get(
+        "/credential-profiles/capabilities",
+        params={"target_kind": "web", "auth_kind": "form_login"},
+    )
+    assert catalog.status_code == 200, catalog.text
+    offered = {item["name"]: item for item in catalog.json()["capabilities"]}
+    for name in ("web.crawl", "web.browser_crawl", "xss.verify_batch", "sqli.verify_batch",
+                 "collections.replay_active", "browser.navigate", "browser.interact"):
+        assert name in offered, name
+    assert offered["xss.verify_batch"]["requires_active_approval"] is True
+    assert offered["xss.verify_batch"]["default"] is False
+    assert offered["web.browser_crawl"]["default"] is True
+    ssh = http.get(
+        "/credential-profiles/capabilities",
+        params={"target_kind": "device", "auth_kind": "ssh_password"},
+    )
+    assert "web.crawl" not in {item["name"] for item in ssh.json()["capabilities"]}
+
+
 def test_capability_registry_defaults_validate_names_and_require_active_elevation(client):
     http, _ = client
 
@@ -234,14 +302,16 @@ def test_capability_registry_defaults_validate_names_and_require_active_elevatio
     )
     assert catalog.status_code == 200, catalog.text
     assert catalog.json()["blank_semantics"] == "safe_server_defaults"
-    assert catalog.json()["safe_defaults"] == ["http.request"]
+    assert catalog.json()["safe_defaults"] == list(HTTP_IDENTITY_DEFAULTS)
 
     defaulted = http.post(
         "/credential-profiles",
         json=_create_payload(name="Defaulted", allowed_capabilities=[]),
     )
     assert defaulted.status_code == 201, defaulted.text
-    assert defaulted.json()["profile"]["allowed_capabilities"] == ["http.request"]
+    assert sorted(defaulted.json()["profile"]["allowed_capabilities"]) == list(
+        HTTP_IDENTITY_DEFAULTS
+    )
 
     inert_ssh = http.post(
         "/credential-profiles",

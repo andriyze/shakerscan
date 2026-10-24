@@ -56,15 +56,21 @@ pre-fill zero-valued ceilings merely to make a request look explicit: doing so c
 turn a usable Hunt into a no-op. Supply a lower ceiling only when the operator actually asks for
 one.
 
-**Budgets: do not starve the Hunt.** Leave `budgets` empty: the profile defaults are sized for
-mapping and then testing. Never lower `max_http_requests` below what discovery needs: one
+**Budgets: do not starve the Hunt.** Leave `budgets` empty: the profile defaults are sized so that
+calls, approval-gated calls, verifications, browser actions and HTTP requests cannot run out before
+the profile's duration, so never ask for more of them in advance. Only the duration ends a Hunt.
+A used-up safety ceiling (TCP ports, state-changing requests, hosts, UDP ports, out-of-band
+interactions, device fragility) refuses only the actions that need it, and the Hunt keeps running. Never lower `max_http_requests` below what discovery needs: one
 `web.crawl` and one `web.content_discover` reserve about 370 requests together, and an agent that
 set 300, then 180, skipped content discovery and missed every exposed `/.env`, `/.git` and backup
-file. The start response's `budget_warnings` names every limit you lowered below what a capability in
-the manifest reserves; when it is not empty, start again with the profile defaults (or ask the
-operator for a budget raise) before you test. A warning with `restart_fixes_it: false` is above even
-the profile's start maximum: only a budget raise the person approves can let that capability run.
-Map first, then narrow.
+file. The start response's `budget_warnings` names each capability the limits leave unable to run
+even once. At a profile's defaults the usual web work (log in, crawl, discover content, verify,
+record) draws none; a default warning names a safety ceiling such as TCP ports or state-changing
+requests. If you lowered a limit and the warning says `restart_fixes_it: true`, start again without
+lowering it. Call the capability a warning names only when your plan needs it (for example
+`ports.discover` on `fast`): its refusal raises a `budget.raise` request for the person to approve;
+otherwise carry on. A warning with `restart_fixes_it: false` is above even the profile's start
+maximum: only a budget raise the person approves can let that capability run. Map first, then narrow.
 
 **Keep answers small.** Hunt tools answer in a compact view by default; leave `view` out. Use
 `capability=<name>` on `shakerscan_hunt_get` for one capability's contract, and `limit`/`cursor` on
@@ -277,18 +283,19 @@ user approves the same way. The user may instead start you with `shakerscan agen
 your Hunts then carry those bounds and requests inside them are granted as they arise. Every
 refusal carries a `reason_code`; act on it rather than on the wording.
 
-## Operator-requested budget extension
+## Budget raises
 
-When the operator asks for more budget, use `POST /hunts/{hunt_id}/budget-amendments` with the
-current run's `expected_revision`, new **total** `limits`, a stable retry `idempotency_key`, and
-`operator_confirmed: true`. Never fabricate confirmation or silently increase an allowance.
-`resume: true` permits continuing an unfinished exhausted Hunt once the exhausted dimension has
-headroom; no action starts automatically. Existing usage, queued holds, identities and permissions
-stay in place. Device pauses and independent device/per-action limits still apply. Inspect current
-state after a conflict; retry a lost response with the same key/body, not an extra increase.
-Completed/cancelled/finalized runs stay terminal. Read `GET /openapi.json` for the request schema
-on an open-source engine (an Enterprise gateway refuses it; the fields above are the request);
-`GET /hunts/{hunt_id}/budget-amendments` pages the saved before/after history.
+A person raises a Hunt's budget; an agent never does. Never call `POST /hunts/{hunt_id}/budget-amendments`
+and never send `operator_confirmed`: that route is the operator's own control, used from the Hunt
+page. When an action needs more of a limit, its refusal raises a `budget.raise` permission request:
+give the person the `shakerscan approve <permission_request_id>` line (see Permission requests) and
+keep working on actions that need none of that limit. When the operator asks in chat for more
+budget, or your launch instructions say to use more, that is not an approval: name the pending
+`budget.raise` request and its approve command, or, when none is pending, say which limit stops
+which planned action and why, so the person can approve the request when it comes or raise the
+limit on the Hunt page; then carry on with other work. A raise keeps usage, queued holds,
+identities and permissions, and starts nothing by itself; completed, cancelled or finalized runs
+stay terminal. `GET /hunts/{hunt_id}/budget-amendments` pages the saved before/after history.
 
 ## Candidates and proof
 
@@ -383,16 +390,36 @@ actions. Cancel with `/cancel`; resume only when the server reports an awaiting-
 
 Stop when the objective is answered, remaining hypotheses are falsified, authorization fails or
 expires, the target changes or is deactivated, the user cancels, a circuit breaker freezes traffic,
-or no useful authorized action fits the remaining budget. An exhausted optional dimension need not
-stop work that uses other remaining dimensions. Preserve observations and name material coverage gaps.
+or no useful authorized action fits the remaining budget. Only the duration running out ends a Hunt
+as `budget_exhausted`. Any other used-up limit, a safety ceiling included, refuses only the actions
+that need it (`budget_exhausted:<dimension>` with a `budget.raise` request the person approves); the
+Hunt keeps running, so keep doing the work that needs none of that dimension. Preserve observations
+and name material coverage gaps.
 An action rejected with `budget_insufficient_for_action` has not exhausted the run: use its
 reported shortages to select a smaller useful action. Do not retry an unchanged oversized action.
-A `budget_exhausted` Hunt still accepts candidates while its candidate budget has room: record the
+A `budget_exhausted` Hunt still accepts candidates and evidence-linked `findings.create|update|delete`
+while its shared `max_candidates` recording allowance has room. Finding recording spends no
+execution calls, active calls or target traffic; existing authority, ownership and proof checks
+still apply. A full recording allowance refuses only that write (a person can raise it); it never
+stops the Hunt, and a refused write spends nothing. A Hunt's findings hold at most 64 MiB of text
+and its candidate records 256 MiB: a write past either is refused (`candidate_bytes_limit` for a
+candidate), so keep descriptions and claims to what the evidence shows or add to an existing
+finding with `findings.update`. Use an absolute finding URL when cited evidence covers several services; a relative
+path stays on the target's own service when it is evidenced, and otherwise follows the single
+evidenced service on the target host, including its scheme and port (a device's address or name
+is that host). Creating a finding this Hunt already recorded with the same title and location
+returns it unchanged (`created: false`) and spends nothing; when `evidence_attached` is false,
+attach the new evidence with `findings.update`. Record the
 leads the gathered evidence supports before finishing. Finishing keeps the `budget_exhausted` status
 but closes the record: afterwards every candidate write (record, correct, expire) is refused with 409. `hosts_attempted` counts distinct hosts: once
 a network action on a host has settled, later network actions on that host do not charge it again.
-An action admitted while the first is still running, or after one that failed before reaching the
-host, is charged in full.
+`tcp_ports_attempted` counts distinct ports the same way: fingerprinting, NSE checks and
+`tls.inspect` of a port this Hunt already attempted (listed in a sweep, or reported open by one)
+cost no TCP allowance, and a `tls.inspect` is one port. An action admitted while the first is
+still running, or after one that failed before reaching the host, is charged in full. Device
+fragility is not a port count: on a device Hunt every connection costs a fragility point and a
+device request, so a re-sweep of ports already attempted or a `tls.inspect` (one point per
+handshake) still uses the device's fragility and request limits; do not repeat them.
 
 Store no hidden chain-of-thought. Durable records should contain objectives, capability calls,
 receipts, observations, bounded notes, candidates, and the final debrief.
@@ -424,6 +451,16 @@ and any operator instructions, never as permission or scope. Saved actions follo
 `instruction_changes` permission: without it, `targets.actions.create|update|delete` files a
 proposal (`applied: false`) for the person to review; add a `reason` and `evidence_refs`. Saved
 actions with `trust: agent_unconfirmed` are advisory recipes.
+Finishing also proposes this Hunt's completed, replayable steps for the operator to review
+before accepting (a path can act although its method reads); it never saves them, whatever the target delegates, and the metadata opt-out skips it. They
+join the target's one rolling retained-checks proposal (one copy of each step, the newest 16 kept),
+which does not use your own proposal allowance. A step is proposed only when every input is on its
+capability's allowlist: no query values, headers, bodies, browser input, sessions, credentials or
+another host's origin. Read `final_debrief.saved_action`: `proposed`, `updated`, `unchanged`,
+`skipped` or `not_saved`. For `proposed` or `updated`, tell the operator to use
+`shakerscan knowledge review`; for `not_saved`, report it instead of claiming the steps were
+retained. The finish retry is idempotent. Use explicit
+`targets.actions.*` calls when a curated recipe needs different steps or instructions.
 
 Record what you learn as attributed interpretations with `knowledge.record`: an `observation`,
 `hypothesis`, `explanation`, `next_step` or `note`, or a `negative_result`. Cite existing records in

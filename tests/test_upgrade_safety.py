@@ -587,6 +587,104 @@ def test_a_restart_of_the_recorded_release_is_still_not_an_upgrade(tmp_path):
     assert "pre-upgrade" not in latest.stdout, latest.stdout
 
 
+# A record of 2.10.0 (image r10) and the 2.9.0 image (r9) an older launcher, or a hand-run Compose
+# command, may have started since. Unit fixture: the stub's `docker inspect` names a container by its
+# image id.
+_RECORDED = r"""
+printf '%s\n' 'ghcr.io/x/shakerscan-api@sha256:r9 id-r9 ghcr.io/x/shakerscan-api' \
+    'ghcr.io/x/shakerscan-api@sha256:r10 id-r10 ghcr.io/x/shakerscan-api' > "$WORK/images"
+printf '# release 2.10.0\nghcr.io/x/shakerscan-api@sha256:r10\n' > "$WORK/.release-images.current"
+"""
+
+
+def test_an_api_running_images_the_record_does_not_name_means_a_backup(tmp_path):
+    """The record still named 2.10.0 while the API ran 2.9.0 images whose environment gives no
+    usable version (started by hand with the release Compose file, which defaults it to "latest").
+    Starting 2.10.0 skipped the backup although it migrates the 2.9.0 database."""
+    before = _RECORDED + """
+echo id-r9 > "$WORK/containers"
+running_api_version() { echo latest; }
+"""
+    result = _backup(tmp_path, "2.10.0", "t", before=before)
+    assert "rc=0" in result.stdout and "-unverified-2.10.0-to-2.10.0" in result.stdout, result.stdout + result.stderr
+
+
+def test_a_stopped_api_container_the_record_does_not_name_means_a_backup(tmp_path):
+    """Nothing runs to ask (the containers were stopped, not removed), and the runtime marker is
+    older than the record: the stopped API container's image still shows the record is stale."""
+    before = _RECORDED + """
+echo prebuilt > "$WORK/.shakerscan-local-build"
+touch -t 202610010000 "$WORK/.shakerscan-local-build"
+echo id-r9 > "$WORK/containers"    # `docker ps -a` lists the stopped API container
+running_api_version() { :; }       # nothing runs
+"""
+    result = _backup(tmp_path, "2.10.0", "t", before=before)
+    assert "rc=0" in result.stdout and "-unverified-2.10.0-to-2.10.0" in result.stdout, result.stdout + result.stderr
+
+
+def test_an_api_container_docker_cannot_inspect_means_a_backup(tmp_path):
+    """Docker lists an API container but cannot say which image it was created from: the record
+    cannot be checked against it, so it is not trusted."""
+    before = _RECORDED + """
+echo id-r10 > "$WORK/containers"
+docker_cli() { case "$*" in *'{{.Image}}'*) return 1 ;; esac; docker "$@"; }
+"""
+    result = _backup(tmp_path, "2.10.0", "t", before=before)
+    assert "rc=0" in result.stdout and "-unverified-2.10.0-to-2.10.0" in result.stdout, result.stdout + result.stderr
+
+
+def test_a_record_whose_images_are_gone_is_not_trusted_while_an_api_container_exists(tmp_path):
+    """The images the record names are no longer on this host, so they cannot be what the API
+    container runs."""
+    before = """
+printf '%s\n' 'ghcr.io/x/shakerscan-api@sha256:r9 id-r9 ghcr.io/x/shakerscan-api' > "$WORK/images"
+printf '# release 2.10.0\nghcr.io/x/shakerscan-api@sha256:r10\n' > "$WORK/.release-images.current"
+echo id-r9 > "$WORK/containers"
+"""
+    result = _backup(tmp_path, "2.10.0", "t", before=before)
+    assert "rc=0" in result.stdout and "-unverified-2.10.0-to-2.10.0" in result.stdout, result.stdout + result.stderr
+
+
+def test_the_api_image_is_noted_before_the_stack_is_stopped(tmp_path):
+    """A clean-slate start or a restart removes the containers before the backup is decided."""
+    before = _RECORDED + """
+echo id-r9 > "$WORK/containers"
+note_running_release
+: > "$WORK/containers"             # the start stopped and removed the stack
+"""
+    result = _backup(tmp_path, "2.10.0", "t", before=before)
+    assert "-unverified-2.10.0-to-2.10.0" in result.stdout, result.stdout + result.stderr
+
+
+def test_a_record_that_names_the_api_image_is_trusted(tmp_path):
+    """No backup for a restart of the recorded release, whatever its API says about its version, nor
+    for a local build, whose images the record does not name."""
+    recorded = _backup(tmp_path, "2.10.0", "t", before=_RECORDED + """
+echo id-r10 > "$WORK/containers"
+running_api_version() { echo latest; }
+""")
+    assert "rc=0" in recorded.stdout and "pre-upgrade" not in recorded.stdout, recorded.stdout + recorded.stderr
+    local_build = tmp_path / "local"
+    local_build.mkdir()
+    built = _backup(local_build, "2.10.0", "t", before=_RECORDED + """
+echo 'shakerscan-api:latest id-local shakerscan-api' >> "$WORK/images"
+echo id-local > "$WORK/containers"
+""")
+    assert "rc=0" in built.stdout and "pre-upgrade" not in built.stdout, built.stdout + built.stderr
+
+
+def test_a_version_the_api_reports_still_decides_over_its_image(tmp_path):
+    """The record lags behind the release that runs (a start that failed after 2.10.0 came up): a
+    start of 2.10.0 is no upgrade, as before."""
+    before = _RECORDED + """
+printf '# release 2.9.0\nghcr.io/x/shakerscan-api@sha256:r9\n' > "$WORK/.release-images.current"
+echo id-r10 > "$WORK/containers"
+running_api_version() { echo 2.10.0; }
+"""
+    result = _backup(tmp_path, "2.9.0", "t", before=before)
+    assert "rc=0" in result.stdout and "pre-upgrade" not in result.stdout, result.stdout + result.stderr
+
+
 def test_without_any_record_a_running_release_of_another_version_is_backed_up(tmp_path):
     """A local build, or a release whose images were not recognised, leaves no record; the version
     its API reports still makes the start an upgrade."""
@@ -1055,3 +1153,199 @@ def test_a_start_or_restart_refuses_an_install_path_with_a_newline(tmp_path):
     spaced = tmp_path / "Shaker Scan spaced"
     spaced.mkdir()
     assert "rc=0" in run(spaced, "ensure_install_path_safe; echo rc=$?").stdout
+
+
+# --- PostgreSQL 16 data that was never migrated (the postgres-data volume of releases before 2.6) --
+
+
+def _volumes(tmp_path: Path, *names: str) -> None:
+    for name in names:
+        (tmp_path / f"volume_shakerscan_{name}").write_text("")
+
+
+def _compose_calls(tmp_path: Path) -> list[str]:
+    return [line for line in calls(tmp_path).splitlines() if line.startswith("compose ")]
+
+
+_LEGACY_GATE = "ensure_no_unmigrated_legacy_database; echo rc=$?"
+
+
+def test_unmigrated_postgresql_16_data_is_refused_before_anything_changes(tmp_path):
+    """A release before 2.6 keeps PostgreSQL 16 data in postgres-data and, never started by a 2.10 or
+    later launcher, leaves no release record. This release does not migrate it: a start created an
+    empty postgres-cluster beside it and took its "pre-upgrade" dump from the empty database."""
+    _volumes(tmp_path, "postgres-data", "redis-data")
+    result = run(tmp_path, _LEGACY_GATE)
+    assert "rc=1" in result.stdout, result.stdout + result.stderr
+    assert "shakerscan_postgres-data" in result.stderr and "never migrated" in result.stderr
+    assert "SHAKERSCAN_INSTALL_VERSION=2.10.0" in result.stderr
+    assert "Nothing was changed" in result.stderr
+    assert "SHAKERSCAN_ALLOW_NEW_DATABASE=1" in result.stderr
+    assert _compose_calls(tmp_path) == []
+    assert "volume rm" not in calls(tmp_path)
+
+
+def test_unmigrated_data_is_refused_while_the_old_release_runs(tmp_path):
+    """The old stack running: the first start of a 2.10 or later launcher records only
+    .release-images.previous, and the refusal leaves that release running."""
+    _volumes(tmp_path, "postgres-data")
+    (tmp_path / ".release-images.previous").write_text("# release 2.5.6\nid-running\n")
+    result = run(tmp_path, 'echo cid > "$WORK/containers"\n' + _LEGACY_GATE)
+    assert "rc=1" in result.stdout, result.stdout + result.stderr
+    assert "the running release keeps running" in result.stderr
+    assert _compose_calls(tmp_path) == []
+
+
+def test_unmigrated_data_may_be_started_empty_only_on_purpose(tmp_path):
+    _volumes(tmp_path, "postgres-data")
+    result = run(tmp_path, _LEGACY_GATE, SHAKERSCAN_ALLOW_NEW_DATABASE="1")
+    assert "rc=0" in result.stdout and result.stderr == "", result.stdout + result.stderr
+
+
+def test_migrated_or_fresh_installs_are_not_held_by_the_legacy_check(tmp_path):
+    both = tmp_path / "both"          # migrated by 2.6 to 2.10, the old copy still present
+    cluster = tmp_path / "cluster"    # migrated, the old copy removed; or installed on 2.6 or later
+    fresh = tmp_path / "fresh"
+    for work in (both, cluster, fresh):
+        work.mkdir()
+    _volumes(both, "postgres-data", "postgres-cluster")
+    _volumes(cluster, "postgres-cluster")
+    for work in (both, cluster, fresh):
+        result = run(work, _LEGACY_GATE)
+        assert "rc=0" in result.stdout and result.stderr == "", (work.name, result.stdout + result.stderr)
+
+
+def test_the_legacy_check_never_guesses_when_docker_cannot_list_volumes(tmp_path):
+    _volumes(tmp_path, "postgres-data")
+    body = """
+    docker_cli() { case "$1" in volume) return 1 ;; esac; docker "$@"; }
+    ensure_no_unmigrated_legacy_database; echo first=$?
+    unset -f docker_cli; docker_cli() { docker "$@"; }
+    ensure_no_unmigrated_legacy_database; echo second=$?
+    """
+    result = run(tmp_path, body)
+    assert "first=0" in result.stdout, result.stdout + result.stderr
+    # An answer Docker could not give is asked again, never kept for the rest of the run.
+    assert "second=1" in result.stdout, result.stdout + result.stderr
+
+
+def test_a_lost_database_is_still_refused_when_the_install_has_a_record(tmp_path):
+    _upgrade_pending(tmp_path)
+    result = run(tmp_path, "ensure_database_volume_present; echo rc=$?")
+    assert "rc=1" in result.stdout and "would create an empty database" in result.stderr
+
+
+def test_status_names_unmigrated_postgresql_16_data_and_an_old_copy_left_beside_the_cluster(tmp_path):
+    _volumes(tmp_path, "postgres-data", "redis-data")
+    unmigrated = run(tmp_path, "upgrade_safety_warnings").stdout
+    assert "shakerscan_postgres-data" in unmigrated and "never migrated" in unmigrated, unmigrated
+    assert "2.10.0" in unmigrated
+    _volumes(tmp_path, "postgres-cluster")
+    both = run(tmp_path, "upgrade_safety_warnings").stdout
+    assert "never migrated" not in both
+    assert "shakerscan_postgres-data" in both and "beside shakerscan_postgres-cluster" in both, both
+    assert "volume rm" not in both  # it may be the only copy of the data: never suggest removing it
+    (tmp_path / "volume_shakerscan_postgres-data").unlink()
+    assert "postgres-data" not in run(tmp_path, "upgrade_safety_warnings").stdout
+
+
+# --- postgres-data beside a lost postgres-cluster, and the record a migration left in backups/ ----
+
+
+def _migration_record(tmp_path: Path, stamp: str = "20261001T004718Z", *, volume: str = "shakerscan_postgres-data",
+                      incomplete: bool = False) -> None:
+    """What 2.6 to 2.10 wrote next to their migration dump (scripts/postgres_upgrade.sh in 2.10.0)."""
+    directory = tmp_path / "backups" / f"postgres-16-to-18-{stamp}"
+    directory.mkdir(parents=True)
+    (directory / "shakerscan-migration.txt").write_text(
+        f"from_kind=legacy\nfrom_major=16\nfrom_volume={volume}\nsource_control=abc\nto_major=18\n"
+        f"migrated_at={stamp}\nbackup={directory}\ntables_verified=42\n")
+    if incomplete:
+        (directory / ".incomplete").write_text("PostgreSQL upgrade did not complete; this dump is not verified.\n")
+
+
+def test_a_lost_database_beside_the_kept_copy_points_to_backups_not_to_a_migration(tmp_path):
+    """A 2.10 record proves a migration ran (2.10 migrated before PostgreSQL could start): postgres-data
+    is the copy it kept, older than the lost postgres-cluster. Migrating it again through 2.10.0 would
+    bring back the data of the migration day as if it were current."""
+    _upgrade_pending(tmp_path)
+    _volumes(tmp_path, "postgres-data", "redis-data")
+    result = run(tmp_path, _LEGACY_GATE)
+    assert "rc=1" in result.stdout, result.stdout + result.stderr
+    assert "missing although this install has started before" in result.stderr
+    assert f"{tmp_path}/backups" in result.stderr and "backup list" in result.stderr
+    assert "copy kept from a migration" in result.stderr and "nothing recorded since" in result.stderr
+    assert "never migrated" not in result.stderr
+    assert "SHAKERSCAN_INSTALL_VERSION=2.10.0" not in result.stderr
+    assert "Nothing was changed" in result.stderr and "SHAKERSCAN_ALLOW_NEW_DATABASE=1" in result.stderr
+    assert _compose_calls(tmp_path) == []
+
+
+def test_a_migration_record_names_the_day_of_the_copy_even_without_a_release_record(tmp_path):
+    """2.6 to 2.9 wrote no release record, only the migration record in backups/."""
+    _volumes(tmp_path, "postgres-data")
+    _migration_record(tmp_path, "20260920T101500Z")
+    _migration_record(tmp_path, "20261001T004718Z")
+    result = run(tmp_path, _LEGACY_GATE)
+    assert "rc=1" in result.stdout, result.stdout + result.stderr
+    assert "copy kept from the migration on 2026-10-01" in result.stderr, result.stderr
+    assert "never migrated" not in result.stderr and "SHAKERSCAN_INSTALL_VERSION=2.10.0" not in result.stderr
+
+
+def test_an_unfinished_or_foreign_migration_record_does_not_count(tmp_path):
+    unfinished = tmp_path / "unfinished"
+    foreign = tmp_path / "foreign"
+    for work in (unfinished, foreign):
+        work.mkdir()
+        _volumes(work, "postgres-data")
+    _migration_record(unfinished, incomplete=True)
+    _migration_record(foreign, volume="other_postgres-data")
+    for work in (unfinished, foreign):
+        result = run(work, _LEGACY_GATE)
+        assert "rc=1" in result.stdout and "never migrated" in result.stderr, (work.name, result.stderr)
+        assert "SHAKERSCAN_INSTALL_VERSION=2.10.0" in result.stderr
+
+
+def test_status_gives_one_consistent_warning_for_a_lost_database_beside_the_kept_copy(tmp_path):
+    (tmp_path / ".env").write_text("POSTGRES_PASSWORD=x\n")
+    _upgrade_pending(tmp_path)
+    _volumes(tmp_path, "postgres-data", "redis-data")
+    warnings = [line for line in run(tmp_path, "upgrade_safety_warnings").stdout.splitlines() if "postgres" in line
+                or "database" in line]
+    assert len(warnings) == 1, warnings
+    assert "missing although this install has started before" in warnings[0]
+    assert "backups" in warnings[0] and "never migrated" not in warnings[0]
+
+
+def test_status_says_nothing_about_the_copy_a_recorded_migration_kept(tmp_path):
+    """2.10 removed postgres-data 30 days after a migration; 2.11 never does, so most migrated installs
+    keep it. With the migration's record in backups/ it is the expected rollback copy, not a warning
+    on every status and doctor run."""
+    _volumes(tmp_path, "postgres-data", "postgres-cluster", "redis-data")
+    _upgrade_pending(tmp_path)
+    _migration_record(tmp_path)
+    assert "postgres" not in run(tmp_path, "upgrade_safety_warnings").stdout
+    assert "rc=0" in run(tmp_path, _LEGACY_GATE).stdout
+    # Without the record (2.11.0 started this install empty, or the backups were deleted) it warns.
+    for receipt in (tmp_path / "backups").glob("postgres-*/shakerscan-migration.txt"):
+        receipt.unlink()
+    unproven = run(tmp_path, "upgrade_safety_warnings").stdout
+    assert "beside shakerscan_postgres-cluster" in unproven and "no record of migrating it" in unproven, unproven
+
+
+def test_a_source_checkout_is_pointed_to_the_2_10_0_tag_not_to_the_installer(tmp_path):
+    """The installer would overwrite a checkout's tracked files with a release's and switch it to
+    prebuilt images."""
+    _volumes(tmp_path, "postgres-data")
+    body = """
+    git() { [ "$3" = symbolic-ref ] && echo fix/my-branch; }
+    USE_PREBUILT=0
+    ensure_no_unmigrated_legacy_database; echo rc=$?
+    """
+    result = run(tmp_path, body)
+    assert "rc=1" in result.stdout, result.stdout + result.stderr
+    assert "git checkout v2.10.0 && ./scanner.sh start --local" in result.stderr, result.stderr
+    assert "git checkout fix/my-branch" in result.stderr
+    assert "install.shakerscan.com" not in result.stderr
+    prebuilt = run(tmp_path, _LEGACY_GATE).stderr
+    assert "SHAKERSCAN_INSTALL_VERSION=2.10.0" in prebuilt and "git checkout" not in prebuilt

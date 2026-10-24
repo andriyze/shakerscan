@@ -4,7 +4,8 @@
 `scripts/upgrade_path_smoke.sh` drives this helper around a real installer upgrade:
 
     baselines  which published releases to upgrade from (the stable channel, plus the newest
-               published release between stable and the candidate when it differs)
+               published release between stable and the candidate when it differs; for a pull
+               request on the promoted release itself, the newest published release below it)
     seed       on the previous release: person-added targets with standing authorization, a
                completed passive Scan of a local fixture, a manual finding, a device, a schedule,
                a discovery run and a Hunt record, all through the public API (never SQL)
@@ -139,20 +140,33 @@ def parse_version(text: str) -> tuple[int, int, int] | None:
     return tuple(int(part) for part in match.groups()) if match else None  # type: ignore[return-value]
 
 
-def select_baselines(stable: str, published: Iterable[str], candidate: str) -> list[str]:
+def select_baselines(
+    stable: str, published: Iterable[str], candidate: str, *, between_releases: bool = False
+) -> list[str]:
     """The releases a candidate must upgrade from: stable, plus the newest published patch above it.
 
     Only final releases (X.Y.Z) older than the candidate count; a candidate that is itself
     published (a rebuild of a tag) is not its own baseline.
+
+    `between_releases` is for a pull request's tree rather than a release candidate. After a
+    promotion the tree's VERSION equals the stable channel until the next release starts, and
+    upgrading a release to itself proves nothing; the baseline is then the newest published
+    release below that version. A release candidate never passes it: its version must be newer
+    than stable.
     """
     stable_v, candidate_v = parse_version(stable), parse_version(candidate)
     if stable_v is None:
         raise ValueError(f"stable version is not X.Y.Z: {stable!r}")
+    versions = {v for v in (parse_version(item) for item in published) if v is not None}
+    if candidate_v is not None and between_releases and stable_v == candidate_v:
+        older = sorted(v for v in versions if v < candidate_v)
+        if not older:
+            raise ValueError(f"no published release older than {candidate} to upgrade from")
+        return [".".join(map(str, older[-1]))]
     if candidate_v is not None and stable_v >= candidate_v:
         raise ValueError(f"stable {stable} is not older than the candidate {candidate}")
     newer = sorted(
-        {v for v in (parse_version(item) for item in published) if v is not None
-         and v > stable_v and (candidate_v is None or v < candidate_v)}
+        v for v in versions if v > stable_v and (candidate_v is None or v < candidate_v)
     )
     baselines = [".".join(map(str, stable_v))]
     if newer:
@@ -650,6 +664,9 @@ def main(argv: list[str] | None = None) -> int:
     baselines.add_argument("--stable", required=True)
     baselines.add_argument("--candidate", required=True)
     baselines.add_argument("--published", default="", help="whitespace-separated published versions or tags")
+    baselines.add_argument("--between-releases", action="store_true",
+                           help="a pull request's tree, which may still carry the stable version; "
+                                "never a release candidate")
 
     for name in ("seed", "sweep", "check"):
         command = sub.add_parser(name)
@@ -674,7 +691,8 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     if args.command == "baselines":
-        for version in select_baselines(args.stable, args.published.split(), args.candidate):
+        for version in select_baselines(args.stable, args.published.split(), args.candidate,
+                                        between_releases=args.between_releases):
             print(version)
         return 0
 

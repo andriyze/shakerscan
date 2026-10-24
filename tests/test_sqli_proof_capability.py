@@ -95,6 +95,8 @@ def test_error_differential_requires_two_matching_reproductions():
     assert proof["proof_contract"] == "sqli_error_differential/v2"
     assert proof["repetitions"] == 2
     assert len(proof["response_pairs"]) == 2
+    # The site the route was proved on, value-free, so a retest sends the request there.
+    assert proof["origin"] == "https://app.example.test"
 
 
 class AuthenticationTransport:

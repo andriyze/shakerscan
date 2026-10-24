@@ -2,9 +2,18 @@
 
 from __future__ import annotations
 
+import urllib.parse
 from dataclasses import dataclass
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 
+# Defined beside the batch attempt costs, which the planner and the report (shipped to the
+# host by the installer, unlike this module) read; re-exported here for the adapter.
+from .external_process import (  # noqa: F401
+    ACTIVE_TEMPLATE_PLANNED_WINDOWS,
+    ACTIVE_TEMPLATE_WINDOWS_RECORD_KIND,
+    TEMPLATE_WINDOW_BEYOND_ALLOWLIST,
+    TEMPLATE_WINDOW_PAST_BASES,
+)
 from .nuclei_template_index import resolve_active_nuclei_selection
 
 
@@ -14,6 +23,9 @@ class ActiveScanNucleiOptions:
     worker_options: Mapping[str, Any]
     skip_reason: str | None = None
     verify_selection: Mapping[str, Any] | None = None
+    # The selection's counts (matched, selected, state-changing, credential-level, excluded),
+    # recorded on the step's receipt so a held-back default login is visible.
+    selection_telemetry: Mapping[str, Any] | None = None
 
 
 def resolve_active_scan_nuclei_options(
@@ -36,6 +48,7 @@ def resolve_active_scan_nuclei_options(
         return ActiveScanNucleiOptions(
             {}, {}, selection.skip_reason or "not_applicable",
             verify_selection=selection.verify_selection,
+            selection_telemetry=selection.telemetry(),
         )
     worker_options = {
         "severity": template_options.get("severity", "high,critical"),
@@ -52,7 +65,10 @@ def resolve_active_scan_nuclei_options(
         for key in ("severity", "template_pack_digest")
         if key in template_options
     }
-    return ActiveScanNucleiOptions(capability_args, worker_options, verify_selection=selection.verify_selection)
+    return ActiveScanNucleiOptions(
+        capability_args, worker_options, verify_selection=selection.verify_selection,
+        selection_telemetry=selection.telemetry(),
+    )
 
 
 #: Active templates one attempt is given. Measured on the 2.11 scanner image (pinned
@@ -100,3 +116,156 @@ def active_template_window(
     index = ordinal % count
     chosen = ids[index::count]
     return ActiveTemplateWindow(",".join(chosen), index, count, len(chosen))
+
+
+def active_template_window_count(template_ids: str, *, size: int | None = None) -> int:
+    """How many windows the allowlist splits into (see ``active_template_window``)."""
+    ids = [item for item in str(template_ids or "").split(",") if item]
+    size = ACTIVE_TEMPLATE_WINDOW_SIZE if size is None else int(size)
+    return max(1, -(-len(ids) // max(1, size))) if ids else 0
+
+
+def active_template_window_applies(
+    template_ids: str, position: int, *, endpoint_entries: int,
+) -> bool:
+    """Whether a planned position past the endpoints still names a window of its own.
+
+    A position below the endpoint count is an endpoint's own attempt and runs exactly as it
+    always did. A later position runs window ``position`` on endpoint ``position % E`` only
+    while the allowlist has that many windows; past them it would repeat a window already run
+    on the same host, so it runs nothing.
+    """
+    if position < max(0, int(endpoint_entries)):
+        return True
+    return position < active_template_window_count(template_ids)
+
+
+def planned_endpoint_entries(
+    capability_args: Mapping[str, Any], manifest_entries: int,
+) -> int | None:
+    """E when an active-template slice plans positions past its endpoints, else None.
+
+    The planner declares ``endpoint_entries`` (E, the endpoint manifest's size) beside
+    ``manifest_entries`` (the positions it plans) only when it planned more positions than
+    endpoints. Both must agree with the immutable manifest and the planned window count.
+    """
+    raw = capability_args.get("endpoint_entries")
+    if raw is None:
+        return None
+    declared = capability_args.get("manifest_entries")
+    if (
+        isinstance(raw, bool) or not isinstance(raw, int) or raw < 1
+        or raw != int(manifest_entries)
+        or isinstance(declared, bool) or not isinstance(declared, int)
+        or not raw <= declared <= max(raw, ACTIVE_TEMPLATE_PLANNED_WINDOWS)
+    ):
+        raise ValueError("active template positions disagree with the endpoint manifest")
+    return raw
+
+
+def _origin(scheme: str, host: str, port: int | None) -> str:
+    scheme = scheme.lower()
+    host = host.lower().rstrip(".")
+    authority = f"[{host}]" if ":" in host else host
+    default = 443 if scheme == "https" else 80
+    return f"{scheme}://{authority}" if port in (None, default) else f"{scheme}://{authority}:{port}"
+
+
+def active_sweep_bases(
+    target_url: str, entries: Sequence[Mapping[str, Any]], *, exclude_origins: Sequence[str] = (),
+) -> tuple[str, ...]:
+    """The base URLs an active-template sweep runs its windows at, in order.
+
+    A window's templates address the host from nuclei's base URL: ``{{BaseURL}}/images/json``,
+    and a raw ``GET /version`` is joined to the base path as well. Running window o at endpoint
+    o % E put a discovered endpoint's path under them: zoo docker's endpoints were /version,
+    /info and /, so misconfigured-docker asked /version/images/json and docker-daemon-exposed
+    asked under /info, both got 404, and both windows counted as run with the host's two
+    critical findings lost.
+
+    The first base is the directory of the URL the Scan targets (the dispatcher's own target
+    URL, so a parallel shard has the same one): a path ending in ``/`` is kept, otherwise its
+    last segment is dropped (``/app/login.php`` -> ``/app/``; ``/app`` -> ``/``, since nothing
+    says ``app`` is a directory), and the query and fragment are dropped. Every other origin the
+    endpoint manifest names (all inside the Scan's frozen binding) follows at its root, sorted,
+    except ``exclude_origins``: a scheme-inferred Scan's origin it did not select (the other
+    scheme usually only redirects, and batch attempts follow no redirects).
+
+    No permitted template needs a discovered endpoint's path (pinned bundle, 1,145 permitted
+    templates): none fuzzes the endpoint or appends a query to it; 550 append a path to
+    {{BaseURL}}, 495 send raw requests with absolute paths (joined to the base path), and 108 ask
+    {{BaseURL}} itself to recognise a product's page -- which a window ran on one arbitrary
+    endpoint, never on each, so the bases are where that check is meaningful.
+    """
+    parsed = urllib.parse.urlsplit(str(target_url or ""))
+    if parsed.scheme.lower() not in {"http", "https"} or not parsed.hostname:
+        raise ValueError("an active-template sweep needs an absolute HTTP(S) target URL")
+    path = parsed.path or "/"
+    if not path.endswith("/"):
+        path = path[: path.rfind("/") + 1] or "/"
+    first_origin = _origin(parsed.scheme, parsed.hostname, parsed.port)
+    others = sorted({
+        _origin(str(entry["scheme"]), str(entry["host"]), int(entry["port"]))
+        for entry in entries
+        if entry.get("scheme") and entry.get("host") and entry.get("port")
+    } - {first_origin} - {str(origin).rstrip("/").lower() for origin in exclude_origins})
+    return (first_origin + path, *(origin + "/" for origin in others))
+
+
+def active_sweep_index(
+    position: int, *, shard_index: int | None, shard_count: int | None, pair_count: int,
+) -> int | None:
+    """The (base, window) pair index a sweep position runs, or None past every pair.
+
+    A direct Scan's position p is pair p. A parallel Scan's children are one global child at
+    shard index 0 (it holds no endpoint, so it never sweeps; the parallel planner always puts it
+    first) and n - 1 endpoint children at indices 1..n-1. Endpoint child k' = k - 1 of n' = n - 1
+    starts its positions at offset k' x floor(P / n') around the P pairs and runs them in order:
+
+    * alone it runs min(E, P) distinct pairs for its E positions, as a direct Scan would, so a
+      lane or family child never runs fewer windows than 2.11.0 gave it;
+    * the children start P / n' apart, so they run different pairs until a child's positions
+      reach the next child's offset, after which they may overlap (the parallel merge counts the
+      distinct pairs and the repeats).
+
+    An interleaved split (pair p x n + k) ran far fewer windows on a typical parallel Scan,
+    because n counts the global child, the family children that never sweep, and every lane.
+    A position at or past P runs nothing, so no child repeats a pair of its own.
+    """
+    pairs = max(0, int(pair_count))
+    position = int(position)
+    if position < 0 or position >= pairs:
+        return None
+    if shard_index is None or shard_count is None or int(shard_count) < 2 or int(shard_index) < 1:
+        return position
+    children = int(shard_count) - 1
+    offset = (int(shard_index) - 1) * (pairs // children)
+    return (position + offset) % pairs
+
+
+def active_sweep_base(position: int, *, bases: Sequence[str], window_count: int) -> str | None:
+    """Where a sweep position runs: window ``position % W`` at base ``position // W``.
+
+    Every (base, window) pair runs once. A position past ``len(bases) x W`` would repeat a
+    pair already run -- a host with 215 endpoints and one origin repeated each of its 39
+    windows five or six times at the same URL, mutating templates included -- so it runs
+    nothing (``None``). The window a position runs is unchanged
+    (``active_template_window``), and so are the plan, the holds and the attempt identities.
+    """
+    count = max(1, int(window_count))
+    index = int(position) // count
+    return bases[index] if 0 <= index < len(bases) else None
+
+
+def window_position_candidate_id(
+    candidate_id: str, position: int, endpoint_entries: int | None,
+) -> str:
+    """The attempt identity of a planned position: an endpoint's own below E, unchanged.
+
+    A position past the endpoints runs another window on endpoint ``position % E``, so it is
+    its own attempt; positions below E keep the identity -- and so the checkpoints and resume
+    -- every earlier release gave them.
+    """
+    if endpoint_entries is None or position < int(endpoint_entries):
+        return candidate_id
+    return f"{candidate_id}:window:{int(position)}"

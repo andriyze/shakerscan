@@ -343,9 +343,11 @@ missing/malformed result is not success. Report settled actual usage separately 
 
 Exhaustion still keeps the debrief, leads and reason. Start with profile budgets, never lower one
 below what discovery needs, act on `budget_warnings`, and keep Hunt views compact (no `view: full`).
-An operator extends a Hunt via `/hunts/{id}/budget-amendments` or a permission request: on
-`awaiting_permission` tell the user the exact `shakerscan approve <id>` for their own terminal, keep
-working, wait with the wait tool, retry with the same key. Only a person decides or sets start bounds
+A person raises a Hunt's budget by approving its `budget.raise` permission request or on the Hunt
+page; an agent never calls `POST /hunts/{id}/budget-amendments` or sends `operator_confirmed`, even
+when asked in chat (name the pending request instead). On `awaiting_permission` tell the user the
+exact `shakerscan approve <id>` for their own terminal, keep working, wait with the wait tool, retry
+with the same key. Only a person decides or sets start bounds
 (`docs/hunt-permission-requests.md`). `resume` needs headroom; it runs no traffic and resets nothing.
 The admission snapshot remains historical. Cancellation is distinct. `GET /hunts` is durable searchable history; `/hunts/{id}/record` exports the explicit
 decision record and debrief, never hidden chain-of-thought. Requests-only export stays separate.

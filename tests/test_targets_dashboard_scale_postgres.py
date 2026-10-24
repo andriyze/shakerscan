@@ -84,6 +84,12 @@ INSERT INTO targets(url, name, root_domain, is_root, discovery_source, created_a
 SELECT CASE WHEN s = 0 THEN 'https://big.invalid' ELSE 'https://n' || s || '.big.invalid' END,
        'big ' || s, 'big.invalid', s = 0, 'subfinder', TIMESTAMPTZ '2026-08-01' + s * INTERVAL '1 second'
 FROM generate_series(0, {BIG_MEMBERS}) s;
+-- one host with three web apps (ports) and a subdomain: three roots of one root domain
+INSERT INTO targets(url, name, root_domain, is_root, discovery_source, created_at) VALUES
+    ('https://ports.invalid', 'ports 443', 'ports.invalid', true, 'manual', TIMESTAMPTZ '2026-07-01 00:00:00'),
+    ('https://ports.invalid:8443', 'ports 8443', 'ports.invalid', true, 'manual', TIMESTAMPTZ '2026-07-01 00:00:01'),
+    ('https://ports.invalid:9443', 'ports 9443', 'ports.invalid', true, 'manual', TIMESTAMPTZ '2026-07-01 00:00:02'),
+    ('https://app.ports.invalid', 'ports app', 'ports.invalid', false, 'manual', TIMESTAMPTZ '2026-07-01 00:00:03');
 -- a target with no root domain groups as "unknown"; two inactive subdomains
 INSERT INTO targets(url, name, root_domain, is_root) VALUES ('https://loose.invalid', 'loose', NULL, false);
 UPDATE targets SET is_active = false WHERE url IN ('https://s1.d0007.invalid', 'https://s2.d0011.invalid');
@@ -675,12 +681,35 @@ def test_grouped_v1_caps_members_and_reads_only_the_page(monkeypatch):
         body = await grouped_list.grouped_page(
             spy, _page(limit=10, count="exact"), filters={}, member_limit=5,
             member_columns=_member_columns(targets_router), public_row=targets_router._public_target_row)
-        assert body["total_kind"] == "exact" and body["total"] == DOMAINS + 2
+        assert body["total_kind"] == "exact" and body["total"] == DOMAINS + 3
         big = next(g for g in body["items"] if g["root_domain"] == "big.invalid")
         assert big["subdomain_count"] == BIG_MEMBERS and len(big["subdomains"]) == 5 and big["subdomains_truncated"]
         assert all(len(g["subdomains"]) <= 5 for g in body["items"])
         # 1,300 targets: no read returns more than a page of groups or of members.
         assert spy.most <= 10 * 6 + 1, sorted(spy.rows, key=lambda item: -item[0])[:2]
+    _run(check)
+
+
+def test_a_host_with_several_web_apps_lists_every_app_in_its_group():
+    """Three roots of one root domain (one host's ports) and a subdomain: the last root in URL
+    order is the group's root, the other two roots are members beside the subdomain, and the
+    oracle and list/v1 agree on it."""
+    from targets import router as targets_router, grouped_list
+
+    async def check(conn):
+        everything = await ref.old_grouped(conn, targets_router)
+        legacy = next(g for g in everything["domains"] if g["root_domain"] == "ports.invalid")
+        assert legacy["root_target"]["url"] == "https://ports.invalid:9443"
+        assert sorted(m["url"] for m in legacy["subdomains"]) == [
+            "https://app.ports.invalid", "https://ports.invalid", "https://ports.invalid:8443"]
+        assert (legacy["subdomain_count"], legacy["total_count"]) == (3, 4)
+        body = await grouped_list.grouped_page(
+            conn, _page(limit=400, count="exact"), filters={}, member_limit=20,
+            member_columns=_member_columns(targets_router), public_row=targets_router._public_target_row)
+        group = next(g for g in body["items"] if g["root_domain"] == "ports.invalid")
+        assert group["root_target"]["id"] == legacy["root_target"]["id"]
+        assert [m["id"] for m in group["subdomains"]] == [m["id"] for m in legacy["subdomains"]]
+        assert (group["subdomain_count"], group["total_count"]) == (3, 4)
     _run(check)
 
 

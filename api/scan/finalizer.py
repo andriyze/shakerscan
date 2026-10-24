@@ -12,6 +12,7 @@ from typing import Any, Mapping, Sequence
 
 from . import scoring
 from .assessment import mark_unexamined_coverage, withhold_unexamined_grade
+from .auth_endpoint_probe import AUTH_ENDPOINT_PACE_UNFUNDED, AUTH_ENDPOINT_PROBE_LIMITED
 from .action_plan import ScanActionPlan
 from .capability_result import (
     BUDGET_EXHAUSTION_REASONS,
@@ -19,12 +20,19 @@ from .capability_result import (
     CapabilityResultReference,
     CapabilityResultStatus,
 )
-from .contracts import SCAN_APPLICATION_SURFACE_FAMILIES
-from .finding_evidence import template_classification, tls_finding_evidence
+from .contracts import SCAN_APPLICATION_SURFACE_FAMILIES, budget_sufficiency
+from .finding_evidence import template_classification, tls_finding_evidence, tls_untrusted_by_leaf_weakness
+from .external_process import (
+    ACTIVE_TEMPLATE_WINDOWS_RECORD_KIND,
+    TEMPLATE_WINDOW_BEYOND_ALLOWLIST,
+    TEMPLATE_WINDOW_PAST_BASES,
+    TEMPLATE_WINDOWS_INCOMPLETE_ON_ORIGIN,
+)
 from .posture_findings import (
     CORS_PROBE_ACTIONS, OPT_IN_HEADERS, cors_findings, dns_posture_findings, open_redirect_finding,
     redact_url_queries, weak_header_findings,
 )
+from .negative_control import indistinguishable_from_absent, is_negative_control_url
 from .redirect_evidence import REDIRECT_STATUSES, http_origin, redirect_destination
 from .severity_calibration import calibrate_findings
 from .sqli_stages import INCONCLUSIVE_RECORD_KIND, sqli_budget_outcomes
@@ -122,6 +130,27 @@ _TRAFFIC_BUDGETS = frozenset({
     "http_requests", "state_changing_requests", "browser_actions",
     "tcp_ports_attempted", "hosts_attempted",
 })
+
+
+def active_verifier_attempted_nothing(
+    capability_name: str, status: Any, consumed: Mapping[str, Any], candidate_count: int,
+) -> bool:
+    """An active verifier that finished with candidates waiting but sent no traffic.
+
+    The report and the coverage explanation both read zero-attempt work through this one
+    predicate, so the page and the stored report always name the same actions.
+    """
+    status_value = getattr(status, "value", status)
+    return (
+        capability_name in _ACTIVE_VERIFIER_CAPABILITIES
+        and candidate_count > 0
+        and status_value in {"success", "partial"}
+        and not any(
+            int(amount or 0) > 0 for name, amount in consumed.items() if name in _TRAFFIC_BUDGETS
+        )
+    )
+
+
 # Context collection is retained in the action ledger but cannot improve or
 # weaken vulnerability coverage, assurance, score, or grade.
 _INFORMATIONAL_CAPABILITIES = frozenset({"infrastructure.inspect"})
@@ -144,6 +173,17 @@ _PROOF_CAPABILITIES = frozenset({
     "xss.browser_prove_batch",
     "sqli.prove_batch",
 })
+# Best-effort checks that ride a family's authority without escalating its candidates:
+# capability -> (family, key of the check's own row inside the family's coverage). They are
+# never required, so they do not move the family's status, but a check that ran nothing says
+# so in its own row instead of leaving the report.
+_AUXILIARY_CHECKS: Mapping[str, tuple[str, str]] = MappingProxyType({
+    "redirect.verify_batch": ("xss", "open_redirect"),
+})
+# authz.verify plans one cross-principal ownership comparison over the endpoint manifest and
+# records it as an ``authz_differential``, not as candidate attempts. These reasons say the
+# target offered nothing to compare, as opposed to a comparison that never happened.
+_AUTHZ_NOTHING_TO_EXAMINE = frozenset({"no_target_bound_routes"})
 # Optional surface discovery feeds every later stage. When its own budget cut it short --
 # its output allowance, request ceiling or wall, or the plan could not fund it at all --
 # part of the application was never examined, so the Scan's coverage is not complete even
@@ -162,6 +202,9 @@ _DISCOVERY_TRUNCATION_REASONS = frozenset({
     "process_killed",
     # Stopped, or never started, because the Scan reached its time limit.
     "scan_time_limit",
+})
+_DISCOVERY_FAILED_STATUSES = frozenset({
+    CapabilityResultStatus.FAILED, CapabilityResultStatus.BLOCKED,
 })
 # GraphQL checks (capabilities/graphql_probe.py): title and CWE per check.
 _GRAPHQL_CHECKS = {
@@ -373,6 +416,19 @@ def _base_finding(
         "url": str(url or "") or None,
         "evidence": dict(evidence),
     }
+
+
+# sqlmap's summary line, "back-end DBMS: SQLite" (optionally after log tags). A fingerprint
+# recorded from another line that mentions the DBMS, such as the --batch prompt "it looks like the
+# back-end DBMS is 'X'. Do you want to skip ...", names no DBMS.
+_SQLMAP_DBMS_LINE_RE = re.compile(r"(?:\[[^\]]*\]\s*)*back-end DBMS:\s*(\S.*)")
+
+
+def _sqlmap_dbms(row: Mapping[str, Any]) -> str:
+    if row.get("dbms"):
+        return str(row["dbms"]).strip()[:120]
+    match = _SQLMAP_DBMS_LINE_RE.fullmatch(str(row.get("message") or "").strip())
+    return match.group(1).strip()[:120] if match else ""
 
 
 def _observed_url_key(value: Any) -> str | None:
@@ -610,10 +666,13 @@ def _attach_observed_header_responses(
         if evidence.get("template_id") != "http-missing-security-headers" or not header:
             continue
         observed = responses.get(_http_origin(finding.get("url")) or "")
+        # An error page is not the response a header finding is about: the template matched
+        # other pages (the root's own match is dropped), so a 4xx/5xx root is not their evidence.
         if (
             observed is None
             or header not in _BASELINE_RECORDED_HEADERS
             or header in observed["observed_headers"]
+            or not 200 <= int(observed["response_status"]) < 400
         ):
             continue
         evidence["observed_response"] = {**observed, "header_absent": header}
@@ -823,6 +882,7 @@ def _findings_for_action(
     observations: Sequence[Mapping[str, Any]],
     *,
     unobserved_response_urls: frozenset[str] = frozenset(),
+    target_url: str = "",
 ) -> list[dict[str, Any]]:
     findings: list[dict[str, Any]] = []
     header_origin_findings: dict[tuple[str, str], dict[str, Any]] = {}
@@ -957,7 +1017,7 @@ def _findings_for_action(
             ))
         elif kind == "dns_posture":
             findings.extend(dns_posture_findings(
-                item, make=_verified_posture_factory(result, receipt, str(kind)),
+                item, make=_verified_posture_factory(result, receipt, str(kind)), target_url=target_url,
             ))
         elif kind == "open_redirect_proof":
             redirect = open_redirect_finding(
@@ -1164,10 +1224,9 @@ def _findings_for_action(
             # SQLMap labels remain candidates until a payload/control
             # differential produces the deterministic proof contract.
             dbms = next((
-                str(row.get("dbms") or row.get("message") or "").split("back-end DBMS:", 1)[-1].strip()[:120]
-                for row in observations
+                name for row in observations
                 if isinstance(row, Mapping) and row.get("kind") == "sqli_dbms_fingerprint"
-                and (row.get("dbms") or row.get("message"))
+                for name in (_sqlmap_dbms(row),) if name
             ), None)
             finding = _base_finding(
                 tool="sqlmap",
@@ -1221,6 +1280,8 @@ def _findings_for_action(
                 evidence={
                     "candidate_id": item.get("candidate_id"),
                     "request_ref_id": item.get("request_ref_id"),
+                    # Where the route was proved, so a retest sends it to the same site.
+                    **({"origin": item["origin"]} if item.get("origin") else {}),
                     "method": item.get("method"),
                     "field_path": item.get("field_path"),
                     "request_class": item.get("request_class"),
@@ -1353,6 +1414,7 @@ def _findings_for_action(
                 evidence={
                     "candidate_id": item.get("candidate_id"),
                     "request_ref_id": item.get("request_ref_id"),
+                    **({"origin": item["origin"]} if item.get("origin") else {}),
                     "method": item.get("method"),
                     "field_path": item.get("field_path"),
                     "request_class": item.get("request_class"),
@@ -1491,7 +1553,9 @@ def _findings_for_action(
                  "TLS certificate is not yet valid", "medium", "CWE-295", "tls_certificate_not_yet_valid"),
                 (item.get("certificate_hostname_matches") is False,
                  "TLS certificate hostname mismatch", "high", "CWE-295", "tls_certificate_hostname_mismatch"),
-                (item.get("certificate_trust") == "untrusted",
+                # Not when the verifier refused only the leaf's own weak key or signature,
+                # which the weak-key / weak-signature finding below already reports.
+                (item.get("certificate_trust") == "untrusted" and not tls_untrusted_by_leaf_weakness(item),
                  "TLS certificate chain is not trusted", "medium", "CWE-295", "tls_certificate_untrusted"),
                 (item.get("legacy_protocol_negotiated") is True,
                  "Legacy TLS protocol negotiated", "high", "CWE-326", "tls_legacy_protocol"),
@@ -2322,6 +2386,18 @@ def _off_origin_redirect(
     return moved if moved and moved != http_origin(origin) else None
 
 
+def browser_session_header_reasons(observations: Mapping[str, Any]) -> set[str]:
+    """What an action's browser could not do with its trusted headers (a page reached by a
+    redirect within the origin loaded without them, a private-network resource refused), from
+    its ``browser_session_header_coverage`` observations. Stated in coverage; no status changes."""
+    reasons: set[str] = set()
+    for rows in (observations or {}).values():
+        for row in rows or ():
+            if isinstance(row, Mapping) and row.get("kind") == "browser_session_header_coverage":
+                reasons.update(str(item)[:100] for item in row.get("reasons") or () if str(item))
+    return reasons
+
+
 def _observed_success_response(
     observations: Mapping[str, Sequence[Mapping[str, Any]]],
     *, origins: frozenset[str],
@@ -2395,6 +2471,161 @@ _NAMED_FAMILY_GAP_REASONS = frozenset({
     CapabilityResultReason.TARGET_REFUSED.value,
     "insufficient_budget_for_stage",
 })
+
+
+def _windows_beyond_allowlist_only(action: Any, rows: Sequence[Any]) -> bool:
+    """An active-template slice whose every planned position was past the allowlist's windows.
+
+    It ran nothing by design (a GET-only allowlist has fewer windows than were planned), so it
+    is not an active verifier that attempted nothing.
+    """
+    raw_slice = action.capability_args.get("slice")
+    planned = int(raw_slice.get("count") or 0) if isinstance(raw_slice, Mapping) else 0
+    beyond = sum(
+        1 for item in rows or ()
+        if isinstance(item, Mapping) and item.get("kind") == "candidate_inapplicable"
+        and item.get("reason") in {TEMPLATE_WINDOW_BEYOND_ALLOWLIST, TEMPLATE_WINDOW_PAST_BASES}
+    )
+    return action.capability_name == "templates.active_batch" and 0 < planned <= beyond
+
+
+def _authz_nothing_to_examine(item: Mapping[str, Any]) -> str | None:
+    """Why one ownership differential had nothing to compare, or None when it had something.
+
+    No in-scope route at all; or routes that were all filtered out as low-value producers
+    (sign-in, health, public catalogue pages), counted by ``producer_candidate_count``. An
+    observation from before that count was recorded cannot show the second.
+    """
+    if str(item.get("reason") or "") in _AUTHZ_NOTHING_TO_EXAMINE:
+        return str(item["reason"])
+    count = item.get("producer_candidate_count")
+    if (
+        item.get("mode") != "selected_object"
+        and isinstance(count, int) and not isinstance(count, bool) and count == 0
+        and not int(item.get("producers_tested") or 0)
+    ):
+        return "no_producer_candidates"
+    return None
+
+
+def _authz_compared(item: Mapping[str, Any]) -> bool:
+    """Whether one ownership differential compared anything.
+
+    The replay path compared once a producer was tested or the differential was proven. The
+    selected-object path (two sibling object URLs) compared once the selected object's request
+    as the other principal was answered: it never reports producers, and its verdict stays
+    inconclusive even when it ran to completion. Requests that stopped before that (a secondary
+    baseline that failed, an owner response without the object) compared nothing.
+    """
+    if item.get("proof_state") == "verified":
+        return True
+    if item.get("mode") == "selected_object":
+        return item.get("selected_request_examined") is True
+    return int(item.get("producers_tested") or 0) > 0
+
+
+def _authz_comparison_work(
+    result: Any, rows: Sequence[Any],
+) -> tuple[int, set[str], int, list[str]]:
+    """(planned, attempts, inapplicable, why nothing to examine) for one authz.verify action.
+
+    The action plans one comparison unless it settled skipped. Two credentials that resolved to
+    one identity, or routes of which no producer was tested, compared nothing.
+    """
+    differentials = [
+        item for item in rows or ()
+        if isinstance(item, Mapping) and item.get("kind") == "authz_differential"
+    ]
+    planned = 0 if result.status is CapabilityResultStatus.SKIPPED else 1
+    compared = any(_authz_compared(item) for item in differentials)
+    empty = sorted({
+        reason for item in differentials
+        for reason in (_authz_nothing_to_examine(item),) if reason
+    })
+    inapplicable = int(bool(empty) and not compared)
+    return (
+        planned, ({f"authz:{result.action_id}"} if compared else set()), inapplicable,
+        empty if inapplicable else [],
+    )
+
+
+def _discovery_contributed(capability_name: str, rows: Sequence[Any]) -> bool:
+    """Whether a surface producer recorded a route the endpoint manifest takes in.
+
+    Mirrors surface_manifest: crawlers and spec ingestion contribute ``discovered_route``
+    records; content discovery contributes ``content_discovery`` records other than its negative
+    control and paths indistinguishable from one that cannot exist.
+    """
+    items = [item for item in rows or () if isinstance(item, Mapping)]
+    if capability_name == "web.content_discover":
+        absent = indistinguishable_from_absent(items)
+        return any(
+            item.get("kind") == "content_discovery"
+            and not is_negative_control_url(item.get("url"))
+            and str(item.get("url") or "") not in absent
+            for item in items
+        )
+    return any(item.get("kind") == "discovered_route" for item in items)
+
+
+def _proven_empty_manifest(action: Any, known: Mapping[str, Mapping[str, Any]]) -> bool:
+    """Whether the manifest a slice indexes is known to have been produced complete and empty.
+
+    The planner declares ``manifest_entries: 0`` both for a manifest that held nothing and as an
+    admission placeholder for one not yet produced, and a producer that failed leaves 0 too.
+    Only the Scan's own reference to that manifest -- complete, with no entry -- tells them
+    apart, as an adapter does before skipping an empty slice (``_empty_slice_reason``). A
+    rebuild whose manifest list lacks it reads the reference frozen into the slice's arguments.
+    """
+    for name in _SLICE_MANIFEST_ARGS:
+        reference = action.capability_args.get(name)
+        if isinstance(reference, Mapping) and reference.get("manifest_digest"):
+            item = known.get(str(reference["manifest_digest"])) or reference
+            return (
+                str(item.get("status") or "") == "complete"
+                and int(item.get("entry_count") or 0) == 0
+            )
+    return False
+
+
+def _auxiliary_check_coverage(entries: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    """Coverage of one auxiliary check from its actions' outcomes and counts."""
+    planned = sum(int(item["planned"]) for item in entries)
+    attempted = sum(int(item["attempted"]) for item in entries)
+    statuses = [str(item["status"]) for item in entries]
+    reasons = sorted({str(item["reason"]) for item in entries if item["reason"]})
+    if all(item["settled_empty"] for item in entries) and not attempted:
+        status, reason = "not_applicable", "no_candidates"
+    elif all(value == "success" for value in statuses) and attempted and attempted >= planned:
+        status, reason = "complete", None
+    else:
+        status = "partial"
+        reason = (
+            reasons[0] if reasons
+            else "zero_attempts" if not attempted else "candidates_unattempted"
+        )
+    return {
+        "actions": len(entries), "planned_candidates": planned,
+        "attempted_candidates": attempted, "status": status, "reason": reason,
+    }
+
+
+def _sign_in_limited_variant(item: Mapping[str, Any]) -> tuple[str, str]:
+    """(which variant, its sign-in endpoint) of a record the sign-in endpoint's limit left
+    without a verdict.
+
+    A variant is its candidate id and manifest position: the variants of one form share a
+    candidate id, and the verifier and the proof of one variant name different attempt ids (each
+    its family's), so neither id alone counts a variant once. A record without a position (an
+    earlier build's) is its attempt id.
+    """
+    position = item.get("manifest_index")
+    candidate = str(item.get("candidate_id") or "")
+    if candidate and isinstance(position, int) and not isinstance(position, bool):
+        variant = f"{candidate}:{position}"
+    else:
+        variant = str(item.get("attempt_id") or candidate)
+    return variant, str(item.get("sign_in_endpoint") or "")
 
 
 def _family_action_reason(action: Any, result: Any) -> str:
@@ -2505,6 +2736,7 @@ def finalize_scan_report(
             result,
             rows,
             unobserved_response_urls=frozenset(unobserved_response_urls),
+            target_url=target_url,
         ):
             identity = _finding_identity(finding)
             existing = findings_by_id.get(identity)
@@ -2564,11 +2796,65 @@ def finalize_scan_report(
     # required action did not complete, makes the grade unreliable — a scan can no
     # longer report a reliable grade while a chosen family did no work.
     family_coverage: dict[str, dict[str, Any]] = {}
+    # The active-template windows the Scan's sweeps finished, per allowlist size: a slice
+    # without a mutation hold runs the smaller GET-only allowlist, whose windows are others.
+    template_windows_run: dict[int, set[int]] = {}
+    # A parallel shard's part of the (base, window) pairs, and windows resumed from attempts an
+    # earlier mapping ran (a 2.11.0 worker at an endpoint's path), credited to no base.
+    template_windows_shard: dict[str, Any] | None = None
+    template_windows_legacy: set[int] = set()
+    # Per allowlist size, the windows each sweep base finished, in the order the sweep maps
+    # positions to them; and whether a thorough or deep direct sweep holds every base to every
+    # window (a fast or balanced one runs one window per endpoint by design).
+    template_base_windows: dict[int, dict[str, set[int]]] = {}
+    template_windows_strict = False
+    auxiliary_entries: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    known_manifests = [
+        dict(item) for item in (*work_manifest_references, *revision.work_manifest_references)
+        if isinstance(item, Mapping)
+    ]
+    manifests_by_digest = {
+        str(item["manifest_digest"]): item for item in known_manifests
+        if item.get("manifest_digest")
+    }
     for action in expected_actions:
         family = _FAMILY_BY_CAPABILITY.get(action.capability_name)
-        if family is None:
+        auxiliary = _AUXILIARY_CHECKS.get(action.capability_name)
+        if family is None and auxiliary is None:
             continue
         result = action_results[action.action_id]
+        if action.capability_name == "templates.active_batch":
+            for item in observations.get(action.action_id, ()):
+                if not isinstance(item, Mapping) or item.get("kind") != ACTIVE_TEMPLATE_WINDOWS_RECORD_KIND:
+                    continue
+                count = item.get("window_count")
+                part = item.get("shard_part")
+                if isinstance(part, Mapping) and isinstance(part.get("count"), int):
+                    template_windows_shard = {"index": part.get("index"), "count": part.get("count")}
+                template_windows_legacy.update(
+                    int(index) for index in item.get("legacy_windows_run") or ()
+                    if isinstance(index, int) and not isinstance(index, bool)
+                )
+                if isinstance(count, int) and not isinstance(count, bool) and count > 0:
+                    template_windows_run.setdefault(count, set()).update(
+                        int(index) for index in item.get("windows_run") or ()
+                        if isinstance(index, int) and not isinstance(index, bool)
+                        and 0 <= index < count
+                    )
+                    bases = item.get("bases")
+                    if isinstance(bases, list) and bases:
+                        per_base = template_base_windows.setdefault(count, {})
+                        for entry in bases:
+                            if isinstance(entry, Mapping) and isinstance(entry.get("base"), str):
+                                per_base.setdefault(entry["base"], set()).update(
+                                    int(index) for index in entry.get("windows_run") or ()
+                                    if isinstance(index, int) and not isinstance(index, bool)
+                                    and 0 <= index < count
+                                )
+                        profile = str(action.capability_args.get("profile") or "")
+                        template_windows_strict |= budget_sufficiency(
+                            profile.removesuffix("_batch_v1"),
+                        ) and not isinstance(item.get("shard_part"), Mapping)
         raw_slice = action.capability_args.get("slice")
         planned = (
             int(raw_slice.get("count") or 0)
@@ -2591,20 +2877,53 @@ def finalize_scan_report(
         # A slice entry the verifier recorded as inapplicable to its family (a path-segment
         # candidate handed to Dalfox) was never attemptable, so it is not planned work that
         # went unattempted. It stays in the scheduled count: the slice did cover it.
-        inapplicable = sum(
-            1 for item in observations.get(action.action_id, ())
+        # Distinct entries: two records about one entry account for one.
+        inapplicable = len({
+            str(item.get("candidate_id") or index)
+            for index, item in enumerate(observations.get(action.action_id, ()))
             if isinstance(item, Mapping) and item.get("kind") == "candidate_inapplicable"
+        })
+        empty_reasons: list[str] = []
+        if action.capability_name == "authz.verify":
+            planned, attempts, inapplicable, empty_reasons = _authz_comparison_work(
+                result, observations.get(action.action_id, ()),
+            )
+        # The action settled having nothing to examine: skipped as not applicable, or it
+        # succeeded over a slice whose every entry it recorded as inapplicable, or whose
+        # manifest the Scan's references show was produced complete with no entry. Anything
+        # else that attempted nothing did no work.
+        settled_empty = (
+            result.status is CapabilityResultStatus.SKIPPED
+            and result.reason_code is CapabilityResultReason.NOT_APPLICABLE
+        ) or (
+            result.status is CapabilityResultStatus.SUCCESS
+            and max(0, planned - inapplicable) == 0
+            and (inapplicable > 0 or (
+                declared_entries == 0 and _proven_empty_manifest(action, manifests_by_digest)
+            ))
         )
+        if auxiliary is not None:
+            if action.action_id not in superseded:
+                auxiliary_entries.setdefault(auxiliary, []).append({
+                    "status": result.status.value,
+                    "reason": result.reason_code.value if result.reason_code is not None else None,
+                    "planned": max(0, planned - inapplicable),
+                    "attempted": len(attempts),
+                    "settled_empty": settled_empty,
+                })
+            continue
         row = family_coverage.setdefault(family, {
             "family": family, "selected": True, "required": False,
             "batch_actions": 0, "planned_candidates": 0, "attempted_candidates": 0,
             "verified_findings": 0, "suspected_findings": 0,
             "budget_reserved": {}, "budget_consumed": {}, "_statuses": [], "_reasons": [],
+            "_settled_empty": [], "_empty_reasons": [],
             # Per-capability manifest size vs what the plan actually scheduled. A capability whose
             # manifest holds more entries than its slices cover has work that was never attempted,
             # and comparing attempts with slices alone reports that as complete coverage.
             "_manifest_entries": {}, "_scheduled_entries": {}, "_slow_endpoints": [],
-            "_refused_candidates": [],
+            "_refused_candidates": [], "_sign_in_limited": [],
+            "_proofs_attempted": set(), "_proofs_pace_unfunded": {},
             "proof_escalation": {
                 "actions": 0, "attempted_candidates": 0,
                 "_statuses": [], "_reasons": [],
@@ -2616,13 +2935,34 @@ def finalize_scan_report(
             pass
         elif action.capability_name in _PROOF_CAPABILITIES:
             # Escalation over candidates the verifier already counted: record it
-            # separately so it can neither double-count nor fail its family.
+            # separately so it never double-counts them. Only an escalation that
+            # broke (failed or timed out, below) leaves its family partial.
             proof = row["proof_escalation"]
             proof["actions"] += 1
             proof["attempted_candidates"] += len(attempts)
             proof["_statuses"].append(result.status.value)
             if result.reason_code is not None:
                 proof["_reasons"].append(result.reason_code.value)
+            # A proof the sign-in endpoint's probe set left without a verdict is named too.
+            row["_sign_in_limited"].extend(
+                _sign_in_limited_variant(item)
+                for item in observations.get(action.action_id, ())
+                if isinstance(item, Mapping)
+                and item.get("kind") in {"candidate_attempt", "candidate_deferred"}
+                and item.get("inconclusive_reason") == AUTH_ENDPOINT_PROBE_LIMITED
+            )
+            # So is a proof the slice's wall could not pace at the sign-in endpoint's lockout-safe
+            # rate, unless another proof action attempted it: nothing proved or refuted it.
+            row["_proofs_attempted"].update(attempts)
+            for item in observations.get(action.action_id, ()):
+                if (
+                    isinstance(item, Mapping) and item.get("kind") == "candidate_deferred"
+                    and item.get("reason") == AUTH_ENDPOINT_PACE_UNFUNDED
+                    and str(item.get("attempt_id") or "")
+                ):
+                    row["_proofs_pace_unfunded"].setdefault(
+                        str(item["attempt_id"]), _sign_in_limited_variant(item),
+                    )
         else:
             row["batch_actions"] += 1
             # Endpoints a template batch could not finish inside its wall even on a retry
@@ -2643,10 +2983,21 @@ def finalize_scan_report(
                         str(item["inconclusive_reason"]),
                         str(item.get("url") or item.get("candidate_id") or ""),
                     ))
+                # The credential profile's own sign-in endpoint got its bounded probe set
+                # (auth_endpoint_probe): named, so the limit is visible, not a silent gap. Counted
+                # by variant (_sign_in_limited_variant).
+                if (
+                    isinstance(item, Mapping)
+                    and item.get("kind") in {"candidate_attempt", "candidate_deferred"}
+                    and item.get("inconclusive_reason") == AUTH_ENDPOINT_PROBE_LIMITED
+                ):
+                    row["_sign_in_limited"].append(_sign_in_limited_variant(item))
             row["planned_candidates"] += max(0, planned - inapplicable)
             row["attempted_candidates"] += len(attempts)
             row["_statuses"].append(result.status.value)
             row["_reasons"].append(_family_action_reason(action, result))
+            row["_settled_empty"].append(settled_empty)
+            row["_empty_reasons"].extend(empty_reasons)
             declared = action.capability_args.get("manifest_entries")
             # Every slice of one worklist declares the same manifest size. A passive Scan
             # runs the pack over two worklists -- the admitted surface and the discovered
@@ -2677,10 +3028,53 @@ def finalize_scan_report(
             row["verified_findings"] += 1
         elif finding.get("suspected") is True:
             row["suspected_findings"] += 1
+    if template_windows_run and "nuclei_active" in family_coverage:
+        # Informational: how much of the largest permitted active allowlist ran. A sweep runs
+        # one window per attempt, so a host with fewer endpoints than windows ran a fraction.
+        total = max(template_windows_run)
+        per_base = template_base_windows.get(total) or {}
+        if per_base:
+            # Run and total count (base, window) pairs: a second origin that finished 11 of 39
+            # windows makes 50 of 78, not the 39 of 39 a union of window indices read.
+            family_coverage["nuclei_active"]["template_windows"] = {
+                "run": sum(len(windows) for windows in per_base.values()),
+                "total": total * len(per_base),
+                "bases": [
+                    {
+                        "base": base, "run": len(windows), "total": total,
+                        # A shard's own windows, so the parallel merge can count the distinct
+                        # pairs its children ran and the ones they repeated.
+                        **({"windows_run": sorted(windows)} if template_windows_shard else {}),
+                    }
+                    for base, windows in per_base.items()
+                ],
+            }
+            short = [base for base, windows in per_base.items() if len(windows) < total]
+            if template_windows_strict and short:
+                family_coverage["nuclei_active"]["_windows_short_bases"] = len(short)
+            if not short and template_windows_shard is None:
+                # Every (base, window) pair ran: the active templates run at the sweep's bases,
+                # not at each endpoint, so endpoints the plan left without a position are not
+                # work it skipped (a position past bases x windows runs nothing).
+                family_coverage["nuclei_active"]["_windows_cover_unscheduled"] = True
+        else:
+            # A record from before sweep bases (2.11.0) or a hand-made one: window indices only.
+            family_coverage["nuclei_active"]["template_windows"] = {
+                "run": len(template_windows_run[total]), "total": total,
+            }
+        if template_windows_shard is not None:
+            # This shard ran its part of the pairs; its siblings ran the others.
+            family_coverage["nuclei_active"]["template_windows"]["shard_part"] = template_windows_shard
+        if template_windows_legacy:
+            family_coverage["nuclei_active"]["template_windows"]["legacy_windows_run"] = len(
+                template_windows_legacy,
+            )
     selected_family_gaps: list[str] = []
     for family, row in family_coverage.items():
         statuses = row.pop("_statuses")
         batch_reasons = row.pop("_reasons")
+        windows_short_bases = int(row.pop("_windows_short_bases", 0) or 0)
+        windows_cover_unscheduled = bool(row.pop("_windows_cover_unscheduled", False))
         if family == "sqli":
             # Every SQLi candidate the Scan left inconclusive for budget, including one still
             # waiting for a continuation no round could fund when the Scan ended (soak N55).
@@ -2693,6 +3087,18 @@ def finalize_scan_report(
             if outcomes:
                 row["budget_inconclusive_candidates"] = outcomes
                 row["_slow_endpoints"].extend(item["url"] for item in outcomes)
+        sign_in_limited = row.pop("_sign_in_limited", [])
+        proofs_attempted = row.pop("_proofs_attempted", set())
+        proofs_paced_out = [
+            limited for attempt_id, limited in row.pop("_proofs_pace_unfunded", {}).items()
+            if attempt_id not in proofs_attempted
+        ]
+        sign_in_limited.extend(proofs_paced_out)
+        if sign_in_limited:
+            row["sign_in_probe_limited"] = {
+                "endpoints": sorted({endpoint for _candidate, endpoint in sign_in_limited if endpoint}),
+                "candidates": len({candidate for candidate, _endpoint in sign_in_limited}),
+            }
         refused = row.pop("_refused_candidates")
         for reason in sorted(_REFUSAL_REASONS):
             named = sorted({candidate for kind, candidate in refused if kind == reason and candidate})
@@ -2706,6 +3112,14 @@ def finalize_scan_report(
         proof = row["proof_escalation"]
         proof_statuses = proof.pop("_statuses")
         proof_reasons = proof.pop("_reasons")
+        # An escalation that crashed or ran out of time left the candidates its verifier
+        # flagged without a verdict. A reflection Dalfox only flagged reaches the report
+        # through the browser proof alone, so the family was not examined to completion. A
+        # skip (nothing eligible, or no browser budget on this shard) is not a break.
+        # A proof refused before it ran (blocked), cancelled, or skipped for a reason other
+        # than "nothing eligible" or "could not be funded or placed" broke the same way, and so
+        # did one that settled partial without escalating a single candidate.
+        proof_broke = any(status in {"failed", "timed_out"} for status in proof_statuses)
         if not proof_statuses:
             # The family planned no escalation at all.
             proof["status"] = "not_planned"
@@ -2737,6 +3151,11 @@ def finalize_scan_report(
         else:
             proof["status"] = "failed"
             proof["reason"] = (sorted(set(proof_reasons)) or ["proof_incomplete"])[0]
+        proof_broke = proof_broke or proof["status"] == "failed" or (
+            # A proof the sign-in endpoint's pace held back did not break: it is named below.
+            proof["status"] == "partial" and not proof["attempted_candidates"]
+            and not proofs_paced_out
+        )
         row["unattempted_candidates"] = max(
             0, row["planned_candidates"] - row["attempted_candidates"],
         )
@@ -2754,15 +3173,18 @@ def finalize_scan_report(
         zero_attempts = (
             row["planned_candidates"] > 0 and row["attempted_candidates"] == 0
         )
-        # Every verifier settled skipped/not_applicable over an empty candidate set.
-        # The family ran against a surface that offered it nothing; that is a
-        # complete examination with no work, not one that failed to finish.
+        # Every verifier settled over an empty candidate set (skipped as not applicable, or a
+        # slice whose manifest held nothing or whose every entry was inapplicable). The family
+        # ran against a surface that offered it nothing; that is a complete examination with
+        # no work, not one that failed to finish, and the row says so (``no_candidates``).
+        settled_empty = row.pop("_settled_empty")
+        empty_reasons = sorted(set(row.pop("_empty_reasons")))
         no_candidates = (
             row["batch_actions"] > 0
             and row["planned_candidates"] == 0
             and row["unscheduled_candidates"] == 0
-            and all(status == "skipped" for status in statuses)
-            and all(reason == "not_applicable" for reason in batch_reasons)
+            and row["attempted_candidates"] == 0
+            and all(settled_empty)
         )
         if row["batch_actions"] == 0:
             # Only escalation was planned for this family, so nothing established
@@ -2792,7 +3214,7 @@ def finalize_scan_report(
                 row["reason"] = next(iter(incomplete_reasons))
             if row["required"]:
                 selected_family_gaps.append(family)
-        elif row["unscheduled_candidates"] > 0:
+        elif row["unscheduled_candidates"] > 0 and not windows_cover_unscheduled:
             row["coverage_status"] = "partial"
             row["reason"] = "manifest_entries_unscheduled"
             # A REQUIRED family that left work unscheduled has not covered its surface, so the
@@ -2801,21 +3223,53 @@ def finalize_scan_report(
             # a plan that ran a fraction of its manifest.
             if row["required"]:
                 selected_family_gaps.append(family)
+        elif windows_short_bases:
+            # A thorough or deep sweep left a base -- the target's or another origin's -- short of
+            # every active-template window: those templates never ran there.
+            row["coverage_status"] = "partial"
+            row["reason"] = TEMPLATE_WINDOWS_INCOMPLETE_ON_ORIGIN
+            row["template_windows_incomplete_bases"] = windows_short_bases
+            if row["required"]:
+                selected_family_gaps.append(family)
         elif row["unattempted_candidates"] > 0:
             row["coverage_status"] = "partial"
             row["reason"] = "candidates_unattempted"
             if row["required"]:
                 selected_family_gaps.append(family)
+        elif (
+            row["attempted_candidates"] == 0 and not no_candidates
+            # A finding is evidence of work, attempted or not.
+            and not (row["verified_findings"] or row["suspected_findings"])
+        ):
+            # Nothing was attempted and nothing shows the family had nothing to examine (a
+            # manifest not known to be complete and empty, an ownership comparison that
+            # compared nothing): no work.
+            row["coverage_status"] = "partial"
+            row["reason"] = "zero_work"
+            if row["required"]:
+                selected_family_gaps.append(family)
+        elif proof_broke:
+            row["coverage_status"] = "partial"
+            row["reason"] = "proof_escalation_failed"
+            if row["required"]:
+                selected_family_gaps.append(family)
+        elif row.get("sign_in_probe_limited"):
+            # A candidate on the credential profile's own sign-in endpoint that its lockout-safe
+            # probe set left inconclusive has no verdict, so the family did not examine its
+            # surface to completion, and a grade over it is not reliable.
+            row["coverage_status"] = "partial"
+            row["reason"] = AUTH_ENDPOINT_PROBE_LIMITED
+            if row["required"]:
+                selected_family_gaps.append(family)
         else:
             row["coverage_status"] = "complete"
             row["reason"] = "no_candidates" if no_candidates else None
+            if no_candidates and empty_reasons:
+                # Why there was nothing to examine, when the check can say.
+                row["no_candidates_reasons"] = empty_reasons
     # Every selected check family is reported, including one the plan gave no action: an
     # absent family read as nothing to report, and the Scan as complete. `recon` is
     # discovery, not a check family with a verifier, so it has no row.
-    known_manifests = [
-        dict(item) for item in (*work_manifest_references, *revision.work_manifest_references)
-        if isinstance(item, Mapping)
-    ]
     unplanned_families = sorted(
         {str(item).strip() for item in resolved_families or ()}
         & set(_FAMILY_BY_CAPABILITY.values())
@@ -2825,6 +3279,11 @@ def finalize_scan_report(
         row = family_coverage[family] = _unplanned_family_row(family, known_manifests)
         if row["coverage_status"] != "complete":
             selected_family_gaps.append(family)
+    # After the unplanned rows, so a check that ran while its family planned no verifier (no
+    # candidates for it) is still reported.
+    for (family, name), entries in sorted(auxiliary_entries.items()):
+        if family in family_coverage:
+            family_coverage[family][name] = _auxiliary_check_coverage(entries)
     families_without_candidates = sorted(
         family for family, row in family_coverage.items()
         if row.get("reason") == "no_candidates"
@@ -2872,16 +3331,13 @@ def finalize_scan_report(
     zero_attempt_actions = [
         action.action_id
         for action in coverage_actions
-        if action.capability_name in _ACTIVE_VERIFIER_CAPABILITIES
-        and candidate_count > 0
-        and action_results[action.action_id].status in {
-            CapabilityResultStatus.SUCCESS, CapabilityResultStatus.PARTIAL,
-        }
-        and not any(
-            int(amount) > 0
-            for name, amount in action_results[action.action_id].budget_consumed.items()
-            if name in _TRAFFIC_BUDGETS
+        if active_verifier_attempted_nothing(
+            action.capability_name,
+            action_results[action.action_id].status,
+            action_results[action.action_id].budget_consumed,
+            candidate_count,
         )
+        and not _windows_beyond_allowlist_only(action, observations.get(action.action_id, ()))
     ]
     placement_gaps = [
         action.action_id
@@ -2956,6 +3412,32 @@ def finalize_scan_report(
         if isinstance(explicit_http_status, int)
         else "unknown"
     )
+    # An optional discovery producer that failed, was refused, or was skipped for a missing
+    # prerequisite produced no surface. It is always stated. It leaves the Scan's coverage
+    # incomplete only when no other surface producer worked: a target without a browser runtime
+    # still completes on the static crawl alone.
+    failed_discovery = sorted(
+        action.action_id
+        for action in coverage_actions
+        if not action.required
+        and action.capability_name in _SURFACE_DISCOVERY_CAPABILITIES
+        and (
+            action_results[action.action_id].status in _DISCOVERY_FAILED_STATUSES
+            or action_results[action.action_id].reason_code
+            is CapabilityResultReason.PREREQUISITE_UNAVAILABLE
+        )
+    )
+    # A sibling covers for it only when it settled and contributed routes: spec ingestion that
+    # succeeded on a target publishing no spec, or a crawl that found nothing, produced none.
+    surface_produced = any(
+        action.capability_name in _SURFACE_DISCOVERY_CAPABILITIES
+        and action_results[action.action_id].status in {
+            CapabilityResultStatus.SUCCESS, CapabilityResultStatus.PARTIAL,
+        }
+        and _discovery_contributed(action.capability_name, observations.get(action.action_id, ()))
+        for action in coverage_actions
+    )
+    discovery_gap = bool(failed_discovery) and not surface_produced
     truncated_discovery = sorted(
         action.action_id
         for action in coverage_actions
@@ -2997,6 +3479,7 @@ def finalize_scan_report(
         for _action, result in required_incomplete
     } | ({"active_verifier_zero_attempts"} if zero_attempt_actions else set())
       | ({"discovery_truncated"} if truncated_discovery else set())
+      | ({"discovery_failed"} if discovery_gap else set())
       | ({"placement_unavailable"} if placement_gaps else set())
       | ({"no_families_selected"} if no_families_selected else set())
       | ({"application_surface_not_examined"} if surface_not_examined else set())
@@ -3013,9 +3496,11 @@ def finalize_scan_report(
         | ({"selected_family_no_candidates"} if families_without_candidates else set())
         | ({"active_verifier_zero_attempts"} if zero_attempt_actions else set())
         | ({"discovery_truncated"} if truncated_discovery else set())
+        | ({"discovery_failed"} if failed_discovery else set())
         | ({"placement_unavailable"} if placement_gaps else set())
         | ({"bound_origin_redirects_off_origin"}
            if application_forwarded_off_origin else set())
+        | browser_session_header_reasons(observations)
         | {f"{OMITTED_CAPABILITY_REASON}:{str(name)[:80]}" for name in omitted_capabilities or () if str(name).strip()}
     )
     coverage_action_rows = [
@@ -3143,7 +3628,7 @@ def finalize_scan_report(
         if row["unattempted_candidates"] or row["incomplete_candidates"]:
             row["status"] = "partial"
     if (
-        zero_attempt_actions or truncated_discovery or selected_family_gaps
+        zero_attempt_actions or truncated_discovery or discovery_gap or selected_family_gaps
     ) and coverage_status == "complete":
         # A selected family that did not cover its surface (entries never scheduled, candidates
         # left unattempted) leaves the Scan's coverage incomplete even when every action it did
@@ -3152,6 +3637,13 @@ def finalize_scan_report(
         coverage_status = "partial"
         if selected_family_gaps:
             coverage_reasons = sorted(set(coverage_reasons) | {"selected_family_incomplete"})
+    if any(row.get("sign_in_probe_limited") for row in family_coverage.values()):
+        coverage_reasons = sorted(set(coverage_reasons) | {AUTH_ENDPOINT_PROBE_LIMITED})
+    if any(
+        row.get("reason") == TEMPLATE_WINDOWS_INCOMPLETE_ON_ORIGIN for row in family_coverage.values()
+    ):
+        # Named at the top as well, so a reader of the coverage summary sees which gap it is.
+        coverage_reasons = sorted(set(coverage_reasons) | {TEMPLATE_WINDOWS_INCOMPLETE_ON_ORIGIN})
     verified = sum(1 for item in findings if item.get("verified") is True)
     suspected = sum(1 for item in findings if item.get("suspected") is True)
     coverage_block = {
@@ -3168,6 +3660,7 @@ def finalize_scan_report(
         },
         "optional_gaps": optional_gaps,
         "truncated_discovery_actions": truncated_discovery,
+        "failed_discovery_actions": failed_discovery,
         "active_zero_attempt_actions": zero_attempt_actions,
         "candidate_coverage": candidate_coverage,
         "family_coverage": sorted(

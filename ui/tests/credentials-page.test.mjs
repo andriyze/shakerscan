@@ -96,9 +96,14 @@ test('credential target pickers search the server instead of loading every targe
   assert.doesNotMatch(page, /getAllTargetAssets/)
   assert.match(page, /useTargetSearch\(\{ includeServices: true \}\)/)
   assert.match(page, /onQueryChange=\{targetSearch\.setQuery\}/)
-  // A link by URL is resolved with one bounded search for its origin, a link by id is read directly.
-  assert.match(page, /searchTargetAssets\(\{ search: requested\.host, limit: 50, includeServices: true \}/)
-  assert.match(page, /new URL\(item\.url\)\.origin === requested\.origin/)
+  // A link by URL is resolved by a host search read page by page (bounded) for its origin
+  // (behaviour: resolveTargetByOrigin in targetSearchModel.test.mjs); a link by id is read directly.
+  assert.match(page, /resolveTargetByOrigin\(\{\s*url: requested\.href,\s*signal: controller\.signal,/)
+  assert.match(page, /search: requested\.host, limit: LIST_V1_MAX_LIMIT, includeServices: true, webOnly: true, position,/)
+  assert.match(page, /else if \(result\.status === 'unconfirmed'\) setUnconfirmedTarget\(/)
+  // A failed read is shown as one, never as a target that does not exist.
+  assert.match(page, /else if \(result\.status === 'failed'\) setUnconfirmedTarget\(\{url: requestedUrl, scanned: result\.scanned, failure:/)
+  assert.doesNotMatch(page, /\.catch\(\(\) => \{ if \(!controller\.signal\.aborted\) setMissingTarget\(requestedUrl\)/)
   assert.match(page, /getTargetAsset\(targetId\)/)
   // A selection still being read keeps the profiles loading instead of showing none.
   assert.match(page, /if \(resolvingTarget\) setProfilesLoading\(true\)/)

@@ -254,7 +254,9 @@ postgres_data_volume_exists() {
     local project="${COMPOSE_PROJECT_NAME:-shakerscan}"
 
     command_exists docker || return 1
-    docker volume inspect "${project}_postgres-cluster" > /dev/null 2>&1
+    # A release before 2.6 kept the data in postgres-data (PostgreSQL 16, not migrated here).
+    docker volume inspect "${project}_postgres-cluster" > /dev/null 2>&1 || \
+        docker volume inspect "${project}_postgres-data" > /dev/null 2>&1
 }
 
 # Whether a numeric id is unused by host accounts and groups (true when it cannot be checked).
@@ -345,7 +347,7 @@ ensure_runtime_datastore_credentials() {
                         echo -e "${RED}That volume belongs to a ShakerScan install in another directory. To upgrade it in place, re-run the installer with SHAKERSCAN_HOME=<that directory>. To take the volume over from here (its password will be rotated and that install's results/ evidence will not be visible), set SHAKERSCAN_ADOPT_EXISTING_DATA=1.${NC}" >&2
                         return 1
                     fi
-                    compose up -d postgres > /dev/null
+                    compose up -d postgres > /dev/null || return 1
                     ready_attempt=0
                     until compose exec -T postgres pg_isready -U scanner > /dev/null 2>&1; do
                         ready_attempt=$((ready_attempt + 1))
@@ -637,7 +639,32 @@ compose() {
         return 1
     fi
 
+    # up/run/create can start PostgreSQL directly or as a dependency. Beside PostgreSQL 16 data with
+    # no postgres-cluster volume, PostgreSQL 18 would initialize a new, empty database, so they are
+    # refused (scripts/upgrade_safety.sh). The refusal goes to stderr: callers often discard
+    # Compose's stdout.
+    case "$(compose_subcommand "$@")" in
+        up|run|create)
+            ensure_no_unmigrated_legacy_database || return 1
+            ;;
+    esac
+
     "${DOCKER_COMPOSE_CMD[@]}" "${COMPOSE_FILE_ARGS[@]}" "$@"
+}
+
+# Commands that change the install (a volume, containers, .env) before their own `compose up` or
+# `compose run`. Beside PostgreSQL 16 data with no postgres-cluster volume compose() refuses that
+# call, so these are refused first, with nothing changed: `redis reset` would otherwise remove
+# Redis's volume, `rebuild` the running workers, `model-intake` its .env setting. start and restart
+# check inside start_services and restart_services.
+command_changes_then_starts_containers() {
+    case "$1 ${2:-}" in
+        "scale "*|"rebuild "*|"shell "*|"redis reset"|"devices start"|"devices restart"|\
+        "model-intake enable"|"model-intake disable"|"gungnir start")
+            return 0
+            ;;
+    esac
+    return 1
 }
 
 compose_up() {
@@ -2559,6 +2586,9 @@ start_services() {
     # Every step fails closed with an explicit return: callers such as `reset` call this in an
     # `||` list, where `set -e` does not apply.
     note_running_release
+    # PostgreSQL 16 data with no postgres-cluster volume (never migrated, or the copy a migration
+    # kept beside a lost database): refused before anything is downloaded or stopped.
+    ensure_no_unmigrated_legacy_database || return 1
     prepare_runtime_files || return 1
     persist_remote_access_env || return 1
     warn_if_ui_port_has_foreign_listener || return 1
@@ -2711,6 +2741,8 @@ stop_services() {
 
 restart_services() {
     local restart_workers restart_device_workers restart_gungnir
+    # Before the running release is stopped (start_services checks again).
+    ensure_no_unmigrated_legacy_database || return 1
     prepare_runtime_files
     restart_workers="$(restart_worker_count)"
     # Preserve dedicated network capacity and the opt-in Gungnir monitor on the
@@ -4710,6 +4742,11 @@ case $COMMAND in
         fi
         ;;
 esac
+
+# After the dependency check, so Docker is asked with sudo when the launcher needs it.
+if command_changes_then_starts_containers "$COMMAND" "${ARGS[0]:-}" && ! ensure_no_unmigrated_legacy_database; then
+    exit 1
+fi
 
 case $COMMAND in
     start)

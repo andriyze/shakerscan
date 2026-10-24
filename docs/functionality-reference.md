@@ -53,9 +53,12 @@ through an AI coding agent (Claude Code, Codex, OpenCode, Pi) using plain-Englis
 It covers two complementary pillars:
 
 - **DAST** — actively probes a running website or API for real vulnerabilities the way an attacker
-  would: injection (XSS, SQLi), broken access control (BOLA/IDOR), exposed secrets and files,
-  misconfigured TLS/headers/CORS, SSRF/LFI/RCE, weak auth/session/JWT, and more — then grades what it
-  finds and correlates findings into attack chains.
+  would: injection (XSS, SQL and NoSQL injection), broken access control (BOLA and function-level
+  authorization, with credentials), exposed secrets and files, misconfigured TLS/headers/CORS,
+  insecure session cookies, and known product issues through Nuclei templates from a pinned,
+  checksum-verified bundle — then grades what it finds and correlates findings into attack chains.
+  A Scan has no generic check for SSRF, command injection, path traversal, SSTI, XXE or JWT; see the
+  [OWASP coverage matrix](owasp-coverage-matrix.md).
 - **AI red teaming** — attacks AI features the same way: chatbots, RAG endpoints, agents, and MCP
   tools are probed for prompt injection, sensitive-data disclosure, unsafe tool use, approval bypass,
   and RAG/MCP boundary failures. A separate **Model Intake** capability statically vets model
@@ -223,10 +226,16 @@ operation ID, request/response schema digest, and component-schema digest is che
 `scripts/generate_public_api_contract.py` also generates the six release-critical UI client surfaces
 (Scan, Hunt, credentials, request collections, evidence, and Model Intake) from that same live
 OpenAPI document. `GET /hunts/contract` remains the runtime Hunt policy/budget discovery endpoint.
-The canonical action compiler currently implements `recon`, `nuclei`, `xss`, `sqli`, and `bola`.
-An unsupported registry family is rejected rather than accepted as a successful no-op. Explicit
-XSS, SQLi, or BOLA inclusion requires active permission; BOLA additionally requires two distinct
-credential profiles whose scopes allow `authz.verify`.
+The canonical action compiler implements eleven families: `recon`, `nuclei_passive`,
+`nuclei_active`, `xss`, `sqli`, `bola`, `sensitive_exposure`, `nosqli`, `authz_surface`, `graphql`
+and `recon_active` (`SCAN_V2_FAMILY_NAMES` in `api/scan/contracts.py`). Any other registry family,
+including the planned `ssrf`, `lfi`, `rce` and `business_logic`, is rejected rather than accepted as
+a successful no-op. Every family except `recon`, `nuclei_passive` and `sensitive_exposure` requires
+active permission. A Scan that names BOLA is also refused without two distinct credential profiles
+whose scopes allow `authz.verify`, and one that names `recon_active` without a target-bound approval
+receipt; its virtual-host and DNS-name discovery also need subdomain discovery and a declared apex.
+Nothing refuses an `authz_surface` Scan without credentials: the family is planned only when the
+Scan has a primary credential, and without one it is selected but does not run.
 
 ### Historical compatibility records
 
@@ -332,8 +341,11 @@ and values under an OpenAPI `example` are documentation. A key counts only when 
 is secret (`DB_PASSWORD`, `clientSecret`; not `SECRETS_MANAGER_ENDPOINT`), and a credential-free URL,
 host name, address, class name, file path, boolean or number is configuration, never a secret. The first match in a batch reads two paths
 that cannot exist; a match byte-identical to the host's answer for an absent path is dropped
-(`indistinguishable_from_absent`). `/actuator/heapdump` is never requested -- its exposure is proved
-from the anonymous actuator index. Evidence keeps field names, provider categories and scrypt value
+(`indistinguishable_from_absent`). A path ending in `/heapdump` (such as `/actuator/heapdump`) is
+never requested, because it makes the JVM write a full heap dump: not by this probe, and not by an
+active Nuclei template, whose selection drops any template whose paths, raw requests, payloads or
+variables reach one (`springboot-heapdump` in the pinned bundle). An anonymous actuator index that
+links it is recorded as an `actuator_endpoint` discovery, not as proof. Evidence keeps field names, provider categories and scrypt value
 fingerprints of at most 20 distinct secrets per body, never a value. The scrypt salt, and the HMAC
 that replaces `response_body_sha256` (as `response_body_hmac`) for any body whose content is
 withheld, use a key derived from the installation's credential key, so fingerprints match across
@@ -354,22 +366,45 @@ per seed plus the controls and ten listing follow-ups on top of its endpoint sha
 wordlist is 125 entries.
 
 **Family presets and the active default.** The canonical Scan families are `recon`, `nuclei_passive`,
-`nuclei_active`, `xss`, `sqli`, `bola`, `sensitive_exposure`, `nosqli` and `authz_surface`
-(`api/scan/contracts.py`), and only these run. A name outside the check registry is rejected; a
-registry family outside the nine is not run as a Scan family (read `resolved_families` on the
-result), and a `custom` selection with none of the nine is refused. `policy.preset`
+`nuclei_active`, `xss`, `sqli`, `bola`, `sensitive_exposure`, `nosqli`, `authz_surface`, `graphql`
+and `recon_active` (`api/scan/contracts.py`), and only these run. A name outside the check registry
+is rejected, a registry family outside the eleven is refused ("families are not implemented by
+canonical Scan"), and a `custom` selection with none of the eleven is refused. `policy.preset`
 selects the family set: `passive` (recon, reviewed passive templates, verified exposure checks),
-`standard_active` (passive plus XSS and SQLi) or `custom` (exactly `include_families`, from the nine
-above). A submission that allows active testing and names no preset resolves to `standard_active`;
+`standard_active` (passive plus XSS and SQLi; on the `thorough` and `deep` budget profiles also
+`nuclei_active`, the active templates, unless the request ceiling is lowered below 8,000 (twice
+what their sweep holds at admission) or, with state-changing HTTP, the mutation ceiling below 5,000
+(a quarter above the sweep's 4,000 mutations, under `thorough`'s own 6,000); the floors are
+published as `family_preset_addition_floors` in `GET /scan/contracts`) or `custom` (exactly `include_families`,
+from the
+eleven above). A submission that allows active testing and names no preset resolves to `standard_active`;
 one that does not allow it resolves to `passive`. `include_families` is exact only under `custom`:
 with any other preset, named or implied, it adds to that preset, so `active_testing: true` with
 `include_families: ["sensitive_exposure"]` runs the standard active set (XSS and SQLi included);
 send `"preset": "custom"` to run only the named families. `POST /scans` and
 `POST /scan/contracts/preview` both return `family_preset`, `requested_families`,
 `resolved_families`, `include_families_mode` (`exact` or `added_to_preset`) and
-`families_added_by_preset`, the families the preset added beyond those named.
+`families_added_by_preset`, the families the preset added beyond those named. The preview takes
+the Scan's lowered ceilings (`advanced.max_http_requests`, `advanced.max_state_changing_requests`)
+so it resolves exactly as the submission will.
 Permission and work are reported separately: the scan page's Testing tile names the active
 families that ran, or warns that active testing was allowed but no active family was selected.
+Without state-changing HTTP, `nuclei_active` runs only templates whose every request is a GET or
+HEAD, and never a template that tries logins: one tagged `default-login`, one that sends a value
+named like a username or password (a payload, a variable or an extracted value) in a header or
+the body, or one named like a password in the query string, or one whose Basic `Authorization`
+header holds a literal credential (`admin:admin`, `admin:` or `:admin`) needs that permission
+even when it sends only GETs, because a login attempt can lock the account it tries. So does a
+GET reviewed as changing state (`STATE_CHANGING_GET_TEMPLATE_IDS`: it sets a device password,
+restores a default admin password, changes a plugin's settings, registers a user or adds an
+administrator). A check that names an account but sends no password (an authentication bypass)
+runs without it. An exploit template needs it too, by GET or not: one tagged `rce`, `lfi`, `sqli`,
+`ssrf`, `ssti`, `xxe`, `deserialization`, `code-injection` or `cmdi`, or one that runs a code,
+JavaScript or flow step, sends attack input (a shell command in a parameter, a `Runtime.exec`
+expression in a path) whether or not it can match. A verify Scan lists such a check as
+`credential_level_needs_state_changing_http`, `exploit_class_needs_exploit_tier` or
+`needs_state_changing_http`, and the step's receipt counts the selection (`template_selection`:
+matched, selected, state-changing, `default_login`, `exploit_class`, excluded).
 
 **DNS posture over a limited forwarder.** `dns.inspect` asks the system resolver first. When a
 query times out and the bound host is a public name on public addresses, the same query is retried
@@ -451,10 +486,15 @@ contract.
 
 V2 exposes only checks backed by a registered semantic capability and deterministic output/evidence
 contract. The current Scan family surface is intentionally narrower than the historical module
-inventory: passive reviewed templates plus bounded XSS, SQLi, and two-principal BOLA verification.
-The modules below describe available detector implementations; modules not yet wired to the
-canonical action graph remain compatibility/internal implementation surface, not advertised Scan
-coverage.
+inventory. A Scan runs its eleven families (§3) and the baseline checks of headers, session cookies,
+CORS, TLS and DNS. For the checks in this section that means XSS (with the open-redirect probe), SQL
+injection, NoSQL operator injection, two-principal BOLA, function-level authorization, GraphQL
+limits, verified exposure checks, the six reviewed passive Nuclei templates and the opt-in active
+Nuclei pack (a severity-and-tag selection from the pinned, checksum-verified bundle). The modules
+below describe available detector implementations; modules not yet wired to the canonical action
+graph remain compatibility/internal implementation surface, not advertised Scan coverage. Each
+subsection says which part, if any, a Scan runs. The [OWASP coverage matrix](owasp-coverage-matrix.md)
+maps what a Scan runs.
 
 ### Active injection
 
@@ -462,11 +502,19 @@ coverage.
   custom **context-aware** tester that detects reflection context (in-script, in-attribute, event
   handler, HTML body, SVG/CSS/JSON/URL-path) and selects context-specific payloads; canary-based
   reflection detection; browser proof for GET reflections and HTML-like POST/PUT/PATCH response
-  reflections; hash-route testing; static DOM-XSS source-to-sink analysis over JS files.
+  reflections; hash-route testing; static DOM-XSS source-to-sink analysis over JS files. In a Scan,
+  the `xss` family runs Dalfox over the ranked query candidates of GET routes and proves the
+  reflections it finds in a browser. When state-changing HTTP is allowed, Dalfox also tests body
+  candidates from the OpenAPI spec, known endpoints and requests the browser saw the application
+  send, and a request verifier tests request-collection fields. A URL fragment never reaches the
+  server, so a fragment candidate goes straight to a browser attempt without a Dalfox signal. The
+  context-aware tester and the static DOM-XSS analysis are detector modules no Scan family runs,
+  and no Scan action looks for stored XSS.
 - **SQLi** (`active_checks.py`): `sqlmap`-based testing that is **DBMS-aware** (SQLite, MySQL,
   PostgreSQL, MSSQL, Oracle) — it fingerprints the database, then chooses DBMS-specific payloads,
   techniques, and optional data-extraction chaining. Supports out-of-band (blind) detection via
-  `oob_callback_url`. A canonical Scan's `sqli.verify_batch` verifies each candidate one sqlmap
+  `oob_callback_url`. Data extraction and out-of-band detection are detector features only: a Scan
+  drops these options. A canonical Scan's `sqli.verify_batch` verifies each candidate one sqlmap
   technique at a time, cheapest first (UNION, boolean, error, then time-based only when the others
   were inconclusive), checkpoints every finished technique, and paces later techniques by the
   response time it measured. A slice its wall interrupted is continued by a verification extension
@@ -491,50 +539,66 @@ coverage.
   sqlmap process is still bounded by its own hold, and the request gate, not the wall, keeps
   concurrency from adding load. The receipt records the bound, the peak and the rate ceiling
   (`candidate_concurrency`).
-- **Other injection** (`injection_extra_checks.py`): SSI/ESI, prototype pollution, CSV/formula
-  injection, RFI, LDAP/XPath, XXE/XML injection.
-- **SSRF / command injection / LFI / RCE**: high-risk active families, gated behind non-safe exploit
-  level and parameterized endpoints; SSRF includes cloud-metadata and Gopher payloads
-  (`gopher_payloads.py`) with OOB verification.
+- **Other injection** (`injection_extra_checks.py`, `active_checks.py`): SSI/ESI, prototype
+  pollution, CSV/formula injection, RFI, LDAP/XPath, SSTI, XXE/XML injection. Detector modules only:
+  no Scan family runs them.
+- **SSRF / command injection / LFI / RCE** (`active_checks.py`, `gopher_payloads.py`): detector
+  modules only. The `ssrf`, `lfi` and `rce` (alias `command_injection`) families are registered as
+  planned and a Scan refuses them, so no Scan family tests for these classes.
 
 ### Access control
 
 - **BOLA / IDOR** (`bola_comparison.py`, `access_control_checks.py`): dual-user testing — replay the
   same endpoint as user1 and user2, normalize volatile fields (timestamps, UUIDs, nonces), and detect
   cross-user data exposure with concrete PII matching. Also forced browsing, path traversal,
-  privilege escalation, and unauthenticated-access detection.
+  privilege escalation, and unauthenticated-access detection. In a Scan, `bola` runs the dual-user
+  comparison and `authz_surface` the authenticated-versus-anonymous comparison; the forced-browsing,
+  path-traversal and privilege-escalation probes are detector modules no Scan family runs.
 
 ### Web/API security (Phase 4)
 
-File upload bypass (`file_upload_tests.py`), open redirect, host-header injection, CSRF token
-presence/reuse/randomness, HTTP method tampering, content-type switching, WebSocket auth/message
-handling (`websocket_security.py`), OAuth flow tests (`oauth_tests.py`), and a generic API-security
-sweep (`api_security.py`).
+Detector modules: file upload bypass (`file_upload_tests.py`), open redirect, host-header
+injection, CSRF token presence/reuse/randomness, HTTP method tampering, content-type switching,
+WebSocket auth/message handling (`websocket_security.py`), OAuth flow tests (`oauth_tests.py`), and a
+generic API-security sweep (`api_security.py`). A Scan runs only its own open-redirect probe, with
+`xss`; no Scan family runs the rest.
 
 ### Auth/session/crypto
 
-Weak JWT/session/cookie checks, default-credential testing (`credential_check.py`), and
-deserialization tests (`deserialization_tests.py`) for Java/PHP/Python unsafe deserialization.
+Detector modules: weak JWT/session/cookie checks, default-credential testing
+(`credential_check.py`), and deserialization tests (`deserialization_tests.py`) for Java/PHP/Python
+unsafe deserialization. No Scan family runs them. A Scan checks session cookie flags in its baseline
+and default logins only through opt-in Nuclei `default-login` templates.
 
 ### Business logic
 
-Race conditions (`race_condition_tests.py`) for checkout, coupons, balance, votes, and invitations.
+Detector module: race conditions (`race_condition_tests.py`) for checkout, coupons, balance, votes,
+and invitations. `business_logic` is a planned family and a Scan refuses it.
 
 ### Template & infra
 
-Nuclei template checks (`nuclei.py`, with a reviewed read-only passive pack); infrastructure-leak checks
-(`infrastructure_checks.py`) for CI/CD config, cloud buckets, registries, k8s/terraform artifacts;
-critical checks (`critical_checks.py`) for default creds, directory listing, and verbose error pages.
+Nuclei template checks (`nuclei.py`). A Scan runs the six-template reviewed read-only passive pack
+and, opt-in, the active pack in 30-template windows; a `fast` or `balanced` Scan of a host with few
+endpoints runs only some windows (see the
+[OWASP coverage matrix](owasp-coverage-matrix.md#active-nuclei-pack)). Detector modules no Scan
+family runs: infrastructure-leak checks (`infrastructure_checks.py`) for CI/CD config, cloud
+buckets, registries, k8s/terraform artifacts, and critical checks (`critical_checks.py`) for
+default creds, directory listing, and verbose error pages. A Scan finds directory listings and
+verbose error pages with `sensitive_exposure` instead.
 
-Opt-in infrastructure families also cover SSH authentication posture; SMTP STARTTLS, banner, MX, and
-safe open-relay checks; VPN, RDP/VNC, IoT, industrial-protocol, and database-service exposure; IP/ASN
-and domain intelligence; third-party vendor resources; webhook signature bypass; package-manager and
-backup artifacts; container registries; and Kubernetes/Terraform/cloud-storage exposure. The SMTP
-check contacts each MX host (or the target itself when it has none) only after resolving it once
-and judging every address under the scan's destination policy (the target's environment and
-`SHAKERSCAN_PRIVATE_NETWORK_TARGETS`, with the web scope guard's address classes); every probe
-connects to an admitted address (tried in answer order) and the cipher probe keeps the MX name as
-SNI. A process a worker launches for a Scan reads an empty or missing
+Infrastructure detector modules also cover SSH authentication posture; SMTP STARTTLS, banner, MX,
+and safe open-relay checks; VPN, RDP/VNC, IoT, industrial-protocol, and database-service exposure;
+IP/ASN and domain intelligence; third-party vendor resources; webhook signature bypass;
+package-manager and backup artifacts; container registries; and Kubernetes/Terraform/cloud-storage
+exposure. They are not Scan families and no Scan runs them. Connected-device posture runs its own
+SSH checks on discovered SSH ports (see [Connected-device posture](#connected-device-posture)). A
+Scan's baseline collects only informational domain-registration and address-ownership context
+(`infrastructure.inspect`), never findings. The SMTP check contacts each MX host (or the target
+itself when it has none) only after resolving it once and judging every address under the scan's
+destination policy (the target's environment and `SHAKERSCAN_PRIVATE_NETWORK_TARGETS`, with the
+web scope guard's address classes); every probe connects to an admitted address (tried in answer
+order) and the cipher probe keeps the MX name as SNI.
+A process a worker launches for a Scan reads an empty or missing
 `SHAKERSCAN_PRIVATE_NETWORK_TARGETS` as `refuse` (a fleet worker cannot know what the admitting
 deployment chose); fleet and broker worker Compose files pass the setting and
 `SHAKERSCAN_NAT64_PREFIXES`. A refused or single-label MX host (a Docker service name) is listed
@@ -542,7 +606,9 @@ in `skipped_hosts` with its reason and never contacted, a null MX (RFC 7505) is 
 domain that accepts no mail, and a result with no host tested grades `N/A`, never a pass.
 
 OpenAPI schemas can be supplied explicitly or discovered and exercised through Schemathesis. The
-scanner records schema/test errors as evidence rather than treating process exit as proof.
+scanner records schema/test errors as evidence rather than treating process exit as proof. A Scan
+does not run Schemathesis: `web.spec_ingest` reads the target's OpenAPI document and turns its
+operations into routes and inputs for the Scan families.
 
 Canonical focus uses `policy.include_families` / `policy.exclude_families`. The old `xss: true` and
 `sqli: true` booleans are compatibility inputs only and must not be added to new UI, CLI, skill, or
@@ -559,6 +625,13 @@ the worker checks the profile's semantic `allowed_capabilities` against the exac
 to execute. Static identities can authorize capabilities such as `http.request`, `web.crawl`,
 `templates.scan`, `collections.replay_safe`, `xss.verify`, `sqli.verify`, or `authz.verify`.
 Interactive form/OAuth profiles must additionally authorize `auth.session.establish`.
+A blank allowlist on an HTTP identity grants the read-only capabilities that use it: `http.request`,
+the Scan producers (`web.probe`, `web.crawl`, `web.browser_crawl`, `web.content_discover`,
+`web.spec_ingest`, the passive templates, `collections.replay_safe`) and `browser.navigate`, plus
+the session lifecycle for interactive kinds. Active verifiers (`xss.verify_batch`,
+`sqli.verify_batch`, `authz.verify`, `collections.replay_active`, ...) are never defaults; they need
+explicit elevation with an approval receipt, and an action the profile does not allow runs without
+the identity.
 
 Canonical Scan submission accepts up to two `credential_profile_ids`, bound to the exact Web/API
 target. Profiles hold authorization headers, bearer tokens, API-key headers, cookies, custom
@@ -641,7 +714,11 @@ and check provenance, preserving the row ID and its triage and verification hist
 business impact. The nine implemented chain types (`CHAIN_TEMPLATES`) are
 `xss_to_account_takeover`, `sqli_to_privilege_escalation`, `ssrf_to_cloud_breach`,
 `idor_to_data_breach`, `lfi_to_credential_theft`, `cors_to_data_theft`,
-`weak_jwt_to_impersonation`, `xxe_to_data_exfil`, and `deserialization_to_rce`.
+`weak_jwt_to_impersonation`, `xxe_to_data_exfil`, and `deserialization_to_rce`. A chain forms only
+from findings of its types. A Scan has no generic check for SSRF, file inclusion, JWT, XXE or
+deserialization. The file-inclusion and JWT chains can form from a Nuclei product-template finding
+or a finding recorded another way. No template in a Scan can match SSRF, XXE or deserialization, so
+those three chains form only from a finding recorded another way.
 Partial chains can be surfaced with `include_partial_attack_chains: true`.
 
 **Coverage tracking**: `/scans/{id}/actions`, `/capabilities`, and `/coverage` expose the plan digest,
@@ -1173,8 +1250,10 @@ the live `/session*` OpenAPI contract.
 When an AI provider is configured (`AI_URL` / `AI_API_KEY` / `AI_MODEL`), ShakerScan adds
 cross-finding correlation and an overall risk assessment to DAST reports, and can run AI-driven retest
 verification of findings (`AI_VERIFY_*`). The AI retest tier generates an exploitation plan and
-replays it (optionally via a browser), and can downgrade false positives — but deterministic proof of
-exploitation blocks any downgrade.
+replays it (optionally via a browser). Its verdict is at most `inconclusive`: a model's reading is not
+the check that produced the finding, so an AI "likely fixed" or "false positive" is recorded as an
+inconclusive result with the model's text as the note (the model's own verdict stays in the
+retest's artifacts), and it never closes a finding or refutes a Hunt candidate.
 
 ### 11.5 AI Operations Router
 
@@ -1222,6 +1301,23 @@ receipt's `http_charge_basis` names which. Scanner subprocesses run on the worke
 argv and revalidates the target host; the API never spawns them. The external coding agent owns its
 model context: ShakerScan cannot meter an external coding agent's tokens, and makes no token-budget
 claim for that planner. It meters every executable capability.
+
+A scanner call's hold depends on the Hunt's budget profile only for `sqli.verify` and `xss.verify`,
+whose paced argv cannot finish inside the registry wall. On every named profile (`fast`, `balanced`,
+`thorough`), `sqli.verify` reserves 900 requests / 540 s and `xss.verify` 1,800 requests / 480 s. A
+call against a device target (its fragility allowance is charged one point per held request) and a
+headless `deep_domxss` call keep the registry holds (900 / 300 s and 400 / 120 s). An `xss.verify`
+the worker routes to the pinned browser runs within the browser prover's own limits under either
+hold and settles what it used. When the Hunt's remaining ledger cannot fund the hold, the call is
+refused with a budget request a person can grant rather than started at a shorter hold; its
+receipt's `budget_reserved` shows the hold it ran at. The capability manifest's `budget_cost` lists
+the registry hold. The argv and request rate are the
+same on every profile (sqlmap about 1 request/s, Dalfox about 3.3 requests/s). The process deadline,
+the worker lease and the API wait (counted from enqueue, plus 30 s) follow the reserved wall, so an
+`sqli.verify` is waited on for up to 570 s and holds one of the worker's agent-tool slots
+while it runs. A call admitted before these holds existed still runs at the hold it reserved. Update
+the API and its workers together: a worker that predates these holds fails a call reserved at a
+thorough hold as a contract error and leaves the hold to reconciliation.
 
 `service.nse_check` exposes Nmap's scripting engine inside Hunt only for the reviewed
 `ssl-enum-ciphers`, `http-security-headers`, `http-methods`, and `http-trace` scripts. It requires
@@ -1413,10 +1509,45 @@ vendors, AI surfaces, MCP tools, model artifacts, scans, and findings, with asse
 **Dashboard & queue**: `/dashboard` (active/critical counts, average score, running scans),
 `/queue/stats`, and `/queue/clear`.
 
-**Verification & retest**: deterministic provers exist for xss, sqli, ssrf, path_traversal,
-open_redirect, cors, command_injection, ssti, xxe, jwt, idor, bola, and exposed_file; others can be
-replayed by the AI tier. Retests are slot-limited (`RETEST_MAX_PARALLEL`) with a watchdog and
-auto-retest-on-scan-complete policy.
+**Verification & retest**: deterministic provers exist for xss, sqli, nosqli, ssrf, path_traversal,
+open_redirect, cors, command_injection, ssti, xxe, jwt, idor, bola, and exposed_file. A finding is
+retested only by the prover of its own kind of check, chosen by its tool (`RETEST_TOOL_TYPE_MAP`);
+its title chooses only for a finding with no tool or with one of the earlier scanner's checks that
+sent attack input, by whole words. A finding with no prover of its own, or only the AI tier
+(`generic_http`, `2fa_bypass`, which can never conclude), has no retest and says why in
+`retest_unsupported_reason`: `retest_needs_template_replay` (a Nuclei template finding),
+`retest_exposure_by_rescan` (an exposure-probe finding), `retest_by_hunt_rerun` (a Hunt's own
+finding, its verified XSS and authorization proofs included, which a Scan prover would judge by a
+different check, or a Hunt finding of a family no prover covers: run the Hunt again) or
+`retest_by_rescan_only` (headers, cookies, CORS, TLS, DNS, takeover, GraphQL, authorization and
+earlier posture findings, and a point sqlmap found in a URL path segment: run a new Scan). Finding
+detail, `POST /findings/{id}/retest`, bulk retest and the automatic retest after a Scan apply the
+same rule. A verified SQL injection, NoSQL injection or browser-executed XSS finding is retested by
+the check that proved it, with the request it proved: the route on the site the proof recorded
+(else the scanned target's site) with the tested query parameter set as the Scan set it, or the
+page with the browser proof's own payload, checked against the payload digest the finding kept.
+The worker sends exactly the URL the API admitted: a caller's `target` does not move it, and a
+retest whose finding changed after it was queued sends nothing. The SQL and NoSQL checks run over
+the retest's HTTP client (session headers, request limits and the destination guard); the browser
+check loads the payload page in a headless browser after one ordinary request of the page and
+judges it as the browser proof does (the proof's attribute on the page, or a console or dialog
+message that is exactly its marker; nothing else the page logs or shows counts), letting only
+same-origin reads leave the page. Reproduced is still vulnerable; not reproduced with every
+request answered is likely fixed; a refusal, an unanswered request, an unavailable service (a
+408, 429, 502, 503 or 504 answer, or a 404, 410 or server error to every request) or a missing
+browser is inconclusive.
+When the request cannot be rebuilt exactly (a path segment, a templated route, a request body, a
+recorded request whose values were not kept, a masked value, a fragment or another page), or the
+finding is a potential injection from a request differential (which keeps no route), the reason is
+`retest_by_rescan_only` and `retest_unsupported_message` says what is missing. A replay URL that
+names no site is refused as `replay_url_unresolved`, never as out of scope.
+`GET /findings/{id}` also returns `retest_active`, true when the retest may send
+active requests (a prover's payloads, an AI Gate probe, or the AI tier's requests when an AI
+verifier is configured). Its `retest_modes` are `tiered` (the prover, then the AI tier when it
+is inconclusive) and `deterministic`; the AI tier alone (`mode=ai`) is not offered, because its
+verdict is at most inconclusive. A prover retests a finding that already exists; it does not mean
+a Scan looks for that class (see the [OWASP coverage matrix](owasp-coverage-matrix.md)). Retests
+are slot-limited (`RETEST_MAX_PARALLEL`) with a watchdog and auto-retest-on-scan-complete policy.
 
 ---
 
@@ -1931,7 +2062,7 @@ for the profile contract, invocation, limits and acceptance gates.
 | Make targets | 20 | `Makefile` |
 | Release gates | 17 | `scripts/release_gates.py` |
 | Runtime environment keys | 429 | Python sources + Compose manifests |
-| Internal compatibility scanner modules | 139 | `scanner/scanner_tools/` |
+| Internal compatibility scanner modules | 142 | `scanner/scanner_tools/` |
 | UI pages | 40 | `ui/src/app/` |
 | Skills | 9 | `skills/` |
 | Canonical slash commands | 14 | `.claude/commands/` |
@@ -2456,7 +2587,7 @@ for the profile contract, invocation, limits and acceptance gates.
 |---|---|---|---|---|---|---|---|---|
 | `auth` | active | access_control | True | medium | True | `asm_endpoint_batch` | `active_endpoint_attempt_v1` | Read-only authenticated-vs-anonymous access checks for focused ASM endpoint batches. |
 | `authz_surface` | active | access_control | True | high | False | `authz_surface_verify_batch` | `active_endpoint_attempt_v1` | Deterministic BFLA proof via anonymous vs authenticated route access differential. |
-| `bola` | active | access_control | True | high | True | `asm_endpoint_batch` | `active_endpoint_attempt_v1` | Multi-user object authorization comparisons. Requires Lab/deep policy and two auth contexts. |
+| `bola` | active | access_control | True | high | True | `asm_endpoint_batch` | `active_endpoint_attempt_v1` | Multi-user object authorization comparisons. A Scan needs active testing and two distinct credential profiles that allow authz.verify; a focused Continuous ASM batch also needs Lab/deep policy. |
 | `business_logic` | active | workflow | True | high | False | `none` | `planned_workflow_attempt` | Workflow/business-logic testing. Planned for AI/manual-assisted campaigns. |
 | `endpoint_security` | passive | endpoint_surface | False | low | True | `endpoint_scoped_surface` | `endpoint_surface_attempt_v1` | Target-wide API data exposure, webhook signature, and approval/authorization checks over the discovered endpoint inventory. |
 | `graphql` | active | api | True | medium | False | `graphql_verify_batch` | `active_endpoint_attempt_v1` | Bounded read-only GraphQL checks over GET: field suggestions and missing alias or duplicate-field limits on discovered GraphQL endpoints. |
@@ -2471,9 +2602,9 @@ for the profile contract, invocation, limits and acceptance gates.
 | `recon` | recon | passive | False | low | True | `legacy_discovery` | `discovery` | Crawl, API/HAR/OpenAPI discovery, and passive surface refresh. |
 | `recon_active` | recon | discovery | True | medium | False | `recon_active` | `discovery` | Authorized active recon from bundled authored lists: DNS name enumeration and virtual-host discovery under a declared apex (the target is the apex or its www name; needs subdomain discovery; virtual hosts not on a shared edge), and parameter discovery on observed routes. Wildcard, catch-all and random-parameter controls; leads only, never findings or proof. |
 | `sensitive_exposure` | passive | disclosure | False | medium | False | `exposure_probe_batch` | `active_endpoint_attempt_v1` | Read-only verified exposure checks: secrets in env, actuator, OpenAPI and config files, VCS metadata, backups, debug pages, metrics, and listings. |
-| `sqli` | active | injection | True | medium | True | `legacy_active_loop` | `active_endpoint_attempt_v1` | SQL injection probes and proof/extraction depth. |
+| `sqli` | active | injection | True | medium | True | `legacy_active_loop` | `active_endpoint_attempt_v1` | SQL injection verification with sqlmap and a differential proof; no data extraction. |
 | `ssrf` | active | server_side | True | high | False | `none` | `planned_high_risk_attempt` | Server-side request forgery checks. Planned and permission-gated. |
-| `xss` | active | client | True | medium | True | `legacy_active_loop` | `active_endpoint_attempt_v1` | Reflected, stored, and DOM XSS probes. |
+| `xss` | active | client | True | medium | True | `legacy_active_loop` | `active_endpoint_attempt_v1` | Reflected XSS, and DOM XSS through URL-fragment parameters, proven in a browser. No stored-XSS check. |
 
 ### Command Arsenal
 
@@ -3014,7 +3145,7 @@ Only key names and declaring sources are documented; secret values are never rea
 | `RETEST_SLOT_WAIT_MAX_SECONDS` | `api/worker.py` |
 | `RETEST_STALE_BATCH_SIZE` | `api/worker.py`, `docker-compose.release.yml`, `docker-compose.yml` |
 | `RETEST_STALE_CHECK_INTERVAL_SECONDS` | `api/worker.py`, `docker-compose.release.yml`, `docker-compose.yml` |
-| `RETEST_STALE_REQUEUE_LIMIT` | `api/worker.py`, `docker-compose.release.yml`, `docker-compose.yml` |
+| `RETEST_STALE_REQUEUE_LIMIT` | `api/retest_contract.py`, `docker-compose.release.yml`, `docker-compose.yml` |
 | `RETEST_WATCHDOG_LOCK_KEY` | `api/worker.py` |
 | `RETEST_WATCHDOG_LOCK_SECONDS` | `api/worker.py` |
 | `SCANNER_DALFOX_DEEP_DOMXSS` | `scanner/scanner_tools/active_checks.py` |
@@ -3280,7 +3411,7 @@ Implementation modules below are inventory only. The immutable action graph and 
 capability registry define execution authority; module presence does not advertise a public
 Scan feature or a second orchestration engine.
 
-`access_control_checks.py`, `active_checks.py`, `active_enrichment_policy.py`, `active_prioritization.py`, `adaptive_throttle.py`, `address_classes.py`, `ai_classifier.py`, `api_auth.py`, `api_security.py`, `approval_checks.py`, `asn_discovery.py`, `attack_chains.py`, `attempt_telemetry.py`, `auth_session.py`, `authz_replay_routing.py`, `benchmark_summary.py`, `bola_comparison.py`, `bounded_exec.py`, `brand_protection.py`, `breach_check.py`, `browser_profile.py`, `build_fingerprint.py`, `cancellation.py`, `client_side.py`, `common.py`, `completion_status.py`, `compliance_mapper.py`, `corporate_identity.py`, `coverage_tracker.py`, `credential_check.py`, `critical_checks.py`, `ct_monitor.py`, `data_exposure.py`, `deduplication_engine.py`, `deserialization_tests.py`, `destination_guard.py`, `device_advisories.py`, `device_application.py`, `device_control_plane.py`, `device_evidence.py`, `device_postman.py`, `device_posture.py`, `device_probe.py`, `device_protocols.py`, `device_reachability.py`, `device_request_formats.py`, `device_safety.py`, `device_scan_scope.py`, `device_shell.py`, `device_web.py`, `discovered_names.py`, `discovery.py`, `discovery_policy.py`, `dns_enhanced.py`, `dom_xss_analyzer.py`, `domain_intel.py`, `exposure_markers.py`, `file_upload_tests.py`, `finding_correlator.py`, `finding_validator.py`, `focused_scope.py`, `form_login.py`, `frontend_http.py`, `github_recon.py`, `google_dorking.py`, `gopher_payloads.py`, `graphql_schema_recovery.py`, `grpc_discovery.py`, `gungnir.py`, `har_discovery.py`, `hash_routes.py`, `health_check.py`, `host_names.py`, `http_archive_capture.py`, `http_scanner.py`, `hunter_summary.py`, `infrastructure_checks.py`, `injection_extra_checks.py`, `intel_bundle.py`, `ip_reputation.py`, `log_text.py`, `logging_checks.py`, `model_intake.py`, `model_intake_acquisition.py`, `model_intake_adapter_self_test.py`, `model_intake_admission.py`, `model_intake_archives.py`, `model_intake_attestation.py`, `model_intake_evaluation.py`, `model_intake_licenses.py`, `model_intake_providers.py`, `model_intake_registry.py`, `model_intake_retention.py`, `model_intake_runtime.py`, `model_intake_safetensors_runtime.py`, `model_intake_safetensors_selftest.py`, `model_intake_sandbox.py`, `model_intake_scanners.py`, `network_services.py`, `nmap.py`, `nuclei.py`, `oauth_auth.py`, `oauth_tests.py`, `phase4_checks.py`, `process_memory.py`, `proof_of_exploit.py`, `race_condition_tests.py`, `registrable.py`, `remediation_kb.py`, `remediation_kb_devices.py`, `remediation_kb_findings.py`, `remediation_kb_tls.py`, `report_gating.py`, `request_collections.py`, `request_meter.py`, `request_replay.py`, `resource_propagation.py`, `sarif_output.py`, `scan_delta.py`, `signal_types.py`, `smtp_scanner.py`, `ssh_scanner.py`, `subdomain_discovery.py`, `subfinder.py`, `subfinder_providers.py`, `surface_hints.py`, `tech_discovery.py`, `tls_scanner.py`, `unsafe_actions.py`, `url_redaction.py`, `v2_fingerprint_hardening.py`, `v2_request_replay_hardening.py`, `vendor_risk.py`, `verification_engine.py`, `verification_phase.py`, `wayback_discovery.py`, `webhook_checks.py`, `websocket_security.py`, `xss_evidence.py`
+`access_control_checks.py`, `active_checks.py`, `active_enrichment_policy.py`, `active_prioritization.py`, `adaptive_throttle.py`, `address_classes.py`, `ai_classifier.py`, `api_auth.py`, `api_security.py`, `approval_checks.py`, `asn_discovery.py`, `attack_chains.py`, `attempt_telemetry.py`, `auth_session.py`, `authz_replay_routing.py`, `benchmark_summary.py`, `bola_comparison.py`, `bounded_exec.py`, `brand_protection.py`, `breach_check.py`, `browser_profile.py`, `build_fingerprint.py`, `cancellation.py`, `client_side.py`, `common.py`, `completion_status.py`, `compliance_mapper.py`, `copy_commands.py`, `corporate_identity.py`, `coverage_tracker.py`, `credential_check.py`, `credential_redirects.py`, `critical_checks.py`, `ct_monitor.py`, `data_exposure.py`, `deduplication_engine.py`, `deserialization_tests.py`, `destination_guard.py`, `device_advisories.py`, `device_application.py`, `device_control_plane.py`, `device_evidence.py`, `device_postman.py`, `device_posture.py`, `device_probe.py`, `device_protocols.py`, `device_reachability.py`, `device_request_formats.py`, `device_safety.py`, `device_scan_scope.py`, `device_shell.py`, `device_web.py`, `discovered_names.py`, `discovery.py`, `discovery_policy.py`, `dns_enhanced.py`, `dom_xss_analyzer.py`, `domain_intel.py`, `exposure_markers.py`, `file_upload_tests.py`, `finding_correlator.py`, `finding_validator.py`, `focused_scope.py`, `form_login.py`, `frontend_http.py`, `github_recon.py`, `google_dorking.py`, `gopher_payloads.py`, `graphql_schema_recovery.py`, `grpc_discovery.py`, `gungnir.py`, `har_discovery.py`, `hash_routes.py`, `health_check.py`, `host_names.py`, `http_archive_capture.py`, `http_scanner.py`, `hunter_summary.py`, `infrastructure_checks.py`, `injection_extra_checks.py`, `intel_bundle.py`, `ip_reputation.py`, `log_text.py`, `logging_checks.py`, `model_intake.py`, `model_intake_acquisition.py`, `model_intake_adapter_self_test.py`, `model_intake_admission.py`, `model_intake_archives.py`, `model_intake_attestation.py`, `model_intake_evaluation.py`, `model_intake_licenses.py`, `model_intake_providers.py`, `model_intake_registry.py`, `model_intake_retention.py`, `model_intake_runtime.py`, `model_intake_safetensors_runtime.py`, `model_intake_safetensors_selftest.py`, `model_intake_sandbox.py`, `model_intake_scanners.py`, `network_services.py`, `nmap.py`, `nuclei.py`, `oauth_auth.py`, `oauth_tests.py`, `phase4_checks.py`, `process_memory.py`, `proof_of_exploit.py`, `race_condition_tests.py`, `registrable.py`, `remediation_kb.py`, `remediation_kb_devices.py`, `remediation_kb_findings.py`, `remediation_kb_tls.py`, `report_gating.py`, `request_collections.py`, `request_meter.py`, `request_replay.py`, `resource_propagation.py`, `sarif_output.py`, `scan_delta.py`, `shell_words.py`, `signal_types.py`, `smtp_scanner.py`, `ssh_scanner.py`, `subdomain_discovery.py`, `subfinder.py`, `subfinder_providers.py`, `surface_hints.py`, `tech_discovery.py`, `tls_scanner.py`, `unsafe_actions.py`, `url_redaction.py`, `v2_fingerprint_hardening.py`, `v2_request_replay_hardening.py`, `vendor_risk.py`, `verification_engine.py`, `verification_phase.py`, `wayback_discovery.py`, `webhook_checks.py`, `websocket_security.py`, `xss_evidence.py`
 
 ### Durable Storage Inventory
 

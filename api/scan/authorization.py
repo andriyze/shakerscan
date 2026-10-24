@@ -266,7 +266,35 @@ async def revalidate_scan_action_authority(
         # stop the work exactly as it stops a new submission. An inherited receipt (target and
         # scope differ) is already resolved afresh by standing_authorization_matches_target.
         return ActionAuthorityDecision.REJECTED_REVOKED
+    if (
+        decision is ActionAuthorityDecision.ALLOWED
+        and approval_receipt is not None
+        and _derived_credential_scan(approval_receipt)
+        and not await _derived_source_current(conn, approval_receipt, target_id)
+    ):
+        # A credential-tier receipt derived for this Scan from the target's standing
+        # authorization lives exactly as long as that authorization does. The target is the one
+        # the receipt names, so a binding without a target id fails closed instead of skipping.
+        return ActionAuthorityDecision.REJECTED_REVOKED
     return decision
+
+
+def _target_authorization() -> Any:
+    try:
+        from .. import target_authorization
+    except (ImportError, ModuleNotFoundError):
+        import target_authorization
+    return target_authorization
+
+
+def _derived_credential_scan(approval_receipt: Any) -> bool:
+    return _target_authorization().derived_credential_scan_context(approval_receipt) is not None
+
+
+async def _derived_source_current(conn: Any, approval_receipt: Any, target_id: str) -> bool:
+    return await _target_authorization().derived_credential_scan_source_is_current(
+        conn, approval_receipt, expected_target_id=target_id or None,
+    )
 
 
 async def _standing_receipt_still_current(conn: Any, target_id: str, approval_receipt: Any) -> bool:

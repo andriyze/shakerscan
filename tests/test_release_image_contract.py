@@ -117,15 +117,25 @@ def test_release_images_remove_fixable_runtime_vulnerabilities():
     scanner = (ROOT / "scanner" / "Dockerfile").read_text()
     ui = (ROOT / "ui" / "Dockerfile").read_text()
 
-    assert "golang:1.27.2-bookworm@sha256:" in scanner
+    assert "golang:1.27.3-bookworm@sha256:" in scanner
     assert "github.com/projectdiscovery/nuclei/v3/cmd/nuclei v3.11.1" in scanner
+    # The lifts every Go tool is built with (the shared go get list in build_tool, not a per-tool
+    # lift): echo/v4 is in dalfox, klauspost/compress in gungnir, httpx, katana, naabu, subfinder
+    # and tlsx.
+    shared_lifts = scanner.split('go get "${tool_package}@${tool_version}"', 1)[1].split("|| return 1", 2)[1]
     for dependency in (
         "github.com/getkin/kin-openapi@v0.149.0",
         "github.com/go-git/go-git/v5@v5.19.2",
-        "github.com/labstack/echo/v4@v4.15.3",
+        "github.com/klauspost/compress@v1.18.7",
+        "github.com/labstack/echo/v4@v4.16.1",
         "golang.org/x/mod@v0.41.0",
     ):
-        assert dependency in scanner
+        assert dependency in shared_lifts
+    # A lift below what a dependency requires would downgrade the tool; the build refuses that.
+    assert '"${resolved_version}" != "${tool_version}"' in scanner
+    assert scanner.index('if [ "$#" -gt 0 ]; then go get "$@"') < scanner.index("resolved_version=") < (
+        scanner.index('go build -mod=mod -trimpath -o "/go/bin/${tool_name}"')
+    )
     assert "pip uninstall -y --break-system-packages msgpack setuptools" in scanner
     assert "pip uninstall -y --break-system-packages pip" in scanner
     assert 'find_spec("pip") is None' in scanner

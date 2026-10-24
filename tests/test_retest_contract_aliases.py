@@ -2,7 +2,9 @@
 Tests for retest type normalization and inference coverage.
 """
 
+import json
 import os
+import shlex
 import sys
 
 
@@ -129,7 +131,28 @@ def test_replay_commands_for_exposed_file_are_plain_get():
             "original_url": "https://example.com/id_rsa",
         }
     )
-    assert commands == ["curl -i -k 'https://example.com/id_rsa'"]
+    assert commands == ["curl -i -k https://example.com/id_rsa"]
+
+
+def test_replay_commands_never_send_a_value_the_scanner_masked():
+    """Unit fixture: a SQL injection finding whose stored URL has its query value masked."""
+    masked_url = "http://sqli.fixture.invalid/product?id=%3Credacted%3E"
+    commands = build_replay_commands(infer_retest_inputs({
+        "title": "Potential SQL injection", "tool": "sqlmap", "finding_type": "sqli",
+        "target_url": "http://sqli.fixture.invalid", "finding_url": masked_url,
+        "evidence": json.dumps({"param": "id", "method": "GET", "url": masked_url}),
+    }))
+    # Replayed as stored it would send the mask marker; the payload variant sets the value itself.
+    assert len(commands) == 1 and "redacted" not in commands[0]
+    assert "/product?id=%27+OR+%271%27%3D%271" in commands[0]
+    unmasked = build_replay_commands(infer_retest_inputs({
+        "title": "Potential SQL injection", "tool": "sqlmap", "finding_type": "sqli",
+        "target_url": "http://sqli.fixture.invalid", "finding_url": "http://sqli.fixture.invalid/product?id=1",
+        "evidence": json.dumps({"param": "id"}),
+    }))
+    assert len(unmasked) == 2 and "/product?id=1" in unmasked[0]
+    exposed = build_replay_commands({"finding_type": "exposed_file", "original_url": "https://x.fixture.invalid/f?k=<redacted>"})
+    assert exposed == []
 
 
 def test_infer_retest_inputs_for_exposed_file_finding_row():
@@ -207,3 +230,23 @@ def test_retest_queue_binding_requires_the_exact_durable_subject():
          "candidate_id": "33333333-3333-4333-8333-333333333333"},
         {"job_id": "job-1", "finding_id": "33333333-3333-4333-8333-333333333333"},
     )
+
+
+def test_replay_commands_put_a_sqlmap_path_marker_payload_in_the_segment():
+    # Unit fixture: a sqlmap path candidate as recorded by a 2.11.0 lab scan (host renamed to
+    # .invalid). sqlmap marks the segment as /products/1* and names the point "#1*".
+    inferred = infer_retest_inputs({
+        "finding_type": "sqli",
+        "finding_url": "http://sqli-path.fixture.invalid/products/1*",
+        "evidence": {"url": "http://sqli-path.fixture.invalid/products/1*", "param": "#1*", "method": "GET"},
+    })
+    commands = build_replay_commands(inferred)
+    assert [shlex.split(command)[3] for command in commands] == [
+        "http://sqli-path.fixture.invalid/products/1",
+        "http://sqli-path.fixture.invalid/products/1%27%20OR%20%271%27%3D%271",
+    ]
+    assert not any("*" in command or "%2A" in command or "%23" in command for command in commands)
+    # A query parameter named like a marker, with no marked segment, keeps the query replay.
+    plain = build_replay_commands({"finding_type": "sqli", "original_url": "http://s.invalid/p?a=1",
+                                   "param": "#1*", "method": "GET"})
+    assert "%231%2A=" in plain[1]

@@ -7,6 +7,8 @@ try:
 except ModuleNotFoundError:  # package import layout
     from api.capabilities.secret_material import keyed_body_digest
 import asyncio
+import contextlib
+import dataclasses
 from dataclasses import dataclass, field
 import json
 import hashlib
@@ -20,11 +22,16 @@ from http.cookies import SimpleCookie
 from typing import Any, Mapping
 import urllib.parse
 from .browser_steps import browser_steps, browser_surface, ELEMENT_DESCRIPTOR, validate_fill
+from .xss_proof_payload import (
+    XSS_PROOF_ATTRIBUTE, XSS_PROOF_SETTLE_SECONDS, XSS_PROOF_TIMEOUT_MS, xss_proof_marker,
+    xss_proof_payload, xss_proof_signal,
+)
 
 try:
     from hunt.capability_executor import CapabilityAdapterResult, Cancelled, Heartbeat
     from pinned_socks_proxy import PinnedSocksProxy
     from runtime.auth_refusal import AUTHENTICATION_REQUIRED, is_login_location, refusal
+    from runtime.auth_session_store import AuthSessionStoreError
     from runtime.models import PreparedExecution, TargetBinding
     from runtime.request_shape import nested_json_body
     from runtime.secret_material import contains_secret_material
@@ -33,6 +40,7 @@ except ModuleNotFoundError:  # package imports in host-side tests
     from ..hunt.capability_executor import CapabilityAdapterResult, Cancelled, Heartbeat
     from ..pinned_socks_proxy import PinnedSocksProxy
     from ..runtime.auth_refusal import AUTHENTICATION_REQUIRED, is_login_location, refusal
+    from ..runtime.auth_session_store import AuthSessionStoreError
     from ..runtime.models import PreparedExecution, TargetBinding
     from ..runtime.request_shape import nested_json_body
     from ..runtime.secret_material import contains_secret_material
@@ -47,6 +55,12 @@ try:
     from scanner_tools.url_redaction import redact_client_route, redact_url
 except ModuleNotFoundError:  # package imports in host-side tests
     from scanner.scanner_tools.url_redaction import redact_client_route, redact_url
+try:
+    from scanner_tools import credential_redirects as _credential_redirects
+    from scanner_tools.destination_guard import DISABLE_WEBRTC as _DISABLE_WEBRTC
+except ModuleNotFoundError:  # package imports in host-side tests
+    from scanner.scanner_tools import credential_redirects as _credential_redirects
+    from scanner.scanner_tools.destination_guard import DISABLE_WEBRTC as _DISABLE_WEBRTC
 
 
 SAFE_BROWSER_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
@@ -186,7 +200,9 @@ class XSSBrowserProofAdapter:
     """Execute one server-derived XSS payload in the pinned browser runtime."""
 
     capability_name = "xss.browser_prove_batch"
-    adapter_name = "playwright"
+    # The identity the registry declares for xss.browser_prove_batch; the executor refuses
+    # any other. The Hunt prover (a subclass) declares the plain runtime it runs under.
+    adapter_name = "playwright.xss_proof_batch"
     adapter_version = "1"
     parser_version = "xss-browser-proof/v1"
     manages_cancellation = True
@@ -217,11 +233,8 @@ class XSSBrowserProofAdapter:
             raise BrowserCapabilityInputError("XSS proof target has no frozen address")
         parsed = urllib.parse.urlsplit(execution_url)
         normalized_method = str(method or "GET").strip().upper()
-        marker = f"shakerscan_xss_{candidate_id[:12]}"
-        payload = (
-            '<img src=x onerror="document.documentElement.setAttribute('
-            f"'data-shakerscan-proof','{marker}');console.log('{marker}')\">"
-        )
+        marker = xss_proof_marker(candidate_id)
+        payload = xss_proof_payload(candidate_id)
         body = b""
         normalized_content_type: str | None = None
         if body_field_names:
@@ -322,7 +335,7 @@ class XSSBrowserProofAdapter:
             adapter_version=cls.adapter_version, parser_version=cls.parser_version,
             target=target, url=url, origin=origin,
             pinned_address=socket_factory.primary_address,
-            wait_until="domcontentloaded", timeout_ms=20_000, max_requests=50,
+            wait_until="domcontentloaded", timeout_ms=XSS_PROOF_TIMEOUT_MS, max_requests=50,
             marker=marker, marker_sha256=hashlib.sha256(marker.encode()).hexdigest(),
             payload_sha256=hashlib.sha256(payload.encode()).hexdigest(),
             candidate_id=candidate_id, parameter_name=parameter_name,
@@ -733,11 +746,34 @@ def browser_capability_adapter(name: str):
     return adapters[normalized]
 
 
+def _refused_session_code(exc: Exception) -> str:
+    # The store's refusals are fixed sentences without target data; reduce them to a stable code.
+    message = str(exc)
+    if "capability" in message:
+        return "auth_session_capability_not_allowed"
+    if "expired or revoked" in message:
+        return "auth_session_expired"
+    return "auth_session_unavailable"
+
+
 async def _execute_browser_with_session(prepared, *, session_loader, heartbeat, cancelled):
     if prepared.session_ref:
         if session_loader is None:
             raise BrowserCapabilityInputError("Managed browser session requires worker resolution")
-        async with session_loader() as headers:
+        async with contextlib.AsyncExitStack() as stack:
+            try:
+                headers = await stack.enter_async_context(session_loader())
+            except AuthSessionStoreError as exc:
+                # A refused session ends the action before any request, with its reason: as a
+                # bare adapter fault the agent could not tell that the session's profile does
+                # not allow the browser.
+                return CapabilityAdapterResult(
+                    status="failed",
+                    errors=(_refused_session_code(exc),),
+                    actual_budget={},
+                    parser_version=prepared.parser_version,
+                    redacted_execution=prepared.redacted_execution,
+                )
             return await _execute_browser_action(prepared, heartbeat=heartbeat, cancelled=cancelled, trusted_headers=headers)
     return await _execute_browser_action(prepared, heartbeat=heartbeat, cancelled=cancelled)
 
@@ -748,6 +784,29 @@ async def _execute_browser_action(
     heartbeat: Heartbeat,
     cancelled: Cancelled,
     trusted_headers: Mapping[str, str] | None = None,
+) -> CapabilityAdapterResult:
+    """Run one browser action. Its pinned proxy admits only the bound origin, so trusted headers
+    reach nothing else; the result says what was refused (``browser_session_header_coverage``)."""
+    events = _credential_redirects.SessionHeaderEvents()
+    result = await _execute_browser_action_in_context(
+        prepared, heartbeat=heartbeat, cancelled=cancelled, trusted_headers=trusted_headers,
+        session_header_events=events,
+    )
+    if not events.reasons():
+        return result
+    coverage = {"kind": "browser_session_header_coverage", **events.as_dict()}
+    return dataclasses.replace(
+        result, observations=(coverage, *result.observations)[:MAX_BROWSER_RESPONSE_OBSERVATIONS],
+    )
+
+
+async def _execute_browser_action_in_context(
+    prepared: PreparedBrowserAction,
+    *,
+    heartbeat: Heartbeat,
+    cancelled: Cancelled,
+    trusted_headers: Mapping[str, str] | None = None,
+    session_header_events: Any = None,
 ) -> CapabilityAdapterResult:
     started = time.monotonic()
     request_count = 0
@@ -805,6 +864,8 @@ async def _execute_browser_action(
                 443 if parsed_origin.scheme.lower() == "https" else 80
             ),
             max_connections=prepared.max_requests,
+            # Only the bound origin's scheme crosses the tunnel (TLS for https, plaintext for http).
+            scheme=parsed_origin.scheme.lower(),
         ).start()
         responses.append({
             "kind": "browser_target_transport",
@@ -831,6 +892,9 @@ async def _execute_browser_action(
             accept_downloads=False,
             ignore_https_errors=True,
             service_workers="block",
+            # Every connection goes through the pinned proxy, so Local Network Access can be
+            # granted without widening where the page can reach.
+            **_credential_redirects.local_network_access(True),
         )
         # Cookie headers cannot be overridden by Playwright routing. Bind them
         # to the exact target URL; do not serialize or return browser storage.
@@ -843,6 +907,13 @@ async def _execute_browser_action(
                      "httpOnly": True, "secure": prepared.origin.startswith("https:")}
                     for key, cookie in cookies.items()
                 ])
+        if trusted_headers and session_header_events is not None:
+            context.on("console", session_header_events.observe_console)
+            session_header_events.origins = frozenset(_credential_redirects.bound_origins([prepared.origin]))
+            context.on("request", session_header_events.observe_request)
+
+        # WebRTC sends UDP outside the pinned proxy: the page has no RTCPeerConnection.
+        await context.add_init_script(_DISABLE_WEBRTC)
         await context.add_init_script(
             "window.WebSocket = class { constructor() { throw new Error('blocked'); } };"
             "window.EventSource = class { constructor() { throw new Error('blocked'); } };"
@@ -916,6 +987,9 @@ async def _execute_browser_action(
                     name.lower(): value for name, value in trusted_headers.items()
                     if name.lower() != "cookie"
                 }}
+                # Chromium carries continued headers into redirect hops; the pinned proxy admits
+                # only the target's hostname and port, so a hop elsewhere is refused before any
+                # byte of it leaves (refusals are counted below).
                 await route.continue_(headers=headers)
             else:
                 await route.continue_()
@@ -955,7 +1029,7 @@ async def _execute_browser_action(
                 message = str(dialog.message or "")
                 proof_events.append({
                     "signal": "dialog",
-                    "marker_match": message == prepared.marker,
+                    "marker_match": xss_proof_signal(message, prepared.marker),
                     "message_sha256": _event_digest(proof_events, message),
                 })
                 await dialog.dismiss()
@@ -964,7 +1038,7 @@ async def _execute_browser_action(
                 text = str(message.text or "")
                 proof_events.append({
                     "signal": "console",
-                    "marker_match": text == prepared.marker,
+                    "marker_match": xss_proof_signal(text, prepared.marker),
                     "message_sha256": _event_digest(proof_events, text),
                 })
 
@@ -1012,12 +1086,12 @@ async def _execute_browser_action(
         navigation_observations.append(navigation_observation)
         if isinstance(prepared, PreparedXSSBrowserProof):
             browser_actions = 2
-            await asyncio.sleep(1.5)
+            await asyncio.sleep(XSS_PROOF_SETTLE_SECONDS)
             await heartbeat()
             dom_marker = await page.get_attribute(
-                "html", "data-shakerscan-proof",
+                "html", XSS_PROOF_ATTRIBUTE,
             )
-            dom_match = str(dom_marker or "") == prepared.marker
+            dom_match = xss_proof_signal(dom_marker, prepared.marker)
             matched = [item for item in proof_events if item["marker_match"]]
             proven = bool(matched or dom_match)
             screenshot_sha256 = None
@@ -1225,6 +1299,13 @@ async def _execute_browser_action(
                 await pinned_proxy.close()
             except Exception:
                 pass
+            if trusted_headers and session_header_events is not None:
+                # Connections to anything but the bound origin, refused at the pinned proxy.
+                session_header_events.record(
+                    _credential_redirects.SESSION_CROSS_ORIGIN_REFUSED,
+                    sum(dict(getattr(pinned_proxy, "refused_destinations", {}) or {}).values())
+                    + int(getattr(pinned_proxy, "refused_destinations_other", 0) or 0),
+                )
             # Inside a Scan worker the browser's tunnel joins the Scan's request archive; the
             # archive never decides the action's outcome.
             try:

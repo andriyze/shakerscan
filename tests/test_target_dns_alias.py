@@ -37,6 +37,16 @@ class AliasConn(_Conn):
         return await super().fetchrow(query, *args)
 
     async def execute(self, query, *args):
+        if "revoke derived credential-scan receipts" in query:
+            active = {str(row["id"]) for row in self.approvals if row["status"] == "active"}
+            count = 0
+            for row in self.approvals:
+                context = json.loads(row["action_context"])
+                if (row["status"] == "active" and context.get("derived_for") == args[2]
+                        and context.get("derived_from_approval_receipt_id") not in active):
+                    row["status"] = "revoked"
+                    count += 1
+            return f"UPDATE {count}"
         if "revoke derived alias lineage" in query:
             revoked = {str(row["id"]) for row in self.approvals if row["status"] == "revoked"}
             count = 0

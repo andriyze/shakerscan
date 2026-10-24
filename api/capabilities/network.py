@@ -10,7 +10,7 @@ import math
 import re
 import sys
 import time
-from typing import Any, Awaitable, Callable, Mapping
+from typing import Any, Awaitable, Callable, Mapping, Sequence
 import xml.etree.ElementTree as ET
 
 from hunt.capability_executor import CapabilityAdapterResult, Cancelled, Heartbeat
@@ -95,6 +95,7 @@ class NetworkExecutionAdapter:
         max_stdout_bytes: int,
         max_stderr_bytes: int,
         heartbeat_interval_seconds: float = 30.0,
+        command_usage: Sequence[Mapping[str, int]] | None = None,
     ) -> None:
         self.capability_name = prepared.capability_name
         self.adapter_name = prepared.adapter_name
@@ -109,6 +110,11 @@ class NetworkExecutionAdapter:
         self._binding_errors: list[str] = []
         if self._heartbeat_interval_seconds <= 0:
             raise ValueError("network capability heartbeat interval must be positive")
+        # What each command uses once it starts (a Hunt's distinct hosts and ports, and the
+        # connections device fragility counts); without it a hold is split evenly over commands.
+        self._command_usage = None if command_usage is None else tuple(dict(item) for item in command_usage)
+        if self._command_usage is not None and len(self._command_usage) != len(prepared.commands):
+            raise ValueError("network command usage must name every prepared command")
 
     async def _run_command_with_heartbeats(self, command, **kwargs):
         if self.capability_name == "subdomains.discover":
@@ -272,12 +278,22 @@ class NetworkExecutionAdapter:
         else:
             status = "failed" if process_failed and not observations else "partial" if partial else "success"
 
+        planned: set[str] = set()
+        started: dict[str, int] = {}
+        for index, item in enumerate(self._command_usage or ()):
+            planned.update(item)
+            for key, value in item.items():
+                if index < attempted_commands:
+                    started[key] = started.get(key, 0) + int(value)
         actual: dict[str, int] = {}
         for dimension, reserved_amount in prepared.estimated_budget.items():
             reserved_amount = int(reserved_amount)
             if dimension == "tool_wall_seconds":
                 actual[dimension] = min(reserved_amount, elapsed_seconds)
-            elif dimension in {"hosts_attempted", "tcp_ports_attempted"}:
+            elif dimension in planned and dimension in {"hosts_attempted", "tcp_ports_attempted"}:
+                # What the commands that started attempted, never the hold spread over them.
+                actual[dimension] = min(reserved_amount, started.get(dimension, 0))
+            elif dimension in {"hosts_attempted", "tcp_ports_attempted", "udp_ports_attempted"}:
                 actual[dimension] = min(
                     reserved_amount,
                     (
@@ -296,6 +312,16 @@ class NetworkExecutionAdapter:
                     non_http = reserved_amount - int(prepared.estimated_budget.get("http_requests") or 0)
                     actual[dimension] = ((non_http * attempted_commands + command_count - 1) // command_count
                                          + nse_http_actual["http_requests"])
+            elif dimension == "device_fragility_points":
+                # A native estimate (SNMP): the share of the commands that started.
+                actual[dimension] = min(
+                    reserved_amount,
+                    (reserved_amount * attempted_commands + command_count - 1) // command_count,
+                )
+        for dimension in planned - set(prepared.estimated_budget) - {"hosts_attempted", "tcp_ports_attempted"}:
+            # Device fragility counts every connection the started commands made, including
+            # ports the Hunt attempted before and so no longer holds.
+            actual[dimension] = started.get(dimension, 0)
 
 
         return CapabilityAdapterResult(

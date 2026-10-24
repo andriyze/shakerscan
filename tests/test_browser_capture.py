@@ -421,6 +421,278 @@ def test_a_capture_relabelled_as_har_is_still_stripped():
     assert request["captured_withheld"]
 
 
+# A recorded path that carries a credential: (path, the fixture value in it, the positions of the
+# segments a capture replay withholds). Unit fixtures only.
+PATH_CREDENTIALS = [
+    ("/auth/magic-login/{}", "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08", [3]),
+    ("/magic/{}", "mgk7Fixture", [2]),
+    ("/password/reset/{}", "rst7Fixture", [3]),
+    ("/s/{}/dashboard", "Zx9Qp2Lm7Rt4Wv8Yb3NcKd5Hj6", [2]),
+    ("/api/token={}/me", "tkn7Fixture", [2]),
+    ("/invite/{}", "inv7Fixture", [2]),
+    ("/otp/{}", "otp7Fixture", [2]),
+    ("/otp/{}", "482913", [2]),
+    ("/share/{}", "Qx7Lm2Np9Rt4Wv8Yb3", [2]),
+    ("/reset-password/{}", "a1b2c3d4", [2]),
+    ("/api/access_key={}/report", "AKIAFIXTURE01", [2]),
+    ("/download/{}", "Ab3_dE5-fG7hJ9kL1mN3pQ5rS7tU9vW1xY3z", [2]),
+    ("/verify/{}", "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.c2lnbmF0dXJlX3Zh", [2]),
+    # An ASP.NET cookieless session, compound and plural labels, short links, credential pairs
+    # the display mask shows, and an unlabelled hex token the random-run rule alone would miss.
+    ("/(S({}))/default.aspx", "lit3py55t21z5v55vlm25s55", [1]),
+    ("/app/(X(1)S({}))/Orders.aspx", "lit3py55t21z5v55vlm25s55", [2]),
+    ("/api/sessions/{}", "Zx9Qp2Lm7Rt4Wv8Yb3NcKd5Hj6", [3]),
+    ("/verify-email/{}", "Vfy7Fixture2", [2]),
+    ("/confirm_account/{}", "Cnf7Fixture2", [2]),
+    ("/session-id/{}", "Sid7Fixture2", [2]),
+    ("/login/{}", "Lgn7Fixture2", [2]),
+    ("/unsubscribe/{}", "Uns7Fixture2", [2]),
+    ("/m/{}", "Mq7Lm2Np9Rt4Wv8Yb3NcKd5Hj6", [2]),
+    ("/api/sessionid={}/me", "qwertyuiop", [2]),  # after "=", even a word is the value
+    ("/api/x-sig={}/file", "Sig7Fixture2", [2]),
+    ("/hooks/{}/events", "deadbeefcafebabedeadbeefcafebabe", [2]),
+]
+# Ordinary REST, SPA and asset routes a capture replays exactly as recorded: route words after a
+# credential word (/auth/login, /session/current, /token/refresh), versions, UUID and ObjectId
+# resource ids, short opaque ids, digests, build ids and slugs. Unit fixtures only.
+ORDINARY_ROUTES = [
+    "/products/ProductCategory12", "/docs/getting-started", "/2026-01-01/report", "/files/report.pdf",
+    "/api/orders/550e8400-e29b-41d4-a716-446655440000",
+    "/api/projects/3f2b9c1e-7a4d-4e8b-9c2a-1b5d6e7f8a9b/items",
+    "/api/users/507f1f77bcf86cd799439011", "/api/users/64b7f1c2e4a9d3f0b1c2d3e4",
+    "/api/auth/login", "/api/auth/session", "/auth/me", "/identity/api/auth/v3/check-otp",
+    "/api/session/current", "/api/token/refresh", "/api/key/list", "/verify/email",
+    "/api/confirm/order", "/api/signed/upload", "/code/review/42", "/rest/basket/6",
+    "/auth/oauth2/callback", "/sso/saml2/acs", "/s/dashboard", "/v1/sessions:create",
+    "/community/api/v2/community/posts/a5ZmDQ8Lx8A9LGmBbBKBjk",
+    "/api/v1/invoices/inv_1NqZ8x2eZvKYlo2C9x7Yd3Ab",
+    "/api/files/sha256-2c26b46b68ffc68ff99b453c1d30413413422d706483bfa0f98a5e886266e7ae",
+    "/_next/static/aB3dE5fG7hJ9kL1mN3pQ5/_buildManifest.js",
+    "/_next/static/chunks/pages/_app-3c9d8e1f2a4b5c6d.js", "/assets/index-B7xQ2kLm.js",
+    "/blog/introducing-the-new-dashboard-experience-2026",
+    "/download/report-2024.pdf", "/m/settings", "/login/oauth2", "/verify-email/sent",
+    "/api/sessions/123", "/check-otp/v2", "/api/share/settings", "/s/v2",
+]
+
+
+def _get_entry(path, headers=()):
+    return har_entry(CaptureFlow.model_validate({
+        "method": "GET", "url": f"https://app.example.test{path}",
+        "request_headers": [{"name": name, "value": value} for name, value in headers],
+    }))[0]
+
+
+@pytest.mark.parametrize(("template", "secret", "positions"), PATH_CREDENTIALS)
+def test_a_capture_replay_withholds_credential_path_segments(template, secret, positions):
+    """A session id, magic-login, reset, invitation or one-time code in a recorded path is a
+    credential like a cookie: a capture's replay never sends it, every selection leaves the
+    request out, and its index row is not offered as replayable."""
+    from scanner.scanner_tools.device_request_formats import resolve_imported_requests
+    from scanner.scanner_tools.request_collections import RequestSelector, select_requests
+    from scanner.scanner_tools.request_replay import build_selected_replay_plan
+
+    path = template.format(secret)
+    entries = [_get_entry(path), _get_entry("/products/ProductCategory12")]
+    payload = _capture_payload(entries)
+    withheld, control = resolve_imported_requests(payload)
+    assert withheld["error"] == "captured_path_credential_withheld"
+    assert withheld["captured_path_segments_withheld"] == positions
+    assert withheld["captured_withheld"] == [f"path:{position}" for position in positions]
+    assert secret not in json.dumps(withheld, default=str)
+    assert control["error"] is None and control["url"] == "https://app.example.test/products/ProductCategory12"
+
+    for selector in (RequestSelector(), RequestSelector(safe_methods_only=False)):
+        assert [item["id"] for item in select_requests(payload, selector)] == [control["id"]]
+    plan = build_selected_replay_plan(
+        payload, RequestSelector(safe_methods_only=False), allowed_origins=ORIGINS)
+    assert [request.request_id for request in plan.requests] == [control["id"]]
+    assert secret not in json.dumps([plan.public_dict(), list(plan.wire_requests())], default=str)
+
+    rows = index_appended_har_entries(entries, start_index=0)
+    assert [row["supported"] for row in rows] == [False, True]
+    assert rows[0]["request_id"] == withheld["id"]
+    assert secret not in json.dumps(rows)
+
+    # The same document imported as an ordinary HAR is replayed as the operator supplied it.
+    har, _control = resolve_imported_requests({"format": "har", "document": payload["document"]})
+    assert har["url"] == f"https://app.example.test{path}" and har["error"] is None
+
+
+@pytest.mark.parametrize("path", ORDINARY_ROUTES)
+def test_a_capture_replay_keeps_ordinary_route_segments(path):
+    """The replay rule is not the list's masking: a route the request list partly masks (a UUID,
+    the word after ``auth``) is still replayed exactly, with a credential profile when the target
+    has one."""
+    from scanner.scanner_tools.device_request_formats import resolve_imported_requests
+    from scanner.scanner_tools.request_collections import RequestSelector
+    from scanner.scanner_tools.request_replay import bind_replay_credential_headers, build_selected_replay_plan
+
+    entry = _get_entry(path)
+    payload = _capture_payload([entry])
+    (request,) = resolve_imported_requests(payload)
+    assert request["url"] == f"https://app.example.test{path}" and request["error"] is None
+    assert request["captured_path_segments_withheld"] == [] and request["captured_withheld"] == []
+    (row,) = index_appended_har_entries([entry], start_index=0)
+    assert row["supported"] is True
+    plan = build_selected_replay_plan(payload, RequestSelector(), allowed_origins=ORIGINS)
+    bound = bind_replay_credential_headers(plan, {"Cookie": "session=profile"}, auth_kind="cookie")
+    assert [item.wire_dict()["url"] for item in bound.requests] == [f"https://app.example.test{path}"]
+
+
+def test_the_request_list_masks_every_segment_replay_withholds():
+    """A capture's request list masks every segment its replay withholds, so it never shows a
+    value that replay treats as a credential, and shows every other URL exactly as the shared
+    display mask does (a fixed corpus and a seeded random one; unit fixtures)."""
+    import random
+
+    from scanner.scanner_tools.device_request_formats import (
+        captured_path_credential_segments, redact_captured_url,
+    )
+    from scanner.scanner_tools.url_redaction import redact_url
+
+    words = ["api", "v2", "auth", "login", "session", "s", "share", "sid", "reset", "otp", "token",
+             "magic-link", "users", "posts", "invite", "code", "list", "me", "x"]
+    rng = random.Random(20261019)
+
+    def segment():
+        choice = rng.random()
+        if choice < 0.5:
+            return rng.choice(words)
+        alphabet = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_.=~"
+        return "".join(rng.choice(alphabet) for _ in range(rng.randint(1, 48)))
+
+    corpus = [template.format(secret) for template, secret, _positions in PATH_CREDENTIALS]
+    corpus += ORDINARY_ROUTES
+    corpus += ["/" + "/".join(segment() for _ in range(rng.randint(1, 6))) for _ in range(5_000)]
+    for path in corpus:
+        url = f"https://app.example.test{path}"
+        withheld = captured_path_credential_segments(url)
+        shown = redact_captured_url(url)
+        segments = shown.removeprefix("https://app.example.test").split("/")
+        for position in withheld:
+            assert segments[position].endswith("<redacted>"), (path, position)
+        if not withheld:
+            assert shown == redact_url(url), path
+
+
+def test_a_capture_replay_sends_a_credential_referer_as_its_origin():
+    """A page under ``/s/<session>/`` (or with ``?token=``) sends its full URL as the Referer of
+    every request it makes; replay sends only the origin, and names the header it changed."""
+    from scanner.scanner_tools.device_request_formats import resolve_imported_requests
+
+    session = "Zx9Qp2Lm7Rt4Wv8Yb3NcKd5Hj6"
+    referers = [
+        f"https://app.example.test/s/{session}/dashboard",
+        "https://app.example.test/welcome?token=tok7Fixture&view=1",
+        "https://app.example.test/home;jsessionid=JSESSIONFIXTURE1",
+        "https://app.example.test/products/ProductCategory12?page=2",
+        "not a url",
+    ]
+    entries = [_get_entry("/api/data", [("Referer", referer), ("Accept", "*/*")]) for referer in referers]
+    resolved = resolve_imported_requests(_capture_payload(entries))
+    sent = [dict(request["header_items"]).get("Referer") for request in resolved]
+    assert sent == ["https://app.example.test/", "https://app.example.test/", "https://app.example.test/",
+                    "https://app.example.test/products/ProductCategory12?page=2", None]
+    assert [request["headers"].get("Referer") for request in resolved] == sent
+    assert [("header:referer" in request["captured_withheld"]) for request in resolved] == [
+        True, True, True, False, True]
+    assert all(request["error"] is None for request in resolved)
+    for secret in (session, "tok7Fixture", "JSESSIONFIXTURE1"):
+        assert secret not in json.dumps(resolved, default=str)
+
+
+def test_a_capture_marked_har_import_counts_its_withheld_requests():
+    from api.capture.flows import empty_capture_document
+    from scanner.scanner_tools.request_collections import validate_and_index
+
+    document = empty_capture_document()["document"]
+    document["log"]["entries"] = [_get_entry("/s/Zx9Qp2Lm7Rt4Wv8Yb3NcKd5Hj6/dashboard"), _get_entry("/api/data")]
+    _payload, summary, rows = validate_and_index(document, import_format="har")
+    assert [row["supported"] for row in rows] == [False, True]
+    assert summary["unsupported_request_count"] == 1
+    assert "Zx9Qp2Lm7Rt4Wv8Yb3NcKd5Hj6" not in json.dumps(summary)
+
+
+def test_a_capture_counts_the_requests_replay_leaves_out(monkeypatch):
+    """Each batch adds its withheld requests to the capture's ``unsupported_request_count`` (an
+    import's summary has the same count); request and endpoint counts still include them."""
+    from datetime import datetime, timezone
+
+    from api.capture import store
+    from api.capture.flows import new_capture_state, public_capture_state
+
+    class Conn:
+        def __init__(self):
+            self.index_rows = []
+
+        async def fetch(self, _sql, *_args):
+            return [{"allowed_origins": json.dumps(ORIGINS)}]
+
+        async def fetchval(self, _sql, *_args):
+            return len({(row[5], row[7]) for row in self.index_rows})
+
+        async def execute(self, _sql, *_args):
+            return "OK"
+
+        async def executemany(self, _sql, rows):
+            self.index_rows.extend(rows)
+
+    monkeypatch.setattr(store, "encrypt_secret", lambda text: "enc:fernet:" + text)
+    state = new_capture_state(allowed_origins=ORIGINS, opened_at="2026-10-19T00:00:00+00:00")
+    metadata = {"capture": state}
+    row = {"id": "c1", "target_id": "t1", "db_now": datetime.now(timezone.utc)}
+    conn = Conn()
+    for seq, paths in enumerate((["/s/Zx9Qp2Lm7Rt4Wv8Yb3NcKd5Hj6/home", "/api/items"],
+                                 ["/api/orders/550e8400-e29b-41d4-a716-446655440000", "/otp/482913"]), 1):
+        batch = CaptureBatch.model_validate({"seq": seq, "flows": [
+            {"method": "GET", "url": f"https://app.example.test{path}"} for path in paths]})
+        asyncio.run(store._append(conn, row, metadata, state, batch, batch.digest()))
+    assert [item[-1] for item in conn.index_rows] == [False, True, True, False]
+    public = public_capture_state(metadata)
+    assert (public["flow_count"], public["endpoint_count"], public["unsupported_request_count"]) == (4, 4, 2)
+
+
+# Paths whose credential segments the collection index masks (url_redaction). Unit fixtures only.
+MASKED_PATHS = [
+    ("/s/Zx9Qp2Lm7Rt4Wv8Yb3NcKd5Hj6/dashboard", "Zx9Qp2Lm7Rt4Wv8Yb3NcKd5Hj6"),
+    ("/share/Qx7Lm2Np9Rt4Wv8Yb3", "Qx7Lm2Np9Rt4Wv8Yb3"),
+    ("/otp/otpFixture1", "otpFixture1"),
+    ("/sso/ssoFixture1/callback", "ssoFixture1"),
+    ("/nonce/nonceFixture1", "nonceFixture1"),
+    ("/api-key/apikeyFixture1", "apikeyFixture1"),
+    ("/invitation/invFixture1", "invFixture1"),
+    ("/app;jsessionid=JSESSIONFIXTURE1/home", "JSESSIONFIXTURE1"),
+    ("/api/token=tokFixture1/me", "tokFixture1"),
+    ("/auth/magic-login/9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08",
+     "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"),
+]
+
+
+def test_capture_wire_urls_and_replay_plans_mask_what_the_index_masks():
+    from scanner.scanner_tools import request_replay, v2_request_replay_hardening
+    from scanner.scanner_tools.device_request_formats import resolve_imported_requests
+    from scanner.scanner_tools.url_redaction import redact_url
+
+    # Importing the package applies the compatibility hardening: this is the redactor in use.
+    assert request_replay._redacted_url is v2_request_replay_hardening._redacted_url
+    entries = [_get_entry(path) for path, _secret in MASKED_PATHS]
+    resolved = resolve_imported_requests(_capture_payload(entries))
+    rows = index_appended_har_entries(entries, start_index=0)
+    for (path, secret), request, row in zip(MASKED_PATHS, resolved, rows, strict=True):
+        url = f"https://app.example.test{path}"
+        index_url = redact_url(url)
+        assert row["redacted_url"] == index_url and secret not in index_url
+        assert secret not in request["url"] and secret not in request["url_template"]
+        # An ordinary HAR import replays the path exactly; its plan (and so its receipt) shows
+        # the path the way the index does.
+        plan = request_replay.build_replay_plan(
+            [{"id": "r1", "method": "GET", "url": url}], allowed_origins=ORIGINS)
+        assert plan.requests[0].wire_dict()["url"] == url
+        public = plan.public_dict()
+        assert public["secret_values_visible"] is False
+        assert public["requests"][0]["redacted_url"] == index_url, path
+
+
 def test_device_scans_refuse_an_open_capture():
     from fastapi import HTTPException
 

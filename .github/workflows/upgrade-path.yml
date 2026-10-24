@@ -5,8 +5,12 @@ name: Upgrade path
 # then calls every GET route in the API's OpenAPI document plus targeted writes
 # (scripts/upgrade_path_smoke.sh). Any 5xx fails. It upgrades from the stable channel and from the
 # newest published release between stable and the candidate, when that differs. The release
-# candidate calls this before certifying; a pull request that changes the gate runs it against the
-# newest candidate built on main.
+# candidate calls this before certifying, with its exact commit and images; that call is the gate.
+# A pull request that changes the gate runs it against the newest candidate built on main,
+# upgrading from the release before stable while main still carries the promoted stable version.
+# A pull request whose VERSION differs from that candidate's (a version bump) cannot pair its own
+# runtime files with main's images, so the lane installs the candidate's commit with the pull
+# request's gate files and records why (scripts/upgrade_lane_candidate.sh).
 on:
   workflow_call:
     inputs:
@@ -22,6 +26,7 @@ on:
     paths:
       - 'scripts/upgrade_path_smoke.sh'
       - 'scripts/upgrade_path_probe.py'
+      - 'scripts/upgrade_lane_candidate.sh'
       - '.github/workflows/upgrade-path.yml'
 
 permissions:
@@ -39,22 +44,46 @@ jobs:
     timeout-minutes: 5
     outputs:
       versions: ${{ steps.select.outputs.versions }}
+      # Empty for a release candidate, which brings its own receipt.
+      candidate_run: ${{ steps.candidate.outputs.run_id }}
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
         with:
           ref: ${{ inputs.candidate_sha || github.event.pull_request.head.sha }}
           persist-credentials: false
 
+      # A pull request only. One build-on-main run is chosen here and passed to every matrix job,
+      # so the baselines and the installs read one candidate; on a version bump the tree becomes
+      # that candidate's commit (with this pull request's gate files) before baselines are chosen.
+      - name: Choose the candidate built on main
+        id: candidate
+        if: ${{ inputs.candidate_sha == '' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          # The files whose change runs this lane (the pull_request paths above).
+          GATE_FILES: scripts/upgrade_path_smoke.sh scripts/upgrade_path_probe.py
+        shell: bash
+        run: |
+          # shellcheck disable=SC2086 # GATE_FILES is a list of paths
+          bash scripts/upgrade_lane_candidate.sh --out artifacts/candidate $GATE_FILES
+
       - name: Stable channel plus the newest published release below the candidate
         id: select
         env:
           GH_TOKEN: ${{ github.token }}
           REPOSITORY: ${{ github.repository }}
+          # Empty for a pull request. Between releases its tree still carries the promoted stable
+          # version, so it upgrades from the newest published release below it. A release
+          # candidate passes its exact commit and must be newer than stable.
+          CANDIDATE_SHA: ${{ inputs.candidate_sha }}
         shell: bash
         run: |
+          between=()
+          [ -n "$CANDIDATE_SHA" ] || between=(--between-releases)
           published="$(gh release list -R "$REPOSITORY" --exclude-drafts --exclude-pre-releases \
             --limit 100 --json tagName --jq '.[].tagName')"
-          versions="$(python3 scripts/upgrade_path_probe.py baselines \
+          versions="$(python3 scripts/upgrade_path_probe.py baselines ${between[@]+"${between[@]}"} \
             --stable "$(tr -d '[:space:]' < install/STABLE_VERSION)" \
             --candidate "$(tr -d '[:space:]' < VERSION)" --published "$published" \
             | jq -Rnc '[inputs | select(test("^[0-9]+\\.[0-9]+\\.[0-9]+$"))]')"
@@ -84,24 +113,25 @@ jobs:
 
       - name: Download this run's candidate receipt
         if: ${{ inputs.receipt_artifact != '' }}
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
         with:
           name: ${{ inputs.receipt_artifact }}
           path: artifacts/candidate
 
-      - name: Download the newest candidate built on main
+      # A pull request only: the candidate the baselines job chose, on a tree of its release.
+      - name: Download the candidate built on main
         if: ${{ inputs.receipt_artifact == '' }}
         env:
           GH_TOKEN: ${{ github.token }}
           REPOSITORY: ${{ github.repository }}
+          CANDIDATE_RUN: ${{ needs.baselines.outputs.candidate_run }}
+          BASELINE_VERSION: ${{ matrix.baseline }}
+          GATE_FILES: scripts/upgrade_path_smoke.sh scripts/upgrade_path_probe.py
         shell: bash
         run: |
-          run_id="$(gh run list -R "$REPOSITORY" --workflow build-on-main.yml --branch main --status success \
-            --limit 1 --json databaseId --jq '.[0].databaseId')"
-          [[ "$run_id" =~ ^[0-9]+$ ]] || { echo "no successful build-on-main run" >&2; exit 1; }
-          artifact="$(gh api "repos/$REPOSITORY/actions/runs/$run_id/artifacts" \
-            --jq '[.artifacts[] | select(.name | startswith("release-candidate-uncertified-"))][0].name')"
-          gh run download "$run_id" -R "$REPOSITORY" -n "$artifact" -D artifacts/candidate
+          # shellcheck disable=SC2086 # GATE_FILES is a list of paths
+          bash scripts/upgrade_lane_candidate.sh --out artifacts/candidate --run-id "$CANDIDATE_RUN" \
+            --record "artifacts/upgrade-path/$BASELINE_VERSION-lane-candidate.json" $GATE_FILES
 
       - name: Write the candidate image lock
         shell: bash
@@ -157,7 +187,7 @@ jobs:
 
       - name: Keep the receipt and logs
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: upgrade-path-${{ matrix.baseline }}-${{ inputs.candidate_sha || github.sha }}
           path: artifacts/upgrade-path

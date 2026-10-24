@@ -36,7 +36,7 @@ const stoppedRetest = {
   completed_at: '2026-10-10T10:00:03Z',
 }
 
-async function mockApi(page: Page) {
+async function mockApi(page: Page, retestModes: string[] = ['tiered', 'deterministic']) {
   await pinMockApiOrigin(page)
   await page.route(`${MOCK_API_ORIGIN}/**`, async route => {
     const path = new URL(route.request().url()).pathname
@@ -45,7 +45,7 @@ async function mockApi(page: Page) {
         id: findingId, title: 'Reflected XSS', severity: 'high', status: 'active', tool: 'dalfox',
         url: 'http://retest.fixture.test/search?q=1', target_url: 'http://retest.fixture.test',
         last_verification_status: 'error', last_verification_verdict: 'error',
-        retest_supported: true, retest_type: 'xss', retest_modes: ['tiered', 'deterministic', 'ai'],
+        retest_supported: true, retest_type: 'xss', retest_modes: retestModes,
         first_seen_at: '2026-10-01T00:00:00Z', last_seen_at: '2026-10-10T00:00:00Z',
       } })
     }
@@ -74,6 +74,14 @@ test('a retest stopped by its authorization says so and records no verdict', asy
   await expect(stop).toContainText('Retest stopped: authorization withdrawn')
   await expect(stop).toContainText('authorization was revoked while this retest was running')
   await expect(stop).toContainText('No verdict was recorded')
+})
+
+test('a retest offers the prover tiers, never the AI tier alone', async ({ page }) => {
+  // An AI verdict is at most inconclusive, so an AI-only retest could never conclude; the page
+  // offers none even where the API (an earlier one) still lists the "ai" mode.
+  await mockApi(page, ['tiered', 'deterministic', 'ai'])
+  await page.goto(`/findings/${findingId}`)
+  await expect(page.getByLabel('Retest mode').locator('option')).toHaveText(['Tiered', 'Deterministic only'])
 })
 
 test('a scan stopped by its authorization names why, not the failed phase', async ({ page }) => {

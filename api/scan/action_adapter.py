@@ -11,10 +11,11 @@ import asyncio
 from datetime import datetime, timezone
 import functools
 import hashlib
-from typing import Any, Awaitable, Callable, Iterable, Mapping, Protocol, Sequence
+from typing import Any, Awaitable, Callable, Collection, Iterable, Mapping, Protocol, Sequence
 import json
 import math
 import statistics
+import sys
 import time
 import urllib.parse
 try:
@@ -215,6 +216,20 @@ except (ImportError, ModuleNotFoundError):
     from scanner.scanner_tools.url_redaction import redact_url
 
 try:
+    from scanner_tools.unsafe_actions import path_may_change_state
+except (ImportError, ModuleNotFoundError):
+    from scanner.scanner_tools.unsafe_actions import path_may_change_state
+
+from .auth_endpoint_probe import (
+    AUTH_ACTION_IDS, AUTH_ENDPOINT_CHECK_ATTEMPT_REQUESTS, AUTH_ENDPOINT_MAX_PARAMETERS,
+    AUTH_ENDPOINT_PACE_UNFUNDED, AUTH_ENDPOINT_PROBE_LIMITED, AUTH_ENDPOINT_PROBE_PROFILE,
+    PacedSignInTransport, SignInEndpoint,
+    auth_endpoint_hold, normalize_path, pace_seconds, pace_wall_seconds, paced_check_hold,
+    parallel_children, probe_parameters, probe_set_left, probe_set_spent, sign_in_endpoint_for,
+    sign_in_endpoints, sign_in_page_paths,
+)
+
+try:
     from redaction import redact_text
 except (ImportError, ModuleNotFoundError):
     from scanner.redaction import redact_text
@@ -237,6 +252,7 @@ except (ImportError, ModuleNotFoundError):
     )
 
 from .action_plan import ScanAction, ScanActionPlan
+from .collection_replay import ScanCollectionReplayWithheld
 from .sqli_concurrency import (
     CANDIDATE_CONCURRENCY_ARG,
     ELAPSED_DIMENSIONS,
@@ -249,6 +265,7 @@ from .sqli_stages import (
     prior_resume,
     prior_stages,
     run_staged_sqli_attempt,
+    stage_requests,
 )
 from .verifier_refusal import is_refusal_error, mark_refused, refusal_exempt
 from .verification_extension import (
@@ -274,6 +291,7 @@ from .external_process import (
     order_batch_rows_by_cost_class,
     template_attempt_wall,
     template_retry_wall,
+    window_template_attempt_hold,
 )
 from .continuation import (
     ScanContinuationError,
@@ -288,11 +306,25 @@ from .capability_execution import (
     prepare_scan_inline_capability,
     scan_external_execution_target,
     scan_parameterized_execution_candidates,
+    tls_legacy_probes_affordable,
 )
 from .execution_backend import ActionHeartbeat, ActionLease
 from .finalizer import _observed_url_key, finalize_scan_report
-from .nuclei_execution import active_template_window, resolve_active_scan_nuclei_options
-from .posture_findings import CORS_PROBE_ACTIONS
+from .nuclei_execution import (
+    ACTIVE_TEMPLATE_WINDOWS_RECORD_KIND,
+    TEMPLATE_WINDOW_BEYOND_ALLOWLIST,
+    TEMPLATE_WINDOW_PAST_BASES,
+    active_template_window,
+    active_template_window_applies,
+    active_template_window_count,
+    planned_endpoint_entries,
+    resolve_active_scan_nuclei_options,
+    active_sweep_base,
+    active_sweep_bases,
+    active_sweep_index,
+    window_position_candidate_id,
+)
+from .posture_findings import CORS_PROBE_ACTIONS, cors_probe_verdict
 from .negative_control import negative_control_entries
 from .nuclei_template_index import nuclei_templates_directory
 from .private_inputs import BrokerPrivateScanInputs
@@ -464,6 +496,80 @@ def _batch_candidate_id(row: Mapping[str, Any], manifest_index: int) -> str:
     )
 
 
+def _repeated_candidate_positions(entries: Sequence[Mapping[str, Any]]) -> frozenset[int]:
+    """The manifest positions whose candidate id an earlier entry of the manifest already has.
+
+    A candidate's id is its route, method and the one field that anchors a body
+    (``work_manifests``), so the declared sign-in form, the crawled form with its hidden fields
+    and a JSON variant of it are one id with three bodies.
+    """
+    seen: set[str] = set()
+    repeated: set[int] = set()
+    for index, entry in enumerate(entries):
+        identity = _batch_candidate_id(entry, index)
+        if identity in seen:
+            repeated.add(index)
+        seen.add(identity)
+    return frozenset(repeated)
+
+
+def _batch_attempt_id(
+    manifest_digest: str, family: str, candidate_id: str, manifest_index: int,
+    repeated_positions: Collection[int] = frozenset(), retry_round: int = 0,
+) -> str:
+    """The attempt id of one manifest entry in a ``family`` batch over the manifest.
+
+    The manifest, the family and the entry's candidate id name it. An entry whose candidate id an
+    earlier entry of the manifest has (``_repeated_candidate_positions``: a variant of one form)
+    also names its position, so each variant keeps its own checkpoint, units and count of what it
+    sent; the first entry with an id keeps the attempt id earlier builds checkpointed it under.
+    Every batch over a candidate manifest derives its attempt ids here.
+    """
+    key = f"{manifest_digest}:{family}:{candidate_id}"
+    if manifest_index in repeated_positions:
+        key += f":entry:{manifest_index}"
+    if retry_round:
+        key += f":retry:{retry_round}"
+    return hashlib.sha256(key.encode()).hexdigest()
+
+
+def _signalled_positions(
+    entries: Sequence[Mapping[str, Any]], *, manifest_digest: str, verifier_family: str,
+    signals: Iterable[tuple[str, str]], recorded_attempts: Collection[str],
+) -> frozenset[int]:
+    """The manifest positions a verifier's signals escalate to a proof.
+
+    ``signals`` are (verifier attempt id, candidate id) pairs, ``recorded_attempts`` every attempt
+    id the verifier's records name. Each variant of one form is its own verifier attempt, so a
+    signal escalates only the variant that produced it. A signal whose attempt id names no entry
+    of this manifest escalates every entry with its candidate id, and so does one that names the
+    first variant of a form whose other variants the verifier never recorded under their own ids:
+    an earlier build kept the variants under one attempt id, so its signal cannot say which.
+    """
+    repeated = _repeated_candidate_positions(entries)
+    identities = [_batch_candidate_id(entry, index) for index, entry in enumerate(entries)]
+    attempt_ids = [
+        _batch_attempt_id(manifest_digest, verifier_family, identity, index, repeated)
+        for index, identity in enumerate(identities)
+    ]
+    position_of = {attempt: index for index, attempt in enumerate(attempt_ids)}
+    varied = {identities[index] for index in repeated}
+    per_variant = {identities[index] for index in repeated if attempt_ids[index] in recorded_attempts}
+    positions: set[int] = set()
+    for attempt_id, candidate_id in signals:
+        index = position_of.get(attempt_id)
+        if index is not None and (
+            index in repeated or identities[index] not in varied or identities[index] in per_variant
+        ):
+            positions.add(index)
+            continue
+        identity = identities[index] if index is not None else candidate_id
+        positions.update(
+            position for position, item in enumerate(identities) if item == identity
+        )
+    return frozenset(positions)
+
+
 def _template_match_identity(item: Mapping[str, Any]) -> tuple[str, str, str]:
     """What makes two template matches the same finding: template, matcher and location.
 
@@ -573,6 +679,33 @@ def _sqli_fields(
     return None, max(1, len(urllib.parse.parse_qsl(query, keep_blank_values=True)))
 
 
+# Sources and path shapes of an API route rather than a page: a crawl seeded there finds few links.
+_API_SEED_SOURCES = frozenset({"collections.replay", "web.spec_ingest"})
+_DATA_FILE_SUFFIXES = (".json", ".xml", ".csv", ".txt", ".yaml", ".yml", ".js", ".map")
+
+
+def _api_route(path: str, source: Any) -> bool:
+    """Whether a seed is an API route or a data file rather than a page."""
+    segments = [segment.casefold() for segment in str(path or "").split("/") if segment]
+    return (
+        str(source or "") in _API_SEED_SOURCES
+        or bool(segments) and segments[0] in {"api", "rest", "graphql", "v1", "v2", "v3"}
+        or str(path or "").casefold().endswith(_DATA_FILE_SUFFIXES)
+    )
+
+
+def _next_unit_requests(head: Mapping[str, Any]) -> int:
+    """What an unfinished SQLi candidate's next unit needs for its verdict, from its record."""
+    technique = str(head.get("resume_technique") or "")
+    if not technique:
+        return 0
+    try:
+        count = 1 if head.get("resume_field") else max(1, int(head.get("field_count") or 1))
+        return stage_requests(technique, count)
+    except (KeyError, TypeError, ValueError):
+        return 0
+
+
 def _staged_resume_fields(result: Any) -> dict[str, Any]:
     """What an unfinished SQLi candidate's next attempt was sized from, for its record."""
     technique = getattr(result, "resume_technique", None)
@@ -639,7 +772,7 @@ def _budget_verdict(
 def _deferred_budget_verdict(
     resume: Any, prior: Any, *, closed: bool, candidate_id: str,
     fields: Sequence[str] | None, field_count: int, ceiling: int | None,
-    scan_wall_share: int | None, execution_target: str, method: str,
+    scan_wall_share: int | None, execution_target: str, method: str, attempt_id: str,
 ) -> list[dict[str, Any]]:
     """The budget verdict of a SQLi candidate deferred before any traffic, if it has one."""
     unfundable = tuple(getattr(resume, "unfundable", ()) or ())
@@ -648,6 +781,8 @@ def _deferred_budget_verdict(
     return [{
         "url": redact_url(execution_target),
         "method": method,
+        # The variants of one form share a candidate id: the verdict names its own attempt.
+        "attempt_id": attempt_id,
         **budget_inconclusive_record(
             candidate_id=candidate_id,
             finished=prior.finished,
@@ -670,6 +805,147 @@ def _no_tool_output(observations: Any) -> bool:
         isinstance(item, Mapping) and item.get("kind") == "candidate_attempt"
         for item in observations or ()
     )
+
+
+class _SignInChecks:
+    """The pace and probe set of an in-process check's requests to the sign-in endpoint.
+
+    The SQLi and XSS request verifiers, the SQLi proof, the NoSQLi check and the XSS browser proof
+    send a few requests to a candidate's endpoint. On the credential profile's own sign-in
+    endpoint they are held to the same pace as the sqlmap and Dalfox verifiers and draw from a
+    probe set of their own across the Scan (auth_endpoint_probe), so what the endpoint may receive
+    is the sum of the probe sets. Each check's set is the endpoint's, sized for four fields
+    whatever variant draws from it: sized by each variant's own fields, a two-field variant's
+    NoSQLi set was spent by the crawled four-field form's attempt, and which variants a fresh Scan
+    tested came down to the manifest's order.
+    """
+
+    #: Every variant on the endpoint draws from the endpoint's four-field set.
+    parameters = AUTH_ENDPOINT_MAX_PARAMETERS
+
+    def __init__(
+        self, capability_name: str, endpoints: Sequence[SignInEndpoint],
+        received: dict[str, int], children: int,
+    ) -> None:
+        self.capability_name = capability_name
+        self.endpoints = tuple(endpoints)
+        self.received = received
+        self.children = children
+        #: What this action sent the sign-in endpoints.
+        self.sent = 0
+
+    def endpoint(self, url: str, method: str) -> SignInEndpoint | None:
+        return sign_in_endpoint_for(url, method, self.endpoints) if self.endpoints else None
+
+    def spent(self, endpoint: SignInEndpoint) -> bool:
+        return probe_set_spent(
+            self.capability_name, self.received.get(endpoint.key, 0), self.parameters,
+        )
+
+    def short_of(self, endpoint: SignInEndpoint, need: int) -> bool:
+        """Whether the probe set has less left than the attempt would send."""
+        return probe_set_left(
+            self.capability_name, self.received.get(endpoint.key, 0), self.parameters,
+        ) < need
+
+    def hold(
+        self, endpoint: SignInEndpoint, sub_budget: Mapping[str, int], *,
+        available_wall_seconds: int, need: int,
+    ) -> dict[str, int] | None:
+        """The attempt's paced hold, or None when the slice cannot pace all ``need`` requests."""
+        return paced_check_hold(
+            sub_budget, capability_name=self.capability_name,
+            received=self.received.get(endpoint.key, 0), parameters=self.parameters,
+            children=self.children, available_wall_seconds=available_wall_seconds, need=need,
+        )
+
+    def transport(self, transport: Any, endpoint: SignInEndpoint) -> PacedSignInTransport:
+        return PacedSignInTransport(
+            transport, endpoint, pace_seconds=pace_seconds(children=self.children),
+        )
+
+    @property
+    def pace(self) -> int:
+        """The least delay between two requests to the endpoint, for this Scan part."""
+        return pace_seconds(children=self.children)
+
+    async def wait(self) -> None:
+        """The pace before an attempt that sends the endpoint one request of its own."""
+        await PacedSignInTransport.wait(self.pace)
+
+    async def settle(
+        self, consumed: dict[str, int], requested: Mapping[str, int], *, cancelled: bool = False,
+    ) -> None:
+        """The pace after the action's last request to the endpoint, charged to the action.
+
+        Each request waits the pace before it, so nothing this action sends comes closer to the
+        one before. The next sender may not: a verifier's process can send its first request
+        without waiting its own delay. Waited only from wall the action has left, and not by a
+        cancelled action.
+        """
+        if cancelled or not self.sent or "tool_wall_seconds" not in requested:
+            return
+        spent = int(consumed.get("tool_wall_seconds", 0) or 0)
+        if int(requested["tool_wall_seconds"]) - spent < self.pace:
+            return
+        await self.wait()
+        consumed["tool_wall_seconds"] = spent + self.pace
+
+    def record(
+        self, head: Mapping[str, Any], endpoint: SignInEndpoint, sent: int, *, short: bool,
+        manifest_index: int,
+    ) -> dict[str, Any]:
+        """The attempt's record with what the endpoint received; inconclusive when the probe set
+        left it short and it proved nothing."""
+        received = self.received.get(endpoint.key, 0) + max(0, int(sent))
+        self.received[endpoint.key] = received
+        self.sent += max(0, int(sent))
+        # Named sign_in_*: a key with an "auth" segment is withheld from receipts.
+        record = {
+            **dict(head),
+            "sign_in_endpoint": endpoint.label,
+            "sign_in_endpoint_key": endpoint.key,
+            "sign_in_endpoint_requests": max(0, int(sent)),
+            "sign_in_endpoint_received": received,
+            # Which variant of the candidate: coverage counts a limited variant once, whichever
+            # checks (each its own attempt id) it was limited in.
+            "manifest_index": int(manifest_index),
+        }
+        if short and str(record.get("proof_state") or "") != "verified" and not record.get("verdict"):
+            record.update({
+                "verdict": "inconclusive", "inconclusive_reason": AUTH_ENDPOINT_PROBE_LIMITED,
+            })
+        return record
+
+    def closed(
+        self, endpoint: SignInEndpoint, *, attempt_id: str, candidate_id: str, family: str,
+        manifest_index: int,
+    ) -> dict[str, Any]:
+        """A candidate whose probe set is spent: inconclusive, nothing sent, never negative."""
+        return {
+            "kind": "candidate_attempt", "attempt_id": attempt_id, "candidate_id": candidate_id,
+            "family": family, "status": "success", "proof_state": "not_proven",
+            "budget_consumed": {}, "verdict": "inconclusive",
+            "inconclusive_reason": AUTH_ENDPOINT_PROBE_LIMITED,
+            "sign_in_endpoint": endpoint.label, "sign_in_endpoint_key": endpoint.key,
+            "sign_in_endpoint_requests": 0,
+            "sign_in_endpoint_received": self.received.get(endpoint.key, 0),
+            "manifest_index": int(manifest_index),
+        }
+
+    def deferred(
+        self, endpoint: SignInEndpoint, *, attempt_id: str, candidate_id: str, family: str,
+        available_wall_seconds: int, manifest_index: int,
+    ) -> dict[str, Any]:
+        """A candidate the slice's wall cannot pace: left for a later action, with no verdict."""
+        return {
+            "kind": "candidate_deferred", "attempt_id": attempt_id, "candidate_id": candidate_id,
+            "family": family, "reason": AUTH_ENDPOINT_PACE_UNFUNDED,
+            "available_wall_seconds": max(0, int(available_wall_seconds)),
+            "sign_in_endpoint": endpoint.label,
+            "sign_in_endpoint_received": self.received.get(endpoint.key, 0),
+            "manifest_index": int(manifest_index),
+        }
 
 
 def batch_outcome(
@@ -951,6 +1227,9 @@ class DatabaseNeutralScanActionDispatcher:
         # action actually succeeds.  Preloading them would let a dependent
         # verifier run after a failed or skipped collection action.
         self._private_requests: dict[str, Any] = {}
+        # Collection actions whose every request a capture's replay withholds (the recorded
+        # path carries a credential): skipped with that reason, not failed.
+        self._withheld_replay_actions: set[str] = set()
 
     async def _private_replay_plan(
         self, action: ScanAction,
@@ -958,7 +1237,11 @@ class DatabaseNeutralScanActionDispatcher:
         plan = self._private_replay_plans.get(action.action_id)
         if plan is not None or self._private_replay_plan_loader is None:
             return plan
-        plan = await self._private_replay_plan_loader(action, self.options)
+        try:
+            plan = await self._private_replay_plan_loader(action, self.options)
+        except ScanCollectionReplayWithheld:
+            self._withheld_replay_actions.add(action.action_id)
+            return None
         if plan is not None:
             self._private_replay_plans[action.action_id] = plan
         return plan
@@ -1033,7 +1316,8 @@ class DatabaseNeutralScanActionDispatcher:
         )
 
     def _skip(self, action: ScanAction, reason: str, *,
-              verify_selection: Mapping[str, Any] | None = None) -> CapabilityReceipt:
+              verify_selection: Mapping[str, Any] | None = None,
+              template_selection: Mapping[str, Any] | None = None) -> CapabilityReceipt:
         now = datetime.now(timezone.utc).isoformat()
         return self._receipt(
             action,
@@ -1045,6 +1329,7 @@ class DatabaseNeutralScanActionDispatcher:
                 "action_id": action.action_id,
                 "execution_started": False,
                 **({"verify_selection": dict(verify_selection)} if verify_selection else {}),
+                **({"template_selection": dict(template_selection)} if template_selection else {}),
             },
         )
 
@@ -1259,6 +1544,7 @@ class DatabaseNeutralScanActionDispatcher:
         *,
         managed_cancellation: bool = False,
         target: TargetBinding | None = None,
+        execution_record: Mapping[str, Any] | None = None,
     ) -> CapabilityReceipt:
         started = datetime.now(timezone.utc)
         result = await CapabilityExecutor().execute(
@@ -1282,7 +1568,12 @@ class DatabaseNeutralScanActionDispatcher:
             consumed=result.actual_budget,
             partial=result.partial,
             timed_out=result.timed_out,
-            redacted_execution=result.redacted_execution,
+            # ``execution_record``: what the dispatcher decided before the run (a template
+            # selection's counts), kept beside the executor's own record.
+            redacted_execution=(
+                {**dict(result.redacted_execution or {}), **dict(execution_record)}
+                if execution_record else result.redacted_execution
+            ),
         )
 
     def _prepared_inline(
@@ -1375,6 +1666,12 @@ class DatabaseNeutralScanActionDispatcher:
                 dict(result.get("response") or {})
                 if isinstance(result.get("response"), Mapping) else {}
             )
+            if cors_probe_origin is not None:
+                # Judged before the receipt redacts the header it compares.
+                headers = response.get("security_headers")
+                response["cors_probe"] = cors_probe_verdict(
+                    cors_probe_origin, headers if isinstance(headers, Mapping) else {},
+                )
             if action.action_id == "baseline.security_txt":
                 body = str(response.get("body_sample") or "").strip()
                 markers = (
@@ -1512,11 +1809,19 @@ class DatabaseNeutralScanActionDispatcher:
             raise ScanActionAdapterError(
                 "TLS action differs from the frozen target matrix"
             )
+        # The action's own hold decides the raw legacy-protocol/weak-suite probes: one reserved
+        # for the handshakes only (a reduced TCP grant, or a plan compiled before the probes were
+        # reserved) must not open them and then fail its budget contract.
+        legacy_probes = tls_legacy_probes_affordable(
+            action.requested_budget,
+            len(https_origins) * len(self.target.allowed_addresses),
+        )
 
         async def operation() -> Mapping[str, Any]:
             return await inspect_tls_binding(
                 target=self.target,
                 timeout_seconds_per_target=15,
+                legacy_probes=legacy_probes,
             )
 
         adapter = self._prepared_inline(
@@ -1639,7 +1944,11 @@ class DatabaseNeutralScanActionDispatcher:
     ) -> CapabilityReceipt:
         plan = await self._private_replay_plan(action)
         if plan is None:
-            return self._skip(action, "private_request_unavailable")
+            return self._skip(action, (
+                "captured_path_credential_withheld"
+                if action.action_id in self._withheld_replay_actions
+                else "private_request_unavailable"
+            ))
         if any(
             int(action.requested_budget.get(name) or 0) < int(amount)
             for name, amount in plan.estimated_budget.items()
@@ -1829,6 +2138,8 @@ class DatabaseNeutralScanActionDispatcher:
         }
         family = "xss" if action.capability_name.startswith("xss.") else "sqli"
         manifest_digest = manifest.reference().manifest_digest
+        repeated_positions = _repeated_candidate_positions(manifest.entries)
+        sign_in_checks = await self._sign_in_checks(action, load_attempts)
         started_at = datetime.now(timezone.utc).isoformat()
         observations: list[Mapping[str, Any]] = []
         errors: list[str] = []
@@ -1840,9 +2151,9 @@ class DatabaseNeutralScanActionDispatcher:
         stopped_by_cancel = False
         for offset, candidate in enumerate(rows):
             candidate_id = str(candidate["candidate_id"])
-            attempt_id = hashlib.sha256(
-                f"{manifest_digest}:{family}:{candidate_id}".encode()
-            ).hexdigest()
+            attempt_id = _batch_attempt_id(
+                manifest_digest, family, candidate_id, start + offset, repeated_positions,
+            )
             prior = completed.get(attempt_id)
             if prior is not None:
                 resumed += 1
@@ -1885,13 +2196,41 @@ class DatabaseNeutralScanActionDispatcher:
             if request is None or not authorized or short:
                 exhausted |= short
                 break
+            transport = self._scan_replay_transport(action, private=True)
+            # The credential profile's own sign-in request: paced, and drawn from this
+            # verifier's probe set on the endpoint (_SignInChecks).
+            sign_in = sign_in_checks.endpoint(request.url, request.method)
+            if sign_in is not None:
+                if sign_in_checks.spent(sign_in):
+                    attempted += 1
+                    attempt_statuses.append({"status": "success", "timed_out": False})
+                    observations.append(sign_in_checks.closed(
+                        sign_in, attempt_id=attempt_id, candidate_id=candidate_id, family=family,
+                        manifest_index=start + offset,
+                    ))
+                    continue
+                held = sign_in_checks.hold(
+                    sign_in, sub_budget,
+                    available_wall_seconds=remaining.get("tool_wall_seconds", 0),
+                    need=AUTH_ENDPOINT_CHECK_ATTEMPT_REQUESTS[action.capability_name],
+                )
+                if held is None:
+                    observations.append(sign_in_checks.deferred(
+                        sign_in, attempt_id=attempt_id, candidate_id=candidate_id, family=family,
+                        available_wall_seconds=remaining.get("tool_wall_seconds", 0),
+                        manifest_index=start + offset,
+                    ))
+                    exhausted.add("tool_wall_seconds")
+                    continue
+                sub_budget = held
+                transport = sign_in_checks.transport(transport, sign_in)
             specification = CAPABILITY_REGISTRY.require(action.capability_name)
             adapter = RequestMutationVerificationAdapter(
                 specification=specification,
                 target=self.target,
                 request=request,
                 candidate=candidate,
-                transport=self._scan_replay_transport(action, private=True),
+                transport=transport,
                 requested_budget=sub_budget,
             )
             result = await CapabilityExecutor().execute(
@@ -1931,6 +2270,14 @@ class DatabaseNeutralScanActionDispatcher:
                 })[:20],
                 "budget_consumed": dict(result.actual_budget),
             }, *attempt_observations)
+            if sign_in is not None:
+                attempt_observations = (
+                    sign_in_checks.record(
+                        attempt_observations[0], sign_in, transport.sent, short=False,
+                        manifest_index=start + offset,
+                    ),
+                    *attempt_observations[1:],
+                )
             attempt = {
                 "attempt_id": attempt_id,
                 "candidate_id": candidate_id,
@@ -1974,6 +2321,10 @@ class DatabaseNeutralScanActionDispatcher:
                 cancelled=stopped_by_cancel,
             )
             batch_errors.insert(0, stated)
+        # The pace after this action's last request to a sign-in endpoint (_SignInChecks.settle).
+        await sign_in_checks.settle(
+            consumed, action.requested_budget, cancelled=self.cancelled(),
+        )
         _batch_status, _batch_partial, _batch_timed_out = batch_outcome(
             attempt_statuses, unattempted,
         )
@@ -2026,28 +2377,37 @@ class DatabaseNeutralScanActionDispatcher:
         ))
         if not rows:
             return self._skip(action, self._empty_slice_reason(manifest))
-        candidate_signals: set[str] = set()
+        manifest_digest = manifest.reference().manifest_digest
+        # A signal escalates the variant whose verifier attempt produced it (_signalled_positions).
+        signals: list[tuple[str, str]] = []
+        recorded: set[str] = set()
         for dependency in proof_signal_sources(action, self.plan):
             for item in await self._observations(dependency):
+                if item.get("attempt_id"):
+                    recorded.add(str(item["attempt_id"]))
                 if (
                     str(item.get("kind") or "") in {"xss_alert", "request_body_verification"}
                     and str(item.get("candidate_id") or "")
                     and str(item.get("proof_state") or item.get("proof_status") or "")
                     not in {"not_proven", "unproven", ""}
                 ):
-                    candidate_signals.add(str(item["candidate_id"]))
+                    signals.append((str(item.get("attempt_id") or ""), str(item["candidate_id"])))
+        signalled = set(_signalled_positions(
+            manifest.entries, manifest_digest=manifest_digest, verifier_family="xss",
+            signals=signals, recorded_attempts=recorded,
+        ))
         # A URL fragment never reaches a server-side verifier, so requiring an upstream reflection
         # signal makes DOM-only XSS impossible to prove. The immutable fragment candidate itself is
         # sufficient authority for a bounded same-origin browser attempt.
-        candidate_signals.update(
-            str(candidate.get("candidate_id") or "")
-            for _index, candidate in rows
-            if candidate.get("browser_fragment_query_parameter_names")
+        signalled.update(
+            index
+            for index, candidate in rows
+            if str(candidate.get("candidate_id") or "")
+            and candidate.get("browser_fragment_query_parameter_names")
             and str(candidate.get("parameter_name") or "")
             in candidate.get("browser_fragment_query_parameter_names", ())
         )
-        candidate_signals.discard("")
-        if not candidate_signals:
+        if not signalled:
             return self._skip(action, "no_xss_candidate_observation")
         load_attempts = getattr(self.backend, "load_batch_attempts", None)
         checkpoint_attempt = getattr(self.backend, "checkpoint_batch_attempt", None)
@@ -2071,7 +2431,8 @@ class DatabaseNeutralScanActionDispatcher:
                     carried[finished_id] = item
                     carried_source[finished_id] = source
         carried_count = 0
-        manifest_digest = manifest.reference().manifest_digest
+        repeated_positions = _repeated_candidate_positions(manifest.entries)
+        sign_in_checks = await self._sign_in_checks(action, load_attempts)
         started_at = datetime.now(timezone.utc).isoformat()
         observations: list[Mapping[str, Any]] = []
         errors: list[str] = []
@@ -2087,11 +2448,12 @@ class DatabaseNeutralScanActionDispatcher:
         proof_headers = primary.headers() if primary.authenticated else None
         for offset, (manifest_index, candidate) in enumerate(rows):
             candidate_id = str(candidate.get("candidate_id") or "")
-            if candidate_id not in candidate_signals:
+            if manifest_index not in signalled:
                 continue
-            attempt_id = hashlib.sha256(
-                f"{manifest_digest}:xss_browser_proof:{candidate_id}".encode()
-            ).hexdigest()
+            attempt_id = _batch_attempt_id(
+                manifest_digest, "xss_browser_proof", candidate_id, manifest_index,
+                repeated_positions,
+            )
             if attempt_id in carried:
                 carried_count += 1
                 attempted += 1
@@ -2166,6 +2528,37 @@ class DatabaseNeutralScanActionDispatcher:
                 observations.extend(rejected["observations"])
                 errors.append(rejected["errors"][0])
                 continue
+            # The proof submits the form once: on the credential profile's own sign-in endpoint
+            # that submission waits the pace and draws from this proof's probe set there.
+            sign_in = (
+                sign_in_checks.endpoint(execution_url, str(resolved_request.get("method") or ""))
+                if body_fields else None
+            )
+            paced = 0
+            if sign_in is not None:
+                if sign_in_checks.spent(sign_in):
+                    attempted += 1
+                    attempt_statuses.append({"status": "success", "timed_out": False})
+                    observations.append(sign_in_checks.closed(
+                        sign_in, attempt_id=attempt_id, candidate_id=candidate_id,
+                        family="xss_browser_proof", manifest_index=manifest_index,
+                    ))
+                    continue
+                # The wait is the attempt's own wall: it comes out of the attempt's share and is
+                # charged with it, so the slice keeps to its wall; a share that cannot hold it
+                # waits for a later action.
+                paced = sign_in_checks.pace
+                share = int(sub_budget.get("tool_wall_seconds") or 0)
+                if share <= paced:
+                    observations.append(sign_in_checks.deferred(
+                        sign_in, attempt_id=attempt_id, candidate_id=candidate_id,
+                        family="xss_browser_proof",
+                        available_wall_seconds=remaining.get("tool_wall_seconds", 0),
+                        manifest_index=manifest_index,
+                    ))
+                    continue
+                sub_budget = {**sub_budget, "tool_wall_seconds": share - paced}
+                await sign_in_checks.wait()
             adapter = XSSBrowserProofAdapter(prepared, trusted_headers=proof_headers)
             specification = CAPABILITY_REGISTRY.require(action.capability_name)
             result = await CapabilityExecutor().execute(
@@ -2182,16 +2575,25 @@ class DatabaseNeutralScanActionDispatcher:
                 str(item.get("proof_state")) for item in attempt_observations
                 if item.get("proof_state")
             ), "not_proven")
+            charged = dict(result.actual_budget)
+            if paced:
+                charged["tool_wall_seconds"] = int(charged.get("tool_wall_seconds") or 0) + paced
             bundled = ({
                 "kind": "candidate_attempt", "attempt_id": attempt_id,
                 "candidate_id": candidate_id, "family": "xss_browser_proof",
                 "status": result.status, "proof_state": proof_state,
-                "budget_consumed": dict(result.actual_budget),
+                "budget_consumed": charged,
             }, *attempt_observations)
+            if sign_in is not None:
+                bundled = (sign_in_checks.record(
+                    bundled[0], sign_in,
+                    int(dict(result.actual_budget).get("state_changing_requests", 0) or 0),
+                    short=False, manifest_index=manifest_index,
+                ), *bundled[1:])
             attempt = {
                 "attempt_id": attempt_id, "candidate_id": candidate_id,
                 "status": result.status, "timed_out": bool(result.timed_out),
-                "budget_consumed": dict(result.actual_budget),
+                "budget_consumed": charged,
                 "observations": bundled, "errors": tuple(result.errors),
                 "proof_state": proof_state,
             }
@@ -2204,15 +2606,16 @@ class DatabaseNeutralScanActionDispatcher:
             attempted += 1
             observations.extend(bundled)
             errors.extend(str(item) for item in result.errors)
-            for name, amount in result.actual_budget.items():
+            for name, amount in charged.items():
                 consumed[name] = min(
                     int(action.requested_budget.get(name, 0)),
                     consumed.get(name, 0) + int(amount),
                 )
-        eligible = sum(
-            str(candidate.get("candidate_id") or "") in candidate_signals
-            for _index, candidate in rows
+        # The pace after this action's last request to a sign-in endpoint (_SignInChecks.settle).
+        await sign_in_checks.settle(
+            consumed, action.requested_budget, cancelled=self.cancelled(),
         )
+        eligible = sum(manifest_index in signalled for manifest_index, _candidate in rows)
         unattempted = max(0, eligible - attempted)
         _batch_status, _batch_partial, _batch_timed_out = batch_outcome(
             attempt_statuses, unattempted,
@@ -2266,9 +2669,14 @@ class DatabaseNeutralScanActionDispatcher:
         ))
         if not rows:
             return self._skip(action, self._empty_slice_reason(manifest))
-        candidate_signals: set[str] = set()
+        manifest_digest = manifest.reference().manifest_digest
+        # A signal escalates the variant whose verifier attempt produced it (_signalled_positions).
+        signals: list[tuple[str, str]] = []
+        recorded: set[str] = set()
         for dependency in proof_signal_sources(action, self.plan):
             for item in await self._observations(dependency):
+                if item.get("attempt_id"):
+                    recorded.add(str(item["attempt_id"]))
                 if (
                     str(item.get("kind") or "") in {
                         "sqli_finding", "request_body_verification", "candidate_attempt",
@@ -2277,8 +2685,12 @@ class DatabaseNeutralScanActionDispatcher:
                     and str(item.get("proof_state") or item.get("proof_status") or "")
                     not in {"not_proven", "unproven", ""}
                 ):
-                    candidate_signals.add(str(item["candidate_id"]))
-        if not candidate_signals:
+                    signals.append((str(item.get("attempt_id") or ""), str(item["candidate_id"])))
+        signalled = _signalled_positions(
+            manifest.entries, manifest_digest=manifest_digest, verifier_family="sqli",
+            signals=signals, recorded_attempts=recorded,
+        )
+        if not signalled:
             return self._skip(action, "no_sqli_candidate_observation")
         load_attempts = getattr(self.backend, "load_batch_attempts", None)
         checkpoint_attempt = getattr(self.backend, "checkpoint_batch_attempt", None)
@@ -2302,7 +2714,8 @@ class DatabaseNeutralScanActionDispatcher:
                     carried[finished_id] = item
                     carried_source[finished_id] = source
         carried_count = 0
-        manifest_digest = manifest.reference().manifest_digest
+        repeated_positions = _repeated_candidate_positions(manifest.entries)
+        sign_in_checks = await self._sign_in_checks(action, load_attempts)
         started_at = datetime.now(timezone.utc).isoformat()
         observations: list[Mapping[str, Any]] = []
         errors: list[str] = []
@@ -2320,11 +2733,11 @@ class DatabaseNeutralScanActionDispatcher:
             # the browser XSS proof; skip it here.
             if candidate.get("browser_fragment_path"):
                 continue
-            if candidate_id not in candidate_signals:
+            if manifest_index not in signalled:
                 continue
-            attempt_id = hashlib.sha256(
-                f"{manifest_digest}:sqli_proof:{candidate_id}".encode()
-            ).hexdigest()
+            attempt_id = _batch_attempt_id(
+                manifest_digest, "sqli_proof", candidate_id, manifest_index, repeated_positions,
+            )
             if attempt_id in carried:
                 carried_count += 1
                 attempted += 1
@@ -2395,6 +2808,42 @@ class DatabaseNeutralScanActionDispatcher:
             }
             if sub_budget.get("http_requests", 0) < 4:
                 break
+            transport = self._scan_replay_transport(action, private=True)
+            # The credential profile's own sign-in endpoint: each proof request waits the pace,
+            # and the proofs draw from a probe set of their own there (_SignInChecks).
+            sign_in = sign_in_checks.endpoint(request.url, request.method)
+            short_of_set = False
+            if sign_in is not None:
+                if sign_in_checks.spent(sign_in):
+                    attempted += 1
+                    attempt_statuses.append({"status": "success", "timed_out": False})
+                    observations.append(sign_in_checks.closed(
+                        sign_in, attempt_id=attempt_id, candidate_id=candidate_id,
+                        family="sqli_proof", manifest_index=manifest_index,
+                    ))
+                    continue
+                # An authentication form's proof is an error pair and a bypass pair (8); any
+                # other runs the error, boolean and timing pairs (14). The slice paces all of it
+                # or the proof waits: one cut short reads like a finished proof.
+                need = min(int(sub_budget.get("http_requests") or 0), (
+                    8 if str(proof_candidate.get("request_class") or "") == "safe_authentication"
+                    else AUTH_ENDPOINT_CHECK_ATTEMPT_REQUESTS["sqli.prove_batch"]
+                ))
+                held = sign_in_checks.hold(
+                    sign_in, sub_budget,
+                    available_wall_seconds=remaining.get("tool_wall_seconds", 0), need=need,
+                )
+                if held is None:
+                    observations.append(sign_in_checks.deferred(
+                        sign_in, attempt_id=attempt_id, candidate_id=candidate_id,
+                        family="sqli_proof",
+                        available_wall_seconds=remaining.get("tool_wall_seconds", 0),
+                        manifest_index=manifest_index,
+                    ))
+                    continue
+                short_of_set = sign_in_checks.short_of(sign_in, need)
+                sub_budget = held
+                transport = sign_in_checks.transport(transport, sign_in)
             specification = CAPABILITY_REGISTRY.require(action.capability_name)
             # Constructing the adapter validates this candidate's request against the
             # sub-budget -- a body candidate in a slice whose reservation tier carries
@@ -2408,7 +2857,7 @@ class DatabaseNeutralScanActionDispatcher:
                     target=self.target,
                     request=request,
                     candidate=proof_candidate,
-                    transport=self._scan_replay_transport(action, private=True),
+                    transport=transport,
                     requested_budget=sub_budget,
                 )
             except SQLiProofError as exc:
@@ -2459,6 +2908,11 @@ class DatabaseNeutralScanActionDispatcher:
                 "proof_state": proof_state,
                 "budget_consumed": dict(result.actual_budget),
             }, *attempt_observations)
+            if sign_in is not None:
+                bundled = (sign_in_checks.record(
+                    bundled[0], sign_in, transport.sent, short=short_of_set,
+                    manifest_index=manifest_index,
+                ), *bundled[1:])
             attempt = {
                 "attempt_id": attempt_id, "candidate_id": candidate_id,
                 "status": result.status, "timed_out": bool(result.timed_out),
@@ -2480,10 +2934,11 @@ class DatabaseNeutralScanActionDispatcher:
                     int(action.requested_budget.get(name, 0)),
                     consumed.get(name, 0) + int(amount),
                 )
-        eligible = sum(
-            str(candidate.get("candidate_id") or "") in candidate_signals
-            for _index, candidate in rows
+        # The pace after this action's last request to a sign-in endpoint (_SignInChecks.settle).
+        await sign_in_checks.settle(
+            consumed, action.requested_budget, cancelled=self.cancelled(),
         )
+        eligible = sum(manifest_index in signalled for manifest_index, _candidate in rows)
         unattempted = max(0, eligible - attempted)
         _batch_status, _batch_partial, _batch_timed_out = batch_outcome(
             attempt_statuses, unattempted,
@@ -2701,13 +3156,24 @@ class DatabaseNeutralScanActionDispatcher:
         seed_urls = {f"{base_origin}{path}" for path in SENSITIVE_SEED_PATHS}
         seed_urls.update(url for url, _headers in graphql_seeds)
         window = endpoints.entries[start:min(len(endpoints.entries), start + count)]
-        for entry in window:
+        # A route seen with several bodies is an endpoint entry per body, all at one URL: the URL
+        # is read once, and each further entry is its own attempt that shares that read (its
+        # attempt id names its manifest position; the URL's first entry keeps its earlier id).
+        queued: set[str] = set()
+        repeated: list[tuple[str, str]] = []
+        for index, entry in enumerate(window, start=start):
             try:
                 url = execution_url_for_endpoint(entry)
             except (ScanWorkManifestError, KeyError):
                 continue
             if url in seed_urls or is_never_requested(url):
                 continue
+            if url in queued:
+                repeated.append((url, hashlib.sha256(
+                    f"{manifest_digest}:exposure:{url}:entry:{index}".encode()
+                ).hexdigest()))
+                continue
+            queued.add(url)
             probes.append((url, "discovered_endpoint"))
             # A discovered GraphQL route is also read with the fixed introspection document.
             if is_graphql_endpoint_url(url):
@@ -3002,6 +3468,25 @@ class DatabaseNeutralScanActionDispatcher:
                 "retry_timeout_seconds": round(retry_wait, 2) if retry_wait else None,
             })
         observations.extend(slow_probes)
+        # Each further entry of a URL read once shares that read's outcome; it sends nothing and
+        # carries no evidence of its own, so the URL yields one finding. A URL never read leaves
+        # its further entries unattempted too.
+        read = {
+            str(item.get("attempt_id")): item for item in observations
+            if isinstance(item, Mapping) and item.get("kind") == "candidate_attempt"
+        }
+        shared = 0
+        for url, attempt_id in repeated:
+            first = read.get(hashlib.sha256(f"{manifest_digest}:exposure:{url}".encode()).hexdigest())
+            if first is None:
+                continue
+            shared += 1
+            observations.append({
+                "kind": "candidate_attempt", "attempt_id": attempt_id,
+                "candidate_id": attempt_id[:32], "family": "sensitive_exposure",
+                "status": first.get("status"), "proof_state": first.get("proof_state"),
+                "budget_consumed": {}, "shared_attempt_id": first.get("attempt_id"),
+            })
         unattempted = max(0, len(probes) - attempted)
         consumed["tool_wall_seconds"] = min(
             wall_ceiling, max(1, len(probes)),
@@ -3025,6 +3510,7 @@ class DatabaseNeutralScanActionDispatcher:
                 "slice": {"start": start, "count": count},
                 "probe_count": len(probes), "attempted_count": attempted,
                 "resumed_count": resumed, "unattempted_count": unattempted,
+                "shared_read_count": shared,
                 "retried_count": len(deferred), "timed_out_count": len(slow_probes),
                 "indistinguishable_from_absent": indistinguishable,
                 "soft_404_controls_requested": absent_bodies is not None,
@@ -3082,10 +3568,12 @@ class DatabaseNeutralScanActionDispatcher:
         wall_deadline = time.monotonic() + max(1, int(action.requested_budget.get("tool_wall_seconds") or 1))
         errors: list[str] = []
         refused_probes: list[str] = []
+        # The transport's error code for each probe that got no HTTP answer.
+        unanswered: list[str] = []
         attempted = resumed = 0
         ordinal = start * 1000
 
-        async def send(url: str) -> tuple[int | None, Mapping[str, Any] | None]:
+        async def send(url: str) -> tuple[int | None, Mapping[str, Any] | None, str | None]:
             nonlocal ordinal
             ordinal += 1
             request = ReplayRequest(
@@ -3101,7 +3589,9 @@ class DatabaseNeutralScanActionDispatcher:
             if result.error_code:
                 errors.append(str(result.error_code))
             await heartbeat()
-            return result.status_code, result.response_headers
+            return result.status_code, result.response_headers, (
+                "timeout" if getattr(result, "timed_out", False) else result.error_code
+            )
 
         for candidate in candidates:
             attempt_id = hashlib.sha256(
@@ -3125,6 +3615,21 @@ class DatabaseNeutralScanActionDispatcher:
             ):
                 break
             proof = await probe_redirect_candidate(candidate, send)
+            if proof["proof_state"] == "unproven":
+                # No HTTP answer: the parameter was never tested. A gap, never "not proven",
+                # and not checkpointed, so a resumed batch probes it again.
+                no_answer = proof["inconclusive_reason"]
+                probe_timed_out = no_answer == CapabilityResultReason.TIMED_OUT.value
+                unanswered.append("timeout" if probe_timed_out else "transport_error")
+                observations.extend(({
+                    "kind": "candidate_attempt", "attempt_id": attempt_id,
+                    "candidate_id": attempt_id[:32], "family": "open_redirect",
+                    "status": "timed_out" if probe_timed_out else "partial", "proof_state": "unproven",
+                    "verdict": "inconclusive", "inconclusive_reason": no_answer,
+                    "budget_consumed": {"http_requests": 1},
+                }, proof))
+                attempted += 1
+                continue
             refused = proof.get("inconclusive_reason")
             if refused:
                 refused_probes.append(f"{refused}:{proof.get('refusal_status') or 0}")
@@ -3158,21 +3663,25 @@ class DatabaseNeutralScanActionDispatcher:
         )
         # Every candidate attempted, but the target refused some probes: partial for that
         # reason (a credential request named before a plain refusal), never "not proven".
+        # Probes that got no answer are partial for theirs: a request that timed out is
+        # `timed_out`; a failed connection, like any failed attempt, is `adapter_failed`.
         stated = [stopped_by] if partial else (
-            [batch_stop_reason(refused_probes, unattempted=0)] if refused_probes else []
+            [batch_stop_reason(refused_probes, unattempted=0)] if refused_probes
+            else [batch_stop_reason(unanswered, unattempted=0)] if unanswered else []
         )
         return self._receipt(
-            action, status="partial" if partial or refused_probes else "success",
+            action, status="partial" if partial or refused_probes or unanswered else "success",
             parser_version=OPEN_REDIRECT_PARSER_VERSION, started_at=started_at,
             observations=tuple(observations),
             errors=tuple(stated + refused_probes[:5] + errors[:20]), consumed=consumed,
-            partial=partial or bool(refused_probes),
+            partial=partial or bool(refused_probes or unanswered),
             timed_out=partial and stopped_by == CapabilityResultReason.TIMED_OUT.value,
             redacted_execution={
                 "action_id": action.action_id, "manifest_digest": manifest_digest,
                 "slice": {"start": start, "count": count},
                 "candidate_count": len(candidates), "attempted_count": attempted,
                 "resumed_count": resumed, "unattempted_count": unattempted,
+                "unanswered_count": len(unanswered),
                 "checkpoint_mode": "after_each_candidate",
             },
         )
@@ -3415,6 +3924,8 @@ class DatabaseNeutralScanActionDispatcher:
             if isinstance(item, Mapping)
         }
         manifest_digest = manifest.reference().manifest_digest
+        repeated_positions = _repeated_candidate_positions(manifest.entries)
+        sign_in_checks = await self._sign_in_checks(action, load_attempts)
         started_at = datetime.now(timezone.utc).isoformat()
         observations: list[Mapping[str, Any]] = []
         errors: list[str] = []
@@ -3459,9 +3970,9 @@ class DatabaseNeutralScanActionDispatcher:
             candidate_id = str(candidate.get("candidate_id") or "")
             if manifest_index in skipped:
                 continue
-            attempt_id = hashlib.sha256(
-                f"{manifest_digest}:nosqli:{candidate_id}".encode()
-            ).hexdigest()
+            attempt_id = _batch_attempt_id(
+                manifest_digest, "nosqli", candidate_id, manifest_index, repeated_positions,
+            )
             prior = completed.get(attempt_id)
             if prior is not None:
                 resumed += 1
@@ -3519,13 +4030,52 @@ class DatabaseNeutralScanActionDispatcher:
             }
             if sub_budget.get("http_requests", 0) < 4:
                 break
+            transport = self._scan_replay_transport(action, private=True)
+            # The credential profile's own sign-in endpoint: each request waits the pace, and the
+            # check draws from a probe set of its own there (_SignInChecks).
+            sign_in = sign_in_checks.endpoint(request.url, request.method)
+            short_of_set = False
+            if sign_in is not None:
+                if sign_in_checks.spent(sign_in):
+                    attempted += 1
+                    attempt_statuses.append({"status": "success", "timed_out": False})
+                    observations.append(sign_in_checks.closed(
+                        sign_in, attempt_id=attempt_id, candidate_id=candidate_id,
+                        family="nosqli", manifest_index=manifest_index,
+                    ))
+                    continue
+                # Four requests a field, over the anchor and every declared field; the slice paces
+                # all of them or the check waits.
+                tested = dict.fromkeys([
+                    str(candidate.get("field_path") or candidate.get("parameter_name") or ""),
+                    *(str(item) for item in candidate.get("body_field_names") or ()),
+                ])
+                need = min(
+                    int(sub_budget.get("http_requests") or 0),
+                    AUTH_ENDPOINT_CHECK_ATTEMPT_REQUESTS["nosqli.verify_batch"] * len(tested),
+                )
+                held = sign_in_checks.hold(
+                    sign_in, sub_budget,
+                    available_wall_seconds=remaining.get("tool_wall_seconds", 0), need=need,
+                )
+                if held is None:
+                    observations.append(sign_in_checks.deferred(
+                        sign_in, attempt_id=attempt_id, candidate_id=candidate_id,
+                        family="nosqli",
+                        available_wall_seconds=remaining.get("tool_wall_seconds", 0),
+                        manifest_index=manifest_index,
+                    ))
+                    continue
+                short_of_set = sign_in_checks.short_of(sign_in, need)
+                sub_budget = held
+                transport = sign_in_checks.transport(transport, sign_in)
             specification = CAPABILITY_REGISTRY.require(action.capability_name)
             adapter = NoSQLiVerifyAdapter(
                 specification=specification,
                 target=self.target,
                 request=request,
                 candidate=proof_candidate,
-                transport=self._scan_replay_transport(action, private=True),
+                transport=transport,
                 requested_budget=sub_budget,
             )
             result = await CapabilityExecutor().execute(
@@ -3553,6 +4103,11 @@ class DatabaseNeutralScanActionDispatcher:
                 "proof_state": proof_state,
                 "budget_consumed": dict(result.actual_budget),
             }, *attempt_observations)
+            if sign_in is not None:
+                bundled = (sign_in_checks.record(
+                    bundled[0], sign_in, transport.sent, short=short_of_set,
+                    manifest_index=manifest_index,
+                ), *bundled[1:])
             attempt = {
                 "attempt_id": attempt_id, "candidate_id": candidate_id,
                 "status": result.status, "timed_out": bool(result.timed_out),
@@ -3574,6 +4129,10 @@ class DatabaseNeutralScanActionDispatcher:
                     int(action.requested_budget.get(name, 0)),
                     consumed.get(name, 0) + int(amount),
                 )
+        # The pace after this action's last request to a sign-in endpoint (_SignInChecks.settle).
+        await sign_in_checks.settle(
+            consumed, action.requested_budget, cancelled=self.cancelled(),
+        )
         unattempted = max(0, len(rows) - len(skipped) - attempted)
         _batch_status, _batch_partial, _batch_timed_out = batch_outcome(
             attempt_statuses, unattempted,
@@ -3678,20 +4237,25 @@ class DatabaseNeutralScanActionDispatcher:
             await heartbeat()
             return result
 
-        comparisons: list[RouteComparison] = []
+        # Two entries of one route (a POST route seen with two bodies) are probed with the same
+        # GETs. Each entry is its own attempt (_batch_attempt_id), so the report counts both; the
+        # later one reuses the comparison this batch already made for the route and sends nothing.
+        repeated_positions = _repeated_candidate_positions(endpoints.entries)
+        compared: dict[str, RouteComparison] = {}
+        entry_heads: list[tuple[str, RouteComparison]] = []
         primary_headers = tuple(primary.headers().items())
         ordinal = start * 1000
         for manifest_index, entry in window:
             route_id = str(entry.get("route_id") or "")
-            attempt_id = hashlib.sha256(
-                f"{manifest_digest}:authz_surface:{route_id}".encode()
-            ).hexdigest()
+            attempt_id = _batch_attempt_id(
+                manifest_digest, "authz_surface", route_id, manifest_index, repeated_positions,
+            )
             prior = completed.get(attempt_id)
             if prior is not None:
                 resumed += 1
                 attempted += 1
                 attempt_statuses.append(prior)
-                comparisons.append(RouteComparison(
+                comparison = RouteComparison(
                     route_id=route_id, url=str(prior.get("url") or ""),
                     anonymous=tuple(
                         PrincipalProbe(**probe) for probe in prior.get("anonymous") or ()
@@ -3699,7 +4263,24 @@ class DatabaseNeutralScanActionDispatcher:
                     authenticated=tuple(
                         PrincipalProbe(**probe) for probe in prior.get("authenticated") or ()
                     ),
-                ))
+                )
+                compared.setdefault(route_id, comparison)
+                entry_heads.append((attempt_id, comparison))
+                continue
+            if route_id and route_id in compared:
+                comparison = compared[route_id]
+                checkpoint = {
+                    "attempt_id": attempt_id, "candidate_id": attempt_id[:32],
+                    "status": "success", "route_id": route_id, "url": comparison.url,
+                    "anonymous": [vars(probe) for probe in comparison.anonymous],
+                    "authenticated": [vars(probe) for probe in comparison.authenticated],
+                    "budget_consumed": {"http_requests": 0},
+                }
+                if not self.cancelled():
+                    await checkpoint_attempt(action.action_id, checkpoint)
+                attempt_statuses.append(checkpoint)
+                attempted += 1
+                entry_heads.append((attempt_id, comparison))
                 continue
             if self.cancelled() or consumed["http_requests"] + 4 > http_ceiling:
                 break
@@ -3724,7 +4305,8 @@ class DatabaseNeutralScanActionDispatcher:
                 route_id=route_id, url=url,
                 anonymous=tuple(anon_probes), authenticated=tuple(authed_probes),
             )
-            comparisons.append(comparison)
+            compared.setdefault(route_id, comparison)
+            entry_heads.append((attempt_id, comparison))
             checkpoint = {
                 "attempt_id": attempt_id, "candidate_id": attempt_id[:32],
                 # The durable checkpoint contract requires a terminal status.
@@ -3747,21 +4329,22 @@ class DatabaseNeutralScanActionDispatcher:
 
         # A finding needs proof the app gates function access somewhere; without an
         # established boundary a fully-public app yields nothing.
-        boundary = boundary_established(comparisons)
+        boundary = boundary_established(compared.values())
         observations: list[Mapping[str, Any]] = []
-        for comparison in comparisons:
+        reported: set[str] = set()
+        for attempt_id, comparison in entry_heads:
             proven = bfla_finding(comparison) if boundary else None
             observations.append({
                 "kind": "candidate_attempt",
-                "attempt_id": hashlib.sha256(
-                    f"{manifest_digest}:authz_surface:{comparison.route_id}".encode()
-                ).hexdigest(),
+                "attempt_id": attempt_id,
                 "candidate_id": comparison.route_id,
                 "family": "authz_surface",
                 "status": "success",
                 "proof_state": "verified" if proven else "not_proven",
             })
-            if proven is not None:
+            # One finding per route, however many entries the route has.
+            if proven is not None and comparison.route_id not in reported:
+                reported.add(comparison.route_id)
                 observations.append(proven)
         unattempted = max(0, len(window) - attempted)
         _batch_status, _batch_partial, _batch_timed_out = batch_outcome(
@@ -3783,6 +4366,117 @@ class DatabaseNeutralScanActionDispatcher:
                 "secret_values_visible": False,
             },
         )
+
+    async def _sign_in_endpoints(self) -> tuple[SignInEndpoint, ...]:
+        """The sign-in endpoints of the credential profiles this Scan carries."""
+        planned_ids = {item.action_id for item in self.plan.actions}
+        sessions = [
+            item
+            for auth_action in AUTH_ACTION_IDS if auth_action in planned_ids
+            for item in await self._observations(auth_action)
+        ]
+        return sign_in_endpoints(self.options, sessions, base_url=self.target_url)
+
+    async def _sign_in_checks(self, action: ScanAction, load_attempts: Any) -> _SignInChecks:
+        """The sign-in pace and probe set an in-process check's batch action draws from."""
+        endpoints = await self._sign_in_endpoints()
+        received = (
+            await self._sign_in_requests_received(action, load_attempts) if endpoints else {}
+        )
+        return _SignInChecks(
+            action.capability_name, endpoints, received, parallel_children(self.options),
+        )
+
+    async def _sign_in_requests_received(
+        self, action: ScanAction, load_attempts: Any,
+    ) -> dict[str, int]:
+        """What each sign-in endpoint already received from this verifier across the Scan.
+
+        Every batch action of the same capability in the plan (each slice, each continuation
+        round, this action's own checkpoints) is read; each checkpointed attempt counts once.
+        """
+        received: dict[str, int] = {}
+        for item in self.plan.actions:
+            if item.capability_name != action.capability_name:
+                continue
+            for record in await load_attempts(item.action_id):
+                records = record.get("observations") or () if isinstance(record, Mapping) else ()
+                head = records[0] if records else None
+                if not isinstance(head, Mapping):
+                    continue
+                key, sent = head.get("sign_in_endpoint_key"), head.get("sign_in_endpoint_requests")
+                if (
+                    isinstance(key, str) and key and isinstance(sent, int)
+                    and not isinstance(sent, bool) and sent > 0
+                ):
+                    received[key] = received.get(key, 0) + sent
+        return received
+
+    async def _signed_in_crawl_seeds(self, action: ScanAction, execution_target: str) -> list[str]:
+        """The paths a session-carrying crawl starts from besides ``execution_target``.
+
+        The page the primary sign-in landed on, then every GET seed of the scan's endpoint
+        manifest (depth 0: seeds, known endpoints, collection requests) on the crawl's own origin
+        and lane: pages before API routes (an imported collection's routes, a path under
+        ``/api/`` or naming a data file), each group in path order. A path is percent-encoded
+        where the crawler needs it (``/café/``). Never a seed: a path that may act (sign-out,
+        delete, a one-time token, also percent-encoded), a route template (``{int}``, ``:id``,
+        ``<id>``), the profile's own sign-in page (a GET there may end the session), or a path
+        the crawler cannot take.
+        """
+        parsed = urllib.parse.urlsplit(execution_target)
+        scheme = parsed.scheme.lower()
+        host = str(parsed.hostname or "").lower().rstrip(".")
+        port = parsed.port or (443 if scheme == "https" else 80)
+        own_path = parsed.path or "/"
+        sessions = [
+            item for item in await self._observations("inputs.auth_primary")
+            if isinstance(item, Mapping) and item.get("kind") == "credential_session"
+        ]
+        sign_in_pages = sign_in_page_paths(self.options, sessions, base_url=self.target_url)
+        paths: list[str] = []
+
+        def seed_path(path: Any) -> str | None:
+            if not isinstance(path, str) or not path.startswith("/") or path.startswith("//"):
+                return None
+            if any(mark in path for mark in "{}<>?#,\\ ") or any(
+                segment.startswith(":") for segment in path.split("/")
+            ):
+                return None
+            encoded = urllib.parse.quote(path, safe="/-._~!$&'()*+;=:@%")
+            if (
+                encoded == own_path or encoded in paths
+                or not agent_tools.crawl_seed_path_is_plain(encoded)
+                or path_may_change_state(encoded)
+                or normalize_path(encoded) in sign_in_pages
+            ):
+                return None
+            return encoded
+
+        for item in sessions:
+            landing = seed_path(item.get("landing_path")) if item.get("status") == "established" else None
+            if landing:
+                paths.append(landing)
+        manifest = await self._work_manifest(
+            action, "endpoint_manifest_ref", ScanWorkManifestKind.ENDPOINT,
+        )
+        seeded: dict[str, bool] = {}
+        for entry in (manifest.entries if manifest is not None else ()):
+            if (
+                entry.get("method") == "GET"
+                and int(entry.get("discovery_depth") or 0) == 0
+                and str(entry.get("scheme") or "") == scheme
+                and str(entry.get("host") or "") == host
+                and int(entry.get("port") or 0) == port
+                and entry.get("auth_lane") in (None, "anonymous", "primary")
+            ):
+                path = str(entry.get("canonical_path") or "")
+                seeded[path] = seeded.get(path, False) or _api_route(path, entry.get("source_tool"))
+        for path in sorted(seeded, key=lambda item: (seeded[item], item)):
+            usable = seed_path(path)
+            if usable:
+                paths.append(usable)
+        return paths[:agent_tools.MAX_CRAWL_SEED_PATHS]
 
     async def _external(self, action: ScanAction, heartbeat: ActionHeartbeat) -> CapabilityReceipt:
         tool_by_capability = {
@@ -3841,6 +4535,16 @@ class DatabaseNeutralScanActionDispatcher:
         args: dict[str, Any] = dict(primary.capability_args())
         scanner_options: dict[str, Any] = {}
         requested_budget = dict(action.requested_budget)
+        execution_record: dict[str, Any] = {}
+        if action.capability_name in {"web.crawl", "web.browser_crawl"} and (
+            primary.headers()
+            or (tool == "katana_headless" and self.options.get("auth_browser_storage"))
+        ):
+            # A crawl carrying the session also starts where the signed-in area is: the scan's
+            # seeds on this origin and the page the sign-in landed on (E1-N3).
+            seeds = await self._signed_in_crawl_seeds(action, execution_target)
+            if seeds:
+                scanner_options["crawl_seed_paths"] = seeds
         if tool == "nuclei":
             template_manifest = await self._work_manifest(
                 action, "template_manifest_ref", ScanWorkManifestKind.TEMPLATE,
@@ -3867,8 +4571,11 @@ class DatabaseNeutralScanActionDispatcher:
                         and requested_budget.get("state_changing_requests", 0) > 0
                     ),
                 )
+                if resolved.selection_telemetry:
+                    execution_record["template_selection"] = dict(resolved.selection_telemetry)
                 if resolved.skip_reason:
-                    return self._skip(action, resolved.skip_reason)
+                    return self._skip(action, resolved.skip_reason,
+                                      template_selection=resolved.selection_telemetry)
                 args.update(resolved.capability_args)
                 scanner_options.update(resolved.worker_options)
                 # Reuse the same reservation-derived pacing as a batch attempt,
@@ -3934,6 +4641,7 @@ class DatabaseNeutralScanActionDispatcher:
         )
         return await self._execute_adapter(
             action, adapter, heartbeat, managed_cancellation=True,
+            execution_record=execution_record,
         )
 
     async def _external_batch(
@@ -3976,14 +4684,39 @@ class DatabaseNeutralScanActionDispatcher:
             or not 1 <= count <= 50
         ):
             raise ScanActionAdapterError("batch action slice is invalid")
-        stop = min(len(manifest.entries), start + count)
+        # A thorough or deep active-template slice may plan positions past its E endpoints:
+        # position o runs template window o on endpoint o % E (nuclei_execution).
+        try:
+            window_endpoints = (
+                planned_endpoint_entries(action.capability_args, len(manifest.entries))
+                if action.capability_name == "templates.active_batch" else None
+            )
+        except ValueError as exc:
+            raise ScanActionAdapterError(str(exc)) from exc
+        stop = min(
+            len(manifest.entries) if window_endpoints is None
+            else int(action.capability_args["manifest_entries"]),
+            start + count,
+        )
         # Fund cheaper candidate classes before expensive body candidates within the slice, so an
         # expensive attempt runs only on the budget cheaper verdicts did not need and can never
         # displace one (R1: see order_batch_rows_by_cost_class). Score order is preserved inside a
         # class; the slice membership is unchanged, only the attempt order within it.
         rows = tuple(order_batch_rows_by_cost_class(
             enumerate(manifest.entries[start:stop], start=start)
+            if window_endpoints is None else (
+                (position, manifest.entries[position % window_endpoints])
+                for position in range(start, stop)
+            )
         ))
+
+        def batch_candidate_id(row: Mapping[str, Any], manifest_index: int) -> str:
+            if window_endpoints is None:
+                return _batch_candidate_id(row, manifest_index)
+            return window_position_candidate_id(
+                _batch_candidate_id(row, manifest_index % window_endpoints),
+                manifest_index, window_endpoints,
+            )
         if not rows:
             return self._skip(action, self._empty_slice_reason(manifest))
         template_options: dict[str, Any] = {}
@@ -4008,6 +4741,7 @@ class DatabaseNeutralScanActionDispatcher:
         worker_template_options = dict(template_options)
         args_template_options = dict(template_options)
         verify_selection = None
+        template_selection = None
         if tool == "nuclei" and action.capability_name == "templates.active_batch":
             mutation_tier = bool(
                 self.policy.allow_state_changing_http
@@ -4022,13 +4756,94 @@ class DatabaseNeutralScanActionDispatcher:
                 allow_exploit_classes=mutation_tier,
             )
             verify_selection = resolved.verify_selection
+            template_selection = resolved.selection_telemetry
             if resolved.skip_reason:
                 # Fail closed: the active selection could not be resolved (index
                 # unavailable, or no permitted template once intrusive/non-GET
                 # exclusions apply). Record a coverage gap, never a clean result.
-                return self._skip(action, resolved.skip_reason, verify_selection=verify_selection)
+                return self._skip(action, resolved.skip_reason, verify_selection=verify_selection,
+                                  template_selection=template_selection)
             worker_template_options = dict(resolved.worker_options)
             args_template_options = dict(resolved.capability_args)
+        # An active sweep runs one window of the allowlist per attempt (a verify Scan runs its
+        # named checks whole); the slice reports which windows its attempts finished.
+        windowed = (
+            tool == "nuclei" and worker_template_options.get("template_profile") == "active"
+            and verify_selection is None
+        )
+        allowlist = str(worker_template_options.get("template_ids") or "")
+        windows_run: set[int] = set()
+        # The windows each sweep base finished, so coverage can say which base ran how many.
+        base_windows_run: dict[str, set[int]] = {}
+        legacy_windows_run: set[int] = set()
+
+        # Each sweep position names one (base, window) pair, index i: base i // W, window i % W.
+        # The bases are the target URL's directory, then other origins' roots
+        # (active_sweep_bases); a scheme-inferred Scan's target URL is the origin it selected. A
+        # direct Scan's position p is index p; a parallel endpoint child starts its positions at
+        # its own offset around the pairs (active_sweep_index). Every shard maps over the same
+        # bases, the binding's allowed origins, whatever part of the endpoints it holds.
+        if windowed and self.target.inferred_origins:
+            await self._restore_selected_origin()
+        shard = self.options.get("canonical_shard_authority")
+        shard_part = (
+            (int(shard["shard_index"]), int(shard["shard_count"]))
+            if isinstance(shard, Mapping) and not shard.get("parallel_discovery")
+            and isinstance(shard.get("shard_index"), int) and isinstance(shard.get("shard_count"), int)
+            and not isinstance(shard.get("shard_index"), bool)
+            and int(shard["shard_count"]) >= 2 and 0 <= int(shard["shard_index"]) < int(shard["shard_count"])
+            else None
+        )
+        unselected_origins = tuple(
+            origin for origin in self.target.inferred_origins
+            if not self.target_url.lower().startswith(origin.lower() + "/")
+        )
+        sweep_bases = active_sweep_bases(
+            self.target_url,
+            manifest.entries if shard_part is None else [
+                {"scheme": parsed.scheme, "host": parsed.hostname,
+                 "port": parsed.port or (443 if parsed.scheme == "https" else 80)}
+                for parsed in (urllib.parse.urlsplit(origin) for origin in self.target.allowed_origins)
+                if parsed.hostname
+            ],
+            exclude_origins=unselected_origins,
+        ) if windowed else ()
+        sweep_windows = active_template_window_count(allowlist) if windowed else 0
+
+        sweep_pairs = sweep_windows * len(sweep_bases)
+
+        def sweep_index(manifest_index: int) -> int:
+            """The pair a position runs (active_sweep_index); the pair count when past them."""
+            index = active_sweep_index(
+                manifest_index,
+                shard_index=shard_part[0] if shard_part else None,
+                shard_count=shard_part[1] if shard_part else None,
+                pair_count=sweep_pairs,
+            )
+            return sweep_pairs if index is None else index
+
+        def position_base(manifest_index: int) -> str | None:
+            return active_sweep_base(
+                sweep_index(manifest_index), bases=sweep_bases, window_count=sweep_windows,
+            ) if windowed else None
+
+        def window_skip_reason(manifest_index: int) -> str | None:
+            """Why a planned position runs nothing, or None when it names a pair of its own."""
+            if (
+                window_endpoints is not None and manifest_index >= window_endpoints
+                and not (windowed and active_template_window_applies(
+                    allowlist, manifest_index, endpoint_entries=window_endpoints,
+                ))
+            ):
+                return TEMPLATE_WINDOW_BEYOND_ALLOWLIST
+            if windowed and position_base(manifest_index) is None:
+                return TEMPLATE_WINDOW_PAST_BASES
+            return None
+
+        def window_applies(manifest_index: int) -> bool:
+            """Whether a planned position names a (base, window) pair no other position runs."""
+            return window_skip_reason(manifest_index) is None
+
         load_attempts = getattr(self.backend, "load_batch_attempts", None)
         checkpoint_attempt = getattr(self.backend, "checkpoint_batch_attempt", None)
         if not callable(load_attempts) or not callable(checkpoint_attempt):
@@ -4090,6 +4905,23 @@ class DatabaseNeutralScanActionDispatcher:
             "templates.passive_batch": "nuclei_passive",
             "templates.active_batch": "nuclei_active",
         }[action.capability_name]
+        # Each candidate entry is its own attempt -- its own checkpoint, units and count of what
+        # it sent -- even when an earlier entry has its candidate id (variants of one form). One
+        # attempt id for the three variants of a sign-in form kept one checkpoint for all three:
+        # a later round counted one variant's requests as all the endpoint had received, and a
+        # variant took another's finished units as its own. A repeated entry's attempt names its
+        # manifest position; the first entry with an id keeps the attempt id it always had.
+        repeated_positions = (
+            _repeated_candidate_positions(manifest.entries)
+            if manifest_kind is ScanWorkManifestKind.CANDIDATE else frozenset()
+        )
+
+        def batch_attempt_id(candidate_id: str, manifest_index: int, retry_round: int) -> str:
+            return _batch_attempt_id(
+                manifest_digest, family, candidate_id, manifest_index, repeated_positions,
+                retry_round,
+            )
+
         started_at = datetime.now(timezone.utc).isoformat()
         observations: list[Mapping[str, Any]] = []
         errors: list[str] = []
@@ -4107,6 +4939,18 @@ class DatabaseNeutralScanActionDispatcher:
         primary = resolve_scan_http_principal(
             self.options, lane="primary", capability_name=legacy_capability,
         )
+        # The credential profile's own sign-in endpoint (and its form action) is held to a
+        # lockout-safe pace, one attempt at a time, and to one probe set per verifier across the
+        # Scan (auth_endpoint_probe, E1-N6): what every batch action of this verifier already
+        # sent the endpoint, from any candidate or round, counts against that set.
+        sign_ins: tuple = ()
+        sign_in_received: dict[str, int] = {}
+        sign_in_running: set[str] = set()
+        sign_in_children = parallel_children(self.options)
+        if tool in {"sqlmap", "dalfox"} and manifest_kind is ScanWorkManifestKind.CANDIDATE:
+            sign_ins = await self._sign_in_endpoints()
+            if sign_ins:
+                sign_in_received = await self._sign_in_requests_received(action, load_attempts)
         # A template sweep attempt that hits its wall before the tool reported anything examined
         # nothing: on a CPU- or network-starved host every endpoint of a slice could die that way
         # and the batch reported zero findings with every candidate "attempted". Such an endpoint
@@ -4122,6 +4966,23 @@ class DatabaseNeutralScanActionDispatcher:
         # pack inside its share needs the pack's latency bound (template_retry_wall), and its
         # retry holds that much of what the batch has left.
         retry_partial_timeouts = action.capability_name == "templates.passive_batch"
+        # A further template window (a thorough or deep slice's positions) the wall cut off is
+        # retried even when it already reported a match: its other templates never ran, and
+        # zoo d0a8d43c8 lost one or two windows on 16 of 57 hosts that way. The slice holds
+        # the retry's wall and requests beside its positions (``window_retry_hold``); the
+        # positions' planned shares are what the slice holds without it.
+        retry_cut_off = retry_partial_timeouts or window_endpoints is not None
+        raw_retry = action.capability_args.get("window_retry_hold")
+        positions_budget = {
+            name: int(amount) - (
+                int(raw_retry[name])
+                if window_endpoints is not None and isinstance(raw_retry, Mapping)
+                and isinstance(raw_retry.get(name), int) and not isinstance(raw_retry[name], bool)
+                and 0 < int(raw_retry[name]) < int(amount)
+                else 0
+            )
+            for name, amount in action.requested_budget.items()
+        }
         empty_timeouts: dict[str, int] = {}
         # The first attempt each retried endpoint was cut off in, and the redacted URL each
         # endpoint was attempted at, so an endpoint that never finished can be named.
@@ -4139,6 +5000,7 @@ class DatabaseNeutralScanActionDispatcher:
         attempt_log: list[tuple[str, int, bool, bool]] = []
         work = [(manifest_index, row, 0) for manifest_index, row in rows]
         template_windows: dict[str, dict[str, int]] = {}
+        candidate_bases: dict[str, str] = {}
         first_pass = len(work)
         position = 0
         # SQLi candidates of one slice may run concurrently, inside the slice's reservation and
@@ -4273,9 +5135,52 @@ class DatabaseNeutralScanActionDispatcher:
                     attempt_observations = (
                         head,
                         *attempt_observations[1:],
+                        # Named by its attempt: the variants of one form share a candidate id.
                         {"url": redact_url(execution_target),
-                         "method": body_request.get("method", "GET"), **verdict},
+                         "method": body_request.get("method", "GET"), **verdict,
+                         "attempt_id": attempt_id},
                     )
+            sign_in_key = row.get("sign_in_key")
+            if sign_in_key:
+                sign_in_running.discard(str(sign_in_key))
+                # What the sign-in endpoint has now received from this verifier across the Scan.
+                head = dict(attempt_observations[0])
+                sent = max(0, int(dict(result.actual_budget).get("http_requests", 0) or 0))
+                received = sign_in_received.get(str(sign_in_key), 0) + sent
+                sign_in_received[str(sign_in_key)] = received
+                # Named sign_in_*: a key with an "auth" segment is withheld from receipts.
+                head.update({
+                    "sign_in_endpoint": str(row["sign_in_endpoint"]),
+                    "sign_in_endpoint_key": str(sign_in_key),
+                    "sign_in_endpoint_requests": sent,
+                    "sign_in_endpoint_received": received,
+                    # Which variant: coverage counts a limited variant once across checks.
+                    "manifest_index": int(row["manifest_index"]),
+                })
+                unfinished = bool(head.get("resume_technique") or head.get("resume_wall_seconds")) or (
+                    str(result.status) not in _BATCH_SUCCESS_STATUSES
+                )
+                if proof_state != "verified" and head.get("verdict") is None and (
+                    # Dalfox sent a bounded part of its payloads there: never a negative.
+                    tool == "dalfox"
+                    # sqlmap still had units to run that the probe set cannot fund.
+                    or unfinished and probe_set_spent(
+                        action.capability_name, received, int(row.get("auth_parameters") or 1),
+                        next_need=_next_unit_requests(head),
+                    )
+                ):
+                    # Inconclusive, never extended, never negative.
+                    head.update({
+                        "verdict": "inconclusive",
+                        "inconclusive_reason": AUTH_ENDPOINT_PROBE_LIMITED,
+                    })
+                    for key in (
+                        "resume_wall_seconds", "resume_technique", "resume_field",
+                        "remaining_requests", "remaining_wall_seconds", "last_chance_wall_seconds",
+                        "resume_probe", "resume_unconfirmed",
+                    ):
+                        head.pop(key, None)
+                attempt_observations = (head, *attempt_observations[1:])
             refusals = [
                 str(item).split(":", 1)[0] for item in result.errors or () if is_refusal_error(item)
             ]
@@ -4306,6 +5211,12 @@ class DatabaseNeutralScanActionDispatcher:
             }
             if result.status != "cancelled":
                 await checkpoint_attempt(action.action_id, attempt)
+            if candidate_id in template_windows and result.status in _BATCH_SUCCESS_STATUSES:
+                windows_run.add(int(template_windows[candidate_id]["index"]))
+                if candidate_id in candidate_bases:
+                    base_windows_run.setdefault(candidate_bases[candidate_id], set()).add(
+                        int(template_windows[candidate_id]["index"])
+                    )
             if retry_round:
                 retried += 1
                 if result.observations:
@@ -4321,7 +5232,7 @@ class DatabaseNeutralScanActionDispatcher:
                 bool(getattr(result, "timed_out", False)) or result.status == "timed_out"
             )
             needs_retry = retry_empty_timeouts and result_timed_out and (
-                not result.observations or (retry_partial_timeouts and result_wall_killed)
+                not result.observations or (retry_cut_off and result_wall_killed)
             )
             if needs_retry and not retry_round:
                 cut_off_attempts[candidate_id] = attempt_id
@@ -4367,10 +5278,46 @@ class DatabaseNeutralScanActionDispatcher:
             if result.status == "cancelled":
                 stopped_by_cancel = True
 
+        def close_spent_sign_in(
+            sign_in: Any, attempt_id: str, candidate_id: str, retry_round: int,
+            manifest_index: int,
+        ) -> None:
+            """Settle a candidate whose sign-in endpoint's probe set is spent: inconclusive.
+
+            Spent by this candidate in an earlier round, or by another candidate on the same
+            endpoint. Nothing more is sent there; the candidate is never called negative.
+            """
+            nonlocal attempted
+            attempted += 1
+            attempt_log.append((candidate_id, retry_round, True, False))
+            observations.append({
+                "kind": "candidate_attempt",
+                "attempt_id": attempt_id,
+                "candidate_id": candidate_id,
+                "family": family,
+                "status": "success",
+                "proof_state": "unproven",
+                "budget_consumed": {},
+                "verdict": "inconclusive",
+                "inconclusive_reason": AUTH_ENDPOINT_PROBE_LIMITED,
+                "sign_in_endpoint": sign_in.label,
+                "sign_in_endpoint_key": sign_in.key,
+                "sign_in_endpoint_requests": 0,
+                "sign_in_endpoint_received": sign_in_received.get(sign_in.key, 0),
+                "manifest_index": int(manifest_index),
+            })
+
         async def fail_attempt(
             attempt_id: str, candidate_id: str, retry_round: int, exc: BaseException,
         ) -> None:
             nonlocal attempted, retried, terminal_failure
+            # The exception type carries no target data; without this line a batch that settled
+            # adapter_failed left nothing in the worker log to say which candidate failed or why.
+            print(
+                f"[scan] action {action.action_id} candidate {candidate_id} failed: "
+                f"{type(exc).__name__}",
+                file=sys.stderr, flush=True,
+            )
             # One candidate that raises anywhere in its setup or execution must never fail the
             # whole batch action. execution_request_for_manifest_candidate and the external
             # capability preparation raise ValueError/ScanWorkManifestError on a candidate the
@@ -4431,11 +5378,11 @@ class DatabaseNeutralScanActionDispatcher:
             manifest_index, row, retry_round = entry
             if row.get("parameter_location") == "path" and family != "sqli":
                 return False
-            candidate = _batch_candidate_id(row, manifest_index)
-            key = f"{manifest_digest}:{family}:{candidate}"
-            if retry_round:
-                key += f":retry:{retry_round}"
-            identity = hashlib.sha256(key.encode()).hexdigest()
+            if not window_applies(manifest_index):
+                return False
+            identity = batch_attempt_id(
+                batch_candidate_id(row, manifest_index), manifest_index, retry_round,
+            )
             if identity in completed or identity in refused_final:
                 return False
             if retry_round:
@@ -4453,7 +5400,7 @@ class DatabaseNeutralScanActionDispatcher:
                         break
                     work.extend(
                         (manifest_index, row, 1) for manifest_index, row in rows
-                        if _batch_candidate_id(row, manifest_index) in still_empty
+                        if batch_candidate_id(row, manifest_index) in still_empty
                     )
                     if position >= len(work):
                         break
@@ -4474,11 +5421,23 @@ class DatabaseNeutralScanActionDispatcher:
                         "reason": "path_segment_candidate",
                     })
                     continue
-                candidate_id = _batch_candidate_id(row, manifest_index)
-                attempt_key = f"{manifest_digest}:{family}:{candidate_id}"
-                if retry_round:
-                    attempt_key += f":retry:{retry_round}"
-                attempt_id = hashlib.sha256(attempt_key.encode()).hexdigest()
+                candidate_id = batch_candidate_id(row, manifest_index)
+                attempt_id = batch_attempt_id(candidate_id, manifest_index, retry_round)
+                # A checkpointed attempt is resumed before the position is judged: an attempt a
+                # 2.11.0 worker (or a shard under an earlier mapping) already ran keeps its
+                # records and is never re-sent, whatever the position maps to now.
+                if attempt_id not in completed and not window_applies(manifest_index):
+                    # A planned position whose (base, window) pair another position already
+                    # runs -- past the allowlist's own windows, or past every base's windows
+                    # -- would repeat it on this host: nothing is sent.
+                    inapplicable += 1
+                    observations.append({
+                        "kind": "candidate_inapplicable",
+                        "candidate_id": candidate_id,
+                        "family": family,
+                        "reason": window_skip_reason(manifest_index),
+                    })
+                    continue
                 route_identity = str(row.get("candidate_id") or row.get("route_id") or "")
                 carry = None if retry_round or attempt_id in completed else (
                     carried[attempt_id] if attempt_id in carried
@@ -4517,12 +5476,27 @@ class DatabaseNeutralScanActionDispatcher:
                     )
                     prior_empty = retry_empty_timeouts and prior_timed_out and (
                         _no_tool_output(prior.get("observations") or ())
-                        or (retry_partial_timeouts and prior_wall_killed)
+                        or (retry_cut_off and prior_wall_killed)
                     )
                     if prior_empty and not retry_round:
                         cut_off_attempts[candidate_id] = attempt_id
                     if retry_round and not _no_tool_output(prior.get("observations") or ()):
                         retried_with_output.add(candidate_id)
+                    prior_window = prior.get("template_window")
+                    if prior_status in _BATCH_SUCCESS_STATUSES and isinstance(prior_window, Mapping):
+                        prior_index = int(prior_window.get("index") or 0)
+                        windows_run.add(prior_index)
+                        resumed_base = position_base(manifest_index)
+                        if (
+                            resumed_base is not None and prior_window.get("base") == resumed_base
+                            and sweep_windows and prior_index == sweep_index(manifest_index) % sweep_windows
+                        ):
+                            base_windows_run.setdefault(resumed_base, set()).add(prior_index)
+                        elif windowed:
+                            # Run by an earlier mapping -- a 2.11.0 worker at an endpoint's
+                            # path, or a shard before shards split the pairs: kept, never
+                            # re-sent, and not credited to a base it did not run at.
+                            legacy_windows_run.add(prior_index)
                     prior_wall = int(dict(prior.get("budget_consumed") or {}).get(
                         "tool_wall_seconds", 0,
                     ) or 0)
@@ -4577,9 +5551,36 @@ class DatabaseNeutralScanActionDispatcher:
                                 "injection_field": str(resolved["field_name"]),
                             }
                     else:
-                        execution_target = execution_url_for_manifest_endpoint(
-                            manifest, manifest_index,
+                        # An active sweep runs each window at a base, never under a discovered
+                        # endpoint's path (active_sweep_bases). A passive pack and a verify
+                        # Scan's named checks run at each endpoint.
+                        execution_target = (
+                            str(position_base(manifest_index))
+                            if windowed
+                            else execution_url_for_manifest_endpoint(manifest, manifest_index)
                         )
+                    # Only a request that carries a body attempts a sign-in.
+                    sign_in = (
+                        sign_in_endpoint_for(
+                            execution_target, str(body_request.get("method") or ""), sign_ins,
+                        )
+                        if sign_ins and body_request else None
+                    )
+                    auth_parameters = probe_parameters(body_request.get("body_field_names"))
+                    if sign_in is not None and sign_in.key in sign_in_running and candidates.running:
+                        # One attempt on the sign-in endpoint at a time: the endpoint then sees
+                        # one attempt's pace, whatever else the slice runs beside it.
+                        position -= 1
+                        await candidates.wait()
+                        continue
+                    if sign_in is not None and probe_set_spent(
+                        action.capability_name, sign_in_received.get(sign_in.key, 0),
+                        auth_parameters,
+                    ):
+                        close_spent_sign_in(
+                            sign_in, attempt_id, candidate_id, retry_round, manifest_index,
+                        )
+                        continue
                     # This entry and every later one that will actually be funded.
                     remaining_attempts = 1 + sum(1 for entry in work[position:] if needs_hold(entry))
                     # What the slice has neither consumed nor lent to a running candidate.
@@ -4647,7 +5648,7 @@ class DatabaseNeutralScanActionDispatcher:
                     }
                     if tool == "nuclei" and sub_budget.get("tool_wall_seconds"):
                         planned_share = (
-                            int(action.requested_budget.get("tool_wall_seconds") or 0)
+                            int(positions_budget.get("tool_wall_seconds") or 0)
                             // max(1, first_pass)
                         )
                         passive_pack = action.capability_name == "templates.passive_batch"
@@ -4668,6 +5669,13 @@ class DatabaseNeutralScanActionDispatcher:
                                 ),
                             )
                         )
+                        if window_endpoints is not None:
+                            sub_budget = window_template_attempt_hold(
+                                sub_budget, remaining_budget=remaining_budget,
+                                remaining_attempts=remaining_attempts,
+                                requested_budget=positions_budget,
+                                first_pass=first_pass, planned_wall_share=planned_share,
+                            )
                     if body_request:
                         # Every request a body attempt sends is a mutation, so the body scanner
                         # requires state_changing_requests >= http_requests (capabilities/scanner.py).
@@ -4722,6 +5730,7 @@ class DatabaseNeutralScanActionDispatcher:
                         # not funded again (soak N55).
                         observations.append({
                             "kind": "candidate_deferred",
+                            "attempt_id": attempt_id,
                             "candidate_id": candidate_id,
                             "family": family,
                             "reason": "budget_inconclusive",
@@ -4732,7 +5741,7 @@ class DatabaseNeutralScanActionDispatcher:
                             candidate_id=candidate_id, fields=sqli_fields,
                             field_count=field_count, ceiling=round_wall_ceiling,
                             scan_wall_share=scan_wall_share, execution_target=execution_target,
-                            method=body_request.get("method", "GET"),
+                            method=body_request.get("method", "GET"), attempt_id=attempt_id,
                         ))
                         continue
                     if stage_need is not None and sub_budget.get("tool_wall_seconds"):
@@ -4760,11 +5769,12 @@ class DatabaseNeutralScanActionDispatcher:
                                 field_count=field_count, ceiling=round_wall_ceiling,
                                 scan_wall_share=scan_wall_share,
                                 execution_target=execution_target,
-                                method=body_request.get("method", "GET"),
+                                method=body_request.get("method", "GET"), attempt_id=attempt_id,
                             )
                             closed = any(item.get("closed") for item in verdicts)
                             observations.append({
                                 "kind": "candidate_deferred",
+                                "attempt_id": attempt_id,
                                 "candidate_id": candidate_id,
                                 "family": family,
                                 "reason": "stage_wall_unfunded",
@@ -4778,6 +5788,50 @@ class DatabaseNeutralScanActionDispatcher:
                         sub_budget["tool_wall_seconds"] = max(
                             int(sub_budget["tool_wall_seconds"]), stage_need + own_spent,
                         )
+                    if sign_in is not None and candidate_resume is not None and probe_set_spent(
+                        action.capability_name, sign_in_received.get(sign_in.key, 0),
+                        auth_parameters, next_need=(
+                            stage_requests(
+                                candidate_resume.technique,
+                                1 if candidate_resume.field_name else field_count,
+                            ) if candidate_resume.technique else 0
+                        ),
+                    ):
+                        # What the probe set has left cannot conclude the candidate's next unit.
+                        close_spent_sign_in(
+                            sign_in, attempt_id, candidate_id, retry_round, manifest_index,
+                        )
+                        continue
+                    if sign_in is not None:
+                        # Lockout-safety ceiling on this one endpoint, never a budget cut elsewhere.
+                        limited = auth_endpoint_hold(
+                            sub_budget, capability_name=action.capability_name,
+                            received=sign_in_received.get(sign_in.key, 0),
+                            parameters=auth_parameters, children=sign_in_children,
+                        )
+                        if limited is None:
+                            if candidates.running:
+                                # A running candidate may return part of its hold when it settles.
+                                position -= 1
+                                await candidates.wait()
+                                continue
+                            # The hold cannot pace a probe at the lockout-safe rate: like any
+                            # candidate this slice cannot fund, it waits for a later round with
+                            # the wall it needs. No verdict; the probe set is untouched.
+                            observations.append({
+                                "kind": "candidate_deferred",
+                                "attempt_id": attempt_id,
+                                "candidate_id": candidate_id,
+                                "family": family,
+                                "reason": AUTH_ENDPOINT_PACE_UNFUNDED,
+                                "resume_wall_seconds": pace_wall_seconds(children=sign_in_children),
+                                "available_wall_seconds": int(sub_budget.get("tool_wall_seconds") or 0),
+                                "sign_in_endpoint": sign_in.label,
+                                "sign_in_endpoint_received": sign_in_received.get(sign_in.key, 0),
+                            })
+                            exhausted.add("tool_wall_seconds")
+                            continue
+                        sub_budget = limited
                     if not sub_budget.get("http_requests") or not sub_budget.get("tool_wall_seconds"):
                         if candidates.running:
                             position -= 1
@@ -4807,6 +5861,9 @@ class DatabaseNeutralScanActionDispatcher:
                         frozen_addresses=self.target.allowed_addresses,
                     )
                     scanner_options = {"_batch_attempt": True, **body_request}
+                    if sign_in is not None:
+                        scanner_options["probe_profile"] = AUTH_ENDPOINT_PROBE_PROFILE
+                        scanner_options["probe_pace_seconds"] = pace_seconds(children=sign_in_children)
                     args = dict(primary.capability_args())
                     args.update(body_request)
                     if tool == "nuclei":
@@ -4816,10 +5873,16 @@ class DatabaseNeutralScanActionDispatcher:
                         if (worker_template_options.get("template_profile") == "active"
                                 and verify_selection is None):
                             window = active_template_window(
-                                str(worker_template_options.get("template_ids") or ""), manifest_index,
+                                str(worker_template_options.get("template_ids") or ""),
+                                sweep_index(manifest_index),
                             )
                             scanner_options["template_ids"] = window.template_ids
                             template_windows[candidate_id] = window.record()
+                            if position_base(manifest_index) is not None:
+                                candidate_bases[candidate_id] = str(position_base(manifest_index))
+                                # The base is checkpointed with the window, so a resume credits
+                                # the attempt only to the base it actually ran at.
+                                template_windows[candidate_id]["base"] = candidate_bases[candidate_id]
                     elif tool == "dalfox":
                         scanner_options["severity"] = "high"
                         args["severity"] = "high"
@@ -4928,6 +5991,12 @@ class DatabaseNeutralScanActionDispatcher:
                             round_wall_ceiling=round_wall_ceiling,
                             scan_wall_share=scan_wall_share,
                             last_chance=last_chance,
+                            # The sign-in endpoint's pace is the floor the worker's argv runs
+                            # at; the stages record and hold it (latency measured, not drift).
+                            minimum_delay_seconds=(
+                                pace_seconds(children=sign_in_children)
+                                if sign_in is not None else None
+                            ),
                         )
                     else:
                         run_attempt = functools.partial(
@@ -4938,6 +6007,9 @@ class DatabaseNeutralScanActionDispatcher:
                         "attempt_id": attempt_id, "candidate_id": candidate_id,
                         "retry_round": retry_round, "execution_target": execution_target,
                         "body_request": body_request, "sub_budget": dict(sub_budget),
+                        "sign_in_key": sign_in.key if sign_in is not None else None,
+                        "sign_in_endpoint": sign_in.label if sign_in is not None else None,
+                        "auth_parameters": auth_parameters, "manifest_index": manifest_index,
                     }
                     if concurrent:
                         # The candidate's records keep its place in the slice whenever it finishes.
@@ -4951,11 +6023,14 @@ class DatabaseNeutralScanActionDispatcher:
                             try:
                                 await settle_attempt(_row, await _run(), _sink)
                             except _BATCH_CANDIDATE_ERRORS as exc:
+                                sign_in_running.discard(str(_row.get("sign_in_key") or ""))
                                 await fail_attempt(
                                     str(_row["attempt_id"]), str(_row["candidate_id"]),
                                     int(_row["retry_round"]), exc,
                                 )
 
+                        if sign_in is not None:
+                            sign_in_running.add(sign_in.key)
                         candidates.launch(attempt_id, sub_budget, consumed, run_candidate)
                         continue
                     await settle_attempt(row, await run_attempt(), observations)
@@ -4974,6 +6049,25 @@ class DatabaseNeutralScanActionDispatcher:
             item for entry in observations
             for item in (entry if isinstance(entry, list) else (entry,))
         ]
+        if windowed and allowlist:
+            observations.append({
+                "kind": ACTIVE_TEMPLATE_WINDOWS_RECORD_KIND,
+                "family": family,
+                "windows_run": sorted(windows_run),
+                "window_count": active_template_window_count(allowlist),
+                # Every base the sweep maps positions to, in order, and the windows each
+                # finished: a second origin that ran 11 of 39 windows is not "39 of 39".
+                "bases": [
+                    {"base": base, "windows_run": sorted(base_windows_run.get(base, ()))}
+                    for base in sweep_bases
+                ],
+                # A shard's part of the pairs: its siblings run the others.
+                **({"shard_part": {"index": shard_part[0], "count": shard_part[1]}}
+                   if shard_part is not None else {}),
+                # Windows resumed from attempts an earlier mapping ran (a 2.11.0 worker at an
+                # endpoint's path): kept, not counted as run at any base.
+                **({"legacy_windows_run": sorted(legacy_windows_run)} if legacy_windows_run else {}),
+            })
         for candidate_id, held in deferred_errors.items():
             if candidate_id not in recovered:
                 errors.extend(held)
@@ -5079,6 +6173,7 @@ class DatabaseNeutralScanActionDispatcher:
                 **({"carried_from_admission": admission_source} if admission_source else {}),
                 **({"carried_count": carried_count} if extends or admission_source else {}),
                 **({"verify_selection": dict(verify_selection)} if verify_selection else {}),
+                **({"template_selection": dict(template_selection)} if template_selection else {}),
             },
         )
 

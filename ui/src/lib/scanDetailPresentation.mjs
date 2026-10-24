@@ -260,6 +260,9 @@ const COVERAGE_REASON_LABELS = {
   state_changing_budget_exhausted: 'A planned step used up its state-changing request allowance before it finished',
   process_killed: 'A tool was killed by the system (for example, out of memory) before it finished; what it wrote before that is kept',
   discovery_truncated: 'Surface discovery was cut short by its budget, so part of the application was never examined',
+  discovery_failed: 'A surface discovery step failed, so what the application exposes was never fully examined',
+  nuclei_selection_empty: "The scan's template policy left no template to run",
+  prerequisite_unavailable: 'A step was skipped because something it needs was missing, such as a reachable origin or an authenticated session',
   cancelled: 'The run was cancelled before all planned work finished',
   budget_exhausted: 'The run exhausted its budget before all planned work finished',
   insufficient_plan_budget: 'Planned steps were skipped because the admitted budget did not reach them',
@@ -268,7 +271,7 @@ const COVERAGE_REASON_LABELS = {
   policy_disabled: 'A planned step was disabled by the scan policy',
   worker_lost: 'A worker was lost before all planned work finished',
   authentication_uncertain: 'Credential authority could not be confirmed',
-  authentication_required: 'The target refused unauthenticated requests (401/403 or a redirect to sign-in), so those candidates were not tested; to verify them, attach a credential profile that allows these checks',
+  authentication_required: 'The target refused unauthenticated requests (401/403 or a redirect to sign-in), so those candidates were not tested; to verify them, the scan needs a credential profile whose allowed capabilities include these checks: attach one, or add the checks to the attached profile (active verifiers need approved elevation)',
   target_refused: "The target refused the verifier's requests (403) without asking for credentials, for example a firewall or an access rule, so those candidates could not be verified",
   insufficient_budget_for_stage: 'A continuation could not fund a single verification stage, so its candidates were left unverified',
   output_truncated: 'A step produced more output than it may keep, so part of its result was cut off',
@@ -286,6 +289,8 @@ const COVERAGE_REASON_LABELS = {
   no_families_selected: 'The scan policy selected no check family, so only the baseline probes ran',
   application_surface_not_examined: 'No selected check family examines the application itself; the selected families only probe fixed, well-known locations',
   selected_family_no_candidates: 'A selected check family had nothing to test on the discovered surface',
+  template_windows_incomplete_on_origin: 'Active templates did not all run at one of the scanned origins (the target or another origin the scan discovered), so some checks never ran there',
+  auth_endpoint_probe_limited: "The attached credential profile's own sign-in endpoint is tested at a lockout-safe pace (at most 20 requests a minute) within a bounded set of probes for each check, and a check there ended without a verdict",
 }
 
 // What a family's slow endpoint could not finish: the template pack, or an exposure probe that
@@ -594,6 +599,47 @@ export function scanFindingCountsText(counts) {
   return parts.join(' · ')
 }
 
+// Active templates run in windows of the allowlist at each sweep base (the target's own base and
+// every other origin the scan found); the finalizer records how many (base, window) pairs ran.
+// Shown on the page. When every pair ran, the finalizer no longer calls the family unfinished for
+// endpoints the plan left unscheduled (the templates ran at the bases, not at each endpoint);
+// the page reads a report stored before that the same way.
+export function templateWindowsPresentation(coverage) {
+  const rows = Array.isArray(record(coverage).family_coverage) ? record(coverage).family_coverage : []
+  const row = record(rows.find((item) => record(item).family === 'nuclei_active'))
+  const windows = record(row.template_windows)
+  const run = finiteNumber(windows.run, null)
+  const total = finiteNumber(windows.total, null)
+  if (run === null || total === null || total <= 0) return null
+  const bases = (Array.isArray(windows.bases) ? windows.bases : [])
+    .map((item) => ({
+      base: String(record(item).base || ''),
+      run: finiteNumber(record(item).run, 0),
+      total: finiteNumber(record(item).total, 0),
+    }))
+    .filter((item) => item.base)
+  const perBase = bases.length ? ` (${bases.map((item) => `${item.base} ${item.run}/${item.total}`).join(', ')})` : ''
+  return {
+    run,
+    total,
+    complete: run >= total && bases.every((item) => item.run >= item.total),
+    bases,
+    detail: `${run} of ${total} ran${perBase}`,
+    text: `Active templates: ${run} of ${total} template windows ran${perBase}.`,
+  }
+}
+
+// The only partial reason every-window-ran outweighs: endpoints the plan never scheduled. A sweep
+// that timed out, failed or left a base short is still unfinished.
+const WINDOWS_COVER_REASONS = new Set(['manifest_entries_unscheduled'])
+
+function windowsCoverFamily(coverage, templateWindows) {
+  if (!templateWindows?.complete) return false
+  const rows = Array.isArray(record(coverage).family_coverage) ? record(coverage).family_coverage : []
+  const row = record(rows.find((item) => record(item).family === 'nuclei_active'))
+  return row.coverage_status === 'complete' || WINDOWS_COVER_REASONS.has(String(row.reason || ''))
+}
+
 export function scanResultPresentation(scan, assurance) {
   const scanRecord = record(scan)
   const report = record(scanRecord.result)
@@ -664,14 +710,24 @@ export function scanResultPresentation(scan, assurance) {
   const posturePenalty = finiteNumber(result.posture_penalty, null)
   const policyVersion = Number(scorePolicy.match(/^risk_and_assurance\/v(\d+)$/)?.[1] || 0)
   const coverage = record(report.coverage)
-  const coverageReasons = Array.isArray(coverage.reasons) ? coverage.reasons : []
+  // Families the operator selected that never reached a complete state. Naming them is what
+  // turns "a selected check family is incomplete" into something a reader can act on.
+  const templateWindows = templateWindowsPresentation(coverage)
+  const windowsCovered = windowsCoverFamily(coverage, templateWindows)
+  // A report stored before the finalizer judged a windowed sweep by its (base, window) pairs
+  // still names the sweep as its only unfinished family; that reason then explains nothing.
+  const windowsOnlyGap = windowsCovered && Array.isArray(coverage.selected_family_gaps)
+    && coverage.selected_family_gaps.length > 0
+    && coverage.selected_family_gaps.every((family) => String(family) === 'nuclei_active')
+  const coverageReasons = (Array.isArray(coverage.reasons) ? coverage.reasons : [])
+    .filter((reason) => !(windowsOnlyGap && String(reason) === 'selected_family_incomplete'))
   const coverageWarnings = coverageReasons.map((reason) => (
     String(reason || '').replaceAll('_', ' ')
   )).filter(Boolean)
-  // Families the operator selected that never reached a complete state. Naming them is what
-  // turns "a selected check family is incomplete" into something a reader can act on.
   const incompleteFamilies = Array.isArray(coverage.selected_family_gaps)
-    ? coverage.selected_family_gaps.map((family) => String(family || '').replaceAll('_', ' ')).filter(Boolean)
+    ? coverage.selected_family_gaps
+      .filter((family) => !(windowsCovered && String(family) === 'nuclei_active'))
+      .map((family) => String(family || '').replaceAll('_', ' ')).filter(Boolean)
     : []
   const candidateRows = Array.isArray(coverage.family_coverage) ? coverage.family_coverage : null
   const candidateGapFamilies = candidateRows ? resolvedFamilies
@@ -733,6 +789,7 @@ export function scanResultPresentation(scan, assurance) {
     coverageIncomplete,
     coverageGapReasons,
     incompleteFamilies,
+    templateWindows,
     candidateGapFamilies,
     injectionCandidateGap,
     observedCount: findings.length,

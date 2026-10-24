@@ -17,7 +17,7 @@ from typing import Any
 import urllib.parse
 
 RISKY_INTERACTION_KEYWORDS = (
-    "logout", "log out", "sign out", "signout",
+    "logout", "log out", "logoff", "log off", "sign out", "signout", "sign off", "signoff",
     "delete", "remove", "destroy", "erase",
     "cancel", "deactivate", "disable", "revoke",
     "reset", "clear all", "wipe", "start", "run", "launch",
@@ -25,7 +25,7 @@ RISKY_INTERACTION_KEYWORDS = (
     "unsubscribe", "close account", "terminate",
 )
 RISKY_NAVIGATION_KEYWORDS = (
-    "logout", "log out", "sign out", "signout",
+    "logout", "log out", "logoff", "log off", "sign out", "signout", "sign off", "signoff",
     "delete", "remove", "destroy", "erase", "deactivate", "disable",
     "revoke", "reset", "clear all", "wipe", "unsubscribe",
     "close account", "terminate",
@@ -77,16 +77,61 @@ def token_like_segment(segment: str) -> bool:
     return has_digit and has_alpha and _entropy_bits(text) >= _TOKEN_MIN_ENTROPY_BITS
 
 
+def _decoded(text: str) -> str:
+    """``text`` with its percent-encoding undone, repeatedly (``%256C`` is ``%6C`` is ``l``)."""
+    for _ in range(3):
+        decoded = urllib.parse.unquote(text)
+        if decoded == text:
+            break
+        text = decoded
+    return text
+
+
 def path_may_change_state(path: str) -> bool:
     """Whether a GET of ``path`` may act rather than read: an action word in it (the crawler's
-    interaction words, the broadest list) or a token-like segment."""
-    text = str(path or "")
-    if contains_risky_keyword((text,), RISKY_INTERACTION_KEYWORDS):
-        return True
-    return any(token_like_segment(segment) for segment in text.split("/") if segment)
+    interaction words, the broadest list) or a token-like segment. The path is read as written
+    and percent-decoded, so ``/%6Cogout`` names the action ``/logout`` does."""
+    raw = str(path or "")
+    for text in dict.fromkeys((raw, _decoded(raw))):
+        if contains_risky_keyword((text,), RISKY_INTERACTION_KEYWORDS):
+            return True
+        if any(token_like_segment(segment) for segment in text.split("/") if segment):
+            return True
+    return False
+
+
+def navigation_exclusion_expression(keywords: tuple[str, ...] = RISKY_NAVIGATION_KEYWORDS) -> str:
+    """A regular expression matching a URL whose path or query names one of ``keywords``.
+
+    For crawlers that take a URL exclusion pattern. Like ``contains_risky_keyword`` it matches a
+    whole word after a separator or at a camelCase hump (``/log-out``, ``logoutAll``,
+    ``deleteUser``) but not a word inside another (``/catalog``, ``removed``). The host is never
+    examined, so an action word in a hostname cannot exclude the whole site. The expression
+    uses only syntax shared by Python and Go (RE2) and contains no comma, which list-valued
+    command-line flags would split on.
+    """
+    insensitive: list[str] = []
+    capitalized: list[str] = []
+    for keyword in keywords:
+        words = semantic_text(keyword).split()
+        if not words:
+            continue
+        joiner = "[^A-Za-z0-9]*"
+        insensitive.append(joiner.join(f"(?i:{re.escape(word)})" for word in words))
+        first, rest = words[0][0], words[0][1:]
+        capitalized.append(joiner.join(
+            [f"{re.escape(first.upper())}(?i:{re.escape(rest)})" if rest else re.escape(first.upper())]
+            + [f"(?i:{re.escape(word)})" for word in words[1:]]
+        ))
+    return (
+        "^[^:/?#]+://[^/?#]*[/?#]"
+        f"(?:(?:.*[^A-Za-z])?(?:{'|'.join(insensitive)})|.*[a-z0-9](?:{'|'.join(capitalized)}))"
+        "(?:[^a-z]|$)"
+    )
 
 
 __all__ = [
     "RISKY_INTERACTION_KEYWORDS", "RISKY_NAVIGATION_KEYWORDS", "contains_risky_keyword",
-    "navigation_url_is_safe", "path_may_change_state", "semantic_text", "token_like_segment",
+    "navigation_exclusion_expression", "navigation_url_is_safe", "path_may_change_state",
+    "semantic_text", "token_like_segment",
 ]

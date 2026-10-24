@@ -36,6 +36,17 @@ except ModuleNotFoundError:
 router = APIRouter()
 
 
+class ScanFamilyPreviewLimits(BaseModel):
+    """The advanced ceilings that change which families a preset resolves to."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    # A request or mutation ceiling lowered far enough leaves the active templates out of the
+    # standard active set on thorough and deep (scan.contracts.standard_active_template_floors).
+    max_http_requests: int | None = Field(default=None, ge=1)
+    max_state_changing_requests: int | None = Field(default=None, ge=0)
+
+
 class ScanFamilyPreviewRequest(BaseModel):
     """Target-independent family and quota resolution used by every Scan client."""
 
@@ -52,6 +63,8 @@ class ScanFamilyPreviewRequest(BaseModel):
     network_discovery: bool = False
     subdomain_discovery: bool = False
     execution_topology: Literal["single_worker", "parallel"] = "single_worker"
+    # The Scan's lowered ceilings, so the preview resolves exactly as its submission will.
+    advanced: ScanFamilyPreviewLimits | None = None
 
 PUBLIC_SCAN_ACTIONS_SQL = """
     SELECT a.action_id, a.stage, a.ordinal, a.capability_name, a.adapter_name,
@@ -256,6 +269,9 @@ async def preview_scan_contract(request: ScanFamilyPreviewRequest):
                 "include_families": request.include_families,
                 "exclude_families": request.exclude_families,
             },
+            advanced=(
+                request.advanced.model_dump(exclude_none=True) if request.advanced else None
+            ),
             # Preview cannot validate a target-bound receipt. Preserve permission
             # resolution without granting executable receipt authority.
             approval_receipt_id=(

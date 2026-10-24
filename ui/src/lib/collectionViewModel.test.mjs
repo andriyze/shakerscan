@@ -44,6 +44,8 @@ test('a browser capture reads as one, with its state and counts', () => {
   assert.deepEqual(captureSummary(open), { open: true, state: 'Recording', counts: '12 requests · 5 endpoints · 3 refused · 2 without bodies' })
   const idle = { format: 'capture', capture: { state: 'closed', closed_reason: 'idle', flow_count: 1, endpoint_count: 1 } }
   assert.deepEqual(captureSummary(idle), { open: false, state: 'Closed (idle)', counts: '1 request · 1 endpoint' })
+  const withheld = { format: 'capture', capture: { state: 'closed', flow_count: 4, endpoint_count: 3, unsupported_request_count: 1 } }
+  assert.equal(captureSummary(withheld).counts, '4 requests · 3 endpoints · 1 not replayed')
   assert.equal(formatLabel({ format: 'openapi' }), 'openapi')
   assert.equal(captureSummary({ format: 'har', capture: { state: 'open' } }), null)
 })

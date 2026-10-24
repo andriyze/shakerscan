@@ -427,6 +427,9 @@ function ScanRunLimitsPanel({ scan }: { scan: any }) {
           {resultPresentation.resolvedFamilies.length > 0 && (
             <div><dt className="inline text-gray-500">Selected check families </dt><dd className="inline text-gray-200">{resultPresentation.resolvedFamilies.map((family: string) => family.replaceAll('_', ' ')).join(', ')}</dd></div>
           )}
+          {resultPresentation.templateWindows && (
+            <div data-testid="template-windows"><dt className="inline text-gray-500">Active template windows </dt><dd className="inline text-gray-200">{resultPresentation.templateWindows.detail}</dd></div>
+          )}
         </dl>
         {(resultPresentation.coverageIncomplete || resultPresentation.missingHeaders.length > 0) && (
           <details

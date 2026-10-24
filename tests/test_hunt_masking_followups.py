@@ -99,6 +99,9 @@ ALLOWED_PLAIN_DIGESTS = {
     ("api/hunt/knowledge_continue.py", "_with_authority"): "canonical",
     ("api/hunt/knowledge_dependencies.py", "_sha"): "redacted",
     ("api/scan/action_adapter.py", "_graphql_verify_batch"): "canonical",
+    # The sign-in endpoint's id: scheme, host, port, normalized path and the routing pairs'
+    # installation-keyed digests, counted across a Scan's attempts (auth_endpoint_probe).
+    ("api/scan/auth_endpoint_probe.py", "key"): "canonical",
     # recon_active: the response digest only compares two answers inside one action and is
     # never emitted (leads carry status and length); the list digest is of our own bundled file.
     ("api/scan/recon_active_actions.py", "_signature"): "inprocess",
@@ -110,7 +113,7 @@ ALLOWED_PLAIN_DIGESTS = {
     ("api/capabilities/authz.py", "authz_route_inventory_digest"): "canonical",
     ("api/capabilities/authz_modes.py", "verify_function_authorization"): "request",
     ("api/capabilities/authz_selected.py", "request_digest"): "canonical",
-    ("api/capabilities/browser.py", "_execute_browser_action"): "request",
+    ("api/capabilities/browser.py", "_execute_browser_action_in_context"): "request",
     ("api/capabilities/browser.py", "prepare"): "request",
     ("api/capabilities/browser_login_action.py", "prepare"): "request",
     ("api/capabilities/browser_steps.py", "browser_surface"): "redacted",
@@ -120,6 +123,9 @@ ALLOWED_PLAIN_DIGESTS = {
     # only query value); the same URL is published beside it, so the digest reveals nothing.
     ("api/capabilities/open_redirect.py", "redirect_candidates"): "canonical",
     ("api/capabilities/sqli_proof.py", "_sha256"): "request",
+    # The browser XSS proof's payload: engine-built from the candidate id and public, compared
+    # with the digest the finding kept so a retest sends the same input.
+    ("api/capabilities/xss_proof_payload.py", "sha256_text"): "request",
     ("api/capabilities/ssh_command_worker.py", "execute"): "request",
     ("api/capabilities/ssh_transport.py", "connect"): "public",
     ("api/capabilities/tls.py", "_certificate_chain_summary"): "public",
@@ -167,20 +173,15 @@ ALLOWED_PLAIN_DIGESTS = {
     ("api/runtime/observation_store.py", "persist"): "integrity",
     ("api/runtime/sealed_inputs.py", "open_private_input"): "integrity",
     ("api/runtime/sealed_inputs.py", "seal_private_input"): "integrity",
-    ("api/scan/action_adapter.py", "_authz_surface_batch"): "canonical",
+    # Every candidate-manifest batch's attempt id (manifest digest, family, candidate id and,
+    # for a repeated candidate id, its position).
+    ("api/scan/action_adapter.py", "_batch_attempt_id"): "canonical",
     ("api/scan/action_adapter.py", "_batch_candidate_id"): "canonical",
     ("api/scan/action_adapter.py", "_exposure_probe_batch"): "canonical",
     ("api/scan/action_adapter.py", "_external"): "canonical",
     ("api/scan/action_adapter.py", "_external_batch"): "canonical",
-    ("api/scan/action_adapter.py", "_nosqli_verify_batch"): "canonical",
-    # _external_batch's attempt id (manifest digest, family, candidate id), recomputed to tell
-    # which slice entries will be carried rather than funded.
-    ("api/scan/action_adapter.py", "needs_hold"): "canonical",
     # The batch attempt id: the manifest digest and the probe's canonical attempt key.
     ("api/scan/action_adapter.py", "_redirect_verify_batch"): "canonical",
-    ("api/scan/action_adapter.py", "_request_mutation_batch"): "canonical",
-    ("api/scan/action_adapter.py", "_sqli_proof_batch"): "canonical",
-    ("api/scan/action_adapter.py", "_xss_browser_proof_batch"): "canonical",
     ("api/scan/action_adapter.py", "run_stage"): "canonical",
     ("api/scan/action_plan.py", "_digest"): "canonical",
     ("api/scan/action_plan.py", "digest_input_bindings"): "canonical",

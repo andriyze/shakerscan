@@ -103,7 +103,10 @@ class HttpRequestExecutionAdapter(_InlineAdapter):
         self.result = result
         execution_started = isinstance(result.get("request"), Mapping)
         followed = max(0, int(result.get("hops_followed") or 0))
-        actual = self._wall_budget(started, execution_started=execution_started)
+        # The wall it took, at least a second, whether or not a request was sent: a request
+        # refused before sending (scope, approval) is charged that second rather than leaving the
+        # whole hold on the clock, as an omitted dimension would.
+        actual = self._wall_budget(started, execution_started=True)
         if "http_requests" in self._requested_budget:
             actual["http_requests"] = min(
                 int(self._requested_budget["http_requests"]),
@@ -159,7 +162,9 @@ class _MeasuredObservationExecutionAdapter(_InlineAdapter):
             if isinstance(result.get("budget_consumed"), Mapping)
             else {}
         )
-        execution_started = any(
+        # An operation may say whether it reached the target when its measured dimensions cannot
+        # (a Hunt's TLS handshakes to a port it already attempted reserve and report no port).
+        execution_started = result["execution_started"] if isinstance(result.get("execution_started"), bool) else any(
             int(measured.get(dimension) or 0) > 0
             for dimension in (
                 "http_requests", "tcp_ports_attempted", "hosts_attempted",
@@ -300,6 +305,7 @@ class ControlPlaneExecutionAdapter(_InlineAdapter):
         conservative_full_budget: bool = False,
         unstarted_exceptions: tuple[type[BaseException], ...] = (),
         measured_wall: bool = False,
+        settle: Callable[[Mapping[str, Any]], Mapping[str, int] | None] | None = None,
     ) -> None:
         super().__init__(
             specification=specification,
@@ -308,6 +314,8 @@ class ControlPlaneExecutionAdapter(_InlineAdapter):
             redacted_execution=redacted_execution,
         )
         self._blocked_exceptions = blocked_exceptions
+        # Corrects the settled charge from a completed result (an existing record wrote nothing).
+        self._settle = settle
         self._conservative_full_budget = conservative_full_budget
         # With a conservative traffic hold, still settle wall time to what elapsed (verification).
         self._measured_wall = measured_wall
@@ -347,13 +355,21 @@ class ControlPlaneExecutionAdapter(_InlineAdapter):
         # admission (D26: a verification that ran 3 s held its whole 180 s against
         # the Hunt's duration).
         if unstarted:
-            actual: dict[str, int] = {}
+            # Proven to have consumed nothing: release every hold explicitly, because the ledger
+            # keeps the hold of any dimension a settlement leaves out.
+            actual: dict[str, int] = {str(dimension): 0 for dimension in self._requested_budget}
         elif self._conservative_full_budget:
             actual = dict(self._requested_budget)
             if self._measured_wall:
                 actual.update(self._wall_budget(started, execution_started=True))
         else:
             actual = self._wall_budget(started, execution_started=succeeded)
+        if self._settle is not None and self.blocked_exception is None:
+            correction = self._settle(result) or {}
+            actual.update({
+                key: min(int(value), int(self._requested_budget.get(key) or 0))
+                for key, value in correction.items() if key in self._requested_budget
+            })
         status = (
             "blocked"
             if self.blocked_exception is not None

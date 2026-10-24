@@ -86,9 +86,9 @@ try:
     from http_experiment import ExperimentContractError, execute_experiment
     from request_models import HypothesisRequest, ScanAdvancedLimits, ScanOptions
     from research_agent import RISK_TIER_ORDER
-    from retest_contract import infer_type_from_title_tool
+    from retest_contract import current_replay_commands, infer_type_from_title_tool
     from serialization import row_to_dict
-    from workflow_experiment import WorkflowContractError, normalize_workflow, validate_principal_contexts
+    from workflow_experiment import WorkflowContractError, normalize_workflow, validate_principal_contexts, workflow_traffic
     from ai_targets import router as _ai_targets
     from exposure import router as _exposure
     from finding_exceptions import router as _finding_exceptions
@@ -106,9 +106,9 @@ except ModuleNotFoundError:  # package import in host-side tests
     from ..http_experiment import ExperimentContractError, execute_experiment
     from ..request_models import HypothesisRequest, ScanAdvancedLimits, ScanOptions
     from ..research_agent import RISK_TIER_ORDER
-    from ..retest_contract import infer_type_from_title_tool
+    from ..retest_contract import current_replay_commands, infer_type_from_title_tool
     from ..serialization import row_to_dict
-    from ..workflow_experiment import WorkflowContractError, normalize_workflow, validate_principal_contexts
+    from ..workflow_experiment import WorkflowContractError, normalize_workflow, validate_principal_contexts, workflow_traffic
     from ..ai_targets import router as _ai_targets
     from ..exposure import router as _exposure
     from ..finding_exceptions import router as _finding_exceptions
@@ -6097,7 +6097,10 @@ def _authz_replay_plan_from_hypothesis_action(
 def _hypothesis_family_matches_finding(hypothesis: dict[str, Any], finding: dict[str, Any]) -> bool:
     raw_family = str(hypothesis.get("family") or "").strip().lower().replace("-", "_")
     evidence = _decode_json_value(finding.get("evidence")) or {}
-    inferred = str(infer_type_from_title_tool(finding.get("title"), finding.get("tool")) or "").lower()
+    # Which kind of check the finding is, from its tool or its title whatever the tool: a
+    # template's title names its family even though no prover replays it.
+    inferred = str(infer_type_from_title_tool(
+        finding.get("title"), finding.get("tool"), title_for_any_tool=True) or "").lower()
     if raw_family in {"nosql", "nosqli", "nosql_injection"}:
         return inferred == "nosqli"
     if raw_family in {"sqli", "sql", "sql_injection"}:
@@ -8484,6 +8487,7 @@ async def _arsenal_dispatch_workflow(p: dict[str, Any], approval_receipt_id: str
         "findings_created": 1 if promotion and promotion.get("status") == "created" else 0,
         "verified_findings_created": 1 if promotion else 0,
         "proof_state": "verified" if promotion else "unverified_workflow_signal",
+        "traffic": workflow_traffic(executed, replayed, materialization, normalized["steps"]),
     }
 
 
@@ -9102,7 +9106,7 @@ async def _derive_refuter_review_verdict(
     outcome = _refuter_review_from_verification_outcome(verification)
     proof = _decode_json_value(verification.get("proof")) or {}
     artifacts = _decode_json_value(verification.get("artifacts")) or {}
-    replay_commands = _decode_json_value(verification.get("replay_commands")) or []
+    replay_commands = current_replay_commands(verification) or []
     counterevidence = _redact_agent_payload({
         "verification_id": str(verification.get("id")),
         "verification_status": verification.get("status"),

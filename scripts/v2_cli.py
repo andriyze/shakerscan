@@ -136,6 +136,15 @@ def _redirect_text(exc: urllib.error.HTTPError, request_url: str) -> str:
     return redirect_explanation(exc.code, location, request_url, option="--url")
 
 
+def _certificate_text(message: str, reason: object) -> str:
+    """Name the remedy when the failure is an untrusted (private CA) certificate."""
+    try:
+        from redirect_hint import with_certificate_hint
+    except ModuleNotFoundError:
+        from scripts.redirect_hint import with_certificate_hint
+    return with_certificate_hint(message, reason)
+
+
 def _approval():
     """The terminal approval protocol (scripts/hunt_approve.py), loaded when a command needs it."""
     try:
@@ -234,7 +243,7 @@ class ApiClient:
             ) from exc
         except urllib.error.URLError as exc:
             raise CliError(
-                f"cannot reach ShakerScan API: {exc.reason}",
+                _certificate_text(f"cannot reach ShakerScan API: {exc.reason}", exc.reason),
                 error_type="network_error",
             ) from exc
         except (TimeoutError, OSError) as exc:
@@ -297,7 +306,7 @@ class ApiClient:
             ) from exc
         except urllib.error.URLError as exc:
             raise CliError(
-                f"cannot reach ShakerScan API: {exc.reason}",
+                _certificate_text(f"cannot reach ShakerScan API: {exc.reason}", exc.reason),
                 error_type="network_error",
             ) from exc
         if len(raw) > max_bytes:
@@ -389,6 +398,29 @@ def _pairs(values: Sequence[str], *, label: str) -> dict[str, str]:
             raise CliError(f"duplicate {label} name: {name}")
         result[name] = value
     return result
+
+
+# `--credential-ref SLOT=ID` takes the short slot names the help documents as aliases of the
+# start contract's fields (primary -> primary_credential_profile_id); the full names still work.
+CREDENTIAL_REF_SLOTS = {
+    "primary": "primary_credential_profile_id",
+    "secondary": "secondary_credential_profile_id",
+    "service": "service_credential_profile_id",
+    "web": "web_credential_profile_id",
+    "ssh": "ssh_credential_profile_id",
+    "oauth": "oauth_credential_profile_id",
+    "authorization_header": "authorization_header_credential_id",
+    "cookie": "cookie_credential_id",
+}
+
+
+def _credential_refs(values: Sequence[str]) -> dict[str, str]:
+    aliased = []
+    for raw in values:
+        name, separator, value = str(raw).partition("=")
+        name = name.strip()
+        aliased.append(f"{CREDENTIAL_REF_SLOTS.get(name, name)}{separator}{value}")
+    return _pairs(aliased, label="credential reference")
 
 
 def _openapi_schema(client: ApiClient, name: str) -> Mapping[str, Any]:
@@ -494,7 +526,7 @@ def _hunt_start_payload(args: argparse.Namespace, contract: Mapping[str, Any]) -
             "scope_receipt_id": args.scope_receipt_id,
         },
         "budgets": budgets,
-        "credential_refs": _pairs(args.credential_ref, label="credential reference"),
+        "credential_refs": _credential_refs(args.credential_ref),
         "capabilities": list(dict.fromkeys(args.capability)),
         "request_collection_ids": list(dict.fromkeys(args.collection_id)),
         "skill_ids": list(dict.fromkeys(args.skill_id)),
@@ -1117,7 +1149,14 @@ def build_parser() -> argparse.ArgumentParser:
     hunt_start.add_argument("--approval-receipt-id")
     hunt_start.add_argument("--scope-receipt-id")
     hunt_start.add_argument("--budget", action="append", default=[], metavar="NAME=VALUE")
-    hunt_start.add_argument("--credential-ref", action="append", default=[], metavar="SLOT=ID")
+    hunt_start.add_argument(
+        "--credential-ref", action="append", default=[], metavar="SLOT=ID",
+        help=(
+            "attach a credential profile (repeatable). SLOT is "
+            + ", ".join(CREDENTIAL_REF_SLOTS)
+            + " or the full field name (primary_credential_profile_id, ...)"
+        ),
+    )
     hunt_start.add_argument("--capability", action="append", default=[])
     hunt_start.add_argument("--collection-id", action="append", default=[])
     hunt_start.add_argument(
@@ -1548,10 +1587,26 @@ def main(argv: Sequence[str] | None = None) -> int:
         else:
             raise CliError("unknown command")
         print(json.dumps(result, indent=2, sort_keys=True))
-        return 0
+        return _hunt_call_exit(args, result)
     except CliError as exc:
         print(json.dumps(exc.public_dict(), sort_keys=True), file=sys.stderr)
         return 2
+
+
+def _hunt_call_exit(args: argparse.Namespace, result: Any) -> int:
+    """``hunt call`` whose action was refused (a denied, expired or withdrawn permission replayed
+    as ``blocked``) exits 2 like any other refusal: the body is a 2xx replay, but nothing ran."""
+    if getattr(args, "product", None) != "hunt" or getattr(args, "hunt_command", None) != "call":
+        return 0
+    response = result.get("response") if isinstance(result, Mapping) else None
+    action = response.get("action_result") if isinstance(response, Mapping) else None
+    if not isinstance(action, Mapping) or str(action.get("status") or "") != "blocked":
+        return 0
+    errors = [str(item) for item in action.get("errors") or () if item]
+    reason = errors[0] if errors else "blocked"
+    print(json.dumps({"error": f"the action was refused ({reason}) and did not run",
+                      "error_type": "action_blocked"}, sort_keys=True), file=sys.stderr)
+    return 2
 
 
 def _run_approval(args: argparse.Namespace, client: ApiClient) -> int:

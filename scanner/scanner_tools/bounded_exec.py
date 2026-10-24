@@ -48,8 +48,14 @@ def _limit(kind: int, value: int) -> None:
     resource.setrlimit(kind, (value, value))
 
 
-def _deny_network_syscalls() -> None:
-    """Deny external-capable socket creation while preserving local Unix IPC."""
+def _load_seccomp() -> tuple[ctypes.CDLL, ctypes.CDLL]:
+    """Resolve and load libseccomp and libc while this process may still fork.
+
+    ctypes.util.find_library forks (ldconfig -p, then gcc and ld fallbacks) and returns None when
+    the fork fails. RLIMIT_NPROC counts every task of the real uid, so once main() lowers it the
+    fork fails whenever the uid already runs that many tasks elsewhere, and the launcher refused
+    every scanner as if libseccomp were absent. Nothing after the limits may fork or resolve.
+    """
     library_name = ctypes.util.find_library("seccomp")
     if not library_name:
         raise SystemExit("bounded_exec requires libseccomp for no-network execution")
@@ -72,6 +78,11 @@ def _deny_network_syscalls() -> None:
     seccomp.seccomp_syscall_resolve_name.restype = ctypes.c_int
     seccomp.seccomp_load.argtypes = [ctypes.c_void_p]
     seccomp.seccomp_load.restype = ctypes.c_int
+    return seccomp, libc
+
+
+def _deny_network_syscalls(seccomp: ctypes.CDLL, libc: ctypes.CDLL) -> None:
+    """Deny external-capable socket creation while preserving local Unix IPC."""
     if libc.prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0:
         raise SystemExit(f"bounded_exec could not set no_new_privileges: errno={ctypes.get_errno()}")
     context = seccomp.seccomp_init(SCMP_ACT_ALLOW)
@@ -120,6 +131,7 @@ def main(argv: list[str] | None = None) -> int:
     if not arguments or not os.path.isabs(arguments[0]):
         raise SystemExit("bounded_exec requires an absolute executable path")
 
+    seccomp, libc = _load_seccomp()
     _limit(resource.RLIMIT_CPU, 300)
     # Go and OCaml runtimes reserve an enormous sparse address space and crash
     # under RLIMIT_AS even when RSS is small. For those explicitly selected
@@ -128,10 +140,13 @@ def main(argv: list[str] | None = None) -> int:
         _limit(resource.RLIMIT_AS, 2 * 1024**3)
     _limit(resource.RLIMIT_FSIZE, 100 * 1024**2)
     _limit(resource.RLIMIT_NOFILE, 256)
+    # Linux counts RLIMIT_NPROC per real uid (every task, threads included, of that uid in the
+    # user namespace), not per launcher, and exempts root. After the drop to the scanner account
+    # the scanner shares these 128 with every other task of that uid.
     if hasattr(resource, "RLIMIT_NPROC"):
         _limit(resource.RLIMIT_NPROC, 128)
     _limit(resource.RLIMIT_CORE, 0)
-    _deny_network_syscalls()
+    _deny_network_syscalls(seccomp, libc)
 
     if os.geteuid() == 0:
         account = pwd.getpwnam("scanner")

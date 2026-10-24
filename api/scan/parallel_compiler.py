@@ -1888,6 +1888,49 @@ def merge_parallel_action_executions(
                 "unattempted_candidates", "verified_findings", "suspected_findings",
             ):
                 aggregate[key] += max(0, int(raw.get(key) or 0))
+            for name, check in raw.items():
+                # A best-effort check's own row (finalizer._AUXILIARY_CHECKS), merged per shard.
+                if name in _AUXILIARY_CHECK_ROWS and isinstance(check, Mapping):
+                    aggregate.setdefault("_auxiliary", {}).setdefault(name, []).append(check)
+            windows = raw.get("template_windows")
+            if isinstance(windows, Mapping) and all(
+                isinstance(windows.get(name), int) and not isinstance(windows.get(name), bool)
+                for name in ("run", "total")
+            ) and 0 <= windows["run"] <= windows["total"]:
+                # Informational, as in a direct Scan's report. A shard that lists the windows it
+                # ran at each base lets the merge count the distinct (base, window) pairs the
+                # shards ran -- at most each base's total -- and the pairs two shards both ran. A
+                # shard from before that ran the allowlist's leading windows on its own endpoints,
+                # as its siblings did: the shards together ran the windows of the one that ran the
+                # most, never fewer.
+                merged = aggregate.get("template_windows")
+                bases = windows.get("bases")
+                if isinstance(windows.get("shard_part"), Mapping) and isinstance(bases, list) and (
+                    merged is None or "_bases" in merged
+                ):
+                    merged = aggregate.setdefault("template_windows", {"_bases": {}, "_runs": 0})
+                    for entry in bases:
+                        if not (isinstance(entry, Mapping) and isinstance(entry.get("base"), str)):
+                            continue
+                        total = max(0, int(entry.get("total") or 0))
+                        ran = {
+                            int(index) for index in entry.get("windows_run") or ()
+                            if isinstance(index, int) and not isinstance(index, bool)
+                            and 0 <= index < total
+                        }
+                        seen = merged["_bases"].setdefault(entry["base"], [set(), total])
+                        seen[0] |= ran
+                        seen[1] = max(seen[1], total)
+                        merged["_runs"] += len(ran)
+                    # Each base's windows were read against its total, so no base counts more.
+                    merged["run"] = sum(len(ran) for ran, _total in merged["_bases"].values())
+                    merged["total"] = sum(total for _ran, total in merged["_bases"].values())
+                elif merged is None or "_bases" not in merged and (
+                    windows["total"], windows["run"],
+                ) > (merged["total"], merged["run"]):
+                    aggregate["template_windows"] = {
+                        "run": int(windows["run"]), "total": int(windows["total"]),
+                    }
             if int(raw.get("batch_actions") or 0) == 0 and raw.get("reason") in {
                 "not_planned", "no_candidates",
             }:
@@ -1974,6 +2017,38 @@ def merge_parallel_action_executions(
 _MIN_INJECTABLE_ENDPOINTS_PER_SHARD = 8
 
 
+_AUXILIARY_CHECK_ROWS = frozenset({"open_redirect"})
+_AUXILIARY_STATUS_ORDER = ("not_applicable", "complete", "partial")
+
+
+def merge_auxiliary_check_rows(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    """One auxiliary check's row across shards: summed counts, the least complete status.
+
+    A shard that had nothing for the check (not_applicable) says nothing about the others; any
+    shard that left work undone leaves the merged check partial with its reason.
+    """
+    statuses = [str(row.get("status") or "partial") for row in rows]
+    status = max(
+        statuses,
+        key=lambda value: _AUXILIARY_STATUS_ORDER.index(value)
+        if value in _AUXILIARY_STATUS_ORDER else len(_AUXILIARY_STATUS_ORDER),
+    )
+    if status not in _AUXILIARY_STATUS_ORDER:
+        status = "partial"
+    reason = next(
+        (row.get("reason") for row, value in zip(rows, statuses)
+         if value == status and row.get("reason")),
+        None,
+    )
+    return {
+        "actions": sum(int(row.get("actions") or 0) for row in rows),
+        "planned_candidates": sum(int(row.get("planned_candidates") or 0) for row in rows),
+        "attempted_candidates": sum(int(row.get("attempted_candidates") or 0) for row in rows),
+        "status": status,
+        "reason": reason if status != "complete" else None,
+    }
+
+
 def _reconciled_family_coverage(aggregate: Mapping[str, Any]) -> dict[str, Any]:
     """Make a merged family's reason agree with the counters merged beside it.
 
@@ -1989,8 +2064,24 @@ def _reconciled_family_coverage(aggregate: Mapping[str, Any]) -> dict[str, Any]:
     """
     row = dict(aggregate)
     unplanned = row.pop("_unplanned_children", None) or {}
+    windows = row.get("template_windows")
+    if isinstance(windows, Mapping) and "_bases" in windows:
+        # The shards' summed per-base runs, as a direct Scan lists them.
+        repeated = max(0, int(windows.get("_runs") or 0) - int(windows["run"]))
+        row["template_windows"] = {
+            "run": int(windows["run"]), "total": int(windows["total"]),
+            "bases": [
+                {"base": base, "run": len(ran), "total": total}
+                for base, (ran, total) in windows["_bases"].items()
+            ],
+            # Pairs more than one shard ran: run counts each once.
+            **({"repeated_pairs": repeated} if repeated else {}),
+        }
+    for name, checks in (row.pop("_auxiliary", None) or {}).items():
+        row[name] = merge_auxiliary_check_rows(checks)
     if (
-        str(row.get("reason") or "") == "zero_attempts"
+        # zero_work is the same claim for a family that planned no counted candidate.
+        str(row.get("reason") or "") in {"zero_attempts", "zero_work"}
         and int(row.get("attempted_candidates") or 0) > 0
     ):
         row["reason"] = "child_family_incomplete"

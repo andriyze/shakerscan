@@ -38,13 +38,19 @@ try:
     from evidence_storage import hydrate_evidence_content, public_evidence_object
     from evidence_triage import redact_finding_evidence as _redact_finding_evidence
     from retest_contract import (
-        AI_ONLY_RETEST_TYPES, SUPPORTED_RETEST_TYPES, build_replay_commands,
+        SUPPORTED_RETEST_TYPES, build_replay_commands,
         build_retest_job_payload, extract_auth_context, infer_type_from_title_tool,
-        normalize_retest_type, parse_json_field, validate_retest_job_payload,
+        normalize_retest_type, parse_json_field, retest_sends_active_requests,
+        retest_refusal_message, retest_refusal_reason, validate_retest_job_payload,
     )
     from serialization import _decode_json_value, _json_object, _str_list, row_to_dict
-    from scan.retest_authority import REPLAY_OUT_OF_SCOPE, admit_retest, admitted_authority_json
+    from scan.retest_authority import (
+        REPLAY_OUT_OF_SCOPE, REPLAY_URL_UNRESOLVED, REPLAY_URL_UNRESOLVED_MESSAGE, admit_retest,
+        admitted_authority_json,
+    )
     from finding_detail import RELATED_SQL, build_finding_detail, related_findings, related_sql_args
+    from finding_detail.evidence_commands import current_evidence_commands
+    from proof_retest import proof_retest_request
     from exposure.finding_link import related_exposures
     from list_contract import DEFAULT_LIMIT, MAX_LIMIT, SqlParams, page_params
 except ModuleNotFoundError:  # package import in host-side tests
@@ -58,13 +64,19 @@ except ModuleNotFoundError:  # package import in host-side tests
     from ..evidence_storage import hydrate_evidence_content, public_evidence_object
     from ..evidence_triage import redact_finding_evidence as _redact_finding_evidence
     from ..retest_contract import (
-        AI_ONLY_RETEST_TYPES, SUPPORTED_RETEST_TYPES, build_replay_commands,
+        SUPPORTED_RETEST_TYPES, build_replay_commands,
         build_retest_job_payload, extract_auth_context, infer_type_from_title_tool,
-        normalize_retest_type, parse_json_field, validate_retest_job_payload,
+        normalize_retest_type, parse_json_field, retest_sends_active_requests,
+        retest_refusal_message, retest_refusal_reason, validate_retest_job_payload,
     )
     from ..serialization import _decode_json_value, _json_object, _str_list, row_to_dict
-    from ..scan.retest_authority import REPLAY_OUT_OF_SCOPE, admit_retest, admitted_authority_json
+    from ..scan.retest_authority import (
+        REPLAY_OUT_OF_SCOPE, REPLAY_URL_UNRESOLVED, REPLAY_URL_UNRESOLVED_MESSAGE, admit_retest,
+        admitted_authority_json,
+    )
     from ..finding_detail import RELATED_SQL, build_finding_detail, related_findings, related_sql_args
+    from ..finding_detail.evidence_commands import current_evidence_commands
+    from ..proof_retest import proof_retest_request
     from ..exposure.finding_link import related_exposures
     from ..list_contract import DEFAULT_LIMIT, MAX_LIMIT, SqlParams, page_params
 
@@ -699,6 +711,8 @@ async def get_finding(finding_id: str):
         exposures = await related_exposures(conn, finding)
 
     result = dict(finding)
+    # Stored copyable commands are rebuilt from their inputs or shown as recorded text only.
+    current_evidence_commands(result)
     # Same single proof-state the list uses, so list and detail never disagree (§7).
     result.update(finding_proof_fields(result))
     # A release's retirement is labelled as such, never read as a fix.
@@ -712,7 +726,9 @@ async def get_finding(finding_id: str):
     result["related_findings"] = related_findings(result, [dict(row) for row in related_rows])
 
     # Retest capability hints so the UI can gate the retest button instead of
-    # surfacing a 400 after the click.
+    # surfacing a 400 after the click. ``retest_active``: the retest may send active requests
+    # (a prover's payloads, an AI Gate probe, or the AI tier's own requests).
+    result["retest_active"] = False
     if result.get("source") == "device" or result.get("device_target_id"):
         result["retest_supported"] = False
         result["retest_type"] = None
@@ -722,40 +738,57 @@ async def get_finding(finding_id: str):
         result["retest_supported"] = True
         result["retest_type"] = None
         result["retest_modes"] = ["same_probe", "same_family", "strict_replay"]
+        result["retest_active"] = True
     else:
         evidence = parse_json_field(result.get("evidence"))
         retest_type = infer_retest_type(result, evidence)
-        tool = str(result.get("tool") or "").lower()
-        if retest_type:
+        refusal = retest_refusal_reason(result, retest_type)
+        if refusal is None:
             result["retest_supported"] = True
             result["retest_type"] = retest_type
-            result["retest_modes"] = (
-                ["tiered", "ai"] if retest_type in AI_ONLY_RETEST_TYPES
-                else ["tiered", "deterministic", "ai"]
+            # Not "ai": the AI tier alone is at most inconclusive, so it could never conclude.
+            # Tiered runs it after the prover; the API still takes mode=ai.
+            result["retest_modes"] = ["tiered", "deterministic"]
+            result["retest_active"] = retest_sends_active_requests(
+                retest_type, ai_tier_available=_ai_verifier_ready(),
             )
-        elif tool == "model_intake":
+        else:
+            # No prover of this finding's kind of check, or only the AI tier (generic_http,
+            # 2fa_bypass). The AI tier is not offered alone: it can never mark a finding fixed,
+            # so an AI-only retest could not conclude.
             result["retest_supported"] = False
             result["retest_type"] = None
             result["retest_modes"] = []
-            result["retest_unsupported_reason"] = "model_intake"
-        else:
-            ai_settings = _load_effective_ai_settings()
-            ai_ready = bool(
-                ai_settings.get("ai_verify_enabled")
-                and (ai_settings.get("ai_verify_url") or ai_settings.get("ai_url"))
-                and (ai_settings.get("ai_verify_api_key") or ai_settings.get("ai_api_key"))
-            )
-            if ai_ready:
-                result["retest_supported"] = True
-                result["retest_type"] = "generic_http"
-                result["retest_modes"] = ["ai"]
-            else:
-                result["retest_supported"] = False
-                result["retest_type"] = None
-                result["retest_modes"] = []
-                result["retest_unsupported_reason"] = "no_deterministic_prover_and_ai_verification_disabled"
+            result["retest_unsupported_reason"] = refusal
+            # A proven finding whose request cannot be sent again says what is missing.
+            message = retest_refusal_message(result)
+            if message:
+                result["retest_unsupported_message"] = message
 
     return result
+
+
+def _ai_verifier_ready() -> bool:
+    ai_settings = _load_effective_ai_settings()
+    return bool(
+        ai_settings.get("ai_verify_enabled")
+        and (ai_settings.get("ai_verify_url") or ai_settings.get("ai_url"))
+        and (ai_settings.get("ai_verify_api_key") or ai_settings.get("ai_api_key"))
+    )
+
+
+_RETEST_UNSUPPORTED_MESSAGES = {
+    "retest_needs_template_replay": (
+        "This template finding has no single-request retest; run a new Scan to check it again."
+    ),
+    "retest_exposure_by_rescan": "Run a new Scan to check this exposure again.",
+    "retest_by_rescan_only": "This finding has no single-request retest; run a new Scan to check it again.",
+    "retest_by_hunt_rerun": "This Hunt finding has no single-request retest; run the Hunt again to check it.",
+    "model_intake": (
+        "Model Intake findings cannot be retested via HTTP replay; re-run the Model Intake scan "
+        "for this artifact instead."
+    ),
+}
 
 
 @router.post("/findings/{finding_id:path}/retest")
@@ -802,50 +835,19 @@ async def retest_finding(
             override_request_body=request.request_body,
         )
 
-        if not retest_inputs.get("finding_type"):
-            tool = str(finding_data.get("tool") or "").lower()
-            if tool == "model_intake":
-                raise HTTPException(
-                    status_code=400,
-                    detail={
-                        "error": "unsupported_finding_type",
-                        "message": "Model Intake findings cannot be retested via HTTP replay; re-run the Model Intake scan for this artifact instead.",
-                    },
-                )
-
-            # No deterministic prover for this finding. Fall back to the AI
-            # verification tier (generic_http) when an AI verifier is configured.
-            ai_settings = _load_effective_ai_settings()
-            ai_ready = bool(
-                ai_settings.get("ai_verify_enabled")
-                and (ai_settings.get("ai_verify_url") or ai_settings.get("ai_url"))
-                and (ai_settings.get("ai_verify_api_key") or ai_settings.get("ai_api_key"))
+        refusal = retest_refusal_reason(finding_data, retest_inputs.get("finding_type"))
+        if refusal is not None:
+            # No prover of this finding's kind of check, or only the AI tier, which alone can
+            # never conclude (it is at most inconclusive): nothing is queued.
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "error": "unsupported_finding_type",
+                    "reason": refusal,
+                    "message": retest_refusal_message(finding_data) or _RETEST_UNSUPPORTED_MESSAGES[refusal],
+                    **({} if refusal == "model_intake" else {"supported_types": list(SUPPORTED_RETEST_TYPES)}),
+                },
             )
-            if not ai_ready:
-                raise HTTPException(
-                    status_code=400,
-                    detail={
-                        "error": "unsupported_finding_type",
-                        "message": (
-                            "Could not infer a deterministic retest type from this finding, "
-                            "and AI verification is not configured. Enable AI verification in "
-                            "AI settings to retest this finding type."
-                        ),
-                        "supported_types": list(SUPPORTED_RETEST_TYPES),
-                    },
-                )
-            if mode == "deterministic":
-                raise HTTPException(
-                    status_code=400,
-                    detail={
-                        "error": "no_deterministic_prover",
-                        "message": "This finding has no deterministic prover; retest it in tiered or AI mode.",
-                    },
-                )
-            retest_inputs["finding_type"] = "generic_http"
-            # Force the AI tier so an explicit user retest is not silently
-            # skipped by the severity-based AI escalation gate.
-            mode = "ai"
 
         if not retest_inputs.get("target_url"):
             raise HTTPException(
@@ -1098,11 +1100,9 @@ async def bulk_retest_findings(request: FindingsBulkRetestRequest):
                 override_type=request.finding_type,
             )
 
-            if not retest_inputs.get("finding_type"):
-                skipped.append({
-                    "finding_id": str(finding_data["id"]),
-                    "reason": "unsupported_type",
-                })
+            refusal = retest_refusal_reason(finding_data, retest_inputs.get("finding_type"))
+            if refusal is not None:
+                skipped.append({"finding_id": str(finding_data["id"]), "reason": refusal})
                 continue
             if not retest_inputs.get("target_url"):
                 skipped.append({
@@ -1140,8 +1140,8 @@ async def bulk_retest_findings(request: FindingsBulkRetestRequest):
                 )
             except HTTPException as exc:
                 detail = exc.detail if isinstance(exc.detail, dict) else {}
-                if detail.get("error") == REPLAY_OUT_OF_SCOPE:
-                    skipped.append({"finding_id": str(finding_data["id"]), "reason": REPLAY_OUT_OF_SCOPE})
+                if detail.get("error") in (REPLAY_OUT_OF_SCOPE, REPLAY_URL_UNRESOLVED):
+                    skipped.append({"finding_id": str(finding_data["id"]), "reason": detail["error"]})
                     continue
                 if exc.status_code != 409 or detail.get("error") != "finding_retest_already_active":
                     raise
@@ -1767,6 +1767,8 @@ async def _enqueue_finding_retest_unlocked(
         conn, target_id=finding.get("target_id"), approval_receipt_id=approval_receipt_id,
         destination=inputs.get("original_url") or inputs.get("target_url"),
     )
+    if refusal == REPLAY_URL_UNRESOLVED_MESSAGE:
+        raise HTTPException(status_code=400, detail={"error": REPLAY_URL_UNRESOLVED, "message": refusal})
     if refusal is not None:
         raise HTTPException(status_code=400, detail={"error": REPLAY_OUT_OF_SCOPE, "message": refusal})
     retest_id = uuid.uuid4()
@@ -1977,6 +1979,12 @@ def extract_retest_inputs(
         override_request_body or finding.get("body") or evidence.get("body")
         or autonomous.get("request_body") or ""
     )
+    # A proven Scan finding replays exactly the request its proof sent (``proof_retest``): the
+    # route joined to its origin, the tested parameter and, for a browser proof, its payload.
+    proof_request, _gap = proof_retest_request(finding)
+    if proof_request is not None:
+        original_url, param, method = proof_request.url, proof_request.param, proof_request.method
+        payload, request_body = proof_request.payload or "", ""
 
     return {
         "finding_type": finding_type,

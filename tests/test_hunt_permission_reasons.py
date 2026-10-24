@@ -292,7 +292,8 @@ def test_an_unregistered_capability_is_refused_with_its_code_and_no_request(monk
     reason_code. It is a hard limit: a coded refusal from the closed list, never a request."""
     from api.hunt import interaction_router as router
 
-    async def executable(*_args):  # labelled double: the Hunt exists and is active
+    async def executable(*_args, capability_name):  # labelled double: the Hunt exists and is active
+        assert capability_name == name
         return None
 
     monkeypatch.setattr(router, "_require_executable_hunt_or_recorded_action", executable)

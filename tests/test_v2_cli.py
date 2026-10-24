@@ -607,3 +607,75 @@ def test_a_validation_refusal_names_each_field_and_never_the_rejected_value():
     ]}).encode()
     message, _detail = v2_cli._safe_api_error(body, fallback="HTTP 422")
     assert message == "status: Field required; state: Extra inputs are not permitted"
+
+
+def _hunt_call_exit_code(monkeypatch, capsys, action_result):
+    class Client:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def get(self, path):
+            return {"capabilities": [{"name": "http.request"}]}
+
+        def post(self, path, payload):
+            return {"idempotent_replay": True, "action_result": action_result}
+
+    monkeypatch.setattr(v2_cli, "ApiClient", Client)
+    code = v2_cli.main([
+        "--api-url", "http://localhost:8080", "hunt", "call", "hunt-1", "http.request",
+        "--idempotency-key", "retry-key-0001",
+    ])
+    return code, capsys.readouterr()
+
+
+def test_hunt_call_exits_non_zero_when_a_denied_action_is_replayed_as_blocked(monkeypatch, capsys):
+    code, captured = _hunt_call_exit_code(monkeypatch, capsys, {
+        "status": "blocked", "errors": ["permission_denied"], "execution_started": False,
+        "result": {"http_status": 409, "error": "permission_denied"},
+    })
+
+    assert code == 2
+    printed = json.loads(captured.out)
+    assert printed["response"]["action_result"]["status"] == "blocked"
+    assert "did not run" in captured.err
+
+
+def test_hunt_call_still_exits_zero_for_an_action_that_ran(monkeypatch, capsys):
+    code, captured = _hunt_call_exit_code(monkeypatch, capsys, {"status": "completed"})
+
+    assert code == 0
+    assert json.loads(captured.out)["response"]["action_result"]["status"] == "completed"
+
+
+@pytest.mark.parametrize(("slot", "field"), [
+    ("primary", "primary_credential_profile_id"),
+    ("secondary", "secondary_credential_profile_id"),
+    ("service", "service_credential_profile_id"),
+    ("web", "web_credential_profile_id"),
+    ("ssh", "ssh_credential_profile_id"),
+    ("oauth", "oauth_credential_profile_id"),
+])
+def test_hunt_start_credential_ref_accepts_the_short_slot_name(slot, field):
+    """E1-N5: the help says SLOT=ID; primary=<id> must mean primary_credential_profile_id."""
+    args = _parse(
+        "hunt", "start", "--target-id", "target-1", "--target-kind", "web",
+        "--credential-ref", f"{slot}=profile-1",
+    )
+    assert v2_cli._hunt_start_payload(args, HUNT_CONTRACT)["credential_refs"] == {field: "profile-1"}
+
+
+def test_hunt_start_credential_ref_refuses_a_slot_given_twice_under_both_names():
+    args = _parse(
+        "hunt", "start", "--target-id", "target-1", "--target-kind", "web",
+        "--credential-ref", "primary=profile-1",
+        "--credential-ref", "primary_credential_profile_id=profile-2",
+    )
+    with pytest.raises(v2_cli.CliError, match="duplicate credential reference"):
+        v2_cli._hunt_start_payload(args, HUNT_CONTRACT)
+
+
+def test_hunt_start_help_lists_the_credential_slots(capsys):
+    with pytest.raises(SystemExit):
+        _parse("hunt", "start", "--help")
+    out = capsys.readouterr().out
+    assert "primary" in out and "secondary" in out

@@ -102,22 +102,82 @@ def _every_capability(kind="web"):
             if spec.planner_visible and spec.hunt_executor is not None and kind in spec.target_kinds]
 
 
-def test_a_start_at_the_profile_defaults_warns_about_nothing_whatever_the_manifest():
-    """D49: every start warned that collections.replay_active reserves 2000 state-changing requests
-    (balanced allows 20) and fast's browser crawl, sqli.verify and templates.scan exceed fast's
-    maxima: limits no allowed start setting can meet. Those calls ask for a budget raise instead."""
+SAFETY_LIMITS = {"max_state_changing_requests", "max_tcp_ports", "max_hosts", "max_udp_ports",
+                 "max_oob_interactions", "max_device_fragility_points"}
+
+
+def test_default_starts_need_no_raise_for_the_standard_web_workflow():
+    """Logging in, mapping a web app and verifying what it finds fits every profile's defaults."""
+    from api.hunt.start_guidance import STANDARD_WEB_WORKFLOW
     for profile in HUNT_BUDGET_PROFILES:
-        started = {**_started({}, profile=profile), "capabilities": _every_capability()}
-        assert start_budget_warnings(started) == [], profile
+        for kind in ("web", "api"):
+            started = {**_started({}, profile=profile, kind=kind), "capabilities": _manifest(*STANDARD_WEB_WORKFLOW)}
+            assert start_budget_warnings(started) == [], (profile, kind)
+
+
+def test_default_warnings_name_only_safety_ceilings():
+    """At a profile's defaults a warning can only be a safety ceiling (ports, hosts, writes,
+    out-of-band, device wear) that a person decides to raise, never a traffic or call budget."""
+    for profile in HUNT_BUDGET_PROFILES:
+        for kind in ("web", "network", "device"):
+            started = {**_started({}, profile=profile, kind=kind), "capabilities": _every_capability(kind)}
+            for warning in start_budget_warnings(started):
+                assert warning["limit"] in SAFETY_LIMITS, (profile, kind, warning)
+                assert warning["restart_fixes_it"] is False
+
+
+def test_device_verifications_reach_a_safety_ceiling_before_their_http_hold():
+    """A device verification queues a scan whose fan-out holds thousands of requests; the port
+    ceiling, not HTTP, must be what limits how many a profile can run."""
+    from api import device_agent
+    from api.hunt import interaction_router
+    for contract in sorted(interaction_router._DEVICE_VERIFICATION_WEB_CONTRACTS):
+        fanout = device_agent.device_verification_fanout_budget(
+            contract_id=contract, web_scan_type=interaction_router._DEVICE_VERIFICATION_WEB_SCAN_TYPE,
+            max_web_origins=interaction_router._DEVICE_VERIFICATION_MAX_WEB_ORIGINS)
+        for name, profile in HUNT_BUDGET_PROFILES.items():
+            allowed = profile.max_tcp_ports // fanout["tcp_ports_attempted"]
+            assert profile.max_http_requests >= allowed * fanout["http_requests"], (contract, name)
+
+
+def test_a_manifest_capability_the_registry_does_not_know_is_costed_from_its_manifest():
+    started = _started({"max_http_requests": 100})
+    started["capabilities"] = [*started["capabilities"],
+                               {"name": "custom.unregistered", "budget_cost": {"http_requests": 500}}]
+    warnings = start_budget_warnings(started)
+    assert any(item.get("capability") == "custom.unregistered" and item["reserves"] == 500 for item in warnings)
+
+
+def test_a_replay_is_costed_by_the_least_it_can_reserve():
+    """A collection replay holds what it selects (one to 25 requests), not the registry's 2,000."""
+    warnings = start_budget_warnings(_started({}, "collections.replay_active", "collections.replay_safe",
+                                              profile="fast"))
+    assert warnings == []
+
+
+def test_verifier_warnings_use_the_execution_hold_instead_of_the_registry_floor():
+    warnings = start_budget_warnings(_started({'max_duration_seconds': 400}, 'sqli.verify'))
+    assert warnings[0]['reserves'] == 540
+
+
+def test_every_profile_funds_mapping_then_both_full_verifiers():
+    from api import agent_tools
+    for name, profile in HUNT_BUDGET_PROFILES.items():
+        holds = [agent_tools.canonical_hunt_scanner_budget(capability, budget_profile=name)
+                 for capability in ('web.crawl', 'web.content_discover', 'sqli.verify', 'xss.verify')]
+        assert sum(hold.get('http_requests', 0) for hold in holds) <= profile.max_http_requests
+        assert sum(hold.get('tool_wall_seconds', 0) for hold in holds) <= profile.max_duration_seconds
+        # Approval-gated calls may use the whole call allowance; each one still checks its receipt.
+        assert profile.max_active_actions == profile.max_capability_calls
 
 
 def test_a_lowered_limit_names_the_start_maximum_when_a_restart_cannot_fix_it():
-    started = {**_started({"max_state_changing_requests": 5}), "capabilities": _every_capability()}
+    started = {**_started({"max_tcp_ports": 50}, profile="fast"), "capabilities": _every_capability()}
     warnings = {item["capability"]: item for item in start_budget_warnings(started)
-                if item["limit"] == "max_state_changing_requests"}
-    replay = warnings["collections.replay_active"]
-    assert replay["restart_fixes_it"] is False and replay["start_maximum"] == 20
-    assert "Start again without lowering it" not in replay["message"]
-    assert "start maximum, 20, is below that" in replay["message"]
+                if item["limit"] == "max_tcp_ports"}
+    ports = warnings["ports.discover"]
+    assert ports["restart_fixes_it"] is False and ports["start_maximum"] == 100
+    assert "Start again without lowering it" not in ports["message"]
+    assert "start maximum, 100, is below that" in ports["message"]
     fits = [item for item in warnings.values() if item["restart_fixes_it"]]
-    assert all("Start again without lowering it" in item["message"] for item in fits)
+    assert fits and all("Start again without lowering it" in item["message"] for item in fits)

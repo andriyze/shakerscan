@@ -98,6 +98,9 @@ def test_no_secret_named_value_reaches_any_stored_surface(
     report = _finalized(observation)
     if verified:
         assert report["findings"], label
+    [exposure] = [row for row in report["coverage"]["family_coverage"]
+                  if row["family"] == "sensitive_exposure"]
+    assert exposure["coverage_status"] == "complete", label
     surfaces = {
         "excerpt": redacted_exposure_excerpt(body, signature),
         "observation": json.dumps(observation, default=str),
@@ -124,7 +127,7 @@ def test_configuration_documents_are_withheld_and_keep_only_key_names(
     excerpt = redacted_exposure_excerpt(body, signature)
     assert excerpt.startswith(f"[{signature.exposure_class} detected - content withheld"), label
     # Key names stay as evidence so an operator knows what to rotate.
-    assert "secret-named keys:" in excerpt
+    assert "keys named as secrets:" in excerpt
 
 
 def test_free_text_excerpts_mask_every_secret_named_assignment():

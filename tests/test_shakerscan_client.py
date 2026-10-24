@@ -764,7 +764,7 @@ def test_api_and_scan_forward_to_the_runtime_clis_with_the_connection(monkeypatc
 
     class FakeScan:
         @staticmethod
-        def main(argv):
+        def main(argv, prog=None):
             seen["scan"] = list(argv)
             return 0
 
@@ -902,3 +902,31 @@ def test_workspace_legacy_symlink_is_moved_without_touching_target(tmp_path):
     assert backup.is_symlink()
 
 
+
+
+def test_scan_help_reaches_the_scan_cli_and_submits_nothing(monkeypatch, tmp_path, clean_environ):
+    monkeypatch.setenv(cli.ENV_CONFIG_DIR, str(tmp_path / "cfg"))
+    cli.save_profile("https://scanner.example.com", SECRET)
+    seen: list[list[str]] = []
+
+    progs: list[str | None] = []
+
+    class FakeScan:
+        @staticmethod
+        def main(argv, prog=None):
+            seen.append(list(argv))
+            progs.append(prog)
+            return 0
+
+    monkeypatch.setattr(cli, "load", lambda name: {"_scan_cli": FakeScan}[name])
+    assert cli.main(["scan", "--help"]) == 0
+    assert cli.main(["scan", "--url", "https://scanner.example.com", "-h"]) == 0
+    assert [argv[-1] for argv in seen] == ["--help", "--help"]
+    # Its help names the command the operator typed, not the engine's own script.
+    assert progs == ["shakerscan scan", "shakerscan scan"]
+    assert "nothing prints its help" not in cli.build_parser().format_help()
+    scan_help = [
+        action for action in cli.build_parser()._subparsers._group_actions[0].choices["scan"]._actions
+        if action.dest == "args"
+    ][0].help
+    assert "nothing prints its help" not in scan_help

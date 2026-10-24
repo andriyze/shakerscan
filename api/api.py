@@ -573,6 +573,8 @@ try:
         ResolvedScanContract,
         SCAN_AUTHENTICATION_KEYS,
         SCAN_V2_FAMILY_NAMES,
+        bind_scan_approval_receipt,
+        bind_scan_fan_out,
         bind_scan_scope_receipt,
         resolve_scan_contract,
         scan_family_capabilities,
@@ -700,6 +702,8 @@ except ModuleNotFoundError:
         ResolvedScanContract,
         SCAN_AUTHENTICATION_KEYS,
         SCAN_V2_FAMILY_NAMES,
+        bind_scan_approval_receipt,
+        bind_scan_fan_out,
         bind_scan_scope_receipt,
         resolve_scan_contract,
         scan_family_capabilities,
@@ -912,6 +916,7 @@ try:
         hunt_run_or_404 as _hunt_run_or_404,
         public_hunt_run as _hunt_public,
     )
+    from hunt.saved_actions import retain_hunt_action_safely
     from hunt.briefing import with_live_briefing as _hunt_with_live_briefing
 except ModuleNotFoundError:
     from api.hunt.action_dispatcher import (
@@ -981,6 +986,7 @@ except ModuleNotFoundError:
         hunt_run_or_404 as _hunt_run_or_404,
         public_hunt_run as _hunt_public,
     )
+    from api.hunt.saved_actions import retain_hunt_action_safely
     from api.hunt.briefing import with_live_briefing as _hunt_with_live_briefing
 try:
     from runtime.budget_reservations import DurableBudgetReservation
@@ -1954,6 +1960,23 @@ def _build_canonical_scan_options_payload(
     for key in ("scan_type", "quick", "thorough"):
         options_payload.pop(key, None)
     policy = contract.policy
+    options_payload.update({
+        "active": policy.active_testing,
+        "network_discovery": policy.network_discovery,
+        "subfinder": policy.subdomain_discovery,
+        "budget_profile": contract.budget_profile,
+        **_canonical_scanner_budget_options(contract),
+    })
+    options_payload, _family = _apply_scan_check_family_policy(
+        options_payload,
+        enforce_preconditions=not defer_family_preconditions,
+    )
+    options_payload.update(contract.option_metadata())
+    return options_payload
+
+
+def _canonical_scanner_budget_options(contract: ResolvedScanContract) -> dict[str, Any]:
+    """The scanner budget snapshots a Scan's worker inputs carry, from its canonical budget."""
     budget = contract.budget
     scanner_budget = {
         "max_duration_minutes": max(1, (budget.max_duration_seconds + 59) // 60),
@@ -1965,29 +1988,46 @@ def _build_canonical_scan_options_payload(
         "nuclei_max_targets": budget.max_endpoints,
         "active_worklist_max": budget.max_endpoints,
     }
-    if policy.active_testing:
+    if contract.policy.active_testing:
         scanner_budget.update({
             "active_max_seconds": budget.max_tool_wall_seconds,
             "active_max_endpoints": budget.max_endpoints,
         })
-    options_payload.update({
-        "active": policy.active_testing,
-        "network_discovery": policy.network_discovery,
-        "subfinder": policy.subdomain_discovery,
-        "budget_profile": contract.budget_profile,
+    return {
         "custom_budget": dict(scanner_budget),
         "resolved_budget": {
             **scanner_budget,
             "budget_profile": contract.budget_profile,
             "budget_source": "canonical_plan",
         },
-    })
-    options_payload, _family = _apply_scan_check_family_policy(
-        options_payload,
-        enforce_preconditions=not defer_family_preconditions,
-    )
-    options_payload.update(contract.option_metadata())
-    return options_payload
+    }
+
+
+# The worker inputs that snapshot the canonical execution plan and its budget.
+_SCAN_EXECUTION_PLAN_OPTION_KEYS = (
+    "scan_execution_plan_digest", "scan_execution_plan", "resolved_scan_budget",
+)
+
+
+def _bind_fan_out_scan_contract(
+    contract: ResolvedScanContract,
+    options_payload: dict[str, Any],
+    advanced: Mapping[str, Any] | None,
+) -> ResolvedScanContract:
+    """The contract of a Scan that became a parallel parent, with its inputs kept in step.
+
+    A thorough or deep Scan whose duration was lowered resolves a tool wall no larger than that
+    duration, because a Scan runs its actions one at a time. A parallel parent divides its tool
+    wall among children that run at the same time, so it keeps the profile's tool wall
+    (``bind_scan_fan_out``); the plan snapshot and scanner budget in its inputs follow.
+    """
+    bound = bind_scan_fan_out(contract, advanced)
+    if bound is contract:
+        return contract
+    metadata = bound.option_metadata()
+    options_payload.update({key: metadata[key] for key in _SCAN_EXECUTION_PLAN_OPTION_KEYS})
+    options_payload.update(_canonical_scanner_budget_options(bound))
+    return bound
 
 
 def _apply_auto_sharding_policy(
@@ -3275,6 +3315,7 @@ async def run_due_schedules(pool: asyncpg.Pool):
                     reason="legacy Scan authority was not migrated",
                 )
                 continue
+            schedule_advanced_limits = scan_options.get("advanced")
             try:
                 scan_contract, scan_options_model = (
                     _resolve_normal_schedule_options(scan_options)
@@ -3305,6 +3346,11 @@ async def run_due_schedules(pool: asyncpg.Pool):
                 active_testing,
                 max_workers=scan_contract.budget.max_workers,
             )
+            if parallel_enabled:
+                scan_contract = _bind_fan_out_scan_contract(
+                    scan_contract, scan_options,
+                    schedule_advanced_limits if isinstance(schedule_advanced_limits, Mapping) else None,
+                )
             scan_role = 'parent' if parallel_enabled else 'standalone'
             # The exact routing this job is queued with, so a job lost from the queue is resent
             # identically (_requeue_scan_lost_from_queue).
@@ -11046,11 +11092,12 @@ async def _submit_scan(
         # Authorize once per target: a standing authorization recorded for this target's scope
         # is reused instead of asking for a new receipt on every active scan.
         approval_receipt_id = await target_dns_alias.standing_authorization_for_target_url(db_pool, normalized_target)
+    scan_advanced_limits = browser_login_scan_limits(request)
     try:
         scan_contract = resolve_scan_contract(
             budget_profile=request.budget_profile or execution_options.budget_profile,
             policy=request.policy,
-            advanced=browser_login_scan_limits(request),
+            advanced=scan_advanced_limits,
             approval_receipt_id=approval_receipt_id,
         )
     except ValueError as exc:
@@ -11186,397 +11233,435 @@ async def _submit_scan(
             action_name="scan.submit",
         )
         await _require_reachable_fleet_placement(conn, options_payload.get("placement") or {})
-        # Check if target exists
-        target = None if alias_target_id else await conn.fetchrow(
-            "SELECT id FROM targets WHERE url = $1", normalized_target
-        )
-        if alias_target_id:
-            target_id = alias_target_id
-        elif target:
-            target_id = target['id']
-        else:
-            # Create new target
-            target_id = await fetch_target_upsert(conn, """
-                INSERT INTO targets (url, name, root_domain, asm_enabled, asm_config, discovery_source)
-                VALUES ($1, $2, $3, $4, $5, 'scan')
-                ON CONFLICT (canonical_key) DO UPDATE SET url = targets.url
-                RETURNING id
-            """, normalized_target, request.name, extract_root_domain(normalized_target),
-                 _default_asm_enabled_for_new_web_target("manual"),
-                 json.dumps(_default_asm_config_for_new_web_target("manual")), method="fetchval")
-
-        (
-            collection_refs,
-            collection_endpoints,
-            collection_manifest_requests,
-        ) = await _generic_collection_refs(
-            conn, target_id=target_id, target_kind=request.target_kind,
-            bindings=request.request_collections,
-        )
-        if collection_refs:
-            options_payload["request_collections"] = collection_refs
-            options_payload["custom_endpoints"] = list(dict.fromkeys([
-                *list(options_payload.get("custom_endpoints") or []), *collection_endpoints,
-            ]))[:2000]
-        executable_collection_refs = _executable_scan_collection_refs(collection_refs)
-        confirmed_active_collection_replay = any(
-            str(item.get("replay_policy") or "") == "confirmed_active"
-            for item in executable_collection_refs
-        )
-        if confirmed_active_collection_replay:
-            try:
-                scan_replay_authorization(
-                    "confirmed_active",
-                    options_payload.get("scan_policy") or {},
-                    approval_receipt_id=approval_receipt_id,
-                )
-            except ScanCollectionReplayContractError as exc:
-                raise HTTPException(status_code=422, detail=str(exc)) from exc
-
-        credential_refs = await _admit_generic_scan_credential_profiles(
-            conn,
-            target_id=target_id,
-            target_kind=request.target_kind,
-            profile_ids=request.credential_profile_ids,
-        )
-        browser_login_refs = await admit_scan_browser_login_profiles(
-            conn, store=_generic_credential_store, request=request,
-            target_id=target_id, policy=scan_contract.policy,
-        )
-        if "bola" in set(scan_contract.policy.include_families):
-            by_lane = {
-                str(item.get("scan_lane") or ""): item for item in credential_refs
-            }
-            if set(by_lane) != {"primary", "secondary"}:
-                raise HTTPException(
-                    status_code=422,
-                    detail=(
-                        "explicit BOLA coverage requires distinct primary and secondary "
-                        "credential profiles"
-                    ),
-                )
-            if any(
-                not scan_credential_allows_capability(
-                    item.get("allowed_capabilities") or (), "authz.verify",
-                )
-                for item in by_lane.values()
-            ):
-                raise HTTPException(
-                    status_code=422,
-                    detail=(
-                        "explicit BOLA coverage requires both credential profiles to "
-                        "allow authz.verify"
-                    ),
-                )
-        credential_action_name = "scan.submit"
-        durable_approval_required = _scan_requires_durable_approval(
-            scan_contract,
-            credential_refs=[*credential_refs, *browser_login_refs],
-            confirmed_active_collection_replay=(
-                confirmed_active_collection_replay
-            ),
-        )
-        if not approval_receipt_id and durable_approval_required:
-            # The standing authorization covers the credentials selected for this target, so a
-            # passive authenticated scan reuses it exactly as an active one does.
-            approval_receipt_id = await target_dns_alias.standing_authorization_for_target_url(db_pool, normalized_target)
-
-        approval_context = await _validate_approval_receipt_for_action(
-            conn,
-            approval_receipt_id,
-            target_url=normalized_target,
-            target_id=target_id,
-            action_name=credential_action_name,
-            risk_tier="credential" if credential_refs or browser_login_refs else "active",
-            always_require_receipt=durable_approval_required,
-            require_target_binding=durable_approval_required,
-            require_expiry=durable_approval_required,
-        )
-        if approval_context:
-            options_payload.update(approval_context)
-            scan_contract = bind_scan_scope_receipt(
-                scan_contract, approval_context.get("scope_receipt_id"),
+        # One transaction from the target row to the queued scan: a refusal anywhere in
+        # admission (DNS, credentials, collections, receipts) leaves no target behind.
+        async with conn.transaction():
+            # Check if target exists
+            target = None if alias_target_id else await conn.fetchrow(
+                "SELECT id FROM targets WHERE url = $1", normalized_target
             )
-            options_payload.update(scan_contract.option_metadata())
-        if executable_collection_refs:
-            options_payload["runtime_scope_guard"] = (
-                await _freeze_scan_collection_target_binding(
-                    target_id=target_id,
-                    target_kind=request.target_kind,
-                    target_url=normalized_target,
-                    refs=executable_collection_refs,
-                    existing_guard=options_payload.get("runtime_scope_guard"),
-                )
+            if alias_target_id:
+                target_id = alias_target_id
+            elif target:
+                target_id = target['id']
+            else:
+                # Create new target
+                target_id = await fetch_target_upsert(conn, """
+                    INSERT INTO targets (url, name, root_domain, asm_enabled, asm_config, discovery_source)
+                    VALUES ($1, $2, $3, $4, $5, 'scan')
+                    ON CONFLICT (canonical_key) DO UPDATE SET url = targets.url
+                    RETURNING id
+                """, normalized_target, request.name, extract_root_domain(normalized_target),
+                     _default_asm_enabled_for_new_web_target("manual"),
+                     json.dumps(_default_asm_config_for_new_web_target("manual")), method="fetchval")
+
+            (
+                collection_refs,
+                collection_endpoints,
+                collection_manifest_requests,
+            ) = await _generic_collection_refs(
+                conn, target_id=target_id, target_kind=request.target_kind,
+                bindings=request.request_collections,
             )
-        if (
-            isinstance(options_payload.get("scan_policy"), dict)
-            and options_payload["scan_policy"].get("scope_receipt_id")
-            != options_payload.get("scope_receipt_id")
-        ):
-            raise HTTPException(
-                status_code=409,
-                detail="validated scope receipt is not bound to the canonical Scan plan",
+            if collection_refs:
+                options_payload["request_collections"] = collection_refs
+                options_payload["custom_endpoints"] = list(dict.fromkeys([
+                    *list(options_payload.get("custom_endpoints") or []), *collection_endpoints,
+                ]))[:2000]
+            executable_collection_refs = _executable_scan_collection_refs(collection_refs)
+            confirmed_active_collection_replay = any(
+                str(item.get("replay_policy") or "") == "confirmed_active"
+                for item in executable_collection_refs
             )
-        if credential_refs:
-            options_payload["credential_profile_refs"] = credential_refs
-            options_payload["credential_target_kind"] = request.target_kind
-            options_payload["credential_action_name"] = credential_action_name
-            if any(
-                str(item.get("auth_kind") or "") in {
-                    "form_login", "oauth_client_credentials", "oauth_password", "json_login",
+            if confirmed_active_collection_replay:
+                try:
+                    scan_replay_authorization(
+                        "confirmed_active",
+                        options_payload.get("scan_policy") or {},
+                        approval_receipt_id=approval_receipt_id,
+                    )
+                except ScanCollectionReplayContractError as exc:
+                    raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+            credential_refs = await _admit_generic_scan_credential_profiles(
+                conn,
+                target_id=target_id,
+                target_kind=request.target_kind,
+                profile_ids=request.credential_profile_ids,
+            )
+            browser_login_refs = await admit_scan_browser_login_profiles(
+                conn, store=_generic_credential_store, request=request,
+                target_id=target_id, policy=scan_contract.policy,
+            )
+            if "bola" in set(scan_contract.policy.include_families):
+                by_lane = {
+                    str(item.get("scan_lane") or ""): item for item in credential_refs
                 }
-                for item in credential_refs
+                if set(by_lane) != {"primary", "secondary"}:
+                    raise HTTPException(
+                        status_code=422,
+                        detail=(
+                            "explicit BOLA coverage requires distinct primary and secondary "
+                            "credential profiles"
+                        ),
+                    )
+                if any(
+                    not scan_credential_allows_capability(
+                        item.get("allowed_capabilities") or (), "authz.verify",
+                    )
+                    for item in by_lane.values()
+                ):
+                    raise HTTPException(
+                        status_code=422,
+                        detail=(
+                            "explicit BOLA coverage requires both credential profiles to "
+                            "allow authz.verify"
+                        ),
+                    )
+            credential_action_name = "scan.submit"
+            durable_approval_required = _scan_requires_durable_approval(
+                scan_contract,
+                credential_refs=[*credential_refs, *browser_login_refs],
+                confirmed_active_collection_replay=(
+                    confirmed_active_collection_replay
+                ),
+            )
+            if not approval_receipt_id and durable_approval_required:
+                # The standing authorization covers the credentials selected for this target, so a
+                # passive authenticated scan reuses it exactly as an active one does.
+                approval_receipt_id = await target_dns_alias.standing_authorization_for_target_url(db_pool, normalized_target)
+
+            approval_context = await _validate_approval_receipt_for_action(
+                conn,
+                approval_receipt_id,
+                target_url=normalized_target,
+                target_id=target_id,
+                action_name=credential_action_name,
+                risk_tier="credential" if credential_refs or browser_login_refs else "active",
+                always_require_receipt=durable_approval_required,
+                require_target_binding=durable_approval_required,
+                require_expiry=durable_approval_required,
+            )
+            if approval_context and (credential_refs or browser_login_refs):
+                # Admitted on the standing authorization, named or not: record a credential-tier
+                # receipt for this credentialed scan, as New Scan does, instead of binding it to
+                # the active-tier standing receipt, so the tier on record does not depend on how
+                # the client spelled the request. Who may start it is unchanged (the standing
+                # authorization was just validated); an inherited, bounded or otherwise
+                # non-derivable receipt derives nothing and stays bound as before.
+                derived_receipt_id = await target_authorization.derive_credential_scan_receipt(
+                    conn, target_id=target_id, standing_receipt_id=approval_receipt_id,
+                    scan_id=scan_id,
+                )
+                if derived_receipt_id:
+                    approval_context = await _validate_approval_receipt_for_action(
+                        conn,
+                        derived_receipt_id,
+                        target_url=normalized_target,
+                        target_id=target_id,
+                        action_name=credential_action_name,
+                        risk_tier="credential",
+                        always_require_receipt=True,
+                        require_target_binding=True,
+                        require_expiry=True,
+                        admit_derived_credential_receipt=True,
+                    )
+                    scan_contract = bind_scan_approval_receipt(
+                        scan_contract, approval_receipt_id, derived_receipt_id,
+                    )
+                    if options_payload["scan_policy"].get("approval_receipt_id") == approval_receipt_id:
+                        options_payload["scan_policy"]["approval_receipt_id"] = derived_receipt_id
+                    approval_receipt_id = derived_receipt_id
+                    execution_options.approval_receipt_id = derived_receipt_id
+            if approval_context:
+                options_payload.update(approval_context)
+                scan_contract = bind_scan_scope_receipt(
+                    scan_contract, approval_context.get("scope_receipt_id"),
+                )
+                options_payload.update(scan_contract.option_metadata())
+            if executable_collection_refs:
+                options_payload["runtime_scope_guard"] = (
+                    await _freeze_scan_collection_target_binding(
+                        target_id=target_id,
+                        target_kind=request.target_kind,
+                        target_url=normalized_target,
+                        refs=executable_collection_refs,
+                        existing_guard=options_payload.get("runtime_scope_guard"),
+                    )
+                )
+            if (
+                isinstance(options_payload.get("scan_policy"), dict)
+                and options_payload["scan_policy"].get("scope_receipt_id")
+                != options_payload.get("scope_receipt_id")
             ):
-                options_payload[SCAN_PRIVATE_STATE_KEY_OPTION] = encrypt_secret(
-                    generate_scan_private_state_key()
+                raise HTTPException(
+                    status_code=409,
+                    detail="validated scope receipt is not bound to the canonical Scan plan",
+                )
+            if credential_refs:
+                options_payload["credential_profile_refs"] = credential_refs
+                options_payload["credential_target_kind"] = request.target_kind
+                options_payload["credential_action_name"] = credential_action_name
+                if any(
+                    str(item.get("auth_kind") or "") in {
+                        "form_login", "oauth_client_credentials", "oauth_password", "json_login",
+                    }
+                    for item in credential_refs
+                ):
+                    options_payload[SCAN_PRIVATE_STATE_KEY_OPTION] = encrypt_secret(
+                        generate_scan_private_state_key()
+                    )
+
+            if browser_login_refs:
+                options_payload["browser_login_profile_refs"] = browser_login_refs
+            options_payload, _family = _apply_scan_check_family_policy(options_payload)
+            # Every selected V2 family must have its registry prerequisites satisfied
+            # before the scan is queued. Admitting the family and letting the compiler
+            # omit its action produces a scan that reports success while never running
+            # the work the operator selected.
+            family_prerequisite_errors = check_registry.scan_family_precondition_errors(
+                scan_contract.policy.include_families, options_payload,
+                exploit_depth=bool(options_payload.get("exploit_depth")),
+                deep_intent_families=scan_contract.execution_plan.requested_families,
+            )
+            if family_prerequisite_errors:
+                raise HTTPException(
+                    status_code=422,
+                    detail={
+                        "error": "family_prerequisites_unmet",
+                        "message": (
+                            "selected scan families are missing required inputs; "
+                            "supply them or deselect the families"
+                        ),
+                        "families": list(scan_contract.policy.include_families),
+                        "errors": family_prerequisite_errors,
+                    },
+                )
+            parallel_enabled, parallel_worker_count = _apply_auto_sharding_policy(
+                execution_options,
+                options_payload,
+                scan_contract.policy.active_testing,
+                max_workers=scan_contract.budget.max_workers,
+            )
+            if parallel_enabled:
+                scan_contract = _bind_fan_out_scan_contract(
+                    scan_contract, options_payload, scan_advanced_limits,
+                )
+            if parallel_worker_count is not None:
+                parallel_worker_count = min(
+                    max(0, int(parallel_worker_count)),
+                    scan_contract.budget.max_workers,
                 )
 
-        if browser_login_refs:
-            options_payload["browser_login_profile_refs"] = browser_login_refs
-        options_payload, _family = _apply_scan_check_family_policy(options_payload)
-        # Every selected V2 family must have its registry prerequisites satisfied
-        # before the scan is queued. Admitting the family and letting the compiler
-        # omit its action produces a scan that reports success while never running
-        # the work the operator selected.
-        family_prerequisite_errors = check_registry.scan_family_precondition_errors(
-            scan_contract.policy.include_families, options_payload,
-            exploit_depth=bool(options_payload.get("exploit_depth")),
-            deep_intent_families=scan_contract.execution_plan.requested_families,
-        )
-        if family_prerequisite_errors:
-            raise HTTPException(
-                status_code=422,
-                detail={
-                    "error": "family_prerequisites_unmet",
-                    "message": (
-                        "selected scan families are missing required inputs; "
-                        "supply them or deselect the families"
-                    ),
-                    "families": list(scan_contract.policy.include_families),
-                    "errors": family_prerequisite_errors,
-                },
+            # Every V2 Scan persists one immutable target-bound job envelope even
+            # while parallel/fleet transport is migrated in the next bounded step.
+            options_payload["runtime_scope_guard"] = await _freeze_scan_target_binding(
+                target_id=target_id,
+                target_kind=request.target_kind,
+                target_url=normalized_target,
+                scope_receipt_id=scan_contract.policy.scope_receipt_id,
+                scheme_inferred=scheme_inferred,
+                existing_guard=options_payload.get("runtime_scope_guard"),
             )
-        parallel_enabled, parallel_worker_count = _apply_auto_sharding_policy(
-            execution_options,
-            options_payload,
-            scan_contract.policy.active_testing,
-            max_workers=scan_contract.budget.max_workers,
-        )
-        if parallel_worker_count is not None:
-            parallel_worker_count = min(
-                max(0, int(parallel_worker_count)),
-                scan_contract.budget.max_workers,
+            target_guard = options_payload["runtime_scope_guard"]
+            target_binding = TargetBinding(
+                target_id=str(target_id),
+                target_kind=request.target_kind,
+                canonical_host=target_guard.get("canonical_host"),
+                allowed_origins=tuple(target_guard.get("allowed_origins") or ()),
+                allowed_addresses=tuple(target_guard.get("allowed_addresses") or ()),
+                allowed_root_domains=tuple(target_guard.get("allowed_root_domains") or ()),
+                environment=str(target_guard.get("environment") or "unknown"),
+                scope_receipt_id=scan_contract.policy.scope_receipt_id,
+                inferred_origins=tuple(target_guard.get("inferred_origins") or ()),
             )
-
-        # Every V2 Scan persists one immutable target-bound job envelope even
-        # while parallel/fleet transport is migrated in the next bounded step.
-        options_payload["runtime_scope_guard"] = await _freeze_scan_target_binding(
-            target_id=target_id,
-            target_kind=request.target_kind,
-            target_url=normalized_target,
-            scope_receipt_id=scan_contract.policy.scope_receipt_id,
-            scheme_inferred=scheme_inferred,
-            existing_guard=options_payload.get("runtime_scope_guard"),
-        )
-        target_guard = options_payload["runtime_scope_guard"]
-        target_binding = TargetBinding(
-            target_id=str(target_id),
-            target_kind=request.target_kind,
-            canonical_host=target_guard.get("canonical_host"),
-            allowed_origins=tuple(target_guard.get("allowed_origins") or ()),
-            allowed_addresses=tuple(target_guard.get("allowed_addresses") or ()),
-            allowed_root_domains=tuple(target_guard.get("allowed_root_domains") or ()),
-            environment=str(target_guard.get("environment") or "unknown"),
-            scope_receipt_id=scan_contract.policy.scope_receipt_id,
-            inferred_origins=tuple(target_guard.get("inferred_origins") or ()),
-        )
-        try:
+            try:
+                (
+                    request_work_manifests,
+                    request_work_manifest_refs,
+                ) = _compile_scan_request_work_manifests(
+                    scan_id=scan_id,
+                    target_binding=target_binding,
+                    collection_refs=executable_collection_refs,
+                    selection_requests=collection_manifest_requests,
+                    options=options_payload,
+                )
+            except (ScanActionPlanError, ScanWorkManifestError) as exc:
+                raise HTTPException(status_code=422, detail=str(exc)) from exc
+            if request_work_manifest_refs:
+                options_payload["request_manifest_refs"] = request_work_manifest_refs
             (
-                request_work_manifests,
-                request_work_manifest_refs,
-            ) = _compile_scan_request_work_manifests(
+                endpoint_work_manifest,
+                candidate_work_manifest,
+            ) = _compile_scan_admission_surface_work_manifests(
                 scan_id=scan_id,
+                target_url=normalized_target,
+                scan_contract=scan_contract,
                 target_binding=target_binding,
-                collection_refs=executable_collection_refs,
-                selection_requests=collection_manifest_requests,
                 options=options_payload,
-            )
-        except (ScanActionPlanError, ScanWorkManifestError) as exc:
-            raise HTTPException(status_code=422, detail=str(exc)) from exc
-        if request_work_manifest_refs:
-            options_payload["request_manifest_refs"] = request_work_manifest_refs
-        (
-            endpoint_work_manifest,
-            candidate_work_manifest,
-        ) = _compile_scan_admission_surface_work_manifests(
-            scan_id=scan_id,
-            target_url=normalized_target,
-            scan_contract=scan_contract,
-            target_binding=target_binding,
-            options=options_payload,
-            request_manifests=request_work_manifests,
-        )
-        endpoint_work_manifest_ref = (
-            endpoint_work_manifest.reference().canonical_dict()
-        )
-        candidate_work_manifest_ref = (
-            candidate_work_manifest.reference().canonical_dict()
-        )
-        request_candidate_work_manifest = (
-            _compile_scan_request_candidate_work_manifest(
                 request_manifests=request_work_manifests,
-                maximum=scan_contract.budget.max_state_changing_requests,
             )
-        )
-        options_payload["endpoint_manifest_id"] = str(
-            endpoint_work_manifest.manifest_id
-        )
-        options_payload["endpoint_manifest_ref"] = endpoint_work_manifest_ref
-        options_payload["candidate_manifest_ref"] = candidate_work_manifest_ref
-        if (
-            request_candidate_work_manifest is not None
-            and request_candidate_work_manifest.entries
-        ):
-            options_payload["request_candidate_manifest_ref"] = (
-                request_candidate_work_manifest.reference().canonical_dict()
+            endpoint_work_manifest_ref = (
+                endpoint_work_manifest.reference().canonical_dict()
             )
-        template_work_manifest = _compile_scan_template_work_manifest(
-            scan_id=scan_id,
-            scan_contract=scan_contract,
-            target_binding=target_binding,
-            verify_template_ids=options_payload.get("verify_templates") or (),
-        )
-        if template_work_manifest is not None:
-            options_payload["template_manifest_ref"] = (
-                template_work_manifest.reference().canonical_dict()
+            candidate_work_manifest_ref = (
+                candidate_work_manifest.reference().canonical_dict()
             )
-        canonical_job = CanonicalScanJob.create(
-            job_id=job_id,
-            scan_id=scan_id,
-            target=target_binding,
-            execution_plan=scan_contract.execution_plan,
-            request_collections=admitted_request_collection_job_refs(collection_refs),
-            credential_profile_ids=admitted_credential_profile_ids([*credential_refs, *browser_login_refs]),
-            endpoint_manifest_id=str(endpoint_work_manifest.manifest_id),
-        )
-        try:
-            (
-                scan_action_plan,
-                scan_continuation_allocation,
-            ) = _compile_scan_admission_action_authority(
+            request_candidate_work_manifest = (
+                _compile_scan_request_candidate_work_manifest(
+                    request_manifests=request_work_manifests,
+                    maximum=scan_contract.budget.max_state_changing_requests,
+                )
+            )
+            options_payload["endpoint_manifest_id"] = str(
+                endpoint_work_manifest.manifest_id
+            )
+            options_payload["endpoint_manifest_ref"] = endpoint_work_manifest_ref
+            options_payload["candidate_manifest_ref"] = candidate_work_manifest_ref
+            if (
+                request_candidate_work_manifest is not None
+                and request_candidate_work_manifest.entries
+            ):
+                options_payload["request_candidate_manifest_ref"] = (
+                    request_candidate_work_manifest.reference().canonical_dict()
+                )
+            template_work_manifest = _compile_scan_template_work_manifest(
                 scan_id=scan_id,
                 scan_contract=scan_contract,
                 target_binding=target_binding,
-                credential_refs=credential_refs,
-                browser_login_profile_refs=browser_login_refs,
-                request_collection_refs=executable_collection_refs,
-                request_manifest_refs=request_work_manifest_refs,
-                endpoint_manifest_ref=endpoint_work_manifest_ref,
-                candidate_manifest_ref=(
-                    candidate_work_manifest_ref
-                    if candidate_work_manifest.entries else None
-                ),
-                request_candidate_manifest_ref=(
-                    request_candidate_work_manifest.reference().canonical_dict()
-                    if request_candidate_work_manifest is not None
-                    and request_candidate_work_manifest.entries else None
-                ),
-                template_manifest_ref=(
+                verify_template_ids=options_payload.get("verify_templates") or (),
+            )
+            if template_work_manifest is not None:
+                options_payload["template_manifest_ref"] = (
                     template_work_manifest.reference().canonical_dict()
-                    if template_work_manifest is not None else None
-                ),
-            )
-            if scan_continuation_allocation is not None:
-                options_payload["scan_continuation_allocation_digest"] = (
-                    scan_continuation_allocation.allocation_digest
                 )
-        except (ScanActionPlanError, ScanBudgetAllocationError) as exc:
-            raise HTTPException(status_code=422, detail=str(exc)) from exc
-        canonical_job_payload = canonical_job.payload()
-        # The exact routing this job is queued with, so a job lost from the queue is resent
-        # identically (_requeue_scan_lost_from_queue).
-        options_payload["queue_routing"] = scan_queue_recovery.queue_routing(
-            None if parallel_enabled else normalize_placement(options_payload.get("placement") or {}),
-            parallel_worker_count if parallel_enabled else None)
-        persisted_options = _attach_target_note(
-            options_payload, request.target, target_note, scheme_inferred,
-        )
-
-        # Parallel scans become a parent row; the scan_plan job fans out shards.
-        scan_role = 'parent' if parallel_enabled else 'standalone'
-
-        # Persist the scan row, complete action index, and audit record atomically.
-        async with conn.transaction():
-            await conn.execute("""
-                INSERT INTO scans (
-                    id, target_id, target_url, job_id, status, options, scan_type, scan_role,
-                    scan_generation, policy_json, budget_json, coverage_status, coverage_json,
-                    scan_job_payload, scan_job_digest
-                ) VALUES ($1, $2, $3, $4, 'pending', $5, $6, $7, 'v2', $8, $9, 'pending', $10,
-                          $11, $12)
-            """, uuid.UUID(scan_id), target_id, normalized_target, job_id,
-                 json.dumps(persisted_options),
-                 public_scan_type, scan_role, json.dumps(options_payload.get("scan_policy") or {}),
-                 json.dumps(options_payload.get("resolved_scan_budget") or {}),
-                 json.dumps({"status": "pending", "reasons": []}),
-                 json.dumps(canonical_job_payload), canonical_job.payload_digest)
+            canonical_job = CanonicalScanJob.create(
+                job_id=job_id,
+                scan_id=scan_id,
+                target=target_binding,
+                execution_plan=scan_contract.execution_plan,
+                request_collections=admitted_request_collection_job_refs(collection_refs),
+                credential_profile_ids=admitted_credential_profile_ids([*credential_refs, *browser_login_refs]),
+                endpoint_manifest_id=str(endpoint_work_manifest.manifest_id),
+            )
             try:
-                from public_retry_context import bind_scan_acceptance
-            except ModuleNotFoundError:
-                from api.public_retry_context import bind_scan_acceptance
-
-            await bind_scan_acceptance(conn, scan_id)
-            action_store = PostgresScanActionStore()
-            await action_store.persist_plan(
-                conn, plan=scan_action_plan,
+                (
+                    scan_action_plan,
+                    scan_continuation_allocation,
+                ) = _compile_scan_admission_action_authority(
+                    scan_id=scan_id,
+                    scan_contract=scan_contract,
+                    target_binding=target_binding,
+                    credential_refs=credential_refs,
+                    browser_login_profile_refs=browser_login_refs,
+                    request_collection_refs=executable_collection_refs,
+                    request_manifest_refs=request_work_manifest_refs,
+                    endpoint_manifest_ref=endpoint_work_manifest_ref,
+                    candidate_manifest_ref=(
+                        candidate_work_manifest_ref
+                        if candidate_work_manifest.entries else None
+                    ),
+                    request_candidate_manifest_ref=(
+                        request_candidate_work_manifest.reference().canonical_dict()
+                        if request_candidate_work_manifest is not None
+                        and request_candidate_work_manifest.entries else None
+                    ),
+                    template_manifest_ref=(
+                        template_work_manifest.reference().canonical_dict()
+                        if template_work_manifest is not None else None
+                    ),
+                )
+                if scan_continuation_allocation is not None:
+                    options_payload["scan_continuation_allocation_digest"] = (
+                        scan_continuation_allocation.allocation_digest
+                    )
+            except (ScanActionPlanError, ScanBudgetAllocationError) as exc:
+                raise HTTPException(status_code=422, detail=str(exc)) from exc
+            canonical_job_payload = canonical_job.payload()
+            # The exact routing this job is queued with, so a job lost from the queue is resent
+            # identically (_requeue_scan_lost_from_queue).
+            options_payload["queue_routing"] = scan_queue_recovery.queue_routing(
+                None if parallel_enabled else normalize_placement(options_payload.get("placement") or {}),
+                parallel_worker_count if parallel_enabled else None)
+            persisted_options = _attach_target_note(
+                options_payload, request.target, target_note, scheme_inferred,
             )
-            if scan_continuation_allocation is not None:
-                await action_store.persist_continuation_allocation(
-                    conn,
-                    allocation=scan_continuation_allocation,
-                    parent_plan=scan_action_plan,
+
+            # Parallel scans become a parent row; the scan_plan job fans out shards.
+            scan_role = 'parent' if parallel_enabled else 'standalone'
+
+            # Persist the scan row, complete action index, and audit record atomically.
+            async with conn.transaction():
+                await conn.execute("""
+                    INSERT INTO scans (
+                        id, target_id, target_url, job_id, status, options, scan_type, scan_role,
+                        scan_generation, policy_json, budget_json, coverage_status, coverage_json,
+                        scan_job_payload, scan_job_digest
+                    ) VALUES ($1, $2, $3, $4, 'pending', $5, $6, $7, 'v2', $8, $9, 'pending', $10,
+                              $11, $12)
+                """, uuid.UUID(scan_id), target_id, normalized_target, job_id,
+                     json.dumps(persisted_options),
+                     public_scan_type, scan_role, json.dumps(options_payload.get("scan_policy") or {}),
+                     json.dumps(options_payload.get("resolved_scan_budget") or {}),
+                     json.dumps({"status": "pending", "reasons": []}),
+                     json.dumps(canonical_job_payload), canonical_job.payload_digest)
+                try:
+                    from public_retry_context import bind_scan_acceptance
+                except ModuleNotFoundError:
+                    from api.public_retry_context import bind_scan_acceptance
+
+                await bind_scan_acceptance(conn, scan_id)
+                action_store = PostgresScanActionStore()
+                await action_store.persist_plan(
+                    conn, plan=scan_action_plan,
                 )
-            for manifest in request_work_manifests:
-                await PostgresScanManifestStore().persist(
-                    conn, manifest=manifest,
-                )
-            for manifest in (
-                endpoint_work_manifest, candidate_work_manifest,
-                request_candidate_work_manifest,
-            ):
-                if manifest is not None:
+                if scan_continuation_allocation is not None:
+                    await action_store.persist_continuation_allocation(
+                        conn,
+                        allocation=scan_continuation_allocation,
+                        parent_plan=scan_action_plan,
+                    )
+                for manifest in request_work_manifests:
                     await PostgresScanManifestStore().persist(
                         conn, manifest=manifest,
                     )
-            if template_work_manifest is not None:
-                await PostgresScanManifestStore().persist(
-                    conn, manifest=template_work_manifest,
+                for manifest in (
+                    endpoint_work_manifest, candidate_work_manifest,
+                    request_candidate_work_manifest,
+                ):
+                    if manifest is not None:
+                        await PostgresScanManifestStore().persist(
+                            conn, manifest=manifest,
+                        )
+                if template_work_manifest is not None:
+                    await PostgresScanManifestStore().persist(
+                        conn, manifest=template_work_manifest,
+                    )
+                command_result = await _record_command_result(
+                    conn,
+                    command="scan.submit",
+                    status="queued",
+                    risk_tier=(
+                        "credential"
+                        if credential_refs
+                        else "active" if scan_contract.policy.active_testing else "passive"
+                    ),
+                    scan_id=scan_id,
+                    scope_receipt_id=options_payload.get("scope_receipt_id"),
+                    approval_receipt_id=options_payload.get("approval_receipt_id"),
+                    operator_message=f"Queued Scan for {normalized_target}",
+                    result_json={
+                        "target": normalized_target,
+                        "scan_type": public_scan_type,
+                        "scan_generation": "v2",
+                        "policy": options_payload.get("scan_policy"),
+                        "budget": options_payload.get("resolved_scan_budget"),
+                        "job_id": job_id,
+                        "scan_action_plan_digest": scan_action_plan.plan_digest,
+                        "scan_role": scan_role,
+                    },
+                    next_action=f"/scans/{scan_id}",
                 )
-            command_result = await _record_command_result(
-                conn,
-                command="scan.submit",
-                status="queued",
-                risk_tier=(
-                    "credential"
-                    if credential_refs
-                    else "active" if scan_contract.policy.active_testing else "passive"
-                ),
-                scan_id=scan_id,
-                scope_receipt_id=options_payload.get("scope_receipt_id"),
-                approval_receipt_id=options_payload.get("approval_receipt_id"),
-                operator_message=f"Queued Scan for {normalized_target}",
-                result_json={
-                    "target": normalized_target,
-                    "scan_type": public_scan_type,
-                    "scan_generation": "v2",
-                    "policy": options_payload.get("scan_policy"),
-                    "budget": options_payload.get("resolved_scan_budget"),
-                    "job_id": job_id,
-                    "scan_action_plan_digest": scan_action_plan.plan_digest,
-                    "scan_role": scan_role,
-                },
-                next_action=f"/scans/{scan_id}",
-            )
 
     # Queue the job
     canonical_queue = True
@@ -13404,7 +13489,7 @@ async def _start_hunt_v2(contract: HuntStartContract) -> dict[str, Any]:
     return {**started, **started_permissions}
 
 
-_hunt_run_service = HuntRunService(lambda: db_pool, get_redis)
+_hunt_run_service = HuntRunService(lambda: db_pool, get_redis, finish_retainer=retain_hunt_action_safely)
 configure_hunt_run_router(
     lambda: _hunt_run_service,
     start_handler=_start_hunt_v2,
@@ -14170,6 +14255,7 @@ async def _verify_web_candidate_workflow_unlocked(
             "novelty_gate": proof.get("novelty_gate"),
         },
         "superseded_suspected": False,
+        "traffic": result.get("traffic"),
     }
 
 
@@ -14915,10 +15001,13 @@ async def _record_blocked_command_result(
     operation id / receipt refs / blocked reasons as a successful queue. It is
     best-effort on purpose: an audit-write failure must never mask or alter the
     security rejection that is about to be raised.
+
+    A refusal raised inside the caller's transaction rolls that transaction back, so the row is
+    written on a connection of its own there; otherwise the refusal would leave no trace.
     """
-    try:
+    async def write(target_conn):
         return await _record_command_result(
-            conn,
+            target_conn,
             command=command or _command_from_action(action_name),
             status=status,
             risk_tier=risk_tier,
@@ -14929,6 +15018,14 @@ async def _record_blocked_command_result(
             result_json={"action": action_name, "outcome": status},
             created_by=created_by,
         )
+
+    in_transaction = getattr(conn, "is_in_transaction", None)
+    try:
+        if callable(in_transaction) and in_transaction() is True and db_pool is not None:
+            async with db_pool.acquire() as audit_conn:
+                if audit_conn is not conn:
+                    return await write(audit_conn)
+        return await write(conn)
     except Exception:
         return None
 
@@ -15142,6 +15239,7 @@ async def _validate_approval_receipt_for_action(
     require_expiry: bool = False,
     created_not_before: datetime | str | None = None,
     expires_no_later_than: datetime | str | None = None,
+    admit_derived_credential_receipt: bool = False,
 ) -> dict[str, Any] | None:
     async def _deny(
         reason: str,
@@ -15194,6 +15292,19 @@ async def _validate_approval_receipt_for_action(
         )
     if not approval.get("approved_by") or approval.get("denial_reason"):
         await _deny("approval_receipt_is_denial", "Approval receipt is not an approval", approval_ref=approval_ref)
+    if (
+        target_authorization.derived_credential_scan_source(approval) is not None
+        and not admit_derived_credential_receipt
+    ):
+        # Derived from the target's standing authorization for one credentialed Scan; it is
+        # credential tier, so reusing it elsewhere would cover more than that authorization did.
+        await _deny(
+            "approval_receipt_derived_for_one_scan",
+            "This credential-tier receipt was recorded for one scan admitted on the target's "
+            "standing authorization and authorizes nothing else; submit without a receipt to use "
+            "the standing authorization again",
+            approval_ref=approval_ref,
+        )
     approved_risk = str(approval.get("risk_tier") or "active")
     if not approval_covers_risk(approval, str(risk_tier or "active")):
         await _deny(

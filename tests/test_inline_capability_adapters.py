@@ -145,8 +145,33 @@ def test_http_adapter_does_not_charge_network_for_scope_block():
     )
 
     assert result.status == "blocked"
-    assert result.actual_budget == {"http_requests": 0, "agent_actions": 1}
+    # Proven unsent: no request, and one second of the clock, not the 15-second hold.
+    assert result.actual_budget == {"http_requests": 0, "agent_actions": 1, "tool_wall_seconds": 1}
     assert result.observations == ()
+
+
+def test_a_request_refused_before_sending_settles_one_second_of_the_clock_on_the_ledger():
+    """240 refused requests used the fast profile's whole hour (each kept its 15 s hold) while
+    sending nothing; settled through the real ledger each now costs the second it took."""
+    from runtime.budgets import reconcile_budget_snapshot
+    from hunt.start_contract import HUNT_BUDGET_PROFILES
+    specification = CAPABILITY_REGISTRY.require("http.request")
+    requested = {"http_requests": 4, "state_changing_requests": 1, "tool_wall_seconds": 15, "agent_actions": 1}
+
+    async def operation():
+        return {"ok": False, "error": "scope:origin is outside the frozen target binding"}
+
+    limits = HUNT_BUDGET_PROFILES["fast"].ledger_limits()
+    used = {dimension: 0 for dimension in limits}
+    for _ in range(240):
+        result = _execute(specification, HttpRequestExecutionAdapter(
+            specification=specification, operation=operation, requested_budget=requested,
+            redacted_execution={"method": "POST", "path": "/"}), requested)
+        assert result.status == "blocked" and result.execution_started is False
+        held = {key: used[key] + requested.get(key, 0) for key in used}
+        used = reconcile_budget_snapshot(held, requested, result.actual_budget)
+    assert used["tool_wall_seconds"] == 240 and used["http_requests"] == 0
+    assert used["state_changing_requests"] == 0 and used["agent_actions"] == 240
 
 
 def test_tls_adapter_returns_typed_observation_and_measured_budget():
@@ -404,6 +429,40 @@ def test_control_adapter_preserves_a_typed_finding_observation():
         "finding_id": "finding-1",
         "proof_state": "unverified",
     },)
+
+
+def test_a_finding_record_that_already_existed_or_was_refused_spends_no_record_unit():
+    from fastapi import HTTPException
+    from hunt.recording import recorded_charge
+
+    specification = CAPABILITY_REGISTRY.require("findings.create")
+    requested = {"candidates": 1}
+
+    def adapter(operation):
+        return ControlPlaneExecutionAdapter(
+            specification=specification, operation=operation, requested_budget=requested,
+            redacted_execution={}, blocked_exceptions=(HTTPException,), conservative_full_budget=True,
+            unstarted_exceptions=(HTTPException,), settle=recorded_charge,
+        )
+
+    async def created():
+        return {"ok": True, "status": "success", "finding_id": "finding-1", "created": True}
+
+    async def existing():
+        return {"ok": True, "status": "success", "finding_id": "finding-1", "created": False}
+
+    async def refused():
+        raise HTTPException(status_code=422, detail="Use an absolute URL for an evidenced HTTP service")
+
+    assert _execute(specification, adapter(created), requested).actual_budget == {"candidates": 1}
+    assert _execute(specification, adapter(existing), requested).actual_budget == {"candidates": 0}
+    refusal = _execute(specification, adapter(refused), requested)
+    assert refusal.status == "blocked" and refusal.execution_started is False
+    # The ledger keeps the hold of any dimension a settlement leaves out, so a refused write must
+    # release its unit explicitly.
+    from runtime.budgets import reconcile_budget_snapshot
+    for result in (refusal, _execute(specification, adapter(existing), requested)):
+        assert reconcile_budget_snapshot({"candidates": 1}, requested, result.actual_budget) == {"candidates": 0}
 
 
 def test_collection_control_adapter_refunds_wall_time_for_a_guard_block():

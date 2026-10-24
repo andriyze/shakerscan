@@ -92,6 +92,33 @@ export function pendingDecisions(hunt, shellPlans = []) {
   return decisions
 }
 
+const DECIDED_STATUSES = new Set(['granted', 'denied', 'expired', 'withdrawn'])
+const DECISION_VIA_TEXT = {
+  terminal_stepup: 'in a terminal with step-up',
+  approver_session: 'in an approver session',
+  preauthorization: 'by pre-authorization',
+  ui_session: 'in the browser',
+  local_confirm: 'in a terminal',
+}
+
+/**
+ * Permission requests that are no longer pending, newest decision first, with who decided, how
+ * and when. Once decided a request leaves `pending_permission_requests`; this keeps it readable.
+ */
+export function decidedPermissionRequests(rows) {
+  return (rows || [])
+    .filter(row => row?.id && DECIDED_STATUSES.has(String(row.status || '')))
+    .map(row => ({
+      id: String(row.id),
+      title: String(row.title || row.kind || 'Permission request'),
+      status: String(row.status),
+      decidedBy: row.decided_by ? String(row.decided_by) : null,
+      via: row.decision_via ? (DECISION_VIA_TEXT[row.decision_via] || String(row.decision_via).replaceAll('_', ' ')) : null,
+      decidedAt: row.decided_at ? String(row.decided_at) : null,
+    }))
+    .sort((left, right) => String(right.decidedAt || '').localeCompare(String(left.decidedAt || '')))
+}
+
 /** Requests keyed by the action that sent them; requests with no recorded action stay separate. */
 export function requestsByAction(rows) {
   const byAction = new Map()

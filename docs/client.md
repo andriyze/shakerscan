@@ -208,6 +208,18 @@ Explicit options and the environment still win over the saved profile:
   through the environment, never on the command line, is sent only over `https://`, and is never
   printed; a token with a plain-http URL refuses to start.
 
+An instance whose certificate comes from a private or corporate CA is reachable once this machine
+trusts that CA. Point `SSL_CERT_FILE` at a PEM bundle that contains it (for example your system
+bundle with the CA appended), and export it where you run `shakerscan` and where your agent starts:
+the MCP server the agent spawns (`shakerscan mcp`) inherits it from that environment, not from the
+saved profile. A certificate the client does not trust is reported with this hint by `connect`,
+`doctor` and every command:
+
+```bash
+export SSL_CERT_FILE=/etc/ssl/certs/ca-with-corporate-root.pem
+shakerscan connect https://scanner.example.com/_enterprise/connect/<code>
+```
+
 Check a connection before handing it to an agent:
 
 ```bash
@@ -462,13 +474,27 @@ it, prints the connection options and then that CLI's own help. `query` takes ev
 engine's `/hunts/{id}/query` accepts, the same as the MCP tool, including `hypotheses`,
 `graph_nodes`, `graph_edges`, `endpoint_groups` and `service_intelligence`, and `--cursor` to
 follow `next_cursor`.
+`hunt call` exits 0 only when the action was admitted: a refusal, a pending permission request
+and an action replayed as `blocked` (its permission was denied, expired or withdrawn) exit 2, with
+the server's answer still printed as JSON.
+
+## Scan from a script
+
+`shakerscan scan` forwards to the runtime's scan CLI; `shakerscan scan --help` (or `scan help`)
+prints its options and submits nothing. Active testing and credential use need a target-bound
+approval receipt. Without `--approval-receipt` the server uses the target's standing
+authorization, the same one New Scan in the UI uses, and refuses with its reason when there is
+none or it does not cover the request: authorize the target once (New Scan, or
+`POST /targets/{id}/authorization`). Credential use may need a credential-tier receipt from
+`POST /arsenal/approvals`, passed as `--approval-receipt`; an instance may reserve creating one
+to administrators. `--active-testing` off a terminal also needs `--confirm-active`.
 
 ## Versioning and release
 
 A client built from a repository checkout (a release, or `pipx install
 "git+https://github.com/andriyze/shakerscan@<commit>#subdirectory=client"`) also records the commit
-it was built from: `shakerscan version` prints `shakerscan client 0.11.0 (source 1a2b3c4d5e6f)`,
-`doctor` shows the same, and the MCP `serverInfo.version` is `client-0.11.0+1a2b3c4d5e6f`.
+it was built from: `shakerscan version` prints `shakerscan client 0.11.1 (source 1a2b3c4d5e6f)`,
+`doctor` shows the same, and the MCP `serverInfo.version` is `client-0.11.1+1a2b3c4d5e6f`.
 
 The client has its own version (`client/src/shakerscan/__init__.py`), tagged `client-vX.Y.Z`,
 independent of the engine release: because tool catalogues come from the live contracts, one

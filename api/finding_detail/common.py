@@ -2,17 +2,22 @@
 
 Every value the brief shows comes from the finding's stored, already-redacted evidence. Target
 controlled strings (URLs, header values, certificate names) are only ever placed in plain text or,
-for copyable commands, passed through ``shlex.quote`` so a pasted command cannot run anything the
-target chose.
+for copyable commands, passed through ``q`` (the shared ``shell_word``) as a whole argument, so a
+pasted command cannot run anything the target chose. A ``#`` line in a command holds fixed text
+only: an interactive zsh does not treat it as a comment by default.
 """
 
 from __future__ import annotations
 
 import json
 import re
-import shlex
 import urllib.parse
 from typing import Any, Iterable, Mapping
+
+try:
+    from scanner_tools.shell_words import shell_word
+except ModuleNotFoundError:  # package import in host-side tests
+    from scanner.scanner_tools.shell_words import shell_word
 
 DETAIL_SCHEMA = "finding-detail/v1"
 MAX_TEXT = 600
@@ -110,7 +115,8 @@ def short_date(value: Any) -> str:
 
 
 def q(value: Any) -> str:
-    return shlex.quote(str(value))
+    """One shell word for a target-controlled value in a copyable command."""
+    return shell_word(value)
 
 
 def fact(label: str, value: Any, *, mono: bool = False, limit: int = MAX_TEXT) -> dict[str, Any] | None:
@@ -160,14 +166,16 @@ def visible_scalar_facts(evidence: Mapping[str, Any], limit: int = 12) -> list[d
 
 
 # Server products named by a recorded Server / X-Powered-By header, for stack-specific examples.
+# Tomcat's connector calls itself "Apache-Coyote" and Tomcat "Apache Tomcat": both are matched
+# before the bare "apache" of Apache httpd.
 _STACKS = (
     ("nginx", ("nginx", "openresty")),
+    ("tomcat", ("tomcat", "coyote", "jetty")),
     ("apache", ("apache",)),
     ("iis", ("microsoft-iis", "asp.net")),
     ("caddy", ("caddy",)),
     ("express", ("express",)),
     ("php", ("php",)),
-    ("tomcat", ("tomcat", "coyote", "jetty")),
     ("werkzeug", ("werkzeug", "gunicorn", "uvicorn", "python")),
 )
 

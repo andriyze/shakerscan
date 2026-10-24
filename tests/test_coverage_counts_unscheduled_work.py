@@ -19,7 +19,10 @@ from tests.api_sources import definition_source  # noqa: E402
 
 def test_batch_actions_declare_the_manifest_size_they_were_cut_from():
     source = definition_source("compile")
-    assert '"manifest_entries": int(entry_count),' in source
+    # The positions a lane plans: its manifest's entries, or every active-template window on a
+    # thorough or deep direct Scan whose host has fewer endpoints than windows.
+    assert '"manifest_entries": int(work_count),' in source
+    assert "else entry_count" in source
     assert '"scheduled_batches": int(count),' in source
     assert '"total_batches": int(total_batches),' in source
 
@@ -36,7 +39,9 @@ def test_unscheduled_entries_make_a_family_partial():
     assert 'row["unscheduled_candidates"] = sum(' in source
     assert 'row["reason"] = "manifest_entries_unscheduled"' in source
     # It must be checked BEFORE the complete branch, or truncation stays invisible.
-    unscheduled = source.index('elif row["unscheduled_candidates"] > 0:')
+    # (A windowed active-template sweep whose every pair ran is the one exception:
+    # tests/test_active_template_windows.py.)
+    unscheduled = source.index('elif row["unscheduled_candidates"] > 0 and not windows_cover_unscheduled:')
     complete = source.index('row["coverage_status"] = "complete"')
     assert unscheduled < complete
 

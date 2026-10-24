@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 import json
 from pathlib import Path
+import ssl
 import urllib.parse
 import uuid
 
@@ -11,13 +13,20 @@ import pytest
 
 from hunt.capability_executor import CapabilityAdapterResult
 from capabilities.auth import TargetBoundSessionCredential, WorkerPrivateScanSession
+from capabilities.tls_legacy_probe import PROBE_COUNT as TLS_LEGACY_PROBE_COUNT
 from runtime.capability_registry import CAPABILITY_REGISTRY
 from runtime.models import PreparedExecution, ScanPolicy, TargetBinding
 from runtime.request_replay_executor import ReplayTransportResult
 import scan.action_adapter as action_adapter_module
 from runtime.observation_manifests import ObservationManifestReference
 from scan.action_adapter import DatabaseNeutralScanActionDispatcher
-from scan.action_plan import ScanAction, ScanActionPlan
+from scan.action_plan import ScanAction, ScanActionPlan, ScanActionPlanCompiler
+from scan.capability_execution import (
+    TLS_CONNECTIONS_PER_PAIR,
+    TLS_HANDSHAKE_CONNECTIONS_PER_PAIR,
+)
+from scan.contracts import BUDGET_PROFILES
+from scan.execution import ScanExecutionPlan
 from scan.private_inputs import (
     BROKER_PRIVATE_SCAN_INPUT_SCHEMA,
     BrokerPrivateScanInputs,
@@ -611,6 +620,35 @@ def test_database_neutral_dispatcher_lazily_loads_local_private_replay(monkeypat
     assert loaded == [(collection.action_id, {})]
 
 
+def test_a_collection_action_whose_every_request_is_withheld_is_skipped_not_failed(monkeypatch):
+    """A capture indexed before path credentials were withheld can give a collection action only
+    requests the worker withholds: the action is skipped with that reason and sends nothing."""
+    from scan.collection_replay import ScanCollectionReplayWithheld
+
+    collection = _action("inputs.collection_00", "collections.replay_safe", 0)
+    plan = ScanActionPlan(
+        scan_id=str(uuid.uuid4()),
+        execution_plan_digest="a" * 64,
+        target_binding_digest=TARGET.digest,
+        actions=(collection,),
+    )
+
+    async def loader(_action, _options):
+        raise ScanCollectionReplayWithheld("every request is withheld")
+
+    class Transport:
+        async def send(self, _request, **_kwargs):
+            raise AssertionError("a withheld capture request must not be sent")
+
+    monkeypatch.setattr(action_adapter_module, "PinnedAiohttpReplayTransport", Transport)
+    receipt = asyncio.run(_dispatcher(
+        plan, Backend(), private_replay_plan_loader=loader,
+    )(collection, _lease(plan, collection), _noop))
+
+    assert receipt.status == "skipped"
+    assert receipt.errors == ("captured_path_credential_withheld",)
+
+
 @pytest.mark.parametrize(
     ("allowed", "session", "expected_status", "expected_cookie"),
     [
@@ -893,7 +931,7 @@ def test_database_neutral_batch_checkpoints_and_resumes_each_candidate(monkeypat
     assert all(len(attempt_id) == 64 for attempt_id in backend.attempts[action.action_id])
 
 
-def test_one_unresolvable_candidate_does_not_fail_the_whole_verify_batch(monkeypatch):
+def test_one_unresolvable_candidate_does_not_fail_the_whole_verify_batch(monkeypatch, capsys):
     """A candidate whose request cannot be resolved must fail only its own attempt.
 
     The 2.2.0-era batch called execution_request_for_manifest_candidate with no per-candidate
@@ -985,6 +1023,13 @@ def test_one_unresolvable_candidate_does_not_fail_the_whole_verify_batch(monkeyp
         "candidate_failed" in str(err)
         for item in attempts.values() for err in (item.get("errors") or ())
     )
+    # The failed candidate is named in the worker log with its exception type, so a batch that
+    # settles partial/adapter_failed can be diagnosed from the log, not only from the database.
+    failed_id = next(
+        str(item["candidate_id"]) for item in attempts.values() if item.get("status") == "failed"
+    )
+    logged = capsys.readouterr().err
+    assert f"candidate {failed_id} failed: ScanWorkManifestError" in logged
 
 
 def test_one_unconstructable_sqli_proof_candidate_does_not_fail_the_whole_batch(monkeypatch):
@@ -1816,6 +1861,46 @@ def test_database_neutral_http_receipt_drops_body_and_redacts_urls(monkeypatch):
     assert "<redacted>" in serialized
 
 
+@pytest.mark.parametrize(("granted", "reflected"), [
+    ("https://shakerscan-cors-probe.invalid", True),
+    # Not the Origin a browser sent: it would refuse the cross-origin read.
+    ("https://shakerscan-cors-probe.invalid/", False),
+    ("https://app.example.test", False),
+])
+def test_cors_probe_is_judged_on_the_header_as_received_not_as_the_receipt_stores_it(
+    monkeypatch, granted, reflected,
+):
+    """Unit fixture: the probe answer of an origin-reflecting target, through the real receipt."""
+    from scan.posture_findings import CORS_PROBE_ORIGIN, cors_findings
+    action = _action("baseline.cors", "http.request", 0)
+    plan = ScanActionPlan(
+        scan_id=str(uuid.uuid4()), execution_plan_digest="a" * 64,
+        target_binding_digest=TARGET.digest, actions=(action,),
+    )
+    sent = {}
+
+    async def execute_bound(_origin, args, **_kwargs):
+        sent.update(args.get("headers") or {})
+        return {
+            "ok": True,
+            "request": {"method": "GET", "origin": "https://app.example.test", "path": "/"},
+            "response": {"status": 200, "security_headers": {
+                "access-control-allow-origin": granted, "access-control-allow-credentials": "true",
+            }},
+            "redirect_chain": [], "hops_followed": 0,
+        }
+
+    monkeypatch.setattr(action_adapter_module, "execute_bound_http_request", execute_bound)
+    receipt = asyncio.run(_dispatcher(plan, Backend())(action, _lease(plan, action), _noop))
+    assert receipt.status == "success" and sent == {"Origin": CORS_PROBE_ORIGIN}
+    [observation] = receipt.observations
+    findings = cors_findings(
+        action.action_id, observation["request"], observation["response"], make=lambda **finding: finding,
+    )
+    titles = [finding["title"] for finding in findings]
+    assert titles == (["CORS policy reflects any origin"] if reflected else [])
+
+
 def test_database_neutral_network_action_limits_commands_to_reserved_hosts(monkeypatch):
     target = TargetBinding(
         target_id=TARGET.target_id,
@@ -2035,7 +2120,14 @@ def test_network_action_binds_addresses_under_the_registry_budget(monkeypatch):
 
 
 
-def test_database_neutral_tls_action_inspects_the_complete_frozen_matrix(monkeypatch):
+@pytest.mark.parametrize(("reserved_connections", "legacy_probes"), [
+    # Four pairs at four connections: the handshakes only, so the raw probes must not run.
+    (4 * TLS_HANDSHAKE_CONNECTIONS_PER_PAIR, False),
+    (4 * TLS_CONNECTIONS_PER_PAIR, True),
+])
+def test_database_neutral_tls_action_inspects_the_complete_frozen_matrix(
+    monkeypatch, reserved_connections, legacy_probes,
+):
     target = TargetBinding(
         target_id=TARGET.target_id,
         target_kind=TARGET.target_kind,
@@ -2063,7 +2155,7 @@ def test_database_neutral_tls_action_inspects_the_complete_frozen_matrix(monkeyp
         target_binding_digest=target.digest,
         input_binding_digest="e" * 64,
         requested_budget={
-            "tcp_ports_attempted": 16,
+            "tcp_ports_attempted": reserved_connections,
             "tool_wall_seconds": 60,
         },
         placement={
@@ -2086,9 +2178,10 @@ def test_database_neutral_tls_action_inspects_the_complete_frozen_matrix(monkeyp
     )
     captured = {}
 
-    async def inspect(*, target, timeout_seconds_per_target):
+    async def inspect(*, target, timeout_seconds_per_target, legacy_probes):
         captured["target"] = target
         captured["timeout"] = timeout_seconds_per_target
+        captured["legacy_probes"] = legacy_probes
         return {
             "ok": True,
             "status": "success",
@@ -2110,12 +2203,182 @@ def test_database_neutral_tls_action_inspects_the_complete_frozen_matrix(monkeyp
     receipt = asyncio.run(dispatcher(action, _lease(plan, action), _noop))
 
     assert receipt.status == "success"
-    assert captured == {"target": target, "timeout": 15}
+    assert captured == {"target": target, "timeout": 15, "legacy_probes": legacy_probes}
     assert len(receipt.observations) == 4
     assert receipt.budget_consumed == {
         "tcp_ports_attempted": 12,
         "tool_wall_seconds": 4,
     }
+
+
+class _ModernTlsSession:
+    """The live stdlib session of a TLS 1.2/1.3 server (no certificate is needed here)."""
+
+    def __init__(self, version):
+        self._version = version
+
+    def get_extra_info(self, name):
+        return self if name == "ssl_object" else None
+
+    def version(self):
+        return self._version
+
+    def cipher(self):
+        return ("ECDHE-RSA-AES128-GCM-SHA256", self._version, 128)
+
+    def selected_alpn_protocol(self):
+        return "h2"
+
+    def getpeercert(self, binary_form=False):
+        return b""
+
+    def close(self):
+        return None
+
+    async def wait_closed(self):
+        return None
+
+
+class _RefusedRawClientHello:
+    """A raw legacy ClientHello connection the server answers with a protocol_version alert."""
+
+    def __init__(self):
+        self._answered = False
+
+    def write(self, _data):
+        return None
+
+    async def drain(self):
+        return None
+
+    async def read(self, _limit):
+        if self._answered:
+            return b""
+        self._answered = True
+        return b"\x15\x03\x01\x00\x02\x02\x46"
+
+    def close(self):
+        return None
+
+    async def wait_closed(self):
+        return None
+
+
+def _modern_tls_server(monkeypatch):
+    """Count every TCP connection TLS inspection opens against a modern-only server."""
+    sockets = {"tls": 0, "raw": 0}
+
+    async def open_connection(**kwargs):
+        context = kwargs.get("ssl")
+        if context is not None:
+            sockets["tls"] += 1
+            modern = "TLSv1.3" if context.minimum_version == ssl.TLSVersion.TLSv1_3 else "TLSv1.2"
+            return object(), _ModernTlsSession(modern)
+        sockets["raw"] += 1
+        connection = _RefusedRawClientHello()
+        return connection, connection
+
+    monkeypatch.setattr(asyncio, "open_connection", open_connection)
+    return sockets
+
+
+def _tls_compiler_target(*addresses):
+    return TargetBinding(
+        target_id="10000000-0000-0000-0000-000000000002", target_kind="web",
+        canonical_host="app.example.test", allowed_origins=("https://app.example.test",),
+        allowed_addresses=tuple(addresses), allowed_root_domains=("example.test",),
+        scope_receipt_id="10000000-0000-0000-0000-000000000003",
+    )
+
+
+def _compiled_tls_action(target, *, max_tcp_ports):
+    execution_plan = ScanExecutionPlan(
+        policy=ScanPolicy(
+            include_families=("sensitive_exposure",),
+            scope_receipt_id=target.scope_receipt_id,
+        ),
+        budget_profile="balanced",
+        budget=replace(BUDGET_PROFILES["balanced"], max_tcp_ports=max_tcp_ports),
+    )
+    compiled = ScanActionPlanCompiler().compile(
+        scan_id=str(uuid.uuid4()), execution_plan=execution_plan,
+        target_binding=target, action_scope="full",
+    )
+    return next(item for item in compiled.actions if item.capability_name == "tls.inspect")
+
+
+def _dispatch_tls_action(action, target):
+    action = replace(action, ordinal=0, dependencies=(), action_digest=None)
+    plan = ScanActionPlan(
+        scan_id=str(uuid.uuid4()), execution_plan_digest="a" * 64,
+        target_binding_digest=target.digest, actions=(action,),
+    )
+    dispatcher = _dispatcher(plan, Backend(), target=target)
+    return asyncio.run(dispatcher(action, _lease(plan, action), _noop))
+
+
+def _assert_tls_handshakes_only_within_hold(receipt, sockets, action, pairs):
+    reserved = int(action.requested_budget["tcp_ports_attempted"])
+    assert reserved == pairs * TLS_HANDSHAKE_CONNECTIONS_PER_PAIR
+    assert sockets["raw"] == 0
+    assert 0 < sockets["tls"] <= reserved
+    assert receipt.status == "success", receipt.errors
+    assert not [error for error in receipt.errors if "budget_contract_violation" in error]
+    assert receipt.budget_consumed["tcp_ports_attempted"] == sockets["tls"]
+    assert len(receipt.observations) == pairs
+    assert {row.get("legacy_probes_skipped") for row in receipt.observations} == {
+        "insufficient_tcp_budget",
+    }
+
+
+@pytest.mark.parametrize(("addresses", "max_tcp_ports"), [
+    # One pair under a TCP grant one connection short of the probes.
+    (("192.0.2.10",), TLS_CONNECTIONS_PER_PAIR - 1),
+    # Two pairs need twenty connections for the probes; twelve pays for the handshakes only.
+    (("192.0.2.10", "192.0.2.11"), 12),
+])
+def test_tls_action_reserved_for_the_handshakes_runs_no_legacy_probe(
+    monkeypatch, addresses, max_tcp_ports,
+):
+    target = _tls_compiler_target(*addresses)
+    action = _compiled_tls_action(target, max_tcp_ports=max_tcp_ports)
+    sockets = _modern_tls_server(monkeypatch)
+
+    receipt = _dispatch_tls_action(action, target)
+
+    _assert_tls_handshakes_only_within_hold(receipt, sockets, action, len(addresses))
+
+
+def test_tls_action_from_a_four_connection_plan_runs_no_legacy_probe(monkeypatch):
+    # Plans compiled before the ten-connection profile reserved four connections per pair even
+    # under a large TCP grant; the dispatcher must keep such an action within that hold.
+    target = _tls_compiler_target("192.0.2.10")
+    current = _compiled_tls_action(target, max_tcp_ports=5_000)
+    assert current.requested_budget["tcp_ports_attempted"] == TLS_CONNECTIONS_PER_PAIR
+    action = replace(current, action_digest=None, requested_budget={
+        **current.requested_budget,
+        "tcp_ports_attempted": TLS_HANDSHAKE_CONNECTIONS_PER_PAIR,
+    })
+    sockets = _modern_tls_server(monkeypatch)
+
+    receipt = _dispatch_tls_action(action, target)
+
+    _assert_tls_handshakes_only_within_hold(receipt, sockets, action, 1)
+
+
+def test_tls_action_reserved_for_the_legacy_probes_runs_every_probe(monkeypatch):
+    target = _tls_compiler_target("192.0.2.10")
+    action = _compiled_tls_action(target, max_tcp_ports=5_000)
+    sockets = _modern_tls_server(monkeypatch)
+
+    receipt = _dispatch_tls_action(action, target)
+
+    assert action.requested_budget["tcp_ports_attempted"] == TLS_CONNECTIONS_PER_PAIR
+    assert sockets["raw"] == TLS_LEGACY_PROBE_COUNT
+    assert sockets["tls"] + sockets["raw"] <= TLS_CONNECTIONS_PER_PAIR
+    assert receipt.status == "success", receipt.errors
+    assert receipt.budget_consumed["tcp_ports_attempted"] == sockets["tls"] + sockets["raw"]
+    assert [row.get("legacy_probes_skipped") for row in receipt.observations] == [None]
 
 
 def test_selected_http_origin_skips_tls_on_the_refused_https_candidate(monkeypatch):

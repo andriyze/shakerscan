@@ -9,7 +9,7 @@
 # results into one multi-arch manifest, so there is no QEMU emulation (which is
 # what blew past GitHub's 6h job limit on the v0.5.4 build) and katana's CGO
 # dependency (go-tree-sitter) compiles cleanly.
-FROM golang:1.27.2-bookworm@sha256:5cf287a799e6b94384bad13d16b14904c531f51ba65792237e122ce42b392f61 AS go-builder
+FROM golang:1.27.3-bookworm@sha256:972b4110ba0f47539a975c31e52c64765e1ff19f2d74469ae4a595c6676e80a5 AS go-builder
 
 # Naabu supports both SYN and CONNECT discovery, and its Go packet-capture
 # dependency is compiled even though ShakerScan deliberately invokes CONNECT
@@ -35,6 +35,9 @@ RUN --mount=type=bind,source=scanner/apt_install.sh,target=/tmp/apt_install.sh,r
 # string-literal lexing is super-linear; one inline script with a few thousand
 # escaped quotes (every Next.js page carries one) took the crawler past 6 GiB in
 # 20 s and got it killed. gotreesitter v0.52.0 parses the same input in 40 MiB.
+# `go get` of a lift below a version some dependency requires would downgrade that
+# dependency, the tool included, so the build stops when a tool no longer resolves to
+# its pinned version.
 ARG GO_INSTALL_ATTEMPTS=4
 RUN --mount=type=cache,target=/go/pkg/mod,sharing=locked \
     --mount=type=cache,target=/root/.cache/go-build,sharing=locked \
@@ -54,7 +57,8 @@ RUN --mount=type=cache,target=/go/pkg/mod,sharing=locked \
       go get \
         github.com/getkin/kin-openapi@v0.149.0 \
         github.com/go-git/go-git/v5@v5.19.2 \
-        github.com/labstack/echo/v4@v4.15.3 \
+        github.com/klauspost/compress@v1.18.7 \
+        github.com/labstack/echo/v4@v4.16.1 \
         golang.org/x/crypto@v0.57.0 \
         golang.org/x/mod@v0.41.0 \
         golang.org/x/net@v0.60.0 \
@@ -62,6 +66,11 @@ RUN --mount=type=cache,target=/go/pkg/mod,sharing=locked \
         github.com/jackc/pgx/v5@v5.9.0 \
         google.golang.org/grpc@v1.83.2 || return 1; \
       if [ "$#" -gt 0 ]; then go get "$@" || return 1; fi; \
+      resolved_version="$(go list -mod=mod -f '{{.Module.Version}}' "${tool_package}")" || return 1; \
+      if [ "${resolved_version}" != "${tool_version}" ]; then \
+        echo "${tool_name}: the dependency lifts moved it from ${tool_version} to ${resolved_version}" >&2; \
+        exit 1; \
+      fi; \
       go build -mod=mod -trimpath -o "/go/bin/${tool_name}" "${tool_package}" || return 1; \
       cd /; \
       rm -rf "${tool_dir}"; \
@@ -196,8 +205,18 @@ ENV TESTSSL_BIN=/opt/testssl.sh/testssl.sh
 # App directory
 WORKDIR /app
 
+# The Playwright base image pip-installs virtualenv and its dependencies (python-discovery,
+# distlib, platformdirs, filelock). Nothing in the runtime imports them (the Model Intake overlay
+# builds its venvs with the stdlib venv module), and they go before the locked install below:
+# virtualenv requires filelock<4, and --ignore-installed would leave the base's older filelock
+# metadata beside the locked version, where image scanners report it.
+RUN python3 -m pip uninstall -y --break-system-packages virtualenv python-discovery distlib platformdirs filelock && \
+    rm -rf /root/.cache/virtualenv /usr/local/bin/virtualenv && \
+    python3 -c 'import importlib.util; assert importlib.util.find_spec("virtualenv") is None'
+
 # Python deps for scanner. requirements.txt is the human-maintained input;
-# requirements.lock is the reviewed, reproducible release resolution.
+# requirements.lock is the reviewed, reproducible release resolution. The last check fails the
+# build when any distribution is still installed twice under /usr/local.
 COPY scanner/requirements.txt /app/requirements.txt
 COPY scanner/requirements.lock /app/requirements.lock
 RUN pip install --no-cache-dir --break-system-packages --ignore-installed --require-hashes \
@@ -205,7 +224,8 @@ RUN pip install --no-cache-dir --break-system-packages --ignore-installed --requ
     pip uninstall -y --break-system-packages msgpack setuptools && \
     rm -f /usr/lib/python3/dist-packages/distutils-precedence.pth && \
     pip check && \
-    test -z "$(python -c 'pass' 2>&1)"
+    test -z "$(python -c 'pass' 2>&1)" && \
+    python3 -c 'import collections, importlib.metadata as md, re; names = collections.Counter(re.sub(r"[-_.]+", "-", d.name).lower() for d in md.distributions(path=["/usr/local/lib/python3.12/dist-packages"])); twice = sorted(n for n, k in names.items() if k > 1); assert not twice, twice'
 
 # The Model Intake dependency locks and Firecracker guest inputs stay in the scanner image even
 # though the toolchain that consumes them lives in the Model Intake image. They are tiny, and the
@@ -341,13 +361,9 @@ RUN set -e && \
 # report those build-only components as deployed vulnerabilities.
 # The Playwright base image also ships virtualenv, whose embedded pip wheels and wheel cache vendor
 # msgpack and setuptools: the exact two findings the vulnerability gate kept reporting on the scanner
-# and API images even after the Model Intake toolchain moved out. Nothing in the runtime imports
-# virtualenv (the Model Intake overlay builds its venvs with the stdlib venv module), so remove it
-# and its caches before pip itself goes.
-RUN python3 -m pip uninstall -y --break-system-packages virtualenv && \
-    rm -rf /root/.cache/virtualenv /usr/local/bin/virtualenv && \
-    python3 -c 'import importlib.util; assert importlib.util.find_spec("virtualenv") is None' && \
-    python3 -m pip uninstall -y --break-system-packages pip && \
+# and API images even after the Model Intake toolchain moved out. It and its caches are removed
+# before the locked dependency install above; the find below proves no copy is left.
+RUN python3 -m pip uninstall -y --break-system-packages pip && \
     rm -f /usr/local/bin/pip /usr/local/bin/pip3 /usr/local/bin/pip3.12 && \
     python3 -c 'import importlib.util; assert importlib.util.find_spec("pip") is None' && \
     test -z "$(find / -path /proc -prune -o \( -iname 'msgpack*' -o -iname 'setuptools-*.dist-info' \) -print 2>/dev/null | grep -v /opt/model-intake-tools)"

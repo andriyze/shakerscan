@@ -41,7 +41,7 @@ export const HUNT_START_CONTRACT = {
       "zeroable": true
     },
     {
-      "label": "Maximum candidates",
+      "label": "Maximum candidate and finding records",
       "minimum": 1,
       "name": "max_candidates",
       "zeroable": false
@@ -109,49 +109,49 @@ export const HUNT_START_CONTRACT = {
   ],
   "budget_profiles": {
     "balanced": {
-      "max_active_actions": 20,
-      "max_browser_actions": 200,
-      "max_candidates": 100,
-      "max_capability_calls": 80,
+      "max_active_actions": 14400,
+      "max_browser_actions": 460800,
+      "max_candidates": 14400,
+      "max_capability_calls": 14400,
       "max_device_fragility_points": 100,
-      "max_duration_seconds": 3600,
+      "max_duration_seconds": 14400,
       "max_hosts": 500,
-      "max_http_requests": 5000,
+      "max_http_requests": 1843200,
       "max_oob_interactions": 50,
       "max_state_changing_requests": 20,
       "max_tcp_ports": 1200,
       "max_udp_ports": 1000,
-      "max_verifications": 20
+      "max_verifications": 14400
     },
     "fast": {
-      "max_active_actions": 4,
-      "max_browser_actions": 20,
-      "max_candidates": 20,
-      "max_capability_calls": 20,
+      "max_active_actions": 3600,
+      "max_browser_actions": 115200,
+      "max_candidates": 3600,
+      "max_capability_calls": 3600,
       "max_device_fragility_points": 20,
-      "max_duration_seconds": 900,
+      "max_duration_seconds": 3600,
       "max_hosts": 50,
-      "max_http_requests": 500,
+      "max_http_requests": 460800,
       "max_oob_interactions": 10,
       "max_state_changing_requests": 4,
       "max_tcp_ports": 100,
       "max_udp_ports": 100,
-      "max_verifications": 4
+      "max_verifications": 3600
     },
     "thorough": {
-      "max_active_actions": 80,
-      "max_browser_actions": 1000,
-      "max_candidates": 500,
-      "max_capability_calls": 300,
+      "max_active_actions": 86400,
+      "max_browser_actions": 2764800,
+      "max_candidates": 86400,
+      "max_capability_calls": 86400,
       "max_device_fragility_points": 500,
-      "max_duration_seconds": 14400,
+      "max_duration_seconds": 86400,
       "max_hosts": 5000,
-      "max_http_requests": 20000,
+      "max_http_requests": 11059200,
       "max_oob_interactions": 200,
       "max_state_changing_requests": 80,
       "max_tcp_ports": 10000,
       "max_udp_ports": 5000,
-      "max_verifications": 100
+      "max_verifications": 86400
     }
   },
   "budget_schema_version": "hunt-budget/v3",
@@ -426,6 +426,9 @@ export const HUNT_START_CONTRACT = {
   "skill_catalog": "/hunt/skills",
   "target_actions": {
     "auto_load_at_start": true,
+    "auto_retain_at_finish": true,
+    "auto_retain_permission": "always proposes for operator review, never saves; one rolling proposal per target; metadata_changes opt-out skips",
+    "completion_result_path": "final_debrief.saved_action",
     "execution": "Read a recipe, then invoke each canonical step through the saved Hunt manifest.",
     "grants_authority": false,
     "max_actions": 32,

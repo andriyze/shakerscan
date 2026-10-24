@@ -14,7 +14,7 @@ redis>=8.1.0
 playwright==1.63.0
 PyJWT>=2.15.1
 httpx>=0.26.0
-aiohttp>=3.14.3
+aiohttp>=3.14.4
 beautifulsoup4>=4.12.0
 lxml>=6.1.3
 onnx>=1.23.0,<2
@@ -24,7 +24,7 @@ defusedxml>=0.7.1
 # Python security tools and their direct runtime integrations. Keep scanner
 # executables exact; the generated lock pins every transitive dependency.
 sqlmap==1.10.9
-certifi>=2026.7.22
+certifi>=2026.10.19
 cryptography>=50.0.1
 dnspython>=2.8.0
 pyOpenSSL>=26.4.0
@@ -36,6 +36,7 @@ paramiko>=5.0.0
 # Security floors for transitive dependencies. The lock already resolves newer versions, but a
 # floor is what a scanner of this file (OSV, Scorecard) resolves, and what an unlocked install gets.
 anyio>=4.15.1
+filelock>=4.2.1
 idna>=3.15
 pygments>=2.20.0
 pytest>=9.0.3

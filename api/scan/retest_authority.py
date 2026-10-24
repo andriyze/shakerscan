@@ -97,6 +97,19 @@ async def _receipt_covers(conn: Any, receipt_id: Any, host: str | None) -> bool:
 
 
 REPLAY_OUT_OF_SCOPE = "replay_url_out_of_scope"
+# A replay URL with no host (a finding that keeps only a path): no scope is asked about it.
+REPLAY_URL_UNRESOLVED = "replay_url_unresolved"
+REPLAY_URL_UNRESOLVED_MESSAGE = (
+    "The finding keeps only a path, with no site to send it to, so a retest cannot replay it. "
+    "Run a new Scan to check it again."
+)
+
+
+def replay_url_is_path_only(url: Any) -> bool:
+    """Whether a replay URL names no site at all (``/product``): not a host any scope is asked
+    about. An authority that is ambiguous (``http://a\\@b/``) is a host no scope covers."""
+    text = str(url or "").strip()
+    return not text or (text.startswith("/") and not text.startswith("//"))
 
 
 async def admit_retest(
@@ -117,6 +130,9 @@ async def admit_retest(
     approval, standing = record["approval_receipt_id"], record["standing_receipt_id"]
     if not approval and not standing:
         return record, None
+    if replay_url_is_path_only(destination):
+        # Not an authorization question: there is no host to ask about.
+        return record, REPLAY_URL_UNRESOLVED_MESSAGE
     host = url_host_for_scope(destination)
     covering = approval or standing
     if await _receipt_covers(conn, covering, host):

@@ -1,7 +1,8 @@
 """Every path that can write a target's instructions or saved actions, inventoried.
 
 Static checks over the source: an agent reaches a write only through the Hunt capability route,
-where instruction_changes gates it (tests/test_saved_action_proposals_postgres.py and
+where instruction_changes gates it; finishing a Hunt only files a proposal
+(tests/test_saved_action_proposals_postgres.py, tests/test_hunt_recording_postgres.py and
 tests/test_instruction_proposals_postgres.py exercise those paths against PostgreSQL). A new caller
 of a write function, a new MCP route or an unreserved generic metadata key fails here until it is
 reviewed and added to the inventory.

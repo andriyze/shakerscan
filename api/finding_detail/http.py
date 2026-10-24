@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from typing import Any, Mapping
 
 from .common import command, detected_stack, fact, facts, origin_of, q, record, text
@@ -44,6 +45,29 @@ HEADERS: Mapping[str, tuple[str, str, str]] = {
 }
 
 
+# A frame-ancestors source worth copying from the observed policy into an example: 'none',
+# 'self', or one named host with its scheme. Scheme sources (https:, data:) and wildcard hosts
+# (*.com) let many sites frame the page, and anything else could break out of the snippet, so
+# those fall back to the recommended 'self'.
+_SAFE_FRAME_SOURCE = re.compile(
+    r"'(?:none|self)'|https?://[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?"
+    r"(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?){0,20}(?::\d{1,5})?/?",
+    re.IGNORECASE,
+)
+
+
+def _observed_frame_ancestors(policy: str) -> str:
+    """The observed CSP frame-ancestors sources when they already restrict framing, else ""."""
+    for part in policy.split(";"):
+        tokens = part.split()
+        if tokens and tokens[0].lower() == "frame-ancestors":
+            sources = tokens[1:]
+            if sources and all(_SAFE_FRAME_SOURCE.fullmatch(token) for token in sources):
+                return " ".join(sources)
+            return ""
+    return ""
+
+
 def _stack_example(stack: str | None, header: str, value: str) -> list[dict[str, str]]:
     examples = {
         "nginx": ("nginx", f'add_header {header} "{value}" always;'),
@@ -66,9 +90,16 @@ def build_missing_header(finding: Mapping[str, Any], evidence: Mapping[str, Any]
         header = text(evidence.get("check"), 120).removeprefix("missing_header_").lower()
     display, value, purpose = HEADERS.get(header, (header.title(), "", "A browser security header."))
     observed = record(evidence.get("observed_response"))
-    headers = {str(k).lower(): v for k, v in record(observed.get("observed_headers")).items()}
     url = text(evidence.get("url") or evidence.get("matched_at") or finding.get("url"), 400)
     origin = origin_of(url) or url
+    # A recorded error page (older findings carried the root's 404) is not the response that lacked
+    # the header: show none, and point the commands at a page the check matched.
+    observed_status = observed.get("response_status")
+    if isinstance(observed_status, int) and not 200 <= observed_status < 400:
+        observed = {}
+    if not observed:
+        url = text((evidence.get("matched_urls") or [None])[0], 400) or url
+    headers = {str(k).lower(): v for k, v in record(observed.get("observed_headers")).items()}
     status = observed.get("response_status") or evidence.get("status")
     request_line = text(observed.get("request_line"), 300)
     stack = detected_stack(headers)
@@ -122,6 +153,15 @@ def build_weak_header(finding: Mapping[str, Any], evidence: Mapping[str, Any]) -
     current = text(evidence.get("observed_value"), 2000) or text(headers.get(header), 2000)
     issues = [record(item) for item in evidence.get("issues") or () if isinstance(item, Mapping)]
     expected = text(evidence.get("expected_value"), 600) or value
+    # A policy that already restricts framing keeps its own frame-ancestors: recommending 'self'
+    # in place of an observed 'none' would loosen the protection while fixing something else.
+    framing = _observed_frame_ancestors(current) if header == "content-security-policy" else ""
+    if framing:
+        value = value.replace("frame-ancestors 'self'", f"frame-ancestors {framing}")
+        expected = expected.replace("frame-ancestors 'self'", f"frame-ancestors {framing}")
+    # Some expectations describe a value ("DENY or SAMEORIGIN", "nonces or hashes"); only one that is
+    # the recommended value itself is a header line the check can print.
+    literal = bool(expected) and expected == value
     stack = detected_stack(headers)
     curl = f"curl -sS -o /dev/null -D - {q(url or origin)} | grep -i {q('^' + header + ':')}"
     return {
@@ -135,10 +175,10 @@ def build_weak_header(finding: Mapping[str, Any], evidence: Mapping[str, Any]) -
             fact("Response status", observed.get("response_status") or evidence.get("status"), mono=True),
             fact("Server", headers.get("server"), mono=True),
         ),
-        "expected": [f"{display}: {expected}"] if expected else [],
+        "expected": [f"{display}: {expected}" if literal else f"{display} — {expected}"] if expected else [],
         "context": [text(item.get("text"), 400) for item in issues] + [purpose],
         "reproduce": command(curl, expect=f"{display}: {current[:120]}"),
-        "verify": command(curl, expect=f"{display}: {expected[:160]}" if expected else f"a {display} line without the weaknesses listed"),
+        "verify": command(curl, expect=f"{display}: {expected[:160]}" if literal else f"a {display} line without the weaknesses listed above"),
         "fix": [f"Change the {display} value sent by {origin}{' (detected server: ' + stack + ')' if stack else ''}: {expected}."]
                + (["Replace inline scripts with external files or add a per-response nonce, then drop 'unsafe-inline'; test with Content-Security-Policy-Report-Only first."] if header == "content-security-policy" else [])
                + (["Raise max-age to at least 15552000 (180 days), ideally 31536000; add includeSubDomains once every subdomain serves HTTPS."] if header == "strict-transport-security" else []),
@@ -191,7 +231,8 @@ def build_cookie(finding: Mapping[str, Any], evidence: Mapping[str, Any]) -> dic
         "context": context,
         "reproduce": command(curl, expect=f"a Set-Cookie line for {name} without {missing}"),
         "verify": command(curl, expect=f"the Set-Cookie line for {name} includes {missing}"),
-        "fix": [f"Set {missing} (and Secure, HttpOnly, SameSite=Lax) on {name} where the application creates its session cookie."],
+        "fix": [f"Set {missing} on {name} where the application creates its session cookie, together with "
+                f"{'HttpOnly' if missing == 'Secure' else 'Secure'} and SameSite=Lax."],
         "examples": examples,
     }
 

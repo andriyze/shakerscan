@@ -410,7 +410,7 @@ def test_finalizer_suppresses_missing_header_template_matches_from_auth_challeng
     )
     results = {
         baseline.action_id: _result_with_observation_count(baseline, 1),
-        templates.action_id: _result_with_observation_count(templates, 1),
+        templates.action_id: _result_with_observation_count(templates, 2),
     }
     observations = {
         baseline.action_id: ({
@@ -418,7 +418,11 @@ def test_finalizer_suppresses_missing_header_template_matches_from_auth_challeng
             "request": {"origin": "https://app.example.test"},
             "response": {"status": 401, "security_headers": {}},
         },),
-        templates.action_id: ({
+        templates.action_id: (
+            # The pack's attempt on the origin: the family did its work.
+            {"kind": "candidate_attempt", "attempt_id": "p" * 64, "candidate_id": "origin",
+             "status": "success"},
+            {
             "kind": "template_match",
             "template_id": "http-missing-security-headers",
             "name": "HTTP Missing Security Headers",
@@ -437,6 +441,9 @@ def test_finalizer_suppresses_missing_header_template_matches_from_auth_challeng
 
     assert report["findings"] == []
     assert report["result"]["risk_assessment_state"] == "not_examined"
+    [passive] = [row for row in report["coverage"]["family_coverage"]
+                 if row["family"] == "nuclei_passive"]
+    assert passive["coverage_status"] == "complete"
 
 
 def test_finalizer_names_the_specific_header_reported_by_nuclei():
@@ -846,6 +853,7 @@ def test_finalizer_promotes_only_repeated_deterministic_sqli_proof():
         "kind": "sqli_proof",
         "candidate_id": "candidate-sqli",
         "request_ref_id": "request-sqli",
+        "origin": "https://app.example.test",
         "method": "POST",
         "field_path": "email",
         "request_class": "safe_authentication",
@@ -872,6 +880,35 @@ def test_finalizer_promotes_only_repeated_deterministic_sqli_proof():
     assert finding["severity"] == "critical"
     assert finding["verified"] is True
     assert finding["evidence"]["canonical_capability"] == "sqli.prove_batch"
+    assert finding["evidence"]["origin"] == "https://app.example.test"
+
+
+def test_finalizer_keeps_the_site_a_nosqli_proof_was_proved_on():
+    prove = _action("prove.nosqli.0", 0, capability_name="nosqli.verify_batch")
+    final = _action("finalize.report", 1, dependencies=(prove.action_id,))
+    plan = ScanActionPlan(
+        scan_id=SCAN_ID, execution_plan_digest="b" * 64,
+        target_binding_digest="a" * 64, actions=(prove, final),
+    )
+    results = {prove.action_id: _result_with_observation_count(prove, 1)}
+    observation = {
+        "kind": "nosqli_proof", "canonical_path": "/api/users", "candidate_id": "candidate-nosqli",
+        "request_ref_id": None, "origin": "https://api.example.test", "method": "GET",
+        "field_path": "username", "request_class": "safe_read", "proof_state": "verified",
+        "finding_verdict": "verified", "proof_contract": "nosqli_operator_differential/v1",
+        "technique": "operator_equality_complement_differential", "operator": "$ne",
+        "repetitions": 2, "response_pairs": [], "session_state_discarded": False,
+    }
+    for recorded, origin in ((observation, "https://api.example.test"),
+                             ({k: v for k, v in observation.items() if k != "origin"}, None)):
+        report = finalize_scan_report(
+            plan=plan, target_url="https://app.example.test",
+            action_results=results, observations={prove.action_id: (recorded,)},
+        )
+        (finding,) = report["findings"]
+        assert finding["tool"] == "shakerscan_nosqli_verify" and finding["url"] == "/api/users"
+        # A proof recorded before the origin was kept has none, rather than a guessed one.
+        assert finding["evidence"].get("origin") == origin
 
 
 def test_finalizer_promotes_only_structured_canonical_browser_xss_proof():
@@ -1505,7 +1542,7 @@ def _redirecting_origin_report(
     results = {
         baseline.action_id: _result_with_observation_count(baseline, 1),
         landing.action_id: _result_with_observation_count(landing, 1),
-        templates.action_id: _result_with_observation_count(templates, 1),
+        templates.action_id: _result_with_observation_count(templates, 2),
     }
     observations = {
         baseline.action_id: ({
@@ -1522,7 +1559,11 @@ def _redirecting_origin_report(
             "response": {"status": 200, "final_url": landing_url, "security_headers": {},
                          "selected_headers": {"server": "Apache"}},
         },),
-        templates.action_id: ({
+        templates.action_id: (
+            # The pack's attempt on the origin: the family did its work.
+            {"kind": "candidate_attempt", "attempt_id": "p" * 64, "candidate_id": "origin",
+             "status": "success"},
+            {
             "kind": "template_match", "template_id": "http-missing-security-headers",
             "name": "HTTP Missing Security Headers", "severity": "info",
             "matched_at": f"{origin}/", "matcher_name": matcher,
@@ -1557,6 +1598,10 @@ def test_a_redirected_origin_reports_a_missing_baseline_header_once(origin, land
     [finding] = csp
     assert finding["tool"] == "http_baseline"
     assert finding["evidence"]["also_reported_by"] == "nuclei:http-missing-security-headers"
+    # The folded template finding no longer belongs to the passive family; its attempt does.
+    [passive] = [row for row in report["coverage"]["family_coverage"]
+                 if row["family"] == "nuclei_passive"]
+    assert passive["coverage_status"] == "complete"
 
 
 def test_a_root_redirect_is_proven_from_the_same_origin_landing_page():

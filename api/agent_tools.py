@@ -25,7 +25,7 @@ import math
 import os
 import re
 import urllib.parse
-from typing import Any, Mapping, Optional
+from typing import Any, Mapping, Optional, Sequence
 
 from runtime.auth_refusal import BASELINE_RECORD_KIND, is_login_location
 from runtime.capability_registry import CAPABILITY_REGISTRY
@@ -33,6 +33,7 @@ from runtime.request_shape import (
     json_field_leaf_name, nested_json_body, public_request_body_shape,
 )
 from scan.negative_control import is_negative_control_url
+from scan.auth_endpoint_probe import AUTH_ENDPOINT_PROBE_PROFILE, AUTH_ENDPOINT_SECONDS_PER_REQUEST
 from scan.external_process import (
     BATCH_ATTEMPT_FLOORS,
     BATCH_ATTEMPT_REQUEST_HEADROOM,
@@ -51,8 +52,10 @@ from target_address_policy import MAX_FROZEN_ADDRESSES, primary_frozen_address
 
 try:
     from scanner_tools.url_redaction import redact_client_route, redact_url
+    from scanner_tools.unsafe_actions import navigation_exclusion_expression
 except ModuleNotFoundError:  # package import in host-side tests
     from scanner.scanner_tools.url_redaction import redact_client_route, redact_url
+    from scanner.scanner_tools.unsafe_actions import navigation_exclusion_expression
 
 # Methods the model may request. Reads are read-only; writes are credential/active-gated.
 READ_METHODS: frozenset[str] = frozenset({"GET", "HEAD", "OPTIONS"})
@@ -376,6 +379,32 @@ EXTERNAL_VERIFICATION_FLOORS: dict[str, dict[str, int]] = {
     "dalfox": {"http_requests": 400, "tool_wall_seconds": 120},
     "sqlmap": {"http_requests": 900, "tool_wall_seconds": 300},
 }
+# Useful per-call holds for every Hunt profile. The older registry holds (sqli.verify
+# 900 requests / 300 s, xss.verify 400 / 120 s) remain accepted for already-queued work. The argv
+# paces a call the same way on every profile: sqlmap BEUT at --delay 1 with one thread (about
+# 1 request/s), Dalfox at --delay 1000 ms with 3 workers (about 3.3 requests/s). At that pace a
+# one-field sqlmap negative (about 432 requests) needs 441-475 s, and Dalfox about 1,300 requests
+# (390-430 s) per parameter, so the registry wall ended those calls before a verdict. These holds
+# raise the wall without touching argv or rate, and keep rate x wall within 90% of the request
+# hold (sqlmap 1 x 540 = 540 <= 810; Dalfox 3.33 x 480 = 1,600 <= 1,620), so the pinned
+# connection ceiling never stops a paced call before its wall does.
+HUNT_THOROUGH_SCANNER_HOLDS: dict[str, dict[str, int]] = {
+    "sqli.verify": {"http_requests": 900, "tool_wall_seconds": 540},
+    "xss.verify": {
+        "http_requests": 1_800, "tool_wall_seconds": 480, "browser_actions": 2,
+    },
+}
+# The longer process ceiling a single (non-batch) verification may run under, on the same argv.
+# Only a reservation that covers all of it runs with it; any other reservation at or above the
+# floor runs at the floor, so a paced call only ever runs one of these two reviewed shapes.
+# Headless Dalfox (deep_domxss) runs unpaced with 10 workers, so it stays at its floor.
+_EXTERNAL_VERIFICATION_CEILINGS: dict[str, dict[str, int]] = {
+    tool: {
+        name: HUNT_THOROUGH_SCANNER_HOLDS[capability][name]
+        for name in ("http_requests", "tool_wall_seconds")
+    }
+    for tool, capability in (("dalfox", "xss.verify"), ("sqlmap", "sqli.verify"))
+}
 # The smallest slice on which one batched attempt can still reach a verdict.
 # A batch divided its reservation evenly across every ranked candidate, so a
 # manifest with more candidates gave each of them less: thirteen candidates
@@ -474,6 +503,74 @@ _AGENT_FFUF_WORDLIST_SOURCES: dict[str, tuple[str, ...]] = {
 }
 
 
+# A crawl that carries a session also starts at the scan's seeds on its own origin (the page the
+# sign-in landed on and the GET seed endpoints): an area behind a sign-in is often linked from
+# nowhere the target's root reaches (E1-N3). Each seed is a plain path joined to the crawl's own
+# origin, so a seed can never name another host; katana splits a list flag on commas, so a seed
+# holds none. A seed that is not such a path is left out, never fatal to the crawl. The target
+# keeps its whole time box (``_fit_crawl_inputs``).
+MAX_CRAWL_SEED_PATHS = 20
+_CRAWL_SEED_PATH = re.compile(r"/(?!/)[A-Za-z0-9\-._~!$&'()*+;=:@%/]{0,2047}")
+# The shortest share of the browser crawl's box worth giving the target and one seed each.
+_CRAWL_INPUT_MIN_SECONDS = {"katana": 10, "katana_headless": 15}
+
+
+def crawl_seed_path_is_plain(path: Any) -> bool:
+    """Whether ``path`` can be a crawl seed: a plain, already percent-encoded path."""
+    return isinstance(path, str) and _CRAWL_SEED_PATH.fullmatch(path) is not None
+
+
+def _crawl_seed_urls(url: str, opts: Mapping[str, Any]) -> list[str]:
+    raw = opts.get("crawl_seed_paths") or ()
+    if not raw:
+        return []
+    if not isinstance(raw, (list, tuple)) or len(raw) > MAX_CRAWL_SEED_PATHS:
+        raise AgentToolError(f"a crawl takes at most {MAX_CRAWL_SEED_PATHS} seed paths")
+    parsed = urllib.parse.urlsplit(url)
+    origin = urllib.parse.urlunsplit((parsed.scheme, parsed.netloc, "", "", ""))
+    urls: list[str] = []
+    for value in raw:
+        if not crawl_seed_path_is_plain(value):
+            continue
+        seed = origin + value
+        if seed != url and seed not in urls:
+            urls.append(seed)
+    return urls
+
+
+def _crawl_inputs(url: str, opts: Mapping[str, Any]) -> list[str]:
+    inputs = ["-u", url]
+    for seed in _crawl_seed_urls(url, opts):
+        inputs += ["-u", seed]
+    return inputs
+
+
+def _fit_crawl_inputs(argv: list[str], duration: int, *, scanner: str) -> tuple[int, int]:
+    """Fit the crawl's ``-u`` inputs to its time box; return (inputs, seconds each).
+
+    ``-crawl-duration`` bounds each input, not the run. The static crawl runs its inputs side by
+    side (``-parallelism`` one per input), each for the whole box, so the run ends with the box:
+    the target's own crawl keeps the time it had alone, and the process's one rate limiter and
+    the hard request ceiling are shared. While seeds are busy the target gets its share of that
+    rate (one of the inputs), and the requests a seed that finishes does not use return to it.
+    Fewer inputs at a time would not raise the target's share inside the box: each later input
+    would start when an earlier one ended and run its own whole box, so the run would outlast
+    the box (in the scanner image, 20 seeds at ``-parallelism 2`` ran 142 s of a 60 s box). The
+    browser crawl runs one input at a time in one browser (its memory bound is the process
+    tree's), so it adds only its first seed and the target keeps half of the box; a box too small
+    to halve keeps the target alone.
+    """
+    positions = [index for index, value in enumerate(argv) if value == "-u"]
+    if scanner == "katana":
+        _replace_argv_value(argv, "-parallelism", len(positions))
+        return len(positions), max(1, duration)
+    allowed = 2 if duration // 2 >= _CRAWL_INPUT_MIN_SECONDS[scanner] else 1
+    for index in reversed(positions[allowed:]):
+        del argv[index:index + 2]
+    inputs = min(len(positions), allowed)
+    return inputs, max(1, duration // inputs)
+
+
 def _tmpl_katana(url: str, opts: dict[str, Any]) -> list[str]:
     # Same-origin crawl + JS endpoint extraction. Read-only (GET only; form auto-fill stays OFF),
     # bounded: depth 2, 30s wall cap, 5 req/s, field-scope fqdn (same HOST only — never crosses
@@ -490,7 +587,7 @@ def _tmpl_katana(url: str, opts: dict[str, Any]) -> list[str]:
     # actually builds its API calls from. Endpoints extracted this way are observed in the
     # application's own served code -- the same epistemic standing as -js-crawl output --
     # never invented by the scanner.
-    return ["-u", url, "-js-crawl", "-jsluice", "-kb-endpoints",
+    return [*_crawl_inputs(url, opts), "-js-crawl", "-jsluice", "-kb-endpoints",
             "-depth", "2", "-concurrency", "5", "-parallelism", "1",
             "-max-domain-pages", str(_KATANA_MAX_DOMAIN_PAGES),
             "-max-response-size", str(_KATANA_MAX_RESPONSE_BYTES),
@@ -515,7 +612,7 @@ def _tmpl_katana_headless(url: str, opts: dict[str, Any]) -> list[str]:
     # endpoints. -no-sandbox is required to run Chromium as the container's user; the
     # page is untrusted content, but it is the same content the scanner already
     # fetches, and egress stays pinned by the proxy build_scanner_argv attaches.
-    return ["-u", url, "-headless", "-no-sandbox",
+    return [*_crawl_inputs(url, opts), "-headless", "-no-sandbox",
             "-system-chrome-path", _SYSTEM_CHROME_PATH,
             "-headless-options", _BROWSER_HEADLESS_OPTIONS,
             "-xhr-extraction", "-js-crawl", "-jsluice", "-kb-endpoints",
@@ -611,6 +708,12 @@ def _tmpl_dalfox(url: str, opts: dict[str, Any]) -> list[str]:
     # and return its verdict inside that reservation.
     headless = opts.get("deep_domxss") is True
     delay_ms, workers = ("0", "10") if headless else ("1000", "3")
+    # The credential profile's own sign-in endpoint (scan/auth_endpoint_probe.py): one worker, so
+    # the batch pacing is the endpoint's whole rate, Dalfox's own payloads for the request's
+    # body, and a stop at the first verified finding (every request there is a failed sign-in).
+    auth_probe = opts.get("probe_profile") == AUTH_ENDPOINT_PROBE_PROFILE and not headless
+    if auth_probe:
+        workers = "1"
     args = (["url", url, "--format", "jsonl", "--silence", "--no-color",
              "--timeout", "8", "--delay", delay_ms, "--worker", workers,
              "--skip-bav", "--skip-grepping", "--skip-mining-all",
@@ -625,7 +728,13 @@ def _tmpl_dalfox(url: str, opts: dict[str, Any]) -> list[str]:
     query_pairs = urllib.parse.parse_qsl(
         urllib.parse.urlsplit(url).query, keep_blank_values=True,
     )
-    if len(query_pairs) == 1 and re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9_.\[\]-]{0,63}", query_pairs[0][0]):
+    injection = _injection_body(opts)
+    # A body candidate verifies its body's fields: a pair in its URL's query (an action that routes
+    # by its query, index.php?route=account/login) is not the parameter it names, and Dalfox's
+    # custom-payload mode would put every payload there and leave the body untested.
+    if injection is None and len(query_pairs) == 1 and re.fullmatch(
+        r"[A-Za-z0-9_][A-Za-z0-9_.\[\]-]{0,63}", query_pairs[0][0],
+    ):
         args.extend(["--skip-discovery", "-p", query_pairs[0][0]])
         if not headless:
             # This is a verifier of one known parameter, not an open-ended
@@ -635,12 +744,15 @@ def _tmpl_dalfox(url: str, opts: dict[str, Any]) -> list[str]:
                 "--custom-payload", "/app/payloads/xss/hunt-verify.txt",
                 "--only-custom-payload",
             ])
-    injection = _injection_body(opts)
     if injection is not None:
         method, body, fields = injection
         args += ["-X", method, "-d", body]
         for name in fields:
             args += ["-p", name]
+    if auth_probe:
+        # The first verified finding settles the candidate; the rest would be further failed
+        # sign-ins. An unverified reflection does not stop it.
+        args += ["--limit-result", "1", "--limit-result-type", "v"]
     return args
 
 
@@ -656,6 +768,8 @@ def _tmpl_sqlmap(url: str, opts: dict[str, Any]) -> list[str]:
     technique = str(opts.get("technique") or "BEUT").strip().upper()
     if technique not in SQLMAP_TECHNIQUES:
         technique = "BEUT"
+    # The credential profile's own sign-in endpoint keeps this ladder; only its pace and its
+    # probe set differ (scan/auth_endpoint_probe.py, the delay floor in build_enforced_scanner_plan).
     args = ["-u", url, "--batch", "--technique", technique, "--level", "2", "--risk", "2",
             "--threads", "1", "--timeout", "8", "--retries", "0", "--delay", "1",
             "--flush-session", "--output-dir", "/tmp/shakerscan-sqlmap",
@@ -871,12 +985,108 @@ def validate_private_interactsh_server(url: Any) -> str | None:
     return f"{scheme}://{authority}"
 
 
-def canonical_hunt_scanner_budget(capability_name: str) -> dict[str, int]:
-    """Admission ceiling for the exact server-owned Hunt scanner selection."""
+def canonical_hunt_scanner_budget(
+    capability_name: str,
+    *,
+    budget_profile: str | None = None,
+    deep_domxss: bool = False,
+    device_target: bool = False,
+) -> dict[str, int]:
+    """Admission ceiling for the exact server-owned Hunt scanner selection.
+
+    Every named Hunt profile reserves ``HUNT_THOROUGH_SCANNER_HOLDS`` for ``sqli.verify``
+    and ``xss.verify``. Unprofiled historical work keeps the registry hold, and so do:
+
+    - a call against a device target, whose fragility allowance is charged one point per held
+      request and which is not given a longer paced call;
+    - a headless (``deep_domxss``) ``xss.verify``, which runs unpaced or in the pinned browser.
+
+    An ``xss.verify`` the worker routes to the pinned browser (one URL-fragment parameter) runs
+    inside its own fixed limits under either hold, and settles only what it used.
+    """
     budget = dict(CAPABILITY_REGISTRY.require(capability_name).budget_cost)
     if capability_name == "templates.scan":
         budget["http_requests"] = canonical_passive_nuclei_request_upper_bound()
+        return budget
+    tier = HUNT_THOROUGH_SCANNER_HOLDS.get(capability_name)
+    if (
+        budget_profile in {"fast", "balanced", "thorough"}
+        and tier is not None
+        and not device_target
+        and not (capability_name == "xss.verify" and deep_domxss)
+    ):
+        budget.update(tier)
     return budget
+
+
+def hunt_scanner_budget_context(
+    run: Mapping[str, Any], capability_input: Mapping[str, Any],
+) -> dict[str, Any]:
+    """What sizes a Hunt scanner call's hold, read from the Hunt row and the call input.
+
+    Admission and the worker's re-derivation both read it here: the action digest covers the
+    hold, so the two must derive the same one.
+    """
+    return {
+        "budget_profile": run.get("budget_profile"),
+        "deep_domxss": capability_input.get("deep_domxss") is True,
+        "device_target": bool(run.get("device_target_id")),
+    }
+
+
+def hunt_scanner_dispatch_budgets(
+    capability_name: str,
+    *,
+    budget_profile: str | None = None,
+    deep_domxss: bool = False,
+    device_target: bool = False,
+) -> tuple[dict[str, int], ...]:
+    """The holds a Hunt scanner call may run at, the current one first.
+
+    The second is the registry hold for a call admitted before profile holds changed. Only
+    the current hold is used for new admission. The worker verifies the action digest against
+    whichever hold the already-queued action reserved.
+    """
+    current = canonical_hunt_scanner_budget(
+        capability_name, budget_profile=budget_profile, deep_domxss=deep_domxss,
+        device_target=device_target,
+    )
+    legacy = canonical_hunt_scanner_budget(capability_name)
+    return (current,) if legacy == current else (current, legacy)
+
+
+def affordable_hunt_scanner_hold(
+    candidates: Sequence[Mapping[str, int]],
+    *,
+    limits: Mapping[str, int],
+    used: Mapping[str, Any],
+) -> dict[str, int]:
+    """The current useful hold; admission reports any shortage through the canonical ledger."""
+    # Older queued actions may still own the registry hold, which the worker accepts.
+    # New actions must request the useful execution envelope. Admission raises the normal
+    # budget request when it does not fit; silently reverting to the old timeouts spends
+    # traffic on the same incomplete checks these longer holds were introduced to fix.
+    return dict(candidates[0])
+
+
+def admitted_hunt_scanner_hold(
+    stored: Mapping[str, Any],
+    candidates: Sequence[Mapping[str, int]],
+) -> dict[str, int]:
+    """The candidate hold equal to the durable reservation, else the first (current) one."""
+    recorded = {str(name): int(amount) for name, amount in dict(stored).items()}
+    for candidate in candidates:
+        if dict(candidate) == recorded:
+            return dict(candidate)
+    return dict(candidates[0])
+
+
+def hunt_scanner_timeout_ms(
+    default_timeout_ms: int, reserved_budget: Mapping[str, Any],
+) -> int:
+    """How long one Hunt scanner call may run: its spec default, or its reserved wall if longer."""
+    wall = int(reserved_budget.get("tool_wall_seconds") or 0)
+    return max(int(default_timeout_ms), wall * 1_000)
 
 
 def canonical_hunt_scanner_options(
@@ -1112,6 +1322,10 @@ def build_scanner_argv(
         + pin_args
         + _trusted_scanner_header_args(name, trusted_headers)
     )
+    if name in KATANA_TOOLS and trusted_headers:
+        # A crawl carrying a session must not follow an action link: /logout ends the session
+        # and /account/delete changes the account, which the anonymous crawl cannot do.
+        argv += ["-crawl-out-scope", navigation_exclusion_expression()]
     if name == "nuclei":
         argv = _apply_nuclei_interactsh(argv, oob_interactsh_server, oob_interactsh_token)
     return (
@@ -1155,6 +1369,22 @@ def _batch_attempt_pacing(
     )
 
 
+def _auth_probe_minimum(options: Mapping[str, Any], minimum_seconds: float) -> float:
+    """The least delay between requests: the lockout-safe pace on a sign-in endpoint probe.
+
+    A parallel child of a split Scan paces the endpoint slower (``probe_pace_seconds``); nothing
+    paces it faster than one request per ``AUTH_ENDPOINT_SECONDS_PER_REQUEST``.
+    """
+    if options.get("probe_profile") != AUTH_ENDPOINT_PROBE_PROFILE:
+        return minimum_seconds
+    raw = options.get("probe_pace_seconds")
+    pace = (
+        float(raw) if isinstance(raw, (int, float)) and not isinstance(raw, bool) and raw > 0
+        else 0.0
+    )
+    return max(minimum_seconds, float(AUTH_ENDPOINT_SECONDS_PER_REQUEST), min(pace, 600.0))
+
+
 def _replace_argv_value(argv: list[str], flag: str, value: Any) -> None:
     try:
         index = argv.index(flag)
@@ -1174,6 +1404,24 @@ def scanner_ffuf_wordlist_sources(options: Mapping[str, Any] | None = None) -> t
 def scanner_ffuf_wordlist_source(options: Mapping[str, Any] | None = None) -> str:
     """The first bundled source a selection reads; callers can never supply a filesystem path."""
     return scanner_ffuf_wordlist_sources(options)[0]
+
+
+def _external_verification_hard(
+    tool: str, reservation: Mapping[str, int], *, headless: bool = False,
+) -> dict[str, int]:
+    """Process ceiling of one non-batch verification reserved at or above its floor.
+
+    A reservation that covers the whole reviewed ceiling runs with it (a thorough Hunt hold keeps
+    its longer wall). Any other one runs exactly at the floor, as every reservation did before, so
+    a registry-sized hold keeps the floor profile. The paced rate times either wall stays within
+    the request hold; a shape in between, such as 400 requests over 480 s, would not.
+    """
+    floor = EXTERNAL_VERIFICATION_FLOORS[tool]
+    ceiling = floor if headless else _EXTERNAL_VERIFICATION_CEILINGS[tool]
+    covered = all(
+        int(reservation.get(name) or 0) >= int(amount) for name, amount in ceiling.items()
+    )
+    return dict(ceiling if covered else floor)
 
 
 def build_enforced_scanner_plan(
@@ -1287,7 +1535,8 @@ def build_enforced_scanner_plan(
         rate = max(1, min(_KATANA_MAX_RATE_PER_SECOND, (http - 1) // max(1, duration)))
         _replace_argv_value(argv, "-rate-limit", rate)
         _replace_argv_value(argv, "-concurrency", rate)
-        _replace_argv_value(argv, "-crawl-duration", f"{duration}s")
+        inputs, per_input = _fit_crawl_inputs(argv, duration, scanner=scanner)
+        _replace_argv_value(argv, "-crawl-duration", f"{per_input}s")
         timeout_seconds = duration + shutdown_grace
         timeout_ms = timeout_seconds * 1_000
         # One initial token plus the rate for each elapsed second.
@@ -1301,6 +1550,7 @@ def build_enforced_scanner_plan(
             "startup_burst": 1, "redirects": 0, "form_fill": False,
             "depth": 2, "concurrency": rate,
             "shutdown_grace_seconds": shutdown_grace,
+            **({"inputs": inputs, "input_duration_seconds": per_input} if inputs > 1 else {}),
         }
     elif scanner == "katana_headless":
         http = int(reservation.get("http_requests") or 0)
@@ -1344,7 +1594,8 @@ def build_enforced_scanner_plan(
             raise AgentToolError(
                 "headless crawl requires a reservation covering one bounded second"
             )
-        _replace_argv_value(argv, "-crawl-duration", f"{duration}s")
+        inputs, per_input = _fit_crawl_inputs(argv, duration, scanner=scanner)
+        _replace_argv_value(argv, "-crawl-duration", f"{per_input}s")
         timeout_seconds = duration + shutdown_grace
         timeout_ms = timeout_seconds * 1_000
         hard = {
@@ -1359,6 +1610,7 @@ def build_enforced_scanner_plan(
             "shutdown_grace_seconds": shutdown_grace,
             "browser": "system_chromium",
             "browser_profile_seeded": bool(chrome_data_dir),
+            **({"inputs": inputs, "input_duration_seconds": per_input} if inputs > 1 else {}),
         }
     elif scanner == "ffuf":
         wordlist_path = str(runtime.get("ffuf_wordlist") or "")
@@ -1493,7 +1745,7 @@ def build_enforced_scanner_plan(
         dalfox_workers = 10 if deep_domxss else 3
         if batch_attempt and http >= 1:
             delay_seconds, affordable = _batch_attempt_pacing(
-                http, wall, minimum_seconds=0.05,
+                http, wall, minimum_seconds=_auth_probe_minimum(internal_options, 0.05),
             )
             _replace_argv_value(argv, "--delay", str(max(1, int(delay_seconds * 1_000))))
             hard = {"http_requests": affordable, "tool_wall_seconds": wall}
@@ -1510,8 +1762,10 @@ def build_enforced_scanner_plan(
             http >= EXTERNAL_VERIFICATION_FLOORS["dalfox"]["http_requests"]
             and wall >= EXTERNAL_VERIFICATION_FLOORS["dalfox"]["tool_wall_seconds"]
         ):
-            hard = dict(EXTERNAL_VERIFICATION_FLOORS["dalfox"])
-            timeout_seconds = EXTERNAL_VERIFICATION_FLOORS["dalfox"]["tool_wall_seconds"]
+            hard = _external_verification_hard(
+                "dalfox", reservation, headless=deep_domxss,
+            )
+            timeout_seconds = hard["tool_wall_seconds"]
             timeout_ms = timeout_seconds * 1_000
             mode, method = "conservative", "fixed_conservative_profile"
             proof_inputs = {
@@ -1538,7 +1792,8 @@ def build_enforced_scanner_plan(
         delay_seconds = 1.0
         if batch_attempt and http >= 1:
             delay_seconds, affordable = _batch_attempt_pacing(
-                http, wall, minimum_seconds=0.05, latency_seconds=measured_latency,
+                http, wall, minimum_seconds=_auth_probe_minimum(internal_options, 0.05),
+                latency_seconds=measured_latency,
             )
             _replace_argv_value(argv, "--delay", f"{delay_seconds:.3f}")
             hard = {"http_requests": affordable, "tool_wall_seconds": wall}
@@ -1549,8 +1804,8 @@ def build_enforced_scanner_plan(
             http >= EXTERNAL_VERIFICATION_FLOORS["sqlmap"]["http_requests"]
             and wall >= EXTERNAL_VERIFICATION_FLOORS["sqlmap"]["tool_wall_seconds"]
         ):
-            hard = dict(EXTERNAL_VERIFICATION_FLOORS["sqlmap"])
-            timeout_seconds = EXTERNAL_VERIFICATION_FLOORS["sqlmap"]["tool_wall_seconds"]
+            hard = _external_verification_hard("sqlmap", reservation)
+            timeout_seconds = hard["tool_wall_seconds"]
             timeout_ms = timeout_seconds * 1_000
             mode, method = "conservative", "fixed_conservative_profile"
             techniques, profile = technique, "full"
@@ -2115,6 +2370,10 @@ def _template_metadata(info: Mapping[str, Any], item: Mapping[str, Any]) -> dict
 BASELINE_RECORDING_TOOLS = frozenset({"sqlmap", "dalfox"})
 # sqlmap raises this on a 401 to its connection test and skips the target.
 _SQLMAP_NOT_AUTHORIZED = "not authorized, try to provide right HTTP authentication"
+# sqlmap's summary line names the DBMS ("back-end DBMS: SQLite", optionally after log tags). Other
+# lines also mention it: the --batch prompt "it looks like the back-end DBMS is 'X'. Do you want
+# ...", "the back-end DBMS is not X" and "back-end DBMS operating system: ...".
+_SQLMAP_DBMS_LINE_RE = re.compile(r"^(?:\[[^\]]*\]\s*)*back-end DBMS:\s*(\S.*)$")
 
 
 def parse_scanner_output(
@@ -2327,7 +2586,7 @@ def parse_scanner_output(
                     ),
                     "proof_state": "candidate",
                 })
-            elif line.startswith("[INFO] back-end DBMS:") or "back-end DBMS" in line:
+            elif _SQLMAP_DBMS_LINE_RE.match(line):
                 records.append({
                     "kind": "sqli_dbms_fingerprint",
                     "message": line[:300],

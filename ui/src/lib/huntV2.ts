@@ -91,7 +91,19 @@ export interface HuntV2 {
     candidate_ids: string[]
     evidence_ids: string[]
   }
-  final_debrief?: { summary?: string; next_actions?: string[] }
+  final_debrief?: {
+    summary?: string
+    next_actions?: string[]
+    saved_action?: {
+      // 'saved' appears only on debriefs written before finishing became proposal-only.
+      status: 'proposed' | 'updated' | 'unchanged' | 'skipped' | 'not_saved' | 'saved'
+      action_id?: string
+      proposal_id?: string
+      step_count?: number
+      added_steps?: number
+      reason?: string
+    }
+  }
   stop_reason?: string | null
   queued_scan?: { scan_id: string; job_id?: string; status: string; ui_url?: string }
   created_at?: string
@@ -202,6 +214,24 @@ export async function getHuntV2(huntId: string): Promise<HuntV2> {
   const response = await fetch(`${API_URL}/hunts/${pathSegment(huntId)}`)
   if (!response.ok) throw new Error(await getApiErrorMessage(response, `Failed to load Hunt (${response.status})`))
   return response.json()
+}
+
+export interface HuntPermissionRequestRow {
+  id: string
+  kind?: string
+  title?: string
+  status?: string
+  decided_by?: string | null
+  decision_via?: string | null
+  decided_at?: string | null
+}
+
+/** Every permission request of this Hunt, pending and decided (the run record lists only pending). */
+export async function listHuntPermissionRequests(huntId: string): Promise<HuntPermissionRequestRow[]> {
+  const response = await fetch(`${API_URL}/hunts/${pathSegment(huntId)}/permission-requests`)
+  if (!response.ok) throw new Error(await getApiErrorMessage(response, `Failed to load permission requests (${response.status})`))
+  const body = await response.json()
+  return Array.isArray(body?.requests) ? body.requests : []
 }
 
 export async function suggestHuntSkills(

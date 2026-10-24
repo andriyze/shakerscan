@@ -530,7 +530,9 @@ refuse_foreign_install() {
         say "To adopt the data volumes from $INSTALL_DIR anyway (that install's results/ evidence will not be visible here), set SHAKERSCAN_ADOPT_EXISTING_DATA=1." >&2
         exit 1
     fi
-    if docker volume inspect "${project}_postgres-cluster" >/dev/null 2>&1; then
+    # postgres-data: a release before 2.6 (PostgreSQL 16 data, which this release does not migrate).
+    if docker volume inspect "${project}_postgres-cluster" >/dev/null 2>&1 || \
+       docker volume inspect "${project}_postgres-data" >/dev/null 2>&1; then
         say "Error: a PostgreSQL data volume for Compose project '$project' already exists, but $INSTALL_DIR is not the install that created it." >&2
         say "If that install lives in another directory, upgrade it in place: SHAKERSCAN_HOME=<that directory> sh -c 'curl -fsSL $INSTALL_URL | sh'" >&2
         say "To adopt the volume from $INSTALL_DIR (its database password will be rotated), set SHAKERSCAN_ADOPT_EXISTING_DATA=1." >&2
@@ -664,6 +666,7 @@ download "$REPO_RAW_BASE/api/scan/capability_result.py" "$INSTALL_DIR/api/scan/c
 download "$REPO_RAW_BASE/api/scan/continuation.py" "$INSTALL_DIR/api/scan/continuation.py"
 download "$REPO_RAW_BASE/api/scan/execution.py" "$INSTALL_DIR/api/scan/execution.py"
 download "$REPO_RAW_BASE/api/scan/external_process.py" "$INSTALL_DIR/api/scan/external_process.py"
+download "$REPO_RAW_BASE/api/scan/auth_endpoint_probe.py" "$INSTALL_DIR/api/scan/auth_endpoint_probe.py"
 download "$REPO_RAW_BASE/api/scan/finalizer.py" "$INSTALL_DIR/api/scan/finalizer.py"
 download "$REPO_RAW_BASE/api/scan/finding_evidence.py" "$INSTALL_DIR/api/scan/finding_evidence.py"
 download "$REPO_RAW_BASE/api/scan/posture_findings.py" "$INSTALL_DIR/api/scan/posture_findings.py"
@@ -757,6 +760,7 @@ download "$REPO_RAW_BASE/scanner/scanner_tools/request_replay.py" "$INSTALL_DIR/
 download "$REPO_RAW_BASE/scanner/scanner_tools/request_collections.py" "$INSTALL_DIR/scanner/scanner_tools/request_collections.py"
 download "$REPO_RAW_BASE/scanner/scanner_tools/device_request_formats.py" "$INSTALL_DIR/scanner/scanner_tools/device_request_formats.py"
 download "$REPO_RAW_BASE/scanner/scanner_tools/url_redaction.py" "$INSTALL_DIR/scanner/scanner_tools/url_redaction.py"
+download "$REPO_RAW_BASE/scanner/scanner_tools/unsafe_actions.py" "$INSTALL_DIR/scanner/scanner_tools/unsafe_actions.py"
 download "$REPO_RAW_BASE/scanner/scanner_tools/xss_evidence.py" "$INSTALL_DIR/scanner/scanner_tools/xss_evidence.py"
 download "$REPO_RAW_BASE/scanner/scanner_tools/corporate_identity.py" "$INSTALL_DIR/scanner/scanner_tools/corporate_identity.py"
 download "$REPO_RAW_BASE/scanner/scanner_tools/discovered_names.py" "$INSTALL_DIR/scanner/scanner_tools/discovered_names.py"

@@ -853,11 +853,14 @@ async def signal_hunt_jobs(
 class HuntRunService:
     """Own read/list/finish/cancel/resume persistence for canonical Hunts."""
 
-    def __init__(self, pool_provider, redis_provider=None):
+    def __init__(self, pool_provider, redis_provider=None, *, finish_retainer=None):
         self._pool_provider = pool_provider
         # Optional so existing construction and tests are unchanged; without it a cancellation
         # still stops the Hunt and its scans, it simply cannot reach worker-placed capability jobs.
         self._redis_provider = redis_provider
+        # The API composition supplies target persistence; the run service must not import
+        # target routers back through their asset/migration dependency on this service.
+        self._finish_retainer = finish_retainer
 
     def _pool(self):
         pool = self._pool_provider()
@@ -1523,6 +1526,17 @@ class HuntRunService:
         async with self._pool().acquire() as connection:
             async with connection.transaction():
                 run_uuid = _uuid_or_400(hunt_id, "hunt id")
+                if self._finish_retainer is not None:
+                    # Lock order: the target row, then the Hunt row, as operator retractions and
+                    # decisions take them. KEY SHARE is all the retained proposal's insert needs
+                    # and never waits on a finding write's count refresh.
+                    await connection.execute(
+                        """SELECT 1 FROM targets
+                           WHERE id = target_asset_access_owner(
+                               (SELECT COALESCE(device_target_id, target_id) FROM hunt_runs WHERE id=$1))
+                           FOR KEY SHARE OF targets""",
+                        run_uuid,
+                    )
                 row = await hunt_run_or_404(connection, hunt_id, for_update=True)
                 debrief = {"summary": summary, "next_actions": next_actions}
                 if row.get("completed_at") is not None or row["status"] not in {
@@ -1532,7 +1546,8 @@ class HuntRunService:
                     # with the record and says nothing changed; anything else is refused, so a
                     # new debrief is never silently dropped.
                     if row["status"] in {"completed", "budget_exhausted"} and (
-                        _decode_json(row.get("final_debrief"), {}) == debrief
+                        {key: _decode_json(row.get("final_debrief"), {}).get(key)
+                         for key in debrief} == debrief
                     ):
                         return {**public_hunt_run(row), "already_terminal": True}
                     raise HTTPException(
@@ -1554,6 +1569,8 @@ class HuntRunService:
                         status_code=409,
                         detail="Hunt has reserved or running actions",
                     )
+                if self._finish_retainer is not None:
+                    debrief["saved_action"] = await self._finish_retainer(connection, dict(row))
                 row = await connection.fetchrow(
                     """UPDATE hunt_runs
                        SET status = CASE

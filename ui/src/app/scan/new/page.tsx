@@ -24,6 +24,7 @@ import { preferredCredentialId } from '@/lib/credentialDefaults'
 import { Button, Card, Combobox, Field, useToast, type ComboboxOption } from '@/components/ui'
 import { useTargetSearch } from '@/lib/useTargetSearch'
 import { getTargetAssets, type TargetAsset } from '@/lib/targetAssetApi'
+import { credentialScanCoverageNote } from '@/lib/credentialScanCoverage.mjs'
 import { DOMAIN_LOOKUP_MAX_PAGES, DOMAIN_LOOKUP_PAGE, INVENTORY_MEMBER_LIMIT, SCAN_BATCH_MAX, batchCapNotice, capBatchTargets, findDomainGroup } from '@/lib/targetInventoryModel.mjs'
 import { credentialDescription, credentialOptions } from '@/lib/pickerOptions'
 import {
@@ -209,11 +210,35 @@ export default function NewScanPage() {
   ) / 60) + 15
   const includeFamilies = familyPreset === 'custom' ? customFamilies : []
   const excludeFamilies: string[] = []
+  // Until the server's preview answers, the contract's preset (with what it adds on this budget
+  // profile: active templates on thorough and deep) stands in for the resolved set.
+  const presetFamilies = (preset: 'passive' | 'standard_active') => {
+    const additions = scanContract?.family_preset_profile_additions?.[preset]?.[budgetProfile] ?? (
+      preset === 'standard_active' && (budgetProfile === 'thorough' || budgetProfile === 'deep') ? ['nuclei_active'] : []
+    )
+    const base = scanContract?.family_presets?.[preset] ?? (
+      preset === 'standard_active'
+        ? ['recon', 'nuclei_passive', 'xss', 'sqli', 'sensitive_exposure']
+        : ['recon', 'nuclei_passive', 'sensitive_exposure']
+    )
+    const chosen = new Set([...base, ...additions])
+    const order = scanContract?.families?.map((family) => family.name) ?? [...base, ...additions]
+    return order.filter((name) => chosen.has(name))
+  }
   const resolvedFamilies = contractPreview?.resolved_families ?? (
-    familyPreset === 'standard_active'
-      ? ['recon', 'nuclei_passive', 'xss', 'sqli', 'sensitive_exposure']
-      : familyPreset === 'passive' ? ['recon', 'nuclei_passive', 'sensitive_exposure'] : customFamilies
+    familyPreset === 'custom' ? customFamilies : presetFamilies(familyPreset)
   )
+
+  // The ceilings that change which families resolve (a request or mutation ceiling lowered far
+  // below the profile's leaves the active templates out of the standard set), as whole numbers.
+  const previewCeilings = (['max_http_requests', 'max_state_changing_requests'] as const).reduce<Record<string, number>>(
+    (chosen, key) => {
+      const value = (limits[key] || '').trim()
+      if (/^\d+$/.test(value) && Number.isSafeInteger(Number(value))) chosen[key] = Number(value)
+      return chosen
+    }, {},
+  )
+  const previewCeilingsKey = JSON.stringify(previewCeilings)
 
   useEffect(() => {
     let cancelled = false
@@ -222,6 +247,7 @@ export default function NewScanPage() {
     setContractPreview(null)
     setContractPreviewLoading(true)
     const timer = window.setTimeout(() => {
+      const advanced = JSON.parse(previewCeilingsKey) as Record<string, number>
       previewScanContract({
         preset: familyPreset,
         budget_profile: budgetProfile,
@@ -232,12 +258,13 @@ export default function NewScanPage() {
         network_discovery: networkDiscovery,
         subdomain_discovery: subdomainDiscovery,
         execution_topology: topology === 'parallel' ? 'parallel' : 'single_worker',
+        ...(Object.keys(advanced).length ? { advanced } : {}),
       })
         .then((preview) => { if (!cancelled) { setContractPreview(preview); setContractPreviewError(null); setContractPreviewLoading(false) } })
         .catch((cause) => { if (!cancelled) { setContractPreview(null); setContractPreviewError(cause instanceof Error ? cause.message : 'Preview unavailable'); setContractPreviewLoading(false) } })
     }, 150)
     return () => { cancelled = true; window.clearTimeout(timer) }
-  }, [familyPreset, budgetProfile, customFamilies, activeTesting, allowStateChanging, networkDiscovery, subdomainDiscovery, topology])
+  }, [familyPreset, budgetProfile, customFamilies, activeTesting, allowStateChanging, networkDiscovery, subdomainDiscovery, topology, previewCeilingsKey])
 
   /** Searchable choices for one lane; incompatible profiles stay visible with the reason. */
   function slotOptions(lane: 'primary' | 'secondary'): ComboboxOption[] {
@@ -288,7 +315,8 @@ export default function NewScanPage() {
     if (!interactive && !scanContract.credentials.semantic_capabilities.some((name) => allowed.has(name))) {
       return { compatible: false, reason: 'does not allow a Scan action capability' }
     }
-    return { compatible: true }
+    const coverageNote = credentialScanCoverageNote(profile.allowed_capabilities, { families: resolvedFamilies })
+    return coverageNote ? { compatible: true, reason: coverageNote } : { compatible: true }
   }
 
   function removeConfirmedActiveSelections() {
@@ -696,7 +724,7 @@ export default function NewScanPage() {
           <div className="grid gap-3 md:grid-cols-2">
             {featureEnabled('scan_discovery') && <label className="flex items-center gap-3 text-sm text-gray-300"><input type="checkbox" checked={subdomainDiscovery} onChange={(event) => setSubdomainDiscovery(event.target.checked)} /><span>Discover subdomains<span className="block text-xs text-gray-500">Found names are listed in the report and added as targets; this scan does not test them.</span></span></label>}
             {featureEnabled('network_testing') && <label className={`flex items-center gap-3 text-sm ${activeTesting ? 'text-gray-300' : 'text-gray-600'}`}><input type="checkbox" disabled={!activeTesting} checked={networkDiscovery} onChange={(event) => setNetworkDiscovery(event.target.checked)} />Discover network services</label>}
-            <label className={`flex items-center gap-3 text-sm ${activeTesting ? 'text-gray-300' : 'text-gray-600'}`}><input type="checkbox" disabled={!activeTesting} checked={allowStateChanging} onChange={(event) => { setAllowStateChanging(event.target.checked); if (!event.target.checked) removeConfirmedActiveSelections() }} />Allow explicitly selected state-changing HTTP requests</label>
+            <label className={`flex items-center gap-3 text-sm ${activeTesting ? 'text-gray-300' : 'text-gray-600'}`}><input type="checkbox" disabled={!activeTesting} checked={allowStateChanging} onChange={(event) => { setAllowStateChanging(event.target.checked); if (!event.target.checked) removeConfirmedActiveSelections() }} /><span>Allow explicitly selected state-changing HTTP requests <span className="text-gray-500">(includes default-login attempts, which can lock accounts, and exploit templates that send attack input)</span></span></label>
           </div>
           {scanContract && (
             <div className="rounded-lg border border-gray-800 bg-gray-950 p-4">
@@ -710,7 +738,7 @@ export default function NewScanPage() {
               <div className="mt-3 grid gap-2 md:grid-cols-3">
                 {([
                   ['passive', 'Passive', 'Recon, reviewed passive templates and verified exposure checks'],
-                  ['standard_active', 'Standard active', 'Passive coverage plus XSS and SQLi'],
+                  ['standard_active', 'Standard active', 'Passive coverage plus XSS and SQLi; on thorough and deep also the active templates'],
                   ['custom', 'Custom', 'Choose an exact family set'],
                 ] as const).map(([value, label, description]) => (
                   <label key={value} className={`rounded-sm border p-3 ${familyPreset === value ? 'border-blue-500 bg-blue-500/10' : 'border-gray-800'}`}>

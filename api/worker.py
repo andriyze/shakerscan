@@ -43,6 +43,7 @@ import deployment_policy
 from request_guards import statement_timeout_pool_options, unbounded_statements
 from scan import coverage_rollup
 from retest_contract import (
+    RETEST_STALE_REQUEUE_LIMIT,
     AI_ONLY_RETEST_TYPES,
     DEFAULT_REPLAY_PAYLOADS,
     SUPPORTED_RETEST_TYPES,
@@ -57,7 +58,10 @@ from retest_contract import (
     mark_candidate_inconclusive,
     normalize_retest_type,
     parse_json_field,
+    retest_refusal_reason,
+    path_segment_retest_result,
     retest_queue_binding_matches,
+    stale_retest_should_requeue as _stale_retest_should_requeue,
     run_schema_migrations,
     settle_retest_subject_error,
     validate_retest_job_payload,
@@ -201,7 +205,6 @@ from scan.capability_execution import (
     scan_network_capability_allocation,
     scan_parameterized_execution_candidates,
     scan_sqli_verification_capability_allocation,
-    scan_template_capability_allocation,
     scan_tls_capability_allocation,
     tls_legacy_probes_affordable,
     scan_web_crawl_capability_allocation,
@@ -257,6 +260,8 @@ from scan.continuation import (
     placed_discovery_stage_receipts,
 )
 from scan.manifest_store import PostgresScanManifestStore
+from scan.inventory_harvest import post_scan_probes_allowed, record_scan_inventory
+from scanner_tools.unsafe_actions import path_may_change_state
 from scan.continuation_rounds import (
     ContinuationRuntime,
     load_continuation_request_manifests,
@@ -331,8 +336,11 @@ from worker_handlers.retest_outcome import (  # noqa: F401 - re-exported
     _detect_security_block_text,
     classify_retest_outcome,
     _result_status_for_verdict,
+    AI_CAPPED_VERDICTS,
+    ai_retest_outcome,
     replay_refusal,
 )
+from worker_handlers.proof_replay import run_proof_retest
 from worker_handlers.retest_authority import (
     ai_replay_authority_stop,
     cut_short_by_destination,
@@ -405,7 +413,7 @@ try:
     )
     from scanner_tools.build_fingerprint import hash_source_files, runtime_file_map
     from scanner_tools.device_web import run_pinned_device_web_scan
-    from scanner_tools.request_collections import RequestSelector, select_requests
+    from scanner_tools.request_collections import RequestSelector, replay_queue_refusal, select_requests
     from scanner_tools.request_replay import (
         ReplayAuthorization,
         RequestReplayError,
@@ -422,7 +430,7 @@ except ModuleNotFoundError:
     )
     from scanner.scanner_tools.build_fingerprint import hash_source_files, runtime_file_map
     from scanner.scanner_tools.device_web import run_pinned_device_web_scan
-    from scanner.scanner_tools.request_collections import RequestSelector, select_requests
+    from scanner.scanner_tools.request_collections import RequestSelector, replay_queue_refusal, select_requests
     from scanner.scanner_tools.request_replay import (
         ReplayAuthorization,
         RequestReplayError,
@@ -1461,7 +1469,6 @@ RETEST_AI_CIRCUIT_COOLDOWN_SECONDS = max(30, int(os.environ.get("RETEST_AI_CIRCU
 RETEST_STALE_CHECK_INTERVAL_SECONDS = max(10, int(os.environ.get("RETEST_STALE_CHECK_INTERVAL_SECONDS", "30")))
 RETEST_RUNNING_STALE_SECONDS = max(30, int(os.environ.get("RETEST_RUNNING_STALE_SECONDS", "600")))
 RETEST_STALE_BATCH_SIZE = max(1, int(os.environ.get("RETEST_STALE_BATCH_SIZE", "25")))
-RETEST_STALE_REQUEUE_LIMIT = max(0, int(os.environ.get("RETEST_STALE_REQUEUE_LIMIT", "1")))
 RETEST_WATCHDOG_LOCK_KEY = os.environ.get("RETEST_WATCHDOG_LOCK_KEY", "retest:watchdog:lock")
 RETEST_WATCHDOG_LOCK_SECONDS = max(10, int(os.environ.get("RETEST_WATCHDOG_LOCK_SECONDS", "30")))
 _reservation_sweep_interval = int(
@@ -5135,15 +5142,6 @@ def _merge_ai_result_into_retest_result(result: dict[str, Any], ai_result: dict[
         ai_result = {**ai_result, "verdict": "likely_vulnerable"}
 
     ai_confidence = ai_result.get("confidence")
-    ai_high_conf = isinstance(ai_confidence, (int, float)) and float(ai_confidence) >= FALSE_POSITIVE_MIN_CONFIDENCE
-
-    # An AI "false_positive" only stands when it is high-confidence. A timeout,
-    # error, or low-confidence AI guess (which surfaces as false_positive or
-    # inconclusive) must not stamp the finding as a terminal false positive —
-    # downgrade it to inconclusive so it stays active and retryable.
-    if ai_verdict == "false_positive" and not ai_high_conf:
-        ai_verdict = "inconclusive"
-        ai_result = {**ai_result, "verdict": "inconclusive"}
 
     # Only replace deterministic outcomes when they were inconclusive or failed.
     # A strong deterministic conclusion (exploited / likely_fixed / likely_vulnerable
@@ -5153,13 +5151,16 @@ def _merge_ai_result_into_retest_result(result: dict[str, Any], ai_result: dict[
 
     result["status"] = "completed"
     result["verification_mode"] = "ai_driven"
-    result["verdict"] = ai_verdict
-    result["verdict_reason"] = ai_result.get("reasoning", "")
-    result["confidence"] = ai_confidence
-    result["result_status"] = _result_status_for_verdict(ai_verdict)
+    # The AI tier is at most inconclusive: it never marks a finding fixed or a false positive.
+    result["verdict"], result["result_status"], result["verdict_reason"] = ai_retest_outcome(
+        ai_verdict, ai_result.get("reasoning"))
+    capped = ai_verdict in AI_CAPPED_VERDICTS
+    result["confidence"] = None if capped else ai_confidence
     artifacts = result.get("artifacts") if isinstance(result.get("artifacts"), dict) else {}
     artifacts = dict(artifacts)
     artifacts["ai_step_results"] = list(ai_result.get("step_results") or [])
+    if capped:
+        artifacts.update(ai_verdict=ai_verdict, ai_confidence=ai_confidence)
     result["artifacts"] = artifacts
     return _enforce_verdict_invariants(result)
 
@@ -5597,10 +5598,6 @@ def _clear_ai_circuit_state(r) -> None:
         pass
 
 
-def _stale_retest_should_requeue(attempt_count: int) -> bool:
-    return int(attempt_count) <= RETEST_STALE_REQUEUE_LIMIT
-
-
 def _current_retest_capabilities() -> dict[str, bool]:
     """
     Snapshot proof-engine capabilities for standardized observability.
@@ -5662,6 +5659,7 @@ async def run_finding_retest(verification: dict) -> dict:
             prove_xxe,
             start_scan_session,
         )
+        from scanner_tools import proof_of_exploit
     except ImportError as e:
         replay_commands = build_replay_commands(infer_retest_inputs(verification))
         retry_class, retryable = classify_retry(str(e))
@@ -5715,6 +5713,15 @@ async def run_finding_retest(verification: dict) -> dict:
             "retryable": False,
         }
 
+    if declined := path_segment_retest_result(inputs, replay_commands):
+        return {**declined, "attempt_ladder": attempt_ladder}
+    # A proven Scan finding is retested by the check that proved it, with the request it proved.
+    proven = await run_proof_retest(
+        verification, inputs, poe=proof_of_exploit, replay_commands=replay_commands,
+        ladder=attempt_ladder, cancelled=action_interrupted,
+    )
+    if proven is not None:
+        return proven
     test_url = inputs.get("original_url") or inputs.get("target_url")
     if not test_url:
         return {
@@ -6834,7 +6841,10 @@ async def queue_auto_retests_for_scan(scan_id: str, target_id: str | None, targe
             finding_type = inferred.get("finding_type")
             effective_target = inferred.get("target_url") or target_url or ""
 
-            if finding_type not in SUPPORTED_RETEST_TYPES or not effective_target:
+            # An AI-only type (generic_http, 2fa_bypass) has no prover, and the AI tier alone is
+            # at most inconclusive: such a retest could never conclude. Nor could one of a proven
+            # finding whose request cannot be sent again as its proof sent it.
+            if retest_refusal_reason(finding, finding_type) is not None or not effective_target:
                 skipped += 1
                 continue
             # Bound to the target's authorization and the Scan's approval; a retest whose replay
@@ -9462,27 +9472,6 @@ async def _execute_scan_auth_session_capability(
     )
 
 
-def _skipped_scan_template_summary(
-    reason: str, *, capability_name: str = "templates.scan",
-) -> dict[str, Any]:
-    return {
-        "schema_version": "canonical-scan-template-execution/v1",
-        "capability_name": capability_name,
-        "enabled": False,
-        "status": "skipped",
-        "reason": str(reason)[:200],
-        "observations": [],
-        "observation_count": 0,
-        "partial": False,
-        "timed_out": False,
-        "errors": [],
-        "budget_consumed": {},
-        "receipt": {},
-        "durable_budget_settled": True,
-        "idempotent_redelivery": False,
-    }
-
-
 def _skipped_scan_tls_summary(reason: str) -> dict[str, Any]:
     return {
         "schema_version": "canonical-scan-tls-inspection-execution/v1",
@@ -10128,7 +10117,10 @@ async def _execute_scan_tls_capability(
     )
     if allocation is None:
         return _skipped_scan_tls_summary("insufficient_stage_budget")
-    legacy_probes = tls_legacy_probes_affordable(allocation, len(https_origins) * len(target.allowed_addresses))
+    legacy_probes = tls_legacy_probes_affordable(
+        canonical_action.requested_budget if canonical_action is not None else allocation,
+        len(https_origins) * len(target.allowed_addresses),
+    )
     stored, idempotent_redelivery = await _execute_reserved_scan_capability(
         admission=admission,
         execution=execution,
@@ -10156,45 +10148,6 @@ async def _execute_scan_tls_capability(
         stored,
         idempotent_redelivery=idempotent_redelivery,
     )
-
-
-def _scan_template_summary_from_stored(
-    stored: Any,
-    *,
-    idempotent_redelivery: bool,
-    capability_name: str = "templates.scan",
-) -> dict[str, Any]:
-    receipt = dict(stored.receipt or {})
-    receipt_status = str(receipt.get("status") or "failed").strip().lower()
-    status = {
-        "succeeded": "success",
-        "success": "success",
-        "partial": "partial",
-        "blocked": "blocked",
-        "cancelled": "cancelled",
-    }.get(receipt_status, "failed")
-    observations = [
-        dict(item)
-        for item in receipt.get("observations") or []
-        if isinstance(item, Mapping)
-        and str(item.get("kind") or "") == "template_match"
-    ][:200]
-    return {
-        "schema_version": "canonical-scan-template-execution/v1",
-        "capability_name": capability_name,
-        "enabled": True,
-        "status": status,
-        "reason": None,
-        "observations": observations,
-        "observation_count": len(observations),
-        "partial": bool(receipt.get("partial")),
-        "timed_out": bool(receipt.get("timed_out")),
-        "errors": list(receipt.get("errors") or [])[:20],
-        "budget_consumed": dict(stored.record.actual),
-        "receipt": _scan_capability_receipt_reference(receipt),
-        "durable_budget_settled": bool(stored.record.terminal),
-        "idempotent_redelivery": bool(idempotent_redelivery),
-    }
 
 
 def _skipped_scan_web_probe_summary(reason: str) -> dict[str, Any]:
@@ -11182,119 +11135,6 @@ async def _execute_scan_sqli_verification_capability(
         stored,
         target_url=execution_target,
         idempotent_redelivery=idempotent_redelivery,
-    )
-
-
-async def _execute_scan_template_capability(
-    target_url: str,
-    options: Mapping[str, Any],
-    *,
-    scan_id: str,
-    job_id: str,
-    canonical_action: Any | None = None,
-    canonical_template_options: Mapping[str, Any] | None = None,
-) -> dict[str, Any]:
-    """Run canonical Nuclei once, outside the compatibility scanner process."""
-    capability_name = (
-        str(canonical_action.capability_name)
-        if canonical_action is not None else "templates.scan"
-    )
-    passive = capability_name == "templates.passive_scan"
-    family_name = "nuclei_passive" if passive else "nuclei_active"
-
-    def skipped(reason: str) -> dict[str, Any]:
-        return _skipped_scan_template_summary(
-            reason, capability_name=capability_name,
-        )
-
-    _normalized, admission = prepare_worker_dispatch(options)
-    if not admission.canonical or admission.plan is None:
-        return skipped("legacy_scan")
-    execution = build_native_scan_execution(admission.plan, options)
-    policy = admission.plan.policy
-    if execution.discovery_manifest_only:
-        return skipped("discovery_manifest_only")
-    if execution.skip_global_checks:
-        return skipped("global_checks_skipped")
-    if execution.focused_endpoints_only or execution.zero_rediscovery:
-        return skipped("assigned_endpoint_scope")
-    if execution.focused_family and execution.focused_family != family_name:
-        return skipped("focused_other_family")
-    include = set(policy.include_families)
-    exclude = set(policy.exclude_families)
-    if family_name in exclude:
-        return skipped("policy_excluded")
-    if include and family_name not in include:
-        return skipped("policy_not_included")
-    if not passive and not policy.active_testing:
-        return skipped("active_testing_not_authorized")
-    if not passive and not policy.approval_receipt_id:
-        return skipped("active_approval_missing")
-    allocation = (
-        dict(canonical_action.requested_budget)
-        if passive and canonical_action is not None
-        else scan_template_capability_allocation(
-            execution.payload()["execution_budget"]
-        )
-    )
-    if allocation is None:
-        return skipped("insufficient_fixed_profile_budget")
-
-    target = execution.target_binding
-    execution_target = scan_external_execution_target(
-        target_url, target=target,
-    )
-    parsed_target = urllib.parse.urlsplit(execution_target)
-    registered_target = urllib.parse.urlunsplit((
-        parsed_target.scheme, parsed_target.netloc, "", "", "",
-    ))
-    authorized_addresses = list(target.allowed_addresses)
-    pinned_address = agent_tools.validate_pinned_scanner_address(
-        None, authorized_addresses,
-    )
-    principal = resolve_scan_http_principal(
-        options, lane="primary", capability_name=capability_name,
-    )
-    template_options = dict(canonical_template_options or {})
-    if canonical_action is not None and not template_options:
-        raise ScanCapabilityContractError(
-            "canonical Nuclei action requires immutable template options"
-        )
-    capability_args = dict(principal.capability_args())
-    capability_args.update(template_options)
-    stored, idempotent_redelivery = await _execute_reserved_scan_capability(
-        admission=admission,
-        execution=execution,
-        scan_id=scan_id,
-        job_id=job_id,
-        capability_name=capability_name,
-        capability_args=capability_args,
-        action_id=(canonical_action.action_id if canonical_action is not None
-                   else "deterministic_baseline.templates.scan"),
-        target_binding=target,
-        reservation_limits=allocation,
-        scanner_process_payload={
-            "job_id": f"{job_id}:{capability_name}",
-            "tool_name": "nuclei",
-            "execution_target": execution_target,
-            "registered_target": registered_target,
-            "scanner_options": template_options,
-            "trusted_headers": principal.headers(),
-            "timeout_ms": int(allocation["tool_wall_seconds"]) * 1_000,
-            "pinned_address": pinned_address,
-            "authorized_addresses": authorized_addresses,
-            # Scan does not grant an additional OOB destination. Nuclei's fixed
-            # template therefore retains -no-interactsh for this capability.
-            "oob_interactsh_server": None,
-            "oob_interactsh_token": None,
-        },
-        scanner_process_runner=_execute_agent_scanner_process,
-        canonical_action=canonical_action,
-    )
-    return _scan_template_summary_from_stored(
-        stored,
-        idempotent_redelivery=idempotent_redelivery,
-        capability_name=capability_name,
     )
 
 
@@ -12644,7 +12484,7 @@ async def _execute_scan_request_collections(
         )
         if canonical_request_manifest is not None:
             plan = narrow_replay_plan_to_request_manifest(
-                plan, canonical_request_manifest,
+                plan, canonical_request_manifest, payload=payload,
             )
         receipt_context: dict[str, Any] = {
             "collection_id": collection_id,
@@ -13789,17 +13629,10 @@ async def process_scan_job(job_data: dict):
         # the per-target inventory (docs §16). Best-effort; never fails the scan.
         if target_id and not error:
             try:
-                worklist = (result.get('active_checks') or {}).get('active_worklist')
-                if worklist:
-                    # Drop spec/OPTIONS-derived phantom (404) endpoints before recording.
-                    worklist = await asm_inventory.filter_reachable_worklist(target, worklist, options)
-                if worklist:
-                    async with db_pool.acquire() as conn:
-                        auth_state = asm_inventory.auth_state_from_options(options)
-                        n = await asm_inventory.upsert_endpoints(
-                            conn, target_id, worklist, source='scan', auth_state=auth_state,
-                            scan_id=scan_id,
-                        )
+                n, _inventory_source = await record_scan_inventory(
+                    db_pool, asm_inventory, result, scan_id=scan_id, target_id=target_id,
+                    target_url=str(target or ""), options=options)
+                if n:
                     print(f"[{job_id[:8]}] ASM inventory: upserted {n} endpoints", flush=True)
 
                 # Focused BOLA/auth preflights can intentionally skip discovery and
@@ -13848,7 +13681,7 @@ async def process_scan_job(job_data: dict):
                     _sweep_max = int(os.environ.get("ASM_SCAN_SWEEP_MAX") or 400)
                 except (TypeError, ValueError):
                     _sweep_max = 400
-                if _sweep_max > 0:
+                if _sweep_max > 0 and post_scan_probes_allowed(options):
                     async with db_pool.acquire() as conn:
                         _sw = await asm_inventory.sweep_endpoint_reachability(
                             conn, target, target_id, options, max_probe=_sweep_max
@@ -16613,7 +16446,8 @@ async def process_scan_merge_job(job_data: dict):
     # SUMMARY block matches the union grade (it was showing the stale shard summary,
     # e.g. top-level F/32 but result.summary still "D (58/100) - 19 issues").
     if _graded_block is not None:
-        for _k in ("summary", "notes", "remediation", "cvss_metrics", "compliance"):
+        # Not "compliance": the legacy grader's narrative must not replace the report's own block.
+        for _k in ("summary", "notes", "remediation", "cvss_metrics"):
             if _graded_block.get(_k) is not None:
                 merged["result"][_k] = _graded_block[_k]
         merged["result"]["score_policy"] = scan_scoring.SCORE_POLICY
@@ -18566,9 +18400,9 @@ _agent_scanner_request_settlement = agent_tools.agent_scanner_request_settlement
 
 
 def _materialize_bounded_ffuf_wordlist(
-    *, options: Mapping[str, Any], reservation: Mapping[str, Any], scratch_dir: str,
+    *, options: Mapping[str, Any], reservation: Mapping[str, Any], scratch_dir: str, authenticated: bool = False,
 ) -> tuple[str, int]:
-    """Create the exact owner-only wordlist whose entries equal FFUF's wire ceiling."""
+    """Create the exact owner-only wordlist (without action entries when a session is attached)."""
     try:
         request_limit = max(0, int(reservation.get("http_requests") or 0))
     except (TypeError, ValueError) as exc:
@@ -18592,7 +18426,7 @@ def _materialize_bounded_ffuf_wordlist(
             or entry.startswith("#")
             or len(entry.encode("utf-8")) > 512
             or any(character in entry for character in "\x00\r\n")
-            or entry in seen
+            or entry in seen or (authenticated and path_may_change_state(entry))
         ):
             continue
         seen.add(entry)
@@ -18707,7 +18541,7 @@ async def _execute_agent_scanner_process(
             os.chmod(scratch_dir, 0o700)
         if name == "ffuf":
             wordlist_path, word_count = _materialize_bounded_ffuf_wordlist(
-                options=options,
+                options=options, authenticated=bool(job_data.get("trusted_headers")),
                 reservation=reserved_budget,
                 scratch_dir=str(scratch_dir),
             )
@@ -19069,19 +18903,8 @@ async def process_agent_scanner_tool_job(job_data: dict[str, Any]) -> None:
 
 
 def _worker_hunt_ledger_limits(budget: Mapping[str, Any]) -> dict[str, int]:
-    return {
-        "agent_actions": int(budget.get("max_capability_calls") or 0),
-        "active_actions": int(budget.get("max_active_actions") or 0),
-        "http_requests": int(budget.get("max_http_requests") or 0),
-        "tcp_ports_attempted": int(budget.get("max_tcp_ports") or 0),
-        "browser_actions": int(budget.get("max_browser_actions") or 0),
-        "state_changing_requests": int(budget.get("max_state_changing_requests") or 0),
-        "tool_wall_seconds": int(budget.get("max_duration_seconds") or 0),
-        "device_fragility_points": int(budget.get("max_device_fragility_points") or 0),
-        "hosts_attempted": int(budget.get("max_hosts") or 0),
-        "udp_ports_attempted": int(budget.get("max_udp_ports") or 0),
-        "oob_interactions": int(budget.get("max_oob_interactions") or 0),
-    }
+    from hunt.start_contract import hunt_ledger_limits
+    return hunt_ledger_limits(budget)
 
 
 def _worker_json_object(value: Any) -> dict[str, Any]:
@@ -19437,11 +19260,10 @@ async def process_request_collection_replay_job(job_data: dict[str, Any]) -> Non
             for item in select_requests(payload, stored_runtime_selector)
             if item.get("id")
         }
-        queued_request_ids = set(selector.request_ids)
-        if not queued_request_ids or not queued_request_ids.issubset(allowed_request_ids):
-            raise ReplayExecutionError(
-                "queued replay requests exceed the saved collection selection"
-            )
+        # A queued capture request withheld from replay (its path carries a credential) is left
+        # out; the queue is refused when nothing else remains or it exceeds the selection.
+        if refusal := replay_queue_refusal(payload, selector.request_ids, allowed_request_ids):
+            raise ReplayExecutionError(refusal)
         plan = build_selected_replay_plan(
             payload,
             selector,
@@ -19919,7 +19741,7 @@ def _worker_terminal_network_result(
 from hunt.target_binding import web_hunt_target as _worker_hunt_web_target
 from hunt.dispatch_authority import HuntDispatchRejected, dispatch_http_request_authority, dispatch_http_target, dispatch_replay_authority, dispatch_scope_binding, require_dispatchable, settle_rejected_dispatch, settle_rejected_replay_dispatch
 from hunt.device_traffic import reserve_device_traffic, require_worker_device_policy, settle_device_traffic, require_device_admission, record_device_traffic
-from hunt.host_accounting import bound_distinct_hosts, record_attempted_hosts
+from hunt.distinct_accounting import bound_distinct_usage, record_attempted_usage
 
 
 async def _revalidate_hunt_action_authority(
@@ -20340,15 +20162,17 @@ async def process_canonical_scanner_capability_job(
                 limits = _worker_hunt_ledger_limits(
                     _worker_json_object(run["budget_json"])
                 )
-                requested_budget = {
-                    key: int(value)
-                    for key, value in agent_tools.canonical_hunt_scanner_budget(capability_name).items()
-                    if key in limits
-                }
-                requested_budget["agent_actions"] = 1
-                if spec.requires_active_approval or uses_service_origin:
-                    requested_budget["active_actions"] = 1
-                reserve_device_traffic(run, agent_tools.CAPABILITY_REGISTRY.require(capability_name), requested_budget)
+                def scanner_hold(base: Mapping[str, Any]) -> dict[str, int]:
+                    hold = {key: int(value) for key, value in base.items() if key in limits}
+                    hold["agent_actions"] = 1
+                    if spec.requires_active_approval or uses_service_origin:
+                        hold["active_actions"] = 1
+                    reserve_device_traffic(run, agent_tools.CAPABILITY_REGISTRY.require(capability_name), hold)
+                    return hold
+                # The run's per-profile hold, or the registry hold (stepped down or admitted before it existed).
+                requested_budget = agent_tools.admitted_hunt_scanner_hold(stored.record.requested, [
+                    scanner_hold(base) for base in agent_tools.hunt_scanner_dispatch_budgets(
+                        capability_name, **agent_tools.hunt_scanner_budget_context(run, capability_input))])
                 recomputed_digest = hunt_capability_action_digest(
                     hunt_id=hunt_id,
                     action_id=action_id,
@@ -20466,7 +20290,7 @@ async def process_canonical_scanner_capability_job(
                 "execution_target": execution_target,
                 "registered_target": registered_target,
                 "scanner_options": scanner_options,
-                "timeout_ms": int(spec.default_timeout_ms),
+                "timeout_ms": agent_tools.hunt_scanner_timeout_ms(spec.default_timeout_ms, persisted.record.requested),
                 "pinned_address": pinned_address,
                 "authorized_addresses": authorized_addresses,
                 "oob_interactsh_server": oob_server,
@@ -21366,7 +21190,7 @@ async def process_canonical_network_capability_job(job_data: dict[str, Any]) -> 
                 ).requires_active_approval:
                     requested_budget["active_actions"] = 1
                 reserve_device_traffic(run, agent_tools.CAPABILITY_REGISTRY.require(capability_name), requested_budget)
-                requested_budget, prepared, attempted_hosts = bound_distinct_hosts(requested_budget, prepared, stored.record.requested, context)
+                requested_budget, prepared, attempted = bound_distinct_usage(requested_budget, prepared, stored.record.requested, context)
                 recomputed_digest = hunt_capability_action_digest(
                     hunt_id=hunt_id,
                     action_id=action_id,
@@ -21455,7 +21279,7 @@ async def process_canonical_network_capability_job(job_data: dict[str, Any]) -> 
             pool=db_pool,run=run,target=target,policy=policy,target_url=target_url,
             revalidate=_revalidate_hunt_action_authority,capability_input=capability_input,
             redis=redis_client,action_id=action_id,worker_id=worker_id,command_runner=run_streaming,
-            max_stdout_bytes=_AGENT_TOOL_OUTPUT_BYTES,max_stderr_bytes=min(_AGENT_TOOL_OUTPUT_BYTES, 20_000))
+            max_stdout_bytes=_AGENT_TOOL_OUTPUT_BYTES,max_stderr_bytes=min(_AGENT_TOOL_OUTPUT_BYTES, 20_000),command_usage=attempted.command_usage)
         execution = await _dispatch_registered_hunt_adapter(
             hunt_id=str(hunt_id),
             action_id=str(action_id),
@@ -21578,7 +21402,7 @@ async def process_canonical_network_capability_job(job_data: dict[str, Any]) -> 
                     hunt_id,
                     json.dumps(current_used),
                 )
-                await record_attempted_hosts(conn, hunt_id=hunt_id, run=locked, hosts=attempted_hosts, reserved=latest.record.requested, actual=terminal.actual)
+                await record_attempted_usage(conn, hunt_id=hunt_id, run=locked, attempted=attempted, reserved=latest.record.requested, actual=terminal.actual, observations=observations)
                 action_result = {
                     "status": status,
                     "ok": status == "success",

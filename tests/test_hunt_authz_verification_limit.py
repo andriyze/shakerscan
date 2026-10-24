@@ -26,7 +26,8 @@ from hunt.candidate_verification_preflight import (
     CandidateVerificationRefused, web_candidate_preflight,
 )
 from hunt.device_traffic import reserve_device_traffic
-from hunt.host_accounting import distinct_host_charge
+from hunt.distinct_accounting import distinct_charge
+from hunt.port_accounting import distinct_port_charge
 from runtime.hunt_http_contract import require_http_request_authority, redact_http_request_body
 from runtime.credential_refs import (
     CredentialReferenceError, select_hunt_immediate_principal_reference,
@@ -199,7 +200,7 @@ def admission(store, **overrides):
         "HuntActionResult": lambda **kwargs: SimpleNamespace(public_dict=lambda: dict(kwargs)),
         "replay_observations": replay_observations,
         "execution_started_from_budget": execution_started_from_budget,
-        "distinct_host_charge": distinct_host_charge,
+        "distinct_charge": distinct_charge, "distinct_port_charge": distinct_port_charge,
         "web_candidate_preflight": web_candidate_preflight,
         "CandidateVerificationRefused": CandidateVerificationRefused,
         "admit_action_credentials": admit_action_credentials,

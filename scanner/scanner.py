@@ -12,7 +12,6 @@ import logging
 import math
 import os
 import re
-import shlex
 import signal
 import socket
 import ssl
@@ -28,6 +27,8 @@ from scanner_tools.common import (
     run,
     snapshot_subprocess_receipts,
 )
+from scanner_tools.copy_commands import exposed_file_verify_commands
+from scanner_tools.credential_redirects import add_session_header_reasons
 try:
     from constants import (
         resolve_active_enrichment_limits,
@@ -1460,6 +1461,13 @@ async def sqlmap_test(url: str, quick_mode: bool = False, aggressive: bool = Fal
 
 
 
+
+
+def apply_browser_session_header_coverage(report: dict[str, Any], coverage: dict[str, Any]) -> None:
+    """List on the scan's coverage what the authenticated browser could not do with its session
+    header (``credential_redirects.SessionHeaderEvents``); the coverage status is unchanged."""
+    add_session_header_reasons(coverage, (report.get("http") or {}).get("browser_session_headers"))
+    add_session_header_reasons(coverage, report.get("session_header_coverage"))
 
 
 def assess_scan_completeness(
@@ -5820,6 +5828,9 @@ async def build_report(target: str,
                 "browser_failed": bool(browser_fetch_error),
                 "discovery_truncated": bool(discovery_truncation_reasons),
                 "truncation_reasons": list(discovery_truncation_reasons),
+                "session_header_reasons": list(
+                    ((browser_res or {}).get("session_headers") or {}).get("reasons") or []
+                ),
             },
         )
 
@@ -8013,6 +8024,12 @@ async def build_report(target: str,
                 if isinstance(browser_res, dict)
                 else None
             ),
+            # What the authenticated browser could not do with its session header.
+            "browser_session_headers": (
+                browser_res.get("session_headers")
+                if isinstance(browser_res, dict)
+                else None
+            ),
         },
         "discovery": discovery,
         "findings": []
@@ -8591,17 +8608,8 @@ async def build_report(target: str,
 
             # Manual verify commands embedded in evidence (safe)
             url = file_info.get("url", urllib.parse.urljoin(base_url + "/", (file_info.get("path") or "").lstrip("/")))
-            verify_cmds = [
-                f"curl -sI {shlex.quote(url)}",
-                f"curl -sL {shlex.quote(url)} | sed -n '1,40p'",
-            ]
-            if ".git" in path_l:
-                base = base_url.rstrip("/")
-                verify_cmds.extend([f"curl -sL {shlex.quote(base)}/.git/HEAD", f"curl -sL {shlex.quote(base)}/.git/config"])
-            if any(m in path_l for m in ["id_rsa", "id_dsa", "id_ecdsa", "id_ed25519", "server.key", "private.key", ".pem"]):
-                verify_cmds.append(f"curl -sL {shlex.quote(url)} | grep -E 'BEGIN (OPENSSH|RSA|DSA|EC) PRIVATE KEY' -m1")
-            if any(m in path_l for m in ["database.yml", "database.yaml", "db.yml", "db.yaml"]):
-                verify_cmds.append(f"curl -sL {shlex.quote(url)} | grep -Ei '(^|[:\"'\\s])(password|username|adapter|database)[:=]' -m1")
+            # The URL path came from the target; each value is one shell_word.
+            verify_cmds = exposed_file_verify_commands(url, path_l, base_url)
 
             duplicate_count = int(file_info.get("duplicate_count") or 0)
             duplicate_suffix = f" (+{duplicate_count} duplicate paths)" if duplicate_count else ""
@@ -10149,6 +10157,13 @@ async def build_report(target: str,
                     # Process XSS results (dalfox_one returns dict with "findings" key)
                     if run_xss:
                         xss = results_by_name.get("dalfox")
+                        if isinstance(xss, dict) and xss.get("coverage_reasons"):
+                            # A session-carrying run that did not use dalfox's headless browser.
+                            recorded = report.setdefault("session_header_coverage", {"reasons": [], "counts": {}})
+                            for reason in xss["coverage_reasons"]:
+                                if reason not in recorded["reasons"]:
+                                    recorded["reasons"].append(reason)
+                                recorded["counts"][reason] = int(recorded["counts"].get(reason, 0)) + 1
                         if not isinstance(xss, Exception) and xss:
                             xss_findings = xss.get("findings", []) if isinstance(xss, dict) else xss
                             xss_completed = xss.get("scan_completed", True) if isinstance(xss, dict) else True
@@ -13641,6 +13656,7 @@ async def build_report(target: str,
             modules["nuclei"]["expected"] = False
             modules["nuclei"]["skipped_for_focus"] = True
         coverage["modules"] = modules
+    apply_browser_session_header_coverage(report, coverage)
     report["coverage"] = coverage
 
     # =========================================================================

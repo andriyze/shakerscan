@@ -385,6 +385,22 @@ def test_kind_capability_and_target_are_checked_before_decryption():
     assert decrypt.calls == []
 
 
+def test_a_sign_in_credential_refusal_names_the_session_path_that_can_prove_it():
+    """Candidate verification cannot sign in, but the Hunt can prove the same lead.
+
+    The refusal only said a login exchange was needed, so an operator whose principals are
+    sign-in forms had no way forward. authz.verify takes two established sessions instead.
+    """
+    decrypt = Decryptions()
+    login = FixtureStore([_profile(SHARED_CAROL, home=OTHER, kind="form_login")])
+    refusal = _refusal(FixtureConn(), login, decrypt, {"user1"},
+                       refs=[_ref(SHARED_CAROL, "primary")])
+    message = refusal.public_detail()["message"]
+    assert "auth.session.establish" in message
+    assert "authz.verify" in message
+    assert decrypt.calls == []
+
+
 # --- Hunt actions ---------------------------------------------------------------------------
 
 class AttachmentConn:

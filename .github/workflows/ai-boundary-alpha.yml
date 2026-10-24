@@ -35,7 +35,7 @@ jobs:
           git rev-parse HEAD > artifacts/source-revision.txt
           git archive --format=tar.gz HEAD > artifacts/boundary-source.tar.gz
           sha256sum artifacts/boundary-source.tar.gz > artifacts/source-sha256.txt
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: boundary-source-${{ github.sha }}
           path: artifacts
@@ -62,7 +62,7 @@ jobs:
           test "$status" = "1"
       - name: Module size ratchet
         run: python scripts/check_module_size.py
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
         with:
           name: boundary-results-${{ github.sha }}

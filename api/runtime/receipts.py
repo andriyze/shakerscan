@@ -137,6 +137,46 @@ _INLINE_SECRET_PATTERNS = (
 )
 
 
+# Keys whose string value is a NAME the evidence is about -- the field an exposure fingerprint
+# was found under, the cookie a session-cookie finding names -- never the value itself. The last
+# inline pattern reads `SECRET_KEY` or `token_session` as a synthetic secret label, and masking
+# them removed the one thing the finding reports. A name is still passed through the shared
+# redactor, so a provider-format secret used as a name stays masked.
+_NAME_VALUE_KEYS: Mapping[str, re.Pattern[str]] = {
+    "field": re.compile(r"[A-Za-z_$][A-Za-z0-9_$.\-\[\]]{0,199}"),
+    "cookie_name": _COOKIE_NAME_RE,
+}
+# An exposure observation's withheld-content notice lists the document's secret-named keys.
+_WITHHELD_NOTICE_RE = re.compile(
+    r"(\[[a-z_]{1,80} detected - content withheld; [0-9]{1,6} secret value\(s\) fingerprinted; "
+    r"keys named as secrets: )([^\r\n]{1,6000})\]"
+)
+_MORE_KEYS_RE = re.compile(r" \(\+[0-9]{1,6} more\)$")
+
+
+def _redact_name(value: str, pattern: re.Pattern[str]) -> str:
+    if pattern.fullmatch(value):
+        return str(_shared_redact_text(value))
+    return _redact_string(value)
+
+
+def _redact_named_string(key: str | None, value: str) -> str | None:
+    """``value`` redacted as the name(s) its key says it holds, or None for an ordinary string."""
+    pattern = _NAME_VALUE_KEYS.get(str(key or ""))
+    if pattern is not None:
+        return _redact_name(value, pattern) if pattern.fullmatch(value) else None
+    if key == "redacted_excerpt":
+        notice = _WITHHELD_NOTICE_RE.fullmatch(value)
+        if notice is not None:
+            listing = notice.group(2)
+            more = _MORE_KEYS_RE.search(listing)
+            suffix = more.group(0) if more else ""
+            names = listing[: len(listing) - len(suffix)].split(", ")
+            shown = ", ".join(_redact_name(name, _NAME_VALUE_KEYS["field"]) for name in names)
+            return f"{notice.group(1)}{shown}{suffix}]"
+    return None
+
+
 def _key_parts(value: Any) -> tuple[str, ...]:
     expanded = _CAMEL_BOUNDARY_RE.sub("_", str(value or ""))
     return tuple(part for part in re.split(r"[^A-Za-z0-9]+", expanded.lower()) if part)
@@ -182,6 +222,9 @@ def key_is_sensitive(value: Any, *, item: Any = _UNSET) -> bool:
     if joined in _COOKIE_METADATA_KEYS and item is not _UNSET:
         if _is_cookie_metadata(joined, item):
             return False
+    # The name a session-cookie finding is about (never its value): a cookie-name token only.
+    if joined == "cookie_name" and isinstance(item, str) and _COOKIE_NAME_RE.match(item):
+        return False
     describes = _describes_a_value(parts)
     # Only a bool. A descriptor name over a boolean is a statement about a secret --
     # `secret_values_visible: False` -- and a secret is never True or False. Numbers are
@@ -260,7 +303,8 @@ def redact_receipt_value(value: Any, *, key: str | None = None) -> Any:
     if isinstance(value, bytes):
         return {"bytes_sha256": hashlib.sha256(value).hexdigest(), "size": len(value)}
     if isinstance(value, str):
-        return _redact_string(value)
+        named = _redact_named_string(key, value)
+        return named if named is not None else _redact_string(value)
     if value is None or isinstance(value, (bool, int, float)):
         return value
     return _redact_string(str(value))

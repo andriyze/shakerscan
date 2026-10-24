@@ -7,9 +7,11 @@ every target's enrichment at 10k targets). list/v1 pages the groups themselves: 
 and last scan, earliest creation) is aggregated in SQL over the filtered targets, keyset-paged on
 the chosen sort, and only the page's groups are read in detail, with at most ``member_limit``
 subdomains each (``subdomain_count`` keeps the true number). Group values follow the legacy
-definitions exactly: the root target is the last ``is_root`` row in URL order, a missing root
-domain groups as ``unknown``, and the group's ASM coverage rolls up every member, not only the
-members on the page.
+definitions: the root target is the last ``is_root`` row in URL order, a missing root domain
+groups as ``unknown``, and the group's ASM coverage rolls up every member, not only the members
+on the page. Every other target of the domain is a member (``subdomains``), including another
+``is_root`` row: several web apps of one host on different ports are each a root of the same
+domain, and keeping only one of them hid the rest from every grouped view (E1-N2).
 
 Tie order differs from legacy only where legacy kept ascending domain order for a descending
 sort; list/v1 breaks ties by domain in the sort's direction, as every keyset list does.
@@ -138,11 +140,14 @@ def groups_sql(where: Sequence[str], *, with_asm: bool = False) -> str:
             ORDER BY group_key, url DESC
         ),
         members AS (
-            SELECT group_key,
-                   COUNT(*) FILTER (WHERE NOT is_root) AS subdomain_count,
-                   COALESCE(SUM(active_findings_count) FILTER (WHERE NOT is_root), 0) AS sub_findings,
-                   MIN(created_at) FILTER (WHERE NOT is_root) AS sub_earliest
-            FROM filtered GROUP BY group_key
+            -- Every target but the group's root target, another root of the same domain included.
+            SELECT f.group_key,
+                   COUNT(*) FILTER (WHERE r.id IS DISTINCT FROM f.id) AS subdomain_count,
+                   COALESCE(SUM(f.active_findings_count) FILTER (WHERE r.id IS DISTINCT FROM f.id), 0)
+                       AS sub_findings,
+                   MIN(f.created_at) FILTER (WHERE r.id IS DISTINCT FROM f.id) AS sub_earliest
+            FROM filtered f LEFT JOIN roots r ON r.group_key = f.group_key
+            GROUP BY f.group_key
         ){asm_cte}
         SELECT m.group_key AS root_domain, r.id AS root_id, {asm_columns},
                m.subdomain_count::bigint AS subdomain_count,
@@ -381,16 +386,17 @@ async def grouped_page(
         member_rows = await conn.fetch(f"""
             SELECT * FROM (
                 SELECT {member_columns}, {GROUP_KEY} AS group_key,
-                       row_number() OVER (PARTITION BY {GROUP_KEY}, t.is_root ORDER BY t.url) AS member_rank
+                       (t.id = ANY({roots_ref}::uuid[])) AS group_root,
+                       row_number() OVER (PARTITION BY {GROUP_KEY}, (t.id = ANY({roots_ref}::uuid[]))
+                                          ORDER BY t.url) AS member_rank
                 FROM targets t
                 WHERE {' AND '.join(where)} AND {GROUP_KEY} = ANY({keys_ref}::text[])
-                  AND (NOT t.is_root OR t.id = ANY({roots_ref}::uuid[]))
             ) ranked
-            WHERE is_root OR member_rank <= {limit_ref}
+            WHERE group_root OR member_rank <= {limit_ref}
             ORDER BY group_key, url
         """, *member_params.values)
         for row in member_rows:
-            if row["is_root"]:
+            if row["group_root"]:
                 roots[row["group_key"]] = row
             else:
                 members_by_group[row["group_key"]].append(row)
@@ -398,10 +404,8 @@ async def grouped_page(
         # summed in SQL, one row per group.
         rollup_params = SqlParams(filter_values)
         rollup_keys = rollup_params.add(keys)
-        rollup_roots = rollup_params.add(root_ids)
         members_sql = (f"SELECT t.id FROM targets t WHERE {' AND '.join(where)} "
-                       f"AND {GROUP_KEY} = ANY({rollup_keys}::text[]) "
-                       f"AND (NOT t.is_root OR t.id = ANY({rollup_roots}::uuid[]))")
+                       f"AND {GROUP_KEY} = ANY({rollup_keys}::text[])")
         for row in await conn.fetch(f"""
             WITH per_target AS ({asm_coverage_sql(members_sql)})
             SELECT {GROUP_KEY} AS group_key,
@@ -419,7 +423,8 @@ async def grouped_page(
     investigator = await investigator_counts(conn, shown_ids)
 
     def target_item(row: Any) -> dict[str, Any]:
-        data = public_row({key: row[key] for key in row.keys() if key not in ("group_key", "member_rank")})
+        data = public_row({key: row[key] for key in row.keys()
+                           if key not in ("group_key", "member_rank", "group_root")})
         data['asm_coverage'] = asm.get(str(data['id']))
         data.update(investigator.get(str(data['id']), {
             'investigator_verified_count': 0,

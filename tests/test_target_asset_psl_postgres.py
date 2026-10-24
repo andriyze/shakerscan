@@ -278,7 +278,14 @@ def test_a_scan_submission_records_its_target_as_scan_created(monkeypatch):
     async def no_op(*_args, **_kwargs):
         return None
 
-    async def stop(*_args, **_kwargs):
+    seen = {}
+
+    async def stop(conn, *_args, **_kwargs):
+        # Admission is one transaction, so the row is read where admission sees it, before
+        # the stop rolls it back with the rest of the refused submission.
+        seen["row"] = await conn.fetchrow(
+            "SELECT discovery_source, asset_owner_id FROM targets WHERE url = 'https://shop.submitted.test'")
+        seen["status"] = await _admission(conn, "submitted.test")
         raise _StopAfterTargetRow
 
     monkeypatch.setattr(api_module, "get_redis", lambda: object())
@@ -295,9 +302,7 @@ def test_a_scan_submission_records_its_target_as_scan_created(monkeypatch):
             with pytest.raises(_StopAfterTargetRow):
                 await api_module._submit_scan(api_module.ScanRequest(
                     target="https://shop.submitted.test", policy={"active_testing": False}))
-            row = await conn.fetchrow(
-                "SELECT discovery_source, asset_owner_id FROM targets WHERE url = 'https://shop.submitted.test'")
-            return row, await _admission(conn, "submitted.test")
+            return seen["row"], seen["status"]
 
     row, status = asyncio.run(run())
     assert row["discovery_source"] == "scan" and row["asset_owner_id"] is not None

@@ -1269,8 +1269,8 @@ class _AsmActionConn:
         return 0
 
     async def fetch(self, query, *args):
-        if "SELECT id FROM scans" in query:
-            return [{"id": uuid.uuid4()} for _ in range(self.active)]
+        if "SELECT id, scan_role FROM scans" in query:
+            return [{"id": uuid.uuid4(), "scan_role": "standalone"} for _ in range(self.active)]
         if "last_attempt_status" in query and "GROUP BY" in query:
             return self.attempts
         return []
@@ -4217,3 +4217,38 @@ def test_saved_target_scan_passes_only_stored_scheme_provenance(monkeypatch):
     ))
     assert result == {"ok": True}
     assert seen == {"target": "https://app.example.test", "inferred": True}
+
+
+def test_asm_recommendation_labels_only_asm_scans_as_hidden_asm_work():
+    """E1-N4: a regular DAST scan blocking the target is not an "ASM batch/recon" scan."""
+    regular = api_module._asm_recommendation(
+        {"total": 9, "tested": 0, "untested": 0, "stale": 0, "in_progress": 9},
+        active_scans=1,
+        active_scan_ids=["scan-1"],
+        active_scan_roles=["standalone"],
+    )["blockers"][0]
+    assert regular["scan_kind"] == "scan"
+    assert regular["hidden_from_scans_list"] is False
+    for role in ("asm_batch", "asm_recon"):
+        asm = api_module._asm_recommendation(
+            {"total": 9, "tested": 0, "untested": 0, "stale": 0, "in_progress": 9},
+            active_scans=1,
+            active_scan_ids=["scan-2"],
+            active_scan_roles=[role],
+        )["blockers"][0]
+        assert asm["scan_kind"] == "asm"
+        assert asm["hidden_from_scans_list"] is True
+
+
+def test_asm_active_scans_lists_the_visible_scan_first():
+    from targets import router as targets_router
+
+    class Conn:
+        async def fetch(self, query, *args):
+            assert "scan_role" in query
+            return [
+                {"id": uuid.UUID(int=1), "scan_role": "parent"},
+            ]
+
+    rows = asyncio.run(targets_router._asm_active_scans(Conn(), str(uuid.UUID(int=9))))
+    assert rows == [{"id": str(uuid.UUID(int=1)), "scan_role": "parent"}]

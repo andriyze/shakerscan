@@ -8,7 +8,7 @@ collections.
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, replace
+from dataclasses import asdict, dataclass, fields, replace
 import ipaddress
 import os
 import re
@@ -115,19 +115,44 @@ class HuntBudget:
             "hosts_attempted": self.max_hosts,
             "udp_ports_attempted": self.max_udp_ports,
             "oob_interactions": self.max_oob_interactions,
+            "candidates": self.max_candidates,
         }
 
 
+# Call, traffic and verification limits cover the whole duration at the most one call can be
+# charged per second of the wall it settles (hunt/budget_pace.py): every call that runs settles at
+# least one second, so one call, one approval-gated call and one verification per second, a login
+# check's 32 browser actions and 128 requests per second. No paced limit runs out before the clock.
+# Approval-gated calls may use the whole call allowance; each one still checks its approval
+# receipt. Records cost no traffic and no wall and get one per call. The safety ceilings (TCP
+# ports, state-changing requests, device fragility, hosts, UDP ports, out-of-band interactions)
+# are not paced and keep their values.
 HUNT_BUDGET_PROFILES: Mapping[str, HuntBudget] = {
-    "fast": HuntBudget(900, 20, 500, 4, 20, 4, 100, 20, 4, 20, 50, 100, 10),
+    "fast": HuntBudget(
+        max_duration_seconds=3_600, max_capability_calls=3_600, max_http_requests=460_800,
+        max_active_actions=3_600, max_candidates=3_600, max_verifications=3_600, max_tcp_ports=100,
+        max_browser_actions=115_200, max_state_changing_requests=4, max_device_fragility_points=20,
+        max_hosts=50, max_udp_ports=100, max_oob_interactions=10,
+    ),
     "balanced": HuntBudget(
-        3_600, 80, 5_000, 20, 100, 20, 1_200, 200, 20, 100, 500, 1_000, 50,
+        max_duration_seconds=14_400, max_capability_calls=14_400, max_http_requests=1_843_200,
+        max_active_actions=14_400, max_candidates=14_400, max_verifications=14_400, max_tcp_ports=1_200,
+        max_browser_actions=460_800, max_state_changing_requests=20, max_device_fragility_points=100,
+        max_hosts=500, max_udp_ports=1_000, max_oob_interactions=50,
     ),
     "thorough": HuntBudget(
-        14_400, 300, 20_000, 80, 500, 100, 10_000, 1_000, 80, 500, 5_000,
-        5_000, 200,
+        max_duration_seconds=86_400, max_capability_calls=86_400, max_http_requests=11_059_200,
+        max_active_actions=86_400, max_candidates=86_400, max_verifications=86_400, max_tcp_ports=10_000,
+        max_browser_actions=2_764_800, max_state_changing_requests=80, max_device_fragility_points=500,
+        max_hosts=5_000, max_udp_ports=5_000, max_oob_interactions=200,
     ),
 }
+
+
+def hunt_ledger_limits(budget: Mapping[str, Any]) -> dict[str, int]:
+    """One ledger projection for API admission, workers and partial historical budgets."""
+    return HuntBudget(**{field.name: int(budget.get(field.name) or 0)
+                         for field in fields(HuntBudget)}).ledger_limits()
 
 ZEROABLE_HUNT_BUDGET_DIMENSIONS = frozenset({
     "max_active_actions",
@@ -145,7 +170,7 @@ HUNT_BUDGET_DIMENSION_LABELS: Mapping[str, str] = {
     "max_capability_calls": "Maximum capability calls",
     "max_http_requests": "Maximum HTTP requests",
     "max_active_actions": "Maximum approval-gated actions",
-    "max_candidates": "Maximum candidates",
+    "max_candidates": "Maximum candidate and finding records",
     "max_verifications": "Maximum deterministic verifications",
     "max_tcp_ports": "Maximum TCP ports",
     "max_browser_actions": "Maximum browser actions",
@@ -245,6 +270,9 @@ def hunt_start_public_contract() -> dict[str, Any]:
         "target_actions": {
             "url_template":"/targets/{target_id}/actions","max_actions":32,
             "auto_load_at_start":True,"snapshot_context_path":"target_actions",
+            "auto_retain_at_finish":True,
+            "auto_retain_permission":"always proposes for operator review, never saves; one rolling proposal per target; metadata_changes opt-out skips",
+            "completion_result_path":"final_debrief.saved_action",
             "execution":"Read a recipe, then invoke each canonical step through the saved Hunt manifest.",
             "grants_authority":False,
         },

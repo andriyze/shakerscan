@@ -49,11 +49,15 @@ from .candidate_verification_preflight import (
     web_candidate_preflight,
 )
 from .action_replay import execution_started_from_budget, replay_observations
-from .host_accounting import distinct_host_charge
+from .candidate_bytes import correction_bytes, require_candidate_room, sighting_bytes
+from .distinct_accounting import distinct_charge
+from .port_accounting import (
+    distinct_port_charge, record_attempted_pairs, tls_attempted_pairs, tls_pair, tls_port_usage,
+)
 from .boundary_handoff import compile_candidate_boundary_handoff
 from .boundary_discovery import discover_hunt_boundaries
 from .knowledge import KnowledgeQueryError, MAX_QUERY_ROWS, query_knowledge_page
-from .verification_budget import web_candidate_budget
+from .verification_budget import record_budget_shortage, verification_traffic_charge, web_candidate_budget
 from . import finding_actions as _hunt_finding_actions
 from .asset_actions import NAMES as ASSET_ACTION_NAMES
 from .cancellation import (
@@ -421,7 +425,7 @@ async def execute_hunt_capability(
     name = str(capability_name or "").strip().lower()
     # State before schema: a call on a finished Hunt is refused for that reason, whatever its
     # input. Only an idempotent replay of an action the Hunt already recorded stays answerable.
-    await _require_executable_hunt_or_recorded_action(hunt_id, request.idempotency_key)
+    await _require_executable_hunt_or_recorded_action(hunt_id, request.idempotency_key, capability_name=name)
     try:
         return await HUNT_ACTION_SERVICE.execute(
             name,
@@ -730,6 +734,12 @@ async def confirm_hunt_shell_plan(
                         receipt=None,
                     )
                     dimension = next(iter(exc.shortages), "unknown")
+                    # Only the clock running out ends the Hunt; any other shortage refuses this
+                    # confirmed queue and leaves the Hunt running.
+                    shortage = await record_budget_shortage(
+                        conn, hunt_id=run["id"], limits=limits,
+                        used={key: int(used.get(key) or 0) for key in limits}, shortages=exc.shortages,
+                    )
                     await conn.execute(
                         """INSERT INTO hunt_actions
                                (id,hunt_run_id,capability_name,status,input_summary,
@@ -740,20 +750,14 @@ async def confirm_hunt_shell_plan(
                         capability_name,
                         json.dumps(capability_input),
                         json.dumps({
-                            "error": f"budget_exhausted:{dimension}",
+                            "error": shortage["error"],
                             "budget_reservation_id": released.reservation_id,
                             "budget_reservation_state": released.status,
                         }),
                     )
-                    await conn.execute(
-                        "UPDATE hunt_runs SET status='budget_exhausted', "
-                        "stop_reason=$2, updated_at=NOW() WHERE id=$1",
-                        run["id"],
-                        f"budget_exhausted:{dimension}",
-                    )
                     admission_error = HTTPException(
                         status_code=409,
-                        detail=f"Hunt budget exhausted: {dimension}",
+                        detail=f"Hunt budget does not cover this queue: {dimension}",
                     )
                 else:
                     reserved = await durable_store.persist_transition(
@@ -1221,20 +1225,22 @@ async def prepare_hunt_boundary_discovery(hunt_id: str, draft_id: str):
                 raise HTTPException(status_code=422, detail={
                     "error": "candidate_locus_invalid", "message": str(exc),
                 }) from exc
+            observation_context = {
+                "hunt_id": str(hunt_uuid),
+                "objective": run["objective"],
+                "discovery_draft_id": draft_id,
+                "boundary_source_binding": draft["source_binding"],
+                "evidence_refs_total": draft["evidence_refs_total"],
+                "provenance_omitted": draft["provenance_omitted"],
+                "authoritative": False,
+            }
+            await require_candidate_room(conn, run["id"], sighting_bytes(candidate, observation_context))
             try:
                 result = await investigation_candidates.upsert_candidate(
                     conn,
                     candidate,
                     created_by=f"hunt_boundary_discovery:{hunt_uuid}",
-                    observation_context={
-                        "hunt_id": str(hunt_uuid),
-                        "objective": run["objective"],
-                        "discovery_draft_id": draft_id,
-                        "boundary_source_binding": draft["source_binding"],
-                        "evidence_refs_total": draft["evidence_refs_total"],
-                        "provenance_omitted": draft["provenance_omitted"],
-                        "authoritative": False,
-                    },
+                    observation_context=observation_context,
                 )
             except investigation_candidates.CandidateLifecycleError as exc:
                 raise _candidate_sighting_http_error(exc) from exc
@@ -1324,10 +1330,12 @@ async def create_hunt_candidate(hunt_id: str, request: HuntCandidateRequest):
                 evidence_refs=request.evidence_refs, verifier_contract_id=request.verifier_contract_id,
                 source_kind="hunt_v2",
             )
+            observation_context = {"hunt_id": hunt_id, "objective": run["objective"]}
+            await require_candidate_room(conn, run["id"], sighting_bytes(candidate, observation_context))
             try:
                 result = await investigation_candidates.upsert_candidate(
                     conn, candidate, created_by=f"hunt_v2:{hunt_id}",
-                    observation_context={"hunt_id": hunt_id, "objective": run["objective"]},
+                    observation_context=observation_context,
                 )
             except investigation_candidates.CandidateLifecycleError as exc:
                 raise _candidate_sighting_http_error(exc) from exc
@@ -1392,6 +1400,9 @@ async def update_hunt_candidate(
                 _require_candidate_writable_hunt(run)
                 _require_unquarantined_hunt(run)
                 await _require_candidate_evidence(conn, run, request.evidence_refs)
+                await require_candidate_room(
+                    conn, run["id"], correction_bytes(request.model_dump(exclude_unset=True)),
+                )
                 result = await investigation_candidates.update_candidate_for_hunt(
                     conn,
                     hunt_run_id=str(hunt_uuid),
@@ -1576,10 +1587,13 @@ async def _hunt_confirmed_shell_dispatch(
     }
 
 
-async def _require_executable_hunt_or_recorded_action(hunt_id: str, idempotency_key: str) -> None:
+async def _require_executable_hunt_or_recorded_action(
+    hunt_id: str, idempotency_key: str, *, capability_name: str = "",
+) -> None:
+    from hunt.recording import recording_run_allowed
     async with _pool().acquire() as conn:
         run = await _hunt_run_or_404(conn, hunt_id)
-        if run["status"] in {"active", "awaiting_planner"}:
+        if run["status"] in {"active", "awaiting_planner"} or recording_run_allowed(dict(run), capability_name):
             return
         recorded = await conn.fetchrow(
             "SELECT id FROM hunt_actions WHERE id=$1 AND hunt_run_id=$2",
@@ -1590,20 +1604,21 @@ async def _require_executable_hunt_or_recorded_action(hunt_id: str, idempotency_
         raise HuntRefusal("hunt_not_runnable", f"Hunt is {run['status']}")
 
 
+def _tls_admission_pair(run: Any, context: Mapping[str, Any], policy: Mapping[str, Any],
+                        values: Mapping[str, Any]) -> tuple[str, int] | None:
+    """The (address, port) a tls.inspect will handshake with, as its execution binds it."""
+    try:
+        target, origin = web_hunt_target(run, context, policy)
+        if values.get("origin") is not None:
+            target, origin = resolve_hunt_http_origin(target, values["origin"], policy), str(values["origin"])
+    except (ValueError, HTTPException):
+        return None
+    return tls_pair(target, origin)
+
+
 def _hunt_ledger_limits(budget: Mapping[str, Any]) -> dict[str, int]:
-    return {
-        "agent_actions": int(budget.get("max_capability_calls") or 0),
-        "active_actions": int(budget.get("max_active_actions") or 0),
-        "http_requests": int(budget.get("max_http_requests") or 0),
-        "tcp_ports_attempted": int(budget.get("max_tcp_ports") or 0),
-        "browser_actions": int(budget.get("max_browser_actions") or 0),
-        "state_changing_requests": int(budget.get("max_state_changing_requests") or 0),
-        "tool_wall_seconds": int(budget.get("max_duration_seconds") or 0),
-        "device_fragility_points": int(budget.get("max_device_fragility_points") or 0),
-        "hosts_attempted": int(budget.get("max_hosts") or 0),
-        "udp_ports_attempted": int(budget.get("max_udp_ports") or 0),
-        "oob_interactions": int(budget.get("max_oob_interactions") or 0),
-    }
+    from hunt.start_contract import hunt_ledger_limits
+    return hunt_ledger_limits(budget)
 
 
 def _hunt_nonexecuting_actual(
@@ -1647,10 +1662,13 @@ async def _resume_parked_action(
     ``permission_required``. Denied, expired or withdrawn: the action settles ``blocked`` with
     ``permission_<status>`` and replays as such.
     """
+    from hunt.recording import recording_run_allowed
     summary = _hunt_json(existing_action["result_summary"], {})
     outcome, parked_request = await parked_outcome(conn, dict(run), action_id, summary)
-    if outcome == "pending" and str(run["status"]) not in {"active", "awaiting_planner"}:
-        # A stopped Hunt (budget_exhausted) cannot admit anything until the request is decided.
+    if (outcome == "pending" and str(run["status"]) not in {"active", "awaiting_planner"}
+            and not recording_run_allowed(dict(run), existing_action["capability_name"])):
+        # An exhausted Hunt may recheck recording headroom after an operator's amendment;
+        # target execution still waits for a decision or a resumed Hunt.
         assert parked_request is not None
         raise permission_required(parked_request, action_id, summary)
     if outcome in {"granted", "pending"}:
@@ -1676,6 +1694,7 @@ async def _execute_hunt_capability_lifecycle(
     request: HuntCapabilityRequest,
     lifecycle: HuntActionLifecycle,
 ):
+    from hunt.recording import evidence_recording, recorded_charge, recording_run_allowed
     prepared_network = None
     network_target = None
     network_policy = None
@@ -1832,7 +1851,7 @@ async def _execute_hunt_capability_lifecycle(
                             ).public_dict(),
                             "result": existing_summary,
                         }
-                    if run["status"] not in {"active", "awaiting_planner"}:
+                    if run["status"] not in {"active", "awaiting_planner"} and not recording_run_allowed(dict(run), name):
                         raise HuntRefusal("hunt_not_runnable", f"Hunt is {run['status']}")
                     policy = _hunt_json(run["policy_json"], {})
                     context = _hunt_json(run["context_pack"], {})
@@ -2146,10 +2165,10 @@ async def _execute_hunt_capability_lifecycle(
                             )
                         except (CapabilityInputError, ValueError) as exc:
                             raise HTTPException(status_code=422, detail=str(exc)) from exc
-                        charges = distinct_host_charge(context, prepared_network, {
+                        charges = {
                             key: int(value) for key, value in prepared_network.estimated_budget.items()
                             if key in limits
-                        })
+                        }
                     elif is_browser:
                         authority_context = _hunt_json(run["context_pack"], {})
                         target_context = (
@@ -2175,7 +2194,17 @@ async def _execute_hunt_capability_lifecycle(
                     else:
                         charges = {
                             key: int(value) for key, value in (
-                                agent_tools.canonical_hunt_scanner_budget(name) if is_scanner else spec.budget_cost
+                                # The Hunt's own profile sizes a scanner call's hold. A longer
+                                # hold the remaining ledger cannot fund steps down to the
+                                # registry hold, which the worker also accepts.
+                                agent_tools.affordable_hunt_scanner_hold(
+                                    agent_tools.hunt_scanner_dispatch_budgets(
+                                        name, **agent_tools.hunt_scanner_budget_context(
+                                            run, request.input,
+                                        ),
+                                    ),
+                                    limits=limits, used=used,
+                                ) if is_scanner else spec.budget_cost
                             ).items() if key in limits
                         }
                         if name == "authz.verify":
@@ -2263,9 +2292,10 @@ async def _execute_hunt_capability_lifecycle(
                                 charges[transport_dimension] = 1
                     if writes_http:
                         charges["state_changing_requests"] = 1
-                    charges["agent_actions"] = 1
-                    if requires_call_approval:
-                        charges["active_actions"] = 1
+                    if not evidence_recording(name):
+                        charges["agent_actions"] = 1
+                        if requires_call_approval:
+                            charges["active_actions"] = 1
                     if spec.hunt_executor == "worker_replay":
                         from hunt.replay_selection import select_hunt_replay
                         selected_replay = await select_hunt_replay(conn, run=run, context=context,
@@ -2275,6 +2305,15 @@ async def _execute_hunt_capability_lifecycle(
                         if name == "collections.replay_active":
                             charges["state_changing_requests"] = selected_replay.writes
                     reserve_device_traffic(run, spec, charges)
+                    # Hosts and ports are charged once per Hunt (hunt/distinct_accounting.py), after the
+                    # device traffic envelope above, which counts every connection the action makes.
+                    if is_network and prepared_network is not None:
+                        charges = distinct_charge(context, prepared_network, charges)
+                    if name == "tls.inspect":
+                        # One port, whatever its handshakes; nothing more on a port already attempted.
+                        tls_port = _tls_admission_pair(run, context, policy, request.input)
+                        charges = distinct_port_charge(context, frozenset({tls_port} if tls_port else ()),
+                                                       {**charges, "tcp_ports_attempted": 1})
                     if is_device_adapter or (run["device_target_id"] and spec.placement_requirements.get("network_reachability")):
                         try:
                             await require_device_admission(
@@ -2400,7 +2439,7 @@ async def _execute_hunt_capability_lifecycle(
                             # forever, even after the budget was raised.
                             raise budget_refusal(
                                 run, limits=limits, used=used, shortages=exc.shortages,
-                                charges=charges,
+                                charges=charges, stops_hunt=not evidence_recording(name),
                             ) from exc
                         else:
                             durable_reservation = await durable_store.persist_transition(
@@ -2411,7 +2450,7 @@ async def _execute_hunt_capability_lifecycle(
                             )
                             used.update(reserved_used)
                             await conn.execute(
-                                "UPDATE hunt_runs SET budget_used_json=$2, status='active', "
+                                "UPDATE hunt_runs SET budget_used_json=$2, status=CASE WHEN status='budget_exhausted' THEN status ELSE 'active' END, "
                                 "updated_at=NOW() WHERE id=$1",
                                 run["id"],
                                 json.dumps(used),
@@ -2425,7 +2464,7 @@ async def _execute_hunt_capability_lifecycle(
                         except BudgetExceeded as exc:
                             raise budget_refusal(
                                 run, limits=limits, used=used, shortages=exc.shortages,
-                                charges=charges,
+                                charges=charges, stops_hunt=not evidence_recording(name),
                             ) from exc
                         else:
                             used.update(reserved_used)
@@ -2653,6 +2692,7 @@ async def _execute_hunt_capability_lifecycle(
     execution_started = time.perf_counter()
     status, result = "failed", {}
     capability_execution = None
+    tls_attempted_pair: tuple[str, int] | None = None
     # Set when the verifier refused before any request reached the target: settlement then
     # releases the whole reservation and the verification slot instead of the conservative hold.
     verification_refused_before_traffic = False
@@ -2688,6 +2728,8 @@ async def _execute_hunt_capability_lifecycle(
                 conservative_full_budget=True,
                 unstarted_exceptions=(VerificationRefused,),
                 measured_wall=True,
+                # Requests and state-changing requests settle to what the workflow reports it sent.
+                settle=verification_traffic_charge,
             )
             capability_execution = await dispatch_registered_adapter(
                 candidate_adapter,
@@ -2810,6 +2852,10 @@ async def _execute_hunt_capability_lifecycle(
                 ),
                 blocked_exceptions=(HTTPException,),
                 conservative_full_budget=True,
+                # A refused write rolled back before recording anything, and an existing record
+                # returned unchanged wrote nothing: neither spends a record unit.
+                unstarted_exceptions=(HTTPException,),
+                settle=recorded_charge,
             )
             capability_execution = await dispatch_registered_adapter(
                 finding_adapter,
@@ -2982,7 +3028,11 @@ async def _execute_hunt_capability_lifecycle(
             result = await _enqueue_canonical_scanner_capability(
                 capability_name=name,
                 capability_input=request.input,
-                timeout_ms=int(spec.default_timeout_ms),
+                # The wait follows the reserved wall, so a longer per-profile hold is not
+                # cancelled at the registry default while it is still running.
+                timeout_ms=agent_tools.hunt_scanner_timeout_ms(
+                    spec.default_timeout_ms, durable_reservation.record.requested,
+                ),
                 hunt_id=str(run["id"]),
                 action_id=str(action_id),
                 reservation_id=durable_reservation.record.reservation_id,
@@ -3010,15 +3060,18 @@ async def _execute_hunt_capability_lifecycle(
                 if durable_reservation is not None
                 else charges
             )
+            tls_attempted_pair = tls_pair(tls_target, tls_origin)
+
+            async def inspect_tls_port() -> dict[str, Any]:
+                # The handshakes attempt one port: charged once per Hunt (hunt/port_accounting.py).
+                return tls_port_usage(await inspect_tls_origin(
+                    tls_origin, target=tls_target,
+                    timeout_seconds=int(tls_budget.get("tool_wall_seconds") or 1),
+                ), tls_budget)
+
             tls_adapter = TlsInspectionExecutionAdapter(
                 specification=spec,
-                operation=lambda: inspect_tls_origin(
-                    tls_origin,
-                    target=tls_target,
-                    timeout_seconds=int(
-                        tls_budget.get("tool_wall_seconds") or 1
-                    ),
-                ),
+                operation=inspect_tls_port,
                 requested_budget=tls_budget,
                 redacted_execution=_hunt_redacted_capability_input(
                     name, request.input,
@@ -3525,6 +3578,8 @@ async def _execute_hunt_capability_lifecycle(
                             locked["id"],
                             json.dumps(current_used),
                         )
+                    await record_attempted_pairs(conn, hunt_id=locked["id"], run=locked,
+                                                 pairs=tls_attempted_pairs(tls_attempted_pair, result))
                     if isinstance(receipt_payload, dict):
                         receipt_payload["receipt_id"] = str(receipt_id)
                         receipt_payload["budget_reservation_id"] = (

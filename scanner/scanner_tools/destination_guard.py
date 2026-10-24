@@ -98,10 +98,14 @@ class GuardProxy:
     the connection opens a new one. Failures are recorded as incidents, never swallowed.
     """
 
-    def __init__(self, guard: DestinationGuard) -> None:
+    def __init__(self, guard: DestinationGuard, *, close_on_refusal: bool = False) -> None:
         self.guard = guard
         self.server: Any = None
         self.port = 0
+        # Refuse by closing the connection unanswered: the page sees a network error, as for a
+        # refused CONNECT, instead of a 403 that would read as the refused origin's answer.
+        self.close_on_refusal = close_on_refusal
+        self._tasks: set[Any] = set()
 
     async def start(self) -> str:
         import asyncio
@@ -112,9 +116,12 @@ class GuardProxy:
         return f"http://127.0.0.1:{self.port}"
 
     def close(self) -> None:
+        """Stop accepting, and end every connection still open (its tunnel included)."""
         if self.server is not None:
             self.server.close()
             self.server = None
+        for task in list(self._tasks):
+            task.cancel()
 
     async def _handle(self, reader: Any, writer: Any) -> None:
         import asyncio
@@ -122,6 +129,9 @@ class GuardProxy:
 
         upstream_writer = None
         host = ""
+        task = asyncio.current_task()
+        if task is not None:
+            self._tasks.add(task)
         try:
             head = await asyncio.wait_for(reader.readuntil(b"\r\n\r\n"), timeout=30)
             line, _, rest = head.partition(b"\r\n")
@@ -136,8 +146,9 @@ class GuardProxy:
                 host = parts.hostname or ""
                 port_number = parts.port or 80
             if not host or not self.guard.check(url):
-                writer.write(b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
-                await writer.drain()
+                if not self.close_on_refusal:
+                    writer.write(b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                    await writer.drain()
                 return
             upstream_reader, upstream_writer = await asyncio.wait_for(
                 asyncio.open_connection(host.strip("[]"), port_number), timeout=30)
@@ -147,9 +158,13 @@ class GuardProxy:
                 await asyncio.gather(_pump(reader, upstream_writer), _pump(upstream_reader, writer))
                 return
             await self._forward_one(method, target, version, rest, reader, upstream_reader, upstream_writer, writer)
+        except asyncio.CancelledError:
+            pass  # the proxy was closed with this connection open
         except Exception as exc:  # recorded, not swallowed; the client sees the connection end
             self.guard.incident(host, exc)
         finally:
+            if task is not None:
+                self._tasks.discard(task)
             for stream in (writer, upstream_writer):
                 if stream is not None:
                     try:

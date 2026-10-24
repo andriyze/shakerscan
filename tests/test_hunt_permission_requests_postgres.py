@@ -98,7 +98,8 @@ class Env:
     def __init__(self, pool, conn, schema):
         self.pool, self.conn, self.schema = pool, conn, schema
 
-    async def hunt(self, *, budget=None, used=None, policy=None, status="active", profile="fast"):
+    async def hunt(self, *, budget=None, used=None, policy=None, status="active", profile="fast",
+                   capabilities=()):
         target = uuid.uuid4()
         await self.conn.execute("INSERT INTO targets(id,url,name) VALUES($1,$2,'fixture')", target, TARGET_URL)
         resolved = dict(vars(HUNT_BUDGET_PROFILES[profile]))
@@ -106,7 +107,7 @@ class Env:
                     "max_oob_interactions", "max_device_fragility_points", "max_active_actions"):
             resolved[key] = 0  # a passive web Hunt, as the start contract resolves it
         resolved.update(budget or {})
-        allowed = ["http.request", "web.probe", "artifact.inspect"]
+        allowed = ["http.request", "web.probe", "artifact.inspect", *capabilities]
         saved_policy = {
             "schema_version": "hunt-policy/v2", "target_kind": "web", "active_testing": False,
             "credential_access": False, "allow_state_changing_http": False, "network_discovery": False,
@@ -291,8 +292,9 @@ def test_budget_refusal_parks_the_action_and_a_grant_readmits_the_same_key_throu
     assert parked["status"] == "awaiting_permission"
     assert json.loads(parked["result_summary"])["permission_request_id"] == detail["permission_request"]["id"]
     assert run(env, env.conn.fetchval("SELECT COUNT(*) FROM budget_reservations")) == 0
-    stopped = run(env, env.run(hunt))
-    assert stopped["status"] == "budget_exhausted" and stopped["stop_reason"] == "budget_exhausted:agent_actions"
+    # Only the clock ends a Hunt: a used-up call limit refuses this action and the Hunt keeps running.
+    running = run(env, env.run(hunt))
+    assert running["status"] == "active" and running["stop_reason"] is None
 
     # Retry while pending: the same answer, nothing changes.
     with pytest.raises(HTTPException) as again:
@@ -307,7 +309,7 @@ def test_budget_refusal_parks_the_action_and_a_grant_readmits_the_same_key_throu
     assert decided["request"]["status"] == "granted" and decided["grant"]["kind"] == "budget.raise"
     amendment = run(env, env.conn.fetchrow("SELECT * FROM hunt_budget_amendments WHERE hunt_run_id=$1", hunt["id"]))
     assert json.loads(amendment["limits_after"])["max_capability_calls"] == 2
-    assert amendment["status_before"] == "budget_exhausted" and amendment["status_after"] == "awaiting_planner"
+    assert amendment["status_before"] == "active" and amendment["status_after"] == "active"
 
     # The same key, the same input: re-admitted under the same action id, with a reservation.
     assert run(env, env.call(hunt, "budget-key-0001")) == "admitted"
@@ -357,6 +359,20 @@ def test_other_actions_continue_while_one_waits_and_the_hunt_clock_runs(env):
     assert run(env, env.call(hunt, "small-0001")) == "admitted"
     assert run(env, env.action(hunt, "small-0001"))["status"] == "reserved"
     assert run(env, env.action(hunt, "big-0001"))["status"] == "awaiting_permission"
+
+
+def test_a_used_up_safety_ceiling_refuses_what_needs_it_and_the_hunt_keeps_working(env):
+    """Before 2.11.1 a used-up TCP port ceiling stopped the Hunt and its next read-only request."""
+    hunt = run(env, env.hunt(budget={"max_tcp_ports": 10}, used={"tcp_ports_attempted": 10},
+                             capabilities=["tls.inspect"]))
+    with pytest.raises(HTTPException) as refused:
+        run(env, env.call(hunt, "tls-0001", name="tls.inspect", values={}))
+    assert _detail(refused)["error"] == "budget_exhausted:tcp_ports_attempted"
+    after = run(env, env.run(hunt))
+    assert after["status"] == "active" and after["stop_reason"] is None
+    # A request that needs no TCP port allowance is admitted in the same Hunt.
+    assert run(env, env.call(hunt, "read-0001")) == "admitted"
+    assert run(env, env.action(hunt, "read-0001"))["status"] == "reserved"
 
 
 # ---------------------------------------------------------------------------------------------
@@ -608,7 +624,9 @@ def test_a_withheld_capability_raises_capability_enable_and_the_grant_binds_stan
     policy = json.loads(run(env, env.run(hunt))["policy_json"])
     assert policy["active_testing"] is True and "xss.verify" in policy["allowed_capabilities"]
     assert policy["approval_receipt_id"] == approval
-    assert json.loads(run(env, env.run(hunt))["budget_json"])["max_active_actions"] == 4
+    # The enabled capability gets the profile's approval-gated allowance (the whole call allowance).
+    assert json.loads(run(env, env.run(hunt))["budget_json"])["max_active_actions"] == (
+        HUNT_BUDGET_PROFILES["fast"].max_active_actions)
     with pytest.raises(HTTPException) as remember:
         run(env, env.decide(hunt, request, scope="target", key="decision-remember"))
     assert remember.value.status_code == 409  # already granted; capability flags have no remember

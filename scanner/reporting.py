@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import json
 import re
-import shlex
 import urllib.parse
 from typing import Any
 
@@ -23,33 +22,41 @@ try:
     from .ai_verdict_policy import has_deterministic_exploit_proof
     from .target_context import is_local_or_private_scan_target
     from .redaction import redact_text
+    from .scanner_tools.shell_words import shell_word
 except ImportError:
     from findings import normalize_finding
     from ai_verdict_policy import has_deterministic_exploit_proof
     from target_context import is_local_or_private_scan_target
     from redaction import redact_text
+    from scanner_tools.shell_words import shell_word
 
 
 # ---------- Reproduction command helpers ----------
+# A person runs these by hand, and hosts, URLs and paths can come from the target, so every
+# such value is one shell_word (see scanner_tools/shell_words.py).
 
 def _reproCurlHost(base_url: str) -> str:
-    return f"curl -sIL {shlex.quote(base_url)}"
+    return f"curl -sIL {shell_word(base_url)}"
 
 
 def _reproCurlCors(url: str, origin: str = "https://evil.com") -> str:
-    return f"curl -sI -H 'Origin: {origin}' -H 'Access-Control-Request-Method: GET' -X OPTIONS {shlex.quote(url)}"
+    return f"curl -sI -H {shell_word('Origin: ' + origin)} -H 'Access-Control-Request-Method: GET' -X OPTIONS {shell_word(url)}"
 
 
 def _reproDig(name: str, rtype: str = "TXT") -> str:
-    return f"dig +short {shlex.quote(name)} {rtype}"
+    return f"dig +short {shell_word(name)} {rtype}"
 
 
 def _reproDelv(domain: str) -> str:
-    return f"delv @1.1.1.1 {shlex.quote(domain)} A"
+    return f"delv @1.1.1.1 {shell_word(domain)} A"
 
 
 def _reproTLS(host: str, port: int) -> str:
-    return f"testssl.sh -e --fast {shlex.quote(host)}:{port}"
+    return f"testssl.sh -e --fast {shell_word(f'{host}:{port}')}"
+
+
+def _reproOpenSSL(host: str, port: int) -> str:
+    return f"openssl s_client -connect {shell_word(f'{host}:{port}')} -servername {shell_word(host)}"
 
 
 # ---------- Configuration findings emission ----------
@@ -232,7 +239,7 @@ def emit_config_findings(report: dict[str, Any]) -> None:
             "redirect_check",
             "Does not redirect HTTP to HTTPS",
             "medium",
-            {"detail": "HTTP did not redirect to HTTPS", "reproduction": f"curl -sI http://{host}"},
+            {"detail": "HTTP did not redirect to HTTPS", "reproduction": f"curl -sI {shell_word('http://' + str(host))}"},
             "CWE-319"
         ))
 
@@ -268,7 +275,7 @@ def emit_config_findings(report: dict[str, Any]) -> None:
             "tls_config",
             "OCSP stapling not detected",
             "low",
-            {"detail": "No stapled OCSP response", "reproduction": f"openssl s_client -connect {host}:{port} -servername {host} -status | sed -n '1,120p'"},
+            {"detail": "No stapled OCSP response", "reproduction": f"{_reproOpenSSL(host, port)} -status | sed -n '1,120p'"},
             "CWE-310"
         ))
     # Certificate expiry
@@ -280,7 +287,7 @@ def emit_config_findings(report: dict[str, Any]) -> None:
                 "tls_config",
                 "TLS certificate expiring soon (<= 30 days)",
                 "medium",
-                {"days_remaining": days, "not_after": cert.get("not_after"), "reproduction": f"echo | openssl s_client -connect {host}:{port} -servername {host} 2>/dev/null | openssl x509 -noout -enddate"},
+                {"days_remaining": days, "not_after": cert.get("not_after"), "reproduction": f"echo | {_reproOpenSSL(host, port)} 2>/dev/null | openssl x509 -noout -enddate"},
                 "CWE-295"
             ))
 
@@ -433,7 +440,7 @@ def emit_config_findings(report: dict[str, Any]) -> None:
             "security_txt",
             "security.txt missing",
             "info",
-            {"url": sec_txt.get("url"), "reproduction": f"curl -sL {sec_txt.get('url') or urllib.parse.urljoin(base_url, '/.well-known/security.txt')}"},
+            {"url": sec_txt.get("url"), "reproduction": f"curl -sL {shell_word(sec_txt.get('url') or urllib.parse.urljoin(base_url, '/.well-known/security.txt'))}"},
             "CWE-16"
         ))
 
@@ -536,15 +543,15 @@ def _ai_safe_commands_for_finding(f: dict, base_url: str, host: str) -> list[str
         url = ev.get("url") or urllib.parse.urljoin(base_url + "/", (ev.get("path") or "").lstrip("/"))
         path_l = (ev.get("path") or "").lower()
         # Always include a HEAD and a short safe preview of the body
-        cmds.append(f"curl -sI {shlex.quote(url)}")
-        cmds.append(f"curl -sL {shlex.quote(url)} | sed -n '1,40p'")
+        cmds.append(f"curl -sI {shell_word(url)}")
+        cmds.append(f"curl -sL {shell_word(url)} | sed -n '1,40p'")
         # Targeted probes for common high-risk exposures
         if any(k in path_l for k in ["id_rsa", "id_dsa", "id_ecdsa", "id_ed25519", "server.key", "private.key", ".pem"]):
-            cmds.append(f"curl -sL {shlex.quote(url)} | grep -E 'BEGIN (OPENSSH|RSA|DSA|EC) PRIVATE KEY' -m1")
+            cmds.append(f"curl -sL {shell_word(url)} | grep -E 'BEGIN (OPENSSH|RSA|DSA|EC) PRIVATE KEY' -m1")
         if ".git" in path_l:
             base = base_url.rstrip("/")
-            cmds.append(f"curl -sL {shlex.quote(base)}/.git/HEAD")
-            cmds.append(f"curl -sL {shlex.quote(base)}/.git/config")
+            cmds.append(f"curl -sL {shell_word(base + '/.git/HEAD')}")
+            cmds.append(f"curl -sL {shell_word(base + '/.git/config')}")
     if tool == "graphql_vulnerability" or ("graphql" in title):
         ev = f.get("evidence", {}) or {}
         # Try to use detected endpoint, else probe common ones
@@ -557,18 +564,18 @@ def _ai_safe_commands_for_finding(f: dict, base_url: str, host: str) -> list[str
         introspect = '{"query":"{ __schema { types { name } } }"}'
         for ep in endpoints[:2]:
             url = urllib.parse.urljoin(base_url, ep)
-            cmds.append(f"curl -sX POST -H 'Content-Type: application/json' -d '{introspect}' {shlex.quote(url)}")
+            cmds.append(f"curl -sX POST -H 'Content-Type: application/json' -d '{introspect}' {shell_word(url)}")
     if tool == "api_security" or ("openapi" in title) or ("swagger" in title):
         # Probe OpenAPI schema endpoints and look for securitySchemes/Bearer/API key hints
         for ep in ["/openapi.json", "/swagger.json", "/swagger/v1/swagger.json"]:
             url = urllib.parse.urljoin(base_url, ep)
-            cmds.append(f"curl -sI {shlex.quote(url)}")
-            cmds.append(f"curl -sS {shlex.quote(url)} | grep -Ei 'securitySchemes|bearer|apiKey' -m1")
+            cmds.append(f"curl -sI {shell_word(url)}")
+            cmds.append(f"curl -sS {shell_word(url)} | grep -Ei 'securitySchemes|bearer|apiKey' -m1")
     if "nosql" in title:
         _payload = json.dumps({"$ne": "1"})
-        cmds.append(f"curl -i -X POST -H 'Content-Type: application/json' {shlex.quote(base_url)} --data '{_payload}'")
+        cmds.append(f"curl -i -X POST -H 'Content-Type: application/json' {shell_word(base_url)} --data '{_payload}'")
     if tool == "waf_detector":
-        cmds.append(f"curl -sIL {shlex.quote(base_url)}?test=%3Cscript%3Ealert(1)%3C%2Fscript%3E")
+        cmds.append(f"curl -sIL {shell_word(base_url + '?test=%3Cscript%3Ealert(1)%3C%2Fscript%3E')}")
     return cmds[:3]
 
 

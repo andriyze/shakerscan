@@ -6,12 +6,16 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
+import stat
+import subprocess
 import sys
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import pytest
+import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "scripts" / "upgrade_path_probe.py"
@@ -70,6 +74,94 @@ def test_baselines_refuse_a_stable_channel_that_is_not_older_than_the_candidate(
         probe.select_baselines("2.8.2", [], "2.8.2")
     with pytest.raises(ValueError):
         probe.select_baselines("latest", [], "2.8.2")
+
+
+def test_a_tree_on_the_promoted_release_upgrades_from_the_release_before_it():
+    """After a promotion, main's VERSION equals the stable channel until the next release starts.
+    A pull request that changes the gate then still has a real upgrade to run: from the newest
+    published release below that version. Release candidates stay strict (test above)."""
+    published = ["v2.9.0", "v2.10.0", "v2.11.0", "v2.12.0-rc.1"]
+    assert probe.select_baselines("2.11.0", published, "2.11.0", between_releases=True) == ["2.10.0"]
+    # Inside a release cycle the tree is already newer than stable: the usual baselines.
+    assert probe.select_baselines("2.10.0", published, "2.11.0", between_releases=True) == ["2.10.0"]
+    assert probe.select_baselines("2.8.1", ["v2.8.2"], "2.8.3", between_releases=True) == ["2.8.1", "2.8.2"]
+
+
+def test_between_releases_still_refuses_what_it_cannot_upgrade_from():
+    with pytest.raises(ValueError, match="no published release older"):
+        probe.select_baselines("2.11.0", ["v2.11.0", "v2.12.0"], "2.11.0", between_releases=True)
+    # A stable channel ahead of the tree is never a pull request's normal state.
+    with pytest.raises(ValueError):
+        probe.select_baselines("2.11.0", ["v2.10.0"], "2.10.0", between_releases=True)
+    with pytest.raises(ValueError):
+        probe.select_baselines("latest", ["v2.10.0"], "2.11.0", between_releases=True)
+
+
+def test_the_baselines_cli_takes_the_between_releases_flag(capsys):
+    argv = ["baselines", "--stable", "2.11.0", "--candidate", "2.11.0", "--published", "v2.10.0 v2.11.0"]
+    with pytest.raises(ValueError):
+        probe.main(argv)
+    assert probe.main([*argv, "--between-releases"]) == 0
+    assert capsys.readouterr().out.split() == ["2.10.0"]
+
+
+# The baselines job of .github/workflows/upgrade-path.yml, run as the runner runs it (bash -e -o
+# pipefail) with a stub `gh` that lists the published releases. Its tree is a temporary directory
+# holding VERSION, install/STABLE_VERSION and this checkout's probe.
+WORKFLOW = ROOT / ".github" / "workflows" / "upgrade-path.yml"
+STEP_SHELL = ("bash", "--noprofile", "--norc", "-e", "-o", "pipefail")
+
+
+def _run_baselines_step(tmp_path: Path, *, version: str, stable: str, published: list[str],
+                        candidate_sha: str) -> tuple[subprocess.CompletedProcess, str]:
+    job = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))["jobs"]["baselines"]
+    [step] = [s for s in job["steps"] if s.get("id") == "select"]
+    assert step.get("shell") == "bash"
+    step_env = step.get("env") or {}
+    # Whether the run is a release candidate comes from the workflow input, through the step env.
+    sha_vars = [name for name, value in step_env.items() if "inputs.candidate_sha" in str(value)]
+    assert sha_vars, "the baselines step must know whether it selects for a release candidate"
+    tree, stubs = tmp_path / "tree", tmp_path / "bin"
+    (tree / "install").mkdir(parents=True)
+    (tree / "scripts").mkdir()
+    stubs.mkdir()
+    (tree / "VERSION").write_text(version + "\n", encoding="utf-8")
+    (tree / "install" / "STABLE_VERSION").write_text(stable + "\n", encoding="utf-8")
+    (tree / "scripts" / "upgrade_path_probe.py").write_bytes(SCRIPT.read_bytes())
+    gh = stubs / "gh"
+    gh.write_text("#!/usr/bin/env bash\nprintf '%s\\n' " + " ".join(published) + "\n", encoding="utf-8")
+    gh.chmod(gh.stat().st_mode | stat.S_IXUSR)
+    output = tmp_path / "github-output"
+    output.write_text("", encoding="utf-8")
+    env = {**os.environ, "PATH": f"{stubs}{os.pathsep}{os.environ['PATH']}", "GITHUB_OUTPUT": str(output),
+           "GH_TOKEN": "unused", "REPOSITORY": "example/shakerscan"}
+    env.update({name: candidate_sha for name in sha_vars})
+    result = subprocess.run([*STEP_SHELL, "-c", step["run"]], cwd=tree, env=env, capture_output=True,
+                            text=True, timeout=60)
+    return result, output.read_text(encoding="utf-8")
+
+
+def test_a_pull_request_on_the_promoted_release_chooses_the_release_before_it(tmp_path):
+    # Dependency pull requests failed here while main sat on promoted 2.10.0 (VERSION == stable).
+    result, output = _run_baselines_step(tmp_path, version="2.11.0", stable="2.11.0",
+                                         published=["v2.9.0", "v2.10.0", "v2.11.0"], candidate_sha="")
+    assert result.returncode == 0, result.stderr
+    assert output.strip() == 'versions=["2.10.0"]'
+
+
+def test_a_release_candidate_on_the_stable_version_still_fails_the_selection(tmp_path):
+    result, output = _run_baselines_step(tmp_path, version="2.11.0", stable="2.11.0",
+                                         published=["v2.10.0", "v2.11.0"], candidate_sha="a" * 40)
+    assert result.returncode != 0
+    assert "not older than the candidate" in result.stderr
+    assert "versions=" not in output
+
+
+def test_a_release_candidate_upgrades_from_stable_and_the_newest_patch_above_it(tmp_path):
+    result, output = _run_baselines_step(tmp_path, version="2.11.1", stable="2.10.0",
+                                         published=["v2.10.0", "v2.11.0"], candidate_sha="b" * 40)
+    assert result.returncode == 0, result.stderr
+    assert output.strip() == 'versions=["2.10.0","2.11.0"]'
 
 
 # ---------------------------------------------------------------------------------------------

@@ -192,8 +192,11 @@ def _check_usable(selection: _Selection) -> None:
     if profile.auth_kind not in VERIFIER_AUTH_KINDS:
         raise _refuse(
             CREDENTIAL_KIND_UNSUPPORTED,
-            f"A {profile.auth_kind} credential needs a login exchange; verification needs a "
-            "header, bearer, basic or cookie credential for this slot.",
+            f"A {profile.auth_kind} credential needs a login exchange, which candidate "
+            "verification does not perform; it needs a header, bearer, basic or cookie "
+            "credential for this slot. To prove the lead with sign-in credentials, establish "
+            "a session for each principal (auth.session.establish) and run authz.verify with "
+            "both session refs; the profiles must allow authz.verify.",
             slot=selection.slot, profile_id=profile.profile_id,
         )
     if VERIFIER_CAPABILITY not in profile.allowed_capabilities:

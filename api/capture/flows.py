@@ -429,6 +429,7 @@ def new_capture_state(*, allowed_origins: Sequence[str], opened_at: str) -> dict
         "last_seq": 0,
         "flow_count": 0,
         "endpoint_count": 0,
+        "unsupported_request_count": 0,
         "refused_out_of_scope": 0,
         "refused_over_limit": 0,
         "bodies_dropped": 0,
@@ -444,7 +445,7 @@ def new_capture_state(*, allowed_origins: Sequence[str], opened_at: str) -> dict
 
 
 _PUBLIC_STATE_KEYS = (
-    "state", "last_seq", "flow_count", "endpoint_count", "refused_out_of_scope",
+    "state", "last_seq", "flow_count", "endpoint_count", "unsupported_request_count", "refused_out_of_scope",
     "refused_over_limit", "bodies_dropped", "client_dropped", "document_bytes", "limit_reached", "allowed_origins",
     "opened_at", "last_batch_at", "closed_at", "closed_reason",
 )

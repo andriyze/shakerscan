@@ -64,6 +64,7 @@ export function captureSummary(collection) {
   const parts = [`${flows} request${flows === 1 ? '' : 's'}`, `${endpoints} endpoint${endpoints === 1 ? '' : 's'}`]
   if (refused) parts.push(`${refused} refused`)
   if (Number(capture.bodies_dropped || 0)) parts.push(`${capture.bodies_dropped} without bodies`)
+  if (Number(capture.unsupported_request_count || 0)) parts.push(`${capture.unsupported_request_count} not replayed`)
   return {
     open,
     state: open ? 'Recording' : capture.closed_reason === 'idle' ? 'Closed (idle)' : 'Closed',

@@ -264,15 +264,21 @@ def test_worker_network_job_adopts_and_records_the_distinct_host_hold():
     source = (root / "api" / "worker.py").read_text(encoding="utf-8")
     job = source[source.index("async def process_canonical_network_capability_job"):]
     job = job[:job.index("\nasync def ", 10)]
+    # Hosts and ports together (hunt/distinct_accounting.py, which calls host_accounting).
     adopt = job.index(
-        "requested_budget, prepared, attempted_hosts = bound_distinct_hosts("
+        "requested_budget, prepared, attempted = bound_distinct_usage("
         "requested_budget, prepared, stored.record.requested, context)"
     )
     assert adopt < job.index("recomputed_digest = hunt_capability_action_digest(")
     assert adopt < job.index("build_network_execution(prepared=prepared")
-    assert "record_attempted_hosts(conn, hunt_id=hunt_id, run=locked, hosts=attempted_hosts" in job
+    assert "record_attempted_usage(conn, hunt_id=hunt_id, run=locked, attempted=attempted" in job
     admission = Path(router.__file__).read_text(encoding="utf-8")
-    assert "charges = distinct_host_charge(context, prepared_network, {" in admission
+    assert "charges = distinct_charge(context, prepared_network, charges)" in admission
+    from hunt import distinct_accounting
+    combined = Path(distinct_accounting.__file__).read_text(encoding="utf-8")
+    assert "bound_distinct_hosts(requested_budget, prepared, reserved, context)" in combined
+    assert "record_attempted_hosts(conn, hunt_id=hunt_id, run=run, hosts=attempted.hosts" in combined
+    assert "distinct_host_charge(context, prepared, charges)" in combined
 
 
 @pytest.mark.asyncio
@@ -298,6 +304,10 @@ async def test_candidates_are_recordable_after_budget_exhaustion(monkeypatch, st
 
         async def fetch(self, _sql, *args):
             return [{"id": action, "kind": "action", "status": "completed"}] if action in args[0] else []
+
+        async def fetchval(self, sql, *args):
+            assert "investigation_candidate_observations" in sql  # the per-Hunt byte bound
+            return 0
 
         async def execute(self, sql, *args):
             writes.append(sql)

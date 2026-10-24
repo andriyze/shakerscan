@@ -47,8 +47,48 @@ test('no inventory yet explains how to build one', async ({ page: browser }) => 
   const api = await mockPageApi(browser, routes([]))
   await visitAndAuditPage(browser, '/asm', 600)
   await expect(browser.getByText('No attack-surface inventory yet', { exact: true })).toBeVisible()
-  await expect(browser.getByText(/Run a coverage scan on a target/)).toBeVisible()
+  await expect(browser.getByText(/choose Discover endpoints/)).toBeVisible()
+  await expect(browser.getByText(/coverage scan/)).toHaveCount(0)
   expect(api.unhandled).toEqual([])
+})
+
+test('a target without an inventory is one click from its coverage view', async ({ page: browser }) => {
+  const onlyNew = [{ root_domain: 'example.test', root_target: null, subdomains: [uninventoried], subdomain_count: 1, total_count: 1 }]
+  await mockPageApi(browser, routes(onlyNew))
+  await visitAndAuditPage(browser, '/asm', 600)
+  await expect(browser.getByText('No attack-surface inventory yet', { exact: true })).toBeVisible()
+  const pick = browser.getByTestId('asm-uninventoried')
+  await expect(pick).toContainText('1 loaded target has no inventory yet')
+  await pick.getByRole('button').first().click()
+  await expect(browser).toHaveURL(new RegExp(`target_id=${uninventoried.id}`))
+})
+
+test('a populated rollup still lists the targets that have no inventory', async ({ page: browser }) => {
+  await mockPageApi(browser, routes(populated))
+  await visitAndAuditPage(browser, '/asm', 600)
+  await expect(browser.getByTestId('asm-uninventoried').getByRole('button')).toHaveCount(1)
+})
+
+test('a deployment without background testing shows continuous testing as unavailable', async ({ page: browser }) => {
+  const api = await mockPageApi(browser, {
+    ...routes(populated),
+    [`/targets/${covered.id}`]: () => covered,
+  })
+  await browser.addInitScript(() => {
+    window.__SHAKERSCAN_CAPABILITIES__ = {
+      schema: 'shakerscan.workspace-capabilities/v1', mode: 'managed',
+      features: { asm: { state: 'enabled' }, asm_continuous: { state: 'unavailable', reason: 'Fixture: not offered here.' } },
+      navigation: { '/asm': 'asm' }, ui_routes: ['/asm'],
+    }
+  })
+  await browser.goto(`/asm?target_id=${covered.id}`)
+  await browser.getByText('Advanced: proof leads and continuous-testing policy').click()
+  const card = browser.getByTestId('asm-continuous-unavailable')
+  await expect(card).toBeVisible()
+  await expect(card).toContainText('Fixture: not offered here.')
+  await expect(browser.getByText('Enable background dispatcher')).toHaveCount(0)
+  // Nothing about the continuous policy is read or written, and no approval can be minted.
+  expect(api.requests.filter(r => r.includes('/asm/policy') || r.includes('/arsenal/'))).toEqual([])
 })
 
 test('a failed inventory read shows the error and retries', async ({ page: browser }) => {

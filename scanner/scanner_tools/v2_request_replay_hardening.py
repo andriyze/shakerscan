@@ -13,6 +13,8 @@ import urllib.parse
 from typing import Any
 
 from . import request_replay as _request_replay
+from .device_request_formats import captured_secret_query_name
+from .url_redaction import redact_url
 
 
 _SENSITIVE_PATH_KEYS = frozenset({
@@ -37,7 +39,7 @@ def _segment_is_sensitive(segment: str, previous: str | None) -> bool:
         return False
     if "=" in lowered:
         key, _separator, value = lowered.partition("=")
-        if key in _SENSITIVE_PATH_KEYS and value:
+        if key in _SENSITIVE_PATH_KEYS and value and value != "<redacted>":
             return True
     return bool(
         _HEX_SECRET_RE.fullmatch(decoded)
@@ -60,16 +62,15 @@ def redact_url_path(path: str) -> str:
 
 
 def _redacted_url(value: str) -> str:
-    parsed = urllib.parse.urlsplit(str(value or ""))
-    query = urllib.parse.urlencode([
-        (str(name)[:200], "<redacted>")
-        for name, _item in urllib.parse.parse_qsl(parsed.query, keep_blank_values=True)
-    ])
+    # The shared evidence redactor first (credential labels, ``;matrix`` parameters, token-like
+    # segments, userinfo, query values), so a plan or receipt never shows a path segment the
+    # collection index masks; then this module's own path pass over what remains.
+    parsed = urllib.parse.urlsplit(redact_url(value, secret_query_name=captured_secret_query_name))
     return urllib.parse.urlunsplit((
         parsed.scheme,
         parsed.netloc,
         redact_url_path(parsed.path or "/"),
-        query,
+        parsed.query,
         "",
     ))[:2_000]
 

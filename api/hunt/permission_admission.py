@@ -26,7 +26,8 @@ from .permission_store import (
     expire_due, load_request, public_request, raise_request, recent_denial, record_event,
 )
 from .permission_subjects import complete_destination_subject, credential_use_refusal
-from .verification_budget import record_budget_shortage, reservation_exhausted
+from .recording import evidence_recording
+from .verification_budget import clock_exhausted, record_budget_shortage, reservation_exhausted
 
 PARKABLE_RUN_STATUSES = frozenset({"active", "awaiting_planner", "budget_exhausted"})
 MAX_ADMISSION_ATTEMPTS = 4
@@ -61,8 +62,15 @@ def permission_required(request: Mapping[str, Any], action_id: Any, refusal_deta
 def budget_refusal(
     run: Mapping[str, Any], *, limits: Mapping[str, int], used: Mapping[str, Any],
     shortages: Mapping[str, int], charges: Mapping[str, int], message: str | None = None,
+    stops_hunt: bool = True,
 ) -> HuntRefusal:
-    """A coded budget refusal; grantable as ``budget.raise`` when the dimension is amendable."""
+    """A coded budget refusal; grantable as ``budget.raise`` when the dimension is amendable.
+
+    A used-up limit refuses only the actions that need it: the Hunt keeps its status and other
+    work carries on. Only the clock running out ends the Hunt (``record_budget_shortage``), which
+    settlement applies from the refusal's budget state. ``stops_hunt`` False (recording a finding)
+    carries no budget state, so even an exhausted clock refuses only that write.
+    """
     from .budget_amendments import amendable_dimensions
 
     exhausted = reservation_exhausted(limits, used, shortages)
@@ -84,15 +92,20 @@ def budget_refusal(
             "grant it.", extra=extra, error=legacy,
         )
     else:
+        ends = stops_hunt and clock_exhausted(limits, used, shortages)
         refusal = HuntRefusal(
             code,
             message or f"The Hunt's {budget_key} limit ({limit}) does not cover this action, which needs a "
-            f"total of {needed}. A person can raise it for this Hunt (a permission request is raised).",
+            f"total of {needed}. A person can raise it for this Hunt (a permission request is raised). "
+            + ("Its duration is used up, so the Hunt stops until a person raises it." if ends else
+               "The Hunt keeps running: actions that do not need this limit continue."),
             extra=extra, error=legacy,
             subject={"dimension": budget_key, "ledger_dimension": dimension, "limit": limit},
         )
     refusal.display = {"needed_total": needed, "proposed_total": max(needed, limit * 2)}  # type: ignore[attr-defined]
-    refusal.budget_state = {"limits": dict(limits), "used": dict(used), "shortages": dict(shortages)}  # type: ignore[attr-defined]
+    refusal.budget_state = (  # type: ignore[attr-defined]
+        {"limits": dict(limits), "used": dict(used), "shortages": dict(shortages)} if stops_hunt else None
+    )
     return refusal
 
 
@@ -185,7 +198,8 @@ async def settle_refusal(
                 raise refusal
             run = dict(row)
             budget_state = getattr(refusal, "budget_state", None)
-            if budget_state:
+            # Recording evidence never stops a Hunt: a full record allowance refuses that write.
+            if budget_state and not evidence_recording(name):
                 await record_budget_shortage(conn, hunt_id=run["id"], **budget_state)
                 run = dict(await conn.fetchrow("SELECT * FROM hunt_runs WHERE id=$1", hunt_uuid))
             refusal = await credential_use_refusal(conn, run, refusal)

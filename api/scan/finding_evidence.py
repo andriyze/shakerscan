@@ -69,7 +69,8 @@ def _chain(item: Mapping[str, Any]) -> list[dict[str, Any]]:
         chain.append({
             key: entry.get(key) for key in (
                 "subject", "subject_cn", "issuer", "issuer_cn", "not_before", "not_after",
-                "expired", "self_signed", "is_ca", "sha256", "parse_status",
+                "expired", "self_signed", "is_ca", "public_key_type", "public_key_bits",
+                "signature_hash", "weak_public_key", "weak_signature", "sha256", "parse_status",
             ) if entry.get(key) is not None
         })
     return chain
@@ -142,12 +143,18 @@ def tls_finding_evidence(
     if check == "tls_weak_cipher":
         weak = [str(name)[:80] for name in list(item.get("weak_ciphers_supported") or ())[:12]]
         evidence["weak_ciphers_supported"] = weak
-        evidence["weak_cipher_probes"] = _probe_rows(item.get("weak_cipher_probes"), "group")
+        probes = _probe_rows(item.get("weak_cipher_probes"), "group")
+        evidence["weak_cipher_probes"] = probes
         if weak:
             # The weakest suite the server accepts is the one the finding is about; the
-            # negotiated suite of a modern handshake stays as `negotiated_cipher`.
+            # negotiated suite of a modern handshake stays as `negotiated_cipher`. Its bits and
+            # protocol come from the probe that accepted it, never from that other handshake
+            # (an RC4 suite was recorded as 256 bits).
+            accepted = next((row for row in probes if row.get("cipher") == weak[0]), {})
             evidence["negotiated_cipher"] = item.get("cipher")
             evidence["cipher"] = weak[0]
+            evidence["cipher_bits"] = accepted.get("cipher_bits")
+            evidence["cipher_protocol"] = accepted.get("negotiated_protocol")
     if item.get("examined_by"):
         evidence["examined_by"] = str(item["examined_by"])[:40]
     sha = item.get("certificate_sha256")
@@ -170,6 +177,35 @@ def tls_finding_evidence(
     if others:
         evidence["other_tls_origins"] = others[:_MAX_ORIGINS]
     return {key: value for key, value in evidence.items() if value not in (None, [], {})}
+
+
+# OpenSSL verify codes for a key or signature digest below the verifier's security level.
+_EE_KEY_TOO_SMALL = 66
+_CA_MD_TOO_WEAK = 68
+
+
+def tls_untrusted_by_leaf_weakness(item: Mapping[str, Any]) -> bool:
+    """True when the verifier refused the chain for the served certificate's own key or signature.
+
+    The weak-key or weak-signature check of the same observation already reports that defect, so
+    an untrusted-chain finding for it counted one defect twice under a title that pointed at the
+    chain. Code 66 is the server's key; 68 names the first certificate, leaf first, whose
+    signature digest is too weak, so it is the leaf's when the leaf's is weak. Code 67 (an
+    issuer's key) and a 68 from an intermediate have no leaf finding and stay reported. So does a
+    self-signed certificate: OpenSSL refuses a weak server key before it builds the chain, and
+    the untrusted finding is then the only one saying that no CA vouches for it.
+    """
+    if item.get("certificate_trust") != "untrusted":
+        return False
+    code = item.get("certificate_trust_error_code")
+    if code == _EE_KEY_TOO_SMALL:
+        return (
+            item.get("certificate_weak_public_key") is True
+            and item.get("certificate_self_signed") is not True
+        )
+    if code == _CA_MD_TOO_WEAK:
+        return item.get("certificate_weak_signature") is True
+    return False
 
 
 # Template classification fields worth keeping: identifiers and scores, never raw traffic.
@@ -235,4 +271,4 @@ def template_classification(item: Mapping[str, Any]) -> dict[str, Any]:
     return out
 
 
-__all__ = ["template_classification", "tls_finding_evidence"]
+__all__ = ["template_classification", "tls_finding_evidence", "tls_untrusted_by_leaf_weakness"]

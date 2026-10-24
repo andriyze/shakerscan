@@ -308,7 +308,7 @@ jobs:
         if: needs.meta.outputs.prebuilt_run_id == ''
         run: |
           scripts/retry-command.sh timeout 300 docker pull \
-            golang:1.27.2-bookworm@sha256:5cf287a799e6b94384bad13d16b14904c531f51ba65792237e122ce42b392f61
+            golang:1.27.3-bookworm@sha256:972b4110ba0f47539a975c31e52c64765e1ff19f2d74469ae4a595c6676e80a5
           scripts/retry-command.sh timeout 300 docker pull \
             mcr.microsoft.com/playwright/python:v1.63.0-noble@sha256:72bd171a9ffc2b4b59532aaa6210e21014d07093120dc25528870c0b840da1f0
 
@@ -412,6 +412,28 @@ jobs:
               sys.exit("first canonical passive nuclei run in a fresh scanner container is not warm")
           PY
 
+      - name: Verify the active Nuclei selection never requests a heapdump path
+        shell: bash
+        run: |
+          # The pinned template bundle exists only in the scanner image, so the selection test
+          # that reads it runs there; with NUCLEI_TEMPLATES set it fails if the bundle is absent.
+          docker run --rm --network none --entrypoint python \
+            -e PYTHONPATH=/src/api:/src/scanner:/src \
+            -v "$PWD:/src:ro" -w /src \
+            shakerscan-scanner:release-candidate \
+            -m pytest -q -p no:cacheprovider tests/test_nuclei_template_index.py
+
+      - name: Verify the sign-in probe finds a login form's reflection inside its probe set
+        shell: bash
+        run: |
+          # Dalfox exists only in the scanner image, so the probe's argv runs there against a
+          # loopback login fixture; outside the image the test skips.
+          docker run --rm --network none --entrypoint python \
+            -e PYTHONPATH=/src/api:/src/scanner:/src \
+            -v "$PWD:/src:ro" -w /src \
+            shakerscan-scanner:release-candidate \
+            -m pytest -q -p no:cacheprovider tests/test_auth_endpoint_probe_tools.py
+
       - name: Enforce candidate-image external wire ceilings
         env:
           CANDIDATE_SHA: ${{ needs.meta.outputs.candidate_sha }}
@@ -439,7 +461,7 @@ jobs:
 
       - name: Upload candidate external wire receipt
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: external-wire-${{ needs.meta.outputs.candidate_sha }}
           path: artifacts/release-external-wire.json
@@ -488,7 +510,7 @@ jobs:
 
       - name: Upload exact-source Python contract report
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: source-contracts-${{ needs.meta.outputs.candidate_sha }}
           path: artifacts/v2-full-python.xml
@@ -537,7 +559,7 @@ jobs:
 
       - name: Upload the exact-source database-backed report
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: source-postgres-${{ needs.meta.outputs.candidate_sha }}
           path: |
@@ -715,7 +737,7 @@ jobs:
           touch "/tmp/digests/model-intake/${model_intake_digest#sha256:}"
 
       - name: Upload digests
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: runtime-digests-${{ env.PLATFORM_PAIR }}
           path: /tmp/digests/*
@@ -798,7 +820,7 @@ jobs:
           touch "/tmp/digests/ui/${digest#sha256:}"
 
       - name: Upload UI digest
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: ui-digests-${{ env.PLATFORM_PAIR }}
           path: /tmp/digests/*
@@ -877,7 +899,7 @@ jobs:
           touch "/tmp/digests/signer/${digest#sha256:}"
 
       - name: Upload signer digest
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: signer-digests-${{ env.PLATFORM_PAIR }}
           path: /tmp/digests/*
@@ -927,7 +949,7 @@ jobs:
 
       - name: Download digests
         if: needs.meta.outputs.prebuilt_run_id == ''
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
         with:
           path: /tmp/digests
           pattern: "*-digests-*"
@@ -1127,7 +1149,7 @@ jobs:
           mv "$receipt_tmp" release-candidate-receipt.json
 
       - name: Upload uncertified manifest receipt
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: release-candidate-uncertified-${{ needs.meta.outputs.version }}-${{ needs.meta.outputs.candidate_sha }}
           path: release-candidate-receipt.json
@@ -1219,7 +1241,7 @@ jobs:
 
       - name: Upload vulnerability report
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: vulnerability-${{ matrix.target.name }}-${{ matrix.platform.name }}-${{ needs.meta.outputs.candidate_sha }}
           path: trivy-${{ matrix.target.name }}-${{ matrix.platform.name }}.json
@@ -1287,19 +1309,19 @@ jobs:
           fetch-depth: 0
 
       - name: Download immutable manifest receipt
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
         with:
           name: release-candidate-uncertified-${{ needs.meta.outputs.version }}-${{ needs.meta.outputs.candidate_sha }}
           path: artifacts/uncertified
 
       - name: Download exact-source Python contract report
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
         with:
           name: source-contracts-${{ needs.meta.outputs.candidate_sha }}
           path: artifacts/certification
 
       - name: Download the exact-source database-backed report
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
         with:
           name: source-postgres-${{ needs.meta.outputs.candidate_sha }}
           path: artifacts/certification
@@ -1437,7 +1459,7 @@ jobs:
 
       - name: Preserve browser evidence from a failed certification
         if: failure()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: browser-evidence-${{ needs.meta.outputs.candidate_sha }}
           path: artifacts/certification/browser
@@ -1528,7 +1550,7 @@ jobs:
           test "$(jq -r '.certification.status' release-candidate-receipt.json)" = pass
 
       - name: Upload promotion-ready receipt
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: release-candidate-${{ needs.meta.outputs.version }}-${{ needs.meta.outputs.candidate_sha }}
           path: release-candidate-receipt.json
@@ -1537,7 +1559,7 @@ jobs:
 
       - name: Upload exact-digest certification evidence
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: release-certification-${{ needs.meta.outputs.candidate_sha }}
           path: artifacts/certification

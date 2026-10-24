@@ -58,7 +58,7 @@ def test_the_model_intake_image_is_an_overlay_on_the_scanner_runtime():
     assert "python3-pip-whl python3-setuptools-whl" in MI
     assert MI.count("apt-get purge -y --auto-remove") == 1
     assert "AS model-intake-go-tools" in MI
-    assert "golang:1.26.9-bookworm@sha256:" in MI
+    assert "golang:1.26.10-bookworm@sha256:" in MI
     assert "golang.org/x/crypto@v0.57.0" in MI
     assert "golang.org/x/net@v0.60.0" in MI
     assert MI.count("check_dep \"$tool\" golang.org/x/net v0.60.0") == 1
@@ -152,6 +152,20 @@ def test_the_scanner_image_removes_the_base_images_virtualenv_remnants():
     assert 'find_spec("virtualenv") is None' in SCANNER
     # The removal happens in the scanner base, which the API and Model Intake images build from.
     assert SCANNER.index("uninstall -y --break-system-packages virtualenv") < SCANNER.index("uninstall -y --break-system-packages pip")
+
+
+def test_the_base_images_virtualenv_and_its_dependencies_leave_before_the_locked_python_tree():
+    # virtualenv 21 requires filelock<4, and an --ignore-installed install left the base's filelock
+    # 3.x metadata beside the locked 4.x one, which the image vulnerability gate reports. The API
+    # copies the scanner's Python tree over the same base, so it removes them before that copy.
+    removal = "pip uninstall -y --break-system-packages virtualenv python-discovery distlib platformdirs filelock"
+    api = (ROOT / "scanner" / "Dockerfile.api").read_text(encoding="utf-8")
+    assert SCANNER.index(removal) < SCANNER.index("-r /app/requirements.lock")
+    assert api.index(removal) < api.index("COPY --from=scanner-runtime /usr/local/lib/python3.12")
+    # Both images fail the build when a distribution is installed twice under /usr/local.
+    duplicate_check = 'md.distributions(path=["/usr/local/lib/python3.12/dist-packages"])'
+    assert SCANNER.index("pip check") < SCANNER.index(duplicate_check) < SCANNER.index("COPY scanner/model_intake_tools")
+    assert api.index("COPY --from=scanner-runtime /usr/local/lib/python3.12") < api.index(duplicate_check)
 
 
 def test_fleet_overlays_carry_no_model_intake_service():

@@ -173,19 +173,21 @@ async def _resolve_target(conn: Any, request: CaptureCreate) -> Mapping[str, Any
     if origin is None:
         raise HTTPException(status_code=422, detail="target_url must be an absolute http(s) URL")
     parsed = urllib.parse.urlsplit(origin)
+    # ``hostname`` drops the brackets of an IPv6 literal; a stored target URL keeps them.
+    host = parsed.hostname or ""
+    prefix = f"{parsed.scheme}://[{host}]" if ":" in host else f"{parsed.scheme}://{host}"
     # A bounded literal prefix lookup, then the exact canonical origin in Python (default ports,
     # case). One row past the bound says the lookup was cut short, which is refused, never guessed.
     rows = await conn.fetch(
         """SELECT id, url, name FROM targets
            WHERE is_active=true AND lower(url) LIKE $1 ESCAPE '\\'
            ORDER BY created_at, id LIMIT $2""",
-        _like_prefix(f"{parsed.scheme}://{parsed.hostname}"), _TARGET_MATCH_LIMIT + 1,
+        _like_prefix(prefix), _TARGET_MATCH_LIMIT + 1,
     )
     if len(rows) > _TARGET_MATCH_LIMIT:
         raise _conflict(
             "ambiguous_target",
-            f"More than {_TARGET_MATCH_LIMIT} targets start with {parsed.scheme}://{parsed.hostname}; "
-            "name the target by id",
+            f"More than {_TARGET_MATCH_LIMIT} targets start with {prefix}; name the target by id",
         )
     matches = [row for row in rows if flow_origin(str(row["url"] or "")) == origin]
     if not matches:
@@ -460,6 +462,11 @@ async def _append(conn: Any, row: Mapping[str, Any], metadata: dict[str, Any],
     state.update(
         last_seq=batch.seq,
         flow_count=flow_count,
+        # Recorded requests replay leaves out (most often a path that carries a credential),
+        # like an import's unsupported_request_count; request_count and endpoint_count still
+        # include them.
+        unsupported_request_count=int(state.get("unsupported_request_count") or 0)
+        + sum(1 for item in index if not item.get("supported", True)),
         document_bytes=built["document_bytes"],
         refused_out_of_scope=int(state.get("refused_out_of_scope") or 0) + built["refused_scope"],
         refused_over_limit=int(state.get("refused_over_limit") or 0) + built["refused_limit"],
