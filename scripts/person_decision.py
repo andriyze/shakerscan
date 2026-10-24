@@ -229,13 +229,22 @@ def _prune_saved(directory: str) -> None:
             pass
 
 
+def _word(value: Any) -> str | None:
+    """``value`` as one shell word of a command, or None when it could be read as an option
+    (it starts with "-"): a value an agent's request carried never becomes an option of the
+    person's command (``--url=...`` would send the person's connection elsewhere)."""
+    text = str(value)
+    return None if not text or text.startswith("-") else shlex.quote(text)
+
+
 def person_command(method: str, path: str, body: bytes | None, detail: Mapping[str, Any] | None = None) -> str:
     """The command the person runs in their own terminal to make this decision: the dedicated
     command where there is one (a budget raise, a target's authorization), else exactly this
     request through ``shakerscan api``. For a refused submission (``detail`` names a
     ``submission``) it is always the target's authorization, by the ``target_id`` the gateway
     names, and never the submission itself: the person would otherwise run the agent's scan or
-    retest as their own, and it would run twice."""
+    retest as their own, and it would run twice. Every value taken from the request is one quoted
+    shell word, never an option (_word)."""
     route = urllib.parse.urlsplit(path).path
     parts = [part for part in route.split("/") if part]
     try:
@@ -247,41 +256,50 @@ def person_command(method: str, path: str, body: bytes | None, detail: Mapping[s
     named = str(detail.get("target_id") or "")
     if detail.get("submission") and _UUID.fullmatch(named):
         return f"shakerscan targets authorize {named.lower()}"
+
+    def authorize(value: Any) -> str | None:
+        word = _word(value)
+        return f"shakerscan targets authorize {word}" if word else None
+
+    found: str | None = None
     if method == "POST" and route == "/targets" and payload and isinstance(payload.get("url"), str) \
             and payload.get("authorized_by") is not None:
         # Registered first, then authorized on its own (the gateway names its environment then).
-        return f"shakerscan targets authorize {shlex.quote(payload['url'])}"
-    if method == "POST" and route == "/targets/hosts" and payload and isinstance(payload.get("locator"), str) \
+        found = authorize(payload["url"])
+    elif method == "POST" and route == "/targets/hosts" and payload and isinstance(payload.get("locator"), str) \
             and payload.get("approved_by") is not None:
-        return f"shakerscan targets authorize {shlex.quote('host://' + payload['locator'])}"
-    if method == "POST" and len(parts) == 3 and parts[0] == "hunts" and parts[2] == "budget-amendments" and payload:
+        found = authorize("host://" + payload["locator"])
+    elif method == "POST" and len(parts) == 3 and parts[0] == "hunts" and parts[2] == "budget-amendments" and payload:
         limits = payload.get("limits") if isinstance(payload.get("limits"), dict) else {}
         pairs = [f"--limit {shlex.quote(f'{key}={value}')}" for key, value in sorted(limits.items())
                  if isinstance(key, str) and type(value) is int]
-        if pairs and len(pairs) == len(limits):
+        hunt = _word(parts[1])
+        if hunt and pairs and len(pairs) == len(limits):
             resume = " --resume" if payload.get("resume") is True else ""
-            return f"shakerscan hunt budget raise {shlex.quote(parts[1])} " + " ".join(pairs) + resume
-    if method == "POST" and len(parts) == 3 and parts[0] == "targets" and parts[2] == "authorization":
-        tier = (payload or {}).get("risk_tier")
-        if tier in (None, "active"):
-            return f"shakerscan targets authorize {shlex.quote(parts[1])}"
-    if method == "POST" and route == "/scans" and payload and isinstance(payload.get("target"), str):
-        return f"shakerscan targets authorize {shlex.quote(payload['target'])}"
-    if method == "POST" and route == "/hunts" and payload and isinstance(payload.get("target_id"), str):
-        return f"shakerscan targets authorize {shlex.quote(payload['target_id'])}"
-    if method == "POST" and len(parts) == 3 and parts[0] == "targets" and parts[2] in {"scan", "network-scans"}:
-        return f"shakerscan targets authorize {shlex.quote(parts[1])}"
-    if method == "POST" and len(parts) == 3 and parts[0] == "devices" and parts[2] == "scan":
+            found = f"shakerscan hunt budget raise {hunt} " + " ".join(pairs) + resume
+    elif method == "POST" and len(parts) == 3 and parts[0] == "targets" and parts[2] == "authorization":
+        if (payload or {}).get("risk_tier") in (None, "active"):
+            found = authorize(parts[1])
+    elif method == "POST" and route == "/scans" and payload and isinstance(payload.get("target"), str):
+        found = authorize(payload["target"])
+    elif method == "POST" and route == "/hunts" and payload and isinstance(payload.get("target_id"), str):
+        found = authorize(payload["target_id"])
+    elif method == "POST" and len(parts) == 3 and parts[0] in {"targets", "devices"} \
+            and parts[2] in ({"scan", "network-scans"} if parts[0] == "targets" else {"scan"}):
         # A device is authorized under the same route as a target (its id).
-        return f"shakerscan targets authorize {shlex.quote(parts[1])}"
-    if detail.get("submission"):
-        # A retest whose target the gateway did not name: never the retest itself.
-        return "shakerscan targets authorize <the target's URL or id>"
+        found = authorize(parts[1])
+    if found:
+        return found
+    if detail.get("submission") or (method == "POST" and route in {"/scans", "/hunts"}):
+        # A submission whose target is not named here as one word: never the submission itself.
+        # `<target>`: a placeholder a shell cannot mistake for an open quote when pasted whole.
+        return "shakerscan targets authorize <target>"
     if method == "POST" and payload and (secret := _SECRET.fullmatch(route)):
-        target, reference, what = (shlex.quote(part) for part in secret.groups())
-        if secret.group(3) == "state" and payload == {"state": "active"}:
+        target, reference = _word(secret.group(1)), _word(secret.group(2))
+        if target and reference and secret.group(3) == "state" and payload == {"state": "active"}:
             return f"shakerscan secrets reactivate {target} {reference}"
-        if secret.group(3) == "expiry" and set(payload) == {"days"} and type(payload["days"]) is int:
+        if target and reference and secret.group(3) == "expiry" and set(payload) == {"days"} \
+                and type(payload["days"]) is int:
             return f"shakerscan secrets expiry {target} {reference} --days {payload['days']}"
     text = body.decode("utf-8", "replace") if body else ""
     request = "shakerscan api " + " ".join(shlex.quote(part) for part in (method, path))
