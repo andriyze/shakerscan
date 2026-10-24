@@ -67,7 +67,11 @@ jobs:
           python -m build --outdir dist client
           ls -l dist
       - name: Client tests
-        run: python -m pytest -q -p no:cacheprovider tests/test_shakerscan_client.py
+        run: |
+          set -euo pipefail
+          python -m pytest -q -p no:cacheprovider tests/test_shakerscan_client.py
+          # The package's own tests (client/tests), against the package source.
+          PYTHONPATH=client/src python -m pytest -q -p no:cacheprovider client/tests
       - name: Smoke the built wheel in a clean environment
         run: |
           set -euo pipefail
@@ -163,16 +167,18 @@ jobs:
   # What `pipx install shakerscan` and `uv tool install shakerscan` install is a resolution of the
   # declared ranges at install time (python-fido2 exactly 2.2.1, cryptography 50.0.x), not the
   # lock: the built wheel is also installed with no lock, as they do, on Linux x86-64 and macOS
-  # arm64 with the oldest and the build's Python, and the touch path's libraries are exercised as
-  # resolved at publish time. An Intel Mac's cryptography 48.0.x is checked through the lock only
-  # (there is no Intel macOS runner).
+  # arm64, with the oldest supported Python, the build's, and the newer ones a Homebrew-based
+  # pipx or a current distribution runs (3.13 to 3.15; a 3.15 pre-release until its final
+  # release is on the runners), and the touch path's libraries are exercised as resolved at
+  # publish time. An Intel Mac's cryptography 48.0.x is checked through the lock only (there is no
+  # Intel macOS runner).
   smoke-unlocked:
     needs: build
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
         os: [ubuntu-latest, macos-latest]
-        python: ["3.10", "3.12"]
+        python: ["3.10", "3.12", "3.13", "3.14", "3.15"]
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
         with:
@@ -180,6 +186,7 @@ jobs:
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
         with:
           python-version: ${{ matrix.python }}
+          allow-prereleases: true
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: client-dist
