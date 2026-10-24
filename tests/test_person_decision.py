@@ -1785,6 +1785,26 @@ def test_a_large_request_is_named_by_a_saved_body_not_one_long_line(tmp_path, mo
         api_cli.build_request("PUT", path, "@" + str(tmp_path / "missing.json"), api_url=ORIGIN, token=None)
 
 
+def test_a_saved_body_is_removed_after_a_week(tmp_path, monkeypatch):
+    """Saved bodies were never cleaned up. One older than a week is removed the next time a body
+    is saved; a newer one, and any file the client did not save there, stays."""
+    import os
+    import time
+
+    monkeypatch.setenv("SHAKERSCAN_CONFIG_DIR", str(tmp_path / "cfg"))
+    path = f"/targets/{TARGET}/hunt-authority"
+    old = Path(decision.person_command("PUT", path, json.dumps({"ids": [TARGET] * 100}).encode()).split(" @", 1)[1])
+    recent = Path(decision.person_command("PUT", path, json.dumps({"ids": [TARGET] * 101}).encode()).split(" @", 1)[1])
+    other = old.parent / "notes.json"
+    other.write_text("{}")
+    week = decision.SAVED_SECONDS
+    os.utime(old, (time.time() - week - 60,) * 2)
+    os.utime(other, (time.time() - week - 60,) * 2)
+    os.utime(recent, (time.time() - week + 3600,) * 2)
+    decision.person_command("PUT", path, json.dumps({"ids": [TARGET] * 102}).encode())
+    assert not old.exists() and recent.exists() and other.exists()
+
+
 def test_a_body_that_cannot_be_saved_is_named_without_it(tmp_path, monkeypatch):
     blocked = tmp_path / "file"
     blocked.write_text("")
