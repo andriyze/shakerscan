@@ -1636,6 +1636,33 @@ def test_a_refused_decision_in_the_watch_says_the_persons_command():
     assert "change the environment a target or device is judged in" in environment
 
 
+def test_a_refused_start_in_the_watch_says_to_ask_the_agent_for_its_command():
+    """A Hunt start past its session's safety budget: the feed keeps no request body, so the
+    watch cannot name the start's own `shakerscan api POST /hunts` command; it says whom to ask
+    for it, and what the decision is."""
+    when = 1792772519
+    line = approval.person_decision_line({"at": when, "made": "refused", "decision": "hunt.start",
+                                          "method": "POST", "path": "/hunts", "connection": "agent"})
+    assert "refused, a key touch is required (ask the agent for its command: the start's own" in line
+    assert "`shakerscan api POST /hunts ...` line, which only its output has)" in line
+    assert "start a Hunt past its agent session's safety budget (POST /hunts)" in line
+    assert "run in your terminal" not in line
+    said = approval.person_decision_line({"at": when, "made": "refused", "decision": "hunt.start",
+                                          "summary": "Start a Hunt of honey.example.com", "connection": "agent"})
+    assert said.endswith(": Start a Hunt of honey.example.com via connection agent")
+
+
+def test_a_token_is_only_ever_sent_over_https_by_the_touch():
+    """The approval routes take the connection's bearer token; over http:// it is refused before
+    any request is built (defense in depth: the commands refuse such a connection first)."""
+    for url in ("http://gateway.example.com", "HTTP://gateway.example.com", "gateway.example.com"):
+        with pytest.raises(decision.PersonDecisionError, match="only ever sent over https://"):
+            decision.json_poster(url, "secret-token")
+    assert callable(decision.json_poster("https://gateway.example.com/", "secret-token"))
+    # No token, no bearer header: nothing to protect (an engine without one).
+    assert callable(decision.json_poster("http://127.0.0.1:8080", None))
+
+
 def test_an_approval_names_whom_it_is_for_at_the_proof_not_in_a_line_of_its_own(monkeypatch):
     """The client asks for no sign-in name; someone using a token that acts for another person
     used to be asked for that person's proof without being told. The touch prompt names them

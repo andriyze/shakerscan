@@ -622,8 +622,13 @@ raised state-changing requests 20 -> 40 (safety ceiling) for Hunt 3f2a91c0-…
   key has no display. Touch only for a prompt you started, and read the decision it names. Running
   an agent as another computer user, or in a container, with its own connection, keeps your
   client, token file and key out of its reach. Your client then reads no file of the agent's
-  either: a body over 1,024 characters, which the agent's refusal saves under the agent's own
-  decisions directory for `shakerscan api … @FILE`, is decided in the browser.
+  either: a body over 1,024 characters (a long Hunt start, typically), which the agent's refusal
+  saves under the agent's own decisions directory for `shakerscan api … @FILE`, is not readable
+  to you. Ask the agent for the body, save it in your own decisions directory
+  (`~/.config/shakerscan/decisions/`), run the same command with that file and read the decision
+  the touch prompt names (the gateway says it from the bytes you send), or decide in the browser.
+  `approve --watch` cannot name a refused start's command (the gateway keeps no request body): it
+  says to ask the agent for it.
 - **Keys.** A USB FIDO2 key (a YubiKey 5, for example) over python-fido2. Touch ID, Windows Hello
   and synced passkeys are out of reach of a terminal client, and Windows is not supported for the
   touch in this release. On Linux, python-fido2 lists only the keys this user can open, so a key

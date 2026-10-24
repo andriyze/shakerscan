@@ -1995,7 +1995,12 @@ _DECISION_WORDS = {
     "secret.reactivate": "reactivate a discovered secret",
     "secret.expiry": "change a discovered secret's expiry",
     "target.environment": "change the environment a target or device is judged in",
+    "hunt.start": "start a Hunt past its agent session's safety budget",
 }
+# A refused Hunt start: the feed keeps no request body, so the start's own command is the agent's
+# to give (its refusal line ends with it).
+_ASK_THE_AGENT = (" (ask the agent for its command: the start's own `shakerscan api POST /hunts ...` "
+                  "line, which only its output has)")
 
 
 class PersonDecisionFeed:
@@ -2042,6 +2047,8 @@ def person_decision_line(item: Mapping[str, Any]) -> str:
         head = "refused, a key touch is required"
         if run := _refused_command(item):
             head += f" (run in your terminal: {run})"
+        elif kind == "hunt.start":
+            head += _ASK_THE_AGENT
     else:
         outcome = str(item.get("outcome") or "")
         refused = outcome.startswith("unproven_")
