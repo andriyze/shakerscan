@@ -81,15 +81,17 @@ Rust and OpenSSL toolchain exists.
 
 The package declares exactly `fido2==2.2.1` (the touch path is security-sensitive, so a new
 python-fido2 release reaches you only with a client release that was checked with it) and
-`cryptography` within the releases the client's publish checks run: `>=50.0.2,<51`, or
-`>=48.0.1,<49` on an Intel Mac. A plain `pipx` or `uv tool` install resolves the newest matching
+`cryptography>=50.0.2,<52` (from the release the publish checks lock up to python-fido2's own
+bound, so cryptography's fixes keep reaching an installed client), or `>=48.0.1,<49` on an Intel
+Mac. A plain `pipx` or `uv tool` install resolves the newest matching
 releases from the package index without hashes. What is tested before a client is published:
 the built wheel installed from the hash-locked set in `client/requirements/runtime.lock`
 (python-fido2 2.2.1, cryptography 50.0.2, or 48.0.1 on an Intel Mac, with their dependencies;
 `pip install --require-hashes -r client/requirements/runtime.lock` installs exactly that), and the
 same wheel installed with no lock, as `pipx` does, on Linux x86-64 and Apple Silicon macOS with
 Python 3.10, 3.12, 3.13, 3.14 and 3.15 (a 3.15 pre-release until its final release reaches the
-CI runners): it checks that python-fido2 2.2.1 and a cryptography 50.0.x were resolved,
+CI runners; that pre-release is checked but never holds up a release): it checks that
+python-fido2 2.2.1 and a cryptography within the declared range were resolved,
 imports python-fido2's USB and CTAP2 client and verifies an ES256 signature through it. An Intel
 Mac's set is checked through the lock only (there is no Intel macOS runner), and a cryptography
 patch release after the client was published is installed untested (still within the declared

@@ -26,13 +26,15 @@ classifiers = [
 # everywhere it installed before: macOS and 64-bit Linux (x86-64, ARM64). Windows (no terminal
 # touch yet), 32-bit and other Linux architectures and the BSDs install the client without it
 # (`pipx inject shakerscan fido2` adds it where a wheel or a toolchain exists).
-# cryptography within the releases the publish checks run (the hash-locked set in
-# client/requirements/runtime.lock, and what pip resolves from these ranges when it publishes):
-# 50.0.x, and 48.0.x on an Intel Mac (49 and later publish no Intel macOS wheel).
+# cryptography from the release the publish checks lock (client/requirements/runtime.lock) up to
+# python-fido2's own bound (<52), so its fixes keep reaching an installed client and a shared
+# environment is constrained no more than python-fido2 constrains it; what pip resolves from that
+# range is checked when the client publishes. 48.0.x on an Intel Mac (49 and later publish no
+# Intel macOS wheel).
 dependencies = [
   'fido2==2.2.1; sys_platform == "darwin" or (sys_platform == "linux" and (platform_machine == "x86_64" or platform_machine == "aarch64"))',
   'cryptography>=48.0.1,<49; sys_platform == "darwin" and platform_machine == "x86_64"',
-  'cryptography>=50.0.2,<51; (sys_platform == "darwin" and platform_machine != "x86_64") or (sys_platform == "linux" and (platform_machine == "x86_64" or platform_machine == "aarch64"))',
+  'cryptography>=50.0.2,<52; (sys_platform == "darwin" and platform_machine != "x86_64") or (sys_platform == "linux" and (platform_machine == "x86_64" or platform_machine == "aarch64"))',
 ]
 
 [project.optional-dependencies]

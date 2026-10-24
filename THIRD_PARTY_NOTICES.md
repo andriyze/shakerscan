@@ -94,7 +94,7 @@ its dependencies cryptography (Apache-2.0 OR BSD-3-Clause), cffi (MIT), pycparse
 and, on Python 3.10, typing-extensions (PSF-2.0). The versions a client release was reviewed and
 tested with are pinned with hashes in `client/requirements/runtime.lock` and inventoried in the
 client's release SBOM. `pipx install shakerscan` or `uv tool install shakerscan` resolves the
-declared requirements (exactly `fido2==2.2.1`; `cryptography>=50.0.2,<51`, or `>=48.0.1,<49` on an
+declared requirements (exactly `fido2==2.2.1`; `cryptography>=50.0.2,<52`, or `>=48.0.1,<49` on an
 Intel Mac; whatever versions of their own dependencies match) from the package index at install
 time, without hashes; `pip install --require-hashes -r client/requirements/runtime.lock` installs
 exactly the locked set. Before a client is published its wheel is checked both ways: from the lock,

@@ -1523,13 +1523,14 @@ def test_python_fido2_is_declared_only_where_cryptography_ships_wheels(platform,
     applying = [Requirement(text) for text in project["dependencies"]
                 if Requirement(text).marker.evaluate(environment)]
     assert any(item.name == "fido2" for item in applying) is declared
-    # cryptography within the releases the publish checks run, where python-fido2 installs: 48.0.x
-    # on an Intel Mac (no wheel of 49 or later there), 50.0.x elsewhere; never declared otherwise.
+    # cryptography where python-fido2 installs: 48.0.x on an Intel Mac (no wheel of 49 or later
+    # there), elsewhere from the locked 50.0.2 up to python-fido2's own bound (<52), so its fixes
+    # keep arriving; never declared otherwise.
     from packaging.specifiers import SpecifierSet
 
     crypto = [item.specifier for item in applying if item.name == "cryptography"]
     intel_mac = platform == "darwin" and machine == "x86_64"
-    expected = [SpecifierSet(">=48.0.1,<49" if intel_mac else ">=50.0.2,<51")] if declared else []
+    expected = [SpecifierSet(">=48.0.1,<49" if intel_mac else ">=50.0.2,<52")] if declared else []
     assert crypto == expected, crypto
     assert all(str(Requirement(text).specifier) for text in project["dependencies"])
     assert approval.fido2_declared(platform, machine) is declared
