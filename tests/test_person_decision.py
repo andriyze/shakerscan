@@ -734,14 +734,14 @@ def test_the_yes_flag_never_bypasses_the_touch(gateway, monkeypatch, capsys):
 
 
 def test_the_local_question_is_not_asked_twice_when_a_touch_confirms(monkeypatch, capsys):
-    monkeypatch.setattr(scan_cli, "_touch_confirms", lambda url: True)
+    monkeypatch.setattr(scan_cli, "_touch_follows", lambda url, target: True)
     monkeypatch.setattr(sys, "stdin", types.SimpleNamespace(isatty=lambda: True))
     monkeypatch.setattr("builtins.input", lambda prompt="": pytest.fail("asked twice"))
     args = types.SimpleNamespace(active_testing=True, confirm_active=False, target="https://a.example.com",
                                  api_url=ORIGIN)
     scan_cli._confirm_active(args)
     assert "touch of your security key" in capsys.readouterr().err
-    monkeypatch.setattr(scan_cli, "_touch_confirms", lambda url: False)
+    monkeypatch.setattr(scan_cli, "_touch_follows", lambda url, target: False)
     monkeypatch.setattr("builtins.input", lambda prompt="": "no")
     with pytest.raises(scan_cli.ScanCliError, match="cancelled"):
         scan_cli._confirm_active(args)
@@ -1140,7 +1140,9 @@ def test_a_refused_start_is_sent_again_only_after_the_person_authorized_the_targ
     line = decision.refusal_line(refused, command)
     assert f"shakerscan targets authorize {TARGET}" in line
     assert "Do not send this request again until the person says the target is authorized" in line
-    assert line.endswith("then send it once (with the same Idempotency-Key, if it had one)")
+    assert "then send it once (with the same Idempotency-Key, if it had one)." in line
+    # The command ends the line, so a copy that takes the line's end takes no period with it.
+    assert line.endswith(f"touches their security key: shakerscan targets authorize {TARGET}")
     plain = decision.refusal_line(REFUSAL["detail"], "shakerscan hunt budget raise x")
     assert "same request again" not in plain
     message = email.message.Message()
@@ -1250,7 +1252,7 @@ def test_a_refused_retest_or_network_scan_names_the_targets_authorization_never_
     # Without the target's id (the gateway could not read it), still never the work itself.
     unnamed = {key: value for key, value in refused.items() if key != "target_id"}
     if path.startswith("/findings/"):
-        assert decision.person_command(method, path, raw, unnamed).startswith("shakerscan targets authorize <")
+        assert decision.person_command(method, path, raw, unnamed) == "shakerscan targets authorize TARGET-ID"
     elif path.startswith("/devices/"):
         assert decision.person_command(method, path, raw, unnamed) == f"shakerscan targets authorize {DEVICE}"
 
@@ -1583,13 +1585,15 @@ def test_targets_authorize_records_the_person_the_connection_acts_for(monkeypatc
     off = {**person, "person_decision_proof": False}
     assert decisions._decider(client(off), "authorize") == (
         "service token andriy-mac for alice via shakerscan targets authorize "
-        "(made with a token, not proven by a person)")
+        "(made with the token; no security-key touch proved who ran it)")
     service = {"user": {"display": "CI", "token_label": "ci"}, "acts_for_name": None, "person_decision_proof": False}
     assert decisions._decider(client(service), "unauthorize") == (
-        "service token ci (CI) via shakerscan targets unauthorize (made with a token, not proven by a person)")
+        "service token ci (CI) via shakerscan targets unauthorize "
+        "(made with the token; no security-key touch proved who ran it)")
     older = {"user": {"display": "Laptop", "subject": "laptop"}}
     assert decisions._decider(client(older), "authorize") == (
-        "a service token (Laptop) via shakerscan targets authorize (made with a token, not proven by a person)")
+        "a service token (Laptop) via shakerscan targets authorize "
+        "(made with the token; no security-key touch proved who ran it)")
     assert decisions._decider(client(OSError("404")), "authorize") == "root via shakerscan targets authorize"
     for proof in (True, False):
         long = {"user": {"display": "x" * 300, "token_label": "y" * 300}, "acts_for_name": "z" * 300,
@@ -1987,14 +1991,16 @@ def test_a_value_that_reads_as_an_option_is_never_one(hostile):
         options = [word for word in words if word.startswith("-")]
         assert set(options) <= {"--limit", "--resume", "--days"}, words
         if path.startswith(("/scans", "/hunts")) and path in {"/scans", "/hunts"}:
-            assert words == ["shakerscan", "targets", "authorize", "<target>"], words
+            assert words == ["shakerscan", "targets", "authorize", "TARGET-ID"], words
 
 
 def test_a_refused_retest_without_a_target_names_a_placeholder_a_shell_does_not_wait_on():
     """The command used to read `<the target's URL or id>`: pasted whole, the apostrophe left the
-    shell waiting for a closing quote."""
+    shell waiting for a closing quote; then `<target>`, which a shell reads as input redirected
+    from a file named target. TARGET-ID is one plain word, which `targets authorize` refuses."""
     command = decision.person_command("POST", f"/findings/{HUNT}/retest", b"{}", {"submission": "retest"})
-    assert command == "shakerscan targets authorize <target>" and "'" not in command
+    assert command == "shakerscan targets authorize TARGET-ID"
+    assert not set(command) & set("'\"<>|;&$`")
 
 
 def test_targets_authorize_with_the_switch_off_is_sent_and_recorded_as_the_tokens(gateway, monkeypatch, capsys):
@@ -2002,7 +2008,7 @@ def test_targets_authorize_with_the_switch_off_is_sent_and_recorded_as_the_token
     the engine records the token first and that no person proved it."""
     decisions = _client_module(monkeypatch, gateway)
     monkeypatch.setenv("SHAKERSCAN_API_TOKEN", "token-1")
-    at_a_terminal(monkeypatch, stdin=False)
+    out = at_a_terminal(monkeypatch, stdin=False)
     import shakerscan.cli as cli
 
     monkeypatch.setattr(cli, "apply_connection", lambda args: ORIGIN)
@@ -2022,7 +2028,10 @@ def test_targets_authorize_with_the_switch_off_is_sent_and_recorded_as_the_token
     assert decisions.cmd_targets(args) == 0
     authorized = [sent for sent in gateway.sent if sent["url"].endswith("/authorization")]
     assert json.loads(authorized[0]["data"])["approved_by"] == (
-        "service token laptop for alice via shakerscan targets authorize (made with a token, not proven by a person)")
+        "service token laptop for alice via shakerscan targets authorize "
+        "(made with the token; no security-key touch proved who ran it)")
+    # The person who ran it is told why the record names the token.
+    assert "requires no security-key touch for it, so the record names the connection's token" in out.getvalue()
     capsys.readouterr()
 
 
@@ -2033,13 +2042,255 @@ def test_a_raise_records_why_and_that_no_person_proved_it_where_no_touch_is_requ
     off = {"user": {"display": "Laptop", "token_label": "laptop"}, "acts_for_name": "alice",
            "person_decision_proof": False}
     assert decisions._raise_reason(None, off) == (
-        "Raised with service token laptop for alice; made with a token, not proven by a person "
+        "Raised via service token laptop for alice; no security-key touch proved who ran it "
         "(shakerscan hunt budget raise)")
     assert decisions._raise_reason("the login form needs more", off) == (
-        "the login form needs more (service token laptop for alice; made with a token, not proven by a person)")
+        "the login form needs more (via service token laptop for alice; no security-key touch proved who ran it)")
     # Where a touch is required the gateway writes its own reason; on an open-source engine there
     # are no tokens.
     assert decisions._raise_reason(None, {**off, "person_decision_proof": True}) == (
         "Raised from the terminal (shakerscan hunt budget raise)")
     assert decisions._raise_reason("why", None) == "why"
     assert len(decisions._raise_reason("x" * 900, off)) <= 500
+
+
+# ---- the key's PIN, one approver per watch, a copied command, the local question --------------
+
+
+def _pin_asking_fido2(monkeypatch, seen):
+    """FAKE python-fido2 (unit fixture) whose key asks for its PIN during the assertion."""
+
+    class Client:
+        def __init__(self, device, user_interaction=None, **kwargs):
+            self.interaction = user_interaction
+
+        def get_assertion(self, options):
+            seen["pin"] = self.interaction.request_pin(None, "gateway.example.com")
+            inner = types.SimpleNamespace(client_data=b"{}", authenticator_data=b"a", signature=b"s", user_handle=None)
+            return types.SimpleNamespace(get_response=lambda index: types.SimpleNamespace(raw_id=b"id", response=inner))
+
+    keys = [types.SimpleNamespace(descriptor=types.SimpleNamespace(product_name="YubiKey"))]
+    modules = {
+        "fido2": types.ModuleType("fido2"),
+        "fido2.client": types.SimpleNamespace(Fido2Client=Client, UserInteraction=object,
+                                              DefaultClientDataCollector=lambda origin: origin),
+        "fido2.hid": types.SimpleNamespace(CtapHidDevice=types.SimpleNamespace(list_devices=lambda: iter(keys))),
+        "fido2.webauthn": types.SimpleNamespace(
+            PublicKeyCredentialDescriptor=lambda **k: k, PublicKeyCredentialRequestOptions=lambda **k: k,
+            PublicKeyCredentialType=types.SimpleNamespace(PUBLIC_KEY="public-key"),
+            UserVerificationRequirement=lambda value: f"uv:{value}"),
+    }
+    for name, module in modules.items():
+        monkeypatch.setitem(sys.modules, name, module)
+
+
+@pytest.mark.parametrize(("retries", "words"), [
+    (8, " 8 PIN tries are left."),
+    (2, " Only 2 PIN tries are left before the key blocks its PIN; unblocking it resets the key"),
+    (1, " Only 1 PIN try is left"),
+    (None, "where you enrolled one."),
+])
+def test_the_pin_prompt_says_it_is_the_keys_pin_not_an_authenticator_code(monkeypatch, retries, words):
+    """With the switch off a plugged-in key is preferred over the authenticator code, and the
+    gateway asks for its PIN: someone used to typing the 6-digit code at that prompt spent the
+    key's PIN tries on it (three in a row need the key removed and inserted again; eight block its
+    PIN, and a reset removes every credential on the key)."""
+    seen = {}
+    _pin_asking_fido2(monkeypatch, seen)
+    monkeypatch.setattr(approval, "pin_retries", lambda device: retries)
+
+    class Typed(approval.Terminal):
+        def secret(self, prompt):
+            self.stdout.write(prompt)
+            return "4321"
+
+    terminal = Typed(io.StringIO(), io.StringIO())
+    approval.security_key_assertion({"challenge": "AA", "userVerification": "required"}, ORIGIN, terminal)
+    text = terminal.stdout.getvalue()
+    notice = text.index("asks for your security key's own PIN (the one set on the key), not your authenticator")
+    assert notice < text.index("Security key PIN (not your authenticator code): ")
+    assert words in text and "--method totp approves with the code instead" in text
+    assert seen["pin"] == "4321"
+
+
+def test_the_pin_tries_are_read_silently_or_not_at_all(monkeypatch):
+    calls = []
+
+    class ClientPin:
+        def __init__(self, ctap):
+            calls.append(ctap)
+
+        def get_pin_retries(self):
+            return 5, None
+
+    monkeypatch.setitem(sys.modules, "fido2.ctap2", types.SimpleNamespace(Ctap2=lambda device: ("ctap", device)))
+    monkeypatch.setitem(sys.modules, "fido2.ctap2.pin", types.SimpleNamespace(ClientPin=ClientPin))
+    assert approval.pin_retries("key") == 5 and calls == [("ctap", "key")]
+
+    def refused(ctap):
+        raise FakeCtapError("INVALID_COMMAND")
+
+    monkeypatch.setitem(sys.modules, "fido2.ctap2.pin", types.SimpleNamespace(ClientPin=refused))
+    assert approval.pin_retries("key") is None
+    assert "not an authenticator code" in approval.key_failure(
+        types.SimpleNamespace(code=None, cause=types.SimpleNamespace(code=types.SimpleNamespace(name="PIN_INVALID"))))
+
+
+def test_a_touch_mode_watch_names_the_approver_once_for_every_decision(monkeypatch):
+    """A watch started without --account printed 'Approving as alice, ...' before every decision
+    (and read the gateway's description again each time): the approver session it was refused
+    named nobody, and each decision began without a name. The name the first decision's challenge
+    gives is passed to every later one."""
+    from tests.test_hunt_approve import ORIGIN as SCRIPTED_ORIGIN
+    from tests.test_hunt_approve import Gateway, Terminal, _request
+
+    gateway = Gateway(_request(), _request(id="cccccccc-cccc-4ccc-8ccc-cccccccccccc", title="Second"),
+                      methods=("security_key",))
+    original = gateway.__call__
+    begun = []
+
+    def touch_only(method, path, payload=None, headers=None, *, timeout=None):
+        if (answer := newer_gateway(method, path)) is not None:
+            return answer
+        if path == approval.BEGIN_PATH and payload["purpose"] == "approver_session":
+            return 403, {"schema_version": "shakerscan-approval-error/v1", "error": "touch_required",
+                         "message": "each decision is one touch"}
+        if path == approval.BEGIN_PATH:
+            begun.append(payload["account"])
+            status, answer = original(method, path, {**payload, "account": "alice"}, headers, timeout=timeout)
+            return status, {**answer, "account": "alice"}
+        return original(method, path, payload, headers, timeout=timeout)
+
+    monkeypatch.setattr(approval.StepUp, "prove", lambda self, challenge: {"method": "security_key", "credential": {}})
+    monkeypatch.setattr(approval, "security_key_readiness", lambda **_: "")
+    terminal = Terminal(keys=["a", "a"])
+
+    def stop(seconds):
+        raise KeyboardInterrupt
+
+    assert approval.watch(touch_only, terminal, enterprise=True, origin=SCRIPTED_ORIGIN,
+                          poll_seconds=0.01, sleep=stop) == 0
+    assert terminal.text.count("Approving as alice, the person this connection acts for") == 1, terminal.text
+    assert begun == ["", "alice"], "the second decision names the approver the first one was given"
+    assert all(item["status"] == "granted" for item in gateway.requests.values())
+
+
+def _decisions_module():
+    sys.path.insert(0, str(ROOT / "client" / "src"))
+    from shakerscan import decisions
+
+    return decisions
+
+
+@pytest.mark.parametrize("value", [f"{TARGET}.", f"{TARGET},", f"{TARGET})", "https://app.example.com.",
+                                   "https://app.example.com/;", "TARGET-ID", "target-id", "<target>", "TARGET-URL"])
+def test_targets_authorize_refuses_a_placeholder_or_a_copied_punctuation_mark(gateway, monkeypatch, capsys, value):
+    """`targets authorize <id>.`, copied with the sentence's period, registered and authorized a
+    target `https://<id>.`; a placeholder pasted as it was printed registered a host of that
+    name. Both are refused before anything is sent."""
+    decisions = _client_module(monkeypatch, gateway)
+    monkeypatch.setenv("SHAKERSCAN_API_TOKEN", "token-1")
+    at_a_terminal(monkeypatch)
+    import shakerscan.cli as cli
+
+    monkeypatch.setattr(cli, "apply_connection", lambda args: ORIGIN)
+    args = types.SimpleNamespace(action="authorize", target=value, reason=None, json=False,
+                                 timeout=None, url=None, token_file=None)
+    assert decisions.cmd_targets(args) == 2
+    assert gateway.sent == [] and gateway.begun == []
+    err = capsys.readouterr().err
+    if value.startswith(TARGET):
+        assert f"did you mean {TARGET}?" in err
+    elif "app.example.com" in value:
+        assert "ends in punctuation" in err
+    else:
+        assert "stands for the target" in err
+
+
+def test_a_named_target_is_kept_as_it_was_typed():
+    decisions = _decisions_module()
+    for value in (TARGET, TARGET.upper(), "https://app.example.com", "app.example.com:8443",
+                  "host://198.51.100.7", "https://app.example.com/path-(v2"):
+        assert decisions.checked_target(f"  {value} ") == value
+
+
+def test_the_agents_line_ends_with_the_persons_command_for_every_decision():
+    for detail in (REFUSAL["detail"], {**REFUSAL["detail"], "submission": "scan", "target_id": TARGET}):
+        line = decision.refusal_line(detail, "shakerscan targets authorize " + TARGET)
+        assert line.endswith(": shakerscan targets authorize " + TARGET), line
+        assert line.count("shakerscan targets authorize") == 1
+
+
+class _Answers:
+    """The scan command's JSON reads, scripted (unit fixture): what the gateway says of itself,
+    the target it registers for the URL and that target's standing authorization."""
+
+    def __init__(self, *, proof=True, authorization=None, fail=None):
+        self.proof, self.authorization, self.fail = proof, authorization, fail
+        self.asked = []
+
+    def __call__(self, url, **kwargs):
+        path = urllib.parse.urlsplit(url).path
+        self.asked.append((path, kwargs.get("payload")))
+        if self.fail == path:
+            raise scan_cli.ScanCliError("unreachable")
+        if path == "/_enterprise/me":
+            return {"person_decision_proof": self.proof}
+        if path == "/targets":
+            return {"id": TARGET.upper(), "url": "https://app.example.com/"}
+        if path == f"/targets/{TARGET}/authorization":
+            return {"target_id": TARGET, "authorization": self.authorization}
+        raise AssertionError(path)
+
+
+@pytest.mark.parametrize(("answers", "asked"), [
+    (_Answers(), False),
+    (_Answers(authorization={"standing": True, "approved_by": "alice"}), True),
+    (_Answers(proof=False), True),
+    (_Answers(fail="/targets"), True),
+    (_Answers(fail=f"/targets/{TARGET}/authorization"), True),
+])
+def test_the_local_question_stays_for_a_target_no_touch_will_confirm(monkeypatch, capsys, answers, asked):
+    """With the switch on the local "Type 'yes'" was dropped for every active scan, also of a
+    target already authorized, which then runs with no touch: the person's own accidental
+    `scan --active-testing` ran with no confirmation at all. The question is dropped only when the
+    target the engine registers for the URL holds no standing authorization, so the gateway asks
+    for the touch."""
+    monkeypatch.setattr(scan_cli, "_bearer_token", lambda: "token-1")
+    monkeypatch.setattr(scan_cli, "_request_json", answers)
+    monkeypatch.setattr(sys, "stdin", types.SimpleNamespace(isatty=lambda: True))
+    questions = []
+    monkeypatch.setattr("builtins.input", lambda prompt="": questions.append(prompt) or "yes")
+    args = types.SimpleNamespace(active_testing=True, confirm_active=False, target="https://app.example.com",
+                                 api_url=ORIGIN, credential_profile=[], approval_receipt=None)
+    scan_cli._confirm_active(args)
+    assert bool(questions) is asked, (questions, answers.asked)
+    if not asked:
+        assert "is not authorized yet: you confirm it with a touch of your security key" in capsys.readouterr().err
+        assert ("/targets", {"url": "https://app.example.com"}) in answers.asked
+
+
+def test_a_scan_with_its_own_credential_or_receipt_keeps_the_local_question(monkeypatch):
+    """The gateway asks a touch only for active work without a credential or receipt of its own."""
+    answers = _Answers()
+    monkeypatch.setattr(scan_cli, "_bearer_token", lambda: "token-1")
+    monkeypatch.setattr(scan_cli, "_request_json", answers)
+    monkeypatch.setattr(sys, "stdin", types.SimpleNamespace(isatty=lambda: True))
+    questions = []
+    monkeypatch.setattr("builtins.input", lambda prompt="": questions.append(prompt) or "yes")
+    for changes in ({"credential_profile": ["p-1"]}, {"approval_receipt": "r-1"}):
+        args = types.SimpleNamespace(active_testing=True, confirm_active=False, target="https://app.example.com",
+                                     api_url=ORIGIN, credential_profile=[], approval_receipt=None)
+        vars(args).update(changes)
+        scan_cli._confirm_active(args)
+    assert len(questions) == 2 and answers.asked == []
+
+
+def test_the_budget_reason_help_says_what_a_touch_records_instead():
+    import contextlib
+
+    decisions = _decisions_module()
+    out = io.StringIO()
+    with contextlib.redirect_stdout(out), pytest.raises(SystemExit):
+        decisions.hunt_budget_raise(["--help"], ORIGIN)
+    assert "the gateway records 'Raised by <you> (terminal security-key touch)'" in " ".join(out.getvalue().split())

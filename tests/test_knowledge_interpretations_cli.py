@@ -139,7 +139,7 @@ def test_a_pipe_never_dismisses(monkeypatch, capsys):
         monkeypatch.setattr(approval, "Terminal", REAL_TERMINAL)
         monkeypatch.setattr(sys, "stdin", io.StringIO("d\n"))
         assert v2_cli.main(["--api-url", stub.url, "knowledge", "dismiss", TARGET, FINDING,
-                            "--reason", "false_positive", "--note", "agent says"]) == 2
+                            "--reason", "false_positive", "--note", "agent says"]) == 3  # refused, nothing ran
         assert "interactive terminal" in capsys.readouterr().err
     assert stub.seen == []
 
