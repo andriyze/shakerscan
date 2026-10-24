@@ -195,20 +195,20 @@ def _me(client: Any) -> Mapping[str, Any] | None:
 
 # What the engine is told of a decision a connection's token sent without a person's touch (the
 # gateway's own audit says the same: made with a token, not proven by a person). It says what
-# happened, not that nobody was there: the person who ran the command reads it too.
-NO_TOUCH = "no security-key touch proved who ran it"
-UNPROVEN = "made with the token; " + NO_TOUCH
+# happened, not that nobody was there: the person who ran the command reads it too, and so does
+# everyone who opens the target in the scanner, so it is short.
+NO_TOUCH = "no security-key touch"
 
 
 def _token_words(me: Mapping[str, Any]) -> str:
-    """The connection, token first: 'service token <label> for <person>' (the person the token
-    acts for, as the gateway names them), else the service account's name."""
+    """The connection, token first: "<person>'s token <label>" (the person the token acts for, as
+    the gateway names them), else the service token and its service account's name."""
     user = me.get("user") if isinstance(me.get("user"), Mapping) else {}
     label = str(user.get("token_label") or "")[:60]
-    token = f"service token {label}" if label else "a service token"
     person = me.get("acts_for_name")
     if isinstance(person, str) and person.strip():
-        return f"{token} for {person.strip()[:100]}"
+        return f"{person.strip()[:100]}'s token {label}" if label else f"{person.strip()[:100]}'s service token"
+    token = f"service token {label}" if label else "a service token"
     account = str(user.get("display") or user.get("subject") or "")[:100]
     return f"{token} ({account})" if account else token
 
@@ -238,7 +238,7 @@ def _decider(client: Any, verb: str, me: Mapping[str, Any] | None | object = ...
         who = person if isinstance(person, str) and person.strip() else (user.get("display") or user.get("subject"))
         tail = f", service token {label}" if label else ""
         return f"{str(who or 'a service token')[:100]} via {through}{tail}"[:200]
-    return f"{_token_words(me)} via {through} ({UNPROVEN})"[:200]
+    return f"{_token_words(me)}, {NO_TOUCH} ({through})"[:200]
 
 
 def _named(target: Mapping[str, Any]) -> str:
@@ -336,7 +336,7 @@ def _raise_reason(given: str | None, me: Mapping[str, Any] | None) -> str:
     connection (token first) and that, after the reason given. On an open-source engine: the
     reason given, else that it came from the terminal."""
     if isinstance(me, Mapping) and not touch_required(me):
-        made = f"via {_token_words(me)}; {NO_TOUCH}"
+        made = f"with {_token_words(me)}, {NO_TOUCH}"
         if given:
             return f"{given.strip()[:400]} ({made})"[:500]
         return f"Raised {made} (shakerscan hunt budget raise)"[:500]

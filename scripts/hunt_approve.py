@@ -1200,10 +1200,11 @@ def preferred_method(methods: Sequence[str], webauthn: Mapping[str, Any] | None 
     """The proof to give when ``--method`` is not named: the security key whenever the gateway
     offers one, python-fido2 is installed and a plugged-in key holds one of the person's keys for
     this challenge (asked silently: nothing blinks), with the administrator's touch switch on or
-    off (off, the key asks for its PIN as at sign-in, never a 6-digit code); also when a key is the
-    only proof offered. A TOTP code only when no key can answer here (none plugged in, none
-    registered, or the gateway asks for a PIN the key has none for); then the browser.
-    ``--method totp`` still chooses the code."""
+    off (a touch, with no PIN, wherever the gateway asks only for user presence; an earlier
+    gateway asks the key's PIN, as at sign-in), never a 6-digit code while a key can answer;
+    also when a key is the only proof offered. A TOTP code only when no key can answer here (none
+    plugged in, none registered, or the gateway asks for a PIN the key has none for); for a
+    single sign-on person the browser sign-in then. ``--method totp`` still chooses the code."""
     if "security_key" in methods and security_keys_present():
         if "totp" in methods:
             # Only a key that says it holds one of the person's credentials: a code is there to
@@ -1214,7 +1215,9 @@ def preferred_method(methods: Sequence[str], webauthn: Mapping[str, Any] | None 
             # No code to fall back on: a key that could not be asked silently (a U2F-only key,
             # or a credential that answers only after its PIN) is tried too.
             return "security_key"
-    for method in ("totp", "security_key", "sso"):
+    # No key can answer here: the code, else the browser sign-in, are the fallbacks; a key the
+    # gateway offers alone is still asked (insert it when told).
+    for method in ("totp", "sso", "security_key"):
         if method in methods:
             return method
     return ""
@@ -1652,7 +1655,7 @@ def decide(send: Send, terminal: Terminal, requests: Sequence[Mapping[str, Any]]
     via = str(result.get("decision_via") or "terminal_stepup").replace("_", " ")
     webauthn = challenge.get("webauthn") if isinstance(challenge.get("webauthn"), Mapping) else {}
     if proof.get("method") == "security_key" and webauthn.get("userVerification") == "discouraged":
-        via = "security-key touch"  # the gateway asked a touch only (its administrator's switch)
+        via = "security-key touch"  # the gateway asked a touch only (user presence, no PIN)
     return _report(terminal, by_id, list(result.get("results") or ()),
                    decided_by=str(result.get("decided_by") or stepup.account), via=via)
 

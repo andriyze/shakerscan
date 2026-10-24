@@ -455,7 +455,10 @@ def test_approve_prefers_a_plugged_in_key_and_falls_back_as_before(monkeypatch):
     assert approval.preferred_method(["totp"]) == "totp"
     monkeypatch.setattr(approval, "security_keys_present", lambda: False)
     assert approval.preferred_method(["totp", "security_key"]) == "totp"
-    assert approval.preferred_method(["security_key", "sso"]) == "security_key"
+    # No key plugged in: the browser sign-in a single sign-on person has beside a registered key,
+    # as the code is a local person's fallback; a key that is the only proof is still asked.
+    assert approval.preferred_method(["sso", "security_key"]) == "sso"
+    assert approval.preferred_method(["security_key"]) == "security_key"
     assert approval.preferred_method(["sso"]) == "sso"
 
 
@@ -1584,16 +1587,13 @@ def test_targets_authorize_records_the_person_the_connection_acts_for(monkeypatc
     # (the scanner UI showed it as the person's own decision).
     off = {**person, "person_decision_proof": False}
     assert decisions._decider(client(off), "authorize") == (
-        "service token andriy-mac for alice via shakerscan targets authorize "
-        "(made with the token; no security-key touch proved who ran it)")
+        "alice's token andriy-mac, no security-key touch (shakerscan targets authorize)")
     service = {"user": {"display": "CI", "token_label": "ci"}, "acts_for_name": None, "person_decision_proof": False}
     assert decisions._decider(client(service), "unauthorize") == (
-        "service token ci (CI) via shakerscan targets unauthorize "
-        "(made with the token; no security-key touch proved who ran it)")
+        "service token ci (CI), no security-key touch (shakerscan targets unauthorize)")
     older = {"user": {"display": "Laptop", "subject": "laptop"}}
     assert decisions._decider(client(older), "authorize") == (
-        "a service token (Laptop) via shakerscan targets authorize "
-        "(made with the token; no security-key touch proved who ran it)")
+        "a service token (Laptop), no security-key touch (shakerscan targets authorize)")
     assert decisions._decider(client(OSError("404")), "authorize") == "root via shakerscan targets authorize"
     for proof in (True, False):
         long = {"user": {"display": "x" * 300, "token_label": "y" * 300}, "acts_for_name": "z" * 300,
@@ -2076,8 +2076,7 @@ def test_targets_authorize_with_the_switch_off_is_sent_and_recorded_as_the_token
     assert decisions.cmd_targets(args) == 0
     authorized = [sent for sent in gateway.sent if sent["url"].endswith("/authorization")]
     assert json.loads(authorized[0]["data"])["approved_by"] == (
-        "service token laptop for alice via shakerscan targets authorize "
-        "(made with the token; no security-key touch proved who ran it)")
+        "alice's token laptop, no security-key touch (shakerscan targets authorize)")
     # The person who ran it is told why the record names the token.
     assert "requires no security-key touch for it, so the record names the connection's token" in out.getvalue()
     capsys.readouterr()
@@ -2090,10 +2089,9 @@ def test_a_raise_records_why_and_that_no_person_proved_it_where_no_touch_is_requ
     off = {"user": {"display": "Laptop", "token_label": "laptop"}, "acts_for_name": "alice",
            "person_decision_proof": False}
     assert decisions._raise_reason(None, off) == (
-        "Raised via service token laptop for alice; no security-key touch proved who ran it "
-        "(shakerscan hunt budget raise)")
+        "Raised with alice's token laptop, no security-key touch (shakerscan hunt budget raise)")
     assert decisions._raise_reason("the login form needs more", off) == (
-        "the login form needs more (via service token laptop for alice; no security-key touch proved who ran it)")
+        "the login form needs more (with alice's token laptop, no security-key touch)")
     # Where a touch is required the gateway writes its own reason; on an open-source engine there
     # are no tokens.
     assert decisions._raise_reason(None, {**off, "person_decision_proof": True}) == (

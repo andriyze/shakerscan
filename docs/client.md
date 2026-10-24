@@ -409,14 +409,15 @@ shakerscan hunt permissions wait 8f0c…  # JSON: granted, denied, expired, with
   refuse and record as a denied approval). You prove it with a USB/NFC security key
   (`--method security_key`) or your TOTP code, typed at the prompt (`--method totp`). Without
   `--method` the client uses the security key whenever a plugged-in key holds one of your
-  credentials for this gateway (asked silently, without a touch): a touch alone when the gateway
-  asks only for one (its administrator requires a touch), else a touch and the key's PIN, as at
-  sign-in. Before the PIN prompt the client says it is the key's own PIN (the one set on the
-  key), not your authenticator app's code, and how many PIN tries the key has left: each wrong PIN
-  costs one, three in a row need the key removed and inserted again, and eight block its PIN,
-  which only a reset (removing every credential on the key, other sites' passkeys included)
-  undoes. The TOTP code only when no key can answer here (none plugged in, none of yours, or the
-  gateway asks for a PIN and the key has none set); `--method totp` chooses it. When several keys are plugged in, the first that holds one of your
+  credentials for this gateway (asked silently, without a touch): one touch, no PIN, whether or
+  not its administrator requires a touch for each decision. A gateway of an earlier release asks
+  for the key's PIN as well, as at sign-in; the client then says before the PIN prompt that it is
+  the key's own PIN (the one set on the key), not your authenticator app's code, and how many PIN
+  tries the key has left: each wrong PIN costs one, three in a row need the key removed and
+  inserted again, and eight block its PIN, which only a reset (removing every credential on the
+  key, other sites' passkeys included) undoes. The TOTP code only when no key can answer here
+  (none plugged in or none of yours, or such a gateway asks for a PIN and the key has none set),
+  and for a single sign-on account the browser sign-in then; `--method totp` chooses the code. When several keys are plugged in, the first that holds one of your
   credentials is used; you pick one only among keys that cannot be asked that way. The silent
   check is made only for this gateway's own relying party (the same rule the assertion follows), so
   no gateway learns what else your key holds. Without `--account`, the client says once whom it
@@ -521,7 +522,7 @@ raised state-changing requests 20 -> 40 (safety ceiling) for Hunt 3f2a91c0-…
   decision too long for a terminal is never touched for), asks
   the gateway for a challenge bound to exactly that request (method, path and query, SHA-256 of the
   body bytes, this connection, the person it acts for), checks the binding, asks for one touch of
-  a security key registered to your account (user presence; no PIN unless the gateway asks), and
+  a security key registered to your account (user presence; no PIN), and
   sends the same request once more with the one-time grant (`X-ShakerScan-Person-Proof`, valid two
   minutes, for that request only). "touch accepted" means the gateway took your touch; what the
   instance then did with the request (applied, or refused because, say, the Hunt's budget changed
@@ -549,11 +550,13 @@ raised state-changing requests 20 -> 40 (safety ceiling) for Hunt 3f2a91c0-…
   their security key: <command>` (the command last, with nothing after it, so a copy of the line's
   end takes no punctuation with it), and exits with status **3** (refused, nothing ran); the Hunt
   and target commands print that one line too, not the CLI's error JSON. The command is the
-  dedicated one where there is one (`targets authorize`, `hunt budget raise`, `secrets
-  reactivate|expiry`), else `shakerscan api METHOD PATH '<body>'`; a body longer than 1,024
+  dedicated one where there is one (`targets authorize`, `hunt budget raise` when every limit
+  name is lower-case letters and underscores, `secrets reactivate|expiry`), else `shakerscan api
+  METHOD PATH '<body>'`; a body longer than 1,024
   characters is saved, readable by you only, for a week, under `~/.config/shakerscan/decisions/` and named as
-  `@<file>` (`shakerscan api` reads a body from a file with `@`), so the line stays short and the
-  body stays out of your shell history. No option skips the
+  `@<file>` (`shakerscan api` reads a body from a file with `@`, from that directory only: any
+  other JSON body is given inline), so the line stays short and the body stays out of your shell
+  history. No option skips the
   touch. The MCP adapter answers the same refusal as `outcome:
   person_decision_required` with the decision and the command, and tells the agent never to retry
   it.
@@ -561,10 +564,9 @@ raised state-changing requests 20 -> 40 (safety ceiling) for Hunt 3f2a91c0-…
   - `shakerscan targets authorize <url-or-id>` registers the target if needed and records its
     standing authorization for active testing (never intrusive; that is made in the browser). A
     gateway that requires the touch records the person who touched. Elsewhere on Enterprise the
-    engine records the connection's token first, the person it acts for, and that no touch
-    proved it (`service token laptop for alice via shakerscan targets authorize (made with the
-    token; no security-key touch proved who ran it)`), and the command says why; on an
-    open-source engine, this computer's user. A placeholder (`TARGET-ID`) or a value ending in
+    engine records the connection's token first, with the person it acts for, and that no touch
+    proved it (`alice's token laptop, no security-key touch (shakerscan targets authorize)`), and
+    the command says why; on an open-source engine, this computer's user. A placeholder (`TARGET-ID`) or a value ending in
     punctuation copied from a sentence is refused before anything is sent. The
     gateway names the environment the authorization is evaluated in ("in the production
     environment", or a lab environment, which admits private and local addresses). It takes a

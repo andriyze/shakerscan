@@ -261,10 +261,11 @@ Rules for bounds:
      - **Security key:** a FIDO2 USB or NFC key over CTAP2 from the client (python-fido2). The
        RP ID is the gateway host, the challenge covers the request-set digest, and the gateway
        verifies the person's registered credential. User verification follows the challenge's
-       `userVerification`: `required` (the key's PIN, as at login, `passkeys.py:55-68`), or
-       `discouraged` when the gateway requires a touch for each decision (user presence only).
-       Without `--method` the client uses a plugged-in key when the gateway offers one and it
-       costs a touch only (`discouraged`) or is the person's only proof; else the code. Platform
+       `userVerification`: `discouraged` (a touch, user presence only, as an Enterprise gateway
+       asks for every terminal approval), or `required` (the key's PIN, as at login, which a
+       gateway of an earlier release asks for). Without `--method` the
+       client uses a plugged-in key that holds one of the person's credentials when the gateway
+       offers one; else the code, then the browser sign-in. Platform
        authenticators (Touch ID, Windows Hello, synced passkeys) are **not** reachable from a
        pip-installed CLI without a signed native helper, so v1 does not offer them.
    - The token alone never approves: it must be a valid connection **and** belong to a person
