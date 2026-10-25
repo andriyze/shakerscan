@@ -1959,6 +1959,48 @@ def test_no_key_registered_names_the_decision_and_asks_no_touch():
     assert text.endswith("nothing was changed")
 
 
+NO_KEY = ("register a USB or NFC security key once, in the browser, at https://gateway.example.com/_enterprise/"
+          "#account, under My account > Passkeys with \"Use it: for terminal approvals (touch)\" (it never signs "
+          "you in), then run the command again: alice has no security key registered for terminal approvals. "
+          "An administrator requires a security-key touch for terminal approvals on this installation; a code, "
+          "a phone or Touch ID cannot answer a terminal, and a passkey saved in a browser cannot either, so "
+          "use a USB or NFC key such as a YubiKey and touch it when the command asks.")
+
+
+def test_approve_says_no_key_registered_whole_before_any_request_and_exits_1(monkeypatch):
+    """`shakerscan approve <id>` for a person with no key under the switch: the gateway's remedy
+    was cut at 400 characters ("...a phone or Touch ID cann"), printed after the request list,
+    and approve exited 2 where `targets authorize` exits 1."""
+    assert len(NO_KEY) > 400
+    monkeypatch.delenv("SHAKERSCAN_AGENT_NAME", raising=False)
+    out = at_a_terminal(monkeypatch)
+    monkeypatch.setattr(sys, "stderr", io.StringIO())
+    monkeypatch.setenv("SHAKERSCAN_API_TOKEN", "sst_fixture_token")
+    request = {"id": REQUEST_ID, "hunt_id": HUNT, "status": "pending", "title": "Raise max_http_requests",
+               "kind": "budget.raise", "subject_digest": "d" * 64, "choices": ["allow", "deny"],
+               "scopes": ["hunt"], "remember_supported": False}
+    posted = []
+
+    def send(method, path, payload=None, **_):
+        if (method, path) == ("GET", approval.ME_PATH):
+            return 200, {"user": {"auth": "token"}, "person_decision_proof": True}
+        if method == "GET" and path.startswith(f"/hunts/{HUNT}/permission-requests/{REQUEST_ID}"):
+            return 200, request
+        if (method, path) == ("POST", approval.BEGIN_PATH):
+            posted.append(path)
+            return 403, {"schema_version": "shakerscan-approval-error/v1", "error": "security_key_not_registered",
+                         "message": NO_KEY}
+        raise AssertionError((method, path))
+
+    monkeypatch.setattr(v2_cli, "_approval_send", lambda client: send)
+    code = v2_cli.main(["--api-url", ORIGIN, "approve", REQUEST_ID, "--hunt", HUNT])
+    assert code == 1, sys.stderr.getvalue()
+    assert posted == [approval.BEGIN_PATH], "begun once, nothing finished"
+    err = sys.stderr.getvalue()
+    assert NO_KEY in err, err
+    assert "permission request(s)" not in out.getvalue() and "Raise max_http_requests" not in out.getvalue()
+
+
 def test_a_touch_the_gateway_did_not_accept_is_said_as_such():
     challenge = {}
 

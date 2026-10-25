@@ -857,7 +857,9 @@ class StepUp:
             )
         if not _ok(status):
             code = str(body.get("error") or "refused")
-            raise GatewayRefused(f"the gateway refused ({code}, HTTP {status}): {_detail_text(body)}",
+            # Whole, up to the person-decision path's 1,200 characters: a refusal says its remedy
+            # (where to register a key) in full.
+            raise GatewayRefused(f"the gateway refused ({code}, HTTP {status}): {_detail_text(body, 1200)}",
                                  code=code, status=status)
         return dict(body)
 
@@ -1763,22 +1765,30 @@ def decide(send: Send, terminal: Terminal, requests: Sequence[Mapping[str, Any]]
            enterprise: bool, origin: str, remember: bool = False, total: int | None = None,
            account: str | None = None, method: str | None = None,
            session: Mapping[str, Any] | None = None, confirmed: bool = False,
-           approver: dict[str, Any] | None = None) -> int:
+           approver: dict[str, Any] | None = None, shown: Callable[[], None] | None = None) -> int:
     """Decide ``requests`` with one proof: one step-up (or the open approver ``session``) on
     Enterprise, one local confirmation on OSS (``confirmed``: the --watch keypress was it).
     ``approver`` receives the account the gateway named as approving (``account``), so a watch
-    names it once and passes it to every later decision."""
+    names it once and passes it to every later decision. ``shown`` shows the requests: on
+    Enterprise once the gateway has begun the approval (a refusal before any proof is then said
+    alone), on OSS before the confirmation."""
     if not requests:
         terminal.say("no pending permission requests")
         return 0
     entries = [decision_entry(item, decision, remember=remember, total=total) for item in requests]
     by_id = {str(item["id"]): item for item in requests}
-    if remember and decision == "allow":
-        for entry in entries:
-            if entry["scope"] != "target":
-                terminal.say(f"note: {by_id[entry['request_id']].get('title')} cannot be remembered; "
-                             "it is allowed for this Hunt only")
+
+    def show() -> None:
+        if shown is not None:
+            shown()
+        if remember and decision == "allow":
+            for entry in entries:
+                if entry["scope"] != "target":
+                    terminal.say(f"note: {by_id[entry['request_id']].get('title')} cannot be remembered; "
+                                 "it is allowed for this Hunt only")
+
     if not enterprise:
+        show()
         verb = "Allow" if decision == "allow" else "Deny"
         what = "this request" if len(entries) == 1 else f"these {len(entries)} requests"
         if not confirmed and not terminal.confirm(f"{verb} {what} on this engine?"):
@@ -1789,6 +1799,7 @@ def decide(send: Send, terminal: Terminal, requests: Sequence[Mapping[str, Any]]
     stepup = StepUp(send, origin, terminal, account=account, method=method)
     stepup.named = bool(approver and approver.get("named"))
     challenge, _ = stepup.begin("permission_decision", {"decisions": entries})
+    show()
     if approver is not None and stepup.account:
         approver["account"] = stepup.account
         approver["named"] = stepup.named
@@ -2264,16 +2275,22 @@ def run(command: str, args: Any, send: Send, *, enterprise: bool, origin: str,
     if not requests:
         terminal.say("no pending permission requests")
         return 0
-    terminal.say(f"{'Allow' if decision == 'allow' else 'Deny'} {len(requests)} permission request(s):")
-    for request in requests:
-        terminal.say(render_request(request))
     if args.total is not None and len(requests) != 1:
         raise ApprovalError("--total applies to one budget request at a time")
-    if not enterprise:
-        terminal.say("This engine has no accounts: anyone who can reach its API could decide. "
-                     "The confirmation below is the only check.")
+
+    def shown() -> None:
+        terminal.say(f"{'Allow' if decision == 'allow' else 'Deny'} {len(requests)} permission request(s):")
+        for request in requests:
+            terminal.say(render_request(request))
+        if not enterprise:
+            terminal.say("This engine has no accounts: anyone who can reach its API could decide. "
+                         "The confirmation below is the only check.")
+
+    # On Enterprise the requests are shown once the gateway has begun the approval, so a refusal
+    # before any proof (no security key registered, say) is said first and alone.
     return decide(send, terminal, requests, decision, enterprise=enterprise, origin=origin,
-                  remember=args.remember, total=args.total, account=args.account, method=args.method)
+                  remember=args.remember, total=args.total, account=args.account, method=args.method,
+                  shown=shown)
 
 
 def add_arguments(parser: Any, command: str) -> None:

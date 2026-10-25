@@ -1688,9 +1688,14 @@ def _run_approval(args: argparse.Namespace, client: ApiClient) -> int:
 def _approval_exit(exc: Exception) -> int:
     """The exit status of a terminal decision that failed: 3 when it asks the person and this is
     no person's terminal (refused, nothing ran: the same as a person's decision an agent's shell
-    cannot make), else 2."""
+    cannot make), 1 when no security key is registered to the person (as `targets authorize`,
+    `api` and `approve --test` exit for it), else 2."""
     approval = _approval()
-    return approval.EXIT_NOT_AT_TERMINAL if isinstance(exc, approval.NotAtTerminal) else 2
+    if isinstance(exc, approval.NotAtTerminal):
+        return approval.EXIT_NOT_AT_TERMINAL
+    if isinstance(exc, approval.GatewayRefused) and exc.code == "security_key_not_registered":
+        return 1
+    return 2
 
 
 # --- knowledge review --------------------------------------------------------------------------
