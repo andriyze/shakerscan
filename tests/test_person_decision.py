@@ -320,6 +320,8 @@ def test_a_step_up_begun_for_captured_output_under_the_switch_is_refused_before_
     (True, False, "stdout", True),  # `2> log`: the prompt stays where the person sees it
     # `HUNT=$(shakerscan hunt start ... --allow ... | jq -r .hunt_id)`: asked on stderr, as 0.11.1 did
     (False, True, "stderr", False),
+    # `... > out.json 2> err.log`: still on stderr, never into the JSON answer (0.11.1 wrote it there)
+    (False, False, "stderr", False),
 ])
 def test_hunt_start_allow_asks_on_stderr(monkeypatch, stdout, stderr, asked_on, full):
     """Terminal(stdin, stdout, stderr), as `hunt start --allow` constructs it: the prompt prefers
@@ -327,6 +329,7 @@ def test_hunt_start_allow_asks_on_stderr(monkeypatch, stdout, stderr, asked_on, 
     monkeypatch.delenv("SHAKERSCAN_AGENT_NAME", raising=False)
     streams = {name: types.SimpleNamespace(isatty=lambda value=value: value)
                for name, value in (("stdin", True), ("stdout", stdout), ("stderr", stderr))}
+    monkeypatch.setattr(approval.sys, "stderr", streams["stderr"])
     terminal = approval.Terminal(streams["stdin"], streams["stdout"], streams["stderr"])
     terminal.require("pre-authorizing --allow bounds")
     assert terminal.stdout is streams[asked_on] and terminal.full is full

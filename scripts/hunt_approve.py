@@ -577,8 +577,10 @@ class Terminal:
             )
         if touch_required is not None and touch_required():
             raise NotAtTerminal(OUTPUT_CAPTURED.format(what=what), why="output")
-        # Asked as client 0.11.1 asked: the prompts where the person sees them.
-        self.stdout = next((stream for stream in (*prompts, sys.stderr) if _is_tty(stream)), self.stdout)
+        # Asked as client 0.11.1 asked: the prompts where the person sees them, else where 0.11.1
+        # wrote them (``prompts`` for `hunt start --allow`, whose stdout carries its answer).
+        self.stdout = next((stream for stream in (*prompts, sys.stderr) if _is_tty(stream)),
+                           prompts[0] if prompts else self.stdout)
         self.full = False
 
     def say(self, text: str = "") -> None:
