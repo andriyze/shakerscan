@@ -363,8 +363,8 @@ PLACEHOLDER = "TARGET-ID"
 # A Hunt start past its session's safety budget: the person's own terminal starts it.
 HUNT_START = "hunt.start"
 START_ONCE = (
-    "Nothing was started. Do not send this start again: the person's command starts it, and "
-    "then you continue with the Hunt it reports."
+    "Nothing was started. Do not send this start again: the person's command starts it; then "
+    "find that Hunt with `shakerscan hunt list` (the newest of this target) and continue with it."
 )
 # A decision no touch from a terminal confirms yet (the gateway's `proof: browser`).
 BROWSER = "browser"

@@ -242,7 +242,8 @@ PERSON_DECISION_START_RECOVERY = (
     "for this agent session, and starting it anyway is the user's decision. Tell the user the "
     "exact command to run in their own terminal; it starts this Hunt after their touch. Do not "
     "start it again yourself, and do not start a smaller one to get around the budget unless the "
-    "user asks; continue with the Hunt the user names once it is started."
+    "user asks; once the user started it, continue with it (the newest Hunt of this target; no "
+    "need to ask the user for its id)."
 )
 # A decision no touch from a terminal confirms yet (proof: browser).
 PERSON_DECISION_BROWSER_RECOVERY = (
