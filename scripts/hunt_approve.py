@@ -56,7 +56,6 @@ import math
 import os
 import re
 import select
-import shlex
 import sys
 import time
 import urllib.parse
@@ -139,14 +138,29 @@ class OutcomeUnknown(ApprovalError):
 
 
 class NotAtTerminal(ApprovalError):
-    """The command asks the person, and this is no person's terminal (its input or every output is
-    not a terminal, or the shell belongs to an agent that ``shakerscan agent`` started). Nothing
-    was asked of the person or a security key; the command exits 3 (refused, nothing ran)."""
+    """The command asks the person, and this is no person's terminal (its input is not a
+    terminal, or the shell belongs to an agent that ``shakerscan agent`` started), or it would ask
+    for a touch the gateway's administrator requires while the command's output is captured.
+    Nothing was asked of the person or a security key; the command exits 3 (refused, nothing
+    ran). ``why``: "agent" (an agent's shell), "input" (no terminal for input: an agent's tool
+    call, a pipe), or "output" (the person's own terminal, the command's output captured)."""
+
+    def __init__(self, message: str, *, why: str = "input") -> None:
+        super().__init__(message)
+        self.why = why
 
 
 # Exit status of a command that asks the person and has no terminal to ask on: refused, nothing
 # ran (person_decision.EXIT_REFUSED has the same meaning).
 EXIT_NOT_AT_TERMINAL = 3
+# A touch the administrator requires, for a command whose output is captured (Terminal.require).
+OUTPUT_CAPTURED = (
+    "{what} needs a touch of your security key (this gateway's administrator requires one), and "
+    "this client asks for a touch only when the command's output is your terminal too, never with "
+    "it captured (a pipe, $(...) or a file), so a key never blinks for a program that captures a "
+    "command's output; nothing was asked or decided: run the same command again with its output on "
+    "your terminal"
+)
 
 
 class GatewayRefused(ApprovalError):
@@ -475,42 +489,67 @@ def person_at_terminal(*streams: Any, environ: Mapping[str, str] | None = None) 
 
 
 def terminal_output(stdin: Any, stdout: Any, *prefer: Any, environ: Mapping[str, str] | None = None) -> Any:
-    """The stream a person is asked on, or None. A person is at a terminal when stdin and stdout
-    are both terminals and this is not an agent that ``shakerscan agent`` launched: one rule for
-    every command that asks the person (an approval, a watch, start bounds, a person's decision,
-    a knowledge decision). A command whose output is captured (an agent's tool call, a harness
-    that gives it a terminal for its input and errors only, ``| jq``, ``| tee``, ``> file``)
-    never asks and never makes a key blink: it exits 3 with the command to run without the pipe.
-    The prompt goes to the first of ``prefer`` that is a terminal too (``hunt start --allow``
-    asks on stderr, its stdout carrying the JSON answer), else to stdout."""
+    """The stream a person is asked on at their whole terminal, or None. The whole terminal is
+    stdin and stdout both terminals, outside an agent that ``shakerscan agent`` launched: what a
+    person's decision under the touch switch (person_decision.py), the touch test and the commands
+    new in client 0.11.2 (``targets authorize``, ``hunt budget raise``) need, and where a key is
+    asked first. The prompt goes to the first of ``prefer`` that is a terminal too (``hunt start
+    --allow`` asks on stderr, its stdout carrying the JSON answer), else to stdout.
+
+    The commands client 0.11.1 already had (approve, --watch, deny, agent and hunt start
+    --allow, the knowledge and secrets decisions) also ask with only stdin a terminal and their
+    output captured, as 0.11.1 did (Terminal.require): see there."""
     if not person_at_terminal(stdin, stdout, environ=environ):
         return None
     return next((stream for stream in prefer if _is_tty(stream)), stdout)
 
 
+def touch_switch(send: Send) -> Callable[[], bool]:
+    """Whether the gateway's administrator requires a security-key touch for person decisions
+    from terminals, read when asked (GET /_enterprise/me; no such route answers False)."""
+    return lambda: gateway_features(send)["touch_required"]
+
+
 class Terminal:
-    """The person's own terminal. Every prompt refuses to run without one (``require``: stdin and
-    stdout terminals), and every prompt is written to ``prompts`` when it is a terminal too, else
-    to stdout."""
+    """The person's own terminal. Every prompt refuses to run without one (``require``), and every
+    prompt is written to ``prompts`` when it is a terminal too, else to stdout (or, with stdout
+    captured, to stderr when that is a terminal). ``full``: stdin and stdout are both terminals
+    (set by ``require``); only then is a security key asked first (StepUp.method_for)."""
 
     def __init__(self, stdin: Any = None, stdout: Any = None, prompts: Any = None) -> None:
         self.stdin = stdin or sys.stdin
         self.stdout = stdout or sys.stdout
         # Where a command whose stdout carries its answer asks instead (hunt start --allow: stderr).
         self.prompts = prompts
+        # stdin and stdout both terminals (require); a terminal object without it counts as one.
+        self.full = True
         self._key_fd: int | None = None
         self._key_saved: Any = None
         self._escape = "idle"  # the escape-sequence state machine of key()
         self._utf8_left = 0  # continuation bytes still due for a UTF-8 character
         self._last_input = 0.0  # when _feed last saw a byte (a control string's quiet reset)
 
-    def require(self, what: str = "it", *, person_runs: str | None = None) -> None:
+    def require(self, what: str = "it", *, person_runs: str | None = None, whole: bool = False,
+                touch_required: Callable[[], bool] | None = None) -> None:
         """Refuse (NotAtTerminal, exit 3) unless a person is at this terminal: before anything is
         read from the gateway, shown or asked of a security key. From here on every prompt goes
         to the output that is the terminal. ``what`` names the command where the line printed
         does not already (it is printed after the command's own name otherwise: "it");
         ``person_runs`` is the command the person runs in their own terminal (the request id
-        named, for an agent to pass on)."""
+        named, for an agent to pass on).
+
+        A person is at the terminal when stdin is a terminal, outside an agent that ``shakerscan
+        agent`` started. With stdout a terminal too (``full``) the prompts go there (or to
+        ``prompts``) and a plugged-in key is asked first. With only stdin a terminal and the
+        output captured (``approve ... | tee log``, ``HUNT=$(shakerscan hunt start --allow ...)``)
+        the person is asked as client 0.11.1 asked them (the prompts on stderr when it is a
+        terminal, else where 0.11.1 wrote them), with 0.11.1's choice of proof (the code where the
+        gateway offers one; nothing that worked with 0.11.0 or 0.11.1 is refused), except where the
+        gateway's administrator requires a touch (``touch_required``, read only then): a touch is
+        never asked for a command whose output is captured, so a key never blinks for a harness
+        that gives an agent's command a terminal for its input and errors. ``whole``: the
+        commands new in 0.11.2 (the touch test, a person's decision, ``targets authorize``,
+        ``hunt budget raise``) need stdin and stdout terminals in any case."""
         run = (f"the person runs this in their own terminal: {_inert(person_runs)}" if person_runs
                else "run it yourself in your own terminal")
         if (os.environ.get("SHAKERSCAN_AGENT_NAME") or "").strip():
@@ -518,16 +557,29 @@ class Terminal:
             # a plugged-in key would answer the agent's own request.
             raise NotAtTerminal(
                 f"{what} asks the person, and this shell belongs to an agent that `shakerscan agent` "
-                f"started; nothing was asked or decided: {run}"
+                f"started; nothing was asked or decided: {run}", why="agent",
             )
-        stream = terminal_output(self.stdin, self.stdout, *([self.prompts] if self.prompts is not None else []))
-        if stream is None:
+        prompts = [self.prompts] if self.prompts is not None else []
+        stream = terminal_output(self.stdin, self.stdout, *prompts)
+        if stream is not None:
+            self.stdout, self.full = stream, True
+            return
+        if not _is_tty(self.stdin):
+            raise NotAtTerminal(
+                f"{what} asks the person at an interactive terminal and refuses to read a pipe, never "
+                f"through an agent's shell; nothing was asked or decided: {run}", why="input",
+            )
+        if whole:
             raise NotAtTerminal(
                 f"{what} asks the person at an interactive terminal (its input and its output a "
-                "terminal) and refuses a pipe or captured output, never through an agent's shell; "
-                f"nothing was asked or decided: {run}"
+                "terminal) and refuses captured output (a pipe, $(...) or a file), never through an "
+                f"agent's shell; nothing was asked or decided: {run}", why="output",
             )
-        self.stdout = stream
+        if touch_required is not None and touch_required():
+            raise NotAtTerminal(OUTPUT_CAPTURED.format(what=what), why="output")
+        # Asked as client 0.11.1 asked: the prompts where the person sees them.
+        self.stdout = next((stream for stream in (*prompts, sys.stderr) if _is_tty(stream)), self.stdout)
+        self.full = False
 
     def say(self, text: str = "") -> None:
         self.stdout.write(text + "\n")
@@ -774,6 +826,7 @@ class StepUp:
         # The gateway named the approver (no --account): the person this connection acts for,
         # whom the touch prompt then names ("..., as alice").
         self.named = False
+        self._checked_output = False
 
     def _names_no_approver(self) -> bool:
         """Whether this gateway predates an approval that names its own approver: it refuses an
@@ -815,6 +868,7 @@ class StepUp:
         this) is answered by asking for it."""
         parts = {key: value for key, value in set_document(purpose, "", self.origin, body).items()
                  if key in {"decisions", "preauthorization", "session", "knowledge", "key_check"}}
+        self.require_touchable()
 
         def post(account: str) -> dict[str, Any]:
             return self._post(BEGIN_PATH, {
@@ -920,10 +974,24 @@ class StepUp:
         return {"method": "security_key",
                 "credential": security_key_assertion(webauthn, self.origin, self.terminal, **told)}
 
+    def require_touchable(self) -> None:
+        """Before anything is begun: a command whose output is captured (Terminal.full False) is
+        never asked for a touch the gateway's administrator requires (Terminal.require)."""
+        if getattr(self.terminal, "full", True) or self._checked_output:
+            return
+        self._checked_output = True
+        if gateway_features(self.send)["touch_required"]:
+            raise NotAtTerminal(OUTPUT_CAPTURED.format(what="it"), why="output")
+
     def method_for(self, challenge: Mapping[str, Any]) -> str:
         methods = [str(item) for item in challenge.get("methods") or ()]
         webauthn = challenge.get("webauthn") if isinstance(challenge.get("webauthn"), Mapping) else None
-        return self.method or preferred_method(methods, webauthn, self.origin)
+        if self.method:
+            return self.method
+        if not getattr(self.terminal, "full", True):
+            # The output captured (Terminal.require): client 0.11.1's choice, never a key first.
+            return legacy_method(methods)
+        return preferred_method(methods, webauthn, self.origin)
 
 
 def as_approver(prompt: str, account: str) -> str:
@@ -1241,6 +1309,13 @@ def answering_keys(devices: Sequence[Any], webauthn: Mapping[str, Any] | None,
                 "(touch)\"; single sign-on: \"Security key for terminal decisions\")"), False
 
 
+def legacy_method(methods: Sequence[str]) -> str:
+    """Client 0.11.1's proof when ``--method`` is not named: the code where the gateway offers
+    one, else a security key, else the browser sign-in. Used where the output is captured
+    (Terminal.require), so such a command asks what 0.11.1 asked."""
+    return next((method for method in ("totp", "security_key", "sso") if method in methods), "")
+
+
 def preferred_method(methods: Sequence[str], webauthn: Mapping[str, Any] | None = None, origin: str = "") -> str:
     """The proof to give when ``--method`` is not named: the security key whenever the gateway
     offers one, python-fido2 is installed and a plugged-in key holds one of the person's keys for
@@ -1460,7 +1535,7 @@ def preauthorize(send: Send, origin: str, terminal: Terminal, allow: Sequence[st
     """Step up once for start bounds; return the gateway's pre-authorization (id, allow, expiry)."""
     if use not in PREAUTHORIZATION_USES:
         raise ApprovalError(f"unknown pre-authorization use {use!r}")
-    terminal.require("pre-authorizing --allow bounds")
+    terminal.require("pre-authorizing --allow bounds", touch_required=touch_switch(send))
     bounds = sorted(dict.fromkeys(str(item).strip() for item in allow if str(item).strip()))
     terminal.say("Pre-authorize these bounds (requests inside them are granted as they arise):")
     for bound in bounds:
@@ -1765,7 +1840,9 @@ def watch(send: Send, terminal: Terminal, *, enterprise: bool, origin: str, hunt
     Enterprise: one step-up opens an approver session at the gateway (30 minutes at most); its
     secret lives only in this foreground process. Local OSS: every keypress is the confirmation.
     """
-    terminal.require(person_runs="shakerscan approve --watch" + (f" --hunt {shlex.quote(hunt_id)}" if hunt_id else ""))
+    hunt_word = _id_word(hunt_id)
+    terminal.require(person_runs="shakerscan approve --watch" + (f" --hunt {hunt_word}" if hunt_word else ""),
+                     touch_required=touch_switch(send) if enterprise else None)
     seconds = max(60, min(int(minutes) * 60, SESSION_SECONDS))
     opened_session: dict[str, Any] = {}
     # Installed before the step-up, so no moment leaves an opened approver session unrevoked.
@@ -2139,18 +2216,25 @@ def _revoke(send: Send, terminal: Terminal, session_id: str, held: _HeldSecret) 
 # --- the commands ------------------------------------------------------------------------------
 
 
+def _id_word(value: Any) -> str | None:
+    """A request or Hunt id as one word of the person's command: a UUID only (lower case), never
+    a value an agent chose that the person's client would read as an option (``--url=...`` would
+    send the person's approval protocol to another origin)."""
+    text = str(value or "").strip().lower()
+    return text if _UUID.fullmatch(text) else None
+
+
 def _person_runs(command: str, args: Any) -> str:
     """The approve or deny command the person runs in their own terminal, naming the pending
-    request the agent named (or every pending one)."""
+    request the agent named (or every pending one); an id that is not a UUID is named as
+    ``<request-id>`` (the request is then found with ``--all-pending``)."""
     words = [f"shakerscan {command}"]
     if args.all_pending:
         words.append("--all-pending")
-    elif args.request_id:
-        words.append(shlex.quote(str(args.request_id)))
     else:
-        words.append("<request-id>")
-    if args.hunt:
-        words.append(f"--hunt {shlex.quote(str(args.hunt))}")
+        words.append(_id_word(args.request_id) or "<request-id>")
+    if hunt := _id_word(args.hunt):
+        words.append(f"--hunt {hunt}")
     return " ".join(words)
 
 
@@ -2164,7 +2248,8 @@ def run(command: str, args: Any, send: Send, *, enterprise: bool, origin: str,
             raise ApprovalError("--watch belongs to shakerscan approve")
         return watch(send, terminal, enterprise=enterprise, origin=origin, hunt_id=args.hunt,
                      minutes=args.minutes, account=args.account, method=args.method)
-    terminal.require(person_runs=_person_runs(command, args))
+    terminal.require(person_runs=_person_runs(command, args),
+                     touch_required=touch_switch(send) if enterprise else None)
     if args.all_pending:
         requests = list_pending(send, args.hunt)
     elif args.request_id:

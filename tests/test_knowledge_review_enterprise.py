@@ -236,7 +236,7 @@ class Terminal(approval.Terminal):
         self.keys, self.codes, self.account = list(keys), list(codes), account
         self.secrets_asked = 0
 
-    def require(self, what: str = "it", *, person_runs: str | None = None) -> None:
+    def require(self, what: str = "it", *, person_runs: str | None = None, **_: object) -> None:
         return None
 
     def key(self, prompt: str, choices: str, **_waiting: Any) -> str:

@@ -284,44 +284,53 @@ def _input_terminal_only(argv: list[str], env: dict[str, str], *, stderr_termina
 
 
 @pytest.mark.parametrize("argv", [
+    ["approve", REQUEST, "--hunt", HUNT, "--account", "alice"],
+    ["deny", REQUEST, "--hunt", HUNT, "--account", "alice"],
+], ids=["approve", "deny"])
+@pytest.mark.parametrize("stderr_terminal", [False, True], ids=["all-captured", "stderr-terminal"])
+def test_a_terminal_for_input_only_is_asked_as_0_11_1_asked(tmp_path, enterprise, argv, stderr_terminal):
+    """``shakerscan approve ... | tee log``, ``> file``: stdin a terminal and the output captured.
+    Client 0.11.1 asked the person there (its prompts on stdout); 0.11.2 asks too, with the switch
+    off, the prompts on stderr where that is a terminal, else where 0.11.1 wrote them, and the code
+    0.11.1 chose. Nothing that worked with 0.11.0 or 0.11.1 is refused."""
+    stub, connection, env = enterprise("g1", touch_switch=False)
+    with stub:
+        master, proc = _input_terminal_only([argv[0], *connection, *argv[1:]], env, stderr_terminal=stderr_terminal)
+        screen = _Screen(master)
+        prompt = b"TOTP code for alice"
+        if stderr_terminal:
+            # On the person's terminal (stderr), not in the captured output.
+            screen.wait_for(prompt, 30, lambda: proc.poll() is None)
+            early = b""
+        else:
+            # Where 0.11.1 wrote it: the captured output (a `| tee log` shows it).
+            early, deadline = b"", time.monotonic() + 30
+            while prompt not in early:
+                assert time.monotonic() < deadline and proc.poll() is None, early
+                early += _read_ready(proc.stdout)
+        os.write(master, (TOTP + "\n").encode())
+        out, err = proc.communicate(timeout=60)
+        shown = screen.close()
+    out = early + out
+    assert proc.returncode == 0, (out, err, shown)
+    assert (prompt in out) is (not stderr_terminal), (out, shown)
+    finish = next(body for method, path, body in stub.seen if path == "/_enterprise/approvals/finish")
+    assert finish["proof"] == {"method": "totp", "code": TOTP}
+    assert stub.request["status"] == ("granted" if argv[0] == "approve" else "denied")
+
+
+@pytest.mark.parametrize("argv", [
     ["approve", REQUEST, "--hunt", HUNT],
     ["approve", "--all-pending", "--hunt", HUNT],
     ["approve", "--watch", "--hunt", HUNT, "--minutes", "1"],
     ["deny", REQUEST, "--hunt", HUNT],
 ], ids=["approve", "all-pending", "watch", "deny"])
-@pytest.mark.parametrize("instance", ["enterprise", "local"])
-def test_a_terminal_for_input_only_is_no_persons_terminal(tmp_path, enterprise, argv, instance):
-    """The same rule as a person's decision: the command asks only when its input and its output
-    are a terminal. With stdin a terminal and stdout and stderr captured it refuses at once (exit
-    3), writes no prompt to the captured output, reads nothing of the instance and decides
-    nothing."""
-    if instance == "enterprise":
-        stub, connection, env = enterprise("g1")
-    else:
-        stub, connection, env = StubInstance(), [], _environment(tmp_path)
-    with stub:
-        connection = connection or ["--url", stub.url]
-        master, proc = _input_terminal_only([argv[0], *connection, *argv[1:]], env)
-        out, err = proc.communicate(timeout=60)
-        os.close(master)
-    assert proc.returncode == 3, (out, err)
-    assert b"interactive terminal" in err and b"nothing was asked or decided" in err
-    assert out == b"", "no prompt went to the captured output"
-    assert b"TOTP code" not in err and b"[y/N]" not in err
-    assert stub.seen == [], "nothing was read from or sent to the instance"
-    assert stub.request["status"] == "pending"
-
-
-@pytest.mark.parametrize("argv", [
-    ["approve", REQUEST, "--hunt", HUNT, "--account", "alice"],
-    ["approve", "--watch", "--hunt", HUNT, "--minutes", "1", "--account", "alice"],
-], ids=["approve", "watch"])
-def test_stdout_captured_is_no_persons_terminal_even_with_stderr_one(tmp_path, enterprise, argv):
-    """``shakerscan approve ... | tee log``, or a harness that gives an agent's command a terminal
-    for its input and errors and captures its output: the person is not asked (stdin and stdout
-    must be terminals). It refuses at once (exit 3) on the terminal, writes nothing to the pipe,
-    reads nothing of the instance and decides nothing, so no key blinks for it."""
-    stub, connection, env = enterprise("g1")
+def test_output_captured_under_the_switch_is_refused_and_no_key_blinks(tmp_path, enterprise, argv):
+    """Where the gateway's administrator requires a touch, a command whose output is captured (a
+    harness that gives an agent's command a terminal for its input and errors) never asks for one:
+    exit 3 on the terminal, nothing written to the pipe, only the gateway's description read,
+    nothing begun or decided, so no key blinks for it."""
+    stub, connection, env = enterprise("g1", touch_switch=True)
     with stub:
         master, proc = _input_terminal_only([argv[0], *connection, *argv[1:]], env, stderr_terminal=True)
         screen = _Screen(master)
@@ -329,10 +338,37 @@ def test_stdout_captured_is_no_persons_terminal_even_with_stderr_one(tmp_path, e
         shown = screen.close()
     assert proc.returncode == 3, (out, shown)
     assert out == b"", "nothing went to the pipe"
-    assert b"interactive terminal" in shown and b"nothing was asked or decided" in shown
-    assert b"TOTP code" not in shown
+    assert b"only when the command's output is your terminal too" in shown
+    assert b"nothing was asked or decided" in shown
+    assert [path for method, path, _ in stub.seen] == ["/_enterprise/me"], "only the description was read"
+    assert stub.request["status"] == "pending"
+
+
+@pytest.mark.parametrize("instance", ["enterprise", "local"])
+def test_no_terminal_for_input_is_no_persons_terminal(tmp_path, enterprise, instance):
+    """An agent's tool call: no terminal for input. Refused at once (exit 3), nothing written to
+    the captured output, nothing read of the instance, nothing decided."""
+    if instance == "enterprise":
+        stub, connection, env = enterprise("g1")
+    else:
+        stub, connection, env = StubInstance(), [], _environment(tmp_path)
+    with stub:
+        connection = connection or ["--url", stub.url]
+        proc = subprocess.run(
+            [sys.executable, "-m", "shakerscan", "approve", *connection, REQUEST, "--hunt", HUNT],
+            stdin=subprocess.DEVNULL, capture_output=True, env=env, cwd=str(ROOT), timeout=60,
+        )
+    assert proc.returncode == 3, (proc.stdout, proc.stderr)
+    assert b"interactive terminal" in proc.stderr and b"nothing was asked or decided" in proc.stderr
+    assert proc.stdout == b""
     assert stub.seen == [], "nothing was read from or sent to the instance"
     assert stub.request["status"] == "pending"
+
+
+def _read_ready(stream) -> bytes:
+    import select
+
+    return os.read(stream.fileno(), 65536) if select.select([stream], [], [], 0.1)[0] else b""
 
 
 PROMPT = "[d]eny  [s]kip  [q]uit: "

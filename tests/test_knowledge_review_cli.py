@@ -119,7 +119,7 @@ class Terminal(approval.Terminal):
         super().__init__(io.StringIO(), io.StringIO())
         self.keys = list(keys)
 
-    def require(self, what: str = "it", *, person_runs: str | None = None) -> None:
+    def require(self, what: str = "it", *, person_runs: str | None = None, **_: object) -> None:
         return None
 
     def key(self, prompt: str, choices: str, **_waiting: Any) -> str:

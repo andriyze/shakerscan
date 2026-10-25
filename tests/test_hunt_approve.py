@@ -51,7 +51,7 @@ class Terminal(approval.Terminal):
         self.answers = list(answers)
         self.keys = list(keys)
 
-    def require(self, what="it", *, person_runs=None):
+    def require(self, what="it", *, person_runs=None, **_):
         return None
 
     def line(self, prompt):
@@ -412,16 +412,31 @@ def test_hunt_start_allow_on_enterprise_needs_the_persons_step_up_first(monkeypa
     assert client.sent[-1][3] == {"X-ShakerScan-Preauthorization": "pre_0042"}
 
 
-def test_hunt_start_allow_with_its_output_piped_asks_nothing_even_with_stderr_a_terminal(monkeypatch):
-    """`shakerscan hunt start --allow ... | jq` (or a harness capturing stdout and giving stderr a
-    terminal): the rule reads the process's stdout, so nothing is begun at the gateway and no
-    Hunt starts, although the prompt would go to stderr."""
+@pytest.mark.parametrize("switch", [False, True])
+def test_hunt_start_allow_with_its_output_piped_asks_as_0_11_1_did(monkeypatch, switch):
+    """`HUNT=$(shakerscan hunt start --allow ... | jq -r .hunt_id)`: stdout is the command's data
+    channel and its prompt goes to stderr, the person's terminal. With the touch switch off it is
+    asked as client 0.11.1 asked it (the code, on stderr) and the Hunt starts; under the switch a
+    touch is never asked for a command whose output is captured: refused with exit 3 (a person's
+    decision), nothing begun and no Hunt started, the line saying how to run it."""
     monkeypatch.delenv("SHAKERSCAN_HUNT_ALLOW", raising=False)
     monkeypatch.delenv("SHAKERSCAN_PREAUTHORIZATION_ID", raising=False)
     monkeypatch.delenv("SHAKERSCAN_AGENT_NAME", raising=False)
     contract = {"schema_version": "hunt-start/v2", "target_kinds": ["web"], "budget_profiles": {"balanced": {}},
                 "budget_dimensions": []}
-    client = Client({("GET", "/hunts/contract"): contract, ("GET", "/_enterprise/me"): {"user": {"auth": "token"}},
+
+    def begin(payload):
+        document = approval.set_document(payload["purpose"], "alice", payload["origin"], payload)
+        return {"schema_version": "shakerscan-approval-challenge/v1", "approval_id": "apv_1",
+                "set_digest": approval.set_digest(document), "methods": ["totp", "security_key"],
+                "account": "alice"}
+
+    finish = {"schema_version": "shakerscan-approval-result/v1", "decided_by": "alice",
+              "preauthorization": {"id": "pre_0042", "allow": ["budget.raise:2x"], "expires_at": "later"}}
+    client = Client({("GET", "/hunts/contract"): contract,
+                     ("GET", "/_enterprise/me"): {"user": {"auth": "token"}, "person_decision_proof": switch},
+                     ("POST", "/_enterprise/approvals/begin"): begin,
+                     ("POST", "/_enterprise/approvals/finish"): lambda payload: finish,
                      ("POST", "/hunts"): lambda payload: {"hunt_id": HUNT}}, token="token-1")
     monkeypatch.setattr(v2_cli.sys, "stdin", types.SimpleNamespace(isatty=lambda: True, readline=lambda: "alice\n"))
     piped, terminal_err = io.StringIO(), io.StringIO()
@@ -429,13 +444,29 @@ def test_hunt_start_allow_with_its_output_piped_asks_nothing_even_with_stderr_a_
     terminal_err.isatty = lambda: True  # type: ignore[method-assign]
     monkeypatch.setattr(v2_cli.sys, "stdout", piped)
     monkeypatch.setattr(v2_cli.sys, "stderr", terminal_err)
+    monkeypatch.setattr(approval.sys, "stderr", terminal_err)
+    monkeypatch.setattr(approval.getpass, "getpass", lambda prompt, stream=None: (stream.write(prompt), "123456")[1])
+    monkeypatch.setattr(approval, "security_keys_present", lambda: True)
     args = _parse("hunt", "start", "--target-id", "t-1", "--target-kind", "web", "--allow", "budget.raise:2x")
-    with pytest.raises(v2_cli.CliError) as refused:
-        v2_cli._run_hunt(args, client)
-    assert "asks the person at an interactive terminal" in str(refused.value)
-    assert "No Hunt was started" in str(refused.value)
-    assert [(m, p) for m, p, *_ in client.sent if m == "POST"] == [], "nothing begun, nothing started"
-    assert terminal_err.getvalue() == "", "no prompt"
+    if switch:
+        with pytest.raises(v2_cli.CliError) as refused:
+            v2_cli._run_hunt(args, client)
+        assert refused.value.error_type == "person_decision_required"
+        assert v2_cli.PERSON_DECISION_EXITS[refused.value.error_type] == 3
+        text = str(refused.value)
+        assert "only when the command's output is your terminal too" in text and "No Hunt was started" in text
+        assert "--propose-allow" not in text, "the person piped the output; no agent is told anything"
+        assert [(m, p) for m, p, *_ in client.sent if m == "POST"] == [], "nothing begun, nothing started"
+        assert terminal_err.getvalue() == "", "no prompt"
+        return
+    v2_cli._run_hunt(args, client)
+    posts = [(m, p) for m, p, *_ in client.sent if m == "POST"]
+    assert posts == [("POST", "/_enterprise/approvals/begin"), ("POST", "/_enterprise/approvals/finish"),
+                     ("POST", "/hunts")]
+    finished = next(payload for m, p, payload, *_ in client.sent if p == "/_enterprise/approvals/finish")
+    assert finished["proof"] == {"method": "totp", "code": "123456"}, "the code, as 0.11.1 chose, never the key"
+    assert "TOTP code for alice" in terminal_err.getvalue() and piped.getvalue() == ""
+    assert client.sent[-1][3] == {"X-ShakerScan-Preauthorization": "pre_0042"}
 
 
 def test_hunt_start_inherits_the_launch_bounds_of_shakerscan_agent(monkeypatch):
@@ -596,7 +627,7 @@ class _PtyTerminal(approval.Terminal):
     def flush(self):
         return None
 
-    def require(self, what="it", *, person_runs=None):
+    def require(self, what="it", *, person_runs=None, **_):
         return None
 
     @property

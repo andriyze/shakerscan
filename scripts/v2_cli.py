@@ -638,6 +638,13 @@ def _start_preauthorization(
                 payload["allow"], use="hunt_start", account=getattr(args, "account", None),
                 method=getattr(args, "method", None),
             )
+        except approval.NotAtTerminal as exc:
+            # Refused before anything was asked (exit 3, as every command that asks the person).
+            if exc.why == "output":
+                tail = "No Hunt was started. Run that way, its answer names the Hunt id (so does `shakerscan hunt list`)"
+            else:
+                tail = "No Hunt was started. An agent proposes bounds with --propose-allow instead"
+            raise CliError(f"{str(exc).rstrip('.')}. {tail}.", error_type="person_decision_required") from exc
         except approval.ApprovalError as exc:
             raise CliError(
                 f"{str(exc).rstrip('.')}. No Hunt was started. An agent proposes bounds with --propose-allow instead.",
@@ -1960,7 +1967,7 @@ def _run_knowledge_review(args: argparse.Namespace, client: ApiClient) -> int:
     terminal = approval.Terminal()
     stepup = None
     try:
-        terminal.require()
+        terminal.require(touch_required=approval.touch_switch(send))
         wanted = args.accept or args.reject
         proposals, unconfirmed = _pending_review(send, args.target_id)
         if wanted:
@@ -2244,7 +2251,7 @@ def _offer_refresh(args: argparse.Namespace, client: ApiClient, report: Mapping[
     send = _approval_send(client)
     terminal = approval.Terminal()
     try:
-        terminal.require()
+        terminal.require(touch_required=approval.touch_switch(send))
         failures = 0
         with terminal.keypresses():
             for offer in offers:
@@ -2378,7 +2385,7 @@ def _run_knowledge_release(args: argparse.Namespace, client: ApiClient) -> int:
     if args.at is not None:
         payload["released_at"] = args.at
     try:
-        terminal.require()
+        terminal.require(touch_required=approval.touch_switch(send))
         terminal.say(_shown(f"declare a release of target {args.target_id}"
                             + (f" labelled {args.label!r}" if args.label else "")
                             + f" at {args.at or 'now'}"))
@@ -2430,7 +2437,7 @@ def _run_knowledge_decision(args: argparse.Namespace, client: ApiClient) -> int:
     terminal = approval.Terminal()
     action = args.knowledge_command
     try:
-        terminal.require()
+        terminal.require(touch_required=approval.touch_switch(send))
         status, finding = send("GET", f"/findings/{_quoted(args.finding_id)}")
         if not 200 <= status < 300 or not isinstance(finding, Mapping):
             raise approval.ApprovalError(f"could not read finding {args.finding_id}: HTTP {status}")
@@ -2564,7 +2571,7 @@ def _run_secrets(args: argparse.Namespace, client: ApiClient) -> int:
     send = _approval_send(client)
     terminal = approval.Terminal()
     try:
-        terminal.require()
+        terminal.require(touch_required=approval.touch_switch(send))
         terminal.say(approval._knowledge_summary(approval.reference_decision(action, target, ref_id, payload)))
         if approval.instance_kind(send) == "enterprise":
             stepup = approval.StepUp(send, client.base_url, terminal, account=args.account, method=args.method)
@@ -2617,7 +2624,7 @@ def _run_allow_changes(args: argparse.Namespace, client: ApiClient) -> int:
     terminal = approval.Terminal()
     command = "shakerscan knowledge allow-changes"
     try:
-        terminal.require()
+        terminal.require(touch_required=approval.touch_switch(send))
         target = str(args.target_id or "").strip().lower()
         if not re.fullmatch(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", target):
             raise approval.ApprovalError(f"{args.target_id!r} is not a target id")

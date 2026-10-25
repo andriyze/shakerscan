@@ -58,7 +58,7 @@ def approve_test(argv: Sequence[str], url: str, timeout: float | None = None, *,
         return 2
     terminal = terminal or approval.Terminal(sys.stdin, sys.stdout)
     try:
-        terminal.require("a touch test of your security key")
+        terminal.require("a touch test of your security key", whole=True)
     except approval.NotAtTerminal as exc:
         print(f"shakerscan: {exc}", file=sys.stderr)
         return approval.EXIT_NOT_AT_TERMINAL
