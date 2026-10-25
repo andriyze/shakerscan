@@ -295,6 +295,26 @@ def test_with_the_output_captured_a_touch_the_switch_requires_is_never_asked(mon
         {"methods": ["totp", "security_key"]}) == "security_key", "--method still chooses"
 
 
+def test_a_step_up_begun_for_captured_output_under_the_switch_is_refused_before_the_gateway_is_asked():
+    """The backstop under every command's own check (Terminal.require): a step-up whose terminal is
+    not the whole terminal never begins an approval where the gateway requires a touch."""
+    read = []
+
+    def send(method, path, payload=None, **_):
+        read.append((method, path))
+        if (method, path) == ("GET", approval.ME_PATH):
+            return 200, {"user": {"auth": "token"}, "person_decision_proof": True}
+        raise AssertionError((method, path))
+
+    terminal = approval.Terminal(io.StringIO(), io.StringIO())
+    terminal.full = False
+    stepup = approval.StepUp(send, ORIGIN, terminal, account="alice")
+    with pytest.raises(approval.NotAtTerminal) as refused:
+        stepup.begin("key_check", {"key_check": dict(approval.KEY_CHECK)})
+    assert refused.value.why == "output"
+    assert read == [("GET", approval.ME_PATH)], "nothing begun"
+
+
 @pytest.mark.parametrize(("stdout", "stderr", "asked_on", "full"), [
     (True, True, "stderr", True),  # stdout carries the JSON answer: the prompt goes to stderr
     (True, False, "stdout", True),  # `2> log`: the prompt stays where the person sees it
