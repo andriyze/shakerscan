@@ -641,12 +641,16 @@ client and `./scanner.sh approve` on an engine install run the same protocol.
   `--propose-allow BOUND` on `hunt start` sends `proposed_allow` (one pending request), as the MCP
   start tool does with its `allow` argument.
 - Every command that decides refuses to run without an interactive terminal, so a command an agent
-  runs in its own tool shell cannot decide or pre-authorize anything. Since client 0.11.2 it is the
-  rule a person's decision follows: stdin and stdout TTYs (the prompts go to stdout; `hunt start
-  --allow` asks on stderr when it is a TTY too), and not inside `shakerscan agent`
-  (`SHAKERSCAN_AGENT_NAME`). Otherwise the command
-  exits 3 (refused, nothing ran; 0.11.1 exited 2) before it reads the instance, shows anything or
-  asks a security key anything.
+  runs in its own tool shell cannot decide or pre-authorize anything: stdin a TTY, and not inside
+  `shakerscan agent` (`SHAKERSCAN_AGENT_NAME`). Otherwise the command exits 3 (refused, nothing
+  ran; 0.11.1 exited 2) before it reads the instance, shows anything or asks a security key
+  anything. With stdout a TTY too the prompts go there (`hunt start --allow` asks on stderr) and a
+  plugged-in key is asked first. With stdout captured the command asks as client 0.11.1 did (the
+  prompts on stderr when it is a TTY, the TOTP code where offered), except that a touch the
+  gateway's administrator requires (`GET /_enterprise/me` reports `person_decision_proof: true`)
+  is never asked then: exit 3, only that description read. The commands new in client 0.11.2
+  (`approve --test`, `targets authorize`, `hunt budget raise`, a person's decision) need stdin and
+  stdout TTYs.
 
 **Which proof.** A connection with a service token is Enterprise: everything goes through the
 gateway's step-up routes and the engine's decision route is never called. A connection without a
@@ -937,7 +941,7 @@ it in the person's terminal (`scripts/person_decision.py`):
 - `"decision": "hunt.start"`: a Hunt start past its agent session's one safety budget (under the
   switch the Hunts of one session share it; the session is the one `agent --allow` touched for,
   else the connection's). Its command is that start itself (`shakerscan api POST /hunts ...`): the
-  agent does not send it again. The preauthorization challenge of `agent_launch` carries
+  agent does not send it again, and finds the Hunt the person started with `shakerscan hunt list`. The preauthorization challenge of `agent_launch` carries
   `safety_budget` (`[{limit, label, total}]`), shown before the touch.
 - `"proof": "browser"`: a decision no touch from a terminal confirms yet (a device SSH plan's
   confirmation, an authorization investigation's approval); the client never begins one and says

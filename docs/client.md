@@ -87,8 +87,10 @@ The package declares exactly `fido2==2.2.1` (the touch path is security-sensitiv
 python-fido2 release reaches you only with a client release that was checked with it) and
 `cryptography>=50.0.2,<52` (from the release the publish checks lock up to python-fido2's own
 bound, so cryptography's fixes keep reaching an installed client), or `>=48.0.1,<49` on an Intel
-Mac. A plain `pipx` or `uv tool` install resolves the newest matching
-releases from the package index without hashes. What is tested before a client is published:
+Mac. Said plainly: `pipx install shakerscan` or `uv tool install shakerscan` resolves the exact pin
+`fido2==2.2.1` and a `cryptography` release in that range (with `cffi` and `pycparser`) from PyPI
+by version, without hashes; the hash-locked `client/requirements/runtime.lock` protects the
+publish checks and the SBOM, not your install. What is tested before a client is published:
 the built wheel installed from the hash-locked set in `client/requirements/runtime.lock`
 (python-fido2 2.2.1, cryptography 50.0.2, or 48.0.1 on an Intel Mac, with their dependencies;
 `pip install --require-hashes -r client/requirements/runtime.lock` installs exactly that), and the
@@ -480,16 +482,22 @@ shakerscan hunt permissions wait 8f0c…  # JSON: granted, denied, expired, with
   Hunt. It reads every 3 s after a request was shown and waits longer (up to 15 s) while nothing
   new arrives.
   The engine has no accounts: anyone who can reach its API could decide, and the command says so.
-- Neither runs without an interactive terminal, so an agent cannot run it in its own shell: `approve`,
-  `approve --all-pending`, `approve --watch`, `deny`, `agent --allow` and the knowledge and secrets
-  decisions ask only when their input and their output are a terminal (the prompts then go to
-  it), the same rule as a person's decision below. Otherwise they exit with status 3 (refused,
-  nothing ran) before anything is read from the instance, shown, or asked of a security key, so a
-  harness that captures an agent's command's output never makes your key blink, whatever
-  terminal it gives the command's input or errors. Inside an agent that `shakerscan agent` started they are refused the
-  same way, even in its own window. The refusal ends with the command to run in your own terminal,
-  with the request the agent named (`shakerscan approve 8f0c…`). Never type a code into an agent's
-  chat.
+- Neither runs without an interactive terminal, so an agent cannot run it in its own shell:
+  `approve`, `approve --all-pending`, `approve --watch`, `deny`, `agent --allow`, `hunt start
+  --allow` and the knowledge and secrets decisions ask when their input is a terminal, outside an
+  agent that `shakerscan agent` started (even in its own window). Without one they exit with
+  status 3 (refused, nothing ran) before anything is read from the instance, shown, or asked of a
+  security key; the refusal ends with the command to run in your own terminal, with the request
+  the agent named by its id (`shakerscan approve 8f0c…`). Never type a code into an agent's chat.
+- With their output piped or captured (`| tee log`, `> file`, `--json | jq`, `HUNT=$(shakerscan
+  hunt start ... --allow ... | jq -r .hunt_id)`) they ask as client 0.11.1 did: the prompts on
+  standard error when that is the terminal, and the TOTP code where your account has one (a key
+  is asked first only when the output is the terminal too). Where the gateway's administrator
+  requires a security-key touch, such a command exits 3 having asked nothing and says to run it
+  again with its output on your terminal (`shakerscan hunt list` shows a Hunt's id), so your key
+  never blinks for a program that captures a command's output.
+- With no security key registered where one is needed, `approve` says so whole, before showing
+  any request, and exits 1.
 
 Bounds set when you start an agent pre-authorize requests inside them, so they are granted as they
 arise: `shakerscan agent opencode --allow budget.raise:2x --allow capability:state-changing`
@@ -540,12 +548,11 @@ touch accepted for alice (security-key touch); sending the request again...
 raised state-changing requests 20 -> 40 (safety ceiling) for Hunt 3f2a91c0-…
 ```
 
-- **In your own terminal**: stdin and stdout are terminals (the prompt goes to stdout; `hunt start
-  --allow` asks on stderr when that is a terminal too, its stdout carrying the JSON answer). A
+- **In your own terminal**: stdin and stdout are terminals (the prompt goes to stdout). A
   command whose output is piped or captured (`--json | jq`, `| tee log`, `> file`, an agent's tool
   call) or whose input is piped or redirected (`shakerscan api … < /dev/null`, or any script feeding
-  it) never asks, even in your own terminal: it exits 3, nothing changed, and names the command to
-  run without the pipe. The client shows the
+  it) never asks for this touch, even in your own terminal: it exits 3, nothing changed, and names
+  the command to run without the pipe. The client shows the
   decision whole (every limit a raise sets, the whole host; a
   decision too long for a terminal is never touched for), asks
   the gateway for a challenge bound to exactly that request (method, path and query, SHA-256 of the
@@ -593,14 +600,15 @@ raised state-changing requests 20 -> 40 (safety ceiling) for Hunt 3f2a91c0-…
     standing authorization for active testing (never intrusive; that is made in the browser). A
     gateway that requires the touch records the person who touched. Elsewhere on Enterprise the
     engine records the connection's token first, with the person it acts for, and that no touch
-    proved it (`alice's token laptop, no security-key touch (shakerscan targets authorize)`), and
-    the command says why; on an open-source engine, this computer's user. A placeholder (`TARGET-ID`) or a value ending in
+    proved it (`alice's token laptop, no security-key touch (shakerscan targets authorize)`); on an
+    open-source engine, this computer's user. A placeholder (`TARGET-ID`) or a value ending in
     punctuation copied from a sentence is refused before anything is sent. The
     gateway names the environment the authorization is evaluated in ("in the production
     environment", or a lab environment, which admits private and local addresses). It takes a
     connected device's id as well (a device is authorized the same way) and `host://<address>`
-    for a host target. Where the gateway requires the touch, an agent's shell is refused before
-    anything is registered (exit 3). In your own terminal the target is registered first (an
+    for a host target. An agent's shell, or a run with its output captured, is refused before
+    anything is read or registered (exit 3), whatever the gateway's switch says. In your own
+    terminal the target is registered first (an
     ordinary add, no decision): a touch that fails or is cancelled leaves it registered and not
     authorized, and the command says so.
     `shakerscan targets unauthorize <url-or-id> [--reason …]` withdraws it.
@@ -610,9 +618,11 @@ raised state-changing requests 20 -> 40 (safety ceiling) for Hunt 3f2a91c0-…
     touch proved it, after any `--reason` you give; where it requires the touch, the gateway
     records "Raised by <you> (terminal security-key touch)" instead of your `--reason`.
 
-  On an open-source engine, or a gateway that does not require the touch, they are sent as they
-  are, from any shell (on such a gateway an agent with your connection can make them too: the
-  accepted risk of that setting).
+  Both run only in your own terminal (stdin and stdout terminals, outside `shakerscan agent`), on
+  any instance and whatever the switch says; elsewhere they print the decision and your command
+  and exit 3. On an open-source engine, or a gateway that does not require the touch, they are
+  sent as they are (on such a gateway an agent holding your connection's token can still send the
+  same request itself: the accepted risk of that setting).
 - **What a touch proves.** A person was at the key: presence, not identity (anyone at a plugged-in
   key can touch it). An agent started some other way than `shakerscan agent` (Codex or Claude
   Code registered with `shakerscan connect --codex` or `--claude` and started directly, say) whose
