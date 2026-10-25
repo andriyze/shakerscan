@@ -678,19 +678,34 @@ def test_hunt_budget_raise_reads_the_budget_and_sends_totals(gateway, monkeypatc
     code = decisions.hunt_budget_raise([HUNT, "--limit", "max_state_changing_requests=+20",
                                         "--limit", "max_http_requests=600"], ORIGIN)
     assert code == 3, "an agent's shell gets the person's command, never a prompt"
-    read, me, refused = gateway.sent
+    assert gateway.sent == [], "nothing was read from or sent to the instance"
+    err = capsys.readouterr().err
+    # One line, not the CLI's error JSON, ending with the person's command.
+    assert err.startswith("shakerscan: person decision required: ") and err.count("\n") == 1, err
+    assert err.rstrip().endswith(f"shakerscan hunt budget raise {HUNT} --limit max_state_changing_requests=+20 "
+                                 "--limit max_http_requests=600"), err
+    assert "{" not in err
+    # In the person's own terminal: the budget read, totals sent, one touch, the same bytes again.
+    at_a_terminal(monkeypatch)
+    signer = Signer()
+    monkeypatch.setattr(approval, "security_key_assertion", signer)
+    assert decisions.hunt_budget_raise([HUNT, "--limit", "max_state_changing_requests=+20",
+                                        "--limit", "max_http_requests=600"], ORIGIN) == 0
+    read, me, refused, resent = gateway.sent
     assert urllib.parse.urlsplit(me["url"]).path == "/_enterprise/me"
     body = json.loads(refused["data"])
     assert body["limits"] == {"max_state_changing_requests": 40, "max_http_requests": 600}
     assert body["expected_revision"] == 2 and body["operator_confirmed"] is True
-    err = capsys.readouterr().err
-    # One line, not the CLI's error JSON.
-    assert err.startswith("shakerscan: person decision required: ") and err.count("\n") == 1, err
-    assert "shakerscan hunt budget raise" in err and "{" not in err
+    assert resent["data"] == refused["data"] and len(signer.asked) == 1
+    capsys.readouterr()
     with pytest.raises(SystemExit):
         decisions.hunt_budget_raise([HUNT], ORIGIN)  # --limit is required
     assert decisions.hunt_budget_raise([HUNT, "--limit", "max_hosts=5"], ORIGIN) == 2
     assert "no budget limit max_hosts" in capsys.readouterr().err
+    # A limit that is not NAME=N|+N is refused before anything, wherever it runs.
+    gateway.sent.clear()
+    assert decisions.hunt_budget_raise([HUNT, "--limit=--url=https://evil.example=1"], ORIGIN) == 2
+    assert gateway.sent == []
 
 
 # ---- the whole decision, the binding, Ctrl-C, readiness -----------------------------------------
@@ -1292,12 +1307,12 @@ def test_a_target_registered_before_a_refused_touch_is_said_to_stay_registered(g
     gateway.open = created
     args = types.SimpleNamespace(action="authorize", target="app.example.com", reason=None, json=False,
                                  timeout=None, url=None, token_file=None)
-    # In an agent's shell, where the gateway requires a touch: refused before anything is
-    # registered, so there is no note to give.
+    # In an agent's shell: refused before anything is read or registered (switch on or off), so
+    # there is no note to give.
     assert decisions.cmd_targets(args) == 3
     err = capsys.readouterr().err
     assert "shakerscan targets authorize app.example.com" in err and "registered" not in err
-    assert [urllib.parse.urlsplit(sent["url"]).path for sent in gateway.sent] == ["/_enterprise/me"]
+    assert gateway.sent == []
     # In the person's terminal the target is registered first; a touch that fails leaves it
     # registered, and that is said.
     at_a_terminal(monkeypatch)
@@ -2275,12 +2290,24 @@ def test_a_refused_retest_without_a_target_names_a_placeholder_a_shell_does_not_
 
 
 def test_targets_authorize_with_the_switch_off_is_sent_and_recorded_as_the_tokens(gateway, monkeypatch, capsys):
-    """Where no touch is required an agent's shell authorizes as before (the accepted risk), and
-    the engine records the token first and that no person proved it."""
+    """Where no touch is required the person's own `targets authorize` is sent with no touch, and
+    the engine records the token first and that no person proved it; the command says nothing
+    more (`shakerscan doctor` says the switch is off). From an agent's shell it is refused with
+    the switch off too: a decision only a person makes is never an agent's one-line command
+    (an agent holding the token can still send the request itself: the accepted risk)."""
     decisions = _client_module(monkeypatch, gateway)
     monkeypatch.setenv("SHAKERSCAN_API_TOKEN", "token-1")
-    out = at_a_terminal(monkeypatch, stdin=False)
+    at_a_terminal(monkeypatch, stdin=False)
     import shakerscan.cli as cli
+
+    monkeypatch.setattr(cli, "apply_connection", lambda args: ORIGIN)
+    args = types.SimpleNamespace(action="authorize", target="app.example.com", reason=None, json=False,
+                                 timeout=None, url=None, token_file=None)
+    gateway.refuse = False
+    assert decisions.cmd_targets(args) == 3
+    assert gateway.sent == []
+    assert capsys.readouterr().err.rstrip().endswith("shakerscan targets authorize app.example.com")
+    out = at_a_terminal(monkeypatch)
 
     monkeypatch.setattr(cli, "apply_connection", lambda args: ORIGIN)
     gateway.refuse = False
@@ -2300,8 +2327,9 @@ def test_targets_authorize_with_the_switch_off_is_sent_and_recorded_as_the_token
     authorized = [sent for sent in gateway.sent if sent["url"].endswith("/authorization")]
     assert json.loads(authorized[0]["data"])["approved_by"] == (
         "alice's token laptop, no security-key touch (shakerscan targets authorize)")
-    # The person who ran it is told why the record names the token.
-    assert "requires no security-key touch for it, so the record names the connection's token" in out.getvalue()
+    shown = out.getvalue().splitlines()
+    assert len(shown) == 1 and shown[0].startswith("authorized https://app.example.com/ for active testing"), (
+        "one line, no note on the switch")
     capsys.readouterr()
 
 

@@ -6,12 +6,14 @@ target is named by its URL, by its id (a connected device's id too: a device is 
 same way), or as ``host://<address>`` for a host (network) target.
 ``shakerscan hunt budget raise <hunt> --limit NAME=N|+N`` raises a Hunt's budget.
 
-They are ordinary API writes. On an Enterprise gateway whose administrator requires a
-security-key touch for person decisions from terminals, the gateway refuses them with the
-connection's token alone, and the product CLI's client completes them with one touch of the
-person's key and sends them again (person_decision.py, vendored as ``_person_decision``). From an
-agent's shell, which has no terminal, they never prompt: they print the command the person runs
-and exit 3. On an open-source engine, or a gateway without the switch, they are sent as they are.
+They are ordinary API writes, made only in the person's own terminal (stdin and stdout
+terminals, outside an agent that ``shakerscan agent`` started), whatever the gateway's switch
+says: from an agent's shell, or with the output captured, they send nothing, print the command
+the person runs and exit 3. On an Enterprise gateway whose administrator requires a security-key
+touch for person decisions from terminals, the gateway refuses them with the connection's token
+alone, and the product CLI's client completes them with one touch of the person's key and sends
+them again (person_decision.py, vendored as ``_person_decision``). On an open-source engine, or a
+gateway without the switch, they are sent as they are.
 """
 
 from __future__ import annotations
@@ -20,7 +22,6 @@ import argparse
 import hashlib
 import json
 import re
-import shlex
 import sys
 import urllib.parse
 from collections.abc import Mapping, Sequence
@@ -77,6 +78,23 @@ def _client(url: str, timeout: float | None):
 
     token = os.environ.get("SHAKERSCAN_API_TOKEN", "").strip() or None
     return v2, v2.ApiClient(url, api_token=token, timeout=timeout or v2.DEFAULT_TIMEOUT_SECONDS)
+
+
+# A limit as `hunt budget raise --limit` takes it, before the Hunt's budget is read.
+LIMIT = re.compile(r"[a-z_]{1,64}=\+?[0-9]{1,16}")
+
+
+def _not_here(summary: str, command: str, decision: str) -> int | None:
+    """Exit 3 with the one line naming the decision and the person's command, unless this is the
+    person's own terminal (stdin and stdout terminals, not an agent's shell): before anything is
+    read from or sent to the instance. The same rule whatever the gateway's switch says, so an
+    agent is never handed a one-line command for a decision only a person makes."""
+    person = helper("_person_decision")
+    if person.interactive():
+        return None
+    line = person.refusal_line({"decision": decision, "summary": summary}, command)
+    print(f"shakerscan: {line}", file=sys.stderr)
+    return person.EXIT_REFUSED
 
 
 def _exit(v2: Any, exc: Exception) -> int:
@@ -257,16 +275,15 @@ def cmd_targets(args: argparse.Namespace) -> int:
         args.target = checked_target(args.target)
     except DecisionError as exc:
         return _exit(v2, exc)
+    if args.action == "authorize":
+        # Only in the person's own terminal, switch on or off: said before the target is
+        # registered, so nothing at all changes (unauthorize withdraws, and needs no person).
+        word = helper("_person_decision")._word(args.target.strip())
+        refused = _not_here(f"Authorize {args.target.strip()} for active testing",
+                            f"shakerscan targets authorize {word or 'TARGET-ID'}", "target.authorize")
+        if refused is not None:
+            return refused
     me = _me(client)
-    if args.action == "authorize" and touch_required(me) and not helper("_person_decision").interactive():
-        # Where the gateway requires a touch, an agent's shell cannot authorize: said before the
-        # target is registered, so nothing at all changes (unauthorize needs no touch).
-        decision = helper("_person_decision")
-        command = "shakerscan targets authorize " + shlex.quote(args.target.strip())
-        line = decision.refusal_line({"decision": "target.authorize",
-                                      "summary": f"Authorize {args.target.strip()} for active testing"}, command)
-        print(f"shakerscan: {line}", file=sys.stderr)
-        return decision.EXIT_REFUSED
     try:
         target = find_target(client, args.target, create=args.action == "authorize")
         identifier = str(target.get("id") or "")
@@ -282,11 +299,9 @@ def cmd_targets(args: argparse.Namespace) -> int:
             )
             recorded = (answer or {}).get("authorization") if isinstance(answer, Mapping) else None
             who = (recorded or {}).get("approved_by") if isinstance(recorded, Mapping) else None
+            # The record says how it was made (the token, and that no touch proved it, where the
+            # switch is off); `shakerscan doctor` says whether the switch is on.
             line = f"authorized {_named(target)} for active testing" + (f", recorded as {who}" if who else "")
-            if isinstance(me, Mapping) and not touch_required(me):
-                # The person who ran it reads the record too: why it names the token.
-                line += ("\n(this gateway requires no security-key touch for it, so the record names the "
-                         "connection's token, which anyone holding it could have used)")
         else:
             answer = client.request(
                 "DELETE", f"/targets/{identifier}/authorization",
@@ -362,6 +377,19 @@ def hunt_budget_raise(argv: Sequence[str], url: str, timeout: float | None = Non
     try:
         if not UUID.fullmatch(hunt):
             raise DecisionError("name the Hunt by its id")
+        for raw in args.limit:
+            if not LIMIT.fullmatch(str(raw).strip()):
+                raise DecisionError(f"--limit takes NAME=N or NAME=+N, not {raw!r}")
+    except DecisionError as exc:
+        return _exit(v2, exc)
+    command = (f"shakerscan hunt budget raise {hunt} "
+               + " ".join(f"--limit {str(raw).strip()}" for raw in args.limit)
+               + (" --resume" if args.resume else ""))
+    refused = _not_here(f"Raise the budget of Hunt {hunt}: " + ", ".join(str(raw).strip() for raw in args.limit),
+                        command, "budget.raise")
+    if refused is not None:
+        return refused
+    try:
         current = client.request("GET", f"/hunts/{hunt}")
         budget = current.get("budget") if isinstance(current, Mapping) and isinstance(current.get("budget"), Mapping) else {}
         revision = current.get("budget_revision") if isinstance(current, Mapping) else None
