@@ -810,3 +810,85 @@ def test_automatic_retests_skip_a_proven_finding_that_cannot_be_rebuilt(monkeypa
     assert counts == {"queued": 0, "skipped": 2}
     # Only the rebuilt request reaches admission, as the request its proof sent.
     assert admitted == ["http://shop.fixture.invalid/product?id=1"]
+
+
+# --- what the page's own requests did, judged without a browser ----------------------------------
+
+class _StandInFrame:
+    def __init__(self, parent=None):
+        self.parent_frame = parent
+
+
+_MAIN_FRAME = _StandInFrame()
+
+
+class _StandInRequest:
+    """A Playwright request as the retest's page listeners see it (unit fixture)."""
+
+    def __init__(self, url, resource_type, *, navigation=False, frame=_MAIN_FRAME, failure=None):
+        self.url, self.resource_type, self.frame, self.failure = url, resource_type, frame, failure
+        self._navigation = navigation
+
+    def is_navigation_request(self):
+        return self._navigation
+
+
+class _StandInResponse:
+    def __init__(self, request, status):
+        self.request, self.status = request, status
+
+
+@pytest.mark.parametrize("events,incomplete", [
+    # The page and its script answered: a negative answer stands.
+    ([("document", 200, True), ("script", 200, False)], False),
+    # A missing image or style, or another origin's script: still a negative answer.
+    ([("image", 404, False), ("stylesheet", 503, False), ("script@other", 503, False)], False),
+    # The page's own script, or the data call its sink makes, answered with an error.
+    ([("script", 503, False)], True),
+    ([("fetch", 503, False)], True),
+    ([("xhr", 429, False)], True),
+    # A frame the page embeds failed.
+    ([("document", 404, False)], True),
+    # The navigation's own status is judged elsewhere (refusal, unavailable).
+    ([("document", 404, True)], False),
+])
+def test_the_page_activity_says_when_the_page_did_not_run_whole(events, incomplete):
+    from worker_handlers.proof_replay import _PageActivity, _url_origin
+
+    page = "http://shop.fixture.invalid/search?q=1"
+    activity = _PageActivity(_url_origin(page))
+    for kind, status, navigation in events:
+        resource, _, where = kind.partition("@")
+        url = ("http://other.fixture.invalid/x.js" if where == "other" else "http://shop.fixture.invalid/x")
+        request = _StandInRequest(url, resource, navigation=navigation,
+                                  frame=_MAIN_FRAME if navigation else _StandInFrame(_MAIN_FRAME))
+        activity.started(request)
+        activity.answered(_StandInResponse(request, status))
+        activity.finished(request)
+    assert (activity.incomplete() is not None) is incomplete
+
+
+def test_a_request_still_open_a_failed_one_and_a_capped_one_leave_the_page_incomplete():
+    from worker_handlers.proof_replay import _PageActivity, _url_origin
+
+    origin = _url_origin("http://shop.fixture.invalid/")
+    still_open = _PageActivity(origin)
+    still_open.started(_StandInRequest("http://shop.fixture.invalid/app.js", "script"))
+    assert still_open.incomplete()["pending"] == 1
+
+    network = _PageActivity(origin)
+    request = _StandInRequest("http://shop.fixture.invalid/api", "fetch", failure="net::ERR_CONNECTION_RESET")
+    network.started(request)
+    network.failed(request)
+    assert network.incomplete()["failed"][0]["resource_type"] == "fetch"
+
+    # A request the retest itself blocked by design (another origin, an unsafe method) is not a
+    # failure of the page; one the request cap cut is.
+    blocked = _PageActivity(origin)
+    aborted = _StandInRequest("http://shop.fixture.invalid/api", "fetch", failure="net::ERR_BLOCKED_BY_CLIENT")
+    blocked.aborted.add(id(aborted))
+    blocked.started(aborted)
+    blocked.failed(aborted)
+    assert blocked.incomplete() is None
+    blocked.capped += 1
+    assert blocked.incomplete()["capped"] == 1

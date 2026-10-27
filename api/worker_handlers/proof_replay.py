@@ -17,8 +17,12 @@ Otherwise the same check runs again:
 
 The verdict follows the check: reproduced is still vulnerable; not reproduced, with every request
 answered, is likely fixed; a refusal, a failed request, an unavailable service (``_unavailable``),
-a missing browser or one that does not answer is inconclusive, and the finding stays open. Nothing
-here escalates to the AI tier.
+a missing browser or one that does not answer is inconclusive, and the finding stays open. In the
+browser "every request" includes the page's own: a same-origin script, frame or data request that
+answered with an error or failed, one the retest's request cap cut, or one still open when the
+proof's page timeout ran out leaves the page not running as it did when the finding was proved, and
+the retest inconclusive. A failed image, style or font, and a request to another origin (blocked as
+the proof blocks it), do not. Nothing here escalates to the AI tier.
 """
 
 from __future__ import annotations
@@ -239,6 +243,79 @@ async def _differential_check(
 _BROWSER_SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
 _BROWSER_MAX_REQUESTS = 50
 _BROWSER_CLOSE_SECONDS = 10.0
+# The page's own requests that carry its application: when one of these fails, the page did not
+# run as it did when the finding was proved. A failed image, style or font does not stop a script.
+_APPLICATION_RESOURCES = frozenset({"document", "script", "fetch", "xhr", "eventsource", "websocket"})
+# How long the requests the page still has open may keep a negative answer waiting, past the
+# proof's settle: up to the proof's own page timeout.
+_PENDING_POLL_SECONDS = 0.1
+_PENDING_QUIET_SECONDS = 0.25
+
+
+class _PageActivity:
+    """What the page's same-origin requests did: answered with an error, failed, cut by the
+    retest's request cap, or still open. The page's own navigation is judged elsewhere."""
+
+    def __init__(self, origin: tuple[str, str, int | None] | None) -> None:
+        self.origin = origin
+        self.pending: dict[int, Any] = {}
+        self.failures: list[dict[str, Any]] = []
+        self.capped = 0
+        self.aborted: set[int] = set()
+
+    def _same_origin(self, request: Any) -> bool:
+        with contextlib.suppress(Exception):
+            return _url_origin(request.url) == self.origin
+        return False
+
+    @staticmethod
+    def _main_navigation(request: Any) -> bool:
+        with contextlib.suppress(Exception):
+            frame = request.frame
+            return bool(request.is_navigation_request()) and frame.parent_frame is None
+        return False
+
+    @staticmethod
+    def _resource(request: Any) -> str:
+        with contextlib.suppress(Exception):
+            return str(request.resource_type or "")
+        return ""
+
+    def started(self, request: Any) -> None:
+        if self._same_origin(request):
+            self.pending[id(request)] = request
+
+    def finished(self, request: Any) -> None:
+        self.pending.pop(id(request), None)
+
+    def failed(self, request: Any) -> None:
+        self.pending.pop(id(request), None)
+        if id(request) in self.aborted or not self._same_origin(request) or self._main_navigation(request):
+            return
+        if self._resource(request) in _APPLICATION_RESOURCES:
+            error = ""
+            with contextlib.suppress(Exception):
+                error = str(request.failure or "")
+            self.failures.append({"resource_type": self._resource(request), "error": error[:80] or "failed"})
+
+    def answered(self, response: Any) -> None:
+        with contextlib.suppress(Exception):
+            request = response.request
+            status = int(response.status)
+            if (status >= 400 and self._same_origin(request) and not self._main_navigation(request)
+                    and self._resource(request) in _APPLICATION_RESOURCES):
+                self.failures.append({"resource_type": self._resource(request), "status": status})
+
+    def incomplete(self) -> dict[str, Any] | None:
+        """Why the page did not run as proved, or None when every request it needed answered."""
+        if not (self.failures or self.capped or self.pending):
+            return None
+        return {
+            "failed": self.failures[:10],
+            "pending": len(self.pending),
+            "pending_resource_types": sorted({self._resource(item) for item in self.pending.values()}),
+            "capped": self.capped,
+        }
 
 
 def _url_origin(url: str) -> tuple[str, str, int | None] | None:
@@ -272,15 +349,19 @@ async def _marker_check(
     signals: list[str] = []
     blocked = 0
     sent = 0
+    activity = _PageActivity(origin)
 
     async def route(handled: Any) -> None:
         nonlocal blocked, sent
         request = handled.request
-        if (
-            cancelled() or _url_origin(request.url) != origin
-            or str(request.method).upper() not in _BROWSER_SAFE_METHODS or sent >= _BROWSER_MAX_REQUESTS
-        ):
+        same_origin = _url_origin(request.url) == origin
+        safe = str(request.method).upper() in _BROWSER_SAFE_METHODS
+        if cancelled() or not same_origin or not safe or sent >= _BROWSER_MAX_REQUESTS:
             blocked += 1
+            activity.aborted.add(id(request))
+            if same_origin and safe and not cancelled():
+                # A request the page needed that the retest's cap cut: the page did not run whole.
+                activity.capped += 1
             await handled.abort("blockedbyclient")
             return
         sent += 1
@@ -302,12 +383,34 @@ async def _marker_check(
             return "browser_unresponsive", {}
         page.on("dialog", dialog)
         page.on("console", console)
+        page.on("request", activity.started)
+        page.on("requestfinished", activity.finished)
+        page.on("requestfailed", activity.failed)
+        page.on("response", activity.answered)
+        loaded = time.monotonic()
         try:
             response = await page.goto(url, wait_until="domcontentloaded", timeout=XSS_PROOF_TIMEOUT_MS)
         except Exception as exc:  # no page to judge: nothing reproduced, nothing ruled out
             return "failed", {"errors": [type(exc).__name__]}
         await asyncio.sleep(XSS_PROOF_SETTLE_SECONDS)
         dom = xss_proof_signal(await page.get_attribute("html", XSS_PROOF_ATTRIBUTE), marker)
+        # Requests the page still has open (a slow script, the call its sink waits for, the
+        # payload's own image) may yet run the payload: wait for them, within the proof's own page
+        # timeout. A marker that fires meanwhile is the same oracle's answer.
+        # Once they have finished, a short quiet spell lets what they started run (and start more).
+        deadline = loaded + XSS_PROOF_TIMEOUT_MS / 1000
+        quiet_since: float | None = None
+        while activity.pending or quiet_since is not None:
+            if signals or dom or cancelled() or time.monotonic() >= deadline:
+                break
+            if activity.pending:
+                quiet_since = None
+            else:
+                quiet_since = quiet_since or time.monotonic()
+                if time.monotonic() - quiet_since >= _PENDING_QUIET_SECONDS:
+                    break
+            await asyncio.sleep(_PENDING_POLL_SECONDS)
+            dom = xss_proof_signal(await page.get_attribute("html", XSS_PROOF_ATTRIBUTE), marker)
         status = int(response.status) if response is not None else 0
         final_url = page.url
         response_headers = dict(response.headers) if response is not None else {}
@@ -330,7 +433,30 @@ async def _marker_check(
     refused = poe.baseline_refusal(url, {"status_code": status, "headers": response_headers, "final_url": final_url})
     if refused:
         return refused, proof
+    incomplete = activity.incomplete()
+    if incomplete is not None:
+        # The page did not run as it did when the finding was proved: no negative answer.
+        proof["page_incomplete"] = incomplete
+        return "page_incomplete", proof
     return "not_reproduced", proof
+
+
+def _page_incomplete_reason(incomplete: Mapping[str, Any]) -> str:
+    failed = list(incomplete.get("failed") or ())
+    if failed:
+        first = failed[0]
+        kind = str(first.get("resource_type") or "request")
+        what = {"script": "script", "document": "frame", "fetch": "data request",
+                "xhr": "data request"}.get(kind, "request")
+        answer = (f"answered HTTP {first['status']}" if first.get("status")
+                  else "failed before it was answered")
+        cause = f"One of the page's own {what}s {answer}"
+    elif incomplete.get("capped"):
+        cause = "The page made more requests than the retest allows, and the rest were not sent"
+    else:
+        cause = "The page's own requests did not all finish loading in time"
+    return (f"{cause}, so the page did not run as it did when the finding was proved: nothing was "
+            "reproduced or ruled out, and the finding stays open.")
 
 
 async def _browser_check(
@@ -429,6 +555,10 @@ async def run_proof_retest(
         return _result(status="completed", result_status="inconclusive", verdict="inconclusive",
                        reason="The headless browser did not answer in time, so the browser check that "
                               "proved the finding could not run; the finding stays open.",
+                       proof=proof, artifacts=artifacts, **common)
+    if outcome == "page_incomplete":
+        return _result(status="completed", result_status="inconclusive", verdict="inconclusive",
+                       reason=_page_incomplete_reason(proof.get("page_incomplete") or {}),
                        proof=proof, artifacts=artifacts, **common)
     if outcome == "failed":
         return _result(status="completed", result_status="inconclusive", verdict="inconclusive",

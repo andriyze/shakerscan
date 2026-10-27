@@ -71,7 +71,8 @@ class _Pages(BaseHTTPRequestHandler):
         self.send_response(status)
         for name, value in headers:
             self.send_header(name, value)
-        self.send_header("Content-Type", "text/html; charset=utf-8")
+        if not any(name.lower() == "content-type" for name, _value in headers):
+            self.send_header("Content-Type", "text/html; charset=utf-8")
         self.send_header("Content-Length", str(len(data)))
         self.end_headers()
         self.wfile.write(data)
@@ -103,7 +104,47 @@ class _Pages(BaseHTTPRequestHandler):
                                    f"<h1>Results for {q}</h1></body></html>")
         if parsed.path == "/login":
             return self._send(200, "<form><input name=user><input type=password name=pass></form>")
+        # An application whose sink is in its own same-origin script (query -> innerHTML), in the
+        # states a retest may meet it in: running, fixed, or not running whole.
+        if parsed.path in _APP_PAGES:
+            script, attrs = _APP_PAGES[parsed.path]
+            return self._send(200, f"<html><body><h1>Search</h1><div id=r></div>"
+                                   f"<script {attrs} src='{script}'></script></body></html>")
+        if parsed.path in _APP_SCRIPTS:
+            status, body, delay = _APP_SCRIPTS[parsed.path]
+            time.sleep(delay)
+            return self._send(status, body, (("Content-Type", "application/javascript"),))
+        if parsed.path == "/api/search":  # the data call the app's sink waits for, down
+            return self._send(503, json.dumps({"error": "unavailable"}))
+        if parsed.path == "/refl/search":  # server-side reflection, no application script
+            return self._send(200, f"<html><body><h1>Results for {q}</h1></body></html>")
+        if parsed.path == "/refl/x":  # the payload's own <img src=x>, answered late under load
+            time.sleep(3.0)
+            return self._send(404, "not found")
+        if parsed.path == "/fixed-image":  # fixed, and a decorative image is missing
+            return self._send(200, f"<html><body><img src='/missing.png'><h1>Results for {html.escape(q)}</h1>"
+                                   "</body></html>")
+        if parsed.path == "/fixed-analytics":  # fixed, and loads another site's script (blocked)
+            return self._send(200, f"<html><body><script src='{self.off_origin}/analytics.js'></script>"
+                                   f"<h1>Results for {html.escape(q)}</h1></body></html>")
         return self._send(404, "not found")
+
+
+_VULNERABLE_JS = "document.getElementById('r').innerHTML = new URLSearchParams(location.search).get('q') || '';"
+_FIXED_JS = "document.getElementById('r').textContent = new URLSearchParams(location.search).get('q') || '';"
+_API_JS = ("fetch('/api/search' + location.search).then(r => r.json())"
+           ".then(d => { document.getElementById('r').innerHTML = d.echo; });")
+_APP_PAGES = {
+    "/dom": ("/app.js", ""), "/dom-fixed": ("/app-fixed.js", ""), "/dom-503": ("/app-503.js", ""),
+    "/dom-404": ("/app-404.js", ""), "/dom-429": ("/app-429.js", ""), "/dom-api503": ("/app-api.js", ""),
+    "/dom-slow": ("/app-slow.js", "async"),
+}
+_APP_SCRIPTS = {  # path: (status, body, seconds before answering)
+    "/app.js": (200, _VULNERABLE_JS, 0.0), "/app-fixed.js": (200, _FIXED_JS, 0.0),
+    "/app-503.js": (503, "Service Unavailable", 0.0), "/app-404.js": (404, "not found", 0.0),
+    "/app-429.js": (429, "Too Many Requests", 0.0), "/app-api.js": (200, _API_JS, 0.0),
+    "/app-slow.js": (200, _VULNERABLE_JS, 3.0),
+}
 
 
 class _OffOrigin(BaseHTTPRequestHandler):
@@ -197,6 +238,42 @@ def test_the_retest_uses_the_scans_session_and_only_on_the_findings_origin(monke
     assert signed_in["verdict"] == "exploited", signed_in["verdict_reason"]
     assert signed_in["proof"]["blocked_requests"] >= 1
     assert OFF_ORIGIN_HITS == []
+
+
+@pytest.mark.parametrize("path,verdict", [
+    ("/dom", "exploited"),          # the application's script runs the payload
+    ("/dom-fixed", "likely_fixed"),  # fixed: the script writes text
+    # Fixed: a missing decorative image, and another site's script the proof blocks, do not
+    # stop a negative answer.
+    ("/fixed-image", "likely_fixed"),
+    ("/fixed-analytics", "likely_fixed"),
+])
+def test_a_page_that_ran_as_proved_gets_a_verdict(monkeypatch, pages, path, verdict):
+    result = _retest(monkeypatch, _verification(pages, path))
+    assert result["verdict"] == verdict, result["verdict_reason"]
+
+
+@pytest.mark.parametrize("path,shown", [
+    ("/dom-503", "answered HTTP 503"),
+    ("/dom-404", "answered HTTP 404"),   # a rolling deploy: the bundle is not there yet
+    ("/dom-429", "answered HTTP 429"),   # rate limiting
+    ("/dom-api503", "answered HTTP 503"),  # the script loads; the call its sink needs fails
+])
+def test_a_page_whose_own_scripts_or_calls_failed_is_inconclusive(monkeypatch, pages, path, shown):
+    result = _retest(monkeypatch, _verification(pages, path))
+    assert (result["verdict"], result["result_status"]) == ("inconclusive", "inconclusive"), result["verdict_reason"]
+    assert shown in result["verdict_reason"]
+    assert "did not run as it did when the finding was proved" in result["verdict_reason"]
+    assert result["proof"]["page_incomplete"]["failed"]
+
+
+@pytest.mark.parametrize("path", ["/dom-slow", "/refl/search"])
+def test_a_page_still_loading_after_the_settle_is_never_likely_fixed(monkeypatch, pages, path):
+    """A script slower than the settle, or the payload's own image answered late: the retest
+    waits for them within the proof's page timeout, and the payload then runs."""
+    result = _retest(monkeypatch, _verification(pages, path))
+    assert result["verdict"] != "likely_fixed", result["verdict_reason"]
+    assert result["verdict"] == "exploited", result["verdict_reason"]
 
 
 def test_the_marker_is_the_one_the_browser_proof_looks_for():
