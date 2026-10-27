@@ -1,4 +1,4 @@
-"""The in-process checks keep the sign-in endpoint's pace and probe sets too (E1-N6).
+"""The in-process checks keep the sign-in endpoint's pace and probe sets too.
 
 Besides sqlmap and Dalfox, five checks send requests to a candidate's endpoint from the worker
 itself: the SQLi and XSS request verifiers, the SQLi proof, the NoSQLi check and the XSS browser

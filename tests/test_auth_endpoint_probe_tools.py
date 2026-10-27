@@ -1,4 +1,4 @@
-"""In the scanner image: the sign-in probe's Dalfox run finds a login form's reflected XSS (E1-N6),
+"""In the scanner image: the sign-in probe's Dalfox run finds a login form's reflected XSS,
 and cannot clear a login that does not reflect inside its probe set.
 
 The credential profile's own sign-in endpoint is probed with Dalfox's own discovery and payloads

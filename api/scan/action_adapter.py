@@ -4949,7 +4949,7 @@ class DatabaseNeutralScanActionDispatcher:
         )
         # The credential profile's own sign-in endpoint (and its form action) is held to a
         # paced rate, one attempt at a time, and to one probe set per verifier across the
-        # Scan (auth_endpoint_probe, E1-N6): what every batch action of this verifier already
+        # Scan (auth_endpoint_probe): what every batch action of this verifier already
         # sent the endpoint, from any candidate or round, counts against that set.
         sign_ins: tuple = ()
         sign_in_received: dict[str, int] = {}

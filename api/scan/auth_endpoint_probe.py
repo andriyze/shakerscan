@@ -1,4 +1,4 @@
-"""A paced, bounded probe set on the credential profile's own sign-in endpoint (E1-N6).
+"""A paced, bounded probe set on the credential profile's own sign-in endpoint.
 
 This is a pace and a bound on one endpoint, not a budget cut: budgets stay generous. Every
 other endpoint, and every fast, balanced, thorough or deep plan, keeps its full verification
