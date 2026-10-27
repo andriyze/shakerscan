@@ -341,6 +341,7 @@ from worker_handlers.retest_outcome import (  # noqa: F401 - re-exported
     replay_refusal,
 )
 from worker_handlers.proof_replay import run_proof_retest
+from worker_handlers.retest_identity import identity_unresolved_result, retest_identity_unresolved
 from worker_handlers.retest_authority import (
     ai_replay_authority_stop,
     cut_short_by_destination,
@@ -5715,6 +5716,9 @@ async def run_finding_retest(verification: dict) -> dict:
 
     if declined := path_segment_retest_result(inputs, replay_commands):
         return {**declined, "attempt_ladder": attempt_ladder}
+    # A finding found signed in is never retested anonymously: no tier sends anything.
+    if retest_identity_unresolved(verification):
+        return identity_unresolved_result(replay_commands=replay_commands, ladder=attempt_ladder)
     # A proven Scan finding is retested by the check that proved it, with the request it proved.
     proven = await run_proof_retest(
         verification, inputs, poe=proof_of_exploit, replay_commands=replay_commands,
@@ -6253,8 +6257,13 @@ async def process_finding_retest_job(job_data: dict):
                     ai_verify_min_severity = _retest_policy.ai_escalation_min_severity
                     ai_config_ready = bool(ai_verify_enabled and ai_verify_url and ai_verify_api_key)
 
+                    # A retest that cannot run as its finding's signed-in identity sends nothing,
+                    # in the deterministic and the AI-driven tier alike.
+                    identity_unresolved = retest_identity_unresolved(verification)
                     # Tier 1: Deterministic proof (fast, free) — skip if forced AI
-                    if force_ai and not ai_config_ready:
+                    if identity_unresolved:
+                        result = identity_unresolved_result()
+                    elif force_ai and not ai_config_ready:
                         result = {
                             "status": "failed",
                             "result_status": "error",
@@ -6302,7 +6311,8 @@ async def process_finding_retest_job(job_data: dict):
                     ai_failure_error: str | None = None
                     still_vulnerable_deterministic = result.get("verdict") == "exploited"
                     should_try_ai = (
-                        not still_vulnerable_deterministic
+                        not identity_unresolved
+                        and not still_vulnerable_deterministic
                         and requested_mode != "deterministic"
                         and (result.get("has_ai_step") or force_ai)
                         and ai_config_ready
