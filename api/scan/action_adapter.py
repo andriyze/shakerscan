@@ -271,9 +271,12 @@ from .verifier_refusal import is_refusal_error, mark_refused, refusal_exempt
 from .verification_extension import (
     EXTENDS_ARG,
     LAST_CHANCE_ARG,
+    PROOF_LEFT_CANCELLED,
+    PROOF_LEFT_UNFUNDED,
     SCAN_WALL_SHARE_ARG,
     extension_lineage,
     lane_round_wall_ceiling,
+    proof_left_record,
 )
 from .batch_carry import (
     admission_template_source, carried_records, finished_attempts, proof_signal_sources,
@@ -511,6 +514,30 @@ def _repeated_candidate_positions(entries: Sequence[Mapping[str, Any]]) -> froze
             repeated.add(index)
         seen.add(identity)
     return frozenset(repeated)
+
+
+def _proof_left_records(
+    rows: Sequence[tuple[int, Mapping[str, Any]]], *, reason: str, family: str,
+    signalled: Collection[int], manifest_digest: str, repeated_positions: Collection[int],
+    settled: Collection[str], skip: Callable[[Mapping[str, Any]], bool] = lambda _candidate: False,
+) -> list[dict[str, Any]]:
+    """The signalled candidates from ``rows`` on that a proof batch stopped before, one
+    ``verification_extension.proof_left_record`` each. An attempt a carried or checkpointed verdict already
+    settled (``settled``) is not left."""
+    left: list[dict[str, Any]] = []
+    for manifest_index, candidate in rows:
+        if manifest_index not in signalled or skip(candidate):
+            continue
+        candidate_id = str(candidate.get("candidate_id") or "")
+        attempt_id = _batch_attempt_id(
+            manifest_digest, family, candidate_id, manifest_index, repeated_positions,
+        )
+        if attempt_id not in settled:
+            left.append(proof_left_record(
+                attempt_id=attempt_id, candidate_id=candidate_id, family=family, reason=reason,
+                manifest_index=manifest_index,
+            ))
+    return left
 
 
 def _batch_attempt_id(
@@ -2446,6 +2473,7 @@ class DatabaseNeutralScanActionDispatcher:
             self.options, lane="primary", capability_name=action.capability_name,
         )
         proof_headers = primary.headers() if primary.authenticated else None
+        stopped: tuple[str, int] | None = None
         for offset, (manifest_index, candidate) in enumerate(rows):
             candidate_id = str(candidate.get("candidate_id") or "")
             if manifest_index not in signalled:
@@ -2472,6 +2500,7 @@ class DatabaseNeutralScanActionDispatcher:
                     consumed[name] = consumed.get(name, 0) + int(amount)
                 continue
             if self.cancelled():
+                stopped = (PROOF_LEFT_CANCELLED, offset)
                 break
             resolved_request = execution_request_for_manifest_candidate(
                 endpoints, manifest, manifest_index,
@@ -2491,9 +2520,10 @@ class DatabaseNeutralScanActionDispatcher:
                 name: amount // remaining_attempts
                 for name, amount in remaining.items() if amount // remaining_attempts > 0
             }
-            if sub_budget.get("browser_actions", 0) < 2:
-                break
-            if body_fields and sub_budget.get("state_changing_requests", 0) < 1:
+            if sub_budget.get("browser_actions", 0) < 2 or (
+                body_fields and sub_budget.get("state_changing_requests", 0) < 1
+            ):
+                stopped = (PROOF_LEFT_UNFUNDED, offset)
                 break
             try:
                 prepared = XSSBrowserProofAdapter.prepare(
@@ -2615,6 +2645,12 @@ class DatabaseNeutralScanActionDispatcher:
         await sign_in_checks.settle(
             consumed, action.requested_budget, cancelled=self.cancelled(),
         )
+        if stopped is not None:  # each signalled candidate it stopped before, named, no verdict
+            observations.extend(_proof_left_records(
+                rows[stopped[1]:], reason=stopped[0], family="xss_browser_proof",
+                signalled=signalled, manifest_digest=manifest_digest,
+                repeated_positions=repeated_positions, settled={*carried, *completed},
+            ))
         eligible = sum(manifest_index in signalled for manifest_index, _candidate in rows)
         unattempted = max(0, eligible - attempted)
         _batch_status, _batch_partial, _batch_timed_out = batch_outcome(
@@ -2725,6 +2761,7 @@ class DatabaseNeutralScanActionDispatcher:
         primary = resolve_scan_http_principal(
             self.options, lane="primary", capability_name=action.capability_name,
         )
+        stopped: tuple[str, int] | None = None
         for offset, (manifest_index, candidate) in enumerate(rows):
             candidate_id = str(candidate.get("candidate_id") or "")
             # A fragment-located candidate (family_hints: ["xss"]) lives only in the
@@ -2756,6 +2793,7 @@ class DatabaseNeutralScanActionDispatcher:
                     consumed[name] = consumed.get(name, 0) + int(amount)
                 continue
             if self.cancelled():
+                stopped = (PROOF_LEFT_CANCELLED, offset)
                 break
             request_class = str(candidate.get("request_class") or "safe_read")
             proof_candidate = dict(candidate)
@@ -2807,6 +2845,7 @@ class DatabaseNeutralScanActionDispatcher:
                 for name, amount in remaining.items() if amount // remaining_attempts > 0
             }
             if sub_budget.get("http_requests", 0) < 4:
+                stopped = (PROOF_LEFT_UNFUNDED, offset)
                 break
             transport = self._scan_replay_transport(action, private=True)
             # The credential profile's own sign-in endpoint: each proof request waits the pace,
@@ -2938,6 +2977,13 @@ class DatabaseNeutralScanActionDispatcher:
         await sign_in_checks.settle(
             consumed, action.requested_budget, cancelled=self.cancelled(),
         )
+        if stopped is not None:  # each signalled candidate it stopped before, named, no verdict
+            observations.extend(_proof_left_records(
+                rows[stopped[1]:], reason=stopped[0], family="sqli_proof",
+                signalled=signalled, manifest_digest=manifest_digest,
+                repeated_positions=repeated_positions, settled={*carried, *completed},
+                skip=lambda candidate: bool(candidate.get("browser_fragment_path")),
+            ))
         eligible = sum(manifest_index in signalled for manifest_index, _candidate in rows)
         unattempted = max(0, eligible - attempted)
         _batch_status, _batch_partial, _batch_timed_out = batch_outcome(

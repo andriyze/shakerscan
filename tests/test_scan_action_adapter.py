@@ -1134,6 +1134,99 @@ def test_one_unconstructable_sqli_proof_candidate_does_not_fail_the_whole_batch(
     )
 
 
+def _two_candidate_proof(capability, family_verifier):
+    """A proof batch over two signalled candidates (unit fixtures)."""
+    scan_id = str(uuid.uuid4())
+    endpoint_manifest = build_endpoint_manifest(
+        scan_id=scan_id, target_binding_digest=TARGET.digest,
+        surface_manifest={
+            "schema_version": "endpoint-manifest/v2", "status": "complete", "reason": None,
+            "endpoints": [
+                {"method": "GET", "scheme": "https", "host": "app.example.test", "port": 443,
+                 "normalized_path": path, "concrete_path": path, "query_keys": [key],
+                 "source": "web.crawl"}
+                for path, key in (("/one", "id"), ("/two", "q"))
+            ],
+        },
+        source_action_ids=("discover.web_crawl",),
+    )
+    candidates = build_candidate_manifest(
+        endpoint_manifest, source_action_ids=("discover.web_crawl",), maximum=10,
+    )
+    kind = "xss_alert" if capability == "xss.browser_prove_batch" else "candidate_attempt"
+    signals = tuple(
+        {"kind": kind, "candidate_id": entry["candidate_id"], "proof_state": "suspected"}
+        for entry in candidates.entries
+    )
+    dependency = _action("verify.family.00000", family_verifier, 0)
+    action = _action(
+        "prove.family.00000", capability, 1,
+        capability_args={
+            "candidate_manifest_ref": candidates.reference().canonical_dict(),
+            "endpoint_manifest_ref": endpoint_manifest.reference().canonical_dict(),
+            "slice": {"start": 0, "count": 2},
+        },
+        dependencies=(dependency.action_id,),
+    )
+    plan = ScanActionPlan(
+        scan_id=scan_id, execution_plan_digest="a" * 64,
+        target_binding_digest=TARGET.digest, actions=(dependency, action),
+    )
+    backend = Backend(
+        manifests={endpoint_manifest.manifest_id: endpoint_manifest, candidates.manifest_id: candidates},
+        observations={dependency.action_id: signals},
+    )
+    return plan, action, backend
+
+
+_PROOF_BATCHES = [
+    ("sqli.prove_batch", "sqli.verify_batch", "sqli_proof", "http_requests"),
+    ("xss.browser_prove_batch", "xss.verify_batch", "xss_browser_proof", "browser_actions"),
+]
+
+
+@pytest.mark.parametrize("capability, verifier, family, dimension", _PROOF_BATCHES)
+@pytest.mark.parametrize("stop", ["cancelled", "share_unfunded"])
+def test_a_proof_batch_names_each_signalled_candidate_it_stopped_before(
+    monkeypatch, capability, verifier, family, dimension, stop,
+):
+    """The batch stops before its second candidate: the Scan was cancelled, or what is left of
+    the budget cannot fund that attempt's share. The candidate is named with no verdict, so the
+    family's coverage counts it unresolved instead of losing it."""
+    plan, action, backend = _two_candidate_proof(capability, verifier)
+    cancelled = {"now": False}
+
+    async def execute(_self, context, adapter, **_kwargs):
+        # The first attempt spends all but a sliver of the batch's budget, or the Scan is
+        # cancelled while it runs.
+        if stop == "cancelled":
+            cancelled["now"] = True
+        spent = {name: 1 for name in context.requested_budget}
+        if stop == "share_unfunded":
+            spent[dimension] = max(1, int(action.requested_budget[dimension]) - 1)
+        observation = ({"kind": "xss_browser_proof", "proof_state": "not_proven"}
+                       if family == "xss_browser_proof" else
+                       {"kind": "sqli_proof", "proof_state": "not_proven", "finding_verdict": "not_proven",
+                        "proof_contract": None})
+        return CapabilityAdapterResult(
+            status="success", actual_budget=spent, observations=(observation,),
+            execution_started=True, parser_version="fixture/v1",
+        )
+
+    monkeypatch.setattr(action_adapter_module.CapabilityExecutor, "execute", execute)
+    dispatcher = _dispatcher(plan, backend, policy=ScanPolicy(active_testing=True, approval_receipt_id="approval-1"))
+    dispatcher.cancelled = lambda: cancelled["now"]
+    receipt = asyncio.run(dispatcher(action, _lease(plan, action), _noop))
+
+    attempts = [item for item in receipt.observations if item.get("kind") == "candidate_attempt"]
+    left = [item for item in receipt.observations if item.get("kind") == "candidate_deferred"]
+    assert len(attempts) == 1
+    assert [(item["family"], item["reason"]) for item in left] == [
+        (family, "proof_cancelled" if stop == "cancelled" else "proof_share_unfunded")]
+    assert left[0]["attempt_id"] != attempts[0]["attempt_id"] and left[0]["candidate_id"]
+    assert receipt.redacted_execution["unattempted_count"] == 1
+
+
 def test_browser_proof_attempts_fragment_candidate_without_server_signal(monkeypatch):
     scan_id = str(uuid.uuid4())
     endpoint_manifest = build_endpoint_manifest(

@@ -36,7 +36,7 @@ from .negative_control import indistinguishable_from_absent, is_negative_control
 from .redirect_evidence import REDIRECT_STATUSES, http_origin, redirect_destination
 from .severity_calibration import calibrate_findings
 from .sqli_stages import INCONCLUSIVE_RECORD_KIND, sqli_budget_outcomes
-from .verification_extension import superseding_results
+from .verification_extension import PROOF_LEFT_REASONS, superseding_results
 from .continuation import (
     ScanContinuationError,
     ScanPlanRevision,
@@ -2706,14 +2706,22 @@ def _proof_attempts_resolved(records: Any) -> dict[str, bool]:
 
     An attempt reached one when it proved its candidate, or when every record of it settled as a
     success without timing out. A candidate the sign-in endpoint's bounded probe set left inconclusive is named by its own
-    reason (``AUTH_ENDPOINT_PROBE_LIMITED``), not counted here.
+    reason (``AUTH_ENDPOINT_PROBE_LIMITED``), not counted here. A signalled candidate the batch
+    stopped before (cancelled, or its share unfunded: ``verification_extension.PROOF_LEFT_REASONS``) reached
+    none.
     """
     resolved: dict[str, bool] = {}
     for item in records or ():
-        if not isinstance(item, Mapping) or item.get("kind") != "candidate_attempt":
+        if not isinstance(item, Mapping):
             continue
         attempt_id = str(item.get("attempt_id") or "")
-        if not attempt_id:
+        if (
+            item.get("kind") == "candidate_deferred" and attempt_id
+            and item.get("reason") in PROOF_LEFT_REASONS
+        ):
+            resolved[attempt_id] = False
+            continue
+        if item.get("kind") != "candidate_attempt" or not attempt_id:
             continue
         settled = (
             str(item.get("proof_state") or "") == "verified"
@@ -2723,6 +2731,13 @@ def _proof_attempts_resolved(records: Any) -> dict[str, bool]:
         )
         resolved[attempt_id] = resolved.get(attempt_id, True) and settled
     return resolved
+
+
+def _merge_proof_resolution(row: dict[str, Any], records: Any) -> None:
+    """Fold one proof action's attempts into its family's: an attempt any action settled is
+    resolved, whichever action recorded it first."""
+    for attempt_id, resolved in _proof_attempts_resolved(records).items():
+        row["_proofs_resolved"][attempt_id] = row["_proofs_resolved"].get(attempt_id, False) or resolved
 
 
 def _family_action_reason(action: Any, result: Any) -> str:
@@ -3028,8 +3043,11 @@ def finalize_scan_report(
         })
         row["required"] = row["required"] or bool(action.required)
         if action.action_id in superseded:
-            # Its extension re-plans the same slice and is counted instead.
-            pass
+            # Its extension re-plans the same slice and is counted instead. A proof's attempts
+            # that reached no verdict still need one: they stay unresolved unless the extension
+            # (or a retry) settles the same attempt, which it does only for those it re-runs.
+            if action.capability_name in _PROOF_CAPABILITIES:
+                _merge_proof_resolution(row, observations.get(action.action_id, ()))
         elif action.capability_name in _PROOF_CAPABILITIES:
             # Escalation over candidates the verifier already counted: record it
             # separately so it never double-counts them. Only an escalation that
@@ -3052,14 +3070,10 @@ def finalize_scan_report(
             # rate, unless another proof action attempted it: nothing proved or refuted it.
             row["_proofs_attempted"].update(attempts)
             # Whether each attempt reached a verdict: one that failed, was refused or timed out
-            # left its candidate unproven, not disproven. A later action (an extension or a
-            # retry) that settles the same attempt resolves it.
-            for attempt_id, resolved in _proof_attempts_resolved(
-                observations.get(action.action_id, ()),
-            ).items():
-                row["_proofs_resolved"][attempt_id] = (
-                    row["_proofs_resolved"].get(attempt_id, False) or resolved
-                )
+            # left its candidate unproven, not disproven, and so did one the batch stopped
+            # before. A later action (an extension or a retry) that settles the same attempt
+            # resolves it.
+            _merge_proof_resolution(row, observations.get(action.action_id, ()))
             for item in observations.get(action.action_id, ()):
                 if (
                     isinstance(item, Mapping) and item.get("kind") == "candidate_deferred"
