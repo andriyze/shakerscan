@@ -1,4 +1,5 @@
 from pathlib import Path
+import re
 
 import yaml
 
@@ -249,3 +250,91 @@ def test_certification_requires_the_seeded_upgrade_path_sweep():
     assert "locked_pattern='^[A-Z_]*_IMAGE='" in script
     assert "! grep -qx 'SHAKERSCAN_MODEL_INTAKE_ENABLED=false' \"$RUNTIME/.env\" || " \
         "locked_pattern='^(SCANNER|API|UI)_IMAGE='" in script
+
+
+CLIENT_PUBLISH = ROOT / ".github" / "workflows" / "publish-client.yml"
+CLIENT_RELEASE_CONDITION = (
+    "github.event_name == 'push' && github.ref_type == 'tag' && startsWith(github.ref_name, 'client-v') "
+    "&& needs.build.outputs.publishable == 'true'"
+)
+
+
+def _evaluate(expression: str, context: dict[str, str]):
+    """Evaluate the `a == 'x' && startsWith(b, 'y')` subset the client workflow's gates use.
+
+    Anything else (`||`, `!`, parentheses beyond startsWith, another function) is refused, so a
+    gate cannot gain an alternative path past these tests by being written differently.
+    """
+    expression = expression.strip()
+    if expression.startswith("${{") and expression.endswith("}}"):
+        expression = expression[3:-2].strip()
+    assert "||" not in expression and "!" not in expression, expression
+    for term in (part.strip() for part in expression.split("&&")):
+        starts = re.fullmatch(r"startsWith\(([\w.]+), '([^']*)'\)", term)
+        equals = re.fullmatch(r"([\w.]+) == '([^']*)'", term)
+        assert starts or equals, f"unsupported gate term: {term}"
+        if starts and not context.get(starts.group(1), "").startswith(starts.group(2)):
+            return False
+        if equals and context.get(equals.group(1), "") != equals.group(2):
+            return False
+    return True
+
+
+def test_client_publishes_only_from_a_checked_client_tag_push():
+    """PyPI, the GitHub release and the formula run only for a pushed client-v* tag that passed
+    the on-main and version checks. A manual run, from any branch or tag, builds and tests only:
+    it once took a `publish` input that skipped both checks, which run for tags alone.
+    """
+    workflow = yaml.safe_load(CLIENT_PUBLISH.read_text(encoding="utf-8"))
+    triggers = workflow.get("on", workflow.get(True))  # YAML 1.1 reads the bare key `on` as True.
+    assert triggers["push"] == {"tags": ["client-v*"]}
+    assert not (triggers["workflow_dispatch"] or {}).get("inputs")
+    assert "inputs." not in CLIENT_PUBLISH.read_text(encoding="utf-8")
+    jobs = workflow["jobs"]
+
+    def releases(job):
+        for step in job.get("steps", []):
+            run = step.get("run", "")
+            if (step.get("uses", "").startswith("pypa/gh-action-pypi-publish") or "gh release create" in run
+                    or "git push" in run):
+                return True
+        return False
+
+    assert {name for name, job in jobs.items() if releases(job)} == {"publish", "homebrew"}
+    for name in ("publish", "homebrew"):
+        assert jobs[name]["if"] == CLIENT_RELEASE_CONDITION
+        assert "build" in jobs[name]["needs"]
+        assert all("if" not in step for step in jobs[name]["steps"] if releases({"steps": [step]}))
+    assert "publish" in jobs["homebrew"]["needs"]
+
+    build = jobs["build"]
+    steps = {step.get("id"): step for step in build["steps"] if step.get("id")}
+    line = steps["release_line"]["run"]
+    assert steps["release_line"]["if"] == "github.ref_type == 'tag'"
+    assert line.index('merge-base --is-ancestor "$GITHUB_SHA" FETCH_HEAD') < line.index("exit 1") < line.index(
+        'echo "on_main=true" >> "$GITHUB_OUTPUT"')
+    version = steps["version"]["run"]
+    assert "if" not in steps["version"]
+    assert version.index('!= "client-v$version"') < version.index("exit 1") < version.index(
+        'echo "tag_matches=true" >> "$GITHUB_OUTPUT"')
+
+    def gate(event: str, ref_type: str, ref_name: str, on_main: str = "true", tag_matches: str = "true"):
+        context = {
+            "github.event_name": event,
+            "github.ref_type": ref_type,
+            "github.ref_name": ref_name,
+            "steps.release_line.outputs.on_main": on_main,
+            "steps.version.outputs.tag_matches": tag_matches,
+        }
+        context["needs.build.outputs.publishable"] = str(_evaluate(build["outputs"]["publishable"], context)).lower()
+        return _evaluate(jobs["publish"]["if"], context)
+
+    assert gate("push", "tag", "client-v0.11.2")
+    # A manual run never publishes, even on a client tag whose checks pass.
+    assert not gate("workflow_dispatch", "tag", "client-v0.11.2")
+    assert not gate("workflow_dispatch", "branch", "main", on_main="", tag_matches="")
+    assert not gate("workflow_dispatch", "branch", "feature", on_main="", tag_matches="")
+    # A tag whose checks did not both pass, or that is not a client tag, never publishes.
+    assert not gate("push", "tag", "client-v0.11.2", on_main="")
+    assert not gate("push", "tag", "client-v0.11.2", tag_matches="")
+    assert not gate("push", "tag", "v2.11.2")

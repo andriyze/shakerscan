@@ -791,3 +791,7 @@ environment), attach the files to a GitHub release (never marked as the reposito
 which stays the engine's), and render the Homebrew formula
 (`client/homebrew/`), pushing it to the `andriyze/homebrew-shakerscan` tap with that repository's
 write deploy key (the `HOMEBREW_TAP_DEPLOY_KEY` secret) and attaching it as an artifact otherwise.
+Only a pushed `client-v*` tag publishes, and only when the tag sits on `main` and names the
+client's own version: PyPI, the GitHub release and the formula all wait on those two checks. A
+manual run of the workflow, from any branch or tag, builds and tests the client and publishes
+nothing.

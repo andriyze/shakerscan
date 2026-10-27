@@ -1,19 +1,16 @@
 name: Publish client
 
 # The `shakerscan` client (client/): build, test, publish to PyPI, attach the files to a GitHub
-# release, and render the Homebrew formula. Runs on `client-v*` tags; a manual run builds and
-# tests only unless `publish` is set. PyPI uses trusted publishing through the `pypi`
-# environment, so no API token is stored. See docs/client.md.
+# release, and render the Homebrew formula. Only a pushed `client-v*` tag that sits on main and
+# names the client's own version publishes; a manual run, from any ref, builds and tests and never
+# publishes. PyPI uses trusted publishing through the `pypi` environment, so no API token is
+# stored. See docs/client.md.
 
 on:
   push:
     tags: ["client-v*"]
+  # Build and test only: no input can turn a manual run into a publish.
   workflow_dispatch:
-    inputs:
-      publish:
-        description: "Publish to PyPI and create the GitHub release"
-        type: boolean
-        default: false
 
 permissions:
   contents: read
@@ -23,11 +20,15 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.version.outputs.version }}
+      # "true" only for a pushed client-v* tag that passed both checks below; publish and homebrew
+      # run on nothing else.
+      publishable: ${{ github.event_name == 'push' && github.ref_type == 'tag' && startsWith(github.ref_name, 'client-v') && steps.release_line.outputs.on_main == 'true' && steps.version.outputs.tag_matches == 'true' }}
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
         with:
           fetch-depth: 0
       - name: The tag must sit on the supported release line
+        id: release_line
         if: github.ref_type == 'tag'
         run: |
           set -euo pipefail
@@ -42,6 +43,7 @@ jobs:
             exit 1
           fi
           echo "tag is on the main release line"
+          echo "on_main=true" >> "$GITHUB_OUTPUT"
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
         with:
           python-version: "3.12"
@@ -55,9 +57,12 @@ jobs:
           print(re.search(r'^__version__ = "([^"]+)"', text, re.M).group(1))
           PY
           )"
-          if [ "${GITHUB_REF_TYPE:-}" = "tag" ] && [ "$GITHUB_REF_NAME" != "client-v$version" ]; then
-            echo "tag $GITHUB_REF_NAME does not match the client version $version" >&2
-            exit 1
+          if [ "${GITHUB_REF_TYPE:-}" = "tag" ]; then
+            if [ "$GITHUB_REF_NAME" != "client-v$version" ]; then
+              echo "tag $GITHUB_REF_NAME does not match the client version $version" >&2
+              exit 1
+            fi
+            echo "tag_matches=true" >> "$GITHUB_OUTPUT"
           fi
           echo "version=$version" >> "$GITHUB_OUTPUT"
       - name: Build the sdist and wheel
@@ -230,9 +235,11 @@ jobs:
           (cd "$RUNNER_TEMP" && "$RUNNER_TEMP/unlocked-venv/bin/shakerscan" version)
           (cd "$RUNNER_TEMP" && "$RUNNER_TEMP/unlocked-venv/bin/shakerscan" approve --help >/dev/null)
 
+  # PyPI and the GitHub release: a pushed client-v* tag on main that names the client's version,
+  # never a manual run (whatever its ref) and never a tag that failed either check.
   publish:
     needs: [build, smoke-oldest-python, smoke-unlocked]
-    if: github.ref_type == 'tag' || inputs.publish
+    if: github.event_name == 'push' && github.ref_type == 'tag' && startsWith(github.ref_name, 'client-v') && needs.build.outputs.publishable == 'true'
     runs-on: ubuntu-latest
     environment: pypi
     permissions:
@@ -273,7 +280,6 @@ jobs:
         with:
           packages-dir: dist/
       - name: GitHub release with the built files
-        if: github.ref_type == 'tag'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -286,7 +292,7 @@ jobs:
 
   homebrew:
     needs: [build, publish]
-    if: github.ref_type == 'tag'
+    if: github.event_name == 'push' && github.ref_type == 'tag' && startsWith(github.ref_name, 'client-v') && needs.build.outputs.publishable == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
