@@ -189,6 +189,21 @@ _EE_KEY_TOO_SMALL = 66
 _CA_MD_TOO_WEAK = 68
 
 
+def tls_weak_issuer_links(chain: Any) -> list[Mapping[str, Any]]:
+    """The issuing certificates the server sent (every entry of ``certificate_chain_details``
+    after the leaf) whose key is weak, or whose signature is: a self-signed root's own signature
+    is never checked, so it does not count for a weak signature."""
+    if not isinstance(chain, (list, tuple)):
+        return []
+    return [
+        link for link in chain[1:]
+        if isinstance(link, Mapping) and (
+            link.get("weak_public_key") is True
+            or (link.get("weak_signature") is True and link.get("self_signed") is not True)
+        )
+    ]
+
+
 def tls_untrusted_by_leaf_weakness(item: Mapping[str, Any]) -> bool:
     """True when the verifier refused the chain for the served certificate's own key or signature.
 
@@ -200,10 +215,13 @@ def tls_untrusted_by_leaf_weakness(item: Mapping[str, Any]) -> bool:
 
     OpenSSL refuses a weak server key (66) before it builds the chain, so that refusal says
     nothing about the chain. The inspection then judges the chain on its own
-    (``certificate_chain_trust``), and the untrusted finding is folded into the weak-key one only
-    when the chain is trusted. An untrusted chain (a private CA, a missing intermediate, a
-    self-signed certificate), or one not judged (an observation recorded before the chain was
-    judged on its own included), keeps it.
+    (``certificate_chain_trust``), with every strength check off (``@SECLEVEL=0``), and the
+    untrusted finding is folded into the weak-key one only when that chain is trusted and no
+    issuing certificate the server sent is weak itself (``tls_weak_issuer_links``). An untrusted
+    chain (a private CA, a missing intermediate, a self-signed certificate), one not judged (an
+    observation recorded before the chain was judged on its own included), and one with a weak
+    intermediate, which clients refuse too once the server key is replaced, keep it: it names
+    the weak link.
     """
     if item.get("certificate_trust") != "untrusted":
         return False
@@ -212,6 +230,7 @@ def tls_untrusted_by_leaf_weakness(item: Mapping[str, Any]) -> bool:
         return (
             item.get("certificate_weak_public_key") is True
             and item.get("certificate_chain_trust") == "trusted"
+            and not tls_weak_issuer_links(item.get("certificate_chain_details"))
         )
     if code == _CA_MD_TOO_WEAK:
         return item.get("certificate_weak_signature") is True
@@ -281,4 +300,6 @@ def template_classification(item: Mapping[str, Any]) -> dict[str, Any]:
     return out
 
 
-__all__ = ["template_classification", "tls_finding_evidence", "tls_untrusted_by_leaf_weakness"]
+__all__ = [
+    "template_classification", "tls_finding_evidence", "tls_untrusted_by_leaf_weakness", "tls_weak_issuer_links",
+]

@@ -264,6 +264,68 @@ def test_a_weak_leaf_from_a_trusted_ca_is_reported_once(tmp_path, monkeypatch):
     assert any("the chain reaches a trusted root" in line for line in weak["context"])
 
 
+def test_a_weak_leaf_under_a_weak_intermediate_keeps_the_finding_that_names_it(tmp_path, monkeypatch):
+    """The chain check runs with every strength check off, so a 1024-bit intermediate under a
+    trusted root reads trusted there. It is weak all the same: clients refuse it once the server
+    key is replaced, and only the untrusted-chain finding names it."""
+    root_key, inter_key, leaf_key = _key(), _key(1024), _key(1024)
+    root = _cert("Fixture Root", "Fixture Root", root_key.public_key(), root_key, ca=True)
+    inter = _cert("Fixture Intermediate", "Fixture Root", inter_key.public_key(), root_key, ca=True)
+    leaf = _cert(HOST, "Fixture Intermediate", leaf_key.public_key(), inter_key, ca=False, sans=(HOST,))
+    observation = _inspect_real_server(tmp_path, monkeypatch, served=(leaf, inter), leaf_key=leaf_key,
+                                       root=root)["observation"]
+    if observation.get("certificate_trust_error_code") != 66:
+        pytest.skip("this OpenSSL accepts 1024-bit server keys at the default security level")
+    assert observation["certificate_chain_trust"] == "trusted"
+    assert [link["weak_public_key"] for link in observation["certificate_chain_details"]] == [True, True]
+    findings = _findings(observation)
+    titles = [finding["title"] for finding in findings]
+    assert "TLS certificate uses a weak public key" in titles
+    assert "TLS certificate chain is not trusted" in titles
+    untrusted = build_finding_detail(next(item for item in findings if item["title"] == "TLS certificate chain is not trusted"))
+    assert "CN=Fixture Intermediate uses a 1024-bit RSA key." in untrusted["fix"]
+    assert any("also below the verifier's minimum" in line for line in untrusted["fix"])
+    weak = build_finding_detail(next(item for item in findings if item["title"] == "TLS certificate uses a weak public key"))
+    assert not any(line.endswith("Judged on its own, the chain reaches a trusted root.") for line in weak["context"])
+    assert any("an issuing certificate in it is weak too" in line for line in weak["context"])
+
+
+def _weak_leaf_trusted_chain(*issuers):
+    """A weak-key leaf whose chain, judged with the strength checks off, is trusted (unit fixture)."""
+    leaf = {"subject": f"CN={HOST}", "issuer": "CN=Fixture Intermediate", "public_key_type": "RSAPublicKey",
+            "public_key_bits": 1024, "weak_public_key": True, "weak_signature": False, "self_signed": False}
+    return _observation(
+        certificate_trust="untrusted", certificate_trust_error_code=66, certificate_trust_failure="other",
+        certificate_trust_error="ee key too small", certificate_weak_public_key=True, certificate_public_key_bits=1024,
+        certificate_public_key_type="RSAPublicKey", certificate_chain_trust="trusted",
+        certificate_chain_details=[leaf, *issuers],
+    )
+
+
+@pytest.mark.parametrize("issuer,kept,named", [
+    # An intermediate signed with SHA-1: kept, and named.
+    ({"subject": "CN=Fixture Intermediate", "issuer": "CN=Fixture Root", "signature_hash": "sha1",
+      "public_key_bits": 2048, "public_key_type": "RSAPublicKey", "weak_public_key": False,
+      "weak_signature": True, "self_signed": False}, True, "CN=Fixture Intermediate is signed with SHA1."),
+    # A sound intermediate: folded into the weak-key finding.
+    ({"subject": "CN=Fixture Intermediate", "issuer": "CN=Fixture Root", "signature_hash": "sha256",
+      "public_key_bits": 2048, "public_key_type": "RSAPublicKey", "weak_public_key": False,
+      "weak_signature": False, "self_signed": False}, False, None),
+    # A root the server also sent, self-signed with SHA-1: its own signature is never checked.
+    ({"subject": "CN=Fixture Root", "issuer": "CN=Fixture Root", "signature_hash": "sha1",
+      "public_key_bits": 2048, "public_key_type": "RSAPublicKey", "weak_public_key": False,
+      "weak_signature": True, "self_signed": True}, False, None),
+])
+def test_a_trusted_chain_with_a_weak_issuer_keeps_the_untrusted_finding(issuer, kept, named):
+    findings = _findings(_weak_leaf_trusted_chain(issuer))
+    titles = [finding["title"] for finding in findings]
+    assert ("TLS certificate chain is not trusted" in titles) is kept
+    assert "TLS certificate uses a weak public key" in titles
+    if named:
+        untrusted = build_finding_detail(next(item for item in findings if item["title"] == "TLS certificate chain is not trusted"))
+        assert named in untrusted["fix"]
+
+
 def test_the_chain_check_stays_within_the_pairs_four_handshakes(tmp_path, monkeypatch):
     from api.scan.capability_execution import TLS_HANDSHAKE_CONNECTIONS_PER_PAIR
 

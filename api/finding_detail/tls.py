@@ -207,10 +207,22 @@ def build(finding: Mapping[str, Any], evidence: Mapping[str, Any]) -> dict[str, 
         key_first = integer(trust.get("error_code")) == 66
         chain_failure = text(trust.get("chain_failure"), 60)
         key_line: list[str] = []
+        strength_code = integer(trust.get("error_code"))
+        chain_error = trust.get("error")
         if key_first and trust.get("chain_result") == "untrusted":
             failure = chain_failure or "other"
+            chain_error = trust.get("chain_error")
             key_line = ["The server certificate's key is also below the verifier's minimum; that is reported as its own finding."]
-        reason = _TRUST_REASONS.get(failure) or text(trust.get("chain_error") if key_line else trust.get("error"), 200) or "the verifier refused the chain"
+        elif key_first and trust.get("chain_result") == "trusted" and (
+            _weak_links(chain, "weak_public_key") or _weak_links(chain, "weak_signature")
+        ):
+            # The chain was judged with every strength check off (@SECLEVEL=0): it reaches a
+            # trusted root, but an issuing certificate in it is weak too, and clients refuse it for
+            # that once the server key is replaced. This finding names it.
+            failure = "weak_key" if _weak_links(chain, "weak_public_key") else "weak_signature"
+            strength_code = None
+            key_line = ["The server certificate's key is also below the verifier's minimum; that is reported as its own finding."]
+        reason = _TRUST_REASONS.get(failure) or text(chain_error, 200) or "the verifier refused the chain"
         if key_first and not key_line and trust.get("chain_result") != "trusted":
             reason = ("the verifier refused the server's weak key before it checked the chain, so trust in the chain was "
                       "not established")
@@ -236,7 +248,7 @@ def build(finding: Mapping[str, Any], evidence: Mapping[str, Any]) -> dict[str, 
         elif failure == "issuer_not_found":
             fix = _issuer_not_found_fix(cert, chain, length)
         elif failure in {"weak_key", "weak_signature"}:
-            fix = _strength_fix(failure, integer(trust.get("error_code")), cert, chain)
+            fix = _strength_fix(failure, strength_code, cert, chain)
         elif failure == "untrusted_root":
             root = text(chain[-1].get("subject")) if chain else issuer
             fix = [
@@ -347,10 +359,16 @@ def build(finding: Mapping[str, Any], evidence: Mapping[str, Any]) -> dict[str, 
         code = integer(trust.get("error_code"))
         if trust.get("result") == "untrusted" and code == (68 if signature else 66):
             chain_result = trust.get("chain_result")
+            # The chain is judged with every strength check off: a weak issuing certificate in it
+            # is named by the untrusted-chain finding, which then stands.
+            weak_issuer = bool(_weak_links(chain, "weak_public_key") or _weak_links(chain, "weak_signature"))
             context.append(
                 f"Clients that verify certificates refuse this certificate for its {'signature' if signature else 'key'} "
                 f"(verifier: {text(trust.get('error'), 120) or 'refused'}, code {code})."
                 + ("" if signature else
+                   " Judged on its own with the strength checks off, the chain reaches a trusted root, but an issuing "
+                   "certificate in it is weak too; that is reported as its own finding."
+                   if chain_result == "trusted" and weak_issuer else
                    " Judged on its own, the chain reaches a trusted root." if chain_result == "trusted" else
                    " Judged on its own, the chain is not trusted either; that is reported as its own finding." if chain_result == "untrusted" else
                    " The verifier refuses a weak server key before it builds the chain, so whether the chain reaches a trusted root was not established.")

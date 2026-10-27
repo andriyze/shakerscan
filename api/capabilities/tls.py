@@ -368,8 +368,9 @@ async def inspect_tls_origin(
         if trust_error.get("certificate_trust_error_code") == _EE_KEY_TOO_WEAK:
             # The verifier refuses a weak server key before it builds the chain, so whether the
             # chain reaches a trusted root is not known from that refusal. One more handshake at
-            # security level 0 judges the chain alone. It stays within the pair's four handshakes:
-            # it is skipped when the default negotiation already used the fourth.
+            # security level 0 (every strength check off) judges whether the chain reaches a
+            # trusted root. It stays within the pair's four handshakes: it is skipped when the
+            # default negotiation already used the fourth.
             trust_error.update(
                 {"certificate_chain_trust": "not_evaluated"} if fallback_attempted
                 else await _chain_trust(handshake)
@@ -587,8 +588,11 @@ _EE_KEY_TOO_WEAK = 66
 
 
 async def _chain_trust(handshake: Any) -> dict[str, Any]:
-    """Whether the chain is trusted with the key-strength check turned off (``@SECLEVEL=0``):
-    ``trusted``, ``untrusted`` with the verifier's own reason, or ``not_evaluated``."""
+    """Whether the chain is trusted with every strength check turned off (``@SECLEVEL=0``: the
+    key size and signature digest of every certificate in it, not only the server's): ``trusted``,
+    ``untrusted`` with the verifier's own reason, or ``not_evaluated``. A weak issuing
+    certificate is judged from the chain the server sent (``certificate_chain_details``), not
+    from this answer."""
     context = ssl.create_default_context()
     context.check_hostname = False
     context.verify_mode = ssl.CERT_REQUIRED
