@@ -444,9 +444,12 @@ def compile_continuation_round(
         )
         if revision_number >= 2 and not finalize_only else ()
     )
+    # One per collection the compiler gives a replay action: a saved selection that replays. A
+    # collection named by its id seeds discovery only (``discovery_only``) and has none, so naming
+    # it here asked for an action the compiler never creates and the round was refused.
     zero_cost_existing_inputs.update({
         f"inputs.collection_{index:02d}": {}
-        for index, _item in enumerate(collection_refs)
+        for index, _item in enumerate(request_collection_action_refs(collection_refs))
     })
     if target.inferred_origins:
         zero_cost_existing_inputs["origin.select"] = {}
