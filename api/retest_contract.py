@@ -41,6 +41,7 @@ from runtime.request_collection_store import PostgresRequestCollectionStore
 from scan.stage_store import PostgresScanStageCheckpointStore
 from scan.action_store import PostgresScanActionStore
 from scan.manifest_store import PostgresScanManifestStore
+from scan.contracts import raw_scan_authentication_keys, scan_authentication_value_present
 
 RETEST_QUEUE_SCHEMA_VERSION = 1
 ASM_ENDPOINT_FINGERPRINT_MIGRATION = "asm_endpoint_fingerprint_v2"
@@ -986,6 +987,64 @@ def auth_context_to_headers(auth_context: dict[str, str] | None) -> dict[str, st
         except (json.JSONDecodeError, TypeError):
             pass
     return headers
+
+
+# A retest runs as the identity its finding was found with, or not at all. An authenticated
+# Scan keeps only content-free references to its credential profiles, and their secrets are never
+# copied into a retest, so a retest of its finding would send the proof's request anonymously:
+# a guest page that answers 200 would then read as "likely fixed" for a flaw still there for the
+# signed-in user. Such a finding is not offered a retest, none is queued for it, and a retest
+# already queued sends nothing (``worker_handlers.retest_identity``).
+RETEST_REASON_IDENTITY = "retest_needs_signed_in_identity"
+RETEST_IDENTITY_MESSAGE = (
+    "The Scan that found this finding was signed in, and a retest cannot run as that identity: it "
+    "would send the proof's request anonymously. Run an authenticated Scan with the same profile "
+    "to check it again."
+)
+# Sign-in keys older Scans stored that the raw-authentication set no longer names.
+_LEGACY_SIGN_IN_KEYS = ("auth_token", "auth_user")
+
+
+def scan_options_signed_in(options: Mapping[str, Any] | None) -> bool:
+    """Whether a Scan ran signed in, by its stored options: credential profile references
+    (``credential_profile_refs``, ``credential_profile_ids``), the managed profiles earlier
+    releases recorded (``managed_credential_profiles``, written by 0.8.18 through 1.x), or any
+    raw sign-in material (a header, cookies, a form or OAuth login, a scenario:
+    ``scan.contracts.raw_scan_authentication_keys``). A row from any supported upgrade base is
+    judged the same way."""
+    if not isinstance(options, Mapping):
+        return False
+    for key in ("credential_profile_refs", "credential_profile_ids"):
+        value = options.get(key)
+        if isinstance(value, (list, tuple)) and len(value) > 0:
+            return True
+    return bool(raw_scan_authentication_keys(options)) or any(
+        scan_authentication_value_present(options.get(key)) for key in _LEGACY_SIGN_IN_KEYS
+    )
+
+
+def retest_identity_refusal(
+    scan_options: Any, auth_context: Mapping[str, Any] | None = None,
+) -> str | None:
+    """``RETEST_REASON_IDENTITY`` when a retest of a finding from this Scan would hold no
+    identity to apply: the Scan ran signed in (``scan_options_signed_in``) and neither
+    ``auth_context`` nor, without one, the Scan's own (``extract_auth_context``) gives a header
+    to send. None otherwise, whatever the finding's type: no retest of such a finding concludes."""
+    options = parse_json_field(scan_options)
+    if not scan_options_signed_in(options):
+        return None
+    context = parse_json_field(auth_context) if auth_context is not None else extract_auth_context(options)
+    return None if auth_context_to_headers(context) else RETEST_REASON_IDENTITY
+
+
+def candidate_evidence_principals(context: Any) -> list[str]:
+    """The Hunt principals (``as_principal`` slots) other than ``anonymous`` that an
+    investigation candidate's own evidence was gathered as, from its ``verification_context``."""
+    recorded = parse_json_field(context).get("evidence_principals")
+    if not isinstance(recorded, (list, tuple)):
+        return []
+    slots = {str(slot or "").strip().lower()[:80] for slot in recorded}
+    return sorted(slot for slot in slots if slot not in {"", "anonymous", "anon", "none"})
 
 
 async def _backfill_target_endpoint_fingerprints(conn) -> None:

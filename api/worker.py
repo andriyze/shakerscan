@@ -58,6 +58,7 @@ from retest_contract import (
     mark_candidate_inconclusive,
     normalize_retest_type,
     parse_json_field,
+    retest_identity_refusal,
     retest_refusal_reason,
     path_segment_retest_result,
     retest_queue_binding_matches,
@@ -5718,7 +5719,8 @@ async def run_finding_retest(verification: dict) -> dict:
         return {**declined, "attempt_ladder": attempt_ladder}
     # A finding found signed in is never retested anonymously: no tier sends anything.
     if retest_identity_unresolved(verification):
-        return identity_unresolved_result(replay_commands=replay_commands, ladder=attempt_ladder)
+        return identity_unresolved_result(
+            replay_commands=replay_commands, ladder=attempt_ladder, verification=verification)
     # A proven Scan finding is retested by the check that proved it, with the request it proved.
     proven = await run_proof_retest(
         verification, inputs, poe=proof_of_exploit, replay_commands=replay_commands,
@@ -6262,7 +6264,7 @@ async def process_finding_retest_job(job_data: dict):
                     identity_unresolved = retest_identity_unresolved(verification)
                     # Tier 1: Deterministic proof (fast, free) — skip if forced AI
                     if identity_unresolved:
-                        result = identity_unresolved_result()
+                        result = identity_unresolved_result(verification=verification)
                     elif force_ai and not ai_config_ready:
                         result = {
                             "status": "failed",
@@ -6788,6 +6790,9 @@ async def queue_auto_retests_for_scan(scan_id: str, target_id: str | None, targe
             return {"queued": 0, "skipped": 0}
         auth_ctx = extract_auth_context(scan_options)
         auth_ctx_json = json.dumps(auth_ctx) if auth_ctx else None
+        # A signed-in Scan whose identity no retest can apply queues none: each would send nothing,
+        # read inconclusive and still count towards the finding's auto-retest attempts.
+        identity_refused = retest_identity_refusal(scan_options, auth_ctx) is not None
 
         # The auto-retest budget is bounded, so spend it on findings that still need
         # PROOF (suspected/unverified), highest severity first — not on findings the
@@ -6814,6 +6819,9 @@ async def queue_auto_retests_for_scan(scan_id: str, target_id: str | None, targe
         for row in rows:
             if queued >= auto_retest_max_per_scan:
                 break
+            if identity_refused:
+                skipped += 1
+                continue
 
             finding = dict(row)
             # Already proven by the scan — don't spend a retest slot re-confirming it.
