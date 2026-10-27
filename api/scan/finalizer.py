@@ -2648,6 +2648,36 @@ def _sign_in_limited_variant(item: Mapping[str, Any]) -> tuple[str, str]:
     return variant, str(item.get("sign_in_endpoint") or "")
 
 
+# A family whose proof attempts did not all reach a verdict (each failed, was refused or timed
+# out): the candidates its verifier flagged for proof were neither proven nor ruled out.
+PROOF_ATTEMPTS_UNRESOLVED = "proof_attempts_unresolved"
+_PROOF_ATTEMPT_RESOLVED_STATUSES = frozenset({"success", "succeeded", "completed"})
+
+
+def _proof_attempts_resolved(records: Any) -> dict[str, bool]:
+    """Each proof attempt one action recorded, and whether it reached a verdict.
+
+    An attempt reached one when it proved its candidate, or when every record of it settled as a
+    success without timing out. A candidate the sign-in endpoint's bounded probe set left inconclusive is named by its own
+    reason (``AUTH_ENDPOINT_PROBE_LIMITED``), not counted here.
+    """
+    resolved: dict[str, bool] = {}
+    for item in records or ():
+        if not isinstance(item, Mapping) or item.get("kind") != "candidate_attempt":
+            continue
+        attempt_id = str(item.get("attempt_id") or "")
+        if not attempt_id:
+            continue
+        settled = (
+            str(item.get("proof_state") or "") == "verified"
+            or item.get("inconclusive_reason") == AUTH_ENDPOINT_PROBE_LIMITED
+            or (str(item.get("status") or "").strip().lower() in _PROOF_ATTEMPT_RESOLVED_STATUSES
+                and not item.get("timed_out"))
+        )
+        resolved[attempt_id] = resolved.get(attempt_id, True) and settled
+    return resolved
+
+
 def _family_action_reason(action: Any, result: Any) -> str:
     """The reason one verifier action contributes to its family's coverage.
 
@@ -2943,7 +2973,7 @@ def finalize_scan_report(
             # and comparing attempts with slices alone reports that as complete coverage.
             "_manifest_entries": {}, "_scheduled_entries": {}, "_slow_endpoints": [],
             "_refused_candidates": [], "_sign_in_limited": [],
-            "_proofs_attempted": set(), "_proofs_pace_unfunded": {},
+            "_proofs_attempted": set(), "_proofs_pace_unfunded": {}, "_proofs_resolved": {},
             "proof_escalation": {
                 "actions": 0, "attempted_candidates": 0,
                 "_statuses": [], "_reasons": [],
@@ -2974,6 +3004,15 @@ def finalize_scan_report(
             # So is a proof the slice's wall could not pace at the sign-in endpoint's lockout-safe
             # rate, unless another proof action attempted it: nothing proved or refuted it.
             row["_proofs_attempted"].update(attempts)
+            # Whether each attempt reached a verdict: one that failed, was refused or timed out
+            # left its candidate unproven, not disproven. A later action (an extension or a
+            # retry) that settles the same attempt resolves it.
+            for attempt_id, resolved in _proof_attempts_resolved(
+                observations.get(action.action_id, ()),
+            ).items():
+                row["_proofs_resolved"][attempt_id] = (
+                    row["_proofs_resolved"].get(attempt_id, False) or resolved
+                )
             for item in observations.get(action.action_id, ()):
                 if (
                     isinstance(item, Mapping) and item.get("kind") == "candidate_deferred"
@@ -3176,6 +3215,10 @@ def finalize_scan_report(
             proof["status"] == "partial" and not proof["attempted_candidates"]
             and not proofs_paced_out
         )
+        # Proof attempts that never reached a verdict (failed, refused or timed out): their
+        # candidates were not proven or ruled out, however many the batch started.
+        unresolved_proofs = sum(1 for resolved in row.pop("_proofs_resolved").values() if not resolved)
+        proof["unresolved_candidates"] = unresolved_proofs
         row["unattempted_candidates"] = max(
             0, row["planned_candidates"] - row["attempted_candidates"],
         )
@@ -3271,6 +3314,11 @@ def finalize_scan_report(
         elif proof_broke:
             row["coverage_status"] = "partial"
             row["reason"] = "proof_escalation_failed"
+            if row["required"]:
+                selected_family_gaps.append(family)
+        elif unresolved_proofs:
+            row["coverage_status"] = "partial"
+            row["reason"] = PROOF_ATTEMPTS_UNRESOLVED
             if row["required"]:
                 selected_family_gaps.append(family)
         elif row.get("sign_in_probe_limited"):
