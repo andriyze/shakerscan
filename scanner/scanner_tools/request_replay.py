@@ -433,10 +433,15 @@ class ReplayPlan:
 
 def _public_withheld_label(item: Any) -> str:
     """A ``kind:name`` label of what a capture's replay withheld, with a name that is itself a
-    credential (a bare ``?<token>`` query name, a token-like value) shown as ``<redacted>``."""
+    credential (a bare ``?<token>`` query name, a token-like value) shown as ``<redacted>``. A
+    label does not say whether its query parameter had a value, so a query name is judged as
+    one without (``token_like_query_name(name, bare=True)``): any token-shaped name of 16 or
+    more base64 characters that is not words is masked."""
     text = str(item)[:200]
     kind, separator, name = text.partition(":")
-    if separator and (token_like_query_name(name) or token_like_segment(urllib.parse.unquote(name))):
+    if separator and (
+        token_like_query_name(name, bare=kind == "query") or token_like_segment(urllib.parse.unquote(name))
+    ):
         return f"{kind}:<redacted>"
     return text
 

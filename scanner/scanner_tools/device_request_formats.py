@@ -18,6 +18,7 @@ from typing import Any
 
 from .url_redaction import (
     drop_matrix_parameters, is_sensitive_label, redact_url, token_like_query_name, token_like_segment,
+    valueless_query_value, word_query_name,
 )
 from .device_postman import (
     MAX_BODY_BYTES,
@@ -243,20 +244,26 @@ def is_captured_secret_query(name: str, value: str) -> bool:
     return (
         is_credential_name(text)
         or token_like_segment(urllib.parse.unquote(str(value or "")))
-        # A bare parameter (``?<token>``) is its own value: a JWT or random token, an AWS access
-        # key id or standard base64 (``token_like_query_name``).
+        # A parameter with no value of its own (``?<token>``, ``?<base64>==``) is its own value:
+        # a JWT or random token, an AWS access key id, standard base64, or any name of 16 or more
+        # base64 or base64url characters that is not words (``token_like_query_name``).
         or token_like_segment(urllib.parse.unquote(text))
-        or token_like_query_name(text)
+        or token_like_query_name(text, valueless_query_value(str(value or "")))
     )
 
 
-def withheld_query_label(name: str, pieces: frozenset[str] = frozenset()) -> str:
-    """The label a withheld query parameter is listed under: its name, or ``<redacted>`` when the
-    name is itself a credential (``?<token>``, a token-like or base64 name, an AWS access key id,
-    or a recorded credential value), so the list of what was withheld never carries it."""
+def withheld_query_label(name: str, value: str = "", pieces: frozenset[str] = frozenset()) -> str:
+    """The label a withheld query parameter (``name``, ``value`` as ``parse_qsl`` reads them) is
+    listed under: its name, or ``<redacted>`` when the name may be a credential itself, so the
+    list of what was withheld never carries it. That is a token-shaped name (a token-like or
+    base64 name, an AWS access key id, 16 or more base64 characters that are not words), a
+    recorded credential value, and a name with no value of its own that is not words: a bare
+    token withheld only for the credential word it happens to contain (``?Zq8+otpW/3kLm9Xa``)
+    is listed as ``<redacted>`` too, and ``?access_token`` as ``access_token``."""
     text = str(name or "")
-    if (token_like_query_name(text) or token_like_segment(urllib.parse.unquote(text))
-            or _holds_recorded_credential(text, pieces)):
+    if (token_like_query_name(text, bare=True) or token_like_segment(urllib.parse.unquote(text))
+            or _holds_recorded_credential(text, pieces)
+            or (valueless_query_value(value) and not word_query_name(text))):
         return "<redacted>"
     return text[:160]
 
@@ -636,7 +643,7 @@ def _replayable_capture_url(url: str, pieces: frozenset[str] = frozenset()) -> t
         kept = []
         for name, value in urllib.parse.parse_qsl(query, keep_blank_values=True):
             if is_captured_secret_query(name, value) or _replayable_text(value, pieces) != value:
-                label = withheld_query_label(name, pieces)
+                label = withheld_query_label(name, value, pieces)
                 if label not in withheld:
                     withheld.append(label)
             else:

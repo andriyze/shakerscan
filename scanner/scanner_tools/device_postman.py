@@ -18,9 +18,9 @@ from collections import Counter
 from typing import Any, Iterator, Mapping
 
 try:
-    from .url_redaction import token_like_query_name
+    from .url_redaction import token_like_query_name, valueless_query_value
 except ImportError:  # direct host-side import in focused tests
-    from url_redaction import token_like_query_name
+    from url_redaction import token_like_query_name, valueless_query_value
 
 
 MAX_COLLECTION_BYTES = 5 * 1024 * 1024
@@ -272,10 +272,12 @@ def _redacted_path(path: str) -> str:
 
 
 def _redacted_query(query: str) -> str:
-    """Query values masked, and a name that is itself a credential (``?<token>``) masked too."""
+    """Query values masked, and a name that is itself a credential (``?<token>``, a token-shaped
+    name with no value of its own) masked too."""
     pairs = urllib.parse.parse_qsl(query, keep_blank_values=True)
     return urllib.parse.urlencode([
-        ("<redacted>" if token_like_query_name(key) else key, "<redacted>") for key, _ in pairs
+        ("<redacted>" if token_like_query_name(key, valueless_query_value(value)) else key, "<redacted>")
+        for key, value in pairs
     ])
 
 
