@@ -11,7 +11,7 @@ Hunt of another target T may send it only under an operator's grant of that secr
 * **Scoped.** The grant names one secret, one login (scheme, host and port of T, path and method)
   and this Hunt. It never widens the Hunt's scope: the request still passes every admission check
   (target binding, standing authorization, approval receipt, budget) and the worker's own.
-* **Rate limited, lockout-safe.** A grant allows ``max_attempts`` attempts (3 unless the person
+* **Rate limited and bounded.** A grant allows ``max_attempts`` attempts (3 unless the person
   chooses 1..10); across all Hunts, a secret is tried at most ``WINDOW_MAX`` times per
   ``WINDOW`` on one host. Attempts are claimed under the grant's row lock in the transaction that
   records them, so concurrent actions cannot overrun either limit.

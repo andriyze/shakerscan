@@ -1,4 +1,4 @@
-"""The credential profile's own sign-in endpoint gets a lockout-safe pace and one probe set (E1-N6).
+"""The credential profile's own sign-in endpoint gets a paced rate and one bounded probe set (E1-N6).
 
 An authenticated balanced Scan of a test application sent about 1,460 injection requests to the
 sign-in form it used (938 sqlmap, 523 Dalfox). On that one endpoint the verifiers keep their full
@@ -165,7 +165,7 @@ def test_the_sign_in_records_where_its_form_posts():
 
 # --- the hold and the pace ----------------------------------------------------------------------
 
-def test_an_attempt_holds_what_the_probe_set_has_left_at_the_lockout_safe_pace():
+def test_an_attempt_holds_what_the_probe_set_has_left_at_the_paced_rate():
     body = {"http_requests": 480, "state_changing_requests": 480, "tool_wall_seconds": 420}
     assert AUTH_ENDPOINT_SECONDS_PER_REQUEST == 3
     hold = auth_endpoint_hold(body, capability_name="sqli.verify_batch", received=0, parameters=2)

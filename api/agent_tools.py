@@ -1370,7 +1370,7 @@ def _batch_attempt_pacing(
 
 
 def _auth_probe_minimum(options: Mapping[str, Any], minimum_seconds: float) -> float:
-    """The least delay between requests: the lockout-safe pace on a sign-in endpoint probe.
+    """The least delay between requests: the paced rate on a sign-in endpoint probe.
 
     A parallel child of a split Scan paces the endpoint slower (``probe_pace_seconds``); nothing
     paces it faster than one request per ``AUTH_ENDPOINT_SECONDS_PER_REQUEST``.

@@ -4948,7 +4948,7 @@ class DatabaseNeutralScanActionDispatcher:
             self.options, lane="primary", capability_name=legacy_capability,
         )
         # The credential profile's own sign-in endpoint (and its form action) is held to a
-        # lockout-safe pace, one attempt at a time, and to one probe set per verifier across the
+        # paced rate, one attempt at a time, and to one probe set per verifier across the
         # Scan (auth_endpoint_probe, E1-N6): what every batch action of this verifier already
         # sent the endpoint, from any candidate or round, counts against that set.
         sign_ins: tuple = ()
@@ -5811,7 +5811,7 @@ class DatabaseNeutralScanActionDispatcher:
                         )
                         continue
                     if sign_in is not None:
-                        # Lockout-safety ceiling on this one endpoint, never a budget cut elsewhere.
+                        # A paced, bounded probe set on this one endpoint, never a budget cut elsewhere.
                         limited = auth_endpoint_hold(
                             sub_budget, capability_name=action.capability_name,
                             received=sign_in_received.get(sign_in.key, 0),
@@ -5823,7 +5823,7 @@ class DatabaseNeutralScanActionDispatcher:
                                 position -= 1
                                 await candidates.wait()
                                 continue
-                            # The hold cannot pace a probe at the lockout-safe rate: like any
+                            # The hold cannot pace a probe at the endpoint's paced rate: like any
                             # candidate this slice cannot fund, it waits for a later round with
                             # the wall it needs. No verdict; the probe set is untouched.
                             observations.append({

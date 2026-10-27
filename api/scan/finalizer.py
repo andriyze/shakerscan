@@ -3001,7 +3001,7 @@ def finalize_scan_report(
                 and item.get("kind") in {"candidate_attempt", "candidate_deferred"}
                 and item.get("inconclusive_reason") == AUTH_ENDPOINT_PROBE_LIMITED
             )
-            # So is a proof the slice's wall could not pace at the sign-in endpoint's lockout-safe
+            # So is a proof the slice's wall could not pace at the sign-in endpoint's paced
             # rate, unless another proof action attempted it: nothing proved or refuted it.
             row["_proofs_attempted"].update(attempts)
             # Whether each attempt reached a verdict: one that failed, was refused or timed out
@@ -3322,7 +3322,7 @@ def finalize_scan_report(
             if row["required"]:
                 selected_family_gaps.append(family)
         elif row.get("sign_in_probe_limited"):
-            # A candidate on the credential profile's own sign-in endpoint that its lockout-safe
+            # A candidate on the credential profile's own sign-in endpoint that its paced, bounded
             # probe set left inconclusive has no verdict, so the family did not examine its
             # surface to completion, and a grade over it is not reliable.
             row["coverage_status"] = "partial"
