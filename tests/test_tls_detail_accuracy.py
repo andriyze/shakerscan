@@ -144,10 +144,12 @@ def test_verifier_refusals_for_weak_algorithms_are_named(code, failure):
     ({"certificate_weak_signature": True, "certificate_signature_hash": "sha1",
       "certificate_trust_error_code": 68, "certificate_trust_error": "CA signature digest algorithm too weak"},
      "TLS certificate uses a weak signature"),
-    # An RSA-1024 leaf: verify code 66, "EE certificate key too weak".
+    # An RSA-1024 leaf: verify code 66, "EE certificate key too weak". The verifier refuses the
+    # key before it builds the chain; judged on its own, the chain is trusted.
     ({"certificate_weak_public_key": True, "certificate_public_key_bits": 1024,
       "certificate_public_key_type": "RSAPublicKey",
-      "certificate_trust_error_code": 66, "certificate_trust_error": "EE certificate key too weak"},
+      "certificate_trust_error_code": 66, "certificate_trust_error": "EE certificate key too weak",
+      "certificate_chain_trust": "trusted"},
      "TLS certificate uses a weak public key"),
 ])
 def test_a_leaf_weakness_the_verifier_refused_is_reported_once(fields, title):
@@ -162,7 +164,17 @@ def test_a_leaf_weakness_the_verifier_refused_is_reported_once(fields, title):
     {"certificate_trust_error_code": 68, "certificate_signature_hash": "sha256"},
     # A self-signed 1024-bit leaf: OpenSSL stops at the key (66) before it builds the chain, and
     # only the untrusted finding says that no CA vouches for it.
-    {"certificate_trust_error_code": 66, "certificate_weak_public_key": True, "certificate_self_signed": True},
+    {"certificate_trust_error_code": 66, "certificate_weak_public_key": True, "certificate_self_signed": True,
+     "certificate_chain_trust": "untrusted", "certificate_chain_trust_error_code": 18},
+    # A 1024-bit leaf from a CA the verifier does not know: the key and the chain both fail.
+    {"certificate_trust_error_code": 66, "certificate_weak_public_key": True,
+     "certificate_chain_trust": "untrusted", "certificate_chain_trust_error_code": 20,
+     "certificate_chain_trust_failure": "issuer_not_found"},
+    # A 1024-bit leaf whose chain was not judged on its own (an observation recorded before it was,
+    # or a handshake that did not complete): trust was never established, so the finding stays.
+    {"certificate_trust_error_code": 66, "certificate_weak_public_key": True},
+    {"certificate_trust_error_code": 66, "certificate_weak_public_key": True,
+     "certificate_chain_trust": "not_evaluated"},
     # Any other refusal.
     {"certificate_trust_error_code": 20, "certificate_weak_signature": True},
 ])
@@ -201,6 +213,66 @@ def test_weak_signature_and_key_checks_print_the_weakness():
     assert "Public-Key" in key["reproduce"]["command"] and "-text" in key["reproduce"]["command"]
     assert "2048 bit" in key["verify"]["expect"]
     assert any("before it builds the chain" in line for line in key["context"])
+
+
+def _weak_leaf_hierarchy():
+    """An RSA-1024 server certificate issued by a 2048-bit intermediate under its own root."""
+    root_key, inter_key, leaf_key = _key(), _key(), _key(1024)
+    root = _cert("Fixture Root", "Fixture Root", root_key.public_key(), root_key, ca=True)
+    inter = _cert("Fixture Intermediate", "Fixture Root", inter_key.public_key(), root_key, ca=True)
+    leaf = _cert(HOST, "Fixture Intermediate", leaf_key.public_key(), inter_key, ca=False, sans=(HOST,))
+    return root, inter, leaf, leaf_key
+
+
+def _weak_leaf_inspection(tmp_path, monkeypatch, *, issuer_trusted):
+    root, inter, leaf, leaf_key = _weak_leaf_hierarchy()
+    trusted = root
+    if not issuer_trusted:  # the verifier trusts only a root that did not issue this chain
+        other_key = _key()
+        trusted = _cert("Unrelated Root", "Unrelated Root", other_key.public_key(), other_key, ca=True)
+    observation = _inspect_real_server(tmp_path, monkeypatch, served=(leaf, inter), leaf_key=leaf_key,
+                                       root=trusted)["observation"]
+    if observation.get("certificate_trust_error_code") != 66:
+        pytest.skip("this OpenSSL accepts 1024-bit server keys at the default security level")
+    return observation
+
+
+def test_a_weak_leaf_from_an_unknown_ca_keeps_the_untrusted_chain_finding(tmp_path, monkeypatch):
+    observation = _weak_leaf_inspection(tmp_path, monkeypatch, issuer_trusted=False)
+    assert observation["certificate_chain_trust"] == "untrusted"
+    assert observation["certificate_chain_trust_error_code"] == 20
+    assert observation["certificate_chain_trust_failure"] == "issuer_not_found"
+    findings = _findings(observation)
+    titles = [finding["title"] for finding in findings]
+    assert "TLS certificate chain is not trusted" in titles
+    assert "TLS certificate uses a weak public key" in titles
+    untrusted = next(item for item in findings if item["title"] == "TLS certificate chain is not trusted")
+    brief = build_finding_detail(untrusted)
+    # The chain's own failure (a private CA or missing intermediate), with the key as a second line.
+    assert "neither sent by the server nor found in the trust store" in brief["summary"]
+    assert any("also below the verifier's minimum" in line for line in brief["fix"])
+    weak = build_finding_detail(next(item for item in findings if item["title"] == "TLS certificate uses a weak public key"))
+    assert any("the chain is not trusted either" in line for line in weak["context"])
+
+
+def test_a_weak_leaf_from_a_trusted_ca_is_reported_once(tmp_path, monkeypatch):
+    observation = _weak_leaf_inspection(tmp_path, monkeypatch, issuer_trusted=True)
+    assert observation["certificate_chain_trust"] == "trusted"
+    findings = _findings(observation)
+    assert [finding["title"] for finding in findings] == ["TLS certificate uses a weak public key"]
+    weak = build_finding_detail(findings[0])
+    assert any("the chain reaches a trusted root" in line for line in weak["context"])
+
+
+def test_the_chain_check_stays_within_the_pairs_four_handshakes(tmp_path, monkeypatch):
+    from api.scan.capability_execution import TLS_HANDSHAKE_CONNECTIONS_PER_PAIR
+
+    root, inter, leaf, leaf_key = _weak_leaf_hierarchy()
+    result = _inspect_real_server(tmp_path, monkeypatch, served=(leaf, inter), leaf_key=leaf_key, root=root)
+    if result["observation"].get("certificate_trust_error_code") != 66:
+        pytest.skip("this OpenSSL accepts 1024-bit server keys at the default security level")
+    # TLS 1.2, TLS 1.3, the trust handshake and the chain check; legacy probes are off here.
+    assert result["budget_consumed"]["tcp_ports_attempted"] == 4 <= TLS_HANDSHAKE_CONNECTIONS_PER_PAIR
 
 
 def test_a_weak_intermediate_key_on_a_real_connection_is_named(tmp_path, monkeypatch):

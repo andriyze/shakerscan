@@ -294,7 +294,9 @@ async def inspect_tls_origin(
 
     # If the two supported modern profiles both fail, one default negotiation
     # distinguishes a reachable legacy-only endpoint from a non-TLS service.
+    fallback_attempted = False
     if not successful and route_gap is None:
+        fallback_attempted = True
         fallback = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
         fallback.check_hostname = False
         fallback.verify_mode = ssl.CERT_NONE
@@ -363,6 +365,15 @@ async def inspect_tls_origin(
             trust_error_type = type(exc).__name__
         else:
             trust = "trusted"
+        if trust_error.get("certificate_trust_error_code") == _EE_KEY_TOO_WEAK:
+            # The verifier refuses a weak server key before it builds the chain, so whether the
+            # chain reaches a trusted root is not known from that refusal. One more handshake at
+            # security level 0 judges the chain alone. It stays within the pair's four handshakes:
+            # it is skipped when the default negotiation already used the fourth.
+            trust_error.update(
+                {"certificate_chain_trust": "not_evaluated"} if fallback_attempted
+                else await _chain_trust(handshake)
+            )
 
     elapsed = min(
         timeout,
@@ -569,6 +580,32 @@ _TRUST_FAILURE_KINDS: Mapping[int, str] = {
     67: "weak_key",                 # CA certificate key too weak
     68: "weak_signature",           # CA signature digest algorithm too weak
 }
+
+
+# OpenSSL X509_V_ERR_EE_KEY_TOO_SMALL: the server's own key is below the security level.
+_EE_KEY_TOO_WEAK = 66
+
+
+async def _chain_trust(handshake: Any) -> dict[str, Any]:
+    """Whether the chain is trusted with the key-strength check turned off (``@SECLEVEL=0``):
+    ``trusted``, ``untrusted`` with the verifier's own reason, or ``not_evaluated``."""
+    context = ssl.create_default_context()
+    context.check_hostname = False
+    context.verify_mode = ssl.CERT_REQUIRED
+    context.set_alpn_protocols(["h2", "http/1.1"])
+    try:
+        context.set_ciphers("DEFAULT:@SECLEVEL=0")
+        await handshake(context)
+    except ssl.SSLCertVerificationError as exc:
+        reason = _trust_error(exc)
+        return {
+            "certificate_chain_trust": "untrusted",
+            **{key.replace("certificate_trust_", "certificate_chain_trust_"): value
+               for key, value in reason.items()},
+        }
+    except (OSError, ssl.SSLError, asyncio.TimeoutError):
+        return {"certificate_chain_trust": "not_evaluated"}
+    return {"certificate_chain_trust": "trusted"}
 
 
 def _trust_error(exc: ssl.SSLCertVerificationError) -> dict[str, Any]:

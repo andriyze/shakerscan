@@ -82,6 +82,11 @@ def _trust(item: Mapping[str, Any]) -> dict[str, Any]:
         "failure": item.get("certificate_trust_failure"),
         "error": _text(item.get("certificate_trust_error"), 200),
         "error_code": item.get("certificate_trust_error_code"),
+        # The chain judged on its own, when the verifier refused the server's key first (66).
+        "chain_result": item.get("certificate_chain_trust"),
+        "chain_failure": item.get("certificate_chain_trust_failure"),
+        "chain_error": _text(item.get("certificate_chain_trust_error"), 200),
+        "chain_error_code": item.get("certificate_chain_trust_error_code"),
     }
     return {key: value for key, value in trust.items() if value is not None}
 
@@ -191,9 +196,14 @@ def tls_untrusted_by_leaf_weakness(item: Mapping[str, Any]) -> bool:
     an untrusted-chain finding for it counted one defect twice under a title that pointed at the
     chain. Code 66 is the server's key; 68 names the first certificate, leaf first, whose
     signature digest is too weak, so it is the leaf's when the leaf's is weak. Code 67 (an
-    issuer's key) and a 68 from an intermediate have no leaf finding and stay reported. So does a
-    self-signed certificate: OpenSSL refuses a weak server key before it builds the chain, and
-    the untrusted finding is then the only one saying that no CA vouches for it.
+    issuer's key) and a 68 from an intermediate have no leaf finding and stay reported.
+
+    OpenSSL refuses a weak server key (66) before it builds the chain, so that refusal says
+    nothing about the chain. The inspection then judges the chain on its own
+    (``certificate_chain_trust``), and the untrusted finding is folded into the weak-key one only
+    when the chain is trusted. An untrusted chain (a private CA, a missing intermediate, a
+    self-signed certificate), or one not judged (an observation recorded before the chain was
+    judged on its own included), keeps it.
     """
     if item.get("certificate_trust") != "untrusted":
         return False
@@ -201,7 +211,7 @@ def tls_untrusted_by_leaf_weakness(item: Mapping[str, Any]) -> bool:
     if code == _EE_KEY_TOO_SMALL:
         return (
             item.get("certificate_weak_public_key") is True
-            and item.get("certificate_self_signed") is not True
+            and item.get("certificate_chain_trust") == "trusted"
         )
     if code == _CA_MD_TOO_WEAK:
         return item.get("certificate_weak_signature") is True
