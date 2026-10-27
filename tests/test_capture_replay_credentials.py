@@ -499,3 +499,105 @@ def test_a_capture_list_row_masks_what_the_old_list_showed():
     assert [row["supported"] for row in rows] == [False, False, False]
     # A shown placeholder never trips the scanner's sensitive-path gate.
     assert all(redact_path(row["normalized_path"]) == row["normalized_path"] for row in rows)
+
+
+# --- a bare query token (``/items?<token>``) in what the replay lists as withheld ----------------
+# Unit fixture tokens, not credentials: a JWT, random strings of 32 and 20 characters, 40 hex
+# characters, an AWS access key id shape and standard base64.
+BARE_JWT = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.c2lnbmF0dXJlX3ZhbHVlXzEyMw"
+BARE_TOKENS = {
+    "jwt": BARE_JWT,
+    "random32": "Zx9Qp2Lm7Rt4Wv8Yb3Nc5Kd1Hf6Gj0Ts",
+    "random20": "Zx9Qp2Lm7Rt4Wv8Yb3Nc",
+    "hex40": "0123456789abcdef0123456789abcdef01234567",
+    "access_key_id": "AKIA" + "ZOOFIXTUREVALUE1",
+    "base64": "q8Zx+2Lm/7Rt4Wv8Yb3Nc5Kd1Hf6G==",
+}
+
+
+def _bare_token_capture(query: str) -> dict:
+    entry = {"request": {"method": "GET", "url": f"{APP}/items?{query}", "headers": [], "cookies": []},
+             "response": {"status": 200}}
+    return {"format": "capture", "document": {"log": {"version": "1.2", "entries": [entry]}}}
+
+
+def _bare_token_absent(token: str, text: str) -> bool:
+    readable = urllib.parse.unquote_plus(text)
+    pieces = {token, token.rstrip("="), urllib.parse.quote(token, safe=""), urllib.parse.quote_plus(token)}
+    return not any(piece in text or piece in readable for piece in pieces)
+
+
+class _AnsweringTransport:
+    """Unit fixture transport: every replayed request is answered 200 from a fixture address."""
+
+    async def send(self, request, *, target, timeout_seconds, follow_redirects):
+        from runtime.request_replay_executor import ReplayTransportResult
+        return ReplayTransportResult(status_code=200, connected_address="192.0.2.10", final_url=request.url,
+                                     response_headers={}, response_body=b"ok", elapsed_ms=1)
+
+
+@pytest.mark.parametrize("shape", ["{t}", "{t}&page=2", "page=2&{t}"])
+@pytest.mark.parametrize("token", BARE_TOKENS.values(), ids=BARE_TOKENS.keys())
+def test_a_bare_query_token_never_reaches_the_withheld_list_the_plan_or_the_receipt(token, shape):
+    import asyncio
+    from datetime import datetime, timedelta, timezone
+
+    from runtime.models import TargetBinding
+    from runtime.request_replay_executor import execute_replay_plan
+    from scanner.scanner_tools.request_collections import RequestSelector
+    from scanner.scanner_tools.request_replay import build_selected_replay_plan
+
+    capture = _bare_token_capture(shape.format(t=token))
+    (request,) = resolve_imported_requests(capture)
+    assert _bare_token_absent(token, request["url"])
+    assert _bare_token_absent(token, json.dumps(request["captured_withheld"]))
+    assert _bare_token_absent(token, json.dumps(request["captured_query_parameters_withheld"]))
+    # Still listed as withheld, under a masked name.
+    assert request["captured_withheld"] == ["query:<redacted>"]
+    plan = build_selected_replay_plan(capture, RequestSelector(safe_methods_only=False), allowed_origins=[APP])
+    assert _bare_token_absent(token, plan.requests[0].wire_dict()["url"])
+    assert _bare_token_absent(token, json.dumps(plan.public_dict()))
+    moments = iter(datetime(2026, 10, 25, 12, 0, tzinfo=timezone.utc) + timedelta(milliseconds=10 * step)
+                   for step in range(1000))
+    outcome = asyncio.run(execute_replay_plan(
+        plan, target=TargetBinding(target_id="target-1", target_kind="web", canonical_host="app.example.test",
+                                   allowed_origins=(APP,), allowed_addresses=("192.0.2.10",),
+                                   scope_receipt_id="scope-1"),
+        owner_kind="hunt", owner_id="hunt-1", worker_id="worker-1", limits={"http_requests": 10},
+        consumed={}, transport=_AnsweringTransport(), clock=lambda: next(moments)))
+    assert _bare_token_absent(token, json.dumps(outcome.public_dict(), default=str))
+
+
+def test_ordinary_and_credential_named_bare_parameters_keep_their_names():
+    (request,) = resolve_imported_requests(_bare_token_capture("debug&page=2"))
+    assert request["captured_withheld"] == []
+    (request,) = resolve_imported_requests(_bare_token_capture("access_token&page=2"))
+    assert request["captured_withheld"] == ["query:access_token"]
+
+
+@pytest.mark.parametrize("token", BARE_TOKENS.values(), ids=BARE_TOKENS.keys())
+def test_a_replay_plan_masks_a_token_in_a_withheld_label_whoever_produced_it(token):
+    from scanner.scanner_tools.request_replay import build_replay_plan
+
+    rows = [{"id": "r1", "method": "GET", "url": f"{APP}/items?page=2",
+             "captured_withheld": [f"query:{token}", "header:cookie", "path:2", "query:access_token"]}]
+    plan = build_replay_plan(rows, allowed_origins=[APP])
+    assert plan.requests[0].captured_withheld == (
+        "query:<redacted>", "header:cookie", "path:2", "query:access_token")
+    assert _bare_token_absent(token, json.dumps(plan.public_dict()))
+
+
+@pytest.mark.parametrize("token", BARE_TOKENS.values(), ids=BARE_TOKENS.keys())
+def test_an_imported_collections_request_list_masks_a_bare_query_token(token):
+    document = {"log": {"version": "1.2", "entries": [
+        {"request": {"method": "GET", "url": f"{APP}/items?{token}&page=2", "headers": []},
+         "response": {"status": 200}}]}}
+    _payload, _summary, rows = validate_and_index(document, import_format="har")
+    for row in rows:
+        assert _bare_token_absent(token, json.dumps(row))
+    postman = {"info": {"name": "fixture", "schema": "https://schema.getpostman.com/json/collection/v2.1.0/"},
+               "item": [{"name": "items", "request": {"method": "GET", "url": f"{APP}/items?{token}"}}]}
+    _payload, _summary, rows = validate_and_index(postman, import_format="postman_collection")
+    assert rows
+    for row in rows:
+        assert _bare_token_absent(token, json.dumps(row))

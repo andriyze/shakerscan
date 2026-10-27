@@ -20,9 +20,9 @@ except ImportError:  # direct host-side import in focused tests
     from host_names import HostNameError, canonical_host
 
 try:
-    from .url_redaction import redact_url
+    from .url_redaction import redact_url, token_like_query_name, token_like_segment
 except ImportError:  # direct host-side import in focused tests
-    from url_redaction import redact_url
+    from url_redaction import redact_url, token_like_query_name, token_like_segment
 
 try:
     from .device_postman import (
@@ -431,6 +431,16 @@ class ReplayPlan:
         return tuple(request.wire_dict() for request in self.requests)
 
 
+def _public_withheld_label(item: Any) -> str:
+    """A ``kind:name`` label of what a capture's replay withheld, with a name that is itself a
+    credential (a bare ``?<token>`` query name, a token-like value) shown as ``<redacted>``."""
+    text = str(item)[:200]
+    kind, separator, name = text.partition(":")
+    if separator and (token_like_query_name(name) or token_like_segment(urllib.parse.unquote(name))):
+        return f"{kind}:<redacted>"
+    return text
+
+
 def build_replay_plan(
     requests: Iterable[Mapping[str, Any]],
     *,
@@ -489,7 +499,8 @@ def build_replay_plan(
             body_mode=str(row.get("body_mode") or "none")[:100],
             auth_type=str(row.get("auth_type") or "none")[:200],
             has_sensitive_material=bool(row.get("has_sensitive_material")),
-            captured_withheld=tuple(str(item)[:200] for item in row.get("captured_withheld") or ())[:200],
+            captured_withheld=tuple(
+                _public_withheld_label(item) for item in row.get("captured_withheld") or ())[:200],
         ))
     return ReplayPlan(
         requests=tuple(result),

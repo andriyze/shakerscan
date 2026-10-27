@@ -243,9 +243,22 @@ def is_captured_secret_query(name: str, value: str) -> bool:
     return (
         is_credential_name(text)
         or token_like_segment(urllib.parse.unquote(str(value or "")))
-        # A bare parameter (``?<token>``) is its own value.
+        # A bare parameter (``?<token>``) is its own value: a JWT or random token, an AWS access
+        # key id or standard base64 (``token_like_query_name``).
         or token_like_segment(urllib.parse.unquote(text))
+        or token_like_query_name(text)
     )
+
+
+def withheld_query_label(name: str, pieces: frozenset[str] = frozenset()) -> str:
+    """The label a withheld query parameter is listed under: its name, or ``<redacted>`` when the
+    name is itself a credential (``?<token>``, a token-like or base64 name, an AWS access key id,
+    or a recorded credential value), so the list of what was withheld never carries it."""
+    text = str(name or "")
+    if (token_like_query_name(text) or token_like_segment(urllib.parse.unquote(text))
+            or _holds_recorded_credential(text, pieces)):
+        return "<redacted>"
+    return text[:160]
 
 
 def captured_secret_query_name(name: str, bare: bool) -> bool:
@@ -623,8 +636,9 @@ def _replayable_capture_url(url: str, pieces: frozenset[str] = frozenset()) -> t
         kept = []
         for name, value in urllib.parse.parse_qsl(query, keep_blank_values=True):
             if is_captured_secret_query(name, value) or _replayable_text(value, pieces) != value:
-                if name[:160] not in withheld:
-                    withheld.append(name[:160])
+                label = withheld_query_label(name, pieces)
+                if label not in withheld:
+                    withheld.append(label)
             else:
                 kept.append((name, value))
         if withheld:
