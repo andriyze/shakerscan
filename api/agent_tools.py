@@ -1911,7 +1911,8 @@ def bind_scanner_runtime_paths(
 
 # Exact wire logs the worker binds into each job's private scratch directory. sqlmap's -t
 # traffic file and Dalfox's HAR record every HTTP transaction the tool sends: measured
-# against a counting origin, sqlmap logged 471 of 471 requests and Dalfox 1,225 of 1,225.
+# against a counting origin that answered 200, sqlmap logged 471 of 471 requests and Dalfox
+# 1,225 of 1,225. sqlmap logs a request answered with a redirect twice under its one number.
 # Their counts therefore settle the wire reservation exactly (a refund of the unused hold,
 # or the recorded overrun) instead of retaining the full conservative hold. Katana's JSONL
 # is a discovery feed, not a wire log, and stays conservative on purpose.
@@ -1925,9 +1926,12 @@ def sqlmap_traffic_request_count(text: str) -> int | None:
     markers = [int(value) for value in _SQLMAP_TRAFFIC_MARKER.findall(str(text or ""))]
     if not markers:
         return None
-    # sqlmap numbers its requests sequentially. A gap means blocks were lost, so the
-    # highest number is the larger, safe count.
-    return max(len(markers), max(markers))
+    # sqlmap numbers each request it sends once, sequentially. A request answered 30x is logged
+    # twice under its number (its redirect, then its response), so the count is of distinct
+    # numbers: exact while sqlmap follows no redirect (--ignore-redirects, pinned in
+    # _tmpl_sqlmap), where a followed hop would be a second request under the same number. A gap
+    # means blocks were lost, so the highest number is the larger, safe count.
+    return max(len(set(markers)), max(markers))
 
 
 _SQLMAP_RESPONSE_MARKER = re.compile(

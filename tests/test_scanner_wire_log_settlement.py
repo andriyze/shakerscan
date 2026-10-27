@@ -90,3 +90,46 @@ def test_bind_requires_an_absolute_scratch_directory():
     _binary, argv, _ms = agent_tools.build_scanner_argv("dalfox", "http://t/?q=1", {})
     with pytest.raises(agent_tools.AgentToolError):
         agent_tools.bind_scanner_runtime_paths("dalfox", argv, scratch_dir="relative")
+
+
+# A request sqlmap's pinned version (1.10.9) sends with the template's argv (-t,
+# --ignore-redirects) and the target answers 302: its redirect handler logs the request with an
+# "HTTP redirect [#N]" block, then the request is logged again under the same #N with its
+# "HTTP response [#N]" block (unit fixture of that log shape; nothing reaches a network).
+_TRAFFIC_SEPARATOR = "\n" + "#" * 76 + "\n\n"
+
+
+def _redirected_request(number: int) -> str:
+    request = (f"HTTP request [#{number}]:\nPOST /login HTTP/1.1\nHost: 127.0.0.1:8080\n"
+               "Content-length: 25\n\nusername=alice&password=x\n")
+    again = request.replace("POST /login HTTP/1.1", "POST None HTTP/1.1")
+    return (request + f"\nHTTP redirect [#{number}] (302 Found):\nLocation: /login?error=1\n"
+            + _TRAFFIC_SEPARATOR + again
+            + f"\nHTTP response [#{number}] (302 Found):\nLocation: /login?error=1\n" + _TRAFFIC_SEPARATOR)
+
+
+def _answered_request(number: int) -> str:
+    return (f"HTTP request [#{number}]:\nPOST /login HTTP/1.1\nHost: 127.0.0.1:8080\n\nusername=a\n"
+            f"\nHTTP response [#{number}] (200 OK):\nContent-Type: text/html\n" + _TRAFFIC_SEPARATOR)
+
+
+def test_a_request_answered_with_a_redirect_counts_once():
+    assert agent_tools.sqlmap_traffic_request_count(_redirected_request(1)) == 1
+    # 492 requests to a sign-in form that redirects: under a 900-request ceiling, not 984 over it.
+    log = "".join(_redirected_request(number) for number in range(1, 493))
+    assert agent_tools.sqlmap_traffic_request_count(log) == 492
+
+
+def test_a_lost_block_still_counts_and_answered_requests_are_unchanged():
+    # Request #2 was never logged (it timed out); its number is still a request that was sent.
+    log = _answered_request(1) + _redirected_request(3) + _answered_request(4)
+    assert agent_tools.sqlmap_traffic_request_count(log) == 4
+    assert agent_tools.sqlmap_traffic_request_count(
+        "".join(_answered_request(number) for number in range(1, 472))) == 471
+
+
+def test_the_sqlmap_template_never_follows_redirects():
+    """Counting distinct request numbers is exact only while sqlmap follows no redirect."""
+    argv = agent_tools._tmpl_sqlmap("https://app.example.test/x?id=1", {})
+    assert "--ignore-redirects" in argv
+    assert "--follow-redirects" not in argv
