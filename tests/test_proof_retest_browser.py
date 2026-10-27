@@ -127,23 +127,85 @@ class _Pages(BaseHTTPRequestHandler):
         if parsed.path == "/fixed-analytics":  # fixed, and loads another site's script (blocked)
             return self._send(200, f"<html><body><script src='{self.off_origin}/analytics.js'></script>"
                                    f"<h1>Results for {html.escape(q)}</h1></body></html>")
+        # Fixed pages whose own requests a working page makes on every visit: more images than the
+        # retest's request cap, an event stream, a long poll, a session check a guest fails, a call
+        # the page gives up on; and pages whose sink's own call does not answer.
+        fixed = f"<h1>Results for {html.escape(q)}</h1>"
+        images = "".join(f"<img src='/img/{index}.png'>" for index in range(60))
+        if parsed.path == "/gallery":
+            return self._send(200, f"<html><body>{fixed}{images}</body></html>")
+        if parsed.path == "/gallery-late-script":  # ... and a script it loads once they are done
+            return self._send(200, f"<html><body>{fixed}{images}<script>window.onload = () => {{"
+                                   "const s = document.createElement('script'); s.src = '/noop.js';"
+                                   "document.body.appendChild(s); };</script></body></html>")
+        if parsed.path.startswith("/img/"):
+            return self._send(200, "x", (("Content-Type", "image/png"),))
+        if parsed.path == "/sse":
+            return self._send(200, f"<html><body>{fixed}<script>"
+                                   "new EventSource('/events').onmessage = () => {};</script></body></html>")
+        if parsed.path == "/events":  # one event, then the stream stays open
+            return self._hold(200, "text/event-stream", b"data: tick\n\n", seconds=30.0)
+        if parsed.path == "/longpoll":
+            return self._send(200, f"<html><body>{fixed}<script>"
+                                   "fetch('/poll').then(r => r.text());</script></body></html>")
+        if parsed.path == "/poll":  # answered when there is news: not within the retest
+            return self._late(30.0, 200, "news")
+        if parsed.path == "/session":
+            return self._send(200, f"<html><body>{fixed}<script>"
+                                   "fetch('/api/me').then(r => r.ok ? r.json() : null);</script></body></html>")
+        if parsed.path == "/api/me":
+            if SESSION in str(self.headers.get("Cookie") or ""):
+                return self._send(200, json.dumps({"user": "fixture"}), (("Content-Type", "application/json"),))
+            return self._send(401, json.dumps({"error": "sign in"}), (("Content-Type", "application/json"),))
+        if parsed.path == "/abort":
+            return self._send(200, f"<html><body>{fixed}<script>const c = new AbortController();"
+                                   "setTimeout(() => c.abort(), 100);"
+                                   "fetch('/api/slow', {signal: c.signal}).catch(() => {});</script></body></html>")
+        if parsed.path == "/api/slow":
+            return self._late(2.0, 200, json.dumps({"ok": True}))
+        if parsed.path == "/api/slower":  # the call the sink of /dom-api-slow waits for, stuck
+            return self._late(30.0, 200, json.dumps({"echo": ""}))
         return self._send(404, "not found")
+
+    def _hold(self, status: int, content_type: str, first: bytes, *, seconds: float) -> None:
+        """Answer the headers and ``first`` now, and keep the response open for ``seconds``."""
+        self.send_response(status)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Cache-Control", "no-cache")
+        self.end_headers()
+        with contextlib.suppress(OSError):
+            self.wfile.write(first)
+            self.wfile.flush()
+            ends = time.monotonic() + seconds
+            while time.monotonic() < ends:
+                time.sleep(0.25)
+
+    def _late(self, seconds: float, status: int, body: str) -> None:
+        """Answer only after ``seconds`` (the browser may have gone by then)."""
+        ends = time.monotonic() + seconds
+        while time.monotonic() < ends:
+            time.sleep(0.25)
+        with contextlib.suppress(OSError):
+            self._send(status, body, (("Content-Type", "application/json"),))
 
 
 _VULNERABLE_JS = "document.getElementById('r').innerHTML = new URLSearchParams(location.search).get('q') || '';"
 _FIXED_JS = "document.getElementById('r').textContent = new URLSearchParams(location.search).get('q') || '';"
 _API_JS = ("fetch('/api/search' + location.search).then(r => r.json())"
            ".then(d => { document.getElementById('r').innerHTML = d.echo; });")
+_API_SLOW_JS = ("fetch('/api/slower' + location.search).then(r => r.json())"
+                ".then(d => { document.getElementById('r').innerHTML = d.echo; });")
 _APP_PAGES = {
     "/dom": ("/app.js", ""), "/dom-fixed": ("/app-fixed.js", ""), "/dom-503": ("/app-503.js", ""),
     "/dom-404": ("/app-404.js", ""), "/dom-429": ("/app-429.js", ""), "/dom-api503": ("/app-api.js", ""),
-    "/dom-slow": ("/app-slow.js", "async"),
+    "/dom-slow": ("/app-slow.js", "async"), "/dom-api-slow": ("/app-api-slow.js", ""),
 }
 _APP_SCRIPTS = {  # path: (status, body, seconds before answering)
     "/app.js": (200, _VULNERABLE_JS, 0.0), "/app-fixed.js": (200, _FIXED_JS, 0.0),
     "/app-503.js": (503, "Service Unavailable", 0.0), "/app-404.js": (404, "not found", 0.0),
     "/app-429.js": (429, "Too Many Requests", 0.0), "/app-api.js": (200, _API_JS, 0.0),
-    "/app-slow.js": (200, _VULNERABLE_JS, 3.0),
+    "/app-slow.js": (200, _VULNERABLE_JS, 3.0), "/app-api-slow.js": (200, _API_SLOW_JS, 0.0),
+    "/noop.js": (200, "window.loadedLate = true;", 0.0),
 }
 
 
@@ -175,8 +237,11 @@ def pages():
             server.server_close()
 
 
-def _verification(origin: str, path: str, *, auth_context: dict | None = None) -> dict:
-    """A retest row joined with its verified browser XSS finding, as the Scan stores it."""
+def _verification(origin: str, path: str, *, auth_context: dict | None = None,
+                  page_requests: list | None = None) -> dict:
+    """A retest row joined with its verified browser XSS finding, as the Scan stores it.
+    ``page_requests``: the proof page's own data requests the finding keeps (the Scan records
+    them since this release); None for a finding recorded without them."""
     stored = f"{origin}{path}?q=%3Credacted%3E"
     payload = xss_proof_payload(CANDIDATE)
     evidence = {
@@ -185,6 +250,8 @@ def _verification(origin: str, path: str, *, auth_context: dict | None = None) -
         "request_url": stored, "related_request_urls": [stored], "proof_state": "verified",
         "execution_sink": {"signal": "console", "location": "query", "parameter": "q"},
     }
+    if page_requests is not None:
+        evidence["browser_proof"] = {"proven": True, "page_requests": page_requests}
     return {
         "id": uuid.uuid4(), "finding_id": uuid.uuid4(), "tool": "shakerscan_browser_proof",
         "title": "Verified cross-site scripting", "finding_type": "xss", "target_url": origin,
@@ -274,6 +341,54 @@ def test_a_page_still_loading_after_the_settle_is_never_likely_fixed(monkeypatch
     result = _retest(monkeypatch, _verification(pages, path))
     assert result["verdict"] != "likely_fixed", result["verdict_reason"]
     assert result["verdict"] == "exploited", result["verdict_reason"]
+
+
+def _data(path: str, status: int, resource: str = "fetch") -> dict:
+    """One of the proof page's own data requests, as the finding keeps it."""
+    return {"method": "GET", "path": path, "resource_type": resource, "status": status}
+
+
+# A fixed page reads likely fixed in a few seconds; the 20-second page timeout is not waited out.
+FIXED_PAGE_SECONDS = 15.0
+
+
+@pytest.mark.parametrize("path,page_requests,auth_context", [
+    ("/gallery", None, None),            # 60 same-origin images: the cap cuts 11, none needed
+    ("/sse", None, None),                # an open event stream counts as answered
+    ("/longpoll", [], None),             # a long poll the proof's own page never saw answered
+    ("/session", None, None),            # a guest's session check answers 401, no session sent
+    ("/session", [_data("/api/me", 401)], None),  # ... as it did for the proof's page
+    ("/session", [_data("/api/me", 200)], {"auth_cookies": SESSION}),  # signed in, answered
+    ("/abort", None, None),              # the page gives up on its own slow call
+    ("/abort", [_data("/api/slow", 401)], None),  # ... which never worked for the proof either
+])
+def test_a_fixed_page_whose_own_requests_behave_as_designed_reads_likely_fixed(
+        monkeypatch, pages, path, page_requests, auth_context):
+    started = time.monotonic()
+    result = _retest(monkeypatch, _verification(pages, path, auth_context=auth_context, page_requests=page_requests))
+    assert result["verdict"] == "likely_fixed", (result["verdict_reason"], result.get("proof"))
+    assert time.monotonic() - started < FIXED_PAGE_SECONDS
+
+
+@pytest.mark.parametrize("path,page_requests,auth_context,shown", [
+    # A script the cap cut, after more images than the cap: the page did not run whole.
+    ("/gallery-late-script", None, None, "more requests than the retest allows"),
+    # The session sent is refused (expired): judged without the proof's record, and against it.
+    ("/session", None, {"auth_cookies": "session=expired"}, "answered HTTP 401"),
+    ("/session", [_data("/api/me", 200)], {"auth_cookies": "session=expired"}, "answered HTTP 401"),
+    # The call the proof's page saw answered is cancelled this time.
+    ("/abort", [_data("/api/slow", 200)], None, "got no answer this time"),
+    # The sink's own call, answered for the proof, is still open at the timeout.
+    ("/dom-api-slow", [_data("/api/slower", 200)], None, "did not all finish loading in time"),
+    # A long poll recorded without the proof's requests: still open, so not ruled out.
+    ("/longpoll", None, None, "did not all finish loading in time"),
+])
+def test_a_page_whose_needed_requests_did_not_behave_as_proved_is_inconclusive(
+        monkeypatch, pages, path, page_requests, auth_context, shown):
+    result = _retest(monkeypatch, _verification(pages, path, auth_context=auth_context, page_requests=page_requests))
+    assert (result["verdict"], result["result_status"]) == ("inconclusive", "inconclusive"), result["verdict_reason"]
+    assert shown in result["verdict_reason"], result["verdict_reason"]
+    assert result["proof"]["page_incomplete"]
 
 
 def test_the_marker_is_the_one_the_browser_proof_looks_for():

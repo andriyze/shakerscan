@@ -1016,6 +1016,9 @@ async def _execute_browser_action_in_context(
                     "content_type": _safe_content_type(
                         response.headers.get("content-type")
                     ),
+                    # What the page asked for (document, script, fetch, xhr, image...): a retest
+                    # of a browser XSS proof judges the page's data requests against these.
+                    "resource_type": str(getattr(response.request, "resource_type", "") or "")[:20],
                 })
             except Exception:
                 return

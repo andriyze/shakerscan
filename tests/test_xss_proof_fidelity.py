@@ -55,6 +55,7 @@ def _install_fake_browser(monkeypatch, *, requires_auth: bool):
     class FakeRequest:
         def __init__(self, method, url):
             self.method, self.url, self.headers = method, url, {"user-agent": "x"}
+            self.resource_type = "document"
 
     class FakeRoute:
         def __init__(self, request, page): self.request, self.page = request, page
@@ -209,6 +210,20 @@ def test_public_negative_result_is_still_a_completed_attempt(monkeypatch):
     assert result.status == "success"
     assert _proof(result)["proof_state"] == "not_proven"
     assert "inconclusive_reason" not in _proof(result)
+
+
+def test_the_proof_records_what_kind_of_request_each_answer_was_for(monkeypatch):
+    """A retest judges the page's own data requests against the proof's (``resource_type``)."""
+    prepared = _query_proof()
+    page, _seen = _install_fake_browser(monkeypatch, requires_auth=False)
+    page.marker = prepared.marker
+
+    result = asyncio.run(XSSBrowserProofAdapter(prepared).execute(
+        heartbeat=_noop, cancelled=lambda: False,
+    ))
+
+    answers = [item for item in result.observations if item.get("kind") == "browser_http_response"]
+    assert answers and all(item["resource_type"] == "document" for item in answers)
 
 
 def test_json_body_proof_nests_dotted_fields():

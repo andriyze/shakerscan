@@ -897,6 +897,51 @@ def _verified_posture_factory(result: CapabilityResultReference, receipt: Any, k
     return make
 
 
+# The data requests (fetch, XHR, EventSource) a browser XSS proof's page made on its own origin, and
+# how they were answered, kept with the finding: its retest judges the page's data requests against
+# them (``worker_handlers.proof_replay``). A request the proof saw answered that fails now means
+# the page did not run as proved; one that also failed or never answered then (a guest page's
+# ``/api/me`` answering 401, a long poll) does not. Kept only when the proof recorded each
+# response's resource type and its record was not cut short (``capabilities.browser``
+# ``MAX_BROWSER_RESPONSE_OBSERVATIONS``); without it the retest applies its own stricter rules.
+_PROOF_PAGE_DATA_RESOURCES = frozenset({"fetch", "xhr", "eventsource"})
+_PROOF_PAGE_RESPONSES_RECORDED = 200
+_PROOF_PAGE_REQUESTS_KEPT = 50
+
+
+def _proof_page_requests(
+    observations: Sequence[Mapping[str, Any]], attempt_id: Any,
+) -> list[dict[str, Any]] | None:
+    """``[{method, path, resource_type, status}]`` (the lowest status each answered with) for
+    one proof attempt's page, or None when the proof's record cannot tell."""
+    responses = [
+        item for item in observations
+        if isinstance(item, Mapping) and item.get("kind") == "browser_http_response"
+        and item.get("attempt_id") == attempt_id
+    ]
+    if (not responses or len(responses) >= _PROOF_PAGE_RESPONSES_RECORDED
+            or any("resource_type" not in item for item in responses)):
+        return None
+    kept: dict[tuple[str, str], dict[str, Any]] = {}
+    for item in responses:
+        resource = str(item.get("resource_type") or "")
+        if resource not in _PROOF_PAGE_DATA_RESOURCES:
+            continue
+        try:
+            path = urllib.parse.urlsplit(str(item.get("url") or "")).path or "/"
+            status = int(item.get("status_code") or 0)
+        except (TypeError, ValueError):
+            return None
+        key = (str(item.get("method") or "GET").upper()[:10], path[:500])
+        if key in kept:
+            kept[key]["status"] = min(kept[key]["status"], status)
+        elif len(kept) < _PROOF_PAGE_REQUESTS_KEPT:
+            kept[key] = {"method": key[0], "path": key[1], "resource_type": resource, "status": status}
+        else:
+            return None
+    return list(kept.values())
+
+
 def _findings_for_action(
     result: CapabilityResultReference,
     observations: Sequence[Mapping[str, Any]],
@@ -1116,6 +1161,7 @@ def _findings_for_action(
             and item.get("evidence_type") in {"dom_execution", "browser_execution"}
             and str(item.get("technique") or "").startswith("headless_xss_")
         ):
+            page_requests = _proof_page_requests(observations, item.get("attempt_id"))
             finding = _base_finding(
                 tool="shakerscan_browser_proof",
                 title="Verified cross-site scripting",
@@ -1148,6 +1194,7 @@ def _findings_for_action(
                         "technique": item.get("technique"),
                         "dom_marker_executed": item.get("dom_marker_executed"),
                         "verifier_build": item.get("browser_build"),
+                        **({"page_requests": page_requests} if page_requests is not None else {}),
                     },
                     "canonical_capability": result.capability_name,
                     "capability_receipt": receipt,

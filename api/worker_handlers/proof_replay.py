@@ -18,11 +18,16 @@ Otherwise the same check runs again:
 The verdict follows the check: reproduced is still vulnerable; not reproduced, with every request
 answered, is likely fixed; a refusal, a failed request, an unavailable service (``_unavailable``),
 a missing browser or one that does not answer is inconclusive, and the finding stays open. In the
-browser "every request" includes the page's own: a same-origin script, frame or data request that
-answered with an error or failed, one the retest's request cap cut, or one still open when the
-proof's page timeout ran out leaves the page not running as it did when the finding was proved, and
-the retest inconclusive. A failed image, style or font, and a request to another origin (blocked as
-the proof blocks it), do not. Nothing here escalates to the AI tier.
+browser "every request" includes the page's own (``_PageActivity``): a same-origin script or frame
+that answered with an error, a script, frame or data request that a service refused (408, 429,
+5xx), failed on the network, or that the retest's request cap cut, and a request still open when
+the proof's page timeout ran out leave the page not running as it did when the finding was proved,
+and the retest inconclusive. The page's data requests are judged against the proof's own page,
+which the finding keeps (``browser_proof.page_requests``): one the proof saw answered must be
+answered again, and one that also failed or never answered then (a guest's ``/api/me`` answering
+401, a long poll) does not count. An open event stream counts as answered. A failed image, style
+or font, an image the cap cut, a data request the page cancels itself, and a request to another
+origin (blocked as the proof blocks it) do not count. Nothing here escalates to the AI tier.
 """
 
 from __future__ import annotations
@@ -52,6 +57,10 @@ except ModuleNotFoundError:  # package import in host-side tests
     from ..proof_retest import PROOF_RETEST_GAPS, ProofRetestRequest, proof_retest_request
     from ..retest_contract import auth_context_to_headers, parse_json_field
     from .retest_outcome import _internal_retest_scope_authorized, classify_retest_outcome
+try:
+    from scanner_tools.url_redaction import redact_url
+except ModuleNotFoundError:  # package import in host-side tests
+    from scanner.scanner_tools.url_redaction import redact_url
 
 
 # The Scan reserves at most this much for one candidate's proof (the error, boolean and timing
@@ -245,23 +254,90 @@ _BROWSER_MAX_REQUESTS = 50
 _BROWSER_CLOSE_SECONDS = 10.0
 # The page's own requests that carry its application: when one of these fails, the page did not
 # run as it did when the finding was proved. A failed image, style or font does not stop a script.
-_APPLICATION_RESOURCES = frozenset({"document", "script", "fetch", "xhr", "eventsource", "websocket"})
+_APPLICATION_RESOURCES = frozenset({"document", "script", "fetch", "xhr", "eventsource"})
+# Its data requests: judged against what the proof's own page saw (``browser_proof.page_requests``,
+# recorded by the Scan), since a working page may expect one to fail (a guest's ``/api/me``
+# answering 401) or never to finish (a long poll).
+_DATA_RESOURCES = frozenset({"fetch", "xhr", "eventsource"})
+# An event stream's body never finishes by design: once its headers arrive it is answered.
+_STREAM_RESOURCES = frozenset({"eventsource"})
+# Answers that say the service, not the page, decided: on any of the page's own requests.
+_SERVICE_REFUSALS = frozenset({408, 429})
+_SESSION_REFUSALS = frozenset({401, 403})
 # How long the requests the page still has open may keep a negative answer waiting, past the
 # proof's settle: up to the proof's own page timeout.
 _PENDING_POLL_SECONDS = 0.1
 _PENDING_QUIET_SECONDS = 0.25
 
 
+def _proof_page_requests(verification: Mapping[str, Any]) -> Any:
+    """The browser proof page's own data requests the finding keeps, or None without them."""
+    proof = parse_json_field(verification.get("evidence")).get("browser_proof")
+    return proof.get("page_requests") if isinstance(proof, Mapping) else None
+
+
+def _request_key(method: Any, url: Any) -> tuple[str, str]:
+    """A request as the proof's record names it: the method and the path of the redacted URL."""
+    try:
+        path = urllib.parse.urlsplit(redact_url(str(url or ""))).path or "/"
+    except ValueError:
+        path = "/"
+    return str(method or "GET").upper()[:10], path[:500]
+
+
+def _proved_requests(recorded: Any) -> dict[tuple[str, str], bool] | None:
+    """``{(method, path): answered}`` from a finding's ``page_requests``, or None without one."""
+    if not isinstance(recorded, (list, tuple)):
+        return None
+    proved: dict[tuple[str, str], bool] = {}
+    for item in recorded:
+        if not isinstance(item, Mapping):
+            continue
+        key = (str(item.get("method") or "GET").upper()[:10], str(item.get("path") or "/")[:500])
+        with contextlib.suppress(TypeError, ValueError):
+            proved[key] = proved.get(key, False) or 100 <= int(item.get("status") or 0) < 400
+    return proved
+
+
 class _PageActivity:
     """What the page's same-origin requests did: answered with an error, failed, cut by the
-    retest's request cap, or still open. The page's own navigation is judged elsewhere."""
+    retest's request cap, or still open. The page's own navigation is judged elsewhere.
 
-    def __init__(self, origin: tuple[str, str, int | None] | None) -> None:
+    A script or frame that answers with an error, and any of its application requests that a
+    service refused (408, 429, 5xx) or that failed on the network, mean the page did not run as
+    proved. Its data requests are judged against the proof's own page (``proved``, from the
+    finding's ``browser_proof.page_requests``): one the proof saw answered must be answered again,
+    while one that also failed or never answered then (a guest's 401, a long poll) does not count.
+    For a finding recorded without them, a data request answering 401 or 403 counts only when the
+    retest carries a session (``signed_in``: the session expired), and one still open at the
+    timeout counts. A data request the page cancels itself (``net::ERR_ABORTED``) is not a failure
+    by itself; the request cap counts only application requests."""
+
+    def __init__(
+        self, origin: tuple[str, str, int | None] | None, *,
+        proved: Any = None, signed_in: bool = False,
+    ) -> None:
         self.origin = origin
         self.pending: dict[int, Any] = {}
         self.failures: list[dict[str, Any]] = []
         self.capped = 0
         self.aborted: set[int] = set()
+        self.proved = _proved_requests(proved)
+        self.signed_in = signed_in
+        self.answered_keys: set[tuple[str, str]] = set()
+
+    @staticmethod
+    def _key(request: Any) -> tuple[str, str]:
+        with contextlib.suppress(Exception):
+            return _request_key(getattr(request, "method", "GET"), request.url)
+        return "GET", "/"
+
+    def _proof_answered(self, request: Any) -> bool:
+        return bool(self.proved and self.proved.get(self._key(request)))
+
+    def application(self, request: Any) -> bool:
+        """A request that carries the page's application (``_APPLICATION_RESOURCES``)."""
+        return self._resource(request) in _APPLICATION_RESOURCES
 
     def _same_origin(self, request: Any) -> bool:
         with contextlib.suppress(Exception):
@@ -292,29 +368,71 @@ class _PageActivity:
         self.pending.pop(id(request), None)
         if id(request) in self.aborted or not self._same_origin(request) or self._main_navigation(request):
             return
-        if self._resource(request) in _APPLICATION_RESOURCES:
+        resource = self._resource(request)
+        if resource in _APPLICATION_RESOURCES:
             error = ""
             with contextlib.suppress(Exception):
                 error = str(request.failure or "")
-            self.failures.append({"resource_type": self._resource(request), "error": error[:80] or "failed"})
+            if resource in _DATA_RESOURCES and "ERR_ABORTED" in error.upper():
+                # The page cancelled its own call (superseded, or its own timeout): not a failure by
+                # itself; a call the proof saw answered must still be answered (``_unanswered``).
+                return
+            self.failures.append({"resource_type": resource, "error": error[:80] or "failed"})
 
     def answered(self, response: Any) -> None:
         with contextlib.suppress(Exception):
             request = response.request
             status = int(response.status)
-            if (status >= 400 and self._same_origin(request) and not self._main_navigation(request)
-                    and self._resource(request) in _APPLICATION_RESOURCES):
-                self.failures.append({"resource_type": self._resource(request), "status": status})
+            if not self._same_origin(request) or self._main_navigation(request):
+                return
+            resource = self._resource(request)
+            if status < 400:
+                if resource in _STREAM_RESOURCES:
+                    self.pending.pop(id(request), None)
+                if resource in _DATA_RESOURCES:
+                    self.answered_keys.add(self._key(request))
+                return
+            if resource in _APPLICATION_RESOURCES and self._error_counts(request, resource, status):
+                self.failures.append({"resource_type": resource, "status": status})
+
+    def _error_counts(self, request: Any, resource: str, status: int) -> bool:
+        if status in _SERVICE_REFUSALS or status >= 500 or resource not in _DATA_RESOURCES:
+            return True
+        if self.proved is not None:
+            return self._proof_answered(request)
+        return self.signed_in or status not in _SESSION_REFUSALS
+
+    def _pending_counts(self, request: Any) -> bool:
+        """A request still open that keeps the page from having run as proved: any but a data
+        request the proof's own page did not see answered either (a long poll)."""
+        if self.proved is not None and self._resource(request) in _DATA_RESOURCES:
+            return self._proof_answered(request)
+        return True
+
+    def waiting(self) -> bool:
+        """Whether a request the page still has open may yet change the answer."""
+        return any(self._pending_counts(item) for item in self.pending.values())
+
+    def _unanswered(self) -> list[dict[str, str]]:
+        """Data requests the proof's page saw answered that this page got no answer to: it did
+        not make them, cancelled them, or they are still open."""
+        if not self.proved:
+            return []
+        return [{"method": method, "path": path} for (method, path), answered in sorted(self.proved.items())
+                if answered and (method, path) not in self.answered_keys][:10]
 
     def incomplete(self) -> dict[str, Any] | None:
         """Why the page did not run as proved, or None when every request it needed answered."""
-        if not (self.failures or self.capped or self.pending):
+        pending = [item for item in self.pending.values() if self._pending_counts(item)]
+        unanswered = self._unanswered()
+        if not (self.failures or self.capped or pending or unanswered):
             return None
         return {
             "failed": self.failures[:10],
-            "pending": len(self.pending),
-            "pending_resource_types": sorted({self._resource(item) for item in self.pending.values()}),
+            "pending": len(pending),
+            "pending_resource_types": sorted({self._resource(item) for item in pending}),
             "capped": self.capped,
+            **({"unanswered_since_proof": unanswered} if unanswered else {}),
         }
 
 
@@ -337,8 +455,10 @@ def _payload_url(request: ProofRetestRequest, value: str) -> str:
 
 async def _marker_check(
     url: str, marker: str, *, poe: Any, headers: Mapping[str, str] | None, cancelled: Callable[[], bool],
+    proved: Any = None,
 ) -> tuple[str, dict[str, Any]]:
-    """Load the payload page once and apply the browser proof's oracle to it."""
+    """Load the payload page once and apply the browser proof's oracle to it. ``proved`` is the
+    proof page's own data requests (``browser_proof.page_requests``), when the finding has them."""
     try:
         context = await poe.proof_browser_context(url, headers=dict(headers or {}) or None)
     except TimeoutError:  # the proof module's BrowserUnresponsive: it has let that browser go
@@ -349,7 +469,7 @@ async def _marker_check(
     signals: list[str] = []
     blocked = 0
     sent = 0
-    activity = _PageActivity(origin)
+    activity = _PageActivity(origin, proved=proved, signed_in=bool(headers))
 
     async def route(handled: Any) -> None:
         nonlocal blocked, sent
@@ -359,8 +479,9 @@ async def _marker_check(
         if cancelled() or not same_origin or not safe or sent >= _BROWSER_MAX_REQUESTS:
             blocked += 1
             activity.aborted.add(id(request))
-            if same_origin and safe and not cancelled():
-                # A request the page needed that the retest's cap cut: the page did not run whole.
+            if same_origin and safe and not cancelled() and activity.application(request):
+                # A script, frame or data request the retest's cap cut: the page did not run whole.
+                # An image, style or font it cut does not stop the page's application.
                 activity.capped += 1
             await handled.abort("blockedbyclient")
             return
@@ -398,12 +519,14 @@ async def _marker_check(
         # payload's own image) may yet run the payload: wait for them, within the proof's own page
         # timeout. A marker that fires meanwhile is the same oracle's answer.
         # Once they have finished, a short quiet spell lets what they started run (and start more).
+        # An open event stream, and a long poll the proof's own page never saw answered either, do
+        # not hold it (``_PageActivity.waiting``).
         deadline = loaded + XSS_PROOF_TIMEOUT_MS / 1000
         quiet_since: float | None = None
-        while activity.pending or quiet_since is not None:
+        while activity.waiting() or quiet_since is not None:
             if signals or dom or cancelled() or time.monotonic() >= deadline:
                 break
-            if activity.pending:
+            if activity.waiting():
                 quiet_since = None
             else:
                 quiet_since = quiet_since or time.monotonic()
@@ -447,21 +570,24 @@ def _page_incomplete_reason(incomplete: Mapping[str, Any]) -> str:
         first = failed[0]
         kind = str(first.get("resource_type") or "request")
         what = {"script": "script", "document": "frame", "fetch": "data request",
-                "xhr": "data request"}.get(kind, "request")
+                "xhr": "data request", "eventsource": "data request"}.get(kind, "request")
         answer = (f"answered HTTP {first['status']}" if first.get("status")
                   else "failed before it was answered")
         cause = f"One of the page's own {what}s {answer}"
     elif incomplete.get("capped"):
         cause = "The page made more requests than the retest allows, and the rest were not sent"
-    else:
+    elif incomplete.get("pending"):
         cause = "The page's own requests did not all finish loading in time"
+    else:
+        cause = ("A data request the page made when the finding was proved got no answer this "
+                 "time (it was not made, was cancelled or is still open)")
     return (f"{cause}, so the page did not run as it did when the finding was proved: nothing was "
             "reproduced or ruled out, and the finding stays open.")
 
 
 async def _browser_check(
     request: ProofRetestRequest, *, poe: Any, auth_headers: Mapping[str, str] | None,
-    cancelled: Callable[[], bool],
+    cancelled: Callable[[], bool], proved: Any = None,
 ) -> tuple[str, dict[str, Any]]:
     """The proof's own payload and oracle in a headless browser, after one ordinary request."""
     ordinary = _payload_url(request, "shakerscan")
@@ -478,7 +604,7 @@ async def _browser_check(
         return "no_browser", {}
     outcome, proof = await _marker_check(
         _payload_url(request, request.payload or ""), xss_proof_marker(request.candidate_id),
-        poe=poe, headers=auth_headers, cancelled=cancelled,
+        poe=poe, headers=auth_headers, cancelled=cancelled, proved=proved,
     )
     proof["baseline_status"] = status
     unavailable = _unavailable((status, proof.get("navigation_status")))
@@ -516,7 +642,10 @@ async def run_proof_retest(
         pass
     try:
         if request.capability == "xss.browser_prove_batch":
-            outcome, proof = await _browser_check(request, poe=poe, auth_headers=auth_headers, cancelled=cancelled)
+            outcome, proof = await _browser_check(
+                request, poe=poe, auth_headers=auth_headers, cancelled=cancelled,
+                proved=_proof_page_requests(verification),
+            )
         else:
             outcome, proof = await _differential_check(
                 request, target_id=str(verification.get("target_id") or "retest"),

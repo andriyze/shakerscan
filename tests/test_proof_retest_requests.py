@@ -892,3 +892,136 @@ def test_a_request_still_open_a_failed_one_and_a_capped_one_leave_the_page_incom
     assert blocked.incomplete() is None
     blocked.capped += 1
     assert blocked.incomplete()["capped"] == 1
+
+
+def _activity(proved=None, *, signed_in=False):
+    from worker_handlers.proof_replay import _PageActivity, _url_origin
+
+    return _PageActivity(_url_origin("http://shop.fixture.invalid/"), proved=proved, signed_in=signed_in)
+
+
+def _data(path, status, resource="fetch"):
+    return {"method": "GET", "path": path, "resource_type": resource, "status": status}
+
+
+def _call(resource, path="/api/search", query="?q=1"):
+    return _StandInRequest(f"http://shop.fixture.invalid{path}{query}", resource, frame=_StandInFrame(_MAIN_FRAME))
+
+
+@pytest.mark.parametrize("proved,signed_in,status,incomplete", [
+    # A service refusal on a data request counts, whatever the proof's page saw.
+    ([_data("/api/search", 401)], False, 503, True),
+    ([_data("/api/search", 401)], False, 429, True),
+    (None, False, 408, True),
+    # Judged against the proof's page: an answer that worked then and fails now counts; one that
+    # failed then too (a guest's session check) or that the page did not make then does not.
+    ([_data("/api/search", 200)], False, 401, True),
+    ([_data("/api/search", 200)], False, 404, True),
+    ([_data("/api/search", 401)], False, 401, False),
+    ([_data("/api/search", 404)], False, 404, False),
+    ([_data("/api/other", 200)], False, 403, True),  # /api/other went unanswered this time
+    ([], False, 404, False),
+    # Recorded without the proof's requests: a 401 or 403 counts only for a retest with a
+    # session (it expired); any other error counts.
+    (None, False, 401, False),
+    (None, False, 403, False),
+    (None, True, 401, True),
+    (None, False, 404, True),
+])
+def test_a_data_request_error_is_judged_against_the_proofs_own_page(proved, signed_in, status, incomplete):
+    activity = _activity(proved, signed_in=signed_in)
+    request = _call("fetch")
+    activity.started(request)
+    activity.answered(_StandInResponse(request, status))
+    activity.finished(request)
+    assert (activity.incomplete() is not None) is incomplete, activity.incomplete()
+
+
+def test_a_script_or_frame_error_counts_whatever_the_proofs_page_saw():
+    for resource in ("script", "document"):
+        activity = _activity([])
+        request = _call(resource, "/app.js", "")
+        activity.started(request)
+        activity.answered(_StandInResponse(request, 404))
+        activity.finished(request)
+        assert activity.incomplete()["failed"] == [{"resource_type": resource, "status": 404}]
+
+
+def test_a_call_the_page_cancels_is_judged_by_whether_the_proofs_page_got_its_answer():
+    def cancelled(proved):
+        activity = _activity(proved)
+        request = _StandInRequest("http://shop.fixture.invalid/api/slow", "fetch",
+                                  frame=_StandInFrame(_MAIN_FRAME), failure="net::ERR_ABORTED")
+        activity.started(request)
+        activity.failed(request)
+        return activity.incomplete()
+
+    assert cancelled(None) is None
+    assert cancelled([_data("/api/slow", 401)]) is None
+    assert cancelled([_data("/api/slow", 200)])["unanswered_since_proof"] == [{"method": "GET", "path": "/api/slow"}]
+    # Any other network failure of a data request counts.
+    activity = _activity(None)
+    request = _StandInRequest("http://shop.fixture.invalid/api/slow", "xhr", frame=_StandInFrame(_MAIN_FRAME),
+                              failure="net::ERR_CONNECTION_RESET")
+    activity.started(request)
+    activity.failed(request)
+    assert activity.incomplete()["failed"][0]["error"] == "net::ERR_CONNECTION_RESET"
+
+
+def test_an_open_event_stream_is_answered_and_a_long_poll_is_judged_against_the_proof():
+    stream = _activity(None)
+    events = _call("eventsource", "/events", "")
+    stream.started(events)
+    stream.answered(_StandInResponse(events, 200))
+    assert not stream.waiting() and stream.incomplete() is None
+
+    def still_open(proved):
+        activity = _activity(proved)
+        activity.started(_call("fetch", "/poll", ""))
+        return activity.waiting(), activity.incomplete()
+
+    assert still_open([]) == (False, None)  # the proof's page never saw it answered either
+    waiting, incomplete = still_open([_data("/poll", 200)])
+    assert waiting and incomplete["pending"] == 1
+    waiting, incomplete = still_open(None)
+    assert waiting and incomplete["pending_resource_types"] == ["fetch"]
+    # A script or an image still open always waits and counts.
+    activity = _activity([])
+    activity.started(_call("image", "/x", ""))
+    assert activity.waiting() and activity.incomplete()["pending"] == 1
+
+
+def test_only_requests_that_carry_the_application_count_against_the_cap():
+    activity = _activity(None)
+    assert [activity.application(_call(kind)) for kind in (
+        "document", "script", "fetch", "xhr", "eventsource", "image", "stylesheet", "font", "media", "websocket",
+    )] == [True] * 5 + [False] * 5
+
+
+def test_the_proof_keeps_its_pages_own_data_requests_for_the_retest():
+    from scan.finalizer import _proof_page_requests
+
+    def response(path, status, resource, attempt="a1", method="GET"):
+        return {"kind": "browser_http_response", "method": method, "status_code": status,
+                "url": f"http://shop.fixture.invalid{path}?q=%3Credacted%3E", "resource_type": resource,
+                "content_type": "application/json", "attempt_id": attempt, "candidate_id": "c1"}
+
+    observations = [
+        {"kind": "candidate_attempt", "attempt_id": "a1"},
+        response("/search", 200, "document"), response("/app.js", 200, "script"),
+        response("/logo.png", 404, "image"), response("/api/me", 401, "fetch"),
+        response("/api/search", 503, "xhr"), response("/api/search", 200, "xhr"),
+        response("/events", 200, "eventsource"), response("/api/other", 200, "fetch", attempt="a2"),
+    ]
+    assert _proof_page_requests(observations, "a1") == [
+        {"method": "GET", "path": "/api/me", "resource_type": "fetch", "status": 401},
+        {"method": "GET", "path": "/api/search", "resource_type": "xhr", "status": 200},
+        {"method": "GET", "path": "/events", "resource_type": "eventsource", "status": 200},
+    ]
+    # A page that made no data request keeps an empty record; no record without resource types
+    # (an older proof), without responses, or when the proof's record was cut short.
+    assert _proof_page_requests([response("/search", 200, "document")], "a1") == []
+    older = {key: value for key, value in response("/api/me", 200, "fetch").items() if key != "resource_type"}
+    assert _proof_page_requests([older], "a1") is None
+    assert _proof_page_requests([], "a1") is None
+    assert _proof_page_requests([response(f"/img/{n}", 200, "image") for n in range(200)], "a1") is None
