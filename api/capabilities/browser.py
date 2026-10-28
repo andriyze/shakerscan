@@ -32,7 +32,9 @@ from .xss_proof_payload import (
 try:
     from hunt.capability_executor import CapabilityAdapterResult, Cancelled, Heartbeat
     from pinned_socks_proxy import PinnedSocksProxy
-    from runtime.auth_refusal import AUTHENTICATION_REQUIRED, is_login_location, refusal
+    from runtime.auth_refusal import (
+        AUTHENTICATION_REQUIRED, TARGET_UNAVAILABLE, is_login_location, refusal, unavailable_status,
+    )
     from runtime.auth_session_store import AuthSessionStoreError
     from runtime.models import PreparedExecution, TargetBinding
     from runtime.request_shape import nested_json_body
@@ -41,7 +43,9 @@ try:
 except ModuleNotFoundError:  # package imports in host-side tests
     from ..hunt.capability_executor import CapabilityAdapterResult, Cancelled, Heartbeat
     from ..pinned_socks_proxy import PinnedSocksProxy
-    from ..runtime.auth_refusal import AUTHENTICATION_REQUIRED, is_login_location, refusal
+    from ..runtime.auth_refusal import (
+        AUTHENTICATION_REQUIRED, TARGET_UNAVAILABLE, is_login_location, refusal, unavailable_status,
+    )
     from ..runtime.auth_session_store import AuthSessionStoreError
     from ..runtime.models import PreparedExecution, TargetBinding
     from ..runtime.request_shape import nested_json_body
@@ -1165,6 +1169,14 @@ async def _execute_browser_action_in_context(
                 # The browser followed a redirect to sign-in: the route under test never
                 # rendered.
                 refused = (int(navigation_status or 0), AUTHENTICATION_REQUIRED)
+            if refused is None and not proven and (
+                navigation_status is None or unavailable_status((navigation_status,)) is not None
+            ):
+                # The service did not serve the page under test: it answered the navigation
+                # with 408, 429, a missing page or a server error, or not at all. The browser
+                # rendered that answer, not the route, so a payload that did not run there is
+                # no verdict on the candidate (as a retest reads the same answer).
+                refused = (int(navigation_status or 0), TARGET_UNAVAILABLE)
             if refused is not None:
                 # A 403 that asks for no credentials (a WAF, an access rule) is told apart:
                 # adding a credential profile would not help it.

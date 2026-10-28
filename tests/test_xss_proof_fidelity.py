@@ -34,8 +34,19 @@ TARGET = TargetBinding(
 SECRET = "Bearer shakerscan-test-secret-value"
 
 
-def _install_fake_browser(monkeypatch, *, requires_auth: bool):
-    """A page that renders the reflected payload only for an authenticated request."""
+def _install_fake_browser(
+    monkeypatch, *, requires_auth: bool, status: int | None = None,
+    headers: dict[str, str] | None = None, final_url: str | None = None,
+    answer: bool = True, fail: BaseException | None = None, modules=(),
+):
+    """A page that renders the reflected payload only for an authenticated request.
+
+    The page the target serves (unit fixture): an allowed request answers ``status`` (200 when
+    not given) with ``headers``, the browser ends on ``final_url`` (the requested URL when not
+    given), ``answer=False`` is a navigation Playwright returns no response for, and ``fail``
+    (or ``page.fail``) is what the navigation raises (a network error, a timeout). ``modules``:
+    further loaded copies of the browser capability to give the fake proxy (a test that drives
+    the Scan's dispatcher passes the one it runs)."""
     seen: dict[str, object] = {"headers": [], "cookies": [], "requests": []}
 
     class FakePinnedProxy:
@@ -51,6 +62,8 @@ def _install_fake_browser(monkeypatch, *, requires_auth: bool):
         async def close(self): return None
 
     monkeypatch.setattr("api.capabilities.browser.PinnedSocksProxy", FakePinnedProxy)
+    for module in modules:
+        monkeypatch.setattr(module, "PinnedSocksProxy", FakePinnedProxy)
 
     class FakeRequest:
         def __init__(self, method, url):
@@ -71,7 +84,7 @@ def _install_fake_browser(monkeypatch, *, requires_auth: bool):
         def __init__(self, method, url, status):
             self.url, self.status = url, status
             self.request = FakeRequest(method, url)
-            self.headers = {"content-type": "text/html"}
+            self.headers = {"content-type": "text/html", **(headers or {})}
 
     class FakeConsole:
         def __init__(self, text): self.type, self.text = "log", text
@@ -82,20 +95,24 @@ def _install_fake_browser(monkeypatch, *, requires_auth: bool):
             self.authenticated = False
             self.console_handler = None
             self.marker = None
+            self.fail = fail
 
         def on(self, event, handler):
             if event == "console":
                 self.console_handler = handler
 
         async def goto(self, url, **_kwargs):
+            if self.fail is not None:
+                raise self.fail
             await self.route_handler(FakeRoute(FakeRequest("GET", url), self))
             allowed = self.authenticated or not requires_auth
-            status = 200 if allowed else 401
-            await self.response_handler(FakeResponse("GET", url, status))
+            code = (200 if status is None else status) if allowed else 401
+            if answer:
+                await self.response_handler(FakeResponse("GET", url, code))
             if allowed and self.console_handler is not None:
                 self.console_handler(FakeConsole(self.marker))
-            self.url = url
-            return FakeResponse("GET", url, status)
+            self.url = final_url or url
+            return FakeResponse("GET", url, code) if answer else None
 
         async def get_attribute(self, *_args):
             allowed = self.authenticated or not requires_auth

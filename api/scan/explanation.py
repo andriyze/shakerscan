@@ -72,6 +72,11 @@ _REASON_LABELS = {
         "The target refused the verifier's requests (403) without asking for credentials, for "
         "example a firewall or an access rule, so those candidates could not be verified"
     ),
+    "target_unavailable": (
+        "The target did not serve the page a proof tests: it answered unavailable, rate-limited "
+        "or timed out (HTTP 408, 429, 502-504), or with no such page or a server error on every "
+        "request, so those candidates were neither proven nor ruled out"
+    ),
     "insufficient_budget_for_stage": (
         "A continuation could not fund a single verification stage, so its candidates were "
         "left unverified"

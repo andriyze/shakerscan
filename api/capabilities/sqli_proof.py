@@ -26,7 +26,9 @@ try:
     from capabilities.sql_error_signatures import SQL_ERROR_PATTERNS
     from capabilities.sqli_path_mutation import prepare_path_candidate, path_field_value, replace_path_field
     from hunt.capability_executor import CapabilityAdapterResult, Cancelled, Heartbeat
-    from runtime.auth_refusal import refusal_error, request_refusal
+    from runtime.auth_refusal import (
+        TARGET_UNAVAILABLE, refusal_error, request_refusal, unavailable_status,
+    )
     from runtime.capability_registry import CapabilitySpec
     from runtime.models import TargetBinding
     from runtime.request_replay_executor import ReplayTransport, ReplayTransportResult
@@ -39,7 +41,9 @@ except ModuleNotFoundError:
     from .sql_error_signatures import SQL_ERROR_PATTERNS
     from .sqli_path_mutation import prepare_path_candidate, path_field_value, replace_path_field
     from ..hunt.capability_executor import CapabilityAdapterResult, Cancelled, Heartbeat
-    from ..runtime.auth_refusal import refusal_error, request_refusal
+    from ..runtime.auth_refusal import (
+        TARGET_UNAVAILABLE, refusal_error, request_refusal, unavailable_status,
+    )
     from ..runtime.capability_registry import CapabilitySpec
     from ..runtime.models import TargetBinding
     from ..runtime.request_replay_executor import ReplayTransport, ReplayTransportResult
@@ -371,6 +375,14 @@ class SQLiProofAdapter:
             pairs[0][0].status_code, pairs[0][0].response_headers, request_class=request_class,
             url=self.request.url, body=self.request.body,
         )
+        errors = tuple(item.error_code for item in results if item.error_code)
+        if refused is None and not verified and not errors:
+            # Every request was answered, but the service decided the answers (408, 429, 502,
+            # 503 or 504 anywhere, or nothing but a missing page or a server error): the
+            # comparisons measured the service, not the route, as a retest reads them.
+            unavailable = unavailable_status(item.status_code for item in results)
+            if unavailable is not None:
+                refused = (unavailable, TARGET_UNAVAILABLE)
         hashes = [{
             "control_request_sha256": control_request.digest_dict()["body_sha256"] if control_request.body else _sha256(control_request.url.encode()),
             "control_response_sha256": keyed_body_digest(control.response_body),
@@ -409,7 +421,6 @@ class SQLiProofAdapter:
             **({"finding_verdict": "inconclusive", "inconclusive_reason": refused[1]}
                if refused else {}),
         }
-        errors = tuple(item.error_code for item in results if item.error_code)
         if refused:
             errors = (refusal_error(*refused), *errors)
         return CapabilityAdapterResult(
