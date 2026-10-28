@@ -103,11 +103,11 @@ def test_pyjwt_stays_above_the_token_forgery_fix_despite_semgreps_pin():
 
 
 def test_model_intake_pip_audit_environment_removes_avoidable_build_tools():
-    lock = (ROOT / "scanner" / "model_intake_tools" / "pip-audit.lock").read_text()
+    lock = ROOT / "scanner" / "model_intake_tools" / "pip-audit.lock"
 
-    # GHSA-6v7p-g79w-8964 affects msgpack <=1.2.0; 1.2.1 is the patched release.
-    assert "msgpack==1.2.1" in lock
-    assert "msgpack==1.2.0" not in lock
+    # GHSA-6v7p-g79w-8964 affects msgpack <=1.2.0 and CVE-2026-114613 (GHSA-j586-36cw-2gc2, a
+    # memory leak on a strict_map_key failure) affects 1.2.1; 1.2.3 carries both fixes.
+    assert _locked_version(lock, "msgpack") >= (1, 2, 3)
     # setuptools is seeded by some distro venv implementations but is not in the
     # hash-locked runtime graph. Remove it and prove it is absent during the build.
     # The four tool venvs lose pip (whose vendor.txt names msgpack 1.1.2 and setuptools 70.3.0)
