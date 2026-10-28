@@ -35,6 +35,7 @@ RUN --mount=type=bind,source=scanner/apt_install.sh,target=/tmp/apt_install.sh,r
 # string-literal lexing is super-linear; one inline script with a few thousand
 # escaped quotes (every Next.js page carries one) took the crawler past 6 GiB in
 # 20 s and got it killed. gotreesitter v0.52.0 parses the same input in 40 MiB.
+# nuclei v3.11.1 is built with go-jose v4.1.4 (CVE-2026-116587, fixed in v4.1.6).
 # `go get` of a lift below a version some dependency requires would downgrade that
 # dependency, the tool included, so the build stops when a tool no longer resolves to
 # its pinned version.
@@ -82,7 +83,8 @@ RUN --mount=type=cache,target=/go/pkg/mod,sharing=locked \
         github.com/odvcencio/gotreesitter@v0.52.0 && \
       build_tool subfinder github.com/projectdiscovery/subfinder/v2/cmd/subfinder v2.15.0 && \
       build_tool naabu github.com/projectdiscovery/naabu/v2/cmd/naabu v2.3.7 && \
-      build_tool nuclei github.com/projectdiscovery/nuclei/v3/cmd/nuclei v3.11.1 && \
+      build_tool nuclei github.com/projectdiscovery/nuclei/v3/cmd/nuclei v3.11.1 \
+        github.com/go-jose/go-jose/v4@v4.1.6 && \
       build_tool dalfox github.com/hahwul/dalfox/v2 v2.13.0 && \
       build_tool ffuf github.com/ffuf/ffuf/v2 v2.2.1 && \
       build_tool meg github.com/tomnomnom/meg v0.3.0 && \

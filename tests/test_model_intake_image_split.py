@@ -63,6 +63,11 @@ def test_the_model_intake_image_is_an_overlay_on_the_scanner_runtime():
     assert "golang.org/x/net@v0.60.0" in MI
     assert MI.count("check_dep \"$tool\" golang.org/x/net v0.60.0") == 1
     assert "google.golang.org/grpc@v1.83.2" in MI
+    # Trivy 0.74.0 is built with go-jose v4.1.4 (CVE-2026-116587, fixed in 4.1.6): the Trivy build
+    # lifts it, and the builder proves the lifted version in the binary's metadata.
+    trivy_lifts = MI.split("cd /src/trivy;", 1)[1].split("go build", 1)[0]
+    assert "github.com/go-jose/go-jose/v4@v4.1.6" in trivy_lifts
+    assert MI.count("check_dep trivy github.com/go-jose/go-jose/v4 v4.1.6") == 1
     assert "COPY --from=model-intake-go-tools /out/trivy /out/osv-scanner /out/" in MI
     # The image installs exactly the two binaries, through the binaries-only stage, so cached
     # builds need not restore the Go build stage.
