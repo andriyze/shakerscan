@@ -27,6 +27,8 @@ from tests.test_detect211_tls_legacy import _Reader as _LegacyReader, _Writer as
 
 HOST = "app.fixture.invalid"
 ORIGIN = f"https://{HOST}:8450/"
+# OpenSSL's default security level refuses RSA keys below 2048 bits; the weak fixtures use half.
+WEAK_RSA_BITS = 2048 // 2
 
 
 # ---------------------------------------------------------------- fixtures
@@ -217,7 +219,7 @@ def test_weak_signature_and_key_checks_print_the_weakness():
 
 def _weak_leaf_hierarchy():
     """An RSA-1024 server certificate issued by a 2048-bit intermediate under its own root."""
-    root_key, inter_key, leaf_key = _key(), _key(), _key(1024)
+    root_key, inter_key, leaf_key = _key(), _key(), _key(WEAK_RSA_BITS)
     root = _cert("Fixture Root", "Fixture Root", root_key.public_key(), root_key, ca=True)
     inter = _cert("Fixture Intermediate", "Fixture Root", inter_key.public_key(), root_key, ca=True)
     leaf = _cert(HOST, "Fixture Intermediate", leaf_key.public_key(), inter_key, ca=False, sans=(HOST,))
@@ -268,7 +270,7 @@ def test_a_weak_leaf_under_a_weak_intermediate_keeps_the_finding_that_names_it(t
     """The chain check runs with every strength check off, so a 1024-bit intermediate under a
     trusted root reads trusted there. It is weak all the same: clients refuse it once the server
     key is replaced, and only the untrusted-chain finding names it."""
-    root_key, inter_key, leaf_key = _key(), _key(1024), _key(1024)
+    root_key, inter_key, leaf_key = _key(), _key(WEAK_RSA_BITS), _key(WEAK_RSA_BITS)
     root = _cert("Fixture Root", "Fixture Root", root_key.public_key(), root_key, ca=True)
     inter = _cert("Fixture Intermediate", "Fixture Root", inter_key.public_key(), root_key, ca=True)
     leaf = _cert(HOST, "Fixture Intermediate", leaf_key.public_key(), inter_key, ca=False, sans=(HOST,))
@@ -338,7 +340,7 @@ def test_the_chain_check_stays_within_the_pairs_four_handshakes(tmp_path, monkey
 
 
 def test_a_weak_intermediate_key_on_a_real_connection_is_named(tmp_path, monkeypatch):
-    root, inter, leaf, leaf_key = _hierarchy(intermediate_bits=1024)
+    root, inter, leaf, leaf_key = _hierarchy(intermediate_bits=WEAK_RSA_BITS)
     result = _inspect_real_server(tmp_path, monkeypatch, served=(leaf, inter), leaf_key=leaf_key, root=root)
     observation = result["observation"]
     if observation.get("certificate_trust") != "untrusted":
