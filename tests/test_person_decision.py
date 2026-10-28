@@ -996,6 +996,9 @@ def test_a_key_error_is_said_in_plain_words(code, cause, words):
 
 
 def test_a_missing_library_or_an_unreadable_key_is_explained(monkeypatch):
+    # A local terminal: over SSH the remote session is named first (tested on its own below).
+    monkeypatch.delenv("SSH_CONNECTION", raising=False)
+    monkeypatch.delenv("SSH_TTY", raising=False)
     monkeypatch.setitem(sys.modules, "fido2.hid", None)
     monkeypatch.setattr(approval, "_homebrew_install", lambda: True)
     assert "Homebrew install" in approval.security_key_readiness()
@@ -1421,9 +1424,12 @@ def test_targets_authorize_takes_a_device_id_and_a_host_target(gateway, monkeypa
         decisions.find_target(client, "host://", create=True)
 
 
-def test_an_unplugged_key_is_waited_for_then_the_touch_goes_on():
+def test_an_unplugged_key_is_waited_for_then_the_touch_goes_on(monkeypatch):
     """With the key on a keyring every one-shot command exited ('insert it and
     run the command again') and the person began again."""
+    # A local terminal: over SSH no key can arrive, so nothing is waited for (tested on its own).
+    monkeypatch.delenv("SSH_CONNECTION", raising=False)
+    monkeypatch.delenv("SSH_TTY", raising=False)
     plugged = [[], [], ["key"]]
     terminal_out = io.StringIO()
     terminal = approval.Terminal(io.StringIO(), terminal_out)
