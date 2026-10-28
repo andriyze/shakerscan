@@ -105,9 +105,12 @@ FROM mcr.microsoft.com/playwright/python:v1.63.0-noble@sha256:72bd171a9ffc2b4b59
 
 # System deps for network tooling and additional scanners. Retry with fresh signed
 # indexes when a mirror rotates between update and install; omit no packages.
+# libbrotli1 is named so the base's 1.1.0-2build2 (libcurl decodes scanned targets' responses
+# with it; FreeType, libwoff1, libjxl and libsoup load it too) is upgraded to the noble-security
+# build that fixes CVE-2026-111497, the Brotli decoder's out-of-bounds write (1.1.0-2ubuntu0.1).
 RUN --mount=type=bind,source=scanner/apt_install.sh,target=/tmp/apt_install.sh,ro \
     sh /tmp/apt_install.sh \
-    ca-certificates curl nmap openssl bind9-dnsutils jq git bash make gcc libpcap0.8 \
+    ca-certificates curl nmap openssl libbrotli1 bind9-dnsutils jq git bash make gcc libpcap0.8 \
     iputils-ping dnsutils procps coreutils \
     nikto masscan \
     whois netcat-openbsd traceroute \
