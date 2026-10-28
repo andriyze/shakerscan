@@ -332,7 +332,7 @@
     {
       "caseId": "START-003",
       "route": "/",
-      "source": "src/app/page.tsx",
+      "source": "src/components/DashboardPage.tsx",
       "marker": "href: '/scan/new'",
       "assertion": "Dashboard action opens the canonical form."
     },

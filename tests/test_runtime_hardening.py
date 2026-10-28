@@ -95,7 +95,7 @@ def test_docs_page_renders_markdown_without_raw_html_injection():
 
 def test_fleet_ui_is_capability_driven_and_keeps_remote_capacity_last():
     sidebar = (ROOT / "ui" / "src" / "components" / "Sidebar.tsx").read_text()
-    dashboard = (ROOT / "ui" / "src" / "app" / "page.tsx").read_text()
+    dashboard = (ROOT / "ui" / "src" / "components" / "DashboardPage.tsx").read_text()
     fleet_page = (ROOT / "ui" / "src" / "app" / "fleet" / "page.tsx").read_text()
     new_scan = (ROOT / "ui" / "src" / "app" / "scan" / "new" / "page.tsx").read_text()
 
