@@ -4,8 +4,11 @@ FROM python:3.14-slim-bookworm@sha256:416f0db2a2b561945630cef9877a7ea0581b27449e
 # gate (Trivy, HIGH/CRITICAL with a fix available) fails on any OS package that lags behind.
 # Apply the distribution's current fixes at build time so the base digest can stay pinned;
 # 2026-09-13: libpcre2-8-0 10.42-1 -> 10.42-1+deb12u1 (CVE-2026-86145, CVE-2026-89161).
+# 2026-10-28: libssl3 and openssl 3.0.22-1~deb12u1 -> 3.0.22-1~deb12u2 (CVE-2026-84782). They are
+# named so a build cache that still holds an earlier upgrade of this step cannot keep the fix out.
 RUN apt-get update \
     && apt-get upgrade -y --no-install-recommends \
+    && apt-get install -y --no-install-recommends --only-upgrade libssl3 openssl \
     && rm -rf /var/lib/apt/lists/*
 
 ENV PYTHONDONTWRITEBYTECODE=1 \

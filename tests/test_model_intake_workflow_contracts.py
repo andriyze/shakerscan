@@ -887,6 +887,11 @@ def test_signer_image_and_database_role_are_narrow_and_releasable():
     assert "model_intake_signer_service.py" in dockerfile
     assert "--require-hashes" in dockerfile
     assert "USER 65532:65532" in dockerfile
+    # Debian's current fixes are applied at build time; OpenSSL is named (CVE-2026-84782, fixed
+    # in 3.0.22-1~deb12u2) so a cached upgrade step cannot keep an older build.
+    upgrade = dockerfile.split("RUN apt-get update", 1)[1].split("rm -rf /var/lib/apt/lists/*", 1)[0]
+    assert "apt-get upgrade -y --no-install-recommends" in upgrade
+    assert "apt-get install -y --no-install-recommends --only-upgrade libssl3 openssl" in upgrade
     assert "boto3==" in (ROOT / "api" / "model_intake_signer.requirements.lock").read_text()
     assert "NOSUPERUSER NOCREATEDB NOCREATEROLE" in role_script
     assert "UPDATE (state, updated_at)" in role_script
