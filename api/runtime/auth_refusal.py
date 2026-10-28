@@ -182,10 +182,12 @@ def unavailable_status(statuses: Iterable[Any]) -> int | None:
     """The status that leaves a proof's answers unusable, or None.
 
     The first of ``UNAVAILABLE_STATUSES`` among the answers, else the first answer when every
-    answer was a missing page or a server error (one answer, for a browser proof's navigation).
-    A request that got no answer (0 or None) is not counted. Asked only of a negative: a proof
-    that reproduced still proves its finding. A control that was answered, with payloads that met
-    a client or server error, is the route's own answer.
+    answer was a missing page or a server error. A request that got no answer (0 or None) is not
+    counted. Asked only of a negative: a proof that reproduced still proves its finding. A control
+    that was answered, with payloads that met any other client or server error (not 408, 429 or
+    502-504), is the route's own answer. The "every answer" half needs such a control: a proof
+    that sent the payload alone (a browser proof of a query or body parameter) may have met the
+    application's own 404 or 500 for that payload, so it reads only ``UNAVAILABLE_STATUSES``.
     """
     answered: list[int] = []
     for item in statuses or ():

@@ -74,8 +74,8 @@ _REASON_LABELS = {
     ),
     "target_unavailable": (
         "The target did not serve the page a proof tests: it answered unavailable, rate-limited "
-        "or timed out (HTTP 408, 429, 502-504), or with no such page or a server error on every "
-        "request, so those candidates were neither proven nor ruled out"
+        "or timed out (HTTP 408, 429, 502-504), did not answer, or answered every request with "
+        "no such page or a server error, so those candidates were neither proven nor ruled out"
     ),
     "insufficient_budget_for_stage": (
         "A continuation could not fund a single verification stage, so its candidates were "

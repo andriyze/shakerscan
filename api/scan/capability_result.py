@@ -57,8 +57,9 @@ class CapabilityResultReason(str, Enum):
     # The target refused the verifier's baseline with a 403 that asks for no credentials (a WAF
     # rejecting the tool, an ownership check): what was measured against it is not a verdict.
     TARGET_REFUSED = "target_refused"
-    # A proof met a service that did not serve the page it tests (408, 429, 502-504, or a missing
-    # page or server error on every answer, ``auth_refusal.unavailable_status``): no verdict.
+    # A proof met a service that did not serve the page it tests (408, 429, 502-504 or no answer,
+    # or a missing page or server error on every answer of a proof with a control and on a
+    # fragment proof's navigation, ``auth_refusal.unavailable_status``): no verdict.
     TARGET_UNAVAILABLE = "target_unavailable"
     SCOPE_INVALID = "scope_invalid"
     CANCELLED = "cancelled"

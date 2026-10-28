@@ -92,6 +92,9 @@ _DIAGNOSTIC_ERROR_CLASSES = frozenset({
     "slow_endpoints",
     # The Scan's own time limit stopped the action or kept it from starting.
     "scan_time_limit",
+    # A proof met a service that did not serve the page it tests (the status after the colon
+    # is dropped with the rest of the token).
+    "target_unavailable",
 })
 # Labels a batch prepends to say *that* it failed rather than *why*. They are honest answers
 # only when nothing more specific follows, so the scan must look past them.

@@ -5,11 +5,16 @@ answered the proof's own navigation with HTTP 503: the payload never reached the
 the XSS family read complete with a reliable grade, and the reflection only the proof can promote
 was dropped. The SQL injection proof did the same when its control and payloads met a service
 that was down, rate-limiting or no longer serving the route. The retest of a proven finding
-already read such answers as the service's (inconclusive, "the target was unavailable"); the
-Scan's proofs now apply the same rule (``auth_refusal.unavailable_status``): one answer of 408,
-429, 502, 503 or 504, or a missing page or server error on every answer, leaves the attempt
-partial with ``target_unavailable:<status>``, its candidate unresolved and its family partial.
-A page that loaded and did not run the payload is still "not proven".
+already read such answers as the service's (inconclusive, "the target was unavailable").
+
+Now (``auth_refusal.unavailable_status``): the browser proof's navigation answered 408, 429 or
+502-504, or not at all, and for a fragment parameter (which the server never receives) a missing
+page or a server error too, leaves the attempt partial with ``target_unavailable:<status>``, its
+candidate unresolved and its family partial. A query or body payload reaches the server, which
+may answer that payload itself with 404 or 500, and the browser proof sends no ordinary request
+to compare with, so there those stay "not proven". The SQL injection proof, which sends its
+control, applies the retest's rule: 408, 429 or 502-504 anywhere, or a missing page or server
+error on every answer. A page that loaded and did not run the payload is still "not proven".
 
 Unit fixtures: a fake Playwright page (``tests.test_xss_proof_fidelity``) and a fake replay
 transport stand in for the target, and the adapters are the real ones. Not a live Scan; the same
@@ -31,11 +36,16 @@ from api.runtime.capability_registry import CAPABILITY_REGISTRY
 from api.runtime.request_replay_executor import ReplayTransportResult
 from api.scan.capability_result import CapabilityResultReason as Reason
 from tests.test_sqli_proof_capability import _request, _target
-from tests.test_xss_proof_fidelity import _install_fake_browser, _noop, _proof, _query_proof
+from tests.test_xss_proof_fidelity import (
+    TARGET, _install_fake_browser, _noop, _proof, _query_proof,
+)
 
-# Answers that say the service decided (it timed the request out, asked for fewer requests, was
-# down), and a missing page or a server error, which on a proof's only navigation is every answer.
-NOT_SERVED = (404, 408, 410, 429, 500, 502, 503, 504)
+# Answers that say the service decided: it timed the request out, asked for fewer requests, or
+# was down or overloaded. Whatever parameter a proof tests.
+UNAVAILABLE = (408, 429, 502, 503, 504)
+# A missing page or a server error: the service's answer to a page that never saw the payload
+# (a fragment), but possibly the application's own answer to a payload it received.
+MISSING_OR_FAILING = (404, 410, 500)
 NEVER_FIRES = "a-marker-that-never-fires"
 
 
@@ -45,8 +55,29 @@ def _no_settle(monkeypatch):
     monkeypatch.setattr("api.capabilities.browser.XSS_PROOF_SETTLE_SECONDS", 0)
 
 
-def _browser_proof(monkeypatch, *, runs=False, marker=None, **page_kwargs):
-    prepared = _query_proof()
+def _fragment_proof():
+    """A DOM XSS candidate in a single-page application's client route: the server is asked for
+    ``/app/`` and never sees the fragment that carries the payload."""
+    return XSSBrowserProofAdapter.prepare(
+        target=TARGET, execution_url="https://app.example.test/app/#/search?q=seed",
+        candidate_id="c0deadbeefcafe03", parameter_name="q",
+    )
+
+
+def _body_proof():
+    return XSSBrowserProofAdapter.prepare(
+        target=TARGET, execution_url="https://app.example.test/comments",
+        candidate_id="c0deadbeefcafe04", parameter_name="text", method="POST",
+        content_type="application/x-www-form-urlencoded", body_field_names=("text",),
+    )
+
+
+PROOFS = {"query": _query_proof, "fragment": _fragment_proof, "body": _body_proof}
+
+
+def _browser_proof(monkeypatch, *, location="query", runs=False, marker=None, **page_kwargs):
+    prepared = PROOFS[location]()
+    assert prepared.injection_location == location
     page, _seen = _install_fake_browser(monkeypatch, requires_auth=False, **page_kwargs)
     page.marker = marker if marker is not None else prepared.marker if runs else NEVER_FIRES
     return asyncio.run(XSSBrowserProofAdapter(prepared).execute(
@@ -58,34 +89,15 @@ def _navigation(result):
     return next(item for item in result.observations if item.get("kind") == "browser_navigation")
 
 
-# --- the browser XSS proof -----------------------------------------------------------------------
-
-
-@pytest.mark.parametrize("status", NOT_SERVED)
-def test_a_proof_page_the_service_did_not_serve_is_an_unresolved_attempt(monkeypatch, status):
-    result = _browser_proof(monkeypatch, status=status)
-
+def _assert_unresolved(result, status):
     assert result.status == "partial" and result.partial is True
     assert result.errors == (f"target_unavailable:{status}",)
-    assert _navigation(result)["status_code"] == status
     proof = _proof(result)
     assert proof["proof_state"] == "not_proven"
     assert proof["inconclusive_reason"] == "target_unavailable"
 
 
-def test_a_navigation_answered_with_nothing_is_an_unresolved_attempt(monkeypatch):
-    result = _browser_proof(monkeypatch, answer=False)
-
-    assert result.status == "partial"
-    assert result.errors == ("target_unavailable:0",)
-    assert _navigation(result)["status_code"] is None
-    assert _proof(result)["inconclusive_reason"] == "target_unavailable"
-
-
-@pytest.mark.parametrize("status", [200, 201, 204, 299])
-def test_a_page_that_loaded_and_did_not_run_the_payload_is_still_not_proven(monkeypatch, status):
-    result = _browser_proof(monkeypatch, status=status)
-
+def _assert_not_proven(result):
     assert result.status == "success" and result.partial is False
     assert result.errors == ()
     proof = _proof(result)
@@ -93,32 +105,90 @@ def test_a_page_that_loaded_and_did_not_run_the_payload_is_still_not_proven(monk
     assert "inconclusive_reason" not in proof
 
 
+# --- the browser XSS proof -----------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("location", sorted(PROOFS))
+@pytest.mark.parametrize("status", UNAVAILABLE)
+def test_a_proof_page_the_service_did_not_serve_is_an_unresolved_attempt(
+    monkeypatch, location, status,
+):
+    result = _browser_proof(monkeypatch, location=location, status=status)
+
+    _assert_unresolved(result, status)
+    assert _navigation(result)["status_code"] == status
+
+
+@pytest.mark.parametrize("status", MISSING_OR_FAILING)
+def test_a_fragment_proof_page_that_is_missing_or_failing_is_an_unresolved_attempt(
+    monkeypatch, status,
+):
+    """The server never received the fragment's payload: its 404 or 500 is for the page."""
+    result = _browser_proof(monkeypatch, location="fragment", status=status)
+
+    _assert_unresolved(result, status)
+
+
+@pytest.mark.parametrize("location", ["query", "body"])
+@pytest.mark.parametrize("status", MISSING_OR_FAILING)
+def test_a_missing_page_or_server_error_for_a_payload_the_server_received_is_still_not_proven(
+    monkeypatch, location, status,
+):
+    """Request validation answering ``<script>`` with 500, a lookup by the value answering 404:
+    with no ordinary request to compare with, that may be the application's answer to the
+    payload, which the retest tells apart by sending one first."""
+    result = _browser_proof(monkeypatch, location=location, status=status)
+
+    _assert_not_proven(result)
+    assert _navigation(result)["status_code"] == status
+
+
+@pytest.mark.parametrize("location", sorted(PROOFS))
+@pytest.mark.parametrize("answer", ["none", "status-0"])
+def test_a_navigation_answered_with_nothing_is_an_unresolved_attempt(monkeypatch, location, answer):
+    kwargs = {"answer": False} if answer == "none" else {"status": 0}
+    result = _browser_proof(monkeypatch, location=location, **kwargs)
+
+    _assert_unresolved(result, 0)
+    assert _navigation(result)["status_code"] == (None if answer == "none" else 0)
+
+
+@pytest.mark.parametrize("location", sorted(PROOFS))
+@pytest.mark.parametrize("status", [200, 201, 204, 299])
+def test_a_page_that_loaded_and_did_not_run_the_payload_is_still_not_proven(
+    monkeypatch, location, status,
+):
+    _assert_not_proven(_browser_proof(monkeypatch, location=location, status=status))
+
+
+@pytest.mark.parametrize("location", sorted(PROOFS))
 @pytest.mark.parametrize("status", [400, 405, 422])
-def test_the_applications_own_answer_to_the_payload_is_still_not_proven(monkeypatch, status):
+def test_the_applications_own_answer_to_the_payload_is_still_not_proven(
+    monkeypatch, location, status,
+):
     """A route that answers the payload with a client error rejected that input: as in the retest
     (a control answered, payloads met a client error), that is the application's answer."""
-    result = _browser_proof(monkeypatch, status=status)
-
-    assert result.status == "success"
-    assert "inconclusive_reason" not in _proof(result)
+    _assert_not_proven(_browser_proof(monkeypatch, location=location, status=status))
 
 
+@pytest.mark.parametrize("location", sorted(PROOFS))
 @pytest.mark.parametrize("status", [503, 404, 500])
-def test_a_payload_that_ran_is_proven_whatever_the_page_answered(monkeypatch, status):
-    result = _browser_proof(monkeypatch, status=status, runs=True)
+def test_a_payload_that_ran_is_proven_whatever_the_page_answered(monkeypatch, location, status):
+    result = _browser_proof(monkeypatch, location=location, status=status, runs=True)
 
     assert result.status == "success"
     assert _proof(result)["proof_state"] == "verified"
     assert "inconclusive_reason" not in _proof(result)
 
 
+@pytest.mark.parametrize("location", ["query", "fragment"])
 @pytest.mark.parametrize("status, headers, error", [
     (401, {}, "authentication_required:401"),
     (403, {}, "target_refused:403"),
     (403, {"WWW-Authenticate": "Basic realm=app"}, "authentication_required:403"),
 ])
-def test_a_refusal_keeps_its_own_reason(monkeypatch, status, headers, error):
-    result = _browser_proof(monkeypatch, status=status, headers=headers)
+def test_a_refusal_keeps_its_own_reason(monkeypatch, location, status, headers, error):
+    result = _browser_proof(monkeypatch, location=location, status=status, headers=headers)
 
     assert result.status == "partial"
     assert result.errors == (error,)
@@ -162,20 +232,21 @@ def test_a_page_that_never_loaded_stays_a_timed_out_attempt(monkeypatch):
 # --- target-controlled status codes, headers and page output (hostile data) ----------------------
 
 
-@pytest.mark.parametrize("status, headers", [
+@pytest.mark.parametrize("location, status, headers", [
     # A challenge on a 503 asks for no credentials the proof could add: the service was down.
-    (503, {"WWW-Authenticate": "Basic realm=app"}),
+    ("query", 503, {"WWW-Authenticate": "Basic realm=app"}),
     # A Location on an answer that is not a redirect sends the browser nowhere.
-    (503, {"Location": "/login"}),
-    # A status outside the registered range is no page that loaded.
-    (999, {}),
-    (600, {}),
-    (429, {"Retry-After": "999999999"}),
-], ids=["503-challenge", "503-location", "999", "600", "429-retry-after"])
+    ("query", 503, {"Location": "/login"}),
+    ("query", 429, {"Retry-After": "999999999"}),
+    # A status outside the registered range is no page that loaded, where the server never saw
+    # the payload; for a payload it received it is read as the application's answer (above).
+    ("fragment", 999, {}),
+    ("fragment", 600, {}),
+], ids=["503-challenge", "503-location", "429-retry-after", "fragment-999", "fragment-600"])
 def test_target_controlled_status_and_headers_cannot_make_an_unserved_page_a_negative(
-    monkeypatch, status, headers,
+    monkeypatch, location, status, headers,
 ):
-    result = _browser_proof(monkeypatch, status=status, headers=headers)
+    result = _browser_proof(monkeypatch, location=location, status=status, headers=headers)
 
     assert result.status == "partial"
     assert result.errors == (f"target_unavailable:{status}",)
@@ -220,8 +291,8 @@ class PairTransport:
         )
 
 
-def _sqli_proof(control, payload, **kwargs):
-    transport = PairTransport(control, payload, **kwargs)
+def _sqli_proof(control=None, payload=None, *, transport=None, **kwargs):
+    transport = transport or PairTransport(control, payload, **kwargs)
     adapter = SQLiProofAdapter(
         specification=CAPABILITY_REGISTRY.require("sqli.prove_batch"), target=_target(),
         request=_request(url="https://app.example.test/search?q=apple"),
@@ -256,12 +327,72 @@ def test_a_sqli_proof_measured_against_an_unavailable_service_is_an_unresolved_a
 
 @pytest.mark.parametrize("control, payload", [(200, 200), (200, 400), (200, 404), (200, 500)])
 def test_a_sqli_proof_whose_route_answered_its_control_is_still_not_proven(control, payload):
-    """The route answered its control: a payload answered with an error is the route's answer."""
+    """The route answered its control: a payload answered with a client or server error other
+    than 408, 429 or 502-504 is the route's answer."""
     result, _transport = _sqli_proof(control, payload)
 
     assert result.status == "success" and result.errors == ()
     proof = result.observations[0]
     assert (proof["proof_state"], proof["finding_verdict"]) == ("not_proven", "not_proven")
+    assert "inconclusive_reason" not in proof
+
+
+class ErrorOn503Transport:
+    """The control answers 200; the quote payload answers 503 with the database's error (an
+    application that turns an unhandled database exception into 503). Unit fixture."""
+
+    async def send(self, request, **_kwargs):
+        value = urllib.parse.parse_qs(urllib.parse.urlsplit(request.url).query).get("q", [""])[0]
+        failing = value.endswith("'")
+        return ReplayTransportResult(
+            status_code=503 if failing else 200, connected_address="192.0.2.10",
+            final_url=request.url, response_headers={"Content-Type": "text/html"},
+            response_body=(b"You have an error in your SQL syntax near ''apple''' at line 1"
+                           if failing else b'{"products":[]}'),
+            elapsed_ms=5,
+        )
+
+
+def test_a_verified_sqli_proof_is_verified_whatever_the_payload_was_answered_with():
+    """A 503 carrying the database's error on every quote payload is the proof itself: the
+    unavailable rule is asked only of a negative, so a verified error-based injection stays
+    verified (and a critical finding is not dropped as inconclusive)."""
+    result, _transport = _sqli_proof(transport=ErrorOn503Transport())
+
+    assert result.status == "success" and result.partial is False
+    assert result.errors == ()
+    proof = result.observations[0]
+    assert (proof["proof_state"], proof["finding_verdict"]) == ("verified", "verified")
+    assert proof["proof_contract"] == "sqli_error_differential/v2"
+    assert "inconclusive_reason" not in proof
+    assert [pair["payload_status"] for pair in proof["response_pairs"]] == [503, 503]
+
+
+class FirstRequestFailsTransport(PairTransport):
+    """The first request fails on the network; every later one answers 503 (unit fixture)."""
+
+    async def send(self, request, **kwargs):
+        if not self.statuses:
+            self.statuses.append(0)
+            return ReplayTransportResult(
+                status_code=None, connected_address=None, final_url=request.url,
+                error_code="request_error:ConnectError",
+            )
+        return await super().send(request, **kwargs)
+
+
+def test_a_sqli_proof_with_a_transport_error_among_unavailable_answers_stays_unresolved():
+    """A request that failed already leaves the attempt partial with its own error; the
+    unavailable rule, asked only of an otherwise clean negative, adds nothing to it."""
+    result, transport = _sqli_proof(transport=FirstRequestFailsTransport(503, 503))
+
+    assert transport.statuses[0] == 0 and set(transport.statuses[1:]) == {503}
+    assert result.status == "partial" and result.partial is True
+    # The transport's error, as the executor records it.
+    assert any(str(item).lower() == "request_error:connecterror" for item in result.errors)
+    assert not any(str(item).startswith("target_unavailable") for item in result.errors)
+    proof = result.observations[0]
+    assert proof["proof_state"] == "not_proven"
     assert "inconclusive_reason" not in proof
 
 
@@ -313,7 +444,10 @@ def test_the_shared_rule_matches_the_retest():
 
 
 def test_the_reason_is_a_durable_code_the_coverage_explains():
+    from api.scan.activity import diagnostic_error_class
     from api.scan.explanation import _REASON_LABELS
 
     assert Reason("target_unavailable") is Reason.TARGET_UNAVAILABLE
     assert "neither proven nor ruled out" in _REASON_LABELS["target_unavailable"]
+    # The operator log and the receipt projection name the cause, without the target's status.
+    assert diagnostic_error_class(["adapter_failed", "target_unavailable:503"]) == "target_unavailable"

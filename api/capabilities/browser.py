@@ -33,7 +33,8 @@ try:
     from hunt.capability_executor import CapabilityAdapterResult, Cancelled, Heartbeat
     from pinned_socks_proxy import PinnedSocksProxy
     from runtime.auth_refusal import (
-        AUTHENTICATION_REQUIRED, TARGET_UNAVAILABLE, is_login_location, refusal, unavailable_status,
+        AUTHENTICATION_REQUIRED, TARGET_UNAVAILABLE, UNAVAILABLE_STATUSES, is_login_location,
+        refusal, unavailable_status,
     )
     from runtime.auth_session_store import AuthSessionStoreError
     from runtime.models import PreparedExecution, TargetBinding
@@ -44,7 +45,8 @@ except ModuleNotFoundError:  # package imports in host-side tests
     from ..hunt.capability_executor import CapabilityAdapterResult, Cancelled, Heartbeat
     from ..pinned_socks_proxy import PinnedSocksProxy
     from ..runtime.auth_refusal import (
-        AUTHENTICATION_REQUIRED, TARGET_UNAVAILABLE, is_login_location, refusal, unavailable_status,
+        AUTHENTICATION_REQUIRED, TARGET_UNAVAILABLE, UNAVAILABLE_STATUSES, is_login_location,
+        refusal, unavailable_status,
     )
     from ..runtime.auth_session_store import AuthSessionStoreError
     from ..runtime.models import PreparedExecution, TargetBinding
@@ -1170,12 +1172,22 @@ async def _execute_browser_action_in_context(
                 # rendered.
                 refused = (int(navigation_status or 0), AUTHENTICATION_REQUIRED)
             if refused is None and not proven and (
-                navigation_status is None or unavailable_status((navigation_status,)) is not None
+                not navigation_status
+                or navigation_status in UNAVAILABLE_STATUSES
+                or (
+                    prepared.injection_location == "fragment"
+                    and unavailable_status((navigation_status,)) is not None
+                )
             ):
                 # The service did not serve the page under test: it answered the navigation
-                # with 408, 429, a missing page or a server error, or not at all. The browser
-                # rendered that answer, not the route, so a payload that did not run there is
-                # no verdict on the candidate (as a retest reads the same answer).
+                # with 408, 429 or 502-504 (down, overloaded, rate-limiting), or not at all. The
+                # browser rendered that answer, not the route, so a payload that did not run
+                # there is no verdict on the candidate. A fragment never reaches the server, so
+                # for a fragment parameter a missing page or a server error is the service's
+                # answer too. A query or body payload does reach it, and a 404 or 500 may be the
+                # application's answer to that payload (request validation, a lookup by the
+                # value); with no ordinary request to compare with (the retest sends one), that
+                # stays a negative.
                 refused = (int(navigation_status or 0), TARGET_UNAVAILABLE)
             if refused is not None:
                 # A 403 that asks for no credentials (a WAF, an access rule) is told apart:

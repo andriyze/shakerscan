@@ -94,7 +94,11 @@ def test_page_writes_do_not_hide_an_exhausted_request_budget():
     assert result.errors == ("browser_request_blocked:request_budget_exhausted",)
 
 
-def _run_proof(monkeypatch, *, write_carries_payload: bool):
+def _run_proof(
+    monkeypatch, *, write_carries_payload: bool, status: int = 200,
+    execution_target: str = "https://app.example.test/#/search?q=seed",
+    deep_domxss: bool = False,
+):
     class FakePinnedProxy:
         def __init__(self, **_kwargs):
             self.socket_factory = types.SimpleNamespace(policy_receipt={})
@@ -121,7 +125,7 @@ def _run_proof(monkeypatch, *, write_carries_payload: bool):
 
     class FakeResponse:
         def __init__(self, url):
-            self.url, self.status, self.headers = url, 200, {"content-type": "text/html"}
+            self.url, self.status, self.headers = url, status, {"content-type": "text/html"}
             self.request = FakeRequest("GET", url)
 
     class FakePage:
@@ -157,7 +161,7 @@ def _run_proof(monkeypatch, *, write_carries_payload: bool):
     )
     adapter = hunt_browser_xss_proof_adapter(
         capability_name="xss.verify", spec=None, target=target,
-        execution_target="https://app.example.test/#/search?q=seed", action_id="action-1",
+        execution_target=execution_target, action_id="action-1", deep_domxss=deep_domxss,
     )
     page = FakePage(adapter.prepared.marker)
 
@@ -214,6 +218,40 @@ def test_refused_write_carrying_the_payload_keeps_the_negative_partial(monkeypat
     assert result.status == "partial"
     assert "browser_request_blocked:state_changing_method" in result.errors
 
+
+
+@pytest.mark.parametrize("status", [503, 429, 404, 500])
+def test_a_fragment_proof_page_the_service_did_not_serve_settles_partial(monkeypatch, status):
+    """``xss.verify``'s browser proof is the Scan's adapter: a client route whose page the service
+    answered with 503, 429, a missing page or a server error (the server never saw the fragment's
+    payload) is no verdict, and the Hunt's own normalization keeps it partial."""
+    result, sent, _aborted = _run_proof(monkeypatch, write_carries_payload=False, status=status)
+    assert sent == ["GET"]
+    proof = next(o for o in result.observations if o.get("kind") == "xss_browser_proof")
+    assert proof["injection_location"] == "fragment"
+    assert (proof["proof_state"], proof["inconclusive_reason"]) == ("not_proven", "target_unavailable")
+    assert (result.status, result.partial) == ("partial", True)
+    assert result.errors == (f"target_unavailable:{status}",)
+
+
+@pytest.mark.parametrize("status, partial", [(503, True), (429, True), (404, False), (500, False)])
+def test_a_deep_query_proof_reads_only_a_service_refusal_as_no_verdict(monkeypatch, status, partial):
+    """An explicit deep query proof sends its payload to the server, which may answer that payload
+    itself with 404 or 500: there only 408, 429, 502-504 (or no answer) leave the attempt partial."""
+    result, sent, _aborted = _run_proof(
+        monkeypatch, write_carries_payload=False, status=status,
+        execution_target="https://app.example.test/search?q=seed", deep_domxss=True,
+    )
+    assert sent == ["GET"]
+    proof = next(o for o in result.observations if o.get("kind") == "xss_browser_proof")
+    assert proof["injection_location"] == "query"
+    assert proof["proof_state"] == "not_proven"
+    if partial:
+        assert (result.status, result.errors) == ("partial", (f"target_unavailable:{status}",))
+        assert proof["inconclusive_reason"] == "target_unavailable"
+    else:
+        assert (result.status, result.partial, result.errors) == ("success", False, ())
+        assert "inconclusive_reason" not in proof
 
 class _Request:
     def __init__(self, url, body=b"", unreadable=False):
