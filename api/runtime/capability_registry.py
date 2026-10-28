@@ -481,15 +481,31 @@ _SAME_ORIGIN_PATH_PROPERTY: Mapping[str, Any] = {
 # A service origin on the same authorized target host. Scheme and port are
 # service coordinates on the already-authorized asset, not a new authorization
 # boundary, so any valid port is allowed under the Hunt's active target
-# authorization; a different host is never admitted by this field.
+# authorization. Another host is admitted only as a destination a person
+# authorized for this Hunt (target.authorize), and never for a scanner.
+_SERVICE_ORIGIN_DESCRIPTION = (
+    "HTTP(S) service origin on the same authorized target host. Any valid "
+    "port is allowed under the Hunt's active target authorization; another "
+    "host only when a person authorized it as a destination for this Hunt, "
+    "and never for a scanner capability."
+)
 _SERVICE_ORIGIN_PROPERTY: Mapping[str, Any] = {
     "type": "string",
     "minLength": 1,
     "maxLength": 2_048,
+    "description": _SERVICE_ORIGIN_DESCRIPTION,
+}
+
+
+# The service an artifact read goes to. A network target names a host and no HTTP service of
+# its own, so a read there names one; elsewhere it defaults to the target's own service.
+_ARTIFACT_ORIGIN_PROPERTY: Mapping[str, Any] = {
+    **_SERVICE_ORIGIN_PROPERTY,
     "description": (
-        "HTTP(S) service origin on the same authorized target host. Any valid "
-        "port is allowed under the Hunt's active target authorization; a "
-        "different host is never admitted."
+        "HTTP(S) service origin on the same authorized target host, checked as for "
+        "http.request; defaults to the target's own service. Required on a network target, "
+        "which names a host and no HTTP service. Another port needs the Hunt's active-testing "
+        "authority; another host only a destination a person authorized for this Hunt."
     ),
 }
 
@@ -1370,7 +1386,7 @@ CAPABILITY_REGISTRY = CapabilityRegistry(
                 "json_body": {"type": "object", "description": "JSON body template for an authorized write. Use request_bindings for PINs/tokens; mutually exclusive with form_body."},
                 "form_body": {"type": "object", "description": "Non-secret form fields for an authorized write. Mutually exclusive with json_body."},
                 "origin": {"type": "string", "minLength": 1, "maxLength": 2048,
-                           "description": "HTTP(S) service origin on the same authorized target host. Any valid port is allowed under the Hunt's active target authorization; a different host is never admitted."},
+                           "description": _SERVICE_ORIGIN_DESCRIPTION},
                 "path": {"type": "string"},
                 "query": {"type": "object"},
                 "headers": {"type": "object"},
@@ -1403,6 +1419,7 @@ CAPABILITY_REGISTRY = CapabilityRegistry(
                 "worker_private_result": True,
             },
             _schema({
+                "origin": _ARTIFACT_ORIGIN_PROPERTY,
                 "path": {"type": "string", "minLength": 1, "maxLength": 4_000},
                 "offset": {"type": "integer", "minimum": 0, "maximum": 16_777_216},
                 "max_bytes": {"type": "integer", "minimum": 1, "maximum": 16_384},
@@ -1427,6 +1444,7 @@ CAPABILITY_REGISTRY = CapabilityRegistry(
                 "worker_private_result": True,
             },
             _schema({
+                "origin": _ARTIFACT_ORIGIN_PROPERTY,
                 "path": {"type": "string", "minLength": 1, "maxLength": 4_000},
                 "max_bytes": {"type": "integer", "minimum": 1, "maximum": 262_144},
             }, required=("path",)),
@@ -1673,7 +1691,7 @@ CAPABILITY_REGISTRY = CapabilityRegistry(
             _schema({
                 "path": {"type": "string", "maxLength": 2000},
                 "session_ref": {"type": "string", "format": "uuid"},
-                "origin": {"type": "string", "maxLength": 2048, "description": "HTTP(S) service origin on the same authorized target host. Any valid port is allowed under the Hunt's active target authorization; a different host is never admitted."},
+                "origin": {"type": "string", "maxLength": 2048, "description": _SERVICE_ORIGIN_DESCRIPTION},
                 "wait_until": {
                     "type": "string", "enum": ["domcontentloaded", "load"],
                 },
@@ -1706,7 +1724,7 @@ CAPABILITY_REGISTRY = CapabilityRegistry(
             },
             {**_schema({
                 "path": {"type": "string", "maxLength": 2000},
-                "origin": {"type": "string", "maxLength": 2048, "description": "HTTP(S) service origin on the same authorized target host. Any valid port is allowed under the Hunt's active target authorization; a different host is never admitted."},
+                "origin": {"type": "string", "maxLength": 2048, "description": _SERVICE_ORIGIN_DESCRIPTION},
                 "selector": {"type": "string", "minLength": 1, "maxLength": 500},
                 "session_ref": {"type": "string", "format": "uuid"},
                 "steps": {

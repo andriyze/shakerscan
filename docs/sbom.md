@@ -27,9 +27,18 @@ listed packages execute or ship in the final application**. A lock-file hash ide
 the input file; it is never substituted for a package distribution's hash.
 
 Client releases retain actual wheel and sdist SPDX file inventories and add CycloneDX
-representations. The base install has no declared third-party runtime dependencies: a
-`Requires-Dist` that is not scoped to an optional extra (unconditional, or any other marker)
-fails generation until base dependency resolution is implemented.
+representations. The base install's third-party runtime dependencies (since client 0.11.2:
+python-fido2, pinned exactly, and cryptography within the releases the publish checks run, one
+range on an Intel Mac and one elsewhere: a `Requires-Dist` with no marker or a platform marker,
+kept with the requirement) are inventoried like an extra, from
+`client/requirements/runtime.txt` (exactly the declared dependencies) and
+`client/requirements/runtime.lock` (compiled with the same `uv pip compile … --generate-hashes`
+command), read from the clean source checkout: the bundle gains
+`shakerscan-<version>-runtime.spdx.json` (and its CycloneDX conversion in stage two, with
+`scope: required`), listing every locked package as a dependency of the client, and
+`sbom-index.json` binds the input and lock hashes under `runtime`; each locked package carries the
+platform marker it applies under. A `Requires-Dist` whose marker names an extra together with any
+other condition still fails generation, and `runtime` is never an extra name.
 
 Optional extras (since client 0.11.0: `shakerscan[record]`, Playwright for `shakerscan record`)
 are inventoried from their reviewed, hash-locked resolution. Each extra declared in

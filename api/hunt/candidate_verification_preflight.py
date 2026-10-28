@@ -19,6 +19,10 @@ try:
     import family_proof
 except ModuleNotFoundError:  # package import in host-side tests
     from .. import family_proof
+try:
+    from scanner_tools.host_names import HostNameError, canonical_host
+except ModuleNotFoundError:  # package import in host-side tests
+    from scanner.scanner_tools.host_names import HostNameError, canonical_host
 
 # Families the server-owned family-proof bridge can re-execute.
 VERIFIABLE_FAMILIES: frozenset[str] = frozenset({
@@ -90,6 +94,71 @@ def verification_route(locus: Mapping[str, Any], context: Mapping[str, Any]) -> 
     if raw.startswith("http://") or raw.startswith("https://"):
         raw = urllib.parse.urlsplit(raw).path or "/"
     return raw if raw and raw != "/" else None
+
+
+# A network target is registered as ``host://H``: it names a host, not an HTTP service.
+SERVICE_UNRESOLVED = (
+    "verification_service_unresolved: on a network target the candidate names the HTTP service "
+    "it was found on, in its locus origin (http(s)://host[:port] on the target's host) or an "
+    "absolute url"
+)
+
+
+def _host_key(host: Any) -> str:
+    """The host the HTTP client connects to (IP literals in canonical form), or "" for none."""
+    try:
+        return canonical_host(host)
+    except HostNameError:
+        return ""
+
+
+def _service_origin(raw: str, *, bare: bool) -> tuple[str, str]:
+    """``(origin, host)`` of an absolute http(s) URL; ``bare`` also refuses a path or query.
+
+    The origin is written the way the client connects: canonical host, and no port when it is
+    the scheme's default, so ``http://h`` and ``http://h:80/x`` name the same service.
+    """
+    try:
+        parsed = urllib.parse.urlsplit(raw)
+        port = parsed.port
+    except ValueError:
+        raise CandidateVerificationRefused(422, SERVICE_UNRESOLVED) from None
+    scheme = parsed.scheme.lower()
+    host = _host_key(parsed.hostname)
+    if (scheme not in {"http", "https"} or not host
+            or parsed.username is not None or parsed.password is not None or port == 0
+            or any(ch.isspace() or ord(ch) < 32 or ch == "\\" for ch in raw)
+            or (bare and (parsed.path not in {"", "/"} or parsed.query or parsed.fragment))):
+        raise CandidateVerificationRefused(422, SERVICE_UNRESOLVED)
+    netloc = f"[{host}]" if ":" in host else host
+    if port is not None and port != (443 if scheme == "https" else 80):
+        netloc = f"{netloc}:{port}"
+    return f"{scheme}://{netloc}", host
+
+
+def verification_service_origin(candidate: Mapping[str, Any], target_url: str) -> str | None:
+    """The HTTP service a candidate on a network target is verified on; None for a URL target.
+
+    A ``host://H`` target names no HTTP service of its own, so the proof runs on the one the
+    candidate names: its locus ``origin``, or the origin of an absolute ``url`` or ``route``.
+    Every one it names must be the same http(s) service on exactly host H; anything else is
+    refused before any budget or traffic.
+    """
+    target = urllib.parse.urlsplit(str(target_url or "").strip())
+    if target.scheme.lower() != "host":
+        return None
+    locus = _mapping(candidate.get("canonical_locus"))
+    named = [
+        _service_origin(str(locus[key]).strip(), bare=key == "origin")
+        for key in ("origin", "url", "route")
+        if isinstance(locus.get(key), str) and str(locus[key]).strip()
+        and (key == "origin" or "://" in str(locus[key]))
+    ]
+    origins = {origin for origin, _host in named}
+    target_host = _host_key(target.hostname)
+    if len(origins) != 1 or not target_host or any(host != target_host for _origin, host in named):
+        raise CandidateVerificationRefused(422, SERVICE_UNRESOLVED)
+    return origins.pop()
 
 
 def web_candidate_preflight(candidate: Mapping[str, Any]) -> tuple[str, str, str]:

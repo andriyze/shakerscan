@@ -152,7 +152,8 @@ def test_a_pipe_never_reveals(monkeypatch, capsys):
     with Stub() as stub:
         monkeypatch.setattr(approval, "Terminal", REAL_TERMINAL)
         monkeypatch.setattr(sys, "stdin", io.StringIO("y\n"))
-        assert v2_cli.main(["--api-url", stub.url, "secrets", "reveal", TARGET, SECRET]) == 2
+        # Exit 3: refused, nothing ran (the one terminal rule every person's command reads).
+        assert v2_cli.main(["--api-url", stub.url, "secrets", "reveal", TARGET, SECRET]) == 3
         assert "interactive terminal" in capsys.readouterr().err
     assert stub.writes() == []
 

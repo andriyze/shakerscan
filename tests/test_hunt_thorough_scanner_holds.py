@@ -1,16 +1,19 @@
-"""A thorough Hunt's sqli.verify and xss.verify calls get a wall they can finish in.
+"""A Hunt's sqli.verify and xss.verify calls get a wall they can finish in.
 
 In measured runs, 2 of 2 sqli.verify calls timed out at 300.06 s and 300.08 s after 272 and 295
 requests, and 2 of 2 xss.verify calls timed out at 120 s after 400 requests. The argv paces
 sqlmap at about 1 request/s and Dalfox at about 3.3 requests/s on every Hunt profile, so a
-one-field sqlmap negative (about 432 requests) and one Dalfox parameter (about 1,300 requests)
-cannot finish inside the registry wall. Every profile reserved the same hold.
+one-field sqlmap negative and one Dalfox parameter (about 1,300 requests) cannot finish inside
+the registry wall. Every profile reserved the same hold.
 
-A thorough Hunt now reserves 900 requests / 540 s for sqli.verify and 1,800 requests / 480 s for
-xss.verify, with the same argv. Fast and balanced Hunts, the passive templates.scan pack, calls
+Every named profile (fast, balanced, thorough) now reserves 1,800 requests / 1,200 s for
+sqli.verify and 1,800 requests / 480 s for xss.verify, with the same argv. The sqli.verify hold is
+twice what one injection point with no injection was measured to cost (up to 516 requests, about
+570 s, on an endpoint that echoes the parameter): a 540 s wall stopped such a call at 490
+requests without a verdict. Unprofiled historical Hunts, the passive templates.scan pack, calls
 against a device target and headless (deep_domxss) xss.verify keep their 2.11.0 holds, plans and
-waits byte for byte. A thorough call the remaining ledger cannot fund at the longer hold is
-admitted at the registry hold, as it was before.
+waits byte for byte. A call the remaining budget cannot fund at its hold is refused with a
+budget request a person can grant, never started at a shorter hold.
 """
 from __future__ import annotations
 
@@ -47,7 +50,7 @@ SQLMAP_OUTPUT = {"sqlmap_output_dir": "/tmp/shakerscan-sqlmap-fixture"}
 DALFOX_SCRATCH = {"scratch_dir": "/tmp/shakerscan-dalfox-fixture"}
 REGISTRY_SQLI = {"http_requests": 900, "tool_wall_seconds": 300}
 REGISTRY_XSS = {"http_requests": 400, "tool_wall_seconds": 120, "browser_actions": 2}
-THOROUGH_SQLI = {"http_requests": 900, "tool_wall_seconds": 540}
+THOROUGH_SQLI = {"http_requests": 1_800, "tool_wall_seconds": 1_200}
 THOROUGH_XSS = {"http_requests": 1_800, "tool_wall_seconds": 480, "browser_actions": 2}
 # Fixture: the process plan digests that build_enforced_scanner_plan produced at 2.11.0
 # (81caee26d) for the registry holds below. A changed digest means a changed argv, wall,
@@ -222,7 +225,7 @@ def test_a_thorough_sqlmap_call_keeps_its_argv_and_gets_the_longer_wall():
     assert thorough.argv == registry.argv
     assert _flag(thorough, "--technique") == "BEUT"
     assert _flag(thorough, "--delay") == "1" and _flag(thorough, "--threads") == "1"
-    assert thorough.timeout_ms == 540_000
+    assert thorough.timeout_ms == 1_200_000
     assert thorough.hard_budget_dict == THOROUGH_SQLI
     assert thorough.budget_proof["method"] == "fixed_conservative_profile"
     assert thorough.budget_proof["inputs"] == registry.budget_proof["inputs"]
@@ -250,14 +253,15 @@ def test_headless_dalfox_stays_at_its_floor_whatever_it_reserved():
 
 FLOOR_SQLMAP = {"http_requests": 900, "tool_wall_seconds": 300}
 FLOOR_DALFOX = {"http_requests": 400, "tool_wall_seconds": 120}
-TIER_SQLMAP = {"http_requests": 900, "tool_wall_seconds": 540}
+TIER_SQLMAP = {"http_requests": 1_800, "tool_wall_seconds": 1_200}
 TIER_DALFOX = {"http_requests": 1_800, "tool_wall_seconds": 480}
 
 
 @pytest.mark.parametrize("capability,reservation,expected", [
     # In between the floor and the reviewed ceiling: exactly the floor, as before.
     ("sqli.verify", {"http_requests": 900, "tool_wall_seconds": 400}, FLOOR_SQLMAP),
-    ("sqli.verify", {"http_requests": 5_000, "tool_wall_seconds": 539}, FLOOR_SQLMAP),
+    ("sqli.verify", {"http_requests": 5_000, "tool_wall_seconds": 1_199}, FLOOR_SQLMAP),
+    ("sqli.verify", {"http_requests": 1_799, "tool_wall_seconds": 3_600}, FLOOR_SQLMAP),
     ("xss.verify", {"http_requests": 400, "tool_wall_seconds": 480}, FLOOR_DALFOX),
     ("xss.verify", {"http_requests": 900, "tool_wall_seconds": 200}, FLOOR_DALFOX),
     ("xss.verify", {"http_requests": 1_799, "tool_wall_seconds": 3_600}, FLOOR_DALFOX),
@@ -312,7 +316,7 @@ def test_paced_traffic_over_the_whole_wall_stays_inside_the_request_hold():
 def test_the_wait_follows_the_reserved_wall_and_registry_holds_keep_the_spec_default():
     sqli = CAPABILITY_REGISTRY.require("sqli.verify")
     xss = CAPABILITY_REGISTRY.require("xss.verify")
-    assert agent_tools.hunt_scanner_timeout_ms(sqli.default_timeout_ms, THOROUGH_SQLI) == 540_000
+    assert agent_tools.hunt_scanner_timeout_ms(sqli.default_timeout_ms, THOROUGH_SQLI) == 1_200_000
     assert agent_tools.hunt_scanner_timeout_ms(xss.default_timeout_ms, THOROUGH_XSS) == 480_000
     for spec in CAPABILITY_REGISTRY.for_hunt_executor("worker_scanner"):
         held = agent_tools.canonical_hunt_scanner_budget(spec.name)
@@ -323,7 +327,7 @@ def test_the_wait_follows_the_reserved_wall_and_registry_holds_keep_the_spec_def
 
 def test_the_lease_follows_the_thorough_wall():
     for hold, lease in (
-        (THOROUGH_SQLI, 570), (THOROUGH_XSS, 510), (REGISTRY_SQLI, 330), (REGISTRY_XSS, 150),
+        (THOROUGH_SQLI, 1_230), (THOROUGH_XSS, 510), (REGISTRY_SQLI, 330), (REGISTRY_XSS, 150),
     ):
         assert hunt_capability_lease_seconds({**hold, "agent_actions": 1}) == lease
 
@@ -566,7 +570,7 @@ def test_the_thorough_hold_on_a_device_would_be_refused_by_the_device_policy():
     ("xss.verify", {"path": "/search?q=1"}, {"max_http_requests": 1_500}, {}, REGISTRY_XSS),
     ("sqli.verify", {"path": "/item?id=1"}, {"max_duration_seconds": 500}, {}, REGISTRY_SQLI),
     # Exactly enough for the thorough hold: it is taken.
-    ("sqli.verify", {"path": "/item?id=1"}, {}, {"tool_wall_seconds": 13_860}, THOROUGH_SQLI),
+    ("sqli.verify", {"path": "/item?id=1"}, {}, {"tool_wall_seconds": 13_200}, THOROUGH_SQLI),
     ("xss.verify", {"path": "/search?q=1"}, {"max_http_requests": 1_800}, {}, THOROUGH_XSS),
 ])
 def test_new_calls_require_the_useful_hold_instead_of_falling_back_to_short_timeouts(
@@ -589,7 +593,7 @@ def test_a_call_neither_hold_fits_is_refused_with_what_the_thorough_hold_needs()
         )
     detail = error.value.detail
     assert detail["reason_code"] in {"budget_exhausted", "budget_insufficient_for_action"}
-    assert detail["shortages"] == {"tool_wall_seconds": 14_200 + 540 - 14_400}
+    assert detail["shortages"] == {"tool_wall_seconds": 14_200 + 1_200 - 14_400}
 
 
 # --- the API wait ------------------------------------------------------------------------------

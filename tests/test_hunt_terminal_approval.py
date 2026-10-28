@@ -19,11 +19,12 @@ from __future__ import annotations
 import contextlib
 import os
 import pty
-import select
 import signal
 import subprocess
 import sys
+import threading
 import time
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -52,38 +53,80 @@ def _sigint_as_a_shell_leaves_it():
         signal.signal(signal.SIGINT, inherited)
 
 
+class _Screen:
+    """What a pseudo-terminal shows, read from its master as it is written (a thread): macOS drops
+    what is left in a terminal once the program that wrote it has exited."""
+
+    def __init__(self, master: int) -> None:
+        self.master = master
+        self._raw = b""
+        self._lock = threading.Lock()
+        self._reader = threading.Thread(target=self._pump, daemon=True)
+        self._reader.start()
+
+    def _pump(self) -> None:
+        while True:
+            try:
+                chunk = os.read(self.master, 65536)
+            except OSError:  # the program exited and the terminal is closed
+                return
+            if not chunk:
+                return
+            with self._lock:
+                self._raw += chunk
+
+    @property
+    def text(self) -> bytes:
+        with self._lock:
+            return self._raw.replace(b"\r\n", b"\n")
+
+    def wait_for(self, text: bytes, timeout: float, alive: Callable[[], bool]) -> None:
+        deadline = time.monotonic() + timeout
+        while text not in self.text:
+            if time.monotonic() > deadline:
+                raise AssertionError(f"never saw {text!r}; output so far: {self.text.decode(errors='replace')}")
+            if not alive() and not self._reader.is_alive() and text not in self.text:
+                raise AssertionError(f"exited before {text!r}; output so far: {self.text.decode(errors='replace')}")
+            time.sleep(0.05)
+
+    def close(self) -> bytes:
+        self._reader.join(timeout=5)
+        os.close(self.master)
+        return self.text
+
+
 class Session:
-    """The CLI in a pseudo-terminal: stdin is the terminal, stdout/stderr are read here."""
+    """The CLI in a pseudo-terminal that is its stdin and its stdout, as a person's terminal is
+    (the CLI asks the person only when its input and its output are a terminal); stderr is read
+    separately. What the terminal shows is ``out``."""
 
     def __init__(self, argv: list[str], env: dict[str, str]) -> None:
         self.master, slave = pty.openpty()
         with _sigint_as_a_shell_leaves_it():
             self.proc = subprocess.Popen(
-                [sys.executable, "-m", "shakerscan", *argv], stdin=slave, stdout=subprocess.PIPE,
+                [sys.executable, "-m", "shakerscan", *argv], stdin=slave, stdout=slave,
                 stderr=subprocess.PIPE, env=env, cwd=str(ROOT), start_new_session=True,
             )
         os.close(slave)
-        self.out = b""
+        self.screen = _Screen(self.master)
+
+    @property
+    def out(self) -> bytes:
+        return self.screen.text
 
     def expect(self, text: str, timeout: float = 20.0) -> None:
-        deadline = time.monotonic() + timeout
-        while text.encode() not in self.out:
-            remaining = deadline - time.monotonic()
-            if remaining <= 0 or self.proc.poll() is not None and not self._ready(0):
-                raise AssertionError(f"never saw {text!r}; output so far: {self.out.decode(errors='replace')}")
-            if self._ready(min(0.2, remaining)):
-                self.out += os.read(self.proc.stdout.fileno(), 65536)
-
-    def _ready(self, timeout: float) -> bool:
-        return bool(select.select([self.proc.stdout], [], [], timeout)[0])
+        self.screen.wait_for(text.encode(), timeout, lambda: self.proc.poll() is None)
 
     def type(self, text: str) -> None:
         os.write(self.master, text.encode())
 
     def finish(self, timeout: float = 30.0) -> tuple[int, str, str]:
-        out, err = self.proc.communicate(timeout=timeout)
-        os.close(self.master)
-        return self.proc.returncode, (self.out + out).decode(), err.decode()
+        try:
+            _, err = self.proc.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            self.proc.kill()
+            raise
+        return self.proc.returncode, self.screen.close().decode(), (err or b"").decode()
 
 
 def _environment(tmp_path: Path, **extra: str) -> dict[str, str]:
@@ -212,16 +255,120 @@ def test_local_deny_and_a_declined_confirmation(tmp_path):
 
 
 def test_approve_refuses_without_a_terminal(tmp_path):
-    """An agent's tool shell is a pipe: the command must not decide from there."""
+    """An agent's tool shell is a pipe: the command must not decide from there (exit 3: refused,
+    nothing ran)."""
     with StubInstance() as stub:
         result = subprocess.run(
             [sys.executable, "-m", "shakerscan", "approve", "--url", stub.url, REQUEST, "--hunt", HUNT],
             input="y\n", capture_output=True, text=True, env=_environment(tmp_path), cwd=str(ROOT), timeout=60,
         )
-    assert result.returncode == 2
+    assert result.returncode == 3
     assert "interactive terminal" in result.stderr and "never through an agent's shell" in result.stderr
     assert stub.request["status"] == "pending"
     assert not [path for path in stub.routes() if path.endswith("/decision")]
+
+
+def _input_terminal_only(argv: list[str], env: dict[str, str], *, stderr_terminal: bool = False):
+    """The CLI with a terminal for input only and its output captured (as a tool harness that
+    gives an agent's command a terminal on stdin), or with stderr the terminal too."""
+    master, slave = pty.openpty()
+    try:
+        proc = subprocess.Popen(
+            [sys.executable, "-m", "shakerscan", *argv], stdin=slave, stdout=subprocess.PIPE,
+            stderr=slave if stderr_terminal else subprocess.PIPE, env=env, cwd=str(ROOT),
+            start_new_session=True,
+        )
+    finally:
+        os.close(slave)
+    return master, proc
+
+
+@pytest.mark.parametrize("argv", [
+    ["approve", REQUEST, "--hunt", HUNT, "--account", "alice"],
+    ["deny", REQUEST, "--hunt", HUNT, "--account", "alice"],
+], ids=["approve", "deny"])
+@pytest.mark.parametrize("stderr_terminal", [False, True], ids=["all-captured", "stderr-terminal"])
+def test_a_terminal_for_input_only_is_asked_as_0_11_1_asked(tmp_path, enterprise, argv, stderr_terminal):
+    """``shakerscan approve ... | tee log``, ``> file``: stdin a terminal and the output captured.
+    Client 0.11.1 asked the person there (its prompts on stdout); 0.11.2 asks too, with the switch
+    off, the prompts on stderr where that is a terminal, else where 0.11.1 wrote them, and the code
+    0.11.1 chose. Nothing that worked with 0.11.0 or 0.11.1 is refused."""
+    stub, connection, env = enterprise("g1", touch_switch=False)
+    with stub:
+        master, proc = _input_terminal_only([argv[0], *connection, *argv[1:]], env, stderr_terminal=stderr_terminal)
+        screen = _Screen(master)
+        prompt = b"TOTP code for alice"
+        if stderr_terminal:
+            # On the person's terminal (stderr), not in the captured output.
+            screen.wait_for(prompt, 30, lambda: proc.poll() is None)
+            early = b""
+        else:
+            # Where 0.11.1 wrote it: the captured output (a `| tee log` shows it).
+            early, deadline = b"", time.monotonic() + 30
+            while prompt not in early:
+                assert time.monotonic() < deadline and proc.poll() is None, early
+                early += _read_ready(proc.stdout)
+        os.write(master, (TOTP + "\n").encode())
+        out, err = proc.communicate(timeout=60)
+        shown = screen.close()
+    out = early + out
+    assert proc.returncode == 0, (out, err, shown)
+    assert (prompt in out) is (not stderr_terminal), (out, shown)
+    finish = next(body for method, path, body in stub.seen if path == "/_enterprise/approvals/finish")
+    assert finish["proof"] == {"method": "totp", "code": TOTP}
+    assert stub.request["status"] == ("granted" if argv[0] == "approve" else "denied")
+
+
+@pytest.mark.parametrize("argv", [
+    ["approve", REQUEST, "--hunt", HUNT],
+    ["approve", "--all-pending", "--hunt", HUNT],
+    ["approve", "--watch", "--hunt", HUNT, "--minutes", "1"],
+    ["deny", REQUEST, "--hunt", HUNT],
+], ids=["approve", "all-pending", "watch", "deny"])
+def test_output_captured_under_the_switch_is_refused_and_no_key_blinks(tmp_path, enterprise, argv):
+    """Where the gateway's administrator requires a touch, a command whose output is captured (a
+    harness that gives an agent's command a terminal for its input and errors) never asks for one:
+    exit 3 on the terminal, nothing written to the pipe, only the gateway's description read,
+    nothing begun or decided, so no key blinks for it."""
+    stub, connection, env = enterprise("g1", touch_switch=True)
+    with stub:
+        master, proc = _input_terminal_only([argv[0], *connection, *argv[1:]], env, stderr_terminal=True)
+        screen = _Screen(master)
+        out, _ = proc.communicate(timeout=60)
+        shown = screen.close()
+    assert proc.returncode == 3, (out, shown)
+    assert out == b"", "nothing went to the pipe"
+    assert b"only when the command's output is your terminal too" in shown
+    assert b"nothing was asked or decided" in shown
+    assert [path for method, path, _ in stub.seen] == ["/_enterprise/me"], "only the description was read"
+    assert stub.request["status"] == "pending"
+
+
+@pytest.mark.parametrize("instance", ["enterprise", "local"])
+def test_no_terminal_for_input_is_no_persons_terminal(tmp_path, enterprise, instance):
+    """An agent's tool call: no terminal for input. Refused at once (exit 3), nothing written to
+    the captured output, nothing read of the instance, nothing decided."""
+    if instance == "enterprise":
+        stub, connection, env = enterprise("g1")
+    else:
+        stub, connection, env = StubInstance(), [], _environment(tmp_path)
+    with stub:
+        connection = connection or ["--url", stub.url]
+        proc = subprocess.run(
+            [sys.executable, "-m", "shakerscan", "approve", *connection, REQUEST, "--hunt", HUNT],
+            stdin=subprocess.DEVNULL, capture_output=True, env=env, cwd=str(ROOT), timeout=60,
+        )
+    assert proc.returncode == 3, (proc.stdout, proc.stderr)
+    assert b"interactive terminal" in proc.stderr and b"nothing was asked or decided" in proc.stderr
+    assert proc.stdout == b""
+    assert stub.seen == [], "nothing was read from or sent to the instance"
+    assert stub.request["status"] == "pending"
+
+
+def _read_ready(stream) -> bytes:
+    import select
+
+    return os.read(stream.fileno(), 65536) if select.select([stream], [], [], 0.1)[0] else b""
 
 
 PROMPT = "[d]eny  [s]kip  [q]uit: "

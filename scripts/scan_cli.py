@@ -6,9 +6,11 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
 from typing import Any, Iterable
 import urllib.error
+import urllib.parse
 import urllib.request
 
 
@@ -183,16 +185,27 @@ def _opener() -> urllib.request.OpenerDirector:
     return urllib.request.build_opener(_NoRedirect())
 
 
+def _person_decision():
+    try:
+        import person_decision
+    except ModuleNotFoundError:
+        from scripts import person_decision
+    return person_decision
+
+
 def _request_json(
     url: str,
     *,
     payload: dict[str, Any] | None = None,
     idempotency_key: str | None = None,
+    _person_proof: str | None = None,
 ) -> dict[str, Any]:
     headers = {
         "Accept": "application/json",
         "User-Agent": "shakerscan-cli/scan-start-v2",
     }
+    if _person_proof:
+        headers[_person_decision().PROOF_HEADER] = _person_proof
     token = _bearer_token()
     if token:
         if not url.startswith("https://"):
@@ -224,6 +237,10 @@ def _request_json(
         except (json.JSONDecodeError, UnicodeDecodeError):
             error = {}
         detail = error.get("detail") if isinstance(error, dict) else None
+        if _person_proof is None and _person_decision().required(exc.code, exc.headers, detail):
+            # An Enterprise gateway wants the person's security-key touch for this submission
+            # (authorizing its target for active testing): asked in the person's own terminal.
+            return _scan_person_decision(url, data or b"", method, detail, payload, idempotency_key)
         api_detail = detail
         if isinstance(detail, dict):
             detail = detail.get("message") or detail.get("error") or detail
@@ -255,6 +272,66 @@ def _request_json(
     return decoded
 
 
+def _scan_person_decision(url: str, data: bytes, method: str, detail: dict[str, Any],
+                          payload: dict[str, Any] | None, idempotency_key: str | None) -> dict[str, Any]:
+    decision = _person_decision()
+    parts = urllib.parse.urlsplit(url)
+    origin = f"{parts.scheme}://{parts.netloc}"
+    path = parts.path + (f"?{parts.query}" if parts.query else "")
+    try:
+        return decision.handle(
+            decision.json_poster(origin, _bearer_token()), origin=origin, method=method, path=path,
+            body=data, detail=detail,
+            resend=lambda grant: _request_json(url, payload=payload, idempotency_key=idempotency_key,
+                                               _person_proof=grant),
+        )
+    except decision.PersonDecisionRefused as exc:
+        error = ScanCliError(exc.line, http_status=403, api_detail={**exc.detail, "command": exc.command})
+        error.exit_code = decision.EXIT_REFUSED
+        raise error from None
+    except decision.PersonDecisionCancelled as exc:
+        error = ScanCliError(str(exc))
+        error.exit_code = decision.EXIT_CANCELLED
+        raise error from None
+    except decision.PersonDecisionError as exc:
+        raise ScanCliError(str(exc), http_status=403, api_detail=detail) from None
+
+
+def _touch_confirms(api_url: str) -> bool:
+    """Whether an Enterprise gateway requires the person's security-key touch to authorize a
+    target from a terminal (its description of itself, GET /_enterprise/me, says so): that touch
+    is then the confirmation, and the local question is not asked twice. An open-source engine or
+    an older gateway says nothing of it, and the question is asked as before."""
+    if not _bearer_token() or not api_url.startswith("https://"):
+        return False
+    try:
+        me = _request_json(api_url.rstrip("/") + "/_enterprise/me")
+    except ScanCliError:
+        return False
+    return isinstance(me, dict) and me.get("person_decision_proof") is True
+
+
+def _touch_follows(api_url: str, target: str) -> bool:
+    """Whether a security-key touch will confirm this active scan: the gateway requires one
+    (_touch_confirms) and the target the engine registers for this URL holds no standing
+    authorization yet, so the gateway refuses the scan until the person touches. The target is
+    registered (or found) as the gateway itself registers a refused scan's URL; registering is no
+    decision. An authorized target is scanned with no touch, so the local question is asked for
+    it as before; so it is when anything here cannot be read."""
+    if not _touch_confirms(api_url):
+        return False
+    base = api_url.rstrip("/")
+    try:
+        found = _request_json(base + "/targets", payload={"url": target})
+        identifier = str(found.get("id") or "") if isinstance(found, dict) else ""
+        if not re.fullmatch(r"[0-9a-fA-F]{8}-(?:[0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}", identifier):
+            return False
+        held = _request_json(f"{base}/targets/{identifier.lower()}/authorization")
+    except ScanCliError:
+        return False
+    return isinstance(held, dict) and "authorization" in held and held["authorization"] is None
+
+
 def _confirm_active(args: argparse.Namespace) -> None:
     if not args.active_testing:
         return
@@ -264,6 +341,18 @@ def _confirm_active(args: argparse.Namespace) -> None:
         raise ScanCliError(
             "active testing requires --confirm-active after confirming target authorization"
         )
+    # The gateway asks a touch only for active work that carries no credential or receipt of its
+    # own (it gates what it would authorize the target for); anything else is asked here.
+    gated = not getattr(args, "credential_profile", None) and not getattr(args, "approval_receipt", None)
+    if gated and _touch_follows(str(getattr(args, "api_url", "") or ""), str(args.target)):
+        # The touch the gateway asks for authorizes the target and is the confirmation; the
+        # local question is not asked twice. A target already authorized is asked below.
+        print(
+            f"Active testing can change target state. {args.target} is not authorized yet: you "
+            "confirm it with a touch of your security key.",
+            file=sys.stderr,
+        )
+        return
     print(
         f"Active testing can change target state. Confirm authorization for {args.target}.",
         file=sys.stderr,
@@ -526,7 +615,7 @@ def main(argv: list[str] | None = None, prog: str | None = None) -> int:
             )
         else:
             print(f"Error: {exc}", file=sys.stderr)
-        return 1
+        return getattr(exc, "exit_code", 1)
 
 
 if __name__ == "__main__":

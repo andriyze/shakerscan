@@ -382,14 +382,17 @@ EXTERNAL_VERIFICATION_FLOORS: dict[str, dict[str, int]] = {
 # Useful per-call holds for every Hunt profile. The older registry holds (sqli.verify
 # 900 requests / 300 s, xss.verify 400 / 120 s) remain accepted for already-queued work. The argv
 # paces a call the same way on every profile: sqlmap BEUT at --delay 1 with one thread (about
-# 1 request/s), Dalfox at --delay 1000 ms with 3 workers (about 3.3 requests/s). At that pace a
-# one-field sqlmap negative (about 432 requests) needs 441-475 s, and Dalfox about 1,300 requests
-# (390-430 s) per parameter, so the registry wall ended those calls before a verdict. These holds
-# raise the wall without touching argv or rate, and keep rate x wall within 90% of the request
-# hold (sqlmap 1 x 540 = 540 <= 810; Dalfox 3.33 x 480 = 1,600 <= 1,620), so the pinned
+# 1 request/s), Dalfox at --delay 1000 ms with 3 workers (about 3.3 requests/s). Measured with the
+# pinned sqlmap and this argv, one injection point (a query parameter, or a marked path segment)
+# with no injection costs 432-516 requests (516 on an endpoint that echoes the parameter into its
+# page), about 1.1 s each at that pace: up to about 570 s. A 540 s wall stopped such a call at
+# 490 requests with no verdict. sqli.verify therefore holds twice that: 1,200 s and 1,800
+# requests. Dalfox needs about 1,300 requests (390-430 s) per parameter. These holds raise the
+# wall without touching argv or rate, and keep rate x wall within 90% of the request hold
+# (sqlmap 1 x 1,200 = 1,200 <= 1,620; Dalfox 3.33 x 480 = 1,600 <= 1,620), so the pinned
 # connection ceiling never stops a paced call before its wall does.
 HUNT_THOROUGH_SCANNER_HOLDS: dict[str, dict[str, int]] = {
-    "sqli.verify": {"http_requests": 900, "tool_wall_seconds": 540},
+    "sqli.verify": {"http_requests": 1_800, "tool_wall_seconds": 1_200},
     "xss.verify": {
         "http_requests": 1_800, "tool_wall_seconds": 480, "browser_actions": 2,
     },
@@ -1370,7 +1373,7 @@ def _batch_attempt_pacing(
 
 
 def _auth_probe_minimum(options: Mapping[str, Any], minimum_seconds: float) -> float:
-    """The least delay between requests: the lockout-safe pace on a sign-in endpoint probe.
+    """The least delay between requests: the paced rate on a sign-in endpoint probe.
 
     A parallel child of a split Scan paces the endpoint slower (``probe_pace_seconds``); nothing
     paces it faster than one request per ``AUTH_ENDPOINT_SECONDS_PER_REQUEST``.
@@ -1911,7 +1914,8 @@ def bind_scanner_runtime_paths(
 
 # Exact wire logs the worker binds into each job's private scratch directory. sqlmap's -t
 # traffic file and Dalfox's HAR record every HTTP transaction the tool sends: measured
-# against a counting origin, sqlmap logged 471 of 471 requests and Dalfox 1,225 of 1,225.
+# against a counting origin that answered 200, sqlmap logged 471 of 471 requests and Dalfox
+# 1,225 of 1,225. sqlmap logs a request answered with a redirect twice under its one number.
 # Their counts therefore settle the wire reservation exactly (a refund of the unused hold,
 # or the recorded overrun) instead of retaining the full conservative hold. Katana's JSONL
 # is a discovery feed, not a wire log, and stays conservative on purpose.
@@ -1925,9 +1929,12 @@ def sqlmap_traffic_request_count(text: str) -> int | None:
     markers = [int(value) for value in _SQLMAP_TRAFFIC_MARKER.findall(str(text or ""))]
     if not markers:
         return None
-    # sqlmap numbers its requests sequentially. A gap means blocks were lost, so the
-    # highest number is the larger, safe count.
-    return max(len(markers), max(markers))
+    # sqlmap numbers each request it sends once, sequentially. A request answered 30x is logged
+    # twice under its number (its redirect, then its response), so the count is of distinct
+    # numbers: exact while sqlmap follows no redirect (--ignore-redirects, pinned in
+    # _tmpl_sqlmap), where a followed hop would be a second request under the same number. A gap
+    # means blocks were lost, so the highest number is the larger, safe count.
+    return max(len(set(markers)), max(markers))
 
 
 _SQLMAP_RESPONSE_MARKER = re.compile(

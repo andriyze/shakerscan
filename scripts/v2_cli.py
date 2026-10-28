@@ -53,6 +53,24 @@ class CliError(RuntimeError):
         return result
 
 
+# A person's decision a command could not complete: 3, this shell cannot ask for it (refused,
+# nothing ran); 130, the person pressed Ctrl-C at the touch; 1, the touch failed (as `shakerscan
+# api` and `shakerscan scan` exit). Nothing changed in any of them.
+PERSON_DECISION_EXITS = {"person_decision_required": 3, "person_decision_cancelled": 130, "person_decision_failed": 1}
+
+
+def person_decision_exit(exc: CliError) -> int:
+    """Report a CliError and give the exit status: a person's decision as its one line (in an
+    agent's shell, the decision and the command the person runs), anything else as the CLI's
+    error JSON (exit 2)."""
+    code = PERSON_DECISION_EXITS.get(exc.error_type)
+    if code is None:
+        print(json.dumps(exc.public_dict(), sort_keys=True), file=sys.stderr)
+        return 2
+    print(f"shakerscan: {exc}", file=sys.stderr)
+    return code
+
+
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
     """Never replay an authenticated request against another origin.
 
@@ -172,6 +190,14 @@ def _approval_send(client: "ApiClient"):
     return send
 
 
+def _person_decision():
+    try:
+        import person_decision
+    except ModuleNotFoundError:
+        from scripts import person_decision
+    return person_decision
+
+
 def _launch_bounds() -> tuple[list[str], str | None]:
     """``shakerscan agent --allow``: the person's bounds and the gateway pre-authorization id."""
     try:
@@ -207,10 +233,16 @@ class ApiClient:
         idempotency_key: str | None = None,
         headers: Mapping[str, str] | None = None,
         timeout: float | None = None,
+        _person_proof: str | None = None,
     ) -> Any:
-        """``timeout`` (seconds) overrides this client's own for one request."""
+        """``timeout`` (seconds) overrides this client's own for one request. A request an
+        Enterprise gateway refuses for a person's security-key touch is completed in the person's
+        own terminal and sent again once (person_decision.py)."""
         body = None
+        headers_in = headers
         headers = {"Accept": "application/json", **dict(headers or {}), **self._auth_headers()}
+        if _person_proof:
+            headers[_person_decision().PROOF_HEADER] = _person_proof
         if payload is not None:
             body = json.dumps(payload, separators=(",", ":")).encode("utf-8")
             if len(body) > MAX_REQUEST_BYTES:
@@ -235,6 +267,11 @@ class ApiClient:
             message, detail = _safe_api_error(
                 raw, fallback=f"API returned HTTP {exc.code}"
             )
+            if _person_proof is None and _person_decision().required(exc.code, exc.headers, detail):
+                return self._person_decision(
+                    method, path, body or b"", detail,
+                    payload=payload, idempotency_key=idempotency_key, headers=headers_in, timeout=timeout,
+                )
             raise CliError(
                 message,
                 error_type="api_error",
@@ -259,6 +296,26 @@ class ApiClient:
             return json.loads(raw)
         except json.JSONDecodeError as exc:
             raise CliError("ShakerScan API returned invalid JSON") from exc
+
+    def _person_decision(self, method: str, path: str, body: bytes, detail: Mapping[str, Any], **again: Any) -> Any:
+        """A person's decision the gateway wants a security-key touch for: one touch and one
+        resend of exactly this request in the person's terminal; elsewhere a refusal naming the
+        person's command (exit 3)."""
+        decision = _person_decision()
+        parsed = urllib.parse.urlsplit(self.base_url)
+        try:
+            return decision.handle(
+                decision.json_poster(self.base_url, self.api_token),
+                origin=f"{parsed.scheme}://{parsed.netloc}", method=method, path=path, body=body, detail=detail,
+                resend=lambda grant: self.request(method, path, _person_proof=grant, **again),
+            )
+        except decision.PersonDecisionRefused as exc:
+            raise CliError(exc.line, error_type="person_decision_required", http_status=403,
+                           api_detail={**exc.detail, "command": exc.command}) from None
+        except decision.PersonDecisionCancelled as exc:
+            raise CliError(str(exc), error_type="person_decision_cancelled") from None
+        except decision.PersonDecisionError as exc:
+            raise CliError(str(exc), error_type="person_decision_failed", http_status=403, api_detail=detail) from None
 
     def get(self, path: str) -> Any:
         return self.request("GET", path)
@@ -577,10 +634,17 @@ def _start_preauthorization(
     if not preauthorization:
         try:
             granted = approval.preauthorize(
-                _approval_send(client), client.base_url, approval.Terminal(sys.stdin, sys.stderr),
+                _approval_send(client), client.base_url, approval.Terminal(sys.stdin, sys.stdout, sys.stderr),
                 payload["allow"], use="hunt_start", account=getattr(args, "account", None),
                 method=getattr(args, "method", None),
             )
+        except approval.NotAtTerminal as exc:
+            # Refused before anything was asked (exit 3, as every command that asks the person).
+            if exc.why == "output":
+                tail = "No Hunt was started. Run that way, its answer names the Hunt id (so does `shakerscan hunt list`)"
+            else:
+                tail = "No Hunt was started. An agent proposes bounds with --propose-allow instead"
+            raise CliError(f"{str(exc).rstrip('.')}. {tail}.", error_type="person_decision_required") from exc
         except approval.ApprovalError as exc:
             raise CliError(
                 f"{str(exc).rstrip('.')}. No Hunt was started. An agent proposes bounds with --propose-allow instead.",
@@ -1589,8 +1653,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(json.dumps(result, indent=2, sort_keys=True))
         return _hunt_call_exit(args, result)
     except CliError as exc:
-        print(json.dumps(exc.public_dict(), sort_keys=True), file=sys.stderr)
-        return 2
+        return person_decision_exit(exc)
 
 
 def _hunt_call_exit(args: argparse.Namespace, result: Any) -> int:
@@ -1619,7 +1682,20 @@ def _run_approval(args: argparse.Namespace, client: ApiClient) -> int:
         )
     except approval.ApprovalError as exc:
         print(f"shakerscan {args.product}: {exc}", file=sys.stderr)
-        return 2
+        return _approval_exit(exc)
+
+
+def _approval_exit(exc: Exception) -> int:
+    """The exit status of a terminal decision that failed: 3 when it asks the person and this is
+    no person's terminal (refused, nothing ran: the same as a person's decision an agent's shell
+    cannot make), 1 when no security key is registered to the person (as `targets authorize`,
+    `api` and `approve --test` exit for it), else 2."""
+    approval = _approval()
+    if isinstance(exc, approval.NotAtTerminal):
+        return approval.EXIT_NOT_AT_TERMINAL
+    if isinstance(exc, approval.GatewayRefused) and exc.code == "security_key_not_registered":
+        return 1
+    return 2
 
 
 # --- knowledge review --------------------------------------------------------------------------
@@ -1896,7 +1972,7 @@ def _run_knowledge_review(args: argparse.Namespace, client: ApiClient) -> int:
     terminal = approval.Terminal()
     stepup = None
     try:
-        terminal.require("shakerscan knowledge review")
+        terminal.require(touch_required=approval.touch_switch(send))
         wanted = args.accept or args.reject
         proposals, unconfirmed = _pending_review(send, args.target_id)
         if wanted:
@@ -1939,7 +2015,7 @@ def _run_knowledge_review(args: argparse.Namespace, client: ApiClient) -> int:
         return 1 if failures else 0
     except approval.ApprovalError as exc:
         print(f"shakerscan knowledge review: {exc}", file=sys.stderr)
-        return 2
+        return _approval_exit(exc)
 
 
 # --- knowledge show | dismiss | reopen ---------------------------------------------------------
@@ -2180,7 +2256,7 @@ def _offer_refresh(args: argparse.Namespace, client: ApiClient, report: Mapping[
     send = _approval_send(client)
     terminal = approval.Terminal()
     try:
-        terminal.require("shakerscan knowledge continue --refresh")
+        terminal.require(touch_required=approval.touch_switch(send))
         failures = 0
         with terminal.keypresses():
             for offer in offers:
@@ -2206,7 +2282,7 @@ def _offer_refresh(args: argparse.Namespace, client: ApiClient, report: Mapping[
         return 1 if failures else 0
     except approval.ApprovalError as exc:
         print(f"shakerscan knowledge continue --refresh: {exc}", file=sys.stderr)
-        return 2
+        return _approval_exit(exc)
 
 
 _DISCOVERY_PATH = re.compile(r"^/discovery\?root_domain=[A-Za-z0-9.-]{1,253}$")
@@ -2314,7 +2390,7 @@ def _run_knowledge_release(args: argparse.Namespace, client: ApiClient) -> int:
     if args.at is not None:
         payload["released_at"] = args.at
     try:
-        terminal.require("shakerscan knowledge release")
+        terminal.require(touch_required=approval.touch_switch(send))
         terminal.say(_shown(f"declare a release of target {args.target_id}"
                             + (f" labelled {args.label!r}" if args.label else "")
                             + f" at {args.at or 'now'}"))
@@ -2339,7 +2415,7 @@ def _run_knowledge_release(args: argparse.Namespace, client: ApiClient) -> int:
         return 0
     except approval.ApprovalError as exc:
         print(f"shakerscan knowledge release: {exc}", file=sys.stderr)
-        return 2
+        return _approval_exit(exc)
 
 
 def _run_knowledge_releases(args: argparse.Namespace, client: ApiClient) -> int:
@@ -2366,7 +2442,7 @@ def _run_knowledge_decision(args: argparse.Namespace, client: ApiClient) -> int:
     terminal = approval.Terminal()
     action = args.knowledge_command
     try:
-        terminal.require(f"shakerscan knowledge {action}")
+        terminal.require(touch_required=approval.touch_switch(send))
         status, finding = send("GET", f"/findings/{_quoted(args.finding_id)}")
         if not 200 <= status < 300 or not isinstance(finding, Mapping):
             raise approval.ApprovalError(f"could not read finding {args.finding_id}: HTTP {status}")
@@ -2409,7 +2485,7 @@ def _run_knowledge_decision(args: argparse.Namespace, client: ApiClient) -> int:
         return 0
     except approval.ApprovalError as exc:
         print(f"shakerscan knowledge {action}: {exc}", file=sys.stderr)
-        return 2
+        return _approval_exit(exc)
 
 
 REFERENCE_LIST_DEFAULT = 50
@@ -2500,7 +2576,7 @@ def _run_secrets(args: argparse.Namespace, client: ApiClient) -> int:
     send = _approval_send(client)
     terminal = approval.Terminal()
     try:
-        terminal.require(f"shakerscan secrets {command}")
+        terminal.require(touch_required=approval.touch_switch(send))
         terminal.say(approval._knowledge_summary(approval.reference_decision(action, target, ref_id, payload)))
         if approval.instance_kind(send) == "enterprise":
             stepup = approval.StepUp(send, client.base_url, terminal, account=args.account, method=args.method)
@@ -2513,7 +2589,7 @@ def _run_secrets(args: argparse.Namespace, client: ApiClient) -> int:
             status, body = send("POST", f"{path}/{action}", payload)
     except approval.ApprovalError as exc:
         print(f"shakerscan secrets {command}: {exc}", file=sys.stderr)
-        return 2
+        return _approval_exit(exc)
     if not 200 <= status < 300:
         detail = body.get("detail") if isinstance(body, Mapping) else body
         print(_shown(f"  not applied: HTTP {status}: {detail}"), file=sys.stderr)
@@ -2553,7 +2629,7 @@ def _run_allow_changes(args: argparse.Namespace, client: ApiClient) -> int:
     terminal = approval.Terminal()
     command = "shakerscan knowledge allow-changes"
     try:
-        terminal.require(command)
+        terminal.require(touch_required=approval.touch_switch(send))
         target = str(args.target_id or "").strip().lower()
         if not re.fullmatch(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", target):
             raise approval.ApprovalError(f"{args.target_id!r} is not a target id")
@@ -2603,7 +2679,7 @@ def _run_allow_changes(args: argparse.Namespace, client: ApiClient) -> int:
         return 1
     except approval.ApprovalError as exc:
         print(f"{command}: {exc}", file=sys.stderr)
-        return 2
+        return _approval_exit(exc)
 
 
 if __name__ == "__main__":

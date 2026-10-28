@@ -58,6 +58,7 @@ from retest_contract import (
     mark_candidate_inconclusive,
     normalize_retest_type,
     parse_json_field,
+    retest_identity_refusal,
     retest_refusal_reason,
     path_segment_retest_result,
     retest_queue_binding_matches,
@@ -341,6 +342,7 @@ from worker_handlers.retest_outcome import (  # noqa: F401 - re-exported
     replay_refusal,
 )
 from worker_handlers.proof_replay import run_proof_retest
+from worker_handlers.retest_identity import identity_unresolved_result, retest_identity_unresolved
 from worker_handlers.retest_authority import (
     ai_replay_authority_stop,
     cut_short_by_destination,
@@ -5715,6 +5717,10 @@ async def run_finding_retest(verification: dict) -> dict:
 
     if declined := path_segment_retest_result(inputs, replay_commands):
         return {**declined, "attempt_ladder": attempt_ladder}
+    # A finding found signed in is never retested anonymously: no tier sends anything.
+    if retest_identity_unresolved(verification):
+        return identity_unresolved_result(
+            replay_commands=replay_commands, ladder=attempt_ladder, verification=verification)
     # A proven Scan finding is retested by the check that proved it, with the request it proved.
     proven = await run_proof_retest(
         verification, inputs, poe=proof_of_exploit, replay_commands=replay_commands,
@@ -6253,8 +6259,13 @@ async def process_finding_retest_job(job_data: dict):
                     ai_verify_min_severity = _retest_policy.ai_escalation_min_severity
                     ai_config_ready = bool(ai_verify_enabled and ai_verify_url and ai_verify_api_key)
 
+                    # A retest that cannot run as its finding's signed-in identity sends nothing,
+                    # in the deterministic and the AI-driven tier alike.
+                    identity_unresolved = retest_identity_unresolved(verification)
                     # Tier 1: Deterministic proof (fast, free) — skip if forced AI
-                    if force_ai and not ai_config_ready:
+                    if identity_unresolved:
+                        result = identity_unresolved_result(verification=verification)
+                    elif force_ai and not ai_config_ready:
                         result = {
                             "status": "failed",
                             "result_status": "error",
@@ -6302,7 +6313,8 @@ async def process_finding_retest_job(job_data: dict):
                     ai_failure_error: str | None = None
                     still_vulnerable_deterministic = result.get("verdict") == "exploited"
                     should_try_ai = (
-                        not still_vulnerable_deterministic
+                        not identity_unresolved
+                        and not still_vulnerable_deterministic
                         and requested_mode != "deterministic"
                         and (result.get("has_ai_step") or force_ai)
                         and ai_config_ready
@@ -6778,6 +6790,9 @@ async def queue_auto_retests_for_scan(scan_id: str, target_id: str | None, targe
             return {"queued": 0, "skipped": 0}
         auth_ctx = extract_auth_context(scan_options)
         auth_ctx_json = json.dumps(auth_ctx) if auth_ctx else None
+        # A signed-in Scan whose identity no retest can apply queues none: each would send nothing,
+        # read inconclusive and still count towards the finding's auto-retest attempts.
+        identity_refused = retest_identity_refusal(scan_options, auth_ctx) is not None
 
         # The auto-retest budget is bounded, so spend it on findings that still need
         # PROOF (suspected/unverified), highest severity first — not on findings the
@@ -6804,6 +6819,9 @@ async def queue_auto_retests_for_scan(scan_id: str, target_id: str | None, targe
         for row in rows:
             if queued >= auto_retest_max_per_scan:
                 break
+            if identity_refused:
+                skipped += 1
+                continue
 
             finding = dict(row)
             # Already proven by the scan — don't spend a retest slot re-confirming it.
@@ -19739,6 +19757,7 @@ def _worker_terminal_network_result(
 
 
 from hunt.target_binding import web_hunt_target as _worker_hunt_web_target
+from hunt.sqli_target import sqli_injection_point_refusal
 from hunt.dispatch_authority import HuntDispatchRejected, dispatch_http_request_authority, dispatch_http_target, dispatch_replay_authority, dispatch_scope_binding, require_dispatchable, settle_rejected_dispatch, settle_rejected_replay_dispatch
 from hunt.device_traffic import reserve_device_traffic, require_worker_device_policy, settle_device_traffic, require_device_admission, record_device_traffic
 from hunt.distinct_accounting import bound_distinct_usage, record_attempted_usage
@@ -20131,6 +20150,11 @@ async def process_canonical_scanner_capability_job(
                     scanner_base,
                     capability_input,
                 )
+                if capability_name == "sqli.verify" and (
+                    refusal := sqli_injection_point_refusal(execution_target, capability_input)
+                ):
+                    # Admission refuses this first; a queued call is released, never run.
+                    raise HuntDispatchRejected(refusal)
                 authorized_addresses = [
                     str(item)
                     for item in target.allowed_addresses
@@ -22018,6 +22042,7 @@ async def process_canonical_http_capability_job(job_data: dict[str, Any]) -> Non
             operation = execute_artifact
             adapter_type = ArtifactInspectionExecutionAdapter
             redacted_execution = {
+                **({"origin": redact_url(str(public_input["origin"]))} if public_input.get("origin") else {}),
                 "path": redact_url(str(public_input.get("path") or "")),
                 "offset": int(public_input.get("offset") or 0),
                 "max_bytes": int(public_input.get("max_bytes") or 0) or None,
@@ -22778,6 +22803,41 @@ async def _guard_queue_lease(
                 return
 
 
+# Queue jobs whose result the API waits for (hunt/interaction_router.py): it counts the call's own
+# time from when the work starts, not from enqueue, so a call that waited for a slot keeps it.
+_API_AWAITED_JOB_TYPES = frozenset({
+    "canonical_scanner_capability", "canonical_browser_capability",
+    "canonical_network_capability", "canonical_http_capability",
+})
+
+
+def _mark_work_started(redis_client: Any, job_data: dict[str, Any]) -> None:
+    """Stamp when a leased Hunt capability job's work starts, after any wait for a long slot.
+
+    Scheduling metadata only: the job's durable reservation still decides whether it may run."""
+    job_id = str(job_data.get("job_id") or "").strip()
+    if redis_client is None or not job_id or job_data.get("type") not in _API_AWAITED_JOB_TYPES:
+        return
+    try:
+        redis_client.hset(f"job:{job_id}", mapping={"work_started_at": utc_now_iso()})
+    except Exception as exc:
+        print(f"[worker] work start metadata error: {type(exc).__name__}", flush=True)
+
+
+def _leased_work(job_data: dict[str, Any], redis_client: Any = None) -> Any:
+    """The work one leased job runs. On the agent-tool worker a long action first takes one of
+    the long slots, so a short call never waits behind long actions; it waits inside the leased
+    execution, under the lease's heartbeat (hunt/agent_job_concurrency.py)."""
+    async def work(job: dict[str, Any]) -> Any:
+        _mark_work_started(redis_client, job)
+        return await process_job(job)
+
+    if AGENT_TOOL_ONLY_WORKER:
+        from hunt.agent_job_concurrency import in_lane
+        return in_lane(job_data, work)
+    return work(job_data)
+
+
 async def _run_job_under_lease(redis_client: Any, lease: QueueLease, job_data: dict[str, Any]) -> None:
     consumer_name = _worker_runtime_identity()
     if lease.delivery_attempts > QUEUE_MAX_DELIVERY_ATTEMPTS:
@@ -22791,10 +22851,10 @@ async def _run_job_under_lease(redis_client: Any, lease: QueueLease, job_data: d
     try:
         marker = _fleet_busy_marker(job_data)
         if lease.legacy:
-            await process_job(job_data)
+            await _leased_work(job_data, redis_client)
             return
 
-        work_task = asyncio.create_task(process_job(job_data))
+        work_task = asyncio.create_task(_leased_work(job_data, redis_client))
         guard_task = asyncio.create_task(_guard_queue_lease(redis_client, lease, consumer_name, work_task))
         try:
             await work_task

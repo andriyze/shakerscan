@@ -63,6 +63,11 @@ def test_the_model_intake_image_is_an_overlay_on_the_scanner_runtime():
     assert "golang.org/x/net@v0.60.0" in MI
     assert MI.count("check_dep \"$tool\" golang.org/x/net v0.60.0") == 1
     assert "google.golang.org/grpc@v1.83.2" in MI
+    # Trivy 0.74.0 is built with go-jose v4.1.4 (CVE-2026-116587, fixed in 4.1.6): the Trivy build
+    # lifts it, and the builder proves the lifted version in the binary's metadata.
+    trivy_lifts = MI.split("cd /src/trivy;", 1)[1].split("go build", 1)[0]
+    assert "github.com/go-jose/go-jose/v4@v4.1.6" in trivy_lifts
+    assert MI.count("check_dep trivy github.com/go-jose/go-jose/v4 v4.1.6") == 1
     assert "COPY --from=model-intake-go-tools /out/trivy /out/osv-scanner /out/" in MI
     # The image installs exactly the two binaries, through the binaries-only stage, so cached
     # builds need not restore the Go build stage.
@@ -103,11 +108,11 @@ def test_pyjwt_stays_above_the_token_forgery_fix_despite_semgreps_pin():
 
 
 def test_model_intake_pip_audit_environment_removes_avoidable_build_tools():
-    lock = (ROOT / "scanner" / "model_intake_tools" / "pip-audit.lock").read_text()
+    lock = ROOT / "scanner" / "model_intake_tools" / "pip-audit.lock"
 
-    # GHSA-6v7p-g79w-8964 affects msgpack <=1.2.0; 1.2.1 is the patched release.
-    assert "msgpack==1.2.1" in lock
-    assert "msgpack==1.2.0" not in lock
+    # GHSA-6v7p-g79w-8964 affects msgpack <=1.2.0 and CVE-2026-114613 (GHSA-j586-36cw-2gc2, a
+    # memory leak on a strict_map_key failure) affects 1.2.1; 1.2.3 carries both fixes.
+    assert _locked_version(lock, "msgpack") >= (1, 2, 3)
     # setuptools is seeded by some distro venv implementations but is not in the
     # hash-locked runtime graph. Remove it and prove it is absent during the build.
     # The four tool venvs lose pip (whose vendor.txt names msgpack 1.1.2 and setuptools 70.3.0)

@@ -21,9 +21,12 @@ without Docker, and any engine subcommand (`start`, `stop`, `status`, `update`, 
 a local engine install when one exists. The adapter and CLI are the runtime's own code, vendored
 at build time, and the tools an agent sees come from the instance's live contracts.
 
-Python 3.10 or newer, no third-party dependencies (a USB/NFC security key for `shakerscan approve`
-on Enterprise needs `pipx inject shakerscan fido2`; `shakerscan record` needs the `record` extra,
-`pipx install 'shakerscan[record]'`, then `python -m playwright install chromium`), AGPL-3.0-only. Documentation:
+Python 3.10 or newer, with one third-party dependency, python-fido2, for a USB security key's touch
+(`shakerscan approve`, and the decisions an Enterprise gateway asks a touch for), installed on
+macOS and 64-bit Linux, where its `cryptography` dependency ships wheels (elsewhere the client
+installs without it; see the documentation); `shakerscan
+record` needs the `record` extra, `pipx install 'shakerscan[record]'`, then `python -m playwright
+install chromium`. AGPL-3.0-only. Documentation:
 https://github.com/andriyze/shakerscan/blob/main/docs/client.md
 
 

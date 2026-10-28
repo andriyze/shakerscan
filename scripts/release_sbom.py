@@ -31,6 +31,10 @@ EXTRA_NAME = re.compile(r"[a-z0-9](?:[a-z0-9._-]{0,62}[a-z0-9])?\Z")
 EXTRA_MARKER = re.compile(r"""\s*extra\s*==\s*(["'])([a-z0-9](?:[a-z0-9._-]{0,62}[a-z0-9])?)\1\s*""")
 EXTRA_LOCK_DIR = "client/requirements"
 EXTRA_SCOPE = "client-optional-extra-lock-resolution"
+# The base install's own third-party dependencies (Requires-Dist without a marker), inventoried like
+# an extra from client/requirements/runtime.txt and runtime.lock; "runtime" is never an extra name.
+RUNTIME = "runtime"
+RUNTIME_SCOPE = "client-runtime-dependency-lock-resolution"
 LOCK_PIN = re.compile(r"([A-Za-z0-9][A-Za-z0-9._-]*)==([0-9A-Za-z.+!_-]+)\s*(?:;\s*([^#]*?))?\s*((?:--hash=sha256:[0-9a-f]{64}\s*)+)")
 MAX_ARCHIVE_BYTES = 64 * 1024 * 1024
 MAX_MEMBERS = 10000
@@ -46,7 +50,7 @@ ENGINE_LIMITS = [
 ]
 CLIENT_LIMITS = [
     "File-level inventory of the actual wheel and sdist, including packaged CLI/MCP modules and agent kit.",
-    "The base install declares no third-party runtime dependencies; generation fails on any Requires-Dist that is not scoped to an optional extra.",
+    "Third-party runtime dependencies of the base install (Requires-Dist without an extra marker, since client 0.11.2: python-fido2 for security keys, on the platforms named by its environment marker) are inventoried from their reviewed, hash-locked universal resolution in client/requirements/runtime.lock at the source commit, each locked package with the platform marker it applies under. They are not bundled in the archives; an install resolves the declared range from the package index at install time and can differ unless installed with --require-hashes from that lock. A Requires-Dist whose marker names an extra together with any other condition fails generation.",
     "Each optional extra (pip install 'shakerscan[<extra>]') is inventoried from its reviewed, hash-locked resolution in client/requirements/<extra>.lock at the source commit. Extras are not bundled in the archives; an install resolves the declared range from the package index at install time and can differ unless installed with --require-hashes from that lock. Native/bundled code inside those packages (such as Playwright's driver) and browsers they download are not inventoried.",
     "Host Python, its standard library, pip/uv/pipx/Homebrew, build tools and externally launched agents are not bundled and are excluded.",
     "File hashes do not establish transitive composition of vendored code or absence of vulnerabilities.",
@@ -279,26 +283,53 @@ def package_name(name: str) -> str:
     return re.sub(r"[-_.]+", "-", name).lower()
 
 
+def marker_key(marker: str) -> str:
+    """An environment marker as one comparable string: no whitespace, double quotes (the built
+    metadata writes ``sys_platform == "darwin"`` for a source's ``sys_platform == 'darwin'``)."""
+    return "".join(marker.split()).replace("'", '"')
+
+
 def requirement_key(requirement: str) -> str:
-    """``Playwright >= 1.44`` and ``playwright>=1.44`` are the same declared requirement."""
+    """``Playwright >= 1.44`` and ``playwright>=1.44`` are the same declared requirement, and so are
+    ``fido2>=2.0,<3`` and ``fido2<3,>=2.0`` (how the built metadata orders the specifiers). An
+    environment marker is kept (``fido2>=2.2;sys_platform=="darwin"``), as marker_key spells it."""
+    requirement, _, marker = requirement.partition(";")
+    if marker.strip():
+        return requirement_key(requirement) + ";" + marker_key(marker)
     text = "".join(requirement.split())
     match = re.match(r"[A-Za-z0-9][A-Za-z0-9._-]*", text)
     require(match is not None, "unparseable declared requirement")
-    return package_name(match.group()) + text[match.end():]
+    rest = text[match.end():]
+    if rest and not rest.startswith(("[", "@")):
+        rest = ",".join(sorted(rest.split(",")))
+    return package_name(match.group()) + rest
 
 
-def declared_extras(metadata) -> dict[str, list[str]]:
-    """Requires-Dist grouped by optional extra. A requirement that is not scoped to exactly one
-    extra (unconditional, or any other marker) is a base runtime dependency: not supported."""
+def declared_requirements(metadata) -> tuple[list[str], dict[str, list[str]]]:
+    """Requires-Dist as (base runtime dependencies, requirements grouped by optional extra). A base
+    runtime dependency has no marker or an environment marker (the platforms it installs on,
+    kept in its key); an extra's is scoped to exactly that extra. A marker that names an extra
+    with any other condition is not supported."""
+    runtime: list[str] = []
     extras: dict[str, list[str]] = {}
     for entry in metadata.get_all("Requires-Dist") or []:
         requirement, _, marker = str(entry).partition(";")
-        match = EXTRA_MARKER.fullmatch(marker) if marker else None
-        require(match is not None, "client now declares runtime dependencies: extend stage-one SBOM resolution before publishing")
+        match = EXTRA_MARKER.fullmatch(marker) if marker.strip() else None
+        if match is None:
+            require(not re.search(r"\bextra\b", marker), "client declares runtime dependencies whose marker "
+                    "names an extra with another condition: extend stage-one SBOM resolution before publishing")
+            runtime.append(requirement_key(str(entry)))
+            continue
         extras.setdefault(match.group(2), []).append(requirement_key(requirement))
     provided = {package_name(str(name)) for name in metadata.get_all("Provides-Extra") or []}
     require(set(extras) <= provided, "Requires-Dist names an extra the package does not provide")
-    return {name: sorted(set(requirements)) for name, requirements in sorted(extras.items())}
+    require(RUNTIME not in extras and RUNTIME not in provided, f"{RUNTIME!r} is reserved for the base install's resolution")
+    return sorted(set(runtime)), {name: sorted(set(requirements)) for name, requirements in sorted(extras.items())}
+
+
+def declared_extras(metadata) -> dict[str, list[str]]:
+    """Requires-Dist grouped by optional extra (declared_requirements)."""
+    return declared_requirements(metadata)[1]
 
 
 def lock_pins(text: str) -> list[dict]:
@@ -321,7 +352,8 @@ def lock_pins(text: str) -> list[dict]:
 
 
 def read_extra_locks(root: Path, extras: dict[str, list[str]], source_sha: str) -> dict[str, dict]:
-    """Each extra's requirement input and lock, from a clean checkout at the exact source commit."""
+    """Each extra's requirement input and lock (RUNTIME: the base install's), from a clean checkout
+    at the exact source commit."""
     if not extras:
         return {}
     try:
@@ -331,13 +363,14 @@ def read_extra_locks(root: Path, extras: dict[str, list[str]], source_sha: str) 
     require(head == source_sha, "source checkout differs from the client source commit")
     locks = {}
     for extra in extras:
+        what = "runtime dependencies" if extra == RUNTIME else f"extra {extra}"
         relative = {kind: f"{EXTRA_LOCK_DIR}/{extra}.{kind}" for kind in ("txt", "lock")}
         dirty = subprocess.run(["git", "-C", str(root), "status", "--porcelain", "--", *relative.values()],
                                capture_output=True, text=True, check=True).stdout
-        require(not dirty, f"extra {extra}: lock files differ from the source commit")
+        require(not dirty, f"{what}: lock files differ from the source commit")
         paths = {kind: root / path for kind, path in relative.items()}
         for path in paths.values():
-            require(path.is_file() and not path.is_symlink(), f"extra {extra}: missing {path.name} in {EXTRA_LOCK_DIR}")
+            require(path.is_file() and not path.is_symlink(), f"{what}: missing {path.name} in {EXTRA_LOCK_DIR}")
         locks[extra] = {"input_path": relative["txt"], "input": paths["txt"].read_bytes(),
                         "lock_path": relative["lock"], "lock": paths["lock"].read_bytes()}
     return locks
@@ -346,28 +379,33 @@ def read_extra_locks(root: Path, extras: dict[str, list[str]], source_sha: str) 
 def extra_document(extra: str, requirements: list[str], lock: dict, version: str, source_sha: str,
                    repository: str, created: str) -> tuple[dict, dict]:
     """The reviewed resolution of one optional extra: what ``shakerscan[<extra>]`` pulled in when
-    the release was cut, with the package hashes the lock accepts. Not an installed-file inventory."""
+    the release was cut, with the package hashes the lock accepts. Not an installed-file inventory.
+    ``extra`` RUNTIME is the base install's own dependencies (runtime_document)."""
+    runtime = extra == RUNTIME
+    what = "runtime dependencies" if runtime else f"extra {extra}"
     declared = [requirement_key(line.split("#", 1)[0]) for line in lock["input"].decode().splitlines()
                 if line.split("#", 1)[0].strip()]
-    require(sorted(set(declared)) == requirements, f"extra {extra}: {lock['input_path']} differs from the declared Requires-Dist")
+    require(sorted(set(declared)) == requirements, f"{what}: {lock['input_path']} differs from the declared Requires-Dist")
     pins = lock_pins(lock["lock"].decode())
     pinned = {p["name"] for p in pins}
     for requirement in requirements:
         name = re.match(r"[a-z0-9-]+", requirement).group()
-        require(name in pinned, f"extra {extra}: {name} is declared but not locked")
-    root = "SPDXRef-ShakerScanClientExtra"
+        require(name in pinned, f"{what}: {name} is declared but not locked")
+    root = "SPDXRef-ShakerScanClientRuntime" if runtime else "SPDXRef-ShakerScanClientExtra"
+    described = (f"Runtime dependencies of the shakerscan base install ({', '.join(requirements)})" if runtime
+                 else f"Optional extra shakerscan[{extra}] ({', '.join(requirements)})")
     packages = [{"SPDXID": root, "name": "shakerscan", "versionInfo": version,
                  "downloadLocation": f"https://github.com/{repository}/releases/download/client-v{version}/",
                  "filesAnalyzed": False, "licenseConcluded": "NOASSERTION", "licenseDeclared": "NOASSERTION",
                  "copyrightText": "NOASSERTION", "supplier": "Organization: ShakerScan",
-                 "sourceInfo": f"Optional extra shakerscan[{extra}] ({', '.join(requirements)}); resolution "
-                               f"{lock['lock_path']} at source commit {source_sha}.",
+                 "sourceInfo": f"{described}; resolution {lock['lock_path']} at source commit {source_sha}.",
                  "externalRefs": [{"referenceCategory": "PACKAGE-MANAGER", "referenceType": "purl",
                                    "referenceLocator": f"pkg:pypi/shakerscan@{version}"}]}]
     relationships = [{"spdxElementId": "SPDXRef-DOCUMENT", "relationshipType": "DESCRIBES", "relatedSpdxElement": root}]
+    installed = ("installed with shakerscan" if runtime else f"installed only with shakerscan[{extra}]")
     for pin in pins:
         purl = f"pkg:pypi/{pin['name']}@{pin['version']}"
-        ident = "SPDXRef-Extra-" + sha256(f"{purl};{pin['marker'] or ''}".encode())[:24]
+        ident = ("SPDXRef-Runtime-" if runtime else "SPDXRef-Extra-") + sha256(f"{purl};{pin['marker'] or ''}".encode())[:24]
         packages.append({"SPDXID": ident, "name": pin["name"], "versionInfo": pin["version"],
                          "downloadLocation": "NOASSERTION", "filesAnalyzed": False,
                          "licenseConcluded": "NOASSERTION", "licenseDeclared": "NOASSERTION", "copyrightText": "NOASSERTION",
@@ -375,20 +413,24 @@ def extra_document(extra: str, requirements: list[str], lock: dict, version: str
                          "comment": "The lock accepts any one of these distribution hashes (one per wheel or sdist).",
                          "sourceInfo": f"Hash-locked resolution in {lock['lock_path']}"
                                        + (f" when {pin['marker']}" if pin["marker"] else "")
-                                       + f"; installed only with shakerscan[{extra}], not bundled in the archives.",
+                                       + f"; {installed}, not bundled in the archives.",
                          "externalRefs": [{"referenceCategory": "PACKAGE-MANAGER", "referenceType": "purl", "referenceLocator": purl}]})
-        relationships.append({"spdxElementId": ident, "relationshipType": "OPTIONAL_DEPENDENCY_OF", "relatedSpdxElement": root})
+        relationships.append({"spdxElementId": ident, "relationshipType": "DEPENDENCY_OF" if runtime else "OPTIONAL_DEPENDENCY_OF",
+                              "relatedSpdxElement": root})
+    label = RUNTIME if runtime else f"extra-{extra}"
     document = {
         "spdxVersion": "SPDX-2.3", "SPDXID": "SPDXRef-DOCUMENT", "dataLicense": "CC0-1.0",
-        "name": f"shakerscan-{version}-extra-{extra}",
-        "documentNamespace": f"https://github.com/{repository}/sbom/{source_sha}/extra-{extra}/{sha256(lock['lock'])}",
+        "name": f"shakerscan-{version}-{label}",
+        "documentNamespace": f"https://github.com/{repository}/sbom/{source_sha}/{label}/{sha256(lock['lock'])}",
         "creationInfo": {"created": created, "creators": ["Organization: ShakerScan", "Tool: shakerscan-release-sbom-1"]},
         "packages": packages, "relationships": relationships,
     }
     validate_spdx(document)
-    entry = {"extra": extra, "requires": requirements, "scope": EXTRA_SCOPE,
+    entry = {"extra": extra, "requires": requirements, "scope": RUNTIME_SCOPE if runtime else EXTRA_SCOPE,
              "input": lock["input_path"], "input_sha256": sha256(lock["input"]),
              "lock": lock["lock_path"], "lock_sha256": sha256(lock["lock"]), "package_count": len(pins)}
+    if runtime:
+        entry.pop("extra")
     return document, entry
 
 
@@ -399,7 +441,7 @@ def client_document(path: Path, version: str, source_sha: str, repository: str, 
     require(metadata_path in files, "missing expected client package metadata")
     metadata = BytesParser().parsebytes(files[metadata_path])
     require(metadata.get("Name") == "shakerscan" and metadata.get("Version") == version, "client package identity mismatch")
-    extras = declared_extras(metadata)
+    runtime, extras = declared_requirements(metadata)
     require(bool(metadata.get("Requires-Python")), "missing client Python requirement")
     prefix = "shakerscan/" if wheel else f"shakerscan-{version}/src/shakerscan/"
     packaged = {name[len(prefix):]: sha256(data) for name, data in files.items() if name.startswith(prefix)}
@@ -436,7 +478,7 @@ def client_document(path: Path, version: str, source_sha: str, repository: str, 
     }
     validate_spdx(document)
     artifact = {"file": path.name, "sha256": digest, "distribution": "wheel" if wheel else "sdist",
-                "requires_python": metadata["Requires-Python"], "declared_runtime_dependencies": [],
+                "requires_python": metadata["Requires-Python"], "declared_runtime_dependencies": runtime,
                 "optional_extras": extras, "file_count": len(files), "scope": "client-archive-files"}
     return document, artifact, packaged
 
@@ -459,12 +501,17 @@ def client_documents(dist: Path, version: str, source_sha: str, repository: str,
     require(package_trees[0] == package_trees[1], "wheel/sdist packaged modules or agent kit differ")
     extras = artifacts[0]["optional_extras"]
     require(all(a["optional_extras"] == extras for a in artifacts), "wheel/sdist declare different optional extras")
-    require(not extras or source_root is not None, "client declares optional extras: pass --source-root (the source checkout)")
-    locks = read_extra_locks(source_root, extras, source_sha) if extras else {}
+    runtime = artifacts[0]["declared_runtime_dependencies"]
+    require(all(a["declared_runtime_dependencies"] == runtime for a in artifacts),
+            "wheel/sdist declare different runtime dependencies")
+    resolutions = {**({RUNTIME: runtime} if runtime else {}), **extras}
+    require(not resolutions or source_root is not None,
+            "client declares runtime dependencies or optional extras: pass --source-root (the source checkout)")
+    locks = read_extra_locks(source_root, resolutions, source_sha) if resolutions else {}
     entries = []
-    for extra, requirements in extras.items():
+    for extra, requirements in resolutions.items():
         document, entry = extra_document(extra, requirements, locks[extra], version, source_sha, repository, created)
-        name = f"shakerscan-{version}-extra-{extra}.spdx.json"
+        name = f"shakerscan-{version}-{RUNTIME if extra == RUNTIME else 'extra-' + extra}.spdx.json"
         documents[name] = json_bytes(document)
         entries.append(entry | {"sbom": name, "sbom_sha256": sha256(documents[name])})
     return documents, artifacts, entries
@@ -489,7 +536,12 @@ def write_bundle(output: Path, documents: dict[str, bytes], artifacts: list, *, 
              "coverage": {"stage": 1, "completeness": "partial", "limitations": limits}, "artifacts": artifacts,
              "files": {name: sha256(data) for name, data in sorted(files.items())}}
     if kind == "client":
-        index["extras"] = list(extras or [])
+        # client_documents' resolutions: the optional extras, and the base install's runtime ones.
+        index["extras"] = [e for e in extras or [] if e.get("scope") != RUNTIME_SCOPE]
+        runtime = [e for e in extras or [] if e.get("scope") == RUNTIME_SCOPE]
+        require(len(runtime) <= 1, "more than one runtime dependency resolution")
+        if runtime:
+            index["runtime"] = runtime[0]
     else:
         require(not extras, "only a client bundle has optional extras")
     files[INDEX] = json_bytes(index)
@@ -563,11 +615,25 @@ def verify_bundle(directory: Path, dist: Path | None = None) -> dict:
             require(isinstance(extra.get(key + "_sha256"), str) and re.fullmatch(r"[0-9a-f]{64}", extra[key + "_sha256"]), "invalid optional extra lock hash")
         validate_spdx(load_json(directory / name))
         sboms.add(name)
+    runtime = index.get("runtime")
+    require(runtime is None or index["kind"] == "client", "only a client bundle has runtime dependencies")
+    if runtime is not None:
+        require(isinstance(runtime, dict) and runtime.get("scope") == RUNTIME_SCOPE, "invalid runtime dependency resolution")
+        name = runtime.get("sbom")
+        require(name in files and name.endswith(".spdx.json") and name not in sboms, "missing/duplicate runtime dependency SBOM")
+        require(runtime.get("sbom_sha256") == files[name], "runtime dependency/SBOM hash mismatch")
+        for key in ("input", "lock"):
+            require(runtime.get(key) == f"{EXTRA_LOCK_DIR}/{RUNTIME}.{'txt' if key == 'input' else 'lock'}", "invalid runtime dependency lock path")
+            require(isinstance(runtime.get(key + "_sha256"), str) and re.fullmatch(r"[0-9a-f]{64}", runtime[key + "_sha256"]), "invalid runtime dependency lock hash")
+        validate_spdx(load_json(directory / name))
+        sboms.add(name)
     if index["kind"] == "client":
         declared = {e["extra"]: e.get("requires") for e in extras}
         require(len(declared) == len(extras), "duplicate optional extra")
         for artifact in artifacts:
             require(artifact.get("optional_extras", {}) == declared, "archive extras differ from the indexed extra resolutions")
+            require(artifact.get("declared_runtime_dependencies", []) == (runtime or {}).get("requires", []),
+                    "archive runtime dependencies differ from the indexed runtime resolution")
     if index.get("coverage", {}).get("stage") == 2:
         root = str(Path(__file__).resolve().parents[1])
         if root not in sys.path:

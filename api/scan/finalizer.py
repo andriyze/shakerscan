@@ -36,7 +36,7 @@ from .negative_control import indistinguishable_from_absent, is_negative_control
 from .redirect_evidence import REDIRECT_STATUSES, http_origin, redirect_destination
 from .severity_calibration import calibrate_findings
 from .sqli_stages import INCONCLUSIVE_RECORD_KIND, sqli_budget_outcomes
-from .verification_extension import superseding_results
+from .verification_extension import PROOF_LEFT_REASONS, superseding_results
 from .continuation import (
     ScanContinuationError,
     ScanPlanRevision,
@@ -897,6 +897,51 @@ def _verified_posture_factory(result: CapabilityResultReference, receipt: Any, k
     return make
 
 
+# The data requests (fetch, XHR, EventSource) a browser XSS proof's page made on its own origin, and
+# how they were answered, kept with the finding: its retest judges the page's data requests against
+# them (``worker_handlers.proof_replay``). A request the proof saw answered that fails now means
+# the page did not run as proved; one that also failed or never answered then (a guest page's
+# ``/api/me`` answering 401, a long poll) does not. Kept only when the proof recorded each
+# response's resource type and its record was not cut short (``capabilities.browser``
+# ``MAX_BROWSER_RESPONSE_OBSERVATIONS``); without it the retest applies its own stricter rules.
+_PROOF_PAGE_DATA_RESOURCES = frozenset({"fetch", "xhr", "eventsource"})
+_PROOF_PAGE_RESPONSES_RECORDED = 200
+_PROOF_PAGE_REQUESTS_KEPT = 50
+
+
+def _proof_page_requests(
+    observations: Sequence[Mapping[str, Any]], attempt_id: Any,
+) -> list[dict[str, Any]] | None:
+    """``[{method, path, resource_type, status}]`` (the lowest status each answered with) for
+    one proof attempt's page, or None when the proof's record cannot tell."""
+    responses = [
+        item for item in observations
+        if isinstance(item, Mapping) and item.get("kind") == "browser_http_response"
+        and item.get("attempt_id") == attempt_id
+    ]
+    if (not responses or len(responses) >= _PROOF_PAGE_RESPONSES_RECORDED
+            or any("resource_type" not in item for item in responses)):
+        return None
+    kept: dict[tuple[str, str], dict[str, Any]] = {}
+    for item in responses:
+        resource = str(item.get("resource_type") or "")
+        if resource not in _PROOF_PAGE_DATA_RESOURCES:
+            continue
+        try:
+            path = urllib.parse.urlsplit(str(item.get("url") or "")).path or "/"
+            status = int(item.get("status_code") or 0)
+        except (TypeError, ValueError):
+            return None
+        key = (str(item.get("method") or "GET").upper()[:10], path[:500])
+        if key in kept:
+            kept[key]["status"] = min(kept[key]["status"], status)
+        elif len(kept) < _PROOF_PAGE_REQUESTS_KEPT:
+            kept[key] = {"method": key[0], "path": key[1], "resource_type": resource, "status": status}
+        else:
+            return None
+    return list(kept.values())
+
+
 def _findings_for_action(
     result: CapabilityResultReference,
     observations: Sequence[Mapping[str, Any]],
@@ -1116,6 +1161,7 @@ def _findings_for_action(
             and item.get("evidence_type") in {"dom_execution", "browser_execution"}
             and str(item.get("technique") or "").startswith("headless_xss_")
         ):
+            page_requests = _proof_page_requests(observations, item.get("attempt_id"))
             finding = _base_finding(
                 tool="shakerscan_browser_proof",
                 title="Verified cross-site scripting",
@@ -1148,6 +1194,7 @@ def _findings_for_action(
                         "technique": item.get("technique"),
                         "dom_marker_executed": item.get("dom_marker_executed"),
                         "verifier_build": item.get("browser_build"),
+                        **({"page_requests": page_requests} if page_requests is not None else {}),
                     },
                     "canonical_capability": result.capability_name,
                     "capability_receipt": receipt,
@@ -2648,6 +2695,51 @@ def _sign_in_limited_variant(item: Mapping[str, Any]) -> tuple[str, str]:
     return variant, str(item.get("sign_in_endpoint") or "")
 
 
+# A family whose proof attempts did not all reach a verdict (each failed, was refused or timed
+# out): the candidates its verifier flagged for proof were neither proven nor ruled out.
+PROOF_ATTEMPTS_UNRESOLVED = "proof_attempts_unresolved"
+_PROOF_ATTEMPT_RESOLVED_STATUSES = frozenset({"success", "succeeded", "completed"})
+
+
+def _proof_attempts_resolved(records: Any) -> dict[str, bool]:
+    """Each proof attempt one action recorded, and whether it reached a verdict.
+
+    An attempt reached one when it proved its candidate, or when every record of it settled as a
+    success without timing out. A candidate the sign-in endpoint's bounded probe set left inconclusive is named by its own
+    reason (``AUTH_ENDPOINT_PROBE_LIMITED``), not counted here. A signalled candidate the batch
+    stopped before (cancelled, or its share unfunded: ``verification_extension.PROOF_LEFT_REASONS``) reached
+    none.
+    """
+    resolved: dict[str, bool] = {}
+    for item in records or ():
+        if not isinstance(item, Mapping):
+            continue
+        attempt_id = str(item.get("attempt_id") or "")
+        if (
+            item.get("kind") == "candidate_deferred" and attempt_id
+            and item.get("reason") in PROOF_LEFT_REASONS
+        ):
+            resolved[attempt_id] = False
+            continue
+        if item.get("kind") != "candidate_attempt" or not attempt_id:
+            continue
+        settled = (
+            str(item.get("proof_state") or "") == "verified"
+            or item.get("inconclusive_reason") == AUTH_ENDPOINT_PROBE_LIMITED
+            or (str(item.get("status") or "").strip().lower() in _PROOF_ATTEMPT_RESOLVED_STATUSES
+                and not item.get("timed_out"))
+        )
+        resolved[attempt_id] = resolved.get(attempt_id, True) and settled
+    return resolved
+
+
+def _merge_proof_resolution(row: dict[str, Any], records: Any) -> None:
+    """Fold one proof action's attempts into its family's: an attempt any action settled is
+    resolved, whichever action recorded it first."""
+    for attempt_id, resolved in _proof_attempts_resolved(records).items():
+        row["_proofs_resolved"][attempt_id] = row["_proofs_resolved"].get(attempt_id, False) or resolved
+
+
 def _family_action_reason(action: Any, result: Any) -> str:
     """The reason one verifier action contributes to its family's coverage.
 
@@ -2943,7 +3035,7 @@ def finalize_scan_report(
             # and comparing attempts with slices alone reports that as complete coverage.
             "_manifest_entries": {}, "_scheduled_entries": {}, "_slow_endpoints": [],
             "_refused_candidates": [], "_sign_in_limited": [],
-            "_proofs_attempted": set(), "_proofs_pace_unfunded": {},
+            "_proofs_attempted": set(), "_proofs_pace_unfunded": {}, "_proofs_resolved": {},
             "proof_escalation": {
                 "actions": 0, "attempted_candidates": 0,
                 "_statuses": [], "_reasons": [],
@@ -2951,8 +3043,11 @@ def finalize_scan_report(
         })
         row["required"] = row["required"] or bool(action.required)
         if action.action_id in superseded:
-            # Its extension re-plans the same slice and is counted instead.
-            pass
+            # Its extension re-plans the same slice and is counted instead. A proof's attempts
+            # that reached no verdict still need one: they stay unresolved unless the extension
+            # (or a retry) settles the same attempt, which it does only for those it re-runs.
+            if action.capability_name in _PROOF_CAPABILITIES:
+                _merge_proof_resolution(row, observations.get(action.action_id, ()))
         elif action.capability_name in _PROOF_CAPABILITIES:
             # Escalation over candidates the verifier already counted: record it
             # separately so it never double-counts them. Only an escalation that
@@ -2971,9 +3066,14 @@ def finalize_scan_report(
                 and item.get("kind") in {"candidate_attempt", "candidate_deferred"}
                 and item.get("inconclusive_reason") == AUTH_ENDPOINT_PROBE_LIMITED
             )
-            # So is a proof the slice's wall could not pace at the sign-in endpoint's lockout-safe
+            # So is a proof the slice's wall could not pace at the sign-in endpoint's paced
             # rate, unless another proof action attempted it: nothing proved or refuted it.
             row["_proofs_attempted"].update(attempts)
+            # Whether each attempt reached a verdict: one that failed, was refused or timed out
+            # left its candidate unproven, not disproven, and so did one the batch stopped
+            # before. A later action (an extension or a retry) that settles the same attempt
+            # resolves it.
+            _merge_proof_resolution(row, observations.get(action.action_id, ()))
             for item in observations.get(action.action_id, ()):
                 if (
                     isinstance(item, Mapping) and item.get("kind") == "candidate_deferred"
@@ -3176,6 +3276,10 @@ def finalize_scan_report(
             proof["status"] == "partial" and not proof["attempted_candidates"]
             and not proofs_paced_out
         )
+        # Proof attempts that never reached a verdict (failed, refused or timed out): their
+        # candidates were not proven or ruled out, however many the batch started.
+        unresolved_proofs = sum(1 for resolved in row.pop("_proofs_resolved").values() if not resolved)
+        proof["unresolved_candidates"] = unresolved_proofs
         row["unattempted_candidates"] = max(
             0, row["planned_candidates"] - row["attempted_candidates"],
         )
@@ -3273,8 +3377,13 @@ def finalize_scan_report(
             row["reason"] = "proof_escalation_failed"
             if row["required"]:
                 selected_family_gaps.append(family)
+        elif unresolved_proofs:
+            row["coverage_status"] = "partial"
+            row["reason"] = PROOF_ATTEMPTS_UNRESOLVED
+            if row["required"]:
+                selected_family_gaps.append(family)
         elif row.get("sign_in_probe_limited"):
-            # A candidate on the credential profile's own sign-in endpoint that its lockout-safe
+            # A candidate on the credential profile's own sign-in endpoint that its paced, bounded
             # probe set left inconclusive has no verdict, so the family did not examine its
             # surface to completion, and a grade over it is not reliable.
             row["coverage_status"] = "partial"

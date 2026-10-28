@@ -122,6 +122,8 @@ def preflight_reason_code(detail: Any) -> str | None:
     text = str(detail or "")
     if text == "verification_route_unresolved":
         return "verification_route_unresolved"
+    if text.startswith("verification_service_unresolved"):
+        return "verification_service_unresolved"
     if text.startswith("verification bridge supports"):
         return "verification_family_unsupported"
     if text.startswith("mass_assignment verification requires"):

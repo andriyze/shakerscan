@@ -153,6 +153,12 @@ class FakeGateway:
         self.seen.append((method, path, payload))
         if path == "/_enterprise/healthz":
             return (200, {"status": "ok", "mode": "enterprise"}) if self.enterprise else (404, {"detail": "Not Found"})
+        if path == "/_enterprise/me":
+            # How a gateway describes itself to a token: one that names the approver itself reports
+            # person_decision_proof; one from before the step-up routes does not.
+            if not self.enterprise:
+                return 404, {"detail": "Not Found"}
+            return 200, ({"person_decision_proof": False} if self.has_stepup else {"user": {"auth": "token"}})
         if path.startswith("/_enterprise/approvals/"):
             if not self.has_stepup:
                 return 404, {"detail": "Not Found"}
@@ -183,10 +189,13 @@ class FakeGateway:
                 return 422, {"schema_version": error, "error": "request_invalid",
                              "message": "invalid approval request fields"}
             identifier = f"apv_{len(self.begun) + 1:04d}"
-            digest = contract_digest(payload["account"], payload["knowledge"], payload["origin"])
+            # No account named: the person the connection's token acts for (a gateway that names the person).
+            account = payload["account"] or "carol"
+            digest = contract_digest(account, payload["knowledge"], payload["origin"])
             self.begun[identifier] = {"digest": digest, "knowledge": payload["knowledge"]}
             return 200, {"schema_version": "shakerscan-approval-challenge/v1", "approval_id": identifier,
-                         "set_digest": digest, "methods": ["totp"], "expires_at": "2026-10-10T00:03:00Z"}
+                         "set_digest": digest, "methods": ["totp"], "account": account,
+                         "expires_at": "2026-10-10T00:03:00Z"}
         begun = self.begun.pop(payload["approval_id"], None)
         if begun is None or payload["set_digest"] != begun["digest"]:
             return 404, {"schema_version": error, "error": "approval_unknown", "message": "begin again"}
@@ -227,7 +236,7 @@ class Terminal(approval.Terminal):
         self.keys, self.codes, self.account = list(keys), list(codes), account
         self.secrets_asked = 0
 
-    def require(self, what: str) -> None:
+    def require(self, what: str = "it", *, person_runs: str | None = None, **_: object) -> None:
         return None
 
     def key(self, prompt: str, choices: str, **_waiting: Any) -> str:
@@ -264,7 +273,9 @@ def test_an_enterprise_accept_takes_the_persons_code_for_that_proposal(monkeypat
     terminal = Terminal("y")
     assert _run(gateway, terminal, "review", "--note", "covers 8443", monkeypatch=monkeypatch) == 0
     (begin,) = gateway.begins()
-    assert begin["purpose"] == "knowledge_decision" and begin["account"] == "carol"
+    # No sign-in name typed: the gateway names the person the token acts for.
+    assert begin["purpose"] == "knowledge_decision" and begin["account"] == ""
+    assert "sign-in name" not in terminal.stdout.getvalue()
     assert begin["origin"] == ORIGIN
     assert begin["knowledge"] == {"decision": "accept", "target_id": TARGET, "subject_id": PROPOSAL,
                                   "text_sha256": "f" * 64, "expected_revision": None, "reason": None, "note": "covers 8443"}
@@ -407,8 +418,9 @@ def test_allow_changes_and_review_refuse_a_pipe(monkeypatch, capsys):
     monkeypatch.setattr(v2_cli, "_approval_send", lambda client: gateway)
     monkeypatch.setenv("SHAKERSCAN_API_TOKEN", "sst_fixture_token")
     monkeypatch.setattr(sys, "stdin", io.StringIO("y\n246810\n"))
-    assert v2_cli.main(["--api-url", ORIGIN, "knowledge", "allow-changes", TARGET]) == 2
-    assert v2_cli.main(["--api-url", ORIGIN, "knowledge", "review"]) == 2
+    # Exit 3: refused, nothing ran (the same as any command that asks the person from no terminal).
+    assert v2_cli.main(["--api-url", ORIGIN, "knowledge", "allow-changes", TARGET]) == 3
+    assert v2_cli.main(["--api-url", ORIGIN, "knowledge", "review"]) == 3
     assert capsys.readouterr().err.count("interactive terminal") == 2
     assert gateway.seen == []
 

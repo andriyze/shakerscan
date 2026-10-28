@@ -17,6 +17,11 @@ import urllib.parse
 from collections import Counter
 from typing import Any, Iterator, Mapping
 
+try:
+    from .url_redaction import token_like_query_name, valueless_query_value
+except ImportError:  # direct host-side import in focused tests
+    from url_redaction import token_like_query_name, valueless_query_value
+
 
 MAX_COLLECTION_BYTES = 5 * 1024 * 1024
 MAX_ENVIRONMENT_BYTES = 2 * 1024 * 1024
@@ -266,6 +271,16 @@ def _redacted_path(path: str) -> str:
     return "/".join(output)
 
 
+def _redacted_query(query: str) -> str:
+    """Query values masked, and a name that is itself a credential (``?<token>``, a token-shaped
+    name with no value of its own) masked too."""
+    pairs = urllib.parse.parse_qsl(query, keep_blank_values=True)
+    return urllib.parse.urlencode([
+        ("<redacted>" if token_like_query_name(key, valueless_query_value(value)) else key, "<redacted>")
+        for key, value in pairs
+    ])
+
+
 def _redacted_url(raw: str) -> str:
     if not raw:
         return ""
@@ -278,12 +293,11 @@ def _redacted_url(raw: str) -> str:
         path = _redacted_path(path)
         if not separator:
             return path[:1000]
-        pairs = urllib.parse.parse_qsl(query, keep_blank_values=True)
-        return (path + "?" + urllib.parse.urlencode([(key, "<redacted>") for key, _ in pairs]))[:1000]
+        return (path + "?" + _redacted_query(query))[:1000]
     host = parsed.hostname or ""
     if parsed.port:
         host = f"{host}:{parsed.port}"
-    query = urllib.parse.urlencode([(key, "<redacted>") for key, _ in urllib.parse.parse_qsl(parsed.query, keep_blank_values=True)])
+    query = _redacted_query(parsed.query)
     return urllib.parse.urlunsplit((parsed.scheme, host, _redacted_path(parsed.path or "/"), query, ""))[:1000]
 
 

@@ -29,6 +29,7 @@ import pytest
 from api.scan import finalizer
 from api.scan.action_plan import ScanAction, ScanActionPlan
 from api.scan.capability_result import CapabilityResultReason as Reason
+from api.scan.capability_result import CapabilityResultReference
 from api.scan.capability_result import CapabilityResultStatus as Status
 from api.scan.contracts import (
     _SCAN_V2_FAMILY_CAPABILITIES,
@@ -286,7 +287,19 @@ def _work_rows(action, count=3):
 def _settled(action, status, reason, rows=()):
     if status is Status.SUCCESS:
         return _result_with_observation_count(action, len(rows))
+    if status is Status.PARTIAL and rows:
+        return _partial_with_observation_count(action, reason, len(rows))
     return _result(action, status=status, reason=reason)
+
+
+def _partial_with_observation_count(action, reason, count):
+    """A partial receipt whose observation manifest holds ``count`` records (unit fixture)."""
+    counted = _result_with_observation_count(action, count)
+    base = _result(action, status=Status.PARTIAL, reason=reason)
+    return CapabilityResultReference(**{
+        **base.digest_material(), "receipt_ref": base.receipt_ref,
+        "observation_manifest_ref": counted.observation_manifest_ref,
+    })
 
 
 def _companion_family(family):
@@ -813,6 +826,204 @@ def test_a_proof_with_nothing_eligible_is_not_applicable(family, capability):
     assert row["coverage_status"] == "complete"
     assert row["proof_escalation"]["status"] == "not_applicable"
     assert report["result"]["grade_reliable"] is True
+
+
+def _proof_attempt_rows(action, statuses, *, proof_state="not_proven"):
+    """The candidate_attempt records a proof batch writes, one per attempt (unit fixture)."""
+    return tuple(
+        {
+            "kind": "candidate_attempt", "status": status, "candidate_id": f"c-{index}",
+            "attempt_id": hashlib.sha256(f"proof-attempt:{index}".encode()).hexdigest(),
+            "proof_state": proof_state, **({"timed_out": True} if status == "timed_out" else {}),
+        }
+        for index, status in enumerate(statuses)
+    )
+
+
+@pytest.mark.parametrize("family, capability", PROOFS)
+@pytest.mark.parametrize("reason", [Reason.OUTPUT_TRUNCATED, Reason.ADAPTER_FAILED])
+@pytest.mark.parametrize("statuses", [
+    ("failed", "failed", "failed"), ("failed", "blocked", "timed_out"),
+], ids=["all-failed", "failed-blocked-timed-out"])
+def test_a_proof_whose_attempts_never_reached_a_verdict_leaves_its_family_partial(
+    family, capability, reason, statuses,
+):
+    """The proof batch attempted every candidate, and every attempt failed: the batch settles
+    partial with its attempts counted, which is no verdict on any of them."""
+    proof = _planned_slice("prove.swept", capability, 2, required=False)
+    report, row = _proof_report(family, capability, Status.PARTIAL, reason,
+                                _proof_attempt_rows(proof, statuses))
+    assert row["proof_escalation"]["attempted_candidates"] == 3
+    assert row["proof_escalation"]["unresolved_candidates"] == 3
+    assert row["coverage_status"] == "partial", row["proof_escalation"]
+    assert row["reason"] == "proof_attempts_unresolved"
+    assert family in report["coverage"]["selected_family_gaps"]
+    assert report["result"]["grade_reliable"] is False
+
+
+@pytest.mark.parametrize("family, capability", PROOFS)
+def test_a_proof_with_some_attempts_unresolved_names_how_many(family, capability):
+    proof = _planned_slice("prove.swept", capability, 2, required=False)
+    report, row = _proof_report(family, capability, Status.PARTIAL, Reason.ADAPTER_FAILED,
+                                _proof_attempt_rows(proof, ("success", "failed", "failed")))
+    assert row["proof_escalation"]["unresolved_candidates"] == 2
+    assert row["coverage_status"] == "partial"
+    assert row["reason"] == "proof_attempts_unresolved"
+    assert report["result"]["grade_reliable"] is False
+
+
+@pytest.mark.parametrize("family, capability", PROOFS)
+def test_a_proof_whose_attempts_all_reached_a_verdict_is_complete(family, capability):
+    """Control: an attempt that ran and did not prove its candidate is a verdict."""
+    proof = _planned_slice("prove.swept", capability, 2, required=False)
+    report, row = _proof_report(family, capability, Status.SUCCESS, None,
+                                _proof_attempt_rows(proof, ("success", "success", "success")))
+    assert row["proof_escalation"]["unresolved_candidates"] == 0
+    assert row["coverage_status"] == "complete"
+    assert report["result"]["grade_reliable"] is True
+
+
+@pytest.mark.parametrize("family, capability", PROOFS)
+def test_a_proof_attempt_its_extension_settled_is_resolved(family, capability):
+    passive, passive_result, passive_rows = _companion_that_worked(family)
+    verifier = _planned_slice("verify.family", _SCAN_V2_FAMILY_CAPABILITIES[family][0], 1)
+    first = _planned_slice("prove.swept", capability, 2, required=False)
+    extension = replace(
+        _planned_slice("prove.extension", capability, 3, required=False),
+        capability_args={**_planned_slice("prove.extension", capability, 3).capability_args,
+                         "extends": first.action_id},
+        action_digest=None,
+    )
+    failed_rows = _proof_attempt_rows(first, ("success", "failed", "failed"))
+    settled_rows = _proof_attempt_rows(extension, ("success", "success", "success"))
+    report, row = _finalize(
+        (passive, verifier, first, extension),
+        {passive.action_id: passive_result,
+         verifier.action_id: _result_with_observation_count(verifier, 3),
+         first.action_id: _partial_with_observation_count(first, Reason.ADAPTER_FAILED, 3),
+         extension.action_id: _result_with_observation_count(extension, 3)},
+        {passive.action_id: passive_rows, verifier.action_id: _work_rows(verifier),
+         first.action_id: failed_rows, extension.action_id: settled_rows},
+        family,
+    )
+    assert row["proof_escalation"]["unresolved_candidates"] == 0
+    assert row["coverage_status"] == "complete", row
+    assert report["result"]["grade_reliable"] is True
+
+
+def _extended_proof_report(family, capability, first_statuses, extension_statuses):
+    """A proof whose attempts ended as ``first_statuses``, and the extension that re-planned it,
+    which settled PARTIAL with records for ``extension_statuses`` only: the attempts it carried
+    or re-ran before it stopped (unit fixtures)."""
+    passive, passive_result, passive_rows = _companion_that_worked(family)
+    verifier = _planned_slice("verify.family", _SCAN_V2_FAMILY_CAPABILITIES[family][0], 1)
+    first = _planned_slice("prove.swept", capability, 2, required=False)
+    extension = replace(
+        _planned_slice("prove.extension", capability, 3, required=False),
+        capability_args={**_planned_slice("prove.extension", capability, 3).capability_args,
+                         "extends": first.action_id},
+        action_digest=None,
+    )
+    first_rows = _proof_attempt_rows(first, first_statuses)
+    extension_rows = _proof_attempt_rows(extension, extension_statuses)
+    return _finalize(
+        (passive, verifier, first, extension),
+        {passive.action_id: passive_result,
+         verifier.action_id: _result_with_observation_count(verifier, 3),
+         first.action_id: _partial_with_observation_count(first, Reason.ADAPTER_FAILED, len(first_rows)),
+         extension.action_id: _partial_with_observation_count(
+             extension, Reason.OUTPUT_TRUNCATED, len(extension_rows))},
+        {passive.action_id: passive_rows, verifier.action_id: _work_rows(verifier),
+         first.action_id: first_rows, extension.action_id: extension_rows},
+        family,
+    )
+
+
+@pytest.mark.parametrize("family, capability", PROOFS)
+@pytest.mark.parametrize("extension_statuses, unresolved", [
+    (("success",), 2),            # it carried the settled attempt and stopped
+    (("success", "success"), 1),  # it re-ran one of the two failed attempts and stopped
+], ids=["carried-only", "re-ran-one"])
+def test_an_extension_that_reruns_only_some_failed_attempts_leaves_the_rest_unresolved(
+    family, capability, extension_statuses, unresolved,
+):
+    report, row = _extended_proof_report(family, capability, ("success", "failed", "failed"), extension_statuses)
+    assert row["proof_escalation"]["unresolved_candidates"] == unresolved, row["proof_escalation"]
+    assert row["coverage_status"] == "partial", row
+    assert row["reason"] == "proof_attempts_unresolved"
+    assert report["result"]["grade_reliable"] is False
+
+
+def _left(index, reason):
+    """The record a proof batch writes for a signalled candidate it stopped before (unit fixture)."""
+    return {"kind": "candidate_deferred", "candidate_id": f"c-{index}", "reason": reason,
+            "attempt_id": hashlib.sha256(f"proof-attempt:{index}".encode()).hexdigest()}
+
+
+@pytest.mark.parametrize("family, capability", PROOFS)
+@pytest.mark.parametrize("reason", ["proof_share_unfunded", "proof_cancelled"])
+def test_a_proof_batch_that_stopped_before_some_candidates_leaves_its_family_partial(
+    family, capability, reason,
+):
+    """One attempt reached a verdict; the batch stopped before the other two (its next share was
+    unfunded, or the Scan was cancelled). Nothing proved or ruled them out."""
+    proof = _planned_slice("prove.swept", capability, 2, required=False)
+    rows = (*_proof_attempt_rows(proof, ("success",)), _left(1, reason), _left(2, reason))
+    report, row = _proof_report(family, capability, Status.PARTIAL, Reason.OUTPUT_TRUNCATED, rows)
+    assert row["proof_escalation"]["attempted_candidates"] == 1
+    assert row["proof_escalation"]["unresolved_candidates"] == 2
+    assert row["coverage_status"] == "partial", row
+    assert row["reason"] == "proof_attempts_unresolved"
+    assert report["result"]["grade_reliable"] is False
+
+
+@pytest.mark.parametrize("family, capability", PROOFS)
+def test_a_candidate_a_proof_stopped_before_is_resolved_once_its_extension_settles_it(family, capability):
+    """Control: the extension re-runs both candidates the first batch stopped before."""
+    passive, passive_result, passive_rows = _companion_that_worked(family)
+    verifier = _planned_slice("verify.family", _SCAN_V2_FAMILY_CAPABILITIES[family][0], 1)
+    first = _planned_slice("prove.swept", capability, 2, required=False)
+    extension = replace(
+        _planned_slice("prove.extension", capability, 3, required=False),
+        capability_args={**_planned_slice("prove.extension", capability, 3).capability_args,
+                         "extends": first.action_id},
+        action_digest=None,
+    )
+    first_rows = (*_proof_attempt_rows(first, ("success",)),
+                  _left(1, "proof_share_unfunded"), _left(2, "proof_share_unfunded"))
+    settled_rows = _proof_attempt_rows(extension, ("success", "success", "success"))
+    report, row = _finalize(
+        (passive, verifier, first, extension),
+        {passive.action_id: passive_result,
+         verifier.action_id: _result_with_observation_count(verifier, 3),
+         first.action_id: _partial_with_observation_count(first, Reason.OUTPUT_TRUNCATED, len(first_rows)),
+         extension.action_id: _result_with_observation_count(extension, 3)},
+        {passive.action_id: passive_rows, verifier.action_id: _work_rows(verifier),
+         first.action_id: first_rows, extension.action_id: settled_rows},
+        family,
+    )
+    assert row["proof_escalation"]["unresolved_candidates"] == 0
+    assert row["coverage_status"] == "complete", row
+    assert report["result"]["grade_reliable"] is True
+
+
+def test_unresolved_proof_attempts_do_not_count_as_verification_attempted():
+    """A family coverage row whose only active verification is three proof attempts that never
+    reached a verdict earns no active-verification credit (unit fixture rows)."""
+    from api.scan import scoring
+
+    def coverage(unresolved):
+        return {"family_coverage": [{
+            "family": "nuclei_passive", "selected": True, "coverage_status": "partial",
+            "attempted_candidates": 0,
+            "proof_escalation": {"attempted_candidates": 3, "unresolved_candidates": unresolved},
+        }]}
+
+    def credit(unresolved):
+        return scoring.assurance(coverage(unresolved))["components"]["active_verification_attempted"]["value"]
+
+    assert credit(0) == 1.0
+    assert credit(3) == 0.0
 
 
 # --- checks that ride a family's authority ---------------------------------------------------

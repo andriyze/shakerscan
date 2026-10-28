@@ -1,6 +1,6 @@
-"""A lockout-safety ceiling on the credential profile's own sign-in endpoint (E1-N6).
+"""A paced, bounded probe set on the credential profile's own sign-in endpoint.
 
-This is a lockout-safety ceiling on one endpoint, not a budget cut: budgets stay generous. Every
+This is a pace and a bound on one endpoint, not a budget cut: budgets stay generous. Every
 other endpoint, and every fast, balanced, thorough or deep plan, keeps its full verification
 budget; no plan changes. It applies only to the sign-in endpoint of a credential profile the
 Scan carries (its login, second-user login or OAuth token request, and the form's action), the
@@ -77,9 +77,12 @@ URL's query, not a body). What changes:
   its verdict is inconclusive. Both are named ``auth_endpoint_probe_limited``, and coverage leaves
   the family partial for that reason.
 
-The probes carry placeholder values, not the profile's account, so they cannot lock out the
-account the Scan signs in with; the pace and the probe set bound what a per-address sign-in
-throttle sees from the scanner.
+The probes carry placeholder values, not the profile's account, so a lockout keyed to the
+account the Scan signs in with is not triggered by them. That is the only lockout this avoids. A
+throttle or lockout keyed to the scanner's address (3, 5 or 10 failed sign-ins) can still trip
+within seconds at 20 requests a minute, and then also refuses the scanner's own sign-in from that
+address; the pace and the probe set bound what it sees, they do not prevent it. Sign-in forms
+other than the profile's own, and a Scan without a credential profile, are not paced at all.
 """
 from __future__ import annotations
 
@@ -420,7 +423,7 @@ def auth_endpoint_hold(
 
     Requests are at most what the endpoint's probe set has left and at most one per
     ``pace_seconds`` of the attempt's wall, so the attempt's own pacing (wall / requests) never
-    exceeds the lockout-safe rate. The caller checks ``probe_set_spent`` first.
+    exceeds the endpoint's paced rate. The caller checks ``probe_set_spent`` first.
     """
     paced = max(0, int(sub_budget.get("tool_wall_seconds") or 0)) // pace_seconds(children=children)
     if paced < AUTH_ENDPOINT_MIN_ATTEMPT_REQUESTS:

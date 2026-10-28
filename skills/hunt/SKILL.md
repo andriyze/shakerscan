@@ -178,7 +178,8 @@ Choose the next smallest action that can answer or falsify a useful hypothesis:
 - For a client bundle, prefer `javascript.analyze` for compact routes, source-map references,
   sink signals, and decoded JWT claims. Use `artifact.inspect` only for one necessary redacted
   byte window. Neither capability returns discovered token values, and neither justifies using a
-  discovered credential.
+  discovered credential. Both take `origin` like `http.request`; a network target needs it, since
+  it names a host and no HTTP service.
 - If a technique needs authority the user did not grant, skip that technique while using the
   methodology's compatible parts. Ask for additional authority only when needed for the objective;
   never enable active, network, credential, direct-origin, state-changing, or OOB permission merely
@@ -237,6 +238,17 @@ Choose the next smallest action that can answer or falsify a useful hypothesis:
   `POST /hunts/{hunt_id}/capabilities/{capability_name}`. Supply a fresh opaque
   `idempotency_key` for each intended action and reuse that same key only when retrying the exact
   action. Supply semantic operation inputs, never a new target, tool name, or raw command line.
+  Give `sqli.verify` the input to test: a query parameter (`/reports?filter=x`), or a path
+  segment marked with `*` (`/products/1*`); a bare path is refused. A long action (`sqli.verify`
+  holds up to 20 minutes) may answer `outcome: running`: do other work, then call it again with the
+  same key and input to collect it (`shakerscan_hunt_get` lists the ones not collected yet). A
+  Hunt runs at most two long actions at once (any worker action over a minute: `sqli.verify`,
+  `xss.verify`, `templates.scan`, crawls and content discovery, port, NSE and subdomain discovery,
+  `service.fingerprint`, `browser.login_check`); a third answers `retry_later` with
+  `long_actions_in_flight` and nothing reserved, so pick the two that matter, keep working with
+  short calls (`http.request`, `artifact.inspect`), which do not wait behind long actions, and
+  send it again with the same key once one settles. A running action keeps its wall reservation until it settles: on a
+  `fast` Hunt (3,600 s) two `sqli.verify` in flight hold 2,400 s of it.
 - Prefer passive inventory and prior evidence, then focused probes, then active capabilities when
   the approval and expected evidence justify their budget and risk.
 - Compare principals for authorization hypotheses. Principal references are not proof of identity
@@ -286,16 +298,28 @@ refusal carries a `reason_code`; act on it rather than on the wording.
 ## Budget raises
 
 A person raises a Hunt's budget; an agent never does. Never call `POST /hunts/{hunt_id}/budget-amendments`
-and never send `operator_confirmed`: that route is the operator's own control, used from the Hunt
-page. When an action needs more of a limit, its refusal raises a `budget.raise` permission request:
-give the person the `shakerscan approve <permission_request_id>` line (see Permission requests) and
-keep working on actions that need none of that limit. When the operator asks in chat for more
-budget, or your launch instructions say to use more, that is not an approval: name the pending
-`budget.raise` request and its approve command, or, when none is pending, say which limit stops
-which planned action and why, so the person can approve the request when it comes or raise the
-limit on the Hunt page; then carry on with other work. A raise keeps usage, queued holds,
-identities and permissions, and starts nothing by itself; completed, cancelled or finalized runs
-stay terminal. `GET /hunts/{hunt_id}/budget-amendments` pages the saved before/after history.
+and never send `operator_confirmed`: that route is the person's own control. When an action needs
+more of a limit, its refusal raises a `budget.raise` permission request: give the person the
+`shakerscan approve <permission_request_id>` line (see Permission requests) and keep working on
+actions that need none of that limit. When the person asks in chat for more budget, or your launch
+instructions say to use more, that is not an approval: name the pending `budget.raise` request and
+its approve command, or, when none is pending, say which limit stops which planned action, so the
+person can approve the request when it comes or raise the limit themselves: on the Hunt page, or
+with the Python client in their own terminal, `shakerscan hunt budget raise <hunt_id> --limit
+<name>=<total>` (or `=+<more>`); then carry on with other work. If a call answers
+`person_decision_required`, name the command it gives and do not retry the request or look for
+another way to make the same decision. The one exception is a refused start (the answer names a
+`submission`: a Hunt start, scan, retest or network scan of a target nobody authorized yet):
+nothing was started, and the command it names authorizes the target only. Do not send the start
+again until the person tells you they authorized the target; then send it once (with the same
+idempotency key, if it had one). A Hunt start the answer names `hunt.start` would go past the one
+safety budget the person approved for your agent session (the Hunts you start share it, and
+cancelling one does not give it back): nothing was started, and the person's command starts that
+Hunt; do not start it again yourself, and do not start a smaller Hunt to get around the budget
+unless the person asks. A decision whose answer says `proof: browser` is made in the browser by
+the person: say so and carry on. A raise keeps usage, queued holds, identities and
+permissions, and starts nothing by itself; completed, cancelled or finalized runs stay terminal.
+`GET /hunts/{hunt_id}/budget-amendments` pages the saved before/after history.
 
 ## Candidates and proof
 
@@ -312,7 +336,8 @@ A value that does not fit (over 1000 characters, a list over 100 items, an inval
 rather than truncated. Put
 the attribute that distinguishes this issue in the locus (for a file exposure, its `path`).
 Verification re-executes the first of `route`, `url` or `path` in the locus; `paths` only
-distinguishes candidates. A
+distinguishes candidates. On a network target also put the service it was found on in `origin`
+(`http://host:port`, the target's own host): verification runs on that service. A
 second record with the same identity and the same title or claim merges its evidence
 (`outcome: merged`); a different claim becomes its own candidate and never replaces a stored one.
 A merge never rewrites title, claim or severity: it lists them in `unapplied_fields`, so correct

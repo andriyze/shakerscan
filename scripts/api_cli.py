@@ -26,6 +26,8 @@ METHODS = ("GET", "POST", "PUT", "PATCH", "DELETE")
 MAX_RESPONSE_BYTES = 8 * 1024 * 1024
 # An error body is only shown as the instance's message, so a short read of it is enough.
 MAX_ERROR_BYTES = 64 * 1024
+# The longest request body read from a file (`@FILE`).
+MAX_BODY_FILE_BYTES = 8 * 1024 * 1024
 
 
 class ApiCliError(RuntimeError):
@@ -79,6 +81,20 @@ def build_request(
         raise ApiCliError("a token is only ever sent over https://; the API URL is plain http")
     headers = {"Accept": "application/json", "User-Agent": "shakerscan-api-cli"}
     data = None
+    if body is not None and body.startswith("@"):
+        # `@FILE`: the body is read from a file (a JSON text never starts with "@"), as the
+        # command a person is given for a request too long to name inline. Only from the
+        # directory the client saves those in: any other file a person could be talked into
+        # naming (a registry login, a cloud key) would become the request's body.
+        where = _decision_body_file(body[1:])
+        try:
+            with open(where, "rb") as handle:
+                raw = handle.read(MAX_BODY_FILE_BYTES + 1)
+        except OSError as exc:
+            raise ApiCliError(f"cannot read the request body from {body[1:]}: {exc.strerror or exc}") from exc
+        if len(raw) > MAX_BODY_FILE_BYTES:
+            raise ApiCliError("the request body file is larger than 8 MiB")
+        body = raw.decode("utf-8", "replace")
     if body is not None:
         try:
             parsed = json.loads(body)
@@ -89,6 +105,19 @@ def build_request(
     if token:
         headers["Authorization"] = "Bearer " + token
     return urllib.request.Request(api_url + path, data=data, headers=headers, method=method)
+
+
+def _decision_body_file(name: str) -> str:
+    """The real path of an ``@FILE`` body inside the client's decisions directory
+    (person_decision.decisions_directory), links and ``..`` resolved; ApiCliError otherwise."""
+    directory = os.path.realpath(_person_decision().decisions_directory())
+    where = os.path.realpath(os.path.expanduser(name))
+    if os.path.dirname(where) != directory:
+        raise ApiCliError(
+            f"shakerscan api reads a request body only from {directory} (@FILE), where the client "
+            "saves a decision's body too long to show; give any other JSON body inline"
+        )
+    return where
 
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -108,7 +137,9 @@ def _opener() -> urllib.request.OpenerDirector:
     return urllib.request.build_opener(_NoRedirect())
 
 
-def call(request: urllib.request.Request, *, opener=None, timeout: float = 60.0) -> tuple[int, str]:
+def call(request: urllib.request.Request, *, opener=None, timeout: float = 60.0,
+         headers_out: dict | None = None) -> tuple[int, str]:
+    """``(status, text)``; ``headers_out``, when given, receives an error answer's headers."""
     opener = opener or _opener()
     try:
         with opener.open(request, timeout=timeout) as response:
@@ -132,6 +163,8 @@ def call(request: urllib.request.Request, *, opener=None, timeout: float = 60.0)
                 from scripts.redirect_hint import redirect_explanation
             location = exc.headers.get("Location") if exc.headers is not None else None
             raise ApiCliError(redirect_explanation(exc.code, location, request.full_url)) from exc
+        if headers_out is not None and exc.headers is not None:
+            headers_out.update({key.lower(): value for key, value in exc.headers.items()})
         return exc.code, exc.read(MAX_ERROR_BYTES).decode("utf-8", "replace")
     except (urllib.error.URLError, TimeoutError, OSError) as exc:
         try:
@@ -168,6 +201,40 @@ def validation_error_text(item: object) -> str:
     return f"{where}: {said}" if where else said
 
 
+def _person_decision():
+    try:
+        import person_decision
+    except ModuleNotFoundError:
+        from scripts import person_decision
+    return person_decision
+
+
+def with_person_decision(request: urllib.request.Request, api_url: str, token: str | None, *,
+                         timeout: float, sender=None) -> tuple[int, str]:
+    """Send ``request``; when an Enterprise gateway refuses it for a person's security-key touch,
+    complete the touch in the person's own terminal and send it again once (person_decision.py).
+    Without a terminal, PersonDecisionRefused (exit 3). ``sender`` defaults to this module's
+    ``call`` as it is when the request is sent."""
+    call = sender or globals()["call"]
+    seen: dict = {}
+    status, text = call(request, timeout=timeout, headers_out=seen)
+    decision = _person_decision()
+    detail = decision.detail_of(text)
+    if not decision.required(status, seen, detail):
+        return status, text
+    parts = urllib.parse.urlsplit(api_url)
+
+    def resend(grant: str) -> tuple[int, str]:
+        again = urllib.request.Request(request.full_url, data=request.data, method=request.get_method(),
+                                       headers={**dict(request.header_items()), decision.PROOF_HEADER: grant})
+        return call(again, timeout=timeout)
+
+    return decision.handle(
+        decision.json_poster(api_url, token), origin=f"{parts.scheme}://{parts.netloc}",
+        method=request.get_method(), path=request.selector, body=request.data or b"", detail=detail, resend=resend,
+    )
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="shakerscan api",
@@ -178,7 +245,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--stream", action="store_true", help="print SSE events as they arrive; never retry")
     parser.add_argument("method", help="GET, POST, PUT, PATCH or DELETE")
     parser.add_argument("path", help="the API path, with query string if any, e.g. /findings?limit=20")
-    parser.add_argument("body", nargs="?", help="a JSON object for POST, PUT or PATCH")
+    parser.add_argument("body", nargs="?", help="a JSON object for POST, PUT or PATCH, or @FILE to read it from a file")
     args = parser.parse_args(argv)
     try:
         api_url = base_url(args.api_url)
@@ -193,10 +260,21 @@ def main(argv: list[str] | None = None) -> int:
                 return code
             except (ValueError, OSError, urllib.error.URLError) as exc:
                 raise ApiCliError(str(exc)) from exc
-        status, text = call(request, timeout=args.timeout)
+        token = bearer_token()
+        status, text = with_person_decision(request, api_url, token, timeout=args.timeout)
     except ApiCliError as exc:
         print(f"shakerscan api: {exc}", file=sys.stderr)
         return 2
+    except _person_decision().PersonDecisionRefused as exc:
+        # An agent's tool call: never a prompt, never a key; the person runs the command.
+        print(f"shakerscan api: {exc.line}", file=sys.stderr)
+        return _person_decision().EXIT_REFUSED
+    except _person_decision().PersonDecisionCancelled as exc:
+        print(f"shakerscan api: {exc}", file=sys.stderr)
+        return _person_decision().EXIT_CANCELLED
+    except _person_decision().PersonDecisionError as exc:
+        print(f"shakerscan api: {exc}", file=sys.stderr)
+        return 1
     output, code = render(status, text)
     print(output, file=sys.stderr if code else sys.stdout)
     return code

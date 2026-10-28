@@ -125,27 +125,70 @@ def redact_path(path: str) -> str:
     return result or "/"
 
 
-def _query_items(query: str) -> list[tuple[str, bool]]:
-    """``(name, bare)`` for each query parameter, in ``parse_qsl(keep_blank_values=True)``
-    order; ``bare`` is a parameter written without ``=`` (``?<token>``)."""
-    items: list[tuple[str, bool]] = []
+def _query_items(query: str) -> list[tuple[str, bool, bool]]:
+    """``(name, bare, valueless)`` for each query parameter, in
+    ``parse_qsl(keep_blank_values=True)`` order; ``bare`` is a parameter written without ``=``
+    (``?<token>``), ``valueless`` one with no value of its own (``valueless_query_value``)."""
+    items: list[tuple[str, bool, bool]] = []
     for piece in query.split("&"):
         if not piece:
             continue
-        name, equals, _value = piece.partition("=")
-        items.append((urllib.parse.unquote(name.replace("+", " ")), not equals))
+        name, equals, value = piece.partition("=")
+        items.append((
+            urllib.parse.unquote(name.replace("+", " ")),
+            not equals,
+            valueless_query_value(urllib.parse.unquote(value.replace("+", " "))),
+        ))
     return items
+
+
+def valueless_query_value(value: str) -> bool:
+    """A query parameter's value (as ``parse_qsl`` reads it) that leaves the name as the only
+    thing it carries: none (``?<token>``, ``?name=``) or only ``=`` (``?<base64>==`` reads as the
+    name ``<base64>`` with the value ``=``). Such a name may be the credential itself."""
+    return not str(value or "").strip("=")
 
 
 _BASE64_NAME_RE = re.compile(r"[A-Za-z0-9+/ ]{16,}=*")
 _ACCESS_KEY_ID_RE = re.compile(r"(?:AKIA|ASIA)[0-9A-Z]{16}")
+# 16 or more characters (12 random bytes or more) of the base64 and base64url alphabets, a
+# ``+`` read back as a space.
+_BARE_TOKEN_RE = re.compile(r"[A-Za-z0-9+/ _-]{16,}")
+# One word of a parameter name: lower case, upper case, or camel case (each capital followed by
+# two or more lower-case letters), with up to two digits at the end: ``access``, ``AMZ``,
+# ``includeDeleted``, ``Signature``, ``page2``.
+_NAME_WORD_RE = re.compile(r"(?:[a-z]+|[A-Z]+|[A-Z]?[a-z]+(?:[A-Z][a-z]{2,})*)[0-9]{0,2}")
 
 
-def token_like_query_name(name: str, bare: bool = False) -> bool:  # noqa: ARG001 - predicate signature
+def word_query_name(name: str) -> bool:
+    """A query name made of words joined by ``-`` or ``_`` (leading and trailing ``_``
+    allowed): ``access_token``, ``includeDeletedItems``, ``X-Amz-Signature``, ``__debug__``. A
+    random token of 16 characters or more is almost never one: a digit, a case change, a ``+``
+    or a ``/`` falls inside one of its words."""
+    words = str(name or "").strip("_").split("_")
+    pieces = [piece for word in words for piece in word.split("-")]
+    return bool(pieces) and all(_NAME_WORD_RE.fullmatch(piece) for piece in pieces)
+
+
+def bare_token_name(name: str) -> bool:
+    """A query name that reads as a random token by its shape alone: 16 or more characters of
+    the base64 or base64url alphabet (trailing ``=`` padding aside) that are not words
+    (``word_query_name``). ``secrets.token_urlsafe(16)``, or 12 or 16 random bytes in standard
+    base64, is one whatever digits it happens to hold; ``includeDeletedItems`` is not. Applied
+    only to a name with no value of its own, where a wrongly masked word costs little."""
+    text = str(name or "").rstrip("=")
+    return bool(_BARE_TOKEN_RE.fullmatch(text)) and not word_query_name(text)
+
+
+def token_like_query_name(name: str, bare: bool = False) -> bool:
     """A query name that is itself a credential: a JWT or random token (``?<token>``), standard
-    base64 (its ``+`` read back as a space, cut at the first ``=``) or an AWS access key id."""
+    base64 (its ``+`` read back as a space, cut at the first ``=``) or an AWS access key id.
+    With ``bare`` (the parameter has no value of its own: ``valueless_query_value``), a name
+    shaped like a token (``bare_token_name``) is one too."""
     text = urllib.parse.unquote(str(name or ""))
     if token_like_segment(text) or _ACCESS_KEY_ID_RE.fullmatch(text):
+        return True
+    if bare and bare_token_name(text):
         return True
     if _BASE64_NAME_RE.fullmatch(text) and ("+" in text or "/" in text or " " in text or text.endswith("=")):
         return token_like_segment(re.sub(r"[+/ =]", "", text))
@@ -162,7 +205,9 @@ def redact_url(
     """Redact one absolute or relative URL without retaining userinfo or query values.
 
     A query name for which ``secret_query_name(name, bare)`` holds (by default: a token-like
-    name, the form a credential used as a bare key takes) is shown as ``<redacted>`` too.
+    name, the form a credential used as a bare key takes) is shown as ``<redacted>`` too, and
+    so is a token-shaped name with no value of its own (``valueless_query_value``,
+    ``bare_token_name``) whatever the predicate.
     """
     text = str(value or "").strip()
     try:
@@ -176,8 +221,13 @@ def redact_url(
         return (text[:start + 3] if start >= 0 else "") + authority[:200] + "/<unparsed>"
     path = redact_path(parsed.path or "/")
     query = urllib.parse.urlencode([
-        ("<redacted>" if secret_query_name(name, bare) else str(name)[:200], query_placeholder)
-        for name, bare in _query_items(parsed.query)
+        (
+            "<redacted>"
+            if secret_query_name(name, bare) or (valueless and bare_token_name(name))
+            else str(name)[:200],
+            query_placeholder,
+        )
+        for name, bare, valueless in _query_items(parsed.query)
     ])
     if parsed.scheme or parsed.netloc:
         host = parsed.hostname or ""

@@ -59,13 +59,14 @@ RETAINED_STEP_FIELDS: Mapping[str, frozenset[str]] = {
     "web.crawl": frozenset({"origin"}),
     "web.browser_crawl": frozenset({"origin"}),
     "web.content_discover": frozenset({"origin", "wordlist"}),
-    "javascript.analyze": frozenset({"path", "max_bytes"}),
-    "artifact.inspect": frozenset({"path", "offset", "max_bytes"}),
+    "javascript.analyze": frozenset({"origin", "path", "max_bytes"}),
+    "artifact.inspect": frozenset({"origin", "path", "offset", "max_bytes"}),
     "http.request": frozenset({"method", "origin", "path", "follow_redirects"}),
     "browser.navigate": frozenset({"origin", "path", "wait_until", "timeout_ms", "max_requests"}),
     "tls.inspect": frozenset({"origin"}),
     "device.http.probe": frozenset({"method", "path", "origin_port"}),
-    "sqli.verify": frozenset({"origin", "path"}),
+    # sqli.verify is not retained: a step carries no query, and a path with no parameter is not
+    # a sqli.verify input (hunt/sqli_target.py), so the step could never run again.
     "xss.verify": frozenset({"origin", "path", "severity", "deep_domxss"}),
 }
 _READ_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})

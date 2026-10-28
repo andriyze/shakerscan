@@ -69,7 +69,10 @@ FINISH_PATH = "/_enterprise/approvals/finish"
 SESSION_REVOKE_PATH = "/_enterprise/approvals/session/revoke"
 PREAUTHORIZATION_HEADER = "X-ShakerScan-Preauthorization"
 SET_SCHEMA = "shakerscan-approval-set/v1"
-PURPOSES = ("permission_decision", "preauthorization", "approver_session", "knowledge_decision")
+PURPOSES = ("permission_decision", "preauthorization", "approver_session", "knowledge_decision", "key_check")
+# A touch test (``shakerscan approve --test``): one touch of the person's key over a document that
+# decides nothing, on an Enterprise gateway that offers it.
+KEY_CHECK = {"test": "touch", "decides": "nothing"}
 # One knowledge-review decision, always with exactly these keys (null where they do not apply).
 KNOWLEDGE_DECISIONS = ("accept", "confirm", "allow_changes", "dismiss", "reopen", "retract", "retract_hunt", "release_marker")
 KNOWLEDGE_KEYS = ("decision", "target_id", "subject_id", "text_sha256", "expected_revision", "reason", "note")
@@ -134,6 +137,32 @@ class OutcomeUnknown(ApprovalError):
     """The decision was sent but its outcome is not known (no answer in time): check, never resend."""
 
 
+class NotAtTerminal(ApprovalError):
+    """The command asks the person, and this is no person's terminal (its input is not a
+    terminal, or the shell belongs to an agent that ``shakerscan agent`` started), or it would ask
+    for a touch the gateway's administrator requires while the command's output is captured.
+    Nothing was asked of the person or a security key; the command exits 3 (refused, nothing
+    ran). ``why``: "agent" (an agent's shell), "input" (no terminal for input: an agent's tool
+    call, a pipe), or "output" (the person's own terminal, the command's output captured)."""
+
+    def __init__(self, message: str, *, why: str = "input") -> None:
+        super().__init__(message)
+        self.why = why
+
+
+# Exit status of a command that asks the person and has no terminal to ask on: refused, nothing
+# ran (person_decision.EXIT_REFUSED has the same meaning).
+EXIT_NOT_AT_TERMINAL = 3
+# A touch the administrator requires, for a command whose output is captured (Terminal.require).
+OUTPUT_CAPTURED = (
+    "{what} needs a touch of your security key (this gateway's administrator requires one), and "
+    "this client asks for a touch only when the command's output is your terminal too, never with "
+    "it captured (a pipe, $(...) or a file), so a key never blinks for a program that captures a "
+    "command's output; nothing was asked or decided: run the same command again with its output on "
+    "your terminal"
+)
+
+
 class GatewayRefused(ApprovalError):
     """The gateway's step-up routes answered with a refusal in the contract's shape."""
 
@@ -169,13 +198,34 @@ def _inert(text: str) -> str:
                    or unicodedata.category(ch) in {"Cf", "Zl", "Zp"} else ch for ch in text)
 
 
-def _detail_text(body: Any) -> str:
+def _detail_text(body: Any, limit: int = 400) -> str:
     if isinstance(body, Mapping):
         for key in ("message", "detail", "error"):
             if isinstance(body.get(key), str) and body[key].strip():
-                return _inert(body[key].strip()[:400])
-        return _inert(json.dumps(dict(body), sort_keys=True)[:400])
-    return _inert(str(body or "no detail")[:400])
+                return _inert(body[key].strip()[:limit])
+        return _inert(json.dumps(dict(body), sort_keys=True)[:limit])
+    return _inert(str(body or "no detail")[:limit])
+
+
+# What an Enterprise gateway says of itself to a connection's token: every gateway serves it.
+ME_PATH = "/_enterprise/me"
+
+
+def gateway_features(send: Send) -> dict[str, bool]:
+    """What an Enterprise gateway says of itself (GET /_enterprise/me): ``known`` (it answered),
+    ``names_approver`` (it reports ``person_decision_proof``: it takes an approval with no sign-in
+    name, the approver being the person the token acts for, and serves the person-decision feed)
+    and ``touch_required`` (its administrator requires a security-key touch for person decisions
+    from terminals). Read instead of probing a route an older gateway refuses, which would write
+    a refusal into its audit log on every command."""
+    try:
+        status, body = send("GET", ME_PATH)
+    except ApprovalError:
+        status, body = None, None
+    if not isinstance(status, int) or not _ok(status) or not isinstance(body, Mapping):
+        return {"known": False, "names_approver": False, "touch_required": False}
+    return {"known": True, "names_approver": "person_decision_proof" in body,
+            "touch_required": body.get("person_decision_proof") is True}
 
 
 # --- reading requests --------------------------------------------------------------------------
@@ -392,6 +442,8 @@ def set_document(purpose: str, account: str, origin: str, body: Mapping[str, Any
         keys = KNOWLEDGE_KEYS + (("release_label", "released_at")
                                 if body["knowledge"].get("decision") == "release_marker" else ())
         document["knowledge"] = {key: body["knowledge"].get(key) for key in keys}
+    elif purpose == "key_check":
+        document["key_check"] = dict(KEY_CHECK)
     else:
         document["session"] = {"ttl_seconds": int(body["session"]["ttl_seconds"])}
     return document
@@ -419,28 +471,117 @@ def expected_challenge(nonce: str, digest: str) -> str:
 # --- the terminal ------------------------------------------------------------------------------
 
 
-class Terminal:
-    """The person's own terminal. Every prompt refuses to run without one."""
+def _is_tty(stream: Any) -> bool:
+    try:
+        return bool(stream is not None and stream.isatty())
+    except (AttributeError, ValueError):
+        return False
 
-    def __init__(self, stdin: Any = None, stdout: Any = None) -> None:
+
+def person_at_terminal(*streams: Any, environ: Mapping[str, str] | None = None) -> bool:
+    """A person at a terminal: every stream given is a terminal, and this is not an agent that
+    ``shakerscan agent`` launched (SHAKERSCAN_AGENT_NAME). An agent's tool call has no terminal;
+    an agent's own pseudo-terminal still carries the variable."""
+    environ = os.environ if environ is None else environ
+    if (environ.get("SHAKERSCAN_AGENT_NAME") or "").strip():
+        return False
+    return all(_is_tty(stream) for stream in streams)
+
+
+def terminal_output(stdin: Any, stdout: Any, *prefer: Any, environ: Mapping[str, str] | None = None) -> Any:
+    """The stream a person is asked on at their whole terminal, or None. The whole terminal is
+    stdin and stdout both terminals, outside an agent that ``shakerscan agent`` launched: what a
+    person's decision under the touch switch (person_decision.py), the touch test and the commands
+    new in client 0.11.2 (``targets authorize``, ``hunt budget raise``) need, and where a key is
+    asked first. The prompt goes to the first of ``prefer`` that is a terminal too (``hunt start
+    --allow`` asks on stderr, its stdout carrying the JSON answer), else to stdout.
+
+    The commands client 0.11.1 already had (approve, --watch, deny, agent and hunt start
+    --allow, the knowledge and secrets decisions) also ask with only stdin a terminal and their
+    output captured, as 0.11.1 did (Terminal.require): see there."""
+    if not person_at_terminal(stdin, stdout, environ=environ):
+        return None
+    return next((stream for stream in prefer if _is_tty(stream)), stdout)
+
+
+def touch_switch(send: Send) -> Callable[[], bool]:
+    """Whether the gateway's administrator requires a security-key touch for person decisions
+    from terminals, read when asked (GET /_enterprise/me; no such route answers False)."""
+    return lambda: gateway_features(send)["touch_required"]
+
+
+class Terminal:
+    """The person's own terminal. Every prompt refuses to run without one (``require``), and every
+    prompt is written to ``prompts`` when it is a terminal too, else to stdout (or, with stdout
+    captured, to stderr when that is a terminal). ``full``: stdin and stdout are both terminals
+    (set by ``require``); only then is a security key asked first (StepUp.method_for)."""
+
+    def __init__(self, stdin: Any = None, stdout: Any = None, prompts: Any = None) -> None:
         self.stdin = stdin or sys.stdin
         self.stdout = stdout or sys.stdout
+        # Where a command whose stdout carries its answer asks instead (hunt start --allow: stderr).
+        self.prompts = prompts
+        # stdin and stdout both terminals (require); a terminal object without it counts as one.
+        self.full = True
         self._key_fd: int | None = None
         self._key_saved: Any = None
         self._escape = "idle"  # the escape-sequence state machine of key()
         self._utf8_left = 0  # continuation bytes still due for a UTF-8 character
         self._last_input = 0.0  # when _feed last saw a byte (a control string's quiet reset)
 
-    def require(self, what: str) -> None:
-        try:
-            interactive = self.stdin.isatty()
-        except (AttributeError, ValueError):
-            interactive = False
-        if not interactive:
-            raise ApprovalError(
-                f"{what} asks the person at an interactive terminal and refuses to read a pipe: run it "
-                "yourself in your own terminal, never through an agent's shell"
+    def require(self, what: str = "it", *, person_runs: str | None = None, whole: bool = False,
+                touch_required: Callable[[], bool] | None = None) -> None:
+        """Refuse (NotAtTerminal, exit 3) unless a person is at this terminal: before anything is
+        read from the gateway, shown or asked of a security key. From here on every prompt goes
+        to the output that is the terminal. ``what`` names the command where the line printed
+        does not already (it is printed after the command's own name otherwise: "it");
+        ``person_runs`` is the command the person runs in their own terminal (the request id
+        named, for an agent to pass on).
+
+        A person is at the terminal when stdin is a terminal, outside an agent that ``shakerscan
+        agent`` started. With stdout a terminal too (``full``) the prompts go there (or to
+        ``prompts``) and a plugged-in key is asked first. With only stdin a terminal and the
+        output captured (``approve ... | tee log``, ``HUNT=$(shakerscan hunt start --allow ...)``)
+        the person is asked as client 0.11.1 asked them (the prompts on stderr when it is a
+        terminal, else where 0.11.1 wrote them), with 0.11.1's choice of proof (the code where the
+        gateway offers one; nothing that worked with 0.11.0 or 0.11.1 is refused), except where the
+        gateway's administrator requires a touch (``touch_required``, read only then): a touch is
+        never asked for a command whose output is captured, so a key never blinks for a harness
+        that gives an agent's command a terminal for its input and errors. ``whole``: the
+        commands new in 0.11.2 (the touch test, a person's decision, ``targets authorize``,
+        ``hunt budget raise``) need stdin and stdout terminals in any case."""
+        run = (f"the person runs this in their own terminal: {_inert(person_runs)}" if person_runs
+               else "run it yourself in your own terminal")
+        if (os.environ.get("SHAKERSCAN_AGENT_NAME") or "").strip():
+            # Inside an agent that `shakerscan agent` started (its shell may well be a terminal):
+            # a plugged-in key would answer the agent's own request.
+            raise NotAtTerminal(
+                f"{what} asks the person, and this shell belongs to an agent that `shakerscan agent` "
+                f"started; nothing was asked or decided: {run}", why="agent",
             )
+        prompts = [self.prompts] if self.prompts is not None else []
+        stream = terminal_output(self.stdin, self.stdout, *prompts)
+        if stream is not None:
+            self.stdout, self.full = stream, True
+            return
+        if not _is_tty(self.stdin):
+            raise NotAtTerminal(
+                f"{what} asks the person at an interactive terminal and refuses to read a pipe, never "
+                f"through an agent's shell; nothing was asked or decided: {run}", why="input",
+            )
+        if whole:
+            raise NotAtTerminal(
+                f"{what} asks the person at an interactive terminal (its input and its output a "
+                "terminal) and refuses captured output (a pipe, $(...) or a file), never through an "
+                f"agent's shell; nothing was asked or decided: {run}", why="output",
+            )
+        if touch_required is not None and touch_required():
+            raise NotAtTerminal(OUTPUT_CAPTURED.format(what=what), why="output")
+        # Asked as client 0.11.1 asked: the prompts where the person sees them, else where 0.11.1
+        # wrote them (``prompts`` for `hunt start --allow`, whose stdout carries its answer).
+        self.stdout = next((stream for stream in (*prompts, sys.stderr) if _is_tty(stream)),
+                           prompts[0] if prompts else self.stdout)
+        self.full = False
 
     def say(self, text: str = "") -> None:
         self.stdout.write(text + "\n")
@@ -681,6 +822,21 @@ class StepUp:
         self.terminal = terminal
         self.account = (account or "").strip() or None
         self.method = method.replace("-", "_") if method else None
+        # What the person is told at the touch (decide() names what it decides); None: the
+        # assertion's own words.
+        self.prompt: str | None = None
+        # The gateway named the approver (no --account): the person this connection acts for,
+        # whom the touch prompt then names ("..., as alice").
+        self.named = False
+        self._checked_output = False
+
+    def _names_no_approver(self) -> bool:
+        """Whether this gateway predates an approval that names its own approver: it refuses an
+        empty sign-in name as request_invalid (422), and its own description of itself (GET
+        /_enterprise/me, which every Enterprise gateway serves to a token) does not report
+        ``person_decision_proof``. Anything but a gateway that says it is newer counts as older,
+        so the person is asked for the name rather than left with a refusal."""
+        return not gateway_features(self.send)["names_approver"]
 
     def _account(self) -> str:
         if not self.account:
@@ -703,19 +859,59 @@ class StepUp:
             )
         if not _ok(status):
             code = str(body.get("error") or "refused")
-            raise GatewayRefused(f"the gateway refused ({code}, HTTP {status}): {_detail_text(body)}",
+            # Whole, up to the person-decision path's 1,200 characters: a refusal says its remedy
+            # (where to register a key) in full.
+            raise GatewayRefused(f"the gateway refused ({code}, HTTP {status}): {_detail_text(body, 1200)}",
                                  code=code, status=status)
         return dict(body)
 
     def begin(self, purpose: str, body: Mapping[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
-        account = self._account()
+        """Begin an approval. Without ``--account`` the approver is the person this connection's
+        token acts for: the gateway names them in its answer, and the set document is checked with
+        that name. A gateway that needs a name (a token that acts for nobody, or one that predates
+        this) is answered by asking for it."""
+        parts = {key: value for key, value in set_document(purpose, "", self.origin, body).items()
+                 if key in {"decisions", "preauthorization", "session", "knowledge", "key_check"}}
+        self.require_touchable()
+
+        def post(account: str) -> dict[str, Any]:
+            return self._post(BEGIN_PATH, {
+                "schema_version": "shakerscan-approval-begin/v1", "purpose": purpose,
+                "account": account, "origin": self.origin, **parts,
+            })
+
+        if not self.account and self._names_no_approver():
+            # A gateway from before the approver was named (it does not report
+            # person_decision_proof) refuses an empty sign-in name and audits the refusal: ask
+            # for the name first, as client 0.11.1 always did, instead of posting it empty.
+            self._account()
+        if self.account:
+            challenge = post(self.account)
+        else:
+            try:
+                challenge = post("")
+            except GatewayRefused as exc:
+                # A token that acts for nobody (account_required), or a gateway from before the
+                # approver was named (it refuses the empty name as request_invalid): ask for it.
+                # A gateway that names the approver refuses request_invalid for another reason,
+                # which is said as it is.
+                if exc.status != 422 or exc.code not in {"account_required", "request_invalid"}:
+                    raise
+                if exc.code == "request_invalid" and not self._names_no_approver():
+                    raise
+                challenge = post(self._account())
+            named = challenge.get("account")
+            if not self.account:
+                if not isinstance(named, str) or not named.strip() or len(named) > 200:
+                    raise ApprovalError("the gateway's challenge names no approver; nothing was approved")
+                self.account = named
+                # The proof asked for is this person's (a token that acts for another person than
+                # the one at the keyboard approves as that person, unless --account): the prompt
+                # names them at the moment of the proof ("TOTP code for alice", "Touch your
+                # security key ..., as alice"), not in a line of its own on every run.
+                self.named = True
+        account = self.account
         document = set_document(purpose, account, self.origin, body)
-        challenge = self._post(BEGIN_PATH, {
-            "schema_version": "shakerscan-approval-begin/v1", "purpose": purpose,
-            "account": account, "origin": self.origin,
-            **{key: value for key, value in document.items()
-               if key in {"decisions", "preauthorization", "session", "knowledge"}},
-        })
         if challenge.get("set_digest") != set_digest(document):
             raise ApprovalError(
                 "the gateway's challenge does not match what you are approving (set digest differs); "
@@ -735,7 +931,7 @@ class StepUp:
     def prove(self, challenge: Mapping[str, Any]) -> dict[str, Any]:
         """A TOTP code, security-key assertion, or browser confirmation of this exact set."""
         methods = [str(item) for item in challenge.get("methods") or ()]
-        method = self.method or ("totp" if "totp" in methods else "security_key" if "security_key" in methods else "sso" if "sso" in methods else "")
+        method = self.method_for(challenge)
         if method not in methods:
             raise ApprovalError(
                 f"your account offers {', '.join(methods) or 'no step-up method'} for this approval, not "
@@ -775,15 +971,476 @@ class StepUp:
         nonce = str(challenge.get("nonce") or "")
         if not webauthn or not nonce or webauthn.get("challenge") != expected_challenge(nonce, challenge["set_digest"]):
             raise ApprovalError("the gateway's security-key challenge is not bound to this approval; nothing was approved")
-        return {"method": "security_key", "credential": security_key_assertion(webauthn, self.origin, self.terminal)}
+        prompt = self.prompt
+        if self.named and self.account:
+            prompt = as_approver(prompt or "Touch your security key.", self.account)
+        told = {"prompt": prompt} if prompt else {}
+        return {"method": "security_key",
+                "credential": security_key_assertion(webauthn, self.origin, self.terminal, **told)}
+
+    def require_touchable(self) -> None:
+        """Before anything is begun: a command whose output is captured (Terminal.full False) is
+        never asked for a touch the gateway's administrator requires (Terminal.require)."""
+        if getattr(self.terminal, "full", True) or self._checked_output:
+            return
+        self._checked_output = True
+        if gateway_features(self.send)["touch_required"]:
+            raise NotAtTerminal(OUTPUT_CAPTURED.format(what="it"), why="output")
+
+    def method_for(self, challenge: Mapping[str, Any]) -> str:
+        methods = [str(item) for item in challenge.get("methods") or ()]
+        webauthn = challenge.get("webauthn") if isinstance(challenge.get("webauthn"), Mapping) else None
+        if self.method:
+            return self.method
+        if not getattr(self.terminal, "full", True):
+            # The output captured (Terminal.require): client 0.11.1's choice, never a key first.
+            return legacy_method(methods)
+        return preferred_method(methods, webauthn, self.origin)
 
 
-def security_key_assertion(webauthn: Mapping[str, Any], origin: str, terminal: Terminal) -> dict[str, Any]:
+def as_approver(prompt: str, account: str) -> str:
+    """The touch prompt naming whom the touch approves as: "Touch your security key to allow, as
+    alice (Ctrl-C to cancel)..."."""
+    who = f", as {_inert(account)[:120]}"
+    for tail in (" (Ctrl-C to cancel)...", "."):
+        if prompt.endswith(tail):
+            return prompt[: -len(tail)] + who + tail
+    return prompt + who
+
+
+def _homebrew_install() -> bool:
+    return "/Cellar/shakerscan/" in os.path.realpath(__file__)
+
+
+def fido2_declared(platform: str | None = None, machine: str | None = None) -> bool:
+    """Whether the client package installs python-fido2 here (client/pyproject.toml): macOS, and
+    64-bit Linux, where its cryptography dependency publishes wheels."""
+    import platform as _platform
+
+    platform = sys.platform if platform is None else platform
+    machine = _platform.machine() if machine is None else machine
+    return platform == "darwin" or (platform.startswith("linux") and machine in {"x86_64", "aarch64"})
+
+
+def _no_fido2() -> str:
+    if _homebrew_install():
+        return ("this Homebrew install of the client has no security-key support (python-fido2 is not "
+                "in the formula): install the client with pipx (pipx install shakerscan) or uv (uv tool "
+                "install shakerscan), which carry it")
+    if not fido2_declared():
+        return ("the client installs without python-fido2 on this platform (its cryptography dependency "
+                "publishes no wheel for it, and on Windows the terminal touch is not supported yet): "
+                "pipx inject shakerscan fido2 adds it where a cryptography wheel or a Rust toolchain exists")
+    return ("a security key needs python-fido2 beside the client: reinstall the client (0.11.2 and later "
+            "carry it), or pipx inject shakerscan fido2 (or pip install fido2)")
+
+
+def remote_session(environ: Mapping[str, str] | None = None) -> bool:
+    """Whether this terminal is a remote (SSH) session, where a key plugged into the computer the
+    person connects from is out of reach."""
+    environ = os.environ if environ is None else environ
+    return bool((environ.get("SSH_CONNECTION") or environ.get("SSH_TTY") or "").strip())
+
+
+REMOTE_NO_KEY = (
+    "no USB security key found: this terminal is a remote (SSH) session, and a key plugged into the "
+    "computer you connect from is out of reach here; run the command on that computer, with a "
+    "connection of its own that acts for you"
+)
+WSL_NO_KEY = (
+    "no USB security key found: this terminal runs in WSL, which sees a USB key only when it is "
+    "passed through (usbipd attach); pass the key through, or run the command where the key is "
+    "plugged in, with a connection of its own that acts for you"
+)
+CONTAINER_NO_KEY = (
+    "no USB security key found: this terminal runs in a container, which sees a USB key only when "
+    "the container is given the device; run the command on the computer the key is plugged into, "
+    "with a connection of its own that acts for you"
+)
+
+
+def key_out_of_reach(environ: Mapping[str, str] | None = None, *, root: str = "/") -> str:
+    """Why a key plugged in by the person cannot arrive in this terminal, or "": a remote (SSH)
+    session, WSL (whose Linux sees a USB key only when it is passed through) or a container. Then
+    no key listed means none will be (the client says why at once instead of waiting for an
+    insertion). mosh and other remote shells are not recognized: the wait names them."""
+    environ = os.environ if environ is None else environ
+    if remote_session(environ):
+        return REMOTE_NO_KEY
+    if not sys.platform.startswith("linux") and root == "/":
+        return ""
+    if environ.get("WSL_DISTRO_NAME") or environ.get("WSL_INTEROP"):
+        return WSL_NO_KEY
+    try:
+        with open(os.path.join(root, "proc/sys/kernel/osrelease"), encoding="utf-8") as release:
+            if "microsoft" in release.read(200).lower():
+                return WSL_NO_KEY
+    except OSError:
+        pass
+    if any(os.path.exists(os.path.join(root, marker)) for marker in (".dockerenv", "run/.containerenv")):
+        return CONTAINER_NO_KEY
+    return ""
+
+
+# The report-descriptor item that names the FIDO Alliance usage page (0xF1D0): every FIDO
+# security key's HID interface declares it.
+FIDO_USAGE_PAGE = b"\x06\xd0\xf1"
+UNOPENABLE_KEY = (
+    "a security key is plugged in that this user may not open: log in at the desktop (systemd 244 "
+    "and later let a desktop session open it), or install your distribution's FIDO udev rules "
+    "(libu2f-udev on Debian and Ubuntu, u2f-hidraw-policy on Fedora; with no desktop session, a "
+    "rule for your group: see the client guide), then run the command again (over SSH a key on "
+    "your laptop is out of reach)"
+)
+MAYBE_UNOPENABLE = (
+    " (if your key is plugged in, this user may not be allowed to open it: log in at the desktop, "
+    "or install your distribution's FIDO udev rules, libu2f-udev on Debian and Ubuntu or "
+    "u2f-hidraw-policy on Fedora; over SSH a key on your laptop is out of reach)"
+)
+
+
+def unopenable_keys(*, root: str = "/") -> str:
+    """On Linux, a plugged-in key this user cannot open, which python-fido2 leaves out of its list
+    (it lists only the devices it can open, so such a key looks unplugged): "fido" when a
+    /dev/hidraw node this user may not read and write is a FIDO key (its report descriptor, which
+    sysfs lets anyone read, names the FIDO usage page), "maybe" when such a node's kind cannot be
+    read, else "" (a keyboard's or touchpad's node is not a key)."""
+    if not sys.platform.startswith("linux"):
+        return ""
+    import glob
+
+    found = ""
+    for node in sorted(glob.glob(os.path.join(root, "dev/hidraw*"))):
+        if os.access(node, os.R_OK | os.W_OK):
+            continue
+        described = os.path.join(root, "sys/class/hidraw", os.path.basename(node), "device/report_descriptor")
+        try:
+            with open(described, "rb") as handle:
+                descriptor = handle.read(4096)
+        except OSError:
+            found = found or "maybe"
+            continue
+        if FIDO_USAGE_PAGE in descriptor:
+            return "fido"
+    return found
+
+
+def _no_device(*, root: str = "/") -> str:
+    """No key found: over SSH, where the key is; on Linux, a plugged-in key this user cannot open
+    (said plainly when its node is a FIDO key, as a possibility when its kind cannot be read)."""
+    if reason := key_out_of_reach():
+        return reason
+    kind = unopenable_keys(root=root)
+    if kind == "fido":
+        return UNOPENABLE_KEY
+    text = "no USB security key found; insert it and run the command again"
+    return text + (MAYBE_UNOPENABLE if kind == "maybe" else "")
+
+
+def security_key_readiness(*, waiting: bool = False) -> str:
+    """Why no key could answer here (python-fido2 missing, no key plugged in), or "". With
+    ``waiting``, a key that is only not plugged in yet is no reason in a local terminal (the
+    assertion waits for it to be inserted); over SSH it still is (it cannot arrive)."""
+    try:
+        from fido2.hid import CtapHidDevice
+    except ImportError:
+        return _no_fido2()
+    if waiting and not key_out_of_reach():
+        return ""
+    try:
+        found = next(iter(CtapHidDevice.list_devices()), None)
+    except Exception:  # no HID access, or a platform the library does not serve
+        found = None
+    return "" if found is not None else _no_device()
+
+
+# While waiting for a key to be inserted: how often the USB devices are listed again.
+INSERT_POLL_SECONDS = 0.5
+
+
+def wait_for_key(list_devices: Callable[[], Any], terminal: "Terminal", seconds: float,
+                 *, sleep: Callable[[float], None] | None = None,
+                 clock: Callable[[], float] | None = None, root: str = "/") -> list[Any]:
+    """The plugged-in keys, after waiting up to ``seconds`` for one to be inserted (a key kept on
+    a keyring costs no second run of the command); the person is told once, and Ctrl-C cancels.
+    None in time: ApprovalError. On Linux a key this user cannot open is said at once (waiting
+    cannot help), and a device of unknown kind it cannot open is named while waiting and after."""
+    sleep = sleep or time.sleep
+    clock = clock or time.monotonic
+    try:
+        devices = list(list_devices())
+    except Exception:
+        devices = []
+    if devices:
+        return devices
+    if reason := key_out_of_reach():
+        raise ApprovalError(reason)
+    kind = unopenable_keys(root=root)
+    if kind == "fido":
+        raise ApprovalError(UNOPENABLE_KEY)
+    hint = MAYBE_UNOPENABLE if kind == "maybe" else ""
+    terminal.say(f"Insert your security key (Ctrl-C to cancel; waiting up to {int(seconds)} seconds){hint}...")
+    deadline = clock() + max(0.0, seconds)
+    while clock() < deadline:
+        sleep(INSERT_POLL_SECONDS)
+        try:
+            devices = list(list_devices())
+        except Exception:
+            devices = []
+        if devices:
+            return devices
+    # Said only now, not at every local prompt: a key plugged into another computer never arrives
+    # over mosh or another remote shell the client cannot recognize (SSH, WSL and containers are
+    # said at once, key_out_of_reach).
+    raise ApprovalError(f"no USB security key was inserted within {int(seconds)} seconds{hint}; nothing "
+                        "was decided (insert it and run the command again; a key plugged into another "
+                        "computer cannot reach this terminal over mosh or another remote shell)")
+
+
+def security_keys_present() -> bool:
+    """Whether python-fido2 is importable and at least one USB security key is plugged in."""
+    return not security_key_readiness()
+
+
+def _credential_ids(webauthn: Mapping[str, Any] | None) -> list[bytes]:
+    return [
+        _b64url_decode(str(item["id"]))
+        for item in (webauthn or {}).get("allowCredentials") or ()
+        if isinstance(item, Mapping) and item.get("id")
+    ]
+
+
+def rp_id_valid(rp_id: str, origin: str) -> bool:
+    """Whether a WebAuthn relying party id may be used from this origin (python-fido2's own check,
+    the one its client applies to the assertion itself)."""
+    try:
+        from fido2.rpid import verify_rp_id
+    except ImportError:
+        return False
+    try:
+        return bool(rp_id) and bool(origin) and bool(verify_rp_id(rp_id, origin))
+    except Exception:
+        return False
+
+
+def probe_device(device: Any, webauthn: Mapping[str, Any] | None, origin: str = "") -> str:
+    """Whether this key can answer the challenge, asked silently (user presence off, so the key
+    does not wait for a touch): "yes" (it holds one of the person's keys), "no" (it holds none),
+    "no_pin" (the gateway asks for the key's PIN and this key has none), "pin_only" (the gateway
+    asks for a touch alone, and the key has a PIN but answers nothing without it: it may hold a
+    passkey a browser made to need the PIN for every use, which the assertion then asks with its
+    PIN), or "unknown" (a key that cannot be asked this way, such as a U2F-only key; the touch
+    itself then tells).
+
+    Only for a relying party id valid for the connection's ``origin`` (rp_id_valid): a gateway
+    could otherwise learn, from what the client does next, whether the key holds a credential of
+    another site. Without a valid one the key is not asked, and the assertion (which checks the
+    same) refuses."""
+    if not rp_id_valid(str((webauthn or {}).get("rpId") or ""), origin):
+        return "unknown"
+    try:
+        from fido2.ctap import CtapError
+        from fido2.ctap2 import Ctap2
+        ctap2 = Ctap2(device)
+        info = ctap2.info
+    except Exception:
+        return "unknown"
+    options = getattr(info, "options", None) or {}
+    requirement = str((webauthn or {}).get("userVerification") or "required")
+    verifies = bool(options.get("clientPin") or options.get("uv"))
+    if requirement == "required" and not verifies:
+        return "no_pin"
+    ids = _credential_ids(webauthn)
+    rp_id = str((webauthn or {}).get("rpId") or "")
+    if not ids or not rp_id:
+        return "unknown"
+    longest = getattr(info, "max_cred_id_length", None)
+    listed = [{"type": "public-key", "id": item} for item in ids if not longest or len(item) <= longest]
+    size = max(1, int(getattr(info, "max_creds_in_list", None) or 1))
+    for start in range(0, len(listed), size):
+        try:
+            ctap2.get_assertion(rp_id, b"\0" * 32, listed[start:start + size], options={"up": False})
+            return "yes"
+        except CtapError as exc:
+            if exc.code != CtapError.ERR.NO_CREDENTIALS:
+                return "unknown"
+        except Exception:
+            return "unknown"
+    if requirement in {"required", "preferred"} and verifies:
+        # A credential a browser made to need the key's PIN for every use (credProtect) is not
+        # found without it; the gateway asks for the PIN here, so the assertion, with it, decides.
+        return "unknown"
+    if verifies:
+        # The same credential, where the gateway asks for a touch only: it is asked with its PIN
+        # (a PIN-verified assertion is user presence too), not called unregistered.
+        return "pin_only"
+    return "no"
+
+
+def eligible_devices(devices: Sequence[Any], webauthn: Mapping[str, Any] | None,
+                     origin: str = "") -> tuple[list[Any], str]:
+    """The plugged-in keys that can answer, and why none can when the list is empty
+    (answering_keys, without whether the PIN is asked)."""
+    found, why, _ = answering_keys(devices, webauthn, origin)
+    return found, why
+
+
+def answering_keys(devices: Sequence[Any], webauthn: Mapping[str, Any] | None,
+                   origin: str = "") -> tuple[list[Any], str, bool]:
+    """The plugged-in keys that can answer, why none can when the list is empty, and whether they
+    are asked with their PIN where the gateway asks for a touch only: the first key that holds one
+    of the person's credentials (any of them answers, so nobody is asked to pick among keys that
+    all can), else every key that could not be asked (the person picks), else every key with a
+    PIN that answered nothing without it (asked with the PIN: a passkey made to need it for every
+    use answers then)."""
+    found = [(device, probe_device(device, webauthn, origin)) for device in devices]
+    holding = [device for device, status in found if status == "yes"]
+    unknown = [device for device, status in found if status == "unknown"]
+    with_pin = [device for device, status in found if status == "pin_only"]
+    if holding:
+        return holding[:1], "", False
+    if unknown:
+        return unknown, "", False
+    if with_pin:
+        return with_pin, "", True
+    if any(status == "no_pin" for _, status in found):
+        return [], ("this security key has no PIN, and this approval asks for the key's PIN: set one "
+                    "(for a YubiKey: ykman fido access change-pin), or approve with --method totp where "
+                    "the gateway offers it"), False
+    return [], ("the security key plugged in holds none of your keys: it is not registered to your "
+                "account; use the key you registered, or add this one under My account in the "
+                "Enterprise console (a local account: Passkeys, \"Use it: for terminal approvals "
+                "(touch)\"; single sign-on: \"Security key for terminal decisions\")"), False
+
+
+def legacy_method(methods: Sequence[str]) -> str:
+    """Client 0.11.1's proof when ``--method`` is not named: the code where the gateway offers
+    one, else a security key, else the browser sign-in. Used where the output is captured
+    (Terminal.require), so such a command asks what 0.11.1 asked."""
+    return next((method for method in ("totp", "security_key", "sso") if method in methods), "")
+
+
+def preferred_method(methods: Sequence[str], webauthn: Mapping[str, Any] | None = None, origin: str = "") -> str:
+    """The proof to give when ``--method`` is not named: the security key whenever the gateway
+    offers one, python-fido2 is installed and a plugged-in key holds one of the person's keys for
+    this challenge (asked silently: nothing blinks), with the administrator's touch switch on or
+    off (a touch, with no PIN, wherever the gateway asks only for user presence; an earlier
+    gateway asks the key's PIN, as at sign-in), never a 6-digit code while a key can answer;
+    also when a key is the only proof offered. A TOTP code only when no key can answer here (none
+    plugged in, none registered, or the gateway asks for a PIN the key has none for); for a
+    single sign-on person the browser sign-in then. ``--method totp`` still chooses the code."""
+    if "security_key" in methods and security_keys_present():
+        if "totp" in methods:
+            # Only a key that says it holds one of the person's credentials: a code is there to
+            # fall back on (and with no challenge to ask about, the code).
+            if webauthn is not None and _key_answers_here(webauthn, origin, unknown_counts=False):
+                return "security_key"
+        elif len(methods) == 1 or webauthn is None or _key_answers_here(webauthn, origin):
+            # No code to fall back on: a key that could not be asked silently (a U2F-only key,
+            # or a credential that answers only after its PIN) is tried too.
+            return "security_key"
+    # No key can answer here: the code, else the browser sign-in, are the fallbacks; a key the
+    # gateway offers alone is still asked (insert it when told).
+    for method in ("totp", "sso", "security_key"):
+        if method in methods:
+            return method
+    return ""
+
+
+def _key_answers_here(webauthn: Mapping[str, Any], origin: str = "", *, unknown_counts: bool = True) -> bool:
+    """Whether a plugged-in key holds one of the person's credentials for this challenge (probe
+    "yes"), or, with ``unknown_counts``, could not be asked silently (probe "unknown")."""
+    try:
+        from fido2.hid import CtapHidDevice
+        found = [probe_device(device, webauthn, origin) for device in CtapHidDevice.list_devices()]
+    except Exception:
+        return False
+    return "yes" in found or (unknown_counts and "unknown" in found)
+
+
+def _device_name(device: Any) -> str:
+    descriptor = getattr(device, "descriptor", None)
+    name = getattr(descriptor, "product_name", None) or getattr(device, "product_name", None)
+    serial = getattr(descriptor, "serial_number", None)
+    where = getattr(descriptor, "path", None)
+    text = str(name or "security key") + (f", serial {serial}" if serial else f" at {where}" if where else "")
+    return _inert(text)[:100]
+
+
+def choose_device(devices: Sequence[Any], terminal: Terminal) -> Any:
+    """The key to ask: the only one that can answer, or, among keys that could not be asked
+    silently (eligible_devices), the one the person picks by number."""
+    if len(devices) == 1:
+        return devices[0]
+    terminal.say("Several security keys are plugged in, and none could be asked which one is yours:")
+    for number, device in enumerate(devices, 1):
+        terminal.say(f"  {number}) {_device_name(device)}")
+    answer = terminal.line(f"Which one is registered to your account? [1-{len(devices)}]: ")
+    if not answer.isdigit() or not 1 <= int(answer) <= len(devices):
+        raise ApprovalError("no security key chosen; nothing was approved")
+    return devices[int(answer) - 1]
+
+
+def key_failure(exc: BaseException) -> str:
+    """What a python-fido2 error means, in plain words (its own text names an enum)."""
+    code = getattr(getattr(exc, "code", None), "name", "")
+    cause = getattr(exc, "cause", None)
+    cause_code = getattr(getattr(cause, "code", None), "name", "") or code
+    if code == "DEVICE_INELIGIBLE" or cause_code == "NO_CREDENTIALS":
+        return ("this security key is not registered to your account: use the key you registered, or "
+                "add this one under My account in the Enterprise console")
+    if code == "TIMEOUT" or cause_code in {"USER_ACTION_TIMEOUT", "ACTION_TIMEOUT", "KEEPALIVE_CANCEL"}:
+        return "no touch in time"
+    if cause_code in {"PIN_BLOCKED", "PIN_AUTH_BLOCKED"}:
+        return "the key's PIN is blocked after wrong PINs: remove and insert the key, or reset its PIN"
+    if cause_code == "PIN_INVALID":
+        return "the PIN was not accepted (the key's own PIN, not an authenticator code; each wrong PIN costs a try)"
+    if code == "CONFIGURATION_UNSUPPORTED" or cause_code in {"PIN_NOT_SET", "UNSUPPORTED_OPTION"}:
+        return ("this key cannot do what the approval asks (its PIN): set a PIN on the key (for a "
+                "YubiKey: ykman fido access change-pin), or approve with --method totp where offered")
+    if cause_code == "OPERATION_DENIED":
+        return "the key declined"
+    return "the security key did not answer as expected"
+
+
+def pin_retries(device: Any) -> int | None:
+    """How many wrong PINs the key still takes before it blocks its PIN, as the key says
+    (CTAP2 getPinRetries: a silent command, nothing blinks); None when it does not say."""
+    try:
+        from fido2.ctap2 import Ctap2
+        from fido2.ctap2.pin import ClientPin
+
+        retries = ClientPin(Ctap2(device)).get_pin_retries()[0]
+    except Exception:  # an older key, a U2F-only key, or a library without the command
+        return None
+    return retries if type(retries) is int and 0 <= retries <= 255 else None
+
+
+def pin_notice(retries: int | None) -> str:
+    """What the person is told before a security key's PIN is asked for: it is the key's own PIN
+    (the one set on the key, as at sign-in), not the 6-digit code of an authenticator app, and
+    how many tries are left; each wrong PIN costs one, and a blocked PIN is reset only by
+    resetting the key, which removes every credential on it, other sites' passkeys included."""
+    text = ("This approval asks for your security key's own PIN (the one set on the key), not your "
+            "authenticator app's code; --method totp approves with the code instead, where you enrolled one.")
+    if retries is None:
+        return text
+    if retries <= 3:
+        return (text + f" Only {retries} PIN {'try is' if retries == 1 else 'tries are'} left before the key "
+                "blocks its PIN; unblocking it resets the key and removes every credential on it.")
+    return text + f" {retries} PIN tries are left."
+
+
+def security_key_assertion(webauthn: Mapping[str, Any], origin: str, terminal: Terminal, *,
+                           prompt: str = "Touch your security key.",
+                           insert_seconds: float = 60.0) -> dict[str, Any]:
     """A WebAuthn assertion from a USB/NFC security key over CTAP2 (python-fido2).
 
     Platform authenticators (Touch ID, Windows Hello, synced passkeys) are not reachable from a
-    pip-installed command, so only a roaming key is used. The key's PIN (user verification) is
-    asked for here, as at sign-in."""
+    pip-installed command, so only a roaming key is used. User verification is what the gateway
+    asks for (``userVerification``): ``required`` (the key's PIN is asked for here, as at sign-in)
+    or, when an administrator requires a touch for each decision, ``discouraged`` (a touch, no
+    PIN). A gateway that names none asks for ``required``."""
     try:
         from fido2.client import Fido2Client, UserInteraction
         from fido2.hid import CtapHidDevice
@@ -792,20 +1449,44 @@ def security_key_assertion(webauthn: Mapping[str, Any], origin: str, terminal: T
             PublicKeyCredentialType, UserVerificationRequirement,
         )
     except ImportError as exc:
-        raise ApprovalError(
-            "a security key needs python-fido2 beside the client: pipx inject shakerscan fido2 "
-            "(or pip install fido2); or approve with a TOTP code (--method totp)"
-        ) from exc
-    device = next(iter(CtapHidDevice.list_devices()), None)
-    if device is None:
-        raise ApprovalError("no USB security key found; insert it (or approve with --method totp)")
+        raise ApprovalError(_no_fido2() + "; or approve with a TOTP code where the gateway offers one "
+                            "(--method totp)") from exc
+    # A key not plugged in yet is waited for (bounded, within the challenge's life).
+    devices = wait_for_key(CtapHidDevice.list_devices, terminal, insert_seconds)
+    # Asked silently first, so the key that blinks is one that can answer, and the person picks
+    # among those before being told to touch.
+    candidates, why, with_pin = answering_keys(devices, webauthn, origin)
+    if not candidates:
+        raise ApprovalError(why)
+    device = choose_device(candidates, terminal)
+    requirement = str(webauthn.get("userVerification") or "required")
+    if requirement not in {"required", "preferred", "discouraged"}:
+        requirement = "required"
+    if with_pin and requirement == "discouraged":
+        # Nothing on the key answers a touch alone: a passkey a browser made to need its PIN for
+        # every use answers with it (the gateway accepts a PIN-verified touch), so the PIN is asked
+        # once instead of the key being called unregistered.
+        terminal.say("This security key answers nothing to a touch alone: it is not registered to your account, "
+                     "or it holds a passkey that answers only after the key's PIN. To try it, enter the key's "
+                     "PIN, then touch it (Ctrl-C to cancel).")
+        requirement = "required"
+
+    # A touch alone (no PIN): told now, once the key is chosen. With a PIN: after it is typed.
+    told = [requirement == "discouraged"]
+    if prompt and told[0]:
+        terminal.say(prompt)
 
     class Interaction(UserInteraction):  # type: ignore[misc,valid-type]
         def prompt_up(self) -> None:
-            terminal.say("Touch your security key.")
+            if prompt and not told[0]:
+                told[0] = True
+                terminal.say(prompt)
 
         def request_pin(self, permissions: Any, rp_id: Any) -> str:  # noqa: ARG002
-            return terminal.secret("Security key PIN: ")
+            # Said before the prompt: someone used to typing an authenticator code here (client
+            # 0.11.1 asked for one) would spend one of the key's PIN tries on it.
+            terminal.say(pin_notice(pin_retries(device)))
+            return terminal.secret("Security key PIN (not your authenticator code): ")
 
         def request_uv(self, permissions: Any, rp_id: Any) -> bool:  # noqa: ARG002
             return True
@@ -817,7 +1498,7 @@ def security_key_assertion(webauthn: Mapping[str, Any], origin: str, terminal: T
             PublicKeyCredentialDescriptor(type=PublicKeyCredentialType.PUBLIC_KEY, id=_b64url_decode(str(item["id"])))
             for item in webauthn.get("allowCredentials") or () if isinstance(item, Mapping) and item.get("id")
         ] or None,
-        user_verification=UserVerificationRequirement.REQUIRED,
+        user_verification=UserVerificationRequirement(requirement),
         timeout=webauthn.get("timeout"),
     )
     try:  # python-fido2 2.x takes a client-data collector; 1.x takes the origin.
@@ -829,7 +1510,7 @@ def security_key_assertion(webauthn: Mapping[str, Any], origin: str, terminal: T
     try:
         response = client.get_assertion(options).get_response(0)
     except Exception as exc:  # the library raises several client/CTAP errors for the same failure
-        raise ApprovalError(f"the security key did not sign the approval: {exc}") from exc
+        raise ApprovalError(f"the security key did not sign: {key_failure(exc)}") from exc
     return assertion_json(response)
 
 
@@ -858,18 +1539,36 @@ def preauthorize(send: Send, origin: str, terminal: Terminal, allow: Sequence[st
     """Step up once for start bounds; return the gateway's pre-authorization (id, allow, expiry)."""
     if use not in PREAUTHORIZATION_USES:
         raise ApprovalError(f"unknown pre-authorization use {use!r}")
-    terminal.require("pre-authorizing --allow bounds")
+    terminal.require("pre-authorizing --allow bounds", touch_required=touch_switch(send))
     bounds = sorted(dict.fromkeys(str(item).strip() for item in allow if str(item).strip()))
     terminal.say("Pre-authorize these bounds (requests inside them are granted as they arise):")
     for bound in bounds:
         terminal.say(f"  --allow {bound}")
     stepup = StepUp(send, origin, terminal, account=account, method=method)
     challenge, _ = stepup.begin("preauthorization", {"preauthorization": {"allow": bounds, "use": use}})
+    if budget := safety_budget_words(challenge.get("safety_budget")):
+        # Under the administrator's touch switch, what this one touch approves besides the bounds:
+        # the one safety budget every Hunt of the agent session shares (the gateway's words).
+        terminal.say(f"Every Hunt this agent session starts shares one safety budget: {budget}.")
+        terminal.say("A Hunt start past what is left, or a raise past it, asks you again.")
     result = stepup.finish(challenge, stepup.prove(challenge))
     grant = result.get("preauthorization") if isinstance(result.get("preauthorization"), Mapping) else {}
     if not grant.get("id"):
         raise ApprovalError("the gateway answered without a pre-authorization id; nothing was pre-authorized")
     return dict(grant)
+
+
+def safety_budget_words(lines: Any) -> str:
+    """An agent session's safety budget as the gateway named it (each ceiling's label and total),
+    in one line; "" when the gateway named none (the switch is off, or an earlier gateway)."""
+    if not isinstance(lines, list):
+        return ""
+    words = []
+    for item in lines[:6]:
+        if not isinstance(item, Mapping) or type(item.get("total")) is not int:
+            continue
+        words.append(f"{_inert(str(item.get('label') or item.get('limit') or ''))[:40]} {item['total']:,}")
+    return ", ".join(words)
 
 
 # --- knowledge-review decisions ----------------------------------------------------------------
@@ -1067,20 +1766,31 @@ def _report(terminal: Terminal, requests: Mapping[str, Mapping[str, Any]], resul
 def decide(send: Send, terminal: Terminal, requests: Sequence[Mapping[str, Any]], decision: str, *,
            enterprise: bool, origin: str, remember: bool = False, total: int | None = None,
            account: str | None = None, method: str | None = None,
-           session: Mapping[str, Any] | None = None, confirmed: bool = False) -> int:
+           session: Mapping[str, Any] | None = None, confirmed: bool = False,
+           approver: dict[str, Any] | None = None, shown: Callable[[], None] | None = None) -> int:
     """Decide ``requests`` with one proof: one step-up (or the open approver ``session``) on
-    Enterprise, one local confirmation on OSS (``confirmed``: the --watch keypress was it)."""
+    Enterprise, one local confirmation on OSS (``confirmed``: the --watch keypress was it).
+    ``approver`` receives the account the gateway named as approving (``account``), so a watch
+    names it once and passes it to every later decision. ``shown`` shows the requests: on
+    Enterprise once the gateway has begun the approval (a refusal before any proof is then said
+    alone), on OSS before the confirmation."""
     if not requests:
         terminal.say("no pending permission requests")
         return 0
     entries = [decision_entry(item, decision, remember=remember, total=total) for item in requests]
     by_id = {str(item["id"]): item for item in requests}
-    if remember and decision == "allow":
-        for entry in entries:
-            if entry["scope"] != "target":
-                terminal.say(f"note: {by_id[entry['request_id']].get('title')} cannot be remembered; "
-                             "it is allowed for this Hunt only")
+
+    def show() -> None:
+        if shown is not None:
+            shown()
+        if remember and decision == "allow":
+            for entry in entries:
+                if entry["scope"] != "target":
+                    terminal.say(f"note: {by_id[entry['request_id']].get('title')} cannot be remembered; "
+                                 "it is allowed for this Hunt only")
+
     if not enterprise:
+        show()
         verb = "Allow" if decision == "allow" else "Deny"
         what = "this request" if len(entries) == 1 else f"these {len(entries)} requests"
         if not confirmed and not terminal.confirm(f"{verb} {what} on this engine?"):
@@ -1089,14 +1799,24 @@ def decide(send: Send, terminal: Terminal, requests: Sequence[Mapping[str, Any]]
         return _report(terminal, by_id, _local_decide(send, entries), decided_by="local-operator",
                        via="local confirmation")
     stepup = StepUp(send, origin, terminal, account=account, method=method)
+    stepup.named = bool(approver and approver.get("named"))
     challenge, _ = stepup.begin("permission_decision", {"decisions": entries})
+    show()
+    if approver is not None and stepup.account:
+        approver["account"] = stepup.account
+        approver["named"] = stepup.named
     if session is not None:
         proof = {"method": "approver_session", "session_id": session["session_id"],
                  "session_secret": session["secret"]()}
     else:
+        what = "" if len(entries) == 1 else f" these {len(entries)} requests"
+        stepup.prompt = f"Touch your security key to {decision}{what} (Ctrl-C to cancel)..."
         proof = stepup.prove(challenge)
     result = stepup.finish(challenge, proof)
     via = str(result.get("decision_via") or "terminal_stepup").replace("_", " ")
+    webauthn = challenge.get("webauthn") if isinstance(challenge.get("webauthn"), Mapping) else {}
+    if proof.get("method") == "security_key" and webauthn.get("userVerification") == "discouraged":
+        via = "security-key touch"  # the gateway asked a touch only (user presence, no PIN)
     return _report(terminal, by_id, list(result.get("results") or ()),
                    decided_by=str(result.get("decided_by") or stepup.account), via=via)
 
@@ -1133,7 +1853,9 @@ def watch(send: Send, terminal: Terminal, *, enterprise: bool, origin: str, hunt
     Enterprise: one step-up opens an approver session at the gateway (30 minutes at most); its
     secret lives only in this foreground process. Local OSS: every keypress is the confirmation.
     """
-    terminal.require("shakerscan approve --watch")
+    hunt_word = _id_word(hunt_id)
+    terminal.require(person_runs="shakerscan approve --watch" + (f" --hunt {hunt_word}" if hunt_word else ""),
+                     touch_required=touch_switch(send) if enterprise else None)
     seconds = max(60, min(int(minutes) * 60, SESSION_SECONDS))
     opened_session: dict[str, Any] = {}
     # Installed before the step-up, so no moment leaves an opened approver session unrevoked.
@@ -1159,21 +1881,47 @@ def watch(send: Send, terminal: Terminal, *, enterprise: bool, origin: str, hunt
 def _watch(send: Send, terminal: Terminal, *, enterprise: bool, origin: str, hunt_id: str | None, seconds: int,
            account: str | None, method: str | None, poll_seconds: float, sleep: Callable[[float], None],
            opened: dict[str, Any]) -> int:
-    """The watch itself; ``opened`` receives the approver session the moment it exists."""
+    """The watch itself; ``opened`` receives the approver session the moment it exists.
+
+    When the gateway's administrator requires a security-key touch for each decision, the gateway
+    opens no approver session (``touch_required``): the watch then asks for one touch per
+    decision (``allow a[l]l`` decides every request shown with one touch)."""
     session: dict[str, Any] | None = None
+    touch_mode = False
     if enterprise:
         stepup = StepUp(send, origin, terminal, account=account, method=method)
-        challenge, _ = stepup.begin("approver_session", {"session": {"ttl_seconds": seconds}})
-        answer = stepup.finish(challenge, stepup.prove(challenge)).get("session") or {}
-        if not answer.get("session_id") or not answer.get("session_secret"):
-            raise ApprovalError("the gateway answered without an approver session; nothing was opened")
-        session = {"session_id": str(answer["session_id"]), "secret": _HeldSecret(str(answer["session_secret"]))}
-        opened.update(session)
+        try:
+            challenge, _ = stepup.begin("approver_session", {"session": {"ttl_seconds": seconds}})
+        except GatewayRefused as exc:
+            if exc.code != "touch_required":
+                raise
+            touch_mode = True
+            terminal.say("Each decision is one touch of your security key (required on this installation).")
+            unready = security_key_readiness()
+            if unready and "python-fido2" in unready:
+                raise ApprovalError(unready + "; nothing was decided")
+            if unready:
+                terminal.say(f"note: {unready.split(';')[0]}; plug it in before you decide")
+        else:
+            answer = stepup.finish(challenge, stepup.prove(challenge)).get("session") or {}
+            if not answer.get("session_id") or not answer.get("session_secret"):
+                raise ApprovalError("the gateway answered without an approver session; nothing was opened")
+            session = {"session_id": str(answer["session_id"]), "secret": _HeldSecret(str(answer["session_secret"]))}
+            opened.update(session)
+            terminal.say(f"approver session open until {answer.get('expires_at') or f'{seconds // 60} minutes from now'} "
+                         "(held in this process only; Ctrl-C ends it)")
         account = stepup.account
-        terminal.say(f"approver session open until {answer.get('expires_at') or f'{seconds // 60} minutes from now'} "
-                     "(held in this process only; Ctrl-C ends it)")
+    # Who approves: named by the gateway at the first decision of a touch-mode watch (whose
+    # approver session it refused before naming anyone), then passed to every later one, so it is
+    # said once and the gateway's description is not read again for each decision.
+    approver: dict[str, Any] = {"account": account}
+    # Only a gateway that says it serves the feed is read (an older one would audit a refusal).
+    decisions_elsewhere = (
+        PersonDecisionFeed(send) if enterprise and gateway_features(send)["names_approver"] else None
+    )
     deadline = time.monotonic() + seconds
     seen: set[str] = set()
+    retry: list[dict[str, Any]] = []
     where = f"Hunt {hunt_id}" if hunt_id else "every open Hunt"
     # O2: on an open-source engine nothing was printed until a request arrived, and the end said
     # "approver session ended" although there is no session there.
@@ -1209,7 +1957,17 @@ def _watch(send: Send, terminal: Terminal, *, enterprise: bool, origin: str, hun
         terminal.say(f"watching {where} for permission requests... (Ctrl-C to stop)")
         while time.monotonic() < deadline:
             shown = False
-            for request in feed.poll():
+            for line in decisions_elsewhere.poll() if decisions_elsewhere else ():
+                terminal.say(line)
+            # A request whose touch failed is shown again first (the feed brings only changes).
+            polled, retry[:] = [*retry, *feed.poll()], []
+            fresh = list({str(item["id"]): item for item in polled if str(item["id"]) not in seen}.values())
+            if len(fresh) > 1 and touch_mode:
+                # One touch can decide every request shown (a set of up to 50).
+                terminal.say(f"{len(fresh)} new requests:")
+                for request in fresh:
+                    terminal.say(render_request(request))
+            for index, request in enumerate(fresh):
                 if str(request["id"]) in seen:
                     continue
                 seen.add(str(request["id"]))
@@ -1220,19 +1978,45 @@ def _watch(send: Send, terminal: Terminal, *, enterprise: bool, origin: str, hun
                     terminal.say(f"{ended_prompt.pop()}; now showing request {request['id']} "
                                  "(press a new key for it)")
                     ended_prompt.clear()
-                terminal.say(render_request(request))
+                if not (len(fresh) > 1 and touch_mode):
+                    terminal.say(render_request(request))
+                else:
+                    terminal.say(f"[{index + 1}/{len(fresh)}] {_inert(str(request.get('title') or request['id']))}")
                 remember = "r" if request.get("remember_supported") else ""
+                rest = [item for item in fresh[index:] if item is request or str(item["id"]) not in seen]
+                every = "l" if touch_mode and len(rest) > 1 else ""
                 choice = terminal.key(
-                    "  [a]llow" + ("  [r]emember for the target" if remember else "") + "  [d]eny  [s]kip  [q]uit: ",
-                    "ads" + remember + "q", keep_waiting=still_pending(request), interval=poll_seconds,
+                    "  [a]llow" + ("  [r]emember for the target" if remember else "")
+                    + (f"  allow a[l]l {len(rest)} shown" if every else "") + "  [d]eny  [s]kip  [q]uit: ",
+                    "ads" + remember + every + "q", keep_waiting=still_pending(request), interval=poll_seconds,
                 )
                 if choice == "q":
                     terminal.say(ended)
                     return 0
+                if choice == "l":
+                    # One touch per set of up to 50 (the gateway's set size): every request shown.
+                    seen.update(str(item["id"]) for item in rest)
+                    for start in range(0, len(rest), 50):
+                        chunk = rest[start:start + 50]
+                        if not _touch_decision(terminal, seen, retry, chunk, lambda chunk=chunk: decide(
+                                send, terminal, chunk, "allow", enterprise=enterprise, origin=origin,
+                                account=approver["account"], method=method, session=None, confirmed=False,
+                                approver=approver)):
+                            for item in rest[start + 50:]:
+                                seen.discard(str(item["id"]))
+                                retry.append(item)
+                            break
+                    break
                 if choice in {"a", "r", "d"}:
-                    decide(send, terminal, [request], "deny" if choice == "d" else "allow",
-                           enterprise=enterprise, origin=origin, remember=choice == "r",
-                           account=account, method=method, session=session, confirmed=not enterprise)
+                    def one(request=request, choice=choice) -> None:
+                        decide(send, terminal, [request], "deny" if choice == "d" else "allow",
+                               enterprise=enterprise, origin=origin, remember=choice == "r",
+                               account=approver["account"], method=method, session=session,
+                               confirmed=not enterprise, approver=approver)
+                    if touch_mode:
+                        _touch_decision(terminal, seen, retry, [request], one)
+                    else:
+                        one()
                 if time.monotonic() >= deadline:
                     break
             # Each read that brings nothing new doubles the wait before the next, up to
@@ -1243,6 +2027,146 @@ def _watch(send: Send, terminal: Terminal, *, enterprise: bool, origin: str, hun
             delay = min(delay * 2, max(poll_seconds, WATCH_MAX_POLL_SECONDS))
     terminal.say(f"{ended} (time limit)")
     return 0
+
+
+# Refusals a touch-mode watch never asks again for: retrying them cannot succeed in this watch.
+FINAL_REFUSALS = frozenset({
+    "security_key_not_registered", "security_key_unavailable", "person_unknown", "account_unknown",
+    "role_insufficient", "stepup_locked", "token_invalid",
+})
+
+
+def _touch_decision(terminal: Terminal, seen: set[str], retry: list[dict[str, Any]],
+                    requests: Sequence[Mapping[str, Any]], run: Callable[[], Any]) -> bool:
+    """One decision of a touch-mode watch: a touch that fails (no touch in time, the wrong key,
+    a key pulled out) or that the person cancels with Ctrl-C leaves the requests pending, says
+    why, and the watch goes on showing them; only a signal from elsewhere ends it here."""
+    try:
+        run()
+        return True
+    except Terminated:
+        raise
+    except KeyboardInterrupt:
+        reason = "touch cancelled"
+    except (OutcomeUnknown, RequestGone):
+        raise
+    except GatewayRefused as exc:
+        if exc.code in FINAL_REFUSALS:
+            # Asking again cannot help (no key registered, the person or account gone, locked
+            # out): said once, and the watch ends instead of asking on every poll.
+            raise
+        reason = f"not decided: {_inert(str(exc))[:300]}"
+    except ApprovalError as exc:
+        reason = f"not decided: {_inert(str(exc))[:300]}"
+    for request in requests:
+        seen.discard(str(request["id"]))
+        retry.append(dict(request))
+    which = "the request stays pending and is" if len(requests) == 1 else "they stay pending and are"
+    terminal.say(f"  {reason}; {which} shown again (q quits)")
+    return False
+
+
+# --- the person decisions of every connection of this person (Enterprise, --watch) -------------
+
+PERSON_FEED_PATH = "/_enterprise/person-decisions"
+PERSON_FEED_SCHEMA = "shakerscan-person-decisions/v1"
+_DECISION_WORDS = {
+    "budget.raise": "raise a Hunt's budget",
+    "target.authorize": "authorize a target for active testing",
+    "credential.share": "share a saved credential with another target",
+    "approval_receipt": "write a scope or approval receipt",
+    "hunt_authority.widen": "widen a target's Hunt permissions",
+    "shell_plan.confirm": "confirm a device SSH plan",
+    "authorization_investigation.approve": "approve an authorization investigation",
+    "device.locator": "move a device to a new address",
+    "device.lockout": "acknowledge a device credential's lockout",
+    "device.policy": "choose a device's automation policy",
+    "device.verify": "confirm authorization to probe a device's service",
+    "secret.reactivate": "reactivate a discovered secret",
+    "secret.expiry": "change a discovered secret's expiry",
+    "target.environment": "change the environment a target or device is judged in",
+    "hunt.start": "start a Hunt past its agent session's safety budget",
+}
+# A refused Hunt start: the feed keeps no request body, so the start's own command is the agent's
+# to give (its refusal line ends with it).
+_ASK_THE_AGENT = (" (ask the agent for its command: the start's own `shakerscan api POST /hunts ...` "
+                  "line, which only its output has)")
+
+
+class PersonDecisionFeed:
+    """``GET /_enterprise/person-decisions``: decisions only a person should make, made through
+    any connection that acts for the same person (made with a token, proved by a key touch, or
+    refused), for --watch to print as lines. Read only on a gateway that reports it serves it
+    (gateway_features); one that answers without the feed's schema is left alone after that."""
+
+    def __init__(self, send: Send) -> None:
+        self.send, self.after, self.supported = send, None, True
+
+    def poll(self) -> list[str]:
+        if not self.supported:
+            return []
+        path = PERSON_FEED_PATH + (f"?after={int(self.after)}" if self.after is not None else "")
+        try:
+            status, body = self.send("GET", path)
+        except ApprovalError:
+            return []
+        if not _ok(status) or not isinstance(body, Mapping) or body.get("schema_version") != PERSON_FEED_SCHEMA:
+            self.supported = not (status in FEED_ABSENT or _ok(status))
+            return []
+        if isinstance(body.get("after"), int):
+            self.after = body["after"]
+        return [person_decision_line(item) for item in body.get("decisions") or () if isinstance(item, Mapping)]
+
+
+def person_decision_line(item: Mapping[str, Any]) -> str:
+    when = time.strftime("%H:%M:%S", time.localtime(item["at"])) if isinstance(item.get("at"), int) else "--:--:--"
+    kind = str(item.get("decision") or "")
+    what = _DECISION_WORDS.get(kind, _inert(kind[:60]) or "a person's decision")
+    where = _inert(f"{item.get('method') or ''} {item.get('path') or ''}".strip()[:200])
+    said = _inert(str(item.get("summary") or ""))[:300]
+    via = _inert(str(item.get("connection") or "another connection")[:100])
+    made = item.get("made")
+    if made == "proved":
+        # Written once the engine answered: `security_key`, or `security_key_<status>` when it
+        # refused the request the person touched for (nothing was decided then).
+        outcome = str(item.get("outcome") or "")
+        refused = outcome.startswith("security_key_")
+        head = ("proved by key touch, not applied (the engine answered HTTP "
+                f"{_inert(outcome[13:])[:10]})" if refused else "decided by key touch")
+    elif made == "refused":
+        head = "refused, a key touch is required"
+        if run := _refused_command(item):
+            head += f" (run in your terminal: {run})"
+        elif kind == "hunt.start":
+            head += _ASK_THE_AGENT
+    else:
+        outcome = str(item.get("outcome") or "")
+        refused = outcome.startswith("unproven_")
+        head = "made with a token, no touch" + (f" (the engine answered HTTP {_inert(outcome[9:])[:10]})" if refused else "")
+    if said:
+        # The gateway's own words for what was decided (every limit a raise set, the host).
+        return f"[{when}] {head}: {said} via connection {via}"
+    return f"[{when}] {head}: {what} ({where}) via connection {via}"
+
+
+_ID = re.compile(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}")
+
+
+def _refused_command(item: Mapping[str, Any]) -> str:
+    """The command that decides a refused decision the watch shows, when the feed row says enough
+    without the request's body: a refused submission's target (the target's authorization, never
+    the agent's work), a target's own authorization, a budget raise (its limits are the agent's
+    request: named as placeholders). Else "" (the agent's own output names the command)."""
+    target = str(item.get("target_id") or "")
+    path = str(item.get("path") or "")
+    parts = [part for part in path.split("/") if part]
+    if item.get("decision") == "target.authorize" and _ID.fullmatch(target):
+        return f"shakerscan targets authorize {target.lower()}"
+    if len(parts) == 3 and parts[0] == "targets" and parts[2] == "authorization" and _ID.fullmatch(parts[1]):
+        return f"shakerscan targets authorize {parts[1].lower()}"
+    if len(parts) == 3 and parts[0] == "hunts" and parts[2] == "budget-amendments" and _ID.fullmatch(parts[1]):
+        return f"shakerscan hunt budget raise {parts[1].lower()} --limit NAME=N"
+    return ""
 
 
 class Terminated(KeyboardInterrupt):
@@ -1305,6 +2229,28 @@ def _revoke(send: Send, terminal: Terminal, session_id: str, held: _HeldSecret) 
 # --- the commands ------------------------------------------------------------------------------
 
 
+def _id_word(value: Any) -> str | None:
+    """A request or Hunt id as one word of the person's command: a UUID only (lower case), never
+    a value an agent chose that the person's client would read as an option (``--url=...`` would
+    send the person's approval protocol to another origin)."""
+    text = str(value or "").strip().lower()
+    return text if _UUID.fullmatch(text) else None
+
+
+def _person_runs(command: str, args: Any) -> str:
+    """The approve or deny command the person runs in their own terminal, naming the pending
+    request the agent named (or every pending one); an id that is not a UUID is named as
+    ``<request-id>`` (the request is then found with ``--all-pending``)."""
+    words = [f"shakerscan {command}"]
+    if args.all_pending:
+        words.append("--all-pending")
+    else:
+        words.append(_id_word(args.request_id) or "<request-id>")
+    if hunt := _id_word(args.hunt):
+        words.append(f"--hunt {hunt}")
+    return " ".join(words)
+
+
 def run(command: str, args: Any, send: Send, *, enterprise: bool, origin: str,
         terminal: Terminal | None = None) -> int:
     """``shakerscan approve|deny`` as parsed by the product CLI; returns the exit code."""
@@ -1315,7 +2261,8 @@ def run(command: str, args: Any, send: Send, *, enterprise: bool, origin: str,
             raise ApprovalError("--watch belongs to shakerscan approve")
         return watch(send, terminal, enterprise=enterprise, origin=origin, hunt_id=args.hunt,
                      minutes=args.minutes, account=args.account, method=args.method)
-    terminal.require(f"shakerscan {command}")
+    terminal.require(person_runs=_person_runs(command, args),
+                     touch_required=touch_switch(send) if enterprise else None)
     if args.all_pending:
         requests = list_pending(send, args.hunt)
     elif args.request_id:
@@ -1330,16 +2277,22 @@ def run(command: str, args: Any, send: Send, *, enterprise: bool, origin: str,
     if not requests:
         terminal.say("no pending permission requests")
         return 0
-    terminal.say(f"{'Allow' if decision == 'allow' else 'Deny'} {len(requests)} permission request(s):")
-    for request in requests:
-        terminal.say(render_request(request))
     if args.total is not None and len(requests) != 1:
         raise ApprovalError("--total applies to one budget request at a time")
-    if not enterprise:
-        terminal.say("This engine has no accounts: anyone who can reach its API could decide. "
-                     "The confirmation below is the only check.")
+
+    def shown() -> None:
+        terminal.say(f"{'Allow' if decision == 'allow' else 'Deny'} {len(requests)} permission request(s):")
+        for request in requests:
+            terminal.say(render_request(request))
+        if not enterprise:
+            terminal.say("This engine has no accounts: anyone who can reach its API could decide. "
+                         "The confirmation below is the only check.")
+
+    # On Enterprise the requests are shown once the gateway has begun the approval, so a refusal
+    # before any proof (no security key registered, say) is said first and alone.
     return decide(send, terminal, requests, decision, enterprise=enterprise, origin=origin,
-                  remember=args.remember, total=args.total, account=args.account, method=args.method)
+                  remember=args.remember, total=args.total, account=args.account, method=args.method,
+                  shown=shown)
 
 
 def add_arguments(parser: Any, command: str) -> None:
@@ -1362,10 +2315,11 @@ def add_arguments(parser: Any, command: str) -> None:
 
 
 __all__ = [
-    "APPROVAL_SCHEMA_PREFIX", "ApprovalError", "BEGIN_PATH", "GatewayRefused", "OutcomeUnknown",
+    "APPROVAL_SCHEMA_PREFIX", "ApprovalError", "BEGIN_PATH", "EXIT_NOT_AT_TERMINAL", "GatewayRefused",
+    "NotAtTerminal", "OutcomeUnknown", "terminal_output",
     "instance_kind", "FINISH_PATH", "PREAUTHORIZATION_HEADER",
     "REVOKE_TIMEOUT_SECONDS", "RequestGone", "SESSION_REVOKE_PATH", "StepUp", "StepUpUnavailable", "Terminal", "add_arguments",
     "assertion_json", "decide", "decide_knowledge", "decision_entry", "expected_challenge", "find_request",
-    "knowledge_entry", "list_pending", "preauthorize",
+    "knowledge_entry", "list_pending", "preauthorize", "safety_budget_words",
     "render_request", "run", "set_digest", "set_document", "wait_for", "watch",
 ]

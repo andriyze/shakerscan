@@ -1304,7 +1304,7 @@ claim for that planner. It meters every executable capability.
 
 A scanner call's hold depends on the Hunt's budget profile only for `sqli.verify` and `xss.verify`,
 whose paced argv cannot finish inside the registry wall. On every named profile (`fast`, `balanced`,
-`thorough`), `sqli.verify` reserves 900 requests / 540 s and `xss.verify` 1,800 requests / 480 s. A
+`thorough`), `sqli.verify` reserves 1,800 requests / 1,200 s and `xss.verify` 1,800 requests / 480 s. A
 call against a device target (its fragility allowance is charged one point per held request) and a
 headless `deep_domxss` call keep the registry holds (900 / 300 s and 400 / 120 s). An `xss.verify`
 the worker routes to the pinned browser runs within the browser prover's own limits under either
@@ -1520,9 +1520,16 @@ sent attack input, by whole words. A finding with no prover of its own, or only 
 finding, its verified XSS and authorization proofs included, which a Scan prover would judge by a
 different check, or a Hunt finding of a family no prover covers: run the Hunt again) or
 `retest_by_rescan_only` (headers, cookies, CORS, TLS, DNS, takeover, GraphQL, authorization and
-earlier posture findings, and a point sqlmap found in a URL path segment: run a new Scan). Finding
-detail, `POST /findings/{id}/retest`, bulk retest and the automatic retest after a Scan apply the
-same rule. A verified SQL injection, NoSQL injection or browser-executed XSS finding is retested by
+earlier posture findings, and a point sqlmap found in a URL path segment: run a new Scan). A
+finding of any type from a Scan that ran signed in (credential profiles, or the managed profiles,
+form or OAuth logins and sign-in scenarios earlier releases recorded) and left no identity a retest
+can send says `retest_needs_signed_in_identity`: a retest would send its request anonymously, so
+run an authenticated Scan with the same profile; a Scan signed in with a raw header or cookies is
+retested with them. Finding detail, `POST /findings/{id}/retest`, bulk retest and the automatic
+retest after a Scan apply the same rule. A Hunt agent's candidate proven with `http_request` as a
+signed-in principal records it (`evidence_principals`) and is not queued for a retest, and a retest
+of a signed-in finding or candidate that reaches the worker anyway sends nothing and is
+inconclusive. A verified SQL injection, NoSQL injection or browser-executed XSS finding is retested by
 the check that proved it, with the request it proved: the route on the site the proof recorded
 (else the scanned target's site) with the tested query parameter set as the Scan set it, or the
 page with the browser proof's own payload, checked against the payload digest the finding kept.
@@ -2061,7 +2068,7 @@ for the profile contract, invocation, limits and acceptance gates.
 | Deprecated wrapper aliases | 0 | `scanner.sh` |
 | Make targets | 20 | `Makefile` |
 | Release gates | 17 | `scripts/release_gates.py` |
-| Runtime environment keys | 429 | Python sources + Compose manifests |
+| Runtime environment keys | 431 | Python sources + Compose manifests |
 | Internal compatibility scanner modules | 142 | `scanner/scanner_tools/` |
 | UI pages | 40 | `ui/src/app/` |
 | Skills | 9 | `skills/` |
@@ -3180,6 +3187,7 @@ Only key names and declaring sources are documented; secret values are never rea
 | `SCAN_SETTINGS_KEY` | `api/settings_routes/router.py` |
 | `SCAN_SHUTDOWN_GRACE_SECONDS` | `scanner/scanner.py` |
 | `SCAN_VERIFICATION_MAX` | `scanner/scanner.py` |
+| `SHAKERSCAN_AGENT_NAME` | `scripts/hunt_approve.py` |
 | `SHAKERSCAN_AGENT_TOOL_OUTPUT_BYTES` | `api/worker.py` |
 | `SHAKERSCAN_AGENT_TOOL_RESULT_TTL_SECONDS` | `api/worker.py` |
 | `SHAKERSCAN_ALLOWED_HOSTS` | `docker-compose.release.yml`, `docker-compose.yml` |
@@ -3215,6 +3223,7 @@ Only key names and declaring sources are documented; secret values are never rea
 | `SHAKERSCAN_CANONICAL_REPORT_ONLY` | `scanner/scanner_tools/common.py` |
 | `SHAKERSCAN_CANONICAL_SCAN_EXECUTION` | `scanner/scanner.py` |
 | `SHAKERSCAN_COMPOSE_PROJECT` | `api/api.py` |
+| `SHAKERSCAN_CONFIG_DIR` | `scripts/person_decision.py` |
 | `SHAKERSCAN_CORS_ALLOW_ORIGINS` | `api/api.py`, `docker-compose.release.yml`, `docker-compose.yml` |
 | `SHAKERSCAN_CORS_ALLOW_ORIGIN_REGEX` | `api/api.py`, `docker-compose.release.yml`, `docker-compose.yml` |
 | `SHAKERSCAN_CRAWLER_MEMORY_LIMIT_MB` | `api/deployment_policy.py` |

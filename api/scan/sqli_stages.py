@@ -705,7 +705,7 @@ async def run_staged_sqli_attempt(
     hold cannot fund the unit's negative verdict but can a positive. The stage guard still
     refuses a hold no larger than one the unit already ran out of (the planner sizes a last
     chance above it). ``minimum_delay_seconds`` is the floor the worker paces this candidate's
-    requests at when its endpoint has one of its own (the sign-in endpoint's lockout-safe pace):
+    requests at when its endpoint has one of its own (the sign-in endpoint's paced rate):
     each stage is paced, recorded and held at it, so the latency a stage measures is the
     target's, and a stage holds no more requests than its wall paces at that floor.
     """

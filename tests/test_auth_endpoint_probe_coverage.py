@@ -1,4 +1,4 @@
-"""Coverage names the lockout-safe probe set on the credential profile's sign-in endpoint (E1-N6).
+"""Coverage names the paced, bounded probe set on the credential profile's sign-in endpoint.
 
 The batch side is tests/test_auth_endpoint_probe_limit.py; this file reads its records through the
 finalizer in the package import layout, as tests/test_slow_endpoint_coverage.py does.

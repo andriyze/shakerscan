@@ -1,7 +1,7 @@
 # Hunt recording, finish proposals and budgets
 
 **Status:** describes how a Hunt records findings, what finishing proposes for reuse and how the
-Hunt budget profiles are sized, as of 2.11.1.
+Hunt budget profiles are sized, as of 2.11.2.
 
 ## Finding locations
 
@@ -147,10 +147,26 @@ their values: TCP ports (100 / 1,200 / 10,000), state-changing requests (4 / 20 
 ports, out-of-band interactions and device fragility, as do the policy switches and approvals
 that turn them on. Records cost no traffic and no wall and get one per call.
 
-`sqli.verify` reserves 900 requests / 540 s and `xss.verify` 1,800 requests / 480 s on every
-profile (a device target and a headless `deep_domxss` call keep the registry holds). A call the
-remaining budget cannot fund is refused with a budget request a person can grant, never started at
-a shorter hold; a call admitted at an older hold runs at the hold it reserved.
+`sqli.verify` reserves 1,800 requests / 1,200 s and `xss.verify` 1,800 requests / 480 s on every
+profile (a device target and a headless `deep_domxss` call keep the registry holds). One sqli.verify
+input with no injection was measured to cost up to 516 requests, about 570 s at sqlmap's pace of
+about one request a second; the hold is twice that. A `sqli.verify` names the input to test, a
+query parameter (`/reports?filter=x`) or a path segment marked with `*` (`/products/1*`); a path
+with neither is refused at no cost (`sqli_injection_point_missing`), because sqlmap would inject
+into the URL path itself. A call the remaining budget cannot fund is refused with a budget request
+a person can grant, never started at a shorter hold; a call admitted at an older hold runs at the
+hold it reserved. Calls run side by side, and each keeps its whole wall reservation until it
+settles to the wall it ran: on `fast` (3,600 s), two `sqli.verify` calls in flight hold 2,400 s,
+and another call that needs more wall than is left waits for a budget raise or for one to settle.
+A Hunt has at most two long actions in flight (a worker action whose wall, as the registry gives
+it or as the call reserves it, exceeds 60 s: `sqli.verify`, `xss.verify`, `templates.scan`,
+`ports.discover`, `service.fingerprint`, `service.nse_check`, `subdomains.discover`, `web.crawl`,
+`web.content_discover`, `web.browser_crawl`, `browser.login_check`), so a short call never waits
+behind long actions for one of the worker's three slots, only behind short work or an SSH
+command; a third is refused with `long_actions_in_flight` (HTTP 429), reserving and recording
+nothing, and is sent again with the same key once one settles. A call's own time counts from when
+a worker starts it, and one no worker starts within its reservation's lease is released without a
+charge.
 
 ## When a limit is used up
 

@@ -159,7 +159,7 @@ A capability runs synchronously on the engine and can take minutes (a crawl, con
 When its answer is lost -- the adapter's own request timeout, or a gateway's 502/503/504 -- the
 adapter replays the same key and unchanged input, which the engine answers with the action's
 current state without starting it again, until the action is final or
-`SHAKERSCAN_MCP_ACTION_WAIT_SECONDS` (default 900, at most 3600) passes; only then does it report
+`SHAKERSCAN_MCP_ACTION_WAIT_SECONDS` (default 120, at most 3600) passes; only then does it report
 the unknown outcome and its recovery identity. `shakerscan hunt call` does the same, bounded by
 `SHAKERSCAN_HUNT_ACTION_WAIT_SECONDS`. The adapter classifies by the HTTP status it received, never
 by the text of the reason. A definite refusal (a 4xx other than 408, 425 and 429) is never replayed
@@ -189,15 +189,52 @@ The capability request may run as long as the server's wall time for it
 (`budget_cost.tool_wall_seconds` in the Hunt manifest) plus a margin, never only the adapter's
 20-second request timeout. MCP clients usually end a request after 60 seconds, so the adapter never outlives it: a
 client that sent a progress token receives progress notifications every 10 seconds while the
-action runs (clients that reset their timeout on progress, such as OpenCode, keep waiting); any
-other client gets an answer within `SHAKERSCAN_MCP_CALL_SECONDS` (default 45, at most 55). The
-engine answers the first request only when the action is done, so that request ends 10 seconds
+action runs (clients that reset their timeout on progress, such as OpenCode, keep waiting), for at
+most `SHAKERSCAN_MCP_ACTION_WAIT_SECONDS` (default 120); any other client gets an answer within
+`SHAKERSCAN_MCP_CALL_SECONDS` (default 45, at most 55). The bound matters because a client keeps
+the agent's step open while any of its calls runs, and OpenCode starts nothing else meanwhile: a
+verifier that runs for twenty minutes (`sqli.verify`) answers `outcome: "running"` after two, and
+the agent works on and collects it later. An action that ends within the wait settles in the call
+(`web.crawl` and content discovery hold 75 s); one whose `budget_cost.tool_wall_seconds` is longer
+(`ports.discover`, `web.browser_crawl`, `candidate.verify`, `browser.login_check`,
+`templates.scan`, `service.nse_check`, `sqli.verify`, `xss.verify`) may answer running. A running
+action keeps its wall reservation until it settles, so two in flight can hold most of a short
+Hunt's duration (on `fast`, two `sqli.verify` hold 2,400 of its 3,600 s); a call the remaining
+duration cannot fund asks for a budget raise, or waits for one to settle.
+
+A Hunt has at most two long actions in flight: a worker action whose wall, as the registry gives
+it or as the call reserves it, exceeds 60 s (`sqli.verify`, `xss.verify`, `templates.scan`,
+`ports.discover`, `service.fingerprint`, `service.nse_check`, `subdomains.discover`, `web.crawl`,
+`web.content_discover`, `web.browser_crawl`, `browser.login_check`). The agent-tool worker runs
+three actions at once and long ones in at most two of them, so a short call (`http.request`,
+`artifact.inspect`, a browser step) does not wait behind long actions: it waits only for short
+work, each at most 60 s, or for an SSH command, which runs on the worker that holds its session
+and takes a slot without counting as long. The engine counts a call's own time, its timeout plus
+30 s, from when a worker starts it; a call no worker starts while its reservation's lease lasts
+(at least 90 s) is released without running or a charge and ends `worker_result_timeout`. A third
+long call is refused with HTTP 429 and reason code `long_actions_in_flight` (the actions in flight
+are listed in `in_flight`), reserving and recording nothing, and the adapter answers it as
+`outcome: "retry_later"`: collect one of the others or work with short calls, then send it again
+with the same key. Other Hunts on the same instance share the worker: a long action queued while
+theirs hold both long slots waits for one, without taking the slot short calls run in, and runs
+its whole wall once it starts (one still waiting when its reservation's lease ends is released
+without running). Once eight long actions wait on one worker, it leases nothing more, short calls
+included, until one of them starts.
+
+The engine answers the first request only when the action is done, so that request ends 10 seconds
 before the call's wait does, and a replay of the same key learns the recorded action's state. An
 action still running then is returned as a normal result with `outcome: "running"` and its
 `mcp_idempotency_key`, and the `continue` text names that key: calling the tool again with the same
 key and unchanged input collects the result, because the engine replays the recorded action and
-never runs it twice. When no answer arrives at all, the error message itself names the key to call
-again with.
+never runs it twice. A collect the engine answers at once with "still running" waits at most 10
+more seconds for it, not the whole action wait. `shakerscan_hunt_get` lists, as
+`mcp_uncollected_actions`, each action this adapter answered `outcome: "running"` for that no later
+call has collected (at most 20, each with its capability, key and input, or the input's digest when
+it is over 2 KB), and as `in_flight_actions` every action the server still runs, from this session
+or an earlier one (at most 20, with its capability, status, start and `idempotency_key_sha256`: an
+earlier session's action is collected with the key that session sent, or read in the Hunt once it
+settles). When no answer arrives at all, the error message itself names the key to call again
+with.
 The runtime still revalidates target binding, approval, budgets, evidence, and proof contracts.
 Catalog/contract drift, redirects, oversized responses, unavailable APIs, and unexpected dispatch
 results fail closed. A redirect names the origin it points at and how to connect there (usually an

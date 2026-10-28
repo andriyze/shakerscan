@@ -1,9 +1,9 @@
-"""The in-process checks keep the sign-in endpoint's pace and probe sets too (E1-N6).
+"""The in-process checks keep the sign-in endpoint's pace and probe sets too.
 
 Besides sqlmap and Dalfox, five checks send requests to a candidate's endpoint from the worker
 itself: the SQLi and XSS request verifiers, the SQLi proof, the NoSQLi check and the XSS browser
 proof. On the credential profile's own sign-in endpoint each of their requests waits the
-lockout-safe pace, and each check draws from a probe set of its own across the Scan, so what the
+paced rate, and each check draws from a probe set of its own across the Scan, so what the
 endpoint may receive is the sum of the probe sets. The adapters are the real ones over a fake
 transport (a unit fixture: a sign-in form that answers every request alike, so nothing proves);
 the pace is recorded, not slept; the XSS browser proof's runtime is a stand-in.

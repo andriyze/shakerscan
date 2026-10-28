@@ -8,7 +8,7 @@ FROM ${SCANNER_RUNTIME_IMAGE} AS scanner-runtime
 # The posture check engine (posture/) is the same TypeScript code that serves
 # pub.shakerscan.com. It is bundled into one file here; the final image gets
 # only that bundle and this stage's pinned Node runtime, never npm or sources.
-FROM node:26-bookworm-slim@sha256:662933cf47f013bc8e4beb31a6116448427a82057ba7c42c97e4c5ba766504c2 AS posture-engine
+FROM node:26-bookworm-slim@sha256:28147155d47dc31abe0a46e0d12b59b2fb3d0a2dcc5dc65fce76a074180b16fe AS posture-engine
 WORKDIR /src
 COPY posture/package.json posture/package-lock.json ./
 RUN npm ci --ignore-scripts --no-audit --no-fund
@@ -22,8 +22,10 @@ FROM mcr.microsoft.com/playwright/python:v1.63.0-noble@sha256:72bd171a9ffc2b4b59
 # Naming the base image's OpenSSL here upgrades it to the current noble-security build (the
 # scanner image already does); otherwise the API keeps whatever the pinned Playwright base
 # shipped, which failed the image gate on CVE-2026-84782 (fixed in 3.0.13-0ubuntu3.16).
+# libbrotli1 likewise, for CVE-2026-111497 (the Brotli decoder's out-of-bounds write, fixed in
+# 1.1.0-2ubuntu0.1); Ubuntu rates it medium, so the image gate does not refuse the base's build.
 RUN --mount=type=bind,source=scanner/apt_install.sh,target=/tmp/apt_install.sh,ro \
-    sh /tmp/apt_install.sh ca-certificates curl jq openssl libssl3t64
+    sh /tmp/apt_install.sh ca-certificates curl jq openssl libssl3t64 libbrotli1
 
 # The scanner runtime's Python tree below is copied over this base, which pip-installs virtualenv
 # and its dependencies. The scanner removes them before its locked install; remove them here too,

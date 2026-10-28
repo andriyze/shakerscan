@@ -808,12 +808,16 @@ test('a record without bases (2.11.0) still shows run of total; no record shows 
 
 const scanPage = fs.readFileSync(path.join(import.meta.dirname, '../app/scans/[id]/page.tsx'), 'utf8')
 
-test('a sign-in endpoint probed only within its lockout-safe ceiling is named as a coverage limit', () => {
+test('a sign-in endpoint probed only within its paced, bounded probe set is named as a coverage limit', () => {
   const result = scanResultPresentation({
     result: { findings: [], result: {}, coverage: { reasons: ['auth_endpoint_probe_limited'], family_coverage: [] } },
   }, { band: 'moderate', label: 'Moderate coverage' })
   assert.equal(result.coverageGapReasons.length, 1)
-  assert.match(result.coverageGapReasons[0], /sign-in endpoint .* lockout-safe/)
+  assert.match(result.coverageGapReasons[0], /sign-in endpoint is tested paced and bounded \(at most 20 requests a minute/)
+  assert.match(result.coverageGapReasons[0], /up to 4,352 requests per scan part/)
+  // It never claims the pace prevents a lockout.
+  assert.doesNotMatch(result.coverageGapReasons[0], /lockout-safe/)
+  assert.match(result.coverageGapReasons[0], /does not prevent a sign-in throttle or lockout/)
   // Each check there draws from a set of its own.
   assert.match(result.coverageGapReasons[0], /a bounded set of probes for each check/)
 })

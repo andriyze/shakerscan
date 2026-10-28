@@ -201,7 +201,9 @@ def _forwarded(argv):
     """Run main() with the runtime CLIs stubbed; return (url_args, forwarded argv) per call."""
     calls = []
     fake = mock.Mock()
-    fake.main.side_effect = lambda forwarded: calls.append(list(forwarded)) or 0
+    # `scan` also names the command it was started as (prog=, for its help); the argv is the
+    # same either way.
+    fake.main.side_effect = lambda forwarded, **_named: calls.append(list(forwarded)) or 0
     with mock.patch.object(cli, "apply_connection", side_effect=lambda args: args.url or "http://127.0.0.1:8080"), \
          mock.patch.object(cli, "load", return_value=fake):
         assert cli.main(argv) == 0

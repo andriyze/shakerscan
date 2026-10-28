@@ -8168,7 +8168,14 @@ async def _arsenal_dispatch_http_diff(p: dict[str, Any], approval_receipt_id: st
     }
 
 
-async def _arsenal_dispatch_workflow(p: dict[str, Any], approval_receipt_id: str | None) -> dict[str, Any]:
+async def _arsenal_dispatch_workflow(
+    p: dict[str, Any], approval_receipt_id: str | None, *, service_origin: str | None = None,
+) -> dict[str, Any]:
+    """Run one two-run family-proof workflow on the target.
+
+    ``service_origin`` is the HTTP service the verifier resolved for a network target, whose
+    ``host://`` URL names no service. It is keyword-only, so command parameters never set it.
+    """
     target_uuid = _uuid_or_400(str(p.get("target_id") or ""), "target id")
     hypothesis_id = str(p.get("_research_hypothesis_id") or "").strip() or None
     workflow_uuid = _uuid_or_400(str(p.get("workflow_id") or ""), "workflow id")
@@ -8185,13 +8192,14 @@ async def _arsenal_dispatch_workflow(p: dict[str, Any], approval_receipt_id: str
             raise HTTPException(status_code=404, detail="Active target not found")
         if str(target["discovery_source"] or "") == "model-intake":
             raise HTTPException(status_code=400, detail="Model Intake artifacts are not workflow targets")
+        base_url = str(service_origin or target["url"])
         # A create-based mass_assignment lead selected WITHOUT a planner-supplied workflow is materialized
         # server-side: probe the create surface for its real body/envelope, then build the workflow. This
         # is what makes an unattended deep_hunt promote registration mass_assignment -- the planner only
         # selects the lead. No-op when the planner supplied steps or the lead is not create-based MA.
         await _server_materialize_create_ma(
             conn,
-            str(target["url"]),
+            base_url,
             target_uuid,
             p,
             hypothesis_id,
@@ -8210,7 +8218,7 @@ async def _arsenal_dispatch_workflow(p: dict[str, Any], approval_receipt_id: str
             }
         }
         try:
-            normalized = normalize_workflow(str(target["url"]), workflow_payload)
+            normalized = normalize_workflow(base_url, workflow_payload)
             used_slots = {
                 *{step["principal"] for step in normalized["steps"]},
                 *{item["principal"] for item in normalized.get("principal_variables") or []},
@@ -8307,7 +8315,7 @@ async def _arsenal_dispatch_workflow(p: dict[str, Any], approval_receipt_id: str
     try:
         _inject_create_mass_assignment_credentials(principal_contexts, normalized)
         executed = await _execute_workflow_runtime(
-            str(target["url"]),
+            base_url,
             workflow_payload,
             normalized,
             principal_contexts,
@@ -8327,7 +8335,7 @@ async def _arsenal_dispatch_workflow(p: dict[str, Any], approval_receipt_id: str
         else:
             _inject_create_mass_assignment_credentials(principal_contexts, normalized)
             replayed = await _execute_workflow_runtime(
-                str(target["url"]),
+                base_url,
                 workflow_payload,
                 normalized,
                 principal_contexts,
@@ -8359,7 +8367,11 @@ async def _arsenal_dispatch_workflow(p: dict[str, Any], approval_receipt_id: str
                 tool_name="experiment.workflow",
                 adapter_version="2026-07-12.v1",
                 redacted_argv=["experiment.workflow", str(target_uuid), workflow_id, f"steps:{safe_result.get('step_count', 0)}"],
-                target_scope={"target_id": str(target_uuid), "target_url": str(target["url"]), "same_origin_only": True},
+                target_scope={
+                    "target_id": str(target_uuid), "target_url": str(target["url"]),
+                    **({"service_origin": service_origin} if service_origin else {}),
+                    "same_origin_only": True,
+                },
                 approval_receipt_id=approval_receipt_id,
                 status="failed" if failed_count == safe_result.get("step_count") else "success",
                 parser_status="parsed",
@@ -8388,7 +8400,7 @@ async def _arsenal_dispatch_workflow(p: dict[str, Any], approval_receipt_id: str
             receipt = receipt_result.get("tool_receipt") or {}
             evidence_result = await _record_evidence_instance(conn, EvidenceInstanceRequest(
                 target_id=str(target_uuid),
-                concrete_url=str(target["url"]),
+                concrete_url=base_url,
                 request_response_refs=[
                     f"{item.get('kind')}:{item.get('label')}:{item.get('principal')}"
                     for item in safe_result.get("observations", [])
@@ -8414,7 +8426,7 @@ async def _arsenal_dispatch_workflow(p: dict[str, Any], approval_receipt_id: str
             promotion = await _promote_trusted_workflow_finding(
                 conn,
                 target_uuid=target_uuid,
-                target_url=str(target["url"]),
+                target_url=base_url,
                 hypothesis_id=hypothesis_id or "",
                 workflow_id=workflow_id,
                 proof=trusted_proof,

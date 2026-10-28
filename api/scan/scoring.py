@@ -130,8 +130,10 @@ def assurance(
 
     # Active verification actually attempted, across every selected family: a candidate an
     # active verifier attempted, or proof escalation that ran over one.
+    # A proof attempt that never reached a verdict (``unresolved_candidates``) verified nothing.
     verifier_attempts = sum(
-        int((item.get("proof_escalation") or {}).get("attempted_candidates") or 0)
+        max(0, int((item.get("proof_escalation") or {}).get("attempted_candidates") or 0)
+            - int((item.get("proof_escalation") or {}).get("unresolved_candidates") or 0))
         + int(item.get("verified_findings") or 0)
         for item in families
         if isinstance(item.get("proof_escalation"), Mapping)

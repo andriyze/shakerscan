@@ -86,6 +86,21 @@ through Tailwind CSS at build time only), and the optional `@img/sharp-libvips-*
 used by Next.js image handling (LGPL-3.0-or-later). All other direct dependencies are under MIT,
 BSD, ISC or Apache-2.0 licences; the exact set is recorded in each release SBOM.
 
+The `shakerscan` client package has one runtime dependency on macOS and 64-bit Linux (where it is
+installed from the package index with the client rather than bundled; elsewhere the client
+installs without it): python-fido2 (Yubico AB, https://github.com/Yubico/python-fido2;
+BSD-2-Clause, with some files under Apache-2.0 and MPL-2.0), which talks to a USB security key, and
+its dependencies cryptography (Apache-2.0 OR BSD-3-Clause), cffi (MIT), pycparser (BSD-3-Clause)
+and, on Python 3.10, typing-extensions (PSF-2.0). The versions a client release was reviewed and
+tested with are pinned with hashes in `client/requirements/runtime.lock` and inventoried in the
+client's release SBOM. `pipx install shakerscan` or `uv tool install shakerscan` resolves the
+declared requirements (exactly `fido2==2.2.1`; `cryptography>=50.0.2,<52`, or `>=48.0.1,<49` on an
+Intel Mac; whatever versions of their own dependencies match) from the package index at install
+time, without hashes; `pip install --require-hashes -r client/requirements/runtime.lock` installs
+exactly the locked set. Before a client is published its wheel is checked both ways: from the lock,
+and from a plain resolution on Linux x86-64 and Apple Silicon macOS (docs/client.md says what each
+check covers).
+
 ## External services
 
 ShakerScan never sends callbacks to ProjectDiscovery's public Interactsh servers. Out-of-band

@@ -39,7 +39,7 @@ from ._vendored import helper, kit_sources, load
 INSTALL_ONE_LINER = "curl -fsSL https://install.shakerscan.com | sh"
 CLIENT_COMMANDS = (
     "connect", "disconnect", "agent", "api", "scan", "check", "mcp", "hunt", "approve", "deny", "knowledge",
-    "secrets", "record", "doctor", "version",
+    "secrets", "targets", "record", "doctor", "version",
 )
 AGENTS = ("codex", "claude", "opencode", "pi")
 CONNECT_PATH = "/_enterprise/connect/"
@@ -59,6 +59,10 @@ LOOPBACK_HOSTS = {"localhost", "127.0.0.1", "::1"}
 
 class ClientError(Exception):
     """A configuration problem the operator can fix; reported without a traceback."""
+
+    # 3: a command that asks the person, refused because this is no person's terminal (nothing
+    # ran); every other problem exits 2.
+    exit_code = 2
 
 
 def build_source() -> str | None:
@@ -829,7 +833,10 @@ def launch_preauthorization(args: argparse.Namespace, url: str, token_file: str 
             url, approval.Terminal(), bounds, use="agent_launch", account=args.account, method=args.method,
         )
     except approval.ApprovalError as exc:
-        raise ClientError(f"{str(exc).rstrip('.')}. No agent was started.") from exc
+        error = ClientError(f"{str(exc).rstrip('.')}. No agent was started.")
+        if isinstance(exc, approval.NotAtTerminal):
+            error.exit_code = approval.EXIT_NOT_AT_TERMINAL
+        raise error from exc
     print(_shown(f"allowed:   {', '.join(bounds)} (pre-authorization {granted['id']}"
                  + (f", until {granted['expires_at']}" if granted.get("expires_at") else "") + ")"))
     return {**env, "SHAKERSCAN_PREAUTHORIZATION_ID": str(granted["id"])}
@@ -1276,7 +1283,8 @@ def cmd_mcp(args: argparse.Namespace) -> int:
 HUNT_HELP_NOTE = """\
 shakerscan hunt [--url URL] [--token-file FILE] [--timeout SECONDS] <subcommand> ...
   The connection options may come before or after the subcommand; --timeout is the number of
-  seconds to wait for each API answer (default 60). The runtime Hunt CLI's own help follows.
+  seconds to wait for each API answer (default 60). `shakerscan hunt budget raise <hunt> --limit
+  NAME=N|+N` raises a Hunt's budget (a person's decision). The runtime Hunt CLI's own help follows.
 """
 
 
@@ -1288,6 +1296,11 @@ def cmd_hunt(args: argparse.Namespace) -> int:
     if rest and rest[0] in ("-h", "--help"):
         sys.stdout.write(HUNT_HELP_NOTE + "\n")
         sys.stdout.flush()
+    if rest[:2] == ["budget", "raise"]:
+        # A person's decision, in the person's own terminal (decisions.py).
+        from .decisions import hunt_budget_raise
+
+        return hunt_budget_raise(rest[2:], url, args.timeout)
     timeout = ["--timeout", str(args.timeout)] if args.timeout is not None else []
     return int(load("_v2_cli").main(["--api-url", url, *timeout, "hunt", *rest]))
 
@@ -1301,10 +1314,19 @@ def cmd_approval(args: argparse.Namespace) -> int:
     rest = list(args.args)
     if rest and rest[0] == "--":
         rest = rest[1:]
+    if args.command == "approve" and "--test" in rest:
+        # One touch of the person's key, nothing decided (touchtest.py).
+        from .touchtest import approve_test
+
+        return approve_test(rest, url, args.timeout)
     if any(token in ("-h", "--help") for token in rest):
         sys.stdout.write(f"shakerscan {args.command} [--url URL] [--token-file FILE] [--timeout SECONDS] ...\n"
                          "  Against the connected instance unless --url names another. Run it yourself, in your\n"
-                         "  own terminal: it asks you (never an agent) for the decision.\n\n")
+                         "  own terminal: it asks you (never an agent) for the decision.\n"
+                         + ("  shakerscan approve --test: one touch of your security key on an Enterprise\n"
+                            "  connection, checked by the gateway; nothing is decided.\n"
+                            if args.command == "approve" else "")
+                         + "\n")
         sys.stdout.flush()
     timeout = ["--timeout", str(args.timeout)] if args.timeout is not None else []
     return int(load("_v2_cli").main(["--api-url", url, *timeout, args.command, *rest]))
@@ -1373,6 +1395,10 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     except mcp.MCPError as exc:
         lines.append(f"mcp:      {_with_reason(exc)}")
         ok = False
+    if token:
+        from .decisions import touch_lines
+
+        lines.extend(touch_lines(client))
     print("\n".join(_shown(line) for line in lines))
     if is_loopback(url) and engine_launcher() is not None:
         # For a local engine, the launcher's own `doctor` (Docker, disk, host checks) is what
@@ -1382,8 +1408,15 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     return 0 if ok else 1
 
 
+def cmd_targets(args: argparse.Namespace) -> int:
+    from .decisions import cmd_targets as run
+
+    return run(args)
+
+
 COMMANDS = {
     "version": cmd_version,
+    "targets": cmd_targets,
     "mcp": cmd_mcp,
     "hunt": cmd_hunt,
     "approve": cmd_approval,
@@ -1576,7 +1609,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     for name, text in (
         ("approve", "allow a Hunt permission request in your own terminal: Enterprise with your TOTP code or "
-                    "security key, an open-source engine with a y/N; --all-pending, --watch"),
+                    "security key, an open-source engine with a y/N; --all-pending, --watch; --test: one "
+                    "touch of your security key, nothing decided"),
         ("deny", "deny a Hunt permission request in your own terminal"),
     ):
         approval = commands.add_parser(name, help=text)
@@ -1602,8 +1636,10 @@ def build_parser() -> argparse.ArgumentParser:
     connection(secrets)
     secrets.add_argument("args", nargs=argparse.REMAINDER,
                          help="list | revoke | reactivate | expiry | grant | ungrant | promote | reveal ...")
+    from .decisions import add_parser as add_targets_parser
     from .record import add_parser as add_record_parser
 
+    add_targets_parser(commands, connection)
     add_record_parser(commands, connection)
     doctor = commands.add_parser(
         "doctor",
@@ -1652,4 +1688,4 @@ def main(argv: Sequence[str] | None = None) -> int:
         return COMMANDS[args.command](args)
     except ClientError as exc:
         sys.stderr.write(f"shakerscan: {_shown(exc, multiline=True)}\n")
-        return 2
+        return exc.exit_code

@@ -175,3 +175,34 @@ def test_other_tools_mark_a_retry_later_status_in_the_message():
     with pytest.raises(mcp.MCPError) as later:
         client.call_tool("shakerscan_hunt_cancel", {"hunt_id": HUNT})
     assert later.value.message == "ShakerScan API returned HTTP 429: rate limited (retryable: wait and try again)"
+
+
+def test_a_hunt_over_its_long_actions_answers_retry_later_with_what_is_in_flight():
+    """The engine refuses a third long action with 429 long_actions_in_flight: "not now", nothing
+    reserved or recorded, so the agent works on and sends the same key again later."""
+    body = {"detail": {
+        "error": "long_actions_in_flight", "reason_code": "long_actions_in_flight",
+        "message": "This Hunt already has 2 long actions in flight (sqli.verify, xss.verify).",
+        "in_flight": [{"capability_name": "sqli.verify", "action_id": "act-1"},
+                      {"capability_name": "xss.verify", "action_id": "act-2"}],
+        "max_long_actions_in_flight": 2,
+    }}
+
+    class Busy(ScriptedOpener):
+        def open(self, request, timeout):
+            if request.get_method() == "GET":
+                return super().open(request, timeout)
+            self.seen.append(("POST", request.full_url.removeprefix("http://127.0.0.1:8080")))
+            raise urllib.error.HTTPError(request.full_url, 429, "busy", {"Retry-After": "60"},
+                                         io.BytesIO(json.dumps(body).encode()))
+
+    client = _client({})
+    client.opener = Busy({("GET", f"/hunts/{HUNT}"): HUNT_RECORD})
+    with pytest.raises(mcp.MCPError) as later:
+        _call_capability(client)
+    error = later.value
+    assert error.data["outcome"] == "retry_later" and error.data["reason_code"] == "long_actions_in_flight"
+    assert error.data["in_flight"] == body["detail"]["in_flight"]
+    assert "2 long actions in flight" in error.message and "key-refusal-1" in error.message
+    assert error.data["retry_after_seconds"] == 60
+    assert client.opener.seen.count(("POST", CAPABILITY_PATH)) == 1

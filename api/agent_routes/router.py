@@ -36,7 +36,9 @@ try:
     from capabilities.http import execute_bound_http_request
     from http_experiment import MAX_REDIRECT_HOPS, compare_summaries
     from hunt.run_service import agent_tools
-    from retest_contract import build_retest_job_payload, normalize_retest_type, validate_retest_job_payload
+    from retest_contract import (
+        build_retest_job_payload, candidate_evidence_principals, normalize_retest_type, validate_retest_job_payload,
+    )
     from runtime.models import TargetBinding
     from scan.retest_authority import admit_retest, admitted_authority_json
     from serialization import row_to_dict
@@ -55,7 +57,9 @@ except ModuleNotFoundError:  # package import in host-side tests
     from ..capabilities.http import execute_bound_http_request
     from ..http_experiment import MAX_REDIRECT_HOPS, compare_summaries
     from ..hunt.run_service import agent_tools
-    from ..retest_contract import build_retest_job_payload, normalize_retest_type, validate_retest_job_payload
+    from ..retest_contract import (
+        build_retest_job_payload, candidate_evidence_principals, normalize_retest_type, validate_retest_job_payload,
+    )
     from ..runtime.models import TargetBinding
     from ..scan.retest_authority import admit_retest, admitted_authority_json
     from ..serialization import row_to_dict
@@ -1615,14 +1619,27 @@ def _agent_finalize_gate(state: dict[str, Any]) -> list[dict[str, Any]]:
     """Provenance-gate the model's debrief findings (SUSPECTED tier). ONLY a finding's OWN
     cited evidence refs count — never borrow another finding's (or the run's) tool output. A
     finding whose refs do not resolve to real tool evidence fails the gate and is surfaced
-    (tier 'blocked') but NOT persisted: fail-closed against false-positive persistence."""
+    (tier 'blocked') but NOT persisted: fail-closed against false-positive persistence.
+
+    ``evidence_principals`` names the principals other than ``anonymous`` that the finding's own
+    ``http_request`` evidence was sent as (``as_principal``): a retest cannot run as one, so it
+    must not judge the claim."""
     gated_findings: list[dict[str, Any]] = []
     for raw in state["findings"]:
         finding = agent_provenance.strip_self_verification(dict(raw))
         refs = raw.get("evidence_refs") or []
         finding["evidence"] = [state["evidence_by_ref"][r] for r in refs if r in state["evidence_by_ref"]]
         gate = agent_provenance.gate_live_finding(finding)
-        gated_findings.append({"finding": finding, "gate": gate, "tier": "suspected" if gate["passed"] else "blocked"})
+        principals = sorted({
+            agent_tools.normalize_principal_slot(
+                ((state.get("results_store") or {}).get(ref) or {}).get("request", {}).get("as_principal")
+            )
+            for ref in refs if isinstance(ref, str) and ref in (state.get("results_store") or {})
+        } - {"anonymous"})
+        gated_findings.append({
+            "finding": finding, "gate": gate, "tier": "suspected" if gate["passed"] else "blocked",
+            "evidence_principals": principals,
+        })
     return gated_findings
 
 
@@ -1697,6 +1714,7 @@ async def _agent_persist_suspected_findings(
                         research_episode_id=research_episode_id,
                         agent_hunt_run_id=agent_hunt_run_id,
                         known_keys=known_keys,
+                        evidence_principals=entry.get("evidence_principals") or (),
                     )
                 entry["persisted"] = record
                 persisted.append(record)
@@ -1923,6 +1941,11 @@ async def _agent_auto_queue_dast_retests(
                 if not candidate:
                     continue
                 context = _decode_json_value(candidate["verification_context"]) or {}
+                # A claim whose evidence was sent signed in (``as_principal``) is not retested: the
+                # retest cannot run as that principal, and an anonymous one meeting a guest page
+                # that answers 200 would refute a flaw still there for the signed-in user.
+                if candidate_evidence_principals(context):
+                    continue
                 rtype = normalize_retest_type(
                     context.get("retest_type") or candidate["family"]
                 )
@@ -2214,12 +2237,17 @@ async def _persist_agent_suspected_finding(
     research_episode_id: Optional[str],
     agent_hunt_run_id: Optional[str],
     known_keys: set[str],
+    evidence_principals: Sequence[str] = (),
 ) -> dict[str, Any]:
     """Persist a provenance-gated model claim as a non-authoritative investigation candidate.
 
     The candidate is kept outside ``findings`` until a registered deterministic verifier crosses
     the proof gate. It is deduplicated by family and canonical locus and retains enough bounded,
     redacted context for that verifier to replay the exact claim.
+
+    The principals other than ``anonymous`` the claim's evidence was sent as are recorded
+    (``evidence_principals``), so no retest judges it anonymously. A later claim on the same
+    candidate gathered anonymously leaves them recorded.
     """
     severity = str(finding.get("severity") or "info").lower()
     if severity not in ("critical", "high", "medium", "low", "info"):
@@ -2318,6 +2346,10 @@ async def _persist_agent_suspected_finding(
         "legacy_fingerprint": fingerprint,
         "evidence": evidence_json,
     }
+    principals = candidate_evidence_principals({"evidence_principals": list(evidence_principals or ())})
+    if principals:
+        # Only ever added: the merge below keeps an earlier claim's principals when this one has none.
+        candidate_context["evidence_principals"] = principals
     candidate_record = await investigation_candidates.upsert_candidate(
         conn, candidate, created_by="autonomous_agent",
         observation_context=candidate_context, strict=False,

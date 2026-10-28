@@ -9,8 +9,10 @@ class Shakerscan < Formula
 
   depends_on "python@3.13"
 
-  # Pure Python with no dependencies: install the package tree and a launcher that runs it with
-  # the formula's interpreter. No virtualenv and no build backend at install time.
+  # Pure Python: install the package tree and a launcher that runs it with the formula's
+  # interpreter. No virtualenv and no build backend at install time. The client's one dependency,
+  # python-fido2 (a USB security key's touch), is not installed here; the client says so when a
+  # touch is asked for.
   def install
     libexec.install "src/shakerscan"
     python = Formula["python@3.13"].opt_bin/"python3.13"
@@ -18,6 +20,17 @@ class Shakerscan < Formula
       #!/bin/sh
       exec "#{python}" -c 'import sys; sys.path.insert(0, "#{libexec}"); from shakerscan.cli import main; sys.exit(main())' "$@"
     SH
+  end
+
+  def caveats
+    <<~EOS
+      This install cannot use a USB security key (python-fido2 is not in the formula), so it
+      cannot answer a touch. Where an Enterprise gateway requires a security key touch for
+      decisions from terminals, install the client with pipx or uv instead:
+        pipx install shakerscan
+        uv tool install shakerscan
+      `shakerscan doctor` says whether your gateway requires the touch.
+    EOS
   end
 
   test do

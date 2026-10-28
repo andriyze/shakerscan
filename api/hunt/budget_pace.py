@@ -47,8 +47,9 @@ RATE_PACED_EXECUTORS = frozenset({"worker_scanner", "worker_network"})
 # Request-collection replays: admission holds the selected requests (at most 25) for 60 s.
 REPLAY_MAX_REQUESTS = 25
 REPLAY_WALL_SECONDS = 60
-# Target kinds whose candidate verification admission adds the HTTP envelope to.
-_CANDIDATE_HTTP_KINDS = frozenset({"web", "api"})
+# Target kinds whose candidate verification admission adds the HTTP envelope to (a network
+# target's candidate is verified on the HTTP service it names).
+_CANDIDATE_HTTP_KINDS = frozenset({"web", "api", "network"})
 
 
 def _registry():

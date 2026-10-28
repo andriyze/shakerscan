@@ -185,7 +185,7 @@ class _Terminal:
         self.lines = list(lines)
         self.said = []
 
-    def require(self, what):
+    def require(self, what="it", *, person_runs=None, **_):
         return None
 
     def say(self, text=""):
@@ -199,7 +199,7 @@ class _Terminal:
         return self.lines.pop(0)
 
 
-def _launch(monkeypatch, tmp_path, *, gateway):
+def _launch(monkeypatch, tmp_path, *, gateway, terminal=True):
     from tests.hunt_permission_stub import TOTP
 
     monkeypatch.setenv(cli.ENV_CONFIG_DIR, str(tmp_path / "cfg"))
@@ -210,18 +210,26 @@ def _launch(monkeypatch, tmp_path, *, gateway):
 
     def send(method, path, payload=None, headers=None):
         sent.append((method, path, payload))
+        if method == "GET" and path == approval.ME_PATH:
+            # How every Enterprise gateway describes itself to a token; one with the terminal
+            # approval that names the approver reports person_decision_proof.
+            return 200, ({"user": {"auth": "token"}} if gateway == "pre-g1"
+                         else {"person_decision_proof": gateway == "g1-switch"})
         if gateway == "pre-g1":
             return 403, "operator tokens cannot use POST /_enterprise/approvals/begin"
         if path.endswith("/begin"):
-            document = approval.set_document(payload["purpose"], payload["account"], payload["origin"], payload)
+            # No account named: the person the connection's token acts for (a gateway that names the person).
+            account = payload["account"] or "alice"
+            document = approval.set_document(payload["purpose"], account, payload["origin"], payload)
             return 200, {"schema_version": "shakerscan-approval-challenge/v1", "approval_id": "apv_1",
-                         "set_digest": approval.set_digest(document), "methods": ["totp"]}
+                         "set_digest": approval.set_digest(document), "methods": ["totp"], "account": account}
         assert payload["proof"] == {"method": "totp", "code": TOTP}
         return 200, {"schema_version": "shakerscan-approval-result/v1", "decided_by": "alice",
                      "preauthorization": {"id": "pre_0042", "allow": ["budget.raise:2x"], "expires_at": "later"}}
 
     monkeypatch.setattr(v2, "_approval_send", lambda client: send)
-    monkeypatch.setattr(approval, "Terminal", lambda *a, **k: _Terminal("alice", TOTP))
+    if terminal:
+        monkeypatch.setattr(approval, "Terminal", lambda *a, **k: _Terminal(TOTP))
     launched = {}
     monkeypatch.setattr(cli.shutil, "which", lambda name: f"/usr/bin/{name}" if name == "opencode" else None)
     monkeypatch.setattr(cli.os, "chdir", lambda path: None)
@@ -233,8 +241,10 @@ def test_agent_allow_steps_up_once_before_the_agent_starts(monkeypatch, tmp_path
     sent, launched = _launch(monkeypatch, tmp_path, gateway="g1")
     workspace = tmp_path / "ws"
     assert cli.main(["agent", "opencode", "--workspace", str(workspace), "--allow", "budget.raise:2x"]) == 0
-    assert [path for _, path, _ in sent] == ["/_enterprise/approvals/begin", "/_enterprise/approvals/finish"]
-    begin = sent[0][2]
+    assert [path for method, path, _ in sent if method == "POST"] == [
+        "/_enterprise/approvals/begin", "/_enterprise/approvals/finish"
+    ]
+    begin = next(payload for method, path, payload in sent if path == "/_enterprise/approvals/begin")
     assert begin["purpose"] == "preauthorization"
     assert begin["preauthorization"] == {"allow": ["budget.raise:2x"], "use": "agent_launch"}
     env = launched["env"]
@@ -251,6 +261,46 @@ def test_agent_allow_against_a_gateway_without_g1_starts_no_agent(monkeypatch, t
     err = capsys.readouterr().err
     assert "has no terminal approval yet" in err and "No agent was started" in err
     assert launched == {}
+
+
+def test_agent_allow_without_a_terminal_to_ask_on_exits_3_and_asks_nothing(monkeypatch, tmp_path, capsys,
+                                                                          clean_environ):
+    """`agent --allow` asks the person as approve does. Without a terminal for its input (an
+    agent's tool call): refused with exit 3 before the gateway is asked anything, and no agent is
+    started."""
+    import types
+
+    sent, launched = _launch(monkeypatch, tmp_path, gateway="g1", terminal=False)
+    monkeypatch.delenv("SHAKERSCAN_AGENT_NAME", raising=False)
+    monkeypatch.setattr(sys, "stdin", types.SimpleNamespace(isatty=lambda: False, readline=lambda: ""))
+    captured = io.StringIO()
+    monkeypatch.setattr(sys, "stdout", captured)
+    code = cli.main(["agent", "opencode", "--workspace", str(tmp_path / "ws"), "--allow", "budget.raise:2x"])
+    assert code == 3
+    assert sent == [] and launched == {}
+    assert "interactive terminal" in capsys.readouterr().err
+    assert captured.getvalue() == "", "no prompt went to the captured output"
+
+
+def test_agent_allow_with_its_output_captured_under_the_switch_asks_no_touch(monkeypatch, tmp_path, capsys,
+                                                                            clean_environ):
+    """A terminal for input only (a harness that captures the command's output): where the
+    gateway's administrator requires a touch, refused with exit 3 once the gateway's description
+    is read, nothing begun, no key asked, no agent started. With the switch off it is asked as
+    client 0.11.1 asked (the process tests run that)."""
+    import types
+
+    sent, launched = _launch(monkeypatch, tmp_path, gateway="g1-switch", terminal=False)
+    monkeypatch.delenv("SHAKERSCAN_AGENT_NAME", raising=False)
+    monkeypatch.setattr(sys, "stdin", types.SimpleNamespace(isatty=lambda: True, readline=lambda: ""))
+    captured = io.StringIO()
+    monkeypatch.setattr(sys, "stdout", captured)
+    code = cli.main(["agent", "opencode", "--workspace", str(tmp_path / "ws"), "--allow", "budget.raise:2x"])
+    assert code == 3
+    assert [(method, path) for method, path, _ in sent] == [("GET", "/_enterprise/me")] and launched == {}
+    err = capsys.readouterr().err
+    assert "only when the command's output is your terminal too" in err and "No agent was started" in err
+    assert captured.getvalue() == "", "no prompt went to the captured output"
 
 
 def test_agent_allow_on_an_open_source_engine_needs_no_step_up(monkeypatch, tmp_path, capsys, clean_environ):

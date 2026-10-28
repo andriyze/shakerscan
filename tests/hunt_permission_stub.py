@@ -87,9 +87,12 @@ def approval_set_digest(body: dict[str, Any], origin: str) -> str:
 
 class StubInstance:
     def __init__(self, *, tls: tuple[Path, Path] | None = None, gateway: str | None = None,
-                 stall_revoke: bool = False) -> None:
+                 stall_revoke: bool = False, touch_switch: bool | None = None) -> None:
         self.gateway = gateway  # None (open-source engine), "g1" or "pre-g1"
         self.stall_revoke = stall_revoke
+        # Whether GET /_enterprise/me says the administrator requires a touch (None: no such route,
+        # as before the switch).
+        self.touch_switch = touch_switch
         self.stopping = threading.Event()
         self.lock = threading.Lock()
         self.seen: list[tuple[str, str, Any]] = []
@@ -277,6 +280,8 @@ class StubInstance:
             self.seen.append((method, handler.path, body))
         if self.gateway is not None and handler.headers.get("Authorization") != f"Bearer {TOKEN}":
             return handler._send(401, {"detail": "sign in to ShakerScan Enterprise"})
+        if method == "GET" and path == "/_enterprise/me" and self.touch_switch is not None:
+            return handler._send(200, {"user": {"auth": "token"}, "person_decision_proof": self.touch_switch})
         if path.startswith("/_enterprise/approvals/"):
             if self.gateway != "g1":
                 status = 403 if self.gateway == "pre-g1" else 404

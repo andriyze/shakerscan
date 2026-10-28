@@ -157,7 +157,7 @@ def test_a_replay_is_costed_by_the_least_it_can_reserve():
 
 def test_verifier_warnings_use_the_execution_hold_instead_of_the_registry_floor():
     warnings = start_budget_warnings(_started({'max_duration_seconds': 400}, 'sqli.verify'))
-    assert warnings[0]['reserves'] == 540
+    assert warnings[0]['reserves'] == 1_200
 
 
 def test_every_profile_funds_mapping_then_both_full_verifiers():

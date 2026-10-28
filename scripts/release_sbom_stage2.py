@@ -111,12 +111,15 @@ def client_cdx(document: dict) -> dict:
             "dependencies": [{"ref": root["bom-ref"], "dependsOn": [f["bom-ref"] for f in components]}]}
 
 def extra_cdx(document: dict, extra: str) -> dict:
-    """Lossless mapping of our own optional-extra resolution SPDX (one root, locked packages)."""
-    root_package = next(p for p in document["packages"] if p["SPDXID"] == "SPDXRef-ShakerScanClientExtra")
+    """Lossless mapping of our own optional-extra resolution SPDX (one root, locked packages), or of
+    the base install's runtime dependency resolution (``extra`` sbom.RUNTIME: required scope)."""
+    runtime = extra == sbom.RUNTIME
+    root_id = "SPDXRef-ShakerScanClientRuntime" if runtime else "SPDXRef-ShakerScanClientExtra"
+    root_package = next(p for p in document["packages"] if p["SPDXID"] == root_id)
     root = {"type": "application", "bom-ref": root_package["SPDXID"], "name": root_package["name"],
             "version": root_package["versionInfo"], "purl": next(iter(coverage.spdx_purls({"packages": [root_package]}))),
-            "properties": [{"name": "shakerscan:scope", "value": sbom.EXTRA_SCOPE},
-                           {"name": "shakerscan:extra", "value": extra},
+            "properties": [{"name": "shakerscan:scope", "value": sbom.RUNTIME_SCOPE if runtime else sbom.EXTRA_SCOPE},
+                           *([] if runtime else [{"name": "shakerscan:extra", "value": extra}]),
                            {"name": "shakerscan:source-info", "value": root_package["sourceInfo"]}]}
     components = []
     for package in document["packages"]:
@@ -125,7 +128,8 @@ def extra_cdx(document: dict, extra: str) -> dict:
         purls = coverage.spdx_purls({"packages": [package]})
         require(len(purls) == 1, "extra package must have one identity")
         components.append({"type": "library", "bom-ref": package["SPDXID"], "name": package["name"],
-                           "version": package["versionInfo"], "purl": next(iter(purls)), "scope": "optional",
+                           "version": package["versionInfo"], "purl": next(iter(purls)),
+                           "scope": "required" if runtime else "optional",
                            "hashes": [{"alg": "SHA-256", "content": c["checksumValue"]} for c in package["checksums"]],
                            "properties": [{"name": "shakerscan:source-info", "value": package["sourceInfo"]}]})
     return {"bomFormat": "CycloneDX", "specVersion": "1.6", "version": 1,
@@ -236,7 +240,9 @@ def enhance(directory: Path, root: Path, tools: Path, output: Path) -> None:
             documents[name] = sbom.json_bytes(cdx)
             extra.append({"scope": "client-archive-files", "distribution": artifact["distribution"],
                           "cyclonedx": name, "cyclonedx_sha256": sbom.sha256(documents[name])})
-        for entry in index.get("extras", []):
+        resolutions = [*([{**index["runtime"], "extra": sbom.RUNTIME}] if index.get("runtime") else []),
+                       *index.get("extras", [])]
+        for entry in resolutions:
             for key in ("input", "lock"):
                 path = root / entry[key]
                 require(path.is_file() and sbom.sha256(path.read_bytes()) == entry[key + "_sha256"],
@@ -251,8 +257,12 @@ def enhance(directory: Path, root: Path, tools: Path, output: Path) -> None:
             require(coverage.spdx_purls(spdx) <= coverage.cdx_purls(cdx), "extra conversion lost package identities")
             name = entry["sbom"].removesuffix(".spdx.json") + ".cdx.json"
             documents[name] = sbom.json_bytes(cdx)
-            extra.append({"scope": sbom.EXTRA_SCOPE, "extra": entry["extra"],
-                          "cyclonedx": name, "cyclonedx_sha256": sbom.sha256(documents[name])})
+            if entry["extra"] == sbom.RUNTIME:
+                extra.append({"scope": sbom.RUNTIME_SCOPE, "cyclonedx": name,
+                              "cyclonedx_sha256": sbom.sha256(documents[name])})
+            else:
+                extra.append({"scope": sbom.EXTRA_SCOPE, "extra": entry["extra"],
+                              "cyclonedx": name, "cyclonedx_sha256": sbom.sha256(documents[name])})
         limits = sbom.CLIENT_LIMITS + ["SPDX and CycloneDX documents pass pinned official JSON schemas; signatures and completeness are separate properties."]
     else:
         inventory = sbom.load_json(root / "install/release-images.json")
@@ -367,6 +377,9 @@ def verify_extension(directory: Path, index: dict) -> set[str]:
         if index["kind"] == "client" and catalog.get("scope") == sbom.EXTRA_SCOPE:
             subject = ("extra", catalog.get("extra"))
             require(subject[1] in {e["extra"] for e in index.get("extras", [])}, "conversion of an unindexed optional extra")
+        elif index["kind"] == "client" and catalog.get("scope") == sbom.RUNTIME_SCOPE:
+            subject = (sbom.RUNTIME,)
+            require(index.get("runtime") is not None, "conversion of an unindexed runtime resolution")
         elif index["kind"] == "client":
             require(catalog.get("scope") == "client-archive-files", "invalid client catalog scope")
             subject = catalog.get("distribution")
@@ -395,9 +408,11 @@ def verify_extension(directory: Path, index: dict) -> set[str]:
         subjects.add(subject)
     require(cdx_files == {n for n in files if n.endswith(".cdx.json")}, "unindexed CycloneDX document")
     if index["kind"] == "client":
-        expected = {"wheel", "sdist"} | {("extra", e["extra"]) for e in index.get("extras", [])}
+        expected = ({"wheel", "sdist"} | {("extra", e["extra"]) for e in index.get("extras", [])}
+                    | ({(sbom.RUNTIME,)} if index.get("runtime") else set()))
         require(subjects == expected, "missing client CycloneDX conversion")
-        locked = {(e[key], e[key + "_sha256"]) for e in index.get("extras", []) for key in ("input", "lock")}
+        resolutions = [*index.get("extras", []), *([index["runtime"]] if index.get("runtime") else [])]
+        locked = {(e[key], e[key + "_sha256"]) for e in resolutions for key in ("input", "lock")}
         require({(i.get("path"), i.get("sha256")) for i in plan.get("inputs", [])} == locked, "stage-two extra inputs differ from the index")
     else:
         expected_first = {(a["image"], a["platform"], a["platform_digest"]) for a in index["artifacts"]}

@@ -427,3 +427,39 @@ def test_the_report_states_each_capability_left_out_without_degrading_coverage()
     assert not any(r.startswith("capability_not_in_allocation") for r in plain["coverage"]["reasons"])
     assert stated["coverage"]["status"] == plain["coverage"]["status"]
     assert stated["report_digest"] != plain["report_digest"], "the reason is part of the digest-bound report"
+
+
+# --- a request collection named by its id: discovery only ------------------------------------------
+
+def _discovery_only_collection_ref() -> dict:
+    """What admission stores for a collection named by its id, without a saved selection: its safe
+    routes seed discovery, and nothing is replayed (unit fixture identifiers)."""
+    return {
+        "collection_id": "11111111-1111-4111-8111-111111111111", "name": "fixture API",
+        "format": "openapi", "request_count": 3, "selection_id": None,
+        "binding_id": "22222222-2222-4222-8222-222222222222", "environment_id": None,
+        "target_kind": "api", "target_id": "33333333-3333-4333-8333-333333333333",
+        "allowed_origins": ["https://app.example.test"],
+        "selector": {"safe_methods_only": True}, "replay_policy": "discovery_only",
+        "selection_digest": "a" * 64, "selected_requests": 3, "selected_safe_requests": 3,
+        "selected_mutating_requests": 0, "payload_sha256": "b" * 64, "environment_sha256": None,
+        "secret_values_visible": False,
+    }
+
+
+def test_a_scan_whose_collection_seeds_discovery_only_continues_past_admission():
+    """A collection named by id replays nothing, so no round has an ``inputs.collection_*``
+    action to carry: allocating one named an action the compiler never creates, and the Scan
+    failed at its first round ("action budget allocation contains unknown actions")."""
+    from tests.scan_round_fixtures import admitted_round_fixture, compile_round, settle_round
+
+    fixture = admitted_round_fixture(
+        "balanced", endpoints=9, queries=4, families=("recon", "nuclei_passive", "xss", "sqli"),
+        extra_options={"request_collections": [_discovery_only_collection_ref()]},
+    )
+    assert not any(action.action_id.startswith("inputs.collection_")
+                   for action in fixture["parent_plan"].actions)
+    settle_round(fixture)
+    prepared = compile_round(fixture, 1)
+    assert not any(action.action_id.startswith("inputs.collection_") for action in prepared.plan.actions)
+    assert any(action.capability_name == "xss.verify_batch" for action in prepared.plan.actions)

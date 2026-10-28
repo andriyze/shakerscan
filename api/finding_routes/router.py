@@ -20,7 +20,7 @@ import hashlib
 import json
 import os
 import re
-from typing import Any, Callable, Literal, Optional
+from typing import Any, Callable, Literal, Mapping, Optional
 import uuid
 
 from fastapi import APIRouter, HTTPException, Query, Request
@@ -38,10 +38,10 @@ try:
     from evidence_storage import hydrate_evidence_content, public_evidence_object
     from evidence_triage import redact_finding_evidence as _redact_finding_evidence
     from retest_contract import (
-        SUPPORTED_RETEST_TYPES, build_replay_commands,
+        RETEST_IDENTITY_MESSAGE, RETEST_REASON_IDENTITY, SUPPORTED_RETEST_TYPES, build_replay_commands,
         build_retest_job_payload, extract_auth_context, infer_type_from_title_tool,
         normalize_retest_type, parse_json_field, retest_sends_active_requests,
-        retest_refusal_message, retest_refusal_reason, validate_retest_job_payload,
+        retest_identity_refusal, retest_refusal_message, retest_refusal_reason, validate_retest_job_payload,
     )
     from serialization import _decode_json_value, _json_object, _str_list, row_to_dict
     from scan.retest_authority import (
@@ -64,10 +64,10 @@ except ModuleNotFoundError:  # package import in host-side tests
     from ..evidence_storage import hydrate_evidence_content, public_evidence_object
     from ..evidence_triage import redact_finding_evidence as _redact_finding_evidence
     from ..retest_contract import (
-        SUPPORTED_RETEST_TYPES, build_replay_commands,
+        RETEST_IDENTITY_MESSAGE, RETEST_REASON_IDENTITY, SUPPORTED_RETEST_TYPES, build_replay_commands,
         build_retest_job_payload, extract_auth_context, infer_type_from_title_tool,
         normalize_retest_type, parse_json_field, retest_sends_active_requests,
-        retest_refusal_message, retest_refusal_reason, validate_retest_job_payload,
+        retest_identity_refusal, retest_refusal_message, retest_refusal_reason, validate_retest_job_payload,
     )
     from ..serialization import _decode_json_value, _json_object, _str_list, row_to_dict
     from ..scan.retest_authority import (
@@ -709,6 +709,9 @@ async def get_finding(finding_id: str):
         )
         # Exposure candidates (Service Intelligence) for the same CVE or product on this origin.
         exposures = await related_exposures(conn, finding)
+        # Whether a retest could run as the identity the source Scan was signed in with. The
+        # options are read for that decision alone and never returned.
+        identity_refusal = await _retest_identity_refusal(conn, finding)
 
     result = dict(finding)
     # Stored copyable commands are rebuilt from their inputs or shown as recorded text only.
@@ -742,7 +745,9 @@ async def get_finding(finding_id: str):
     else:
         evidence = parse_json_field(result.get("evidence"))
         retest_type = infer_retest_type(result, evidence)
-        refusal = retest_refusal_reason(result, retest_type)
+        # A finding of a signed-in Scan whose identity a retest cannot apply is not offered one:
+        # an anonymous retest of any type would only ever be inconclusive.
+        refusal = retest_refusal_reason(result, retest_type) or identity_refusal
         if refusal is None:
             result["retest_supported"] = True
             result["retest_type"] = retest_type
@@ -760,12 +765,25 @@ async def get_finding(finding_id: str):
             result["retest_type"] = None
             result["retest_modes"] = []
             result["retest_unsupported_reason"] = refusal
-            # A proven finding whose request cannot be sent again says what is missing.
-            message = retest_refusal_message(result)
+            # A proven finding whose request cannot be sent again says what is missing, and a
+            # signed-in Scan's finding says how to check it again.
+            message = (
+                RETEST_IDENTITY_MESSAGE if refusal == RETEST_REASON_IDENTITY
+                else retest_refusal_message(result)
+            )
             if message:
                 result["retest_unsupported_message"] = message
 
     return result
+
+
+async def _retest_identity_refusal(conn, finding: Mapping[str, Any]) -> str | None:
+    """``RETEST_REASON_IDENTITY`` when the finding's source Scan was signed in and a retest
+    would hold no identity to apply (``retest_identity_refusal``), else None."""
+    if not finding.get("scan_id"):
+        return None
+    row = await conn.fetchrow("SELECT options FROM scans WHERE id = $1", finding["scan_id"])
+    return retest_identity_refusal(row["options"]) if row else None
 
 
 def _ai_verifier_ready() -> bool:
@@ -788,6 +806,7 @@ _RETEST_UNSUPPORTED_MESSAGES = {
         "Model Intake findings cannot be retested via HTTP replay; re-run the Model Intake scan "
         "for this artifact instead."
     ),
+    RETEST_REASON_IDENTITY: RETEST_IDENTITY_MESSAGE,
 }
 
 
@@ -1142,6 +1161,9 @@ async def bulk_retest_findings(request: FindingsBulkRetestRequest):
                 detail = exc.detail if isinstance(exc.detail, dict) else {}
                 if detail.get("error") in (REPLAY_OUT_OF_SCOPE, REPLAY_URL_UNRESOLVED):
                     skipped.append({"finding_id": str(finding_data["id"]), "reason": detail["error"]})
+                    continue
+                if detail.get("reason") == RETEST_REASON_IDENTITY:
+                    skipped.append({"finding_id": str(finding_data["id"]), "reason": RETEST_REASON_IDENTITY})
                     continue
                 if exc.status_code != 409 or detail.get("error") != "finding_retest_already_active":
                     raise
@@ -1760,7 +1782,21 @@ async def _enqueue_finding_retest_unlocked(
 
     The retest is bound to what it is admitted with: the target's current authorization and the
     approval receipt the request named (``admitted_authority``), re-checked while it runs.
+    A finding of a signed-in Scan whose identity the retest could not apply is refused
+    (``RETEST_REASON_IDENTITY``): it would send the proof's request anonymously.
     """
+    scan_options: dict[str, Any] = {}
+    if finding.get("scan_id"):
+        scan_row = await conn.fetchrow(
+            "SELECT options FROM scans WHERE id = $1", finding["scan_id"]
+        )
+        if scan_row:
+            scan_options = parse_json_field(scan_row["options"])
+    if retest_identity_refusal(scan_options, auth_context) is not None:
+        raise HTTPException(status_code=400, detail={
+            "error": "unsupported_finding_type", "reason": RETEST_REASON_IDENTITY,
+            "message": RETEST_IDENTITY_MESSAGE,
+        })
     # The replay destination must be covered by the scope that admits the retest (the approval
     # named, else the target's authorization); the same check runs while it runs.
     admitted, refusal = await admit_retest(
@@ -1776,12 +1812,8 @@ async def _enqueue_finding_retest_unlocked(
     replay_commands = build_replay_commands(inputs)
 
     # If no auth_context provided, try to pull from the finding's scan
-    if auth_context is None and finding.get("scan_id"):
-        scan_row = await conn.fetchrow(
-            "SELECT options FROM scans WHERE id = $1", finding["scan_id"]
-        )
-        if scan_row:
-            auth_context = extract_auth_context(parse_json_field(scan_row["options"]))
+    if auth_context is None and scan_options:
+        auth_context = extract_auth_context(scan_options)
 
     auth_ctx_json = json.dumps(auth_context) if auth_context else None
     campaign_id = None

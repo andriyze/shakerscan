@@ -38,9 +38,10 @@ def _normalize_hunt_browser_xss_result(
 ) -> CapabilityAdapterResult:
     """Keep verified proofs complete, but do not hide incomplete negative attempts.
 
-    The pinned browser intentionally blocks off-origin subresources. Those blocks do not
-    invalidate either a verified same-origin DOM proof or a complete negative result. Other
-    block reasons mean the browser did not exercise the full admitted attempt. A verified
+    The pinned browser intentionally blocks off-origin subresources and every write. Those
+    blocks do not invalidate either a verified same-origin DOM proof or a complete negative
+    result, unless a refused write carried the payload. Other block reasons mean the browser
+    did not exercise the full admitted attempt. A verified
     proof remains success because the vulnerability is already established; an unverified
     attempt becomes partial (or cancelled) so Hunt coverage does not overclaim completeness.
     """
@@ -61,7 +62,19 @@ def _normalize_hunt_browser_xss_result(
         for item in result.observations
         if isinstance(item, dict) and item.get("kind") == "browser_request_blocked"
     }
-    material = tuple(sorted(reason for reason in reasons - _BENIGN_BLOCK_REASONS if reason))
+    benign = set(_BENIGN_BLOCK_REASONS)
+    write_flags = [
+        item.get("payload_write_blocked")
+        for item in result.observations
+        if isinstance(item, dict) and item.get("kind") == "xss_browser_proof"
+    ]
+    if write_flags and all(flag is False for flag in write_flags):
+        # The proof is read-only and refuses every write. Writes the page sent on its own
+        # (socket polling, telemetry), none carrying the payload, are outside the attempt; a
+        # proof that does not say (an older receipt), or any proof that refused a write carrying
+        # its payload, stays partial.
+        benign.add("state_changing_method")
+    material = tuple(sorted(reason for reason in reasons - benign if reason))
     if not material:
         return result
 

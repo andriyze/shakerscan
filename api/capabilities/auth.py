@@ -708,7 +708,7 @@ async def establish_target_bound_http_session(
         )
         if landing:
             observation["landing_path"] = landing
-        # Where the sign-in request went, for the verifiers' lockout-safe limit on it
+        # Where the sign-in request went, for the verifiers' paced, bounded probe set on it
         # (scan/auth_endpoint_probe.py): the page's query routing and, for a form, where it posts,
         # which may differ from the page. The redacted public path, and only digests of the
         # query's routing pairs, never its values.

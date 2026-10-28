@@ -51,7 +51,7 @@ class Terminal(approval.Terminal):
         self.answers = list(answers)
         self.keys = list(keys)
 
-    def require(self, what):
+    def require(self, what="it", *, person_runs=None, **_):
         return None
 
     def line(self, prompt):
@@ -90,6 +90,13 @@ class Gateway:
         if path.startswith(approval.FEED_PATH + "?"):
             # A gateway that does not pass the cross-Hunt feed refuses it as an unknown route.
             return 403, {"detail": "route not allowed"}
+        if path == approval.ME_PATH:
+            # A gateway before the person-decision feed describes itself without
+            # person_decision_proof (as an older Enterprise gateway does).
+            return 200, {"user": {"auth": "token"}}
+        if path.startswith(approval.PERSON_FEED_PATH):
+            # Never asked: the proxy of such a gateway refuses the unknown route and audits it.
+            raise AssertionError("an older gateway's person-decision feed is never read")
         if path.startswith(f"/hunts/{HUNT}/permission-requests?status=pending"):
             return 200, {"requests": [item for item in self.requests.values() if item["status"] == "pending"]}
         if path.startswith("/hunts?status="):
@@ -275,7 +282,7 @@ def _fake_fido2(monkeypatch, *, device=True):
     webauthn.PublicKeyCredentialDescriptor = Descriptor
     webauthn.PublicKeyCredentialRequestOptions = Options
     webauthn.PublicKeyCredentialType = types.SimpleNamespace(PUBLIC_KEY="public-key")
-    webauthn.UserVerificationRequirement = types.SimpleNamespace(REQUIRED="required")
+    webauthn.UserVerificationRequirement = lambda value: f"uv:{value}"
     for name, module in {"fido2": types.ModuleType("fido2"), "fido2.client": client, "fido2.hid": hid,
                          "fido2.webauthn": webauthn}.items():
         monkeypatch.setitem(sys.modules, name, module)
@@ -306,7 +313,8 @@ def test_a_security_key_signs_a_challenge_bound_to_the_set(monkeypatch):
     assert credential["type"] == "public-key" and credential["rawId"] == credential["id"]
     assert set(credential["response"]) == {"clientDataJSON", "authenticatorData", "signature", "userHandle"}
     assert seen["origin"] == ORIGIN and seen["options"]["rp_id"] == "scanner.example.com"
-    assert "Touch your security key." in terminal.text
+    # The prompt says what the touch decides (allow or deny, and how many).
+    assert "Touch your security key to allow (Ctrl-C to cancel)..." in terminal.text
 
 
 def test_a_security_key_needs_the_library_and_a_bound_challenge(monkeypatch):
@@ -380,9 +388,17 @@ def test_hunt_start_allow_on_enterprise_needs_the_persons_step_up_first(monkeypa
                 "budget_dimensions": []}
     closed = v2_cli.CliError("Operators cannot use POST /_enterprise/approvals/begin", error_type="api_error",
                              http_status=403, api_detail="Operators cannot use POST /_enterprise/approvals/begin")
+    # A gateway from before the terminal approval (it describes itself to a token, as every one does).
     client = Client({("GET", "/hunts/contract"): contract, ("POST", "/_enterprise/approvals/begin"): closed,
+                     ("GET", "/_enterprise/me"): {"user": {"auth": "token"}},
                      ("POST", "/hunts"): lambda payload: {"hunt_id": HUNT}}, token="token-1")
     monkeypatch.setattr(v2_cli.sys, "stdin", types.SimpleNamespace(isatty=lambda: True, readline=lambda: "alice\n"))
+    # The person's terminal: stdout (the JSON answer) and stderr, where the prompts go.
+    terminal_out, terminal_err = io.StringIO(), io.StringIO()
+    terminal_out.isatty = lambda: True  # type: ignore[method-assign]
+    terminal_err.isatty = lambda: True  # type: ignore[method-assign]
+    monkeypatch.setattr(v2_cli.sys, "stdout", terminal_out)
+    monkeypatch.setattr(v2_cli.sys, "stderr", terminal_err)
     args = _parse("hunt", "start", "--target-id", "t-1", "--target-kind", "web", "--allow", "budget.raise:2x")
     with pytest.raises(v2_cli.CliError) as refused:
         v2_cli._run_hunt(args, client)
@@ -393,6 +409,63 @@ def test_hunt_start_allow_on_enterprise_needs_the_persons_step_up_first(monkeypa
     args = _parse("hunt", "start", "--target-id", "t-1", "--target-kind", "web", "--allow", "budget.raise:2x",
                   "--preauthorization", "pre_0042")
     v2_cli._run_hunt(args, client)
+    assert client.sent[-1][3] == {"X-ShakerScan-Preauthorization": "pre_0042"}
+
+
+@pytest.mark.parametrize("switch", [False, True])
+def test_hunt_start_allow_with_its_output_piped_asks_as_0_11_1_did(monkeypatch, switch):
+    """`HUNT=$(shakerscan hunt start --allow ... | jq -r .hunt_id)`: stdout is the command's data
+    channel and its prompt goes to stderr, the person's terminal. With the touch switch off it is
+    asked as client 0.11.1 asked it (the code, on stderr) and the Hunt starts; under the switch a
+    touch is never asked for a command whose output is captured: refused with exit 3 (a person's
+    decision), nothing begun and no Hunt started, the line saying how to run it."""
+    monkeypatch.delenv("SHAKERSCAN_HUNT_ALLOW", raising=False)
+    monkeypatch.delenv("SHAKERSCAN_PREAUTHORIZATION_ID", raising=False)
+    monkeypatch.delenv("SHAKERSCAN_AGENT_NAME", raising=False)
+    contract = {"schema_version": "hunt-start/v2", "target_kinds": ["web"], "budget_profiles": {"balanced": {}},
+                "budget_dimensions": []}
+
+    def begin(payload):
+        document = approval.set_document(payload["purpose"], "alice", payload["origin"], payload)
+        return {"schema_version": "shakerscan-approval-challenge/v1", "approval_id": "apv_1",
+                "set_digest": approval.set_digest(document), "methods": ["totp", "security_key"],
+                "account": "alice"}
+
+    finish = {"schema_version": "shakerscan-approval-result/v1", "decided_by": "alice",
+              "preauthorization": {"id": "pre_0042", "allow": ["budget.raise:2x"], "expires_at": "later"}}
+    client = Client({("GET", "/hunts/contract"): contract,
+                     ("GET", "/_enterprise/me"): {"user": {"auth": "token"}, "person_decision_proof": switch},
+                     ("POST", "/_enterprise/approvals/begin"): begin,
+                     ("POST", "/_enterprise/approvals/finish"): lambda payload: finish,
+                     ("POST", "/hunts"): lambda payload: {"hunt_id": HUNT}}, token="token-1")
+    monkeypatch.setattr(v2_cli.sys, "stdin", types.SimpleNamespace(isatty=lambda: True, readline=lambda: "alice\n"))
+    piped, terminal_err = io.StringIO(), io.StringIO()
+    piped.isatty = lambda: False  # type: ignore[method-assign]
+    terminal_err.isatty = lambda: True  # type: ignore[method-assign]
+    monkeypatch.setattr(v2_cli.sys, "stdout", piped)
+    monkeypatch.setattr(v2_cli.sys, "stderr", terminal_err)
+    monkeypatch.setattr(approval.sys, "stderr", terminal_err)
+    monkeypatch.setattr(approval.getpass, "getpass", lambda prompt, stream=None: (stream.write(prompt), "123456")[1])
+    monkeypatch.setattr(approval, "security_keys_present", lambda: True)
+    args = _parse("hunt", "start", "--target-id", "t-1", "--target-kind", "web", "--allow", "budget.raise:2x")
+    if switch:
+        with pytest.raises(v2_cli.CliError) as refused:
+            v2_cli._run_hunt(args, client)
+        assert refused.value.error_type == "person_decision_required"
+        assert v2_cli.PERSON_DECISION_EXITS[refused.value.error_type] == 3
+        text = str(refused.value)
+        assert "only when the command's output is your terminal too" in text and "No Hunt was started" in text
+        assert "--propose-allow" not in text, "the person piped the output; no agent is told anything"
+        assert [(m, p) for m, p, *_ in client.sent if m == "POST"] == [], "nothing begun, nothing started"
+        assert terminal_err.getvalue() == "", "no prompt"
+        return
+    v2_cli._run_hunt(args, client)
+    posts = [(m, p) for m, p, *_ in client.sent if m == "POST"]
+    assert posts == [("POST", "/_enterprise/approvals/begin"), ("POST", "/_enterprise/approvals/finish"),
+                     ("POST", "/hunts")]
+    finished = next(payload for m, p, payload, *_ in client.sent if p == "/_enterprise/approvals/finish")
+    assert finished["proof"] == {"method": "totp", "code": "123456"}, "the code, as 0.11.1 chose, never the key"
+    assert "TOTP code for alice" in terminal_err.getvalue() and piped.getvalue() == ""
     assert client.sent[-1][3] == {"X-ShakerScan-Preauthorization": "pre_0042"}
 
 
@@ -554,7 +627,7 @@ class _PtyTerminal(approval.Terminal):
     def flush(self):
         return None
 
-    def require(self, what):
+    def require(self, what="it", *, person_runs=None, **_):
         return None
 
     @property

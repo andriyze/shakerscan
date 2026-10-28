@@ -235,7 +235,7 @@ export const HUNT_START_CONTRACT = {
         "workflow"
       ]
     },
-    "verification_route": "candidate.verify re-executes one concrete route, taken from the first of the verification_route_keys present in the locus; identity_only_location_keys distinguish candidates but never resolve a route (otherwise 422 verification_route_unresolved, at no budget cost).",
+    "verification_route": "candidate.verify re-executes one concrete route, taken from the first of the verification_route_keys present in the locus; identity_only_location_keys distinguish candidates but never resolve a route (otherwise 422 verification_route_unresolved, at no budget cost). On a network target, which names a host and no HTTP service, the locus also names the service the candidate was found on: origin (http(s)://host[:port] on the target's host) or an absolute url; the proof runs there (otherwise 422 verification_service_unresolved, at no budget cost).",
     "verification_route_keys": [
       "route",
       "url",
@@ -322,6 +322,7 @@ export const HUNT_START_CONTRACT = {
     "active_replay_not_allowed",
     "approval_receipt_required",
     "approval_scope_changed",
+    "artifact_origin_required",
     "budget_above_profile_ceiling",
     "budget_dimension_needs_permission",
     "budget_exhausted",
@@ -351,6 +352,7 @@ export const HUNT_START_CONTRACT = {
     "dispatch_authority_rejected",
     "hunt_not_runnable",
     "idempotency_key_reused",
+    "long_actions_in_flight",
     "permission_denied",
     "permission_expired",
     "permission_unused",
@@ -370,6 +372,7 @@ export const HUNT_START_CONTRACT = {
     "secret_try_destination_denied",
     "secret_try_rate_limited",
     "secret_try_unrelated_target",
+    "sqli_injection_point_missing",
     "ssh_exec_not_allowed",
     "ssh_host_key_untrusted",
     "state_changing_http_not_allowed",
@@ -379,7 +382,8 @@ export const HUNT_START_CONTRACT = {
     "verification_family_unsupported",
     "verification_in_progress",
     "verification_method_unsupported",
-    "verification_route_unresolved"
+    "verification_route_unresolved",
+    "verification_service_unresolved"
   ],
   "policy_derived_zeros": {
     "mutation_disabled": [
@@ -1544,6 +1548,7 @@ export const HUNT_START_CONTRACT = {
       "description": "Read one small redacted byte window from a target-bound public client artifact. Reserves two requests: the second is spent only when tab-separated rows need the resource's head read to tell a database dump from plain text (once per resource; a failed read is retried once). Both requests share the 30-second wall-time reservation.",
       "input": {
         "fields": [
+          "origin",
           "path",
           "offset",
           "max_bytes",
@@ -1576,6 +1581,7 @@ export const HUNT_START_CONTRACT = {
       "description": "Statically analyze one bounded target JavaScript artifact for routes, source maps, client sinks, and decoded JWT claims without exposing token values.",
       "input": {
         "fields": [
+          "origin",
           "path",
           "max_bytes"
         ],

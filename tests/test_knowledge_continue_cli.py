@@ -143,9 +143,10 @@ def test_a_pipe_never_starts_a_refresh_or_declares_a_release(monkeypatch, capsys
     with Stub([PASSIVE]) as stub:
         monkeypatch.setattr(approval, "Terminal", REAL_TERMINAL)
         monkeypatch.setattr(sys, "stdin", io.StringIO("s\n"))
-        assert v2_cli.main(["--api-url", stub.url, "knowledge", "continue", TARGET, "--refresh", "--json"]) == 2
+        # Exit 3: refused, nothing ran (the one terminal rule every person's command reads).
+        assert v2_cli.main(["--api-url", stub.url, "knowledge", "continue", TARGET, "--refresh", "--json"]) == 3
         monkeypatch.setattr(sys, "stdin", io.StringIO("r\n"))
-        assert v2_cli.main(["--api-url", stub.url, "knowledge", "release", TARGET, "--label", "v2"]) == 2
+        assert v2_cli.main(["--api-url", stub.url, "knowledge", "release", TARGET, "--label", "v2"]) == 3
         assert "interactive terminal" in capsys.readouterr().err
     assert stub.posts() == []
 

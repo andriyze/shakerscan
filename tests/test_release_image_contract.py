@@ -131,6 +131,10 @@ def test_release_images_remove_fixable_runtime_vulnerabilities():
         "golang.org/x/mod@v0.41.0",
     ):
         assert dependency in shared_lifts
+    # A per-tool lift: nuclei 3.11.1 is built with go-jose v4.1.4 (CVE-2026-116587, fixed in 4.1.6).
+    nuclei_call = scanner[scanner.index("build_tool nuclei "):]
+    nuclei_call = nuclei_call[:nuclei_call.index("build_tool dalfox ")]
+    assert "github.com/go-jose/go-jose/v4@v4.1.6" in nuclei_call
     # A lift below what a dependency requires would downgrade the tool; the build refuses that.
     assert '"${resolved_version}" != "${tool_version}"' in scanner
     assert scanner.index('if [ "$#" -gt 0 ]; then go get "$@"') < scanner.index("resolved_version=") < (

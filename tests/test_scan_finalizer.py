@@ -972,6 +972,46 @@ def test_finalizer_promotes_only_structured_canonical_browser_xss_proof():
     }
 
 
+def test_a_browser_xss_finding_keeps_its_proof_pages_own_data_requests():
+    """Its retest judges the page's data requests against them (unit fixtures)."""
+    prove = _action("prove.xss", 0, capability_name="xss.browser_prove_batch")
+    final = _action("finalize.report", 1, dependencies=(prove.action_id,))
+    plan = ScanActionPlan(
+        scan_id=SCAN_ID, execution_plan_digest="b" * 64,
+        target_binding_digest="a" * 64, actions=(prove, final),
+    )
+
+    def response(path, status, resource, attempt="attempt-1"):
+        return {"kind": "browser_http_response", "method": "GET", "status_code": status,
+                "url": f"https://app.example.test{path}?q=%3Credacted%3E", "content_type": "",
+                "resource_type": resource, "attempt_id": attempt, "candidate_id": "candidate-xss"}
+
+    proof = {
+        "kind": "xss_browser_proof", "attempt_id": "attempt-1", "candidate_id": "candidate-xss",
+        "parameter_name": "q", "proof_state": "verified", "finding_verdict": "verified",
+        "proof_producer": "shakerscan", "evidence_type": "dom_execution",
+        "technique": "headless_xss_dom", "dom_marker_executed": True, "browser_build": "Chromium test",
+        "injection_location": "query", "request_url": "https://app.example.test/search?q=%3Credacted%3E",
+    }
+    recorded = (
+        {"kind": "candidate_attempt", "attempt_id": "attempt-1", "candidate_id": "candidate-xss",
+         "family": "xss_browser_proof", "status": "success", "proof_state": "verified"},
+        proof, response("/search", 200, "document"), response("/app.js", 200, "script"),
+        response("/api/me", 401, "fetch"), response("/api/search", 200, "xhr"),
+        response("/api/other", 200, "fetch", attempt="attempt-2"),
+    )
+    report = finalize_scan_report(
+        plan=plan, target_url="https://app.example.test",
+        action_results={prove.action_id: _result_with_observation_count(prove, len(recorded))},
+        observations={prove.action_id: recorded},
+    )
+    (finding,) = report["findings"]
+    assert finding["evidence"]["browser_proof"]["page_requests"] == [
+        {"method": "GET", "path": "/api/me", "resource_type": "fetch", "status": 401},
+        {"method": "GET", "path": "/api/search", "resource_type": "xhr", "status": 200},
+    ]
+
+
 def test_finalizer_explains_required_action_degradation():
     plan = _plan()
     results = _results(plan)

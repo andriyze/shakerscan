@@ -74,6 +74,13 @@ RESUMABLE_CAPABILITIES = frozenset({"sqli.verify_batch"})
 # Proof escalation reads its candidates from the verifiers it depends on, so a slice whose
 # verifier is extended gets its escalation re-planned behind the extension.
 PROOF_CAPABILITIES = frozenset({"sqli.prove_batch", "xss.browser_prove_batch"})
+# A proof batch that stops before a signalled candidate it was given (the Scan was cancelled, or
+# what is left of its budget cannot fund one more attempt's share) names each one it left, with no
+# verdict: the family's coverage counts them unresolved (``finalizer``) unless a later action (an
+# extension or a retry) settles them. Without the record such a candidate left no trace at all.
+PROOF_LEFT_CANCELLED = "proof_cancelled"
+PROOF_LEFT_UNFUNDED = "proof_share_unfunded"
+PROOF_LEFT_REASONS = frozenset({PROOF_LEFT_CANCELLED, PROOF_LEFT_UNFUNDED})
 # The share of the profile's tool wall one lane's extensions may hold together in a round: the
 # bound a single verifier lane holds in one compile, so extensions cannot starve the proof
 # stage they feed.
@@ -1142,6 +1149,16 @@ def plan_verification_extensions(
             "dependencies": dependencies,
         })
     return tuple(planned)
+
+
+def proof_left_record(
+    *, attempt_id: str, candidate_id: str, family: str, reason: str, manifest_index: int,
+) -> dict[str, Any]:
+    """The record of a signalled candidate a proof batch stopped before (``PROOF_LEFT_REASONS``)."""
+    return {
+        "kind": "candidate_deferred", "attempt_id": attempt_id, "candidate_id": candidate_id,
+        "family": family, "reason": reason, "manifest_index": int(manifest_index),
+    }
 
 
 def superseding_results(

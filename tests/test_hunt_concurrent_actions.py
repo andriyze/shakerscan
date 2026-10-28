@@ -1,6 +1,7 @@
 """SSH watches and external checks share the canonical leased worker path."""
 import asyncio
 import pytest
+from fastapi import HTTPException
 from api.hunt import agent_job_concurrency as jobs
 from api.hunt.device_traffic import require_device_admission
 from api.hunt.device_traffic import record_device_traffic
@@ -90,3 +91,338 @@ def test_device_ssh_and_external_lanes_keep_daily_budget_and_health_checks(incom
             with pytest.raises(ValueError,match='frozen'):
                 await require_device_admission(Conn(),hunt,fragility=1,requests=1,capability_name=incoming)
     asyncio.run(run())
+
+
+# --- Long actions leave the last slot to short work --------------------------------------------
+#
+# The worker runs three leased jobs at once. Once an MCP call answered outcome=running instead of
+# holding the agent's step, an agent could keep three long actions in flight (two sqli.verify of
+# 1,200 s and an xss.verify): they took all three slots, and every short call it made meanwhile
+# (http.request, artifact.inspect) timed out in the queue. A long job (a reserved wall over a
+# minute) now takes one of at most two long slots; one leased while both are taken waits in its
+# leased execution without holding the slot short work runs in. Unit fixtures: the queue and the
+# job handlers are doubles; the scheduler is the worker's own.
+
+def _job(label, name):
+    job_type = ("canonical_http_capability" if name in {"http.request", "artifact.inspect"}
+                else "canonical_scanner_capability")
+    return {"label": label, "type": job_type, "capability_name": name}
+
+
+def _bounded(scenario):
+    """Run a scheduler scenario for at most 10 s: a scheduler that stops leasing fails the test
+    instead of hanging it, and the scheduler's state is cleared whatever happened."""
+    async def run():
+        try:
+            await asyncio.wait_for(scenario(), 10)
+        finally:
+            await jobs.close()
+    asyncio.run(run())
+
+
+class Jobs:
+    """Leases and dispatches jobs as the worker loop does; each job's work runs until released."""
+
+    def __init__(self):
+        self.started, self.release, self.leased = [], {}, []
+
+    async def execute(self, redis, lease, job):
+        async def work(job):
+            self.started.append(job["label"])
+            self.release[job["label"]] = gate = asyncio.Event()
+            await gate.wait()
+        await jobs.in_lane(job, work)
+
+    async def lease_and_dispatch(self, job):
+        await jobs.lease_when_ready(lambda: self.leased.append(job["label"]), enabled=True)
+        await jobs.dispatch(None, None, job, execute=self.execute, enabled=True)
+        await asyncio.sleep(0.02)
+
+
+def test_long_actions_take_two_slots_and_a_short_call_runs_beside_them():
+    async def run():
+        queue = Jobs()
+        for label, name in (("long-1", "sqli.verify"), ("long-2", "templates.scan"), ("long-3", "xss.verify")):
+            await queue.lease_and_dispatch(_job(label, name))
+        # The third long job waits for a long slot, and does not hold the slot short work needs.
+        assert queue.started == ["long-1", "long-2"] and jobs._waiting == 1
+        await asyncio.wait_for(queue.lease_and_dispatch(_job("short-1", "http.request")), 1)
+        assert queue.started[-1] == "short-1"
+        # All three slots work now, so the worker leases nothing more.
+        blocked = asyncio.create_task(jobs.lease_when_ready(lambda: queue.leased.append("next"), enabled=True))
+        await asyncio.sleep(0.02)
+        assert not blocked.done()
+        # A long slot frees: the waiting long job takes it, and the slots stay full.
+        queue.release["long-1"].set()
+        await asyncio.sleep(0.02)
+        assert queue.started[-1] == "long-3" and jobs._waiting == 0 and jobs._long_running == 2
+        assert not blocked.done()
+        queue.release["short-1"].set()
+        await asyncio.wait_for(blocked, 1)
+        for gate in queue.release.values():
+            gate.set()
+        await jobs.close()
+        assert queue.leased == ["long-1", "long-2", "long-3", "short-1", "next"]
+    _bounded(run)
+
+
+def test_short_work_may_use_every_slot_and_long_work_never_more_than_two():
+    async def run():
+        queue = Jobs()
+        for index in range(3):
+            await queue.lease_and_dispatch(_job(f"short-{index}", "artifact.inspect"))
+        assert queue.started == ["short-0", "short-1", "short-2"] and jobs._waiting == 0
+        blocked = asyncio.create_task(jobs.lease_when_ready(lambda: None, enabled=True))
+        await asyncio.sleep(0.02)
+        assert not blocked.done()
+        for gate in queue.release.values():
+            gate.set()
+        await asyncio.wait_for(blocked, 1)
+        await jobs.close()
+        queue = Jobs()
+        for index in range(5):
+            await queue.lease_and_dispatch(_job(f"long-{index}", "sqli.verify"))
+        assert queue.started == ["long-0", "long-1"] and jobs._waiting == 3
+        await jobs.close()
+        assert (jobs._waiting, jobs._long_running, jobs._tasks) == (0, 0, set())
+    _bounded(run)
+
+
+def test_waiting_long_jobs_are_bounded():
+    async def run():
+        queue = Jobs()
+        for index in range(jobs.MAX_CONCURRENT_LONG_AGENT_JOBS + jobs.MAX_WAITING_LONG_AGENT_JOBS):
+            await queue.lease_and_dispatch(_job(f"long-{index}", "templates.scan"))
+        assert jobs._waiting == jobs.MAX_WAITING_LONG_AGENT_JOBS
+        # With that many waiting the worker stops leasing until one of them starts.
+        blocked = asyncio.create_task(jobs.lease_when_ready(lambda: None, enabled=True))
+        await asyncio.sleep(0.02)
+        assert not blocked.done()
+        queue.release["long-0"].set()
+        await asyncio.wait_for(blocked, 1)
+        await jobs.close()
+    _bounded(run)
+
+
+@pytest.mark.parametrize("job,long", [
+    (_job("a", "sqli.verify"), True), (_job("b", "xss.verify"), True),
+    (_job("c", "templates.scan"), True), (_job("d", "http.request"), False),
+    (_job("e", "artifact.inspect"), False),
+    ({"type": "canonical_network_capability", "capability_name": "ports.discover"}, True),
+    ({"type": "canonical_browser_capability", "capability_name": "browser.login_check"}, True),
+    ({"type": "canonical_browser_capability", "capability_name": "browser.navigate"}, False),
+    # 75 s: longer than a short call queued behind it in the slot left to short work could wait.
+    ({"type": "canonical_scanner_capability", "capability_name": "web.crawl"}, True),
+    ({"type": "canonical_scanner_capability", "capability_name": "web.content_discover"}, True),
+    # A service fingerprint reserves 120 s per address (nmap's host timeout), 240 s on a dual-stack
+    # host; the registry's 90 s already makes it long, and its payload's reserved wall says so too.
+    ({"type": "canonical_network_capability", "capability_name": "service.fingerprint",
+      "expected_budget": {"tool_wall_seconds": 240}}, True),
+    ({"type": "canonical_network_capability", "capability_name": "service.fingerprint"}, True),
+    # 60 s: still short work.
+    ({"type": "canonical_http_capability", "capability_name": "authz.verify",
+      "expected_budget": {"tool_wall_seconds": 60}}, False),
+    # A call is long by the wall admission reserved for it, whatever the registry says.
+    ({"type": "canonical_scanner_capability", "capability_name": "web.probe"}, False),
+    ({"type": "canonical_scanner_capability", "capability_name": "web.probe",
+      "reserved_wall_seconds": 120}, True),
+    ({"type": "canonical_http_capability", "capability_name": "http.request",
+      "expected_budget": {"tool_wall_seconds": 61}}, True),
+    # A malformed reserved wall is no wall: the registry's decides.
+    ({"type": "canonical_scanner_capability", "capability_name": "web.probe",
+      "reserved_wall_seconds": True}, False),
+    ({"type": "canonical_scanner_capability", "capability_name": "web.probe",
+      "reserved_wall_seconds": "600"}, False),
+    ({"type": "canonical_scanner_capability", "capability_name": "web.probe",
+      "reserved_wall_seconds": float("nan"), "expected_budget": []}, False),
+    # An SSH command runs on the worker that holds its session and never waits for a slot.
+    ({"type": "canonical_network_capability", "capability_name": "ssh.exec",
+      "expected_budget": {"tool_wall_seconds": 332}}, False),
+    ({"type": "request_collection_replay", "capability_name": "collections.replay_active"}, False),
+    ({"type": "agent_scanner_tool", "timeout_ms": 300_000}, True),
+    ({"type": "agent_scanner_tool", "timeout_ms": 30_000}, False),
+    ({"type": "authentication_validation"}, False),
+])
+def test_which_jobs_are_long(job, long):
+    assert jobs.long_job(job) is long
+
+
+def test_the_long_capabilities_are_the_worker_actions_whose_registry_wall_exceeds_a_minute():
+    assert jobs.LONG_ACTION_WALL_SECONDS == 60
+    assert jobs.long_capabilities() == {
+        "browser.login_check", "ports.discover", "service.fingerprint", "service.nse_check",
+        "sqli.verify", "subdomains.discover", "templates.scan", "web.browser_crawl",
+        "web.content_discover", "web.crawl", "xss.verify",
+    }
+    assert jobs.long_capabilities() < jobs.slot_capabilities()
+    assert not jobs.slot_capabilities() & {"ssh.connect", "ssh.exec", "ssh.close", "candidate.verify"}
+
+
+def test_a_short_call_queued_behind_one_short_action_still_starts_within_its_reservation_lease():
+    """Short work shares the slot long actions leave, so a short call may wait for one short
+    action there. A worker refuses a job whose reservation lease ran out before it started, so
+    every short action's lease must outlast the longest short action ahead of it, with room for
+    the queue's own delay."""
+    from api.hunt.capability_reservations import hunt_capability_lease_seconds
+    from api.runtime.capability_registry import CAPABILITY_REGISTRY
+
+    short = sorted(jobs.slot_capabilities() - jobs.long_capabilities())
+    assert {"http.request", "artifact.inspect", "javascript.analyze", "authz.verify",
+            "browser.navigate", "web.probe"} <= set(short)
+    for name in short:
+        lease = hunt_capability_lease_seconds(CAPABILITY_REGISTRY.require(name).budget_cost)
+        assert lease - jobs.LONG_ACTION_WALL_SECONDS >= 30, (name, lease)
+
+
+def test_a_dual_stack_service_fingerprint_beside_two_long_actions_leaves_short_calls_a_slot():
+    """A service fingerprint reserves 240 s on a dual-stack host. Counted as short, it took the
+    slot left to short work beside two long actions, and an http.request queued behind it waited
+    for the fingerprint to end."""
+    async def run():
+        queue = Jobs()
+        for label, name in (("long-1", "sqli.verify"), ("long-2", "xss.verify")):
+            await queue.lease_and_dispatch(_job(label, name))
+        await queue.lease_and_dispatch({
+            "label": "fingerprint", "type": "canonical_network_capability",
+            "capability_name": "service.fingerprint", "expected_budget": {"tool_wall_seconds": 240}})
+        assert queue.started == ["long-1", "long-2"] and jobs._waiting == 1
+        await asyncio.wait_for(queue.lease_and_dispatch(_job("short", "http.request")), 1)
+        assert queue.started[-1] == "short"
+        for gate in queue.release.values():
+            gate.set()
+        await jobs.close()
+    _bounded(run)
+
+
+def test_the_worker_loop_leases_a_short_job_right_after_dispatching_a_long_one_that_waits():
+    """The worker loop (worker.async_main) leases again as soon as dispatch returns, before the
+    job it dispatched has run at all: on a single host nothing in between yields. A third long job
+    has therefore not started waiting for a long slot when the next lease checks for a free slot,
+    and only its wake when it does start waiting lets the loop lease the short job queued behind
+    it. This loop has the worker's shape: lease, dispatch, lease, with nothing in between."""
+    queued = [_job("long-1", "sqli.verify"), _job("long-2", "templates.scan"),
+              _job("long-3", "xss.verify"), _job("short", "http.request")]
+    started, gates = [], {}
+
+    async def execute(redis, lease, job):
+        async def work(job):
+            started.append(job["label"])
+            gates[job["label"]] = gate = asyncio.Event()
+            await gate.wait()
+        await jobs.in_lane(job, work)
+
+    async def loop():
+        while queued:
+            job = await jobs.lease_when_ready(lambda: queued.pop(0), enabled=True)
+            await jobs.dispatch(None, None, job, execute=execute, enabled=True)
+
+    async def run():
+        worker_loop = asyncio.create_task(loop())
+        try:
+            for _ in range(200):
+                if "short" in started:
+                    break
+                await asyncio.sleep(0.005)
+            assert started == ["long-1", "long-2", "short"] and jobs._waiting == 1
+        finally:
+            for gate in gates.values():
+                gate.set()
+            worker_loop.cancel()
+            await asyncio.gather(worker_loop, return_exceptions=True)
+    _bounded(run)
+
+
+# --- Admission keeps one Hunt within the long slots ---------------------------------------------
+
+class ReservationRows:
+    """Unit fixture: answers admission's in-flight query from fixed rows, keeping its arguments."""
+
+    def __init__(self, rows):
+        self.rows, self.queries = rows, []
+
+    async def fetch(self, sql, *args):
+        self.queries.append((sql, args))
+        return self.rows
+
+
+def test_a_hunts_third_long_action_is_refused_without_anything_reserved_or_recorded():
+    rows = [{"capability_name": "sqli.verify", "action_id": "a1"},
+            {"capability_name": "templates.scan", "action_id": "a2"}]
+    conn = ReservationRows(rows)
+    with pytest.raises(HTTPException) as refused:
+        asyncio.run(jobs.require_long_action_slot(conn, {"id": "hunt-1"}, "xss.verify"))
+    assert refused.value.status_code == 429 and refused.value.headers == {"Retry-After": "60"}
+    detail = refused.value.detail
+    assert detail["reason_code"] == "long_actions_in_flight"
+    assert detail["in_flight"] == [{"capability_name": "sqli.verify", "action_id": "a1"},
+                                   {"capability_name": "templates.scan", "action_id": "a2"}]
+    assert "same idempotency_key" in detail["message"] and "http.request" in detail["message"]
+    # "Not now": nothing is recorded under the key, so the same call is sent again later.
+    assert not refused.value.recorded and refused.value.kind is None
+    ((sql, args),) = conn.queries
+    assert args[0] == "hunt-1" and set(args[1]) == jobs.slot_capabilities()
+    # A live reservation counts as long by its capability or by the wall it reserved.
+    assert set(args[2]) == jobs.long_capabilities() and args[3] == jobs.LONG_ACTION_WALL_SECONDS
+    assert "(requested_json->>'tool_wall_seconds')::numeric > $4" in sql
+    assert "status IN ('reserved','running')" in sql and "lease_expires_at > NOW()" in sql
+    assert "owner_kind='hunt'" in sql
+
+
+def test_a_hunt_below_the_long_slots_and_any_short_call_are_admitted():
+    one = ReservationRows([{"capability_name": "sqli.verify", "action_id": "a1"}])
+    asyncio.run(jobs.require_long_action_slot(one, {"id": "hunt-1"}, "sqli.verify"))
+    full = ReservationRows([{"capability_name": "sqli.verify", "action_id": "a1"},
+                            {"capability_name": "sqli.verify", "action_id": "a2"}])
+    for name, wall in (("http.request", 15), ("artifact.inspect", 30), ("authz.verify", 60),
+                       ("browser.navigate", 30), ("candidate.verify", 180), ("ssh.exec", 332)):
+        asyncio.run(jobs.require_long_action_slot(full, {"id": "hunt-1"}, name, wall))
+    assert full.queries == []  # a short call never even counts
+    # A call is long by the wall it reserves: a crawl, a fingerprint, or any worker action held
+    # longer than a minute.
+    for name, wall in (("web.crawl", 75), ("service.fingerprint", 240), ("web.probe", 120)):
+        with pytest.raises(HTTPException) as refused:
+            asyncio.run(jobs.require_long_action_slot(full, {"id": "hunt-1"}, name, wall))
+        assert refused.value.detail["reason_code"] == "long_actions_in_flight"
+
+
+def test_hunt_admission_refuses_a_third_long_action_before_reserving_it(monkeypatch):
+    """The real admission loop (the AST harness of test_hunt_authz_verification_limit) asks for a
+    long slot before it reserves anything."""
+    from tests import test_hunt_sqli_verify_input as sqli
+
+    stores = []
+
+    class TwoInFlight(sqli.AdmissionStore):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self.long_in_flight = [{"capability_name": "sqli.verify", "action_id": "a1"},
+                                   {"capability_name": "xss.verify", "action_id": "a2"}]
+            stores.append(self)
+
+    monkeypatch.setattr(sqli, "AdmissionStore", TwoInFlight)
+    with pytest.raises(HTTPException) as refused:
+        sqli._admit("/reports?filter=x")
+    assert refused.value.status_code == 429
+    assert refused.value.detail["reason_code"] == "long_actions_in_flight"
+    (store,) = stores
+    assert store.actions == {} and "verifications" in store.run["budget_used_json"]
+    assert store.run["budget_used_json"] == {"verifications": 0}
+    store.long_in_flight = store.long_in_flight[:1]
+    monkeypatch.setattr(sqli, "AdmissionStore", lambda: store)
+    admitted, reserved = sqli._admit("/reports?filter=x")
+    assert len(admitted.actions) == 1 and reserved[0]["tool_wall_seconds"] == 1_200
+
+
+def test_admission_classifies_the_call_by_the_wall_it_is_about_to_reserve():
+    """Structural pin for a unit run: the admission loop hands its own reserved wall to the long
+    slot check (tests/test_hunt_long_actions_postgres.py runs admission on PostgreSQL)."""
+    import ast
+    from pathlib import Path
+
+    source = (Path(__file__).resolve().parents[1] / "api/hunt/interaction_router.py").read_text()
+    lifecycle = next(node for node in ast.walk(ast.parse(source))
+                     if isinstance(node, ast.AsyncFunctionDef)
+                     and node.name == "_execute_hunt_capability_lifecycle")
+    (check,) = [call for call in ast.walk(lifecycle) if isinstance(call, ast.Call)
+                and getattr(call.func, "id", None) == "require_long_action_slot"]
+    assert ast.unparse(check) == "require_long_action_slot(conn, run, name, charges.get('tool_wall_seconds'))"

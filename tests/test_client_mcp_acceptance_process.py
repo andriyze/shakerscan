@@ -15,8 +15,6 @@ scripted routes, every request recorded); it is not an engine or a gateway.
 from __future__ import annotations
 
 import json
-import os
-import select
 import sys
 import time
 from pathlib import Path
@@ -70,16 +68,16 @@ def test_the_mcp_capability_tool_sends_only_what_the_engine_accepts():
 
 
 def _run_until_exit(session: Session, *, timeout: float = 30.0) -> None:
-    """Read the CLI's output until it exits; answer a step-up prompt if one appears (the
-    behaviour being tested is that none does, but a hang would hide the failure)."""
+    """Wait for the CLI to exit, watching its terminal; answer a step-up prompt if one appears
+    (the behaviour being tested is that none does, but a hang would hide the failure). The
+    terminal is read as it is written (``Session.out``)."""
     deadline = time.monotonic() + timeout
     answered = False
     while session.proc.poll() is None and time.monotonic() < deadline:
-        if select.select([session.proc.stdout], [], [], 0.2)[0]:
-            session.out += os.read(session.proc.stdout.fileno(), 65536)
         if not answered and b"TOTP code for alice" in session.out:
             session.type(TOTP + "\n")
             answered = True
+        time.sleep(0.05)
 
 
 def test_agent_allow_checks_the_agent_binary_before_any_step_up(tmp_path):
