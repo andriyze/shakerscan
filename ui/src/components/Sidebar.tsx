@@ -23,8 +23,10 @@ import {
   TriangleAlert,
   X,
 } from 'lucide-react'
-import { buttonClasses, Toggle } from '@/components/ui'
+import { buttonClasses, ToggleVisual } from '@/components/ui'
 import { API_URL } from '@/lib/api'
+import { productEdition } from '@/lib/pageTitle'
+import { SHAKERSCAN_REPOSITORY_URL, SHAKERSCAN_WEBSITE_URL } from '@/lib/repository'
 import { usePoll } from '@/lib/usePoll'
 import { DEFAULT_EDITION_LABEL, navigationAllowed, workspaceEdition } from '@/lib/workspaceCapabilities'
 import {
@@ -176,11 +178,30 @@ function loadHealthBuildIdentity(force = false): Promise<HealthBuildIdentity | n
   return healthBuildIdentityRequest.promise
 }
 
-function BrandMark({ className = 'w-6 h-6' }: { className?: string }) {
+// The ShakerScan S mark, the same drawing as public/favicon.svg: a blue S on its own dark tile,
+// so it reads on any background. Its colours are the mark's own, not theme colours.
+function BrandMark({ className = 'h-[22px] w-[22px]' }: { className?: string }) {
   return (
-    <svg className={`${className} text-blue-500`} fill="none" viewBox="0 0 24 24" stroke="currentColor">
-      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z" />
+    <svg className={`${className} shrink-0`} fill="none" viewBox="0 0 32 32" aria-hidden="true" focusable="false">
+      <rect width="32" height="32" rx="7" fill="#07090e" />
+      <path d="M23 8H13L9 12L13 16H19L23 20L19 24H9" stroke="#3b82f6" strokeWidth={4} strokeLinecap="square" strokeLinejoin="round" />
     </svg>
+  )
+}
+
+// "ShakerScan" in one weight, then the edition a managed deployment names as a quiet label
+// after a hairline ("ShakerScan | Enterprise").
+function BrandLockup({ edition, compact = false }: { edition?: string; compact?: boolean }) {
+  return (
+    <>
+      <BrandMark className={compact ? 'h-5 w-5' : undefined} />
+      <span className="text-base font-semibold leading-none tracking-[-0.012em]">ShakerScan</span>
+      {edition ? (
+        <span className="border-l border-gray-700 pl-2.5 text-[13px] font-medium leading-[14px] text-gray-400">
+          {edition}
+        </span>
+      ) : null}
+    </>
   )
 }
 
@@ -200,6 +221,7 @@ function NavContent({
   fleetEnabled: boolean
 }) {
   const buildLabel = formatBuildIdentity(buildIdentity)
+  const edition = productEdition(editionLabel)
   // Default view hides advanced groups/items; the footer switch reveals them.
   const visibleGroups = navGroups
     .filter((group) => showAll || !group.advanced)
@@ -229,18 +251,19 @@ function NavContent({
   return (
     <>
       <div className="mb-8">
+        {/* The link's name keeps the lockup's visible words ("ShakerScan Enterprise") in it. */}
         <Link
           href="/"
-          aria-label="ShakerScan dashboard"
-          className="flex items-center gap-2 rounded-sm text-xl font-bold text-white focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-blue-500"
+          aria-label={edition ? `ShakerScan ${edition} dashboard` : 'ShakerScan dashboard'}
+          className="flex items-center gap-2.5 rounded-sm py-0.5 text-white focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-blue-500"
         >
-          <BrandMark />
-          ShakerScan
+          <BrandLockup edition={edition} />
         </Link>
-        <p className="text-xs text-gray-500 mt-1">{editionLabel}</p>
+        {/* The lockup already names an Enterprise edition; any other label stays on its own line. */}
+        {!edition && <p className="text-xs text-gray-500 mt-2">{editionLabel}</p>}
         {(buildIdentity.ui || buildIdentity.api || buildIdentity.workers) && (
           <p
-            className={`mt-1 flex items-center gap-1 text-[11px] ${buildIdentity.skew ? 'text-amber-300' : 'text-gray-400'}`}
+            className={`${edition ? 'mt-2' : 'mt-1'} flex items-center gap-1 text-[11px] ${buildIdentity.skew ? 'text-amber-300' : 'text-gray-400'}`}
             title={buildIdentity.skew ? 'Component build mismatch detected' : 'Component build identities'}
             role={buildIdentity.skew ? 'status' : undefined}
             aria-live={buildIdentity.skew ? 'polite' : undefined}
@@ -258,8 +281,7 @@ function NavContent({
               <div className="flex items-center gap-1.5 px-3 pb-0.5 text-[10px] font-semibold uppercase tracking-wider text-gray-600">
                 <span>{group.heading}</span>
                 {group.badge ? (
-                  <span className="inline-flex items-center gap-1 rounded-full border border-violet-400/40 bg-violet-500/20 px-1.5 py-px text-[8px] font-bold uppercase tracking-wider text-violet-200">
-                    <span className="h-1 w-1 rounded-full bg-violet-300 animate-pulse" aria-hidden="true" />
+                  <span className="inline-flex items-center rounded-full border border-violet-400/30 px-1.5 text-[10px] font-medium normal-case leading-4 tracking-normal text-violet-300">
                     {group.badge}
                   </span>
                 ) : null}
@@ -303,24 +325,45 @@ function NavContent({
         </Link>
       </div>
 
-      <div className="pt-4 mt-4 border-t border-gray-800">
-        <div className="flex items-center justify-between">
+      <div className="pt-3 mt-4 border-t border-gray-800">
+        <div className="flex items-center gap-1.5 px-1 text-[12.5px]">
           <a
-            href="https://github.com/andriyze/shakerscan"
+            href={SHAKERSCAN_WEBSITE_URL}
+            target="_blank"
+            rel="noopener noreferrer"
+            title={SHAKERSCAN_WEBSITE_URL}
+            className="inline-flex items-center gap-1.5 rounded-sm text-gray-400 transition-colors hover:text-white focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-blue-500"
+          >
+            <BrandMark className="h-3.5 w-3.5" />
+            shakerscan.com
+          </a>
+          <span className="text-gray-700" aria-hidden="true">·</span>
+          <a
+            href={SHAKERSCAN_REPOSITORY_URL}
             target="_blank"
             rel="noopener noreferrer"
             aria-label="ShakerScan on GitHub"
-            className="flex items-center gap-2 px-3 py-2 text-sm text-gray-400 hover:text-white transition-colors rounded-lg focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-blue-500"
+            title="Source code on GitHub"
+            className="inline-flex items-center gap-1.5 rounded-sm text-gray-400 transition-colors hover:text-white focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-blue-500"
           >
-            <svg className="w-5 h-5" fill="currentColor" viewBox="0 0 24 24">
+            <svg className="h-3.5 w-3.5" fill="currentColor" viewBox="0 0 24 24" aria-hidden="true">
               <path fillRule="evenodd" clipRule="evenodd" d="M12 2C6.477 2 2 6.477 2 12c0 4.42 2.865 8.17 6.839 9.49.5.092.682-.217.682-.482 0-.237-.008-.866-.013-1.7-2.782.604-3.369-1.34-3.369-1.34-.454-1.156-1.11-1.464-1.11-1.464-.908-.62.069-.608.069-.608 1.003.07 1.531 1.03 1.531 1.03.892 1.529 2.341 1.087 2.91.831.092-.646.35-1.086.636-1.336-2.22-.253-4.555-1.11-4.555-4.943 0-1.091.39-1.984 1.029-2.683-.103-.253-.446-1.27.098-2.647 0 0 .84-.269 2.75 1.025A9.578 9.578 0 0112 6.836c.85.004 1.705.114 2.504.336 1.909-1.294 2.747-1.025 2.747-1.025.546 1.377.203 2.394.1 2.647.64.699 1.028 1.592 1.028 2.683 0 3.842-2.339 4.687-4.566 4.935.359.309.678.919.678 1.852 0 1.336-.012 2.415-.012 2.743 0 .267.18.578.688.48C19.138 20.167 22 16.418 22 12c0-5.523-4.477-10-10-10z" />
             </svg>
             GitHub
           </a>
-          <div className="flex items-center gap-2">
-          <span title="Show advanced sections (Records, Governance, Developer, Model Intake)" className="inline-flex">
-            <Toggle checked={showAll} onChange={onToggleShowAll} label="Show all sidebar sections" />
-          </span>
+        </div>
+        <div className="mt-2 flex items-center justify-between pl-1">
+          <button
+            type="button"
+            role="switch"
+            aria-checked={showAll}
+            onClick={() => onToggleShowAll(!showAll)}
+            title="Show advanced sections (Records, Governance, Developer, Model Intake)"
+            className="inline-flex items-center gap-2 rounded-md py-1 pr-1 text-[12.5px] text-gray-400 transition-colors hover:text-white focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-blue-500"
+          >
+            <ToggleVisual checked={showAll} />
+            All sections
+          </button>
           <Link
             href="/settings"
             aria-label="Settings"
@@ -332,7 +375,7 @@ function NavContent({
                 : 'text-gray-400 hover:text-white hover:bg-gray-800'
             }`}
           >
-            <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" aria-hidden="true">
               <path
                 strokeLinecap="round"
                 strokeLinejoin="round"
@@ -342,7 +385,6 @@ function NavContent({
               <circle cx="13.5" cy="12" r="2.5" strokeWidth={2} />
             </svg>
           </Link>
-          </div>
         </div>
       </div>
     </>
@@ -440,9 +482,8 @@ export default function Sidebar() {
     <>
       {/* Mobile: slim top bar instead of a viewport-eating sidebar. */}
       <div className="sticky top-0 z-40 flex items-center justify-between border-b border-gray-800 bg-gray-900 px-4 py-3 md:hidden">
-        <Link href="/" className="flex items-center gap-2 text-base font-bold text-white">
-          <BrandMark className="w-5 h-5" />
-          ShakerScan
+        <Link href="/" className="flex items-center gap-2.5 text-white">
+          <BrandLockup edition={productEdition(editionLabel)} compact />
         </Link>
         <button
           ref={openerRef}

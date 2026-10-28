@@ -20,7 +20,14 @@ export const metadata: Metadata = {
   },
   description: 'Open Source Dynamic Application Security Testing Scanner',
   icons: {
-    icon: '/favicon.svg',
+    // The .ico (16 and 32 px) for browsers without SVG icons; browsers that take SVG use the
+    // last entry. Both, and the apple-touch icon, are rendered from favicon.svg by
+    // scripts/render-icons.mjs.
+    icon: [
+      { url: '/favicon.ico', sizes: '16x16 32x32' },
+      { url: '/favicon.svg', type: 'image/svg+xml' },
+    ],
+    apple: [{ url: '/apple-touch-icon.png', sizes: '180x180' }],
   },
 }
 

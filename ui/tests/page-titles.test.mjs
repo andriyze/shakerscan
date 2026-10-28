@@ -134,3 +134,27 @@ test('an edition label that names Enterprise extends the product name in the tit
   assert.equal(editionTitle('Findings · ShakerScan Enterprise', 'Enterprise'), 'Findings · ShakerScan Enterprise', 'idempotent')
   assert.equal(editionTitle('404: This page could not be found.', 'Enterprise'), '404: This page could not be found.')
 })
+
+test('the tab icons are the S mark: SVG, a 16 and 32 px ICO, and a 180 px apple-touch icon', () => {
+  const publicDir = path.join(root, 'public')
+  const svg = read(path.join(publicDir, 'favicon.svg'))
+  assert.match(svg, /<rect width="32" height="32" rx="7" fill="#07090e"\/>/)
+  assert.match(svg, /d="M23 8H13L9 12L13 16H19L23 20L19 24H9" stroke="#3b82f6" stroke-width="4" stroke-linecap="square"/)
+
+  const ico = readFileSync(path.join(publicDir, 'favicon.ico'))
+  assert.deepEqual([ico.readUInt16LE(0), ico.readUInt16LE(2)], [0, 1], 'an ICO header')
+  const sizes = Array.from({ length: ico.readUInt16LE(4) }, (_, index) => ico.readUInt8(6 + 16 * index))
+  assert.deepEqual(sizes, [16, 32])
+
+  const png = readFileSync(path.join(publicDir, 'apple-touch-icon.png'))
+  assert.equal(png.subarray(1, 4).toString('latin1'), 'PNG')
+  assert.deepEqual([png.readUInt32BE(16), png.readUInt32BE(20)], [180, 180])
+
+  const layout = read(path.join(app, 'layout.tsx'))
+  for (const href of ['/favicon.svg', '/favicon.ico', '/apple-touch-icon.png']) assert.ok(layout.includes(`'${href}'`), href)
+
+  // The sidebar draws the same mark.
+  const sidebar = read(path.join(root, 'src/components/Sidebar.tsx'))
+  assert.ok(sidebar.includes('d="M23 8H13L9 12L13 16H19L23 20L19 24H9" stroke="#3b82f6"'))
+  assert.ok(sidebar.includes('fill="#07090e"'))
+})

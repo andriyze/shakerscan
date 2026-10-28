@@ -44,7 +44,7 @@ test('MODULE-003 the sidebar lists Model Intake only under the advanced switch',
   const visibleLink = (name: string) => page.locator('aside:visible a[href], nav:visible a[href]').filter({ hasText: name })
   await expect(visibleLink('AI Gate')).not.toHaveCount(0)
   await expect(visibleLink('Model Intake')).toHaveCount(0)
-  await page.getByRole('switch', { name: 'Show all sidebar sections' }).first().click()
+  await page.getByRole('switch', { name: 'All sections', exact: true }).first().click()
   await expect(visibleLink('Model Intake')).not.toHaveCount(0)
 })
 
