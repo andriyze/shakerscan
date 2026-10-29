@@ -118,6 +118,13 @@ SENSITIVE_SEED_PATHS: tuple[str, ...] = (
     "/backup.sql",
     "/database.sql",
     "/dump.sql",
+    # Secret-bearing files deployments commonly leave in a web root: a dotenv-style secrets file,
+    # a kubeconfig, an AI coding assistant's MCP configuration (server tokens), and a PHP
+    # application's shipped configuration template.
+    "/secrets.env",
+    "/kubeconfig.yaml",
+    "/.claude/mcp.json",
+    "/config/config.inc.php.dist",
 )
 
 
