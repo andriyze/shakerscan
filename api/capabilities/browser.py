@@ -1191,8 +1191,11 @@ async def _execute_browser_action_in_context(
                 refused = (int(navigation_status or 0), TARGET_UNAVAILABLE)
             if refused is not None:
                 # A 403 that asks for no credentials (a WAF, an access rule) is told apart:
-                # adding a credential profile would not help it.
+                # adding a credential profile would not help it. The attempt is no verdict, so
+                # the observation says so too, as the partial action does: not "not proven".
                 proof_observation["inconclusive_reason"] = refused[1]
+                proof_observation["proof_state"] = "inconclusive"
+                proof_observation["finding_verdict"] = "inconclusive"
                 return _browser_result(
                     prepared,
                     status="partial",

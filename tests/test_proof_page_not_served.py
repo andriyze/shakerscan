@@ -93,7 +93,8 @@ def _assert_unresolved(result, status):
     assert result.status == "partial" and result.partial is True
     assert result.errors == (f"target_unavailable:{status}",)
     proof = _proof(result)
-    assert proof["proof_state"] == "not_proven"
+    # No verdict, in the observation as in the action (2.11.3): never "not proven".
+    assert (proof["proof_state"], proof["finding_verdict"]) == ("inconclusive", "inconclusive")
     assert proof["inconclusive_reason"] == "target_unavailable"
 
 
@@ -264,7 +265,7 @@ def test_page_output_that_is_not_the_marker_neither_proves_nor_settles_an_unserv
 
     assert result.status == "partial"
     proof = _proof(result)
-    assert proof["proof_state"] == "not_proven"
+    assert proof["proof_state"] == "inconclusive"
     assert proof["inconclusive_reason"] == "target_unavailable"
     assert "<script>" not in json.dumps(result.observations, default=str)
 

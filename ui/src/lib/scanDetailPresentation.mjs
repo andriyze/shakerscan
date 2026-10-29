@@ -294,6 +294,13 @@ const COVERAGE_REASON_LABELS = {
   auth_endpoint_probe_limited: "The attached credential profile's own sign-in endpoint is tested paced and bounded (at most 20 requests a minute across the scan, within a bounded set of probes for each check: up to 4,352 requests per scan part), and a check there ended without a verdict. The pace does not prevent a sign-in throttle or lockout keyed to the scanner's address",
 }
 
+// A coverage reason code as the Scan page shows it: its label when this table knows the code,
+// otherwise the code in title case ("selected_family_incomplete" -> "Selected Family Incomplete").
+export function coverageReasonText(code) {
+  const raw = String(code || '')
+  return COVERAGE_REASON_LABELS[raw] || raw.replace(/_/g, ' ').replace(/\b\w/g, (char) => char.toUpperCase())
+}
+
 // What a family's slow endpoint could not finish: the template pack, or an exposure probe that
 // no retry got an answer for.
 const SLOW_ENDPOINT_WORK = {

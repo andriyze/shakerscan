@@ -229,7 +229,9 @@ def test_a_fragment_proof_page_the_service_did_not_serve_settles_partial(monkeyp
     assert sent == ["GET"]
     proof = next(o for o in result.observations if o.get("kind") == "xss_browser_proof")
     assert proof["injection_location"] == "fragment"
-    assert (proof["proof_state"], proof["inconclusive_reason"]) == ("not_proven", "target_unavailable")
+    # No verdict, in the observation as in the action: neither "not proven" nor verified.
+    assert (proof["proof_state"], proof["finding_verdict"], proof["inconclusive_reason"]) == (
+        "inconclusive", "inconclusive", "target_unavailable")
     assert (result.status, result.partial) == ("partial", True)
     assert result.errors == (f"target_unavailable:{status}",)
 
@@ -245,13 +247,14 @@ def test_a_deep_query_proof_reads_only_a_service_refusal_as_no_verdict(monkeypat
     assert sent == ["GET"]
     proof = next(o for o in result.observations if o.get("kind") == "xss_browser_proof")
     assert proof["injection_location"] == "query"
-    assert proof["proof_state"] == "not_proven"
     if partial:
         assert (result.status, result.errors) == ("partial", (f"target_unavailable:{status}",))
         assert proof["inconclusive_reason"] == "target_unavailable"
+        assert (proof["proof_state"], proof["finding_verdict"]) == ("inconclusive", "inconclusive")
     else:
         assert (result.status, result.partial, result.errors) == ("success", False, ())
         assert "inconclusive_reason" not in proof
+        assert (proof["proof_state"], proof["finding_verdict"]) == ("not_proven", "not_proven")
 
 class _Request:
     def __init__(self, url, body=b"", unreadable=False):
