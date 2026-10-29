@@ -10,6 +10,7 @@ import { Button, gradeTextColor } from '@/components/ui'
 import { DeleteRecordsButton } from '@/components/lifecycle/DeleteRecordsButton'
 import type { TargetAsset } from '@/lib/targetAssetApi'
 import { featureEnabled } from '@/lib/workspaceCapabilities'
+import { TERMINAL_HUNT_START_COMMAND, TERMINAL_HUNT_START_LABEL, useWorkspaceIsManaged } from '@/components/hunt/TerminalHuntStart'
 import { assetAuthorizationStatus } from '@/lib/assetAuthorization.mjs'
 import { configureScanHref, latestGrade, originLabel, relativeTime, scanUrls, severitySummary } from '@/lib/targetInventoryModel.mjs'
 import { boundedDisplayText, boundedTargetDisplay } from '@/lib/targetChoices'
@@ -113,6 +114,7 @@ export function TargetRow({ asset, selected, onSelect, actions, busy, nested = f
   const locator = boundedDisplayText(asset.locator, 120)
   const name = asset.name && asset.name !== asset.locator ? boundedDisplayText(asset.name, 120) : null
   const devices = featureEnabled('devices')
+  const managed = useWorkspaceIsManaged()
   const webApps = (asset.origins || []).filter(origin => origin.is_active).length
   const domain = assetKind(asset) === 'domain'
   const canScan = asset.is_active && (webApps > 0 || domain || devices)
@@ -162,7 +164,9 @@ export function TargetRow({ asset, selected, onSelect, actions, busy, nested = f
             description="Choose budget, permissions, credentials, and coverage">Customize Scan…</MenuItem>
           {devices && <MenuItem icon={<Radar />} onSelect={() => actions.networkScan(asset)} description="Open ports, services and web apps">Network scan</MenuItem>}
           {discoverDomain && featureEnabled('discovery') && <TargetDomainDiscovery menuItem domain={discoverDomain} onSettled={actions.refresh} />}
-          <MenuItem icon={<Crosshair />} href={`/hunt?target=${asset.id}`} description="AI investigation with this target's instructions">Start Hunt</MenuItem>
+          {managed
+            ? <MenuItem icon={<Crosshair />} disabled>{TERMINAL_HUNT_START_LABEL} <code className="font-mono text-xs">{TERMINAL_HUNT_START_COMMAND}</code></MenuItem>
+            : <MenuItem icon={<Crosshair />} href={`/hunt?target=${asset.id}`} description="AI investigation with this target's instructions">Start Hunt</MenuItem>}
           <TargetSkillEditor menuItem targetId={asset.id} targetName={name || locator} hasSkill={asset.has_target_skill} />
           <MenuSeparator />
           {asset.authorized

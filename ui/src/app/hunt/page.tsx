@@ -37,6 +37,7 @@ import { RequestCollectionPicker } from '@/components/RequestCollectionPicker'
 import { managedTargetAuthorizationIsAutomatic } from '@/lib/workspaceCapabilities'
 import { HuntHistoryList } from '@/components/hunt/HuntHistoryList'
 import { HuntRunView } from '@/components/hunt/HuntRunView'
+import { TerminalHuntStart, useWorkspaceIsManaged } from '@/components/hunt/TerminalHuntStart'
 import { cleanTargetLocator, huntTargetTitle } from '@/lib/huntListModel.mjs'
 import type { TargetAsset } from '@/lib/targetAssetApi'
 import { useTargetSearch } from '@/lib/useTargetSearch'
@@ -114,6 +115,8 @@ function HuntContent() {
   const [hunt, setHunt] = useState<HuntV2 | null>(null)
   // The launcher opens from New Hunt, or straight away when a target was preselected by a link.
   const [launcherOpen, setLauncherOpen] = useState(() => Boolean(searchParams.get('target') && !searchParams.get('run')))
+  // A managed (Enterprise) workspace starts Hunts from the terminal: no browser launcher.
+  const managed = useWorkspaceIsManaged()
   const [legacyDeviceRun, setLegacyDeviceRun] = useState<DeviceAgentSession | null>(null)
   const [legacyRunLoading, setLegacyRunLoading] = useState(false)
   const [starting, setStarting] = useState(false)
@@ -170,7 +173,7 @@ function HuntContent() {
 
   // The launcher searches the inventory on the server (one bounded page per query) instead of
   // loading every target; a preselected target is read on its own.
-  const launcherSearchOpen = launcherOpen && !searchParams.get('run') && !searchParams.get('legacy_run')
+  const launcherSearchOpen = launcherOpen && !managed && !searchParams.get('run') && !searchParams.get('legacy_run')
   const targetSearch = useTargetSearch({
     selectedIds: [targetId],
     includeServices: true,
@@ -192,7 +195,7 @@ function HuntContent() {
   // Opening a run also selects its target, but the launcher is not on screen then. Its target
   // authorization and credential reads are launcher state: issuing them on a run page cost two
   // calls the run view never used, and a viewer role is refused both.
-  const launcherVisible = launcherOpen && !hunt && !legacyDeviceRun && !searchParams.get('run')
+  const launcherVisible = launcherOpen && !managed && !hunt && !legacyDeviceRun && !searchParams.get('run')
   const launcherChoice = launcherVisible ? selectedChoice : undefined
   // The run detail carries no target name. Inactive targets are not launch choices, so read those directly.
   const [runTargetRecord, setRunTargetRecord] = useState<{ id: string; name?: string; url?: string } | null>(null)
@@ -392,7 +395,7 @@ function HuntContent() {
               </p>
             </div>
           </div>
-          {!launcherOpen && <Button onClick={() => setLauncherOpen(true)}><Plus className="h-4 w-4" aria-hidden="true" />New Hunt</Button>}
+          {managed ? <TerminalHuntStart className="self-center" /> : !launcherOpen && <Button onClick={() => setLauncherOpen(true)}><Plus className="h-4 w-4" aria-hidden="true" />New Hunt</Button>}
         </div>
       )}
 
@@ -404,7 +407,7 @@ function HuntContent() {
         <p role="status" className="text-sm text-gray-400">Loading Hunt…</p>
       ) : !hunt ? (
         <>
-          {launcherOpen && <Card className="space-y-5 p-5">
+          {launcherOpen && !managed && <Card className="space-y-5 p-5">
           <div className="flex items-center justify-between gap-3">
             <h2 className="font-medium text-white">New Hunt</h2>
             <Button size="sm" variant="ghost" onClick={() => setLauncherOpen(false)}>Close</Button>

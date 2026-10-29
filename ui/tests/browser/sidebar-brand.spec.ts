@@ -12,10 +12,13 @@ const enterprisePolicy = {
   edition: 'Enterprise Edition',
   features: {
     dashboard: { state: 'enabled' }, docs: { state: 'enabled' }, schedules: { state: 'enabled' },
-    settings: { state: 'enabled' },
+    settings: { state: 'enabled' }, evidence: { state: 'enabled' },
   },
-  navigation: { '/': 'dashboard', '/docs': 'docs', '/schedules': 'schedules', '/settings': 'settings' },
-  ui_routes: ['/', '/docs', '/schedules', '/settings/policy-profiles'],
+  navigation: {
+    '/': 'dashboard', '/docs': 'docs', '/schedules': 'schedules', '/settings': 'settings',
+    '/evidence': 'evidence', '/model-intake': 'model_intake',
+  },
+  ui_routes: ['/', '/docs', '/schedules', '/settings/policy-profiles', '/evidence'],
 }
 
 // The server-rendered tab title: the first <title> in the document, which is the one a browser
@@ -101,6 +104,17 @@ test('BRAND-003 a managed Enterprise edition names itself in the lockup and ever
   await expect(nav.getByRole('link', { name: 'ShakerScan Enterprise dashboard', exact: true })).toHaveText('ShakerScanEnterprise')
   await expect(nav.getByRole('link', { name: 'ShakerScan dashboard', exact: true })).toHaveCount(0)
   await expect(nav.getByText('Enterprise Edition', { exact: true })).toHaveCount(0)
+
+  // A managed workspace has no section switch: its navigation list decides. Evidence (allowed
+  // here) is listed under Records without a click; Timeline and Model Intake (not allowed) are not.
+  await expect(nav.getByRole('switch')).toHaveCount(0)
+  await expect(nav.getByRole('link', { name: 'Evidence' })).toBeVisible()
+  await expect(nav.getByText('Records', { exact: true })).toBeVisible()
+  await expect(nav.getByRole('link', { name: 'Timeline' })).toHaveCount(0)
+  await expect(nav.getByRole('link', { name: 'Model Intake' })).toHaveCount(0)
+  // The footer stays "[S] shakerscan.com · GitHub".
+  await expect(nav.getByRole('link', { name: 'shakerscan.com', exact: true })).toHaveAttribute('href', 'https://shakerscan.com')
+  await expect(nav.getByRole('link', { name: 'ShakerScan on GitHub' })).toBeVisible()
 
   // Next.js swaps the title on client navigation; the edition stays.
   await nav.getByRole('link', { name: 'Schedules' }).click()

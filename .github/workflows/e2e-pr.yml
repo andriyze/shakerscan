@@ -490,7 +490,7 @@ jobs:
             service-intelligence.spec.ts \
             dashboard-page.spec.ts asm-page.spec.ts request-collections-page.spec.ts \
             schedules-page.spec.ts timeline-page.spec.ts deep-hunt-run.spec.ts \
-            ui-audit-2-11.spec.ts sidebar-brand.spec.ts
+            ui-audit-2-11.spec.ts sidebar-brand.spec.ts hunt-terminal-start.spec.ts
 
       - name: Upload this shard's E2E scorecard, browser and image results
         if: always() && steps.changes.outputs.ui == 'true'

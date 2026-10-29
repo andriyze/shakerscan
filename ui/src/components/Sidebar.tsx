@@ -29,6 +29,7 @@ import { productEdition } from '@/lib/pageTitle'
 import { SHAKERSCAN_REPOSITORY_URL, SHAKERSCAN_WEBSITE_URL } from '@/lib/repository'
 import { usePoll } from '@/lib/usePoll'
 import { DEFAULT_EDITION_LABEL, navigationAllowed, workspaceEdition } from '@/lib/workspaceCapabilities'
+import { useWorkspaceIsManaged } from '@/components/hunt/TerminalHuntStart'
 import {
   deriveBuildIdentity,
   formatBuildIdentity,
@@ -39,7 +40,8 @@ import {
 const navGroups: {
   heading: string | null
   badge?: string
-  // Advanced groups/items are hidden unless the sidebar "show all" switch is on.
+  // Advanced groups/items are hidden unless the sidebar "show all" switch is on. A managed
+  // workspace has no switch: its gateway's navigation list decides, so every page it allows shows.
   advanced?: boolean
   items: { href: string; label: string; icon: ReactNode; advanced?: boolean; fleetOnly?: boolean }[]
 }[] = [
@@ -212,8 +214,10 @@ function NavContent({
   buildIdentity,
   fleetEnabled,
   editionLabel,
+  managed,
 }: {
   editionLabel: string
+  managed: boolean
   pathname: string
   showAll: boolean
   onToggleShowAll: (value: boolean) => void
@@ -222,13 +226,15 @@ function NavContent({
 }) {
   const buildLabel = formatBuildIdentity(buildIdentity)
   const edition = productEdition(editionLabel)
-  // Default view hides advanced groups/items; the footer switch reveals them.
+  // Default view hides advanced groups/items; the footer switch reveals them. A managed
+  // workspace shows every page its navigation list allows and renders no switch.
+  const showAdvanced = managed || showAll
   const visibleGroups = navGroups
-    .filter((group) => showAll || !group.advanced)
+    .filter((group) => showAdvanced || !group.advanced)
     .map((group) => ({
       ...group,
       items: group.items.filter((item) => (
-        (showAll || !item.advanced)
+        (showAdvanced || !item.advanced)
         && (!item.fleetOnly || fleetEnabled)
         && navigationAllowed(item.href)
       )),
@@ -353,6 +359,7 @@ function NavContent({
           </a>
         </div>
         <div className="mt-2 flex items-center justify-between pl-1">
+          {managed ? <span /> : (
           <button
             type="button"
             role="switch"
@@ -364,6 +371,7 @@ function NavContent({
             <ToggleVisual checked={showAll} />
             All sections
           </button>
+          )}
           <Link
             href="/settings"
             aria-label="Settings"
@@ -400,6 +408,7 @@ export default function Sidebar() {
   const pathname = usePathname()
   const [mobileOpen, setMobileOpen] = useState(false)
   const [showAll, setShowAll] = useState(false)
+  const managed = useWorkspaceIsManaged()
   const bakedVersion = process.env.NEXT_PUBLIC_APP_VERSION
   const bakedExpectedApiFingerprint = process.env.NEXT_PUBLIC_EXPECTED_API_BUILD_FINGERPRINT
   const [buildIdentity, setBuildIdentity] = useState<BuildIdentity>({ ui: bakedVersion, skew: false })
@@ -523,14 +532,14 @@ export default function Sidebar() {
                 <X className="h-5 w-5" aria-hidden="true" />
               </button>
             </div>
-            <NavContent editionLabel={editionLabel} pathname={pathname} showAll={showAll} onToggleShowAll={handleToggleShowAll} buildIdentity={buildIdentity} fleetEnabled={fleetEnabled} />
+            <NavContent editionLabel={editionLabel} managed={managed} pathname={pathname} showAll={showAll} onToggleShowAll={handleToggleShowAll} buildIdentity={buildIdentity} fleetEnabled={fleetEnabled} />
           </aside>
         </div>
       )}
 
       {/* Desktop: persistent sidebar. */}
       <aside className="sticky top-0 hidden h-screen w-64 shrink-0 flex-col overflow-y-auto overscroll-contain border-r border-gray-800 bg-gray-900 p-4 md:flex">
-        <NavContent editionLabel={editionLabel} pathname={pathname} showAll={showAll} onToggleShowAll={handleToggleShowAll} buildIdentity={buildIdentity} fleetEnabled={fleetEnabled} />
+        <NavContent editionLabel={editionLabel} managed={managed} pathname={pathname} showAll={showAll} onToggleShowAll={handleToggleShowAll} buildIdentity={buildIdentity} fleetEnabled={fleetEnabled} />
       </aside>
     </>
   )
