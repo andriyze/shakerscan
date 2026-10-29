@@ -23,7 +23,10 @@ the deliberate tightenings of this change, and nothing else:
   carries;
 - the cloud-service list gains the EKS Pod Identity agent (169.254.170.23, fd00:ec2::23) and
   Oracle Cloud Classic metadata (192.0.0.192), refused everywhere, and the device plane refuses
-  the limited broadcast address 255.255.255.255 in every spelling.
+  the limited broadcast address 255.255.255.255 in every spelling;
+- 2.11.3: this deployment's own addresses (loopback, and every network in
+  ``SHAKERSCAN_DEVICE_DENY_CIDRS``) are refused on every plane in every environment and under
+  every setting, in every spelling that carries one.
 """
 from __future__ import annotations
 
@@ -273,6 +276,16 @@ def _carries_new_cloud(text):
     return any(item in _NEW_CLOUD for item in _carried(text))
 
 
+def _deployment_fenced(text, settings):
+    """2.11.3: loopback and the configured list, judged as every address the spelling carries."""
+    networks = [ipaddress.ip_network(raw) for raw in DENY_CIDRS] if (
+        "SHAKERSCAN_DEVICE_DENY_CIDRS" in SETTINGS[settings]) else []
+    return any(
+        item.is_loopback or any(item.version == net.version and item in net for net in networks)
+        for item in _carried(text)
+    )
+
+
 def _deliberate_scope_tightening(text):
     address = _plain(text)
     carried = _carried(text)
@@ -301,7 +314,8 @@ def test_the_scope_guard_is_never_more_permissive(monkeypatch, environment, allo
             loosened.append(text)
         elif old is None and new is not None:
             tightened.append(text)
-            if not (_deliberate_scope_tightening(text) or _under_declared_nat64(text, settings)):
+            if not (_deliberate_scope_tightening(text) or _under_declared_nat64(text, settings)
+                    or _deployment_fenced(text, settings)):
                 unexplained.append(text)
     assert not loosened, loosened[:20]
     assert not unexplained, unexplained[:20]
@@ -346,7 +360,8 @@ def test_the_device_plane_is_never_more_permissive(monkeypatch, environment, pol
         new = device_posture.device_destination_admitted(text, environment=environment, policy=policy)
         if new and not old:
             loosened.append(text)
-        elif old and not new and not _deliberate_device_tightening(text, environment, policy):
+        elif old and not new and not (_deliberate_device_tightening(text, environment, policy)
+                                      or _deployment_fenced(text, settings)):
             unexplained.append(text)
     assert not loosened, loosened[:20]
     assert not unexplained, unexplained[:20]

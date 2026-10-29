@@ -195,9 +195,16 @@ def test_a_frozen_address_the_deployment_now_refuses_does_not_run(monkeypatch):
 
 
 def test_the_lab_environment_admits_what_its_admission_admitted(refusing_deployment):
-    binding = _binding(host="app.lab.example", addresses=("127.0.0.1",), environment="lab")
-    _, materialized = _materialize(("127.0.0.2",), binding)
+    binding = _binding(host="app.lab.example", addresses=("10.0.0.7",), environment="lab")
+    _, materialized = _materialize(("10.0.0.8",), binding)
     assert materialized["options"][RUNTIME_DNS_REVALIDATION_OPTION]["environment"] == "lab"
+
+
+def test_a_lab_label_never_admits_this_deployments_own_loopback(refusing_deployment):
+    """2.11.3: loopback is this deployment's own address, refused whatever the label."""
+    binding = _binding(host="app.lab.example", addresses=("127.0.0.1",), environment="lab")
+    with pytest.raises(CanonicalScanJobMaterializationError, match="no longer an allowed"):
+        _materialize(("127.0.0.2",), binding)
 
 
 def test_no_lookup_records_no_dns_evidence(refusing_deployment):

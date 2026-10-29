@@ -19,15 +19,17 @@ from fastapi import HTTPException
 
 try:
     import deployment_policy
+    from scanner_tools.address_classes import DEPLOYMENT_DENY_CIDRS_ENV, deployment_fenced
     from scanner_tools.device_posture import (
-        DEVICE_LAB_ENVIRONMENTS, PRIVATE_DESTINATION_REASON, device_private_destination_refusal,
-        canonical_device_address, validate_device_destination,
+        DEVICE_FENCE_REFUSAL, DEVICE_LAB_ENVIRONMENTS, PRIVATE_DESTINATION_REASON,
+        device_private_destination_refusal, canonical_device_address, validate_device_destination,
     )
 except ModuleNotFoundError:  # package import in host-side tests
     from .. import deployment_policy
+    from scanner.scanner_tools.address_classes import DEPLOYMENT_DENY_CIDRS_ENV, deployment_fenced
     from scanner.scanner_tools.device_posture import (
-        DEVICE_LAB_ENVIRONMENTS, PRIVATE_DESTINATION_REASON, device_private_destination_refusal,
-        canonical_device_address, validate_device_destination,
+        DEVICE_FENCE_REFUSAL, DEVICE_LAB_ENVIRONMENTS, PRIVATE_DESTINATION_REASON,
+        device_private_destination_refusal, canonical_device_address, validate_device_destination,
     )
 
 Resolver = Callable[[str], Awaitable[list[str]]]
@@ -55,19 +57,18 @@ async def admit_device_destination(
     policy: str | None = None,
     resolve: Resolver | None = None,
 ) -> list[str]:
-    """Return the admitted addresses of ``locator``, or raise a 422 naming the setting.
+    """Return the admitted addresses of ``locator``, or raise a 422 before anything is queued.
 
-    Nothing needs checking (and nothing is resolved) when the deployment allows private-network
-    targets or the device is in a Lab environment; the result is then empty. An unresolvable
-    hostname is not refused here: the worker reports unresolved reachability for it.
+    A hostname is resolved whatever the private-network setting and the environment, because
+    this deployment's own addresses (loopback and ``SHAKERSCAN_DEVICE_DENY_CIDRS``) are refused
+    under every setting and label. An unresolvable hostname is not refused here: the worker
+    reports unresolved reachability for it.
     """
     effective = policy or deployment_policy.private_network_targets_policy()
     judged = device_policy_environment(environment)
     try:
         addresses = [str(ipaddress.ip_address(str(locator).strip("[]")))]
     except ValueError:
-        if effective == "allow" or judged in DEVICE_LAB_ENVIRONMENTS:
-            return []
         try:
             addresses = list(dict.fromkeys(await (resolve or _resolve)(str(locator))))
         except (OSError, TimeoutError, ValueError):
@@ -75,7 +76,13 @@ async def admit_device_destination(
     admitted: list[str] = []
     refusal: str | None = None
     for address in addresses:
+        try:
+            own_address = deployment_fenced(ipaddress.ip_address(address))
+        except ValueError:
+            continue
         reason = device_private_destination_refusal(address, judged, effective)
+        if reason is None and own_address:
+            reason = DEVICE_FENCE_REFUSAL
         if reason is None:
             admitted.append(address)
         else:
@@ -85,7 +92,10 @@ async def admit_device_destination(
     raise HTTPException(status_code=422, detail={
         "message": f"Connected device address is not an allowed destination class: {refusal}",
         "reason": PRIVATE_DESTINATION_REASON,
-        "setting": deployment_policy.PRIVATE_NETWORK_TARGETS_ENV,
+        "setting": (
+            DEPLOYMENT_DENY_CIDRS_ENV if refusal == DEVICE_FENCE_REFUSAL
+            else deployment_policy.PRIVATE_NETWORK_TARGETS_ENV
+        ),
         "environment": judged,
     })
 

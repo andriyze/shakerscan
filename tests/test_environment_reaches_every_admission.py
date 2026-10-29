@@ -151,7 +151,7 @@ def _admit(address, environment, allow_private=None):
     ) is None
 
 
-@pytest.mark.parametrize("address", ["192.168.1.50", "10.0.0.7", "127.0.0.1"])
+@pytest.mark.parametrize("address", ["192.168.1.50", "10.0.0.7"])
 def test_a_lab_target_is_admitted_the_same_way_on_a_refusing_deployment(address):
     """What N01 broke: creation admitted under Lab; Hunt and the broker judged under production."""
     at_creation = _admit(address, "lab", allow_private=False)

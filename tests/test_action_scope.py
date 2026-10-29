@@ -34,20 +34,20 @@ def test_blocks_userinfo_trailing_dot_and_unicode_hosts():
     assert "unicode_or_punycode_confusion" in blocked_by("https://xn--e1awd7f.com/", allowed_root_domains=["xn--e1awd7f.com"])
 
 
-def test_admits_private_and_loopback_by_default_and_blocks_them_when_refused(monkeypatch):
+def test_admits_private_by_default_and_blocks_it_when_refused(monkeypatch):
     """A self-hosted install scans its own network by default; a deployment that must not reach
-    private ranges sets the policy to refuse and is then blocked."""
+    private ranges sets the policy to refuse and is then blocked. Loopback is this deployment's
+    own address (2.11.3): refused by default, under refuse and under a lab label alike."""
     monkeypatch.delenv("SHAKERSCAN_PRIVATE_NETWORK_TARGETS", raising=False)
-    assert evaluate_scope("http://127.0.0.1:8080/", allowed_hosts=["127.0.0.1"]).verdict != "blocked"
     assert evaluate_scope("http://192.168.1.50/", allowed_hosts=["192.168.1.50"]).verdict != "blocked"
-    monkeypatch.setenv("SHAKERSCAN_PRIVATE_NETWORK_TARGETS", "refuse")
     assert "loopback_or_private_range" in blocked_by(
         "http://127.0.0.1:8080/", allowed_hosts=["127.0.0.1"])
+    monkeypatch.setenv("SHAKERSCAN_PRIVATE_NETWORK_TARGETS", "refuse")
     assert "loopback_or_private_range" in blocked_by("http://10.0.0.5/", allowed_hosts=["10.0.0.5"])
-    lab = evaluate_scope("http://127.0.0.1:8080/", allowed_hosts=["127.0.0.1"], environment="lab")
-    assert lab.verdict == "allowed", "a lab label still admits its own address"
-    localhost_lab = evaluate_scope("http://localhost:8080/", allowed_hosts=["localhost"], environment="lab")
-    assert localhost_lab.verdict == "allowed"
+    lab = evaluate_scope("http://10.0.0.5/", allowed_hosts=["10.0.0.5"], environment="lab")
+    assert lab.verdict == "allowed", "a lab label still admits a private address"
+    for url, host in (("http://127.0.0.1:8080/", "127.0.0.1"), ("http://localhost:8080/", "localhost")):
+        assert "loopback_or_private_range" in blocked_by(url, allowed_hosts=[host], environment="lab")
 
 
 def test_deployment_policy_admits_private_networks_for_production_and_records_it(monkeypatch):
@@ -60,7 +60,7 @@ def test_deployment_policy_admits_private_networks_for_production_and_records_it
     assert "allowed_by_deployment_policy" in recorded["private_network_scope"].message
     assert not receipt.warnings, "a policy admission is a recorded check, not an approval request"
     localhost = evaluate_scope("http://localhost:8080/", allowed_hosts=["localhost"], environment="production")
-    assert localhost.verdict == "allowed"
+    assert localhost.verdict == "blocked", "the policy never admits this deployment's own loopback"
     # A public address under the same policy is admitted without the policy marker.
     public = evaluate_scope("https://app.example.com/", allowed_hosts=["app.example.com"], environment="production")
     assert "private_network_scope" not in {check.name for check in public.checks}

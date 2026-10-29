@@ -37,8 +37,9 @@ except ImportError:  # pragma: no cover - minimal host test environment
 
 try:
     from .address_classes import (
-        CLOUD_SERVICE_ADDRESSES, LIMITED_BROADCAST, embedded_ipv4_addresses, judged_addresses,
-        private_class, shared_address_space, without_scope,
+        CLOUD_SERVICE_ADDRESSES, LIMITED_BROADCAST, deployment_deny_networks, deployment_fenced,
+        embedded_ipv4_addresses, judged_addresses, private_class, shared_address_space,
+        without_scope,
     )
     from .common import run
     from .device_evidence import build_device_evidence_graph
@@ -55,8 +56,9 @@ try:
     from .ssh_scanner import DEFAULT_SSH_HOST_REVIEW_BUNDLES, full_ssh_scan
 except ImportError:  # pragma: no cover - flat scanner runtime
     from address_classes import (
-        CLOUD_SERVICE_ADDRESSES, LIMITED_BROADCAST, embedded_ipv4_addresses, judged_addresses,
-        private_class, shared_address_space, without_scope,
+        CLOUD_SERVICE_ADDRESSES, LIMITED_BROADCAST, deployment_deny_networks, deployment_fenced,
+        embedded_ipv4_addresses, judged_addresses, private_class, shared_address_space,
+        without_scope,
     )
     from common import run
     from device_evidence import build_device_evidence_graph
@@ -128,6 +130,10 @@ _HOST_RE = re.compile(r"^(?=.{1,253}$)(?:[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z
 KNOWN_POLICY_REQUIREMENTS = {"encrypted", "password_auth", "weak_algorithms", "publickey_auth"}
 PRIVATE_NETWORK_TARGETS_ENV = "SHAKERSCAN_PRIVATE_NETWORK_TARGETS"
 PRIVATE_DESTINATION_REASON = "loopback_or_private_range"
+DEVICE_FENCE_REFUSAL = (
+    "device destination is denied because it is an infrastructure metadata or configured "
+    "control-plane address"
+)
 # Must equal api/action_scope.SAFE_LAB_ENVIRONMENTS; a test keeps the two identical.
 DEVICE_LAB_ENVIRONMENTS = frozenset({"development", "dev", "preview", "staging", "lab", "test"})
 # The shared cloud-service list (``address_classes.CLOUD_SERVICE_ADDRESSES``), one host network
@@ -390,6 +396,10 @@ def validate_device_destination(
     if refusal:
         raise ValueError(f"device destination refused ({PRIVATE_DESTINATION_REASON}): {refusal}")
     canonical = canonical_device_address(address)
+    # This deployment's own addresses (loopback and SHAKERSCAN_DEVICE_DENY_CIDRS) are refused
+    # whatever the environment, the private-network setting and the metadata switch say.
+    if deployment_fenced(parsed):
+        raise ValueError(DEVICE_FENCE_REFUSAL)
     if _metadata_targets_allowed():
         return canonical
     if getattr(without_scope(parsed), "ipv4_mapped", None) is None and any(
@@ -399,22 +409,15 @@ def validate_device_destination(
             "device destination is denied because it carries a link-local IPv4 address inside a "
             "translator or tunnel form (NAT64, SIIT, 6to4 or Teredo)"
         )
-    configured = [
-        item.strip()
-        for item in os.environ.get("SHAKERSCAN_DEVICE_DENY_CIDRS", "").split(",")
-        if item.strip()
+    networks = [
+        *(ipaddress.ip_network(raw) for raw in DEFAULT_DENIED_DEVICE_DESTINATIONS),
+        *deployment_deny_networks(),
     ]
-    networks: list[ipaddress.IPv4Network | ipaddress.IPv6Network] = []
-    for raw in (*DEFAULT_DENIED_DEVICE_DESTINATIONS, *configured):
-        try:
-            networks.append(ipaddress.ip_network(raw, strict=False))
-        except ValueError as exc:
-            raise ValueError(f"invalid SHAKERSCAN_DEVICE_DENY_CIDRS entry: {raw}") from exc
     if any(
         candidate.version == network.version and candidate in network
         for candidate in candidates for network in networks
     ):
-        raise ValueError("device destination is denied because it is an infrastructure metadata or configured control-plane address")
+        raise ValueError(DEVICE_FENCE_REFUSAL)
     return canonical
 
 

@@ -68,14 +68,24 @@ def _validate_nat64_prefixes_setting(raw: str | None = None) -> tuple[object, ..
     return validate_nat64_prefixes_setting(raw)
 
 
+def _validate_deny_cidrs_setting() -> tuple[object, ...]:
+    try:
+        from scanner_tools.address_classes import deployment_deny_networks
+    except ModuleNotFoundError:  # package import (api.deployment_policy)
+        from scanner.scanner_tools.address_classes import deployment_deny_networks
+    return deployment_deny_networks()
+
+
 def require_valid_destination_settings() -> None:
     """Refuse to start the API or a worker with a malformed destination setting.
 
-    ``SHAKERSCAN_NAT64_PREFIXES`` is parsed once here; an invalid value raises ``RuntimeError``
-    naming the setting instead of failing each IPv6 destination check later as a 500.
+    ``SHAKERSCAN_NAT64_PREFIXES`` and ``SHAKERSCAN_DEVICE_DENY_CIDRS`` are parsed once here; an
+    invalid value raises ``RuntimeError`` naming the setting instead of failing each destination
+    check later as a 500.
     """
     try:
         _validate_nat64_prefixes_setting()
+        _validate_deny_cidrs_setting()
     except ValueError as exc:
         raise RuntimeError(f"refusing to start: {exc}") from None
 

@@ -24,7 +24,7 @@ sys.path.insert(0, str(ROOT / "api"))
 import action_scope  # noqa: E402
 
 RESTRICTED = ("169.254.169.254", "224.0.0.1", "0.0.0.0", "255.255.255.255")
-OPERATOR_OWN = ("192.168.1.50", "10.0.0.7", "172.16.3.4", "127.0.0.1")
+OPERATOR_OWN = ("192.168.1.50", "10.0.0.7", "172.16.3.4")
 
 
 def _admit(addresses, environment="production", allow_private=None):
@@ -46,6 +46,12 @@ def test_a_restricted_answer_is_never_admitted(address, environment):
 @pytest.mark.parametrize("address", OPERATOR_OWN)
 def test_the_operators_own_network_is_admitted_by_the_self_hosted_default(address):
     assert _admit([address]) == [address]
+
+
+@pytest.mark.parametrize("environment", ["production", "lab"])
+def test_this_deployments_own_loopback_is_never_admitted(environment):
+    """2.11.3: loopback is refused under the self-hosted default and under a Lab label."""
+    assert _admit(["127.0.0.1", "::1"], environment) == []
 
 
 @pytest.mark.parametrize("address", OPERATOR_OWN)

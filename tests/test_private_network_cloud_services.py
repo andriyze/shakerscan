@@ -22,7 +22,14 @@ def test_special_cloud_destination_never_inherits_private_permission(monkeypatch
     assert action_scope._ip_scope_block_reason(address, environment, allow_private_networks=True) is not None
 
 
-@pytest.mark.parametrize("address", ["192.168.1.50", "10.0.0.2", "127.0.0.1", "::1", "fd00:1234::1"])
+@pytest.mark.parametrize("address", ["127.0.0.1", "::1"])
+def test_private_permission_never_admits_loopback(monkeypatch, address):
+    """2.11.3: loopback is this deployment's own address."""
+    monkeypatch.setenv("SHAKERSCAN_PRIVATE_NETWORK_TARGETS", "allow")
+    assert action_scope._ip_scope_block_reason(address, "production") is not None
+
+
+@pytest.mark.parametrize("address", ["192.168.1.50", "10.0.0.2", "fd00:1234::1"])
 def test_private_permission_still_admits_ordinary_intranet_targets(monkeypatch, address):
     monkeypatch.setenv("SHAKERSCAN_PRIVATE_NETWORK_TARGETS", "allow")
     assert action_scope._ip_scope_block_reason(address, "production") is None

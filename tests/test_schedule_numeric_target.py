@@ -303,7 +303,15 @@ def test_transient_dns_retry_does_not_reactivate_a_concurrently_paused_schedule(
     assert state == {"is_active": False, "next_run_at": None}
 
 
-@pytest.mark.parametrize("url", ["http://192.168.1.50", "http://127.0.0.1", "https://[fd00::50]", "http://[::1]"])
+@pytest.mark.parametrize("url", ["http://127.0.0.1", "http://[::1]"])
+def test_a_schedule_never_reaches_this_deployments_own_loopback(url, monkeypatch):
+    """2.11.3: loopback is refused under every setting."""
+    monkeypatch.setenv("SHAKERSCAN_PRIVATE_NETWORK_TARGETS", "allow")
+    with pytest.raises(ScheduleTargetSafetyError):
+        asyncio.run(validate_schedule_target_destination(url))
+
+
+@pytest.mark.parametrize("url", ["http://192.168.1.50", "https://[fd00::50]"])
 def test_self_hosted_schedule_accepts_private_destinations_and_revalidates_policy(url, monkeypatch):
     monkeypatch.setenv("SHAKERSCAN_PRIVATE_NETWORK_TARGETS", "allow")
     assert asyncio.run(validate_schedule_target_destination(url))
