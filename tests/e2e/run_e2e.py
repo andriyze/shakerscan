@@ -1693,8 +1693,10 @@ def run_hunt() -> H.Scorecard:
     try:
         pid = os.getpid()
         stamp = int(_time.time())
+        # A private-class host nothing connects to (198.18.0.0/15, benchmarking space); loopback
+        # is never a scan or Hunt destination.
         locator = (
-            f"127.{1 + pid % 250}.{1 + stamp % 250}."
+            f"198.{18 + pid % 2}.{1 + stamp % 250}."
             f"{1 + (pid + stamp) % 250}"
         )
         device_status, created = H.post("/devices", {

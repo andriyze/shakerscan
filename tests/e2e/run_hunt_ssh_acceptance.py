@@ -74,7 +74,8 @@ def main():
         assert code < 300, trusted
         # Revocation applies to a shared grant; the profile's home binding is permanent.
         home = accepted('/targets/hosts', {
-            'locator': f'127.76.{uuid.uuid4().int % 254 + 1}.{uuid.uuid4().int % 254 + 1}',
+            # A private-class host nothing connects to; loopback is never a destination.
+            'locator': f'198.19.{uuid.uuid4().int % 254 + 1}.{uuid.uuid4().int % 254 + 1}',
             'name': 'Synthetic SSH identity home', 'environment': 'lab',
             'approved_by': 'hunt-ssh-acceptance',
         })
