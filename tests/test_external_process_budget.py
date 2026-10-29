@@ -407,8 +407,11 @@ def test_nuclei_batch_attempt_is_paced_to_what_it_reserved():
         f"-rate-limit {rate} over {hard['tool_wall_seconds']}s plans "
         f"{rate * hard['tool_wall_seconds']} requests against a {hard['http_requests']} hold"
     )
-    # Bursting past the rate defeats the rate.
-    assert int(argv[argv.index("-concurrency") + 1]) <= rate
+    # -rate-limit bounds what is sent; template concurrency only keeps that rate reachable on a
+    # slow target (concurrency 2 sent 12 of the 90 requests a 2/s, 45 s attempt allows against a
+    # server answering in 1.5 s; concurrency 10 sent 83), so it is capped by the rate ceiling,
+    # not by the rate. One target: hosts in parallel never exceed the rate.
+    assert int(argv[argv.index("-concurrency") + 1]) <= 10
     assert int(argv[argv.index("-bulk-size") + 1]) <= rate
 
 

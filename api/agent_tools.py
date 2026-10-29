@@ -1705,9 +1705,14 @@ def build_enforced_scanner_plan(
                 # to shorten the wall rather than let the rate outrun the hold.
                 paced_wall = max(1, http // rate_per_second)
             burst = max(1, min(10, rate_per_second))
+            # -rate-limit bounds what is sent; template concurrency only keeps that rate
+            # reachable on a slow target. Measured with the 2.11.2 scanner image's nuclei
+            # against a local server answering in 1.5 s, 45 s at -rate-limit 2: concurrency 2
+            # sent 12 requests, concurrency 10 sent 83 (at most 3 in any one second, under the
+            # 90 the rate allows). A slow target held every window to about half its plan.
             _replace_argv_value(argv, "-rate-limit", rate_per_second)
             _replace_argv_value(argv, "-bulk-size", burst)
-            _replace_argv_value(argv, "-concurrency", burst)
+            _replace_argv_value(argv, "-concurrency", _NUCLEI_RATE_CEILING)
             hard = {"http_requests": http, "tool_wall_seconds": paced_wall}
             timeout_seconds, timeout_ms = paced_wall, paced_wall * 1_000
             mode, method = "conservative", "runtime_transport_wall_limiter"
