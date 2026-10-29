@@ -213,8 +213,11 @@ def _server_bases(
             _issue(issues, "spec_invalid_server")
             continue
         # Relative Server URLs are relative to the specification document, not the target root.
+        # An empty URL names the document's own directory: joined as is it would be the document
+        # itself, and every route would be requested under /openapi.json/... (generated specs
+        # commonly declare `servers: [{url: ""}]`).
         try:
-            resolved = urllib.parse.urljoin(source, url)
+            resolved = urllib.parse.urljoin(source, url or ".")
         except ValueError:  # e.g. an unbalanced IPv6 bracket
             _issue(issues, "spec_invalid_server")
             continue
