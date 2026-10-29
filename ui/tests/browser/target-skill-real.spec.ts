@@ -8,7 +8,8 @@ test('target instructions persist through the real editor, proposals and opted-i
   test.skip(!REAL_STACK, 'real-stack target instruction acceptance')
   const name = `Target skill acceptance ${testInfo.project.name} ${Date.now()}`
   const created = await request.post(`${API}/targets/hosts`, { data: {
-    locator: `127.77.${randomInt(1, 250)}.${randomInt(1, 250)}`, name, environment: 'lab',
+    // A private-class host nothing connects to (198.18.0.0/15); loopback is never a destination.
+    locator: `198.18.${randomInt(1, 250)}.${randomInt(1, 250)}`, name, environment: 'lab',
   } })
   expect(created.ok()).toBeTruthy()
   const { id } = await created.json()

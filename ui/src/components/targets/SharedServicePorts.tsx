@@ -1,4 +1,5 @@
 import Link from '@/components/WorkspaceLink'
+import { TerminalHuntStart, useWorkspaceIsManaged } from '@/components/hunt/TerminalHuntStart'
 import { Card, EmptyState } from '@/components/ui'
 import { partitionSharedServices, sharedServiceHuntHref } from '@/lib/sharedServicePorts.mjs'
 
@@ -15,6 +16,7 @@ export interface SharedServiceKnowledge {
 }
 
 export function SharedServicePorts({knowledge,targetId}: {knowledge?:SharedServiceKnowledge;targetId:string}) {
+  const managed = useWorkspaceIsManaged()
   if (!knowledge) return null
   const {confirmed, unconfirmed, notObservedCount} = partitionSharedServices(knowledge.services)
   return <section className="mb-6">
@@ -27,7 +29,7 @@ export function SharedServicePorts({knowledge,targetId}: {knowledge?:SharedServi
           <td className="px-4 py-3 font-mono text-gray-300">{service.port}/{service.transport}<div className="text-xs text-gray-500">{service.address || 'Address unattributed'}</div></td>
           <td className="px-4 py-3 text-gray-300">{service.service || 'Not identified'}<div className="text-xs text-gray-500">{service.application_origin || ''}</div></td>
           <td className="px-4 py-3 text-xs text-gray-400"><EvidenceRefs service={service} /></td>
-          <td className="px-4 py-3">{huntHref ? <Link className="text-blue-300" href={huntHref}>Start Hunt</Link> : <span className="text-xs text-amber-300">Historical address</span>}</td>
+          <td className="px-4 py-3">{huntHref ? (managed ? <TerminalHuntStart className="text-xs" /> : <Link className="text-blue-300" href={huntHref}>Start Hunt</Link>) : <span className="text-xs text-amber-300">Historical address</span>}</td>
         </tr>
       })}</tbody>
     </table></Card>}

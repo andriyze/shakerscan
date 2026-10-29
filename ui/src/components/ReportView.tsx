@@ -21,6 +21,7 @@ import { AlertTriangle, CheckCircle2, Download } from 'lucide-react'
 import { normalizeSkipReasons } from '@/lib/deferredWorkContracts'
 import { authorizationStopNotice } from '@/lib/authorizationStop'
 import { deviceScorePresentation } from '@/lib/deviceScanPresentation.mjs'
+import { coverageReasonText } from '@/lib/scanDetailPresentation.mjs'
 import { buildFindingLinkageIndex, linkedPersistedFinding, observedReportFinding } from '@/lib/findingLinkage'
 import ScanCoverageSection, { type ScanCoverage } from '@/components/report/ScanCoverageSection'
 import InfrastructureIntelligenceSection from '@/components/report/InfrastructureIntelligenceSection'
@@ -662,12 +663,12 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
       .replace(/^Dns\b/, 'DNS')
       .replace(/^Http\b/, 'HTTP')
     const status = formatScanToken(item.status || 'incomplete')
-    const reason = item.reason_code ? ` — ${formatScanToken(item.reason_code)}` : ''
+    const reason = item.reason_code ? ` — ${coverageReasonText(item.reason_code)}` : ''
     return `${capability}: ${status}${reason}`
   })
   const canonicalCoverageReasonIssues = (Array.isArray(coverage.reasons) ? coverage.reasons : [])
     .filter((item: any) => typeof item === 'string' && item.trim() && !actionGapReasonCodes.has(item))
-    .map((item: string) => formatScanToken(item))
+    .map((item: string) => coverageReasonText(item))
   const coverageGapIssues = Array.from(new Set([
     ...explicitCoverageGapIssues,
     ...canonicalActionGapIssues,

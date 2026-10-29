@@ -211,7 +211,7 @@ def test_auth_refusal_is_an_inconclusive_attempt_not_a_negative_result(monkeypat
     assert result.partial is True
     assert "authentication_required:401" in result.errors
     proof = _proof(result)
-    assert proof["proof_state"] == "not_proven"
+    assert (proof["proof_state"], proof["finding_verdict"]) == ("inconclusive", "inconclusive")
     assert proof["inconclusive_reason"] == "authentication_required"
 
 

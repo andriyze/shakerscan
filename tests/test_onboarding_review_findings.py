@@ -45,8 +45,11 @@ def test_a_label_never_admits_a_restricted_address_class(host, environment):
 @pytest.mark.parametrize("environment", ["lab", "test"])
 def test_a_lab_label_still_admits_ordinary_local_addresses(environment):
     """The lab convenience itself is deliberate and stays."""
-    for host in ("127.0.0.1", "192.168.1.50", "10.0.0.5", "localhost"):
+    for host in ("192.168.1.50", "10.0.0.5"):
         assert action_scope._ip_scope_block_reason(host, environment) is None, host
+    # 2.11.3: loopback is this deployment's own address; no label admits it.
+    for host in ("127.0.0.1", "localhost"):
+        assert action_scope._ip_scope_block_reason(host, environment) == "loopback_or_private_range", host
 
 
 def test_a_scope_receipt_refuses_the_metadata_address_under_a_lab_cohort():

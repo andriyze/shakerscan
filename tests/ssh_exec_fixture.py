@@ -38,9 +38,23 @@ class AcceptedExecTransport(paramiko.Transport):
                 event.set()
 
 
+def own_interface_address() -> str:
+    """This host's own non-loopback IPv4 address: the source address of a route to a TEST-NET
+    address (a UDP connect sends nothing). Scan and Hunt destinations refuse loopback, so a
+    fixture a Hunt connects to listens here instead."""
+    probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        probe.connect(('192.0.2.1', 9))
+        address = probe.getsockname()[0]
+    finally:
+        probe.close()
+    assert not address.startswith('127.'), 'the test host has no non-loopback IPv4 address'
+    return address
+
+
 class HttpLogFixture:
     """Owned HTTP service whose real requests produce the SSH-watched log."""
-    def __init__(self,directory):
+    def __init__(self,directory,host='127.0.0.1'):
         self.log=directory/'web.log'
         self.log.write_text('')
         log=self.log
@@ -55,7 +69,7 @@ class HttpLogFixture:
                 self.send_header('Content-Type','application/json')
                 self.send_header('Content-Length',str(len(body)))
                 self.end_headers();self.wfile.write(body)
-        self.server=ThreadingHTTPServer(('127.0.0.1',0),Handler)
+        self.server=ThreadingHTTPServer((host,0),Handler)
         self.port=self.server.server_port
         self.thread=threading.Thread(target=self.server.serve_forever,daemon=True)
         self.thread.start()
@@ -64,7 +78,7 @@ class HttpLogFixture:
 
 
 class CommandServer:
-    def __init__(self, directory: Path):
+    def __init__(self, directory: Path, host: str = '127.0.0.1'):
         self.directory = directory
         self.key = paramiko.RSAKey.generate(2048)
         self.fingerprint = 'SHA256:' + base64.b64encode(hashlib.sha256(self.key.asbytes()).digest()).decode().rstrip('=')
@@ -79,7 +93,7 @@ class CommandServer:
         self.lock = threading.Lock()
         self.stopped = threading.Event()
         self.sock = socket.socket()
-        self.sock.bind(('127.0.0.1', 0))
+        self.sock.bind((host, 0))
         self.sock.listen(10)
         self.sock.settimeout(0.1)
         self.port = self.sock.getsockname()[1]

@@ -1,3 +1,8 @@
+import type { Metadata } from 'next'
+import { segmentTitle } from '@/lib/pageTitle'
+
+export const metadata: Metadata = segmentTitle('Settings')
+
 // Shared container for the whole /settings/* cluster: one centered width so the
 // sub-pages stop each picking a different max-w (they previously ranged over
 // max-w-4xl/5xl/6xl/7xl and full-bleed). Adds no padding of its own — the root

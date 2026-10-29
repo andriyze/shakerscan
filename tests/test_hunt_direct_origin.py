@@ -141,8 +141,20 @@ def test_an_embedded_private_direct_origin_needs_the_private_setting(address):
         os.environ.pop("SHAKERSCAN_PRIVATE_NETWORK_TARGETS", None)
 
 
+@pytest.mark.parametrize("address", ["127.0.0.1", "::1", "::ffff:127.0.0.1"])
+def test_a_loopback_direct_origin_is_refused_under_every_setting(address):
+    """2.11.3: loopback is this deployment's own address, never a direct origin."""
+    for setting in ("refuse", "allow"):
+        os.environ["SHAKERSCAN_PRIVATE_NETWORK_TARGETS"] = setting
+        try:
+            with pytest.raises(HuntStartContractError, match="private, local, or non-routable"):
+                _start(direct_origin_addresses=[address], policy=AUTHORIZED)
+        finally:
+            os.environ.pop("SHAKERSCAN_PRIVATE_NETWORK_TARGETS", None)
+
+
 @pytest.mark.parametrize("address", [
-    "127.0.0.1", "10.0.0.8", "::1", "fc00::8", "::ffff:10.0.0.8",
+    "10.0.0.8", "fc00::8", "::ffff:10.0.0.8",
 ])
 def test_private_direct_origins_follow_the_deployment_target_policy(address):
     """This list used to be hardcoded here, so a deployment that admitted 192.168.1.50 as a

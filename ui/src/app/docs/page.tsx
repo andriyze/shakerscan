@@ -1,14 +1,18 @@
 import { readFile } from 'node:fs/promises'
 import path from 'node:path'
+import type { Metadata } from 'next'
 import type { ReactNode } from 'react'
 import { BookOpen, ExternalLink } from 'lucide-react'
 import ReactMarkdown, { type Components } from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { Card, PageHeader } from '@/components/ui'
+import { segmentTitle } from '@/lib/pageTitle'
 import { SHAKERSCAN_DOCUMENTATION_BLOB_URL } from '@/lib/repository'
 import WorkspaceDocs from '@/components/WorkspaceDocs'
 
 export const dynamic = 'force-dynamic'
+
+export const metadata: Metadata = segmentTitle('Docs')
 
 async function loadReadme(): Promise<string | null> {
   const configuredPath = process.env.SHAKERSCAN_README_PATH?.trim()

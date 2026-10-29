@@ -76,6 +76,7 @@ import {
 } from '@/components/ui'
 import { ApprovalReceiptField } from '@/components/ApprovalReceiptField'
 import { featureEnabled, featureUnavailableReason } from '@/lib/workspaceCapabilities'
+import { TerminalHuntStart, useWorkspaceIsManaged } from '@/components/hunt/TerminalHuntStart'
 import { activeScanLinkLabel, activeScanNote } from '@/lib/asmActiveScan'
 
 interface AsmFilters {
@@ -1607,6 +1608,7 @@ function HypothesisLeadsCard({
 function TargetView({ targetId }: { targetId: string }) {
   const { filters, setFilter } = useUrlFilters<AsmFilters>()
   const router = useRouter()
+  const managed = useWorkspaceIsManaged()
   const toast = useToast()
   const [target, setTarget] = useState<Target | null>(null)
   const [endpoints, setEndpoints] = useState<AsmEndpoint[]>([])
@@ -1729,6 +1731,7 @@ function TargetView({ targetId }: { targetId: string }) {
           <Button variant="ghost" size="sm" onClick={load}>
             <RefreshCw className="h-4 w-4" /> Refresh
           </Button>
+          {managed ? <TerminalHuntStart className="text-xs" /> : (
           <button
             type="button"
             onClick={openHuntForGaps}
@@ -1738,6 +1741,7 @@ function TargetView({ targetId }: { targetId: string }) {
           >
             <BrainCircuit className="h-4 w-4" /> Open Hunt
           </button>
+          )}
         </div>
       </div>
 

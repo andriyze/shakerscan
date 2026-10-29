@@ -19,7 +19,9 @@ import pytest
 
 from tests.test_target_asset_startup_postgres import startup_database
 from tests.test_target_asset_inputs_postgres import encryption
-from tests.ssh_exec_fixture import CommandServer, HttpLogFixture, PASSWORD, USERNAME, tls_material
+from tests.ssh_exec_fixture import (
+    CommandServer, HttpLogFixture, PASSWORD, USERNAME, own_interface_address, tls_material,
+)
 
 
 @pytest.mark.parametrize(('kind','auth_kind'), [('network','ssh_password'),('device','ssh_password'),
@@ -49,8 +51,11 @@ def test_hunt_direct_ssh_reuses_streams_cancels_and_revalidates(monkeypatch, tmp
         if not hasattr(app_module, '_start_hunt_v2'):
             app_module = importlib.import_module('api.api')
         worker = importlib.import_module('worker')
-        fixture = CommandServer(tmp_path)
-        http_fixture=HttpLogFixture(tmp_path)
+        # The Hunt's SSH and HTTP destinations: this host's own non-loopback address, because no
+        # scan or Hunt reaches loopback (the deployment's own address).
+        host = own_interface_address()
+        fixture = CommandServer(tmp_path, host)
+        http_fixture=HttpLogFixture(tmp_path, host)
         credential_secret, passphrase = PASSWORD, None
         if auth_kind != 'ssh_password':
             import paramiko
@@ -76,7 +81,7 @@ def test_hunt_direct_ssh_reuses_streams_cancels_and_revalidates(monkeypatch, tmp
             monkeypatch.setattr(app_module,'get_redis',lambda:r)
             monkeypatch.setattr(worker,'get_redis',lambda:r)
             monkeypatch.setattr(worker,'_worker_runtime_identity',lambda:owner)
-            async def addresses(*args, **kwargs): return ['127.0.0.1']
+            async def addresses(*args, **kwargs): return [host]
             monkeypatch.setattr(app_module,'_resolve_agent_target_addresses',addresses)
             base_queue = worker.AGENT_TOOL_QUEUE_NAME
             maintenance = asyncio.create_task(maintain_ssh_sessions(r,pool,owner))
@@ -129,7 +134,7 @@ def test_hunt_direct_ssh_reuses_streams_cancels_and_revalidates(monkeypatch, tmp
                         response = await client.request(method,path,json=body)
                         assert response.status_code < 300, (path,response.status_code,response.text)
                         return response.json()
-                    target = await request('POST','/targets/hosts',{'locator':'127.0.0.1','name':'Local command fixture',
+                    target = await request('POST','/targets/hosts',{'locator':host,'name':'Local command fixture',
                         'environment':'lab','approved_by':'ssh-runtime-fixture','port_hints':[fixture.port]})
                     target_id = target['id']
                     if kind == 'device':
@@ -138,7 +143,8 @@ def test_hunt_direct_ssh_reuses_streams_cancels_and_revalidates(monkeypatch, tmp
                     approval = (await request('GET',f'/targets/{target_id}/authorization'))['authorization']['approval_receipt_id']
                     await request('PUT',f'/targets/{target_id}/hunt-authority',{'expected_revision':0,
                         'ssh_host_keys':[{'port':fixture.port,'fingerprint':fixture.fingerprint}]})
-                    home = await request('POST','/targets/hosts',{'locator':'127.0.0.2','name':'Credential home',
+                    # Another host the credential belongs to; nothing connects to it.
+                    home = await request('POST','/targets/hosts',{'locator':'10.255.255.2','name':'Credential home',
                         'environment':'lab','approved_by':'ssh-runtime-fixture'})
                     home_approval=(await request('GET',f"/targets/{home['id']}/authorization"))['authorization']['approval_receipt_id']
                     profile = (await request('POST','/credential-profiles',{'target_kind':kind,'target_id':home['id'],
@@ -233,7 +239,7 @@ def test_hunt_direct_ssh_reuses_streams_cancels_and_revalidates(monkeypatch, tmp
                     external_started=time.monotonic()
                     external=await planner.post(f'/hunts/{hunt_id}/capabilities/http.request',json={
                         'idempotency_key':'external-with-ssh-001','input':{
-                            'method':'GET','origin':f'http://127.0.0.1:{http_fixture.port}','path':'/fixture-check'}})
+                            'method':'GET','origin':f'http://{host}:{http_fixture.port}','path':'/fixture-check'}})
                     assert external.status_code==200,external.text
                     assert external.json()['action_result']['status']=='success',external.text
                     assert not watch.done(),'External check waited for SSH to finish'

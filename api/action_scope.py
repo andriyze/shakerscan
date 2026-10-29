@@ -19,8 +19,8 @@ import deployment_policy
 
 try:
     from scanner_tools.address_classes import (
-        IPAddress, always_refused, cloud_service_address, destination_block_reason,
-        embedded_ipv4_addresses, judged_addresses, private_class, shared_address_space,
+        IPAddress, always_refused, cloud_service_address, deployment_fenced,
+        destination_block_reason, embedded_ipv4_addresses, judged_addresses, private_class, shared_address_space,
     )
     from scanner_tools.host_names import (
         HostNameError, canonical_host,
@@ -28,8 +28,8 @@ try:
     )
 except ModuleNotFoundError:  # package import (api.action_scope)
     from scanner.scanner_tools.address_classes import (
-        IPAddress, always_refused, cloud_service_address, destination_block_reason,
-        embedded_ipv4_addresses, judged_addresses, private_class, shared_address_space,
+        IPAddress, always_refused, cloud_service_address, deployment_fenced,
+        destination_block_reason, embedded_ipv4_addresses, judged_addresses, private_class, shared_address_space,
     )
     from scanner.scanner_tools.host_names import (
         HostNameError, canonical_host,
@@ -147,18 +147,19 @@ def _ip_scope_block_reason(
 ) -> str | None:
     """Why an address is refused, or None.
 
-    Lab environments admit local targets. A deployment that sets
-    SHAKERSCAN_PRIVATE_NETWORK_TARGETS=allow also admits loopback/private targets in other
-    environments; shared address space (100.64.0.0/10, CGNAT and Tailscale) is private here. Special cloud-service destinations, link-local, multicast, unspecified
-    addresses and the limited broadcast address remain denied regardless of that permission.
-    An IPv6 address that carries an IPv4 address (``embedded_ipv4_addresses``) is judged as
-    every address it carries as well as itself.
+    Lab environments admit private targets. A deployment that sets
+    SHAKERSCAN_PRIVATE_NETWORK_TARGETS=allow also admits private targets in other
+    environments; shared address space (100.64.0.0/10, CGNAT and Tailscale) is private here.
+    Special cloud-service destinations, link-local, multicast, unspecified addresses, the
+    limited broadcast address and this deployment's own addresses (loopback and the configured
+    never-scan list, ``address_classes.deployment_fenced``) remain denied regardless of the
+    label or that permission. An IPv6 address that carries an IPv4 address
+    (``embedded_ipv4_addresses``) is judged as every address it carries as well as itself.
     """
     lowered = host.lower().strip("[]")
     deployment_allows = _deployment_allows_private_networks(allow_private_networks)
     if lowered in {"localhost", "localhost.localdomain"}:
-        if environment in SAFE_LAB_ENVIRONMENTS or deployment_allows:
-            return None
+        # The name of this deployment's own loopback: never a scan destination.
         return "loopback_or_private_range"
     try:
         ip_obj = ipaddress.ip_address(lowered)
@@ -262,6 +263,8 @@ def destination_refusal_explanation(host: str, environment: str) -> str:
         )
         if restricted:
             return f"{lowered} is {restricted} address, which is never scanned in any environment."
+        if deployment_fenced(ip_obj):
+            return _own_address_explanation(lowered)
         kind = (
             "a loopback" if ip_obj.is_loopback
             else "a private-network" if ip_obj.is_private
@@ -270,7 +273,7 @@ def destination_refusal_explanation(host: str, environment: str) -> str:
             else "a reserved"
         )
     else:
-        kind = "a loopback"
+        return _own_address_explanation(lowered)
     setting = deployment_policy.PRIVATE_NETWORK_TARGETS_ENV
     # The policy environment comes from the target's stored environment or cohort and defaults
     # to production. The target list derives an "internal" cohort from a private address for
@@ -285,6 +288,14 @@ def destination_refusal_explanation(host: str, environment: str) -> str:
         "a private address or an 'internal' cohort does not make it a Lab target. To scan your "
         f"own network, set {setting}=allow for the API and workers "
         f"({PRIVATE_NETWORK_TARGETS_DOC}), or set the target's cohort to Lab."
+    )
+
+
+def _own_address_explanation(host: str) -> str:
+    return (
+        f"{host} is one of this deployment's own addresses (loopback, or a network in "
+        "SHAKERSCAN_DEVICE_DENY_CIDRS), which is never scanned, whatever the environment or the "
+        "private-network setting."
     )
 
 
@@ -691,7 +702,11 @@ def _evaluate_runtime_dns_observations(
             # policy and permits explicitly admitted local/lab targets without
             # making arbitrary RFC1918 destinations reachable. Any DNS drift
             # from the frozen set still fails closed.
-            if frozen_addresses and normalized_ip not in frozen_addresses:
+            if deployment_fenced(ipaddress.ip_address(normalized_ip)):
+                # This deployment's own address is refused even when it was frozen at admission.
+                blocked.append("runtime_dns_private_range")
+                result.update({"verdict": "blocked", "reason": "runtime_dns_private_range"})
+            elif frozen_addresses and normalized_ip not in frozen_addresses:
                 blocked.append("runtime_dns_address_drift")
                 result.update({"verdict": "blocked", "reason": "runtime_dns_address_drift"})
             elif not frozen_addresses and _ip_scope_block_reason(

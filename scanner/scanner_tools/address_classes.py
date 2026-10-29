@@ -16,6 +16,10 @@ import os
 IPAddress = ipaddress.IPv4Address | ipaddress.IPv6Address
 
 NAT64_PREFIXES_ENV = "SHAKERSCAN_NAT64_PREFIXES"
+# This deployment's own networks, which no scan may reach (comma-separated CIDRs). The Enterprise
+# render sets it to the container networks, loopback and link-local (and, when private networks
+# are refused, every private range). The name dates from when only the network-scan path read it.
+DEPLOYMENT_DENY_CIDRS_ENV = "SHAKERSCAN_DEVICE_DENY_CIDRS"
 # Special cloud-service destinations: the one list the web scope guard, Hunt destinations and the
 # device plane (``device_posture.DEFAULT_DENIED_DEVICE_DESTINATIONS``) refuse. They are not all
 # link-local, so private-network permission must not admit them.
@@ -109,6 +113,30 @@ def validate_nat64_prefixes_setting(raw: str | None = None) -> tuple[ipaddress.I
         raise ValueError(f"{NAT64_PREFIXES_ENV} is invalid: {exc}") from None
 
 
+@lru_cache(maxsize=16)
+def _parse_deny_cidrs(raw: str) -> tuple[ipaddress.IPv4Network | ipaddress.IPv6Network, ...]:
+    networks: list[ipaddress.IPv4Network | ipaddress.IPv6Network] = []
+    for item in (part.strip() for part in raw.split(",")):
+        if not item:
+            continue
+        try:
+            networks.append(ipaddress.ip_network(item, strict=False))
+        except ValueError as exc:
+            raise ValueError(f"invalid {DEPLOYMENT_DENY_CIDRS_ENV} entry: {item}") from exc
+    return tuple(networks)
+
+
+def deployment_deny_networks(raw: str | None = None) -> tuple[ipaddress.IPv4Network | ipaddress.IPv6Network, ...]:
+    """The configured never-scan networks (``SHAKERSCAN_DEVICE_DENY_CIDRS``), empty by default.
+
+    An invalid entry raises ``ValueError``, so a destination check fails closed rather than
+    ignoring a network the operator meant to protect.
+    """
+    return _parse_deny_cidrs(
+        os.environ.get("SHAKERSCAN_DEVICE_DENY_CIDRS", "") if raw is None else raw
+    )
+
+
 def embedded_ipv4_addresses(address: IPAddress) -> tuple[ipaddress.IPv4Address, ...]:
     """Every IPv4 address an IPv6 address carries and a translator or tunnel would reach.
 
@@ -185,16 +213,28 @@ def always_refused(address: IPAddress) -> bool:
     )
 
 
+def deployment_fenced(address: IPAddress) -> bool:
+    """One of this deployment's own addresses: loopback, or inside the configured never-scan
+    list (``deployment_deny_networks``). Every address ``address`` is judged as is tested. No
+    environment label, private-network setting or metadata switch admits a fenced address."""
+    networks = deployment_deny_networks()
+    return any(
+        candidate.is_loopback
+        or any(candidate.version == network.version and candidate in network for network in networks)
+        for candidate in judged_addresses(address)
+    )
+
+
 def destination_block_reason(address: IPAddress, *, lab: bool, allow_private: bool) -> str | None:
     """The web scope guard's address decision, shared with the scanner's own egress (SMTP MX).
 
     Every address ``address`` is judged as (``judged_addresses``) is tested: an always-refused
-    class refuses in every environment; private-class space is admitted in a Lab environment or
-    when the deployment allows private-network targets. Returns
-    ``REFUSED_DESTINATION_REASON`` or None.
+    class or one of this deployment's own addresses (``deployment_fenced``) refuses in every
+    environment; private-class space is admitted in a Lab environment or when the deployment
+    allows private-network targets. Returns ``REFUSED_DESTINATION_REASON`` or None.
     """
     candidates = judged_addresses(address)
-    if any(always_refused(candidate) for candidate in candidates):
+    if any(always_refused(candidate) for candidate in candidates) or deployment_fenced(address):
         return REFUSED_DESTINATION_REASON
     if lab:
         return None
@@ -204,7 +244,8 @@ def destination_block_reason(address: IPAddress, *, lab: bool, allow_private: bo
 
 
 __all__ = [
-    "CLOUD_SERVICE_ADDRESSES", "CLOUD_SERVICE_ADDRESS_NAMES", "IPAddress", "LAB_ENVIRONMENTS",
+    "CLOUD_SERVICE_ADDRESSES", "CLOUD_SERVICE_ADDRESS_NAMES", "DEPLOYMENT_DENY_CIDRS_ENV",
+    "IPAddress", "LAB_ENVIRONMENTS", "deployment_deny_networks", "deployment_fenced",
     "LIMITED_BROADCAST", "REFUSED_DESTINATION_REASON", "always_refused", "destination_block_reason", "NAT64_PREFIXES_ENV", "SHARED_ADDRESS_SPACE",
     "cloud_service_address", "embedded_ipv4_addresses", "judged_addresses", "nat64_prefixes",
     "private_class", "shared_address_space", "validate_nat64_prefixes_setting", "without_scope",

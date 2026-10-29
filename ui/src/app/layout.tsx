@@ -1,17 +1,33 @@
 import type { Metadata } from 'next'
 import './globals.css'
+import EditionTitle from '@/components/EditionTitle'
 import Sidebar from '@/components/Sidebar'
 import WorkspaceBoundary from '@/components/WorkspaceBoundary'
 import { ToastProvider } from '@/components/ui/Toast'
+import { PRODUCT_NAME, TITLE_TEMPLATE } from '@/lib/pageTitle'
 
 // Deployment mode is runtime configuration, not a public-image build-time setting.
 export const dynamic = 'force-dynamic'
 
 export const metadata: Metadata = {
-  title: 'ShakerScan',
+  // Each route segment names its page through segmentTitle (its layout.tsx, or the page itself
+  // when it is a server component), so a tab reads "Findings · ShakerScan"; the dashboard names
+  // itself too. The default only shows where nothing names a page, such as a URL that matches no
+  // route. EditionTitle adds the edition a managed deployment names.
+  title: {
+    template: TITLE_TEMPLATE,
+    default: PRODUCT_NAME,
+  },
   description: 'Open Source Dynamic Application Security Testing Scanner',
   icons: {
-    icon: '/favicon.svg',
+    // The .ico (16 and 32 px) for browsers without SVG icons; browsers that take SVG use the
+    // last entry. Both, and the apple-touch icon, are rendered from favicon.svg by
+    // scripts/render-icons.mjs.
+    icon: [
+      { url: '/favicon.ico', sizes: '16x16 32x32' },
+      { url: '/favicon.svg', type: 'image/svg+xml' },
+    ],
+    apple: [{ url: '/apple-touch-icon.png', sizes: '180x180' }],
   },
 }
 
@@ -26,6 +42,7 @@ export default function RootLayout({
         <script src="/api/runtime-config" />
       </head>
       <body className="min-h-screen bg-gray-950 text-gray-100">
+        <EditionTitle />
         <ToastProvider>
           <WorkspaceBoundary managed={process.env.SHAKERSCAN_MANAGED_UI === 'true'}>
             <div className="flex min-h-screen flex-col md:flex-row">

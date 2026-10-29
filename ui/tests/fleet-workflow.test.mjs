@@ -3,7 +3,7 @@ import fs from 'node:fs'
 import test from 'node:test'
 
 const page = fs.readFileSync(new URL('../src/app/fleet/page.tsx', import.meta.url), 'utf8')
-const dashboard = fs.readFileSync(new URL('../src/app/page.tsx', import.meta.url), 'utf8')
+const dashboard = fs.readFileSync(new URL('../src/components/DashboardPage.tsx', import.meta.url), 'utf8')
 const newScan = fs.readFileSync(new URL('../src/app/scan/new/page.tsx', import.meta.url), 'utf8')
 const scanDetail = fs.readFileSync(new URL('../src/app/scans/[id]/page.tsx', import.meta.url), 'utf8')
 

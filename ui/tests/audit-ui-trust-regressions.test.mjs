@@ -77,7 +77,7 @@ test('finding evidence names original, latest-observation, and producing scans s
 
 test('docs and mobile operations expose truthful accessible labels', () => {
   const docs = read('src/app/docs/page.tsx')
-  const dashboard = read('src/app/page.tsx')
+  const dashboard = read('src/components/DashboardPage.tsx')
   const sidebar = read('src/components/Sidebar.tsx')
   assert.match(docs, /h1: \(\{ children \}\) => \(\s*<h2/)
   assert.match(dashboard, />Emergency clear<\/span>/)
@@ -87,7 +87,7 @@ test('docs and mobile operations expose truthful accessible labels', () => {
 })
 
 test('executive posture defaults to an explicit operational cohort scope', () => {
-  const dashboard = read('src/app/page.tsx')
+  const dashboard = read('src/components/DashboardPage.tsx')
   const targets = read('src/components/targets/inventory/AddTargetsDialog.tsx')
   const detail = read('src/components/targets/TargetAssetDetail.tsx')
   // The scope is in the URL (?cohort=), defaulting to operational (parseCohortView).
@@ -114,7 +114,7 @@ test('scan submission titles follow the live execution status', () => {
 })
 
 test('scoped dashboard keeps global activity visible without attributing it to a cohort', () => {
-  const dashboard = read('src/app/page.tsx')
+  const dashboard = read('src/components/DashboardPage.tsx')
   const targets = read('src/components/targets/inventory/TargetRow.tsx')
   assert.match(dashboard, /rowMatchesCohort\(scan\.target_id, scan\.target_url/)
   assert.match(dashboard, /isGlobalActivity\(event\.target_id, event\.target_url\)/)

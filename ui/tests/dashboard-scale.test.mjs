@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import test from 'node:test'
 
-const dashboard = readFileSync(new URL('../src/app/page.tsx', import.meta.url), 'utf8')
+const dashboard = readFileSync(new URL('../src/components/DashboardPage.tsx', import.meta.url), 'utf8')
 const asm = readFileSync(new URL('../src/app/asm/page.tsx', import.meta.url), 'utf8')
 
 test('a dashboard exposure failure belongs to its cohort and renders as unavailable, never zeros', () => {

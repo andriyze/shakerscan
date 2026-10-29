@@ -23,6 +23,7 @@ import {
   scanResultPresentation,
   templateWindowsPresentation,
   blockerSeverityPhrase,
+  coverageReasonText,
   scanFindingCounts,
   scanFindingCountsText,
 } from './scanDetailPresentation.mjs'
@@ -831,4 +832,16 @@ test('a proof whose page the target did not serve is named as a coverage limit, 
   assert.match(result.coverageGapReasons[0], /HTTP 408, 429, 502-504/)
   assert.match(result.coverageGapReasons[0], /neither proven nor ruled out/)
   assert.doesNotMatch(result.coverageGapReasons[0], /target_unavailable|target unavailable/)
+})
+
+test('a capability gap row names target_unavailable by its label, not as "Target Unavailable"', () => {
+  // The Scan report's coverage-gap list reads an action's reason code through this helper
+  // (components/ReportView.tsx); coverage.reasons is null on such a run.
+  const text = coverageReasonText('target_unavailable')
+  assert.match(text, /did not serve the page a proof tests/)
+  assert.doesNotMatch(text, /Target Unavailable/)
+  // A code the table does not know still reads as words.
+  assert.equal(coverageReasonText('some_new_code'), 'Some New Code')
+  const report = fs.readFileSync(path.join(import.meta.dirname, '../components/ReportView.tsx'), 'utf8')
+  assert.match(report, /item\.reason_code \? ` — \$\{coverageReasonText\(item\.reason_code\)\}`/)
 })

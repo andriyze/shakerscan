@@ -1883,7 +1883,14 @@ concurrency-limited with per-tool timeouts and a global deadline.
   169.254.169.254, `fd00:ec2::254`, 100.100.100.200 and 192.0.0.192, AWS container credentials
   169.254.170.2, the EKS Pod Identity agent 169.254.170.23 and `fd00:ec2::23`, and Azure
   168.63.129.16; one list, `address_classes.CLOUD_SERVICE_ADDRESSES`), link-local, multicast, unspecified and broadcast addresses are never scanned, under
-  any setting or environment. Loopback, private (RFC1918, unique-local), reserved and shared
+  any setting or environment. Neither is this deployment's own address (since 2.11.3): loopback
+  (127.0.0.0/8, `::1`, the name `localhost`) and every network in `SHAKERSCAN_DEVICE_DENY_CIDRS`
+  (comma-separated CIDRs, empty by default; the Enterprise gateway sets its container networks,
+  loopback and link-local there, and every private range under `refuse`) are refused for a web
+  Scan, a Hunt and a device scan whatever the environment, `SHAKERSCAN_PRIVATE_NETWORK_TARGETS` and
+  `SHAKERSCAN_DEVICE_ALLOW_METADATA_TARGETS` say, at admission, when a name is resolved and frozen,
+  and again before execution connects (`address_classes.deployment_fenced`); a malformed list stops
+  the API and the workers at startup. Private (RFC1918, unique-local), reserved and shared
   (RFC 6598 100.64.0.0/10: carrier-grade NAT and Tailscale node addresses) addresses are
   admitted in Lab environments, and elsewhere only when the deployment admits private-network
   targets with `SHAKERSCAN_PRIVATE_NETWORK_TARGETS` (set on the API and the workers). It is a
@@ -1895,7 +1902,8 @@ concurrency-limited with per-tool timeouts and a global deadline.
   and, where one exists, the setting that would admit it. Connected-device (network) scans and
   service probes apply the same private-network setting, judged under the device's environment:
   the API refuses a device whose address (or every resolved address) is loopback, private or
-  reserved with `422 loopback_or_private_range` before queueing, and the device worker (which now
+  reserved, or inside `SHAKERSCAN_DEVICE_DENY_CIDRS`, with `422 loopback_or_private_range` before
+  queueing (it resolves a name under every setting and environment), and the device worker (which now
   receives the setting) re-checks the address it pins under the stricter of the admitting
   deployment's setting and its own. On this plane link-local (APIPA) devices stay admitted, except
   the cloud-service addresses on the shared list, the limited broadcast address 255.255.255.255 is
@@ -3234,7 +3242,7 @@ Only key names and declaring sources are documented; secret values are never rea
 | `SHAKERSCAN_DEBUG_POST_INFER` | `scanner/scanner.py` |
 | `SHAKERSCAN_DELETION_ENFORCE_HOLDS` | `api/data_lifecycle/inventory.py` |
 | `SHAKERSCAN_DEVICE_ALLOW_METADATA_TARGETS` | `scanner/scanner_tools/device_posture.py` |
-| `SHAKERSCAN_DEVICE_DENY_CIDRS` | `scanner/scanner_tools/device_posture.py` |
+| `SHAKERSCAN_DEVICE_DENY_CIDRS` | `scanner/scanner_tools/address_classes.py` |
 | `SHAKERSCAN_DEVICE_QUEUE_VISIBILITY_TIMEOUT_SECONDS` | `docker-compose.release.yml`, `docker-compose.yml` |
 | `SHAKERSCAN_DISABLE_DISCOVERY_RECOVERY` | `scanner/manifests.py` |
 | `SHAKERSCAN_DISCOVERY_MAX_ACTIVE` | `api/operations/discovery.py` |

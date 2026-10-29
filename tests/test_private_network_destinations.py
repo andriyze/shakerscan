@@ -105,12 +105,15 @@ def test_restricted_classes_are_refused_under_every_setting(monkeypatch, address
         assert SETTING not in detail, "no setting admits this class, so none is suggested"
 
 
-def test_loopback_follows_the_deployment_setting_as_documented(monkeypatch):
-    monkeypatch.setenv(SETTING, "refuse")
-    detail = _refusal("http://127.0.0.1:3000")
-    assert "127.0.0.1 is a loopback address" in detail and f"{SETTING}=allow" in detail
-    monkeypatch.setenv(SETTING, "allow")
-    assert _admit("http://127.0.0.1:3000") == ["127.0.0.1"]
+def test_loopback_is_refused_under_every_setting_as_documented(monkeypatch):
+    """2.11.3: loopback is this deployment's own address. The refusal says so and suggests no
+    setting or label, since none admits it."""
+    for policy in ("refuse", "allow"):
+        monkeypatch.setenv(SETTING, policy)
+        for environment in ("internal", "lab"):
+            detail = _refusal("http://127.0.0.1:3000", environment=environment)
+            assert "127.0.0.1 is one of this deployment's own addresses" in detail
+            assert f"{SETTING}=allow" not in detail
 
 
 def test_the_scope_receipt_records_the_same_explanation(monkeypatch):
