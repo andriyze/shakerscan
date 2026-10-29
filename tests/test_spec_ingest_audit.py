@@ -47,6 +47,16 @@ def test_relative_server_uses_document_url_and_default_variables():
     assert records[0]["url"] == ORIGIN + "/api/v1/users"
 
 
+@pytest.mark.parametrize("document,expected", [
+    ("/openapi.json", "/users"), ("/docs/openapi.json", "/docs/users"), ("/api/v1/openapi.yaml", "/api/v1/users"),
+])
+def test_an_empty_server_url_is_the_document_directory_not_the_document(document, expected):
+    spec = _spec()
+    spec["servers"] = [{"url": ""}]
+    records = ingest_spec_bodies([(ORIGIN + document, json.dumps(spec).encode(), None)], origin=ORIGIN)
+    assert records[0]["url"] == ORIGIN + expected
+
+
 @pytest.mark.parametrize("server", ["https://other.test/v1", "//other.test/v1", "http://api.example.test/v1", "https://secret@api.example.test/v1"])
 def test_foreign_origin_scheme_and_userinfo_are_not_remapped(server):
     spec = _spec()
