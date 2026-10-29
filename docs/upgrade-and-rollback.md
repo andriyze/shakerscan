@@ -178,8 +178,10 @@ shakerscan status
 No separate stop is needed. When `start` finds an earlier release still answering, ShakerScan
 containers running without the API, or containers the API started outside Compose, it first pulls
 (for a source checkout, builds) the new images, then stops every ShakerScan container the way
-`shakerscan stop` does and starts the new release. An enabled connected-device worker and Gungnir CT monitor come back on the new image,
-and the running worker count is kept. Volumes, `results/`, and `.env` are not touched.
+`shakerscan stop` does and starts the new release. An enabled connected-device worker and Gungnir CT monitor come back on the new image.
+The new release starts as many scan workers as were running, or the number automatic sizing gives
+this host's memory when that is more (the default, `--workers auto`); `shakerscan start --workers N`
+starts exactly N. Volumes, `results/`, and `.env` are not touched.
 
 After startup, confirm the API health check, UI, worker build status, existing targets/findings, and a
 safe Quick scan. Do not run `shakerscan reset` to recover from a migration failure; reset deletes the

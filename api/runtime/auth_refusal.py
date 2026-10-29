@@ -19,18 +19,29 @@ Two refusals are told apart, because they call for different action:
 The answer of an authentication endpoint is the exception: a login form answers a wrong password
 with 401 or 403 by design, and that answer is what its injection tests compare against
 (``is_authentication_candidate``).
+
+A proof can also meet a service that did not serve the page it tests (``unavailable_status``):
+``target_unavailable`` is no refusal with a remedy, but what was measured against it is no
+verdict either.
 """
 
 from __future__ import annotations
 
 import re
 import urllib.parse
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from typing import Any
 
 AUTHENTICATION_REQUIRED = "authentication_required"
 TARGET_REFUSED = "target_refused"
 REFUSAL_REASONS = frozenset({AUTHENTICATION_REQUIRED, TARGET_REFUSED})
+# The service, not the code under test, decided a proof's answers: it was down, overloaded or
+# rate-limiting, or the route was missing or failing on every request.
+TARGET_UNAVAILABLE = "target_unavailable"
+# Answers that say the service decided: one of these anywhere leaves a proof's comparisons
+# meaningless. A missing page or a server error does so when every answer met one.
+UNAVAILABLE_STATUSES = frozenset({408, 429, 502, 503, 504})
+MISSING_STATUSES = frozenset({404, 410})
 # The record of an external verifier's first (baseline) response, from its own wire log.
 BASELINE_RECORD_KIND = "verifier_baseline_response"
 AUTH_REFUSAL_STATUSES = frozenset({401, 403, 407})
@@ -167,6 +178,35 @@ def refusal(
     return None
 
 
+def unavailable_status(statuses: Iterable[Any]) -> int | None:
+    """The status that leaves a proof's answers unusable, or None.
+
+    The first of ``UNAVAILABLE_STATUSES`` among the answers, else the first answer when every
+    answer was a missing page or a server error. A request that got no answer (0 or None) is not
+    counted. Asked only of a negative: a proof that reproduced still proves its finding. A control
+    that was answered, with payloads that met any other client or server error (not 408, 429 or
+    502-504), is the route's own answer. The "every answer" half needs such a control: a proof
+    that sent the payload alone (a browser proof of a query or body parameter) may have met the
+    application's own 404 or 500 for that payload, so it reads only ``UNAVAILABLE_STATUSES``.
+    """
+    answered: list[int] = []
+    for item in statuses or ():
+        if isinstance(item, bool):
+            continue
+        try:
+            code = int(item)
+        except (TypeError, ValueError):
+            continue
+        if code > 0:
+            answered.append(code)
+    blocking = next((code for code in answered if code in UNAVAILABLE_STATUSES), None)
+    if blocking is not None:
+        return blocking
+    if answered and all(code in MISSING_STATUSES or code >= 500 for code in answered):
+        return answered[0]
+    return None
+
+
 def refusal_status(status: Any, headers: Mapping[str, Any] | None = None) -> int | None:
     """The status code with which the target refused the request, or None."""
     refused = refusal(status, headers)
@@ -186,7 +226,8 @@ def refusal_reason(error: Any) -> str | None:
 
 __all__ = [
     "AUTHENTICATION_REQUIRED", "AUTH_REFUSAL_STATUSES", "BASELINE_RECORD_KIND",
-    "REFUSAL_REASONS", "TARGET_REFUSED", "is_authentication_candidate", "is_authentication_path",
+    "MISSING_STATUSES", "REFUSAL_REASONS", "TARGET_REFUSED", "TARGET_UNAVAILABLE",
+    "UNAVAILABLE_STATUSES", "is_authentication_candidate", "is_authentication_path",
     "is_login_location",
-    "refusal", "refusal_error", "refusal_reason", "refusal_status",
+    "refusal", "refusal_error", "refusal_reason", "refusal_status", "unavailable_status",
 ]

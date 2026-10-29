@@ -821,3 +821,14 @@ test('a sign-in endpoint probed only within its paced, bounded probe set is name
   // Each check there draws from a set of its own.
   assert.match(result.coverageGapReasons[0], /a bounded set of probes for each check/)
 })
+
+test('a proof whose page the target did not serve is named as a coverage limit, not a raw code', () => {
+  const result = scanResultPresentation({
+    result: { findings: [], result: {}, coverage: { reasons: ['target_unavailable'], family_coverage: [] } },
+  }, { band: 'moderate', label: 'Moderate coverage' })
+  assert.equal(result.coverageGapReasons.length, 1)
+  assert.match(result.coverageGapReasons[0], /did not serve the page a proof tests/)
+  assert.match(result.coverageGapReasons[0], /HTTP 408, 429, 502-504/)
+  assert.match(result.coverageGapReasons[0], /neither proven nor ruled out/)
+  assert.doesNotMatch(result.coverageGapReasons[0], /target_unavailable|target unavailable/)
+})

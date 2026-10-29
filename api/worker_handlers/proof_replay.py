@@ -50,6 +50,14 @@ except ModuleNotFoundError:  # package import in host-side tests
         xss_proof_signal,
     )
 try:
+    from runtime.auth_refusal import (
+        MISSING_STATUSES, TARGET_UNAVAILABLE, UNAVAILABLE_STATUSES, unavailable_status,
+    )
+except ModuleNotFoundError:  # package import in host-side tests
+    from ..runtime.auth_refusal import (
+        MISSING_STATUSES, TARGET_UNAVAILABLE, UNAVAILABLE_STATUSES, unavailable_status,
+    )
+try:
     from proof_retest import PROOF_RETEST_GAPS, ProofRetestRequest, proof_retest_request
     from retest_contract import auth_context_to_headers, parse_json_field
     from worker_handlers.retest_outcome import _internal_retest_scope_authorized, classify_retest_outcome
@@ -74,19 +82,10 @@ _LIKELY_FIXED = "The check that proved the finding sent the same request again a
 # Answers that say the service, not a fix, decided what the check saw. One of these anywhere (down,
 # overloaded, rate-limiting) leaves the check's comparisons meaningless; so does a missing page or
 # a server error when every request met one. A check that reproduces still proves the finding.
-_UNAVAILABLE = frozenset({408, 429, 502, 503, 504})
-_MISSING = frozenset({404, 410})
-
-
-def _unavailable(statuses: Any) -> int | None:
-    """The status that makes a check's answers unusable, or None."""
-    answered = [int(item) for item in statuses if item]
-    blocking = next((item for item in answered if item in _UNAVAILABLE), None)
-    if blocking is not None:
-        return blocking
-    if answered and all(item in _MISSING or item >= 500 for item in answered):
-        return answered[0]
-    return None
+# The Scan's proofs apply the same rule (``auth_refusal.unavailable_status``).
+_UNAVAILABLE = UNAVAILABLE_STATUSES
+_MISSING = MISSING_STATUSES
+_unavailable = unavailable_status
 
 
 def _unavailable_reason(status: int) -> str:
@@ -239,9 +238,13 @@ async def _differential_check(
                     if item.get("finding_verdict") == "inconclusive"), None)
     if refusal in _REFUSALS:
         return refusal, proof
+    unavailable = _unavailable(transport.statuses)
+    if refusal == TARGET_UNAVAILABLE and unavailable is not None:
+        # The check itself read the answers as the service's (``unavailable_status``).
+        proof["unavailable_status"] = unavailable
+        return "unavailable", proof
     if result.status != "success" or result.errors or not observations:
         return "failed", proof
-    unavailable = _unavailable(transport.statuses)
     if unavailable is not None:
         proof["unavailable_status"] = unavailable
         return "unavailable", proof

@@ -273,6 +273,7 @@ const COVERAGE_REASON_LABELS = {
   authentication_uncertain: 'Credential authority could not be confirmed',
   authentication_required: 'The target refused unauthenticated requests (401/403 or a redirect to sign-in), so those candidates were not tested; to verify them, the scan needs a credential profile whose allowed capabilities include these checks: attach one, or add the checks to the attached profile (active verifiers need approved elevation)',
   target_refused: "The target refused the verifier's requests (403) without asking for credentials, for example a firewall or an access rule, so those candidates could not be verified",
+  target_unavailable: 'The target did not serve the page a proof tests: it answered unavailable, rate-limited or timed out (HTTP 408, 429, 502-504), did not answer, or answered every request with no such page or a server error, so those candidates were neither proven nor ruled out',
   insufficient_budget_for_stage: 'A continuation could not fund a single verification stage, so its candidates were left unverified',
   output_truncated: 'A step produced more output than it may keep, so part of its result was cut off',
   source_not_published: 'An optional discovery file (robots.txt or llms.txt) was not published by the target',
