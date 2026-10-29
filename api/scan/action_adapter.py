@@ -597,6 +597,35 @@ def _signalled_positions(
     return frozenset(positions)
 
 
+def _unsignalled_sign_in_positions(
+    entries: Sequence[Mapping[str, Any]], rows: Iterable[tuple[int, Mapping[str, Any]]],
+    signalled: Collection[int],
+) -> frozenset[int]:
+    """Sign-in body candidates of a proof slice that the verifier never signalled.
+
+    A sign-in form's proof is a repeated error pair and a repeated bypass pair (8 requests, paced
+    on a credential profile's own sign-in endpoint). The sqlmap verifier needs hundreds of
+    mutations per body and is often unfunded by the time its slice reaches a body candidate, so
+    waiting for its signal left login injections unproven. Only the first variant of a candidate
+    none of whose variants was signalled is added (a signal still escalates exactly its own
+    variant), and the proof loop still demands state-changing authority before any replay.
+    """
+    signalled_ids = {
+        str(entries[index].get("candidate_id") or "") for index in signalled if index < len(entries)
+    }
+    positions: dict[str, int] = {}
+    for index, entry in rows:
+        candidate_id = str(entry.get("candidate_id") or "")
+        if (
+            candidate_id and candidate_id not in signalled_ids and candidate_id not in positions
+            and entry.get("body_field_names")
+            and "sqli" in (entry.get("family_hints") or ("sqli",))
+            and is_authentication_candidate(entry)
+        ):
+            positions[candidate_id] = index
+    return frozenset(positions.values())
+
+
 def _template_match_identity(item: Mapping[str, Any]) -> tuple[str, str, str]:
     """What makes two template matches the same finding: template, matcher and location.
 
@@ -2726,6 +2755,7 @@ class DatabaseNeutralScanActionDispatcher:
             manifest.entries, manifest_digest=manifest_digest, verifier_family="sqli",
             signals=signals, recorded_attempts=recorded,
         )
+        signalled |= _unsignalled_sign_in_positions(manifest.entries, rows, signalled)
         if not signalled:
             return self._skip(action, "no_sqli_candidate_observation")
         load_attempts = getattr(self.backend, "load_batch_attempts", None)
