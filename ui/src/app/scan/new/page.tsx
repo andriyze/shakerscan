@@ -796,7 +796,7 @@ export default function NewScanPage() {
                 <span><span className="block text-sm font-medium text-white">Single worker — recommended</span><span className="mt-1 block text-xs text-gray-500">Release-authoritative execution with one coherent action graph.</span></span>
               </span>
             </label>
-            {featureEnabled('worker_admin') && <label className={`rounded-lg border p-4 ${topology === 'parallel' ? 'border-amber-600 bg-amber-950/20' : 'border-gray-800'}`}>
+            {(featureEnabled('parallel_scan') || featureEnabled('worker_admin')) && <label className={`rounded-lg border p-4 ${topology === 'parallel' ? 'border-amber-600 bg-amber-950/20' : 'border-gray-800'}`}>
               <span className="flex items-start gap-3">
                 <input type="radio" name="scan-topology" value="parallel" checked={topology === 'parallel'} onChange={() => setTopology('parallel')} />
                 <span><span className="block text-sm font-medium text-white">Parallel — experimental</span><span className="mt-1 block text-xs text-gray-500">Explicit multi-worker fan-out; validate results against single-worker execution.</span></span>
