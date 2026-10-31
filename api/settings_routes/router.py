@@ -14,11 +14,9 @@ from __future__ import annotations
 import asyncio
 import copy
 from datetime import datetime, timezone
-import secrets
 import urllib.error
 import urllib.parse
 import urllib.request
-from pathlib import Path
 import json
 import os
 import re
@@ -36,12 +34,14 @@ try:
     from ai_targets.router import _validate_demo_base_url
     from redaction import mask_secret
     from research_agent import GATED_RESEARCH_COMMANDS, RESEARCH_DECISION_VERSION
+    from retest_contract import AUTO_FP_MIN_CONFIDENCE_FLOOR
     from serialization import _decode_json_value, _json_object, _str_list, row_to_dict
 except ModuleNotFoundError:  # package import in host-side tests
     from ..api_utils import _clean_string_list, _int_or_none, _optional_uuid, _uuid_or_400, utc_now_iso
     from .. import asm_inventory, family_proof, parallel_scan
     from ..ai_targets.router import _validate_demo_base_url
     from ..research_agent import GATED_RESEARCH_COMMANDS, RESEARCH_DECISION_VERSION
+    from ..retest_contract import AUTO_FP_MIN_CONFIDENCE_FLOOR
     from ..serialization import _decode_json_value, _json_object, _str_list, row_to_dict
     from scanner.redaction import mask_secret
 
@@ -222,7 +222,7 @@ async def update_automation_settings(request: AutomationSettingsUpdate):
 
 @router.put("/settings/ai")
 async def update_ai_settings(request: AISettingsUpdate):
-    """Update runtime AI settings, optionally persisting to local .env."""
+    """Update runtime AI settings (Redis persists them across restarts)."""
     _validate_effective_ai_threshold_update(request, _load_effective_ai_settings())
     try:
         r = get_redis()
@@ -239,8 +239,6 @@ async def update_ai_settings(request: AISettingsUpdate):
 
     updates: dict[str, str] = {}
     deletes: list[str] = []
-    clear_demo_honey_public_url = False
-    clear_demo_honey_scanner_url = False
 
     for field in string_fields:
         value = getattr(request, field)
@@ -306,14 +304,12 @@ async def update_ai_settings(request: AISettingsUpdate):
         if normalized:
             updates["demo_honey_public_url"] = normalized
         else:
-            clear_demo_honey_public_url = True
             deletes.append("demo_honey_public_url")
     if request.demo_honey_scanner_url is not None:
         normalized = _validate_demo_base_url(request.demo_honey_scanner_url)
         if normalized:
             updates["demo_honey_scanner_url"] = normalized
         else:
-            clear_demo_honey_scanner_url = True
             deletes.append("demo_honey_scanner_url")
 
     if updates:
@@ -328,43 +324,8 @@ async def update_ai_settings(request: AISettingsUpdate):
         from runtime.ai_settings_secrets import compact_history
         compact_history(r)
 
-    persisted_to_env = False
-    persist_message = "Runtime settings updated"
-    if request.persist_to_env:
-        effective = _load_effective_ai_settings()
-        env_updates: dict[str, Optional[str]] = {
-            "AI_URL": effective.get("ai_url") or None,
-            "AI_API_KEY": effective.get("ai_api_key") or None,
-            "AI_MODEL": effective.get("ai_model") or None,
-            "AI_FALLBACK_MODEL": effective.get("ai_model_fallback") or None,
-            "AI_MASK_HOST": effective.get("ai_mask_host") or None,
-            "AI_SCAN_CLASSIFICATION_ENABLED": "true" if effective.get("ai_scan_classification_enabled") else "false",
-            "AI_CLASSIFY_MIN_SEVERITY": effective.get("ai_classify_min_severity") or effective.get("ai_verify_min_severity") or "high",
-            "AI_VERIFY_ENABLED": "true" if effective.get("ai_verify_enabled") else "false",
-            # Single provider model: keep legacy verify-provider env vars cleared.
-            "AI_VERIFY_URL": None,
-            "AI_VERIFY_API_KEY": None,
-            "AI_VERIFY_MODEL": None,
-            "AI_VERIFY_FALLBACK_MODEL": None,
-            "AI_VERIFY_MIN_SEVERITY": effective.get("ai_verify_min_severity") or "high",
-            "AUTO_RETEST_ON_SCAN_COMPLETE": "true" if effective.get("auto_retest_on_scan_complete") else "false",
-            "AUTO_RETEST_MIN_SEVERITY": effective.get("auto_retest_min_severity") or "medium",
-            "AUTO_RETEST_MAX_PER_SCAN": str(max(0, int(effective.get("auto_retest_max_per_scan") or 0))),
-            "VERIFICATION_MIN_SEVERITY": effective.get("verification_min_severity") or "medium",
-            "AI_ESCALATION_MIN_SEVERITY": effective.get("ai_escalation_min_severity") or "high",
-            "PROOF_REQUIRED_FOR_SMART": "true" if effective.get("proof_required_for_smart", False) else "false",
-            "AUTO_FP_ON_RETEST": "true" if effective.get("auto_fp_on_retest", False) else "false",
-            "AUTO_FP_MIN_CONFIDENCE": str(_normalize_confidence(effective.get("auto_fp_min_confidence"), default=0.9)),
-            "AI_DEMO_MODE_ENABLED": "true" if effective.get("demo_mode_enabled", False) else "false",
-            "AI_DEMO_HONEY_PUBLIC_URL": None if clear_demo_honey_public_url else effective.get("demo_honey_public_url") or None,
-            "AI_DEMO_HONEY_SCANNER_URL": None if clear_demo_honey_scanner_url else effective.get("demo_honey_scanner_url") or None,
-        }
-        persisted_to_env, persist_message = _persist_env_updates(LOCAL_ENV_FILE, env_updates)
-
     return {
         "status": "updated",
-        "persisted_to_env": persisted_to_env,
-        "persist_message": persist_message,
         "settings": _sanitize_ai_settings_response(_load_effective_ai_settings()),
     }
 
@@ -376,20 +337,29 @@ async def test_ai_settings(request: AISettingsProbeRequest):
     scope = request.scope
 
     if scope == "verify":
-        ai_url = (request.ai_url or effective.get("ai_verify_url") or effective.get("ai_url") or "").strip()
+        stored_url = (effective.get("ai_verify_url") or effective.get("ai_url") or "").strip()
         ai_api_key = (request.ai_api_key or effective.get("ai_verify_api_key") or effective.get("ai_api_key") or "").strip()
         ai_model = (request.ai_model or effective.get("ai_verify_model") or effective.get("ai_model") or "").strip()
         fallback_models = request.ai_fallback_model
         if fallback_models is None:
             fallback_models = effective.get("ai_verify_model_fallback") or effective.get("ai_model_fallback") or ""
     else:
-        ai_url = (request.ai_url or effective.get("ai_url") or "").strip()
+        stored_url = (effective.get("ai_url") or "").strip()
         ai_api_key = (request.ai_api_key or effective.get("ai_api_key") or "").strip()
         ai_model = (request.ai_model or effective.get("ai_model") or "").strip()
         fallback_models = request.ai_fallback_model
         if fallback_models is None:
             fallback_models = effective.get("ai_model_fallback") or ""
 
+    # The stored provider key is only ever sent to the stored provider URL. A probe of any other
+    # URL must bring its own key, or the probe would hand the saved key to a caller-chosen host.
+    requested_url = (request.ai_url or "").strip()
+    ai_url = requested_url or stored_url
+    if requested_url and requested_url != stored_url and not (request.ai_api_key or "").strip():
+        raise HTTPException(
+            status_code=400,
+            detail="AI API key is required to probe a URL other than the saved AI URL",
+        )
     if not ai_url:
         raise HTTPException(status_code=400, detail="AI URL is required for probe")
     if not ai_api_key:
@@ -492,7 +462,6 @@ SCAN_SETTINGS_KEY = os.environ.get("SCAN_SETTINGS_KEY", "settings:scan")
 AUTOMATION_SETTINGS_KEY = os.environ.get("AUTOMATION_SETTINGS_KEY", "settings:automation")
 
 
-LOCAL_ENV_FILE = Path(os.environ.get("LOCAL_ENV_FILE", "/workspace/.env"))
 
 
 def _normalize_confidence(value: Any, default: float) -> float:
@@ -640,60 +609,6 @@ def _sanitize_automation_settings_response(
             "available_planner_modes": ["agent", "local_codex", "configured_ai"],
         },
     }
-
-
-def _persist_env_updates(env_path: Path, updates: dict[str, Optional[str]]) -> tuple[bool, str]:
-    temp_path: Path | None = None
-    try:
-        rendered = {
-            key: None if raw_value is None else _normalize_env_value(raw_value)
-            for key, raw_value in updates.items()
-        }
-    except ValueError:
-        return False, "Refused to persist settings: a value contains a control or line-separator character"
-    try:
-        if env_path.exists():
-            lines = env_path.read_text(encoding="utf-8").splitlines()
-        else:
-            lines = []
-            if not env_path.parent.exists():
-                env_path.parent.mkdir(parents=True, exist_ok=True)
-
-        indexed: dict[str, int] = {}
-        key_pattern = re.compile(r"^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=")
-        for idx, line in enumerate(lines):
-            m = key_pattern.match(line)
-            if m:
-                indexed[m.group(1)] = idx
-
-        for key, value in rendered.items():
-            if value is None:
-                if key in indexed:
-                    lines[indexed[key]] = f"# {key}=  # removed by settings API"
-                continue
-            line = f"{key}={value}"
-            if key in indexed:
-                lines[indexed[key]] = line
-            else:
-                lines.append(line)
-
-        payload = "\n".join(lines).rstrip() + "\n"
-        temp_path = env_path.with_name(f".{env_path.name}.{secrets.token_hex(8)}.tmp")
-        fd = os.open(temp_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-        with os.fdopen(fd, "w", encoding="utf-8") as stream:
-            stream.write(payload)
-            stream.flush()
-            os.fsync(stream.fileno())
-        os.replace(temp_path, env_path)
-        os.chmod(env_path, 0o600)
-        return True, "Persisted settings to the local environment file"
-    except Exception:
-        if temp_path is not None:
-            try:
-                temp_path.unlink(missing_ok=True)
-            except OSError:
-                pass
-        return False, "Failed to persist the local environment file"
 
 
 async def _probe_ai_provider(
@@ -1178,18 +1093,6 @@ async def _read_durable_setting(conn, key: str) -> str | None:
         return None
 
 
-# Characters that str.splitlines() treats as line boundaries, plus every other C0/C1 control
-# character except the newline _normalize_env_value escapes. Any of these in a value would let a
-# settings field plant an additional KEY=value line in the host environment file.
-_ENV_VALUE_FORBIDDEN = re.compile(r"[\x00-\x09\x0b-\x1f\x7f-\x9f\u2028\u2029]")
-
-
-def _normalize_env_value(value: str) -> str:
-    if _ENV_VALUE_FORBIDDEN.search(value):
-        raise ValueError("environment values must not contain control or line-separator characters")
-    return value.replace("\n", "\\n")
-
-
 def _load_probe_ai_provider():
     import importlib
 
@@ -1559,11 +1462,10 @@ class AISettingsUpdate(BaseModel):
     ai_escalation_min_severity: Optional[str] = Field(default=None, pattern="^(critical|high|medium|low|info)$")
     proof_required_for_smart: Optional[bool] = None
     auto_fp_on_retest: Optional[bool] = None
-    auto_fp_min_confidence: Optional[float] = Field(default=None, ge=0.0, le=1.0)
+    auto_fp_min_confidence: Optional[float] = Field(default=None, ge=AUTO_FP_MIN_CONFIDENCE_FLOOR, le=1.0)
     demo_mode_enabled: Optional[bool] = None
     demo_honey_public_url: Optional[str] = None
     demo_honey_scanner_url: Optional[str] = None
-    persist_to_env: bool = False
 
     @model_validator(mode="after")
     def validate_verification_threshold_hierarchy(self):

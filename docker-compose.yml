@@ -156,7 +156,6 @@ services:
       - REDIS_URL=redis://:${REDIS_PASSWORD:?REDIS_PASSWORD is required}@redis:6379
       - DATABASE_URL=postgresql://scanner:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@postgres:5432/scanner
       - RESULTS_DIR=/results
-      - LOCAL_ENV_FILE=/workspace/.env
       - SCANNER_VERSION=${SCANNER_VERSION:-dev}
       - GIT_COMMIT=${GIT_COMMIT:-dev}
       - SHAKERSCAN_QUEUE_CONSUMER_GROUP=${SHAKERSCAN_QUEUE_CONSUMER_GROUP:-shakerscan-workers}

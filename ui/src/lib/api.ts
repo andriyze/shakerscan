@@ -2815,7 +2815,6 @@ export interface AISettingsUpdate {
   demo_mode_enabled?: boolean
   demo_honey_public_url?: string
   demo_honey_scanner_url?: string
-  persist_to_env?: boolean
 }
 
 export interface ScanExecutionSettings {
@@ -6856,8 +6855,6 @@ export async function getAISettings(): Promise<AISettings> {
 
 export async function updateAISettings(data: AISettingsUpdate): Promise<{
   status: string
-  persisted_to_env: boolean
-  persist_message?: string
   settings: AISettings
 }> {
   const res = await fetch(`${API_URL}/settings/ai`, {
