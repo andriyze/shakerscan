@@ -35,6 +35,9 @@ from api.runtime.credential_store import (  # noqa: E402
 )
 
 NOW = datetime(2026, 10, 1, 12, 0, tzinfo=timezone.utc)
+# The store checks profile expiry against the database clock, so the fixture expiry follows the
+# real clock rather than NOW: a fixed date would expire the fixtures once the calendar passes it.
+PROFILE_EXPIRES_AT = datetime.now(timezone.utc) + timedelta(days=30)
 HOME = uuid.UUID("11111111-1111-4111-8111-111111111111")
 SHARED = uuid.UUID("22222222-2222-4222-8222-222222222222")
 OTHER = uuid.UUID("33333333-3333-4333-8333-333333333333")
@@ -68,7 +71,7 @@ async def _profile(conn, *, capabilities=("request.replay",), target=HOME, kind=
         conn, target_kind=kind, target_id=target, name=f"profile-{uuid.uuid4().hex[:6]}",
         auth_kind="bearer_token", principal_slot="primary", principal_label="alice",
         configuration=_configuration(), encrypted_secret="enc:fernet:secret",
-        encrypted_metadata="enc:fernet:metadata", expires_at=NOW + timedelta(days=30),
+        encrypted_metadata="enc:fernet:metadata", expires_at=PROFILE_EXPIRES_AT,
         allowed_capabilities=list(capabilities), created_by="test", now=NOW,
     )
 
@@ -353,7 +356,7 @@ def test_a_live_login_is_reused_only_for_the_same_target_credential_version_and_
         profile = await STORE.create_profile(
             conn, target_kind="web", target_id=HOME, name="login", auth_kind="form_login",
             principal_slot="primary", principal_label="alice", configuration=configuration,
-            encrypted_secret="enc:fernet:x", encrypted_metadata="enc:fernet:y", expires_at=NOW + timedelta(days=30),
+            encrypted_secret="enc:fernet:x", encrypted_metadata="enc:fernet:y", expires_at=PROFILE_EXPIRES_AT,
             allowed_capabilities=["auth.session.establish", "http.request"], created_by="test", now=NOW,
         )
         await STORE.grant_profile(conn, profile_id=profile.profile_id, target_kind="web", target_id=SHARED,
@@ -415,7 +418,7 @@ def test_a_live_login_is_reused_only_for_the_same_target_credential_version_and_
         await STORE.rotate_profile(conn, profile_id=profile.profile_id, target_kind="web", target_id=HOME,
                                    expected_record_version=(await STORE.get_profile(conn, profile_id=profile.profile_id)).record_version,
                                    encrypted_secret="enc:fernet:z", encrypted_metadata="enc:fernet:w",
-                                   configuration=configuration, expires_at=NOW + timedelta(days=30),
+                                   configuration=configuration, expires_at=PROFILE_EXPIRES_AT,
                                    created_by="test", now=NOW + timedelta(seconds=1))
         assert await reused(HOME, version=2) is None
     run(scenario)
