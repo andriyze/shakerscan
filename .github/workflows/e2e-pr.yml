@@ -144,7 +144,7 @@ jobs:
       # toomanyrequests). Skipped, so pulls stay anonymous, when the read secrets are absent.
       - name: Log in to Docker Hub for read-only pulls
         if: env.HAS_DH_READ == 'true' && steps.shard.outputs.stack == 'true'
-        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f
+        uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6
         with:
           username: ${{ secrets.DOCKERHUB_READ_USERNAME }}
           password: ${{ secrets.DOCKERHUB_READ_TOKEN }}
