@@ -38,6 +38,9 @@ from workflow_principals import resolve_target_principal_contexts
 from api import api as api_module
 
 NOW = datetime(2026, 10, 7, 12, 0, tzinfo=timezone.utc)
+# Verification checks profile expiry against the real clock, so the fixture expiry follows it
+# rather than NOW: a fixed date would expire the fixtures once the calendar passes it.
+PROFILE_EXPIRES_AT = datetime.now(timezone.utc) + timedelta(days=30)
 HUNT = uuid.UUID("a0000000-0000-4000-8000-000000000001")
 ACTION = uuid.UUID("a0000000-0000-4000-8000-000000000002")
 TARGET = uuid.UUID("b0000000-0000-4000-8000-000000000001")
@@ -69,7 +72,7 @@ def _profile(profile_id, *, home=TARGET, slot="primary", kind="authorization_hea
         profile_id=profile_id, target_kind="web", target_id=str(home), name=f"p-{profile_id[-4:]}",
         auth_kind=kind, principal_label=None, principal_slot=slot,
         configuration={"auth_kind": kind}, current_version=version, record_version=1,
-        is_active=True, expires_at=NOW + timedelta(days=30), rotated_at=NOW, created_at=NOW,
+        is_active=True, expires_at=PROFILE_EXPIRES_AT, rotated_at=NOW, created_at=NOW,
         updated_at=NOW, allowed_capabilities=tuple(capabilities), granted_target_id=str(TARGET),
     )
 
