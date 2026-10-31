@@ -138,6 +138,11 @@ def _normalize_severity(value: str | None, default: str = "high") -> str:
     return severity if severity in SEVERITY_ORDER else default
 
 
+# Auto-closing a finding is riskier than labelling the verdict: the minimum confidence for an
+# automatic false-positive close can never be below the 0.7 false-positive verdict bar.
+AUTO_FP_MIN_CONFIDENCE_FLOOR = 0.7
+
+
 @dataclass(frozen=True)
 class VerificationPolicy:
     """Single source of truth for all verification severity gates.
@@ -228,7 +233,9 @@ class VerificationPolicy:
             else os.environ.get("AUTO_FP_MIN_CONFIDENCE", "0.9")
         )
         try:
-            auto_fp_conf = min(1.0, max(0.0, float(raw_fp_conf)))
+            # Never below the false-positive verdict bar, even for a value stored or set in the
+            # environment before the settings API enforced the floor.
+            auto_fp_conf = min(1.0, max(AUTO_FP_MIN_CONFIDENCE_FLOOR, float(raw_fp_conf)))
         except (TypeError, ValueError):
             pass
 
