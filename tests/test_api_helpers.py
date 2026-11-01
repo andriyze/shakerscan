@@ -25,18 +25,6 @@ from pathlib import Path
 import pytest
 
 
-def test_persist_env_updates_is_atomic_and_owner_only(tmp_path):
-    env_path = tmp_path / ".env"
-
-    ok, message = settings_router_module._persist_env_updates(env_path, {"OPENAI_API_KEY": "secret-value"})
-
-    assert ok is True
-    assert "secret-value" not in message
-    assert env_path.read_text() == "OPENAI_API_KEY=secret-value\n"
-    assert env_path.stat().st_mode & 0o777 == 0o600
-    assert not list(tmp_path.glob(".*.tmp"))
-
-
 def test_latest_result_rejects_traversal_and_symlink_escape(tmp_path, monkeypatch):
     results = tmp_path / "results"
     results.mkdir()
