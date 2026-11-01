@@ -66,7 +66,6 @@ export default function AISettingsPanel() {
   const [loading, setLoading] = useState(true)
   const [scanAPIKeyInput, setScanAPIKeyInput] = useState('')
   const [clearScanAPIKey, setClearScanAPIKey] = useState(false)
-  const [persistAIToEnv, setPersistAIToEnv] = useState(false)
   const [aiURLInput, setAIURLInput] = useState('')
   const [aiModelInput, setAIModelInput] = useState('')
   const [aiModelFallbackInput, setAIModelFallbackInput] = useState('')
@@ -168,11 +167,10 @@ export default function AISettingsPanel() {
         ai_escalation_min_severity: aiEscalationMinSeverityInput,
         proof_required_for_smart: proofRequiredForSmartInput,
         auto_fp_on_retest: autoFpOnRetestInput,
-        auto_fp_min_confidence: Math.min(1, Math.max(0, Number.parseFloat(autoFpMinConfidenceInput || '0.9') || 0.9)),
+        auto_fp_min_confidence: Math.min(1, Math.max(0.7, Number.parseFloat(autoFpMinConfidenceInput || '0.9') || 0.9)),
         demo_mode_enabled: demoModeEnabledInput,
         demo_honey_public_url: demoModeEnabledInput ? demoHoneyPublicURLInput : '',
         demo_honey_scanner_url: demoModeEnabledInput ? demoHoneyScannerURLInput : '',
-        persist_to_env: persistAIToEnv,
       }
 
       if (clearScanAPIKey) {
@@ -184,9 +182,7 @@ export default function AISettingsPanel() {
       const result = await updateAISettings(payload)
       setAISettings(result.settings)
       applyAISettingsToForm(result.settings)
-      const successMessage = result.persisted_to_env
-        ? result.persist_message || 'AI settings updated and persisted to .env'
-        : 'AI runtime settings updated'
+      const successMessage = 'AI settings updated'
       setAISettingsMessage(successMessage)
       toast.success(successMessage)
     } catch (err) {
@@ -679,7 +675,7 @@ export default function AISettingsPanel() {
           {autoFpOnRetestInput && (
             <Field
               label="Auto-FP minimum confidence"
-              hint="Retest confidence required before auto-closing (0–1). Higher than the 0.7 false-positive verdict bar because auto-closing is riskier than labeling."
+              hint="Retest confidence required before auto-closing (0.7–1). Higher than the 0.7 false-positive verdict bar because auto-closing is riskier than labeling."
             >
               <input
                 type="number"
@@ -790,16 +786,6 @@ export default function AISettingsPanel() {
         </Fieldset>
         </div>
       )}
-
-      <div className="pt-2 border-t border-gray-800">
-        <ToggleRow
-          label="Keep settings after restart"
-          description="When on, saved settings survive service and container restarts. When off, changes last only for the current runtime."
-          hint="Leave off for temporary experiments."
-          checked={persistAIToEnv}
-          onChange={setPersistAIToEnv}
-        />
-      </div>
 
       {aiSettingsMessage && <p className="text-xs text-green-400">{aiSettingsMessage}</p>}
       {aiSettingsError && <p className="text-xs text-red-400">{aiSettingsError}</p>}

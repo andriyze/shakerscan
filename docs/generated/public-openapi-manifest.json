@@ -16,7 +16,7 @@
     "AIOpsRouterRequest": "462bf065e07e8baa336b0d9fcb5155826ecd795d150115fdeb042b5a41ac8e9a",
     "AIScanReplayRequest": "6809767e2f3a528d6e0328707c8b52a25cb99783939cea2448e0973b2b2ca0a0",
     "AISettingsProbeRequest": "aa56c0aa6c2c3c4928cd0922421c52b42e768dafdb4e1f3cc0e19460c8f161af",
-    "AISettingsUpdate": "a2e4ec2b9181116972dc310c9336bbd0ab15f462ac51b9d0365cb3f7ca49106f",
+    "AISettingsUpdate": "8ad72cc77ba383aa00645b27bb5e0e352fa971d5b471d0a6a32075a92733d103",
     "AITargetConnectivityTestRequest": "8b42ef7e773d6dcc94e0c5114625d896db0ca68738d783214644c78760c4b435",
     "AITargetCreate": "2dfaa83918b78af34e0a05e37c2915f78307bb5a1d39bf5c114943585aafd8ad",
     "AITargetCredential": "36d18e16447d2066044c7fc4df4e1d01c64e9a4d4da633ab850262e99e0b3a0b",
@@ -229,7 +229,7 @@
     "ValidationRequest": "cb81c65a5c80da74a19c6bd92e9c6a68f5cdb22fafeb94270481d463450f893e",
     "WorkerScaleRequest": "52e7ac017dfa1d92efa8e4071026b9bf24c0cf2a17f5d9e742349df3f08f6c62"
   },
-  "contract_sha256": "59cdc19086e39951d83af9cfea0785e23ea3b258061884abfdc7b4d1400b4d7f",
+  "contract_sha256": "959a37be9c35915158ff6db76516f052471441c3ead84d4b16216937bc0c4000",
   "openapi": "3.1.0",
   "operation_count": 496,
   "operations": {
