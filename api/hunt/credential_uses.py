@@ -35,6 +35,7 @@ try:
         select_hunt_session_principal_reference,
     )
     from runtime.credentials import SSH_CREDENTIAL_KINDS
+    from runtime.hunt_scanner_contract import SIGNED_IN_SCANNERS
 except ModuleNotFoundError:
     from ..runtime.credential_refs import (
         CredentialReferenceError,
@@ -43,6 +44,7 @@ except ModuleNotFoundError:
         select_hunt_session_principal_reference,
     )
     from ..runtime.credentials import SSH_CREDENTIAL_KINDS
+    from ..runtime.hunt_scanner_contract import SIGNED_IN_SCANNERS
 
 
 HUNT_CREDENTIAL_USE_SCHEMA = "hunt-credential-use/v1"
@@ -325,10 +327,14 @@ def action_credential_references(
     """
     # A signed-in artifact.inspect is a read http.request could send: it uses that allowance.
     capability = "http.request" if capability == "artifact.inspect" else capability
-    if capability in {"http.request", "collections.replay_safe", "collections.replay_active"}:
+    principal_capabilities = {
+        "http.request", "collections.replay_safe", "collections.replay_active",
+        *SIGNED_IN_SCANNERS,
+    }
+    if capability in principal_capabilities:
         _refuse_unusable_principal_slot(capability, capability_input, context)
     try:
-        if capability in {"http.request", "collections.replay_safe", "collections.replay_active"}:
+        if capability in principal_capabilities:
             reference = select_hunt_principal_reference(
                 context, capability_input.get("as_principal"), capability=capability,
             )

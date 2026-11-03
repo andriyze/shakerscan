@@ -12,6 +12,10 @@ import re
 from types import MappingProxyType
 from .hunt_http_contract import validate_http_request_input
 from .hunt_http_exchange_contract import HTTP_EXCHANGE_PROPERTIES
+from .hunt_scanner_contract import (
+    HUNT_INJECTION_BODY_PROPERTIES, HUNT_SCANNER_SESSION_PROPERTIES, HuntScannerInputError,
+    validate_hunt_scanner_input,
+)
 from typing import Any, Iterable, Literal, Mapping
 
 
@@ -332,6 +336,11 @@ class CapabilityRegistry:
         _validate_schema_value(
             spec.planner_input_schema, value, path="input", depth=0,
         )
+        if spec.hunt_executor == "worker_scanner":
+            try:
+                validate_hunt_scanner_input(name, value)
+            except HuntScannerInputError as exc:
+                raise CapabilityInputContractError(str(exc)) from exc
         if name == "authz.verify":
             session_keys = {"primary_session_ref", "secondary_session_ref"}
             principal_keys = {"primary_principal", "secondary_principal"}
@@ -633,6 +642,7 @@ CAPABILITY_REGISTRY = CapabilityRegistry(
             retest_contract="rerun-template-or-family-on-same-surface",
             hunt_executor="worker_scanner",
             planner_input_schema=_http_principal_schema({
+                **HUNT_SCANNER_SESSION_PROPERTIES,
                 "path": _SAME_ORIGIN_PATH_PROPERTY,
                 "severity": {
                     "type": "string",
@@ -749,6 +759,7 @@ CAPABILITY_REGISTRY = CapabilityRegistry(
             "katana-lines/v1", ("crawl_observation",), "katana", "katana", 75_000,
             ("-version",), ("/opt/tools/katana",),
             hunt_executor="worker_scanner",
+            planner_input_schema=_http_principal_schema(dict(HUNT_SCANNER_SESSION_PROPERTIES)),
         ),
         CapabilitySpec(
             "web.browser_crawl",
@@ -766,6 +777,9 @@ CAPABILITY_REGISTRY = CapabilityRegistry(
             "katana", "katana_headless", 150_000,
             ("-version",), ("/opt/tools/katana",),
             hunt_executor="worker_scanner",
+            # Anonymous in a Hunt: the headless browser does not reliably send request headers
+            # on the requests the application itself makes (hunt_scanner_contract).
+            planner_input_schema=_schema({"origin": _SERVICE_ORIGIN_PROPERTY}),
         ),
         CapabilitySpec(
             "web.spec_ingest",
@@ -791,6 +805,12 @@ CAPABILITY_REGISTRY = CapabilityRegistry(
             "ffuf-json/v1", ("content_discovery_observation",), "ffuf", "ffuf", 75_000,
             ("-V",), ("/opt/tools/ffuf",),
             hunt_executor="worker_scanner",
+            planner_input_schema=_http_principal_schema({
+                **HUNT_SCANNER_SESSION_PROPERTIES,
+                "wordlist": {
+                    "type": "string", "enum": ["common", "api", "admin", "corporate"],
+                },
+            }),
         ),
         CapabilitySpec(
             "xss.verify", "Bounded target-bound Dalfox XSS verification.",
@@ -815,7 +835,9 @@ CAPABILITY_REGISTRY = CapabilityRegistry(
             "dalfox", "dalfox", 120_000, ("version",), ("/opt/tools/dalfox",),
             hunt_executor="worker_scanner",
             planner_input_schema=_http_principal_schema({
+                **HUNT_SCANNER_SESSION_PROPERTIES,
                 "path": _SAME_ORIGIN_PATH_PROPERTY,
+                **HUNT_INJECTION_BODY_PROPERTIES,
                 "severity": {
                     "type": "string", "enum": ["low", "medium", "high"],
                 },
@@ -899,7 +921,9 @@ CAPABILITY_REGISTRY = CapabilityRegistry(
             arsenal_status="gated", retest_contract="rerun-request-with-sqli-proof",
             hunt_executor="worker_scanner",
             planner_input_schema=_http_principal_schema({
+                **HUNT_SCANNER_SESSION_PROPERTIES,
                 "path": _SAME_ORIGIN_PATH_PROPERTY,
+                **HUNT_INJECTION_BODY_PROPERTIES,
             }),
         ),
         CapabilitySpec(

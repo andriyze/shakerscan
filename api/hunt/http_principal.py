@@ -11,11 +11,12 @@ from runtime.auth_session_store import AuthSessionStoreError
 
 async def resolve_http_principal(conn: Any, *, context: Any, target: Any, authority: Any,
                                  hunt_id: Any, principal: str, origin: str,
-                                 stack: Any, session_store: Any) -> tuple[dict[str, str], Any]:
-    reference = select_hunt_principal_reference(context, principal, capability="http.request")
+                                 stack: Any, session_store: Any,
+                                 capability: str = "http.request") -> tuple[dict[str, str], Any]:
+    reference = select_hunt_principal_reference(context, principal, capability=capability)
     resolved = await stack.enter_async_context(WorkerCredentialResolver().resolve(
         conn, profile_id=reference["profile_id"], target=target,
-        capability="http.request", authority=authority,
+        capability=capability, authority=authority,
     ))
     if (resolved.profile.current_version != reference["profile_version"]
             or resolved.profile.principal_slot != principal):
@@ -36,7 +37,7 @@ async def resolve_http_principal(conn: Any, *, context: Any, target: Any, author
         try:
             session = await session_store.load_for_worker(conn, session_ref=row["id"],
                 owner_kind="hunt", owner_id=hunt_id, target=target,
-                capability="http.request", selected_origins=(origin,))
+                capability=capability, selected_origins=(origin,))
         except AuthSessionStoreError:
             continue
         return session.headers(), session

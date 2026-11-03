@@ -104,7 +104,7 @@ def test_materialized_xss_has_execution_evidence_not_an_invented_impact_score():
     class DB:
         async def fetchrow(self, query, *args): return None
         async def fetchval(self, query, *args):
-            self.query, self.evidence = query, json.loads(args[4])
+            self.query, self.evidence, self.severity = query, json.loads(args[4]), args[9]
             return uuid.uuid4()
         async def execute(self, *args): pass
 
@@ -117,7 +117,9 @@ def test_materialized_xss_has_execution_evidence_not_an_invented_impact_score():
         }],
     ))
     assert len(ids) == 1
-    assert "'high',NULL" in db.query
+    # Severity high, and no CVSS score: the column after severity is a literal NULL.
+    assert db.severity == "high"
+    assert "$10,NULL" in db.query
     assert "8.1" not in db.query
     assert db.evidence["cvss"]["status"] == "not_assessed"
     assert db.evidence["execution_sink"]["parameter"] == "q"
