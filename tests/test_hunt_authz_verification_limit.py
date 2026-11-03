@@ -146,7 +146,7 @@ class AdmissionStore:
 class Lifecycle:
     def __init__(self, name):
         executor = ("inline" if name == "candidate.verify" else
-                    "worker_scanner" if name == "xss.verify" else "worker_http")
+                    "worker_scanner" if name in {"xss.verify", "web.browser_crawl"} else "worker_http")
         self.placement = executor
         self.specification = SimpleNamespace(hunt_executor=executor, requires_active_approval=True,
             risk_tier="active", output_schema="fixture", budget_cost={"http_requests": 4, "tool_wall_seconds": 60})
@@ -228,7 +228,7 @@ def admission(store, **overrides):
         "Any", "parked_outcome", "close_parked_action", "permission_required",
         "ARTIFACT_READ_CAPABILITIES", "artifact_origin_required", "service_origin_changed",
         "sqli_injection_point_refusal", "web_hunt_target", "urllib", "require_long_action_slot",
-        "artifact_read_identity",
+        "artifact_read_identity", "scanner_admission",
     ):
         context.setdefault(helper, getattr(real_router, helper))
     context.setdefault("settle_refusal", settle_refusal)
@@ -342,24 +342,34 @@ def test_serialized_concurrent_admissions_cannot_both_spend_the_last_slot():
 
 
 def test_scanner_capability_rejects_a_principal_it_cannot_apply():
-    """Hunt scanner tools run without the managed principal. Accepting as_principal and
-    running anonymously recorded an unauthenticated attempt as if it used that identity."""
+    """A Hunt scanner that cannot carry the managed principal refuses it rather than run
+    anonymously and record an unauthenticated attempt as if it used that identity. One that can
+    carry it needs the credential selected at start, like http.request."""
     from agent_tools import normalize_principal_slot
 
-    store = AdmissionStore()
     overrides = {
         "agent_tools": SimpleNamespace(
             normalize_principal_slot=normalize_principal_slot, IDENTITY_HEADERS=set(),
             canonical_hunt_scanner_budget=lambda _name: {"http_requests": 4, "tool_wall_seconds": 60},
         ),
-        "_hunt_public": lambda *args, **kwargs: {"capabilities": [{"name": "xss.verify"}]},
+        "_hunt_public": lambda *args, **kwargs: {"capabilities": [
+            {"name": "web.browser_crawl"}, {"name": "xss.verify"}]},
     }
-    with pytest.raises(HTTPException, match="cannot apply as_principal") as error:
+    store = AdmissionStore()
+    with pytest.raises(HTTPException, match="cannot carry a signed-in session") as error:
+        asyncio.run(call(
+            store, name="web.browser_crawl", values={"as_principal": "primary"}, **overrides,
+        ))
+    assert error.value.status_code == 422
+    assert error.value.detail["reason_code"] == "principal_anonymous_only"
+    assert not store.actions
+    store = AdmissionStore()
+    with pytest.raises(HTTPException) as error:
         asyncio.run(call(
             store, name="xss.verify",
             values={"path": "/search?q=1", "as_principal": "primary"}, **overrides,
         ))
-    assert error.value.status_code == 422
+    assert error.value.detail["reason_code"] == "credential_missing_for_slot"
     assert not store.actions
 
 

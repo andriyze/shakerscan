@@ -1176,6 +1176,7 @@ export const HUNT_START_CONTRACT = {
       "description": "Target-bound Nuclei template scan; non-GET templates run only when state-changing HTTP is authorized.",
       "input": {
         "fields": [
+          "session_ref",
           "path",
           "severity",
           "tags",
@@ -1208,6 +1209,7 @@ export const HUNT_START_CONTRACT = {
       "description": "Bounded same-host crawl and JavaScript endpoint discovery.",
       "input": {
         "fields": [
+          "session_ref",
           "origin",
           "as_principal",
           "principal_binding_digest"
@@ -1237,9 +1239,7 @@ export const HUNT_START_CONTRACT = {
       "description": "Bounded same-host headless browse that observes the application's own runtime requests.",
       "input": {
         "fields": [
-          "origin",
-          "as_principal",
-          "principal_binding_digest"
+          "origin"
         ],
         "required": []
       },
@@ -1266,6 +1266,7 @@ export const HUNT_START_CONTRACT = {
       "description": "Bounded content discovery using a bundled wordlist.",
       "input": {
         "fields": [
+          "session_ref",
           "wordlist",
           "origin",
           "as_principal",
@@ -1296,7 +1297,12 @@ export const HUNT_START_CONTRACT = {
       "description": "Bounded target-bound Dalfox XSS verification.",
       "input": {
         "fields": [
+          "session_ref",
           "path",
+          "method",
+          "content_type",
+          "body_field_names",
+          "injection_field",
           "severity",
           "deep_domxss",
           "origin",
@@ -1330,7 +1336,12 @@ export const HUNT_START_CONTRACT = {
       "description": "Bounded target-bound SQL injection verification.",
       "input": {
         "fields": [
+          "session_ref",
           "path",
+          "method",
+          "content_type",
+          "body_field_names",
+          "injection_field",
           "origin",
           "as_principal",
           "principal_binding_digest"
