@@ -453,6 +453,23 @@ _HTTP_PRINCIPAL_BINDING_PROPERTIES: Mapping[str, Any] = MappingProxyType({
 })
 
 
+# A read sent with a value this Hunt captured from a response (a login's session cookie) in one
+# request header: the capture's reference, never its value.
+_ARTIFACT_REQUEST_BINDINGS: Mapping[str, Any] = {
+    "type": "array", "maxItems": 4, "items": {
+        "type": "object", "additionalProperties": False,
+        "required": ["source_action_id", "capture_name", "header"],
+        "properties": {
+            "source_action_id": {"type": "string", "maxLength": 36,
+                "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"},
+            "capture_name": {"type": "string", "pattern": r"^[A-Za-z][A-Za-z0-9_.-]{0,63}$"},
+            "header": {"type": "string", "pattern": r"^[!#$%&'*+.^_`|~0-9A-Za-z-]{1,120}$"},
+            "prefix": {"type": "string", "maxLength": 32},
+        },
+    },
+}
+
+
 # The request-body shape an injection capability may be pointed at. Declared here rather than
 # passed around the contract: the capability's own schema is what bounds its inputs, and the
 # redacted execution receipt records the field names it was given. Values never appear -- the body
@@ -1407,7 +1424,9 @@ CAPABILITY_REGISTRY = CapabilityRegistry(
         ),
         CapabilitySpec(
             "artifact.inspect",
-            "Read one small redacted byte window from a target-bound public client artifact. "
+            "Read one small redacted byte window from a target-bound artifact or page, anonymously "
+            "or as one identity http.request takes (session_ref, as_principal, or request_bindings "
+            "sending a captured session cookie: a signed-in page past what http.request shows). "
             "Reserves two requests: the second is spent only when tab-separated rows need the "
             "resource's head read to tell a database dump from plain text (once per resource; a "
             "failed read is retried once). Both requests share the 30-second wall-time reservation.",
@@ -1428,10 +1447,17 @@ CAPABILITY_REGISTRY = CapabilityRegistry(
                     "items": {"type": "string", "minLength": 1, "maxLength": 100},
                     "maxItems": 10,
                 },
+                "as_principal": _HTTP_PRINCIPAL_BINDING_PROPERTIES["as_principal"],
+                "session_ref": {
+                    "type": "string",
+                    "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+                },
+                "request_bindings": _ARTIFACT_REQUEST_BINDINGS,
             }, required=("path",)),
             "artifact-observation/v1", ("artifact_observation", "tool_receipt"),
             default_timeout_ms=30_000,
             hunt_executor="worker_http",
+            credential_transport="exact_origin", credential_interruption="cooperative",
         ),
         CapabilitySpec(
             "javascript.analyze",
