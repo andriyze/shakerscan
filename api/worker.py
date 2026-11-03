@@ -19759,6 +19759,7 @@ def _worker_terminal_network_result(
 from hunt.target_binding import web_hunt_target as _worker_hunt_web_target
 from hunt.sqli_target import sqli_injection_point_refusal
 from hunt.scanner_identity import resolve_scanner_identity
+from runtime.hunt_scanner_contract import signed_in_request
 from hunt.scanner_sqli_proof import prove_hunt_sqli_signal
 from hunt.dispatch_authority import HuntDispatchRejected, dispatch_http_request_authority, dispatch_http_target, dispatch_replay_authority, dispatch_scope_binding, require_dispatchable, settle_rejected_dispatch, settle_rejected_replay_dispatch
 from hunt.device_traffic import reserve_device_traffic, require_worker_device_policy, settle_device_traffic, require_device_admission, record_device_traffic
@@ -20199,7 +20200,8 @@ async def process_canonical_scanner_capability_job(
                 def scanner_hold(base: Mapping[str, Any]) -> dict[str, int]:
                     hold = {key: int(value) for key, value in base.items() if key in limits}
                     hold["agent_actions"] = 1
-                    if spec.requires_active_approval or uses_service_origin:
+                    # A signed-in call is approval-gated at admission, so it holds one too.
+                    if spec.requires_active_approval or uses_service_origin or signed_in_request(capability_input):
                         hold["active_actions"] = 1
                     reserve_device_traffic(run, agent_tools.CAPABILITY_REGISTRY.require(capability_name), hold)
                     return hold
