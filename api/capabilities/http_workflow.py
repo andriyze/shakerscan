@@ -72,7 +72,6 @@ async def prepare_http_operation(
     exchange = HttpWorkflowExchange(str(run['id']), str(action_id), target, tuple(inputs.get('capture') or ()))
     injects_headers = bool(trusted_headers) or any('header' in item for item in inputs.get('request_bindings') or ())
     bindings = tuple(inputs.get('request_bindings') or ())
-    withheld_only = bool(bindings) and not inputs.get('capture') and all('withheld_ref' in item or 'secret_ref' in item for item in bindings)
     # A discovered secret goes to exactly one login: no redirect is followed with it, even on the
     # same origin, where it would reach another path (a denied login among them) unchecked.
     carries_secret = any('secret_ref' in item for item in bindings)
@@ -97,8 +96,12 @@ async def prepare_http_operation(
                     )
                 except (ValueError, CredentialResolutionError, CredentialReferenceError) as exc:
                     return {"ok": False, "error": "http_workflow_preflight:" + str(exc)[:240]}
+            # Every value this request sends by reference is known exactly (a withheld value, a
+            # discovered secret, a long session cookie this Hunt's login set): the planner keeps
+            # the response, with each of them withheld wherever the target echoes it.
+            scrubbed = bool(bindings) and not inputs.get('capture') and not exchange.opaque_binding
             collector = active_withheld_values()
-            if collector is not None and withheld_only:
+            if collector is not None and scrubbed:
                 # Every echo of a value sent by reference is withheld before any sample is cut.
                 collector.bind_known(exchange.bound_values)
             if carries_secret:
@@ -114,10 +117,7 @@ async def prepare_http_operation(
                 allow_bound_origin_redirects=not carries_secret, private_response_sink=exchange.capture_response,
                 private_response_headers=exchange.response_headers,
             )
-            if workflow and withheld_only:
-                # Only withheld values (N56) were bound, and the worker knows each one exactly, so
-                # the planner keeps the response it needs to judge access, with every bound value
-                # replaced wherever the target echoes it.
+            if workflow and scrubbed:
                 response = _scrub_bound_values(response, exchange.bound_values)
             elif workflow:
                 # Pairing values may be short PINs, arbitrary field names, or echoed
@@ -129,9 +129,14 @@ async def prepare_http_operation(
                         'truncated', 'http_version',
                     ) if key in summary}
                     response['response']['workflow_values_visible'] = False
+                    # Cookie names and security attributes only, never values: a login's answer.
+                    if summary.get('set_cookie_metadata'):
+                        response['response']['set_cookie_metadata'] = summary['set_cookie_metadata']
                 response.pop('redirect_chain', None)
-            if exchange.capture_error:
-                response.update(ok=False, error=exchange.capture_error)
+            if exchange.missing_names and isinstance(response.get('response'), dict):
+                # The request itself stands (a failed login is a result); the capture it asked for
+                # is reported missing rather than failing the action.
+                response['response']['captures_missing'] = list(exchange.missing_names)
             await _note_secret_outcome(pool, exchange, response)
             return response
         finally:

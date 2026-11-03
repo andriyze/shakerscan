@@ -1274,8 +1274,9 @@ def _bounded_answer(result: Any, *, tool: str) -> Any:
 
 
 # hunt_capability: the engine's answer carries the canonical action_result next to the raw
-# worker result, and the observations twice (action_result.observations is result.observations,
-# or result.typed_output.records). The compact view keeps one copy and points at it.
+# worker result, and the observations more than once (action_result.observations is
+# result.observations, result.typed_output.records or result.receipt.observations). The compact
+# view keeps one copy and points at it.
 CAPABILITY_FIELD_CHARS = 16_000
 
 
@@ -1295,6 +1296,10 @@ def _compact_capability_answer(result: Any, *, idempotency_key: str) -> Any:
         if typed.get("records") == observations:
             typed["records"] = {"mcp_same_as": "action_result.observations"}
             reduced["result.typed_output.records"] = "the same list as action_result.observations"
+        receipt = raw.get("receipt") if isinstance(raw.get("receipt"), dict) else {}
+        if receipt.get("observations") == observations:
+            receipt["observations"] = {"mcp_same_as": "action_result.observations"}
+            reduced["result.receipt.observations"] = "the same list as action_result.observations"
     if _size(compact) > MCP_ANSWER_BYTES:
         _shorten_strings(compact, (), reduced)
     if _size(compact) > MCP_ANSWER_BYTES and isinstance(action.get("observations"), list):

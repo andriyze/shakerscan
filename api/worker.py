@@ -22025,19 +22025,24 @@ async def process_canonical_http_capability_job(job_data: dict[str, Any]) -> Non
             }
         elif capability_name in {"artifact.inspect", "javascript.analyze"}:
             public_input = dict(capability_input)
+            artifact_headers, artifact_bound, principal_slot = {}, [], "anonymous"
+            if capability_name == "artifact.inspect":
+                from hunt.artifact_identity import resolve_artifact_identity
+                artifact_headers, artifact_bound, principal_slot = await resolve_artifact_identity(
+                    pool=db_pool, run=run, hunt_id=hunt_id, context=context, target=target, policy=policy,
+                    hunt_policy=hunt_policy, target_url=target_url, values=capability_input,
+                    stack=credential_stack, session_store=session_store)
 
             async def execute_artifact() -> dict[str, Any]:
-                operation = (
-                    inspect_target_artifact
-                    if capability_name == "artifact.inspect"
-                    else analyze_target_javascript
-                )
-                return await operation(
-                    target_url,
-                    public_input,
-                    target=target,
-                    transaction_recorder=_record_call,
-                )
+                if capability_name == "javascript.analyze":
+                    return await analyze_target_javascript(
+                        target_url, public_input, target=target, transaction_recorder=_record_call)
+                from runtime.archive_body_masking import active_withheld_values
+                if artifact_bound and (collector := active_withheld_values()) is not None:
+                    collector.bind_known(artifact_bound)  # every echo of a bound cookie is withheld
+                return await inspect_target_artifact(
+                    target_url, public_input, target=target, transaction_recorder=_record_call,
+                    trusted_headers=artifact_headers, principal_slot=principal_slot)
 
             operation = execute_artifact
             adapter_type = ArtifactInspectionExecutionAdapter
@@ -22047,6 +22052,10 @@ async def process_canonical_http_capability_job(job_data: dict[str, Any]) -> Non
                 "offset": int(public_input.get("offset") or 0),
                 "max_bytes": int(public_input.get("max_bytes") or 0) or None,
                 "search_term_count": len(public_input.get("search_terms") or []),
+                "as_principal": principal_slot,
+                **({"session_ref": str(public_input["session_ref"])} if public_input.get("session_ref") else {}),
+                **({"request_bindings": public_input["request_bindings"]} if public_input.get("request_bindings") else {}),
+                "credential_headers_injected": bool(artifact_headers),
                 "secret_values_visible": False,
             }
         else:

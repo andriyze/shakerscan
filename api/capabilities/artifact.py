@@ -388,6 +388,7 @@ async def _check_resource_head(
     target_url: str, path: str, target: TargetBinding, offset: int, span: bytes,
     transaction_recorder: Callable[[dict[str, Any]], None] | None,
     *, span_start: int = 0, deadline: float | None = None, version: str | None = None,
+    identity: Mapping[str, Any] | None = None,
 ) -> int:
     """Whether tab-separated rows in a window are a dump's COPY rows, when nothing in view says:
     read the resource's head (``HEAD_PROBE_BYTES``) once per resource per Hunt and remember the
@@ -427,7 +428,7 @@ async def _check_resource_head(
     result, private = await _fetch_artifact(
         target_url, path=path, target=target, offset=0, length=HEAD_READ_BYTES,
         transaction_recorder=_metadata_recorder(transaction_recorder),
-        timeout_seconds=min(INSPECT_WALL_SECONDS, int(remaining)),
+        timeout_seconds=min(INSPECT_WALL_SECONDS, int(remaining)), identity=identity,
     )
     if not result.get("ok") or private is None or private.status_code not in {200, 206}:
         tables[HEAD_VERDICT_KEY] = ["unreadable", str(attempts + 1)]
@@ -660,6 +661,7 @@ async def _fetch_artifact(
     length: int,
     transaction_recorder: Callable[[dict[str, Any]], None] | None,
     timeout_seconds: int = INSPECT_WALL_SECONDS,
+    identity: Mapping[str, Any] | None = None,
 ) -> tuple[dict[str, Any], WorkerPrivateHTTPResponse | None]:
     captured: list[WorkerPrivateHTTPResponse] = []
     end = offset + length - 1
@@ -679,6 +681,7 @@ async def _fetch_artifact(
         private_response_sink=captured.append,
         private_response_headers=("etag", "last-modified"),
         response_body_limit=max(length, MAX_PUBLIC_TEXT),
+        **dict(identity or {}),
     )
     return result, captured[-1] if captured else None
 
@@ -689,7 +692,12 @@ async def inspect_target_artifact(
     *,
     target: TargetBinding,
     transaction_recorder: Callable[[dict[str, Any]], None] | None = None,
+    trusted_headers: Mapping[str, str] | None = None,
+    principal_slot: str = "anonymous",
 ) -> dict[str, Any]:
+    """``trusted_headers``: the identity the read is sent as (resolved by the worker, never the
+    planner's); with them a redirect to another origin is not followed."""
+    identity = {"trusted_headers": dict(trusted_headers), "principal_slot": principal_slot} if trusted_headers else None
     target_url = _read_base(target_url, args)
     path = str(args.get("path") or "")
     offset = max(0, int(args.get("offset") or 0))
@@ -707,6 +715,7 @@ async def inspect_target_artifact(
         target_url, path=path, target=target, offset=context_start,
         length=lead + length + CUT_LOOKAHEAD_CHARS,
         transaction_recorder=_window_recorder(transaction_recorder, lead, length),
+        identity=identity,
     )
     if collector is not None and lead > CONTEXT_BYTES:
         collector.context_bytes_used += lead
@@ -750,7 +759,7 @@ async def inspect_target_artifact(
                           context + received[:length], resource=_validated(version))
     requests = 1 + await _check_resource_head(
         target_url, path, target, offset, context + received[:length], transaction_recorder,
-        span_start=context_start, deadline=deadline, version=version)
+        span_start=context_start, deadline=deadline, version=version, identity=identity)
     body = received[:length]
     resource_bytes = _resource_bytes(private)
     terms = [str(term)[:100] for term in args.get("search_terms") or [] if str(term)][:10]

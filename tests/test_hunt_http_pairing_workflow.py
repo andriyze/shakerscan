@@ -264,7 +264,15 @@ def test_sent_write_with_missing_capture_or_lost_response_is_charged_without_ret
             conn = Connection(f'http://fixture.test:{server.sockets[0].getsockname()[1]}')
             values = {'method': 'PUT', 'path': '/pairing/start', 'capture': [{'name': 'challenge', 'json_pointer': '/challenge'}]}
             result, job = await execute(conn, values, 'failed-capture')
-            assert result['status'] == 'failed', result
+            if mode == 'missing':
+                # The request was answered: the action stands, and the capture it asked for is
+                # reported missing (no reference, nothing sealed) rather than failing it.
+                assert result['status'] == 'success', result
+                assert result['captures'] == []
+                observed = result['typed_output']['records'][0]['response']
+                assert observed['captures_missing'] == ['challenge']
+            else:
+                assert result['status'] == 'failed', result
             assert result['durable_budget_settled'], result
             assert len(wire) == 1 and result['budget_consumed']['state_changing_requests'] == 1
             await worker(conn)(job)
