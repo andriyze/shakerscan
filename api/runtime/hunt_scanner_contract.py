@@ -4,7 +4,9 @@ Two additions to the planner projection of the worker scanners:
 
 - **Identity.** ``web.crawl``, ``web.content_discover``, ``templates.scan``, ``xss.verify`` and
   ``sqli.verify`` take the Hunt's managed principal (``as_principal``) or one of its sessions
-  (``session_ref``) and send it on every request, as a Scan sends its sign-in. ``web.browser_crawl``
+  (``session_ref``), or the session cookie the Hunt's own login captured (``request_bindings``
+  naming an ``http.request`` Set-Cookie capture), and send it on every request, as a Scan sends
+  its sign-in. ``web.browser_crawl``
   does not: the headless browser does not reliably carry request headers on the requests the
   application makes itself, so its Hunt schema offers no identity.
 - **Body input.** ``xss.verify`` and ``sqli.verify`` may test a request body instead of a URL
@@ -32,7 +34,27 @@ HUNT_SCANNER_SESSION_PROPERTIES: Mapping[str, Any] = MappingProxyType({
     "session_ref": {
         "type": "string", "pattern": _SESSION_REF_PATTERN,
         "description": "Run signed in with this session of the Hunt; or name as_principal "
-                       "instead, never both.",
+                       "or request_bindings instead, only one.",
+    },
+    # The session cookie this Hunt's own login captured (an http.request Set-Cookie capture),
+    # sent as the Cookie header of every request: the capture's reference, never its value.
+    "request_bindings": {
+        "type": "array", "minItems": 1, "maxItems": 1,
+        "description": "Run signed in with the session cookie a login of this Hunt captured: "
+                       "[{source_action_id, capture_name, header: \"Cookie\"}] naming an "
+                       "http.request Set-Cookie capture. Needs active testing.",
+        "items": {
+            "type": "object", "additionalProperties": False,
+            "required": ["source_action_id", "capture_name", "header"],
+            "properties": {
+                "source_action_id": {
+                    "type": "string", "maxLength": 36,
+                    "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+                },
+                "capture_name": {"type": "string", "pattern": r"^[A-Za-z][A-Za-z0-9_.-]{0,63}$"},
+                "header": {"type": "string", "enum": ["Cookie"]},
+            },
+        },
     },
 })
 
@@ -71,18 +93,27 @@ def hunt_body_input(value: Mapping[str, Any]) -> bool:
     return any(key in value for key in _BODY_KEYS)
 
 
+def captured_login_request(value: Mapping[str, Any]) -> bool:
+    """Whether the call sends a session cookie this Hunt's login captured."""
+    return bool(value.get("request_bindings"))
+
+
 def signed_in_request(value: Mapping[str, Any]) -> bool:
-    """Whether the call names a managed principal or a session."""
+    """Whether the call names a managed principal, a session or a captured login."""
     slot = str(value.get("as_principal") or "").strip().lower()
-    return bool(value.get("session_ref")) or slot not in {"", "anonymous", "anon", "none"}
+    return (bool(value.get("session_ref")) or captured_login_request(value)
+            or slot not in {"", "anonymous", "anon", "none"})
 
 
 def validate_hunt_scanner_input(name: str, value: Mapping[str, Any]) -> None:
     """The cross-field rules a schema cannot state, for the scanners' planner inputs."""
-    if value.get("session_ref") and str(value.get("as_principal") or "").strip().lower() not in {
-        "", "anonymous", "anon", "none",
-    }:
-        raise HuntScannerInputError(f"{name} takes session_ref or as_principal, not both")
+    named = sum((
+        bool(value.get("session_ref")), captured_login_request(value),
+        str(value.get("as_principal") or "").strip().lower() not in {"", "anonymous", "anon", "none"},
+    ))
+    if named > 1:
+        raise HuntScannerInputError(
+            f"{name} runs as one identity: session_ref, as_principal or request_bindings")
     if not hunt_body_input(value):
         return
     if name not in BODY_INPUT_VERIFIERS:
@@ -106,6 +137,7 @@ def validate_hunt_scanner_input(name: str, value: Mapping[str, Any]) -> None:
 
 __all__ = [
     "BODY_INPUT_VERIFIERS", "HUNT_INJECTION_BODY_PROPERTIES", "HUNT_SCANNER_SESSION_PROPERTIES",
-    "HuntScannerInputError", "SIGNED_IN_SCANNERS", "hunt_body_input", "signed_in_request",
+    "HuntScannerInputError", "SIGNED_IN_SCANNERS", "captured_login_request", "hunt_body_input",
+    "signed_in_request",
     "validate_hunt_scanner_input",
 ]

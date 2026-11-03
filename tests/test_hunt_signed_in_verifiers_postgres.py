@@ -42,7 +42,7 @@ SESSION_COOKIE = "sid=fixture-session"
 CAPABILITIES = ["sqli.verify", "xss.verify", "web.browser_crawl", "web.crawl"]
 
 
-async def _active_hunt(pool, *, state_changing=False, approved=True, signed_in=True):
+async def _active_hunt(pool, *, state_changing=False, approved=True, signed_in=True, active=True):
     from runtime.credential_store import PostgresCredentialProfileStore
     from runtime.credentials import public_credential_configuration
     import secret_store
@@ -68,7 +68,7 @@ async def _active_hunt(pool, *, state_changing=False, approved=True, signed_in=T
         )
         budget = dict(vars(HUNT_BUDGET_PROFILES["balanced"]))
         policy = {
-            "schema_version": "hunt-policy/v2", "target_kind": "web", "active_testing": True,
+            "schema_version": "hunt-policy/v2", "target_kind": "web", "active_testing": active,
             "credential_access": signed_in, "allow_state_changing_http": state_changing,
             "network_discovery": False, "allow_oob_interactions": False,
             "allow_identity_headers": False, "allow_direct_origin": False,
@@ -375,5 +375,98 @@ def test_a_signed_in_crawl_holds_the_approval_unit_admission_charged(stack):
             requested = _decode(await conn.fetchval(
                 "SELECT requested_json FROM budget_reservations WHERE action_id=$1", str(action)))
         assert requested["active_actions"] == 1
+
+    stack.loop.run_until_complete(scenario())
+
+
+HUB_SESSION = "hs-2c9e7a41f0b84d3e9a6c1b5d7e2f8a03"
+
+
+async def _captured_login(pool, hunt, *, cookie=HUB_SESSION):
+    """The Hunt's own login: an http.request that captured the Set-Cookie of a 303 answer.
+
+    Labelled double: the login response (status 303, Location /hub/, one session cookie); the
+    capture is sealed on the action row by the production exchange, as the worker seals it."""
+    from types import SimpleNamespace
+    from hunt.target_binding import web_hunt_target
+    from runtime.hunt_http_exchange import HttpWorkflowExchange
+
+    binding, _url = web_hunt_target(hunt, _decode(hunt["context_pack"]), _decode(hunt["policy_json"]))
+    async with pool.acquire() as conn:
+        action = await conn.fetchval(
+            """INSERT INTO hunt_actions(hunt_run_id, capability_name, status)
+               VALUES($1,'http.request','completed') RETURNING id""", hunt["id"])
+        state = HttpWorkflowExchange(str(hunt["id"]), str(action), binding,
+                                     ({"name": "session", "header": "Set-Cookie"},))
+        state.capture_response(SimpleNamespace(
+            status_code=303, headers=lambda: {"location": "/hub/"}, body=lambda: b"",
+            cookies=lambda: {"hub_session": cookie}))
+        await state.persist(conn, run=hunt, status="success")
+    return [{"source_action_id": str(action), "capture_name": "session", "header": "Cookie"}]
+
+
+def test_a_signed_in_sqli_verify_runs_with_the_hunts_captured_login(stack):
+    stack.records.append({"kind": "sqli_finding", "param": "id", "method": "GET",
+                          "message": "GET parameter 'id' is vulnerable", "proof_state": "candidate"})
+
+    async def scenario():
+        hunt, standing, _profile = await _active_hunt(stack.pool, signed_in=False)
+        stack.state["scope_receipt_id"] = str(standing["scope_receipt_id"])
+        bindings = await _captured_login(stack.pool, hunt)
+        result = await _call(stack, hunt, "sqli.verify", "captured-sqli-0001",
+                             {"path": "/item?id=1", "request_bindings": bindings})
+        assert not isinstance(result, Exception), getattr(result, "detail", result)
+        assert result["action_result"]["status"] == "success", (
+            result["action_result"].get("errors"), result.get("result"))
+        (process,) = stack.processes
+        cookie = f"hub_session={HUB_SESSION}"
+        assert process["trusted_headers"] == {"Cookie": cookie}
+        assert process["argv"][process["argv"].index("--headers") + 1] == f"Cookie: {cookie}"
+        assert len(ErrorOnQuote.sent) == 4
+        assert all(("Cookie", cookie) in request.headers for request in ErrorOnQuote.sent)
+        action = _action_id(hunt, "captured-sqli-0001")
+        async with stack.pool.acquire() as conn:
+            finding = await conn.fetchrow("SELECT * FROM findings WHERE hunt_run_id=$1", hunt["id"])
+            row = await conn.fetchrow("SELECT input_summary, result_summary FROM hunt_actions WHERE id=$1", action)
+            requested = _decode(await conn.fetchval(
+                "SELECT requested_json FROM budget_reservations WHERE action_id=$1", str(action)))
+        evidence = _decode(finding["evidence"])
+        assert evidence["evidence_principals"] == ["captured_session"]
+        assert _decode(row["result_summary"])["as_principal"] == "captured_session"
+        assert requested["active_actions"] == 1
+        # The cookie never reaches what the planner or the record shows.
+        assert HUB_SESSION not in json.dumps([evidence, _decode(row["input_summary"]),
+                                              _decode(row["result_summary"]), result], default=str)
+
+    stack.loop.run_until_complete(scenario())
+
+
+def test_a_captured_login_is_refused_without_approval_active_testing_scope_or_a_long_cookie(stack):
+    async def scenario():
+        unapproved, standing, _profile = await _active_hunt(stack.pool, signed_in=False, approved=False)
+        stack.state["scope_receipt_id"] = str(standing["scope_receipt_id"])
+        bindings = await _captured_login(stack.pool, unapproved)
+        refused = await _call(stack, unapproved, "web.crawl", "captured-crawl-0001", {"request_bindings": bindings})
+        assert refused.detail["reason_code"] == "approval_receipt_required"
+
+        passive, standing, _profile = await _active_hunt(stack.pool, signed_in=False, active=False)
+        bindings = await _captured_login(stack.pool, passive)
+        refused = await _call(stack, passive, "web.crawl", "captured-crawl-0002", {"request_bindings": bindings})
+        assert refused.detail["reason_code"] == "capability_requires_active_testing"
+
+        hunt, standing, _profile = await _active_hunt(stack.pool, signed_in=False)
+        stack.state["scope_receipt_id"] = str(standing["scope_receipt_id"])
+        bindings = await _captured_login(stack.pool, hunt)
+        elsewhere = await _call(stack, hunt, "web.crawl", "captured-crawl-0003", {
+            "request_bindings": bindings, "origin": "https://elsewhere.example.net"})
+        assert elsewhere.detail["reason_code"].startswith("scope_")
+        # Another Hunt's capture is not this Hunt's login: released at dispatch, nothing sent.
+        foreign = await _call(stack, hunt, "web.crawl", "captured-crawl-0004", {
+            "request_bindings": await _captured_login(stack.pool, passive)})
+        assert foreign["action_result"]["status"] == "blocked"
+        short = await _call(stack, hunt, "web.crawl", "captured-crawl-0005", {
+            "request_bindings": await _captured_login(stack.pool, hunt, cookie="abc")})
+        assert short["action_result"]["status"] == "blocked"
+        assert stack.processes == []
 
     stack.loop.run_until_complete(scenario())

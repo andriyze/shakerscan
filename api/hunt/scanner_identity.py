@@ -26,12 +26,14 @@ from .permission_reasons import HuntRefusal
 
 try:
     from runtime.hunt_scanner_contract import (
-        BODY_INPUT_VERIFIERS, SIGNED_IN_SCANNERS, hunt_body_input, signed_in_request,
+        BODY_INPUT_VERIFIERS, SIGNED_IN_SCANNERS, captured_login_request, hunt_body_input,
+        signed_in_request,
     )
     from runtime.credential_refs import normalize_hunt_principal_slot
 except ModuleNotFoundError:
     from ..runtime.hunt_scanner_contract import (
-        BODY_INPUT_VERIFIERS, SIGNED_IN_SCANNERS, hunt_body_input, signed_in_request,
+        BODY_INPUT_VERIFIERS, SIGNED_IN_SCANNERS, captured_login_request, hunt_body_input,
+        signed_in_request,
     )
     from ..runtime.credential_refs import normalize_hunt_principal_slot
 
@@ -82,15 +84,32 @@ def body_authority_refusal(name: str, values: Mapping[str, Any], policy: Mapping
     )
 
 
-def scanner_admission(name: str, values: Mapping[str, Any], policy: Mapping[str, Any]) -> str:
-    """Refuse what admission must refuse for a scanner call; return its principal slot."""
+# The evidence principal of a call that sent a session cookie the Hunt's own login captured.
+CAPTURED_SESSION = "captured_session"
+
+
+def scanner_admission(
+    name: str, values: Mapping[str, Any], policy: Mapping[str, Any],
+) -> tuple[str, bool]:
+    """Refuse what admission must refuse for a scanner call; return ``(principal slot, sends a
+    captured login)``. A captured login is a workflow binding: like ``http.request`` and
+    ``artifact.inspect`` it needs active testing, the approval receipt, and is metered as an
+    active action."""
     refusal = scanner_identity_refusal(name, values)
     if refusal is not None:
         raise HuntRefusal("principal_anonymous_only", refusal)
     coded = body_authority_refusal(name, values, policy)
     if coded is not None:
         raise coded
-    return scanner_principal_slot(values)
+    captured = captured_login_request(values)
+    if captured and policy.get("active_testing") is not True:
+        raise HuntRefusal(
+            "capability_requires_active_testing",
+            f"{name} with a captured login (request_bindings) needs this Hunt's active testing "
+            "permission. A person can allow it for this Hunt (a permission request is raised).",
+            subject={"capability": name, "flag": "active-testing"},
+        )
+    return scanner_principal_slot(values), captured
 
 
 @dataclass(frozen=True)
@@ -154,6 +173,11 @@ async def resolve_scanner_identity(
     from .http_principal import resolve_http_principal
 
     origin = _service_origin(execution_target)
+    if captured_login_request(values):
+        return await _captured_login_identity(
+            conn, run_id=str(hunt_id), target=target, policy=policy,
+            capability_name=capability_name, binding=values["request_bindings"][0],
+        )
     try:
         authority = await validate_worker_credential_authority(
             conn, owner_kind="hunt", owner_id=str(hunt_id), target=target,
@@ -193,7 +217,44 @@ async def resolve_scanner_identity(
         ) from exc
 
 
+async def _captured_login_identity(
+    conn: Any, *, run_id: str, target: Any, policy: Mapping[str, Any], capability_name: str,
+    binding: Mapping[str, Any],
+) -> ScannerIdentity:
+    """The ``Cookie`` header a login of this Hunt captured, under the rules ``artifact.inspect``
+    applies to it: only a Set-Cookie capture of this Hunt and target, unexpired, whose every
+    value is long enough to be withheld exactly wherever the target echoes it."""
+    from .dispatch_authority import HuntDispatchRejected
+    try:
+        from runtime.hunt_http_exchange import MIN_SCRUBBED_COOKIE_CHARS, captured_binding, cookie_values
+    except ModuleNotFoundError:
+        from ..runtime.hunt_http_exchange import MIN_SCRUBBED_COOKIE_CHARS, captured_binding, cookie_values
+
+    def rejected(reason: str) -> HuntDispatchRejected:
+        return HuntDispatchRejected(
+            f"Hunt action authority rejected at dispatch: {capability_name} cannot run with the "
+            f"captured login: {reason}")
+
+    if policy.get("active_testing") is not True:
+        raise rejected("the Hunt no longer has active testing")
+    if str(binding.get("header") or "") != "Cookie":
+        raise rejected("a captured login is sent only as the Cookie header")
+    try:
+        value, is_cookie = await captured_binding(conn, run_id=run_id, target=target, binding=binding)
+    except ValueError as exc:  # expired, another Hunt's or target's, or never captured
+        raise rejected(str(exc)) from None
+    text = str(value)
+    secrets = cookie_values(text) if is_cookie else []
+    if not secrets or any(len(item) < MIN_SCRUBBED_COOKIE_CHARS for item in secrets):
+        raise rejected(
+            "only a Set-Cookie capture whose values have at least "
+            f"{MIN_SCRUBBED_COOKIE_CHARS} characters is sent")
+    if any(ord(char) < 32 or ord(char) == 127 for char in text):
+        raise rejected("the captured value is not a valid header value")
+    return ScannerIdentity(headers={"Cookie": text}, principal_slot=CAPTURED_SESSION, session_ref=None)
+
+
 __all__ = [
-    "ANONYMOUS", "ScannerIdentity", "body_authority_refusal", "resolve_scanner_identity",
+    "ANONYMOUS", "CAPTURED_SESSION", "ScannerIdentity", "body_authority_refusal", "resolve_scanner_identity",
     "scanner_admission", "scanner_identity_refusal", "scanner_principal_slot",
 ]
