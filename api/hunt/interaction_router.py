@@ -42,7 +42,9 @@ except ModuleNotFoundError:
     from ..runtime.hunt_http_contract import require_http_request_authority, redact_http_request_body
 from .worker_accounting import worker_replay_settlement_matches
 from .boundary_context import BoundaryContextError, inspect_candidate_boundary_context
-from .candidate_evidence import CandidateEvidenceError, resolve_candidate_evidence
+from .candidate_evidence import (
+    CandidateEvidenceError, evidence_principals, record_evidence_principals, resolve_candidate_evidence,
+)
 from .candidate_verification_preflight import (
     STATE_CHANGING_VERIFY_FAMILIES,
     CandidateVerificationRefused,
@@ -89,6 +91,7 @@ from .verification_credentials import HuntCredentialScope, hunt_credential_scope
 from .device_policy import DeviceHuntPolicyState
 from .device_traffic import reserve_device_traffic, require_device_admission, settle_device_traffic
 from .sqli_target import sqli_injection_point_refusal
+from .scanner_identity import scanner_admission
 from .agent_job_concurrency import require_long_action_slot
 from .service_binding import (
     ARTIFACT_READ_CAPABILITIES, artifact_origin_required, collection_uses_service_origin,
@@ -1346,6 +1349,9 @@ async def create_hunt_candidate(hunt_id: str, request: HuntCandidateRequest):
                 )
             except investigation_candidates.CandidateLifecycleError as exc:
                 raise _candidate_sighting_http_error(exc) from exc
+            # A retest cannot run as a Hunt principal: record the identity the evidence used.
+            await record_evidence_principals(conn, result["id"], await evidence_principals(
+                conn, run=dict(run), references=request.evidence_refs))
             used["candidates"] = int(used.get("candidates") or 0) + 1
             await conn.execute("UPDATE hunt_runs SET budget_used_json=$2, updated_at=NOW() WHERE id=$1", run["id"], json.dumps(used))
     return {"hunt_id": hunt_id, "candidate": result, "authoritative": False, "verified": False}
@@ -1417,6 +1423,8 @@ async def update_hunt_candidate(
                     changes=request.model_dump(exclude_unset=True),
                     created_by=f"hunt_v2:{hunt_uuid}",
                 )
+                await record_evidence_principals(conn, candidate_uuid, await evidence_principals(
+                    conn, run=dict(run), references=request.evidence_refs))
     except investigation_candidates.CandidateLifecycleError as exc:
         raise _candidate_lifecycle_http_error(exc) from exc
     return {"hunt_id": str(hunt_uuid), "candidate": result}
@@ -1959,18 +1967,12 @@ async def _execute_hunt_capability_lifecycle(
                         }
                         else "anonymous"
                     )
-                    if is_scanner and agent_tools.normalize_principal_slot(
-                        request.input.get("as_principal"),
-                    ) != "anonymous":
-                        # Scanner tools run without the Hunt's managed principal. Accepting the slot
-                        # and running anonymously would record an unauthenticated attempt as if it
-                        # had exercised that identity.
-                        raise HuntRefusal(
-                            "principal_anonymous_only",
-                            f"{name} runs anonymously in a Hunt and cannot apply as_principal; "
-                            "omit it, or use http.request with as_principal for an "
-                            "authenticated request",
-                        )
+                    if is_scanner:
+                        # A scanner that can carry an identity runs as the named principal or
+                        # session, under the approval rules http.request follows; one that cannot
+                        # refuses it rather than run anonymously in its place. A body test needs
+                        # the state-changing permission (hunt/scanner_identity.py).
+                        principal_slot = scanner_admission(name, request.input, policy)
                     if name == "auth.session.establish":
                         try:
                             select_hunt_session_principal_reference(
@@ -2018,7 +2020,8 @@ async def _execute_hunt_capability_lifecycle(
                         validated_device_input = dict(request.input)
                     uses_session = bool(
                         (
-                            name in {"http.request", "browser.navigate", "browser.interact", "browser.workflow"}
+                            (name in {"http.request", "browser.navigate", "browser.interact", "browser.workflow"}
+                             or is_scanner)
                             and request.input.get("session_ref")
                         )
                         or (

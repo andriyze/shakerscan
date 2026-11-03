@@ -184,6 +184,82 @@ def _xss_finding_records(
     return records
 
 
+def _sqli_finding_records(
+    hunt_id: uuid.UUID, action_id: uuid.UUID, target_url: str,
+    capability_name: str, receipt_id: uuid.UUID, observations: Any,
+    *, allowed_origins: tuple[str, ...] = (),
+) -> list[dict[str, Any]]:
+    """Verified findings from the Scan's deterministic SQLi proof, under the Scan's standard.
+
+    sqlmap's own "is vulnerable" line stays a candidate (``scan/finalizer.py``); only a
+    ``sqli_proof`` that holds its contract over two repetitions becomes a finding.
+    """
+    try:
+        admitted = {_origin(urllib.parse.urlsplit(value)) for value in (target_url, *allowed_origins)}
+    except ValueError:
+        return []
+    records: list[dict[str, Any]] = []
+    for raw in observations if isinstance(observations, (list, tuple)) else ():
+        if not (
+            isinstance(raw, Mapping) and raw.get("kind") == "sqli_proof"
+            and raw.get("proof_state") == "verified" and raw.get("finding_verdict") == "verified"
+            and str(raw.get("proof_contract") or "").startswith("sqli_")
+            and int(raw.get("repetitions") or 0) >= 2 and raw.get("field_path")
+        ):
+            continue
+        try:
+            origin = urllib.parse.urlsplit(str(raw.get("origin") or ""))
+            if _origin(origin) not in admitted:
+                continue
+        except ValueError:
+            continue
+        path = str(raw.get("canonical_path") or "/")
+        method = str(raw.get("method") or "GET").upper()
+        field = str(raw["field_path"])[:200]
+        url = urllib.parse.urlunsplit((origin.scheme, origin.netloc, path, "", ""))
+        identity = templated_finding_identity({
+            "cwe": "CWE-89", "tool": "shakerscan_sqli_proof", "url": url,
+            "evidence": {"method": method, "param": field},
+        })
+        if not identity:
+            continue
+        auth_bypass = raw.get("proof_contract") == "sqli_authentication_bypass/v1"
+        proof_contract = str(raw["proof_contract"])
+        evidence = {
+            "schema_version": "hunt-deterministic-finding/v1",
+            "authoritative": True, "proof_state": "verified", "finding_verdict": "verified",
+            "canonical_capability": capability_name, "proof_contract": proof_contract,
+            "hunt_id": str(hunt_id), "source_action_id": str(action_id),
+            "tool_receipt_id": str(receipt_id), "origin": _origin_text(origin),
+            "url": url, "path": path, "method": method, "param": field, "field_path": field,
+            **{key: raw.get(key) for key in (
+                "request_class", "technique", "repetitions", "response_pairs",
+                "database_error_signatures", "redacted_excerpt", "payload_shape", "timing_ms",
+                "session_state_discarded",
+            ) if raw.get(key) is not None},
+            "proof_producer": "shakerscan", "evidence_type": "deterministic_differential",
+        }
+        records.append({
+            "fingerprint": "t:" + hashlib.sha256(identity.encode()).hexdigest()[:16],
+            "url": url, "evidence": evidence,
+            "title": ("Verified SQL injection authentication bypass" if auth_bypass
+                      else "Verified SQL injection"),
+            "description": (
+                "A repeated payload/control differential on the bound target proved that the "
+                f"{field} input reaches a SQL query."
+            ),
+            "tool": "shakerscan_sqli_proof", "cwe": "CWE-89", "finding_type": "sqli",
+            "verdict_reason": "Repeated deterministic SQL injection differential satisfied",
+            "contract_id": proof_contract.split("/", 1)[0],
+            "severity": "critical",
+        })
+    return records
+
+
+def _origin_text(parts: urllib.parse.SplitResult) -> str:
+    return f"{parts.scheme.lower()}://{parts.netloc.rpartition('@')[2].lower()}"
+
+
 async def materialize_verified_hunt_findings(
     conn: Any,
     hunt_id: uuid.UUID,
@@ -195,7 +271,7 @@ async def materialize_verified_hunt_findings(
     capability_input: Mapping[str, Any],
     observations: Any,
     *, target_kind: str = "web", capability_receipt: Any = None,
-    allowed_origins: tuple[str, ...] = (),
+    allowed_origins: tuple[str, ...] = (), evidence_principals: tuple[str, ...] = (),
 ) -> list[str]:
     """Persist receipt-backed verifier outputs through one finding/verification path.
 
@@ -206,6 +282,9 @@ async def materialize_verified_hunt_findings(
         records = _xss_finding_records(hunt_id, action_id, target_url, capability_name,
                                       receipt_id, capability_input, observations,
                                       allowed_origins=allowed_origins)
+    elif capability_name == "sqli.verify":
+        records = _sqli_finding_records(hunt_id, action_id, target_url, capability_name,
+                                        receipt_id, observations, allowed_origins=allowed_origins)
     elif capability_name == "authz.verify":
         from .authz_findings import authz_finding_records
         records = authz_finding_records(capability_receipt, hunt_id=hunt_id,
@@ -217,8 +296,12 @@ async def materialize_verified_hunt_findings(
     target_column = "device_target_id" if target_kind == "device" else "target_id"
     target_table = "device_targets" if target_kind == "device" else "targets"
     findings: list[str] = []
+    principals = sorted({str(slot) for slot in evidence_principals} - {"", "anonymous"})
     for record in records:
         evidence = record["evidence"]
+        if principals:
+            # The identity the proof ran as: a retest cannot send it, so it must not judge it.
+            evidence["evidence_principals"] = principals
         try:
             from scan.finding_reconciliation import reconcile_legacy_finding_row
         except ModuleNotFoundError:
@@ -236,7 +319,7 @@ async def materialize_verified_hunt_findings(
                ) VALUES (
                    $1,$2,$3,$8,
                    $6,
-                   'high',NULL,$7,$9,$4,$5::jsonb,'deep_hunt','active',
+                   $10,NULL,$7,$9,$4,$5::jsonb,'deep_hunt','active',
                    'still_vulnerable','exploited',1.0,NOW(),1
                ) ON CONFLICT ({target_column}, fingerprint) WHERE {target_column} IS NOT NULL
                DO UPDATE SET
@@ -264,6 +347,7 @@ async def materialize_verified_hunt_findings(
             record["tool"],
             record["title"],
             record["cwe"],
+            record.get("severity") or "high",
         )
         await record_hunt_verification(
             conn, finding_id=finding_id, hunt_id=hunt_id, action_id=action_id,

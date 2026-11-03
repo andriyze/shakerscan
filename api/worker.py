@@ -19758,6 +19758,8 @@ def _worker_terminal_network_result(
 
 from hunt.target_binding import web_hunt_target as _worker_hunt_web_target
 from hunt.sqli_target import sqli_injection_point_refusal
+from hunt.scanner_identity import resolve_scanner_identity
+from hunt.scanner_sqli_proof import prove_hunt_sqli_signal
 from hunt.dispatch_authority import HuntDispatchRejected, dispatch_http_request_authority, dispatch_http_target, dispatch_replay_authority, dispatch_scope_binding, require_dispatchable, settle_rejected_dispatch, settle_rejected_replay_dispatch
 from hunt.device_traffic import reserve_device_traffic, require_worker_device_policy, settle_device_traffic, require_device_admission, record_device_traffic
 from hunt.distinct_accounting import bound_distinct_usage, record_attempted_usage
@@ -20183,6 +20185,14 @@ async def process_canonical_scanner_capability_job(
                     policy=policy,
                     capability_name=capability_name,
                 )
+                # The principal or session the call names, resolved under the Hunt's current
+                # authority before anything is reserved as running (hunt/scanner_identity.py).
+                scanner_identity = await resolve_scanner_identity(
+                    conn, context=context, target=target, policy=hunt_policy,
+                    approval_receipt_id=policy.approval_receipt_id, hunt_id=hunt_id,
+                    capability_name=capability_name, values=capability_input,
+                    execution_target=execution_target, session_store=PostgresAuthSessionStore(),
+                )
                 limits = _worker_hunt_ledger_limits(
                     _worker_json_object(run["budget_json"])
                 )
@@ -20306,6 +20316,8 @@ async def process_canonical_scanner_capability_job(
             action_id=str(action_id),
             deep_domxss=scanner_options.get("deep_domxss") is True,
         )
+        if browser_proof_adapter is not None and scanner_identity.signed_in:
+            raise agent_tools.AgentToolError("the pinned browser XSS proof runs without a session")
         scanner_adapter = ScannerExecutionAdapter(
             specification=spec,
             process_payload={
@@ -20314,6 +20326,7 @@ async def process_canonical_scanner_capability_job(
                 "execution_target": execution_target,
                 "registered_target": registered_target,
                 "scanner_options": scanner_options,
+                "trusted_headers": dict(scanner_identity.headers),
                 "timeout_ms": agent_tools.hunt_scanner_timeout_ms(spec.default_timeout_ms, persisted.record.requested),
                 "pinned_address": pinned_address,
                 "authorized_addresses": authorized_addresses,
@@ -20322,9 +20335,12 @@ async def process_canonical_scanner_capability_job(
             },
             process_runner=_execute_agent_scanner_process,
             requested_budget=persisted.record.requested,
+            mutations_in_request_hold=True,
             redacted_execution={
                 **receipt_input,
                 "path": safe_path,
+                "as_principal": scanner_identity.principal_slot,
+                **({"session_ref": scanner_identity.session_ref} if scanner_identity.session_ref else {}),
             },
         )
         # A hash-route DOM XSS lives in the URL fragment the server never receives, so
@@ -20374,6 +20390,18 @@ async def process_canonical_scanner_capability_job(
             else "failed"
         )
         actual = dict(execution.actual_budget)
+        if capability_name == "sqli.verify" and status in {"success", "partial"}:
+            # A sqlmap signal becomes a finding only through the Scan's repeated proof.
+            proofs, proof_used = await prove_hunt_sqli_signal(
+                pool=db_pool, results_dir=RESULTS_DIR, run=run, action_id=action_id, target=target,
+                execution_target=execution_target, values=scanner_options, observations=observations,
+                reserved=persisted.record.requested, actual=actual, headers=scanner_identity.headers,
+                principal_slot=scanner_identity.principal_slot, heartbeat=heartbeat_reservation,
+                cancelled=lambda: bool(redis_client.exists(cancel_key)),
+            )
+            observations.extend(proofs)
+            for dimension, amount in proof_used.items():
+                actual[dimension] = int(actual.get(dimension) or 0) + amount
 
         started_at = str(
             process_result.get("started_at")
@@ -20482,6 +20510,7 @@ async def process_canonical_scanner_capability_job(
                     registered_target, capability_name, receipt_id,
                     capability_input, observations, target_kind=target.target_kind,
                     allowed_origins=target.allowed_origins,
+                    evidence_principals=scanner_identity.evidence_principals(),
                 )
                 from hunt.endpoint_knowledge import record_discovered_endpoints
                 await record_discovered_endpoints(conn, target=target, origin=execution_target,
@@ -20508,6 +20537,7 @@ async def process_canonical_scanner_capability_job(
                     "error": error,
                     "record_count": len(observations),
                     "parser_errors": parser_errors, "verified_finding_ids": verified_finding_ids,
+                    "as_principal": scanner_identity.principal_slot,
                     "budget_consumed": dict(terminal.actual),
                     "budget_accounting": worker_hunt_budget_accounting(
                         latest.record.requested,

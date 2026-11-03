@@ -47,10 +47,10 @@ def source_scan_was_authenticated(verification: Mapping[str, Any]) -> bool:
 
 
 def candidate_evidence_was_signed_in(verification: Mapping[str, Any]) -> bool:
-    """True when the retest is of an investigation candidate whose own evidence was gathered as
-    a Hunt principal other than ``anonymous``: with no finding linked, the retest row's
-    ``evidence`` is the candidate's ``verification_context``."""
-    if verification.get("finding_id") or not verification.get("candidate_id"):
+    """True when the retest's evidence was gathered as a Hunt principal other than
+    ``anonymous``: an investigation candidate's ``verification_context`` (no finding linked), or
+    a finding a signed-in Hunt verifier proved (its ``evidence``)."""
+    if not (verification.get("finding_id") or verification.get("candidate_id")):
         return False
     return bool(candidate_evidence_principals(verification.get("evidence")))
 
