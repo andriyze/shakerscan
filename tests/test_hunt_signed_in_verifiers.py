@@ -313,3 +313,22 @@ def test_a_hunt_body_verifier_is_not_charged_to_the_state_changing_ceiling():
     with pytest.raises(ValueError, match="state-changing reservation"):
         ScannerExecutionAdapter(**arguments)
     ScannerExecutionAdapter(**arguments, mutations_in_request_hold=True)
+
+
+def test_the_worker_releases_a_call_whose_body_permission_or_session_route_went_away():
+    from api.hunt.dispatch_authority import HuntDispatchRejected
+    from api.hunt.scanner_identity import ANONYMOUS, resolve_scanner_identity
+
+    def resolve(values, policy):
+        return asyncio.run(resolve_scanner_identity(
+            object(), context={}, target=_target(), policy=policy, approval_receipt_id=None,
+            hunt_id=uuid.uuid4(), capability_name="xss.verify" if "deep_domxss" in values else "sqli.verify",
+            values=values, execution_target=f"{ORIGIN}/login", session_store=None,
+        ))
+
+    # Revoked after admission: nothing is resolved or sent, and the hold is released.
+    with pytest.raises(HuntDispatchRejected, match="state-changing permission"):
+        resolve(LOGIN_BODY, ACTIVE)
+    with pytest.raises(HuntDispatchRejected, match="pinned browser"):
+        resolve({"path": "/s?q=1", "deep_domxss": True, "as_principal": "primary"}, ACTIVE)
+    assert resolve(LOGIN_BODY, STATE_CHANGING) is ANONYMOUS
