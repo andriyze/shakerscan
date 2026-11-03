@@ -39,7 +39,7 @@ pytestmark = pytest.mark.skipif(not DSN, reason="disposable PostgreSQL DSN not c
 TARGET_ADDRESS = "203.0.113.10"
 TOKEN = "Bearer fixture-principal-token"
 SESSION_COOKIE = "sid=fixture-session"
-CAPABILITIES = ["sqli.verify", "xss.verify", "web.browser_crawl"]
+CAPABILITIES = ["sqli.verify", "xss.verify", "web.browser_crawl", "web.crawl"]
 
 
 async def _active_hunt(pool, *, state_changing=False, approved=True, signed_in=True):
@@ -152,10 +152,11 @@ def stack(monkeypatch):
         )
         processes.append({**{k: v for k, v in payload.items() if k != "_cancelled"},
                           "argv": list(plan.argv)})
+        sent = min(432, int(plan.hard_budget_dict.get("http_requests") or 0))
         return {
             "status": "success", "error": None, "partial": False, "timed_out": False,
             "elapsed_seconds": 200, "process_enforcement": plan.enforcement_receipt(),
-            "settlement": {"mode": "exact", "actual": 432, "observed_minimum": 432, "source": "wire_log"},
+            "settlement": {"mode": "exact", "actual": sent, "observed_minimum": sent, "source": "wire_log"},
             "typed_output": {"parser_status": "parsed", "records": list(records),
                              "record_count": len(records)},
         }
@@ -353,5 +354,26 @@ def test_scope_approval_and_uncarriable_sessions_are_still_refused(stack):
         assert isinstance(refused, Exception)
         assert refused.detail["reason_code"] == "approval_receipt_required"
         assert stack.processes == []
+
+    stack.loop.run_until_complete(scenario())
+
+
+def test_a_signed_in_crawl_holds_the_approval_unit_admission_charged(stack):
+    """A read-only scanner is approval-gated once it runs signed in: admission charges one
+    active action, and the worker re-derives the same hold, so the action digest matches."""
+    async def scenario():
+        hunt, standing, _profile = await _active_hunt(stack.pool)
+        stack.state["scope_receipt_id"] = str(standing["scope_receipt_id"])
+        result = await _call(stack, hunt, "web.crawl", "signed-crawl-0001", {"as_principal": "primary"})
+        assert not isinstance(result, Exception), getattr(result, "detail", result)
+        assert result["action_result"]["status"] == "success", (
+            result["action_result"].get("errors"), result.get("result"))
+        (process,) = stack.processes
+        assert process["trusted_headers"] == {"Authorization": TOKEN}
+        action = _action_id(hunt, "signed-crawl-0001")
+        async with stack.pool.acquire() as conn:
+            requested = _decode(await conn.fetchval(
+                "SELECT requested_json FROM budget_reservations WHERE action_id=$1", str(action)))
+        assert requested["active_actions"] == 1
 
     stack.loop.run_until_complete(scenario())
