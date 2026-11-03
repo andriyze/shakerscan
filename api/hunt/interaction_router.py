@@ -1972,7 +1972,8 @@ async def _execute_hunt_capability_lifecycle(
                         # session, under the approval rules http.request follows; one that cannot
                         # refuses it rather than run anonymously in its place. A body test needs
                         # the state-changing permission (hunt/scanner_identity.py).
-                        principal_slot = scanner_admission(name, request.input, policy)
+                        principal_slot, captured_login = scanner_admission(name, request.input, policy)
+                        workflow_http = workflow_http or captured_login
                     if name == "auth.session.establish":
                         try:
                             select_hunt_session_principal_reference(

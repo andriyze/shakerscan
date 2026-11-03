@@ -17,6 +17,10 @@ from api.hunt import scanner_sqli_proof
 from api.hunt.deterministic_findings import _sqli_finding_records, materialize_verified_hunt_findings
 from api.hunt.permission_reasons import HuntRefusal
 from api.hunt.scanner_identity import scanner_admission, scanner_identity_refusal
+
+
+def _validated(name, values):
+    return CAPABILITY_REGISTRY.validate_hunt_input(name, values)
 from api.runtime.capability_registry import CAPABILITY_REGISTRY, CapabilityInputContractError
 from api.runtime.models import TargetBinding
 from api.runtime.request_replay_executor import ReplayTransportResult
@@ -48,7 +52,7 @@ def test_verifiers_accept_a_body_field_as_the_tested_input(name):
     ({**LOGIN_BODY, "method": "GET"}, "not an allowed value"),
     ({**LOGIN_BODY, "body_field_names": ["user.name"]}, "invalid format"),
     ({"path": "/item?id=1", "as_principal": "primary",
-      "session_ref": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"}, "not both"),
+      "session_ref": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"}, "one identity"),
 ])
 def test_a_body_input_must_name_its_field_and_one_identity(values, message):
     with pytest.raises(CapabilityInputContractError, match=message):
@@ -77,10 +81,11 @@ def test_the_signed_in_scanners_advertise_a_session_and_the_browser_crawl_no_ide
 # --- Admission ----------------------------------------------------------------------------------
 
 def test_admission_runs_signed_in_scanners_as_their_principal():
-    assert scanner_admission("sqli.verify", {"path": "/item?id=1", "as_principal": "primary"}, ACTIVE) == "primary"
-    assert scanner_admission("web.crawl", {"as_principal": "secondary"}, ACTIVE) == "secondary"
+    assert scanner_admission("sqli.verify", {"path": "/item?id=1", "as_principal": "primary"}, ACTIVE) == (
+        "primary", False)
+    assert scanner_admission("web.crawl", {"as_principal": "secondary"}, ACTIVE) == ("secondary", False)
     session = {"session_ref": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"}
-    assert scanner_admission("templates.scan", session, ACTIVE) == "anonymous"
+    assert scanner_admission("templates.scan", session, ACTIVE) == ("anonymous", False)
     assert scanner_identity_refusal("xss.verify", {"path": "/search?q=x", **session}) is None
 
 
@@ -102,7 +107,7 @@ def test_a_body_test_needs_the_state_changing_permission_and_raises_a_request():
     assert refused.value.reason_code == "state_changing_http_not_allowed"
     assert refused.value.subject == {"capability": "sqli.verify", "flag": "state-changing"}
     assert "own hold" in refused.value.message
-    assert scanner_admission("sqli.verify", LOGIN_BODY, STATE_CHANGING) == "anonymous"
+    assert scanner_admission("sqli.verify", LOGIN_BODY, STATE_CHANGING) == ("anonymous", False)
 
 
 def test_scanner_principals_are_recorded_as_credential_uses():
@@ -332,3 +337,64 @@ def test_the_worker_releases_a_call_whose_body_permission_or_session_route_went_
     with pytest.raises(HuntDispatchRejected, match="pinned browser"):
         resolve({"path": "/s?q=1", "deep_domxss": True, "as_principal": "primary"}, ACTIVE)
     assert resolve(LOGIN_BODY, STATE_CHANGING) is ANONYMOUS
+
+
+CAPTURED = [{"source_action_id": "6b4cd04e-a1ca-46ba-92c1-90bf3aa505fb", "capture_name": "session",
+             "header": "Cookie"}]
+
+
+def test_a_scanner_takes_the_hunts_captured_login_as_its_one_identity():
+    for name in ("web.crawl", "web.content_discover", "templates.scan", "xss.verify", "sqli.verify"):
+        values = {"request_bindings": CAPTURED, **({"path": "/item?id=1"} if name.endswith("verify") else {})}
+        assert _validated(name, values)["request_bindings"] == CAPTURED
+        assert scanner_admission(name, values, ACTIVE) == ("anonymous", True)
+    with pytest.raises(CapabilityInputContractError, match="one identity"):
+        CAPABILITY_REGISTRY.validate_hunt_input("web.crawl", {"request_bindings": CAPTURED, "as_principal": "primary"})
+    for binding in ({**CAPTURED[0], "header": "Authorization"}, {**CAPTURED[0], "prefix": "x"}):
+        with pytest.raises(CapabilityInputContractError):
+            CAPABILITY_REGISTRY.validate_hunt_input("web.crawl", {"request_bindings": [binding]})
+    with pytest.raises(CapabilityInputContractError, match="between 1 and 1"):
+        CAPABILITY_REGISTRY.validate_hunt_input("web.crawl", {"request_bindings": CAPTURED * 2})
+    with pytest.raises(CapabilityInputContractError, match="unsupported fields: request_bindings"):
+        CAPABILITY_REGISTRY.validate_hunt_input("web.browser_crawl", {"request_bindings": CAPTURED})
+
+
+def test_a_captured_login_needs_active_testing_and_is_a_workflow_binding():
+    with pytest.raises(HuntRefusal) as refused:
+        scanner_admission("web.crawl", {"request_bindings": CAPTURED}, {"active_testing": False})
+    assert refused.value.reason_code == "capability_requires_active_testing"
+    assert refused.value.subject == {"capability": "web.crawl", "flag": "active-testing"}
+
+
+def test_only_a_long_session_cookie_capture_of_this_hunt_is_sent(monkeypatch):
+    from api.hunt import scanner_identity
+    from api.hunt.dispatch_authority import HuntDispatchRejected
+    from api.runtime import hunt_http_exchange
+
+    captured = {}
+
+    async def capture(_conn, *, run_id, target, binding):
+        return captured["value"]
+
+    import runtime.hunt_http_exchange as worker_layout  # the import path the worker resolves
+
+    for module in (hunt_http_exchange, worker_layout):
+        monkeypatch.setattr(module, "captured_binding", capture)
+
+    def resolve(value, policy=ACTIVE):
+        captured["value"] = value
+        return asyncio.run(scanner_identity.resolve_scanner_identity(
+            object(), context={}, target=_target(), policy=policy, approval_receipt_id=None,
+            hunt_id=uuid.uuid4(), capability_name="sqli.verify",
+            values={"path": "/item?id=1", "request_bindings": CAPTURED},
+            execution_target=f"{ORIGIN}/item?id=1", session_store=None,
+        ))
+
+    identity = resolve(("hub_session=hs-2c9e7a41f0b84d3e", True))
+    assert identity.headers == {"Cookie": "hub_session=hs-2c9e7a41f0b84d3e"}
+    assert identity.evidence_principals() == ("captured_session",)
+    for value, reason in ((("hub_session=short", True), "at least 8"), (("pin-123456789", False), "at least 8")):
+        with pytest.raises(HuntDispatchRejected, match=reason):
+            resolve(value)
+    with pytest.raises(HuntDispatchRejected, match="active testing"):
+        resolve(("hub_session=hs-2c9e7a41f0b84d3e", True), policy={"active_testing": False})

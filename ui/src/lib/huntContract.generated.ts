@@ -1177,6 +1177,7 @@ export const HUNT_START_CONTRACT = {
       "input": {
         "fields": [
           "session_ref",
+          "request_bindings",
           "path",
           "severity",
           "tags",
@@ -1210,6 +1211,7 @@ export const HUNT_START_CONTRACT = {
       "input": {
         "fields": [
           "session_ref",
+          "request_bindings",
           "origin",
           "as_principal",
           "principal_binding_digest"
@@ -1267,6 +1269,7 @@ export const HUNT_START_CONTRACT = {
       "input": {
         "fields": [
           "session_ref",
+          "request_bindings",
           "wordlist",
           "origin",
           "as_principal",
@@ -1298,6 +1301,7 @@ export const HUNT_START_CONTRACT = {
       "input": {
         "fields": [
           "session_ref",
+          "request_bindings",
           "path",
           "method",
           "content_type",
@@ -1337,6 +1341,7 @@ export const HUNT_START_CONTRACT = {
       "input": {
         "fields": [
           "session_ref",
+          "request_bindings",
           "path",
           "method",
           "content_type",

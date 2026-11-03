@@ -124,7 +124,9 @@ Send the login (an authorized write) with `"capture": [{"name": "session", "head
 a redirect answer counts. The capture holds the cookies the response set as `name=value` pairs.
 Send each later request with `"request_bindings": [{"source_action_id": "<login action id>",
 "capture_name": "session", "header": "Cookie"}]`; `artifact.inspect` takes the same binding to read
-a longer signed-in page. You never see the cookie; its echoes are withheld. A login that sets no
+a longer signed-in page, and `sqli.verify`, `xss.verify`, `web.crawl`, `web.content_discover` and
+`templates.scan` take it to test signed in (one binding, header `Cookie`; needs active testing).
+You never see the cookie; its echoes are withheld. A login that sets no
 cookie still succeeds and lists the name in `captures_missing`: read its status before you go on.
 An HTML answer carries `html`: the page's links (same-origin first), forms and visible text.
 
@@ -249,7 +251,10 @@ Choose the next smallest action that can answer or falsify a useful hypothesis:
   `idempotency_key` for each intended action and reuse that same key only when retrying the exact
   action. Supply semantic operation inputs, never a new target, tool name, or raw command line.
   Give `sqli.verify` the input to test: a query parameter (`/reports?filter=x`), or a path
-  segment marked with `*` (`/products/1*`); a bare path is refused. A long action (`sqli.verify`
+  segment marked with `*` (`/products/1*`); a bare path is refused. To test a form or JSON body
+  (a login field), give `sqli.verify` or `xss.verify` the path plus `method` (POST/PUT/PATCH),
+  `body_field_names` (every field the form sends) and `injection_field`; that needs the Hunt's
+  state-changing permission. A long action (`sqli.verify`
   holds up to 20 minutes) may answer `outcome: running`: do other work, then call it again with the
   same key and input to collect it (`shakerscan_hunt_get` lists the ones not collected yet). A
   Hunt runs at most two long actions at once (any worker action over a minute: `sqli.verify`,
