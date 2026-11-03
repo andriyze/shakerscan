@@ -73,6 +73,7 @@ class ScannerExecutionAdapter:
         requested_budget: Mapping[str, int],
         redacted_execution: Mapping[str, Any],
         archive_capability_name: str | None = None,
+        mutations_in_request_hold: bool = False,
     ) -> None:
         self.capability_name = specification.name
         # The Scan action this run belongs to (a batch runs its legacy capability per
@@ -105,7 +106,10 @@ class ScannerExecutionAdapter:
             scanner_options.get("nuclei_active_state_changing")
         )
         self._state_changing = self._body_state_changing or self._nuclei_state_changing
-        if self._state_changing and int(
+        # A Hunt verifier's body requests are verifier traffic under the Hunt's active-testing and
+        # state-changing grant: they are counted in the action's own request hold, and the Hunt's
+        # state-changing ceiling (the planner's own writes) is not reserved for them.
+        if self._state_changing and not mutations_in_request_hold and int(
             self._requested_budget.get("state_changing_requests") or 0
         ) < int(self._requested_budget.get("http_requests") or 0):
             raise ValueError(

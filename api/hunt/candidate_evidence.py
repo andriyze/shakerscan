@@ -170,3 +170,68 @@ async def resolve_candidate_evidence(
             [], unsettled=unsettled, code=UNSETTLED,
         )
     return list(references)
+
+
+# The identity each cited record was gathered as: the managed credentials an action used, the
+# principal slot of an archived call, and the principal a scanner action ran as (its settled
+# result). A cited finding contributes its own ``evidence_principals``.
+EVIDENCE_PRINCIPALS_QUERY = """
+WITH cited_actions AS (
+    SELECT a.id FROM hunt_actions a
+    WHERE a.hunt_run_id = $2::uuid AND (a.id = ANY($1::uuid[]) OR a.receipt_id = ANY($1::uuid[]))
+)
+SELECT u.slot AS slot FROM hunt_credential_uses u
+WHERE u.hunt_run_id = $2::uuid AND u.action_id IN (SELECT id FROM cited_actions)
+UNION
+SELECT t.principal_slot FROM http_transactions t
+WHERE t.hunt_run_id = $2::uuid
+  AND (t.id = ANY($1::uuid[]) OR t.hunt_action_id IN (SELECT id FROM cited_actions))
+UNION
+SELECT a.result_summary->>'as_principal' FROM hunt_actions a
+WHERE a.id IN (SELECT id FROM cited_actions)
+UNION
+SELECT jsonb_array_elements_text(
+    CASE WHEN jsonb_typeof(f.evidence->'evidence_principals') = 'array'
+         THEN f.evidence->'evidence_principals' ELSE '[]'::jsonb END)
+FROM findings f WHERE f.id = ANY($1::uuid[]) AND f.hunt_run_id = $2::uuid
+"""
+_NOT_A_PRINCIPAL = frozenset({"", "anonymous", "anon", "none", "ssh"})
+
+
+async def evidence_principals(
+    conn: Any, *, run: Mapping[str, Any], references: list[str] | None,
+) -> list[str]:
+    """The HTTP principals other than ``anonymous`` that resolved evidence was gathered as.
+
+    A retest cannot send a Hunt principal, so a candidate whose evidence was gathered signed in
+    must not be judged by an anonymous retest (``retest_contract.candidate_evidence_principals``).
+    """
+    identifiers = sorted({
+        identifier for kind, identifier in (parse_evidence_reference(item) for item in references or ())
+        if kind != "device_evidence"
+    })
+    if not identifiers:
+        return []
+    rows = await conn.fetch(EVIDENCE_PRINCIPALS_QUERY, identifiers, str(run["id"]))
+    slots = {str(row["slot"] or "").strip().lower()[:80] for row in rows}
+    return sorted(slots - _NOT_A_PRINCIPAL)
+
+
+async def record_evidence_principals(conn: Any, candidate_id: Any, principals: list[str]) -> None:
+    """Add principals to a candidate's ``verification_context``; never removes one."""
+    if not principals:
+        return
+    row = await conn.fetchrow(
+        "SELECT verification_context FROM investigation_candidates WHERE id=$1::uuid FOR UPDATE",
+        str(candidate_id),
+    )
+    if row is None:
+        return
+    recorded = _json_object(row["verification_context"]).get("evidence_principals")
+    merged = sorted({*(recorded if isinstance(recorded, list) else ()), *principals})
+    await conn.execute(
+        """UPDATE investigation_candidates
+           SET verification_context = COALESCE(verification_context, '{}'::jsonb) || $2::jsonb
+           WHERE id=$1::uuid""",
+        str(candidate_id), json.dumps({"evidence_principals": merged}),
+    )

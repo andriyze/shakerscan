@@ -39,6 +39,7 @@ try:
     from evidence_triage import redact_finding_evidence as _redact_finding_evidence
     from retest_contract import (
         RETEST_IDENTITY_MESSAGE, RETEST_REASON_IDENTITY, SUPPORTED_RETEST_TYPES, build_replay_commands,
+        candidate_evidence_principals,
         build_retest_job_payload, extract_auth_context, infer_type_from_title_tool,
         normalize_retest_type, parse_json_field, retest_sends_active_requests,
         retest_identity_refusal, retest_refusal_message, retest_refusal_reason, validate_retest_job_payload,
@@ -65,6 +66,7 @@ except ModuleNotFoundError:  # package import in host-side tests
     from ..evidence_triage import redact_finding_evidence as _redact_finding_evidence
     from ..retest_contract import (
         RETEST_IDENTITY_MESSAGE, RETEST_REASON_IDENTITY, SUPPORTED_RETEST_TYPES, build_replay_commands,
+        candidate_evidence_principals,
         build_retest_job_payload, extract_auth_context, infer_type_from_title_tool,
         normalize_retest_type, parse_json_field, retest_sends_active_requests,
         retest_identity_refusal, retest_refusal_message, retest_refusal_reason, validate_retest_job_payload,
@@ -779,7 +781,10 @@ async def get_finding(finding_id: str):
 
 async def _retest_identity_refusal(conn, finding: Mapping[str, Any]) -> str | None:
     """``RETEST_REASON_IDENTITY`` when the finding's source Scan was signed in and a retest
-    would hold no identity to apply (``retest_identity_refusal``), else None."""
+    would hold no identity to apply (``retest_identity_refusal``), or a signed-in Hunt verifier
+    proved it (``evidence_principals``), else None."""
+    if candidate_evidence_principals(finding.get("evidence")):
+        return RETEST_REASON_IDENTITY
     if not finding.get("scan_id"):
         return None
     row = await conn.fetchrow("SELECT options FROM scans WHERE id = $1", finding["scan_id"])
