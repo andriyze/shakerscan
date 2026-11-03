@@ -50,6 +50,26 @@ def _scalar(value: Any) -> Any:
     return value
 
 
+COOKIE_CAPTURES_KEY = "cookie_captures"
+# A cookie value shorter than this could match ordinary response text: a request sending one is
+# reduced to its status rather than scrubbed.
+MIN_SCRUBBED_COOKIE_CHARS = 8
+
+
+def _cookie_pairs(response: Any) -> str:
+    """The cookies a response set, as one ``Cookie`` header value (``a=1; b=2``)."""
+    cookies = response.cookies() if callable(getattr(response, "cookies", None)) else {}
+    pairs = [f"{name}={value}" for name, value in dict(cookies).items() if str(name) and str(value)]
+    if not pairs:
+        raise ValueError("response set no cookie")
+    return "; ".join(pairs)
+
+
+def cookie_values(header: str) -> list[str]:
+    """The values of a ``Cookie`` header value, without their names."""
+    return [part.split("=", 1)[1].strip() for part in str(header).split(";") if "=" in part]
+
+
 def _unique_json_pairs(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     result = {}
     for key, value in pairs:
@@ -67,7 +87,13 @@ class HttpWorkflowExchange:
     captures: tuple[Mapping[str, Any], ...] = field(default=(), repr=False)
     encrypted_result: str | None = field(default=None, repr=False)
     captured_names: tuple[str, ...] = ()
+    # Requested captures the response did not carry: reported, never a failed request.
+    missing_names: tuple[str, ...] = ()
     capture_error: str | None = None
+    # A binding whose value may be short or echoed under any key (a credential field, a JSON
+    # capture, a short cookie): the response is reduced to its status. Otherwise every bound
+    # value is known exactly and is withheld wherever the target echoes it.
+    opaque_binding: bool = False
     # Withheld values this request sends (worker-private): scrubbed from the planner's view.
     bound_values: list[str] = field(default_factory=list, repr=False)
     # discovered_secret_uses rows this request recorded: their outcome is noted after the answer.
@@ -81,35 +107,67 @@ class HttpWorkflowExchange:
         return tuple(str(item["header"]).lower() for item in self.captures if "header" in item)
 
     def capture_response(self, response: Any) -> None:
-        """Capture only requested fields. Failure never erases the attempted write."""
+        """Capture only requested fields. Failure never erases the attempted write.
+
+        A header capture reads any response that carries the header, a redirect included: a
+        form login answers 302/303 with its cookie. A JSON capture reads a 2xx body only. A
+        ``Set-Cookie`` capture is the cookies the response set, as ``name=value`` pairs joined
+        by ``; `` (every Set-Cookie header, without attributes, deletions dropped): what a
+        later request sends in its ``Cookie`` header. A capture the response does not carry is
+        recorded as missing (``missing_names``); the others are still kept, and the request's
+        own outcome does not depend on them."""
         if not self.captures:
             return
         extracted: dict[str, Any] = {}
+        cookie_names: list[str] = []
+        missing: list[str] = []
         try:
-            if not 200 <= response.status_code < 300:
-                raise ValueError("unsuccessful response")
-            document = json.loads(response.body(), object_pairs_hook=_unique_json_pairs) if any(
-                "json_pointer" in item for item in self.captures) else None
+            success = 200 <= response.status_code < 300
+            document = None
+            if success and any("json_pointer" in item for item in self.captures):
+                try:
+                    document = json.loads(response.body(), object_pairs_hook=_unique_json_pairs)
+                except ValueError:
+                    document = None
             headers = {str(key).lower(): value for key, value in response.headers().items()}
             for item in self.captures:
-                value = pointer_get(document, item["json_pointer"]) if "json_pointer" in item else headers[item["header"].lower()]
-                extracted[item["name"]] = _scalar(value)
-            now = datetime.now(timezone.utc)
-            payload = json.dumps({"schema_version": SCHEMA, "hunt_id": self.run_id,
-                "source_action_id": self.action_id, "target_digest": _target_digest(self.target),
-                "expires_at": (now + timedelta(seconds=CAPTURE_TTL_SECONDS)).isoformat(),
-                "values": extracted}, ensure_ascii=False, allow_nan=False, separators=(",", ":"))
-            if len(payload.encode()) > MAX_CAPTURE_BYTES:
-                raise ValueError("capture too large")
-            self.encrypted_result = encrypt_secret(payload)
-            self.captured_names = tuple(extracted)
+                try:
+                    if "json_pointer" in item:
+                        if not success or document is None:
+                            raise ValueError("no JSON body")
+                        value = pointer_get(document, item["json_pointer"])
+                    elif str(item["header"]).lower() == "set-cookie":
+                        value = _cookie_pairs(response)
+                        cookie_names.append(item["name"])
+                    else:
+                        value = headers[str(item["header"]).lower()]
+                    extracted[item["name"]] = _scalar(value)
+                except (KeyError, ValueError):
+                    missing.append(item["name"])
+            if extracted:
+                payload_values = {"schema_version": SCHEMA, "hunt_id": self.run_id,
+                    "source_action_id": self.action_id, "target_digest": _target_digest(self.target),
+                    "expires_at": (datetime.now(timezone.utc) + timedelta(seconds=CAPTURE_TTL_SECONDS)).isoformat(),
+                    "values": extracted}
+                kept_cookies = [name for name in cookie_names if name in extracted]
+                if kept_cookies:
+                    payload_values[COOKIE_CAPTURES_KEY] = kept_cookies
+                payload = json.dumps(payload_values, ensure_ascii=False, allow_nan=False, separators=(",", ":"))
+                payload_values.clear()
+                if len(payload.encode()) > MAX_CAPTURE_BYTES:
+                    raise ValueError("capture too large")
+                self.encrypted_result = encrypt_secret(payload)
+                self.captured_names = tuple(extracted)
+            self.missing_names = tuple(missing)
         except Exception:
             # Target content and decrypt/encrypt errors must never enter public errors.
             self.encrypted_result = None
             self.captured_names = ()
-            self.capture_error = "http_workflow_capture_incomplete"
+            self.missing_names = tuple(item["name"] for item in self.captures)
         finally:
             extracted.clear()
+        if self.missing_names:
+            self.capture_error = "http_workflow_capture_incomplete"
 
     def public_result(self) -> list[dict[str, str]]:
         return [{"source_action_id": self.action_id, "capture_name": name}
@@ -126,6 +184,13 @@ class HttpWorkflowExchange:
 
 
 async def _captured_value(conn: Any, *, run_id: str, target: TargetBinding, binding: Mapping[str, Any]) -> Any:
+    return (await captured_binding(conn, run_id=run_id, target=target, binding=binding))[0]
+
+
+async def captured_binding(
+    conn: Any, *, run_id: str, target: TargetBinding, binding: Mapping[str, Any],
+) -> tuple[Any, bool]:
+    """``(value, is_cookie)`` of a response capture this Hunt made: worker-private."""
     source_id = str(uuid.UUID(str(binding["source_action_id"])))
     row = await conn.fetchrow("""SELECT private_http_result FROM hunt_actions
         WHERE id=$1 AND hunt_run_id=$2 AND capability_name='http.request'
@@ -141,7 +206,8 @@ async def _captured_value(conn: Any, *, run_id: str, target: TargetBinding, bind
                 or private["target_digest"] != _target_digest(target)
                 or expires_at.tzinfo is None or expires_at <= datetime.now(timezone.utc)):
             raise ValueError("binding changed or expired")
-        return _scalar(private["values"][binding["capture_name"]])
+        name = binding["capture_name"]
+        return _scalar(private["values"][name]), name in (private.get(COOKIE_CAPTURES_KEY) or ())
     except Exception:
         raise ValueError("HTTP workflow response reference is expired or no longer bound to this Hunt") from None
 
@@ -282,7 +348,10 @@ async def sealed_hunt_knowledge(conn: Any, *, run_id: Any, target: TargetBinding
             expires_at = datetime.fromisoformat(private.get(WITHHELD_EXPIRES_KEY) or private["expires_at"])
             if private.get("hunt_id") != str(run_id) or private.get("target_digest") != digest or expires_at <= now:
                 continue
-            found = [*(private.get(WITHHELD_SCHEMA_KEY) or {}).values(), *(private.get("values") or {}).values()]
+            captured = private.get("values") or {}
+            found = [*(private.get(WITHHELD_SCHEMA_KEY) or {}).values(), *captured.values(),
+                     *(item for name in (private.get(COOKIE_CAPTURES_KEY) or ())
+                       for item in cookie_values(str(captured.get(name) or "")))]
             learned = _bounded_sql_tables(private.get(SQL_TABLES_KEY))
             context_bytes += max(0, int(private.get(CONTEXT_BYTES_KEY) or 0))
         except Exception:
@@ -622,8 +691,16 @@ async def prepare_http_exchange(
                 raise ValueError(f"{exc.reason}: {exc}") from None
             exchange.bound_values.append(str(value))
         elif "source_action_id" in binding:
-            value = await _captured_value(conn, run_id=run_id, target=target, binding=binding)
+            value, is_cookie = await captured_binding(conn, run_id=run_id, target=target, binding=binding)
+            secrets = cookie_values(str(value)) if is_cookie and "header" in binding else []
+            if secrets and all(len(item) >= MIN_SCRUBBED_COOKIE_CHARS for item in secrets):
+                # A session cookie this Hunt's own login set: long, random and known exactly, so
+                # the response keeps its content with every echo of it withheld.
+                exchange.bound_values.extend([str(value), *secrets])
+            else:
+                exchange.opaque_binding = True
         else:
+            exchange.opaque_binding = True
             selected = ({"profile_id": binding["profile_id"], "profile_version": binding["profile_version"]}
                 if "profile_id" in binding else select_hunt_principal_reference(
                     context, binding["principal"], capability="http.request"))

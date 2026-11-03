@@ -118,6 +118,16 @@ one hour, and are cleared on finish/cancel; they are not permanent credentials f
 A returned reference proves capture, not accepted application identity. Follow the protocol's
 pairing confirmation with a relevant authenticated request before reporting pairing complete.
 
+### Log in, then reuse the session
+
+Send the login (an authorized write) with `"capture": [{"name": "session", "header": "Set-Cookie"}]`;
+a redirect answer counts. The capture holds the cookies the response set as `name=value` pairs.
+Send each later request with `"request_bindings": [{"source_action_id": "<login action id>",
+"capture_name": "session", "header": "Cookie"}]`; `artifact.inspect` takes the same binding to read
+a longer signed-in page. You never see the cookie; its echoes are withheld. A login that sets no
+cookie still succeeds and lists the name in `captures_missing`: read its status before you go on.
+An HTML answer carries `html`: the page's links (same-origin first), forms and visible text.
+
 ### Secrets the target leaks: use them by reference
 
 Credentials found in target responses (a `.env`, a SQL dump, `web.config`, a phpinfo table, a

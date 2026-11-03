@@ -261,7 +261,8 @@ class CapabilityEngine(ManifestHuntClient):
                 answer["result"] = {"observations": list(self.observations), "budget_consumed": {"http_requests": 1}}
             else:
                 answer["result"] = {"observations": list(self.observations), "budget_consumed": {"http_requests": 1},
-                                    "typed_output": {"records": list(self.observations), "parser": "http/v1"}}
+                                    "typed_output": {"records": list(self.observations), "parser": "http/v1"},
+                                    "receipt": {"observations": list(self.observations), "receipt_id": "r-1"}}
             return answer
         return super().request_json(method, path, payload)
 
@@ -279,6 +280,9 @@ def test_a_capability_answer_keeps_one_copy_of_its_observations():
     assert answer["action_result"]["observations"] == observations
     assert answer["result"]["observations"] == {"mcp_same_as": "action_result.observations"}
     assert answer["result"]["typed_output"]["records"] == {"mcp_same_as": "action_result.observations"}
+    # The receipt's copy too, whatever else the receipt holds.
+    assert answer["result"]["receipt"] == {"observations": {"mcp_same_as": "action_result.observations"},
+                                           "receipt_id": "r-1"}
     assert answer["result"]["budget_consumed"] == {"http_requests": 1}
     assert "same idempotency_key" in answer["mcp_view"]["full_view"]
 

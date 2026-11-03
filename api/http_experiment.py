@@ -25,6 +25,11 @@ except ModuleNotFoundError:  # package import layout
         mask_selected_string, mask_selected_value, mask_url_userinfo, withhold_url_userinfo,
     )
 
+try:
+    from runtime.html_outline import html_outline, looks_like_html
+except ModuleNotFoundError:  # package import layout
+    from api.runtime.html_outline import html_outline, looks_like_html
+
 
 HTTP_EXPERIMENT_VERSION = "http-experiment-2026-07-12.v4"
 ALLOWED_METHODS = {"GET", "HEAD", "OPTIONS", "POST", "PUT", "PATCH", "DELETE"}
@@ -570,16 +575,40 @@ def response_summary(
         "selected_json": selected_json,
         "selected_headers": selected_response_headers,
     }
+    if in_hunt and partial is None and looks_like_html(summary["content_type"], text):
+        # The page as the planner needs it: a sample cut from byte 0 is often all CSS.
+        outline = html_outline(
+            text, _response_url(response),
+            mask_text=_masked_body, bound_text=bounded_masked_text, mask_url=bounded_public_url,
+            mask_field_value=_masked_field_value,
+        )
+        if outline:
+            summary["html"] = outline
     withheld = active_withheld_values()
     if withheld is not None:
-        # Every marker the summary shows has its entry: the body sample's, the URL fields' and the
-        # selected values'.
+        # Every marker the summary shows has its entry: the body sample's, the URL fields', the
+        # selected values' and the page outline's.
         entries = withheld.entries(
             body_sample, summary["location"], json.dumps(selected_response_headers, ensure_ascii=False),
-            json.dumps(selected_json, ensure_ascii=False, default=str))
+            json.dumps(selected_json, ensure_ascii=False, default=str),
+            json.dumps(summary.get("html") or {}, ensure_ascii=False, default=str))
         if entries:
             summary["withheld_values"] = entries
     return summary
+
+
+def _masked_field_value(name: str, value: str) -> Any:
+    """A hidden form field's value, masked by its name and by its shape (a CSRF token named
+    ``csrf_token`` is withheld as a reference the planner can bind, never shown)."""
+    masked = _hunt_selected_value({name: value})
+    return masked.get(name) if isinstance(masked, dict) else masked
+
+
+def _response_url(response: Any) -> str:
+    try:
+        return str(response.url or "")
+    except Exception:  # noqa: BLE001 - a response built without its request has no URL
+        return ""
 
 
 def compare_summaries(control: dict[str, Any], candidate: dict[str, Any]) -> dict[str, Any]:

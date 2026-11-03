@@ -323,6 +323,8 @@ def action_credential_references(
     Only references selected at Hunt start can reach an action, so every one is ``selected``.
     An input the executor would refuse yields nothing here; the executor still refuses it.
     """
+    # A signed-in artifact.inspect is a read http.request could send: it uses that allowance.
+    capability = "http.request" if capability == "artifact.inspect" else capability
     if capability in {"http.request", "collections.replay_safe", "collections.replay_active"}:
         _refuse_unusable_principal_slot(capability, capability_input, context)
     try:

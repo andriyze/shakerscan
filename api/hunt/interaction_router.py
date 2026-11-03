@@ -95,6 +95,7 @@ from .service_binding import (
     service_origin_changed,
 )
 from .target_binding import web_hunt_target
+from .artifact_identity import artifact_read_identity
 from .capability_reservations import hunt_capability_action_digest, hunt_capability_lease_seconds, terminalize_hunt_capability
 from .capability_executor import CapabilityExecutionContext, CapabilityExecutor
 from .action_service import HUNT_ACTION_SERVICE, HuntActionInputError, HuntActionNotFound
@@ -2028,6 +2029,10 @@ async def _execute_hunt_capability_lifecycle(
                             )
                         )
                     )
+                    if name == "artifact.inspect":
+                        # A signed-in read takes http.request's identities, admitted as for it.
+                        principal_slot, uses_session, workflow_http = artifact_read_identity(
+                            request.input, policy)
                     # Forging a client address is a distinct authority the operator granted, so a
                     # call that uses it is metered and re-approved like any other active action.
                     # Classifying it by the capability's static risk tier alone let anonymous
