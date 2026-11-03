@@ -1545,14 +1545,17 @@ export const HUNT_START_CONTRACT = {
         "method": "POST",
         "url_template": "/hunts/{hunt_id}/capabilities/artifact.inspect"
       },
-      "description": "Read one small redacted byte window from a target-bound public client artifact. Reserves two requests: the second is spent only when tab-separated rows need the resource's head read to tell a database dump from plain text (once per resource; a failed read is retried once). Both requests share the 30-second wall-time reservation.",
+      "description": "Read one small redacted byte window from a target-bound artifact or page, anonymously or as one identity http.request takes (session_ref, as_principal, or request_bindings sending a captured session cookie: a signed-in page past what http.request shows). Reserves two requests: the second is spent only when tab-separated rows need the resource's head read to tell a database dump from plain text (once per resource; a failed read is retried once). Both requests share the 30-second wall-time reservation.",
       "input": {
         "fields": [
           "origin",
           "path",
           "offset",
           "max_bytes",
-          "search_terms"
+          "search_terms",
+          "as_principal",
+          "session_ref",
+          "request_bindings"
         ],
         "required": [
           "path"
