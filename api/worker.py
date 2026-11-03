@@ -20316,8 +20316,6 @@ async def process_canonical_scanner_capability_job(
             action_id=str(action_id),
             deep_domxss=scanner_options.get("deep_domxss") is True,
         )
-        if browser_proof_adapter is not None and scanner_identity.signed_in:
-            raise agent_tools.AgentToolError("the pinned browser XSS proof runs without a session")
         scanner_adapter = ScannerExecutionAdapter(
             specification=spec,
             process_payload={
