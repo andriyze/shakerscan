@@ -1316,7 +1316,7 @@ def test_nuclei_interactsh_requires_gate_and_private_server(monkeypatch):
     ) == ("https://oob.corp.example", None)
 
 
-def test_hunt_scanner_projection_rejects_body_mutation_but_preserves_scan_input():
+def test_hunt_scanner_projection_takes_a_bounded_body_input_and_preserves_scan_input():
     body = {
         "path": "/rest/user/login",
         "method": "DELETE",
@@ -1327,11 +1327,16 @@ def test_hunt_scanner_projection_rejects_body_mutation_but_preserves_scan_input(
     for capability in ("xss.verify", "sqli.verify"):
         # Deterministic Scan may still execute an immutable body candidate.
         assert at.CAPABILITY_REGISTRY.validate_input(capability, body) == body
-        # Hunt planners cannot turn those private adapter fields into mutation.
-        with pytest.raises(CapabilityInputContractError, match="unsupported fields"):
+        # A Hunt body test is POST, PUT or PATCH only; other methods are refused.
+        with pytest.raises(CapabilityInputContractError, match="not an allowed value"):
             at.CAPABILITY_REGISTRY.validate_hunt_input(capability, body)
-        with pytest.raises(CapabilityInputContractError, match="unsupported fields"):
+        with pytest.raises(CapabilityInputContractError, match="not an allowed value"):
             at.canonical_hunt_scanner_options(capability, body)
+        posted = {**body, "method": "POST"}
+        assert at.canonical_hunt_scanner_options(capability, posted)["injection_field"] == "email"
+        # Scan-private staging fields stay out of the Hunt projection.
+        with pytest.raises(CapabilityInputContractError, match="unsupported fields"):
+            at.canonical_hunt_scanner_options(capability, {**posted, "probe_profile": "x"})
 
 
 def test_hunt_nuclei_uses_server_owned_get_only_pack():

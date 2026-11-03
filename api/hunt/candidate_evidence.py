@@ -213,7 +213,7 @@ async def evidence_principals(
     if not identifiers:
         return []
     rows = await conn.fetch(EVIDENCE_PRINCIPALS_QUERY, identifiers, str(run["id"]))
-    slots = {str(row["slot"] or "").strip().lower()[:80] for row in rows}
+    slots = {str(row.get("slot") or "").strip().lower()[:80] for row in rows}
     return sorted(slots - _NOT_A_PRINCIPAL)
 
 
