@@ -24,8 +24,9 @@ FROM mcr.microsoft.com/playwright/python:v1.63.0-noble@sha256:72bd171a9ffc2b4b59
 # shipped, which failed the image gate on CVE-2026-84782 (fixed in 3.0.13-0ubuntu3.16).
 # libbrotli1 likewise, for CVE-2026-111497 (the Brotli decoder's out-of-bounds write, fixed in
 # 1.1.0-2ubuntu0.1); Ubuntu rates it medium, so the image gate does not refuse the base's build.
+# apt and libapt-pkg6.0t64 for CVE-2026-109518 (fixed in 2.8.4ubuntu0.1; the base ships 2.8.3).
 RUN --mount=type=bind,source=scanner/apt_install.sh,target=/tmp/apt_install.sh,ro \
-    sh /tmp/apt_install.sh ca-certificates curl jq openssl libssl3t64 libbrotli1
+    sh /tmp/apt_install.sh ca-certificates curl jq openssl libssl3t64 libbrotli1 apt libapt-pkg6.0t64
 
 # The scanner runtime's Python tree below is copied over this base, which pip-installs virtualenv
 # and its dependencies. The scanner removes them before its locked install; remove them here too,
