@@ -125,8 +125,10 @@ def test_both_build_stages_use_helper_without_weakening_apt_verification():
     commands = "\n".join(row for row in SCRIPT.read_text().splitlines() if not row.lstrip().startswith("#"))
     for bypass in ("--fix-missing", "--allow-unauthenticated", "AllowInsecureRepositories", "Verify-Peer=false", "Verify-Host=false", "|| true"):
         assert bypass not in commands
-    # libbrotli1: naming it upgrades the base's build to the CVE-2026-111497 fix.
-    for required in ("nmap", "hydra", "medusa", "nikto", "libpcap-dev", "libssl-dev", "bsdmainutils", "libbrotli1"):
+    # libbrotli1: naming it upgrades the base's build to the CVE-2026-111497 fix; apt and
+    # libapt-pkg6.0t64 likewise to the CVE-2026-109518 fix.
+    for required in ("nmap", "hydra", "medusa", "nikto", "libpcap-dev", "libssl-dev", "bsdmainutils", "libbrotli1",
+                     "apt libapt-pkg6.0t64"):
         assert required in dockerfile
 
 
@@ -190,7 +192,8 @@ def test_source_symlink_target_is_not_modified(tmp_path):
 
 
 @pytest.mark.parametrize("image, expected", [
-    ("Dockerfile.api", ["ca-certificates", "curl", "jq", "openssl", "libssl3t64", "libbrotli1"]),
+    ("Dockerfile.api", ["ca-certificates", "curl", "jq", "openssl", "libssl3t64", "libbrotli1",
+                        "apt", "libapt-pkg6.0t64"]),
     ("Dockerfile.model-intake", [
         "make", "gcc", "libcurl4-openssl-dev", "libssl-dev", "python3-dev",
         "python3-venv", "python3-pip-whl", "python3-setuptools-whl",
