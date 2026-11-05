@@ -6,9 +6,10 @@ FROM python:3.14-slim-bookworm@sha256:416f0db2a2b561945630cef9877a7ea0581b27449e
 # 2026-09-13: libpcre2-8-0 10.42-1 -> 10.42-1+deb12u1 (CVE-2026-86145, CVE-2026-89161).
 # 2026-10-28: libssl3 and openssl 3.0.22-1~deb12u1 -> 3.0.22-1~deb12u2 (CVE-2026-84782). They are
 # named so a build cache that still holds an earlier upgrade of this step cannot keep the fix out.
+# 2026-11-05: apt and libapt-pkg6.0 2.6.1 -> 2.6.2 (CVE-2026-109518), named for the same reason.
 RUN apt-get update \
     && apt-get upgrade -y --no-install-recommends \
-    && apt-get install -y --no-install-recommends --only-upgrade libssl3 openssl \
+    && apt-get install -y --no-install-recommends --only-upgrade libssl3 openssl apt libapt-pkg6.0 \
     && rm -rf /var/lib/apt/lists/*
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
