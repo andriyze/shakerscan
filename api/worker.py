@@ -20442,6 +20442,8 @@ async def process_canonical_scanner_capability_job(
         # and the error, before the receipt, the record, endpoint knowledge or a finding sees them.
         secrecy = PublicSecrecy.for_headers(scanner_identity.headers)
         observations = secrecy.observations(observations)
+        # The tool's parsed output is published with the job result (the action's answer).
+        typed_output = secrecy.value(typed_output)
         if error:
             error = secrecy.text(str(error), target_text=False)
 
@@ -20612,7 +20614,7 @@ async def process_canonical_scanner_capability_job(
                         "scanner action changed before settlement"
                     )
         result = {
-            **process_result,
+            **secrecy.value(dict(process_result)),
             "status": status,
             "error": error,
             "ok": status == "success",
