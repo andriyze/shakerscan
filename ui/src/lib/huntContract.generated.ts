@@ -105,6 +105,12 @@ export const HUNT_START_CONTRACT = {
       "minimum": 1,
       "name": "max_verifications",
       "zeroable": false
+    },
+    {
+      "label": "Maximum verifier write requests",
+      "minimum": 0,
+      "name": "max_verifier_write_requests",
+      "zeroable": true
     }
   ],
   "budget_profiles": {
@@ -121,7 +127,8 @@ export const HUNT_START_CONTRACT = {
       "max_state_changing_requests": 20,
       "max_tcp_ports": 1200,
       "max_udp_ports": 1000,
-      "max_verifications": 14400
+      "max_verifications": 14400,
+      "max_verifier_write_requests": 36000
     },
     "fast": {
       "max_active_actions": 3600,
@@ -136,7 +143,8 @@ export const HUNT_START_CONTRACT = {
       "max_state_changing_requests": 4,
       "max_tcp_ports": 100,
       "max_udp_ports": 100,
-      "max_verifications": 3600
+      "max_verifications": 3600,
+      "max_verifier_write_requests": 7200
     },
     "thorough": {
       "max_active_actions": 86400,
@@ -151,7 +159,8 @@ export const HUNT_START_CONTRACT = {
       "max_state_changing_requests": 80,
       "max_tcp_ports": 10000,
       "max_udp_ports": 5000,
-      "max_verifications": 86400
+      "max_verifications": 86400,
+      "max_verifier_write_requests": 144000
     }
   },
   "budget_schema_version": "hunt-budget/v3",
@@ -393,7 +402,8 @@ export const HUNT_START_CONTRACT = {
   ],
   "policy_derived_zeros": {
     "mutation_disabled": [
-      "max_state_changing_requests"
+      "max_state_changing_requests",
+      "max_verifier_write_requests"
     ],
     "network_disabled": [
       "max_udp_ports"
@@ -2347,7 +2357,8 @@ export const HUNT_ZEROABLE_BUDGET_DIMENSIONS = [
   "max_oob_interactions",
   "max_state_changing_requests",
   "max_tcp_ports",
-  "max_udp_ports"
+  "max_udp_ports",
+  "max_verifier_write_requests"
 ] as const
 export type HuntBudgetProfile = keyof typeof HUNT_BUDGET_PROFILES
 export type HuntBudgetDimension = typeof HUNT_BUDGET_DIMENSIONS[number]['name']
