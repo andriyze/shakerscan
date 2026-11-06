@@ -24,6 +24,8 @@ changes which name admission is asked about.
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
+import functools
 import ipaddress
 import json
 import socket
@@ -56,11 +58,19 @@ UNKNOWN = "unknown"
 NOT_CHECKED = "not_checked"
 
 LOOKUP_TIMEOUT_SECONDS = 3.0
+# getaddrinfo blocks a thread. asyncio's default executor has min(32, CPUs + 4) threads, so on a
+# small host a queued lookup spent part of its timeout waiting for a thread. Lookups run on their
+# own pool, sized above the concurrency so a lookup that outlives its timeout never starves the
+# next one. More concurrency does not help: the resolver is the limit. Measured on a 4-CPU host
+# (2,000 names, a quarter existing): 16 concurrent lookups judged ~5 names/s; 64 judged ~3/s,
+# because the resolver answered fewer lookups within the timeout.
 DISCOVERY_CONCURRENCY = 16
-# Discovery used to insert the first 100 names it found. Resolve a bounded window beyond that so
-# names skipped for having no address record leave room for ones that do.
-DISCOVERY_TARGET_LIMIT = 100
-DISCOVERY_RESOLVE_LIMIT = 300
+_RESOLVER_THREADS = DISCOVERY_CONCURRENCY * 2
+# Every discovered name under the apex is resolved and every name with an address becomes a
+# target. The limit only bounds a pathological source (a wildcard zone listed name by name);
+# sized from measured runs with generous headroom over the largest apex observed.
+DISCOVERY_TARGET_LIMIT = 10_000
+DISCOVERY_RESOLVE_LIMIT = 10_000
 _REPORTED_NAME_LIMIT = 100
 
 # getaddrinfo's "this name has no address" answers. EAI_AGAIN, EAI_FAIL and the rest describe the
@@ -76,11 +86,29 @@ Lookup = Callable[[str], Awaitable[list[str]]]
 Answer = Callable[[str], Awaitable[tuple[list[str], str | None]]]
 
 
+_RESOLVER_POOL: concurrent.futures.ThreadPoolExecutor | None = None
+
+
+def _resolver_pool() -> concurrent.futures.ThreadPoolExecutor:
+    global _RESOLVER_POOL
+    if _RESOLVER_POOL is None:
+        _RESOLVER_POOL = concurrent.futures.ThreadPoolExecutor(
+            max_workers=_RESOLVER_THREADS, thread_name_prefix="target-dns",
+        )
+    return _RESOLVER_POOL
+
+
+async def _getaddrinfo(hostname: str, **kwargs: Any) -> list[Any]:
+    """The system resolver (``getaddrinfo``), exactly as Scan admission asks it, on the
+    lookup pool rather than the event loop's small default executor."""
+    return await asyncio.get_running_loop().run_in_executor(
+        _resolver_pool(), functools.partial(socket.getaddrinfo, hostname, None, **kwargs),
+    )
+
+
 async def system_lookup(hostname: str) -> list[str]:
     """Every distinct address the system resolver returns for ``hostname``."""
-    records = await asyncio.get_running_loop().getaddrinfo(
-        hostname, None, type=socket.SOCK_STREAM, proto=socket.IPPROTO_TCP,
-    )
+    records = await _getaddrinfo(hostname, type=socket.SOCK_STREAM, proto=socket.IPPROTO_TCP)
     addresses: list[str] = []
     for record in records:
         try:
@@ -125,9 +153,8 @@ async def system_answer(hostname: str) -> tuple[list[str], str | None]:
     records can both end at one CDN edge, and only the record a name itself publishes says
     whether it is a wildcard's answer.
     """
-    records = await asyncio.get_running_loop().getaddrinfo(
-        hostname, None, type=socket.SOCK_STREAM, proto=socket.IPPROTO_TCP,
-        flags=socket.AI_CANONNAME,
+    records = await _getaddrinfo(
+        hostname, type=socket.SOCK_STREAM, proto=socket.IPPROTO_TCP, flags=socket.AI_CANONNAME,
     )
     addresses: list[str] = []
     canonical = ""

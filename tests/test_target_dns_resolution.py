@@ -258,7 +258,7 @@ def test_discovery_resolution_is_bounded():
         active -= 1
         return ["203.0.113.10"]
 
-    names = [f"h{index}.example.com" for index in range(400)]
+    names = [f"h{index}.example.com" for index in range(target_resolution.DISCOVERY_RESOLVE_LIMIT + 100)]
     plan = asyncio.run(target_resolution.plan_discovered_targets(names, lookup=lookup))
     assert len(plan["scannable"]) == target_resolution.DISCOVERY_RESOLVE_LIMIT
     assert peak <= target_resolution.DISCOVERY_CONCURRENCY
@@ -296,7 +296,12 @@ def _patch_system_resolver(monkeypatch, table):
             for address in answer
         ]
 
+    def blocking_getaddrinfo(host, port, *args, **kwargs):
+        # target_resolution runs the blocking resolver on its own lookup pool.
+        return asyncio.run(getaddrinfo(None, host, port))
+
     monkeypatch.setattr(asyncio.base_events.BaseEventLoop, "getaddrinfo", getaddrinfo)
+    monkeypatch.setattr(target_resolution.socket, "getaddrinfo", blocking_getaddrinfo)
     monkeypatch.setattr(target_resolution, "system_lookup", REAL_SYSTEM_LOOKUP)
 
 
@@ -478,3 +483,16 @@ def test_one_deadline_bounds_the_whole_discovery_check():
     assert len(plan["scannable"]) == 40 and plan["unresolved"] == []
     assert plan["submitted_count"] == 40
     assert plan["resolve_limit"] == target_resolution.DISCOVERY_RESOLVE_LIMIT
+
+
+def test_a_large_apex_is_resolved_past_the_old_300_name_window():
+    """Only the first 300 discovered names were resolved and only 100 became targets."""
+    async def lookup(_hostname):
+        return ["203.0.113.10"]
+
+    names = [f"h{index:04d}.example.com" for index in range(1_500)]
+    plan = asyncio.run(target_resolution.plan_discovered_targets(names, lookup=lookup))
+    assert len(plan["scannable"]) == 1_500 and plan["not_checked"] == []
+    conn = _DiscoveryConn()
+    outcome = asyncio.run(target_resolution.store_discovered_targets(conn, plan, "example.com"))
+    assert outcome["added"] == 1_500 and len(conn.inserted) == 1_500

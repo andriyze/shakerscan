@@ -117,7 +117,9 @@ _BASELINE_RECORDED_HEADERS: frozenset[str] = frozenset({
     "access-control-allow-origin", "access-control-allow-credentials", "server", "x-powered-by",
 })
 # Hosts listed in the report's subdomain section; the discovery capability itself is bounded.
-_REPORTED_SUBDOMAIN_LIMIT = 1_000
+# Every listed name is what the recording resolves and turns into targets, so the list holds as
+# many names as DNS checks (target_resolution.DISCOVERY_RESOLVE_LIMIT).
+_REPORTED_SUBDOMAIN_LIMIT = 10_000
 _ACTIVE_VERIFIER_CAPABILITIES = frozenset({
     "templates.scan", "xss.verify", "sqli.verify", "authz.verify",
     "templates.active_batch", "xss.verify_batch", "sqli.verify_batch",

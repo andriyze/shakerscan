@@ -41,9 +41,22 @@ OWN_SOURCE_CAPABILITIES = {"dns_enumeration": "dns.enumerate"}
 # ``subfinder`` it is not a declared target: it grants no apex (operations.discovery).
 ENUMERATION_TARGET_SOURCE = "dns-enumeration"
 # The whole DNS check of one scan's names, not each lookup. Recording runs between finalization
-# and the saved result; with a dead resolver every name used to cost its full lookup timeout --
-# about a minute for a full window -- before the finished scan was stored.
+# and the saved result; with a dead resolver every name used to cost its full lookup timeout
+# before the finished scan was stored. The deadline grows with the number of names so a large
+# apex is judged rather than cut at a fixed window: a base plus a per-name allowance from a
+# measured run (a slow resolver judged ~5 names/s, 0.2 s each; 2x headroom), bounded so a huge
+# list cannot hold the finished scan indefinitely. Names the deadline leaves unjudged still
+# become targets and are counted as not checked; the Targets-page discovery has no deadline.
 DNS_DEADLINE_SECONDS = 10.0
+DNS_DEADLINE_PER_NAME_SECONDS = 0.4
+DNS_DEADLINE_MAX_SECONDS = 1_800.0
+
+
+def dns_deadline_seconds(name_count: int) -> float:
+    return min(
+        DNS_DEADLINE_MAX_SECONDS,
+        DNS_DEADLINE_SECONDS + DNS_DEADLINE_PER_NAME_SECONDS * max(0, int(name_count)),
+    )
 
 
 async def _plan_with_deadline(
@@ -51,7 +64,8 @@ async def _plan_with_deadline(
     evidence: Mapping[str, Sequence[str]] | None = None,
 ) -> dict[str, Any]:
     return await target_resolution.plan_discovered_targets(
-        hosts, root_domain=root_domain, evidence=evidence, deadline_seconds=DNS_DEADLINE_SECONDS,
+        hosts, root_domain=root_domain, evidence=evidence,
+        deadline_seconds=dns_deadline_seconds(len(hosts)),
     )
 
 
