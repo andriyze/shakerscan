@@ -105,6 +105,8 @@ def test_hunt_rows_put_known_exploited_and_likely_first_with_the_check_state():
     assert rows[0]["verification"] == "available" and rows[0]["applicability"] == "candidate"
     assert rows[1]["product"] == "OpenSSH"       # control characters stripped from banner labels
     assert rows[2]["verification"] == "no_check"
+    # A candidate from an older engine carries no applicability: unresolved, never affected.
+    assert {row["applicability_status"] for row in rows} == {"unresolved"}
 
 
 def _scan_records(requested, steps, status="completed", target_url=TARGET["locator"]):

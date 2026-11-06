@@ -65,7 +65,7 @@ def test_registry_filters_target_kind_and_active_permission():
         "dns.inspect", "infrastructure.inspect", "subdomains.discover", "subdomains.takeover_check",
         "tls.inspect", "browser.navigate",
         "browser.interact", "web.crawl", "web.browser_crawl",
-        "web.content_discover", "web.spec_ingest",
+        "web.content_discover", "web.spec_ingest", "web.identify",
         "templates.passive_scan", "templates.passive_batch", "exposure.verify_batch",
         "collections.inspect", "collections.select", "collections.replay_safe",
         "secrets.inspect",
