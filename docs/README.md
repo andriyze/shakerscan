@@ -16,6 +16,7 @@ belong in Git history or immutable release notes rather than the active document
 - [Hunt architecture](hunt-architecture.md) — adaptive investigation model.
 - [DAST and ASM architecture](dast-asm-architecture.md) — deterministic Scan and attack-surface model.
 - [Service intelligence](service-intelligence.md) — service observations and investigation handoff.
+- [Target liveness](target-liveness.md) — DNS, reachability and live state per target: checks, limits and display.
 - [Multi-node architecture](multi-node-architecture.md) — distributed execution design.
 
 ## Hunt and authenticated testing
