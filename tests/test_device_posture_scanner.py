@@ -14,6 +14,20 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "scanner"))
 from scanner_tools import device_posture  # noqa: E402
 
 
+@pytest.fixture(autouse=True)
+def _no_live_protocol_identification(monkeypatch):
+    """These scans run on fixture inventories; the native adapters have their own tests."""
+    async def no_tcp_identification(address, services, **_kwargs):
+        return {"stage": "device_protocol_identification", "required": False, "complete": True,
+                "attempted": 0, "identified": 0}
+
+    async def no_udp_identification(address, udp_ports):
+        return []
+
+    monkeypatch.setattr(device_posture, "identify_device_services", no_tcp_identification)
+    monkeypatch.setattr(device_posture, "identify_device_udp", no_udp_identification)
+
+
 def _nmap_xml(ports: str = "", *, timed_out: bool = False, finished_exit: str = "success") -> str:
     timeout_attr = " timedout='1720000000'" if timed_out else ""
     return (

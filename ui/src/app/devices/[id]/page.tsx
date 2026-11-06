@@ -392,6 +392,7 @@ function DeviceDetailContent() {
     ? applicationSurface.controlled_operations.filter((item): item is Record<string, unknown> => Boolean(item && typeof item === 'object'))
     : []
   const reachability = selectedScanId ? selectedReachability : data.reachability || device.last_reachability
+  const networkCoverage = data.network_coverage
   const reachabilityTone = reachability?.status === 'online'
     ? 'border-emerald-500/25 bg-emerald-500/5 text-emerald-100'
     : reachability?.status === 'unreachable'
@@ -453,6 +454,32 @@ function DeviceDetailContent() {
       <Card className={`mb-6 border p-4 ${reachabilityTone}`}>
         <div className="flex items-start gap-3"><ReachabilityIcon className="mt-0.5 h-5 w-5 shrink-0" /><div><p className="font-medium">{reachability ? `Device ${reachability.status === 'online' ? 'online' : reachability.status}` : 'Device reachability not checked'}</p><p className="mt-1 text-sm opacity-75">{reachability?.reason || 'Run a device scan to require a positive network response before port and policy checks begin.'}</p>{reachability?.status === 'online' && <p className="mt-2 text-xs opacity-70">Network accessible · {serviceAccessSummary} · {reachability.confidence} confidence</p>}</div></div>
       </Card>
+
+      {!selectedScanId && networkCoverage && (networkCoverage.network_role || networkCoverage.addresses.length > 1) && (
+        <Card className="mb-6 border border-gray-700 p-4">
+          {networkCoverage.network_role && (
+            <p className="text-sm text-amber-200">
+              {networkCoverage.network_role.provider} edge: {networkCoverage.network_role.note}.
+            </p>
+          )}
+          {networkCoverage.addresses.length > 1 && (
+            <div className={networkCoverage.network_role ? 'mt-3' : ''}>
+              <p className="text-sm font-medium text-gray-200">Addresses examined in the latest scan</p>
+              <ul className="mt-2 space-y-1 text-xs text-gray-400">
+                {networkCoverage.addresses.map((item) => (
+                  <li key={item.address} className="font-mono">
+                    {item.address}{item.primary ? ' (primary)' : ''} ·{' '}
+                    {item.not_scanned
+                      ? `not scanned: ${item.not_scanned.replace(/_/g, ' ')}`
+                      : `${item.reachability_status || 'unknown'} · ${item.confirmed_services_count ?? 0} services · ${item.complete ? 'complete' : 'partial coverage'}`}
+                    {item.network_role ? ` · ${item.network_role.provider} edge` : ''}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+        </Card>
+      )}
 
       <Card className="mb-6 border-blue-500/25 bg-blue-500/5 p-5">
         <div className="flex flex-wrap items-start justify-between gap-4">

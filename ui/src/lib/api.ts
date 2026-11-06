@@ -1494,11 +1494,34 @@ export interface DeviceScanActivity {
   count: number
 }
 
+export interface DeviceNetworkRole {
+  role: 'cdn_edge'
+  provider: string
+  basis: 'published_range' | 'response_header'
+  note: string
+  origin_assessed: false
+  tcp_ports_examined?: number[]
+}
+
+export interface DeviceNetworkCoverage {
+  network_role?: DeviceNetworkRole | null
+  addresses: Array<{
+    address: string
+    primary?: boolean
+    reachability_status?: string | null
+    complete?: boolean
+    confirmed_services_count?: number
+    not_scanned?: string
+    network_role?: DeviceNetworkRole
+  }>
+}
+
 export interface DeviceDetailResponse {
   service_intelligence?: import('@/components/targets/SharedServicePorts').SharedServiceKnowledge
   authorization?: { approved_by: string; approval_receipt_id: string } | null
   device: DeviceTarget
   reachability?: DeviceReachability | null
+  network_coverage?: DeviceNetworkCoverage | null
   interfaces: DeviceInterface[]
   locator_history: DeviceLocatorHistory[]
   services: DeviceService[]

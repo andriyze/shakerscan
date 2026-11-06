@@ -354,6 +354,50 @@ class DeviceRequestCollectionUpdate(BaseModel):
         return self
 
 
+def _network_coverage(network_role: Any, addresses: Any) -> dict[str, Any] | None:
+    """The latest scan's CDN-edge label and per-address summary, without per-address services."""
+    def decoded(value: Any) -> Any:
+        if isinstance(value, str):
+            try:
+                return json.loads(value)
+            except ValueError:
+                return None
+        return value
+
+    role = decoded(network_role)
+    listed = decoded(addresses)
+    summary = [
+        {key: item.get(key) for key in (
+            "address", "primary", "reachability_status", "complete", "confirmed_services_count",
+            "not_scanned",
+        )} | ({"network_role": item["network_role"]} if isinstance(item.get("network_role"), dict) else {})
+        for item in (listed if isinstance(listed, list) else []) if isinstance(item, dict)
+    ][:16]
+    if not isinstance(role, dict) and not summary:
+        return None
+    return {"network_role": role if isinstance(role, dict) else None, "addresses": summary}
+
+
+def _incomplete_tcp_ranges(coverage: Any) -> list[str]:
+    """Port ranges (``START-END``) a stored posture result's latest attempts left incomplete."""
+    if isinstance(coverage, str):
+        try:
+            coverage = json.loads(coverage)
+        except ValueError:
+            return []
+    ranges: list[str] = []
+    for entry in coverage if isinstance(coverage, list) else []:
+        if not isinstance(entry, dict):
+            continue
+        incomplete = {str(stage) for stage in entry.get("tcp_ranges_incomplete") or []}
+        for item in entry.get("tcp_ranges") or []:
+            spec = str((item or {}).get("ports") or "") if isinstance(item, dict) else ""
+            if str(item.get("stage")) in incomplete and re.fullmatch(r"[0-9]{1,5}-[0-9]{1,5}", spec):
+                if spec not in ranges:
+                    ranges.append(spec)
+    return ranges[:16]
+
+
 class DeviceScanRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     profile: Literal["inventory", "posture", "thorough"] = "inventory"
@@ -374,6 +418,28 @@ class DeviceScanRequest(BaseModel):
     udp_ports: list[int] | None = Field(default=None, max_length=1024)
     request_collection_environment_ids: dict[str, str | None] = Field(default_factory=dict, max_length=8)
     request_collection_ids: list[str] = Field(default_factory=list, max_length=8)
+    server_name: Optional[str] = Field(
+        default=None,
+        max_length=253,
+        description=(
+            "Host/SNI name to examine an explicitly authorized origin address under (for example "
+            "the application's name when the device is its origin server behind a CDN). It "
+            "changes the name sent, never the address connected to."
+        ),
+    )
+
+    @field_validator("server_name")
+    @classmethod
+    def validate_server_name(cls, value: Optional[str]) -> Optional[str]:
+        if value is None or not str(value).strip():
+            return None
+        name = str(value).strip().rstrip(".").lower()
+        if not re.fullmatch(
+            r"(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?",
+            name,
+        ):
+            raise ValueError("server_name must be a DNS host name")
+        return name
 
     @field_validator('udp_ports', mode='before')
     @classmethod
@@ -1231,7 +1297,9 @@ async def get_device(
                          FROM scans s WHERE s.id=d.last_scan_id) AS last_posture_complete,
                       (SELECT s.result->'device_posture'->'decision'->>'decision'
                          FROM scans s WHERE s.id=d.last_scan_id) AS last_posture_decision,
-                      (SELECT s.result->'device_posture'->'reachability' FROM scans s WHERE s.id=d.last_scan_id) AS last_reachability
+                      (SELECT s.result->'device_posture'->'reachability' FROM scans s WHERE s.id=d.last_scan_id) AS last_reachability,
+                      (SELECT s.result->'device_posture'->'network_role' FROM scans s WHERE s.id=d.last_scan_id) AS last_network_role,
+                      (SELECT s.result->'device_posture'->'addresses' FROM scans s WHERE s.id=d.last_scan_id) AS last_addresses
                FROM device_targets d LEFT JOIN device_policies p ON p.id=d.policy_id WHERE d.id=$1""",
             device_uuid,
         )
@@ -1284,6 +1352,9 @@ async def get_device(
         "authorization": standing,
         "service_intelligence": shared_services,
         "reachability": device_payload.get("last_reachability"),
+        "network_coverage": _network_coverage(
+            device_payload.pop("last_network_role", None), device_payload.pop("last_addresses", None),
+        ),
         "interfaces": [_decode_device_row(item) for item in interfaces],
         "locator_history": [_decode_device_row(item) for item in locator_history],
         "services": [_decode_device_row(item) for item in services],
@@ -1648,6 +1719,15 @@ async def scan_device(device_id: str, request: DeviceScanRequest):
             device_uuid,
         )
         observed_tcp_ports = list(dict.fromkeys(int(row["port"]) for row in observed_tcp_rows))
+        # Resumable full TCP sweep: the ranges the latest posture scan left incomplete (a budget
+        # or health stop) run first next time. Every range still runs when the budget allows.
+        latest_coverage = await conn.fetchval(
+            """SELECT result->'device_posture'->'address_coverage' FROM scans
+               WHERE device_target_id=$1 AND run_kind='device_posture' AND status='completed'
+               ORDER BY created_at DESC LIMIT 1""",
+            device_uuid,
+        )
+        tcp_resume_ranges = _incomplete_tcp_ranges(latest_coverage)
         policy_tcp_ports = list(dict.fromkeys(
             int(port)
             for rule in policy_payload["rules"] if isinstance(rule, dict)
@@ -1700,6 +1780,8 @@ async def scan_device(device_id: str, request: DeviceScanRequest):
                 "request_collection": collection_tcp_ports,
             },
             "expected_ssh_host_keys": expected_ssh_host_keys,
+            "device_server_name": request.server_name,
+            "device_tcp_resume_ranges": tcp_resume_ranges,
             "device_shell_plan": approved_shell_plan if "agent-confirmed-ssh-shell" in capability_ids else None,
             "device_policy": {"id": str(policy["id"]), "name": policy["name"], "rules": policy_payload["rules"]},
             "approval_receipt_id": request.approval_receipt_id,

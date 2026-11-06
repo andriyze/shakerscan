@@ -22,7 +22,7 @@ import ssl
 import tempfile
 import time
 import urllib.parse
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Callable
 
 try:
@@ -52,6 +52,8 @@ try:
     )
     from .device_shell import validate_shell_plan
     from .device_protocols import discover_core_device_protocols
+    from .cdn_edges import edge_from_headers, header_network_role, network_role as cdn_network_role
+    from .device_service_identity import address_coverage, identify_device_services, identify_device_udp
     from .device_safety import DeviceSafetyGovernor, check_device_health, validate_safety_request
     from .ssh_scanner import DEFAULT_SSH_HOST_REVIEW_BUNDLES, full_ssh_scan
 except ImportError:  # pragma: no cover - flat scanner runtime
@@ -71,6 +73,8 @@ except ImportError:  # pragma: no cover - flat scanner runtime
     )
     from device_shell import validate_shell_plan
     from device_protocols import discover_core_device_protocols
+    from cdn_edges import edge_from_headers, header_network_role, network_role as cdn_network_role
+    from device_service_identity import address_coverage, identify_device_services, identify_device_udp
     from device_safety import DeviceSafetyGovernor, check_device_health, validate_safety_request
     from ssh_scanner import DEFAULT_SSH_HOST_REVIEW_BUNDLES, full_ssh_scan
 
@@ -105,6 +109,13 @@ DEVICE_CLASS_TCP_PORTS = {
     "conference": (80, 443, 554, 1720, 1935, 5060, 5061, 8000, 8443, 8554),
     "building": (80, 102, 443, 502, 1883, 4840, 5683, 8000, 20000, 44818, 47808),
     "industrial": (80, 102, 443, 502, 1883, 4840, 5683, 20000, 44818, 47808),
+    # An internet-facing or internal server: remote administration, mail, VPN, databases,
+    # caches, brokers and container control planes, checked before the full sweep.
+    "server": (
+        21, 22, 25, 53, 80, 110, 143, 443, 445, 465, 587, 993, 995, 1194, 1433, 1521, 1723,
+        2049, 2375, 2376, 3306, 3389, 5432, 5672, 5900, 5984, 6379, 6443, 8080, 8443, 9042,
+        9200, 9300, 11211, 27017,
+    ),
 }
 TV_MANUFACTURER_TCP_PORTS = {
     # Vizio SmartCast uses HTTPS/7345 on current firmware and HTTPS/9000 on
@@ -251,6 +262,49 @@ async def resolve_device_address(
         if admitted:
             return admitted[0]
     return addresses[0]
+
+
+async def resolve_device_addresses(
+    locator: str,
+    *,
+    timeout: float = 5.0,
+    admit: Callable[[str], bool] | None = None,
+) -> tuple[list[str], list[str]]:
+    """Every A/AAAA address of ``locator``: (admitted, refused by the destination policy).
+
+    A device scan pins each stage to one address; a name with several addresses is examined as
+    one pinned child per admitted address, so no authorized address disappears behind the
+    lowest-sorted one. Refused addresses are returned so the result can name them.
+    """
+    try:
+        return [canonical_device_address(locator)], []
+    except ValueError:
+        pass
+    loop = asyncio.get_running_loop()
+    try:
+        infos = await asyncio.wait_for(
+            loop.getaddrinfo(locator, None, type=socket.SOCK_STREAM),
+            timeout=timeout,
+        )
+    except (TimeoutError, OSError, socket.gaierror) as exc:
+        raise ValueError(f"device locator could not be resolved: {type(exc).__name__}") from exc
+    addresses: list[str] = []
+    for info in infos:
+        try:
+            address = canonical_device_address(str(info[4][0]).split("%", 1)[0])
+        except (ValueError, IndexError, TypeError):
+            continue
+        if address not in addresses:
+            addresses.append(address)
+    if not addresses:
+        raise ValueError("device locator resolved to no usable IP address")
+    addresses.sort(key=lambda value: (
+        ipaddress.ip_address(value).version,
+        int(ipaddress.ip_address(value)),
+    ))
+    if admit is None:
+        return addresses, []
+    return [item for item in addresses if admit(item)], [item for item in addresses if not admit(item)]
 
 
 def private_network_targets_policy(raw: Any = None) -> str:
@@ -451,6 +505,11 @@ def _service_from_element(port_elem: Any) -> dict[str, Any]:
     state_reason = str(state_elem.get("reason") if state_elem is not None else "")
     service_elem = port_elem.find("service")
     service_name = str(service_elem.get("name") if service_elem is not None else "unknown").lower()
+    method = str(service_elem.get("method") if service_elem is not None else "").lower() or None
+    port_hint = None
+    if method == "table":
+        # Nmap's port table names the port, not the listener: a hint, never the service.
+        port_hint, service_name = service_name or None, "unknown"
     tunnel = str(service_elem.get("tunnel") if service_elem is not None else "").lower()
     if tunnel == "ssl" and service_name == "http":
         service_name = "https"
@@ -461,6 +520,8 @@ def _service_from_element(port_elem: Any) -> dict[str, Any]:
         "state": state,
         "state_reason": state_reason or None,
         "service_name": service_name or "unknown",
+        "detection_method": method,
+        **({"port_hint": port_hint} if port_hint else {}),
         "product": str(service_elem.get("product") or "") if service_elem is not None else "",
         "version": str(service_elem.get("version") or "") if service_elem is not None else "",
         "extra_info": str(service_elem.get("extrainfo") or "") if service_elem is not None else "",
@@ -756,23 +817,36 @@ async def _run_naabu_tcp_scope_discovery(
     cancel_check: Any = None,
     max_port_probes_per_second: float = 250.0,
     stage_callback: Any = None,
+    explicit_ports: tuple[int, ...] | None = None,
+    resume_first: tuple[str, ...] = (),
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, Any], dict[str, Any]]:
     rate = max(1, int(max_port_probes_per_second or 1))
+    if explicit_ports is not None:
+        # A declared port set (a CDN edge's proxied web ports): that set is the whole scope.
+        priority_ports = tuple(explicit_ports)
     priority_spec = ",".join(str(port) for port in sorted(set(priority_ports)))
     chunks: list[dict[str, Any]] = []
     if priority_spec:
         chunks.append({
             "stage": "tcp_priority_discovery", "args": ["-p", priority_spec],
-            "count": len(set(priority_ports)), "required": not full_tcp,
+            "count": len(set(priority_ports)),
+            "required": explicit_ports is not None or not full_tcp,
         })
-    if full_tcp:
+    if explicit_ports is not None:
+        pass
+    elif full_tcp:
         ranges = _full_tcp_ranges()
-        for index, (start, end) in enumerate(ranges, start=1):
-            chunks.append({
-                "stage": f"tcp_scope_range_{index}_of_{len(ranges)}",
-                "args": ["-p", f"{start}-{end}"],
-                "count": end - start + 1, "required": True,
-            })
+        range_chunks = [{
+            "stage": f"tcp_scope_range_{index}_of_{len(ranges)}",
+            "args": ["-p", f"{start}-{end}"],
+            "count": end - start + 1, "required": True,
+        } for index, (start, end) in enumerate(ranges, start=1)]
+        # Resumable sweep: ranges an earlier, budget-cut scan left incomplete run first, so
+        # successive scans progress through the whole range instead of repeating its start.
+        # Every range still runs when the budget allows; earlier coverage is never assumed.
+        resume = {str(item) for item in resume_first}
+        range_chunks.sort(key=lambda chunk: chunk["args"][-1] not in resume)
+        chunks.extend(range_chunks)
     else:
         chunks.append({
             "stage": "tcp_scope_top_100", "args": ["-top-ports", "100"],
@@ -877,7 +951,10 @@ async def _run_naabu_tcp_scope_discovery(
         "elapsed_seconds": round(time.monotonic() - started, 3),
         "rate_limit_per_second": rate,
         "scan_type": "connect",
-        "scope": "all_tcp" if full_tcp else "top_100_plus_priority",
+        "scope": (
+            "declared_ports" if explicit_ports is not None
+            else "all_tcp" if full_tcp else "top_100_plus_priority"
+        ),
         "required_port_count": total_required_ports,
         "completed_required_port_count": completed_required_ports,
         "failed_required_stages": failed_required_stages,
@@ -1005,6 +1082,7 @@ async def _run_tcp_scope_discovery(
     max_port_probes_per_second: float = 250.0,
     extra_priority_ports: tuple[int, ...] = (),
     stage_callback: Any = None,
+    resume_first: tuple[str, ...] = (),
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, Any], dict[str, Any]]:
     """Run Naabu as the authoritative TCP discovery engine.
 
@@ -1027,6 +1105,9 @@ async def _run_tcp_scope_discovery(
             "reachable_open_port_inventory_complete": False,
             "incomplete_reasons": ["naabu_unavailable"], "chunk_receipts": [],
         }
+    explicit_ports = None
+    if len(profile.tcp_args) == 2 and profile.tcp_args[0] == "-p":
+        explicit_ports = tuple(int(port) for port in profile.tcp_args[1].split(","))
     return await _run_naabu_tcp_scope_discovery(
         locator,
         full_tcp="-p-" in profile.tcp_args,
@@ -1035,6 +1116,8 @@ async def _run_tcp_scope_discovery(
         cancel_check=cancel_check,
         max_port_probes_per_second=max_port_probes_per_second,
         stage_callback=stage_callback,
+        explicit_ports=explicit_ports,
+        resume_first=resume_first,
     )
 
 
@@ -1051,6 +1134,7 @@ async def _nmap_scan(
     prefetched_tcp_scope: tuple[
         list[dict[str, Any]], list[dict[str, Any]], dict[str, Any], dict[str, Any]
     ] | None = None,
+    resume_first: tuple[str, ...] = (),
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, Any], list[dict[str, Any]], dict[str, Any]]:
     receipts: list[dict[str, Any]] = []
     services_by_key: dict[tuple[str, int], dict[str, Any]] = {}
@@ -1081,6 +1165,7 @@ async def _nmap_scan(
             max_port_probes_per_second=max_port_probes_per_second,
             extra_priority_ports=extra_priority_ports,
             stage_callback=stage_callback,
+            resume_first=resume_first,
         )
     else:
         tcp_services, _tcp_uncertain, tcp_identity, original_receipt = prefetched_tcp_scope
@@ -1298,6 +1383,12 @@ async def _probe_http(
         if not _HTTP_STATUS.match(data):
             return None
         status_line = data.split(b"\r\n", 1)[0].decode("latin-1", "replace")
+        response_headers = {}
+        for line in data.split(b"\r\n\r\n", 1)[0].split(b"\r\n")[1:40]:
+            name, sep, value = line.partition(b":")
+            if sep:
+                response_headers[name.decode("latin-1").strip()] = value.decode("latin-1").strip()[:200]
+        cdn_provider = edge_from_headers(response_headers)
         origin = f"{'https' if tls else 'http'}://{_format_origin_host(origin_locator or connect_address)}:{port}"
         return {
             "origin": origin,
@@ -1309,6 +1400,7 @@ async def _probe_http(
             "status_line": status_line,
             "tls": tls,
             "peer_certificate_present": bool(peer_cert),
+            **({"cdn_provider": cdn_provider} if cdn_provider else {}),
         }
     except (TimeoutError, OSError, ssl.SSLError, asyncio.IncompleteReadError):
         return None
@@ -1604,7 +1696,187 @@ def _reachability_only_result(
     }
 
 
+MAX_ADDRESS_CHILDREN = 8
+MIN_CHILD_BUDGET_SECONDS = 15 * 60
+
+
+def _server_name(value: Any) -> str | None:
+    """The Host/SNI name an origin address is examined under (a DNS name, never a URL)."""
+    raw = str(value or "").strip().rstrip(".").lower()
+    if not raw or len(raw) > 253 or not _HOST_RE.fullmatch(raw):
+        return None
+    try:
+        ipaddress.ip_address(raw)
+        return None
+    except ValueError:
+        return raw
+
+
+def _profile_budget_seconds(options: dict[str, Any]) -> int:
+    profile_name = str(options.get("device_profile") or "posture").lower()
+    resolved_budget = options.get("resolved_budget") if isinstance(options.get("resolved_budget"), dict) else {}
+    try:
+        configured_minutes = int(resolved_budget.get("max_duration_minutes") or 0)
+    except (TypeError, ValueError):
+        configured_minutes = 0
+    if configured_minutes > 0:
+        return configured_minutes * 60
+    return DEFAULT_PROFILE_BUDGET_SECONDS.get(profile_name, DEFAULT_PROFILE_BUDGET_SECONDS["posture"])
+
+
 async def run_device_posture_scan(locator: str, options: dict[str, Any]) -> dict[str, Any]:
+    """Scan one authorized device locator, one pinned child per admitted A/AAAA address.
+
+    Every stage of a child stays pinned to its one address (``resolve_device_address`` keeps
+    that contract). A name with several addresses used to be examined on the lowest-sorted
+    admitted one only; each admitted address is now its own child, run in turn within the
+    scan's budget, and the result merges them without hiding which address said what.
+    """
+    locator = normalize_device_locator(locator)
+    if options.get("_pinned_address"):
+        return await _run_pinned_device_posture_scan(locator, options)
+    try:
+        canonical_device_address(locator)
+        return await _run_pinned_device_posture_scan(locator, options)
+    except ValueError:
+        pass
+    destination_environment, destination_policy = device_destination_context(options)
+    try:
+        admitted, refused = await resolve_device_addresses(
+            locator,
+            admit=lambda address: device_destination_admitted(
+                address, environment=destination_environment, policy=destination_policy,
+            ),
+        )
+    except ValueError:
+        # The pinned path reports an unresolvable name exactly as before.
+        return await _run_pinned_device_posture_scan(locator, options)
+    if len(admitted) <= 1:
+        return await _run_pinned_device_posture_scan(locator, options)
+    selected = admitted[:MAX_ADDRESS_CHILDREN]
+    share_minutes = max(
+        MIN_CHILD_BUDGET_SECONDS, _profile_budget_seconds(options) // len(selected),
+    ) // 60
+    progress_callback = options.get("_progress_callback")
+    children: list[dict[str, Any]] = []
+    for index, address in enumerate(selected, start=1):
+        await _call_stage_callback(progress_callback, {
+            "phase": "device_inventory", "progress": 10,
+            "details": {"address_index": index, "address_count": len(selected)},
+        })
+        child_options = dict(options)
+        child_options["_pinned_address"] = address
+        child_options["resolved_budget"] = {
+            **(options.get("resolved_budget") if isinstance(options.get("resolved_budget"), dict) else {}),
+            "max_duration_minutes": share_minutes,
+        }
+        children.append(await _run_pinned_device_posture_scan(locator, child_options))
+    return merge_address_children(
+        locator, children,
+        not_scanned=[{"address": item, "reason": "address_child_limit"} for item in admitted[MAX_ADDRESS_CHILDREN:]]
+        + [{"address": item, "reason": "refused_by_destination_policy"} for item in refused],
+    )
+
+
+def merge_address_children(
+    locator: str, children: list[dict[str, Any]], *, not_scanned: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """One device result from pinned per-address children.
+
+    The first child stays the primary (its posture is the device's familiar view); services are
+    the union by transport and port with the addresses that showed each; findings carry the
+    address that produced them; completeness holds only when every child was complete; and
+    ``addresses`` lists every child's own reachability, completeness and coverage.
+    """
+    primary = json.loads(json.dumps(children[0], default=str))
+    posture = primary.setdefault("device_posture", {})
+    services: dict[tuple[str, int], dict[str, Any]] = {}
+    findings: list[dict[str, Any]] = []
+    addresses: list[dict[str, Any]] = []
+    coverage: list[dict[str, Any]] = []
+    web_origins: dict[str, dict[str, Any]] = {}
+    runtime_destinations: list[dict[str, Any]] = []
+    complete = True
+    execution_complete = True
+    incomplete_stages: list[str] = list((posture.get("completeness") or {}).get("incomplete_stages") or [])
+    online = False
+    for index, child in enumerate(children):
+        child_posture = child.get("device_posture") if isinstance(child.get("device_posture"), dict) else {}
+        address = str(child.get("resolved_target") or child_posture.get("resolved_target") or "")
+        child_completeness = child_posture.get("completeness") if isinstance(child_posture.get("completeness"), dict) else {}
+        reachability = child_posture.get("reachability") if isinstance(child_posture.get("reachability"), dict) else {}
+        online = online or reachability.get("status") == "online"
+        complete = complete and bool(child_completeness.get("complete"))
+        execution_complete = execution_complete and bool(child_completeness.get("execution_complete", child_completeness.get("complete")))
+        if index:
+            incomplete_stages.extend(
+                f"address:{address}:{stage}" for stage in child_completeness.get("incomplete_stages") or []
+            )
+        addresses.append({
+            "address": address,
+            "primary": index == 0,
+            "reachability_status": reachability.get("status"),
+            "complete": bool(child_completeness.get("complete")),
+            "confirmed_services_count": len(child_posture.get("services") or []),
+            "network_role": child_posture.get("network_role"),
+            "services": [
+                {key: service.get(key) for key in ("transport", "port", "service_name", "product", "version", "identity")}
+                for service in child_posture.get("services") or [] if isinstance(service, dict)
+            ][:256],
+        })
+        coverage.extend(item for item in child_posture.get("address_coverage") or [] if isinstance(item, dict))
+        for service in child_posture.get("services") or []:
+            if not isinstance(service, dict) or service.get("port") is None:
+                continue
+            key = (str(service.get("transport") or "tcp"), int(service["port"]))
+            merged = services.setdefault(key, {**service, "observed_addresses": []})
+            if address and address not in merged["observed_addresses"]:
+                merged["observed_addresses"].append(address)
+        for finding in child.get("findings") or []:
+            if not isinstance(finding, dict):
+                continue
+            finding = dict(finding)
+            evidence = dict(finding.get("evidence") or {}) if isinstance(finding.get("evidence"), dict) else {}
+            evidence.setdefault("connect_address", address)
+            finding["evidence"] = evidence
+            findings.append(finding)
+        for origin in child_posture.get("web_origins") or []:
+            if isinstance(origin, dict) and origin.get("origin"):
+                web_origins.setdefault(str(origin["origin"]), dict(origin))
+        runtime_destinations.extend(
+            item for item in child_posture.get("runtime_destinations") or [] if isinstance(item, dict)
+        )
+    for item in not_scanned or ():
+        # An authorized address left out is missing coverage; one the destination policy refuses
+        # was never in scope, so it is named without making the scan partial.
+        if item["reason"] != "refused_by_destination_policy":
+            complete = False
+            incomplete_stages.append(f"address:{item['address']}:{item['reason']}")
+        addresses.append({"address": item["address"], "primary": False, "not_scanned": item["reason"]})
+    completeness = dict(posture.get("completeness") or {})
+    completeness.update({
+        "complete": complete,
+        "execution_complete": execution_complete,
+        "incomplete_stages": list(dict.fromkeys(incomplete_stages)),
+        "address_count": len(addresses),
+        "confirmed_services_count": len(services),
+    })
+    posture["completeness"] = completeness
+    posture["services"] = sorted(services.values(), key=lambda row: (str(row.get("transport")), int(row.get("port") or 0)))
+    posture["addresses"] = addresses
+    posture["address_coverage"] = coverage
+    posture["web_origins"] = sorted(web_origins.values(), key=lambda item: (int(item.get("port") or 0), str(item.get("scheme") or "")))
+    posture["runtime_destinations"] = runtime_destinations[:64]
+    score, grade = _score(findings, complete=execution_complete) if online else (None, None)
+    decision, rationale = _device_decision(findings, complete=complete)
+    posture["decision"] = {**(posture.get("decision") or {}), "decision": decision, "rationale": rationale}
+    primary["findings"] = findings
+    primary["result"] = {"score": score, "grade": grade}
+    primary["target"] = locator
+    return primary
+
+
+async def _run_pinned_device_posture_scan(locator: str, options: dict[str, Any]) -> dict[str, Any]:
     locator = normalize_device_locator(locator)
     profile_name = str(options.get("device_profile") or "posture").lower()
     if profile_name not in DEVICE_PROFILES:
@@ -1719,12 +1991,17 @@ async def run_device_posture_scan(locator: str, options: dict[str, Any]) -> dict
     safety.authorize("target_health_baseline", "readonly")
     destination_environment, destination_policy = device_destination_context(options)
     try:
-        resolved_address = await resolve_device_address(
-            locator,
-            admit=lambda address: device_destination_admitted(
-                address, environment=destination_environment, policy=destination_policy,
-            ),
-        )
+        if options.get("_pinned_address"):
+            # A child of a multi-address scan: the parent resolved the name once; this child is
+            # pinned to one of its admitted addresses and still validated below.
+            resolved_address = canonical_device_address(options["_pinned_address"])
+        else:
+            resolved_address = await resolve_device_address(
+                locator,
+                admit=lambda address: device_destination_admitted(
+                    address, environment=destination_environment, policy=destination_policy,
+                ),
+            )
     except ValueError as exc:
         reachability = unresolved_reachability(locator, exc)
         safety.record_health(_reachability_checkpoint(reachability, stage="reachability_preflight"))
@@ -1743,6 +2020,21 @@ async def run_device_posture_scan(locator: str, options: dict[str, Any]) -> dict
     resolved_address = validate_device_destination(
         resolved_address, environment=destination_environment, policy=destination_policy,
     )
+    server_name = _server_name(options.get("device_server_name"))
+    # A shared CDN edge is the provider's network: only the web ports it proxies are examined
+    # there, and the result says the origin network was not assessed.
+    edge_role = cdn_network_role(resolved_address)
+    edge_ports_only = edge_role is not None
+    if edge_role is not None:
+        profile = replace(
+            profile,
+            tcp_args=("-p", ",".join(str(port) for port in edge_role["tcp_ports_examined"])),
+            udp_ports=(),
+        )
+    resume_first = tuple(
+        str(item) for item in (options.get("device_tcp_resume_ranges") or [])
+        if isinstance(item, str) and re.fullmatch(r"[0-9]{1,5}-[0-9]{1,5}", item)
+    )[:16]
 
     async def scan_stage_callback(event: dict[str, Any]) -> bool | None:
         kind = str(event.get("kind") or "")
@@ -1815,6 +2107,7 @@ async def run_device_posture_scan(locator: str, options: dict[str, Any]) -> dict
             max_port_probes_per_second=safety_profile.max_port_probes_per_second,
             extra_priority_ports=extra_priority_ports,
             stage_callback=scan_stage_callback,
+            resume_first=resume_first,
         )
         fallback_services, _fallback_uncertain, _fallback_identity, fallback_receipt = prefetched_tcp_scope
         reachability = corroborate_device_reachability(
@@ -1872,12 +2165,26 @@ async def run_device_posture_scan(locator: str, options: dict[str, Any]) -> dict
         extra_priority_ports=extra_priority_ports,
         stage_callback=scan_stage_callback,
         prefetched_tcp_scope=prefetched_tcp_scope,
+        resume_first=resume_first,
     )
+    if not safety.halted and await ensure_active("protocol identification"):
+        # Nmap's unknown, tcpwrapped and table-only ports are offered the native adapters; a
+        # port Nmap identified gets only its own adapter for the structured fields.
+        safety.authorize(
+            "service_protocol_identification", "readonly",
+            side_effects="bounded read-only protocol commands without credentials",
+        )
+        await _call_stage_callback(progress_callback, {"phase": "device_service_fingerprinting", "progress": 80})
+        tool_receipts.append(await identify_device_services(
+            resolved_address, services, server_name=server_name, deadline=deadline,
+            max_concurrency=safety_profile.max_concurrency,
+        ))
     await _call_stage_callback(progress_callback, {"phase": "device_protocol_discovery", "progress": 82})
     if not safety.halted:
         safety.authorize("core_protocol_discovery", "readonly")
     if not safety.halted and await ensure_active("core protocol discovery"):
         protocol_results = await discover_core_device_protocols(resolved_address, udp_ports=profile.udp_ports)
+        protocol_results.extend(await identify_device_udp(resolved_address, profile.udp_ports))
     else:
         protocol_results = []
         scan_completeness["complete"] = False
@@ -1965,7 +2272,7 @@ async def run_device_posture_scan(locator: str, options: dict[str, Any]) -> dict
             resolved_address,
             services,
             cap=profile.web_probe_cap,
-            origin_locator=locator,
+            origin_locator=server_name or locator,
             max_concurrency=safety_profile.max_concurrency,
             max_requests_per_second=safety_profile.max_requests_per_second,
         )
@@ -1989,6 +2296,11 @@ async def run_device_posture_scan(locator: str, options: dict[str, Any]) -> dict
         else:
             scan_completeness["overall_budget_exhausted"] = True
             scan_completeness.setdefault("incomplete_stages", []).append("overall_device_budget_exhausted")
+    if edge_role is None:
+        # A CDN outside the published ranges is named by the headers it added to an answer:
+        # the listeners found here are the edge's, and the origin network was not assessed.
+        provider = next((str(item["cdn_provider"]) for item in web_origins if item.get("cdn_provider")), None)
+        edge_role = header_network_role(provider) if provider else None
     origin_by_port = {int(origin["port"]): origin for origin in web_origins}
     for service in services:
         origin = origin_by_port.get(int(service["port"])) if service.get("transport") == "tcp" else None
@@ -2016,7 +2328,7 @@ async def run_device_posture_scan(locator: str, options: dict[str, Any]) -> dict
     if not safety.halted and await ensure_active("device application discovery"):
         application_surface = await discover_device_application_surface(
             connect_address=resolved_address,
-            origin_locator=locator,
+            origin_locator=server_name or locator,
             profile=profile_name,
             safety_profile=safety_profile.name,
             device_name=str(options.get("device_name") or ""),
@@ -2276,7 +2588,10 @@ async def run_device_posture_scan(locator: str, options: dict[str, Any]) -> dict
             "requested_capabilities": requested_capabilities,
             "completeness": {
                 "complete": complete,
-                "tcp_scope": "all_65535" if "-p-" in profile.tcp_args else "top_100",
+                "tcp_scope": (
+                    "cdn_edge_proxied_ports" if edge_ports_only
+                    else "all_65535" if "-p-" in profile.tcp_args else "top_100"
+                ),
                 "tcp_priority_ports": sorted(set(PRIORITY_TCP_PORTS) | set(extra_priority_ports)),
                 "udp_ports_requested": list(profile.udp_ports),
                 "confirmed_services_count": len(services),
@@ -2288,6 +2603,16 @@ async def run_device_posture_scan(locator: str, options: dict[str, Any]) -> dict
                 "web_probe_truncated": len([s for s in services if s.get("transport") == "tcp" and s.get("state") == "open"]) > profile.web_probe_cap,
                 **scan_completeness,
             },
+            "address_coverage": [address_coverage(
+                resolved_address, tool_receipts=tool_receipts, udp_ports=profile.udp_ports,
+                tcp_scope=(
+                    "cdn_edge_proxied_ports" if edge_ports_only
+                    else "all_65535" if "-p-" in profile.tcp_args else "top_100"
+                ),
+                network_role=edge_role,
+            )],
+            **({"network_role": edge_role} if edge_role else {}),
+            **({"server_name": server_name} if server_name else {}),
         },
         "scan_metadata": {
             "run_kind": "device_posture",
