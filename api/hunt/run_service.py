@@ -895,6 +895,8 @@ class HuntRunService:
             credential_uses = await read_credential_uses(connection, hunt_uuid)
             secret_uses = await read_hunt_uses(connection, hunt_uuid)
             pending_permissions = await pending_summary(connection, hunt_uuid)
+            from .saved_logins import safe_hunt_view as saved_login_view
+            saved_logins = await saved_login_view(connection, row)
             result = await with_live_briefing(connection, public_hunt_run(row), row)
         result["actions"] = [public_hunt_action(action) for action in actions]
         result["outcome_summary"] = hunt_action_outcome_summary(result["actions"])
@@ -920,6 +922,8 @@ class HuntRunService:
         result["discovered_secret_uses"] = secret_uses
         # Requests waiting for a person; the Hunt's own status never changes because of them.
         result["pending_permission_requests"] = pending_permissions
+        # Saved logins attached to this Hunt (reference, label, login URL, logins left; never a value).
+        result["saved_logins"] = saved_logins
         result["permission_requests_url"] = f"/hunts/{hunt_id}/permission-requests"
         return result
 

@@ -46,6 +46,19 @@ export interface HuntActionV2 {
   }
 }
 
+export interface HuntSavedLogin {
+  saved_login: string
+  profile_version: number
+  principal_label: string | null
+  auth_kind: string | null
+  login_url: string
+  logins_allowed: number
+  logins_used: number
+  logins_left: number
+  usable: boolean
+  attached_by: string
+}
+
 export interface HuntV2 {
   hunt_id: string
   target_kind: 'web' | 'api' | 'device' | 'network'
@@ -60,6 +73,12 @@ export interface HuntV2 {
   budget_amendable_dimensions?: string[]
   budget_amendments_url?: string
   budget_used: Record<string, number>
+  /** Saved logins a person attached: reference, label and login URL, never a value. */
+  saved_logins?: {
+    attached: HuntSavedLogin[]
+    available: Array<{saved_login: string; profile_version: number; principal_label: string | null; auth_kind: string}>
+    how_to_use?: string | null
+  }
   context_pack?: Record<string, unknown>
   target_skill?: import('./targetSkillApi').TargetSkillSnapshot | null
   capabilities?: Array<{

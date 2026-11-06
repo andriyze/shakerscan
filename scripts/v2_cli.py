@@ -598,7 +598,24 @@ def _hunt_start_payload(args: argparse.Namespace, contract: Mapping[str, Any]) -
         "capabilities": list(dict.fromkeys(args.capability)),
         "request_collection_ids": list(dict.fromkeys(args.collection_id)),
         "skill_ids": list(dict.fromkeys(args.skill_id)),
+        **({"saved_logins": _saved_logins(getattr(args, "saved_login", None) or ())}
+           if getattr(args, "saved_login", None) else {}),
     }
+
+
+def _saved_logins(values: Sequence[str]) -> list[dict[str, Any]]:
+    """``--saved-login PROFILE_ID[=LOGINS]`` as the start's ``saved_logins``."""
+    result: list[dict[str, Any]] = []
+    for raw in dict.fromkeys(str(item).strip() for item in values):
+        profile_id, separator, count = raw.partition("=")
+        item: dict[str, Any] = {"profile_id": profile_id.strip()}
+        if separator:
+            try:
+                item["max_logins"] = int(count)
+            except ValueError as exc:
+                raise CliError(f"--saved-login {raw!r}: the login count must be a number") from exc
+        result.append(item)
+    return result
 
 
 def _start_preauthorization(
@@ -1236,6 +1253,14 @@ def build_parser() -> argparse.ArgumentParser:
             + " or the full field name (primary_credential_profile_id, ...)"
         ),
     )
+    hunt_start.add_argument(
+        "--saved-login", action="append", default=[], metavar="PROFILE_ID[=LOGINS]",
+        help=(
+            "attach a saved login (a form or JSON login profile of the target) for this Hunt "
+            "(repeatable): the agent signs in with it by reference, never seeing its values, at "
+            "most LOGINS times (default 3) and only on its own login URL. Needs --active-testing"
+        ),
+    )
     hunt_start.add_argument("--capability", action="append", default=[])
     hunt_start.add_argument("--collection-id", action="append", default=[])
     hunt_start.add_argument(
@@ -1243,7 +1268,7 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "pre-authorize requests inside this bound (repeatable): budget.raise:2x, "
             "credential.use:<targets>, target.authorize:<patterns>, capability:state-changing, "
-            "capability:active-testing. Enterprise asks for your step-up first"
+            "capability:active-testing, login.use:<saved-login-id>. Enterprise asks for your step-up first"
         ),
     )
     hunt_start.add_argument(

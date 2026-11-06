@@ -10,6 +10,11 @@ start transaction, and no binding is created.
 Enterprise gateway sets after step-up; ``local`` on OSS). ``proposed_allow`` bounds, which the MCP
 start tool sends for the agent, become one pending ``preauthorization`` request: the agent cannot
 pre-authorize itself.
+
+``saved_logins`` a person attaches at start are checked before the Hunt row exists (each an
+active form or JSON login profile attached to the target, whose login URL can be read under the
+Hunt's authorization) and recorded with the start as the person's ``login.use`` pre-authorization
+and grant, with the login count the person chose (hunt/saved_logins.py).
 """
 from __future__ import annotations
 
@@ -21,7 +26,7 @@ from fastapi import HTTPException
 
 from .credential_uses import CREDENTIAL_NOT_ATTACHED, HuntCredentialRefusal, unattached_reference_refusal
 from .permission_bounds import parse_bounds
-from .permission_reasons import KIND_CREDENTIAL_USE, KIND_PREAUTHORIZATION
+from .permission_reasons import KIND_CREDENTIAL_USE, KIND_LOGIN_USE, KIND_PREAUTHORIZATION
 from .permission_store import pending_summary, raise_request, record_preauthorization
 from .permission_subjects import credential_kind_error
 from .start_contract import HuntStartContract
@@ -109,6 +114,23 @@ async def validate_start_credentials(
     return generic, preauthorized
 
 
+async def validate_start_saved_logins(conn: Any, contract: HuntStartContract, run: Mapping[str, Any]) -> None:
+    """Refuse a start whose saved logins cannot be attached, before the Hunt exists (``run`` is
+    the Hunt about to be inserted: target, context and the policy it will be governed by)."""
+    if not contract.saved_logins:
+        return
+    from .saved_logins import resolve_login_url, start_attach_subjects
+    try:
+        subjects = await start_attach_subjects(conn, run, contract.saved_logins)
+        for subject, _display, _logins in subjects:
+            await resolve_login_url(conn, run, subject["profile_id"])
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail={
+            "error": "saved_login_unavailable", "reason_code": "saved_login_unavailable",
+            "message": f"{exc}; no Hunt was started.",
+        }) from exc
+
+
 async def record_start_permissions(
     conn: Any, run: Mapping[str, Any], contract: HuntStartContract, preauthorized: Sequence[Any],
 ) -> dict[str, Any]:
@@ -117,9 +139,9 @@ async def record_start_permissions(
     Returns what the start response adds: the requests still pending for a person (the agent's
     proposed bounds), so the planner can tell the person which ``shakerscan approve`` to run.
     """
-    if not (contract.allow or contract.proposed_allow or preauthorized):
+    if not (contract.allow or contract.proposed_allow or preauthorized or contract.saved_logins):
         return {}
-    from .permission_grants import try_preauthorized_grant
+    from .permission_grants import apply_grant, try_preauthorized_grant
 
     person, proof = _owner(contract)
     async with conn.transaction():
@@ -141,6 +163,8 @@ async def record_start_permissions(
             )
             if request is not None:
                 await try_preauthorized_grant(conn, run, request)
+        if contract.saved_logins:
+            await _attach_start_saved_logins(conn, run, contract, person, proof, apply_grant)
         if contract.proposed_allow:
             bounds = parse_bounds(contract.proposed_allow)
             await raise_request(
@@ -151,4 +175,34 @@ async def record_start_permissions(
     return {"pending_permission_requests": await pending_summary(conn, run["id"])}
 
 
-__all__ = ["record_start_permissions", "validate_start_credentials"]
+async def _attach_start_saved_logins(
+    conn: Any, run: dict[str, Any], contract: HuntStartContract, person: str, proof: str, apply_grant: Any,
+) -> None:
+    """The person's start attachment: one ``login.use`` pre-authorization for the saved logins,
+    and one granted request per login with the count the person chose."""
+    from .permission_store import record_event
+    from .saved_logins import start_attach_subjects
+
+    ids = ",".join(item["profile_id"] for item in contract.saved_logins)
+    preauth = await record_preauthorization(
+        conn, hunt_id=run["id"], bounds=parse_bounds([f"{KIND_LOGIN_USE}:{ids}"]), created_by=person, proof=proof,
+    )
+    for subject, display, logins in await start_attach_subjects(conn, run, contract.saved_logins):
+        request, _created = await raise_request(
+            conn, run=run, kind=KIND_LOGIN_USE, reason_code="saved_login_not_attached",
+            subject=subject, display=display, actor=person, source="hunt_start",
+        )
+        if request is None or request["status"] != "pending":
+            continue
+        grant = await apply_grant(
+            conn, run=run, request=request, scope="hunt", choice={"logins": logins},
+            actor=person, via="preauthorization", preauthorization_id=preauth["id"],
+        )
+        await record_event(
+            conn, hunt_id=run["id"], request_id=request["id"], grant_id=grant["id"],
+            event="auto_granted", actor=person, source="hunt_start",
+            detail={"preauthorization_id": str(preauth["id"])},
+        )
+
+
+__all__ = ["record_start_permissions", "validate_start_credentials", "validate_start_saved_logins"]

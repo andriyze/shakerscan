@@ -897,7 +897,7 @@ try:
         bind_validated_receipts,
     )
     from hunt.credential_uses import HuntCredentialRefusal
-    from hunt.start_permissions import record_start_permissions, validate_start_credentials
+    from hunt.start_permissions import record_start_permissions, validate_start_credentials, validate_start_saved_logins
     from hunt.verification_credentials import (
         current_hunt_credential_scope,
         resolve_hunt_workflow_principal_contexts,
@@ -968,7 +968,7 @@ except ModuleNotFoundError:
         bind_validated_receipts,
     )
     from api.hunt.credential_uses import HuntCredentialRefusal
-    from api.hunt.start_permissions import record_start_permissions, validate_start_credentials
+    from api.hunt.start_permissions import record_start_permissions, validate_start_credentials, validate_start_saved_logins
     from api.hunt.verification_credentials import (
         current_hunt_credential_scope,
         resolve_hunt_workflow_principal_contexts,
@@ -13459,6 +13459,8 @@ async def _start_hunt_v2(contract: HuntStartContract) -> dict[str, Any]:
         context_pack["allowed_capabilities"] = list(allowed_capabilities)
         context_pack = await target_skill.attach_target_skill_snapshot(conn, target_uuid, context_pack, bound.context_section)
 
+        # Saved logins attached at start are checked (and their login URLs read) before the Hunt exists.
+        await validate_start_saved_logins(conn, contract, {"id": uuid.uuid4(), "target_kind": contract.target_kind, "target_id": db_target_id, "device_target_id": device_target_id, "context_pack": context_pack, "policy_json": policy})
         row = await conn.fetchrow(
             """INSERT INTO hunt_runs (
                    target_kind, target_id, device_target_id, objective, status, budget_profile,

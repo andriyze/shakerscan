@@ -14,6 +14,8 @@ whenever anything inside it was shortened:
 * counts: knowledge available on the target, pending instruction proposals, unresolved work;
 * interpretations: counts by kind and negative state, reopened dismissals, and a few headlines
   (open next steps, inconclusive experiments). Titles quoted from the target are withheld here;
+* saved logins: the logins a person attached to this Hunt (reference, principal label, login URL,
+  logins left) and the target's other saved logins (reference and label), never a value;
 * changed since the last Hunt: counts of endpoint, deployment, response, finding and subdomain
   changes from existing records, and up to five interpretations they affected (ids, states and
   the dependency that changed; no text).
@@ -371,6 +373,10 @@ async def live_sections(conn: Any, row: Mapping[str, Any]) -> dict[str, Any]:
             return {"usable": 0, "never_used": 0, "by_kind": {}, "list_with": "secrets.inspect"}
         return await briefing_counts(conn, target)
 
+    async def saved_logins() -> dict[str, Any]:
+        from .saved_logins import hunt_view
+        return await hunt_view(conn, item)
+
     async def continuation() -> dict[str, Any]:
         from .knowledge_continue import briefing_continuation
         return await briefing_continuation(conn, item)
@@ -383,6 +389,7 @@ async def live_sections(conn: Any, row: Mapping[str, Any]) -> dict[str, Any]:
     await section("unresolved", unresolved)
     await section("delegation", delegation)
     await section("discovered_secrets", discovered_secrets)
+    await section("saved_logins", saved_logins)
     return sections
 
 
@@ -403,6 +410,7 @@ async def with_live_briefing(conn: Any, result: dict[str, Any], row: Mapping[str
     briefing["proposals"] = live.get("proposals")
     briefing["unresolved"] = live.get("unresolved")
     briefing["discovered_secrets"] = live.get("discovered_secrets")
+    briefing["saved_logins"] = live.get("saved_logins")
     delegation = live.get("delegation")
     if isinstance(delegation, dict) and "available" not in delegation:
         authority = dict(briefing.get("authority") or {})

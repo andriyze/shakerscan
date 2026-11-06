@@ -23,6 +23,8 @@ SECRET_REF_PATTERN = r"^secret://[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}
 WITHHELD_REF_PATTERN = (
     r"^withheld://hunt/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/[1-9][0-9]{0,3}$"
 )
+# A saved login's reference: its credential profile id (api/hunt/saved_logins.py).
+SAVED_LOGIN_PATTERN = r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
 HTTP_EXCHANGE_PROPERTIES: Mapping[str, Any] = {
     "capture": {"type": "array", "maxItems": 16, "items": {
         "type": "object", "additionalProperties": False, "required": ["name"],
@@ -41,6 +43,11 @@ HTTP_EXCHANGE_PROPERTIES: Mapping[str, Any] = {
                 "description": ("A secret discovered on this target earlier (secret://<id>, from "
                     "secrets.inspect). The request must name its origin (scheme://host:port); the "
                     "secret is sent only there. The worker sends the value; it is never shown.")},
+            "saved_login": {"type": "string", "maxLength": 36, "pattern": SAVED_LOGIN_PATTERN,
+                "description": ("A saved login attached to this Hunt, by its profile id (briefing "
+                    "saved_logins). Only in the login's own POST to its login_url, with "
+                    "credential_field username or secret and a body_pointer. The worker fills the "
+                    "value; it is never shown. An unattached one raises a login.use request.")},
             "capture_name": {"type": "string", "pattern": _NAME},
             "principal": {"type": "string", "enum": ["primary", "secondary", "service"]},
             "profile_id": {"type": "string", "maxLength": 36},
@@ -119,10 +126,16 @@ def validate_exchange_input(values: Mapping[str, Any]) -> None:
     destinations: set[tuple[str, str]] = set()
     for binding in values.get("request_bindings") or ():
         sources = sum(key in binding for key in (
-            "source_action_id", "principal", "profile_id", "withheld_ref", "secret_ref"))
+            "source_action_id", "principal", "profile_id", "withheld_ref", "secret_ref", "saved_login"))
         if sources != 1 or (("body_pointer" in binding) == ("header" in binding)):
             raise ValueError("request binding requires one source and one body/header destination")
-        if "withheld_ref" in binding or "secret_ref" in binding:
+        if "saved_login" in binding:
+            if not re.fullmatch(SAVED_LOGIN_PATTERN, str(binding["saved_login"])):
+                raise ValueError("saved_login must be a saved login's profile id")
+            if binding.get("credential_field") not in {"username", "secret"} or "body_pointer" not in binding \
+                    or any(k in binding for k in ("capture_name", "profile_version", "prefix")):
+                raise ValueError("a saved login binds its username or secret into the request body only")
+        elif "withheld_ref" in binding or "secret_ref" in binding:
             if "withheld_ref" in binding and not re.fullmatch(WITHHELD_REF_PATTERN, str(binding["withheld_ref"])):
                 raise ValueError("withheld_ref must be a withheld://hunt/<action id>/<n> reference")
             if "secret_ref" in binding and not re.fullmatch(SECRET_REF_PATTERN, str(binding["secret_ref"])):

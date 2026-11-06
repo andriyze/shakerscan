@@ -2498,6 +2498,9 @@ class ArsenalClient:
                 # nor a person assertion.
                 payload.pop("secret_visibility", None)
                 payload.pop("allow_asserted_by", None)
+                # A saved login is attached by a person (start, or a login.use request the agent
+                # raises by binding it); the agent never attaches one itself.
+                payload.pop("saved_logins", None)
                 # The agent's bounds are a proposal for the person, never the person's own.
                 if "allow" in payload:
                     payload["proposed_allow"] = payload.pop("allow")

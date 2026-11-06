@@ -20440,7 +20440,8 @@ async def process_canonical_scanner_capability_job(
         )
         # The one secrecy boundary (runtime/public_secrecy.py): every observation of every phase,
         # and the error, before the receipt, the record, endpoint knowledge or a finding sees them.
-        secrecy = PublicSecrecy.for_headers(scanner_identity.headers)
+        from runtime.hunt_http_exchange import saved_login_known_values
+        secrecy = PublicSecrecy.for_headers(scanner_identity.headers, await saved_login_known_values(db_pool, hunt_id, target))
         observations = secrecy.observations(observations)
         # The tool's parsed output is published with the job result (the action's answer).
         typed_output = secrecy.value(typed_output)
