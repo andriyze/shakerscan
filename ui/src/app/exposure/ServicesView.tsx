@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState } from 'react'
 import Link from '@/components/WorkspaceLink'
-import { getServiceIntelligence, submitVerifyScan, type ListenerGroup, type ServiceCandidate, type ServicePage, type ServiceRecord, type ServiceTarget } from '@/lib/serviceIntelligence'
+import { getServiceIntelligence, submitVerifyScan, type ListenerGroup, type ServiceCandidate, type ServiceComponent, type ServicePage, type ServiceRecord, type ServiceTarget } from '@/lib/serviceIntelligence'
 import { useUrlFilters } from '@/lib/useUrlFilters'
 import { Button, Card, EmptyState, ErrorState } from '@/components/ui'
 
@@ -118,11 +118,56 @@ function groupsFor(target: ServiceTarget): ListenerGroup[] {
   }))
 }
 
+const ROLE: Record<string, string> = {
+  edge: 'Edge / proxy', web_server: 'Web server', framework: 'Framework', application: 'Application',
+  plugin: 'Plugin', service: 'Service',
+}
+const VERSION_STATUS: Record<string, string> = {
+  reported: 'reported by the product', inferred_range: 'inferred, not reported', unknown: 'version unknown',
+}
+const APPLICABILITY: Record<string, string> = {
+  affected: 'Affected (reported version in range)', not_affected: 'Not affected', unresolved: 'Unresolved',
+}
+const UNRESOLVED: Record<string, string> = {
+  product_probable: 'product only probable', version_not_reported: 'version not reported',
+  version_inferred: 'version inferred, not reported', distribution_package: 'distribution package may carry a backport',
+  advisory_range_unresolved: 'advisory range not comparable',
+}
+
+function ComponentRow({ component }: { component: ServiceComponent }) {
+  const claim = component.claims.version || component.claims.product
+  return <div className="rounded-sm border border-gray-800 p-3" data-testid="service-component">
+    <div className="flex flex-wrap items-baseline justify-between gap-2">
+      <h4 className="font-medium text-gray-200">{component.product}{component.version ? ` ${component.version}` : ''}<span className="ml-2 text-xs font-normal text-gray-500">{ROLE[component.role] || readable(component.role)} · {component.base_path}</span></h4>
+      <span className={`rounded-sm px-2 py-1 text-xs ${component.product_status === 'identified' ? 'bg-teal-500/10 text-teal-200' : 'bg-gray-800 text-gray-300'}`}>{component.product_status === 'identified' ? 'Identified' : 'Probable'}</span>
+    </div>
+    <p className="mt-1 text-xs text-gray-400">Version: {VERSION_STATUS[component.version_status] || readable(component.version_status)}{component.package_version ? ` · package ${component.package_version}` : ''}{component.distribution ? ` · ${component.distribution} package: a backported fix is possible` : ''}</p>
+    <p className="mt-1 break-all text-xs text-gray-500">Evidence: {readable(component.claims.product.basis)}{component.claims.product.source_field ? ` (${component.claims.product.source_field})` : ''}{component.claims.product.recipe_version ? ` · recipe ${component.claims.product.recipe_version}` : ''}{claim?.connected_address ? ` · ${claim.connected_address}` : ''}{claim?.host ? ` · Host ${claim.host}` : ''}{claim?.sni ? ` · SNI ${claim.sni}` : ''} · product {readable(component.freshness.product)}{component.claims.version ? `, version ${readable(component.freshness.version)}` : ''} · {when(component.last_seen_at)}</p>
+    {component.changes.map((change, index) => <p key={index} className="mt-1 text-xs text-amber-200">{change.kind === 'version_changed' ? `Version changed ${change.from} → ${change.to}` : 'New on this listener'} · {when(change.observed_at)}</p>)}
+    {component.advisories_not_affected && component.advisories_not_affected.count > 0 && <p className="mt-1 text-xs text-gray-500">{component.advisories_not_affected.count} advisories for this product exclude the reported version.</p>}
+  </div>
+}
+
+function ServiceComponents({ service }: { service: ServiceRecord }) {
+  const components = service.components || []
+  const unknowns = (service.component_unknowns || []).filter((item) => item.field === 'product')
+  return <>
+    <p className="text-gray-400">Each piece of software behind this listener, with its own evidence. A probable product or an inferred version is never treated as exact.</p>
+    {components.length === 0 && <p className="text-gray-500">No component identified. The product behind this listener is unknown.</p>}
+    {components.map((component) => <ComponentRow key={component.id} component={component} />)}
+    {unknowns.map((item) => <p key={`${item.role}:${item.base_path}`} className="text-xs text-gray-400">Unknown {ROLE[item.role]?.toLowerCase() || item.role} at {item.base_path}: no identity signal observed.</p>)}
+    {(service.advisory_follow_up || []).length > 0 && <>
+      <h4 className="pt-2 font-medium text-white">Missing evidence for advisory applicability</h4>
+      {(service.advisory_follow_up || []).map((item) => <p key={`${item.component_id}:${item.need}`} className="text-xs text-gray-400">{item.product} ({item.base_path}): {item.detail} {item.advisories} advisor{item.advisories === 1 ? 'y' : 'ies'} waiting{item.capability ? ` · ${item.capability}` : ''}</p>)}
+    </>}
+  </>
+}
+
 function ServiceDetails({ service, target, onClose }: { service: ServiceRecord; target: ServiceTarget; onClose: () => void }) {
   const [tab, setTab] = useState('overview')
   const panel = useRef<HTMLDivElement>(null)
   useEffect(() => { panel.current?.focus({ preventScroll: true }); panel.current?.scrollIntoView({ block: 'nearest' }) }, [service.id])
-  const tabs = ['overview', 'weaknesses', 'activities', 'evidence']
+  const tabs = ['overview', 'components', 'weaknesses', 'activities', 'evidence']
   return (
     <div ref={panel} tabIndex={-1} aria-label="Selected service" className="outline-hidden">
     <Card className="mt-4 p-5" data-testid="service-details">
@@ -157,6 +202,7 @@ function ServiceDetails({ service, target, onClose }: { service: ServiceRecord; 
           <p className="text-gray-400">{service.cve_candidates.length} CVE candidates · {service.cve_candidates.reduce((sum, candidate) => sum + candidate.exploit_references.length, 0)} public exploit references · {service.findings.length} exactly linked active findings.</p>
           <p className="text-xs text-gray-500">A supported generic capability is not a registered validator for a particular CVE. The evidence below determines what was actually demonstrated.</p>
         </>}
+        {tab === 'components' && <ServiceComponents service={service} />}
         {tab === 'weaknesses' && <>
           <p className="text-gray-400">{STATUS[service.intelligence_status] || readable(service.intelligence_status)}. Matching a banner or version never verifies a vulnerability.</p>
           {service.candidates_truncated && <p className="text-amber-300">Candidate list truncated; inspect the pinned snapshot for further matches.</p>}
@@ -165,6 +211,9 @@ function ServiceDetails({ service, target, onClose }: { service: ServiceRecord; 
             <span className="ml-2 rounded-sm bg-amber-500/10 px-2 py-1 text-xs text-amber-200">Candidate · {candidate.severity}{typeof candidate.cvss_score === 'number' ? ` · CVSS ${candidate.cvss_score.toFixed(1)}` : ''}</span>
             {candidate.known_exploited && <span className="ml-2 rounded-sm bg-red-500/15 px-2 py-1 text-xs font-medium text-red-200">Known exploited (CISA KEV{candidate.known_exploited.date_added ? `, added ${candidate.known_exploited.date_added}` : ''}){candidate.known_exploited.ransomware ? ' · used in ransomware' : ''}</span>}
             {candidate.epss && <span className="ml-2 rounded-sm bg-gray-800 px-2 py-1 text-xs text-gray-300" title="EPSS: probability of exploitation activity in the next 30 days">EPSS {(candidate.epss.score * 100).toFixed(1)}%{typeof candidate.epss.percentile === 'number' ? ` (top ${Math.max(0.1, (1 - candidate.epss.percentile) * 100).toFixed(1)}%)` : ''}</span>}
+            {candidate.applicability_status && <span className={`ml-2 rounded-sm px-2 py-1 text-xs ${candidate.applicability_status === 'affected' ? 'bg-red-500/10 text-red-200' : 'bg-gray-800 text-gray-300'}`}>{APPLICABILITY[candidate.applicability_status]}{candidate.unresolved_reason ? `: ${UNRESOLVED[candidate.unresolved_reason] || readable(candidate.unresolved_reason)}` : ''}</span>}
+            {candidate.new_since_observation && <span className="ml-2 rounded-sm bg-amber-500/10 px-2 py-1 text-xs text-amber-200">Published after this identity was observed</span>}
+            {candidate.component && <p className="mt-2 text-xs text-gray-500">Component: {candidate.component.product}{candidate.component.version ? ` ${candidate.component.version}` : ''} · {ROLE[candidate.component.role] || candidate.component.role} · {candidate.component.base_path}</p>}
             <p className="mt-2 text-gray-200">{candidate.title}</p>
             <p className="mt-1 text-xs text-gray-400">{readable(candidate.match_type)} · identity confidence: {candidate.confidence} · {readable(candidate.local_validation)}</p>
             <p className="mt-2 text-gray-400">Prerequisites: {candidate.prerequisites.join('; ')}.</p>
