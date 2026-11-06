@@ -62,7 +62,7 @@ RUN --mount=type=cache,target=/go/pkg/mod,sharing=locked \
         github.com/labstack/echo/v4@v4.16.1 \
         golang.org/x/crypto@v0.57.0 \
         golang.org/x/mod@v0.41.0 \
-        golang.org/x/net@v0.60.0 \
+        golang.org/x/net@v0.62.0 \
         golang.org/x/text@v0.42.0 \
         github.com/jackc/pgx/v5@v5.9.0 \
         google.golang.org/grpc@v1.83.2 || return 1; \
