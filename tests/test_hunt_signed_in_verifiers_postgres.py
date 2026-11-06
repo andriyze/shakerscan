@@ -427,7 +427,7 @@ def test_a_signed_in_sqli_verify_runs_with_the_hunts_captured_login(stack):
                           "message": "GET parameter 'id' is vulnerable", "proof_state": "candidate"})
     # A hostile target: the tool's own output carries the session the page echoed back.
     stack.records.append({"kind": "sqli_dbms_fingerprint",
-                          "message": f"back-end echoed Cookie: hub_session={HUB_SESSION} in its error"})
+                          "message": f"back-end echoed the session ({HUB_SESSION}) in its error page"})
 
     async def scenario():
         hunt, standing, _profile = await _active_hunt(stack.pool, signed_in=False)
