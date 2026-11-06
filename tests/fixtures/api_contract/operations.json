@@ -2385,6 +2385,11 @@
     "operation_id": "post_target_release_targets__target_id__knowledge_releases_post"
   },
   {
+    "path": "/targets/{target_id}/liveness",
+    "method": "post",
+    "operation_id": "check_target_liveness_targets__target_id__liveness_post"
+  },
+  {
     "path": "/targets/{target_id}/negative-results",
     "method": "get",
     "operation_id": "get_target_negative_results_targets__target_id__negative_results_get"

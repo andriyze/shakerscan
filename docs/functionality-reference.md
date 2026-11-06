@@ -2065,8 +2065,8 @@ for the profile contract, invocation, limits and acceptance gates.
 
 | Surface | Count | Source |
 |---|---|---|
-| Public REST operations | 507 | `api/**/*.py` FastAPI decorators |
-| Unique REST paths | 424 | `api/**/*.py` |
+| Public REST operations | 508 | `api/**/*.py` FastAPI decorators |
+| Unique REST paths | 425 | `api/**/*.py` |
 | Check families | 20 | `api/check_registry.py` |
 | Command Arsenal commands | 85 | `api/command_arsenal.py` |
 | Tool adapters | 0 | `api/command_arsenal.py` |
