@@ -135,3 +135,33 @@ def test_start_bounds_from_the_agent_are_a_proposal_for_the_person():
     (_method, path, payload), = sent
     assert path == "/hunts" and payload["proposed_allow"] == ["budget.raise:2x"] and "allow" not in payload
     json.dumps(payload)
+
+
+def test_the_agent_cannot_attach_a_saved_login_at_start():
+    """A saved login is attached by a person (start, or a login.use request the agent raises by
+    binding it); the MCP start tool never sends one the agent named."""
+    contract = {
+        "schema_version": "hunt-start/v2", "target_kinds": ["web"], "policy_fields": ["active_testing"],
+        "credential_ref_fields": [], "budget_profiles": {"fast": {"max_http_requests": 500}},
+        "budget_dimensions": [{"name": "max_http_requests", "minimum": 1}], "limits": {"allow": 32},
+    }
+    assert "saved_logins" not in mcp._hunt_start_tool(contract).properties
+    sent = []
+
+    class Client(mcp.ArsenalClient):
+        def hunt_contract(self):
+            return contract
+
+        def request_json(self, method, path, payload=None):
+            sent.append((method, path, payload))
+            return {"hunt_id": HUNT, "status": "active", "capabilities": []}
+
+    try:
+        Client("http://127.0.0.1:8080").call_tool("shakerscan_hunt_start", {
+            "schema_version": "hunt-start/v2", "target_id": "t1", "target_kind": "web", "goal": "g",
+            "budget_profile": "fast", "policy": {"active_testing": True},
+            "saved_logins": [{"profile_id": "00000000-0000-0000-0000-000000000005"}],
+        })
+    except mcp.MCPError:
+        pass  # refused as an unknown field: nothing is sent either way
+    assert all("saved_logins" not in (payload or {}) for _method, _path, payload in sent)
