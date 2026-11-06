@@ -2001,6 +2001,18 @@ async def _execute_hunt_capability_lifecycle(
                     except HuntCredentialRefusal as exc:
                         # Recorded on the Hunt (D35); another target's credential may be requested.
                         raise from_credential_refusal(exc) from exc
+                    if name == "http.request":
+                        # A saved login a person attached (hunt/saved_logins.py): its own grant, login
+                        # URL and count, recorded with the action under this lock.
+                        try:
+                            from hunt.saved_logins import admit_saved_login
+                        except ModuleNotFoundError:
+                            from api.hunt.saved_logins import admit_saved_login
+                        target_context = context.get("target") if isinstance(context.get("target"), Mapping) else {}
+                        credential_uses = [*await admit_saved_login(
+                            conn, run=run, values=request.input,
+                            default_origin=target_context.get("url") or target_context.get("locator"),
+                        ), *credential_uses]
                     if name in {"collections.replay_safe", "collections.replay_active"}:
                         principal = _hunt_managed_principal_reference(
                             _hunt_json(run["context_pack"], {}), principal_slot, capability=name,
