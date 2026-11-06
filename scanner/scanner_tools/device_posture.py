@@ -1778,6 +1778,15 @@ async def run_device_posture_scan(locator: str, options: dict[str, Any]) -> dict
     )
 
 
+def _service_claim(service: dict[str, Any]) -> dict[str, Any]:
+    identity = service.get("identity") if isinstance(service.get("identity"), dict) else {}
+    return {
+        "service_name": service.get("service_name"), "product": service.get("product") or "",
+        "version": service.get("version") or "", "protocol": identity.get("protocol"),
+        "authentication": identity.get("authentication"),
+    }
+
+
 def merge_address_children(
     locator: str, children: list[dict[str, Any]], *, not_scanned: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
@@ -1829,9 +1838,18 @@ def merge_address_children(
             if not isinstance(service, dict) or service.get("port") is None:
                 continue
             key = (str(service.get("transport") or "tcp"), int(service["port"]))
-            merged = services.setdefault(key, {**service, "observed_addresses": []})
+            merged = services.setdefault(key, {**service, "observed_addresses": [], "identity_by_address": {}})
             if address and address not in merged["observed_addresses"]:
                 merged["observed_addresses"].append(address)
+            claim = _service_claim(service)
+            merged["identity_by_address"][address] = claim
+            if claim != _service_claim(merged) and not merged.get("identity_conflict"):
+                # The same port answers differently on two addresses (a real service on one, a
+                # different or fake one on another): the merged row claims neither.
+                merged.update({
+                    "service_name": "unknown", "product": "", "version": "", "cpe": None,
+                    "identity": None, "identity_conflict": True,
+                })
         for finding in child.get("findings") or []:
             if not isinstance(finding, dict):
                 continue
