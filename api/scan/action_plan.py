@@ -688,6 +688,30 @@ def request_collection_action_refs(
     return tuple(result)
 
 
+# Capabilities funded by their own allowance on top of the Scan's shared ceilings: the plan
+# that contains one holds exactly its registry reservation in addition, so adding it never
+# displaces a slice the shared budget funds. The allowance is derived from the plan itself,
+# identically at admission, in continuation reconciliation and at runtime reservation.
+OWN_BUDGET_CAPABILITIES = frozenset({"web.identify"})
+
+
+def own_budget_allowance(actions: Iterable[Any]) -> dict[str, int]:
+    """The extra authority a plan's own-budget actions bring: their requested holds."""
+    allowance: dict[str, int] = {}
+    for action in actions:
+        if action.capability_name not in OWN_BUDGET_CAPABILITIES or action.admission_status == "skipped":
+            continue
+        for name, amount in dict(action.requested_budget).items():
+            allowance[str(name)] = allowance.get(str(name), 0) + int(amount)
+    return allowance
+
+
+def with_own_budget(limits: Mapping[str, int], actions: Iterable[Any]) -> dict[str, int]:
+    """Shared ceilings plus the plan's own-budget allowance (declared dimensions only)."""
+    allowance = own_budget_allowance(actions)
+    return {name: int(limit) + allowance.get(name, 0) for name, limit in limits.items()}
+
+
 @dataclass(frozen=True)
 class ScanAction:
     action_id: str

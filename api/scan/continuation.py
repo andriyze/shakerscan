@@ -18,8 +18,7 @@ except ModuleNotFoundError:  # package import in host-side tests
     from ..runtime.budgets import BUDGET_DIMENSIONS
     from ..runtime.request_shape import nested_json_body
 
-from .action_plan import ScanAction, ScanActionPlan, ScanActionPlanError
-from .budget_allocator import OWN_BUDGET_CAPABILITIES
+from .action_plan import OWN_BUDGET_CAPABILITIES, ScanAction, ScanActionPlan, ScanActionPlanError
 from .capability_result import CapabilityResultReference
 from .surface_manifest import build_scan_surface_manifest
 from .work_manifests import (

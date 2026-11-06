@@ -6,7 +6,7 @@ from types import SimpleNamespace
 import pytest
 
 from api.runtime.models import TargetBinding
-from api.scan.action_plan import ScanActionPlan, ScanActionPlanCompiler
+from api.scan.action_plan import OWN_BUDGET_CAPABILITIES, ScanActionPlan, ScanActionPlanCompiler
 from api.scan.budget_allocator import allocate_scan_action_plan
 from api.scan.continuation import (
     MAX_SCAN_PLAN_REVISION,
@@ -1071,10 +1071,14 @@ def test_continuation_ceiling_reclaims_what_settled_root_actions_did_not_spend()
     }
     returned = {name: 0 for name in allocation.budget_ceiling}
     for action in parent.actions:
+        if action.capability_name in OWN_BUDGET_CAPABILITIES:
+            # Funded by its own allowance: its unspent hold returns there, not to this ceiling.
+            continue
         for name, amount in action.requested_budget.items():
             if name in returned:
                 returned[name] += amount
     assert returned["tool_wall_seconds"] > 0, "the root plan must hold wall budget"
+    assert any(action.capability_name in OWN_BUDGET_CAPABILITIES for action in parent.actions)
 
     assert reconciled_continuation_ceiling(allocation, fully_charged) == dict(
         allocation.budget_ceiling,
