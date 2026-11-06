@@ -17,7 +17,13 @@ job leased while the long slots are taken waits inside its leased execution, so 
 keeps its heartbeat, and it does not count against the slot short work needs. Admission keeps one
 Hunt within that bound (``require_long_action_slot``), so a long job waits here only while other
 Hunts' long actions hold the long slots. Once ``MAX_WAITING_LONG_AGENT_JOBS`` long jobs wait on one
-worker, it leases nothing more, short work included, until one of them starts.
+worker, it leases no more long work until one of them starts.
+
+Short calls have a lane of their own (``lane_queue``: the agent-tool queue's short lane), which the
+worker leases first and keeps leasing whatever waits in the long lane (``lease_by_lane``), so a
+backlog of long actions never stops a short call being leased. Each Hunt may have
+``MAX_CONCURRENT_LONG_AGENT_JOBS`` long actions in flight per live agent-tool worker
+(``long_actions_per_hunt``), so one Hunt can use the long slots of every worker and no more.
 """
 from __future__ import annotations
 
@@ -144,9 +150,12 @@ async def _next_change() -> None:
         waker.cancel()
 
 
+def _slots_full() -> bool:
+    return len(_tasks) - _waiting >= MAX_CONCURRENT_AGENT_JOBS
+
+
 def _no_slot() -> bool:
-    return (len(_tasks) - _waiting >= MAX_CONCURRENT_AGENT_JOBS
-            or _waiting >= MAX_WAITING_LONG_AGENT_JOBS)
+    return _slots_full() or _waiting >= MAX_WAITING_LONG_AGENT_JOBS
 
 
 async def lease_when_ready(operation, *, enabled):
@@ -156,6 +165,48 @@ async def lease_when_ready(operation, *, enabled):
         while _no_slot():
             await _next_change()
     return await asyncio.to_thread(operation)
+
+
+def _queue_policy():
+    try:
+        import worker_queue_policy
+    except ModuleNotFoundError:  # package import in host-side tests
+        from .. import worker_queue_policy
+    return worker_queue_policy
+
+
+def short_lane(base_queue: str) -> str:
+    """The agent-tool queue's lane for short calls."""
+    return _queue_policy().agent_tool_short_lane(base_queue)
+
+
+def lane_queue(base_queue: str, job: Mapping[str, Any]) -> str:
+    """Where a Hunt capability job is queued: a short call on the short lane, a long action (and
+    any other agent-tool job) on ``base_queue``."""
+    if isinstance(job, Mapping) and job.get("type") in _CAPABILITY_JOB_TYPES and not long_job(job):
+        return short_lane(base_queue)
+    return base_queue
+
+
+def _long_lane(queue_name: str, base_queue: str) -> bool:
+    """The agent-tool queue itself or one of its placement routes; its short lane, and an SSH
+    worker's private queue, are short work."""
+    return queue_name == base_queue or queue_name.startswith(f"{base_queue}:route:")
+
+
+async def lease_by_lane(lease, queue_names, *, base_queue: str, enabled: bool):
+    """Lease the next job, short lanes first. A slot must be free, as for ``lease_when_ready``;
+    while ``MAX_WAITING_LONG_AGENT_JOBS`` long jobs wait for a long slot only the short lanes are
+    leased, so short calls keep starting whatever is queued in the long lane. ``lease`` takes the
+    queue names to lease from, in order."""
+    names = list(queue_names)
+    if not enabled:
+        return await asyncio.to_thread(lease, names)
+    while _slots_full():
+        await _next_change()
+    short = [name for name in names if not _long_lane(name, base_queue)]
+    long = [name for name in names if _long_lane(name, base_queue)]
+    return await asyncio.to_thread(lease, short if _waiting >= MAX_WAITING_LONG_AGENT_JOBS else [*short, *long])
 
 
 async def dispatch(redis, lease, job, *, execute, enabled):
@@ -201,10 +252,54 @@ async def in_lane(job: Any, run: Callable[[Any], Awaitable[Any]]) -> Any:
         _wake()
 
 
+# Where agent-tool workers report themselves (worker.report_worker_build_fingerprint), and how
+# fresh a report must be to count (the readiness check's own window, api/agent_routes).
+AGENT_TOOL_WORKER_REGISTRY_KEY = "shakerscan:agent_tool_worker_build"
+_WORKER_REPORT_MAX_AGE_SECONDS = 120
+_WORKER_REPORT_CLOCK_SKEW_SECONDS = 30
+# Past this many workers a Hunt's long actions are bounded by its own budgets, not by slots.
+MAX_LONG_ACTIONS_PER_HUNT = 16
+
+
+def live_agent_tool_workers(redis_client: Any, *, now: float | None = None) -> int:
+    """How many agent-tool workers reported within the readiness window; at least 1 (an unread
+    registry counts as one worker, the bound before workers were counted)."""
+    import json
+    import time
+    from datetime import datetime, timezone
+
+    current = time.time() if now is None else now
+    try:
+        reports = redis_client.hgetall(AGENT_TOOL_WORKER_REGISTRY_KEY) or {}
+    except Exception:  # noqa: BLE001 - Redis unavailable: the single-worker bound
+        return 1
+    live = 0
+    for payload in reports.values():
+        try:
+            text = payload.decode("utf-8", "replace") if isinstance(payload, bytes) else str(payload)
+            stamp = datetime.fromisoformat(str(json.loads(text).get("reported_at") or "").replace("Z", "+00:00"))
+            if stamp.tzinfo is None:
+                stamp = stamp.replace(tzinfo=timezone.utc)
+            age = current - stamp.timestamp()
+        except (AttributeError, TypeError, ValueError):
+            continue
+        if -_WORKER_REPORT_CLOCK_SKEW_SECONDS <= age <= _WORKER_REPORT_MAX_AGE_SECONDS:
+            live += 1
+    return max(1, live)
+
+
+def long_actions_per_hunt(workers: int) -> int:
+    """A Hunt's long actions in flight at once: the long slots of every live agent-tool worker,
+    at most ``MAX_LONG_ACTIONS_PER_HUNT``."""
+    return max(MAX_CONCURRENT_LONG_AGENT_JOBS,
+               min(MAX_LONG_ACTIONS_PER_HUNT, MAX_CONCURRENT_LONG_AGENT_JOBS * max(1, int(workers))))
+
+
 async def require_long_action_slot(
-    conn: Any, run: Mapping[str, Any], name: str, reserved_wall_seconds: Any = None,
+    conn: Any, run: Mapping[str, Any], name: str, reserved_wall_seconds: Any = None, *, workers: int = 1,
 ) -> None:
-    """Refuse a Hunt's long action while the Hunt already has the long slots' worth in flight.
+    """Refuse a Hunt's long action while the Hunt already has the long slots' worth in flight:
+    ``long_actions_per_hunt(workers)``, the long slots of the ``workers`` live agent-tool workers.
 
     A call is long by its own reserved wall (``long_action``), and so is each live reservation it
     is counted against. Runs in admission's transaction after the Hunt row is locked, so two calls
@@ -212,6 +307,7 @@ async def require_long_action_slot(
     be sent again once one of them settles."""
     if not long_action(name, reserved_wall_seconds):
         return
+    allowed = long_actions_per_hunt(workers)
     rows = await conn.fetch(
         """SELECT capability_name, action_id FROM budget_reservations
            WHERE owner_kind='hunt' AND owner_id=$1 AND capability_name = ANY($2::text[])
@@ -223,7 +319,7 @@ async def require_long_action_slot(
         str(run["id"]), sorted(slot_capabilities()), sorted(long_capabilities()),
         LONG_ACTION_WALL_SECONDS,
     )
-    if len(rows) < MAX_CONCURRENT_LONG_AGENT_JOBS:
+    if len(rows) < allowed:
         return
     try:
         from hunt.permission_reasons import HuntRefusal
@@ -240,7 +336,7 @@ async def require_long_action_slot(
         extra={
             "in_flight": [{"capability_name": str(row["capability_name"]),
                            "action_id": str(row["action_id"])} for row in rows],
-            "max_long_actions_in_flight": MAX_CONCURRENT_LONG_AGENT_JOBS,
+            "max_long_actions_in_flight": allowed,
         },
         headers={"Retry-After": "60"},
     )

@@ -92,7 +92,7 @@ from .device_policy import DeviceHuntPolicyState
 from .device_traffic import reserve_device_traffic, require_device_admission, settle_device_traffic
 from .sqli_target import sqli_injection_point_refusal
 from .scanner_identity import scanner_admission
-from .agent_job_concurrency import require_long_action_slot
+from .agent_job_concurrency import lane_queue, live_agent_tool_workers, require_long_action_slot
 from .service_binding import (
     ARTIFACT_READ_CAPABILITIES, artifact_origin_required, collection_uses_service_origin,
     service_origin_changed,
@@ -2423,10 +2423,12 @@ async def _execute_hunt_capability_lifecycle(
                         from .ssh_stream import require_ssh_session_available
                         require_ssh_session_available(get_redis(), base_queue=_get("AGENT_TOOL_QUEUE_NAME"),
                             hunt_id=hunt_id, session_id=request.input["session_id"])
-                    # Long worker actions take at most two of the worker's three slots; a Hunt
-                    # that already has two in flight is told to collect one first, at no cost.
-                    # A call is long by the wall it is about to reserve.
-                    await require_long_action_slot(conn, run, name, charges.get("tool_wall_seconds"))
+                    # Long worker actions take at most two of each worker's three slots; a Hunt
+                    # that already has the long slots of every live worker in flight is told to
+                    # collect one first, at no cost. A call is long by the wall it is about to
+                    # reserve.
+                    await require_long_action_slot(conn, run, name, charges.get("tool_wall_seconds"),
+                                                   workers=live_agent_tool_workers(get_redis()))
                     if durable_budget:
                         durable_action_digest = hunt_capability_action_digest(
                             hunt_id=run["id"],
@@ -3944,6 +3946,15 @@ class _WorkerResultWait:
         return now < self._deadline
 
 
+def _agent_tool_lane(payload: dict[str, Any]) -> str:
+    """The agent-tool queue lane for a Hunt capability job (``agent_job_concurrency.lane_queue``):
+    a short call on the short lane, a long action on the agent-tool queue. The job names its lane,
+    so a requeue keeps it there."""
+    queue = lane_queue(_get("AGENT_TOOL_QUEUE_NAME"), payload)
+    payload["_base_queue_name"] = queue
+    return queue
+
+
 async def _enqueue_canonical_network_capability(
     *, capability_name: str, capability_input: Mapping[str, Any],
     expected_input_digest: str, expected_budget: Mapping[str, int],
@@ -3973,6 +3984,8 @@ async def _enqueue_canonical_network_capability(
         "action_digest": str(action_digest),
         "submitted_at": utc_now_iso(), "_base_queue_name": queue_name,
     }
+    if queue_name == _get("AGENT_TOOL_QUEUE_NAME"):  # an SSH command keeps its session's worker
+        queue_name = _agent_tool_lane(payload)
     redis_client.hset(f"job:{job_id}", mapping={
         "status": "queued", "current_phase": "canonical_capability_queued",
         "tool": capability_name,
@@ -4051,7 +4064,7 @@ async def _enqueue_canonical_http_capability(
     redis_client.expire(
         f"job:{job_id}", max(3600, math.ceil(timeout_ms / 1000) + 300),
     )
-    enqueue_job(redis_client, _get("AGENT_TOOL_QUEUE_NAME"), payload)
+    enqueue_job(redis_client, _agent_tool_lane(payload), payload)
     wait = _WorkerResultWait(redis_client, job_id, timeout_ms=timeout_ms, queue_seconds=queue_seconds)
     try:
         while wait.open():
@@ -4122,7 +4135,7 @@ async def _enqueue_canonical_browser_capability(
     redis_client.expire(
         f"job:{job_id}", max(3600, math.ceil(timeout_ms / 1000) + 300),
     )
-    enqueue_job(redis_client, _get("AGENT_TOOL_QUEUE_NAME"), payload)
+    enqueue_job(redis_client, _agent_tool_lane(payload), payload)
     wait = _WorkerResultWait(redis_client, job_id, timeout_ms=timeout_ms, queue_seconds=queue_seconds)
     try:
         while wait.open():
@@ -4193,7 +4206,7 @@ async def _enqueue_canonical_scanner_capability(
         f"job:{job_id}",
         max(3600, math.ceil(timeout_ms / 1000) + 300),
     )
-    enqueue_job(redis_client, _get("AGENT_TOOL_QUEUE_NAME"), payload)
+    enqueue_job(redis_client, _agent_tool_lane(payload), payload)
     wait = _WorkerResultWait(redis_client, job_id, timeout_ms=timeout_ms, queue_seconds=queue_seconds)
     try:
         while wait.open():

@@ -74,6 +74,15 @@ def worker_tool_commands(default: dict[str, str], *, model_intake_only: bool) ->
 MODEL_INTAKE_WORKER_BUILD_REGISTRY_KEY = "shakerscan:model_intake_worker_build"
 
 
+# Short Hunt capability calls are queued on their own lane, beside the agent-tool queue, so a
+# backlog of long actions on the agent-tool queue never stops a worker leasing them.
+AGENT_TOOL_SHORT_LANE_SUFFIX = ":short"
+
+
+def agent_tool_short_lane(agent_tool_queue: str) -> str:
+    return f"{agent_tool_queue}{AGENT_TOOL_SHORT_LANE_SUFFIX}"
+
+
 def base_worker_queue_keys(
     *,
     device_only: bool,
@@ -102,7 +111,9 @@ def base_worker_queue_keys(
     if device_only:
         selected = [device_queue]
     elif agent_tool_only:
-        selected = [agent_tool_queue]
+        # The short lane first (hunt.agent_job_concurrency): short Hunt calls never queue behind
+        # long actions waiting in the long lane.
+        selected = [agent_tool_short_lane(agent_tool_queue), agent_tool_queue]
     elif model_intake_only:
         selected = [model_intake_queue]
     else:
