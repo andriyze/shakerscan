@@ -2106,9 +2106,9 @@ def _dns_section(row: Mapping[str, Any]) -> dict[str, Any]:
 def _web_components_section(rows: list[Mapping[str, Any]]) -> dict[str, Any] | None:
     """The products the recipes named, as sanitized claims (catalogue labels, plain versions)."""
     try:
-        from exposure.service_components import sanitized
+        from scanner_tools.web_identity import sanitized_claim as sanitized
     except ModuleNotFoundError:  # package import
-        from ..exposure.service_components import sanitized
+        from scanner.scanner_tools.web_identity import sanitized_claim as sanitized
     items = []
     for row in rows[:60]:
         claim = sanitized(row)
