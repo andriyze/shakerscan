@@ -64,7 +64,7 @@ SELECT a.action_id,a.capability_name,a.action_digest,a.result_digest,a.result_js
        a.status,a.worker_id,a.finished_at,s.id AS scan_id
 FROM scan_capability_actions a JOIN scans s ON s.id=a.scan_id
 WHERE s.target_id=$1 AND s.device_target_id IS NULL
-  AND (a.capability_name IN ('ports.discover','service.fingerprint','web.probe')
+  AND (a.capability_name IN ('ports.discover','service.fingerprint','web.probe','web.identify')
        OR (a.capability_name='http.request' AND a.action_id='baseline.http'))
   AND a.status IN ('success','partial','timed_out','failed','cancelled')
 ORDER BY a.finished_at DESC NULLS LAST,a.scan_id,a.action_id
@@ -125,6 +125,7 @@ async def validated_scan_source(conn: Any, row: dict[str, Any]) -> dict[str, Any
         allowed = {
             "ports.discover": {"open_port"}, "service.fingerprint": {"open_port", "service"},
             "web.probe": {"http_fingerprint"}, "http.request": {"http_observation"},
+            "web.identify": {"http_component"},
         }[row["capability_name"]]
         return {
             "ref": f"scan:{row['scan_id']}:{row['action_id']}",

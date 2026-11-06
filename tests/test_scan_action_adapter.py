@@ -3641,3 +3641,41 @@ def test_takeover_action_checks_discovered_names_by_dns_and_fingerprints_only_th
     assert rows["old.example.test"]["outcome"] == "suspected"
     assert rows["old.example.test"]["service"] == "Microsoft Azure"
     assert receipt.budget_consumed["http_requests"] == 1
+
+
+def test_web_identify_names_components_behind_the_origin_without_response_text(monkeypatch):
+    scan_id = str(uuid.uuid4())
+
+    class Transport:
+        def __init__(self):
+            self.sent = []
+
+        async def send(self, request, *, target, timeout_seconds, follow_redirects):
+            assert follow_redirects is False and request.method == "GET" and not request.headers
+            path = urllib.parse.urlsplit(request.url).path
+            self.sent.append(request.url)
+            if path.startswith("/jenkins/"):
+                headers = {"X-Jenkins": "2.426.3", "Content-Type": "text/html"}
+                body = b'<input name="j_username"> secret-session-text' if path == "/jenkins/login" else b"no"
+                return ReplayTransportResult(status_code=200 if path == "/jenkins/login" else 404,
+                                             connected_address="192.0.2.10", final_url=request.url,
+                                             response_headers=headers, response_body=body, elapsed_ms=1)
+            return ReplayTransportResult(status_code=404, connected_address="192.0.2.10",
+                                         final_url=request.url,
+                                         response_headers={"Server": "nginx/1.24.0", "Content-Type": "text/html"},
+                                         response_body=f"<center>nginx/1.24.0</center>{path}".encode(), elapsed_ms=1)
+
+    transport = Transport()
+    monkeypatch.setattr(action_adapter_module, "PinnedAiohttpReplayTransport", lambda **_: transport)
+    action = _action("discover.identify", "web.identify", 0)
+    plan = ScanActionPlan(scan_id=scan_id, execution_plan_digest="a" * 64,
+                          target_binding_digest=TARGET.digest, actions=(action,))
+    receipt = asyncio.run(_dispatcher(plan, Backend())(action, _lease(plan, action), _noop))
+    assert receipt.status == "success"
+    components = {(item["product"], item["base_path"]): item for item in receipt.observations}
+    jenkins = components[("Jenkins", "/jenkins/")]
+    assert (jenkins["kind"], jenkins["version"], jenkins["connected_address"]) == ("http_component", "2.426.3", "192.0.2.10")
+    assert jenkins["url"] == "https://app.example.test/jenkins/" and jenkins["sni"] == "app.example.test"
+    assert "secret-session-text" not in json.dumps(receipt.observations)
+    assert all(url.startswith("https://app.example.test/") for url in transport.sent)
+    assert len(transport.sent) <= CAPABILITY_REGISTRY.require("web.identify").budget_cost["http_requests"]

@@ -210,7 +210,8 @@ export const SCAN_PUBLIC_CONTRACT_SNAPSHOT = {
         "web.crawl",
         "web.browser_crawl",
         "web.content_discover",
-        "web.spec_ingest"
+        "web.spec_ingest",
+        "web.identify"
       ],
       "default_enabled": true,
       "description": "Crawl, API/HAR/OpenAPI discovery, and passive surface refresh.",
