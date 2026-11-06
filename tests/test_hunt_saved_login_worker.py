@@ -11,6 +11,7 @@ record, a withheld reference or a scanner's observations. Values are synthetic.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import base64
 from copy import deepcopy
 from datetime import datetime, timezone
@@ -200,6 +201,16 @@ async def hostile_target(wire):
     return await asyncio.start_server(serve, "127.0.0.1", 0)
 
 
+@contextlib.asynccontextmanager
+async def serving(server):
+    """The fixture server, closed without waiting for its connections: a failing check must fail,
+    not hang on a connection the HTTP client still holds (``Server.wait_closed`` waits for all)."""
+    try:
+        yield server
+    finally:
+        server.close()
+
+
 def login_input(path="/hub/login"):
     return {"method": "POST", "path": path, "form_body": {"username": "", "password": ""},
             "request_bindings": [
@@ -212,7 +223,7 @@ def test_a_saved_login_signs_in_by_reference_and_its_secret_never_reaches_the_pl
     async def scenario():
         wire = []
         server = await hostile_target(wire)
-        async with server:
+        async with serving(server):
             conn = LoginConnection(f"http://fixture.test:{server.sockets[0].getsockname()[1]}")
             login, _ = await execute(conn, login_input(), "saved-login-1")
             assert login["status"] == "success", login
@@ -282,7 +293,7 @@ def test_a_saved_login_is_never_sent_anywhere_else_or_after_its_authority_change
         from fastapi import HTTPException
         wire = []
         server = await hostile_target(wire)
-        async with server:
+        async with serving(server):
             conn = LoginConnection(f"http://fixture.test:{server.sockets[0].getsockname()[1]}")
             values = login_input()
             if problem == "other-path":
@@ -324,7 +335,7 @@ def test_a_capture_that_carries_the_secret_is_never_kept_so_it_cannot_be_sent_on
     async def scenario():
         wire = []
         server = await hostile_target(wire)
-        async with server:
+        async with serving(server):
             conn = LoginConnection(f"http://fixture.test:{server.sockets[0].getsockname()[1]}")
             conn.login_url = conn.login_url.replace("/hub/login", "/hub/echo-login")
             conn.profile["encrypted_secret"] = secret_store.encrypt_secret(build_credential_secret(
