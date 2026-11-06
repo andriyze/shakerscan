@@ -147,9 +147,13 @@ async def record_start_permissions(
     async with conn.transaction():
         run = dict(await conn.fetchrow("SELECT * FROM hunt_runs WHERE id=$1 FOR UPDATE", run["id"]))
         if contract.allow:
+            bounds = parse_bounds(contract.allow)
             await record_preauthorization(
-                conn, hunt_id=run["id"], bounds=parse_bounds(contract.allow), created_by=person, proof=proof,
+                conn, hunt_id=run["id"], bounds=bounds, created_by=person, proof=proof,
             )
+            # A saved login the person's bounds name is attached now, so the Hunt starts with it
+            # (its login URL and logins left in the briefing) instead of finding it on first use.
+            await _attach_bound_saved_logins(conn, run, bounds.saved_logins, person, try_preauthorized_grant)
         for profile, home_host in preauthorized:
             request, _created = await raise_request(
                 conn, run=run, kind=KIND_CREDENTIAL_USE, reason_code=CREDENTIAL_NOT_ATTACHED,
@@ -173,6 +177,23 @@ async def record_start_permissions(
                 actor="agent", source="proposed_allow",
             )
     return {"pending_permission_requests": await pending_summary(conn, run["id"])}
+
+
+async def _attach_bound_saved_logins(
+    conn: Any, run: dict[str, Any], profile_ids: Sequence[str], person: str, grant: Any,
+) -> None:
+    from .saved_logins import attached_profile, display_of, hunt_consuming_target_id, subject_of
+
+    for profile_id in profile_ids:
+        profile = await attached_profile(conn, hunt_consuming_target_id(run), profile_id)
+        if profile is None:
+            continue  # not a saved login of this target: the bound covers nothing here
+        request, _created = await raise_request(
+            conn, run=run, kind=KIND_LOGIN_USE, reason_code="saved_login_not_attached",
+            subject=subject_of(run, profile), display=display_of(profile), actor=person, source="hunt_start",
+        )
+        if request is not None and request["status"] == "pending":
+            await grant(conn, run, request)
 
 
 async def _attach_start_saved_logins(

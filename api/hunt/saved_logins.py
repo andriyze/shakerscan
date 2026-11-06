@@ -39,7 +39,7 @@ from typing import Any
 import urllib.parse
 import uuid
 
-from .credential_uses import CredentialUse, hunt_consuming_target_id
+from .credential_uses import CredentialUse, hunt_consuming_target_id  # noqa: F401 - re-exported
 from .permission_reasons import KIND_LOGIN_USE, HuntRefusal
 
 SAVED_LOGIN_KINDS = frozenset({"form_login", "json_login"})

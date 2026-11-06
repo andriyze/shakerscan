@@ -333,3 +333,24 @@ def test_a_saved_login_signs_in_only_on_the_hunts_own_host(env, endpoint, expect
         assert grant["login_url"] == expected
 
     run(env, scenario())
+
+
+def test_a_launch_bound_attaches_the_saved_login_when_the_hunt_starts(env):
+    async def scenario():
+        hunt = await env.hunt(policy=ACTIVE, budget=BUDGET)
+        profile_id = await _profile(env, hunt["target_id"])
+        contract = normalize_hunt_start_payload({
+            "target_id": str(hunt["target_id"]), "target_kind": "web", "goal": "fixture",
+            "policy": {"active_testing": True, "authorization_confirmed": True,
+                       "approval_receipt_id": ACTIVE["approval_receipt_id"], "scope_receipt_id": SCOPE},
+            # A bound naming a profile that is not a saved login of this target covers nothing.
+            "allow": [f"login.use:{profile_id},{uuid.uuid4()}"],
+        })
+        await record_start_permissions(env.conn, await env.run(hunt), contract, [])
+        [grant] = await saved_logins.live_login_grants(env.conn, hunt["id"])
+        assert grant["profile_id"] == profile_id and grant["max_logins"] == 3 and grant["login_url"] == LOGIN_URL
+        view = await saved_logins.hunt_view(env.conn, await env.run(hunt))
+        assert [item["logins_left"] for item in view["attached"]] == [3] and view["available"] == []
+        assert await env.call(hunt, "login-0001", values=_login(profile_id)) == "admitted"
+
+    run(env, scenario())
