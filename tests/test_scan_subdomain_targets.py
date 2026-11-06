@@ -21,6 +21,7 @@ import time
 
 import pytest
 
+from api import target_resolution
 from api.scan import subdomain_targets
 from api.scan.action_plan import ScanActionPlan
 from api.scan.finalizer import finalize_scan_report
@@ -246,18 +247,19 @@ def test_a_report_without_subdomains_records_nothing():
 
 
 def test_a_list_cut_at_the_report_limit_says_how_many_names_were_found():
-    hosts = tuple(f"h{index:04d}.shakerscan.com" for index in range(1_200))
+    limit = target_resolution.DISCOVERY_RESOLVE_LIMIT
+    hosts = tuple(f"h{index:05d}.shakerscan.com" for index in range(limit + 200))
     section = _report_with_subdomains(hosts)["discovery"]["subdomains"]
-    assert section["count"] == 1_000 and len(section["hosts"]) == 1_000
-    assert section["total"] == 1_200
+    assert section["count"] == limit and len(section["hosts"]) == limit
+    assert section["total"] == limit + 200
     assert section["truncated"] is True
     complete = _report_with_subdomains()["discovery"]["subdomains"]
     assert complete["total"] == 3 and complete["truncated"] is False
 
 
-def test_every_name_the_recording_did_not_check_or_add_is_counted_with_its_cap():
-    """1,500 names: the report lists 1,000, DNS checks a window of 300, and 100 become targets.
-    The outcome used to say only "100 added", so 1,400 names vanished without a word."""
+def test_every_listed_name_is_resolved_and_the_unlisted_ones_are_counted():
+    """1,500 names found, 1,000 listed: every listed name is checked and becomes a target (DNS
+    used to check a window of 300 and add 100); the 500 never listed are counted, not dropped."""
     hosts = tuple(f"h{index:04d}.shakerscan.com" for index in range(1_000))
     report = _report_with_subdomains(hosts)
     report["discovery"]["subdomains"]["total"] = 1_500
@@ -274,17 +276,17 @@ def test_every_name_the_recording_did_not_check_or_add_is_counted_with_its_cap()
     outcome = asyncio.run(subdomain_targets.record_scan_subdomain_discovery(
         _pool(conn), report, scan_id=str(SCAN_ID), allowed_root_domains=BOUND, plan_targets=plan,
     ))
-    assert len(conn.inserted_targets) == 100
+    assert len(conn.inserted_targets) == 1_000
     assert outcome["found"] == 1_500
-    assert outcome["checked"] == 300 and outcome["not_checked"] == 1_200
-    assert outcome["added"] == 100
-    assert outcome["target_limit"] == 100 and outcome["over_target_limit"] == 200
+    assert outcome["checked"] == 1_000 and outcome["not_checked"] == 500
+    assert outcome["added"] == 1_000
+    assert outcome["over_target_limit"] == 0
     assert outcome["partial"] is True
-    assert outcome["partial_reasons"] == ["report_list_limit", "dns_resolve_limit", "target_limit"]
+    assert outcome["partial_reasons"] == ["report_list_limit"]
     run = conn.runs[0]
     assert run[2] == 1_500
     stored = json.loads(run[5])["dns_resolution"]
-    assert stored["judged"] == 300 and stored["beyond_resolve_limit"] == 700
+    assert stored["judged"] == 1_000 and stored["beyond_resolve_limit"] == 0
 
     # A redelivered job reports the same account from the stored run.
     redelivered = _report_with_subdomains(hosts)
@@ -293,7 +295,7 @@ def test_every_name_the_recording_did_not_check_or_add_is_counted_with_its_cap()
         _pool(_FakeConn(existing={"id": outcome["discovery_id"], "sources_used": run[5]})),
         redelivered, scan_id=str(SCAN_ID), allowed_root_domains=BOUND,
     ))
-    assert again["checked"] == 300 and again["over_target_limit"] == 200
+    assert again["checked"] == 1_000 and again["over_target_limit"] == 0
 
 
 def test_only_the_scans_bound_root_and_names_under_it_are_recorded():
@@ -336,6 +338,7 @@ def test_a_dead_resolver_cannot_hold_the_finished_scan_beyond_the_dns_deadline(m
     monkeypatch.setattr(subdomain_targets.target_resolution, "system_lookup", hangs)
     monkeypatch.setattr(subdomain_targets.target_resolution, "system_answer", hangs)
     monkeypatch.setattr(subdomain_targets, "DNS_DEADLINE_SECONDS", 0.2)
+    monkeypatch.setattr(subdomain_targets, "DNS_DEADLINE_PER_NAME_SECONDS", 0.0)
     hosts = tuple(f"h{index:02d}.shakerscan.com" for index in range(40))
     conn = _FakeConn()
     started = time.monotonic()
@@ -444,3 +447,8 @@ def test_provenance_insert_and_last_observed_refresh_on_real_postgres():
     # The person-added row is reported as known and never gains discovery provenance.
     assert provenance(after["https://mail.shakerscan.com"]) is None
     assert after["https://mail.shakerscan.com"]["discovery_source"] in {None, "manual"}
+
+
+def test_the_dns_deadline_grows_with_the_number_of_names():
+    assert subdomain_targets.dns_deadline_seconds(0) == subdomain_targets.DNS_DEADLINE_SECONDS
+    assert subdomain_targets.dns_deadline_seconds(10_000) >= 300

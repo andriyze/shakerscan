@@ -366,7 +366,12 @@ def test_the_system_answer_reports_the_first_hop_not_the_terminal(monkeypatch):
     async def first_hop(host):
         return "www-example.cdn.net"
 
+    def blocking_getaddrinfo(host, port, *args, **kwargs):
+        # target_resolution runs the blocking resolver on its own lookup pool.
+        return asyncio.run(getaddrinfo(None, host, port))
+
     monkeypatch.setattr(asyncio.base_events.BaseEventLoop, "getaddrinfo", getaddrinfo)
+    monkeypatch.setattr(target_resolution.socket, "getaddrinfo", blocking_getaddrinfo)
     monkeypatch.setattr(target_resolution, "first_cname_hop", first_hop)
     answer = _REAL_SYSTEM_ANSWER
     assert asyncio.run(answer("www.example.com")) == (["198.51.100.20"], "www-example.cdn.net")
