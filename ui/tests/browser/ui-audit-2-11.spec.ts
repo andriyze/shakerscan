@@ -36,7 +36,7 @@ test('#2 a 10k-target domain opens New Scan by reference, and the page reads lis
   // Bounded request: a member cap, an exact group count on the first page, never offset paging.
   const first = api.requests.find(entry => entry.startsWith('GET /targets/inventory'))!
   const params = new URL(first.split(' ')[1], 'http://x').searchParams
-  expect(params.get('member_limit')).toBe('200')
+  expect(params.get('member_limit')).toBe('20')
   expect(params.get('count')).toBe('exact')
   expect(params.get('group_by')).toBe('domain')
   expect(params.has('offset')).toBe(false)

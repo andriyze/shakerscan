@@ -12,13 +12,13 @@ import type { TargetAsset } from '@/lib/targetAssetApi'
 import { featureEnabled } from '@/lib/workspaceCapabilities'
 import { TERMINAL_HUNT_START_LABEL, terminalHuntStartCommand, useWorkspaceIsManaged } from '@/components/hunt/TerminalHuntStart'
 import { assetAuthorizationStatus } from '@/lib/assetAuthorization.mjs'
-import { configureScanHref, latestGrade, originLabel, relativeTime, scanUrls, severitySummary } from '@/lib/targetInventoryModel.mjs'
+import { configureScanHref, latestGrade, livenessView, originLabel, relativeTime, scanUrls, severitySummary } from '@/lib/targetInventoryModel.mjs'
 import { boundedDisplayText, boundedTargetDisplay } from '@/lib/targetChoices'
 import { TargetDomainDiscovery } from '../TargetDomainDiscovery'
 import { TargetSkillEditor } from '../TargetSkillEditor'
 import { MenuItem, MenuSeparator, RowMenu } from './RowMenu'
 
-export const ROW_GRID = 'lg:grid lg:grid-cols-[1.75rem_minmax(0,2fr)_minmax(0,1.5fr)_12rem_7rem_9.5rem] lg:items-center lg:gap-4'
+export const ROW_GRID = 'lg:grid lg:grid-cols-[1.75rem_minmax(0,2fr)_minmax(0,1.5fr)_7.5rem_12rem_7rem_9.5rem] lg:items-center lg:gap-4'
 
 const SEVERITY_STYLE: Record<string, string> = {
   critical: 'bg-red-500/15 text-red-300 ring-red-500/30',
@@ -90,6 +90,24 @@ function WebApps({ asset }: { asset: TargetAsset }) {
   </span>
 }
 
+const LIVENESS_STYLE: Record<string, { pill: string; dot: string }> = {
+  green: { pill: 'bg-emerald-500/10 text-emerald-300', dot: 'bg-emerald-400' },
+  amber: { pill: 'bg-amber-500/10 text-amber-200', dot: 'bg-amber-400' },
+  red: { pill: 'bg-red-500/10 text-red-300', dot: 'bg-red-400' },
+  gray: { pill: 'bg-gray-800 text-gray-400', dot: 'bg-gray-500' },
+}
+
+/** DNS / reachable / live from the latest liveness check; the reason and its age on hover. */
+export function LivenessPill({ liveness }: { liveness?: TargetAsset['liveness'] }) {
+  const view = livenessView(liveness)
+  const style = LIVENESS_STYLE[view.tone]
+  return <span data-testid="target-liveness" data-status={view.status} title={view.title} aria-label={`Liveness: ${view.label}. ${view.title}`}
+    className={`inline-flex max-w-full items-center gap-1.5 rounded-md px-1.5 py-0.5 text-[11px] font-medium leading-4 ${style.pill}`}>
+    <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${style.dot}`} aria-hidden="true" />
+    <span className="truncate">{view.label}</span>
+  </span>
+}
+
 function LastScan({ asset }: { asset: TargetAsset }) {
   if (asset.scanning) {
     return <span className="inline-flex items-center gap-1.5 text-xs font-medium text-blue-300"><span className="h-1.5 w-1.5 animate-pulse rounded-full bg-blue-400" aria-hidden="true" />Scanning…</span>
@@ -148,6 +166,7 @@ export function TargetRow({ asset, selected, onSelect, actions, busy, nested = f
       </span>
     </span>
     <span role="cell" className="mt-2 block pl-7 lg:mt-0 lg:pl-0"><WebApps asset={asset} /></span>
+    <span role="cell" className="mt-2 block pl-7 lg:mt-0 lg:pl-0"><LivenessPill liveness={asset.liveness} /></span>
     <span role="cell" className="mt-2 flex items-center gap-4 pl-7 lg:mt-0 lg:block lg:pl-0"><SeverityPills counts={asset.severity_counts} /></span>
     <span role="cell" className="mt-1 block pl-7 lg:mt-0 lg:pl-0"><LastScan asset={asset} /></span>
     <span role="cell" className="mt-3 flex items-center justify-end gap-1.5 lg:mt-0">

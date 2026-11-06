@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useRouter, useSearchParams } from 'next/navigation'
-import { Globe, Play, Plus, ShieldCheck, X } from 'lucide-react'
+import { ArrowLeft, Globe, Play, Plus, ShieldCheck, X } from 'lucide-react'
 import { Button, ConfirmDialog, EmptyState, ErrorState, Field, Input, PageHeader, Skeleton, useToast } from '@/components/ui'
 import { restoreTarget, scanTarget } from '@/lib/api'
 import {
@@ -11,8 +11,8 @@ import {
 } from '@/lib/targetAssetApi'
 import { usePoll } from '@/lib/usePoll'
 import {
-  filtersFromQuery, groupSections, inventoryPageFromBody, inventoryPageParams, inventoryTargetTotal, queryFromFilters,
-  targetTotalLabel, type InventoryTargetTotal,
+  domainPageFromBody, filtersFromQuery, groupSections, inventoryPageFromBody, inventoryPageParams, inventoryTargetTotal,
+  queryFromFilters, targetTotalLabel, DOMAIN_PAGE_TARGETS, TARGETS_PAGE_GROUPS, type InventoryTargetTotal,
 } from '@/lib/targetInventoryModel.mjs'
 import { AddTargetsDialog } from './inventory/AddTargetsDialog'
 import { AuthorizeDialog } from './inventory/AuthorizeDialog'
@@ -20,7 +20,7 @@ import { InventorySummary, InventoryToolbar, type InventoryFilters } from './inv
 import { ColumnHeader, DomainGroup, NetworkGroup } from './inventory/TargetGroups'
 import { assetKind, type RowActions } from './inventory/TargetRow'
 
-const PAGE_GROUPS = 40
+const PAGE_GROUPS = TARGETS_PAGE_GROUPS
 const plural = (count: number, noun: string) => `${count.toLocaleString()} ${noun}${count === 1 ? '' : 's'}`
 const SCANNING_REFRESH_MS = 10_000
 const GROUPS_KEY = 'shakerscan.targets.expandedGroups'
@@ -100,8 +100,9 @@ export function TargetInventory() {
     getTargetAssets(inventoryPageParams(query, cursor, PAGE_GROUPS) as Parameters<typeof getTargetAssets>[0], controller.signal)
       .then(result => {
         if (controller.signal.aborted) return
-        // list/v1, or (during a rolling upgrade) an older server's legacy or flat answer.
-        const view = inventoryPageFromBody(result)
+        // list/v1, or (during a rolling upgrade) an older server's legacy or flat answer. One
+        // domain's list is a flat page of its targets, shown as that domain's group.
+        const view = query.domain ? domainPageFromBody(result, query.domain) : inventoryPageFromBody(result)
         setGroups(view.groups as TargetAssetGroup[])
         setFacets(view.facets)
         setNextCursor(view.nextCursor)
@@ -141,8 +142,9 @@ export function TargetInventory() {
     setSelected(new Set())
   }
 
-  const narrowed = Boolean(query.search.trim() || query.findings || query.activity || query.authorization)
-  const isOpen = (group: TargetAssetGroup) => expanded[group.root_domain] ?? (narrowed || group.targets.length <= 5)
+  const narrowed = Boolean(query.search.trim() || query.findings || query.activity || query.authorization || query.liveness)
+  const isOpen = (group: TargetAssetGroup) => Boolean(query.domain) || (expanded[group.root_domain] ?? (narrowed || group.targets.length <= 5))
+  const showDomain = (domain: string) => { change({ domain }); window.scrollTo?.({ top: 0 }) }
 
   async function webScan(asset: TargetAsset) {
     const apps = (asset.origins || []).filter(origin => origin.is_active)
@@ -247,6 +249,13 @@ export function TargetInventory() {
     </div> : <>
       <InventorySummary facets={facets} filters={filters} onChange={change} />
       <InventoryToolbar filters={filters} facets={facets} onChange={change} searchRef={searchInput} />
+      {query.domain && <div className="mb-3 flex flex-wrap items-center gap-2 rounded-xl border border-blue-500/30 bg-blue-500/[0.06] px-3 py-2 text-sm" data-testid="target-domain-view">
+        <Globe className="h-4 w-4 text-blue-300" aria-hidden="true" />
+        <span className="text-gray-300">All targets in <strong className="break-all text-white">{query.domain}</strong></span>
+        <button type="button" onClick={() => change({ domain: '' })}
+          className="ml-auto inline-flex items-center gap-1 rounded-md px-2 py-1 text-xs font-medium text-blue-300 hover:bg-blue-500/10 hover:text-blue-200">
+          <ArrowLeft className="h-3.5 w-3.5" aria-hidden="true" />All domains</button>
+      </div>}
       {error && <div className="mb-4" role="alert"><ErrorState message={error} /></div>}
       <div className="@container" role="table" aria-label="Targets" aria-busy={loading}>
         <ColumnHeader />
@@ -254,9 +263,10 @@ export function TargetInventory() {
           ? <div className="space-y-4">{Array.from({ length: 4 }, (_, index) => <Skeleton key={index} className="h-24 w-full rounded-xl" />)}</div>
           : !groups.length
             ? <div className="rounded-xl border border-gray-800 p-6"><EmptyState message="No targets match" hint="Try a different search or clear the filters."
-                action={{ label: 'Clear filters', onClick: () => change({ search: '', environment: '', authorization: '', findings: '', activity: '', asset_type: '', archived: false }) }} /></div>
+                action={{ label: 'Clear filters', onClick: () => change({ search: '', environment: '', authorization: '', findings: '', activity: '', asset_type: '', liveness: '', domain: '', archived: false }) }} /></div>
             : <div className={`space-y-4 ${loading ? 'opacity-60 transition-opacity' : 'transition-opacity'}`}>
                 {sections.domains.map(group => <DomainGroup key={group.root_domain} group={group} open={isOpen(group)} onDomainDeleted={refresh}
+                  onShowAll={query.domain ? undefined : () => showDomain(group.root_domain)}
                   onToggle={() => setExpanded(current => ({ ...current, [group.root_domain]: !isOpen(group) }))}
                   onDiscovered={() => { setExpanded(current => ({ ...current, [group.root_domain]: true })); refresh() }}
                   selection={selection} actions={actions} busy={busy} />)}
@@ -265,7 +275,9 @@ export function TargetInventory() {
       </div>
       {(pageIndex > 0 || nextCursor) && <div className="mt-4 flex items-center justify-between gap-3">
         <Button variant="secondary" size="sm" disabled={pageIndex === 0 || loading || settling} onClick={() => moveTo(current => current.slice(0, -1))}>Previous</Button>
-        <span className="text-xs text-gray-500">Groups {(pageIndex * PAGE_GROUPS + 1).toLocaleString()}–{(pageIndex * PAGE_GROUPS + groups.length).toLocaleString()}{totals.groups != null ? ` of ${totals.groups.toLocaleString()}` : ''} · {targetTotalLabel(totals.targets)}</span>
+        <span className="text-xs text-gray-500" data-testid="target-page-position">{query.domain
+          ? `Targets ${(pageIndex * DOMAIN_PAGE_TARGETS + 1).toLocaleString()}–${(pageIndex * DOMAIN_PAGE_TARGETS + assets.length).toLocaleString()} of ${targetTotalLabel(totals.targets)}`
+          : `Groups ${(pageIndex * PAGE_GROUPS + 1).toLocaleString()}–${(pageIndex * PAGE_GROUPS + groups.length).toLocaleString()}${totals.groups != null ? ` of ${totals.groups.toLocaleString()}` : ''} · ${targetTotalLabel(totals.targets)}`}</span>
         <Button variant="secondary" size="sm" disabled={!nextCursor || loading || settling} onClick={() => { if (nextCursor) moveTo(current => [...current, nextCursor]) }}>Next</Button>
       </div>}
       {!loading && groups.length > 0 && pageIndex === 0 && !nextCursor && <p className="mt-3 text-center text-xs text-gray-600" aria-live="polite">{targetTotalLabel(totals.targets)} in {plural(totals.groups ?? groups.length, 'group')}</p>}

@@ -169,15 +169,21 @@ export function latestGrade(asset) {
   return candidates[0]?.grade || null
 }
 
-export const FILTER_KEYS = ['search', 'environment', 'authorization', 'findings', 'activity', 'asset_type', 'sort', 'archived']
-export const FILTER_DEFAULTS = { search: '', environment: '', authorization: '', findings: '', activity: '', asset_type: '', sort: 'name', archived: false }
+export const FILTER_KEYS = ['search', 'environment', 'authorization', 'findings', 'activity', 'asset_type', 'liveness', 'domain', 'sort', 'archived']
+export const FILTER_DEFAULTS = { search: '', environment: '', authorization: '', findings: '', activity: '', asset_type: '', liveness: '', domain: '', sort: 'name', archived: false }
+export const LIVENESS_STATUSES = ['live', 'reachable', 'unreachable', 'no_dns', 'dns_error', 'blocked', 'unchecked']
 const ALLOWED = {
   authorization: ['authorized', 'unauthorized'],
   findings: ['any', 'critical_high', 'none'],
   activity: ['never', 'scanned', 'scanning'],
   asset_type: ['web', 'network'],
+  liveness: LIVENESS_STATUSES,
   sort: ['name', 'risk', 'recent', 'created'],
 }
+// A domain group as the inventory names it: a registrable domain, an address or a LAN name.
+const DOMAIN_FILTER = /^[a-z0-9.:_[\]-]{1,253}$/
+// The filters the inventory applies on the server (search and domain are scope, not filters).
+const SERVER_FILTERS = ['environment', 'authorization', 'findings', 'activity', 'asset_type', 'liveness']
 
 /** URL query -> validated filter state (unknown values fall back to defaults). */
 export function filtersFromQuery(params) {
@@ -185,6 +191,8 @@ export function filtersFromQuery(params) {
   const filters = { ...FILTER_DEFAULTS }
   filters.search = read('search').slice(0, 500)
   filters.environment = /^[a-z0-9_-]{1,40}$/.test(read('environment')) ? read('environment') : ''
+  const domain = read('domain').trim().toLowerCase().replace(/\.$/, '')
+  filters.domain = DOMAIN_FILTER.test(domain) ? domain : ''
   for (const [key, values] of Object.entries(ALLOWED)) {
     const value = read(key)
     if (values.includes(value)) filters[key] = value
@@ -210,15 +218,25 @@ export function queryFromFilters(filters) {
 export function inventoryParams(filters, offset, limit) {
   const params = { group_by: 'domain', include_facets: true, offset, limit, sort: filters.sort || 'name' }
   if (filters.search.trim()) params.search = filters.search.trim()
-  for (const key of ['environment', 'authorization', 'findings', 'activity', 'asset_type']) {
+  for (const key of SERVER_FILTERS) {
     if (filters[key]) params[key] = filters[key]
   }
+  if (filters.domain) params.domain = filters.domain
   if (filters.archived) params.include_inactive = true
   return params
 }
 
-/** Members per domain group on the Targets page; larger groups say how many are not shown. */
+/** Members read per domain group when a caller needs a group's web apps (New Scan's batch). */
 export const INVENTORY_MEMBER_LIMIT = 200
+/**
+ * Members per domain group on the Targets page. A larger group says how many more it has and
+ * opens as its own list ("Show all"), paged by `DOMAIN_PAGE_TARGETS`.
+ */
+export const TARGETS_PAGE_MEMBER_LIMIT = 20
+/** Domain groups per Targets page: at most 25 x 20 targets, usually far fewer. */
+export const TARGETS_PAGE_GROUPS = 25
+/** Targets per page of one domain's list. */
+export const DOMAIN_PAGE_TARGETS = 50
 
 const V1_SORT = { name: 'name', risk: '-risk', recent: '-recent', created: '-created' }
 
@@ -227,17 +245,61 @@ const V1_SORT = { name: 'name', risk: '-risk', recent: '-recent', created: '-cre
  * count). The legacy grouping read every asset of the install into the API and returned whole
  * groups: 3.5 s and a 10,000-member group at the 10k-target scale seed.
  */
-export function inventoryPageParams(filters, cursor, limit, memberLimit = INVENTORY_MEMBER_LIMIT) {
-  const params = { group_by: 'domain', include_facets: true, limit, member_limit: memberLimit,
-    sort: V1_SORT[filters.sort] || 'name' }
+export function inventoryPageParams(filters, cursor, limit, memberLimit = TARGETS_PAGE_MEMBER_LIMIT) {
+  // One domain: its targets as a flat keyset list, every one reachable by Next.
+  const params = filters.domain
+    ? { domain: filters.domain, include_facets: true, limit: DOMAIN_PAGE_TARGETS, sort: V1_SORT[filters.sort] || 'name' }
+    : { group_by: 'domain', include_facets: true, limit, member_limit: memberLimit, sort: V1_SORT[filters.sort] || 'name' }
   if (cursor) params.cursor = cursor
   else params.count = 'exact'
   if (filters.search.trim()) params.search = filters.search.trim()
-  for (const key of ['environment', 'authorization', 'findings', 'activity', 'asset_type']) {
+  for (const key of SERVER_FILTERS) {
     if (filters[key]) params[key] = filters[key]
   }
   if (filters.archived) params.include_inactive = true
   return params
+}
+
+/**
+ * One page of a single domain's targets (a flat list/v1 answer) as the Targets view: one group
+ * holding this page's targets, whose `member_count` is the domain's total under the filters.
+ */
+export function domainPageFromBody(body, domain) {
+  const item = body && typeof body === 'object' ? body : {}
+  const targets = Array.isArray(item.items) ? item.items : []
+  const total = Number.isFinite(item.total) ? item.total : null
+  const group = { root_domain: domain, discoverable: undefined, targets, member_count: total ?? targets.length, members_truncated: false }
+  return {
+    groups: targets.length ? [group] : [], totalGroups: targets.length ? 1 : 0,
+    targetTotal: total === null ? null : { count: total, kind: item.total_kind === 'at_least' ? 'at_least' : 'exact' },
+    hasMore: Boolean(item.has_more), nextCursor: item.has_more ? item.next_cursor || null : null,
+    facets: item.facets || null, listV1: true,
+  }
+}
+
+const LIVENESS_LABELS = {
+  live: { label: 'Live', tone: 'green' },
+  reachable: { label: 'Reachable', tone: 'amber' },
+  unreachable: { label: 'Unreachable', tone: 'red' },
+  no_dns: { label: 'No DNS', tone: 'red' },
+  dns_error: { label: 'DNS error', tone: 'amber' },
+  blocked: { label: 'Not checked (policy)', tone: 'gray' },
+  unchecked: { label: 'Not checked', tone: 'gray' },
+}
+
+/** Label, tone and hover text of a target's liveness. */
+export function livenessView(liveness, now = Date.now()) {
+  const status = LIVENESS_STATUSES.includes(liveness?.status) ? liveness.status : 'unchecked'
+  const { label, tone } = LIVENESS_LABELS[status]
+  const when = relativeTime(liveness?.checked_at, now)
+  const answered = (liveness?.ports || []).find(port => port && port.answered)
+  const detail = status === 'live'
+    ? (answered ? (answered.http_status ? `HTTP ${answered.http_status} on port ${answered.port}` : `a service answered on port ${answered.port}`) : 'a service answered')
+    : String(liveness?.reason || '').slice(0, 300)
+  const title = status === 'unchecked'
+    ? 'Liveness has not been checked yet'
+    : [detail, when ? `checked ${when}` : ''].filter(Boolean).join(' · ')
+  return { status, label, tone, title, checkedAgo: when }
 }
 
 /**
@@ -289,8 +351,7 @@ export function targetTotalLabel(total) {
 }
 
 export function activeFilterCount(filters) {
-  return ['environment', 'authorization', 'findings', 'activity', 'asset_type'].filter(key => filters[key]).length
-    + (filters.archived ? 1 : 0)
+  return SERVER_FILTERS.filter(key => filters[key]).length + (filters.archived ? 1 : 0)
 }
 
 /** The web addresses a scan of this asset covers: its live web apps, else a bare domain. */
