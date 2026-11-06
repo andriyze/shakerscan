@@ -19,12 +19,15 @@ except ModuleNotFoundError:  # package import
     from scanner.scanner_tools.host_names import HostNameError, canonical_host
 try:
     from scanner_tools.corporate_identity import identities_from_fingerprint
+    from scanner_tools import web_identity
 except ModuleNotFoundError:  # package import
     from scanner.scanner_tools.corporate_identity import identities_from_fingerprint
+    from scanner.scanner_tools import web_identity
 try:
     from scanner_tools.service_identity import identity_fields
 except ModuleNotFoundError:  # package import
     from scanner.scanner_tools.service_identity import identity_fields
+from . import service_components
 
 SCHEMA_VERSION = "service-intelligence/v1"
 SERVICE_NAMESPACE = uuid.UUID("e4089322-9875-4dca-a92d-60be1c2694a1")
@@ -132,6 +135,8 @@ def normalized_observation(raw: Mapping[str, Any]) -> dict[str, Any] | None:
     kind = row.get("kind")
     app_origin = origin(row.get("web_origin"))
     network_address = address(row.get("address"))
+    components: list[dict[str, Any]] = []
+    names: tuple[str | None, str | None] = (None, None)
     if kind == "request_replay":
         # The requested collection URL does not prove a service was reached.
         # Project only the final URL and connected address from the worker receipt.
@@ -160,6 +165,11 @@ def normalized_observation(raw: Mapping[str, Any]) -> dict[str, Any] | None:
         parts = urlsplit(app_origin)
         network_address = address(request.get("pinned_address") or row.get("pinned_address") or row.get("address"))
         product, version = http_server_identity(row.get("webserver"))
+        names = _request_names(app_origin)
+        if kind == "http_fingerprint":
+            # Several components per origin and base path; each keeps its own evidence.
+            components = [c for c in map(service_components.sanitized,
+                                         web_identity.components_from_fingerprint(row)) if c]
         if kind == "http_fingerprint" and not version:
             # A corporate product whose fingerprint read an exact version names the application
             # behind the listener better than a version-less Server banner does.
@@ -171,6 +181,25 @@ def normalized_observation(raw: Mapping[str, Any]) -> dict[str, Any] | None:
             "port": parts.port or (443 if parts.scheme == "https" else 80),
             "service": parts.scheme, "product": product,
             "method": "http_response", "version": version,
+            "encrypted": parts.scheme == "https",
+        }
+    elif kind == "http_component":
+        # A product recipe's claims (``web.identify``): the connected address and the request's
+        # Host/SNI are part of the claim, the product label comes from the catalogue.
+        app_origin = origin(row.get("url"))
+        network_address = address(row.get("connected_address"))
+        status = row.get("status")
+        claim = service_components.sanitized(row)
+        if app_origin is None or claim is None or (status is not None and (
+                type(status) is not int or not 100 <= status <= 599)):
+            return None
+        parts = urlsplit(app_origin)
+        components = [claim]
+        names = _request_names(app_origin)
+        row = {
+            "state": "open", "transport": "tcp",
+            "port": parts.port or (443 if parts.scheme == "https" else 80),
+            "service": parts.scheme, "method": "http_response",
             "encrypted": parts.scheme == "https",
         }
     elif kind not in {"service", "open_port", "device_service"}:
@@ -201,6 +230,12 @@ def normalized_observation(raw: Mapping[str, Any]) -> dict[str, Any] | None:
     # Protocol, version build and authentication are separate claims (service_identity); a
     # port hint carries none of them, and authentication defaults to "not tested".
     identity = identity_fields(row if identity_basis != "port_hint" else {})
+    if kind in {"service", "device_service"} and identity_basis != "port_hint":
+        # A retained Hunt projection carries the components its own normalization produced.
+        carried = row.get("components") if isinstance(row.get("components"), list) else []
+        components = [c for c in map(service_components.sanitized, carried[:24]) if c]
+        if identity_basis == "network_fingerprint":
+            components = [c for c in (service_components.network_component(row),) if c] + components
     return {
         "address": network_address, "transport": transport, "port": port,
         "application_origin": app_origin, "state": state,
@@ -216,7 +251,21 @@ def normalized_observation(raw: Mapping[str, Any]) -> dict[str, Any] | None:
         "version_basis": identity["version_basis"],
         "authentication": identity["authentication"],
         "authentication_proof": identity["authentication_proof"],
+        "components": components,
+        "_host": names[0], "_sni": names[1],
     }
+
+
+def _request_names(app_origin: str | None) -> tuple[str | None, str | None]:
+    """The Host name an HTTP observation asked for, and its TLS SNI name (HTTPS only)."""
+    if not app_origin:
+        return None, None
+    parts = urlsplit(app_origin)
+    host = parts.hostname
+    if host and ":" in host:
+        host = f"[{host}]"
+    sni = host if parts.scheme == "https" and host and not host.startswith("[") and address(host) is None else None
+    return host, sni
 
 
 def service_id(target: Mapping[str, Any], observation: Mapping[str, Any]) -> str:
@@ -265,6 +314,9 @@ def build_inventory(target: Mapping[str, Any], sources: list[dict[str, Any]], *,
             "vantage": text(source.get("vantage"), 120) or None,
             "status": text(source.get("status"), 40) or "unknown",
         }
+        claims = item.pop("components", [])
+        context = service_components.provenance_context(item, evidence)
+        item.pop("_host", None), item.pop("_sni", None)
         record = services.get(sid)
         history = {key: item.get(key) for key in ("service", "product", "version", "state")}
         history.update({"observed_at": observed_at, "evidence_ref": evidence["ref"]})
@@ -280,6 +332,7 @@ def build_inventory(target: Mapping[str, Any], sources: list[dict[str, Any]], *,
         else:
             record["state"] = item["state"]
         record["last_seen_at"] = observed_at
+        service_components.merge(record, claims, context, stale_after=STALE_AFTER)
         if evidence not in record["evidence"]:
             record["evidence"].append(evidence)
         if history not in record["history"]:
@@ -298,6 +351,7 @@ def build_inventory(target: Mapping[str, Any], sources: list[dict[str, Any]], *,
         record["binding_status"] = "observation_only"
         if record.pop("historical_locator", False) or (target["kind"] == "device" and record.get("locator_generation") != target.get("locator_generation")):
             record["binding_status"] = "historical_locator"
+        service_components.finalize(record, now=now, stale_after=STALE_AFTER)
         record["findings"] = []
         record["cve_candidates"] = []
         record["activities"] = []

@@ -140,6 +140,8 @@ def validated_hunt_source(row: Mapping[str, Any], target: Mapping[str, Any]) -> 
                 "version": item["version"], "cpe": item["cpes"], "web_origin": item["application_origin"],
                 "method": item["detection_method"], "confidence": item["detection_confidence"],
                 "encrypted": item["encrypted"], "tunnel": item["tunnel"],
+                # Network components are re-derived from product/version; HTTP ones are carried.
+                "components": [c for c in item["components"] if c["basis"] != "network_fingerprint"],
             })
         generation = None
         historical = False

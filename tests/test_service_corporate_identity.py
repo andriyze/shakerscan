@@ -53,4 +53,5 @@ def test_explicit_cpe_is_not_replaced_by_a_product_alias():
     explicit = 'cpe:2.3:h:fortinet:fortigate:1:*:*:*:*:*:*:*'
     enrich_service({'product': 'FortiOS', 'version': '1.2.3', 'cpes': [explicit]},
                    {'status': 'available', 'advisories': []}, matcher)
-    assert seen == [explicit]
+    # The second query (advisories the version is outside of) wildcards only the version.
+    assert seen == [explicit, 'cpe:2.3:h:fortinet:fortigate:*:*:*:*:*:*:*:*']

@@ -224,15 +224,97 @@ def derived_cpes(product: Any, version: Any) -> list[str]:
     return [f"cpe:2.3:{alias}:{version_text}:*:*:*:*:*:*:*" for alias in PRODUCT_CPE_ALIASES[name]]
 
 
+APPLICABILITY_STATUSES = ("affected", "not_affected", "unresolved")
+# What each unresolved reason still needs; the follow-up names only that missing evidence.
+FOLLOW_UPS: dict[str, dict[str, str]] = {
+    "product_probable": {"need": "confirm_product", "capability": "web.identify",
+                         "detail": "A product recipe or a product-specific response confirms the product."},
+    "version_not_reported": {"need": "reported_version", "capability": "web.identify",
+                             "detail": "The product has not stated its version; a recipe that reads it, or authenticated inventory, resolves it."},
+    "version_inferred": {"need": "reported_version", "capability": "web.identify",
+                         "detail": "The version was inferred from a fingerprint or a readme, not stated by the product."},
+    "distribution_package": {"need": "package_fix_status", "capability": "ssh.connect",
+                             "detail": "A distribution may have backported the fix into this package revision; authenticated package inventory resolves it."},
+    "advisory_range_unresolved": {"need": "exact_identity", "capability": None,
+                                  "detail": "The advisory names the product, but not a range this identity can be compared with."},
+}
+
+
+def _component_queries(service: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """What to match: each named component, or the service's own identity (older records)."""
+    components = [c for c in service.get("components") or () if isinstance(c, Mapping) and c.get("product")]
+    if components:
+        return [dict(c) for c in components]
+    if not service.get("product") and not service.get("cpes"):
+        return []
+    version = service.get("version")
+    return [{
+        "id": None, "role": "service", "base_path": "/", "product": service.get("product"),
+        "product_key": None, "product_status": "identified", "version": version,
+        "version_status": "reported" if version else "unknown", "distribution": None,
+        "cpes": list(service.get("cpes") or ()), "advisory_product": None, "claims": {},
+    }]
+
+
+def _versionless(cpe: Any) -> str | None:
+    """The same CPE with its version wildcarded: every advisory naming the product."""
+    if not isinstance(cpe, str):
+        return None
+    if cpe.startswith("cpe:2.3:"):
+        parts = cpe.split(":")
+        return ":".join([*parts[:5], "*", *parts[6:]]) if len(parts) >= 6 else cpe
+    parts = cpe.split(":")  # cpe:/a:vendor:product:version
+    return ":".join(parts[:4]) if len(parts) > 4 else cpe
+
+
+def applicability(component: Mapping[str, Any], match: Mapping[str, Any]) -> tuple[str, str | None]:
+    """affected only for an identified product whose upstream version the product reported, with
+    no distribution package that may carry a backport, inside an exact CPE range; else unresolved."""
+    if component.get("product_status") != "identified":
+        return "unresolved", "product_probable"
+    if component.get("version_status") == "inferred_range":
+        return "unresolved", "version_inferred"
+    if component.get("version_status") != "reported" or not component.get("version"):
+        return "unresolved", "version_not_reported"
+    if component.get("distribution"):
+        return "unresolved", "distribution_package"
+    if match.get("match_type") == "exact_cpe_version_range" and match.get("version_evaluation") == "affected":
+        return "affected", None
+    return "unresolved", "advisory_range_unresolved"
+
+
+def _published_after(records: list[Mapping[str, Any]], observed: Any) -> bool:
+    """Whether the advisory entered the snapshot after this identity was last observed."""
+    seen = timestamp(observed)
+    if seen is None:
+        return False
+    for record in records:
+        published = timestamp(record.get("published"))
+        if published is not None and published > seen:
+            return True
+    return False
+
+
 def enrich_service(service: dict[str, Any], snapshot: Mapping[str, Any], matcher: Callable[..., Any]) -> None:
-    """Attach separate applicability, reference and local-validation dimensions."""
+    """Attach separate applicability, reference and local-validation dimensions.
+
+    The retained inventory is matched against the snapshot loaded now, so a changed advisory
+    bundle is applied to every listener already observed without new traffic. Each candidate
+    names the component it was matched for and an applicability of its own; a component whose
+    version the product reported also lists the advisories its version is outside of.
+    """
     service["cve_candidates"] = []
     service["intelligence_status"] = "identity_unknown"
     service["candidates_truncated"] = False
+    service["advisory_follow_up"] = []
+    service["advisory_changes"] = []
     if snapshot.get("status") != "available":
         service["intelligence_status"] = "snapshot_unavailable"
         return
-    if service.get("identity_basis") == "port_hint" or not (service.get("cpes") or service.get("product")):
+    if service.get("identity_basis") == "port_hint":
+        return
+    queries = _component_queries(service)
+    if not queries:
         return
     records = snapshot.get("advisories", [])
     by_id = snapshot.get("_advisories_by_id")
@@ -245,18 +327,38 @@ def enrich_service(service: dict[str, Any], snapshot: Mapping[str, Any], matcher
             if CVE_ID.fullmatch(aid):
                 by_id.setdefault(aid, []).append(row)
     found: dict[str, dict[str, Any]] = {}
-    cpes = list(service.get("cpes") or []) or derived_cpes(service.get("product"), service.get("version"))
-    for cpe in cpes or [None]:
-        # Even authenticated identity is not proof of affected build/configuration
-        # here. Findings and their verifier contract remain a separate source.
-        matches = matcher(
-            records, cpe=cpe, product=service.get("product"), version=service.get("version"),
-            identity_evidence_tier="network_service_fingerprint", limit=MAX_CANDIDATES + 1,
-        )
-        for match in matches:
-            aid = str(match.get("advisory_id") or "").upper()
-            if not CVE_ID.fullmatch(aid):
-                continue
+    follow: dict[tuple[Any, ...], dict[str, Any]] = {}
+    by_component = {item["id"]: item for item in service.get("components") or () if isinstance(item, dict) and item.get("id")}
+    for component in queries:
+        product = component.get("advisory_product") or component.get("product")
+        version = component.get("version")
+        cpes = list(component.get("cpes") or []) or derived_cpes(component.get("product"), version)
+        component_matches: dict[str, dict[str, Any]] = {}
+        for cpe in cpes or [None]:
+            # Even authenticated identity is not proof of affected build/configuration
+            # here. Findings and their verifier contract remain a separate source.
+            for match in matcher(
+                records, cpe=cpe, product=product, version=version,
+                identity_evidence_tier="network_service_fingerprint", limit=MAX_CANDIDATES + 1,
+            ):
+                aid = str(match.get("advisory_id") or "").upper()
+                if CVE_ID.fullmatch(aid) and (aid not in component_matches or match.get("match_type") == "exact_cpe_version_range"):
+                    component_matches[aid] = match
+        not_affected: set[str] = set()
+        if component.get("version_status") == "reported" and version and component.get("product_status") == "identified":
+            for cpe in cpes or [None]:
+                for match in matcher(records, cpe=_versionless(cpe), product=product, version=None,
+                                     identity_evidence_tier="network_service_fingerprint", limit=200):
+                    aid = str(match.get("advisory_id") or "").upper()
+                    if CVE_ID.fullmatch(aid) and aid not in component_matches:
+                        not_affected.add(aid)
+        target = by_component.get(component.get("id"))
+        if target is not None:
+            target["advisories_not_affected"] = {"count": len(not_affected), "ids": sorted(not_affected)[:20]}
+        version_observed = ((component.get("claims") or {}).get("version") or {}).get("observed_at") \
+            or ((component.get("claims") or {}).get("product") or {}).get("observed_at")
+        for aid, match in component_matches.items():
+            status, reason = applicability(component, match)
             references: dict[str, dict[str, str]] = {}
             for record in by_id.get(aid, []):
                 # Only explicitly typed references from the trusted snapshot.
@@ -272,6 +374,7 @@ def enrich_service(service: dict[str, Any], snapshot: Mapping[str, Any], matcher
                             "review_status": "not_reviewed_for_execution",
                         }
             context = _exploitation_context(by_id.get(aid, []))
+            newly = _published_after(by_id.get(aid, []), version_observed)
             candidate = {
                 "id": aid, "title": text(match.get("title"), 500) or aid,
                 "severity": text(match.get("severity"), 30) or "unknown",
@@ -279,6 +382,12 @@ def enrich_service(service: dict[str, Any], snapshot: Mapping[str, Any], matcher
                 "match_type": text(match.get("match_type"), 80) or "unknown",
                 "confidence": text(match.get("confidence"), 30) or "unknown",
                 "applicability": "candidate",
+                "applicability_status": status, "unresolved_reason": reason,
+                "component_id": component.get("id"),
+                "component": {"role": component.get("role"), "product": text(component.get("product"), 120),
+                              "base_path": component.get("base_path"), "version": component.get("version"),
+                              "package_version": component.get("package_version")},
+                "new_since_observation": newly,
                 "version_evaluation": text(match.get("version_evaluation"), 30) or "unknown",
                 "local_validation": "no_linked_validation",
                 "exploit_references": list(references.values())[:10],
@@ -287,10 +396,26 @@ def enrich_service(service: dict[str, Any], snapshot: Mapping[str, Any], matcher
                 "prerequisites": ["Confirm exact product/build", "Check affected configuration and vendor backports"],
             }
             prior = found.get(aid)
-            if prior is None or candidate["match_type"] == "exact_cpe_version_range":
+            if prior is None or (status == "affected" and prior["applicability_status"] != "affected") or (
+                    prior["applicability_status"] == status and candidate["match_type"] == "exact_cpe_version_range"):
                 found[aid] = candidate
+            if reason:
+                need = FOLLOW_UPS[reason]
+                key = (component.get("id"), need["need"])
+                entry = follow.setdefault(key, {
+                    "component_id": component.get("id"), "role": component.get("role"),
+                    "product": text(component.get("product"), 120), "base_path": component.get("base_path"),
+                    **need, "advisories": 0,
+                })
+                entry["advisories"] += 1
+            if newly and status == "affected":
+                service["advisory_changes"].append({"kind": "newly_applicable", "advisory_id": aid,
+                                                    "component_id": component.get("id")})
     service["candidates_truncated"] = len(found) > MAX_CANDIDATES
     # What to look at first: known exploited in the wild, then exploitation likelihood, then
     # severity; the cap keeps those, never an alphabetical slice.
     service["cve_candidates"] = sorted(found.values(), key=candidate_priority)[:MAX_CANDIDATES]
+    # Re-evaluation queues only what is missing: one item per component and missing evidence.
+    service["advisory_follow_up"] = sorted(follow.values(), key=lambda item: (-item["advisories"], str(item["product"])))[:10]
+    service["advisory_changes"] = service["advisory_changes"][:20]
     service["intelligence_status"] = "candidates_found" if found else "no_match_in_snapshot"
