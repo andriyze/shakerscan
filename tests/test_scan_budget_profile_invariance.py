@@ -2,7 +2,7 @@
 
 Baseline: 2.12.0, approved by the owner on 2026-11-06, replacing the v2.11.0 (81caee26d)
 baseline. The only change it accepted is the product-recipe action ``discover.identify``
-(``web.identify``), which is funded by its own allowance (``budget_allocator.
+(``web.identify``), which is funded by its own allowance (``action_plan.
 OWN_BUDGET_CAPABILITIES``) and therefore moves no other action's id, slice or frozen budget;
 it only enters the plan-chain digests (input bindings, the finalizer's dependencies).
 
