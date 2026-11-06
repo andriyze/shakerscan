@@ -229,9 +229,9 @@
     "ValidationRequest": "cb81c65a5c80da74a19c6bd92e9c6a68f5cdb22fafeb94270481d463450f893e",
     "WorkerScaleRequest": "52e7ac017dfa1d92efa8e4071026b9bf24c0cf2a17f5d9e742349df3f08f6c62"
   },
-  "contract_sha256": "6b7c9ca735002668264a89e63aedc5adb1aaf19a3f2a9d135ca3b3e4b184c5fc",
+  "contract_sha256": "bf53a12be62a63058dadc80be5dd6770b1c300c4eeac8e082079d88bbe7a67e1",
   "openapi": "3.1.0",
-  "operation_count": 497,
+  "operation_count": 498,
   "operations": {
     "DELETE /ai/scans/{scan_id}/transcript": {
       "deprecated": false,
@@ -3101,7 +3101,7 @@
     "GET /targets/inventory": {
       "deprecated": false,
       "operation_id": "target_inventory_targets_inventory_get",
-      "parameters_sha256": "c65fb15838ef7d473c2ea23596807b9654cb1977d34b69563e4e72b6ec23b65f",
+      "parameters_sha256": "8b213d273f7adae9ec5019d23e46915a1e5c1470cd43ec37bc537f61cdfdc9b2",
       "request_schema_sha256": null,
       "response_schema_sha256": {
         "200": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
@@ -6646,6 +6646,21 @@
       "request_schema_sha256": "1644d44dc95135da8e1e784ae989a513bf84d65f2400c0973bdaca60f04e0387",
       "response_schema_sha256": {
         "201": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "422": "e1fe533ef371cc6965d4015e800b2b5ca90e470f4aae3d57c2754a32b61e8c2d"
+      },
+      "security_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "surface": null,
+      "tags": [
+        "targets"
+      ]
+    },
+    "POST /targets/{target_id}/liveness": {
+      "deprecated": false,
+      "operation_id": "check_target_liveness_targets__target_id__liveness_post",
+      "parameters_sha256": "0e652a1353ac5088b31df5125ab3c2a41bcb6d5c92385081a88d4c5e899d0c50",
+      "request_schema_sha256": null,
+      "response_schema_sha256": {
+        "200": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
         "422": "e1fe533ef371cc6965d4015e800b2b5ca90e470f4aae3d57c2754a32b61e8c2d"
       },
       "security_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",

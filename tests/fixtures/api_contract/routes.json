@@ -3378,6 +3378,13 @@
     "name": "post_target_release"
   },
   {
+    "path": "/targets/{target_id}/liveness",
+    "methods": [
+      "POST"
+    ],
+    "name": "check_target_liveness"
+  },
+  {
     "path": "/targets/{target_id}/negative-results",
     "methods": [
       "GET"
