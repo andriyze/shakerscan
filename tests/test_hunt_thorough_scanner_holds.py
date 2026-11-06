@@ -154,14 +154,18 @@ def test_a_fragment_on_the_path_does_not_change_the_thorough_xss_verify_hold(pat
 
 @pytest.mark.parametrize("run,values,expected", [
     ({"budget_profile": "thorough", "device_target_id": None}, {"path": "/search?q=1"},
-     {"budget_profile": "thorough", "deep_domxss": False, "device_target": False}),
+     {"budget_profile": "thorough", "deep_domxss": False, "device_target": False, "body_test": False}),
     ({"budget_profile": "thorough", "device_target_id": uuid.UUID(int=9)},
      {"path": "/#/search?q=1", "deep_domxss": True},
-     {"budget_profile": "thorough", "deep_domxss": True, "device_target": True}),
+     {"budget_profile": "thorough", "deep_domxss": True, "device_target": True, "body_test": False}),
     # Only a literal true asks for headless Dalfox.
     ({"budget_profile": "balanced"}, {"path": "/search?q=1#", "deep_domxss": "true"},
-     {"budget_profile": "balanced", "deep_domxss": False, "device_target": False}),
-    ({}, {}, {"budget_profile": None, "deep_domxss": False, "device_target": False}),
+     {"budget_profile": "balanced", "deep_domxss": False, "device_target": False, "body_test": False}),
+    ({}, {}, {"budget_profile": None, "deep_domxss": False, "device_target": False, "body_test": False}),
+    # A request body is a body test: its hold carries verifier writes.
+    ({"budget_profile": "balanced"}, {"path": "/login", "method": "POST", "body_field_names": ["user"],
+                                      "injection_field": "user"},
+     {"budget_profile": "balanced", "deep_domxss": False, "device_target": False, "body_test": True}),
 ])
 def test_admission_and_the_worker_read_the_same_hold_context(run, values, expected):
     assert agent_tools.hunt_scanner_budget_context(run, values) == expected
