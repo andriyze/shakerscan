@@ -144,5 +144,6 @@ async def prepare_http_operation(
             headers.clear()
             wire_input.clear()
             exchange.bound_values.clear()
+            exchange.known_secrets.clear()
 
     return execute, exchange, injects_headers
