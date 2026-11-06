@@ -6,14 +6,16 @@ import re
 
 from dataclasses import dataclass, replace
 from types import MappingProxyType
-from typing import Iterable, Mapping, Protocol
+from typing import Mapping, Protocol
 
 try:
     from runtime.models import ScanBudget
 except ModuleNotFoundError:  # package import in host-side tests
     from ..runtime.models import ScanBudget
 
-from .action_plan import ScanAction, ScanActionPlan
+from .action_plan import (
+    OWN_BUDGET_CAPABILITIES, ScanAction, ScanActionPlan, own_budget_allowance, with_own_budget,
+)
 from .external_process import fit_reservation_scaled_profile
 
 
@@ -31,30 +33,6 @@ TARGET_TRAFFIC_DIMENSIONS = frozenset({
     "tcp_ports_attempted",
     "hosts_attempted",
 })
-
-
-# Capabilities funded by their own allowance on top of the Scan's shared ceilings: the plan
-# that contains one holds exactly its registry reservation in addition, so adding it never
-# displaces a slice the shared budget funds. The allowance is derived from the plan itself,
-# identically at admission, in continuation reconciliation and at runtime reservation.
-OWN_BUDGET_CAPABILITIES = frozenset({"web.identify"})
-
-
-def own_budget_allowance(actions: Iterable[ScanAction]) -> dict[str, int]:
-    """The extra authority a plan's own-budget actions bring: their requested holds."""
-    allowance: dict[str, int] = {}
-    for action in actions:
-        if action.capability_name not in OWN_BUDGET_CAPABILITIES or action.admission_status == "skipped":
-            continue
-        for name, amount in dict(action.requested_budget).items():
-            allowance[str(name)] = allowance.get(str(name), 0) + int(amount)
-    return allowance
-
-
-def with_own_budget(limits: Mapping[str, int], actions: Iterable[ScanAction]) -> dict[str, int]:
-    """Shared ceilings plus the plan's own-budget allowance (declared dimensions only)."""
-    allowance = own_budget_allowance(actions)
-    return {name: int(limit) + allowance.get(name, 0) for name, limit in limits.items()}
 
 
 class ScanBudgetAllocationError(ValueError):
