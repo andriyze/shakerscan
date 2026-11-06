@@ -709,6 +709,9 @@ async def run_proof_retest(
         proof={"evidence_type": outcome if outcome in _REFUSALS else ""}, proven=False,
         confidence=None, inputs={**dict(inputs), "original_url": request.url},
         internal_target_authorized=_internal_retest_scope_authorized(dict(verification), request.url),
+        # Every request of the replay got an answer from the finding's own URL (the outcomes
+        # above return earlier): the retest reached the application.
+        origin_reached=True, reach_reason=None,
     )
     if verdict == "likely_fixed":
         reason = _LIKELY_FIXED

@@ -336,6 +336,7 @@ from worker_handlers.retest_outcome import (  # noqa: F401 - re-exported
     _internal_retest_scope_authorized,
     _detect_security_block_text,
     classify_retest_outcome,
+    internal_origin_reach,
     _result_status_for_verdict,
     AI_CAPPED_VERDICTS,
     ai_retest_outcome,
@@ -5974,9 +5975,11 @@ async def run_finding_retest(verification: dict) -> dict:
             internal_target_authorized=internal_target_authorized,
         )
     else:
+        reached, reach_reason = (None, None) if still_vulnerable else await internal_origin_reach(
+            test_url, authorized=internal_target_authorized)
         result_status, verdict, verdict_reason = classify_retest_outcome(
             proof=proof_data, proven=still_vulnerable, confidence=confidence, inputs=inputs,
-            internal_target_authorized=internal_target_authorized,
+            internal_target_authorized=internal_target_authorized, origin_reached=reached, reach_reason=reach_reason,
         )
 
     # Deterministic ladder is exhausted only when all non-AI steps have been tried

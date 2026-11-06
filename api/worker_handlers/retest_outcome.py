@@ -119,12 +119,19 @@ def classify_retest_outcome(
     inputs: dict,
     error_message: str | None = None,
     internal_target_authorized: bool = False,
+    origin_reached: bool | None = None,
+    reach_reason: str | None = None,
 ) -> tuple[str, str, str]:
     """
     Return (result_status, verdict, verdict_reason).
 
     result_status keeps backwards-compatible semantics.
     verdict introduces Shannon-style classification.
+
+    A private-address target is only judged when the source scan authorized it or the retest
+    showed it reached the finding's origin (``origin_reached``: a connection and an HTTP answer
+    there). Otherwise a non-reproduction may only mean the request never arrived, so it stays
+    inconclusive with ``reach_reason``.
     """
     if proven:
         return (
@@ -145,12 +152,11 @@ def classify_retest_outcome(
     extracted_data = str((proof or {}).get("extracted_data") or "")
     target_url = str(inputs.get("original_url") or inputs.get("target_url") or "")
 
-    if _is_internal_target(target_url) and not internal_target_authorized:
-        return (
-            "inconclusive",
-            "out_of_scope_internal",
-            "Target appears internal/private and could require internal network access.",
-        )
+    if _is_internal_target(target_url) and not internal_target_authorized and origin_reached is not True:
+        reason = "Target appears internal/private and could require internal network access"
+        if reach_reason:
+            reason += f"; the retest could not show it reached the target ({str(reach_reason)[:300]})"
+        return ("inconclusive", "out_of_scope_internal", reason + ".")
 
     if _detect_security_block_text(response_snippet, extracted_data):
         return (
@@ -263,3 +269,19 @@ def ai_retest_outcome(verdict: Any, reasoning: Any) -> tuple[str, str, str]:
     if normalized in AI_CAPPED_VERDICTS:
         return "inconclusive", "inconclusive", f"{_AI_CAPPED_REASON} Model note: {note}" if note else _AI_CAPPED_REASON
     return normalized, _result_status_for_verdict(normalized), note
+
+
+async def internal_origin_reach(target_url: str, *, authorized: bool) -> tuple[bool | None, str | None]:
+    """For a private-address target the source scan did not authorize: whether this worker reaches
+    the finding's origin now (``targets.liveness.origin_reach``). ``(None, None)`` when the
+    target is not internal or is authorized, so no request is sent."""
+    if authorized or not _is_internal_target(target_url):
+        return None, None
+    try:
+        from targets.liveness import origin_reach
+    except ModuleNotFoundError:  # package import in host-side tests
+        from ..targets.liveness import origin_reach
+    try:
+        return await origin_reach(target_url)
+    except Exception as exc:  # noqa: BLE001 -- an unexplained check is no reach
+        return False, f"the reach check failed ({type(exc).__name__})"
