@@ -17,7 +17,8 @@ export const HUNT_START_CONTRACT = {
       "credential.use:<target-id|host>,...",
       "target.authorize:<host[:port]|*.domain[:port]>,...",
       "capability:active-replay|active-testing|oob|state-changing|tcp-discovery",
-      "ssh.host_trust:first-contact"
+      "ssh.host_trust:first-contact",
+      "login.use:<saved-login-profile-id>,..."
     ]
   },
   "budget_amendments": {
@@ -316,6 +317,7 @@ export const HUNT_START_CONTRACT = {
     "direct_origin_addresses": 32,
     "goal_chars": 20000,
     "request_collections": 32,
+    "saved_logins": 4,
     "skill_ids": 12
   },
   "patterns": {
@@ -331,7 +333,8 @@ export const HUNT_START_CONTRACT = {
     "ssh.exec",
     "ssh.host_trust",
     "preauthorization",
-    "secret.try"
+    "secret.try",
+    "login.use"
   ],
   "permission_reason_codes": [
     "active_replay_not_allowed",
@@ -376,6 +379,11 @@ export const HUNT_START_CONTRACT = {
     "preauthorization_proposed",
     "preauthorization_reapproval",
     "principal_anonymous_only",
+    "saved_login_destination",
+    "saved_login_invalid",
+    "saved_login_logins_exhausted",
+    "saved_login_not_attached",
+    "saved_login_unavailable",
     "scope_credential_other_host",
     "scope_destination_blocked",
     "scope_origin_invalid",
@@ -433,6 +441,15 @@ export const HUNT_START_CONTRACT = {
     "network_discovery",
     "scope_receipt_id"
   ],
+  "saved_logins": {
+    "field": "saved_logins",
+    "item": {
+      "max_logins": "1-10 (default 3)",
+      "profile_id": "a form_login or json_login profile attached to the target"
+    },
+    "max_items": 4,
+    "requires": "policy.active_testing"
+  },
   "schema_version": "hunt-start/v2",
   "secret_visibility": {
     "default": "withheld",
