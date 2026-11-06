@@ -23055,14 +23055,18 @@ async def async_main():
                 # as an upgrade bridge; all new work is explicitly acked.
                 queue_keys = _worker_lease_queue_keys(r, base_queue_keys)
                 consumer_name = _worker_runtime_identity()
-                lease = await agent_job_concurrency.lease_when_ready(
-                    lambda: lease_job(
+                # Short Hunt calls first, from their own lane: a backlog of long actions never
+                # stops them being leased (hunt/agent_job_concurrency.py).
+                lease = await agent_job_concurrency.lease_by_lane(
+                    lambda keys: lease_job(
                         r,
-                        queue_keys,
+                        keys,
                         consumer_name=consumer_name,
                         block_ms=WORKER_QUEUE_BLOCK_SECONDS * 1000,
                         visibility_timeout_ms=QUEUE_VISIBILITY_TIMEOUT_SECONDS * 1000,
                     ),
+                    queue_keys,
+                    base_queue=AGENT_TOOL_QUEUE_NAME,
                     enabled=AGENT_TOOL_ONLY_WORKER,
                 )
                 if lease is None:

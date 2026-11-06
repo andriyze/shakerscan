@@ -88,7 +88,7 @@ def test_an_agents_start_past_the_budget_exits_3_and_never_begins(monkeypatch):
                         path="/hunts", body=json.dumps(START).encode(), detail=START_REFUSAL,
                         resend=lambda grant: None)
     assert begun == []
-    assert refused.value.command.startswith("shakerscan api POST /hunts ")
+    assert refused.value.command.startswith("shakerscan api --url https://gateway.example.com POST /hunts ")
 
 
 def test_the_mcp_adapter_says_the_users_command_starts_the_hunt():

@@ -486,7 +486,7 @@ def test_without_a_terminal_nothing_is_asked_and_the_command_exits_3(gateway, mo
     with pytest.raises(v2_cli.CliError) as refused:
         client.request("POST", AMENDMENT, payload=RAISE)
     assert refused.value.error_type == "person_decision_required"
-    assert refused.value.api_detail["command"].startswith("shakerscan hunt budget raise")
+    assert refused.value.api_detail["command"].startswith("shakerscan hunt --url https://gateway.example.com budget raise")
     assert signer.asked == [] and gateway.begun == [], "the key never lit up for an agent"
     assert len(gateway.sent) == 1
 
@@ -502,7 +502,7 @@ def test_shakerscan_api_touches_in_a_terminal_and_exits_3_in_an_agents_shell(gat
     monkeypatch.setenv("SHAKERSCAN_AGENT_NAME", "claude")
     assert api_cli.main(["--api-url", ORIGIN, "POST", AMENDMENT, json.dumps(RAISE)]) == 3
     err = capsys.readouterr().err
-    assert "person decision required:" in err and "shakerscan hunt budget raise" in err
+    assert "person decision required:" in err and "shakerscan hunt --url https://gateway.example.com budget raise" in err
     assert len(gateway.sent) == 1 and len(signer.asked) == 1
 
 
@@ -515,7 +515,7 @@ def test_shakerscan_scan_asks_for_the_targets_authorization_then_queues(gateway,
     code = scan_cli.main(["--api-url", ORIGIN, "--ui-url", ORIGIN, "https://new.example.com",
                           "--active-testing", "--confirm-active"])
     assert code == 3 and signer.asked == []
-    assert "shakerscan targets authorize https://new.example.com" in capsys.readouterr().err
+    assert "shakerscan targets --url https://gateway.example.com authorize https://new.example.com" in capsys.readouterr().err
     # At the person's terminal --confirm-active answers only the local question, never the touch:
     # one touch, then the same submission (bytes and Idempotency-Key) once more with the grant.
     gateway.sent.clear()
@@ -540,7 +540,7 @@ def test_the_mcp_adapter_names_the_persons_command_and_never_retries(gateway, mo
         client.request_json("POST", AMENDMENT, RAISE)
     message = refused.value.message
     assert "A person's decision is required" in message and SUMMARY in message
-    assert f"`shakerscan hunt budget raise {HUNT} --limit max_state_changing_requests=40`" in message
+    assert f"`shakerscan hunt --url https://gateway.example.com budget raise {HUNT} --limit max_state_changing_requests=40`" in message
     assert "do not retry" in message
     detail = mcp._error_detail(refused.value)
     assert detail["outcome"] == "person_decision_required" and detail["decision"] == "budget.raise"
@@ -705,7 +705,7 @@ def test_hunt_budget_raise_reads_the_budget_and_sends_totals(gateway, monkeypatc
     err = capsys.readouterr().err
     # One line, not the CLI's error JSON, ending with the person's command.
     assert err.startswith("shakerscan: person decision required: ") and err.count("\n") == 1, err
-    assert err.rstrip().endswith(f"shakerscan hunt budget raise {HUNT} --limit max_state_changing_requests=+20 "
+    assert err.rstrip().endswith(f"shakerscan hunt --url https://gateway.example.com budget raise {HUNT} --limit max_state_changing_requests=+20 "
                                  "--limit max_http_requests=600"), err
     assert "{" not in err
     # In the person's own terminal: the budget read, totals sent, one touch, the same bytes again.
@@ -1253,7 +1253,7 @@ def test_over_ssh_the_key_is_said_to_be_elsewhere_with_the_command_to_run_there(
                           terminal=approval.Terminal(io.StringIO(), io.StringIO()))
     text = str(raised.value)
     assert "remote (SSH) session" in text and "the computer you connect from" in text
-    assert f"shakerscan hunt budget raise {HUNT} --limit max_state_changing_requests=40" in text
+    assert f"shakerscan hunt --url https://gateway.example.com budget raise {HUNT} --limit max_state_changing_requests=40" in text
     assert approval.remote_session({"SSH_TTY": "/dev/pts/3"}) and not approval.remote_session({})
 
 
@@ -1337,7 +1337,7 @@ def test_a_target_registered_before_a_refused_touch_is_said_to_stay_registered(g
     # there is no note to give.
     assert decisions.cmd_targets(args) == 3
     err = capsys.readouterr().err
-    assert "shakerscan targets authorize app.example.com" in err and "registered" not in err
+    assert "shakerscan targets --url https://gateway.example.com authorize app.example.com" in err and "registered" not in err
     assert gateway.sent == []
     # In the person's terminal the target is registered first; a touch that fails leaves it
     # registered, and that is said.
@@ -2335,7 +2335,7 @@ def test_targets_authorize_with_the_switch_off_is_sent_and_recorded_as_the_token
     gateway.refuse = False
     assert decisions.cmd_targets(args) == 3
     assert gateway.sent == []
-    assert capsys.readouterr().err.rstrip().endswith("shakerscan targets authorize app.example.com")
+    assert capsys.readouterr().err.rstrip().endswith("shakerscan targets --url https://gateway.example.com authorize app.example.com")
     out = at_a_terminal(monkeypatch)
 
     monkeypatch.setattr(cli, "apply_connection", lambda args: ORIGIN)

@@ -228,9 +228,11 @@ def admission(store, **overrides):
         "Any", "parked_outcome", "close_parked_action", "permission_required",
         "ARTIFACT_READ_CAPABILITIES", "artifact_origin_required", "service_origin_changed",
         "sqli_injection_point_refusal", "web_hunt_target", "urllib", "require_long_action_slot",
-        "artifact_read_identity", "scanner_admission",
+        "artifact_read_identity", "scanner_admission", "live_agent_tool_workers",
     ):
         context.setdefault(helper, getattr(real_router, helper))
+    # No Redis here: the worker registry reads as one live worker (the single-worker bound).
+    context.setdefault("get_redis", lambda: None)
     context.setdefault("settle_refusal", settle_refusal)
     context.update(overrides)
     exec(compile(selected, str(source), "exec"), context)

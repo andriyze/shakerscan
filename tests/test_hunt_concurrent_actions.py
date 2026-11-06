@@ -425,4 +425,186 @@ def test_admission_classifies_the_call_by_the_wall_it_is_about_to_reserve():
                      and node.name == "_execute_hunt_capability_lifecycle")
     (check,) = [call for call in ast.walk(lifecycle) if isinstance(call, ast.Call)
                 and getattr(call.func, "id", None) == "require_long_action_slot"]
-    assert ast.unparse(check) == "require_long_action_slot(conn, run, name, charges.get('tool_wall_seconds'))"
+    assert ast.unparse(check) == (
+        "require_long_action_slot(conn, run, name, charges.get('tool_wall_seconds'), "
+        "workers=live_agent_tool_workers(get_redis()))")
+
+
+
+# --- Lanes: short calls are leased whatever long work is queued ---------------------------------
+#
+# Owner decision E: three local slots, two long actions running and eight long jobs waiting used to
+# stop the worker leasing anything, short calls included, until one of the waiting started. Short
+# calls now have a lane of their own, leased first and always while a slot is free. Unit fixtures:
+# the queues are lists keyed by lane, leased in the order the worker asks for them.
+
+BASE = "agent_tool_jobs"
+
+
+class Lanes:
+    """The agent-tool queue and its short lane (unit fixture): ``lease(keys)`` takes the first job
+    of the first non-empty queue in ``keys``, as ``job_queue.lease_job`` probes them in order."""
+
+    def __init__(self):
+        self.queues = {jobs.short_lane(BASE): [], BASE: []}
+        self.asked: list[list[str]] = []
+
+    def enqueue(self, job):
+        self.queues[jobs.lane_queue(BASE, job)].append(job)
+
+    def lease(self, keys):
+        self.asked.append(list(keys))
+        for key in keys:
+            if self.queues.get(key):
+                return self.queues[key].pop(0)
+        return None
+
+
+def test_a_short_call_is_queued_on_its_own_lane_and_a_long_action_on_the_agent_tool_queue():
+    short = jobs.short_lane(BASE)
+    assert short == "agent_tool_jobs:short"
+    assert jobs.lane_queue(BASE, _job("s", "http.request")) == short
+    assert jobs.lane_queue(BASE, _job("a", "artifact.inspect")) == short
+    assert jobs.lane_queue(BASE, {"type": "canonical_browser_capability", "capability_name": "browser.navigate"}) == short
+    assert jobs.lane_queue(BASE, _job("l", "sqli.verify")) == BASE
+    assert jobs.lane_queue(BASE, {"type": "canonical_scanner_capability", "capability_name": "web.probe",
+                                  "reserved_wall_seconds": 120}) == BASE
+    # Other agent-tool jobs (a replay, a legacy scanner) keep the agent-tool queue.
+    assert jobs.lane_queue(BASE, {"type": "request_collection_replay"}) == BASE
+    assert jobs.lane_queue(BASE, {"type": "agent_scanner_tool", "timeout_ms": 1_000}) == BASE
+
+
+def test_the_agent_tool_worker_polls_the_short_lane_first():
+    from api.worker_queue_policy import base_worker_queue_keys
+
+    assert base_worker_queue_keys(
+        device_only=False, agent_tool_only=True, device_queue_enabled=False, scan_queue="scan_jobs",
+        retest_queue="retest_jobs", broker_queue="broker_ingest_jobs", device_queue="device_jobs",
+        agent_tool_queue=BASE,
+    ) == ["agent_tool_jobs:short", BASE]
+
+
+def test_short_calls_are_leased_under_a_long_backlog():
+    """Twelve long actions queued, then short calls: two long run, eight wait (the cap), and the
+    worker still leases every short call as a slot frees, while the rest of the long backlog
+    stays queued until a waiting one starts."""
+    lanes = Lanes()
+    started, gates = [], {}
+    for index in range(12):
+        lanes.enqueue(_job(f"long-{index}", "templates.scan"))
+
+    async def execute(redis, lease, job):
+        async def work(job):
+            started.append(job["label"])
+            gates[job["label"]] = gate = asyncio.Event()
+            await gate.wait()
+        await jobs.in_lane(job, work)
+
+    async def worker():
+        keys = [jobs.short_lane(BASE), BASE]
+        while True:
+            job = await jobs.lease_by_lane(lambda names: lanes.lease(names), keys, base_queue=BASE, enabled=True)
+            if job is None:
+                await asyncio.sleep(0.005)
+                continue
+            await jobs.dispatch(None, None, job, execute=execute, enabled=True)
+
+    async def until(condition):
+        for _ in range(400):
+            if condition():
+                return
+            await asyncio.sleep(0.005)
+        raise AssertionError(f"not reached: started={started} waiting={jobs._waiting}")
+
+    async def run():
+        loop = asyncio.create_task(worker())
+        try:
+            await until(lambda: jobs._waiting == jobs.MAX_WAITING_LONG_AGENT_JOBS)
+            assert started == ["long-0", "long-1"]
+            assert len(lanes.queues[BASE]) == 12 - 2 - jobs.MAX_WAITING_LONG_AGENT_JOBS
+            # At the cap the worker asks the short lane only.
+            await until(lambda: lanes.asked and lanes.asked[-1] == [jobs.short_lane(BASE)])
+            for index in range(3):
+                lanes.enqueue(_job(f"short-{index}", "http.request"))
+                await until(lambda index=index: f"short-{index}" in started)
+                gates[f"short-{index}"].set()
+            # The long backlog has not moved meanwhile.
+            assert len(lanes.queues[BASE]) == 12 - 2 - jobs.MAX_WAITING_LONG_AGENT_JOBS
+            # A long slot frees: a waiting one starts, and the worker takes long work again.
+            gates["long-0"].set()
+            await until(lambda: sum(label.startswith("long-") for label in started) == 3
+                        and len(lanes.queues[BASE]) == 1)
+        finally:
+            for gate in gates.values():
+                gate.set()
+            loop.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await loop
+    _bounded(run)
+
+
+def test_without_lanes_a_long_backlog_stopped_short_calls():
+    """The behaviour the lanes replace, kept as the control: one queue, leased in order, stops at
+    the waiting cap and never reaches a short call behind the backlog."""
+    queued = [_job(f"long-{index}", "templates.scan") for index in range(12)] + [_job("short", "http.request")]
+    started, gates = [], {}
+
+    async def execute(redis, lease, job):
+        async def work(job):
+            started.append(job["label"])
+            gates[job["label"]] = gate = asyncio.Event()
+            await gate.wait()
+        await jobs.in_lane(job, work)
+
+    async def worker():
+        while queued:
+            job = await jobs.lease_when_ready(lambda: queued.pop(0), enabled=True)
+            await jobs.dispatch(None, None, job, execute=execute, enabled=True)
+
+    async def run():
+        loop = asyncio.create_task(worker())
+        try:
+            await asyncio.sleep(0.2)
+            assert "short" not in started and jobs._waiting == jobs.MAX_WAITING_LONG_AGENT_JOBS
+        finally:
+            for gate in gates.values():
+                gate.set()
+            loop.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await loop
+    _bounded(run)
+
+
+@pytest.mark.parametrize("workers,allowed", [(0, 2), (1, 2), (2, 4), (3, 6), (8, 16), (50, 16)])
+def test_a_hunts_long_actions_scale_with_the_live_workers(workers, allowed):
+    assert jobs.long_actions_per_hunt(workers) == allowed
+    in_flight = [{"capability_name": "sqli.verify", "action_id": f"a{index}"} for index in range(allowed - 1)]
+    asyncio.run(jobs.require_long_action_slot(ReservationRows(in_flight), {"id": "h"}, "sqli.verify",
+                                              workers=workers))
+    full = ReservationRows([*in_flight, {"capability_name": "xss.verify", "action_id": "last"}])
+    with pytest.raises(HTTPException) as refused:
+        asyncio.run(jobs.require_long_action_slot(full, {"id": "h"}, "sqli.verify", workers=workers))
+    assert refused.value.detail["max_long_actions_in_flight"] == allowed
+
+
+def test_live_agent_tool_workers_counts_fresh_reports_only():
+    from datetime import datetime, timedelta, timezone
+
+    now = datetime(2026, 11, 6, 12, 0, tzinfo=timezone.utc)
+
+    def report(age):
+        return json.dumps({"reported_at": (now - timedelta(seconds=age)).isoformat()})
+
+    class Registry:
+        def __init__(self, reports):
+            self.reports = reports
+
+        def hgetall(self, key):
+            assert key == jobs.AGENT_TOOL_WORKER_REGISTRY_KEY
+            return self.reports
+
+    fresh = {b"w1": report(10).encode(), "w2": report(100), "w3": report(500), "w4": "not json",
+             "w5": json.dumps({"reported_at": None})}
+    assert jobs.live_agent_tool_workers(Registry(fresh), now=now.timestamp()) == 2
+    assert jobs.live_agent_tool_workers(Registry({}), now=now.timestamp()) == 1
+    assert jobs.live_agent_tool_workers(None) == 1  # no registry to read: one worker
