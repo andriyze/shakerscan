@@ -241,12 +241,9 @@ def test_a_saved_login_signs_in_by_reference_and_its_secret_never_reaches_the_pl
             assert any(SECRET in (item.get(KNOWN_VALUES_KEY) or ()) for item in sealed)
             assert "withheld://" not in json.dumps(orders.get("typed_output", {}).get("withheld_values") or [])
             # The raw request body exists only in the private archive, marked so every public view
-            # omits it.
-            login_rows = [row for row in conn.raw_archive if row.method == "POST"] if conn.raw_archive and hasattr(
-                conn.raw_archive[0], "method") else [row for row in conn.raw_archive if row.get("method") == "POST"]
-            assert login_rows and all(
-                (row.metadata if hasattr(row, "metadata") else row["metadata"]).get("workflow_values_private") is True
-                for row in login_rows)
+            # omits it (the harness keeps the recorder's captured calls).
+            login_rows = [row for row in conn.raw_archive if row.get("method") == "POST"]
+            assert login_rows and all(row.get("workflow_values_private") is True for row in login_rows)
 
             # A scanner action's secrecy boundary is given the same value.
             async with conn.acquire() as reader:
