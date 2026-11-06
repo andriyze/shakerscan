@@ -37,6 +37,7 @@ from .permission_bounds import CAPABILITY_FLAGS
 from .permission_reasons import (
     KIND_CAPABILITY_ENABLE,
     KIND_CREDENTIAL_USE,
+    KIND_LOGIN_USE,
     KIND_TARGET_AUTHORIZE,
 )
 
@@ -103,6 +104,8 @@ def coverage_key(kind: Any, subject: Any) -> str | None:
         return f"target:{str(subject.get('scheme') or '').lower()}://{host}:{subject.get('port')}"
     if kind == KIND_CREDENTIAL_USE and subject.get("profile_id"):
         return f"credential:{subject['profile_id']}"
+    if kind == KIND_LOGIN_USE and subject.get("profile_id"):
+        return f"login:{subject['profile_id']}"
     return None
 
 
