@@ -339,3 +339,85 @@ def test_the_port_only_orders_the_adapters(port, hint, first):
     if first != "banner":
         assert order[1] == first
     assert set(sp.SILENT_TCP_ADAPTERS) <= set(order)
+
+
+def test_mqtt_anonymous_connect_is_the_access_proof():
+    def replies(data):
+        if data.startswith(b"\x10"):
+            assert data[1] == len(data) - 2  # a well-formed CONNECT
+            return b"\x20\x02\x00\x00"
+        return None
+
+    row = _identify(_scripted(replies=replies), hints=("mqtt",))
+    assert row["protocol"] == "mqtt"
+    assert row["authentication_proof"] == "mqtt_anonymous_connect_accepted"
+    refused = sp.parse_mqtt_connack(b"\x20\x02\x00\x05")
+    assert refused["authentication"] == si.AUTH_REQUIRED
+
+
+def test_amqp_start_names_product_and_version():
+    def table(entries):
+        body = b"".join(bytes([len(k)]) + k + b"S" + struct.pack(">I", len(v)) + v for k, v in entries)
+        return struct.pack(">I", len(body)) + body
+
+    payload = b"\x00\x0a\x00\x0a\x00\x09" + table([(b"product", b"RabbitMQ"), (b"version", b"3.12.13")])
+    frame = b"\x01\x00\x00" + struct.pack(">I", len(payload)) + payload + b"\xce"
+    parsed = sp.parse_amqp_start(frame)
+    assert parsed["product"] == "RabbitMQ" and parsed["version"] == "3.12.13"
+
+
+def test_modbus_device_identification_and_exception():
+    reply = struct.pack(">HHHB", 7, 0, 20, 0) + b"\x2b\x0e\x01\x01\x00\x00\x02" + b"\x00\x07Siemens" + b"\x01\x03S71"
+    parsed = sp.parse_modbus_reply(reply, 7)
+    assert parsed["protocol"] == "modbus" and parsed["product"] == "Siemens S71"
+    assert sp.parse_modbus_reply(struct.pack(">HHHB", 7, 0, 3, 0) + b"\xab\x01", 7)["protocol"] == "modbus"
+    assert sp.parse_modbus_reply(reply, 8) is None
+
+
+def test_industrial_adapters_are_never_tried_on_an_unknown_port():
+    order = sp.adapter_order(40000, ())
+    assert "modbus" not in order and "enip" not in order
+    assert "modbus" in sp.adapter_order(502, ())
+
+
+def test_mongodb_answering_http_on_its_driver_port_is_not_an_http_service():
+    reply = (b"HTTP/1.0 200 OK\r\nConnection: close\r\nContent-Type: text/plain\r\n\r\n"
+             b"It looks like you are trying to access MongoDB over HTTP on the native driver port.\n")
+
+    def replies(data):
+        if data.startswith(b"GET "):
+            return reply
+        if b"hello\x00" in data:
+            return _op_msg_reply(data, {"isWritablePrimary": True, "ok": 1.0})
+        return None
+
+    row = _identify(_scripted(replies=replies, close_after_reply=True), max_adapters=8)
+    assert row["protocol"] == "mongodb"
+
+
+def test_a_chunked_index_listing_is_still_the_access_proof():
+    root = b'{"version":{"number":"8.15.3"},"tagline":"You Know, for Search"}'
+
+    def replies(data):
+        if data.startswith(b"GET / "):
+            return b"HTTP/1.1 200 OK\r\nContent-Length: %d\r\n\r\n" % len(root) + root
+        if data.startswith(b"GET /_cat/indices"):
+            return b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n2\r\n[]\r\n0\r\n\r\n"
+        return None
+
+    row = _identify(_scripted(replies=replies, close_after_reply=True), hints=("elasticsearch",))
+    assert row["authentication_proof"] == "elasticsearch_index_listing_without_credentials"
+
+
+def test_only_redis_own_refusals_count_as_redis():
+    assert sp.parse_redis_info(b"-ERR unknown command 'INFO', with args beginning with: 'server' \r\n")["protocol"] == "redis"
+    assert sp.parse_redis_info(b"-ERR whatever\r\n") is None
+
+
+def test_deeply_nested_bson_from_a_hostile_server_is_not_recursed():
+    document = b"\x05\x00\x00\x00\x00"
+    for _ in range(3000):
+        body = b"\x03a\x00" + document
+        document = struct.pack("<i", len(body) + 5) + body + b"\x00"
+    parsed = sp.bson_top_level(document)
+    assert parsed == {"a": {"elements": 1}}

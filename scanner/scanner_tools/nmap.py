@@ -3,81 +3,31 @@ from typing import Any
 
 from .common import run
 
-# Well-known port/service mappings for correcting nmap misidentifications
-# Maps port numbers to their expected service names
-KNOWN_PORT_SERVICES = {
-    21: "ftp",
-    22: "ssh",
-    23: "telnet",
-    25: "smtp",
-    53: "dns",
-    80: "http",
-    110: "pop3",
-    143: "imap",
-    443: "https",
-    465: "smtps",
-    587: "submission",
-    993: "imaps",
-    995: "pop3s",
-    1433: "mssql",
-    1521: "oracle",
-    3306: "mysql",
-    3389: "rdp",
-    5432: "postgresql",
-    5900: "vnc",
-    6379: "redis",
-    8080: "http-proxy",
-    8443: "https-alt",
-    27017: "mongodb",
-}
+try:
+    from .service_identity import port_hint as _conventional_service
+except ImportError:  # flat scanner runtime
+    from service_identity import port_hint as _conventional_service
 
 
-def correct_service_name(port: int, detected_service: str, version: str = "") -> str:
+def nmap_service_identity(port: int, service_elem_attrs: Any) -> dict[str, Any]:
+    """Nmap's service name, kept apart from a port-number guess.
+
+    Nmap names a port from its port table when no probe matched (``method="table"``); that and
+    an ``unknown`` result say nothing about what listens there. Such a port is named
+    ``unknown`` and the conventional service is kept only as ``port_hint``, which never
+    replaces a probed name. A probed name is kept exactly as Nmap reported it.
     """
-    Correct common nmap service misidentifications based on well-known ports.
-    Only corrects if the detected service is clearly wrong for the port.
-    """
-    if port not in KNOWN_PORT_SERVICES:
-        return detected_service
-
-    expected_service = KNOWN_PORT_SERVICES[port]
-    detected_lower = detected_service.lower()
-
-    # Don't correct if nmap already detected it correctly or a valid variant
-    if expected_service in detected_lower or detected_lower.startswith(expected_service):
-        return detected_service
-
-    # Special case: PostgreSQL on 5432 is often misidentified
-    if port == 5432:
-        # PostgreSQL versions look like "15.3", "14.0", etc.
-        if re.match(r'^\d+\.\d+', version):
-            return "postgresql"
-        # Common misidentifications for 5432
-        if detected_lower in ("nagios-nsca", "unknown", ""):
-            return "postgresql"
-
-    # Special case: MySQL on 3306
-    if port == 3306:
-        if re.match(r'^\d+\.\d+', version):
-            return "mysql"
-        if detected_lower in ("unknown", ""):
-            return "mysql"
-
-    # Special case: MongoDB on 27017
-    if port == 27017:
-        if detected_lower in ("unknown", ""):
-            return "mongodb"
-
-    # Special case: Redis on 6379
-    if port == 6379:
-        if detected_lower in ("unknown", ""):
-            return "redis"
-
-    # General fallback: if detected service is "unknown", use expected
-    if detected_lower in ("unknown", ""):
-        return expected_service
-
-    return detected_service
+    attrs = dict(service_elem_attrs or {})
+    raw_name = str(attrs.get("name") or "unknown")
+    method = str(attrs.get("method") or "")
+    identity: dict[str, Any] = {"name": raw_name, "method": method or None}
+    if method == "table" or raw_name.lower() in {"unknown", ""}:
+        identity["name"] = "unknown"
+        hint = (raw_name if method == "table" and raw_name.lower() not in {"unknown", ""} else None) \
+            or _conventional_service(port)
+        if hint:
+            identity["port_hint"] = hint
+    return identity
 
 
 async def nmap_ciphers(host: str, port: int) -> dict[str, Any]:
@@ -224,45 +174,43 @@ async def nmap_full_scan(
                         }
                         service_elem = port_elem.find("service")
                         if service_elem is not None:
-                            raw_name = service_elem.get("name", "unknown")
-                            version = service_elem.get("version", "")
-                            # Correct common misidentifications
-                            corrected_name = correct_service_name(int(port_id), raw_name, version)
+                            identity = nmap_service_identity(int(port_id), service_elem.attrib)
                             service_info = {
-                                "name": corrected_name,
+                                "name": identity["name"],
                                 "product": service_elem.get("product", ""),
-                                "version": version,
+                                "version": service_elem.get("version", ""),
                                 "extrainfo": service_elem.get("extrainfo", ""),
                                 "port": int(port_id),
+                                "method": identity["method"],
                             }
-                            if raw_name != corrected_name:
-                                service_info["original_detection"] = raw_name
+                            if identity.get("port_hint"):
+                                service_info["port_hint"] = identity["port_hint"]
                             results["services"].append(service_info)
                             port_info["service"] = service_info["name"]
                         results["open_ports"].append(port_info)
             results["scan_completed"] = True
         except ET.ParseError:
-            # Fallback regex parsing - also apply service name correction
+            # Fallback regex parsing of normal output: it does not say how a name was found, so
+            # only an explicit "unknown" is turned into a port hint.
             port_pattern = re.compile(r'(\d+)/(tcp|udp)\s+open\s+(\S+)(?:\s+(.*))?')
             for match in port_pattern.finditer(out):
                 port_num = int(match.group(1))
-                raw_service = match.group(3)
+                identity = nmap_service_identity(port_num, {"name": match.group(3)})
                 version_info = match.group(4) or ""
-                corrected_service = correct_service_name(port_num, raw_service, version_info)
                 port_info = {
                     "port": port_num,
                     "protocol": match.group(2),
-                    "service": corrected_service,
+                    "service": identity["name"],
                 }
                 results["open_ports"].append(port_info)
                 # Also populate services array for consistency
                 service_info = {
-                    "name": corrected_service,
+                    "name": identity["name"],
                     "port": port_num,
                     "version": version_info.strip() if version_info else "",
                 }
-                if raw_service != corrected_service:
-                    service_info["original_detection"] = raw_service
+                if identity.get("port_hint"):
+                    service_info["port_hint"] = identity["port_hint"]
                 results["services"].append(service_info)
             if results["open_ports"]:
                 results["scan_completed"] = True

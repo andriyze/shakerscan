@@ -52,8 +52,11 @@ PAYLOAD_EXCLUSION_REASON = "printer_raw_port_payloads_excluded"
 # cheapest, most common silent protocols come first.
 SILENT_TCP_ADAPTERS = (
     "http", "tls", "redis", "memcached", "mongodb", "postgresql", "rdp", "smb",
-    "openvpn", "pptp",
+    "openvpn", "pptp", "mqtt", "amqp",
 )
+# Industrial protocols are only offered when Nmap or the port names them: an unknown listener
+# never receives a fieldbus request.
+HINT_ONLY_TCP_ADAPTERS = ("mqtts", "modbus", "enip")
 UDP_ADAPTERS = ("dns", "ntp", "ike", "openvpn")
 # Service names (Nmap's or the port hint's) mapped to the adapter that can confirm them.
 ADAPTER_FOR_SERVICE = {
@@ -66,7 +69,9 @@ ADAPTER_FOR_SERVICE = {
     "rdp": "rdp", "ms-wbt-server": "rdp", "smb": "smb", "microsoft-ds": "smb",
     "netbios-ssn": "smb", "openvpn": "openvpn", "pptp": "pptp",
     "dns": "dns", "domain": "dns", "ntp": "ntp", "ike": "ike", "isakmp": "ike",
-    "wireguard": "wireguard",
+    "wireguard": "wireguard", "mqtt": "mqtt", "secure-mqtt": "mqtts", "mqtts": "mqtts",
+    "amqp": "amqp", "amqps": "tls", "modbus": "modbus", "mbap": "modbus",
+    "ethernetip": "enip", "enip": "enip", "ethernet-ip": "enip",
 }
 
 Reader = Callable[..., Awaitable[Any]]
@@ -142,9 +147,15 @@ class _Connection:
         self.writer = writer
         self.received = 0
 
-    async def send(self, payload: bytes) -> None:
-        self.writer.write(payload)
-        await asyncio.wait_for(self.writer.drain(), READ_TIMEOUT)
+    async def send(self, payload: bytes) -> bool:
+        """Send, or report that the peer has gone: a follow-up exchange on a connection the
+        server closed must not discard what its first answer already identified."""
+        try:
+            self.writer.write(payload)
+            await asyncio.wait_for(self.writer.drain(), READ_TIMEOUT)
+        except (OSError, ConnectionError, TimeoutError, asyncio.TimeoutError, RuntimeError):
+            return False
+        return True
 
     async def read(
         self, *, timeout: float = READ_TIMEOUT, limit: int = MAX_READ_BYTES,
@@ -397,8 +408,9 @@ def parse_redis_info(data: bytes) -> dict[str, Any] | None:
     if data.startswith(b"-DENIED") and b"protected mode" in data[:200]:
         return {"protocol": "redis", "authentication": si.AUTH_REQUIRED,
                 "authentication_proof": "redis_protected_mode"}
-    if data.startswith(b"-ERR") and re.match(rb"^-ERR [\x20-\x7e]{1,200}\r\n", data):
-        # A RESP error to INFO (a renamed command, an ACL refusal): the protocol answered,
+    if (re.match(rb"^-ERR unknown command [\x20-\x7e]{1,200}\r\n", data)
+            or re.match(rb"^-NOPERM [\x20-\x7e]{1,200}\r\n", data)):
+        # Redis's own refusal of INFO (a renamed command, an ACL rule): the protocol answered,
         # but nothing decided access.
         return {"protocol": "redis", "authentication": si.AUTH_INCONCLUSIVE}
     bulk = re.match(rb"^\$(\d{1,7})\r\n", data)
@@ -570,8 +582,12 @@ def mongodb_op_query_ismaster(request_id: int) -> bytes:
     return struct.pack("<iiii", 16 + len(body), request_id, 0, 2004) + body
 
 
-def bson_top_level(document: bytes) -> dict[str, Any] | None:
-    """Top-level scalar fields of one BSON document; arrays and documents as element counts."""
+def bson_top_level(document: bytes, *, depth: int = 0) -> dict[str, Any] | None:
+    """Top-level scalar fields of one BSON document; arrays and documents as element counts.
+
+    Only one nested level is read (to count an array's elements): a hostile server cannot make
+    the parser recurse with deeply nested documents.
+    """
     if len(document) < 5:
         return None
     total = int.from_bytes(document[0:4], "little")
@@ -601,7 +617,7 @@ def bson_top_level(document: bytes) -> dict[str, Any] | None:
                 size = struct.unpack_from("<i", document, offset)[0]
                 if size < 5 or offset + size > end + 1:
                     return None
-                nested = bson_top_level(document[offset:offset + size])
+                nested = bson_top_level(document[offset:offset + size], depth=depth + 1) if depth < 1 else None
                 fields[name] = {"elements": len(nested or {})}
                 offset += size
             elif kind == 0x05:
@@ -648,6 +664,22 @@ def mongodb_reply_complete(data: bytes) -> bool:
     return len(data) >= 4 and len(data) >= int.from_bytes(data[0:4], "little") > 0
 
 
+def _dechunk(body: bytes) -> bytes:
+    """A chunked body's payload (bounded, tolerant of a truncated read)."""
+    out = b""
+    while body and len(out) < MAX_READ_BYTES:
+        size_line, sep, rest = body.partition(b"\r\n")
+        try:
+            size = int(size_line.split(b";", 1)[0].strip() or b"0", 16)
+        except ValueError:
+            break
+        if not sep or size <= 0:
+            break
+        out += rest[:size]
+        body = rest[size + 2:]
+    return out
+
+
 def _http_split(data: bytes) -> tuple[int, dict[str, str], bytes] | None:
     match = re.match(rb"^HTTP/(?:1\.[01]|2(?:\.0)?) (\d{3})[^\r\n]*\r\n", data or b"")
     if not match:
@@ -658,6 +690,8 @@ def _http_split(data: bytes) -> tuple[int, dict[str, str], bytes] | None:
         name, sep, value = line.partition(b":")
         if sep:
             headers[name.decode("latin-1").strip().lower()] = value.decode("latin-1").strip()[:300]
+    if "chunked" in headers.get("transfer-encoding", "").lower():
+        body = _dechunk(body)
     return int(match.group(1)), headers, body
 
 
@@ -998,6 +1032,9 @@ async def _http_adapter(address: str, port: int, *, tls: bool, server_name: str 
             return _identified(port, "tcp", "tls", "tls", details=tls_details)
         return None
     status, headers, body = parsed
+    if b"trying to access MongoDB over HTTP on the native driver port" in body[:400]:
+        # MongoDB answers an HTTP request on its driver port: not an HTTP service.
+        return None
     protocol = "https" if tls else "http"
     details: dict[str, Any] = {"status": status, **tls_details}
     server = si.label(headers.get("server"), 200)
@@ -1170,10 +1207,191 @@ async def adapter_pptp(address: str, port: int, *, server_name: str | None = Non
     return _identified(port, "tcp", "pptp", "pptp", **parsed) if parsed else None
 
 
+_MQTT_CLIENT_ID = b"shakerscan-identify"
+_MQTT_BODY = (
+    b"\x00\x04MQTT\x04\x02\x00\x3c"  # protocol name, level 4, clean session, keep-alive 60
+    + len(_MQTT_CLIENT_ID).to_bytes(2, "big") + _MQTT_CLIENT_ID
+)
+MQTT_CONNECT = b"\x10" + bytes([len(_MQTT_BODY)]) + _MQTT_BODY
+
+
+def parse_mqtt_connack(data: bytes) -> dict[str, Any] | None:
+    """CONNACK to a credential-less CONNECT: return code 0 is anonymous access."""
+    data = data or b""
+    if len(data) < 4 or data[0] != 0x20 or data[1] != 0x02 or data[2] > 1:
+        return None
+    code = data[3]
+    row: dict[str, Any] = {"protocol": "mqtt", "details": {"connack_code": code}}
+    if code == 0:
+        row["authentication"] = si.AUTH_NOT_REQUIRED
+        row["authentication_proof"] = "mqtt_anonymous_connect_accepted"
+    elif code in {4, 5}:
+        row["authentication"] = si.AUTH_REQUIRED
+        row["authentication_proof"] = "mqtt_connect_not_authorized"
+    elif code > 5:
+        return None
+    return row
+
+
+AMQP_HEADER = b"AMQP\x00\x00\x09\x01"
+
+
+def parse_amqp_start(data: bytes) -> dict[str, Any] | None:
+    """Connection.Start (server properties name product and version) or a protocol header."""
+    data = data or b""
+    if data.startswith(b"AMQP") and len(data) >= 8:
+        return {"protocol": "amqp", "details": {"offered_version": ".".join(str(b) for b in data[5:8])}}
+    if len(data) < 12 or data[0] != 1 or data[1:3] != b"\x00\x00":
+        return None
+    if data[7:11] != b"\x00\x0a\x00\x0a":  # class 10 (connection), method 10 (start)
+        return None
+    properties: dict[str, str] = {}
+    try:
+        offset = 13
+        table_end = offset + 4 + struct.unpack_from(">I", data, offset)[0]
+        offset += 4
+        while offset < min(table_end, len(data)) and len(properties) < 16:
+            key_length = data[offset]
+            key = data[offset + 1:offset + 1 + key_length].decode("latin-1")
+            offset += 1 + key_length
+            kind = data[offset:offset + 1]
+            offset += 1
+            if kind == b"S":
+                size = struct.unpack_from(">I", data, offset)[0]
+                properties[key] = data[offset + 4:offset + 4 + min(size, 200)].decode("utf-8", "replace")
+                offset += 4 + size
+            elif kind == b"F":
+                offset += 4 + struct.unpack_from(">I", data, offset)[0]
+            elif kind == b"t":
+                offset += 1
+            else:
+                break
+    except (struct.error, IndexError):
+        pass
+    product = si.label(properties.get("product"), 80)
+    version = si.label(properties.get("version"), 40)
+    row: dict[str, Any] = {"protocol": "amqp", "product": product}
+    if version and re.fullmatch(r"[0-9]+(?:\.[0-9]+){1,3}[0-9A-Za-z.+-]{0,20}", version):
+        row["version"] = re.match(r"^[0-9]+(?:\.[0-9]+){1,3}", version).group(0)
+        row["version_reported"] = version
+    return row
+
+
+def modbus_device_id_request(transaction_id: int) -> bytes:
+    # Read Device Identification (function 43 / MEI 14), basic objects: read-only.
+    return struct.pack(">HHHB", transaction_id, 0, 5, 0) + b"\x2b\x0e\x01\x00"
+
+
+def parse_modbus_reply(data: bytes, transaction_id: int) -> dict[str, Any] | None:
+    data = data or b""
+    if len(data) < 9:
+        return None
+    ident, protocol_id, length = struct.unpack_from(">HHH", data, 0)
+    if ident != transaction_id or protocol_id != 0 or length < 3:
+        return None
+    function = data[7]
+    if function == 0xAB:  # exception to function 43: still Modbus
+        return {"protocol": "modbus", "details": {"exception_code": data[8]}}
+    if function != 0x2B or len(data) < 14 or data[8] != 0x0E:
+        return None
+    objects: dict[int, str] = {}
+    offset, count = 14, data[13]
+    for _ in range(min(count, 8)):
+        if offset + 2 > len(data):
+            break
+        object_id, size = data[offset], data[offset + 1]
+        objects[object_id] = si.label(data[offset + 2:offset + 2 + size], 80) or ""
+        offset += 2 + size
+    vendor, product = objects.get(0), objects.get(1)
+    row: dict[str, Any] = {"protocol": "modbus", "product": " ".join(x for x in (vendor, product) if x) or None}
+    revision = objects.get(2)
+    if revision:
+        row["version_reported"] = revision
+    return row
+
+
+def enip_list_identity(context: bytes) -> bytes:
+    return struct.pack("<HHII", 0x63, 0, 0, 0) + context + struct.pack("<I", 0)
+
+
+def parse_enip_identity(data: bytes, context: bytes) -> dict[str, Any] | None:
+    data = data or b""
+    if len(data) < 24 or struct.unpack_from("<H", data, 0)[0] != 0x63 or data[12:20] != context:
+        return None
+    row: dict[str, Any] = {"protocol": "ethernet-ip", "details": {}}
+    try:
+        # item count (2), item type (2), item length (2), version (2), socket address (16)
+        offset = 24 + 2 + 2 + 2 + 2 + 16
+        vendor_id, device_type, product_code = struct.unpack_from("<HHH", data, offset)
+        major, minor = data[offset + 6], data[offset + 7]
+        name_length = data[offset + 14]
+        name = si.label(data[offset + 15:offset + 15 + name_length], 80)
+    except (struct.error, IndexError):
+        return row
+    row["product"] = name
+    row["version_reported"] = f"{major}.{minor:03d}"
+    row["details"] = {"vendor_id": vendor_id, "device_type": device_type, "product_code": product_code}
+    return row
+
+
+async def _mqtt_adapter(address: str, port: int, *, tls: bool, server_name: str | None) -> dict[str, Any] | None:
+    connection = await _connect(address, port, tls=tls, server_name=server_name)
+    if connection is None:
+        return None
+    try:
+        await connection.send(MQTT_CONNECT)
+        parsed = parse_mqtt_connack(await connection.read(limit=4, until=lambda data: len(data) >= 4))
+        if parsed is None:
+            return None
+        if parsed.get("authentication") == si.AUTH_NOT_REQUIRED:
+            try:
+                await connection.send(b"\xe0\x00")  # DISCONNECT: nothing is subscribed or published
+            except Exception:  # noqa: BLE001
+                pass
+        row = _identified(port, "tcp", "mqtt", "mqtts" if tls else "mqtt", **parsed)
+        row["details"]["tls"] = tls
+        return row
+    finally:
+        await connection.close()
+
+
+async def adapter_mqtt(address: str, port: int, *, server_name: str | None = None) -> dict[str, Any] | None:
+    return await _mqtt_adapter(address, port, tls=False, server_name=server_name)
+
+
+async def adapter_mqtts(address: str, port: int, *, server_name: str | None = None) -> dict[str, Any] | None:
+    return await _mqtt_adapter(address, port, tls=True, server_name=server_name)
+
+
+async def adapter_amqp(address: str, port: int, *, server_name: str | None = None) -> dict[str, Any] | None:
+    reply = await _one_exchange(address, port, AMQP_HEADER,
+                                until=lambda data: data.startswith(b"AMQP") and len(data) >= 8 or data.endswith(b"\xce"))
+    parsed = parse_amqp_start(reply or b"")
+    return _identified(port, "tcp", "amqp", "amqp", **parsed) if parsed else None
+
+
+async def adapter_modbus(address: str, port: int, *, server_name: str | None = None) -> dict[str, Any] | None:
+    transaction_id = int.from_bytes(os.urandom(2), "big")
+    reply = await _one_exchange(address, port, modbus_device_id_request(transaction_id),
+                                until=lambda data: len(data) >= 6 and len(data) >= 6 + int.from_bytes(data[4:6], "big"))
+    parsed = parse_modbus_reply(reply or b"", transaction_id)
+    return _identified(port, "tcp", "modbus", "modbus", **parsed) if parsed else None
+
+
+async def adapter_enip(address: str, port: int, *, server_name: str | None = None) -> dict[str, Any] | None:
+    context = os.urandom(8)
+    reply = await _one_exchange(address, port, enip_list_identity(context),
+                                until=lambda data: len(data) >= 24 and len(data) >= 24 + int.from_bytes(data[2:4], "little"))
+    parsed = parse_enip_identity(reply or b"", context)
+    return _identified(port, "tcp", "ethernet-ip", "enip", **parsed) if parsed else None
+
+
 TCP_ADAPTERS: Mapping[str, Callable[..., Awaitable[dict[str, Any] | None]]] = {
     "banner": adapter_banner, "http": adapter_http, "tls": adapter_tls, "redis": adapter_redis,
     "memcached": adapter_memcached, "mongodb": adapter_mongodb, "postgresql": adapter_postgresql,
     "rdp": adapter_rdp, "smb": adapter_smb, "openvpn": adapter_openvpn, "pptp": adapter_pptp,
+    "mqtt": adapter_mqtt, "mqtts": adapter_mqtts, "amqp": adapter_amqp,
+    "modbus": adapter_modbus, "enip": adapter_enip,
 }
 
 
@@ -1221,7 +1439,7 @@ async def _identify_tcp(
         attempted.append(name)
         try:
             row = await TCP_ADAPTERS[name](address, port, server_name=server_name)
-        except (OSError, ConnectionError, ssl.SSLError, asyncio.TimeoutError, TimeoutError, ValueError, struct.error):
+        except Exception:  # noqa: BLE001 -- a malformed answer fails one adapter, not the port
             row = None
         if row is None:
             continue
@@ -1253,21 +1471,10 @@ async def identify_udp_service(address: str, port: int, *, hints: tuple[str | No
     attempted: list[str] = []
     for name in order:
         attempted.append(name)
-        parsed: dict[str, Any] | None = None
-        if name == "dns":
-            transaction_id = int.from_bytes(os.urandom(2), "big")
-            parsed = parse_dns_reply(await _udp_exchange(address, port, dns_version_query(transaction_id)) or b"", transaction_id)
-        elif name == "ntp":
-            parsed = parse_ntp_reply(await _udp_exchange(address, port, NTP_REQUEST) or b"")
-        elif name == "ike":
-            cookie = os.urandom(8)
-            payload = ike_main_mode_request(cookie)
-            if port == 4500:
-                payload = b"\x00\x00\x00\x00" + payload
-            parsed = parse_ike_reply(await _udp_exchange(address, port, payload) or b"", cookie)
-        elif name == "openvpn":
-            session_id = os.urandom(8)
-            parsed = parse_openvpn_reply(await _udp_exchange(address, port, openvpn_reset(session_id)) or b"", session_id, tcp=False)
+        try:
+            parsed = await _udp_adapter(name, address, port)
+        except Exception:  # noqa: BLE001 -- a malformed datagram fails one adapter, not the port
+            parsed = None
         if parsed:
             row = _identified(port, "udp", parsed["protocol"], name, **parsed)
             row["adapters_attempted"] = attempted
@@ -1275,6 +1482,27 @@ async def identify_udp_service(address: str, port: int, *, hints: tuple[str | No
     row = _result(port, "udp", si.STATUS_SILENT)
     row["adapters_attempted"] = attempted
     return row
+
+
+async def _udp_adapter(name: str, address: str, port: int) -> dict[str, Any] | None:
+    """One bounded datagram exchange; the reply must echo the identifier the probe carried."""
+    if name == "dns":
+        transaction_id = int.from_bytes(os.urandom(2), "big")
+        reply = await _udp_exchange(address, port, dns_version_query(transaction_id))
+        return parse_dns_reply(reply or b"", transaction_id)
+    if name == "ntp":
+        return parse_ntp_reply(await _udp_exchange(address, port, NTP_REQUEST) or b"")
+    if name == "ike":
+        cookie = os.urandom(8)
+        payload = ike_main_mode_request(cookie)
+        if port == 4500:
+            payload = b"\x00\x00\x00\x00" + payload  # NAT-T non-ESP marker
+        return parse_ike_reply(await _udp_exchange(address, port, payload) or b"", cookie)
+    if name == "openvpn":
+        session_id = os.urandom(8)
+        reply = await _udp_exchange(address, port, openvpn_reset(session_id))
+        return parse_openvpn_reply(reply or b"", session_id, tcp=False)
+    return None
 
 
 def public_row(row: Mapping[str, Any]) -> dict[str, Any]:

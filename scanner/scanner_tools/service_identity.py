@@ -50,6 +50,8 @@ AUTHENTICATION_PROOFS: Mapping[str, str] = {
     "vnc_security_none_accepted": "VNC accepted the None security type",
     "vnc_authentication_required": "VNC offered only authenticated security types",
     "rdp_nla_required": "RDP refused TLS-only security and required Network Level Authentication",
+    "mqtt_anonymous_connect_accepted": "MQTT accepted a CONNECT without credentials",
+    "mqtt_connect_not_authorized": "MQTT refused a CONNECT without credentials",
 }
 
 VERSION_REPORTED = "reported"
@@ -71,7 +73,8 @@ STATUSES = frozenset({
 CONVENTIONAL_PORT_SERVICES: Mapping[int, str] = {
     21: "ftp", 22: "ssh", 23: "telnet", 25: "smtp", 53: "dns", 80: "http", 110: "pop3",
     123: "ntp", 143: "imap", 443: "https", 445: "smb", 465: "smtp", 500: "ike", 587: "smtp",
-    993: "imap", 995: "pop3", 1194: "openvpn", 1433: "mssql", 1521: "oracle", 1701: "l2tp",
+    502: "modbus", 993: "imap", 995: "pop3", 1194: "openvpn", 1883: "mqtt", 8883: "secure-mqtt",
+    5671: "amqps", 5672: "amqp", 44818: "ethernetip", 1433: "mssql", 1521: "oracle", 1701: "l2tp",
     1723: "pptp", 2222: "ssh", 3306: "mysql", 3389: "rdp", 4500: "ike", 5432: "postgresql",
     5900: "vnc", 5901: "vnc", 5902: "vnc", 5903: "vnc", 6379: "redis", 8080: "http",
     8443: "https", 9200: "elasticsearch", 11211: "memcached", 27017: "mongodb",
