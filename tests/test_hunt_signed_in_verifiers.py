@@ -146,7 +146,7 @@ def test_a_body_test_needs_the_state_changing_permission_and_raises_a_request():
         scanner_admission("sqli.verify", LOGIN_BODY, ACTIVE)
     assert refused.value.reason_code == "state_changing_http_not_allowed"
     assert refused.value.subject == {"capability": "sqli.verify", "flag": "state-changing"}
-    assert "own hold" in refused.value.message
+    assert "verifier writes" in refused.value.message
     assert scanner_admission("sqli.verify", LOGIN_BODY, STATE_CHANGING) == ("anonymous", False)
 
 
