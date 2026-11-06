@@ -80,10 +80,10 @@
     "DeviceLocatorChangeRequest": "25ea9920429a7d7c6edbe87c9504029d5485322543a4a27d5ff77df43676ac6f",
     "DevicePolicyCreate": "036131d8a8cadc5b5c42a6f6fba72ce2bb1f3c349d01eb61a72e5c64e75f8e6f",
     "DevicePolicyUpdate": "7241f69692c8510a7a9fac14b920f6cc6a7b46ca450793904160235015fe4ec9",
-    "DeviceProfileCreate": "c9422137329d68dd41c6c0be9d362b4e9e135dbeecb53c2ead1f7e807cbb3ed7",
+    "DeviceProfileCreate": "f76f2cebe98b115dac5f423148a35e4b7348bb554c272a5a10b8007e9793febc",
     "DeviceRequestCollectionCreate": "3009cf19fcbaa9e3f474f05885c01a3dd1edb31776f977f017865d1b1aa3ab72",
     "DeviceRequestCollectionUpdate": "25bb49b2f0399f599863fd16ee789f8221dd9a25f5cd52f9e47470deefb0bb2d",
-    "DeviceScanRequest": "9013ad34534fd86a89b02441066559064d90654588cd9401549676faba84a43b",
+    "DeviceScanRequest": "08cec63f49e64c67cd83202125bcaead581c255ff256eac1b3ed06461e386a6e",
     "DeviceServiceVerifyRequest": "076ea2407f46f4ea0593afb26f390b8cec6d32d5d7712d5718aeaecb3370c784",
     "DeviceTargetCreate": "a9cba09797e967f36606de07aea1047860a91727ef3d9007d89e24a4980467ec",
     "DeviceTargetUpdate": "1bb3225d4fcac87d7fd6f2eb0fe28db0b6c589d9f6003d908355b86b8881561f",
@@ -229,7 +229,7 @@
     "ValidationRequest": "cb81c65a5c80da74a19c6bd92e9c6a68f5cdb22fafeb94270481d463450f893e",
     "WorkerScaleRequest": "52e7ac017dfa1d92efa8e4071026b9bf24c0cf2a17f5d9e742349df3f08f6c62"
   },
-  "contract_sha256": "bf53a12be62a63058dadc80be5dd6770b1c300c4eeac8e082079d88bbe7a67e1",
+  "contract_sha256": "9240581bac2b5f73f1401252fdbfc166c321ef7ffa8ddd810403877130e250b0",
   "openapi": "3.1.0",
   "operation_count": 498,
   "operations": {
