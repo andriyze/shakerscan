@@ -191,6 +191,12 @@ async def hostile_target(wire):
                 response = (b"HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nX-Echo: "
                             + urllib.parse.quote(SECRET, safe="").encode()
                             + b"\r\nConnection: close\r\nContent-Length: " + str(len(page)).encode() + b"\r\n\r\n" + page)
+            elif head.startswith(b"GET /hub/login "):
+                page = (b"<html><head><title>Sign in</title></head><body><form method=post action=/hub/login>"
+                        b"<input name=username><input name=password type=password><button>Sign in</button>"
+                        b"</form></body></html>")
+                response = (b"HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nConnection: close\r\nContent-Length: "
+                            + str(len(page)).encode() + b"\r\n\r\n" + page)
             else:
                 response = b"HTTP/1.1 303 See Other\r\nLocation: /hub/login\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
             writer.write(response)
@@ -380,3 +386,37 @@ def test_the_worker_refuses_a_login_request_for_another_url_even_with_a_live_gra
         assert exchange.opaque_binding and exchange.known_secrets == [SECRET]
         assert SECRET not in repr(exchange)
     asyncio.run(scenario())
+
+
+def test_a_sign_in_form_answer_carries_the_ready_saved_login_request_and_it_signs_in():
+    """The planner reads the login form; beside it the answer gives the exact http.request input
+    that signs in with the attached saved login, and sending it as given signs in."""
+    async def scenario():
+        wire = []
+        server = await hostile_target(wire)
+        async with serving(server):
+            conn = LoginConnection(f"http://fixture.test:{server.sockets[0].getsockname()[1]}")
+            page, _ = await execute(conn, {"method": "GET", "path": "/hub/login"}, "login-page")
+            assert page["status"] == "success", page
+            text = json.dumps(page)
+            assert "saved_login_requests" in text, "the sign-in form carries the saved-login request"
+            suggested = next(item for item in _walk(page, "saved_login_requests"))[0]
+            assert suggested["saved_login"] == str(PROFILE_ID) and suggested["attached"] is True
+            request = suggested["http_request_input"]
+            assert request["path"] == "/hub/login" and set(request["form_body"]) == {"username", "password"}
+            login, _ = await execute(conn, request, "suggested-login")
+            assert login["status"] == "success" and login["captures"], login
+            assert urllib.parse.parse_qs(wire[-1][1].decode()) == {"username": [USERNAME], "password": [SECRET]}
+            assert_no_secret(json.dumps([page, login], default=str), "suggested login")
+    asyncio.run(scenario())
+
+
+def _walk(value, key):
+    if isinstance(value, dict):
+        for k, v in value.items():
+            if k == key:
+                yield v
+            yield from _walk(v, key)
+    elif isinstance(value, list):
+        for v in value:
+            yield from _walk(v, key)

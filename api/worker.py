@@ -22237,6 +22237,8 @@ async def process_canonical_http_capability_job(job_data: dict[str, Any]) -> Non
         )
         status = execution.status
         observations = [dict(item) for item in execution.observations]
+        from hunt.saved_logins import suggest_sign_in
+        observations = await suggest_sign_in(db_pool, run, observations, capability_input.get("path")) if capability_name == "http.request" else observations
         parser_errors = [str(item) for item in execution.errors]
         partial = execution.partial
         timed_out = execution.timed_out

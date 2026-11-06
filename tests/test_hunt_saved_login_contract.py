@@ -88,3 +88,17 @@ def test_an_unreferenced_value_is_masked_in_every_encoding_and_never_numbered():
         masked = mask_body_text(page)
     assert SECRET.lower() not in masked.lower() and base64.b64encode(SECRET.encode()).decode() not in masked
     assert collector.values == [] and "[withheld:" not in masked
+
+
+def test_a_login_request_is_built_from_the_forms_own_field_names_only():
+    from hunt.saved_logins import login_request_for_form
+    form = {"sign_in": True, "method": "POST", "action": "/account/session",
+            "fields": [{"name": "csrf", "type": "hidden"}, {"name": "email", "type": "email"},
+                       {"name": "pass", "type": "password"}]}
+    request = login_request_for_form(form, PROFILE, "/account/login")
+    assert request["path"] == "/account/session" and request["form_body"] == {"email": "", "pass": ""}
+    assert [b["body_pointer"] for b in request["request_bindings"]] == ["/email", "/pass"]
+    validate_login_request_shape(request)
+    # A form posting off the origin, or without a password field, gets no suggestion.
+    assert login_request_for_form({**form, "action": "https://evil.example/x"}, PROFILE, "/") is None
+    assert login_request_for_form({"fields": [{"name": "q", "type": "text"}]}, PROFILE, "/") is None
