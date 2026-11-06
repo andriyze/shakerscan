@@ -21,6 +21,12 @@ class HttpAuthorityWithdrawn(ValueError):
     """
 
 
+def is_saved_login_request(values: Mapping[str, Any]) -> bool:
+    """Whether an ``http.request`` binds a saved login (``request_bindings[].saved_login``)."""
+    return any(isinstance(item, Mapping) and "saved_login" in item
+               for item in values.get("request_bindings") or ())
+
+
 def uses_http_workflow(values: Mapping[str, Any]) -> bool:
     return bool(values.get("capture") or values.get("request_bindings"))
 
@@ -72,6 +78,18 @@ def require_http_request_authority(
     """
     validate_http_request_input(values)
     writes = values["method"] in WRITE_METHODS
+    if is_saved_login_request(values):
+        # A saved login's POST (hunt/saved_logins.py): the person's login.use grant is its write
+        # authority (checked at admission and again in the worker, with its URL and count), not
+        # the Hunt's state-changing permission, and it is not charged as a state-changing request.
+        if policy.get("active_testing") is not True:
+            raise HttpAuthorityWithdrawn("a saved login needs this Hunt's active_testing permission")
+        if requested_budget is not None:
+            for dimension in ("http_requests", "active_actions"):
+                value = requested_budget.get(dimension)
+                if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+                    raise ValueError(f"saved-login reservation lacks {dimension}")
+        return False
     if uses_http_workflow(values):
         if policy.get("active_testing") is not True:
             raise HttpAuthorityWithdrawn("HTTP workflow bindings require this Hunt's active_testing permission")

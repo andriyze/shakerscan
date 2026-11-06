@@ -68,6 +68,8 @@ def _cookie_pairs(response: Any) -> str:
 
 
 COOKIE_ORIGIN_KEY = "cookie_origin"
+# Values a request sent that are sealed only to be withheld (a saved login's secret).
+KNOWN_VALUES_KEY = "known_values"
 
 
 def origin_key(url: Any) -> str | None:
@@ -119,6 +121,9 @@ class HttpWorkflowExchange:
     bound_values: list[str] = field(default_factory=list, repr=False)
     # discovered_secret_uses rows this request recorded: their outcome is noted after the answer.
     secret_use_ids: list[Any] = field(default_factory=list, repr=False)
+    # A saved login's secret this request sends (worker-private): sealed into the Hunt's known
+    # values with the action's result, so any later echo of it is withheld. Never referenceable.
+    known_secrets: list[str] = field(default_factory=list, repr=False)
 
     def __repr__(self) -> str:
         return f"HttpWorkflowExchange(action_id={self.action_id!r}, secret_values_visible=False)"
@@ -137,7 +142,7 @@ class HttpWorkflowExchange:
         later request sends in its ``Cookie`` header. A capture the response does not carry is
         recorded as missing (``missing_names``); the others are still kept, and the request's
         own outcome does not depend on them."""
-        if not self.captures:
+        if not self.captures and not self.known_secrets:
             return
         extracted: dict[str, Any] = {}
         cookie_names: list[str] = []
@@ -165,11 +170,17 @@ class HttpWorkflowExchange:
                     extracted[item["name"]] = _scalar(value)
                 except (KeyError, ValueError):
                     missing.append(item["name"])
-            if extracted:
+            if extracted or self.known_secrets:
                 payload_values = {"schema_version": SCHEMA, "hunt_id": self.run_id,
                     "source_action_id": self.action_id, "target_digest": _target_digest(self.target),
                     "expires_at": (datetime.now(timezone.utc) + timedelta(seconds=CAPTURE_TTL_SECONDS)).isoformat(),
                     "values": extracted}
+                if self.known_secrets:
+                    # Withheld wherever the target echoes them for the rest of the Hunt
+                    # (``sealed_hunt_knowledge``); no reference resolves to them.
+                    payload_values[KNOWN_VALUES_KEY] = list(self.known_secrets)
+                    payload_values[WITHHELD_EXPIRES_KEY] = (
+                        datetime.now(timezone.utc) + timedelta(seconds=WITHHELD_TTL_SECONDS)).isoformat()
                 kept_cookies = [name for name in cookie_names if name in extracted]
                 if kept_cookies:
                     payload_values[COOKIE_CAPTURES_KEY] = kept_cookies
@@ -192,6 +203,7 @@ class HttpWorkflowExchange:
             self.missing_names = tuple(item["name"] for item in self.captures)
         finally:
             extracted.clear()
+            self.known_secrets.clear()
         if self.missing_names:
             self.capture_error = "http_workflow_capture_incomplete"
 
@@ -377,6 +389,8 @@ async def sealed_hunt_knowledge(conn: Any, *, run_id: Any, target: TargetBinding
         ORDER BY completed_at DESC NULLS LAST, id""", uuid.UUID(str(run_id)))
     digest, now = _target_digest(target), datetime.now(timezone.utc)
     values: list[str] = []
+    # Saved-login secrets this Hunt sent: masked wherever echoed, never referenceable.
+    unreferenced: list[str] = []
     tables: dict[str, dict[str, list[str]]] = {}
     context_bytes = 0
     budget = _MAX_SEEDED_CHARS
@@ -395,6 +409,8 @@ async def sealed_hunt_knowledge(conn: Any, *, run_id: Any, target: TargetBinding
             # withheld for the rest of the Hunt, so a target cannot hide ordinary text from the
             # planner by setting a cookie to it. Every value is still withheld in a request that
             # sends it (``bound_values``).
+            unreferenced.extend(str(item) for item in private.get(KNOWN_VALUES_KEY) or ()
+                                if isinstance(item, str) and item not in unreferenced)
             found = [*(private.get(WITHHELD_SCHEMA_KEY) or {}).values(),
                      *(value for name, value in captured.items() if name not in cookie_names),
                      *(item for name in cookie_names
@@ -425,7 +441,20 @@ async def sealed_hunt_knowledge(conn: Any, *, run_id: Any, target: TargetBinding
     for value in reversed(used):
         if len(value) >= _MIN_SEEDED_CHARS and value not in values:
             values.insert(0, value)
-    return {"values": values, "sql_tables": tables, "context_bytes": context_bytes}
+    return {"values": [value for value in values if value not in unreferenced], "unreferenced": unreferenced,
+            "sql_tables": tables, "context_bytes": context_bytes}
+
+
+async def saved_login_known_values(pool: Any, run_id: Any, target: TargetBinding) -> list[str]:
+    """The saved-login secrets this Hunt sent (worker-private), for the public secrecy boundary of
+    actions that do not withhold by reference (scanners). Six characters or more: a shorter one
+    would match ordinary text."""
+    try:
+        async with pool.acquire() as conn:
+            found = (await sealed_hunt_knowledge(conn, run_id=run_id, target=target))["unreferenced"]
+    except Exception:  # noqa: BLE001 - an unreadable seal adds nothing; the login answer was reduced
+        return []
+    return [value for value in found if len(value) >= _MIN_SEEDED_CHARS]
 
 
 async def sealed_hunt_values(conn: Any, *, run_id: Any, target: TargetBinding) -> list[str]:
@@ -459,6 +488,7 @@ def withholding_operation(
         if seed is not None:
             knowledge = await seed()
             if isinstance(knowledge, Mapping):
+                collector.bind_unreferenced(knowledge.get("unreferenced") or ())
                 collector.bind_known(knowledge.get("values") or (), found=True)
                 for path, by_table in (knowledge.get("sql_tables") or {}).items():
                     collector.sql_tables.setdefault(path, {}).update(by_table)
@@ -692,6 +722,39 @@ async def _withheld_value(
         raise ValueError("withheld value reference is expired or no longer bound to this Hunt") from None
 
 
+async def _saved_login_value(
+    conn: Any, *, run: Mapping[str, Any], target: TargetBinding, policy: Mapping[str, Any],
+    values: Mapping[str, Any], binding: Mapping[str, Any], destination: str | None,
+) -> str:
+    """A saved login's field, worker-private: only under this Hunt's live ``login.use`` grant for
+    the profile's current version, only in the login's own POST to the profile's login URL."""
+    try:
+        from hunt.saved_logins import live_login_grants, login_url, request_login_url, validate_login_request_shape
+    except ModuleNotFoundError:  # package import layout
+        from ..hunt.saved_logins import live_login_grants, login_url, request_login_url, validate_login_request_shape
+    if not _hunt_is_live(run):
+        raise ValueError("saved login belongs to a Hunt that is no longer live")
+    profile_id = validate_login_request_shape(values)
+    if str(binding["saved_login"]) != profile_id:
+        raise ValueError("a login request binds one saved login")
+    grants = await live_login_grants(conn, run["id"], profile_id)
+    if not grants:
+        raise ValueError("saved_login_not_attached: no live login.use grant for this saved login")
+    authority = await validate_worker_credential_authority(conn, owner_kind="hunt", owner_id=str(run["id"]),
+        target=target, approval_receipt_id=policy.get("approval_receipt_id"),
+        scope_receipt_id=target.scope_receipt_id, action_name="hunt.capability:http.request")
+    async with WorkerCredentialResolver().resolve(conn, profile_id=profile_id, target=target,
+            capability="http.request", authority=authority) as resolved:
+        version = resolved.profile.current_version
+        if resolved.profile.auth_kind not in {"form_login", "json_login"} or not any(
+                grant["profile_version"] == version for grant in grants):
+            raise ValueError("saved login changed after it was attached; a person attaches it again")
+        url = login_url(resolved.interactive_http().endpoint_url)
+        if url is None or request_login_url(values, destination) != url:
+            raise ValueError("saved_login_destination: a saved login is sent only to its own login URL")
+        return str(_scalar(resolved.http_workflow_value(binding["credential_field"])))
+
+
 async def prepare_http_exchange(
     conn: Any, *, run: Mapping[str, Any], action_id: Any, target: TargetBinding,
     context: Mapping[str, Any], policy: Mapping[str, Any], values: Mapping[str, Any],
@@ -739,6 +802,14 @@ async def prepare_http_exchange(
             except DiscoveredSecretError as exc:
                 raise ValueError(f"{exc.reason}: {exc}") from None
             exchange.bound_values.append(str(value))
+        elif "saved_login" in binding:
+            value = await _saved_login_value(
+                conn, run=run, target=target, policy=policy, values=values, binding=binding,
+                destination=destination,
+            )
+            exchange.opaque_binding = True
+            if binding["credential_field"] == "secret":
+                exchange.known_secrets.append(str(value))
         elif "source_action_id" in binding:
             value, is_cookie = await captured_binding(
                 conn, run_id=run_id, target=target, binding=binding,

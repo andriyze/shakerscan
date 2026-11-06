@@ -67,6 +67,14 @@ class HuntAllowAssertion(BaseModel):
     proof: Literal["stepup", "launch_stepup", "local"]
 
 
+class HuntSavedLoginRequest(BaseModel):
+    """A saved login a person attaches at start (hunt/saved_logins.py)."""
+
+    model_config = ConfigDict(extra="forbid")
+    profile_id: str = Field(min_length=36, max_length=36)
+    max_logins: int = Field(default=3, ge=1, le=10)
+
+
 class HuntStartV2Request(BaseModel):
     """Typed public request for the one native Hunt start boundary."""
 
@@ -107,6 +115,8 @@ class HuntStartV2Request(BaseModel):
     secret_visibility: Literal["withheld", "agent_may_see"] | None = None
     # The sender's id for this start, kept with the Hunt (``GET /hunts?handoff_id=``).
     handoff_id: str | None = Field(default=None, max_length=36)
+    # Saved logins a person attaches for this Hunt: the planner signs in with them by reference.
+    saved_logins: list[HuntSavedLoginRequest] | None = Field(default=None, max_length=4)
 
 
 class HuntStartV2Response(BaseModel):

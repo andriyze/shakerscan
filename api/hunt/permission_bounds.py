@@ -6,6 +6,8 @@ Grammar (one bound per string, at most ``MAX_BOUNDS``)::
     budget.raise:<dimension>=<max>       one dimension up to an absolute total
     credential.use:<target-id|host>,...  credentials whose home target is one of these
     target.authorize:<pattern>,...       host[:port] or *.domain[:port]; IDNA 2008/UTS #46 ASCII
+    login.use:<profile-id>,...           attach these saved logins when the Hunt first asks
+                                         (hunt/saved_logins.py; the default login count)
     capability:<flag>                    active-testing | state-changing | oob | tcp-discovery
                                          | active-replay
     ssh.host_trust:first-contact         recorded; SSH requests are not raised in this release
@@ -54,6 +56,7 @@ from .permission_reasons import (
     KIND_BUDGET_RAISE,
     KIND_CAPABILITY_ENABLE,
     KIND_CREDENTIAL_USE,
+    KIND_LOGIN_USE,
     KIND_SSH_HOST_TRUST,
     KIND_TARGET_AUTHORIZE,
 )
@@ -237,9 +240,10 @@ class Bounds:
     target_patterns: tuple[HostPattern, ...] = ()
     capability_flags: tuple[str, ...] = ()
     ssh_first_contact: bool = False
+    saved_logins: tuple[str, ...] = ()
 
     def public(self) -> dict[str, Any]:
-        return {
+        public = {
             "host_canonicalization": HOST_CANONICALIZATION,
             "budget_multiplier": self.budget_multiplier,
             "budget_totals": dict(self.budget_totals or {}),
@@ -248,6 +252,10 @@ class Bounds:
             "capability_flags": list(self.capability_flags),
             "ssh_host_trust_first_contact": self.ssh_first_contact,
         }
+        if self.saved_logins:
+            # Only when set: bounds recorded before saved logins keep their digest.
+            public["saved_logins"] = list(self.saved_logins)
+        return public
 
     def digest(self) -> str:
         return hashlib.sha256(json.dumps(self.public(), sort_keys=True).encode()).hexdigest()
@@ -281,6 +289,9 @@ class Bounds:
     def covers_capability(self, flag: str) -> bool:
         return flag in self.capability_flags
 
+    def covers_saved_login(self, profile_id: str) -> bool:
+        return str(profile_id).lower() in self.saved_logins
+
 
 def parse_bounds(values: Iterable[Any], *, budget_fields: Iterable[str] | None = None) -> Bounds:
     """Parse ``--allow`` strings; raise ``BoundError`` naming the first bad one.
@@ -301,6 +312,7 @@ def _parse_bounds(values: Iterable[Any], *, budget_fields: Iterable[str] | None,
     credential_targets: list[str] = []
     patterns: list[HostPattern] = []
     flags: list[str] = []
+    saved_logins: list[str] = []
     first_contact = False
     for item in items:
         kind, sep, value = item.partition(":")
@@ -347,6 +359,12 @@ def _parse_bounds(values: Iterable[Any], *, budget_fields: Iterable[str] | None,
             if value != "first-contact":
                 raise BoundError("ssh.host_trust bound must be first-contact")
             first_contact = True
+        elif kind == KIND_LOGIN_USE:
+            for part in value.split(","):
+                try:
+                    saved_logins.append(str(uuid.UUID(part.strip())))
+                except ValueError as exc:
+                    raise BoundError("login.use names saved-login profile ids") from exc
         else:
             raise BoundError(f"allow bound kind {kind[:40]!r} is not pre-authorizable")
     return Bounds(
@@ -355,6 +373,7 @@ def _parse_bounds(values: Iterable[Any], *, budget_fields: Iterable[str] | None,
         target_patterns=tuple(dict.fromkeys(patterns)),
         capability_flags=tuple(dict.fromkeys(flags)),
         ssh_first_contact=first_contact,
+        saved_logins=tuple(dict.fromkeys(saved_logins)),
     )
 
 
@@ -466,6 +485,7 @@ def _rebuilt(value: Mapping[str, Any], *, target_patterns: Iterable[str],
         target_patterns=tuple(_stored_host_pattern(str(item)) for item in target_patterns),
         capability_flags=tuple(str(item) for item in value.get("capability_flags") or ()),
         ssh_first_contact=bool(value.get("ssh_host_trust_first_contact")),
+        saved_logins=tuple(str(item).lower() for item in value.get("saved_logins") or ()),
     )
 
 
@@ -586,6 +606,7 @@ def merge(bounds: Sequence[Bounds]) -> Bounds:
         target_patterns=tuple(dict.fromkeys(p for b in bounds for p in b.target_patterns)),
         capability_flags=tuple(dict.fromkeys(f for b in bounds for f in b.capability_flags)),
         ssh_first_contact=any(b.ssh_first_contact for b in bounds),
+        saved_logins=tuple(dict.fromkeys(item for b in bounds for item in b.saved_logins)),
     )
 
 

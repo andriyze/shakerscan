@@ -98,7 +98,11 @@ async def list_hunt_permission_requests(hunt_id: str, status: str | None = Query
         async with conn.transaction():
             await expire_due(conn, hunt_uuid)
         await reconcile_host_encoding_if_needed(conn, hunt_uuid)
-        return {"hunt_id": str(hunt_uuid), "requests": await list_requests(conn, hunt_uuid, status=status)}
+        from .saved_logins import safe_hunt_view
+        run = await conn.fetchrow("SELECT * FROM hunt_runs WHERE id=$1", hunt_uuid)
+        return {"hunt_id": str(hunt_uuid), "requests": await list_requests(conn, hunt_uuid, status=status),
+                # The saved logins this Hunt may sign in with, and how many logins are left.
+                "saved_logins": (await safe_hunt_view(conn, dict(run)))["attached"]}
 
 
 @router.get("/hunts/{hunt_id}/permission-requests/{request_id}", tags=["Hunt"])
