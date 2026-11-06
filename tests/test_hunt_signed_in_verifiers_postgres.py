@@ -425,6 +425,9 @@ async def _captured_login(pool, hunt, *, cookie=HUB_SESSION):
 def test_a_signed_in_sqli_verify_runs_with_the_hunts_captured_login(stack):
     stack.records.append({"kind": "sqli_finding", "param": "id", "method": "GET",
                           "message": "GET parameter 'id' is vulnerable", "proof_state": "candidate"})
+    # A hostile target: the tool's own output carries the session the page echoed back.
+    stack.records.append({"kind": "sqli_dbms_fingerprint",
+                          "message": f"back-end echoed Cookie: hub_session={HUB_SESSION} in its error"})
 
     async def scenario():
         hunt, standing, _profile = await _active_hunt(stack.pool, signed_in=False)
@@ -454,6 +457,11 @@ def test_a_signed_in_sqli_verify_runs_with_the_hunts_captured_login(stack):
         # The cookie never reaches what the planner or the record shows.
         assert HUB_SESSION not in json.dumps([evidence, _decode(row["input_summary"]),
                                               _decode(row["result_summary"]), result], default=str)
+        async with stack.pool.acquire() as conn:
+            receipt = await conn.fetchval(
+                "SELECT receipt_json FROM budget_reservations WHERE action_id=$1", str(action))
+        assert HUB_SESSION not in json.dumps(_decode(receipt), default=str)
+        assert "sqli_dbms_fingerprint" in json.dumps(_decode(receipt), default=str)
 
     stack.loop.run_until_complete(scenario())
 
