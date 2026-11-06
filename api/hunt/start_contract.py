@@ -13,6 +13,7 @@ import ipaddress
 import os
 import re
 from typing import Any, Mapping, Sequence
+import uuid
 
 
 HUNT_START_SCHEMA = "hunt-start/v2"
@@ -38,7 +39,7 @@ _ALLOWED_TOP_LEVEL_KEYS = frozenset({
     "budgets", "policy", "credential_refs", "capabilities", "request_collection_ids",
     "approval_receipt_id", "scope_receipt_id", "schema_version", "skill_ids",
     "direct_origin_addresses", "allow", "proposed_allow", "allow_asserted_by", "secret_visibility",
-    "handoff_id",
+    "handoff_id", "saved_logins",
 })
 # A start's handoff id: chosen by whoever sends the start (an agent, the CLI), kept with the Hunt,
 # and listed by (``GET /hunts?handoff_id=``). When a person's decision is needed for the start and
@@ -240,6 +241,7 @@ def hunt_start_public_contract() -> dict[str, Any]:
     )
     from .permission_bounds import CAPABILITY_FLAGS, MAX_BOUNDS
     from .permission_reasons import PERMISSION_KINDS, REASON_CODES
+    from .saved_logins import DEFAULT_LOGINS, MAX_LOGINS, MAX_SAVED_LOGINS
     from .coverage_ledger import (
         COVERAGE_ANGLE_STATUSES, COVERAGE_LOCUS_KEYS, MAX_COVERAGE_BYTES_PER_HUNT,
         MAX_COVERAGE_EVENT_BYTES, MAX_COVERAGE_EVENTS_PER_HUNT,
@@ -258,6 +260,7 @@ def hunt_start_public_contract() -> dict[str, Any]:
             "skill_ids": MAX_SKILLS,
             "direct_origin_addresses": MAX_DIRECT_ORIGIN_ADDRESSES,
             "allow": MAX_BOUNDS,
+            "saved_logins": MAX_SAVED_LOGINS,
         },
         # Pre-authorization bounds (docs/hunt-permission-requests.md). ``allow`` is a person's
         # (Enterprise: set with allow_asserted_by after step-up); ``proposed_allow`` is the
@@ -268,6 +271,7 @@ def hunt_start_public_contract() -> dict[str, Any]:
                 "budget.raise:<N>x", "budget.raise:<max_dimension>=<total>",
                 "credential.use:<target-id|host>,...", "target.authorize:<host[:port]|*.domain[:port]>,...",
                 "capability:" + "|".join(sorted(CAPABILITY_FLAGS)), "ssh.host_trust:first-contact",
+                "login.use:<saved-login-profile-id>,...",
             ],
             "assertion_proofs": sorted(ALLOW_ASSERTION_PROOFS),
         },
@@ -281,6 +285,15 @@ def hunt_start_public_contract() -> dict[str, Any]:
             "set_by": ("the person starting the Hunt, named in allow_asserted_by (step-up, or local "
                        "on a loopback-only install, where anyone with API access can assert it); "
                        "never changed after start"),
+        },
+        # A person attaches saved logins (form/JSON login profiles of the target) at start; the
+        # planner signs in with them by reference (hunt/saved_logins.py). The MCP start tool drops
+        # the field: an agent asks for a saved login by binding it (a login.use request).
+        "saved_logins": {
+            "field": "saved_logins", "max_items": MAX_SAVED_LOGINS,
+            "item": {"profile_id": "a form_login or json_login profile attached to the target",
+                     "max_logins": f"1-{MAX_LOGINS} (default {DEFAULT_LOGINS})"},
+            "requires": "policy.active_testing",
         },
         "permission_reason_codes": sorted(REASON_CODES),
         "permission_kinds": list(PERMISSION_KINDS),
@@ -686,6 +699,8 @@ class HuntStartContract:
     allow_asserted_by: Mapping[str, str] | None = None
     secret_visibility: str = "withheld"
     handoff_id: str | None = None
+    # Saved logins a person attached at start: ({"profile_id", "max_logins"}, ...).
+    saved_logins: Sequence[Mapping[str, Any]] = ()
 
     @property
     def secret_values_visible(self) -> bool:
@@ -794,6 +809,7 @@ class HuntStartContract:
             "secret_visibility": self.secret_visibility,
             **self.secret_visibility_record(),
             **({"handoff_id": self.handoff_id} if self.handoff_id else {}),
+            **({"saved_logins": [dict(item) for item in self.saved_logins]} if self.saved_logins else {}),
         }
 
 
@@ -995,8 +1011,38 @@ def normalize_hunt_start_payload(value: Mapping[str, Any]) -> HuntStartContract:
         adjustments=tuple(adjustments),
         secret_visibility=_secret_visibility(payload),
         handoff_id=_handoff_id(payload),
+        saved_logins=_saved_logins(payload, policy),
         **_allow_fields(payload),
     )
+
+
+def _saved_logins(payload: Mapping[str, Any], policy: HuntStartPolicy) -> tuple[dict[str, Any], ...]:
+    """``saved_logins``: distinct profile ids with a login count; they need active testing (a
+    login is an active request)."""
+    from .saved_logins import DEFAULT_LOGINS, MAX_LOGINS, MAX_SAVED_LOGINS
+
+    raw = payload.get("saved_logins")
+    if raw in (None, []):
+        return ()
+    if not isinstance(raw, (list, tuple)) or len(raw) > MAX_SAVED_LOGINS:
+        raise HuntStartContractError(f"saved_logins must be an array of at most {MAX_SAVED_LOGINS} items")
+    result: list[dict[str, Any]] = []
+    for item in raw:
+        if not isinstance(item, Mapping) or set(item) - {"profile_id", "max_logins"}:
+            raise HuntStartContractError("each saved login is {profile_id, max_logins}")
+        try:
+            profile_id = str(uuid.UUID(str(item.get("profile_id") or "")))
+        except ValueError:
+            raise HuntStartContractError("saved_logins.profile_id must be a credential profile id") from None
+        logins = item.get("max_logins", DEFAULT_LOGINS)
+        if isinstance(logins, bool) or not isinstance(logins, int) or not 1 <= logins <= MAX_LOGINS:
+            raise HuntStartContractError(f"saved_logins.max_logins must be 1 to {MAX_LOGINS}")
+        if any(entry["profile_id"] == profile_id for entry in result):
+            raise HuntStartContractError("saved_logins must name distinct profiles")
+        result.append({"profile_id": profile_id, "max_logins": logins})
+    if not policy.active_testing:
+        raise HuntStartContractError("saved_logins require policy.active_testing (a login is an active request)")
+    return tuple(result)
 
 
 def _handoff_id(payload: Mapping[str, Any]) -> str | None:

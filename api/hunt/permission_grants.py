@@ -13,6 +13,9 @@ A grant reuses the mechanism that already owns its authority; it never adds a pa
   in the worker. Remember on the Hunt's own host records the standing target authorization.
 * ``secret.try`` lets this Hunt send one discovered secret of another target to one login, a
   bounded number of times (hunt/secret_try.py). Never pre-authorized, never remembered.
+* ``login.use`` lets this Hunt sign in with one saved login (one profile version) on its own login
+  URL, a bounded number of times (hunt/saved_logins.py). Pre-authorized only by the start bound
+  ``login.use:<profile-id>`` and only for the first attachment; never remembered.
 * ``credential.use`` lets this Hunt use exactly one profile version after the same kind rules a
   credential grant applies, without creating a binding. Remember creates the normal credential
   grant (``granted_by="permission-request:<id>"``), which joins the one attached list.
@@ -52,6 +55,7 @@ from .permission_reasons import (
     KIND_BUDGET_RAISE,
     KIND_CAPABILITY_ENABLE,
     KIND_CREDENTIAL_USE,
+    KIND_LOGIN_USE,
     KIND_PREAUTHORIZATION,
     KIND_SECRET_TRY,
     KIND_TARGET_AUTHORIZE,
@@ -325,6 +329,9 @@ async def apply_grant(
     elif kind == KIND_SECRET_TRY:
         from .secret_try import apply_secret_try
         effect = await apply_secret_try(conn, run, request, choice, refused=GrantRefused)
+    elif kind == KIND_LOGIN_USE:
+        from .saved_logins import apply_login_use
+        effect = await apply_login_use(conn, run, request, choice, refused=GrantRefused)
     elif kind == KIND_PREAUTHORIZATION:
         subject = _json(request["subject_json"], {})
         bounds = _approvable_proposal(subject)
@@ -408,6 +415,11 @@ def _covers(bounds: Bounds, request: Mapping[str, Any], run: Mapping[str, Any]) 
     if kind == KIND_CAPABILITY_ENABLE:
         flag = str(subject.get("flag") or "")
         return {} if flag and bounds.covers_capability(flag) else None
+    if kind == KIND_LOGIN_USE:
+        # The first attachment only: more logins after the allowed ones were used is a person's
+        # decision every time, so a start bound never makes the count unbounded.
+        first = str(request.get("reason_code") or "") == "saved_login_not_attached"
+        return {} if first and bounds.covers_saved_login(str(subject.get("profile_id"))) else None
     return None
 
 

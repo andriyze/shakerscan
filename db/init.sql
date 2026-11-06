@@ -1113,7 +1113,7 @@ CREATE INDEX IF NOT EXISTS idx_hunt_preauthorizations_run
 CREATE TABLE IF NOT EXISTS hunt_permission_requests (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     hunt_run_id UUID NOT NULL REFERENCES hunt_runs(id) ON DELETE CASCADE,
-    kind TEXT NOT NULL CHECK (kind IN ('target.authorize','credential.use','capability.enable','budget.raise','ssh.exec','ssh.host_trust','preauthorization','secret.try')),
+    kind TEXT NOT NULL CHECK (kind IN ('target.authorize','credential.use','capability.enable','budget.raise','ssh.exec','ssh.host_trust','preauthorization','secret.try','login.use')),
     reason_code TEXT NOT NULL CHECK (reason_code ~ '^[a-z][a-z_]{2,63}$'),
     subject_json JSONB NOT NULL,
     subject_digest TEXT NOT NULL CHECK (subject_digest ~ '^[0-9a-f]{64}$'),
@@ -1158,7 +1158,7 @@ CREATE TABLE IF NOT EXISTS hunt_permission_grants (
     hunt_run_id UUID NOT NULL REFERENCES hunt_runs(id) ON DELETE CASCADE,
     request_id UUID NOT NULL REFERENCES hunt_permission_requests(id) ON DELETE CASCADE,
     preauthorization_id UUID REFERENCES hunt_preauthorizations(id) ON DELETE SET NULL,
-    kind TEXT NOT NULL CHECK (kind IN ('target.authorize','credential.use','capability.enable','budget.raise','ssh.exec','ssh.host_trust','preauthorization','secret.try')),
+    kind TEXT NOT NULL CHECK (kind IN ('target.authorize','credential.use','capability.enable','budget.raise','ssh.exec','ssh.host_trust','preauthorization','secret.try','login.use')),
     subject_json JSONB NOT NULL,
     subject_digest TEXT NOT NULL CHECK (subject_digest ~ '^[0-9a-f]{64}$'),
     scope TEXT NOT NULL CHECK (scope IN ('hunt','target')),

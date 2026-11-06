@@ -77,6 +77,22 @@ export function HuntDetails({ hunt, shellPlans, confirmingPlanId, onConfirmPlan,
             </li>
           })}
         </ul>
+        {Boolean(hunt.saved_logins?.attached.length) && (
+          <div className="mt-4 border-t border-gray-800 pt-3">
+            <h3 className="text-sm font-medium text-gray-200">Saved logins</h3>
+            <p className="mt-1 text-xs text-gray-500">The agent signs in with these by reference, only on their own login URL; it never sees their values.</p>
+            <ul className="mt-2 space-y-2 text-xs" aria-label="Saved logins attached to this Hunt">
+              {hunt.saved_logins?.attached.map(login => <li key={login.saved_login} className="rounded-sm border border-gray-800 p-2">
+                <div className="flex items-baseline justify-between gap-3">
+                  <span className="text-gray-200">{login.principal_label || 'Saved login'} <span className="text-gray-500">({login.auth_kind || 'login'})</span></span>
+                  <span className="font-mono text-gray-400">{login.logins_used} / {login.logins_allowed} logins</span>
+                </div>
+                <div className="mt-1 break-all font-mono text-gray-500">POST {login.login_url}</div>
+                <div className="mt-1 text-gray-500">Attached by {login.attached_by}{login.usable ? '' : ' · no longer usable (rotated or detached)'}</div>
+              </li>)}
+            </ul>
+          </div>
+        )}
         {Boolean(hunt.policy_adjustments?.length) && (
           <div className="mt-4 rounded-lg border border-amber-800 p-3 text-xs text-amber-100" role="status">
             <p className="font-medium">Resolved Hunt configuration</p>

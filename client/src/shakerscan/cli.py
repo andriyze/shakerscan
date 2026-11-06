@@ -1609,7 +1609,8 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "pre-authorize the agent's Hunts within this bound (repeatable): budget.raise:2x, "
             "credential.use:<targets>, target.authorize:<patterns>, capability:state-changing, "
-            "capability:active-testing. Enterprise asks for your step-up once, before the agent starts"
+            "capability:active-testing, login.use:<saved-login-id> (lets the agent sign in with that "
+            "saved login when it asks). Enterprise asks for your step-up once, before the agent starts"
         ),
     )
     agent.add_argument("--account", help="Enterprise step-up for --allow: your sign-in name")

@@ -55,6 +55,8 @@ SIGN_IN_HINT = (
     "fields; it needs state-changing permission) and \"capture\": [{\"name\": \"session\", "
     "\"header\": \"Set-Cookie\"}]; the answer's captures entry is the request_bindings item that "
     "sends the session on later http.request, artifact.inspect and scanner calls to the same origin. "
+    "A saved login (briefing saved_logins) signs in by reference without state-changing permission: "
+    "bind its username and secret with {\"saved_login\": \"<id>\", \"credential_field\": ...}. "
     "With a selected web credential, auth.session.establish signs in instead (then as_principal)."
 )
 

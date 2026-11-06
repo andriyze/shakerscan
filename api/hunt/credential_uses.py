@@ -371,9 +371,17 @@ async def admit_action_credentials(
     unrevoked binding for the consuming target, and the version selected at start), checked
     at admission so the refusal carries a reason code and nothing is reserved for it.
     """
+    logins: list[CredentialUse] = []
+    if capability == "http.request":
+        # A saved login a person attached (hunt/saved_logins.py): its own grant, URL and count.
+        from .saved_logins import admit_saved_login
+        target = context.get("target") if isinstance(context.get("target"), Mapping) else {}
+        logins = await admit_saved_login(
+            conn, run=run, values=capability_input, default_origin=target.get("url") or target.get("locator"),
+        )
     references = action_credential_references(capability, capability_input, context)
     if not references:
-        return []
+        return logins
     consuming = hunt_consuming_target_id(run)
     ids = sorted({str(reference["profile_id"]) for _, reference in references})
     rows = await conn.fetch(
@@ -417,7 +425,7 @@ async def admit_action_credentials(
         uses.append(CredentialUse(profile_id, version, selected_source(
             home_target_id=homes.get(profile_id), hunt_target_id=consuming,
         ), slot))
-    return uses
+    return [*logins, *uses]
 
 
 async def live_credential_grants(conn: Any, hunt_id: Any) -> dict[str, dict[str, Any]]:

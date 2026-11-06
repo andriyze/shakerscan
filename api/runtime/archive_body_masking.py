@@ -143,7 +143,11 @@ class WithheldValues:
         self.known: list[str] = []
         # Values found elsewhere (a window's preceding context, sealed earlier in the Hunt).
         self.found: list[str] = []
+        # Values withheld without a reference (a saved login's secret): masked wherever the
+        # target echoes them, never numbered, so no ``withheld://`` reference can send them on.
+        self.unreferenced: list[str] = []
         self._known_scrubbers: list[KnownValueScrubber] | None = None
+        self._unreferenced_scrubber: KnownValueScrubber | None = None
         # SQL dump column knowledge, by resource path: carried between windows of one dump, so a
         # window far past its CREATE TABLE still knows which column holds the password.
         self.sql_tables: dict[str, dict[str, list[str]]] = {}
@@ -174,9 +178,26 @@ class WithheldValues:
             # (``Welcome back, <value>!``): both forms are searched for, and an echo is withheld
             # (and referenced) as the form that was echoed.
             for form in dict.fromkeys((text, text.strip())):
-                if len(form) >= minimum and form not in target and _encodable(form):
+                if (len(form) >= minimum and form not in target and form not in self.unreferenced
+                        and _encodable(form)):
                     target.append(form)
         self._known_scrubbers = None
+
+    def bind_unreferenced(self, values: Any) -> None:
+        """Values masked wherever they are echoed and never given a reference (a saved login's
+        secret: it is sent only by its own login). Found semantics: at least six characters, as
+        whole tokens below ten."""
+        for value in values or ():
+            text = str(value)
+            for form in dict.fromkeys((text, text.strip())):
+                if len(form) >= _MIN_FOUND_VALUE_CHARS and form not in self.unreferenced and _encodable(form):
+                    self.unreferenced.append(form)
+                    for held in (self.known, self.found):
+                        if form in held:
+                            held.remove(form)
+        self._known_scrubbers = None
+        self._unreferenced_scrubber = (
+            KnownValueScrubber(self.unreferenced, whole_tokens=True) if self.unreferenced else None)
 
     def known_scrubbers(self) -> list[KnownValueScrubber]:
         if self._known_scrubbers is None:
@@ -479,6 +500,9 @@ def _mask_known_values(text: str) -> str:
     collector = _COLLECTOR.get()
     if collector is None:
         return text
+    if collector._unreferenced_scrubber is not None:
+        # First: an echo of such a value never becomes a numbered (referenceable) marker.
+        text = collector._unreferenced_scrubber.scrub(text, lambda _value: MASK)
     for scrubber in collector.known_scrubbers():
         text = scrubber.scrub(text, collector.marker)
     return text
