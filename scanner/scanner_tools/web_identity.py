@@ -842,11 +842,21 @@ async def identify(*, bases: Iterable[str], fetch: Fetch, request_limit: int,
         seen = seen[:MAX_BASES]
     root_evidence: _Evidence | None = None
     examined: list[str] = []
-    for base in seen:
+    index = 0
+    while index < len(seen):
+        base = seen[index]
+        index += 1
         evidence = await examine(base, RECIPES)
         examined.append(base)
         if base == "/":
             root_evidence = evidence
+            # The root's own relative redirect (``/`` -> ``/app/login``) names the application base.
+            root = evidence.responses.get("")
+            location = str(root.headers.get("location") or "") if root is not None else ""
+            if root is not None and 300 <= root.status < 400 and location.startswith("/") and not location.startswith("//"):
+                redirected = base_of_url_path(urllib.parse.urlsplit(location[:2048]).path)
+                if redirected not in seen and len(seen) < MAX_BASES:
+                    seen.append(redirected)
         if stop():
             break
     # Mounts: a reverse proxy commonly serves a product under its own name. The mount's first

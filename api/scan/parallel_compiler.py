@@ -960,7 +960,7 @@ class ParallelActionPlanCompiler:
         """
         names = [
             "web.probe", "web.crawl", "web.browser_crawl", "web.content_discover",
-            "web.spec_ingest",
+            "web.spec_ingest", "web.identify",
         ]
         if include_subdomains:
             names.extend(("subdomains.discover", "subdomains.takeover_check"))

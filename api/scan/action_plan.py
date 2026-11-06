@@ -1448,6 +1448,17 @@ class ScanActionPlanCompiler:
                 {},
                 dependencies=primary_dependency,
             )
+            if self._family_enabled(execution_plan, "recon"):
+                # Product recipes: fixed read-only GETs naming the edge, server, application and
+                # plugins behind the origin, each against a negative control. Optional: a Scan
+                # without the budget records the gap, and nothing depends on its output.
+                add(
+                    "discover.identify",
+                    "discover_surface",
+                    "web.identify",
+                    {},
+                    dependencies=("discover.web_probe",),
+                )
         if scope in {"full", "discovery"} and policy.subdomain_discovery:
             add(
                 "discover.subdomains",

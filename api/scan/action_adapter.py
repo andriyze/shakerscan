@@ -35,6 +35,7 @@ try:
     from capabilities.http import execute_bound_http_request
     from capabilities.takeover import bound_takeover_hosts, check_takeovers
     from scan.recon_active_actions import RECON_ACTIVE_CAPABILITIES, execute_recon_active
+    from scan.web_identify_actions import execute_web_identify
     from capabilities.replay import RecordedReplayTransport
     from capabilities.inline import (
         AuthSessionExecutionAdapter,
@@ -128,6 +129,7 @@ except (ImportError, ModuleNotFoundError):
     from ..capabilities.http import execute_bound_http_request
     from ..capabilities.takeover import bound_takeover_hosts, check_takeovers
     from .recon_active_actions import RECON_ACTIVE_CAPABILITIES, execute_recon_active
+    from .web_identify_actions import execute_web_identify
     from ..capabilities.replay import RecordedReplayTransport
     from ..capabilities.inline import (
         AuthSessionExecutionAdapter,
@@ -6409,6 +6411,8 @@ class DatabaseNeutralScanActionDispatcher:
             return await self._tls(action, heartbeat)
         if action.capability_name == "web.spec_ingest":
             return await self._spec_ingest(action, heartbeat)
+        if action.capability_name == "web.identify":
+            return await execute_web_identify(self, action, heartbeat)
         if action.capability_name in {
             "ports.discover", "service.fingerprint", "subdomains.discover",
         }:

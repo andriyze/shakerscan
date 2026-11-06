@@ -549,6 +549,11 @@ def _http_principal_schema(
 
 
 from .asset_capability_specs import asset_capability_specs
+try:
+    from scanner_tools.web_identity import request_ceiling as _web_identify_ceiling
+except (ImportError, ModuleNotFoundError):  # package import layout
+    from scanner.scanner_tools.web_identity import request_ceiling as _web_identify_ceiling
+_WEB_IDENTIFY_REQUESTS = _web_identify_ceiling()
 from .ssh_command_contract import ssh_command_specs
 from .investigation_specs import investigation_specs
 
@@ -791,6 +796,19 @@ CAPABILITY_REGISTRY = CapabilityRegistry(
             _http_principal_schema(),
             "spec-ingest/v1", ("discovered_route",),
             planner_visible=False,
+        ),
+        CapabilitySpec(
+            "web.identify",
+            "Identify the products behind the target's origin from fixed read-only product recipes "
+            "(identity signals, a version parser and a negative control per base path).",
+            "internal", "read_only", _HTTP_TARGETS, "scanner.web_identity", "1",
+            # The catalogue's exact request ceiling (three bases, every mount, plugin readmes).
+            None, {"http_requests": _WEB_IDENTIFY_REQUESTS, "tool_wall_seconds": 180},
+            {"network_reachability": True, "runtime_target_binding": True,
+             "http_destinations": "bound_origins_only"},
+            _schema(), "web-identity/v1", ("http_component", "tool_receipt"),
+            planner_visible=False,
+            credential_transport="not_used", credential_interruption="not_needed",
         ),
         CapabilitySpec(
             "web.content_discover", "Bounded content discovery using a bundled wordlist.",
