@@ -141,6 +141,9 @@ class LoginConnection(ReplayConnection):
             assert args[1] == "login.use"
             return [grant for grant in self.grants()
                     if args[2] is None or json.loads(grant["subject_json"])["profile_id"] == args[2]]
+        if "FROM credential_profiles p" in sql and "ORDER BY lower(p.name)" in sql:
+            # The target's saved logins (saved_logins.hunt_view): this one, already attached.
+            return [dict(self.profile)] if args[0] == str(TARGET) else []
         if "private_http_result IS NOT NULL" in sql:
             return [action for action in self.actions.values() if action.get("private_http_result")]
         return await super().fetch(sql, *args)
