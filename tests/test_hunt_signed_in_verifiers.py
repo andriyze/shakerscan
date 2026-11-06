@@ -101,6 +101,32 @@ def test_a_capability_that_cannot_carry_the_session_refuses_it_and_says_why(name
     assert "without a session" in refused.value.message or "cannot carry" in refused.value.message
 
 
+@pytest.mark.parametrize("path,deep,browser", [
+    ("/search?q=1#results", False, None),     # an anchor after a server query: Dalfox's
+    ("/search?q=1#/r?x=2", False, None),      # a server query decides, whatever the fragment says
+    ("/#/search?q=1", False, "q"),            # a client-route parameter: the pinned browser
+    ("/#/search?q=1&p=2", False, None),       # two client-route parameters: Dalfox's
+    ("/#results", False, None),               # a plain anchor, no parameter
+    ("/search?q=1", False, None),
+    ("/search?q=1", True, "q"),               # deep_domxss, one parameter: the pinned browser
+    ("/search?q=1&p=2", True, None),          # deep_domxss, several: headless Dalfox
+])
+def test_the_guard_and_the_worker_select_the_xss_adapter_the_same_way(path, deep, browser):
+    from api.runtime.hunt_scanner_contract import xss_browser_parameter
+
+    assert xss_browser_parameter(f"{ORIGIN}{path}", deep_domxss=deep) == browser
+    assert xss_browser_parameter(path, deep_domxss=deep) == browser
+    values = {"path": path, "as_principal": "primary", **({"deep_domxss": True} if deep else {})}
+    refusal = scanner_identity_refusal("xss.verify", values)
+    # Signed in, only Dalfox without a headless browser carries the session.
+    assert (refusal is None) is (browser is None and not deep), refusal
+
+
+def test_a_signed_in_xss_verify_with_an_anchor_runs_as_its_principal():
+    values = {"path": "/search?q=1#results", "as_principal": "primary"}
+    assert scanner_admission("xss.verify", values, ACTIVE) == ("primary", False)
+
+
 def test_a_body_test_needs_the_state_changing_permission_and_raises_a_request():
     with pytest.raises(HuntRefusal) as refused:
         scanner_admission("sqli.verify", LOGIN_BODY, ACTIVE)

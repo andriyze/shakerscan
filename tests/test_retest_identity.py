@@ -464,6 +464,37 @@ def test_a_signed_in_scans_finding_of_any_type_is_not_offered_a_retest(monkeypat
         assert "credential_profile_refs" not in json.dumps(result, default=str)
 
 
+def test_a_finding_a_signed_in_hunt_proved_says_to_run_a_new_signed_in_hunt(monkeypatch):
+    """A Scan finding a signed-in Hunt verifier proved names the Hunt, not the Scan, as the way
+    to check it again; one from a signed-in Scan names a new signed-in Scan."""
+    from retest_contract import (
+        RETEST_IDENTITY_HUNT_MESSAGE, RETEST_IDENTITY_MESSAGE, RETEST_REASON_IDENTITY,
+    )
+
+    row = _proven("http://shop.fixture.invalid")
+    row["evidence"] = {**row["evidence"], "evidence_principals": ["user1"]}
+    result = _detail(monkeypatch, row, ANONYMOUS_SCAN_OPTIONS)
+    assert (result["retest_supported"], result["retest_unsupported_reason"]) == (False, RETEST_REASON_IDENTITY)
+    assert result["retest_unsupported_message"] == RETEST_IDENTITY_HUNT_MESSAGE
+    assert "new Hunt signed in" in RETEST_IDENTITY_HUNT_MESSAGE
+    assert "new signed-in Scan" in RETEST_IDENTITY_MESSAGE
+
+
+def test_a_finding_a_signed_in_hunt_proved_is_not_queued_for_an_anonymous_retest(monkeypatch):
+    from fastapi import HTTPException
+    from retest_contract import RETEST_IDENTITY_HUNT_MESSAGE, RETEST_REASON_IDENTITY
+
+    row = _proven("http://shop.fixture.invalid")
+    row["evidence"] = {**row["evidence"], "evidence_principals": ["user1"]}
+    with pytest.raises(HTTPException) as refused:
+        _enqueue(monkeypatch, row, ANONYMOUS_SCAN_OPTIONS)
+    assert refused.value.detail["reason"] == RETEST_REASON_IDENTITY
+    assert refused.value.detail["message"] == RETEST_IDENTITY_HUNT_MESSAGE
+    # Control: the same finding without the signed-in principals is queued.
+    _inputs, inserted = _enqueue(monkeypatch, _proven("http://shop.fixture.invalid"), ANONYMOUS_SCAN_OPTIONS)
+    assert inserted
+
+
 def test_a_bulk_retest_skips_a_signed_in_scans_finding_and_queues_nothing(monkeypatch):
     from retest_contract import RETEST_REASON_IDENTITY
 
@@ -610,6 +641,11 @@ def test_a_candidate_records_the_signed_in_principals_behind_its_claim(monkeypat
     agent_router = _agent_router()
     tools = agent_router.agent_tools
     executed: list = []
+    # The API's composition root binds the candidate key into the arsenal routes when it is
+    # imported; bind the same function here, so the test passes alone as in the full suite.
+    from finding_routes.vulnerability_identity import canonical_vulnerability_key
+
+    monkeypatch.setattr(agent_router._arsenal_routes, "_canonical_vulnerability_key", canonical_vulnerability_key)
 
     class Conn:
         async def execute(self, query, *args):

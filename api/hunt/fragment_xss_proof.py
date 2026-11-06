@@ -20,12 +20,14 @@ try:
         XSSBrowserProofAdapter,
     )
     from hunt.capability_executor import CapabilityAdapterResult
+    from runtime.hunt_scanner_contract import xss_browser_parameter
     from runtime.models import TargetBinding
 except ModuleNotFoundError:  # package import in host-side tests
     from ..capabilities.browser import (
         BrowserCapabilityInputError,
         XSSBrowserProofAdapter,
     )
+    from ..runtime.hunt_scanner_contract import xss_browser_parameter
     from ..runtime.models import TargetBinding
     from .capability_executor import CapabilityAdapterResult
 
@@ -116,25 +118,7 @@ def hunt_browser_xss_proof_adapter(
     """
     if capability_name != "xss.verify":
         return None
-    parsed = urllib.parse.urlsplit(execution_target)
-    if parsed.fragment:
-        if parsed.query:
-            return None
-        fragment = urllib.parse.urlsplit(parsed.fragment)
-        if fragment.scheme or fragment.netloc or fragment.fragment:
-            return None
-        params = urllib.parse.parse_qsl(
-            fragment.query, keep_blank_values=True, max_num_fields=50,
-        )
-    elif deep_domxss:
-        params = urllib.parse.parse_qsl(
-            parsed.query, keep_blank_values=True, max_num_fields=50,
-        )
-    else:
-        return None
-    if len(params) != 1:
-        return None
-    parameter_name = params[0][0]
+    parameter_name = xss_browser_parameter(execution_target, deep_domxss=deep_domxss)
     if not parameter_name:
         return None
     candidate_id = hashlib.sha256(

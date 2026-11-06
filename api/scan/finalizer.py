@@ -912,7 +912,7 @@ _PROOF_PAGE_REQUESTS_KEPT = 50
 def _proof_page_requests(
     observations: Sequence[Mapping[str, Any]], attempt_id: Any,
 ) -> list[dict[str, Any]] | None:
-    """``[{method, path, resource_type, status}]`` (the lowest status each answered with) for
+    """``[{method, path, query, resource_type, status}]`` (the lowest status each answered with) for
     one proof attempt's page, or None when the proof's record cannot tell."""
     responses = [
         item for item in observations
@@ -922,21 +922,25 @@ def _proof_page_requests(
     if (not responses or len(responses) >= _PROOF_PAGE_RESPONSES_RECORDED
             or any("resource_type" not in item for item in responses)):
         return None
-    kept: dict[tuple[str, str], dict[str, Any]] = {}
+    kept: dict[tuple[str, str, str], dict[str, Any]] = {}
     for item in responses:
         resource = str(item.get("resource_type") or "")
         if resource not in _PROOF_PAGE_DATA_RESOURCES:
             continue
         try:
-            path = urllib.parse.urlsplit(str(item.get("url") or "")).path or "/"
+            # The recorded URL is already redacted (``capabilities.browser``): its query keeps
+            # the parameter names only, which tell ``?public=1`` from ``?private=1``.
+            parts = urllib.parse.urlsplit(str(item.get("url") or ""))
+            path, query = parts.path or "/", parts.query
             status = int(item.get("status_code") or 0)
         except (TypeError, ValueError):
             return None
-        key = (str(item.get("method") or "GET").upper()[:10], path[:500])
+        key = (str(item.get("method") or "GET").upper()[:10], path[:500], query[:500])
         if key in kept:
             kept[key]["status"] = min(kept[key]["status"], status)
         elif len(kept) < _PROOF_PAGE_REQUESTS_KEPT:
-            kept[key] = {"method": key[0], "path": key[1], "resource_type": resource, "status": status}
+            kept[key] = {"method": key[0], "path": key[1], "query": key[2], "resource_type": resource,
+                         "status": status}
         else:
             return None
     return list(kept.values())

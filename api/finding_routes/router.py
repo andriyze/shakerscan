@@ -38,11 +38,12 @@ try:
     from evidence_storage import hydrate_evidence_content, public_evidence_object
     from evidence_triage import redact_finding_evidence as _redact_finding_evidence
     from retest_contract import (
-        RETEST_IDENTITY_MESSAGE, RETEST_REASON_IDENTITY, SUPPORTED_RETEST_TYPES, build_replay_commands,
-        candidate_evidence_principals,
+        RETEST_IDENTITY_MESSAGE, RETEST_REASON_IDENTITY, SUPPORTED_RETEST_TYPES, auth_context_to_headers,
+        build_replay_commands, candidate_evidence_principals,
         build_retest_job_payload, extract_auth_context, infer_type_from_title_tool,
         normalize_retest_type, parse_json_field, retest_sends_active_requests,
-        retest_identity_refusal, retest_refusal_message, retest_refusal_reason, validate_retest_job_payload,
+        retest_identity_message, retest_identity_refusal, retest_refusal_message, retest_refusal_reason,
+        validate_retest_job_payload,
     )
     from serialization import _decode_json_value, _json_object, _str_list, row_to_dict
     from scan.retest_authority import (
@@ -65,11 +66,12 @@ except ModuleNotFoundError:  # package import in host-side tests
     from ..evidence_storage import hydrate_evidence_content, public_evidence_object
     from ..evidence_triage import redact_finding_evidence as _redact_finding_evidence
     from ..retest_contract import (
-        RETEST_IDENTITY_MESSAGE, RETEST_REASON_IDENTITY, SUPPORTED_RETEST_TYPES, build_replay_commands,
-        candidate_evidence_principals,
+        RETEST_IDENTITY_MESSAGE, RETEST_REASON_IDENTITY, SUPPORTED_RETEST_TYPES, auth_context_to_headers,
+        build_replay_commands, candidate_evidence_principals,
         build_retest_job_payload, extract_auth_context, infer_type_from_title_tool,
         normalize_retest_type, parse_json_field, retest_sends_active_requests,
-        retest_identity_refusal, retest_refusal_message, retest_refusal_reason, validate_retest_job_payload,
+        retest_identity_message, retest_identity_refusal, retest_refusal_message, retest_refusal_reason,
+        validate_retest_job_payload,
     )
     from ..serialization import _decode_json_value, _json_object, _str_list, row_to_dict
     from ..scan.retest_authority import (
@@ -770,7 +772,7 @@ async def get_finding(finding_id: str):
             # A proven finding whose request cannot be sent again says what is missing, and a
             # signed-in Scan's finding says how to check it again.
             message = (
-                RETEST_IDENTITY_MESSAGE if refusal == RETEST_REASON_IDENTITY
+                retest_identity_message(result) if refusal == RETEST_REASON_IDENTITY
                 else retest_refusal_message(result)
             )
             if message:
@@ -1797,10 +1799,12 @@ async def _enqueue_finding_retest_unlocked(
         )
         if scan_row:
             scan_options = parse_json_field(scan_row["options"])
-    if retest_identity_refusal(scan_options, auth_context) is not None:
+    hunt_signed_in = bool(candidate_evidence_principals(finding.get("evidence"))) and not auth_context_to_headers(
+        parse_json_field(auth_context))
+    if hunt_signed_in or retest_identity_refusal(scan_options, auth_context) is not None:
         raise HTTPException(status_code=400, detail={
             "error": "unsupported_finding_type", "reason": RETEST_REASON_IDENTITY,
-            "message": RETEST_IDENTITY_MESSAGE,
+            "message": retest_identity_message(finding),
         })
     # The replay destination must be covered by the scope that admits the retest (the approval
     # named, else the target's authorization); the same check runs while it runs.

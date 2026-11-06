@@ -1007,8 +1007,8 @@ def test_a_browser_xss_finding_keeps_its_proof_pages_own_data_requests():
     )
     (finding,) = report["findings"]
     assert finding["evidence"]["browser_proof"]["page_requests"] == [
-        {"method": "GET", "path": "/api/me", "resource_type": "fetch", "status": 401},
-        {"method": "GET", "path": "/api/search", "resource_type": "xhr", "status": 200},
+        {"method": "GET", "path": "/api/me", "query": "q=%3Credacted%3E", "resource_type": "fetch", "status": 401},
+        {"method": "GET", "path": "/api/search", "query": "q=%3Credacted%3E", "resource_type": "xhr", "status": 200},
     ]
 
 

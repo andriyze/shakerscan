@@ -279,27 +279,34 @@ def _proof_page_requests(verification: Mapping[str, Any]) -> Any:
     return proof.get("page_requests") if isinstance(proof, Mapping) else None
 
 
-def _request_key(method: Any, url: Any) -> tuple[str, str]:
-    """A request as the proof's record names it: the method and the path of the redacted URL."""
+def _request_key(method: Any, url: Any, *, with_query: bool = True) -> tuple[str, str, str]:
+    """A request as the proof's record names it: the method, and the path and query of the
+    redacted URL (``redact_url`` keeps the query's names, never their values, so
+    ``/api/search?public=1`` and ``?private=1`` are two requests). ``with_query`` False: a record
+    an earlier release kept, by method and path only."""
     try:
-        path = urllib.parse.urlsplit(redact_url(str(url or ""))).path or "/"
+        parts = urllib.parse.urlsplit(redact_url(str(url or "")))
+        path, query = parts.path or "/", parts.query
     except ValueError:
-        path = "/"
-    return str(method or "GET").upper()[:10], path[:500]
+        path, query = "/", ""
+    return str(method or "GET").upper()[:10], path[:500], query[:500] if with_query else ""
 
 
-def _proved_requests(recorded: Any) -> dict[tuple[str, str], bool] | None:
-    """``{(method, path): answered}`` from a finding's ``page_requests``, or None without one."""
+def _proved_requests(recorded: Any) -> tuple[dict[tuple[str, str, str], bool] | None, bool]:
+    """``({(method, path, query): answered}, with_query)`` from a finding's ``page_requests``, or
+    ``(None, True)`` without one. ``with_query`` is False for a record an earlier release kept
+    without the query (keyed by method and path, as it was then)."""
     if not isinstance(recorded, (list, tuple)):
-        return None
-    proved: dict[tuple[str, str], bool] = {}
-    for item in recorded:
-        if not isinstance(item, Mapping):
-            continue
-        key = (str(item.get("method") or "GET").upper()[:10], str(item.get("path") or "/")[:500])
+        return None, True
+    items = [item for item in recorded if isinstance(item, Mapping)]
+    with_query = all("query" in item for item in items)
+    proved: dict[tuple[str, str, str], bool] = {}
+    for item in items:
+        key = (str(item.get("method") or "GET").upper()[:10], str(item.get("path") or "/")[:500],
+               str(item.get("query") or "")[:500] if with_query else "")
         with contextlib.suppress(TypeError, ValueError):
             proved[key] = proved.get(key, False) or 100 <= int(item.get("status") or 0) < 400
-    return proved
+    return proved, with_query
 
 
 class _PageActivity:
@@ -325,15 +332,14 @@ class _PageActivity:
         self.failures: list[dict[str, Any]] = []
         self.capped = 0
         self.aborted: set[int] = set()
-        self.proved = _proved_requests(proved)
+        self.proved, self.with_query = _proved_requests(proved)
         self.signed_in = signed_in
-        self.answered_keys: set[tuple[str, str]] = set()
+        self.answered_keys: set[tuple[str, str, str]] = set()
 
-    @staticmethod
-    def _key(request: Any) -> tuple[str, str]:
+    def _key(self, request: Any) -> tuple[str, str, str]:
         with contextlib.suppress(Exception):
-            return _request_key(getattr(request, "method", "GET"), request.url)
-        return "GET", "/"
+            return _request_key(getattr(request, "method", "GET"), request.url, with_query=self.with_query)
+        return "GET", "/", ""
 
     def _proof_answered(self, request: Any) -> bool:
         return bool(self.proved and self.proved.get(self._key(request)))
@@ -421,8 +427,9 @@ class _PageActivity:
         not make them, cancelled them, or they are still open."""
         if not self.proved:
             return []
-        return [{"method": method, "path": path} for (method, path), answered in sorted(self.proved.items())
-                if answered and (method, path) not in self.answered_keys][:10]
+        return [{"method": method, "path": f"{path}?{query}" if query else path}
+                for (method, path, query), answered in sorted(self.proved.items())
+                if answered and (method, path, query) not in self.answered_keys][:10]
 
     def incomplete(self) -> dict[str, Any] | None:
         """Why the page did not run as proved, or None when every request it needed answered."""
@@ -521,20 +528,21 @@ async def _marker_check(
         # Requests the page still has open (a slow script, the call its sink waits for, the
         # payload's own image) may yet run the payload: wait for them, within the proof's own page
         # timeout. A marker that fires meanwhile is the same oracle's answer.
-        # Once they have finished, a short quiet spell lets what they started run (and start more).
-        # An open event stream, and a long poll the proof's own page never saw answered either, do
-        # not hold it (``_PageActivity.waiting``).
+        # Once none is open, a quiet spell (``_PENDING_QUIET_SECONDS`` with nothing open) lets what
+        # they started run (and start more); a request that opens meanwhile starts it over. An open
+        # event stream, and a long poll the proof's own page never saw answered either, do not
+        # hold it (``_PageActivity.waiting``). The marker is read again after every poll, so the
+        # answer is never older than one poll when the wait ends.
         deadline = loaded + XSS_PROOF_TIMEOUT_MS / 1000
         quiet_since: float | None = None
-        while activity.waiting() or quiet_since is not None:
-            if signals or dom or cancelled() or time.monotonic() >= deadline:
-                break
+        while not (signals or dom or cancelled()) and time.monotonic() < deadline:
+            now = time.monotonic()
             if activity.waiting():
                 quiet_since = None
-            else:
-                quiet_since = quiet_since or time.monotonic()
-                if time.monotonic() - quiet_since >= _PENDING_QUIET_SECONDS:
-                    break
+            elif quiet_since is None:
+                quiet_since = now
+            elif now - quiet_since >= _PENDING_QUIET_SECONDS:
+                break
             await asyncio.sleep(_PENDING_POLL_SECONDS)
             dom = xss_proof_signal(await page.get_attribute("html", XSS_PROOF_ATTRIBUTE), marker)
         status = int(response.status) if response is not None else 0

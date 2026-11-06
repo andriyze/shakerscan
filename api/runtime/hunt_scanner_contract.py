@@ -22,6 +22,7 @@ from __future__ import annotations
 
 from types import MappingProxyType
 from typing import Any, Mapping
+import urllib.parse
 
 # Worker scanners that can carry an HTTP identity (the fixed adapters' header flags).
 SIGNED_IN_SCANNERS = frozenset({
@@ -105,6 +106,37 @@ def signed_in_request(value: Mapping[str, Any]) -> bool:
             or slot not in {"", "anonymous", "anon", "none"})
 
 
+def xss_browser_parameter(url: str, *, deep_domxss: bool = False) -> str | None:
+    """The one parameter an ``xss.verify`` call proves in the pinned browser, or None when Dalfox
+    runs it. ``url`` is the execution URL, or the call's same-origin ``path``: only its query and
+    fragment decide. The one selection both the worker's adapter choice
+    (``hunt.fragment_xss_proof``) and the signed-in guard (``hunt.scanner_identity``) read:
+
+    - a client-route fragment with exactly one parameter (``/#/search?q=1``) and no server query;
+    - with ``deep_domxss``, a server query with exactly one parameter.
+
+    Anything else, a plain anchor after a server query (``/search?q=1#results``) included, is
+    Dalfox's."""
+    try:
+        parsed = urllib.parse.urlsplit(str(url or ""))
+        if parsed.fragment:
+            if parsed.query:
+                return None
+            fragment = urllib.parse.urlsplit(parsed.fragment)
+            if fragment.scheme or fragment.netloc or fragment.fragment:
+                return None
+            params = urllib.parse.parse_qsl(fragment.query, keep_blank_values=True, max_num_fields=50)
+        elif deep_domxss:
+            params = urllib.parse.parse_qsl(parsed.query, keep_blank_values=True, max_num_fields=50)
+        else:
+            return None
+    except ValueError:
+        return None
+    if len(params) != 1 or not params[0][0]:
+        return None
+    return params[0][0]
+
+
 def validate_hunt_scanner_input(name: str, value: Mapping[str, Any]) -> None:
     """The cross-field rules a schema cannot state, for the scanners' planner inputs."""
     named = sum((
@@ -139,5 +171,5 @@ __all__ = [
     "BODY_INPUT_VERIFIERS", "HUNT_INJECTION_BODY_PROPERTIES", "HUNT_SCANNER_SESSION_PROPERTIES",
     "HuntScannerInputError", "SIGNED_IN_SCANNERS", "captured_login_request", "hunt_body_input",
     "signed_in_request",
-    "validate_hunt_scanner_input",
+    "validate_hunt_scanner_input", "xss_browser_parameter",
 ]

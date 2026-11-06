@@ -31,13 +31,13 @@ except ModuleNotFoundError:  # package import in host-side tests
 
 IDENTITY_UNRESOLVED_REASON = (
     "The Scan that found this finding was signed in, and the retest cannot run as that identity; "
-    "it sent nothing, so nothing was reproduced or ruled out and the finding stays open. Run an "
-    "authenticated Scan with the same profile to check it again."
+    "it sent nothing, so nothing was reproduced or ruled out and the finding stays open. Run a new "
+    "signed-in Scan with the same credential profile to check it again."
 )
 CANDIDATE_IDENTITY_UNRESOLVED_REASON = (
     "The evidence behind this candidate was gathered signed in as a Hunt principal, and the retest "
     "cannot run as that identity; it sent nothing, so nothing was reproduced or ruled out and the "
-    "candidate stays open. Run the Hunt again to check it."
+    "candidate stays open. Run a new Hunt signed in as the same principal to check it."
 )
 
 

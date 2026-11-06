@@ -1005,8 +1005,14 @@ def auth_context_to_headers(auth_context: dict[str, str] | None) -> dict[str, st
 RETEST_REASON_IDENTITY = "retest_needs_signed_in_identity"
 RETEST_IDENTITY_MESSAGE = (
     "The Scan that found this finding was signed in, and a retest cannot run as that identity: it "
-    "would send the proof's request anonymously. Run an authenticated Scan with the same profile "
-    "to check it again."
+    "would send the proof's request anonymously. To check it again, run a new signed-in Scan with "
+    "the same credential profile: it proves the finding again or no longer finds it."
+)
+# The same for a finding a signed-in Hunt verifier proved (its evidence names the principals).
+RETEST_IDENTITY_HUNT_MESSAGE = (
+    "A Hunt proved this finding signed in, and a retest cannot run as that identity: it would send "
+    "the proof's request anonymously. To check it again, run a new Hunt signed in as the same "
+    "principal."
 )
 # Sign-in keys older Scans stored that the raw-authentication set no longer names.
 _LEGACY_SIGN_IN_KEYS = ("auth_token", "auth_user")
@@ -1042,6 +1048,14 @@ def retest_identity_refusal(
         return None
     context = parse_json_field(auth_context) if auth_context is not None else extract_auth_context(options)
     return None if auth_context_to_headers(context) else RETEST_REASON_IDENTITY
+
+
+def retest_identity_message(finding: Mapping[str, Any]) -> str:
+    """What the operator is told for ``RETEST_REASON_IDENTITY``: a new signed-in Hunt for a
+    finding a signed-in Hunt verifier proved, else a new signed-in Scan."""
+    if candidate_evidence_principals(finding.get("evidence")):
+        return RETEST_IDENTITY_HUNT_MESSAGE
+    return RETEST_IDENTITY_MESSAGE
 
 
 def candidate_evidence_principals(context: Any) -> list[str]:
