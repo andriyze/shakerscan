@@ -6,7 +6,7 @@ import re
 
 from dataclasses import dataclass, replace
 from types import MappingProxyType
-from typing import Mapping, Protocol
+from typing import Iterable, Mapping, Protocol
 
 try:
     from runtime.models import ScanBudget
@@ -31,6 +31,30 @@ TARGET_TRAFFIC_DIMENSIONS = frozenset({
     "tcp_ports_attempted",
     "hosts_attempted",
 })
+
+
+# Capabilities funded by their own allowance on top of the Scan's shared ceilings: the plan
+# that contains one holds exactly its registry reservation in addition, so adding it never
+# displaces a slice the shared budget funds. The allowance is derived from the plan itself,
+# identically at admission, in continuation reconciliation and at runtime reservation.
+OWN_BUDGET_CAPABILITIES = frozenset({"web.identify"})
+
+
+def own_budget_allowance(actions: Iterable[ScanAction]) -> dict[str, int]:
+    """The extra authority a plan's own-budget actions bring: their requested holds."""
+    allowance: dict[str, int] = {}
+    for action in actions:
+        if action.capability_name not in OWN_BUDGET_CAPABILITIES or action.admission_status == "skipped":
+            continue
+        for name, amount in dict(action.requested_budget).items():
+            allowance[str(name)] = allowance.get(str(name), 0) + int(amount)
+    return allowance
+
+
+def with_own_budget(limits: Mapping[str, int], actions: Iterable[ScanAction]) -> dict[str, int]:
+    """Shared ceilings plus the plan's own-budget allowance (declared dimensions only)."""
+    allowance = own_budget_allowance(actions)
+    return {name: int(limit) + allowance.get(name, 0) for name, limit in limits.items()}
 
 
 class ScanBudgetAllocationError(ValueError):
@@ -141,6 +165,10 @@ def _allocation_priority(action: ScanAction) -> int:
     """
     if action.action_id in MANDATORY_ACTION_IDS:
         return 0
+    if action.capability_name in OWN_BUDGET_CAPABILITIES:
+        # Admitted first against its own allowance, so the shared ceilings left for every
+        # other action are exactly what they would be without it.
+        return 0
     if action.required:
         return 1
     if action.supporting:
@@ -208,7 +236,7 @@ def allocate_scan_action_plan(
     was skipped, and the round then dropped both (a lane's appended slices must be a contiguous
     prefix), so a large target's second-round template sweep never ran.
     """
-    limits = budget.ledger_limits()
+    limits = with_own_budget(budget.ledger_limits(), plan.actions)
     reserved = {
         str(name): int(amount)
         for name, amount in dict(reserved_budget or {}).items()
