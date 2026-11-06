@@ -2035,6 +2035,11 @@
     "operation_id": "target_inventory_targets_inventory_get"
   },
   {
+    "path": "/targets/lookup",
+    "method": "get",
+    "operation_id": "lookup_target_targets_lookup_get"
+  },
+  {
     "path": "/targets/{target_id}",
     "method": "delete",
     "operation_id": "delete_target_targets__target_id__delete"

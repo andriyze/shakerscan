@@ -2888,6 +2888,13 @@
     "name": "target_inventory"
   },
   {
+    "path": "/targets/lookup",
+    "methods": [
+      "GET"
+    ],
+    "name": "lookup_target"
+  },
+  {
     "path": "/targets/{target_id}",
     "methods": [
       "DELETE"
