@@ -5,7 +5,7 @@ import uuid
 import pytest
 
 from api.runtime.models import ScanBudget, ScanPolicy, TargetBinding
-from api.scan.action_plan import ScanActionPlanCompiler
+from api.scan.action_plan import OWN_BUDGET_CAPABILITIES, ScanActionPlanCompiler, own_budget_allowance
 from api.scan.budget_allocator import (
     ScanBudgetAllocationError,
     allocate_scan_action_plan,
@@ -69,8 +69,12 @@ def test_allocator_admits_whole_plan_and_leaves_residual_unallocated():
     assert allocation.residual_scan_execute_budget["http_requests"] > 0
     assert allocation.residual_scan_execute_budget["tool_wall_seconds"] > 0
     assert allocation.unallocated_budget == allocation.residual_scan_execute_budget
+    # The shared ceilings plus the plan's own-budget allowance (product recipes) are exactly
+    # what is allocated or left; the shared ceilings alone bound every other action.
+    allowance = own_budget_allowance(allocation.plan.actions)
+    assert allowance and set(allowance) <= set(budget.ledger_limits())
     assert all(
-        allocation.allocated[name] + allocation.unallocated_budget[name] == limit
+        allocation.allocated[name] + allocation.unallocated_budget[name] == limit + allowance.get(name, 0)
         for name, limit in budget.ledger_limits().items()
     )
     assert all(
@@ -78,6 +82,7 @@ def test_allocator_admits_whole_plan_and_leaves_residual_unallocated():
             action.requested_budget.get(name, 0)
             for action in allocation.plan.actions
             if action.admission_status == "planned"
+            and action.capability_name not in OWN_BUDGET_CAPABILITIES
         ) <= limit
         for name, limit in budget.ledger_limits().items()
     )

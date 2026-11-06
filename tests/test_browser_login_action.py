@@ -27,7 +27,7 @@ from runtime.capability_registry import CAPABILITY_REGISTRY
 from runtime.credentials import build_credential_secret, parse_credential_secret, public_credential_configuration
 from runtime.models import TargetBinding, ScanPolicy
 from runtime.request_replay_executor import ReplayTransportResult
-from scan.action_plan import ScanActionPlanCompiler, ScanActionPlan, ScanActionPlanError
+from scan.action_plan import OWN_BUDGET_CAPABILITIES, ScanActionPlanCompiler, ScanActionPlan, ScanActionPlanError
 from scan.action_adapter import DatabaseNeutralScanActionDispatcher, ScanActionAdapterError
 from scan.admission_actions import (
     _compile_allocated_scan_action_plan, _compile_scan_admission_action_authority,
@@ -235,7 +235,10 @@ def test_real_admission_funds_each_selected_qa_once_without_continuation_authori
     assert CAP not in continuation.allowed_capabilities
     assert CAP not in continuation.required_capabilities
     for dimension, limit in resolved.budget.ledger_limits().items():
-        admitted = sum(action.requested_budget.get(dimension, 0) for action in parent.actions)
+        # Product recipes hold their own allowance beside the shared ceiling (action_plan.
+        # OWN_BUDGET_CAPABILITIES); everything else and the continuation share the ceiling.
+        admitted = sum(action.requested_budget.get(dimension, 0) for action in parent.actions
+                       if action.capability_name not in OWN_BUDGET_CAPABILITIES)
         assert admitted + continuation.budget_ceiling.get(dimension, 0) <= limit
     direct = _compile_allocated_scan_action_plan(
         scan_id=OWNER_ID, scan_contract=resolved, target_binding=TARGET,
