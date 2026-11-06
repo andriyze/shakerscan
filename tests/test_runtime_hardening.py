@@ -1338,7 +1338,7 @@ def test_scanner_image_builds_network_tools_above_reviewed_security_floors():
     assert "go build -mod=mod -trimpath" in dockerfile
     assert "golang.org/x/crypto@v0.57.0" in dockerfile
     assert "golang.org/x/mod@v0.41.0" in dockerfile
-    assert "golang.org/x/net@v0.60.0" in dockerfile
+    assert "golang.org/x/net@v0.62.0" in dockerfile
     assert "golang.org/x/text@v0.42.0" in dockerfile
     assert "github.com/jackc/pgx/v5@v5.9.0" in dockerfile
     assert "apt-get purge -y --auto-remove" in dockerfile
