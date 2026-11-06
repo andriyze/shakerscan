@@ -40,8 +40,28 @@ export interface TargetAsset {
   authorized?: boolean
   /** Active linked web apps the scan path treats as authorized (inherited or their own receipt). */
   authorized_origin_count?: number
+  /** DNS, reachable and live, from the latest liveness check (docs/target-liveness.md). */
+  liveness?: TargetLiveness
   created_at: string
   updated_at: string
+}
+
+export type LivenessStatus = 'live' | 'reachable' | 'unreachable' | 'no_dns' | 'dns_error' | 'blocked' | 'unchecked'
+export interface LivenessPort {
+  port: number; mode: 'http' | 'https' | 'tcp'; address: string | null
+  tcp: 'open' | 'refused' | 'timeout' | 'unreachable' | 'error' | 'not_tried'
+  answered: boolean; http_status?: number; note?: 'tls_failed' | 'no_answer' | 'not_http'
+}
+export interface TargetLiveness {
+  status: LivenessStatus
+  dns: 'resolves' | 'no_record' | 'error' | null
+  reachable: boolean | null
+  live: boolean | null
+  reason: string | null
+  checked_at: string | null
+  trigger: 'add' | 'pre_scan' | 'schedule' | 'manual' | null
+  addresses: string[]
+  ports: LivenessPort[]
 }
 
 export interface InventoryOrigin {
@@ -65,6 +85,8 @@ export interface InventoryFacets {
   findings: {any: number; critical_high: number; none: number}
   activity: {scanned: number; never: number; scanning: number}
   asset_type: {web: number; network: number}
+  /** Engines from 2.12 on. */
+  liveness?: Record<LivenessStatus, number>
 }
 
 export interface AssetOrigin {
@@ -136,6 +158,7 @@ export interface InventoryQuery {
   include_services?: boolean; group_by?: 'domain'; asset_type?: 'web' | 'network'; environment?: string
   authorization?: 'authorized' | 'unauthorized'; findings?: 'any' | 'critical_high' | 'none'
   activity?: 'never' | 'scanned' | 'scanning'; include_facets?: boolean
+  liveness?: LivenessStatus; domain?: string
   sort?: 'name' | 'risk' | 'recent' | 'created' | '-name' | '-risk' | '-recent' | '-created'
   /** list/v1 */
   cursor?: string; count?: 'none' | 'estimate' | 'exact'; member_limit?: number
@@ -153,6 +176,9 @@ export function getTargetAssets(params: InventoryQuery = {}, signal?: AbortSigna
 export const getTargetAsset = (id: string, signal?: AbortSignal) => request<AssetDetail>(`/targets/${pathSegment(id)}/asset`, { signal })
 export const getTargetAssetHistory = (id: string, kind: AssetHistoryKind, offset = 0, signal?: AbortSignal) => request<AssetHistory>(`/targets/${pathSegment(id)}/history?${new URLSearchParams({kind,offset:String(offset),limit:'25'})}`, { signal })
 export const enableTargetNetworkView = (id: string, deviceClass = 'generic') => request<{asset_id: string; device_id: string}>(`/targets/${pathSegment(id)}/device-profile`, json('POST', {device_class: deviceClass}))
+/** Run the target's liveness check now (a check younger than 30 s is returned instead). */
+export const checkTargetLiveness = (id: string) =>
+  request<{target_id: string; checked: boolean; liveness: TargetLiveness}>(`/targets/${pathSegment(id)}/liveness`, {method: 'POST'})
 export const renameTargetAsset = (id: string, name: string) => request(`/targets/${pathSegment(id)}`, json('PATCH', {name}))
 export const authorizeTargetAsset = (id: string, approvedBy: string, environment?: string) => request(`/targets/${pathSegment(id)}/authorization`, json('POST', {approved_by: approvedBy, environment, risk_tier:'active'}))
 export const revokeTargetAsset = (id: string, revokedBy: string, reason: string) => request<{revoked: number}>(`/targets/${pathSegment(id)}/authorization`, json('DELETE', {revoked_by: revokedBy, reason}))

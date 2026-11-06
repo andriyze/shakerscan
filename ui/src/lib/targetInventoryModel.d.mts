@@ -35,6 +35,9 @@ export interface TargetFilters {
   findings: '' | 'any' | 'critical_high' | 'none' | string
   activity: '' | 'never' | 'scanned' | 'scanning' | string
   asset_type: '' | 'web' | 'network' | string
+  liveness: '' | 'live' | 'reachable' | 'unreachable' | 'no_dns' | 'dns_error' | 'blocked' | 'unchecked' | string
+  /** One domain group shown as its own paged list. */
+  domain: string
   sort: 'name' | 'risk' | 'recent' | 'created' | string
   archived: boolean
 }
@@ -54,7 +57,15 @@ export function domainBatchTargets(rootDomain: string, page: unknown): {
 export function capBatchTargets(targets: string[]): { targets: string[]; total: number }
 export function batchCapNotice(total: number, source: string, options?: { memberCount?: number; moreMembers?: boolean }): string | null
 export const INVENTORY_MEMBER_LIMIT: number
+export const TARGETS_PAGE_MEMBER_LIMIT: number
+export const TARGETS_PAGE_GROUPS: number
+export const DOMAIN_PAGE_TARGETS: number
+export const LIVENESS_STATUSES: readonly string[]
 export function inventoryPageParams(filters: TargetFilters, cursor: string | null, limit: number, memberLimit?: number): Record<string, string | number | boolean>
+export function domainPageFromBody(body: unknown, domain: string): InventoryPageView
+export function livenessView(liveness: { status?: string; reason?: string | null; checked_at?: string | null; ports?: Array<{ port: number; answered: boolean; http_status?: number }> } | null | undefined, now?: number): {
+  status: string; label: string; tone: 'green' | 'amber' | 'red' | 'gray'; title: string; checkedAgo: string | null
+}
 export interface InventoryTargetTotal { count: number; kind: 'exact' | 'at_least' | 'page' }
 export interface InventoryPageView<G = any> {
   groups: G[]; totalGroups: number | null; targetTotal: InventoryTargetTotal | null

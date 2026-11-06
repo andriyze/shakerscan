@@ -8,6 +8,11 @@ import { activeFilterCount, FILTER_DEFAULTS } from '@/lib/targetInventoryModel.m
 
 export type InventoryFilters = typeof FILTER_DEFAULTS
 
+const LIVENESS_OPTIONS = [
+  ['live', 'Live'], ['reachable', 'Reachable, no answer'], ['unreachable', 'Unreachable'], ['no_dns', 'No DNS'],
+  ['dns_error', 'DNS error'], ['blocked', 'Not checked (policy)'], ['unchecked', 'Not checked'],
+] as const
+
 function Tile({ icon, label, value, hint, active, tone, onClick }: {
   icon: ReactNode; label: string; value: ReactNode; hint?: string; active: boolean
   tone: 'blue' | 'amber' | 'red' | 'gray' | 'cyan'; onClick: () => void
@@ -38,7 +43,7 @@ export function InventorySummary({ facets, filters, onChange }: {
   }
   return <div className="mb-5 grid grid-cols-2 gap-3 sm:grid-cols-3 xl:grid-cols-5">
     <Tile icon={<Layers3 />} tone="blue" label={facets?.total === 1 ? 'Target' : 'Targets'} value={count(facets?.total)}
-      active={activeFilterCount(filters) === 0} onClick={() => onChange({ environment: '', authorization: '', findings: '', activity: '', asset_type: '', archived: false })} />
+      active={activeFilterCount(filters) === 0} onClick={() => onChange({ environment: '', authorization: '', findings: '', activity: '', asset_type: '', liveness: '', archived: false })} />
     <Tile icon={<ShieldOff />} tone="gray" label="Not authorized"
       value={count(facets?.authorization.unauthorized)} active={filters.authorization === 'unauthorized'} onClick={() => only({ authorization: 'unauthorized' })} />
     <Tile icon={<AlertTriangle />} tone="red" label="Critical or high findings" value={count(facets?.findings.critical_high)}
@@ -114,6 +119,10 @@ export function InventoryToolbar({ filters, facets, onChange, searchRef }: {
         <option value="">Web and network</option>
         <option value="web">{withCount('Web apps', facets?.asset_type.web, facets)}</option>
         <option value="network">{withCount('Network & devices', facets?.asset_type.network, facets)}</option>
+      </Select>
+      <Select aria-label="Liveness" value={filters.liveness} onChange={event => onChange({ liveness: event.target.value })} className={filterClass}>
+        <option value="">Any liveness</option>
+        {LIVENESS_OPTIONS.map(([value, label]) => <option key={value} value={value}>{withCount(label, facets?.liveness?.[value], facets)}</option>)}
       </Select>
       {(filtered > 0 || filters.search) && <button type="button" onClick={() => onChange({ ...FILTER_DEFAULTS, sort: filters.sort })}
         className="ml-auto rounded-md px-2 py-1 text-xs font-medium text-blue-300 hover:bg-blue-500/10 hover:text-blue-200">Clear all{filtered ? ` (${filtered})` : ''}</button>}

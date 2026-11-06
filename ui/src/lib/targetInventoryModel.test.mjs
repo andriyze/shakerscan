@@ -106,7 +106,7 @@ test('the newest scan grade wins across the network view and web apps', () => {
 test('filters round-trip through the URL and drop unknown values', () => {
   const filters = filtersFromQuery(new URLSearchParams('search=api&authorization=authorized&findings=bogus&sort=risk&archived=1&type=network'))
   assert.deepEqual(filters, { search: 'api', environment: '', authorization: 'authorized', findings: '', activity: '',
-    asset_type: 'network', sort: 'risk', archived: true })
+    asset_type: 'network', liveness: '', domain: '', sort: 'risk', archived: true })
   assert.equal(queryFromFilters(filters), 'search=api&authorization=authorized&asset_type=network&sort=risk&archived=1')
   assert.equal(queryFromFilters(filtersFromQuery(new URLSearchParams(''))), '')
   assert.equal(activeFilterCount(filters), 3)
@@ -161,10 +161,10 @@ test('a large domain group opens New Scan by reference, capped at one batch', as
 // UI audit 2.11 #12: /targets took 4.1-4.5 s at 10k targets because the legacy grouping read every
 // asset and returned whole groups (one of 10,000 members). The page now reads list/v1 pages.
 test('the Targets page reads list/v1 group pages with a member cap, and still reads a legacy answer', async () => {
-  const { INVENTORY_MEMBER_LIMIT, inventoryPageFromBody, inventoryPageParams, filtersFromQuery } = await import('./targetInventoryModel.mjs')
+  const { TARGETS_PAGE_MEMBER_LIMIT, inventoryPageFromBody, inventoryPageParams, filtersFromQuery } = await import('./targetInventoryModel.mjs')
   const filters = filtersFromQuery(new URLSearchParams('search=api&sort=risk&archived=1&findings=critical_high'))
   assert.deepEqual(inventoryPageParams(filters, null, 40), { group_by: 'domain', include_facets: true, limit: 40,
-    member_limit: INVENTORY_MEMBER_LIMIT, sort: '-risk', count: 'exact', search: 'api', findings: 'critical_high', include_inactive: true })
+    member_limit: TARGETS_PAGE_MEMBER_LIMIT, sort: '-risk', count: 'exact', search: 'api', findings: 'critical_high', include_inactive: true })
   const next = inventoryPageParams(filtersFromQuery(new URLSearchParams('')), 'c2', 40)
   assert.equal(next.cursor, 'c2')
   assert.equal(next.count, undefined, 'a later page carries the cursor, not a recount')
@@ -236,4 +236,40 @@ test('New Scan finds a domain group by exact name across a bounded number of pag
   let reads = 0
   const endless = await findDomainGroup('app.io', async () => { reads += 1; return { items: [{ root_domain: 'xapp.io', targets: [] }], has_more: true, next_cursor: `c${reads}` } })
   assert.deepEqual([endless.found, endless.exhausted, reads], [false, false, DOMAIN_LOOKUP_MAX_PAGES])
+})
+
+// 2.12: a page is bounded by targets, not only groups (25 groups x 20 members), and a larger
+// domain opens as its own keyset list, so every target is reachable by Next.
+test('the Targets page is bounded and one domain pages through every target', async () => {
+  const { TARGETS_PAGE_GROUPS, TARGETS_PAGE_MEMBER_LIMIT, DOMAIN_PAGE_TARGETS, domainPageFromBody, inventoryPageParams } = await import('./targetInventoryModel.mjs')
+  assert.ok(TARGETS_PAGE_GROUPS * TARGETS_PAGE_MEMBER_LIMIT <= 500)
+  const filters = filtersFromQuery(new URLSearchParams('domain=Big.Example.&liveness=unreachable&sort=recent'))
+  assert.equal(filters.domain, 'big.example')
+  assert.equal(queryFromFilters(filters), 'liveness=unreachable&domain=big.example&sort=recent')
+  assert.equal(activeFilterCount(filters), 1)
+  assert.deepEqual(inventoryPageParams(filters, null, 25), { domain: 'big.example', include_facets: true,
+    limit: DOMAIN_PAGE_TARGETS, sort: '-recent', count: 'exact', liveness: 'unreachable' })
+  assert.equal(inventoryPageParams(filters, 'c2', 25).cursor, 'c2')
+  assert.equal(filtersFromQuery(new URLSearchParams('domain=a%20b')).domain, '')
+  assert.equal(filtersFromQuery(new URLSearchParams('liveness=bogus')).liveness, '')
+  const view = domainPageFromBody({ items: [{ id: 'a' }, { id: 'b' }], has_more: true, next_cursor: 'n', total: 800,
+    total_kind: 'exact', facets: { total: 800 } }, 'big.example')
+  assert.deepEqual(view.groups, [{ root_domain: 'big.example', discoverable: undefined, targets: [{ id: 'a' }, { id: 'b' }],
+    member_count: 800, members_truncated: false }])
+  assert.deepEqual([view.nextCursor, view.targetTotal.count, view.totalGroups], ['n', 800, 1])
+  assert.deepEqual(domainPageFromBody({ items: [], has_more: false }, 'x.example').groups, [])
+})
+
+test('liveness reads as a label, a tone and a reason with its age', async () => {
+  const { livenessView } = await import('./targetInventoryModel.mjs')
+  const now = Date.parse('2026-11-06T12:00:00Z')
+  assert.deepEqual(livenessView(undefined, now), { status: 'unchecked', label: 'Not checked', tone: 'gray',
+    title: 'Liveness has not been checked yet', checkedAgo: null })
+  const live = livenessView({ status: 'live', checked_at: '2026-11-06T11:55:00Z', ports: [{ port: 443, answered: true, http_status: 301 }] }, now)
+  assert.deepEqual([live.label, live.tone, live.title], ['Live', 'green', 'HTTP 301 on port 443 · checked 5m ago'])
+  const down = livenessView({ status: 'unreachable', reason: 'port 443: connection refused', checked_at: '2026-11-06T09:00:00Z' }, now)
+  assert.deepEqual([down.label, down.tone, down.title], ['Unreachable', 'red', 'port 443: connection refused · checked 3h ago'])
+  assert.equal(livenessView({ status: 'no_dns', reason: 'x has no address record' }, now).label, 'No DNS')
+  assert.equal(livenessView({ status: 'evil<script>' }, now).status, 'unchecked')
+  assert.equal(livenessView({ status: 'reachable', reason: 'r'.repeat(5000) }, now).title.length, 300)
 })

@@ -37,17 +37,20 @@ export function ColumnHeader() {
     <span role="columnheader"><span className="sr-only">Select</span></span>
     <span role="columnheader">Target</span>
     <span role="columnheader">Web apps &amp; services</span>
+    <span role="columnheader">Liveness</span>
     <span role="columnheader">Open findings</span>
     <span role="columnheader">Last scan</span>
     <span role="columnheader" className="text-right"><span className="sr-only">Actions</span></span>
   </div>
 }
 
-export function DomainGroup({ group, open, onToggle, onDiscovered, onDomainDeleted, selection, actions, busy }: {
+export function DomainGroup({ group, open, onToggle, onDiscovered, onDomainDeleted, onShowAll, selection, actions, busy }: {
   group: TargetAssetGroup; open: boolean; onToggle: () => void; onDiscovered: () => void
   selection: Selection; actions: RowActions; busy: string | null
   /** The whole domain group was deleted; reload the inventory. */
   onDomainDeleted?: () => void
+  /** Open this domain as its own paged list (offered when the group holds more than it shows). */
+  onShowAll?: () => void
 }) {
   const root = group.targets.find(asset => asset.locator === group.root_domain)
   const children = group.targets.filter(asset => asset !== root)
@@ -100,9 +103,13 @@ export function DomainGroup({ group, open, onToggle, onDiscovered, onDomainDelet
       {root && row(root)}
       {/* Collapsing hides the subdomains whether or not the domain itself is a target. */}
       {open && children.map(asset => row(asset, Boolean(root)))}
-      {open && hiddenMembers > 0 && <p className="px-4 py-2 text-xs text-gray-500" data-testid="target-group-truncated">
-        {hiddenMembers.toLocaleString()} more target{hiddenMembers === 1 ? '' : 's'} in {domain} not shown. Search for a host to narrow the list.
-      </p>}
+      {open && hiddenMembers > 0 && <div className="flex flex-wrap items-center gap-2 px-4 py-2 text-xs text-gray-500" data-testid="target-group-truncated">
+        <span>{hiddenMembers.toLocaleString()} more target{hiddenMembers === 1 ? '' : 's'} in {domain}.</span>
+        {onShowAll
+          ? <button type="button" onClick={onShowAll} className="rounded-md px-2 py-1 font-medium text-blue-300 hover:bg-blue-500/10 hover:text-blue-200">
+              Show all {memberCount.toLocaleString()} targets in {domain}</button>
+          : <span>Search for a host to narrow the list.</span>}
+      </div>}
       {!open && children.length > 0 && !root && <button type="button" onClick={onToggle}
         className="w-full px-4 py-2 text-left text-xs text-gray-500 hover:bg-gray-800/40 hover:text-gray-300">
         {children.length} subdomain{children.length === 1 ? '' : 's'} hidden · show
