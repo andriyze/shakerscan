@@ -836,7 +836,11 @@ def test_inventory_facets_equal_the_correlated_facets():
         for search in ("", "d00", "big"):
             query = ai._scope_query(search=search, connected_only=False, include_inactive=False, include_services=False)
             facets[search] = await ai.inventory_facets(conn, ai._Query(query.where, query.parameters))
+            # 2.12 added liveness counts, which the 2.10 reference does not have: every other facet
+            # is equal, and with no check stored every target counts as not checked.
+            liveness = facets[search].pop("liveness")
             assert facets[search] == await ref.old_inventory_facets(conn, ai, query.where, query.parameters)
+            assert liveness["unchecked"] == facets[search]["total"] and sum(liveness.values()) == facets[search]["total"]
         assert facets[""]["authorization"]["authorized"] == 2 and facets[""]["findings"]["critical_high"] > 0
     _run(check)
 

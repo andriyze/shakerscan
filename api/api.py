@@ -85,6 +85,7 @@ from runtime.loop_scale_indexes import build_loop_scale_indexes_in_background, i
 from finding_routes.list_schema import repair_severity_rank_in_background
 from scan.assessment_columns import project_scan_assessment_in_background
 from targets.scale_summary import summary_compactor as _summary_compactor
+from targets.liveness import target_liveness_runner as _target_liveness_runner
 from targets.insert_race import fetch_target_upsert
 from scan.finding_verification_overrides import scan_result_verification_overrides, matching_verification_override
 from scan.finding_reconciliation import reconcile_legacy_finding_row
@@ -4035,6 +4036,7 @@ lifespan = create_api_lifespan(ApiLifecycleDependencies(
             lambda pool: model_intake_automatic_review_runner(pool),
         ),
         ("summary_compactor", lambda pool: _summary_compactor(pool)),
+        ("target_liveness_runner", lambda pool: _target_liveness_runner(pool)),
     ),
     background_maintenance=(
         ("loop_scale_indexes", lambda pool: build_loop_scale_indexes_in_background(pool)),

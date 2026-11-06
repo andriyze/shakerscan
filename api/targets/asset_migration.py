@@ -348,6 +348,10 @@ async def run_unified_startup(pool: Any, baseline: Any, *, redis_provider: Any =
                 # Targets); backfilled once, under the triggers' table lock (2.11).
                 from .scale_summary import install_summary_counts
                 await install_summary_counts(conn)
+                # Per-target liveness and the scans trigger that asks for a check before a Scan
+                # (2.12); the trigger is created only when missing.
+                from .liveness import install_target_liveness
+                await install_target_liveness(conn)
                 # Per-asset classification behind the SQL-ranked Exposure asset list (2.11).
                 try:
                     from exposure.asset_rank import install_exposure_facts

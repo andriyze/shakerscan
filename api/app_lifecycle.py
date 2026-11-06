@@ -33,6 +33,7 @@ LIFESPAN_TASK_NAMES = (
     "scan_artifact_retention_runner",
     "model_intake_automatic_review_runner",
     "summary_compactor",
+    "target_liveness_runner",
 )
 
 

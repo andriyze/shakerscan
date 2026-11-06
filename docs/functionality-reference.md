@@ -2575,6 +2575,7 @@ for the profile contract, invocation, limits and acceptance gates.
 | `POST` | `/targets/{target_id}/knowledge/decisions/{receipt_id}/revert` | `post_revert` |
 | `GET` | `/targets/{target_id}/knowledge/releases` | `get_target_releases` |
 | `POST` | `/targets/{target_id}/knowledge/releases` | `post_target_release` |
+| `POST` | `/targets/{target_id}/liveness` | `check_target_liveness` |
 | `GET` | `/targets/{target_id}/negative-results` | `get_target_negative_results` |
 | `POST` | `/targets/{target_id}/network-scans` | `start_target_network_scan` |
 | `GET` | `/targets/{target_id}/posture` | `get_target_posture` |
