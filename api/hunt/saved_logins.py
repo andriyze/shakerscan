@@ -421,6 +421,79 @@ async def hunt_view(conn: Any, run: Mapping[str, Any]) -> dict[str, Any]:
             "how_to_use": HOW_TO_USE if attached or available else None}
 
 
+def _sign_in_outlines(value: Any, depth: int = 0) -> list[dict[str, Any]]:
+    """Every HTML outline in an action's observations that shows a sign-in form."""
+    if depth > 6:
+        return []
+    found: list[dict[str, Any]] = []
+    if isinstance(value, dict):
+        if isinstance(value.get("forms"), list) and value.get("sign_in_hint"):
+            found.append(value)
+        for nested in value.values():
+            found += _sign_in_outlines(nested, depth + 1)
+    elif isinstance(value, list):
+        for nested in value:
+            found += _sign_in_outlines(nested, depth + 1)
+    return found
+
+
+def login_request_for_form(form: Mapping[str, Any], profile_id: str, page_path: Any) -> dict[str, Any] | None:
+    """The exact ``http.request`` input that signs in through ``form`` with a saved login, or None
+    when the form has no user and password field. Field names come from the page; the values are
+    bound by reference."""
+    fields = [item for item in form.get("fields") or () if isinstance(item, Mapping)]
+    password = next((str(f.get("name")) for f in fields if f.get("type") == "password" and f.get("name")), None)
+    user = next((str(f.get("name")) for f in fields if f.get("type") in {"text", "email", None, ""}
+                 and f.get("name") and str(f.get("name")) != password), None)
+    if not password or not user or "/" in user + password or "~" in user + password:
+        return None
+    path = str(form.get("action") or page_path or "/")
+    if not path.startswith("/"):
+        return None  # a form posting to another origin is never a saved login's
+    return {"method": "POST", "path": path, "follow_redirects": False,
+            "form_body": {user: "", password: ""},
+            "request_bindings": [
+                {BINDING_KEY: profile_id, "credential_field": "username", "body_pointer": f"/{user}"},
+                {BINDING_KEY: profile_id, "credential_field": "secret", "body_pointer": f"/{password}"}],
+            "capture": [{"name": "session", "header": "Set-Cookie"}]}
+
+
+async def suggest_sign_in(pool: Any, run: Mapping[str, Any], observations: list[dict[str, Any]],
+                          page_path: Any = None) -> list[dict[str, Any]]:
+    """Beside a sign-in form an ``http.request`` answer shows, the ready ``http.request`` input that
+    signs in with each saved login of this Hunt (attached, or available to ask for). Ids, labels and
+    field names only; the attachment, URL and count rules apply when it is sent."""
+    outlines = _sign_in_outlines(observations)
+    if not outlines:
+        return observations
+    try:
+        async with pool.acquire() as conn:
+            view = await safe_hunt_view(conn, run)
+    except Exception:  # noqa: BLE001 - a suggestion never fails the action
+        return observations
+    logins = [*(item for item in view.get("attached") or () if item.get("usable") and item.get("logins_left")),
+              *(view.get("available") or ())]
+    if not logins:
+        return observations
+    for outline in outlines:
+        form = next((f for f in outline["forms"] if isinstance(f, Mapping) and f.get("sign_in")), None)
+        suggestions = []
+        for login in logins[:4]:
+            request = login_request_for_form(form or {}, str(login["saved_login"]), page_path)
+            if request is not None:
+                suggestions.append({
+                    "saved_login": login["saved_login"], "principal_label": login.get("principal_label"),
+                    "attached": "logins_left" in login, "http_request_input": request,
+                })
+        if suggestions:
+            outline["saved_login_requests"] = suggestions
+            outline["saved_login_note"] = (
+                "Sign in with a saved login: send one http_request_input exactly as given (only its "
+                "idempotency key is yours). The worker fills the username and secret; you never see "
+                "them. An unattached one raises a login.use permission request for a person first.")
+    return observations
+
+
 async def safe_hunt_view(conn: Any, run: Mapping[str, Any]) -> dict[str, Any]:
     """``hunt_view`` in its own savepoint; a view that cannot be read says so, never raises."""
     try:
@@ -436,5 +509,5 @@ __all__ = [
     "SAVED_LOGIN_KINDS", "admit_saved_login", "apply_login_use", "attached_profile",
     "hunt_view", "is_saved_login_request", "live_login_grants", "login_url", "logins_used", "profile_login_url",
     "render_login_use", "request_login_url", "resolve_login_url", "safe_hunt_view", "saved_login_ids",
-    "start_attach_subjects", "validate_login_request_shape",
+    "start_attach_subjects", "suggest_sign_in", "validate_login_request_shape",
 ]
