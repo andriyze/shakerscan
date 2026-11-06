@@ -21,6 +21,10 @@ try:
     from scanner_tools.corporate_identity import identities_from_fingerprint
 except ModuleNotFoundError:  # package import
     from scanner.scanner_tools.corporate_identity import identities_from_fingerprint
+try:
+    from scanner_tools.service_identity import identity_fields
+except ModuleNotFoundError:  # package import
+    from scanner.scanner_tools.service_identity import identity_fields
 
 SCHEMA_VERSION = "service-intelligence/v1"
 SERVICE_NAMESPACE = uuid.UUID("e4089322-9875-4dca-a92d-60be1c2694a1")
@@ -194,6 +198,9 @@ def normalized_observation(raw: Mapping[str, Any]) -> dict[str, Any] | None:
     confidence = row.get("confidence")
     if isinstance(confidence, bool) or not isinstance(confidence, int) or not 0 <= confidence <= 10:
         confidence = None
+    # Protocol, version build and authentication are separate claims (service_identity); a
+    # port hint carries none of them, and authentication defaults to "not tested".
+    identity = identity_fields(row if identity_basis != "port_hint" else {})
     return {
         "address": network_address, "transport": transport, "port": port,
         "application_origin": app_origin, "state": state,
@@ -204,6 +211,11 @@ def normalized_observation(raw: Mapping[str, Any]) -> dict[str, Any] | None:
         "detection_confidence": confidence,
         "encrypted": row.get("encrypted") if isinstance(row.get("encrypted"), bool) else True if row.get("tunnel") in {"ssl", "tls"} else None,
         "tunnel": text(row.get("tunnel"), 40) or None,
+        "protocol": identity["protocol"],
+        "version_reported": identity["version_reported"],
+        "version_basis": identity["version_basis"],
+        "authentication": identity["authentication"],
+        "authentication_proof": identity["authentication_proof"],
     }
 
 
