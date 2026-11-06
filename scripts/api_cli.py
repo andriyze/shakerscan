@@ -232,6 +232,7 @@ def with_person_decision(request: urllib.request.Request, api_url: str, token: s
     return decision.handle(
         decision.json_poster(api_url, token), origin=f"{parts.scheme}://{parts.netloc}",
         method=request.get_method(), path=request.selector, body=request.data or b"", detail=detail, resend=resend,
+        gateway=api_url,
     )
 
 

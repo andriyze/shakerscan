@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import ipaddress
 import json
 import re
 import sys
@@ -84,15 +85,16 @@ def _client(url: str, timeout: float | None):
 LIMIT = re.compile(r"[a-z_]{1,64}=\+?[0-9]{1,16}")
 
 
-def _not_here(summary: str, command: str, decision: str) -> int | None:
+def _not_here(summary: str, command: str, decision: str, url: str | None = None) -> int | None:
     """Exit 3 with the one line naming the decision and the person's command, unless this is the
     person's own terminal (stdin and stdout terminals, not an agent's shell): before anything is
     read from or sent to the instance. The same rule whatever the gateway's switch says, so an
-    agent is never handed a one-line command for a decision only a person makes."""
+    agent is never handed a one-line command for a decision only a person makes. The command
+    names the instance (``--url``, ``url``), so it reaches the one this command addressed."""
     person = helper("_person_decision")
     if person.interactive():
         return None
-    line = person.refusal_line({"decision": decision, "summary": summary}, command)
+    line = person.refusal_line({"decision": decision, "summary": summary}, person.with_gateway(command, url))
     print(f"shakerscan: {line}", file=sys.stderr)
     return person.EXIT_REFUSED
 
@@ -108,12 +110,41 @@ def _exit(v2: Any, exc: Exception) -> int:
 
 
 def _same_target(left: str, right: str) -> bool:
-    def key(value: str) -> tuple[str, str, int | None, str]:
-        parts = urllib.parse.urlsplit(value if "://" in value else "https://" + value)
-        port = parts.port or {"http": 80, "https": 443}.get(parts.scheme)
-        return parts.scheme.lower(), (parts.hostname or "").lower().rstrip("."), port, parts.path.rstrip("/")
+    """Whether two URLs name one registered target, for an instance without ``GET
+    /targets/lookup``: the instance's identity (host and non-default port; scheme, path, query and
+    fragment are no part of it), as it registers a URL with a path as its origin."""
+    def key(value: str) -> tuple[str, str, int | None] | None:
+        try:
+            parts = urllib.parse.urlsplit(value if "://" in value else "https://" + value)
+            port = parts.port
+        except ValueError:
+            return None
+        scheme = parts.scheme.lower()
+        if scheme.startswith("host"):
+            return scheme, (parts.hostname or "").lower().rstrip("."), port
+        default = {"http": 80, "https": 443}.get(scheme)
+        return "web", (parts.hostname or "").lower().rstrip("."), None if port in (None, default) else port
 
-    return key(left) == key(right)
+    found = key(left)
+    return found is not None and found == key(right)
+
+
+def _looked_up(client: Any, url: str) -> dict[str, Any] | None:
+    """The target the instance itself says ``url`` names (``GET /targets/lookup``): the one
+    identity it registered the URL under. None when the instance has no such route (an older
+    engine or gateway); DecisionError when it has none registered."""
+    try:
+        answer = client.request("GET", "/targets/lookup?" + urllib.parse.urlencode({"url": url}))
+    except Exception as exc:  # an instance without the route: the caller compares itself
+        if getattr(exc, "http_status", None) in (None, 400, 403, 404, 405, 422):
+            return None
+        raise
+    if not isinstance(answer, Mapping) or "target" not in answer:
+        return None
+    found = answer.get("target")
+    if not isinstance(found, Mapping) or not found.get("id"):
+        raise DecisionError(f"no target is registered for {url}; name it by its id")
+    return dict(found)
 
 
 # What a copy from a sentence carries after a command: an id or URL ending in one of these was
@@ -123,6 +154,25 @@ TRAILING = ".,;:!?)]}'\"`"
 PLACEHOLDERS = frozenset({"TARGET-ID", "TARGET-URL", "TARGET", "<TARGET>", "<TARGET-ID>"})
 
 
+def _ends_in_address_literal(text: str) -> bool:
+    """Whether ``text`` parses as a URL (or a bare authority) whose last character closes its
+    IPv6 address literal (``https://[2606:4700:4700::1111]``): the ``]`` is the address's own, not
+    punctuation copied after it. Parsed first, before any punctuation rule."""
+    candidate = text if "://" in text else "//" + text
+    try:
+        parts = urllib.parse.urlsplit(candidate)
+        host = parts.hostname or ""
+        parts.port  # noqa: B018 - a malformed port raises here
+    except ValueError:
+        return False
+    if parts.path or parts.query or parts.fragment or not parts.netloc.endswith("]"):
+        return False
+    try:
+        return isinstance(ipaddress.ip_address(host), ipaddress.IPv6Address)
+    except ValueError:
+        return False
+
+
 def checked_target(value: str) -> str:
     """The target as named, or DecisionError for what cannot be one: a placeholder this client
     or a gateway printed (TARGET-ID), and a value with punctuation copied after it (an id is
@@ -130,7 +180,7 @@ def checked_target(value: str) -> str:
     text = str(value or "").strip()
     if text.upper() in PLACEHOLDERS:
         raise DecisionError(f"{text} stands for the target: name it by its URL (https://app.example.com) or its id")
-    if text and text[-1] in TRAILING:
+    if text and text[-1] in TRAILING and not _ends_in_address_literal(text):
         bare = text.rstrip(TRAILING)
         meant = f": did you mean {bare.lower()}?" if UUID.fullmatch(bare) else ""
         raise DecisionError(f"{text!r} ends in punctuation, which is no part of a target{meant}")
@@ -180,6 +230,10 @@ def find_target(client: Any, value: str, *, create: bool) -> dict[str, Any]:
         if not isinstance(created, Mapping) or not created.get("id"):
             raise DecisionError("the instance registered no target for that URL")
         return dict(created)
+    if not url.startswith("host://"):
+        found = _looked_up(client, url)
+        if found is not None:
+            return found
     for page in range(MAX_TARGET_PAGES):
         listed = client.request("GET", f"/targets?limit={TARGET_PAGE}&offset={page * TARGET_PAGE}")
         rows = listed if isinstance(listed, list) else (listed or {}).get("targets") or []
@@ -280,7 +334,7 @@ def cmd_targets(args: argparse.Namespace) -> int:
         # registered, so nothing at all changes (unauthorize withdraws, and needs no person).
         word = helper("_person_decision")._word(args.target.strip())
         refused = _not_here(f"Authorize {args.target.strip()} for active testing",
-                            f"shakerscan targets authorize {word or 'TARGET-ID'}", "target.authorize")
+                            f"shakerscan targets authorize {word or 'TARGET-ID'}", "target.authorize", url)
         if refused is not None:
             return refused
     me = _me(client)
@@ -386,7 +440,7 @@ def hunt_budget_raise(argv: Sequence[str], url: str, timeout: float | None = Non
                + " ".join(f"--limit {str(raw).strip()}" for raw in args.limit)
                + (" --resume" if args.resume else ""))
     refused = _not_here(f"Raise the budget of Hunt {hunt}: " + ", ".join(str(raw).strip() for raw in args.limit),
-                        command, "budget.raise")
+                        command, "budget.raise", url)
     if refused is not None:
         return refused
     try:
