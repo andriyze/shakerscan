@@ -106,6 +106,9 @@ ALLOWED_PLAIN_DIGESTS = {
     # never emitted (leads carry status and length); the list digest is of our own bundled file.
     ("api/scan/recon_active_actions.py", "_signature"): "inprocess",
     ("api/capabilities/recon_active.py", "load_bundled_list"): "integrity",
+    # web_identity: a recipe probe's body digest is compared with the negative control's inside
+    # one action and never emitted (components carry catalogue labels and plain versions only).
+    ("scanner/scanner_tools/web_identity.py", "digest"): "inprocess",
     ("api/capabilities/artifact.py", "_window_recorder"): "integrity",
     ("api/capabilities/artifact.py", "record"): "integrity",
     ("api/capabilities/auth.py", "_session_evidence_digest"): "redacted",
