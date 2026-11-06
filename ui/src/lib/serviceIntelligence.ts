@@ -32,6 +32,64 @@ export interface ServiceCandidate {
   checks?: Array<{ kind: string; id: string; safety?: 'exploit' | 'probe' }>
   // 2.11: whether the named check ran in a verify Scan and what it found. Absent on an older engine.
   verification?: ServiceVerification
+  // 2.12: applicability per component. Absent on an older engine.
+  applicability_status?: 'affected' | 'not_affected' | 'unresolved'
+  unresolved_reason?: string | null
+  component_id?: string | null
+  component?: { role: string; product: string; base_path: string; version: string | null; package_version: string | null }
+  new_since_observation?: boolean
+}
+export interface ComponentClaim {
+  basis: string
+  source_field: string | null
+  recipe: string | null
+  recipe_version: string | null
+  signals: string[]
+  evidence_ref: string | null
+  observed_at: string | null
+  connected_address: string | null
+  host: string | null
+  sni: string | null
+}
+// 2.12: one piece of software behind a listener (edge, web server, application, plugin...).
+export interface ServiceComponent {
+  id: string
+  role: 'edge' | 'web_server' | 'framework' | 'application' | 'plugin' | 'service'
+  base_path: string
+  product: string
+  product_key: string | null
+  vendor: string | null
+  category: string | null
+  product_status: 'identified' | 'probable'
+  version: string | null
+  version_status: 'reported' | 'inferred_range' | 'unknown'
+  package_version: string | null
+  distribution: string | null
+  cpes: string[]
+  claims: { product: ComponentClaim; version: ComponentClaim | null }
+  freshness: { product: string; version: string }
+  first_seen_at: string | null
+  last_seen_at: string | null
+  history: Array<{ product_status: string; version: string | null; version_status: string; observed_at: string | null; evidence_ref: string | null }>
+  changes: Array<{ kind: string; observed_at: string | null; from?: string; to?: string }>
+  advisories_not_affected?: { count: number; ids: string[] }
+}
+export interface ComponentUnknown {
+  role: string
+  base_path: string
+  field: 'product' | 'version' | 'backport'
+  component_id: string | null
+  reason: string
+}
+export interface AdvisoryFollowUp {
+  component_id: string | null
+  role: string
+  product: string
+  base_path: string
+  need: string
+  capability: string | null
+  detail: string
+  advisories: number
 }
 export interface ServiceVerification {
   status: 'no_check' | 'available' | 'unavailable' | 'pending' | 'check_matched' | 'check_not_matched' | 'inconclusive'
@@ -110,6 +168,11 @@ export interface ServiceRecord {
   intelligence_status: string
   activities: ServiceActivity[]
   hunt_href: string | null
+  // 2.12. Absent on an older engine.
+  components?: ServiceComponent[]
+  component_unknowns?: ComponentUnknown[]
+  advisory_follow_up?: AdvisoryFollowUp[]
+  advisory_changes?: Array<{ kind: string; advisory_id: string; component_id: string | null }>
 }
 export interface ServiceTarget {
   id: string

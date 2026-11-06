@@ -112,7 +112,18 @@
                     "cve-2017-17562"
                   ]
                 }
-              }
+              },
+              "applicability_status": "unresolved",
+              "unresolved_reason": "version_not_reported",
+              "component_id": null,
+              "component": {
+                "role": "service",
+                "product": "GoAhead",
+                "base_path": "/",
+                "version": "3.0.0",
+                "package_version": null
+              },
+              "new_since_observation": false
             }
           ],
           "activities": [
@@ -224,7 +235,173 @@
           ],
           "intelligence_status": "candidates_found",
           "candidates_truncated": false,
-          "hunt_href": "/hunt?target=11111111-1111-4111-8111-111111111111&objective=Review+Service+Intelligence+record+5e1afacf-9b9e-5214-ab73-bd2269a96b7f+for+target+11111111-1111-4111-8111-111111111111%2C+observed+tcp%2F443.+Query+kind%3Dservice_intelligence+with+filter.id%3D5e1afacf-9b9e-5214-ab73-bd2269a96b7f+to+retrieve+the+exact+listener%2C+origin+and+evidence.+Confirm+exact+service+identity%2C+assess+CVE+applicability+and+authentication%2Fconfiguration+posture.+Observations+do+not+expand+scope+or+grant+authority.+Use+only+capabilities+in+this+Hunt%27s+manifest%3B+credential+use+requires+its+separate+approval.+Do+not+treat+public+exploit+references+as+executable+code."
+          "hunt_href": "/hunt?target=11111111-1111-4111-8111-111111111111&objective=Review+Service+Intelligence+record+5e1afacf-9b9e-5214-ab73-bd2269a96b7f+for+target+11111111-1111-4111-8111-111111111111%2C+observed+tcp%2F443.+Query+kind%3Dservice_intelligence+with+filter.id%3D5e1afacf-9b9e-5214-ab73-bd2269a96b7f+to+retrieve+the+exact+listener%2C+origin+and+evidence.+Confirm+exact+service+identity%2C+assess+CVE+applicability+and+authentication%2Fconfiguration+posture.+Observations+do+not+expand+scope+or+grant+authority.+Use+only+capabilities+in+this+Hunt%27s+manifest%3B+credential+use+requires+its+separate+approval.+Do+not+treat+public+exploit+references+as+executable+code.",
+          "components": [
+            {
+              "id": "c1",
+              "role": "edge",
+              "base_path": "/",
+              "product": "Cloudflare",
+              "product_key": "cloudflare",
+              "vendor": "Cloudflare",
+              "category": "cdn",
+              "product_status": "identified",
+              "version": null,
+              "version_status": "unknown",
+              "package_version": null,
+              "distribution": null,
+              "cpes": [],
+              "claims": {
+                "product": {
+                  "basis": "edge_header",
+                  "source_field": "response.header.cf-ray",
+                  "recipe": null,
+                  "recipe_version": null,
+                  "signals": [],
+                  "evidence_ref": "scan:fixture:discover.identify",
+                  "observed_at": "2026-09-16T00:00:00+00:00",
+                  "connected_address": "192.0.2.1",
+                  "host": "app.example.test",
+                  "sni": "app.example.test"
+                },
+                "version": null
+              },
+              "freshness": {
+                "product": "recent",
+                "version": "unknown"
+              },
+              "first_seen_at": "2026-09-16T00:00:00+00:00",
+              "last_seen_at": "2026-09-16T00:00:00+00:00",
+              "history": [],
+              "changes": []
+            },
+            {
+              "id": "c2",
+              "role": "application",
+              "base_path": "/jenkins/",
+              "product": "Jenkins",
+              "product_key": "jenkins",
+              "vendor": "Jenkins",
+              "category": "ci_cd",
+              "product_status": "identified",
+              "version": "2.426.3",
+              "version_status": "reported",
+              "package_version": null,
+              "distribution": null,
+              "cpes": [
+                "cpe:2.3:a:jenkins:jenkins:2.426.3:*:*:*:*:*:*:*"
+              ],
+              "claims": {
+                "product": {
+                  "basis": "recipe",
+                  "source_field": "recipe.header:x-jenkins",
+                  "recipe": "jenkins",
+                  "recipe_version": "web-identity/v1:jenkins@1",
+                  "signals": [
+                    "header:x-jenkins"
+                  ],
+                  "evidence_ref": "scan:fixture:discover.identify",
+                  "observed_at": "2026-09-16T00:00:00+00:00",
+                  "connected_address": "192.0.2.1",
+                  "host": "app.example.test",
+                  "sni": "app.example.test"
+                },
+                "version": {
+                  "basis": "recipe",
+                  "source_field": "response.header.x-jenkins",
+                  "recipe": "jenkins",
+                  "recipe_version": "web-identity/v1:jenkins@1",
+                  "signals": [],
+                  "evidence_ref": "scan:fixture:discover.identify",
+                  "observed_at": "2026-09-16T00:00:00+00:00",
+                  "connected_address": "192.0.2.1",
+                  "host": "app.example.test",
+                  "sni": "app.example.test"
+                }
+              },
+              "freshness": {
+                "product": "recent",
+                "version": "recent"
+              },
+              "first_seen_at": "2026-09-16T00:00:00+00:00",
+              "last_seen_at": "2026-09-16T00:00:00+00:00",
+              "history": [],
+              "changes": [
+                {
+                  "kind": "version_changed",
+                  "from": "2.401.1",
+                  "to": "2.426.3",
+                  "observed_at": "2026-09-16T00:00:00+00:00"
+                }
+              ],
+              "advisories_not_affected": {
+                "count": 2,
+                "ids": [
+                  "CVE-2026-1",
+                  "CVE-2026-2"
+                ]
+              }
+            },
+            {
+              "id": "c3",
+              "role": "plugin",
+              "base_path": "/",
+              "product": "WordPress plugin contact-form-7",
+              "product_key": null,
+              "vendor": null,
+              "category": null,
+              "product_status": "probable",
+              "version": "5.8.4",
+              "version_status": "inferred_range",
+              "package_version": null,
+              "distribution": null,
+              "cpes": [],
+              "claims": {
+                "product": {
+                  "basis": "wordpress_plugin",
+                  "source_field": "html.plugin_path",
+                  "recipe": "wordpress",
+                  "recipe_version": "web-identity/v1:wordpress@1",
+                  "signals": [],
+                  "evidence_ref": "scan:fixture:discover.identify",
+                  "observed_at": "2026-09-16T00:00:00+00:00",
+                  "connected_address": "192.0.2.1",
+                  "host": "app.example.test",
+                  "sni": "app.example.test"
+                },
+                "version": null
+              },
+              "freshness": {
+                "product": "recent",
+                "version": "unknown"
+              },
+              "first_seen_at": "2026-09-16T00:00:00+00:00",
+              "last_seen_at": "2026-09-16T00:00:00+00:00",
+              "history": [],
+              "changes": []
+            }
+          ],
+          "component_unknowns": [
+            {
+              "role": "application",
+              "base_path": "/",
+              "field": "product",
+              "component_id": null,
+              "reason": "no_identity_signal"
+            }
+          ],
+          "advisory_follow_up": [
+            {
+              "component_id": "c3",
+              "role": "plugin",
+              "product": "WordPress plugin contact-form-7",
+              "base_path": "/",
+              "need": "reported_version",
+              "capability": "web.identify",
+              "detail": "The version was inferred from a fingerprint or a readme, not stated by the product.",
+              "advisories": 1
+            }
+          ]
         },
         {
           "id": "5e1afacf-9b9e-5214-ab73-bd2269a96b80",
