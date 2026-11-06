@@ -338,3 +338,27 @@ def test_a_capture_that_carries_the_secret_is_never_kept_so_it_cannot_be_sent_on
                     assert base64.b64encode(SECRET.encode()).decode() not in json.dumps(private.get("values") or {})
             assert_no_secret(json.dumps(result, default=str), "echo-login answer")
     asyncio.run(scenario())
+
+
+def test_the_worker_refuses_a_login_request_for_another_url_even_with_a_live_grant():
+    """Defence in depth: admission refuses another URL first; the worker checks again after
+    decryption, against the profile's own endpoint, before any value is placed in a request."""
+    from runtime.hunt_http_exchange import prepare_http_exchange
+
+    async def scenario():
+        conn = LoginConnection("http://fixture.test:7345")
+        target = _target(conn)
+        for path in ("/hub/other", "/hub/login/../admin"):
+            with pytest.raises(ValueError, match="saved_login_destination"):
+                await prepare_http_exchange(
+                    conn, run=conn.run, action_id=uuid.uuid4(), target=target, context=conn.run["context_pack"],
+                    policy=conn.run["policy_json"], values=login_input(path=path), trusted_headers={},
+                    destination="http://fixture.test:7345")
+        inputs, _headers, exchange = await prepare_http_exchange(
+            conn, run=conn.run, action_id=uuid.uuid4(), target=target, context=conn.run["context_pack"],
+            policy=conn.run["policy_json"], values=login_input(), trusted_headers={},
+            destination="http://fixture.test:7345")
+        assert inputs["form_body"] == {"username": USERNAME, "password": SECRET}
+        assert exchange.opaque_binding and exchange.known_secrets == [SECRET]
+        assert SECRET not in repr(exchange)
+    asyncio.run(scenario())
