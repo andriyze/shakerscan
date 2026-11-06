@@ -229,7 +229,7 @@
     "ValidationRequest": "cb81c65a5c80da74a19c6bd92e9c6a68f5cdb22fafeb94270481d463450f893e",
     "WorkerScaleRequest": "52e7ac017dfa1d92efa8e4071026b9bf24c0cf2a17f5d9e742349df3f08f6c62"
   },
-  "contract_sha256": "2a8619da6ede8b91465f7f8625fe816bcbfa7f08428ff99ff293e89db1bba91c",
+  "contract_sha256": "6b7c9ca735002668264a89e63aedc5adb1aaf19a3f2a9d135ca3b3e4b184c5fc",
   "openapi": "3.1.0",
   "operation_count": 497,
   "operations": {
@@ -1840,7 +1840,7 @@
     "GET /hunts": {
       "deprecated": false,
       "operation_id": "list_hunts_hunts_get",
-      "parameters_sha256": "ef7e94406747e5d929d2f8b054f3dbc708d940327c5b0e2e0a181f304171d876",
+      "parameters_sha256": "bc6d4858f9536cfe661879a6cbf02024f75443cff98ef1379d8d98ea828629e6",
       "request_schema_sha256": null,
       "response_schema_sha256": {
         "200": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
@@ -5056,7 +5056,7 @@
       "deprecated": false,
       "operation_id": "start_hunt_hunts_post",
       "parameters_sha256": "ddaf7d03a5e33d1d0116950a13b7b4a7fd3db89282553bec193c97867ef72115",
-      "request_schema_sha256": "2287ae709c04a76ee3fa31170a5781dc02e3dbd74193d4d57ad37749874926cd",
+      "request_schema_sha256": "3927f2f8eb2fbbb6645868b64ca7d65e9b616380764cbfcb7fe1bfe21ca02796",
       "response_schema_sha256": {
         "200": "87f160d6eeb2c1bfa78deaf517c99df762cf0fc7ce99a07a44df48383dcf9421"
       },

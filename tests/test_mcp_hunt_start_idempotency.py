@@ -122,3 +122,34 @@ def test_the_start_key_is_not_sent_by_the_next_tool():
     client.call_tool("shakerscan_hunt_start", dict(START))
     client.call_tool("shakerscan_hunt_cancel", {"hunt_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"})
     assert opener.other_keys == [None]
+
+
+def _contract_with_handoff():
+    return {**_hunt_contract(), "handoff": {"field": "handoff_id", "list_filter": "handoff_id"}}
+
+
+class HandoffOpener(Opener):
+    def __init__(self, contract):
+        super().__init__()
+        self.contract = contract
+
+    def open(self, request, timeout=None):
+        if request.full_url.endswith("/hunts/contract"):
+            return _Response(json.dumps(self.contract).encode())
+        return super().open(request, timeout)
+
+
+def test_a_start_carries_a_handoff_id_from_its_key_where_the_instance_takes_one():
+    opener = HandoffOpener(_contract_with_handoff())
+    client = _client(opener)
+    client.call_tool("shakerscan_hunt_start", {**START, "idempotency_key": "agent-start-0001"})
+    client.call_tool("shakerscan_hunt_start", {**START, "idempotency_key": "agent-start-0001"})
+    client.call_tool("shakerscan_hunt_start", {**START, "idempotency_key": "agent-start-0002"})
+    first, retry, other = (start["body"]["handoff_id"] for start in opener.starts)
+    # A retry of the same start sends the same body; another start another id.
+    assert first == retry != other
+    assert len(first) == 36
+    # An instance whose contract does not take it never gets the field (it would refuse it).
+    older = HandoffOpener(_hunt_contract())
+    _client(older).call_tool("shakerscan_hunt_start", dict(START))
+    assert "handoff_id" not in older.starts[0]["body"]

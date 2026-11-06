@@ -22,6 +22,7 @@ try:
 except ModuleNotFoundError:  # pragma: no cover - package import layout
     from ..targets.skill_trust import action_trust
 from .credential_uses import read_credential_uses
+from .start_contract import HANDOFF_ID_RE
 from .discovered_secrets import read_hunt_uses
 from .permission_grants import settle_for_ended_hunt
 from .permission_store import pending_summary
@@ -1442,6 +1443,7 @@ class HuntRunService:
         root_domain: str | None = None,
         sort_by: str = "created_at",
         sort_order: str = "desc",
+        handoff_id: str | None = None,
     ) -> dict[str, Any]:
         """List hunts across targets, with the target's identity resolved.
 
@@ -1475,6 +1477,13 @@ class HuntRunService:
         if root_domain:
             params.append(str(root_domain).strip().lower())
             clauses.append(f"t.root_domain=${len(params)}")
+        if handoff_id:
+            # The Hunt a start with this handoff id created (the start contract keeps it).
+            text = str(handoff_id).strip().lower()
+            if not HANDOFF_ID_RE.fullmatch(text):
+                raise HTTPException(status_code=400, detail="invalid handoff id")
+            params.append(text)
+            clauses.append(f"h.context_pack->'hunt_start_contract'->>'handoff_id'=${len(params)}")
         if search:
             # Objective and target identity together: an operator looking for a past hunt
             # remembers one or the other, rarely both.

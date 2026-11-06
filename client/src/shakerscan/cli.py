@@ -624,10 +624,40 @@ def _retire_legacy_agent_guide(workspace: Path) -> None:
         raise
 
 
+# `shakerscan agent --target ID [--saved-action ID]`: the page the operator started from (the
+# managed UI prints this command with the target, and a saved action's id, filled in). Ids only,
+# checked here, so nothing but an id reaches the workspace's instructions.
+_AGENT_CONTEXT_ID = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
+START_CONTEXT_NOTE = """## Where this session starts
+
+The operator started this session from target `{target}` in the ShakerScan UI. Read it first
+(`shakerscan api GET /targets/{target}`) and work on it unless the operator says otherwise.
+"""
+SAVED_ACTION_NOTE = """They chose its saved action `{action}`: read it (`shakerscan api GET /targets/{target}/actions`,
+the action with that id), then start a Hunt on this target that runs its steps through the Hunt
+capability runtime. An action marked `agent_unconfirmed` is advisory: no operator confirmed it.
+"""
+
+
+def agent_start_context(target: str | None, saved_action: str | None) -> str:
+    """The instructions note for ``agent --target/--saved-action``, or "" without a target."""
+    if saved_action and not target:
+        raise ClientError("--saved-action needs the --target it belongs to")
+    if not target:
+        return ""
+    target_id, action_id = str(target).strip().lower(), str(saved_action or "").strip().lower()
+    if not _AGENT_CONTEXT_ID.fullmatch(target_id) or (action_id and not _AGENT_CONTEXT_ID.fullmatch(action_id)):
+        raise ClientError("--target and --saved-action take the ids the ShakerScan UI shows")
+    note = START_CONTEXT_NOTE.format(target=target_id)
+    if action_id:
+        note += "\n" + SAVED_ACTION_NOTE.format(target=target_id, action=action_id)
+    return note + "\n"
+
+
 def prepare_workspace(
     workspace: Path, url: str, who: str, executable: str, *, authenticated: bool = True,
     mcp_env: Mapping[str, str] | None = None, notes: list[str] | None = None,
-    state_directory: Path | None = None,
+    state_directory: Path | None = None, start_context: str = "",
 ) -> list[str]:
     """Materialize the agent kit against the instance; return what was written.
 
@@ -683,7 +713,8 @@ def prepare_workspace(
             release = version_file.read_text(encoding="utf-8").strip()
         kit_version = f"{release} (client {__version__})" if release else f"client {__version__}"
         template = INSTANCE_NOTE if authenticated else ENGINE_NOTE
-        note = template.format(url=url, who=who, kit_version=kit_version)
+        # Rewritten on every launch: a launch without --target leaves no earlier starting point.
+        note = template.format(url=url, who=who, kit_version=kit_version) + start_context
         for name in ("AGENTS.md",):
             root.write(name, (note + sources[name].read_text(encoding="utf-8")).encode("utf-8"))
             written.append(name)
@@ -845,6 +876,7 @@ def launch_preauthorization(args: argparse.Namespace, url: str, token_file: str 
 def cmd_agent(args: argparse.Namespace) -> int:
     url, token_file, who = resolve_agent_instance(args)
     authenticated = token_file is not None
+    start_context = agent_start_context(getattr(args, "target", None), getattr(args, "saved_action", None))
     agents = [args.agent] if args.agent else [a for a in AGENTS if shutil.which(a)]
     if args.agent and args.agent not in AGENTS:
         raise ClientError(f"unsupported agent '{args.agent}'; use one of {', '.join(AGENTS)}")
@@ -874,8 +906,12 @@ def cmd_agent(args: argparse.Namespace) -> int:
         notes += _workspace.adopt_shared_record(shared_state / "workspaces", records, workspace)
     executable = client_executable()
     written = prepare_workspace(workspace, url, who, executable, authenticated=authenticated, mcp_env=allowed,
-                                notes=notes)
+                                notes=notes, start_context=start_context)
     print(f"workspace: {workspace} ({', '.join(written)})\ninstance:  {url} ({who})")
+    if start_context:
+        print("start:     target " + str(args.target).strip().lower()
+              + (f", saved action {str(args.saved_action).strip().lower()}" if args.saved_action else "")
+              + " (in AGENTS.md)")
     for note in notes:
         print(note)
     if agent is None:
@@ -1560,6 +1596,11 @@ def build_parser() -> argparse.ArgumentParser:
             "no token and no per-person identity, so only on a trusted network"
         ),
     )
+    agent.add_argument("--target", metavar="TARGET-ID",
+                       help="start from this target (its id, as the ShakerScan UI prints it): the agent is told to "
+                            "work on it")
+    agent.add_argument("--saved-action", metavar="ACTION-ID",
+                       help="with --target: start by running this saved action of the target in a Hunt")
     agent.add_argument("--workspace", help="workspace directory (default: ~/.local/share/shakerscan/agent)")
     agent.add_argument("--here", action="store_true", help="use the current directory as the workspace")
     agent.add_argument("--no-launch", action="store_true", help="prepare the workspace and print how to start")

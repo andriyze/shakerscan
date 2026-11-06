@@ -372,7 +372,7 @@ def _api_command(method: str, path: str, body: bytes | None) -> str:
     return f"{request} @request.json (request.json: the {len(body or b'')}-byte JSON body this request carried)"
 
 
-def refusal_line(detail: Mapping[str, Any], command: str) -> str:
+def refusal_line(detail: Mapping[str, Any], command: str, *, handoff: str | None = None) -> str:
     """One line for an agent's tool call: the decision (whole, as the gateway said it), that
     nothing changed, for a refused submission not to send it again until the person said the
     target is authorized, and last the person's command (its body made inert: it may carry any
@@ -383,7 +383,8 @@ def refusal_line(detail: Mapping[str, Any], command: str) -> str:
         return f"person decision required: {summary}. Nothing was changed. {BROWSER_ONLY}"
     line = f"person decision required: {summary}. Nothing was changed."
     if detail.get("decision") == HUNT_START:
-        line = f"person decision required: {summary}. {START_ONCE}"
+        line = f"person decision required: {summary}. {START_ONCE}" + (
+            START_HANDOFF.format(handoff=handoff) if handoff else START_NO_HANDOFF)
     if detail.get("submission"):
         line += SUBMISSION_AGAIN
     return line + (" The person runs this in their own terminal and touches their security key: "
@@ -402,8 +403,25 @@ PLACEHOLDER = "TARGET-ID"
 HUNT_START = "hunt.start"
 START_ONCE = (
     "Nothing was started. Do not send this start again: the person's command starts it; then "
-    "find that Hunt with `shakerscan hunt list` (the newest of this target) and continue with it."
+    "find that Hunt by its handoff id and continue with it."
 )
+# How that Hunt is found again: by the handoff id the start carries, never as "the newest Hunt of
+# this target" (another start may have made a newer one meanwhile).
+START_HANDOFF = " Once the person ran it, that Hunt is the one `shakerscan hunt list --handoff-id {handoff}` lists."
+START_NO_HANDOFF = (
+    " This start carries no handoff id (an older instance or client): ask the person for the Hunt's "
+    "id once it started."
+)
+
+
+def start_handoff(body: bytes | None) -> str | None:
+    """The handoff id a Hunt start's body carries, or None."""
+    try:
+        value = json.loads(body or b"").get("handoff_id")
+    except (ValueError, AttributeError, UnicodeDecodeError):
+        return None
+    text = value.strip().lower() if isinstance(value, str) else ""
+    return text if _UUID.fullmatch(text) else None
 # A decision no touch from a terminal confirms yet (the gateway's `proof: browser`).
 BROWSER = "browser"
 BROWSER_ONLY = (
@@ -613,7 +631,8 @@ def handle(post: Post, *, origin: str, method: str, path: str, body: bytes | Non
         raise PersonDecisionRefused(refusal_line(detail, ""), detail=detail, command="")
     if not interactive(stdin, stdout, environ):
         command = person_command(method, path, body, detail, gateway=gateway or origin)
-        raise PersonDecisionRefused(refusal_line(detail, command), detail=detail, command=command)
+        handoff = start_handoff(body) if detail.get("decision") == HUNT_START else None
+        raise PersonDecisionRefused(refusal_line(detail, command, handoff=handoff), detail=detail, command=command)
     if terminal is None:
         terminal = _approve().Terminal(sys.stdin, sys.stdout)
     grant = complete(post, origin=origin, method=method, path=path, body=body or b"", detail=detail,
@@ -625,5 +644,5 @@ __all__ = [
     "ERROR", "EXIT_CANCELLED", "EXIT_REFUSED", "INLINE_BODY", "MAX_SUMMARY", "PROOF_HEADER",
     "PersonDecisionCancelled", "PersonDecisionError", "PersonDecisionRefused", "check_challenge", "complete",
     "detail_of", "gateway_option", "handle", "interactive", "json_poster", "person_command", "refusal_line",
-    "required", "saved_body", "summary_lines", "with_gateway",
+    "required", "saved_body", "start_handoff", "summary_lines", "with_gateway",
 ]

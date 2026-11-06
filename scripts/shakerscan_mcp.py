@@ -242,8 +242,10 @@ PERSON_DECISION_START_RECOVERY = (
     "for this agent session, and starting it anyway is the user's decision. Tell the user the "
     "exact command to run in their own terminal; it starts this Hunt after their touch. Do not "
     "start it again yourself, and do not start a smaller one to get around the budget unless the "
-    "user asks; once the user started it, continue with it (the newest Hunt of this target; no "
-    "need to ask the user for its id)."
+    "user asks; once the user started it, continue with the Hunt this start's handoff_id names "
+    "(GET /hunts?handoff_id=<handoff_id>, or `shakerscan hunt list --handoff-id <handoff_id>`), "
+    "never with the newest Hunt of the target, which may be another one. Without a handoff_id, "
+    "ask the user for the Hunt's id."
 )
 # A decision no touch from a terminal confirms yet (proof: browser).
 PERSON_DECISION_BROWSER_RECOVERY = (
@@ -292,7 +294,10 @@ def _person_decision_error(exc: urllib.error.HTTPError, detail: str, method: str
         "do not send this request again until the user says the target is authorized, then send it "
         "once (with the same idempotency key, if it had one)."
         if submission
-        else "do not start it again yourself: the user's command starts it."
+        else ("do not start it again yourself: the user's command starts it; then continue with the "
+              f"Hunt `shakerscan hunt list --handoff-id {decision.start_handoff(body)}` lists."
+              if decision.start_handoff(body) else
+              "do not start it again yourself: the user's command starts it; then ask the user for its id.")
         if started
         else "do not retry this request."
     )
@@ -302,6 +307,7 @@ def _person_decision_error(exc: urllib.error.HTTPError, detail: str, method: str
     ), json.dumps({"detail": {
         "outcome": "person_decision_required", "error": decision.ERROR, "decision": parsed.get("decision"),
         "summary": summary, "command": command,
+        **({"handoff_id": handoff} if started and (handoff := decision.start_handoff(body)) else {}),
         "recovery": PERSON_DECISION_SUBMISSION_RECOVERY if submission
         else PERSON_DECISION_START_RECOVERY if started else PERSON_DECISION_RECOVERY,
         **({"submission": str(parsed.get("submission"))[:20]} if submission else {}),
@@ -2412,8 +2418,10 @@ class ArsenalClient:
             arguments = {**arguments,"capability_name":"ssh.exec"}
             hunt_tool = _ssh_capability
         if hunt_tool:
+            start_contract: Mapping[str, Any] = {}
             if name == "shakerscan_hunt_start":
-                hunt_tool = _hunt_start_tool(self.hunt_contract())
+                start_contract = self.hunt_contract()
+                hunt_tool = _hunt_start_tool(start_contract)
             if name == "shakerscan_hunt_capability" and not streaming_ssh:
                 arguments = _normalized_capability_arguments(arguments, hunt_tool.properties)
                 stray = set(arguments) - set(hunt_tool.properties)
@@ -2533,6 +2541,12 @@ class ArsenalClient:
                 if not start_key:
                     start_key = f"mcp-{uuid.uuid4().hex}"
                     generated_idempotency_key = start_key
+                # A start a person's decision holds is sent by the person's own terminal; the
+                # agent finds that Hunt again by this id (from the start's key: a retry sends the
+                # same body). Only to an instance whose contract takes it.
+                if isinstance(start_contract.get("handoff"), Mapping):
+                    payload["handoff_id"] = str(uuid.uuid5(
+                        uuid.NAMESPACE_URL, "shakerscan:hunt-start-handoff:" + start_key))
             if name == "shakerscan_hunt_capability":
                 hunt_id = str(arguments["hunt_id"])
                 capability_name = str(arguments["capability_name"])
