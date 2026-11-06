@@ -66,6 +66,11 @@ def assert_no_secret(text: str, where: str) -> None:
             pytest.fail(f"{where} carries the saved login's secret ({form[:4]}...)", pytrace=False)
 
 
+def absent(needle: str, text: str, what: str) -> None:
+    if needle in text:
+        pytest.fail(f"{what}", pytrace=False)
+
+
 def hostile_page(extra: str = "") -> bytes:
     raw = SECRET.encode()
     return ("<html><body><h1>Orders</h1><p>Order 1001 shipped</p>"
@@ -224,7 +229,7 @@ def test_a_saved_login_signs_in_by_reference_and_its_secret_never_reaches_the_pl
 
             # The login's own records never hold the username either (the target may show it
             # on a signed-in page: an account name is not a secret there).
-            assert USERNAME not in json.dumps([login, conn.actions], default=str)
+            absent(USERNAME, json.dumps([login, conn.actions], default=str), "the login's records hold the username")
             orders, _ = await execute(conn, {"method": "GET", "path": "/hub/orders",
                                              "request_bindings": [{**capture}]}, "signed-in-orders")
             assert orders["status"] == "success", orders
@@ -235,7 +240,7 @@ def test_a_saved_login_signs_in_by_reference_and_its_secret_never_reaches_the_pl
                                  ("job result", conn.result), ("run", conn.run)):
                 text = json.dumps(value, default=str)
                 assert_no_secret(text, where)
-                assert SESSION not in text, f"{where} carries the session cookie"
+                absent(SESSION, text, f"{where} carries the session cookie")
             # The secret was sealed for the rest of the Hunt as an unreferenced known value: never
             # under a withheld:// reference, never in clear.
             for action in conn.actions.values():
