@@ -2103,6 +2103,28 @@ def _dns_section(row: Mapping[str, Any]) -> dict[str, Any]:
     return section
 
 
+def _web_components_section(rows: list[Mapping[str, Any]]) -> dict[str, Any] | None:
+    """The products the recipes named, as sanitized claims (catalogue labels, plain versions)."""
+    try:
+        from exposure.service_components import sanitized
+    except ModuleNotFoundError:  # package import
+        from ..exposure.service_components import sanitized
+    items = []
+    for row in rows[:60]:
+        claim = sanitized(row)
+        if claim is None:
+            continue
+        items.append({key: claim[key] for key in (
+            "role", "base_path", "product", "product_status", "version", "version_status",
+            "package_version", "distribution", "basis", "recipe_version",
+        )})
+    if not items:
+        return None
+    return {"items": items, "count": len(items),
+            "note": ("Products named by fixed read-only recipes against a negative control. A probable "
+                     "product or an inferred version is not exact; advisory matches stay candidates.")}
+
+
 def _posture_sections(
     observations: Mapping[str, Sequence[Mapping[str, Any]]],
 ) -> dict[str, Any]:
@@ -2129,6 +2151,7 @@ def _posture_sections(
     takeover_summary: dict[str, Any] = {}
     takeover_outcomes: dict[str, list[str]] = {}
     fingerprint_rows: list[Mapping[str, Any]] = []
+    component_rows: list[Mapping[str, Any]] = []
     content_rows: list[Mapping[str, Any]] = []
     recon_active_rows: dict[str, list[Mapping[str, Any]]] = {}
 
@@ -2268,6 +2291,8 @@ def _posture_sections(
                 content_rows.append(row)
             elif kind in _RECON_ACTIVE_KINDS:
                 recon_active_rows.setdefault(kind, []).append(row)
+            elif kind == "http_component":
+                component_rows.append(row)
             elif kind == "http_fingerprint":
                 fingerprint_rows.append(row)
                 for item in row.get("technologies") or ():
@@ -2362,8 +2387,11 @@ def _posture_sections(
         }
     corporate = _corporate_surface(fingerprint_rows, content_rows)
     active_recon = _recon_active_sections(recon_active_rows)
-    if technologies or server_versions or subdomain_hosts or corporate or active_recon:
+    components = _web_components_section(component_rows)
+    if technologies or server_versions or subdomain_hosts or corporate or active_recon or components:
         discovery: dict[str, Any] = dict(active_recon)
+        if components:
+            discovery["web_components"] = components
         if corporate:
             discovery["corporate_surface"] = corporate
         if technologies:

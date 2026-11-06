@@ -193,3 +193,17 @@ def test_the_roots_relative_redirect_names_the_application_base():
     result = run(site)
     assert "/jenkins/" in result.bases[:2]
     assert ("Jenkins", "/jenkins/") in named(result, "application")
+
+
+def test_the_scan_report_lists_recipe_components_as_sanitized_claims():
+    from api.scan.finalizer import _posture_sections
+
+    result = run(proxy_with_jenkins_and_grafana())
+    rows = [{**item, "kind": "http_component", "url": "https://app.example.test" + item["base_path"]}
+            for item in result.components]
+    rows.append({"kind": "http_component", "role": "application", "base_path": "/", "product_key": "evil",
+                 "product": "<b>x</b>", "product_status": "identified", "basis": "recipe"})
+    section = _posture_sections({"discover.identify": rows})["discovery"]["web_components"]
+    products = {(item["product"], item["base_path"]) for item in section["items"]}
+    assert ("Jenkins", "/jenkins/") in products and ("Grafana", "/grafana/") in products
+    assert not any("<" in item["product"] for item in section["items"])
