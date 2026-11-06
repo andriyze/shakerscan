@@ -61,7 +61,9 @@ def encodings(value: str) -> set[str]:
 
 def assert_no_secret(text: str, where: str) -> None:
     for form in encodings(SECRET) - {SECRET.encode().hex()}:  # hex is not an echo the target makes
-        assert form not in text, f"{where} carries the saved login's secret ({form[:4]}...)"
+        # No assert-rewriting on the long texts: a failing comparison would diff them for minutes.
+        if form in text:
+            pytest.fail(f"{where} carries the saved login's secret ({form[:4]}...)", pytrace=False)
 
 
 def hostile_page(extra: str = "") -> bytes:
