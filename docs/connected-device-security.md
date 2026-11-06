@@ -147,6 +147,64 @@ is recorded as out of scope and is never followed automatically. A valid applica
 promote an Nmap `open|filtered` observation to a validated UDP service; silence remains inconclusive.
 Both adapters now run in the fast inventory profile as well as the all-TCP profiles.
 
+## Protocol identity, versions and authentication
+
+A listener is named by what it answered, never by its port number. Nmap's port-table guesses
+(`method="table"`) and `unknown` results keep their conventional name only as `port_hint`; the
+service is `unknown` until a probe matched. After Nmap fingerprinting, every open TCP port Nmap could
+not name (unknown, `tcpwrapped` or table-only, up to 32 per address) is offered the native protocol
+adapters one at a time: the banner first, then the hinted protocol, then the other silent protocols
+(HTTP, TLS, Redis, Memcached, MongoDB, PostgreSQL, RDP, SMB, OpenVPN, PPTP, MQTT, AMQP). A port Nmap
+did name gets only its own adapter, for the structured fields. Adapters cover SSH, FTP, SMTP (with
+STARTTLS), POP3, IMAP, Telnet, MySQL/MariaDB, PostgreSQL, Redis/Valkey, MongoDB, Elasticsearch/
+OpenSearch, Memcached, SMB2, RDP, VNC, PPTP, OpenVPN, MQTT, AMQP, Modbus and EtherNet/IP over TCP,
+and DNS, NTP, IKE and OpenVPN over UDP. Industrial adapters run only when Nmap or the port names that
+protocol.
+
+Each identification keeps `protocol`, `product`, `version` (the upstream release) and
+`version_reported` (the exact announced string with its distribution build suffix, for
+backport-aware advisory matching) apart. PostgreSQL is identified by its pre-authentication refusal of
+an unsupported protocol version and claims no version. A listener that answered but matched nothing is
+`not_identified`; one that stayed silent is `inconclusive`; WireGuard, silent by design, is
+`not_identifiable`.
+
+A handshake is protocol identity, not access. `authentication` stays `not_tested` unless a bounded,
+read-only exchange decides it, named in `authentication_proof`: Redis answering `INFO`, MongoDB listing
+database names (only the count is kept), Elasticsearch listing indices, Memcached answering `stats`, VNC
+accepting the None security type, an MQTT broker accepting a credential-less `CONNECT`, or the server
+refusing one of these (`NOAUTH`, `Unauthorized`, 401/403, RDP requiring Network Level Authentication).
+No credential is sent and no login is attempted.
+
+TCP 9100-9107 (raw printer ports) are connected to but never sent a probe payload, as Nmap's own version
+detection excludes them; the coverage record lists the exclusion.
+
+## Servers, several addresses and CDN edges
+
+The `server` device class prioritises remote administration, mail, VPN, database, cache, broker and
+container control-plane ports before the full sweep, so an internet-facing or internal server is
+assessed with the same engine: priority ports, chunked all-TCP Naabu discovery, Nmap on confirmed-open
+ports, the curated UDP set and partial-coverage semantics.
+
+Every stage of a scan is pinned to one address. A hostname that publishes several A/AAAA records is
+scanned as one pinned child per address the destination policy admits (up to 8), in turn, sharing the
+scan's time budget; addresses the policy refuses are listed by name rather than dropped. The result
+keeps the first address as the primary view, merges services by transport and port with the addresses
+that showed each (`observed_addresses`), tags each finding with its `connect_address`, and is complete
+only when every child was.
+
+Each address carries a coverage record (`address_coverage`): the TCP ranges attempted with their
+outcome, retries, the requested UDP ports and the exclusions. The full TCP sweep is resumable: ranges
+the latest posture scan left incomplete (a budget or health stop) run first in the next scan, right
+after the priority ports, so successive scans progress through the whole range. Every range still runs
+when the budget allows; earlier coverage is never assumed.
+
+An address inside a shared CDN edge's published ranges (Cloudflare) is the provider's network, not the
+application's origin. Only the web ports the edge proxies are examined there, no UDP or full sweep runs,
+and the result says `application assessed through the CDN; origin network not assessed`
+(`network_role`). To assess the origin, register its explicitly authorized address as its own device
+and set the scan's `server_name` to the application's name: the scan connects only to that address and
+sends the name as Host and TLS SNI.
+
 ## Web interfaces on any port
 
 ShakerScan does not assume ports 80 or 443. After service inventory, it sends a bounded HTTP probe to
@@ -420,6 +478,13 @@ and policy boundary.
 - Service and OS fingerprints are evidence, not guaranteed product identity. Stable MAC identity is
   unavailable across routed networks and can be randomized.
 - UDP coverage is a declared curated set, not all 65,535 ports.
+- SMB is identified by an SMB2 negotiate; a server that speaks only SMB1 is not identified. L2TP and
+  DNP3/S7 have no adapter: an open conventional port is reported as a hint, never as the protocol.
+- A multi-address scan stores the union of services in the device's service table; per-address detail
+  stays in the scan result (`addresses`). The pinned Web DAST handoff for an origin examined under
+  `server_name` keeps the address-based origin.
+- CDN edges are recognised from Cloudflare's published ranges; other CDNs are named only from their
+  response headers after an HTTP exchange.
 - UDP silence is inconclusive. Firewalls can make closed and open UDP ports look identical from the
   worker's network path, so only a protocol response is treated as confirmed open.
 - Cloud metadata/control-plane addresses are denied by default after DNS is pinned. Authorized public

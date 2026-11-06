@@ -57,7 +57,7 @@ class HostTargetCreate(BaseModel):
 
 class DeviceProfileCreate(BaseModel):
     model_config = ConfigDict(extra='forbid')
-    device_class: Literal['generic','media','camera','printer','router','nas','conference','building','industrial'] = 'generic'
+    device_class: Literal['generic','media','camera','printer','router','nas','conference','building','industrial','server'] = 'generic'
     manufacturer: str | None = Field(default=None, max_length=255)
     model: str | None = Field(default=None, max_length=255)
     firmware_version: str | None = Field(default=None, max_length=255)

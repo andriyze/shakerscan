@@ -22,6 +22,7 @@ const DEVICE_CLASSES = [
   ['generic', 'Connected device'], ['media', 'TV or media device'], ['camera', 'Camera'],
   ['printer', 'Printer'], ['router', 'Router or access point'], ['nas', 'NAS or storage'],
   ['conference', 'Conference equipment'], ['building', 'Building system'], ['industrial', 'Industrial device'],
+  ['server', 'Server'],
 ] as const
 const PAGE_SIZE = 50
 const READINESS_LIVE_REFRESH_MS = 3_000
