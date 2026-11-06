@@ -309,3 +309,27 @@ def test_a_launch_bound_names_profile_ids_and_keeps_older_digests():
     assert "saved_logins" not in parse_bounds(["capability:state-changing"]).public()
     with pytest.raises(BoundError):
         parse_bounds(["login.use:admin"])
+
+
+@pytest.mark.parametrize("endpoint,expected", [
+    ("/hub/login", LOGIN_URL),                       # a same-origin path is the Hunt target's
+    ("https://sso.other.test/login", None),          # another host never receives a saved login
+])
+def test_a_saved_login_signs_in_only_on_the_hunts_own_host(env, endpoint, expected):
+    async def scenario():
+        hunt = await env.hunt(policy=ACTIVE, budget=BUDGET)
+        profile_id = await _profile(env, hunt["target_id"], endpoint=endpoint)
+        with pytest.raises(HTTPException):
+            await env.call(hunt, "login-0001", values=_login(profile_id))
+        [request] = await env.requests(hunt)
+        if expected is None:
+            with pytest.raises(GrantRefused) as refused:
+                await env.decide(hunt, request)
+            assert refused.value.detail["error"] == "saved_login_unavailable"
+            assert "target host" in refused.value.detail["message"]
+            return
+        await env.decide(hunt, request)
+        [grant] = await saved_logins.live_login_grants(env.conn, hunt["id"])
+        assert grant["login_url"] == expected
+
+    run(env, scenario())
