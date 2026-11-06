@@ -297,7 +297,7 @@ ALLOWED_PLAIN_DIGESTS = {
     ("scanner/scanner_tools/model_intake_scanners.py", "_sha256_json"): "model",
     ("scanner/scanner_tools/model_intake_scanners.py", "run_builtin_secret_scan"): "model",
     ("scanner/scanner_tools/model_intake_scanners.py", "run_external_scanner"): "model",
-    ("scanner/scanner_tools/network_services.py", "_generate_findings"): "finding",
+    ("scanner/scanner_tools/network_services.py", "_finding_id"): "finding",
     ("scanner/scanner_tools/oauth_tests.py", "generate_pkce_pair"): "protocol",
     ("scanner/scanner_tools/race_condition_tests.py", "analyze_race_responses"): "inprocess",
     ("scanner/scanner_tools/request_replay.py", "_sha256"): "request",

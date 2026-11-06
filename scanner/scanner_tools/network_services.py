@@ -1,633 +1,166 @@
 """
 Network Services Detection Module
 
-Comprehensive network service discovery including:
-- VPN endpoints (OpenVPN, WireGuard, IPSec, SSTP)
-- Remote desktop (RDP, VNC, TeamViewer)
-- IoT protocols (MQTT, CoAP, AMQP)
-- Industrial protocols (Modbus, DNP3, BACnet) - detection only
-- Database exposure (MongoDB, Redis, Elasticsearch, Memcached)
-- Service version fingerprinting
+Bounded discovery of non-web network services on the scanned host: VPN endpoints, remote
+access (RDP, VNC, SSH, Telnet), IoT brokers (MQTT, AMQP), industrial protocols and databases.
 
-Uses nmap and custom probes for detection.
+A listener is named only by a parsed protocol reply (``service_protocols``); the port number
+only decides which adapter is tried first. An open port nothing identified is reported with its
+conventional service as an explicit ``port_hint``, never as that service. A database handshake
+is protocol identity, not access: "unauthenticated access" needs a bounded read-only command the
+server executed without credentials, and otherwise authentication is "not tested".
 """
 
 import asyncio
 import hashlib
-import re
+import ipaddress
+import socket
 from datetime import UTC, datetime
 from typing import Any
 
-from .nmap import correct_service_name
+try:
+    from . import service_identity as si
+    from . import service_protocols as sp
+    from .cdn_edges import network_role as cdn_network_role
+except ImportError:  # pragma: no cover - flat scanner runtime
+    import service_identity as si  # type: ignore[no-redef]
+    import service_protocols as sp  # type: ignore[no-redef]
+    from cdn_edges import network_role as cdn_network_role  # type: ignore[no-redef]
 
 # ============================================================================
 # CONSTANTS
 # ============================================================================
 
-# Service port definitions
-SERVICE_PORTS = {
-    # VPN Services
-    "openvpn": [1194, 443],
-    "wireguard": [51820],
-    "ipsec": [500, 4500],
-    "sstp": [443],
-    "l2tp": [1701],
-    "pptp": [1723],
+# Candidate TCP ports per category. They choose where to look and which adapter to try first;
+# they never name what is found there.
+VPN_TCP_PORTS = (1194, 1723)
+VPN_UDP_PORTS = (500, 4500, 1194)
+SILENT_VPN_UDP_PORTS = (51820,)  # WireGuard: silent by design, never confirmed
+REMOTE_ACCESS_TCP_PORTS = (22, 23, 3389, 5900, 5901, 5902, 5903, 5904, 5905, 5938, 7070)
+IOT_TCP_PORTS = (1883, 8883, 5672, 5671)
+INDUSTRIAL_TCP_PORTS = (502, 102, 20000, 44818)
+DATABASE_TCP_PORTS = (27017, 27018, 6379, 9200, 11211, 3306, 5432, 1433, 1521, 9042, 5984)
 
-    # Remote Desktop
-    "rdp": [3389],
-    "vnc": [5900, 5901, 5902, 5903, 5904, 5905],
-    "teamviewer": [5938],
-    "anydesk": [7070],
-    "ssh": [22],
-    "telnet": [23],
+MAX_ADDRESSES = 4
+CONNECT_CONCURRENCY = 32
+IDENTIFY_CONCURRENCY = 4
+# The banner read, the port's conventional adapter, then HTTP and TLS: these candidate ports
+# are conventional ones, so a full silent-protocol sweep is left to the device engine.
+MAX_ADAPTERS_PER_PORT = 4
 
-    # IoT Protocols
-    "mqtt": [1883, 8883],
-    "coap": [5683, 5684],
-    "amqp": [5672, 5671],
-    "xmpp": [5222, 5223],
-
-    # Industrial/SCADA
-    "modbus": [502],
-    "dnp3": [20000],
-    "bacnet": [47808],
-    "ethernetip": [44818],
-    "s7comm": [102],
-
-    # Databases
-    "mongodb": [27017, 27018, 27019],
-    "redis": [6379],
-    "elasticsearch": [9200, 9300],
-    "memcached": [11211],
-    "mysql": [3306],
-    "postgres": [5432],
-    "mssql": [1433],
-    "oracle": [1521],
-    "cassandra": [9042],
-    "couchdb": [5984],
-
-    # Message Queues
-    "rabbitmq": [5672, 15672],
-    "kafka": [9092],
-    "zookeeper": [2181],
-
-    # Other Services
-    "docker": [2375, 2376],
-    "kubernetes_api": [6443, 8443],
-    "etcd": [2379, 2380],
-    "consul": [8500, 8501],
-    "vault": [8200],
-    "prometheus": [9090],
-    "grafana": [3000],
+VPN_PROTOCOLS = {"openvpn": "OpenVPN", "ike": "IPsec/IKE", "pptp": "PPTP"}
+REMOTE_PROTOCOLS = {"rdp", "vnc", "ssh", "telnet"}
+IOT_PROTOCOLS = {"mqtt": "MQTT", "amqp": "AMQP"}
+INDUSTRIAL_PROTOCOLS = {"modbus": "Modbus", "ethernet-ip": "EtherNet/IP"}
+# Conventional industrial ports whose protocol has no adapter here: an open port is reported as
+# a hint ("conventionally DNP3"), never as the protocol.
+INDUSTRIAL_PORT_HINTS = {102: "S7comm (ISO-TSAP)", 20000: "DNP3"}
+DATABASE_PRODUCTS = {
+    "mongodb": ("MongoDB", "critical"), "redis": ("Redis", "critical"),
+    "memcached": ("Memcached", "critical"), "mysql": ("MySQL", "high"),
+    "postgresql": ("PostgreSQL", "high"),
 }
-
-# Service risk levels
-SERVICE_RISKS = {
-    # Critical - should never be exposed
-    "modbus": "critical",
-    "dnp3": "critical",
-    "bacnet": "critical",
-    "s7comm": "critical",
-    "ethernetip": "critical",
-    "telnet": "critical",
-    "redis": "critical",
-    "memcached": "critical",
-    "mongodb": "high",
-    "elasticsearch": "high",
-    "docker": "critical",
-    "etcd": "critical",
-
-    # High - requires authentication
-    "rdp": "high",
-    "vnc": "high",
-    "mysql": "high",
-    "postgres": "high",
-    "mssql": "high",
-    "oracle": "high",
-    "cassandra": "high",
-    "rabbitmq": "high",
-    "kafka": "high",
-
-    # Medium - should be protected
-    "ssh": "medium",
-    "mqtt": "medium",
-    "amqp": "medium",
-    "kubernetes_api": "medium",
-    "consul": "medium",
-    "vault": "medium",
-
-    # Low/Info - typically safe if configured
-    "openvpn": "info",
-    "wireguard": "info",
-    "ipsec": "info",
-}
-
-# Banner patterns for service identification
-SERVICE_BANNERS = {
-    "ssh": [
-        (r"SSH-(\d+\.\d+)-(.+)", "SSH"),
-        (r"OpenSSH[_\s](\d+\.\d+)", "OpenSSH"),
-        (r"dropbear[_\s]?(\d+\.\d+)?", "Dropbear SSH"),
-    ],
-    "rdp": [
-        (r"\x03\x00", "RDP"),
-    ],
-    "vnc": [
-        (r"RFB (\d+\.\d+)", "VNC"),
-    ],
-    "mysql": [
-        (r"(\d+\.\d+\.\d+)-MariaDB", "MariaDB"),
-        (r"(\d+\.\d+\.\d+).*mysql", "MySQL"),
-    ],
-    "postgres": [
-        (r"PostgreSQL (\d+\.\d+)", "PostgreSQL"),
-    ],
-    "redis": [
-        (r"-ERR.*redis", "Redis"),
-        (r"\$\d+\r\nredis_version:(\d+\.\d+)", "Redis"),
-    ],
-    "mongodb": [
-        (r"MongoDB", "MongoDB"),
-        (r"ismaster", "MongoDB"),
-    ],
-    "elasticsearch": [
-        (r'"cluster_name"', "Elasticsearch"),
-        (r'"version".*"number".*"(\d+\.\d+\.\d+)"', "Elasticsearch"),
-    ],
-    "mqtt": [
-        (r"\x20\x02\x00\x00", "MQTT"),
-    ],
-    "modbus": [
-        (r"\x00\x00\x00\x00\x00", "Modbus"),
-    ],
-}
+SEARCH_PRODUCTS = {"Elasticsearch": "high", "OpenSearch": "high"}
 
 
 # ============================================================================
-# HELPER FUNCTIONS
+# HELPERS
 # ============================================================================
 
-async def _run_command(cmd: list[str], timeout: int = 30) -> tuple[str, str, int]:
-    """Run a command asynchronously with timeout."""
-    proc = None
+async def _resolve(host: str) -> list[str]:
+    """The host's addresses as the process resolver answers them (frozen in a canonical Scan)."""
     try:
-        proc = await asyncio.create_subprocess_exec(
-            *cmd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE
-        )
-        stdout, stderr = await asyncio.wait_for(
-            proc.communicate(),
-            timeout=timeout
-        )
-        return (
-            stdout.decode('utf-8', errors='replace'),
-            stderr.decode('utf-8', errors='replace'),
-            proc.returncode or 0
-        )
-    except TimeoutError:
-        if proc is not None:
-            try:
-                proc.kill()
-                await proc.wait()
-            except Exception:
-                pass
-        return "", "Command timed out", -1
-    except asyncio.CancelledError:
-        if proc is not None:
-            try:
-                proc.kill()
-                await proc.wait()
-            except Exception:
-                pass
-        raise
-    except Exception as e:
-        return "", str(e), -1
-
-
-async def _tcp_probe(host: str, port: int, timeout: float = 3.0) -> dict[str, Any]:
-    """Probe a TCP port and capture any banner."""
-    result = {
-        "port": port,
-        "open": False,
-        "banner": None,
-        "service": None,
-        "version": None
-    }
-
+        return [str(ipaddress.ip_address(host))]
+    except ValueError:
+        pass
+    loop = asyncio.get_running_loop()
     try:
-        reader, writer = await asyncio.wait_for(
-            asyncio.open_connection(host, port),
-            timeout=timeout
-        )
-
-        result["open"] = True
-
-        # Try to read banner
+        infos = await asyncio.wait_for(loop.getaddrinfo(host, None, type=socket.SOCK_STREAM), 10)
+    except (OSError, TimeoutError, asyncio.TimeoutError):
+        return []
+    addresses: list[str] = []
+    for info in infos:
         try:
-            # Send minimal probe data for some services
-            if port in [6379]:  # Redis
-                writer.write(b"INFO\r\n")
-            elif port in [27017]:  # MongoDB
-                writer.write(b"\x3a\x00\x00\x00\x01\x00\x00\x00\x00\x00\x00\x00\xd4\x07\x00\x00\x00\x00\x00\x00admin.$cmd\x00\x00\x00\x00\x00\x01\x00\x00\x00\x10ismaster\x00\x01\x00\x00\x00\x00")
-            elif port in [9200]:  # Elasticsearch
-                writer.write(b"GET / HTTP/1.0\r\n\r\n")
-            elif port in [11211]:  # Memcached
-                writer.write(b"stats\r\n")
+            address = str(ipaddress.ip_address(str(info[4][0]).split("%", 1)[0]))
+        except (ValueError, IndexError):
+            continue
+        if address not in addresses:
+            addresses.append(address)
+    return addresses
 
-            await writer.drain()
 
-            banner_data = await asyncio.wait_for(
-                reader.read(1024),
-                timeout=2.0
-            )
-            if banner_data:
-                # Try to decode as text, fallback to hex representation
-                try:
-                    result["banner"] = banner_data.decode('utf-8', errors='replace')[:200]
-                except Exception:
-                    result["banner"] = banner_data[:100].hex()
-
-        except TimeoutError:
-            pass
-        except Exception:
-            pass
-
+async def _tcp_open(address: str, port: int, gate: asyncio.Semaphore, timeout: float = 3.0) -> bool:
+    async with gate:
+        try:
+            _reader, writer = await asyncio.wait_for(asyncio.open_connection(address, port), timeout)
+        except (OSError, TimeoutError, asyncio.TimeoutError):
+            return False
         writer.close()
         try:
-            await writer.wait_closed()
-        except Exception:
+            await asyncio.wait_for(writer.wait_closed(), 1.0)
+        except Exception:  # noqa: BLE001
             pass
-
-    except TimeoutError:
-        pass
-    except ConnectionRefusedError:
-        pass
-    except Exception:
-        pass
-
-    return result
+        return True
 
 
-async def _udp_probe(host: str, port: int, timeout: float = 3.0) -> dict[str, Any]:
-    """Probe a UDP port."""
-    result = {
-        "port": port,
-        "open": False,
-        "service": None
-    }
-
-    # UDP probing is unreliable without specific payloads
-    # We'll rely on nmap for UDP scanning
-
-    return result
-
-
-# ============================================================================
-# SERVICE DETECTION FUNCTIONS
-# ============================================================================
-
-async def _detect_vpn_services(host: str, timeout: int = 30) -> dict[str, Any]:
-    """Detect VPN service endpoints."""
-    result = {
-        "detected": [],
-        "ports_scanned": []
-    }
-
-    vpn_ports = []
-    for vpn_type in ["openvpn", "wireguard", "ipsec", "l2tp", "pptp"]:
-        vpn_ports.extend(SERVICE_PORTS.get(vpn_type, []))
-
-    vpn_ports = list(set(vpn_ports))
-    result["ports_scanned"] = vpn_ports
-
-    # Scan ports
-    tasks = [_tcp_probe(host, port, timeout/len(vpn_ports)) for port in vpn_ports]
-    probe_results = await asyncio.gather(*tasks, return_exceptions=True)
-
-    for port, probe_result in zip(vpn_ports, probe_results, strict=False):
-        if isinstance(probe_result, Exception):
-            continue
-        if probe_result.get("open"):
-            vpn_info = {
-                "port": port,
-                "type": "unknown",
-                "banner": probe_result.get("banner")
-            }
-
-            # Identify VPN type by port
-            if port == 1194:
-                vpn_info["type"] = "OpenVPN"
-            elif port == 51820:
-                vpn_info["type"] = "WireGuard"
-            elif port in [500, 4500]:
-                vpn_info["type"] = "IPSec/IKE"
-            elif port == 1701:
-                vpn_info["type"] = "L2TP"
-            elif port == 1723:
-                vpn_info["type"] = "PPTP"
-            elif port == 443:
-                # Port 443 is commonly HTTPS - only flag as VPN if banner indicates VPN
-                banner = (probe_result.get("banner") or "").lower()
-                if any(sig in banner for sig in ["openvpn", "sstp", "vpn"]):
-                    vpn_info["type"] = "OpenVPN/SSTP (port 443)"
-                else:
-                    # Skip - likely just HTTPS, not VPN
-                    continue
-
-            # Only add if we identified a specific VPN type (skip unknown)
-            if vpn_info["type"] != "unknown":
-                result["detected"].append(vpn_info)
-
-    return result
+def _category_ports(
+    *, scan_vpn: bool, scan_remote_desktop: bool, scan_iot: bool, scan_industrial: bool,
+    scan_databases: bool,
+) -> tuple[list[int], list[int]]:
+    tcp: list[int] = []
+    udp: list[int] = []
+    for enabled, ports in (
+        (scan_vpn, VPN_TCP_PORTS), (scan_remote_desktop, REMOTE_ACCESS_TCP_PORTS),
+        (scan_iot, IOT_TCP_PORTS), (scan_industrial, INDUSTRIAL_TCP_PORTS),
+        (scan_databases, DATABASE_TCP_PORTS),
+    ):
+        if enabled:
+            tcp.extend(port for port in ports if port not in tcp)
+    if scan_vpn:
+        udp.extend(VPN_UDP_PORTS)
+    return tcp, udp
 
 
-async def _detect_remote_desktop(host: str, timeout: int = 30) -> dict[str, Any]:
-    """Detect remote desktop services."""
-    result = {
-        "rdp": None,
-        "vnc": [],
-        "ssh": None,
-        "other": []
-    }
+async def _scan_address(
+    address: str, *, tcp_ports: list[int], udp_ports: list[int], server_name: str | None,
+    deadline: float,
+) -> list[dict[str, Any]]:
+    loop = asyncio.get_running_loop()
+    gate = asyncio.Semaphore(CONNECT_CONCURRENCY)
+    open_flags = await asyncio.gather(*(_tcp_open(address, port, gate) for port in tcp_ports))
+    open_ports = [port for port, is_open in zip(tcp_ports, open_flags) if is_open]
+    identify_gate = asyncio.Semaphore(IDENTIFY_CONCURRENCY)
 
-    # RDP Detection (port 3389)
-    rdp_probe = await _tcp_probe(host, 3389, 5)
-    if rdp_probe.get("open"):
-        result["rdp"] = {
-            "port": 3389,
-            "open": True,
-            "nla_enabled": None,  # Would need deeper probe
-            "risk": "high",
-            "recommendation": "Ensure NLA is enabled and access is restricted to VPN"
-        }
+    async def identify_tcp(port: int) -> dict[str, Any]:
+        async with identify_gate:
+            if loop.time() >= deadline:
+                row = sp.public_row({"transport": "tcp", "port": port, "status": si.STATUS_SILENT,
+                                     "port_hint": si.port_hint(port)})
+                row["details"] = {"reason": "time_budget_exhausted"}
+                return row
+            return sp.public_row(await sp.identify_tcp_service(
+                address, port, hints=(si.port_hint(port),), server_name=server_name,
+                max_adapters=MAX_ADAPTERS_PER_PORT,
+            ))
 
-    # VNC Detection (ports 5900-5905)
-    vnc_tasks = [_tcp_probe(host, port, 3) for port in range(5900, 5906)]
-    vnc_results = await asyncio.gather(*vnc_tasks, return_exceptions=True)
+    async def identify_udp(port: int) -> dict[str, Any]:
+        async with identify_gate:
+            return sp.public_row(await sp.identify_udp_service(address, port))
 
-    for port, probe_result in zip(range(5900, 5906), vnc_results, strict=False):
-        if isinstance(probe_result, Exception):
-            continue
-        if probe_result.get("open"):
-            vnc_info = {
-                "port": port,
-                "display": port - 5900,
-                "banner": probe_result.get("banner"),
-                "risk": "high"
-            }
-
-            # Parse VNC version from banner
-            banner = probe_result.get("banner", "")
-            rfb_match = re.search(r"RFB (\d+\.\d+)", banner)
-            if rfb_match:
-                vnc_info["version"] = rfb_match.group(1)
-
-            result["vnc"].append(vnc_info)
-
-    # SSH Detection (port 22)
-    ssh_probe = await _tcp_probe(host, 22, 5)
-    if ssh_probe.get("open"):
-        ssh_info = {
-            "port": 22,
-            "open": True,
-            "banner": ssh_probe.get("banner"),
-            "version": None,
-            "risk": "medium"
-        }
-
-        # Parse SSH version
-        banner = ssh_probe.get("banner", "")
-        ssh_match = re.search(r"SSH-(\d+\.\d+)-(.+)", banner)
-        if ssh_match:
-            ssh_info["protocol"] = ssh_match.group(1)
-            ssh_info["software"] = ssh_match.group(2)
-
-            openssh_match = re.search(r"OpenSSH[_\s](\d+\.\d+)", banner)
-            if openssh_match:
-                ssh_info["version"] = openssh_match.group(1)
-
-        result["ssh"] = ssh_info
-
-    # Telnet Detection (critical risk)
-    telnet_probe = await _tcp_probe(host, 23, 3)
-    if telnet_probe.get("open"):
-        result["other"].append({
-            "service": "telnet",
-            "port": 23,
-            "risk": "critical",
-            "recommendation": "Disable Telnet immediately and use SSH instead"
-        })
-
-    return result
-
-
-async def _detect_iot_protocols(host: str, timeout: int = 30) -> dict[str, Any]:
-    """Detect IoT protocol endpoints."""
-    result = {
-        "mqtt": None,
-        "coap": None,
-        "amqp": None,
-        "detected": []
-    }
-
-    # MQTT Detection (1883 unencrypted, 8883 TLS)
-    for port in [1883, 8883]:
-        mqtt_probe = await _tcp_probe(host, port, 5)
-        if mqtt_probe.get("open"):
-            result["mqtt"] = {
-                "port": port,
-                "encrypted": port == 8883,
-                "risk": "medium" if port == 8883 else "high",
-                "recommendation": "Use TLS (port 8883) and require authentication"
-            }
-            result["detected"].append({
-                "protocol": "MQTT",
-                "port": port,
-                "encrypted": port == 8883
-            })
-            break
-
-    # AMQP Detection (5672 unencrypted, 5671 TLS)
-    for port in [5672, 5671]:
-        amqp_probe = await _tcp_probe(host, port, 5)
-        if amqp_probe.get("open"):
-            result["amqp"] = {
-                "port": port,
-                "encrypted": port == 5671,
-                "risk": "medium" if port == 5671 else "high"
-            }
-            result["detected"].append({
-                "protocol": "AMQP",
-                "port": port,
-                "encrypted": port == 5671
-            })
-            break
-
-    return result
-
-
-async def _detect_industrial_protocols(host: str, timeout: int = 30) -> dict[str, Any]:
-    """Detect industrial/SCADA protocol endpoints."""
-    result = {
-        "detected": [],
-        "critical_exposure": False,
-        "protocols_found": []
-    }
-
-    industrial_ports = {
-        502: "Modbus",
-        20000: "DNP3",
-        47808: "BACnet",
-        44818: "EtherNet/IP",
-        102: "S7comm (Siemens)"
-    }
-
-    for port, protocol in industrial_ports.items():
-        probe_result = await _tcp_probe(host, port, 5)
-        if probe_result.get("open"):
-            result["critical_exposure"] = True
-            result["protocols_found"].append(protocol)
-            result["detected"].append({
-                "protocol": protocol,
-                "port": port,
-                "risk": "critical",
-                "owasp": "A05:2021 - Security Misconfiguration",
-                "recommendation": f"CRITICAL: {protocol} should NEVER be exposed to the internet. Isolate on dedicated network."
-            })
-
-    return result
-
-
-async def _detect_database_exposure(host: str, timeout: int = 30) -> dict[str, Any]:
-    """Detect exposed database services."""
-    result = {
-        "detected": [],
-        "unauthenticated": [],
-        "total_exposed": 0
-    }
-
-    db_ports = {
-        27017: ("MongoDB", "critical"),
-        6379: ("Redis", "critical"),
-        9200: ("Elasticsearch", "high"),
-        11211: ("Memcached", "critical"),
-        3306: ("MySQL", "high"),
-        5432: ("PostgreSQL", "high"),
-        1433: ("MSSQL", "high"),
-        1521: ("Oracle", "high"),
-        9042: ("Cassandra", "high"),
-        5984: ("CouchDB", "high"),
-    }
-
-    tasks = []
-    ports = []
-    for port in db_ports:
-        tasks.append(_tcp_probe(host, port, 5))
-        ports.append(port)
-
-    probe_results = await asyncio.gather(*tasks, return_exceptions=True)
-
-    for port, probe_result in zip(ports, probe_results, strict=False):
-        if isinstance(probe_result, Exception):
-            continue
-        if probe_result.get("open"):
-            db_name, risk = db_ports[port]
-            db_info = {
-                "database": db_name,
-                "port": port,
-                "risk": risk,
-                "banner": probe_result.get("banner", "")[:100],
-                "authentication_required": True,  # Assume true by default
-                "version": None
-            }
-
-            # Check for unauthenticated access indicators
-            banner = probe_result.get("banner", "")
-
-            if db_name == "Redis":
-                if "ERR" not in banner and "NOAUTH" not in banner:
-                    db_info["authentication_required"] = False
-                    result["unauthenticated"].append(db_name)
-            elif db_name == "MongoDB":
-                if "ismaster" in banner.lower():
-                    db_info["authentication_required"] = False
-                    result["unauthenticated"].append(db_name)
-            elif db_name == "Elasticsearch":
-                if "cluster_name" in banner:
-                    db_info["authentication_required"] = False
-                    result["unauthenticated"].append(db_name)
-            elif db_name == "Memcached":
-                if "STAT" in banner:
-                    db_info["authentication_required"] = False
-                    result["unauthenticated"].append(db_name)
-
-            result["detected"].append(db_info)
-            result["total_exposed"] += 1
-
-    return result
-
-
-# ============================================================================
-# NMAP SERVICE SCAN
-# ============================================================================
-
-async def _nmap_service_scan(host: str, ports: list[int], timeout: int = 60) -> dict[str, Any]:
-    """Run nmap service version detection on specified ports."""
-    result = {
-        "services": [],
-        "raw": None,
-        "error": None
-    }
-
-    if not ports:
-        return result
-
-    port_str = ",".join(str(p) for p in ports[:50])  # Limit to 50 ports
-
-    cmd = [
-        "nmap", "-Pn", "-sV", "-sT",
-        "--version-intensity", "5",
-        "-p", port_str,
-        "-oG", "-",
-        "--host-timeout", str(timeout) + "s",
-        host
-    ]
-
-    stdout, stderr, returncode = await _run_command(cmd, timeout + 10)
-    result["raw"] = stdout
-
-    if returncode != 0:
-        result["error"] = stderr
-        return result
-
-    # Parse nmap grepable output
-    for line in stdout.split('\n'):
-        if '/open/' in line:
-            # Parse: Ports: 22/open/tcp//ssh//OpenSSH 8.0/
-            ports_section = re.search(r'Ports:\s*(.+)', line)
-            if ports_section:
-                port_entries = ports_section.group(1).split(', ')
-                for entry in port_entries:
-                    parts = entry.split('/')
-                    if len(parts) >= 5 and parts[1] == 'open':
-                        port_num = int(parts[0])
-                        raw_service = parts[4] if len(parts) > 4 else "unknown"
-                        version = parts[6] if len(parts) > 6 else ""
-                        # Apply service name correction for common misidentifications
-                        corrected_service = correct_service_name(port_num, raw_service, version or "")
-                        service_info = {
-                            "port": port_num,
-                            "protocol": parts[2],
-                            "service": corrected_service,
-                            "version": version if version else None
-                        }
-                        if raw_service != corrected_service:
-                            service_info["original_detection"] = raw_service
-                        result["services"].append(service_info)
-
-    return result
+    rows = list(await asyncio.gather(
+        *(identify_tcp(port) for port in open_ports),
+        *(identify_udp(port) for port in udp_ports),
+    ))
+    for port in SILENT_VPN_UDP_PORTS if udp_ports else ():
+        rows.append(sp.public_row({
+            "transport": "udp", "port": port, "status": si.STATUS_NOT_IDENTIFIABLE,
+            "adapter": "wireguard", "port_hint": si.port_hint(port),
+            "details": {"reason": "silent_by_design"},
+        }))
+    for row in rows:
+        row["address"] = address
+    # A UDP port that never answered is not an observed service.
+    return [row for row in rows if not (row["transport"] == "udp" and row["status"] == si.STATUS_SILENT)]
 
 
 # ============================================================================
@@ -642,244 +175,305 @@ async def check_network_services(
     scan_iot: bool = True,
     scan_industrial: bool = True,
     scan_databases: bool = True,
-    safe_mode: bool = True
+    safe_mode: bool = True,
+    server_name: str | None = None,
 ) -> dict[str, Any]:
-    """
-    Comprehensive network service discovery.
+    """Bounded discovery of non-web services on every address of ``host``.
 
     Args:
-        host: Target host to scan
-        timeout: Total timeout for all scans
-        scan_vpn: Scan for VPN endpoints
-        scan_remote_desktop: Scan for RDP/VNC/SSH
-        scan_iot: Scan for IoT protocols
-        scan_industrial: Scan for industrial/SCADA protocols
-        scan_databases: Scan for exposed databases
-        safe_mode: If True, use non-intrusive probes only
-
-    Returns:
-        Dict with network service discovery results
+        host: Target host (its addresses are resolved once and each is examined)
+        timeout: Overall time budget in seconds
+        scan_*: Which candidate port sets to examine
+        safe_mode: Kept for compatibility; every probe is read-only
+        server_name: Host/SNI name for TLS and HTTP adapters (defaults to ``host``)
     """
-    results = {
+    del safe_mode
+    results: dict[str, Any] = {
         "host": host,
         "scan_timestamp": datetime.now(UTC).isoformat(),
-        "vpn_services": None,
-        "remote_desktop": None,
-        "iot_protocols": None,
-        "industrial_protocols": None,
-        "database_exposure": None,
+        "schema_version": si.SCHEMA_VERSION,
+        "addresses": [],
+        # Addresses on a shared CDN edge: the provider's network, not the origin's. Their
+        # non-web ports are not examined and nothing found there is attributed to the target.
+        "cdn_edges": [],
+        "services": [],
+        "vpn_services": {"detected": [], "not_identifiable": []},
+        "remote_desktop": {"rdp": None, "vnc": [], "ssh": None, "other": []},
+        "iot_protocols": {"detected": []},
+        "industrial_protocols": {"detected": [], "unconfirmed": [], "critical_exposure": False, "protocols_found": []},
+        "database_exposure": {"detected": [], "unauthenticated": [], "total_exposed": 0},
         "summary": {
             "total_services": 0,
             "critical_findings": 0,
             "high_findings": 0,
-            "services_by_risk": {
-                "critical": [],
-                "high": [],
-                "medium": [],
-                "low": [],
-                "info": []
-            }
+            "services_by_risk": {"critical": [], "high": [], "medium": [], "low": [], "info": []},
         },
-        "findings": []
+        "findings": [],
     }
-
-    # Run scans concurrently
-    tasks = []
-    task_names = []
-
-    if scan_vpn:
-        tasks.append(_detect_vpn_services(host, timeout // 5))
-        task_names.append("vpn_services")
-
-    if scan_remote_desktop:
-        tasks.append(_detect_remote_desktop(host, timeout // 5))
-        task_names.append("remote_desktop")
-
-    if scan_iot:
-        tasks.append(_detect_iot_protocols(host, timeout // 5))
-        task_names.append("iot_protocols")
-
-    if scan_industrial:
-        tasks.append(_detect_industrial_protocols(host, timeout // 5))
-        task_names.append("industrial_protocols")
-
-    if scan_databases:
-        tasks.append(_detect_database_exposure(host, timeout // 5))
-        task_names.append("database_exposure")
-
-    scan_results = await asyncio.gather(*tasks, return_exceptions=True)
-
-    for name, scan_result in zip(task_names, scan_results, strict=False):
-        if isinstance(scan_result, Exception):
-            results[name] = {"error": str(scan_result)}
-        else:
-            results[name] = scan_result
-
-    # Calculate summary and generate findings
+    tcp_ports, udp_ports = _category_ports(
+        scan_vpn=scan_vpn, scan_remote_desktop=scan_remote_desktop, scan_iot=scan_iot,
+        scan_industrial=scan_industrial, scan_databases=scan_databases,
+    )
+    addresses = (await _resolve(host))[:MAX_ADDRESSES]
+    results["addresses"] = addresses
+    if not addresses:
+        results["error"] = "host_not_resolved"
+        return results
+    try:
+        is_literal = bool(ipaddress.ip_address(host))
+    except ValueError:
+        is_literal = False
+    name = server_name or (None if is_literal else host)
+    deadline = asyncio.get_running_loop().time() + max(10, int(timeout) - 10)
+    for address in list(addresses):
+        role = cdn_network_role(address)
+        if role is not None:
+            results["cdn_edges"].append({"address": address, **role})
+            addresses.remove(address)
+    if not addresses:
+        results["note"] = results["cdn_edges"][0]["note"]
+        return results
+    scanned = await asyncio.gather(*(
+        _scan_address(address, tcp_ports=tcp_ports, udp_ports=udp_ports, server_name=name,
+                      deadline=deadline)
+        for address in addresses
+    ), return_exceptions=True)
+    for address, outcome in zip(addresses, scanned):
+        if isinstance(outcome, BaseException):
+            results.setdefault("errors", []).append({"address": address, "error": type(outcome).__name__})
+            continue
+        results["services"].extend(outcome)
+    _classify(results)
     _calculate_summary(results)
     _generate_findings(results)
-
     return results
+
+
+def _classify(results: dict[str, Any]) -> None:
+    """Group identified services by category; unidentified ones stay in ``services`` only."""
+    for row in results["services"]:
+        protocol = row.get("protocol")
+        identified = row.get("status") == si.STATUS_IDENTIFIED
+        port, address = row.get("port"), row.get("address")
+        if row.get("adapter") == "wireguard":
+            results["vpn_services"]["not_identifiable"].append({"port": port, "address": address, "type": "WireGuard (not identifiable)"})
+            continue
+        if not identified:
+            if row.get("transport") == "tcp" and port in INDUSTRIAL_PORT_HINTS:
+                results["industrial_protocols"]["unconfirmed"].append({
+                    "port": port, "address": address, "port_hint": INDUSTRIAL_PORT_HINTS[port],
+                    "status": row.get("status"),
+                })
+            continue
+        if protocol in VPN_PROTOCOLS:
+            results["vpn_services"]["detected"].append({
+                "port": port, "transport": row.get("transport"), "address": address,
+                "type": VPN_PROTOCOLS[protocol], "product": row.get("product"),
+            })
+        elif protocol in REMOTE_PROTOCOLS:
+            remote = results["remote_desktop"]
+            info = {
+                "port": port, "address": address, "open": True, "product": row.get("product"),
+                "version": row.get("version"), "version_reported": row.get("version_reported"),
+                "authentication": row.get("authentication"),
+                "authentication_proof": row.get("authentication_proof"),
+                "details": row.get("details") or {},
+            }
+            if protocol == "rdp":
+                info["nla_required"] = row.get("authentication_proof") == "rdp_nla_required"
+                remote["rdp"] = remote["rdp"] or info
+            elif protocol == "vnc":
+                remote["vnc"].append({**info, "risk": "critical" if row.get("authentication") == si.AUTH_NOT_REQUIRED else "high"})
+            elif protocol == "ssh":
+                remote["ssh"] = remote["ssh"] or {**info, "risk": "medium"}
+            else:
+                remote["other"].append({**info, "service": "telnet", "risk": "critical"})
+        elif protocol in IOT_PROTOCOLS:
+            encrypted = bool((row.get("details") or {}).get("tls"))
+            results["iot_protocols"]["detected"].append({
+                "protocol": IOT_PROTOCOLS[protocol], "port": port, "address": address,
+                "encrypted": encrypted, "product": row.get("product"), "version": row.get("version"),
+                "authentication": row.get("authentication"),
+                "authentication_proof": row.get("authentication_proof"),
+            })
+        elif protocol in INDUSTRIAL_PROTOCOLS:
+            industrial = results["industrial_protocols"]
+            industrial["critical_exposure"] = True
+            industrial["protocols_found"].append(INDUSTRIAL_PROTOCOLS[protocol])
+            industrial["detected"].append({
+                "protocol": INDUSTRIAL_PROTOCOLS[protocol], "port": port, "address": address,
+                "product": row.get("product"), "risk": "critical",
+            })
+        else:
+            database = DATABASE_PRODUCTS.get(protocol or "")
+            product = row.get("product")
+            if database is None and product in SEARCH_PRODUCTS:
+                database = (product, SEARCH_PRODUCTS[product])
+            if database is None:
+                continue
+            label, risk = database
+            entry = {
+                "database": product or label, "port": port, "address": address, "risk": risk,
+                "version": row.get("version"), "version_reported": row.get("version_reported"),
+                "authentication": row.get("authentication"),
+                "authentication_proof": row.get("authentication_proof"),
+                # Kept for older readers: True only when the server refused unauthenticated use.
+                "authentication_required": row.get("authentication") == si.AUTH_REQUIRED,
+            }
+            results["database_exposure"]["detected"].append(entry)
+            results["database_exposure"]["total_exposed"] += 1
+            if row.get("authentication") == si.AUTH_NOT_REQUIRED:
+                results["database_exposure"]["unauthenticated"].append(entry["database"])
 
 
 def _calculate_summary(results: dict[str, Any]) -> None:
     """Calculate summary statistics from scan results."""
     summary = results["summary"]
+    by_risk = summary["services_by_risk"]
 
-    # VPN services
-    vpn_svc = results.get("vpn_services") or {}
-    if vpn_svc.get("detected"):
-        for vpn in vpn_svc["detected"]:
-            summary["total_services"] += 1
-            summary["services_by_risk"]["info"].append(f"VPN: {vpn.get('type', 'Unknown')} (port {vpn.get('port')})")
-
-    # Remote desktop
-    rd = results.get("remote_desktop") or {}
-    rdp_info = rd.get("rdp") or {}
-    if rdp_info.get("open"):
+    def add(risk: str, text: str) -> None:
         summary["total_services"] += 1
-        summary["high_findings"] += 1
-        summary["services_by_risk"]["high"].append("RDP (port 3389)")
-
-    if rd.get("vnc"):
-        for vnc in rd["vnc"]:
-            summary["total_services"] += 1
-            summary["high_findings"] += 1
-            summary["services_by_risk"]["high"].append(f"VNC (port {vnc.get('port')})")
-
-    ssh_info = rd.get("ssh") or {}
-    if ssh_info.get("open"):
-        summary["total_services"] += 1
-        summary["services_by_risk"]["medium"].append("SSH (port 22)")
-
-    for other in rd.get("other", []):
-        summary["total_services"] += 1
-        risk = other.get("risk", "medium")
         if risk == "critical":
             summary["critical_findings"] += 1
-        summary["services_by_risk"][risk].append(f"{other.get('service')} (port {other.get('port')})")
+        elif risk == "high":
+            summary["high_findings"] += 1
+        by_risk[risk].append(text)
 
-    # IoT protocols
-    iot_results = results.get("iot_protocols") or {}
-    if iot_results.get("detected"):
-        for iot in iot_results["detected"]:
-            summary["total_services"] += 1
-            risk = "high" if not iot.get("encrypted") else "medium"
-            summary["services_by_risk"][risk].append(f"{iot.get('protocol')} (port {iot.get('port')})")
+    for vpn in results["vpn_services"]["detected"]:
+        add("info", f"VPN: {vpn['type']} (port {vpn['port']}/{vpn['transport']})")
+    remote = results["remote_desktop"]
+    if remote["rdp"]:
+        add("high", f"RDP (port {remote['rdp']['port']})")
+    for vnc in remote["vnc"]:
+        add(vnc["risk"], f"VNC (port {vnc['port']})")
+    if remote["ssh"]:
+        add("medium", f"SSH (port {remote['ssh']['port']})")
+    for other in remote["other"]:
+        add(other["risk"], f"{other['service']} (port {other['port']})")
+    for iot in results["iot_protocols"]["detected"]:
+        add("medium" if iot["encrypted"] else "high", f"{iot['protocol']} (port {iot['port']})")
+    for industrial in results["industrial_protocols"]["detected"]:
+        add("critical", f"{industrial['protocol']} (port {industrial['port']})")
+    for database in results["database_exposure"]["detected"]:
+        add(database["risk"], f"{database['database']} (port {database['port']})")
 
-    # Industrial protocols
-    ind_results = results.get("industrial_protocols") or {}
-    if ind_results.get("detected"):
-        for ind in ind_results["detected"]:
-            summary["total_services"] += 1
-            summary["critical_findings"] += 1
-            summary["services_by_risk"]["critical"].append(f"{ind.get('protocol')} (port {ind.get('port')})")
 
-    # Database exposure
-    db_results = results.get("database_exposure") or {}
-    if db_results.get("detected"):
-        for db in db_results["detected"]:
-            summary["total_services"] += 1
-            risk = db.get("risk", "high")
-            if risk == "critical":
-                summary["critical_findings"] += 1
-            elif risk == "high":
-                summary["high_findings"] += 1
-            summary["services_by_risk"][risk].append(f"{db.get('database')} (port {db.get('port')})")
+def _auth_sentence(entry: dict[str, Any]) -> str:
+    proof = entry.get("authentication_proof")
+    if entry.get("authentication") == si.AUTH_REQUIRED and proof:
+        return f"The server refused unauthenticated use ({si.AUTHENTICATION_PROOFS[proof]})."
+    return f"Unauthenticated access was not shown; {si.AUTH_NOT_TESTED_LABEL} beyond the handshake."
+
+
+def _finding_id(host: str, kind: str, address: Any, port: Any) -> str:
+    """A stable finding id from the host, address and port (never response data)."""
+    return "network_services:" + hashlib.md5(f"{kind}_{host}_{address}_{port}".encode()).hexdigest()[:8]
 
 
 def _generate_findings(results: dict[str, Any]) -> None:
-    """Generate security findings from network service scan."""
+    """Generate security findings from identified services only."""
     findings = []
     host = results["host"]
 
-    # Industrial protocols - CRITICAL
-    ind_results = results.get("industrial_protocols", {})
-    if ind_results.get("critical_exposure"):
-        for protocol in ind_results.get("detected", []):
-            prot_port = protocol.get("port")
-            findings.append({
-                "id": f"network_services:{hashlib.md5(f'industrial_{host}_{prot_port}'.encode()).hexdigest()[:8]}",
-                "tool": "network_services",
-                "title": f"Critical: {protocol.get('protocol')} Exposed to Internet",
-                "severity": "critical",
-                "cvss_score": 10.0,
-                "cwe": "CWE-284",
-                "owasp": "A05:2021 - Security Misconfiguration",
-                "description": (
-                    f"Industrial/SCADA protocol {protocol.get('protocol')} is exposed on port {protocol.get('port')}. "
-                    "These protocols have no built-in security and should NEVER be accessible from the internet."
-                ),
-                "evidence": {
-                    "host": host,
-                    "protocol": protocol.get("protocol"),
-                    "port": protocol.get("port")
-                },
-                "remediation": (
-                    "Immediately isolate this system from the internet. "
-                    "Industrial protocols should only be accessible via dedicated, air-gapped networks or VPN."
-                )
-            })
+    def finding_id(kind: str, address: Any, port: Any) -> str:
+        return _finding_id(host, kind, address, port)
 
-    # Database exposure
-    db_results = results.get("database_exposure", {})
-    for db in db_results.get("detected", []):
-        db_port = db.get("port")
-        if not db.get("authentication_required"):
+    for protocol in results["industrial_protocols"]["detected"]:
+        findings.append({
+            "id": finding_id("industrial", protocol["address"], protocol["port"]),
+            "tool": "network_services",
+            "title": f"Critical: {protocol['protocol']} Exposed to Internet",
+            "severity": "critical",
+            "cvss_score": 10.0,
+            "cwe": "CWE-284",
+            "owasp": "A05:2021 - Security Misconfiguration",
+            "description": (
+                f"{protocol['protocol']} answered a read-only identification request on port "
+                f"{protocol['port']}. Industrial protocols have no built-in security and should never be "
+                "reachable from the internet."
+            ),
+            "evidence": {"host": host, "address": protocol["address"], "protocol": protocol["protocol"],
+                         "port": protocol["port"], "product": protocol.get("product"),
+                         "identity_basis": "protocol_response"},
+            "remediation": (
+                "Immediately isolate this system from the internet. "
+                "Industrial protocols should only be accessible via dedicated, air-gapped networks or VPN."
+            ),
+        })
+    for hint in results["industrial_protocols"]["unconfirmed"]:
+        findings.append({
+            "id": finding_id("industrial_port", hint["address"], hint["port"]),
+            "tool": "network_services",
+            "title": f"Open port {hint['port']} conventionally used by {hint['port_hint']} (protocol not confirmed)",
+            "severity": "medium",
+            "cwe": "CWE-284",
+            "owasp": "A05:2021 - Security Misconfiguration",
+            "description": (
+                f"TCP port {hint['port']} accepts connections. It is conventionally used by "
+                f"{hint['port_hint']}, but no protocol reply confirmed that; the port number alone is "
+                "not an identification."
+            ),
+            "evidence": {"host": host, "address": hint["address"], "port": hint["port"],
+                         "port_hint": hint["port_hint"], "identity_basis": "port_hint"},
+            "remediation": "Confirm what listens on this port and restrict it to the networks that need it.",
+        })
+
+    for db in results["database_exposure"]["detected"]:
+        evidence = {
+            "host": host, "address": db["address"], "database": db["database"], "port": db["port"],
+            "version": db.get("version"), "version_reported": db.get("version_reported"),
+            "authentication": db.get("authentication"),
+            "authentication_proof": db.get("authentication_proof"),
+            "identity_basis": "protocol_response",
+        }
+        if db.get("authentication") == si.AUTH_NOT_REQUIRED:
+            proof = si.AUTHENTICATION_PROOFS[db["authentication_proof"]]
             findings.append({
-                "id": f"network_services:{hashlib.md5(f'unauth_db_{host}_{db_port}'.encode()).hexdigest()[:8]}",
+                "id": finding_id("unauth_db", db["address"], db["port"]),
                 "tool": "network_services",
-                "title": f"Unauthenticated {db.get('database')} Access",
+                "title": f"Unauthenticated {db['database']} Access",
                 "severity": "critical",
                 "cvss_score": 9.8,
                 "cwe": "CWE-306",
                 "owasp": "A07:2021 - Identification and Authentication Failures",
                 "description": (
-                    f"{db.get('database')} on port {db.get('port')} appears to allow unauthenticated access. "
-                    "This could allow attackers to read, modify, or delete data."
+                    f"{db['database']} on port {db['port']} executed a read-only command without "
+                    f"credentials: {proof}. Anyone who can reach it can likely read or change its data."
                 ),
-                "evidence": {
-                    "host": host,
-                    "database": db.get("database"),
-                    "port": db.get("port")
-                },
+                "evidence": evidence,
                 "remediation": (
-                    f"Enable authentication for {db.get('database')}. "
+                    f"Enable authentication for {db['database']}. "
                     "Restrict access to trusted networks only. Consider using a firewall."
-                )
+                ),
             })
-        else:
-            risk = db.get("risk", "high")
-            if risk in ["critical", "high"]:
-                findings.append({
-                    "id": f"network_services:{hashlib.md5(f'exposed_db_{host}_{db_port}'.encode()).hexdigest()[:8]}",
-                    "tool": "network_services",
-                    "title": f"Exposed {db.get('database')} Service",
-                    "severity": risk,
-                    "cvss_score": 7.5 if risk == "high" else 9.0,
-                    "cwe": "CWE-284",
-                    "owasp": "A05:2021 - Security Misconfiguration",
-                    "description": (
-                        f"{db.get('database')} is accessible on port {db.get('port')}. "
-                        "Database services should not be directly exposed to the internet."
-                    ),
-                    "evidence": {
-                        "host": host,
-                        "database": db.get("database"),
-                        "port": db.get("port")
-                    },
-                    "remediation": (
-                        "Restrict database access to application servers only. "
-                        "Use firewall rules or VPN for remote access."
-                    )
-                })
-
-    # Remote desktop - RDP
-    rd_results = results.get("remote_desktop") or {}
-    rdp_info = rd_results.get("rdp") or {}
-    if rdp_info.get("open"):
+            continue
         findings.append({
-            "id": f"network_services:{hashlib.md5(f'rdp_{host}'.encode()).hexdigest()[:8]}",
+            "id": finding_id("exposed_db", db["address"], db["port"]),
+            "tool": "network_services",
+            "title": f"Exposed {db['database']} Service",
+            "severity": "high",
+            "cvss_score": 7.5,
+            "cwe": "CWE-284",
+            "owasp": "A05:2021 - Security Misconfiguration",
+            "description": (
+                f"{db['database']} answered its protocol handshake on port {db['port']}. Database "
+                f"services should not be reachable from the internet. {_auth_sentence(db)}"
+            ),
+            "evidence": evidence,
+            "remediation": (
+                "Restrict database access to application servers only. "
+                "Use firewall rules or VPN for remote access."
+            ),
+        })
+
+    remote = results["remote_desktop"]
+    rdp_info = remote.get("rdp")
+    if rdp_info:
+        nla = "Network Level Authentication is required." if rdp_info.get("nla_required") else (
+            "The server accepted TLS-only security, so its login screen is reachable before authentication."
+        )
+        findings.append({
+            "id": finding_id("rdp", rdp_info["address"], rdp_info["port"]),
             "tool": "network_services",
             "title": "RDP Service Exposed to Internet",
             "severity": "high",
@@ -887,47 +481,46 @@ def _generate_findings(results: dict[str, Any]) -> None:
             "cwe": "CWE-284",
             "owasp": "A05:2021 - Security Misconfiguration",
             "description": (
-                "Remote Desktop Protocol (RDP) is accessible on port 3389. "
-                "RDP is a common target for brute force attacks and has had critical vulnerabilities (BlueKeep)."
+                f"Remote Desktop Protocol answered its connection request on port {rdp_info['port']}. "
+                f"{nla} RDP is a common target for brute force attacks and has had critical "
+                "vulnerabilities (BlueKeep)."
             ),
-            "evidence": {
-                "host": host,
-                "port": 3389
-            },
+            "evidence": {"host": host, "address": rdp_info["address"], "port": rdp_info["port"],
+                         "nla_required": rdp_info.get("nla_required"),
+                         "authentication": rdp_info.get("authentication")},
             "remediation": (
                 "Disable direct RDP access from the internet. "
                 "Use VPN, RD Gateway, or Azure AD Proxy for remote access. Enable NLA."
-            )
+            ),
         })
 
-    # VNC
-    for vnc in rd_results.get("vnc", []):
-        vnc_port = vnc.get("port")
+    for vnc in remote.get("vnc", []):
+        open_vnc = vnc.get("authentication") == si.AUTH_NOT_REQUIRED
         findings.append({
-            "id": f"network_services:{hashlib.md5(f'vnc_{host}_{vnc_port}'.encode()).hexdigest()[:8]}",
+            "id": finding_id("vnc", vnc["address"], vnc["port"]),
             "tool": "network_services",
-            "title": f"VNC Service Exposed on Port {vnc.get('port')}",
-            "severity": "high",
-            "cvss_score": 7.5,
-            "cwe": "CWE-284",
+            "title": (f"VNC Without Authentication on Port {vnc['port']}" if open_vnc
+                      else f"VNC Service Exposed on Port {vnc['port']}"),
+            "severity": "critical" if open_vnc else "high",
+            "cvss_score": 9.8 if open_vnc else 7.5,
+            "cwe": "CWE-306" if open_vnc else "CWE-284",
             "owasp": "A05:2021 - Security Misconfiguration",
             "description": (
-                f"VNC remote access is available on port {vnc.get('port')}. "
-                "VNC has weak encryption and is vulnerable to brute force attacks."
+                f"VNC answered its handshake on port {vnc['port']}. "
+                + ("It accepted the None security type, so a session needs no password."
+                   if open_vnc else "VNC has weak encryption and is vulnerable to brute force attacks.")
             ),
-            "evidence": {
-                "host": host,
-                "port": vnc.get("port"),
-                "version": vnc.get("version")
-            },
-            "remediation": "Disable direct VNC access. Use SSH tunneling or VPN for remote access."
+            "evidence": {"host": host, "address": vnc["address"], "port": vnc["port"],
+                         "protocol_version": (vnc.get("details") or {}).get("protocol_version"),
+                         "authentication": vnc.get("authentication"),
+                         "authentication_proof": vnc.get("authentication_proof")},
+            "remediation": "Disable direct VNC access. Use SSH tunneling or VPN for remote access.",
         })
 
-    # Telnet
-    for other in rd_results.get("other", []):
+    for other in remote.get("other", []):
         if other.get("service") == "telnet":
             findings.append({
-                "id": f"network_services:{hashlib.md5(f'telnet_{host}'.encode()).hexdigest()[:8]}",
+                "id": finding_id("telnet", other["address"], other["port"]),
                 "tool": "network_services",
                 "title": "Telnet Service Exposed (Critical)",
                 "severity": "critical",
@@ -935,39 +528,36 @@ def _generate_findings(results: dict[str, Any]) -> None:
                 "cwe": "CWE-319",
                 "owasp": "A02:2021 - Cryptographic Failures",
                 "description": (
-                    "Telnet transmits all data including credentials in plaintext. "
-                    "This is a critical security vulnerability."
+                    "A Telnet server negotiated options on this port. Telnet transmits all data "
+                    "including credentials in plaintext."
                 ),
-                "evidence": {
-                    "host": host,
-                    "port": 23
-                },
-                "remediation": "Disable Telnet immediately. Use SSH for remote access."
+                "evidence": {"host": host, "address": other["address"], "port": other["port"]},
+                "remediation": "Disable Telnet immediately. Use SSH for remote access.",
             })
 
-    # Unencrypted IoT protocols
-    iot_results = results.get("iot_protocols") or {}
-    for iot in iot_results.get("detected") or []:
-        iot_port = iot.get("port")
-        if not iot.get("encrypted"):
-            findings.append({
-                "id": f"network_services:{hashlib.md5(f'unenc_iot_{host}_{iot_port}'.encode()).hexdigest()[:8]}",
-                "tool": "network_services",
-                "title": f"Unencrypted {iot.get('protocol')} Service",
-                "severity": "high",
-                "cvss_score": 7.5,
-                "cwe": "CWE-319",
-                "owasp": "A02:2021 - Cryptographic Failures",
-                "description": (
-                    f"{iot.get('protocol')} is running without encryption on port {iot.get('port')}. "
-                    "Data transmitted over this protocol can be intercepted."
-                ),
-                "evidence": {
-                    "host": host,
-                    "protocol": iot.get("protocol"),
-                    "port": iot.get("port")
-                },
-                "remediation": f"Enable TLS encryption for {iot.get('protocol')}. Require authentication."
-            })
+    for iot in results["iot_protocols"]["detected"]:
+        if iot.get("encrypted"):
+            continue
+        anonymous = iot.get("authentication") == si.AUTH_NOT_REQUIRED
+        findings.append({
+            "id": finding_id("unenc_iot", iot["address"], iot["port"]),
+            "tool": "network_services",
+            "title": (f"Unencrypted {iot['protocol']} Broker Accepts Anonymous Clients" if anonymous
+                      else f"Unencrypted {iot['protocol']} Service"),
+            "severity": "critical" if anonymous else "high",
+            "cvss_score": 9.1 if anonymous else 7.5,
+            "cwe": "CWE-306" if anonymous else "CWE-319",
+            "owasp": "A02:2021 - Cryptographic Failures",
+            "description": (
+                f"{iot['protocol']} answered without encryption on port {iot['port']}. "
+                + ("It accepted a connection without credentials. " if anonymous else "")
+                + "Data transmitted over this protocol can be intercepted."
+            ),
+            "evidence": {"host": host, "address": iot["address"], "protocol": iot["protocol"],
+                         "port": iot["port"], "product": iot.get("product"),
+                         "authentication": iot.get("authentication"),
+                         "authentication_proof": iot.get("authentication_proof")},
+            "remediation": f"Enable TLS encryption for {iot['protocol']}. Require authentication.",
+        })
 
     results["findings"] = findings

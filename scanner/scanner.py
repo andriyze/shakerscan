@@ -8133,7 +8133,7 @@ async def build_report(target: str,
         report["smtp_security"] = smtp_security_results
     if asn_discovery_results is not None and asn_discovery_results.get("asn_info"):
         report["asn_discovery"] = asn_discovery_results
-    if network_services_results is not None and (network_services_results.get("vpn_endpoints") or network_services_results.get("remote_desktop") or network_services_results.get("database_exposure")):
+    if network_services_results is not None and (network_services_results.get("services") or network_services_results.get("cdn_edges") or network_services_results.get("vpn_endpoints") or network_services_results.get("remote_desktop") or network_services_results.get("database_exposure")):
         report["network_services"] = network_services_results
 
     # Add enhanced DNS results to DNS section
