@@ -1014,9 +1014,10 @@ def test_the_proof_keeps_its_pages_own_data_requests_for_the_retest():
         response("/events", 200, "eventsource"), response("/api/other", 200, "fetch", attempt="a2"),
     ]
     assert _proof_page_requests(observations, "a1") == [
-        {"method": "GET", "path": "/api/me", "resource_type": "fetch", "status": 401},
-        {"method": "GET", "path": "/api/search", "resource_type": "xhr", "status": 200},
-        {"method": "GET", "path": "/events", "resource_type": "eventsource", "status": 200},
+        {"method": "GET", "path": "/api/me", "query": "q=%3Credacted%3E", "resource_type": "fetch", "status": 401},
+        {"method": "GET", "path": "/api/search", "query": "q=%3Credacted%3E", "resource_type": "xhr", "status": 200},
+        {"method": "GET", "path": "/events", "query": "q=%3Credacted%3E", "resource_type": "eventsource",
+         "status": 200},
     ]
     # A page that made no data request keeps an empty record; no record without resource types
     # (an older proof), without responses, or when the proof's record was cut short.
@@ -1025,3 +1026,59 @@ def test_the_proof_keeps_its_pages_own_data_requests_for_the_retest():
     assert _proof_page_requests([older], "a1") is None
     assert _proof_page_requests([], "a1") is None
     assert _proof_page_requests([response(f"/img/{n}", 200, "image") for n in range(200)], "a1") is None
+
+
+def test_the_proofs_data_requests_are_told_apart_by_their_query_names():
+    """``/api/search?public=1`` answered for the proof and ``?private=1`` answered now are two
+    requests: the one the proof needed got no answer, so the page did not run as proved. The
+    names are kept, never the values (the recorded URL is redacted)."""
+    from scan.finalizer import _proof_page_requests
+
+    def response(query, status):
+        return {"kind": "browser_http_response", "method": "GET", "status_code": status,
+                "url": f"http://shop.fixture.invalid/api/search?{query}=%3Credacted%3E",
+                "resource_type": "fetch", "attempt_id": "a1"}
+
+    recorded = _proof_page_requests([response("public", 200), response("private", 401)], "a1")
+    assert recorded == [
+        {"method": "GET", "path": "/api/search", "query": "public=%3Credacted%3E", "resource_type": "fetch",
+         "status": 200},
+        {"method": "GET", "path": "/api/search", "query": "private=%3Credacted%3E", "resource_type": "fetch",
+         "status": 401},
+    ]
+    activity = _activity(recorded)
+    request = _call("fetch", "/api/search", "?private=secret-value")
+    activity.started(request)
+    activity.answered(_StandInResponse(request, 200))
+    activity.finished(request)
+    assert activity.incomplete()["unanswered_since_proof"] == [
+        {"method": "GET", "path": "/api/search?public=%3Credacted%3E"}]
+    # The proof's own request answered again: the page ran as proved.
+    activity = _activity(recorded)
+    request = _call("fetch", "/api/search", "?public=1")
+    activity.started(request)
+    activity.answered(_StandInResponse(request, 200))
+    activity.finished(request)
+    assert activity.incomplete() is None
+    # A 401 on the request the proof saw refused (a guest's view) still does not count.
+    activity = _activity(recorded)
+    request = _call("fetch", "/api/search", "?public=1")
+    activity.started(request)
+    activity.answered(_StandInResponse(request, 200))
+    activity.finished(request)
+    other = _call("fetch", "/api/search", "?private=1")
+    activity.started(other)
+    activity.answered(_StandInResponse(other, 401))
+    activity.finished(other)
+    assert activity.incomplete() is None
+
+
+def test_a_record_kept_without_queries_is_still_judged_by_method_and_path():
+    """A finding an earlier release proved keeps ``page_requests`` without ``query``: its retest
+    keys requests by method and path, as that record does."""
+    activity = _activity([_data("/api/search", 200)])
+    request = _call("fetch", "/api/search", "?private=1")
+    activity.started(request)
+    activity.answered(_StandInResponse(request, 200))
+    activity.finished(request)
+    assert activity.incomplete() is None

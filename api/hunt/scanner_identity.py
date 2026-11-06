@@ -27,22 +27,26 @@ from .permission_reasons import HuntRefusal
 try:
     from runtime.hunt_scanner_contract import (
         BODY_INPUT_VERIFIERS, SIGNED_IN_SCANNERS, captured_login_request, hunt_body_input,
-        signed_in_request,
+        signed_in_request, xss_browser_parameter,
     )
     from runtime.credential_refs import normalize_hunt_principal_slot
 except ModuleNotFoundError:
     from ..runtime.hunt_scanner_contract import (
         BODY_INPUT_VERIFIERS, SIGNED_IN_SCANNERS, captured_login_request, hunt_body_input,
-        signed_in_request,
+        signed_in_request, xss_browser_parameter,
     )
     from ..runtime.credential_refs import normalize_hunt_principal_slot
 
 
 def _browser_xss_route(name: str, values: Mapping[str, Any]) -> bool:
-    """An ``xss.verify`` the worker hands to the pinned browser prover, which has no session."""
-    return name == "xss.verify" and (
-        values.get("deep_domxss") is True or "#" in str(values.get("path") or "")
-    )
+    """An ``xss.verify`` that runs in a headless browser, which has no session: the pinned
+    browser prover, by the worker's own selection (``xss_browser_parameter``), or any
+    ``deep_domxss`` call (headless Dalfox). An anchor after a server query
+    (``/search?q=1#results``) is Dalfox's, which carries the session."""
+    if name != "xss.verify":
+        return False
+    deep = values.get("deep_domxss") is True
+    return deep or xss_browser_parameter(str(values.get("path") or ""), deep_domxss=deep) is not None
 
 
 def scanner_identity_refusal(name: str, values: Mapping[str, Any]) -> str | None:
@@ -56,8 +60,9 @@ def scanner_identity_refusal(name: str, values: Mapping[str, Any]) -> str | None
         )
     if _browser_xss_route(name, values):
         return (
-            "xss.verify proves a URL-fragment or deep_domxss parameter in the pinned browser, "
-            "which runs without a session; verify it anonymously, or name a query or body input."
+            "xss.verify proves a client-route fragment parameter in the pinned browser, and a "
+            "deep_domxss call in a headless browser; both run without a session. Verify it "
+            "anonymously, or name a query or body input."
         )
     return None
 
