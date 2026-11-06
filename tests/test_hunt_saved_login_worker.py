@@ -62,7 +62,6 @@ def encodings(value: str) -> set[str]:
 def assert_no_secret(text: str, where: str) -> None:
     for form in encodings(SECRET) - {SECRET.encode().hex()}:  # hex is not an echo the target makes
         assert form not in text, f"{where} carries the saved login's secret ({form[:4]}...)"
-    assert USERNAME not in text, f"{where} carries the saved login's username"
 
 
 def hostile_page(extra: str = "") -> bytes:
@@ -215,6 +214,9 @@ def test_a_saved_login_signs_in_by_reference_and_its_secret_never_reaches_the_pl
             assert conn.run["budget_used_json"].get("state_changing_requests", 0) == 0
             assert [use[5] for use in conn.credential_uses] == ["login"]
 
+            # The login's own records never hold the username either (the target may show it
+            # on a signed-in page: an account name is not a secret there).
+            assert USERNAME not in json.dumps([login, conn.actions], default=str)
             orders, _ = await execute(conn, {"method": "GET", "path": "/hub/orders",
                                              "request_bindings": [{**capture}]}, "signed-in-orders")
             assert orders["status"] == "success", orders
