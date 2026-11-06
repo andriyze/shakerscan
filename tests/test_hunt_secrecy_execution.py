@@ -21,9 +21,9 @@ import httpx
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
-for _path in (ROOT / "scanner", ROOT / "api"):
+for _path in (ROOT / "api", ROOT / "scanner"):
     if str(_path) not in sys.path:
-        sys.path.insert(0, str(_path))
+        sys.path.append(str(_path))
 
 import agent_tools  # noqa: E402
 from capabilities.http import WorkerPrivateHTTPResponse  # noqa: E402

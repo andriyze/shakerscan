@@ -6,6 +6,19 @@ materialized finding. The database paths are in test_hunt_signed_in_verifiers_po
 """
 from __future__ import annotations
 
+from pathlib import Path as _Path
+import sys as _sys
+
+# Collected alone (without the suite runner's PYTHONPATH): this module imports the ``api`` package,
+# whose modules import by their source-tree names, so the repository root goes first and api/ and
+# scanner/ after it.
+_ROOT = _Path(__file__).resolve().parents[1]
+if str(_ROOT) not in _sys.path:
+    _sys.path.insert(0, str(_ROOT))
+for _root in (_ROOT / "api", _ROOT / "scanner"):
+    if str(_root) not in _sys.path:
+        _sys.path.append(str(_root))
+
 import asyncio
 import json
 import time
