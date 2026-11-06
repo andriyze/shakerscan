@@ -66,8 +66,10 @@ def test_the_persons_command_for_a_start_past_the_budget_is_that_start_itself():
     line = decision.refusal_line(START_REFUSAL, command)
     assert line.startswith(f"person decision required: {START_SUMMARY}. Nothing was started.")
     assert "Do not send this start again" in line
-    # The agent finds the Hunt the person's command started; the person passes no id back.
-    assert "find that Hunt with `shakerscan hunt list`" in line
+    # The agent finds the Hunt the person's command started by its handoff id, never as the
+    # newest of the target; a start without one asks the person for the Hunt's id.
+    assert "find that Hunt by its handoff id" in line and "newest" not in line
+    assert "ask the person for the Hunt's id" in line
     assert line.endswith(command) and "\n" not in line
 
 
