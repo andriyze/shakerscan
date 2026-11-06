@@ -38,7 +38,13 @@ _ALLOWED_TOP_LEVEL_KEYS = frozenset({
     "budgets", "policy", "credential_refs", "capabilities", "request_collection_ids",
     "approval_receipt_id", "scope_receipt_id", "schema_version", "skill_ids",
     "direct_origin_addresses", "allow", "proposed_allow", "allow_asserted_by", "secret_visibility",
+    "handoff_id",
 })
+# A start's handoff id: chosen by whoever sends the start (an agent, the CLI), kept with the Hunt,
+# and listed by (``GET /hunts?handoff_id=``). When a person's decision is needed for the start and
+# the person's own terminal sends it, the agent finds that exact Hunt by this id, never by
+# "the newest Hunt of this target", which another start could be.
+HANDOFF_ID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
 # Whether the planner may read the values of the target's discovered secrets (``secrets.inspect``).
 # A person's choice at start, off by default, accepted only with ``allow_asserted_by`` and recorded
 # as theirs; the MCP start tool drops it, the Enterprise gateway strips it, and nothing after start
@@ -245,6 +251,11 @@ def hunt_start_public_contract() -> dict[str, Any]:
                 "capability:" + "|".join(sorted(CAPABILITY_FLAGS)), "ssh.host_trust:first-contact",
             ],
             "assertion_proofs": sorted(ALLOW_ASSERTION_PROOFS),
+        },
+        "handoff": {
+            "field": "handoff_id", "pattern": HANDOFF_ID_RE.pattern, "list_filter": "handoff_id",
+            "purpose": ("an id the sender chooses for this start, kept with the Hunt: a start a "
+                        "person sends from their own terminal is found again by it"),
         },
         "secret_visibility": {
             "field": "secret_visibility", "values": list(SECRET_VISIBILITIES), "default": "withheld",
@@ -655,6 +666,7 @@ class HuntStartContract:
     proposed_allow: Sequence[str] = ()
     allow_asserted_by: Mapping[str, str] | None = None
     secret_visibility: str = "withheld"
+    handoff_id: str | None = None
 
     @property
     def secret_values_visible(self) -> bool:
@@ -762,6 +774,7 @@ class HuntStartContract:
             "proposed_allow": list(self.proposed_allow),
             "secret_visibility": self.secret_visibility,
             **self.secret_visibility_record(),
+            **({"handoff_id": self.handoff_id} if self.handoff_id else {}),
         }
 
 
@@ -962,8 +975,19 @@ def normalize_hunt_start_payload(value: Mapping[str, Any]) -> HuntStartContract:
         direct_origin_addresses=direct_origin_addresses,
         adjustments=tuple(adjustments),
         secret_visibility=_secret_visibility(payload),
+        handoff_id=_handoff_id(payload),
         **_allow_fields(payload),
     )
+
+
+def _handoff_id(payload: Mapping[str, Any]) -> str | None:
+    value = payload.get("handoff_id")
+    if value in (None, ""):
+        return None
+    text = str(value).strip().lower() if isinstance(value, str) else ""
+    if not HANDOFF_ID_RE.fullmatch(text):
+        raise HuntStartContractError("handoff_id must be a UUID")
+    return text
 
 
 def _local_operator_deployment() -> bool:

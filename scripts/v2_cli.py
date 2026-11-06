@@ -525,6 +525,16 @@ def _read_document(path: str) -> Any:
         return text
 
 
+def hunt_handoff_id(idempotency_key: str | None = None) -> str:
+    """The handoff id of a Hunt start (``hunt_start_public_contract`` ``handoff``): derived from
+    the start's idempotency key when it has one, so a retry of the same start sends the same body,
+    else new."""
+    key = str(idempotency_key or "").strip()
+    if key:
+        return str(uuid.uuid5(uuid.NAMESPACE_URL, "shakerscan:hunt-start-handoff:" + key))
+    return str(uuid.uuid4())
+
+
 def _hunt_start_payload(args: argparse.Namespace, contract: Mapping[str, Any]) -> dict[str, Any]:
     if args.request:
         value = _read_json(args.request, default={})
@@ -756,6 +766,8 @@ def _run_hunt(args: argparse.Namespace, client: ApiClient) -> Any:
         if not isinstance(contract, Mapping):
             raise CliError("running server returned an invalid Hunt contract")
         payload = _hunt_start_payload(args, contract)
+        if isinstance(contract.get("handoff"), Mapping) and not payload.get("handoff_id"):
+            payload["handoff_id"] = hunt_handoff_id(args.idempotency_key)
         headers = _start_preauthorization(args, client, payload)
         return client.request(
             "POST", "/hunts", payload=payload,
@@ -767,6 +779,8 @@ def _run_hunt(args: argparse.Namespace, client: ApiClient) -> Any:
         query = {"limit": str(args.limit)}
         if args.target_id:
             query["target_id"] = args.target_id
+        if args.handoff_id:
+            query["handoff_id"] = args.handoff_id
         if args.status:
             query["status"] = args.status
         return client.get(f"/hunts?{urllib.parse.urlencode(query)}")
@@ -1260,6 +1274,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     hunt_list = hunt_commands.add_parser("list", help="List Hunts using bounded server filters")
     hunt_list.add_argument("--target-id")
+    hunt_list.add_argument("--handoff-id", help="the Hunt a start with this handoff id created (a start a "
+                                                "person sent from their own terminal)")
     hunt_list.add_argument("--status")
     hunt_list.add_argument("--limit", type=int, choices=range(1, 201), default=50, metavar="N", help="1-200 (default: 50)")
 

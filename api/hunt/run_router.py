@@ -105,6 +105,8 @@ class HuntStartV2Request(BaseModel):
     # A person's choice, off by default: may the planner read discovered secret values through
     # secrets.inspect in this Hunt? Accepted only with allow_asserted_by (start_contract).
     secret_visibility: Literal["withheld", "agent_may_see"] | None = None
+    # The sender's id for this start, kept with the Hunt (``GET /hunts?handoff_id=``).
+    handoff_id: str | None = Field(default=None, max_length=36)
 
 
 class HuntStartV2Response(BaseModel):
@@ -566,12 +568,15 @@ async def list_hunts(
     sort_order: str = Query("desc"),
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0),
+    handoff_id: str | None = Query(None, max_length=36),
 ):
-    """List hunts across every target, filtered, sorted and paged."""
+    """List hunts across every target, filtered, sorted and paged. ``handoff_id``: the Hunt a
+    start with that handoff id created (``hunt_start_public_contract`` ``handoff``)."""
     return await _service().list(
         target_id=target_id, status=status, target_kind=target_kind,
         budget_profile=budget_profile, root_domain=root_domain, search=search,
         sort_by=sort_by, sort_order=sort_order, limit=limit, offset=offset,
+        **({"handoff_id": handoff_id} if handoff_id else {}),
     )
 
 

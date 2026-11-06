@@ -912,3 +912,48 @@ def test_hunt_run_router_owns_the_complete_public_hunt_lifecycle():
             "authorization_reproduction",
         ),
     }
+
+
+# --- handoff ids: a start a person sends is found again by its id, never as "the newest" --------
+
+HANDOFF = "6f1c2a3b-4d5e-4f60-8a71-b2c3d4e5f607"
+
+
+def test_a_start_keeps_its_handoff_id_and_refuses_one_that_is_no_id():
+    from api.hunt.start_contract import (
+        HuntStartContractError, hunt_start_public_contract, normalize_hunt_start_payload,
+    )
+
+    start = {"schema_version": "hunt-start/v2", "target_id": "t-1", "target_kind": "web", "policy": {}}
+    contract = normalize_hunt_start_payload({**start, "handoff_id": HANDOFF.upper()})
+    assert contract.handoff_id == HANDOFF and contract.public_dict()["handoff_id"] == HANDOFF
+    assert "handoff_id" not in normalize_hunt_start_payload(start).public_dict()
+    for hostile in ("newest", "' OR 1=1 --", 7, HANDOFF + "0"):
+        with pytest.raises(HuntStartContractError, match="handoff_id"):
+            normalize_hunt_start_payload({**start, "handoff_id": hostile})
+    assert hunt_start_public_contract()["handoff"]["field"] == "handoff_id"
+    assert run_router.HuntStartV2Request.model_validate({**start, "handoff_id": HANDOFF}).handoff_id == HANDOFF
+
+
+def test_hunts_are_listed_by_the_handoff_id_their_start_carried():
+    class Connection:
+        def __init__(self):
+            self.queries = []
+
+        async def fetchval(self, query, *args):
+            self.queries.append((query, args))
+            return 1
+
+        async def fetch(self, query, *args):
+            self.queries.append((query, args))
+            return [_row()]
+
+    connection = Connection()
+    service = HuntRunService(lambda: _Pool(connection))
+    asyncio.run(service.list(handoff_id=HANDOFF.upper(), limit=5))
+    for query, args in connection.queries:
+        assert "h.context_pack->'hunt_start_contract'->>'handoff_id'=$1" in query
+        assert args[0] == HANDOFF
+    with pytest.raises(run_router.HTTPException) as refused:
+        asyncio.run(service.list(handoff_id="' OR 1=1 --"))
+    assert refused.value.status_code == 400

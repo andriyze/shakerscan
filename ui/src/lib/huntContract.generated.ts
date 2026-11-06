@@ -294,6 +294,12 @@ export const HUNT_START_CONTRACT = {
     "ssh_credential_profile_id",
     "web_credential_profile_id"
   ],
+  "handoff": {
+    "field": "handoff_id",
+    "list_filter": "handoff_id",
+    "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+    "purpose": "an id the sender chooses for this start, kept with the Hunt: a start a person sends from their own terminal is found again by it"
+  },
   "limits": {
     "allow": 32,
     "capabilities": 128,

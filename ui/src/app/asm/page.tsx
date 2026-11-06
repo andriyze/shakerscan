@@ -1731,7 +1731,7 @@ function TargetView({ targetId }: { targetId: string }) {
           <Button variant="ghost" size="sm" onClick={load}>
             <RefreshCw className="h-4 w-4" /> Refresh
           </Button>
-          {managed ? <TerminalHuntStart className="text-xs" /> : (
+          {managed ? <TerminalHuntStart className="text-xs" targetId={target?.id} /> : (
           <button
             type="button"
             onClick={openHuntForGaps}

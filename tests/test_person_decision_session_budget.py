@@ -28,6 +28,7 @@ sys.path.insert(0, str(ROOT / "client" / "src"))
 
 import person_decision as decision  # noqa: E402
 import shakerscan_mcp as mcp  # noqa: E402
+import v2_cli  # noqa: E402
 
 ORIGIN = "https://gateway.example.com"
 TARGET = "1a2b3c4d-1111-4222-8333-444455556666"
@@ -126,3 +127,27 @@ def test_the_mcp_adapter_sends_a_browser_only_decision_to_the_browser():
     assert detail["recovery"] == mcp.PERSON_DECISION_BROWSER_RECOVERY
 
 
+
+
+def test_a_refused_start_names_the_hunt_by_its_handoff_id_never_the_newest():
+    handoff = "6f1c2a3b-4d5e-4f60-8a71-b2c3d4e5f607"
+    body = json.dumps({**START, "handoff_id": handoff}).encode()
+    line = decision.refusal_line(START_REFUSAL, "shakerscan api POST /hunts x", handoff=decision.start_handoff(body))
+    assert f"shakerscan hunt list --handoff-id {handoff}" in line and "newest" not in line
+    assert line.endswith("shakerscan api POST /hunts x")
+    unnamed = decision.refusal_line(START_REFUSAL, "shakerscan api POST /hunts x")
+    assert "ask the person for the Hunt's id" in unnamed and "newest" not in unnamed
+    assert decision.start_handoff(b'{"handoff_id": "newest"}') is None
+    assert decision.start_handoff(b"not json") is None
+    error = types.SimpleNamespace(code=403, headers={"x-shakerscan-step-up": "required"})
+    answer = mcp._person_decision_error(error, json.dumps({"detail": START_REFUSAL}), "POST", "/hunts", body)
+    detail = mcp._error_detail(answer)
+    assert detail["handoff_id"] == handoff
+    assert f"--handoff-id {handoff}" in answer.message
+    assert "newest Hunt of the target, which may be another one" in detail["recovery"]
+
+
+def test_hunt_list_takes_the_handoff_id():
+    args = v2_cli.build_parser().parse_args(["--api-url", "https://gateway.example.com", "hunt", "list", "--handoff-id", "6f1c2a3b-4d5e-4f60-8a71-b2c3d4e5f607"])
+    assert args.handoff_id == "6f1c2a3b-4d5e-4f60-8a71-b2c3d4e5f607"
+    assert v2_cli.hunt_handoff_id("key-1") == v2_cli.hunt_handoff_id("key-1") != v2_cli.hunt_handoff_id("key-2")

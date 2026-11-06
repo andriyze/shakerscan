@@ -46,9 +46,14 @@ test('HUNT-TERM-001 a managed workspace starts Hunts from the terminal, not the 
   await expect(hint).toHaveText('Start Hunts from your terminal: shakerscan agent')
   await expect(page.getByRole('button', { name: 'New Hunt' })).toHaveCount(0)
 
-  // A link that preselects a target opens no browser launcher either.
+  // A link that preselects a target opens no browser launcher either, and its command keeps the
+  // target the link named.
   await page.goto(`/hunt?target=${id}`, { waitUntil: 'domcontentloaded' })
   await expect(page.getByTestId('terminal-hunt-start')).toBeVisible()
+  await expect(page.getByTestId('terminal-hunt-start')).toHaveText(`Start Hunts from your terminal: shakerscan agent --target ${id}`)
+  // Anything but an id is left out of the command, never printed into it.
+  await page.goto('/hunt?target=x%3B%20rm%20-rf%20~', { waitUntil: 'domcontentloaded' })
+  await expect(page.getByTestId('terminal-hunt-start')).toHaveText('Start Hunts from your terminal: shakerscan agent')
   await expect(page.getByRole('heading', { name: 'New Hunt' })).toHaveCount(0)
   expect(unexpectedErrors()).toEqual([])
 })

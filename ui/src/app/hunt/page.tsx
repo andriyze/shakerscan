@@ -395,7 +395,7 @@ function HuntContent() {
               </p>
             </div>
           </div>
-          {managed ? <TerminalHuntStart className="self-center" /> : !launcherOpen && <Button onClick={() => setLauncherOpen(true)}><Plus className="h-4 w-4" aria-hidden="true" />New Hunt</Button>}
+          {managed ? <TerminalHuntStart className="self-center" targetId={searchParams.get('target') || searchParams.get('target_id')} /> : !launcherOpen && <Button onClick={() => setLauncherOpen(true)}><Plus className="h-4 w-4" aria-hidden="true" />New Hunt</Button>}
         </div>
       )}
 
