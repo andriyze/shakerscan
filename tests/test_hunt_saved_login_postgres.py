@@ -72,7 +72,7 @@ async def _profile(env, target_id, *, kind="form_login", capabilities=("http.req
         **({"endpoint_url": endpoint} if kind in {"form_login", "json_login"} else {}))
     profile_id = uuid.uuid4()
     await PostgresCredentialProfileStore().create_profile(
-        env.conn, profile_id=profile_id, target_kind="web", target_id=target_id, name="hub operator",
+        env.conn, profile_id=profile_id, target_kind="web", target_id=target_id, name=f"hub operator {profile_id.hex[:8]}",
         auth_kind=kind, principal_slot="primary", principal_label="Hub operator",
         configuration=public_credential_configuration(parse_credential_secret(kind, secret)),
         encrypted_secret=secret_store.encrypt_secret(secret),
@@ -170,7 +170,7 @@ def test_an_unattached_saved_login_waits_for_a_person_then_signs_in_only_on_its_
         with pytest.raises(HTTPException) as more:
             await env.call(hunt, "login-0006", values=_login(profile_id))
         assert more.value.detail["reason_code"] == "saved_login_logins_exhausted"
-        pending = [item for item in await env.requests(hunt) if item["status"] == "pending"]
+        pending = [item for item in await env.requests(hunt) if item["status"] == "pending" and item["kind"] == "login.use"]
         assert [item["reason_code"] for item in pending] == ["saved_login_logins_exhausted"]
         assert "used every login" in public_request(pending[0])["explanation"]
 
@@ -274,7 +274,8 @@ def test_a_person_attaches_saved_logins_at_start_with_their_login_count(env):
         bearer = await _profile(env, hunt["target_id"], kind="authorization_header")
         refused_contract = normalize_hunt_start_payload({
             "target_id": str(hunt["target_id"]), "target_kind": "web", "goal": "fixture",
-            "policy": {"active_testing": True, "authorization_confirmed": True},
+            "policy": {"active_testing": True, "authorization_confirmed": True,
+                       "approval_receipt_id": ACTIVE["approval_receipt_id"], "scope_receipt_id": SCOPE},
             "saved_logins": [{"profile_id": bearer}]})
         with pytest.raises(HTTPException) as refused:
             await validate_start_saved_logins(env.conn, refused_contract, stored)
@@ -293,7 +294,8 @@ def test_a_person_attaches_saved_logins_at_start_with_their_login_count(env):
 ])
 def test_start_saved_logins_shape_is_refused_by_name(payload, message):
     body = {"target_id": str(uuid.UUID(int=9)), "target_kind": "web", "goal": "fixture",
-            "policy": {"active_testing": True, "authorization_confirmed": True}, **payload}
+            "policy": {"active_testing": True, "authorization_confirmed": True,
+                       "approval_receipt_id": str(uuid.UUID(int=7))}, **payload}
     with pytest.raises(HuntStartContractError) as refused:
         normalize_hunt_start_payload(body)
     assert message in str(refused.value)
