@@ -212,7 +212,9 @@ async def lease_by_lane(lease, queue_names, *, base_queue: str, enabled: bool):
 async def dispatch(redis, lease, job, *, execute, enabled):
     if not enabled:
         return await execute(redis, lease, job)
-    while _no_slot():
+    # A free slot only: the cap on waiting long jobs is applied when leasing (``lease_when_ready``,
+    # ``lease_by_lane``), and a short call leased past it must run.
+    while _slots_full():
         await _next_change()
     task = asyncio.create_task(execute(redis, lease, job))
     _tasks.add(task)
@@ -263,14 +265,16 @@ MAX_LONG_ACTIONS_PER_HUNT = 16
 
 def live_agent_tool_workers(redis_client: Any, *, now: float | None = None) -> int:
     """How many agent-tool workers reported within the readiness window; at least 1 (an unread
-    registry counts as one worker, the bound before workers were counted)."""
+    registry counts as one worker, the bound before workers were counted). ``redis_client`` is
+    the client, or a callable that returns it."""
     import json
     import time
     from datetime import datetime, timezone
 
     current = time.time() if now is None else now
     try:
-        reports = redis_client.hgetall(AGENT_TOOL_WORKER_REGISTRY_KEY) or {}
+        client = redis_client() if callable(redis_client) else redis_client
+        reports = client.hgetall(AGENT_TOOL_WORKER_REGISTRY_KEY) or {}
     except Exception:  # noqa: BLE001 - Redis unavailable: the single-worker bound
         return 1
     live = 0
