@@ -5,9 +5,12 @@ product vocabulary and support boundary of that release; do not rewrite old note
 current product. For current behavior use `../functionality-reference.md`, and for publication state
 use `../release-process.md` plus `RELEASES.md` at the repository root.
 
+## 2.12 line
+
+- [`2.12.0.md`](2.12.0.md) — integration candidate on `release/2.12.0`; follows 2.11.4.
+
 ## 2.11 line
 
-- [`2.11.5.md`](2.11.5.md) — integration candidate on `release/2.11.5`; follows 2.11.4.
 - [`2.11.4.md`](2.11.4.md) — integration candidate on `release/2.11.4`; follows 2.11.3.
 - [`2.11.3.md`](2.11.3.md) — integration candidate on `release/2.11.3`; follows 2.11.2.
 - [`2.11.2.md`](2.11.2.md) — integration candidate on `release/2.11.2`; follows 2.11.1.
@@ -94,6 +97,7 @@ use `../release-process.md` plus `RELEASES.md` at the repository root.
 
 ## Unpublished, failed, or cancelled candidates
 
+- [`2.11.5.md`](2.11.5.md) — cancelled, never published; its changes ship in 2.12.0.
 - [`0.8.14.md`](0.8.14.md)
 - [`0.8.12.md`](0.8.12.md)
 - [`0.8.11.md`](0.8.11.md)
