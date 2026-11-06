@@ -59,7 +59,7 @@ def test_the_model_intake_image_is_an_overlay_on_the_scanner_runtime():
     assert MI.count("apt-get purge -y --auto-remove") == 1
     assert "AS model-intake-go-tools" in MI
     assert "golang:1.26.10-bookworm@sha256:" in MI
-    assert "golang.org/x/crypto@v0.57.0" in MI
+    assert "golang.org/x/crypto@v0.58.0" in MI
     assert "golang.org/x/net@v0.62.0" in MI
     assert MI.count("check_dep \"$tool\" golang.org/x/net v0.62.0") == 1
     assert "google.golang.org/grpc@v1.83.2" in MI
