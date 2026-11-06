@@ -50,6 +50,7 @@ contracts and release notes describe what ships.
 - [Agent boundary discovery](agent-boundary-discovery.md) — evidence-driven topology and hypothesis phase.
 - [Model Intake security roadmap](model-intake-security-review-roadmap.md)
 - [Hunt permission requests](hunt-permission-requests.md) — proposed live grants for refused Hunt actions (design, not implemented).
+- [Hunt saved logins](hunt-saved-logins.md) — sign in by reference with a login a person attached (`login.use`); the agent never sees the values.
 
 ## Operations
 
