@@ -77,7 +77,7 @@ async def resolve_artifact_identity(
             for binding in bindings:
                 try:
                     value, is_cookie = await captured_binding(
-                        conn, run_id=str(run["id"]), target=target, binding=binding)
+                        conn, run_id=str(run["id"]), target=target, binding=binding, destination=origin)
                 except ValueError as exc:  # expired, another Hunt's, or never captured
                     raise CredentialReferenceError(str(exc)) from None
                 text = str(value)

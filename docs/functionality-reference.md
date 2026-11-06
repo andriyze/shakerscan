@@ -196,7 +196,11 @@ storage convention.
 
 The typed budget covers duration, HTTP requests, state-changing requests, endpoints, hosts, browser
 actions, TCP attempts, tool wall time, and workers. A custom value may only lower the selected
-profile. `max_state_changing_requests=0` is an explicit deny ceiling. Every action reserves its
+profile. `max_state_changing_requests=0` is an explicit deny ceiling. A Hunt also has
+`max_verifier_write_requests`: the POST/PUT/PATCH requests `sqli.verify` and `xss.verify` (and the
+SQL injection proof) send to test a request body, held per body test (its whole request hold) and
+settled at what was sent, shown beside the state-changing ceiling, which bounds the planner's own
+writes. Both are zero without state-changing HTTP. Every action reserves its
 multi-dimensional hold before execution and reconciles consumed, released, or uncertain authority
 afterward; unused profile capacity remains visibly unallocated.
 

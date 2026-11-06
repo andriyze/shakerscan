@@ -77,6 +77,7 @@ LEDGER_TO_BUDGET = {
     "tcp_ports_attempted": "max_tcp_ports",
     "browser_actions": "max_browser_actions",
     "state_changing_requests": "max_state_changing_requests",
+    "verifier_write_requests": "max_verifier_write_requests",
     "tool_wall_seconds": "max_duration_seconds",
     "device_fragility_points": "max_device_fragility_points",
     "hosts_attempted": "max_hosts",

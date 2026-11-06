@@ -662,8 +662,8 @@ raised state-changing requests 20 -> 40 (safety ceiling) for Hunt 3f2a91c0-…
   they approve in full, so no touch is offered for them: the command (and the MCP adapter) says
   to make them on the Hunt page, asks no key and exits 3.
 - **A Hunt start past its agent session's safety budget.** Where the touch is required, the Hunts
-  one agent session starts share one safety budget (state-changing requests, TCP and UDP ports,
-  hosts, out-of-band interactions, device fragility), which the one touch of `shakerscan agent
+  one agent session starts share one safety budget (state-changing requests, verifier write
+  requests, TCP and UDP ports, hosts, out-of-band interactions, device fragility), which the one touch of `shakerscan agent
   --allow` approves with the bounds (the command shows it before the touch: "Every Hunt this agent
   session starts shares one safety budget: state-changing requests 40, ..."). Cancelling a Hunt
   and starting another does not reset it. A start past what is left is your decision: the agent

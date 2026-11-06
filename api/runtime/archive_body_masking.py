@@ -484,6 +484,11 @@ def _mask_known_values(text: str) -> str:
     return text
 
 
+def mask_known_values(text: str) -> str:
+    """Every echo of a value the active collector knows (sent or found), as a reference."""
+    return _mask_known_values(text)
+
+
 _COLLECTOR: ContextVar[WithheldValues | None] = ContextVar("withheld_values", default=None)
 
 
@@ -638,6 +643,11 @@ def _is_credential_shaped(token: str) -> bool:
         counts[char] = counts.get(char, 0) + 1
     entropy = -sum(n / len(token) * math.log2(n / len(token)) for n in counts.values())
     return entropy >= 3.5
+
+
+def is_credential_shaped(token: str) -> bool:
+    """Whether one whole value looks like a key, a token or a signature (not a word or a path)."""
+    return bool(_CREDENTIAL_TOKEN_RE.fullmatch(str(token or ""))) and _is_credential_shaped(str(token))
 
 
 def _mask_shaped_tokens(text: str) -> str:
@@ -3301,6 +3311,8 @@ def withhold_body_secrets(value: Any) -> Any:
 __all__ = [
     "HEAD_VERDICT_KEY",
     "KnownValueScrubber",
+    "is_credential_shaped",
+    "mask_known_values",
     "MAX_MASKED_BODY_CHARS",
     "copy_evidence",
     "looks_like_dump_head",

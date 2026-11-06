@@ -14,8 +14,12 @@ publishes digests and the field name, and every request goes to the Hunt's call 
 """
 from __future__ import annotations
 
+import asyncio
+from dataclasses import dataclass, field
 import hashlib
 import json
+import math
+import time
 from typing import Any, Awaitable, Callable, Mapping, Sequence
 import urllib.parse
 
@@ -107,6 +111,24 @@ def proof_request(
     return request, candidate
 
 
+# How long past its deadline a proof that ignored it is waited for before it is cut off; its whole
+# allowance is then charged, since what it sent is unknown.
+PROOF_DEADLINE_GRACE_SECONDS = 2
+
+
+@dataclass(frozen=True)
+class ProofPhase:
+    """What the proof phase of a ``sqli.verify`` action did, for the action's one outcome."""
+
+    observations: tuple[dict[str, Any], ...] = ()
+    used: Mapping[str, int] = field(default_factory=dict)
+    # "success" (or nothing to prove), "partial", "cancelled"
+    status: str = "success"
+    timed_out: bool = False
+    errors: tuple[str, ...] = ()
+    ran: bool = False
+
+
 def _not_proven(parameter: str | None, reason: str) -> dict[str, Any]:
     return {
         "kind": "sqli_proof", "field_path": parameter, "proof_state": "not_proven",
@@ -119,17 +141,20 @@ async def prove_hunt_sqli_signal(
     execution_target: str, values: Mapping[str, Any], observations: Sequence[Mapping[str, Any]],
     reserved: Mapping[str, Any], actual: Mapping[str, Any], headers: Mapping[str, str],
     principal_slot: str, heartbeat: Callable[[], Awaitable[None]], cancelled: Callable[[], bool],
-) -> tuple[list[dict[str, Any]], dict[str, int]]:
-    """Prove the first signalled parameter; return its observations and the budget it used.
+    deadline: float,
+) -> ProofPhase:
+    """Prove the first signalled parameter, as the second phase of the action's one execution.
 
-    The budget used is what is left of the action's own reservation after sqlmap, so the action
-    settles inside the hold it was admitted with: requests and wall only. A body proof's requests
-    are verifier traffic under the active-testing grant and are not charged to the Hunt's
-    state-changing ceiling (the adapter's own mutation guard is given a matching sub-budget).
+    The phase runs under the action's contract, not beside it: ``deadline`` (``time.monotonic()``)
+    is the action's, set when its scanner was dispatched, and no proof request starts after it;
+    the budget is what is left of the action's own reservation after sqlmap (requests and wall),
+    so the action settles inside the hold it was admitted with; a cancellation or a timeout is
+    reported (``status``, ``timed_out``) for the action's outcome. A body proof's requests are
+    verifier writes, settled in the action's ``verifier_write_requests`` hold.
     """
     parameters = _signalled_parameters(observations)
     if not parameters:
-        return [], {}
+        return ProofPhase()
     prepared = None
     for parameter in parameters:
         prepared = proof_request(execution_target, values, parameter, headers=headers, action_id=action_id)
@@ -137,20 +162,27 @@ async def prove_hunt_sqli_signal(
             break
     if prepared is None:
         # A path segment, a header or a parameter the call did not name: nothing to replay exactly.
-        return [_not_proven(parameters[0], "signalled_input_not_replayable")], {}
+        return ProofPhase(observations=(_not_proven(parameters[0], "signalled_input_not_replayable"),))
     request, candidate = prepared
+    if cancelled():
+        return ProofPhase(observations=(_not_proven(candidate["field_path"], "cancelled"),),
+                          status="cancelled", errors=("cancelled",))
+    left = math.floor(deadline - time.monotonic())
     requests = min(PROOF_REQUESTS, int(reserved.get("http_requests") or 0) - int(actual.get("http_requests") or 0))
-    wall = min(PROOF_WALL_SECONDS,
+    wall = min(PROOF_WALL_SECONDS, left,
                int(reserved.get("tool_wall_seconds") or 0) - int(actual.get("tool_wall_seconds") or 0))
     if requests < PROOF_MINIMUM_REQUESTS or wall < PROOF_MINIMUM_WALL_SECONDS:
-        return [_not_proven(candidate["field_path"], "proof_unfunded")], {}
+        return ProofPhase(observations=(_not_proven(candidate["field_path"], "proof_unfunded"),))
+    body = request.method not in {"GET", "HEAD", "OPTIONS"}
     budget = {"http_requests": requests, "tool_wall_seconds": wall}
-    if request.method not in {"GET", "HEAD", "OPTIONS"}:
+    if body:
+        # The adapter's own mutation guard: every body request is a possible write.
         budget["state_changing_requests"] = requests
     archived, recorder = http_archive.hunt_run_call_recorder(
         run, action_id=action_id, capability_name="sqli.verify", adapter="sqli.proof_batch",
         target_url=execution_target,
     )
+    phase_deadline = min(deadline, time.monotonic() + wall)
     try:
         adapter = SQLiProofAdapter(
             specification=CAPABILITY_REGISTRY.require("sqli.prove_batch"), target=target,
@@ -158,23 +190,51 @@ async def prove_hunt_sqli_signal(
             transport=RecordedHuntReplayTransport(
                 PinnedAiohttpReplayTransport(), recorder, principal_slot=principal_slot,
             ),
+            deadline=phase_deadline,
         )
-        result = await adapter.execute(heartbeat=heartbeat, cancelled=cancelled)
+        try:
+            async with asyncio.timeout(max(0.0, phase_deadline - time.monotonic()) + PROOF_DEADLINE_GRACE_SECONDS):
+                result = await adapter.execute(heartbeat=heartbeat, cancelled=cancelled)
+        except TimeoutError:
+            # The adapter outlived its deadline: what it sent is unknown, so its allowance is spent.
+            return ProofPhase(
+                observations=(_not_proven(candidate["field_path"], "proof_deadline"),),
+                used=_writes(budget, body), status="partial", timed_out=True,
+                errors=("proof_deadline",), ran=True,
+            )
     except SQLiProofError as exc:
-        return [_not_proven(candidate["field_path"], f"proof_unconstructable:{exc}"[:200])], {}
+        return ProofPhase(observations=(_not_proven(candidate["field_path"], f"proof_unconstructable:{exc}"[:200]),))
     finally:
         if archived:
             async with pool.acquire() as conn:
                 await http_archive.archive_hunt_capture(conn, archived, run["id"], run["id"], results_dir)
+    # Settled inside what was granted: a wall rounded up past it was cut at it.
     used = {
-        "http_requests": int(result.actual_budget.get("http_requests") or 0),
-        "tool_wall_seconds": int(result.actual_budget.get("tool_wall_seconds") or 0),
+        "http_requests": min(requests, int(result.actual_budget.get("http_requests") or 0)),
+        "tool_wall_seconds": min(wall, int(result.actual_budget.get("tool_wall_seconds") or 0)),
     }
     proofs = [
         {**dict(item), **({"proof_errors": list(result.errors)[:5]} if result.errors else {})}
         for item in result.observations
     ]
-    return proofs, {key: value for key, value in used.items() if value}
+    status = "cancelled" if result.status == "cancelled" else "partial" if (
+        result.timed_out or result.status in {"partial", "blocked", "failed"} and not proofs) else "success"
+    if not proofs:
+        reason = "proof_deadline" if result.timed_out else (
+            "cancelled" if result.status == "cancelled" else (result.errors or ("proof_failed",))[0])
+        proofs = [_not_proven(candidate["field_path"], str(reason)[:200])]
+    return ProofPhase(
+        observations=tuple(proofs), used=_writes(used, body), status=status,
+        timed_out=bool(result.timed_out), errors=tuple(result.errors)[:5], ran=True,
+    )
 
 
-__all__ = ["PROOF_REQUESTS", "proof_request", "prove_hunt_sqli_signal"]
+def _writes(used: Mapping[str, int], body: bool) -> dict[str, int]:
+    """The budget a proof phase used; a body proof's requests are verifier writes too."""
+    settled = {key: int(used.get(key) or 0) for key in ("http_requests", "tool_wall_seconds")}
+    if body:
+        settled["verifier_write_requests"] = settled["http_requests"]
+    return {key: value for key, value in settled.items() if value}
+
+
+__all__ = ["PROOF_REQUESTS", "ProofPhase", "proof_request", "prove_hunt_sqli_signal"]

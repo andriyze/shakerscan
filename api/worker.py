@@ -18545,6 +18545,9 @@ async def _execute_agent_scanner_process(
                 hostname=str(parsed_execution.hostname or ""),
                 pinned_addresses=job_data.get("authorized_addresses") or (),
                 port=target_port,
+                # Bound to the target's scheme: a redirect to the other scheme on the same port
+                # (an identity sent over plain http to an https service) is refused in the tunnel.
+                scheme=str(parsed_execution.scheme or "").lower() or None,
                 max_connections=connection_ceiling,
                 admit=job_data.get("_request_gate") if callable(job_data.get("_request_gate")) else None,
             ).start()
@@ -19764,6 +19767,7 @@ from hunt.sqli_target import sqli_injection_point_refusal
 from hunt.scanner_identity import resolve_scanner_identity
 from runtime.hunt_scanner_contract import signed_in_request
 from hunt.scanner_sqli_proof import prove_hunt_sqli_signal
+from runtime.public_secrecy import PublicSecrecy
 from hunt.dispatch_authority import HuntDispatchRejected, dispatch_http_request_authority, dispatch_http_target, dispatch_replay_authority, dispatch_scope_binding, require_dispatchable, settle_rejected_dispatch, settle_rejected_replay_dispatch
 from hunt.device_traffic import reserve_device_traffic, require_worker_device_policy, settle_device_traffic, require_device_admission, record_device_traffic
 from hunt.distinct_accounting import bound_distinct_usage, record_attempted_usage
@@ -20346,7 +20350,8 @@ async def process_canonical_scanner_capability_job(
             },
             process_runner=_execute_agent_scanner_process,
             requested_budget=persisted.record.requested,
-            mutations_in_request_hold=True,
+            # A body test's requests are verifier writes, held and settled in their own ceiling.
+            mutation_dimension="verifier_write_requests",
             redacted_execution={
                 **receipt_input,
                 "path": safe_path,
@@ -20361,6 +20366,9 @@ async def process_canonical_scanner_capability_job(
         active_adapter = browser_proof_adapter or scanner_adapter
         adapter_name = str(active_adapter.adapter_name)
         adapter_version = str(active_adapter.adapter_version)
+        # One deadline for every phase of this action (the scanner, then its proof): the reserved
+        # wall, counted from the scanner's dispatch.
+        action_deadline = time.monotonic() + int(persisted.record.requested.get("tool_wall_seconds") or 0)
         execution = await _dispatch_registered_hunt_adapter(
             hunt_id=str(hunt_id),
             action_id=str(action_id),
@@ -20387,10 +20395,40 @@ async def process_canonical_scanner_capability_job(
         ][:20]
         status = execution.status
         is_partial = execution.partial
+        timed_out = execution.timed_out
         error = (
             str(process_result.get("error") or "").strip()
             or (execution.errors[0] if execution.errors else None)
         )
+        actual = dict(execution.actual_budget)
+        proof_ran = False
+        if capability_name == "sqli.verify" and status in {"success", "partial"}:
+            # A sqlmap signal becomes a finding only through the Scan's repeated proof: the
+            # action's second phase, under the same deadline, cancellation and reservation.
+            proof = await prove_hunt_sqli_signal(
+                pool=db_pool, results_dir=RESULTS_DIR, run=run, action_id=action_id, target=target,
+                execution_target=execution_target, values=scanner_options, observations=observations,
+                reserved=persisted.record.requested, actual=actual, headers=scanner_identity.headers,
+                principal_slot=scanner_identity.principal_slot, heartbeat=heartbeat_reservation,
+                cancelled=lambda: bool(redis_client.exists(cancel_key)), deadline=action_deadline,
+            )
+            proof_ran = proof.ran
+            observations.extend(dict(item) for item in proof.observations)
+            for dimension, amount in proof.used.items():
+                actual[dimension] = int(actual.get(dimension) or 0) + amount
+            # One outcome for the action: a cancelled or timed-out phase is the action's.
+            if proof.status == "cancelled":
+                status, is_partial = "cancelled", False
+            elif proof.status == "partial":
+                status, is_partial = "partial", True
+            timed_out = timed_out or proof.timed_out
+            if proof.status != "success" and not error:
+                error = (proof.errors or (proof.status,))[0]
+        # Nothing the action settles exceeds what it reserved.
+        actual = {
+            name: min(int(amount), int(persisted.record.requested.get(name, amount)))
+            for name, amount in actual.items()
+        }
         action_status = (
             "completed"
             if status == "success"
@@ -20400,27 +20438,21 @@ async def process_canonical_scanner_capability_job(
             if status == "cancelled"
             else "failed"
         )
-        actual = dict(execution.actual_budget)
-        if capability_name == "sqli.verify" and status in {"success", "partial"}:
-            # A sqlmap signal becomes a finding only through the Scan's repeated proof.
-            proofs, proof_used = await prove_hunt_sqli_signal(
-                pool=db_pool, results_dir=RESULTS_DIR, run=run, action_id=action_id, target=target,
-                execution_target=execution_target, values=scanner_options, observations=observations,
-                reserved=persisted.record.requested, actual=actual, headers=scanner_identity.headers,
-                principal_slot=scanner_identity.principal_slot, heartbeat=heartbeat_reservation,
-                cancelled=lambda: bool(redis_client.exists(cancel_key)),
-            )
-            observations.extend(proofs)
-            for dimension, amount in proof_used.items():
-                actual[dimension] = int(actual.get(dimension) or 0) + amount
+        # The one secrecy boundary (runtime/public_secrecy.py): every observation of every phase,
+        # and the error, before the receipt, the record, endpoint knowledge or a finding sees them.
+        secrecy = PublicSecrecy.for_headers(scanner_identity.headers)
+        observations = secrecy.observations(observations)
+        if error:
+            error = secrecy.text(str(error), target_text=False)
 
         started_at = str(
             process_result.get("started_at")
             or persisted.record.started_at.isoformat()
         )
-        finished_at = str(
-            process_result.get("finished_at")
-            or datetime.now(timezone.utc).isoformat()
+        # The action finishes after its last phase.
+        finished_at = (
+            datetime.now(timezone.utc).isoformat() if proof_ran else str(
+                process_result.get("finished_at") or datetime.now(timezone.utc).isoformat())
         )
         receipt_id = uuid.uuid4()
         prepared_receipt = SimpleNamespace(
@@ -20486,7 +20518,7 @@ async def process_canonical_scanner_capability_job(
                     result={
                         "ok": status == "success",
                         "error": error,
-                        "timed_out": execution.timed_out,
+                        "timed_out": timed_out,
                         "receipt_observations": observations,
                     },
                 )
@@ -20503,7 +20535,7 @@ async def process_canonical_scanner_capability_job(
                     prepared=prepared_receipt,
                     status=("partial" if is_partial else status),
                     partial=is_partial,
-                    timed_out=bool(process_result.get("timed_out")),
+                    timed_out=bool(process_result.get("timed_out")) or timed_out,
                     parser_errors=parser_errors,
                     record_count=len(observations),
                     reserved=latest.record.requested,
@@ -20543,7 +20575,7 @@ async def process_canonical_scanner_capability_job(
                     "status": status,
                     "ok": status == "success",
                     "partial": is_partial,
-                    "timed_out": execution.timed_out,
+                    "timed_out": timed_out,
                     "observation_count": len(observations),
                     "error": error,
                     "record_count": len(observations),

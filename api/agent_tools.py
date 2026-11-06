@@ -29,6 +29,7 @@ from typing import Any, Mapping, Optional, Sequence
 
 from runtime.auth_refusal import BASELINE_RECORD_KIND, is_login_location
 from runtime.capability_registry import CAPABILITY_REGISTRY
+from runtime.hunt_scanner_contract import SCANNER_HEADER_MARKERS, hunt_body_input
 from runtime.request_shape import (
     json_field_leaf_name, nested_json_body, public_request_body_shape,
 )
@@ -994,6 +995,7 @@ def canonical_hunt_scanner_budget(
     budget_profile: str | None = None,
     deep_domxss: bool = False,
     device_target: bool = False,
+    body_test: bool = False,
 ) -> dict[str, int]:
     """Admission ceiling for the exact server-owned Hunt scanner selection.
 
@@ -1006,6 +1008,10 @@ def canonical_hunt_scanner_budget(
 
     An ``xss.verify`` the worker routes to the pinned browser (one URL-fragment parameter) runs
     inside its own fixed limits under either hold, and settles only what it used.
+
+    A ``body_test`` (a verifier sending POST/PUT/PATCH bodies) also holds its every request as a
+    verifier write (``verifier_write_requests``): the Hunt's own ceiling for verifier writes,
+    shown beside the state-changing ceiling that bounds the planner's writes.
     """
     budget = dict(CAPABILITY_REGISTRY.require(capability_name).budget_cost)
     if capability_name == "templates.scan":
@@ -1019,6 +1025,8 @@ def canonical_hunt_scanner_budget(
         and not (capability_name == "xss.verify" and deep_domxss)
     ):
         budget.update(tier)
+    if body_test:
+        budget["verifier_write_requests"] = int(budget.get("http_requests") or 0)
     return budget
 
 
@@ -1034,6 +1042,7 @@ def hunt_scanner_budget_context(
         "budget_profile": run.get("budget_profile"),
         "deep_domxss": capability_input.get("deep_domxss") is True,
         "device_target": bool(run.get("device_target_id")),
+        "body_test": hunt_body_input(capability_input),
     }
 
 
@@ -1058,6 +1067,7 @@ def hunt_scanner_dispatch_budgets(
     budget_profile: str | None = None,
     deep_domxss: bool = False,
     device_target: bool = False,
+    body_test: bool = False,
 ) -> tuple[dict[str, int], ...]:
     """The holds a Hunt scanner call may run at, the current one first.
 
@@ -1068,11 +1078,12 @@ def hunt_scanner_dispatch_budgets(
     """
     current = canonical_hunt_scanner_budget(
         capability_name, budget_profile=budget_profile, deep_domxss=deep_domxss,
-        device_target=device_target,
+        device_target=device_target, body_test=body_test,
     )
-    legacy = canonical_hunt_scanner_budget(capability_name)
+    legacy = canonical_hunt_scanner_budget(capability_name, body_test=body_test)
     holds = [current, legacy]
-    if current != legacy:
+    if current != legacy and not body_test:
+        # Earlier releases never sent a body test, so none of their holds is one.
         for released in RELEASED_HUNT_SCANNER_HOLDS.get(capability_name, ()):
             holds.append({**legacy, **released})
     unique: list[dict[str, int]] = []
@@ -1212,6 +1223,8 @@ _TRUSTED_SCANNER_HEADER_NAME = re.compile(
 _RESERVED_TRUSTED_SCANNER_HEADERS = frozenset({
     "connection", "content-length", "host", "transfer-encoding",
 })
+# A cookie name sqlmap can be told to skip: a token without the comma its list splits on.
+_COOKIE_NAME_TOKEN = re.compile(r"[!#$%&'+\-.^_`|~0-9A-Za-z]{1,128}")
 _HTTP_HEADER_SCANNER_FLAGS: dict[str, str] = {
     "httpx": "-H",
     "nuclei": "-H",
@@ -1225,7 +1238,11 @@ _HTTP_HEADER_SCANNER_FLAGS: dict[str, str] = {
 def _trusted_scanner_header_args(
     name: str, trusted_headers: Mapping[str, Any] | None,
 ) -> list[str]:
-    """Render worker-resolved headers for fixed HTTP adapters, never planner options."""
+    """Render worker-resolved headers for fixed HTTP adapters, never planner options.
+
+    A value carrying the tool's own injection marker is refused. sqlmap is also told to skip the
+    session's cookies (``--skip``): from ``--level 2`` it tests every cookie as a parameter, and a
+    signed-in run must not inject into the session it runs as."""
     if not trusted_headers:
         return []
     if not isinstance(trusted_headers, Mapping):
@@ -1247,12 +1264,24 @@ def _trusted_scanner_header_args(
                    for character in header_value)
         ):
             raise AgentToolError("trusted scanner headers are invalid")
+        if any(marker in header_name or marker in header_value
+               for marker in SCANNER_HEADER_MARKERS.get(name, ())):
+            raise AgentToolError(
+                f"{name} cannot run with this identity: a header value carries the tool's own "
+                "injection marker")
         normalized_names.add(normalized_name)
         rendered.append((header_name, header_value))
     rendered.sort(key=lambda item: item[0].lower())
     lines = [f"{header_name}: {header_value}" for header_name, header_value in rendered]
     if name == "sqlmap":
-        return ["--headers", "\n".join(lines)]
+        cookies = sorted({
+            part.split("=", 1)[0].strip()
+            for header_name, header_value in rendered if header_name.lower() == "cookie"
+            for part in header_value.split(";") if "=" in part and part.split("=", 1)[0].strip()
+        })
+        if any(not _COOKIE_NAME_TOKEN.fullmatch(cookie) for cookie in cookies):
+            raise AgentToolError("sqlmap cannot run with this identity: a cookie name is invalid")
+        return ["--headers", "\n".join(lines), *(["--skip", ",".join(cookies)] if cookies else [])]
     flag = _HTTP_HEADER_SCANNER_FLAGS.get(name)
     if not flag:
         raise AgentToolError(f"{name} does not accept HTTP credential headers")

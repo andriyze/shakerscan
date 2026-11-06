@@ -21,6 +21,7 @@ const USAGE_KEY = {
   max_capability_calls: 'agent_actions',
   max_http_requests: 'http_requests',
   max_state_changing_requests: 'state_changing_requests',
+  max_verifier_write_requests: 'verifier_write_requests',
   max_active_actions: 'active_actions',
   max_browser_actions: 'browser_actions',
   max_candidates: 'candidates',
@@ -57,6 +58,12 @@ export function budgetUsage(hunt, labels = {}, nowMs = Date.now()) {
     rows.push({ name, label, used: value, limit, ratio: Math.min(1, value / limit) })
   }
   rows.sort((a, b) => b.ratio - a.ratio || a.label.localeCompare(b.label))
+  // Verifier writes are shown beside the state-changing ceiling: both bound writes to the target.
+  const verifier = rows.findIndex(row => row.name === 'max_verifier_write_requests')
+  if (verifier >= 0 && rows.some(row => row.name === 'max_state_changing_requests')) {
+    const [row] = rows.splice(verifier, 1)
+    rows.splice(rows.findIndex(item => item.name === 'max_state_changing_requests') + 1, 0, row)
+  }
   return { rows, disabled: disabled.sort() }
 }
 

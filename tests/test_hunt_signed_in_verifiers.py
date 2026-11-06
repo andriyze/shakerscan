@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 import uuid
 
 import pytest
@@ -220,7 +221,7 @@ class _ErrorOnQuote:
         )
 
 
-def _prove(monkeypatch, observations, *, actual, reserved=None):
+def _prove(monkeypatch, observations, *, actual, reserved=None, deadline=None, cancelled=lambda: False):
     archived = []
 
     async def archive(_conn, collected, *_args):
@@ -240,14 +241,16 @@ def _prove(monkeypatch, observations, *, actual, reserved=None):
     async def beat():
         return None
 
-    proofs, used = asyncio.run(scanner_sqli_proof.prove_hunt_sqli_signal(
+    phase = asyncio.run(scanner_sqli_proof.prove_hunt_sqli_signal(
         pool=Pool(), results_dir="/tmp", run={"id": str(uuid.uuid4()), "target_id": str(uuid.uuid4())},
         action_id=uuid.uuid4(), target=_target(), execution_target=f"{ORIGIN}/item?id=1",
         values={"path": "/item?id=1", "as_principal": "primary"}, observations=observations,
         reserved=reserved or {"http_requests": 1_800, "tool_wall_seconds": 1_200}, actual=actual,
-        headers={"Cookie": "sid=fixture"}, principal_slot="primary", heartbeat=beat, cancelled=lambda: False,
+        headers={"Cookie": "sid=fixture"}, principal_slot="primary", heartbeat=beat, cancelled=cancelled,
+        deadline=time.monotonic() + 600 if deadline is None else deadline,
     ))
-    return proofs, used, archived
+    _prove.phase = phase
+    return list(phase.observations), dict(phase.used), archived
 
 
 def test_a_sqlmap_signal_is_proved_signed_in_inside_the_actions_own_hold(monkeypatch):
@@ -259,6 +262,7 @@ def test_a_sqlmap_signal_is_proved_signed_in_inside_the_actions_own_hold(monkeyp
         "sqli_proof", "verified", "sqli_error_differential/v2")
     assert proof["field_path"] == "id" and proof["repetitions"] == 2
     assert used["http_requests"] == 4 and "state_changing_requests" not in used
+    assert "verifier_write_requests" not in used  # a query proof writes nothing
     assert all(("Cookie", "sid=fixture") in request.headers for request in _ErrorOnQuote.sent)
     assert len(archived) == 4 and {call.principal_slot for call in archived} == {"primary"}
 
@@ -331,7 +335,7 @@ def test_a_retest_does_not_judge_a_finding_proved_signed_in():
     assert not candidate_evidence_was_signed_in({"finding_id": "f", "evidence": {"param": "id"}})
 
 
-def test_a_hunt_body_verifier_is_not_charged_to_the_state_changing_ceiling():
+def test_a_hunt_body_verifier_is_held_in_its_own_verifier_write_ceiling():
     from api.capabilities.scanner import ScannerExecutionAdapter
 
     spec = CAPABILITY_REGISTRY.require("sqli.verify")
@@ -340,10 +344,41 @@ def test_a_hunt_body_verifier_is_not_charged_to_the_state_changing_ceiling():
         requested_budget={"http_requests": 1_800, "tool_wall_seconds": 1_200},
         process_payload={"scanner_options": LOGIN_BODY},
     )
-    # A Scan body attempt reserves its mutations; the guard stays for every other caller.
+    # Every possibly mutating request is held: a Scan's in its state-changing ceiling, a Hunt
+    # verifier's in the verifier-write ceiling. Holding neither is refused either way.
     with pytest.raises(ValueError, match="state-changing reservation"):
         ScannerExecutionAdapter(**arguments)
-    ScannerExecutionAdapter(**arguments, mutations_in_request_hold=True)
+    with pytest.raises(ValueError, match="state-changing reservation"):
+        ScannerExecutionAdapter(**arguments, mutation_dimension="verifier_write_requests")
+    with pytest.raises(ValueError, match="mutation dimension"):
+        ScannerExecutionAdapter(**arguments, mutation_dimension="http_requests")
+    held = {**arguments, "requested_budget": {**arguments["requested_budget"], "verifier_write_requests": 1_800}}
+    ScannerExecutionAdapter(**held, mutation_dimension="verifier_write_requests")
+
+
+def test_a_body_test_holds_its_requests_as_verifier_writes_and_a_query_test_does_not():
+    run = {"budget_profile": "balanced", "device_target_id": None}
+    body = agent_tools.hunt_scanner_dispatch_budgets(
+        "sqli.verify", **agent_tools.hunt_scanner_budget_context(run, LOGIN_BODY))
+    query = agent_tools.hunt_scanner_dispatch_budgets(
+        "sqli.verify", **agent_tools.hunt_scanner_budget_context(run, {"path": "/item?id=1"}))
+    assert body[0]["verifier_write_requests"] == body[0]["http_requests"] == 1_800
+    assert all("verifier_write_requests" not in hold for hold in query)
+    assert "state_changing_requests" not in body[0]
+
+
+def test_every_profile_funds_one_body_test_hold_per_planner_write_and_mutation_off_zeroes_it():
+    from api.hunt.start_contract import (
+        HUNT_BUDGET_PROFILES, VERIFIER_WRITE_HOLD, hunt_start_public_contract,
+    )
+
+    for profile in HUNT_BUDGET_PROFILES.values():
+        assert profile.max_verifier_write_requests == profile.max_state_changing_requests * VERIFIER_WRITE_HOLD
+        assert profile.ledger_limits()["verifier_write_requests"] == profile.max_verifier_write_requests
+    contract = hunt_start_public_contract()
+    assert "max_verifier_write_requests" in contract["policy_derived_zeros"]["mutation_disabled"]
+    labels = {item["name"]: item["label"] for item in contract["budget_dimensions"]}
+    assert labels["max_verifier_write_requests"] == "Maximum verifier write requests"
 
 
 def test_the_worker_releases_a_call_whose_body_permission_or_session_route_went_away():
@@ -399,7 +434,7 @@ def test_only_a_long_session_cookie_capture_of_this_hunt_is_sent(monkeypatch):
 
     captured = {}
 
-    async def capture(_conn, *, run_id, target, binding):
+    async def capture(_conn, *, run_id, target, binding, destination=None):
         return captured["value"]
 
     import runtime.hunt_http_exchange as worker_layout  # the import path the worker resolves

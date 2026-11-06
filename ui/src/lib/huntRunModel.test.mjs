@@ -28,6 +28,17 @@ test('budget use pairs each limit with its own counter and lists zero limits as 
   assert.equal(rows[0].name, 'max_capability_calls')
 })
 
+test('verifier writes show their own use beside the state-changing ceiling', () => {
+  const { rows } = budgetUsage({
+    budget: { max_http_requests: 1843200, max_state_changing_requests: 20, max_verifier_write_requests: 36000, max_capability_calls: 100, max_candidates: 100 },
+    budget_used: { http_requests: 900, state_changing_requests: 1, verifier_write_requests: 432, agent_actions: 90, candidates: 3 },
+  })
+  const names = rows.map(row => row.name)
+  assert.equal(names[names.indexOf('max_state_changing_requests') + 1], 'max_verifier_write_requests')
+  assert.equal(rows.find(row => row.name === 'max_verifier_write_requests').used, 432)
+  assert.equal(rows.find(row => row.name === 'max_state_changing_requests').used, 1)
+})
+
 test('only operator decisions are pending: proposed SSH plans and an unfinished exhausted budget', () => {
   assert.deepEqual(pendingDecisions({ status: 'completed' }, [{ plan_id: 'p1', status: 'queued' }]), [])
   assert.deepEqual(pendingDecisions({ status: 'budget_exhausted', stop_reason: 'budget_exhausted:tcp_ports_attempted' }, [{ plan_id: 'p2', status: 'proposed' }]), [

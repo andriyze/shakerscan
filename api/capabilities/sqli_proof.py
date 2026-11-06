@@ -31,6 +31,7 @@ try:
     )
     from runtime.capability_registry import CapabilitySpec
     from runtime.models import TargetBinding
+    from runtime.public_secrecy import PublicSecrecy
     from runtime.request_replay_executor import ReplayTransport, ReplayTransportResult
 except ModuleNotFoundError:
     from .authentication_proof import successful_token_signals
@@ -46,6 +47,7 @@ except ModuleNotFoundError:
     )
     from ..runtime.capability_registry import CapabilitySpec
     from ..runtime.models import TargetBinding
+    from ..runtime.public_secrecy import PublicSecrecy
     from ..runtime.request_replay_executor import ReplayTransport, ReplayTransportResult
 
 try:
@@ -86,13 +88,19 @@ def _signatures(result: ReplayTransportResult) -> tuple[str, ...]:
     return tuple(pattern.pattern for pattern in _SQL_ERROR_PATTERNS if pattern.search(text))
 
 
-def _excerpt(result: ReplayTransportResult) -> str | None:
+def _excerpt(result: ReplayTransportResult, secrecy: PublicSecrecy | None = None) -> str | None:
+    """A short window of the response around the database error, with every value the request
+    sent (its cookies, its credential) and every labelled secret withheld. An error page may echo
+    the request's headers (``Cookie: lang=en; sid=...``, an ``HTTP_COOKIE`` table row): the
+    window is masked line by line before it is shortened, so a cut never splits a value."""
     text = result.response_body[:2_000_000].decode("utf-8", errors="replace")
     match = next((pattern.search(text) for pattern in _SQL_ERROR_PATTERNS if pattern.search(text)), None)
     if match is None:
         return None
     start = max(0, match.start() - 80)
-    sample = " ".join(text[start:match.end() + 160].split())[:400]
+    window = (secrecy or PublicSecrecy()).text(text[start:match.end() + 160])
+    lines = (" ".join(line.split()) for line in window.splitlines())
+    sample = "\n".join(line for line in lines if line)[:400]
     return _SECRET_RE.sub(lambda item: f"{item.group(1)}=[REDACTED]", sample)
 
 
@@ -191,6 +199,7 @@ class SQLiProofAdapter:
         self, *, specification: CapabilitySpec, target: TargetBinding,
         request: ReplayRequest, candidate: Mapping[str, Any],
         transport: ReplayTransport, requested_budget: Mapping[str, int],
+        deadline: float | None = None,
     ) -> None:
         if specification.name != "sqli.prove_batch":
             raise SQLiProofError("SQLi proof capability is invalid")
@@ -221,6 +230,9 @@ class SQLiProofAdapter:
         self.transport = transport
         self.requested_budget = {str(k): int(v) for k, v in requested_budget.items()}
         self.field = field
+        # An absolute ``time.monotonic()`` deadline shared with the phase before this one (a Hunt
+        # action's scanner): no request starts after it, and none outlives it.
+        self.deadline = deadline
 
     async def execute(self, *, heartbeat: Heartbeat, cancelled: Cancelled) -> CapabilityAdapterResult:
         started = time.monotonic()
@@ -241,12 +253,17 @@ class SQLiProofAdapter:
                 raise SQLiProofError("budget_exhausted")
             remaining = max(1, budget - attempted)
             wall = max(1, int(self.requested_budget.get("tool_wall_seconds") or 1))
-            result = await self.transport.send(
-                request, target=self.target,
-                timeout_seconds=max(0.5, min(15.0, wall / remaining)),
-                follow_redirects=False,
-            )
+            timeout = max(0.5, min(15.0, wall / remaining))
+            if self.deadline is not None:
+                left = self.deadline - time.monotonic()
+                if left < 0.5:
+                    raise SQLiProofError("deadline")
+                timeout = min(timeout, left)
+            # Counted before it is sent: a request cut off in flight still reached the target.
             attempted += 1
+            result = await self.transport.send(
+                request, target=self.target, timeout_seconds=timeout, follow_redirects=False,
+            )
             results.append(result)
             await heartbeat()
             return result
@@ -356,16 +373,19 @@ class SQLiProofAdapter:
                         technique = "time_median_repeated"
                         proof_pairs = timing_pairs
         except SQLiProofError as exc:
-            status = "cancelled" if str(exc) == "cancelled" else "blocked"
+            reason = str(exc)
+            timed_out = reason == "deadline"
+            status = "cancelled" if reason == "cancelled" else "partial" if timed_out else "blocked"
             return CapabilityAdapterResult(
-                status=status, errors=(str(exc),), execution_started=bool(attempted),
+                status=status, errors=(reason,), execution_started=bool(attempted),
+                timed_out=timed_out,
                 actual_budget={
                     "http_requests": attempted,
                     **({"state_changing_requests": attempted}
                        if self.request.method not in {"GET", "HEAD", "OPTIONS"} else {}),
                     "tool_wall_seconds": max(1, math.ceil(time.monotonic() - started)),
                 },
-                partial=bool(attempted), parser_version=SQLI_PROOF_PARSER_VERSION,
+                partial=bool(attempted) or timed_out, parser_version=SQLI_PROOF_PARSER_VERSION,
             )
 
         verified = proof_contract is not None
@@ -408,7 +428,7 @@ class SQLiProofAdapter:
             "repetitions": 2,
             "response_pairs": hashes,
             "database_error_signatures": sorted(repeated_error) if 'repeated_error' in locals() else [],
-            "redacted_excerpt": _excerpt(proof_pairs[0][1]) if verified and technique == "error_based_repeated" else None,
+            "redacted_excerpt": _excerpt(proof_pairs[0][1], PublicSecrecy.for_headers(dict(self.request.headers))) if verified and technique == "error_based_repeated" else None,
             # What was sent, value-free: the target's own value stays ``<original>``.
             **({"payload_shape": _PAYLOAD_SHAPES.get(technique)} if verified and technique in _PAYLOAD_SHAPES
                and not (technique == "time_median_repeated" and self.candidate.get("time_payload")) else {}),
