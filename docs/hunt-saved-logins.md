@@ -21,9 +21,10 @@ login URL is the profile's endpoint (scheme, host, port and path).
   its login URL cannot be read under the Hunt's authorization. The MCP start tool drops the field:
   an agent never attaches a login itself.
 - **Later:** the model binds an available saved login; the first call raises a `login.use`
-  permission request (`shakerscan approve <id>`). A person's launch bound
-  `login.use:<profile-id>` (`shakerscan agent --allow login.use:<id>`) grants that first request as
-  it arises. When every allowed login was used, the next one is a new request that only a person
+  permission request (`shakerscan approve <id>`).
+- **By a launch bound:** `login.use:<profile-id>` in the person's start bounds
+  (`shakerscan agent --allow login.use:<id>`) attaches that saved login when each Hunt starts, with
+  the default login count, and grants the first request of a Hunt that asks for it later. When every allowed login was used, the next one is a new request that only a person
   decides; no bound covers it.
 - **Revoking** a `login.use` grant stops the next login at admission and in the worker; the start
   bound no longer answers for it.
