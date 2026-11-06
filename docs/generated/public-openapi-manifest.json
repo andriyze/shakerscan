@@ -229,7 +229,7 @@
     "ValidationRequest": "cb81c65a5c80da74a19c6bd92e9c6a68f5cdb22fafeb94270481d463450f893e",
     "WorkerScaleRequest": "52e7ac017dfa1d92efa8e4071026b9bf24c0cf2a17f5d9e742349df3f08f6c62"
   },
-  "contract_sha256": "1efa0d337ea9c4cfd5c120ec5b259193e33a28a5fe0cb6418e228827cce48b41",
+  "contract_sha256": "abe4fbaeadffd7bdbe5caae47276abb9e0a628387c1e5fdd98c738e7c9df160b",
   "openapi": "3.1.0",
   "operation_count": 498,
   "operations": {
@@ -5056,7 +5056,7 @@
       "deprecated": false,
       "operation_id": "start_hunt_hunts_post",
       "parameters_sha256": "ddaf7d03a5e33d1d0116950a13b7b4a7fd3db89282553bec193c97867ef72115",
-      "request_schema_sha256": "3927f2f8eb2fbbb6645868b64ca7d65e9b616380764cbfcb7fe1bfe21ca02796",
+      "request_schema_sha256": "89ec364b91144d6897bf09d05b7ac2e19c7e6b6832431d5fe20d9ce496f2ada2",
       "response_schema_sha256": {
         "200": "87f160d6eeb2c1bfa78deaf517c99df762cf0fc7ce99a07a44df48383dcf9421"
       },
