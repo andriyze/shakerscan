@@ -90,9 +90,9 @@ def test_the_pages_open_with_css_past_the_old_sample():
 
 # --- capture -------------------------------------------------------------------------------------
 
-def _private(response_cookies, status=303, headers=None):
+def _private(response_cookies, status=303, headers=None, final_url="http://app.test:8000/hub/login"):
     return SimpleNamespace(status_code=status, headers=lambda: dict(headers or {}), body=lambda: b"",
-                           cookies=lambda: dict(response_cookies))
+                           cookies=lambda: dict(response_cookies), final_url=final_url)
 
 
 def test_a_redirect_login_cookie_is_captured_as_name_value_pairs():
@@ -242,8 +242,9 @@ def test_a_hunt_logs_in_and_reads_signed_in_pages_without_seeing_the_cookie():
             conn = Connection(f"http://fixture.test:{server.sockets[0].getsockname()[1]}")
             login, _ = await execute(conn, LOGIN, "hub-login")
             assert login["status"] == "success", login
+            # The capture is shown as the binding that sends the session back.
             assert login["captures"] == [{"source_action_id": login["captures"][0]["source_action_id"],
-                                          "capture_name": "session"}]
+                                          "capture_name": "session", "header": "Cookie"}]
             answer = login["typed_output"]["records"][0]["response"]
             assert answer["status"] == 303 and "captures_missing" not in answer
             # The login's answer: its status and the cookies' names and attributes, never values.
@@ -366,7 +367,7 @@ def test_artifact_inspect_reads_a_signed_in_page_with_a_captured_cookie(monkeypa
         target = replace(TARGET, canonical_host="127.0.0.1", allowed_origins=(base,),
                          allowed_addresses=("127.0.0.1",), allowed_root_domains=("127.0.0.1",))
         state = HttpWorkflowExchange(HUNT, ACTION, target, ({"name": "session", "header": "Set-Cookie"},))
-        state.capture_response(_private({"hub_session": SESSION}))
+        state.capture_response(_private({"hub_session": SESSION}, final_url=f"{base}/hub/login"))
 
         class Pool:
             def acquire(self):
@@ -514,7 +515,8 @@ def test_artifact_inspect_sends_only_a_long_session_cookie(capture, cookies, hea
     from hunt.artifact_identity import resolve_artifact_identity
     state = HttpWorkflowExchange(HUNT, ACTION, TARGET, (capture,))
     response = SimpleNamespace(status_code=200, headers=lambda: dict(headers),
-                               body=lambda: b'{"token":"4821"}', cookies=lambda: dict(cookies))
+                               body=lambda: b'{"token":"4821"}', cookies=lambda: dict(cookies),
+                               final_url="http://app.test:8000/hub/login")
     state.capture_response(response)
     assert state.encrypted_result
 

@@ -33,6 +33,7 @@ from ._vendored import helper, load
 UUID = re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
 LIMIT_LABELS = {  # every limit the engine takes, safety ceilings first
     "max_state_changing_requests": "state-changing requests",
+    "max_verifier_write_requests": "verifier write requests",
     "max_oob_interactions": "out-of-band interactions",
     "max_tcp_ports": "TCP ports",
     "max_udp_ports": "UDP ports",
@@ -48,8 +49,8 @@ LIMIT_LABELS = {  # every limit the engine takes, safety ceilings first
 }
 # Limits that bound what a Hunt may do to a target or send off it, not how long it works.
 SAFETY_CEILINGS = frozenset({
-    "max_state_changing_requests", "max_oob_interactions", "max_tcp_ports", "max_udp_ports",
-    "max_hosts", "max_device_fragility_points",
+    "max_state_changing_requests", "max_verifier_write_requests", "max_oob_interactions",
+    "max_tcp_ports", "max_udp_ports", "max_hosts", "max_device_fragility_points",
 })
 TARGET_PAGE = 500
 MAX_TARGET_PAGES = 10

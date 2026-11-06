@@ -12,6 +12,10 @@ request already holds (no further request) and returns what a person sees and ca
 - ``text_sample``: the visible text with ``<style>``, ``<script>`` and similar removed.
 
 Pure: the caller supplies the masking, so the outline shows nothing the body sample would not.
+The caller feeds it the page as the body sample's masking left it, so a value withheld there in its
+context (a ``<textarea name=password>``, an element ``id="api_key"``, a password column) is already
+withheld when tags are stripped; every derived string (a field's name, type and value, the form's
+method, a link) is masked again, then shortened, never shortened or re-cased first.
 """
 from __future__ import annotations
 
@@ -38,6 +42,21 @@ _BLOCK_TAGS = frozenset({
 _LINK_ATTRIBUTES = {"a": "href", "area": "href", "iframe": "src", "frame": "src", "script": "src"}
 _FIELD_TAGS = frozenset({"input", "select", "textarea", "button"})
 _NOT_NAVIGABLE = re.compile(r"^\s*(?:javascript|mailto|tel|data|about|blob):", re.IGNORECASE)
+_METHODS = frozenset({"GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS", "DIALOG"})
+_FIELD_TYPES = frozenset({
+    "button", "checkbox", "color", "date", "datetime-local", "email", "file", "hidden", "image",
+    "month", "number", "password", "radio", "range", "reset", "search", "submit", "tel", "text",
+    "time", "url", "week", "select", "textarea",
+})
+MAX_NAME_CHARS = 100
+# What the planner can do with a sign-in form (fixed text, never page content).
+SIGN_IN_HINT = (
+    "A sign-in form. To test signed in: send its POST with http.request (form_body with these "
+    "fields; it needs state-changing permission) and \"capture\": [{\"name\": \"session\", "
+    "\"header\": \"Set-Cookie\"}]; the answer's captures entry is the request_bindings item that "
+    "sends the session on later http.request, artifact.inspect and scanner calls to the same origin. "
+    "With a selected web credential, auth.session.establish signs in instead (then as_principal)."
+)
 
 
 def looks_like_html(content_type: str, text: str) -> bool:
@@ -61,7 +80,11 @@ class _Outline(HTMLParser):
         self._form: dict[str, Any] | None = None
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
-        values = {name.lower(): (value or "") for name, value in attrs}
+        # A browser reads the first of a repeated attribute (``type=password type=hidden`` is a
+        # password field), so the outline does too.
+        values: dict[str, str] = {}
+        for name, value in attrs:
+            values.setdefault(name.lower(), value or "")
         if tag == "title":
             self._in_title = True
         if tag in _HIDDEN_TEXT_TAGS:
@@ -72,15 +95,16 @@ class _Outline(HTMLParser):
         if attribute and values.get(attribute):
             self.links.append(values[attribute])
         if tag == "form":
-            self._form = {"method": (values.get("method") or "GET").upper()[:10],
+            # Kept as written: shortened and re-cased only after masking (``html_outline``).
+            self._form = {"method": values.get("method") or "GET",
                           "action": values.get("action", ""), "fields": []}
             self.forms.append(self._form)
             if values.get("action"):
                 self.links.append(values["action"])
         elif tag in _FIELD_TAGS and self._form is not None and values.get("name"):
-            kind = (values.get("type") or ("text" if tag == "input" else tag)).lower()[:20]
-            field: dict[str, Any] = {"name": values["name"][:100], "type": kind}
-            if kind == "hidden":
+            kind = values.get("type") or ("text" if tag == "input" else tag)
+            field: dict[str, Any] = {"name": values["name"], "type": kind}
+            if kind.strip().lower() == "hidden":
                 field["value"] = values.get("value", "")
             self._form["fields"].append(field)
 
@@ -162,17 +186,26 @@ def html_outline(
         seen.add(link[1])
         (same if link[0] else other).append(link[1])
     ordered = same + other
+
+    def word(value: str, known: frozenset[str], limit: int, case: Callable[[str], str]) -> str:
+        """A method or a type: a known word in its usual case; anything else masked, then cut."""
+        folded = case(value.strip())
+        return folded if folded in known else bound_text(mask_text(value), limit)
+
     forms = []
     for form in parser.forms[:MAX_FORMS]:
         action = _link(form["action"], base_url) if form["action"] else None
         fields = []
         for field in form["fields"][:MAX_FORM_FIELDS]:
-            shown = {"name": field["name"], "type": field["type"]}
+            shown = {"name": bound_text(mask_text(field["name"]), MAX_NAME_CHARS),
+                     "type": word(field["type"], _FIELD_TYPES, 20, str.lower)}
             if "value" in field and field["value"]:
                 shown["value"] = mask_field_value(field["name"], field["value"])
             fields.append(shown)
+        sign_in = any(field["type"] == "password" for field in fields)
         forms.append({
-            "method": form["method"],
+            **({"sign_in": True} if sign_in else {}),
+            "method": word(form["method"], _METHODS, 10, str.upper),
             # A form without an action posts to the page itself.
             "action": mask_url(action[1], MAX_LINK_CHARS) if action else None,
             "fields": fields,
@@ -189,6 +222,8 @@ def html_outline(
     }
     if len(parser.forms) > MAX_FORMS:
         outline["forms_total"] = len(parser.forms)
+    if any(form.get("sign_in") for form in forms):
+        outline["sign_in_hint"] = SIGN_IN_HINT
     return outline
 
 

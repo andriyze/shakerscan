@@ -73,7 +73,7 @@ class ScannerExecutionAdapter:
         requested_budget: Mapping[str, int],
         redacted_execution: Mapping[str, Any],
         archive_capability_name: str | None = None,
-        mutations_in_request_hold: bool = False,
+        mutation_dimension: str = "state_changing_requests",
     ) -> None:
         self.capability_name = specification.name
         # The Scan action this run belongs to (a batch runs its legacy capability per
@@ -106,11 +106,14 @@ class ScannerExecutionAdapter:
             scanner_options.get("nuclei_active_state_changing")
         )
         self._state_changing = self._body_state_changing or self._nuclei_state_changing
-        # A Hunt verifier's body requests are verifier traffic under the Hunt's active-testing and
-        # state-changing grant: they are counted in the action's own request hold, and the Hunt's
-        # state-changing ceiling (the planner's own writes) is not reserved for them.
-        if self._state_changing and not mutations_in_request_hold and int(
-            self._requested_budget.get("state_changing_requests") or 0
+        # The ledger dimension every possibly mutating request is held and settled in: a Scan's
+        # state-changing ceiling, or a Hunt verifier's own verifier-write ceiling (the Hunt's
+        # state-changing ceiling bounds the planner's own writes).
+        if mutation_dimension not in {"state_changing_requests", "verifier_write_requests"}:
+            raise ValueError("scanner mutation dimension is invalid")
+        self._mutation_dimension = mutation_dimension
+        if self._state_changing and int(
+            self._requested_budget.get(mutation_dimension) or 0
         ) < int(self._requested_budget.get("http_requests") or 0):
             raise ValueError(
                 "state-changing scanner requires a conservative state-changing reservation"
@@ -264,12 +267,11 @@ class ScannerExecutionAdapter:
                         observed_minimum=int(settlement.get("observed_minimum") or 0),
                         elapsed_seconds=int(process_result.get("elapsed_seconds") or 0),
                     )
-            if "state_changing_requests" in self._requested_budget:
-                reserved_state_changing = int(
-                    self._requested_budget["state_changing_requests"]
-                )
+            mutation = self._mutation_dimension
+            if mutation in self._requested_budget:
+                reserved_state_changing = int(self._requested_budget[mutation])
                 if not (self._state_changing and execution_started):
-                    actual["state_changing_requests"] = 0
+                    actual[mutation] = 0
                 else:
                     # Settle the mutation dimension to the HTTP requests charged, never
                     # the whole hold. Both a body attempt and an active state-changing
@@ -279,7 +281,7 @@ class ScannerExecutionAdapter:
                     # not. Charging the hold regardless reported 240 of 240 mutations
                     # for a dalfox body attempt that sent six requests, and the batch's
                     # next body candidate went unfunded (insufficient_plan_budget).
-                    actual["state_changing_requests"] = min(
+                    actual[mutation] = min(
                         reserved_state_changing,
                         int(actual.get("http_requests", reserved_state_changing)),
                     )

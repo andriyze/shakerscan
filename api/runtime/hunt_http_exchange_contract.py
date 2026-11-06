@@ -178,5 +178,9 @@ def public_capture_references(values: Any, *, source_action_id: Any) -> list[dic
             if (isinstance(item, Mapping) and item.get("source_action_id") == source
                     and isinstance(item.get("capture_name"), str)
                     and re.fullmatch(_NAME, item["capture_name"])):
-                result.append({"source_action_id": source, "capture_name": item["capture_name"]})
+                reference = {"source_action_id": source, "capture_name": item["capture_name"]}
+                if item.get("header") == "Cookie":
+                    # A session cookie capture is shown as the binding a later call sends it with.
+                    reference["header"] = "Cookie"
+                result.append(reference)
     return result

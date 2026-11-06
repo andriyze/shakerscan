@@ -16,13 +16,13 @@ try:
     from runtime.archive_body_masking import (
         CUT_LOOKAHEAD_CHARS, URL_BEARING_HEADERS, active_withheld_values, bounded_masked_text,
         bounded_public_url, decode_cut, is_withheld_key, mask_before_cut, mask_body_text,
-        mask_selected_string, mask_selected_value, mask_url_userinfo, withhold_url_userinfo,
+        mask_known_values, mask_selected_string, mask_selected_value, mask_url_userinfo, withhold_url_userinfo,
     )
 except ModuleNotFoundError:  # package import layout
     from api.runtime.archive_body_masking import (
         CUT_LOOKAHEAD_CHARS, URL_BEARING_HEADERS, active_withheld_values, bounded_masked_text,
         bounded_public_url, decode_cut, is_withheld_key, mask_before_cut, mask_body_text,
-        mask_selected_string, mask_selected_value, mask_url_userinfo, withhold_url_userinfo,
+        mask_known_values, mask_selected_string, mask_selected_value, mask_url_userinfo, withhold_url_userinfo,
     )
 
 try:
@@ -576,10 +576,15 @@ def response_summary(
         "selected_headers": selected_response_headers,
     }
     if in_hunt and partial is None and looks_like_html(summary["content_type"], text):
-        # The page as the planner needs it: a sample cut from byte 0 is often all CSS.
+        # The page as the planner needs it: a sample cut from byte 0 is often all CSS. Built from
+        # the page as the body sample's masking left it (``masked_text``): a value withheld there
+        # by its context (a password field, an ``id="api_key"`` element, a password column) loses
+        # that context when tags are stripped, so it must already be withheld. No derived view
+        # shows what the body sample withholds.
         outline = html_outline(
-            text, _response_url(response),
-            mask_text=_masked_body, bound_text=bounded_masked_text, mask_url=bounded_public_url,
+            masked_text, _response_url(response),
+            mask_text=_masked_body, bound_text=bounded_masked_text,
+            mask_url=lambda value, limit: bounded_public_url(mask_known_values(value), limit),
             mask_field_value=_masked_field_value,
         )
         if outline:

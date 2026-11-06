@@ -14,8 +14,9 @@ Two additions to the planner projection of the worker scanners:
   ``injection_field`` the claim is about. The body is sent with every field set to an inert
   placeholder and the tool's own payloads go into the fields, exactly as for a Scan body
   candidate. A body test sends POST/PUT/PATCH requests, so it needs the Hunt's state-changing
-  permission; its requests are counted in the verifier's own hold, not in the Hunt's
-  state-changing ceiling, which bounds the planner's own writes.
+  permission; its requests are verifier writes, held and settled in the Hunt's verifier-write
+  ceiling (``max_verifier_write_requests``), shown beside the state-changing ceiling, which bounds
+  the planner's own writes.
 """
 
 from __future__ import annotations
@@ -29,6 +30,22 @@ SIGNED_IN_SCANNERS = frozenset({
     "web.crawl", "web.content_discover", "templates.scan", "xss.verify", "sqli.verify",
 })
 BODY_INPUT_VERIFIERS = frozenset({"xss.verify", "sqli.verify"})
+# Text a scanner reads as its own injection point or template wherever it appears, a header
+# value included (by process tool). A signed-in identity's value may be the target's choice (a
+# cookie its login set): one carrying a marker would make the tool fuzz or inject inside the
+# session itself, so it is refused.
+SCANNER_HEADER_MARKERS: Mapping[str, tuple[str, ...]] = MappingProxyType({
+    "ffuf": ("FUZZ",),
+    "sqlmap": ("*",),
+    "nuclei": ("{{", "\u00a7"),
+})
+
+
+def header_marker_refusal(tool: str, value: str) -> str | None:
+    """Why ``tool`` cannot send ``value`` in a header, or None."""
+    if any(marker in str(value) for marker in SCANNER_HEADER_MARKERS.get(str(tool), ())):
+        return f"the value carries {tool}'s own injection marker, which the tool would test inside the session"
+    return None
 
 _SESSION_REF_PATTERN = "^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
 HUNT_SCANNER_SESSION_PROPERTIES: Mapping[str, Any] = MappingProxyType({

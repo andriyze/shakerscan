@@ -39,6 +39,7 @@ EXECUTED_ACTION_STATUSES = frozenset({"completed", "partial"})
 EXECUTED_TRAFFIC_DIMENSIONS = frozenset({
     "http_requests",
     "state_changing_requests",
+    "verifier_write_requests",
     "browser_actions",
     "tcp_ports_attempted",
     "udp_ports_attempted",

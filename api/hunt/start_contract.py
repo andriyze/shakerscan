@@ -64,6 +64,7 @@ _ALLOWED_BUDGET_KEYS = frozenset({
     "max_tcp_ports",
     "max_browser_actions",
     "max_state_changing_requests",
+    "max_verifier_write_requests",
     "max_device_fragility_points",
     "max_hosts",
     "max_udp_ports",
@@ -107,6 +108,8 @@ class HuntBudget:
     max_hosts: int
     max_udp_ports: int
     max_oob_interactions: int
+    # Written after the fields every stored budget has: a Hunt started before it reads zero.
+    max_verifier_write_requests: int = 0
 
     def ledger_limits(self) -> dict[str, int]:
         return {
@@ -116,6 +119,7 @@ class HuntBudget:
             "tcp_ports_attempted": self.max_tcp_ports,
             "browser_actions": self.max_browser_actions,
             "state_changing_requests": self.max_state_changing_requests,
+            "verifier_write_requests": self.max_verifier_write_requests,
             "tool_wall_seconds": self.max_duration_seconds,
             "device_fragility_points": self.max_device_fragility_points,
             "hosts_attempted": self.max_hosts,
@@ -133,24 +137,37 @@ class HuntBudget:
 # receipt. Records cost no traffic and no wall and get one per call. The safety ceilings (TCP
 # ports, state-changing requests, device fragility, hosts, UDP ports, out-of-band interactions)
 # are not paced and keep their values.
+#
+# Verifier writes are the POST/PUT/PATCH requests a verifier (sqli.verify, xss.verify) sends to
+# test a request body, and its proof's: a ceiling of their own beside the state-changing ceiling,
+# which bounds the planner's own writes. Admission reserves a body test's whole request hold here
+# (1,800, HUNT_THOROUGH_SCANNER_HOLDS) and the action settles its measured requests. Measured: a
+# body test sends 103-286 requests over two fields with sqlmap and up to about 1,300 per field with
+# Dalfox. Each profile funds one body-test hold per planner write it allows (4/20/80 x 1,800):
+# twice the two long actions a Hunt runs at once on fast, and every measured body test settles
+# well under its hold, so the ceiling is never the first limit a planned test meets.
+VERIFIER_WRITE_HOLD = 1_800
 HUNT_BUDGET_PROFILES: Mapping[str, HuntBudget] = {
     "fast": HuntBudget(
         max_duration_seconds=3_600, max_capability_calls=3_600, max_http_requests=460_800,
         max_active_actions=3_600, max_candidates=3_600, max_verifications=3_600, max_tcp_ports=100,
         max_browser_actions=115_200, max_state_changing_requests=4, max_device_fragility_points=20,
         max_hosts=50, max_udp_ports=100, max_oob_interactions=10,
+        max_verifier_write_requests=4 * VERIFIER_WRITE_HOLD,
     ),
     "balanced": HuntBudget(
         max_duration_seconds=14_400, max_capability_calls=14_400, max_http_requests=1_843_200,
         max_active_actions=14_400, max_candidates=14_400, max_verifications=14_400, max_tcp_ports=1_200,
         max_browser_actions=460_800, max_state_changing_requests=20, max_device_fragility_points=100,
         max_hosts=500, max_udp_ports=1_000, max_oob_interactions=50,
+        max_verifier_write_requests=20 * VERIFIER_WRITE_HOLD,
     ),
     "thorough": HuntBudget(
         max_duration_seconds=86_400, max_capability_calls=86_400, max_http_requests=11_059_200,
         max_active_actions=86_400, max_candidates=86_400, max_verifications=86_400, max_tcp_ports=10_000,
         max_browser_actions=2_764_800, max_state_changing_requests=80, max_device_fragility_points=500,
         max_hosts=5_000, max_udp_ports=5_000, max_oob_interactions=200,
+        max_verifier_write_requests=80 * VERIFIER_WRITE_HOLD,
     ),
 }
 
@@ -169,6 +186,7 @@ ZEROABLE_HUNT_BUDGET_DIMENSIONS = frozenset({
     "max_state_changing_requests",
     "max_tcp_ports",
     "max_udp_ports",
+    "max_verifier_write_requests",
 })
 MANDATORY_HUNT_BUDGET_DIMENSIONS = _ALLOWED_BUDGET_KEYS - ZEROABLE_HUNT_BUDGET_DIMENSIONS
 HUNT_BUDGET_DIMENSION_LABELS: Mapping[str, str] = {
@@ -181,6 +199,7 @@ HUNT_BUDGET_DIMENSION_LABELS: Mapping[str, str] = {
     "max_tcp_ports": "Maximum TCP ports",
     "max_browser_actions": "Maximum browser actions",
     "max_state_changing_requests": "Maximum state-changing requests",
+    "max_verifier_write_requests": "Maximum verifier write requests",
     "max_device_fragility_points": "Maximum device fragility points",
     "max_hosts": "Maximum hosts",
     "max_udp_ports": "Maximum UDP ports",
@@ -384,7 +403,7 @@ def hunt_start_public_contract() -> dict[str, Any]:
             for name in sorted(_ALLOWED_BUDGET_KEYS)
         ],
         "policy_derived_zeros": {
-            "mutation_disabled": ["max_state_changing_requests"],
+            "mutation_disabled": ["max_state_changing_requests", "max_verifier_write_requests"],
             "network_disabled": ["max_udp_ports"],
             "network_disabled_without_selected_ssh": ["max_hosts", "max_tcp_ports"],
             "oob_disabled": ["max_oob_interactions"],
@@ -583,7 +602,7 @@ class HuntStartPolicy:
     ) -> frozenset[str]:
         forbidden: set[str] = set()
         if not self.allow_state_changing_http:
-            forbidden.add("max_state_changing_requests")
+            forbidden.update({"max_state_changing_requests", "max_verifier_write_requests"})
         if not self.network_discovery:
             forbidden.add("max_udp_ports")
             # Only a selected SSH slot may reserve a known service connection.

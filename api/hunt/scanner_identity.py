@@ -11,9 +11,9 @@ in place of a requested identity: a capability that cannot carry one refuses it.
 
 A body test (``xss.verify``/``sqli.verify`` with ``method``/``body_field_names``) sends
 POST/PUT/PATCH requests and needs the Hunt's state-changing permission, at admission and again at
-dispatch. Its requests stay in the verifier's own reservation (``http_requests``); the Hunt's
-state-changing ceiling bounds the planner's own writes and is not charged for verifier traffic
-sent under an active-testing grant.
+dispatch. Its requests are verifier writes: held and settled in the Hunt's verifier-write ceiling
+(``verifier_write_requests``), beside the state-changing ceiling that bounds the planner's own
+writes.
 """
 from __future__ import annotations
 
@@ -25,15 +25,17 @@ import urllib.parse
 from .permission_reasons import HuntRefusal
 
 try:
+    from runtime.capability_registry import CAPABILITY_REGISTRY
     from runtime.hunt_scanner_contract import (
-        BODY_INPUT_VERIFIERS, SIGNED_IN_SCANNERS, captured_login_request, hunt_body_input,
-        signed_in_request, xss_browser_parameter,
+        BODY_INPUT_VERIFIERS, SIGNED_IN_SCANNERS, captured_login_request, header_marker_refusal,
+        hunt_body_input, signed_in_request, xss_browser_parameter,
     )
     from runtime.credential_refs import normalize_hunt_principal_slot
 except ModuleNotFoundError:
+    from ..runtime.capability_registry import CAPABILITY_REGISTRY
     from ..runtime.hunt_scanner_contract import (
-        BODY_INPUT_VERIFIERS, SIGNED_IN_SCANNERS, captured_login_request, hunt_body_input,
-        signed_in_request, xss_browser_parameter,
+        BODY_INPUT_VERIFIERS, SIGNED_IN_SCANNERS, captured_login_request, header_marker_refusal,
+        hunt_body_input, signed_in_request, xss_browser_parameter,
     )
     from ..runtime.credential_refs import normalize_hunt_principal_slot
 
@@ -83,8 +85,8 @@ def body_authority_refusal(name: str, values: Mapping[str, Any], policy: Mapping
         "state_changing_http_not_allowed",
         f"{name} on a {method} body sends {method} requests and needs this Hunt's active_testing "
         "and allow_state_changing_http permissions. A person can allow them for this Hunt (a "
-        "permission request is raised). The verifier's requests count in its own hold, not in "
-        "the state-changing request limit.",
+        "permission request is raised). The verifier's requests count as verifier writes, a "
+        "ceiling of their own beside the state-changing request limit.",
         subject={"capability": name, "flag": "state-changing"},
     )
 
@@ -182,6 +184,7 @@ async def resolve_scanner_identity(
         return await _captured_login_identity(
             conn, run_id=str(hunt_id), target=target, policy=policy,
             capability_name=capability_name, binding=values["request_bindings"][0],
+            destination=execution_target,
         )
     try:
         authority = await validate_worker_credential_authority(
@@ -224,7 +227,7 @@ async def resolve_scanner_identity(
 
 async def _captured_login_identity(
     conn: Any, *, run_id: str, target: Any, policy: Mapping[str, Any], capability_name: str,
-    binding: Mapping[str, Any],
+    binding: Mapping[str, Any], destination: str,
 ) -> ScannerIdentity:
     """The ``Cookie`` header a login of this Hunt captured, under the rules ``artifact.inspect``
     applies to it: only a Set-Cookie capture of this Hunt and target, unexpired, whose every
@@ -245,7 +248,8 @@ async def _captured_login_identity(
     if str(binding.get("header") or "") != "Cookie":
         raise rejected("a captured login is sent only as the Cookie header")
     try:
-        value, is_cookie = await captured_binding(conn, run_id=run_id, target=target, binding=binding)
+        value, is_cookie = await captured_binding(
+            conn, run_id=run_id, target=target, binding=binding, destination=destination)
     except ValueError as exc:  # expired, another Hunt's or target's, or never captured
         raise rejected(str(exc)) from None
     text = str(value)
@@ -256,6 +260,9 @@ async def _captured_login_identity(
             f"{MIN_SCRUBBED_COOKIE_CHARS} characters is sent")
     if any(ord(char) < 32 or ord(char) == 127 for char in text):
         raise rejected("the captured value is not a valid header value")
+    tool = CAPABILITY_REGISTRY.require(capability_name).process_tool_name
+    if (marker := header_marker_refusal(tool, text)) is not None:
+        raise rejected(marker)
     return ScannerIdentity(headers={"Cookie": text}, principal_slot=CAPTURED_SESSION, session_ref=None)
 
 

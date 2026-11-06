@@ -93,6 +93,7 @@ async def prepare_http_operation(
                     wire_input, headers, _ = await prepare_http_exchange(
                         conn, run=owner, action_id=action_id, target=target, context=context,
                         policy=policy, values=inputs, trusted_headers=trusted_headers, capture_state=exchange,
+                        destination=target_url,
                     )
                 except (ValueError, CredentialResolutionError, CredentialReferenceError) as exc:
                     return {"ok": False, "error": "http_workflow_preflight:" + str(exc)[:240]}

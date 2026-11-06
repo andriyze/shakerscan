@@ -102,19 +102,25 @@ async def _active_hunt(pool, *, state_changing=False, approved=True, signed_in=T
 
 
 class ErrorOnQuote:
-    """Labelled double: the proof's pinned transport."""
+    """Labelled double: the proof's pinned transport. A hostile error page: a quote answers with a
+    database error that echoes the request's headers (the signed-in identity) back. ``delay``: a
+    slow target, whatever the request's timeout."""
 
     sent: list = []
+    delay = 0.0
 
     async def send(self, request, *, target, timeout_seconds, follow_redirects):
         from runtime.request_replay_executor import ReplayTransportResult
 
         type(self).sent.append(request)
+        if self.delay:
+            await asyncio.sleep(self.delay)
         quoted = "%27" in request.url
+        echoed = "\n".join(f"{name}: {value}" for name, value in request.headers)
         return ReplayTransportResult(
             status_code=500 if quoted else 200, connected_address=TARGET_ADDRESS,
-            final_url=request.url, response_body=b"SQLITE_ERROR: unrecognized token" if quoted else b"ok",
-            elapsed_ms=4,
+            final_url=request.url, elapsed_ms=4,
+            response_body=(f"SQLITE_ERROR: unrecognized token\n{echoed}\n".encode() if quoted else b"ok"),
         )
 
 
@@ -155,7 +161,7 @@ def stack(monkeypatch):
         sent = min(432, int(plan.hard_budget_dict.get("http_requests") or 0))
         return {
             "status": "success", "error": None, "partial": False, "timed_out": False,
-            "elapsed_seconds": 200, "process_enforcement": plan.enforcement_receipt(),
+            "elapsed_seconds": state.get("elapsed_seconds", 200), "process_enforcement": plan.enforcement_receipt(),
             "settlement": {"mode": "exact", "actual": sent, "observed_minimum": sent, "source": "wire_log"},
             "typed_output": {"parser_status": "parsed", "records": list(records),
                              "record_count": len(records)},
@@ -165,7 +171,7 @@ def stack(monkeypatch):
         return {"scope_receipt_id": state["scope_receipt_id"]}
 
     state: dict = {}
-    ErrorOnQuote.sent = []
+    ErrorOnQuote.sent, ErrorOnQuote.delay = [], 0.0
     monkeypatch.setattr(router, "_pool", lambda: pool)
     monkeypatch.setattr(router, "get_redis", lambda: redis)
     monkeypatch.setattr(router, "enqueue_job", enqueue)
@@ -250,6 +256,11 @@ def test_a_signed_in_sqli_verify_runs_as_its_principal_and_its_proof_becomes_a_f
         assert "state_changing_requests" not in _decode(reservation["requested_json"])
         assert {row["principal_slot"] for row in archived} == {"primary"}
         assert "fixture-principal-token" not in json.dumps([evidence, summary])
+        assert "SQLITE_ERROR" in evidence["redacted_excerpt"]
+        async with stack.pool.acquire() as conn:
+            receipts = await conn.fetch(
+                "SELECT receipt_json FROM budget_reservations WHERE action_id=$1", str(action))
+        assert "fixture-principal-token" not in json.dumps([_decode(row["receipt_json"]) for row in receipts])
 
         # A candidate citing the signed-in action records the principal for retests.
         from hunt.interaction_router import HuntCandidateRequest, create_hunt_candidate
@@ -291,8 +302,14 @@ def test_a_body_sqli_verify_needs_the_state_changing_permission_and_runs_with_it
         assert process["trusted_headers"] == {}
         async with stack.pool.acquire() as conn:
             used = _decode(await conn.fetchval("SELECT budget_used_json FROM hunt_runs WHERE id=$1", hunt["id"]))
-        # Verifier traffic is counted in its own hold, not in the state-changing ceiling.
+        # Verifier writes are settled in their own ceiling, not in the state-changing one.
         assert used["http_requests"] == 432 and used.get("state_changing_requests", 0) == 0
+        assert used["verifier_write_requests"] == 432
+        async with stack.pool.acquire() as conn:
+            requested = _decode(await conn.fetchval(
+                "SELECT requested_json FROM budget_reservations WHERE action_id=$1",
+                str(_action_id(hunt, "body-sqli-0002"))))
+        assert requested["verifier_write_requests"] == requested["http_requests"]
 
     stack.loop.run_until_complete(scenario())
 
@@ -400,7 +417,7 @@ async def _captured_login(pool, hunt, *, cookie=HUB_SESSION):
                                      ({"name": "session", "header": "Set-Cookie"},))
         state.capture_response(SimpleNamespace(
             status_code=303, headers=lambda: {"location": "/hub/"}, body=lambda: b"",
-            cookies=lambda: {"hub_session": cookie}))
+            cookies=lambda: {"hub_session": cookie}, final_url=f"{TARGET_URL.rstrip('/')}/hub/login"))
         await state.persist(conn, run=hunt, status="success")
     return [{"source_action_id": str(action), "capture_name": "session", "header": "Cookie"}]
 
@@ -468,5 +485,39 @@ def test_a_captured_login_is_refused_without_approval_active_testing_scope_or_a_
             "request_bindings": await _captured_login(stack.pool, hunt, cookie="abc")})
         assert short["action_result"]["status"] == "blocked"
         assert stack.processes == []
+
+    stack.loop.run_until_complete(scenario())
+
+
+def test_a_proof_cut_by_the_actions_deadline_ends_the_action_partial_and_settled(stack):
+    """sqlmap used all but five seconds of the action's 1,200 s wall; the proof gets those five
+    seconds and a slow target. No proof request starts after the action's deadline, the action
+    ends partial and timed out, its reservation settles inside the hold, and it finishes after
+    the proof's last request."""
+    stack.records.append({"kind": "sqli_finding", "param": "id", "method": "GET",
+                          "message": "GET parameter 'id' is vulnerable", "proof_state": "candidate"})
+    stack.state["elapsed_seconds"] = 1_195
+    ErrorOnQuote.delay = 2.0
+
+    async def scenario():
+        hunt, standing, _profile = await _active_hunt(stack.pool)
+        stack.state["scope_receipt_id"] = str(standing["scope_receipt_id"])
+        result = await _call(stack, hunt, "sqli.verify", "late-sqli-0001",
+                             {"path": "/item?id=1", "as_principal": "primary"})
+        assert not isinstance(result, Exception), getattr(result, "detail", result)
+        action = _action_id(hunt, "late-sqli-0001")
+        async with stack.pool.acquire() as conn:
+            row = await conn.fetchrow("SELECT status, result_summary FROM hunt_actions WHERE id=$1", action)
+            reservation = await conn.fetchrow(
+                "SELECT status, requested_json, actual_json, finished_at FROM budget_reservations "
+                "WHERE action_id=$1", str(action))
+            finding = await conn.fetchval("SELECT count(*) FROM findings WHERE hunt_run_id=$1", hunt["id"])
+        summary = _decode(row["result_summary"])
+        assert row["status"] == "partial" and summary["timed_out"] is True, summary
+        assert 1 <= len(ErrorOnQuote.sent) <= 3 and finding == 0
+        requested, actual = _decode(reservation["requested_json"]), _decode(reservation["actual_json"])
+        assert reservation["status"] != "running"
+        assert all(int(actual[name]) <= int(requested[name]) for name in actual)
+        assert actual["tool_wall_seconds"] <= 1_200
 
     stack.loop.run_until_complete(scenario())

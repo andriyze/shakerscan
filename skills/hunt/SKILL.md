@@ -120,10 +120,12 @@ pairing confirmation with a relevant authenticated request before reporting pair
 
 ### Log in, then reuse the session
 
-Send the login (an authorized write) with `"capture": [{"name": "session", "header": "Set-Cookie"}]`;
-a redirect answer counts. The capture holds the cookies the response set as `name=value` pairs.
-Send each later request with `"request_bindings": [{"source_action_id": "<login action id>",
-"capture_name": "session", "header": "Cookie"}]`; `artifact.inspect` takes the same binding to read
+A page whose outline marks a form `sign_in` is a login. Send the login (an authorized write) with
+`"capture": [{"name": "session", "header": "Set-Cookie"}]`; a redirect answer counts. The capture
+holds the cookies the response set as `name=value` pairs, and the answer's `captures` entry is the
+binding itself: `{"source_action_id": "<login action id>", "capture_name": "session", "header":
+"Cookie"}`. Put that entry in `request_bindings` on each later request. The cookie goes back only to
+the origin (scheme, host, port) that set it. `artifact.inspect` takes the same binding to read
 a longer signed-in page, and `sqli.verify`, `xss.verify`, `web.crawl`, `web.content_discover` and
 `templates.scan` take it to test signed in (one binding, header `Cookie`; needs active testing).
 You never see the cookie; its echoes are withheld. A login that sets no

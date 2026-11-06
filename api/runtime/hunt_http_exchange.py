@@ -10,6 +10,7 @@ import copy
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 import json
+import urllib.parse
 from typing import Any, Awaitable, Callable, Mapping
 import uuid
 
@@ -17,6 +18,7 @@ from .hunt_http_exchange_contract import pointer_get, pointer_set
 from .credential_refs import select_hunt_principal_reference
 from .credential_resolver import WorkerCredentialResolver, validate_worker_credential_authority
 from .models import TargetBinding
+from .archive_body_masking import is_credential_shaped
 try:
     from secret_store import encrypt_secret, decrypt_secret
 except ModuleNotFoundError:
@@ -65,6 +67,23 @@ def _cookie_pairs(response: Any) -> str:
     return "; ".join(pairs)
 
 
+COOKIE_ORIGIN_KEY = "cookie_origin"
+
+
+def origin_key(url: Any) -> str | None:
+    """``scheme://host:port`` of a URL (default ports explicit), or None when it names none."""
+    try:
+        parts = urllib.parse.urlsplit(str(url or ""))
+        port = parts.port
+    except ValueError:
+        return None
+    scheme, host = parts.scheme.lower(), (parts.hostname or "").lower().rstrip(".")
+    if scheme not in {"http", "https"} or not host:
+        return None
+    netloc = f"[{host}]" if ":" in host else host
+    return f"{scheme}://{netloc}:{port or (443 if scheme == 'https' else 80)}"
+
+
 def cookie_values(header: str) -> list[str]:
     """The values of a ``Cookie`` header value, without their names."""
     return [part.split("=", 1)[1].strip() for part in str(header).split(";") if "=" in part]
@@ -87,6 +106,8 @@ class HttpWorkflowExchange:
     captures: tuple[Mapping[str, Any], ...] = field(default=(), repr=False)
     encrypted_result: str | None = field(default=None, repr=False)
     captured_names: tuple[str, ...] = ()
+    # The captured names that hold the cookies a response set (Set-Cookie captures).
+    cookie_names: tuple[str, ...] = ()
     # Requested captures the response did not carry: reported, never a failed request.
     missing_names: tuple[str, ...] = ()
     capture_error: str | None = None
@@ -152,17 +173,22 @@ class HttpWorkflowExchange:
                 kept_cookies = [name for name in cookie_names if name in extracted]
                 if kept_cookies:
                     payload_values[COOKIE_CAPTURES_KEY] = kept_cookies
+                    # The origin that set the cookies: they are sent back only there (never over
+                    # plain http for a login answered over https, never to another port).
+                    payload_values[COOKIE_ORIGIN_KEY] = origin_key(getattr(response, "final_url", ""))
                 payload = json.dumps(payload_values, ensure_ascii=False, allow_nan=False, separators=(",", ":"))
                 payload_values.clear()
                 if len(payload.encode()) > MAX_CAPTURE_BYTES:
                     raise ValueError("capture too large")
                 self.encrypted_result = encrypt_secret(payload)
                 self.captured_names = tuple(extracted)
+                self.cookie_names = tuple(kept_cookies)
             self.missing_names = tuple(missing)
         except Exception:
             # Target content and decrypt/encrypt errors must never enter public errors.
             self.encrypted_result = None
             self.captured_names = ()
+            self.cookie_names = ()
             self.missing_names = tuple(item["name"] for item in self.captures)
         finally:
             extracted.clear()
@@ -170,7 +196,10 @@ class HttpWorkflowExchange:
             self.capture_error = "http_workflow_capture_incomplete"
 
     def public_result(self) -> list[dict[str, str]]:
-        return [{"source_action_id": self.action_id, "capture_name": name}
+        """The references a later call binds. A session cookie capture is shown as the exact
+        ``request_bindings`` entry that sends it back (``header: Cookie``)."""
+        return [{"source_action_id": self.action_id, "capture_name": name,
+                 **({"header": "Cookie"} if name in self.cookie_names else {})}
                 for name in self.captured_names]
 
     async def persist(self, conn: Any, *, run: Mapping[str, Any], status: str) -> None:
@@ -189,8 +218,12 @@ async def _captured_value(conn: Any, *, run_id: str, target: TargetBinding, bind
 
 async def captured_binding(
     conn: Any, *, run_id: str, target: TargetBinding, binding: Mapping[str, Any],
+    destination: str | None = None,
 ) -> tuple[Any, bool]:
-    """``(value, is_cookie)`` of a response capture this Hunt made: worker-private."""
+    """``(value, is_cookie)`` of a response capture this Hunt made: worker-private.
+
+    A Set-Cookie capture is bound to the origin that set it: with ``destination`` (the URL the
+    value is about to be sent to) it is refused for any other scheme, host or port."""
     source_id = str(uuid.UUID(str(binding["source_action_id"])))
     row = await conn.fetchrow("""SELECT private_http_result FROM hunt_actions
         WHERE id=$1 AND hunt_run_id=$2 AND capability_name='http.request'
@@ -207,9 +240,17 @@ async def captured_binding(
                 or expires_at.tzinfo is None or expires_at <= datetime.now(timezone.utc)):
             raise ValueError("binding changed or expired")
         name = binding["capture_name"]
-        return _scalar(private["values"][name]), name in (private.get(COOKIE_CAPTURES_KEY) or ())
+        value = _scalar(private["values"][name])
+        is_cookie = name in (private.get(COOKIE_CAPTURES_KEY) or ())
+        cookie_origin = private.get(COOKIE_ORIGIN_KEY)
     except Exception:
         raise ValueError("HTTP workflow response reference is expired or no longer bound to this Hunt") from None
+    if is_cookie and destination is not None and (
+            not cookie_origin or origin_key(destination) != cookie_origin):
+        raise ValueError(
+            f"a captured login cookie is sent only to the origin that set it ({cookie_origin or 'unknown'}); "
+            "name that origin, or log in on this one")
+    return value, is_cookie
 
 
 # --- Withheld values -------------------------------------------------------------------------
@@ -349,9 +390,16 @@ async def sealed_hunt_knowledge(conn: Any, *, run_id: Any, target: TargetBinding
             if private.get("hunt_id") != str(run_id) or private.get("target_digest") != digest or expires_at <= now:
                 continue
             captured = private.get("values") or {}
-            found = [*(private.get(WITHHELD_SCHEMA_KEY) or {}).values(), *captured.values(),
-                     *(item for name in (private.get(COOKIE_CAPTURES_KEY) or ())
-                       for item in cookie_values(str(captured.get(name) or "")))]
+            cookie_names = set(private.get(COOKIE_CAPTURES_KEY) or ())
+            # The target chooses its cookies' values: only one shaped like a session secret is
+            # withheld for the rest of the Hunt, so a target cannot hide ordinary text from the
+            # planner by setting a cookie to it. Every value is still withheld in a request that
+            # sends it (``bound_values``).
+            found = [*(private.get(WITHHELD_SCHEMA_KEY) or {}).values(),
+                     *(value for name, value in captured.items() if name not in cookie_names),
+                     *(item for name in cookie_names
+                       for item in cookie_values(str(captured.get(name) or ""))
+                       if is_credential_shaped(item))]
             learned = _bounded_sql_tables(private.get(SQL_TABLES_KEY))
             context_bytes += max(0, int(private.get(CONTEXT_BYTES_KEY) or 0))
         except Exception:
@@ -648,6 +696,7 @@ async def prepare_http_exchange(
     conn: Any, *, run: Mapping[str, Any], action_id: Any, target: TargetBinding,
     context: Mapping[str, Any], policy: Mapping[str, Any], values: Mapping[str, Any],
     trusted_headers: Mapping[str, str], capture_state: HttpWorkflowExchange | None = None,
+    destination: str | None = None,
 ) -> tuple[dict[str, Any], dict[str, str], HttpWorkflowExchange]:
     """Resolve values only after the caller holds a revalidated action reservation."""
     from .hunt_http_contract import require_http_request_authority
@@ -691,7 +740,9 @@ async def prepare_http_exchange(
                 raise ValueError(f"{exc.reason}: {exc}") from None
             exchange.bound_values.append(str(value))
         elif "source_action_id" in binding:
-            value, is_cookie = await captured_binding(conn, run_id=run_id, target=target, binding=binding)
+            value, is_cookie = await captured_binding(
+                conn, run_id=run_id, target=target, binding=binding,
+                destination=str(values.get("origin") or destination or "") or None)
             secrets = cookie_values(str(value)) if is_cookie and "header" in binding else []
             if secrets and all(len(item) >= MIN_SCRUBBED_COOKIE_CHARS for item in secrets):
                 # A session cookie this Hunt's own login set: long, random and known exactly, so

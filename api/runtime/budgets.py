@@ -16,6 +16,7 @@ BUDGET_DIMENSIONS = frozenset({
     "udp_ports_attempted",
     "hosts_attempted",
     "state_changing_requests",
+    "verifier_write_requests",
     "tool_wall_seconds",
     "agent_actions",
     "active_actions",
