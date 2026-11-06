@@ -25,6 +25,7 @@ except ModuleNotFoundError:  # package imports in host-side tests
     )
 
 from .action_plan import ScanAction, ScanActionPlan
+from .budget_allocator import with_own_budget
 from .capability_execution import scan_budget_ledger_limits
 
 
@@ -152,6 +153,9 @@ async def admit_and_start_scan_action_reservation(
             "Scan stopped before action budget admission"
         )
     limits, used = _ledger(owner, budget_required=True)
+    # The plan's own-budget actions hold their allowance on top of the shared ceilings, as
+    # their admission did (budget_allocator.OWN_BUDGET_CAPABILITIES).
+    limits = with_own_budget(limits, plan.actions)
     ledger = {name: int(used.get(name) or 0) for name in limits}
     aggregate_limits: dict[str, int] = {}
     aggregate_used: dict[str, Any] = {}
@@ -160,6 +164,7 @@ async def admit_and_start_scan_action_reservation(
         aggregate_limits, aggregate_used = _ledger(
             aggregate_owner, budget_required=True,
         )
+        aggregate_limits = with_own_budget(aggregate_limits, plan.actions)
         aggregate_ledger = {
             name: int(aggregate_used.get(name) or 0)
             for name in aggregate_limits

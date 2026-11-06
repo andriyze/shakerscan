@@ -31,7 +31,9 @@ repeated aliases) are active (`graphql.verify_batch`), though still GET-only.
 Product recipes (`web.identify`) are the same class: fixed GETs of catalogue paths
 (a product's login page, health document or version header) on the Scan's own origin,
 redirects off, anonymous, with one never-existing path per base path as the negative
-control, reserved at the catalogue's exact request ceiling.
+control, reserved at the catalogue's exact request ceiling. That reservation is the
+action's own allowance, held on top of the Scan's shared ceilings (at most the catalogue
+ceiling of requests and its tool wall), so adding it never displaces another action.
 
 Requesting a fixed sensitive path such as `/.env` is the same traffic as a
 wordlist entry; what makes it a verified finding is the file-type proof applied
