@@ -29,7 +29,7 @@ The summary status:
 | Reachable | a port opened, but no service answered within the check's time |
 | Unreachable | the name resolves, but no port opened |
 | No DNS | the name has no address record |
-| DNS error | the resolver could not answer; the check is retried on the next round |
+| DNS error | the resolver could not answer; the check is repeated within an hour |
 | Not checked (policy) | the target's scope is blocked, or every address it resolves to is outside the destination policy, so nothing was sent |
 | Not checked | the target has not been checked yet |
 
@@ -62,16 +62,18 @@ what the target is already allowed:
   1 KiB is read from each connection;
 - time: 3 s for the DNS answer, 3 s per connection, 5 s for the service to answer, 15 s for the
   whole check;
-- the checks of one round run 8 at a time.
+- a round checks at most 64 targets, 16 at a time, every 20 seconds.
 
 ## When a target is checked
 
-- **On add:** a new target, or a new web app on an existing host, is checked within a minute,
-  whatever added it (the Targets page, the API, the client, or discovery).
+- **On add:** a new target, or a new web app on an existing host, is checked in the next round,
+  whatever added it (the Targets page, the API, the client, or discovery). A large import is worked
+  through a round at a time; targets asked for (before a Scan, or added) go before scheduled ones.
 - **Before a Scan:** submitting a Scan asks for a fresh check of its target when the last one is
   more than 10 minutes old. The Scan does not wait for it; the Scan's own first request decides
   whether the Scan can assess the target.
-- **On a schedule:** every active target again 12 hours after its last check.
+- **On a schedule:** every active target again 12 hours after its last check (an hour after a
+  DNS error).
 - **Check now:** the target page's button runs the check at once and shows the result. A target
   checked in the last 30 seconds returns that result instead.
 
@@ -95,6 +97,14 @@ A Scan whose first request cannot reach the target ends without a grade and says
 could not be reached, with the attempts it made. Liveness does not change that rule, and a target
 shown as unreachable can still be scanned: the Scan may run from another network position (a
 remote worker) that can reach it.
+
+## Retests of findings on private addresses
+
+A retest that does not reproduce a finding on a private address (an intranet app) answers
+"likely fixed" only when it shows that it reached the finding's origin: a connection and an HTTP
+answer there, checked the way liveness checks a web port (a replay whose requests were all answered
+counts). When that cannot be shown, the retest stays inconclusive and says why, because a request
+that never arrived reproduces nothing.
 
 ## Known limits
 
