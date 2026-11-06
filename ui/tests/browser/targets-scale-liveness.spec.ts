@@ -58,7 +58,7 @@ test('TARGETS-SCALE-001 a large domain shows 20 targets and pages through all of
   const group = page.getByTestId('target-domain-group')
   await expect(group).toContainText('800 targets')
   // A group of more than five starts collapsed; open it.
-  await group.getByRole('button', { name: 'Subdomains of big.invalid' }).click()
+  await group.getByRole('button', { name: 'Subdomains of big.invalid', exact: true }).click()
   await expect(group.getByTestId('target-asset-row')).toHaveCount(20)
   const first = new URL(api.requests.find(entry => entry.startsWith('GET /targets/inventory'))!.split(' ')[1], 'http://x').searchParams
   expect([first.get('member_limit'), first.get('limit'), first.get('group_by')]).toEqual(['20', '25', 'domain'])
@@ -89,7 +89,7 @@ test('TARGETS-SCALE-001 a large domain shows 20 targets and pages through all of
 test('TARGETS-LIVENESS-001 the Liveness column says why, and the filter is applied by the server', async ({ page }) => {
   const api = await inventory(page)
   await page.goto('/targets')
-  await page.getByRole('button', { name: 'Subdomains of big.invalid' }).click()
+  await page.getByRole('button', { name: 'Subdomains of big.invalid', exact: true }).click()
   const rows = page.getByTestId('target-asset-row')
   await expect(rows).toHaveCount(20)
   const down = rows.filter({ hasText: 'n1.big.invalid' }).getByTestId('target-liveness')
