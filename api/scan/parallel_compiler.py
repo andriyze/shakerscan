@@ -960,7 +960,8 @@ class ParallelActionPlanCompiler:
         """
         names = [
             "web.probe", "web.crawl", "web.browser_crawl", "web.content_discover",
-            "web.spec_ingest", "web.identify",
+            # web.identify is funded by its own allowance (budget_allocator), not the stage.
+            "web.spec_ingest",
         ]
         if include_subdomains:
             names.extend(("subdomains.discover", "subdomains.takeover_check"))

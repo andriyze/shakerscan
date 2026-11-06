@@ -1,17 +1,23 @@
-"""Fast and balanced Scan plans are pinned to what v2.11.0 (81caee26d) planned.
+"""Fast and balanced Scan plans are pinned to what v2.12.0 plans.
 
-The thorough and deep budget changes (``contracts.budget_sufficiency``) must not move a single
+Baseline: 2.12.0, approved by the owner on 2026-11-06, replacing the v2.11.0 (81caee26d)
+baseline. The only change it accepted is the product-recipe action ``discover.identify``
+(``web.identify``), which is funded by its own allowance (``budget_allocator.
+OWN_BUDGET_CAPABILITIES``) and therefore moves no other action's id, slice or frozen budget;
+it only enters the plan-chain digests (input bindings, the finalizer's dependencies).
+
+Budget changes (``contracts.budget_sufficiency`` and any later one) must not move a single
 fast or balanced action: not an id, an argument, a frozen budget, a slice shape or an input
 binding. These unit-test fixtures compile the admission plan and continuation rounds 1-3 with
 the real compilers and allocator over operator-supplied endpoints (no live discovery), settle
 every round with synthetic results that exercise request-bound and wall-killed verifier slices,
 zero-attempt body slices and active template sweeps, and compare every appended action with
-``fixtures/scan_budget_invariance_2_11_0.json``, which was generated from v2.11.0.
+``fixtures/scan_budget_invariance_2_12_0.json``, which was generated from the 2.12.0 tree.
 
 The scanner argv of every batch attempt is derived from the slice's frozen budget and
 capability arguments (pacing: ``external_process.paced_request_delay``), both pinned here.
 
-Regenerate only from a v2.11.0 checkout:
+Regenerate only for an owner-approved new baseline, from that tree:
 ``PYTHONPATH=.:api:scanner python tests/test_scan_budget_profile_invariance.py --write``.
 """
 
@@ -34,7 +40,7 @@ from tests.scan_round_fixtures import (
     settle_round,
 )
 
-FIXTURE = Path(__file__).resolve().parent / "fixtures" / "scan_budget_invariance_2_11_0.json"
+FIXTURE = Path(__file__).resolve().parent / "fixtures" / "scan_budget_invariance_2_12_0.json"
 PROFILES = ("fast", "balanced")
 ACTIVE_GET_ONLY = ("recon", "nuclei_passive", "nuclei_active", "xss", "sqli")
 # Explicitly named active templates hold the registry's mutation cost at admission, which a
@@ -143,7 +149,7 @@ def pinned() -> dict[str, Any]:
 
 @pytest.mark.parametrize("profile", PROFILES)
 @pytest.mark.parametrize("scenario", SCENARIOS, ids=[item[0] for item in SCENARIOS])
-def test_fast_and_balanced_plans_are_the_ones_v2_11_0_compiled(pinned, profile, scenario):
+def test_fast_and_balanced_plans_are_the_ones_v2_12_0_compiled(pinned, profile, scenario):
     expected = pinned[f"{profile}/{scenario[0]}"]
     actual = scenario_snapshot(profile, scenario)
     assert list(actual) == list(expected)

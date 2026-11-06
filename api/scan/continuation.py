@@ -19,6 +19,7 @@ except ModuleNotFoundError:  # package import in host-side tests
     from ..runtime.request_shape import nested_json_body
 
 from .action_plan import ScanAction, ScanActionPlan, ScanActionPlanError
+from .budget_allocator import OWN_BUDGET_CAPABILITIES
 from .capability_result import CapabilityResultReference
 from .surface_manifest import build_scan_surface_manifest
 from .work_manifests import (
@@ -529,6 +530,10 @@ def reconciled_continuation_ceiling(
     for action_id in allocation.parent_action_ids:
         result = (parent_results or {}).get(action_id)
         if result is None:
+            continue
+        if result.capability_name in OWN_BUDGET_CAPABILITIES:
+            # Funded by its own allowance, never by the frozen shared residual: what it did
+            # not use returns to that allowance, not to the shared ceiling.
             continue
         reserved = dict(result.budget_reserved or {})
         consumed = dict(result.budget_consumed or {})
