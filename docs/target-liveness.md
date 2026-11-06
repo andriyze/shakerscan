@@ -1,5 +1,7 @@
 # Target liveness
 
+**Status:** maintained product-behaviour reference for target liveness (engine 2.12).
+
 Every target in the Targets list says whether it can be reached right now: whether its name
 resolves, whether a connection to its ports opens, and whether the service behind them answers.
 This page describes what is checked, when, within which limits, and how it is shown.
