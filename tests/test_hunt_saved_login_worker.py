@@ -162,7 +162,13 @@ async def hostile_target(wire):
             body = await reader.readexactly(int(length[1])) if length else b""
             wire.append((head, body))
             raw = SECRET.encode()
-            if head.startswith(b"POST /hub/login "):
+            if head.startswith(b"POST /hub/echo-login "):
+                # A login answer that hands the password back in a header and a JSON body.
+                page = json.dumps({"ok": True, "password": SECRET}).encode()
+                response = (b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nX-Pass: "
+                            + base64.b64encode(raw) + b"\r\nConnection: close\r\nContent-Length: "
+                            + str(len(page)).encode() + b"\r\n\r\n" + page)
+            elif head.startswith(b"POST /hub/login "):
                 form = urllib.parse.parse_qs(body.decode())
                 ok = form == {"username": [USERNAME], "password": [SECRET]}
                 location = "/hub/?welcome=" + urllib.parse.quote(SECRET, safe="")
@@ -304,4 +310,31 @@ def test_a_saved_login_is_never_sent_anywhere_else_or_after_its_authority_change
             assert result["status"] in {"failed", "blocked"}, result
             assert not wire, "nothing was sent"
             assert_no_secret(json.dumps(result, default=str), "refused result")
+    asyncio.run(scenario())
+
+
+def test_a_capture_that_carries_the_secret_is_never_kept_so_it_cannot_be_sent_on():
+    async def scenario():
+        wire = []
+        server = await hostile_target(wire)
+        async with server:
+            conn = LoginConnection(f"http://fixture.test:{server.sockets[0].getsockname()[1]}")
+            conn.login_url = conn.login_url.replace("/hub/login", "/hub/echo-login")
+            conn.profile["encrypted_secret"] = secret_store.encrypt_secret(build_credential_secret(
+                "form_login", secret=SECRET, username=USERNAME, endpoint_url=conn.login_url))
+            values = login_input(path="/hub/echo-login")
+            values["capture"] = [{"name": "pass_header", "header": "X-Pass"},
+                                 {"name": "pass_json", "json_pointer": "/password"},
+                                 {"name": "ok", "json_pointer": "/ok"}]
+            result, _ = await execute(conn, values, "echo-login")
+            assert result["status"] == "success", result
+            # Only the capture without the secret is a reference; the others are reported missing.
+            assert [item["capture_name"] for item in result["captures"]] == ["ok"]
+            assert sorted(result["typed_output"]["records"][0]["response"]["captures_missing"]) == ["pass_header", "pass_json"]
+            for action in conn.actions.values():
+                if action.get("private_http_result"):
+                    private = json.loads(secret_store.decrypt_secret(action["private_http_result"]))
+                    assert SECRET not in json.dumps(private.get("values") or {})
+                    assert base64.b64encode(SECRET.encode()).decode() not in json.dumps(private.get("values") or {})
+            assert_no_secret(json.dumps(result, default=str), "echo-login answer")
     asyncio.run(scenario())

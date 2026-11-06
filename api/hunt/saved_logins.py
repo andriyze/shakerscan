@@ -87,6 +87,17 @@ def login_url(endpoint: Any) -> str | None:
     return f"{scheme}://{netloc}:{port}{parts.path or '/'}"
 
 
+def profile_login_url(endpoint: Any, target_url: Any, target_host: Any) -> str | None:
+    """A profile's login URL for this Hunt: its endpoint (a same-origin path is the Hunt target's),
+    in ``login_url`` form, and only on the Hunt's own host. A login elsewhere (another host, a
+    destination granted for this Hunt) is never a saved login: no credential goes off the target."""
+    text = str(endpoint or "")
+    url = login_url(urllib.parse.urljoin(str(target_url or ""), text) if text.startswith("/") else text)
+    host = (urllib.parse.urlsplit(url).hostname or "") if url else ""
+    wanted = str(target_host or "").lower().rstrip(".").strip("[]")
+    return url if url and host and host == wanted else None
+
+
 def request_login_url(values: Mapping[str, Any], default_origin: Any) -> str | None:
     """Where an ``http.request`` goes, in ``login_url`` form: its own origin, else the Hunt's."""
     origin = str(values.get("origin") or default_origin or "").strip()
@@ -285,7 +296,7 @@ async def resolve_login_url(conn: Any, run: Mapping[str, Any], profile_id: Any) 
     from .target_binding import web_hunt_target
     context, policy = _json(run.get("context_pack"), {}), _json(run.get("policy_json"), {})
     try:
-        target, _url = web_hunt_target(run, context, policy)
+        target, target_url = web_hunt_target(run, context, policy)
         authority = await validate_worker_credential_authority(
             conn, owner_kind="hunt", owner_id=str(run["id"]), target=target,
             approval_receipt_id=policy.get("approval_receipt_id"),
@@ -293,11 +304,11 @@ async def resolve_login_url(conn: Any, run: Mapping[str, Any], profile_id: Any) 
         async with WorkerCredentialResolver().resolve(
                 conn, profile_id=profile_id, target=target, capability="http.request",
                 authority=authority) as resolved:
-            url = login_url(resolved.interactive_http().endpoint_url)
+            url = profile_login_url(resolved.interactive_http().endpoint_url, target_url, target.canonical_host)
     except (CredentialResolutionError, ValueError) as exc:
         raise ValueError(f"the saved login cannot be read under this Hunt's authorization ({exc})") from None
     if url is None:
-        raise ValueError("the saved login has no HTTP(S) login URL")
+        raise ValueError("the saved login's login URL is not an HTTP(S) URL on this Hunt's target host")
     return url
 
 
@@ -423,7 +434,7 @@ async def safe_hunt_view(conn: Any, run: Mapping[str, Any]) -> dict[str, Any]:
 __all__ = [
     "BINDING_KEY", "DEFAULT_LOGINS", "HOW_TO_USE", "LOGIN_SLOT", "MAX_LOGINS", "MAX_SAVED_LOGINS",
     "SAVED_LOGIN_KINDS", "admit_saved_login", "apply_login_use", "attached_profile",
-    "hunt_view", "is_saved_login_request", "live_login_grants", "login_url", "logins_used",
+    "hunt_view", "is_saved_login_request", "live_login_grants", "login_url", "logins_used", "profile_login_url",
     "render_login_use", "request_login_url", "resolve_login_url", "safe_hunt_view", "saved_login_ids",
     "start_attach_subjects", "validate_login_request_shape",
 ]
