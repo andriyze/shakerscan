@@ -58,3 +58,21 @@ def test_reported_version_keeps_the_build_suffix_and_is_bounded():
 def test_the_port_hint_is_only_a_hint():
     assert service_identity.port_hint(6379) == "redis"
     assert service_identity.port_hint(40000) is None
+
+
+def test_a_device_service_carries_the_adapter_identity_into_the_inventory():
+    from api.exposure.service_store import _adapter_identity
+
+    stored = {"status": "identified", "protocol": "mongodb", "version_reported": "7.0.5-ent",
+              "version_basis": "reported", "authentication": "required",
+              "authentication_proof": "mongodb_unauthorized", "details": {"x": 1}}
+    observation = normalized_observation({
+        "kind": "device_service", "transport": "tcp", "port": 27017, "state": "open",
+        "service_name": "mongodb", "product": "MongoDB", "version": "7.0.5",
+        "detection_method": "probed", **_adapter_identity(stored),
+    })
+    assert observation["protocol"] == "mongodb" and observation["version_reported"] == "7.0.5-ent"
+    assert observation["authentication"] == "required"
+    assert observation["authentication_proof"] == "mongodb_unauthorized"
+    assert _adapter_identity({"status": "inconclusive", "protocol": "redis"}) == {}
+    assert _adapter_identity('{"status": "identified", "protocol": "ssh"}')["protocol"] == "ssh"
