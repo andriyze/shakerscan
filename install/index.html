@@ -766,6 +766,7 @@ download "$REPO_RAW_BASE/scanner/scanner_tools/url_redaction.py" "$INSTALL_DIR/s
 download "$REPO_RAW_BASE/scanner/scanner_tools/unsafe_actions.py" "$INSTALL_DIR/scanner/scanner_tools/unsafe_actions.py"
 download "$REPO_RAW_BASE/scanner/scanner_tools/xss_evidence.py" "$INSTALL_DIR/scanner/scanner_tools/xss_evidence.py"
 download "$REPO_RAW_BASE/scanner/scanner_tools/corporate_identity.py" "$INSTALL_DIR/scanner/scanner_tools/corporate_identity.py"
+download "$REPO_RAW_BASE/scanner/scanner_tools/web_identity.py" "$INSTALL_DIR/scanner/scanner_tools/web_identity.py"
 download "$REPO_RAW_BASE/scanner/scanner_tools/discovered_names.py" "$INSTALL_DIR/scanner/scanner_tools/discovered_names.py"
 download "$REPO_RAW_BASE/scanner/scanner_tools/registrable.py" "$INSTALL_DIR/scanner/scanner_tools/registrable.py"
 download "$REPO_RAW_BASE/scanner/scanner_tools/v2_fingerprint_hardening.py" "$INSTALL_DIR/scanner/scanner_tools/v2_fingerprint_hardening.py"
