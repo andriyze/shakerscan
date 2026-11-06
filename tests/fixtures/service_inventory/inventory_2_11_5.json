@@ -1,0 +1,311 @@
+{
+ "description": "build_inventory output of engine 2.11.5 (d7d48a988) for the sources below; upgrade fixture",
+ "target": {
+  "id": "11111111-1111-4111-8111-111111111111",
+  "kind": "web",
+  "locator": "https://app.example.test"
+ },
+ "sources": [
+  {
+   "ref": "scan:s1:discover.web_probe",
+   "scan_id": "s1",
+   "action_id": "discover.web_probe",
+   "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+   "observed_at": "2026-10-01T00:00:00Z",
+   "status": "success",
+   "vantage": "w1",
+   "observations": [
+    {
+     "kind": "http_fingerprint",
+     "url": "https://app.example.test/",
+     "status": 200,
+     "title": "Sign in [Jenkins]",
+     "webserver": "Apache/2.4.41 (Ubuntu)",
+     "technologies": [
+      "Jenkins:2.401.1",
+      "Java"
+     ]
+    }
+   ]
+  },
+  {
+   "ref": "scan:s1:baseline.http",
+   "scan_id": "s1",
+   "action_id": "baseline.http",
+   "observed_at": "2026-10-01T00:00:01Z",
+   "status": "success",
+   "observations": [
+    {
+     "kind": "http_observation",
+     "request": {
+      "origin": "https://app.example.test",
+      "pinned_address": "192.0.2.10"
+     },
+     "response": {
+      "status": 200
+     },
+     "redirect_chain": []
+    }
+   ]
+  },
+  {
+   "ref": "scan:s1:discover.ports",
+   "scan_id": "s1",
+   "observed_at": "2026-10-01T00:00:02Z",
+   "status": "success",
+   "observations": [
+    {
+     "kind": "open_port",
+     "address": "192.0.2.10",
+     "transport": "tcp",
+     "port": 22,
+     "state": "open"
+    }
+   ]
+  },
+  {
+   "ref": "scan:s1:discover.services",
+   "scan_id": "s1",
+   "observed_at": "2026-10-01T00:00:03Z",
+   "status": "success",
+   "observations": [
+    {
+     "kind": "service",
+     "address": "192.0.2.10",
+     "transport": "tcp",
+     "port": 22,
+     "state": "open",
+     "service": "ssh",
+     "product": "OpenSSH",
+     "version": "8.2p1 Ubuntu 4ubuntu0.5",
+     "cpe": [
+      "cpe:/a:openbsd:openssh:8.2p1"
+     ],
+     "method": "probed",
+     "confidence": 10
+    }
+   ]
+  },
+  {
+   "ref": "scan:s2:discover.web_probe",
+   "scan_id": "s2",
+   "observed_at": "2026-11-01T00:00:00Z",
+   "status": "success",
+   "observations": [
+    {
+     "kind": "http_fingerprint",
+     "url": "https://app.example.test/",
+     "status": 200,
+     "title": null,
+     "webserver": "Apache/2.4.58 (Ubuntu)",
+     "technologies": [
+      "Jenkins:2.426.1"
+     ]
+    }
+   ]
+  }
+ ],
+ "now": "2026-11-06T00:00:00+00:00",
+ "services": [
+  {
+   "id": "c9838d27-adbd-5b4f-8dc3-df5d59d96fab",
+   "target_id": "11111111-1111-4111-8111-111111111111",
+   "target_kind": "web",
+   "evidence": [
+    {
+     "ref": "scan:s1:discover.ports",
+     "scan_id": "s1",
+     "hunt_id": null,
+     "action_id": null,
+     "sha256": null,
+     "observed_at": "2026-10-01T00:00:02+00:00",
+     "vantage": null,
+     "status": "success"
+    },
+    {
+     "ref": "scan:s1:discover.services",
+     "scan_id": "s1",
+     "hunt_id": null,
+     "action_id": null,
+     "sha256": null,
+     "observed_at": "2026-10-01T00:00:03+00:00",
+     "vantage": null,
+     "status": "success"
+    }
+   ],
+   "history": [
+    {
+     "service": "unknown",
+     "product": null,
+     "version": null,
+     "state": "open",
+     "observed_at": "2026-10-01T00:00:02+00:00",
+     "evidence_ref": "scan:s1:discover.ports"
+    },
+    {
+     "service": "ssh",
+     "product": "OpenSSH",
+     "version": "8.2p1 Ubuntu 4ubuntu0.5",
+     "state": "open",
+     "observed_at": "2026-10-01T00:00:03+00:00",
+     "evidence_ref": "scan:s1:discover.services"
+    }
+   ],
+   "evidence_truncated": false,
+   "first_seen_at": "2026-10-01T00:00:02+00:00",
+   "identity_observed_at": "2026-10-01T00:00:03+00:00",
+   "address": "192.0.2.10",
+   "transport": "tcp",
+   "port": 22,
+   "application_origin": null,
+   "state": "open",
+   "service": "ssh",
+   "product": "OpenSSH",
+   "version": "8.2p1 Ubuntu 4ubuntu0.5",
+   "cpes": [
+    "cpe:/a:openbsd:openssh:8.2p1"
+   ],
+   "identity_basis": "network_fingerprint",
+   "detection_method": "probed",
+   "detection_confidence": 10,
+   "encrypted": null,
+   "tunnel": null,
+   "locator_generation": null,
+   "last_seen_at": "2026-10-01T00:00:03+00:00",
+   "observation_status": "success",
+   "freshness": "stale",
+   "identity_stale": true,
+   "presence": "observed_open",
+   "binding_status": "observation_only",
+   "findings": [],
+   "cve_candidates": [],
+   "activities": []
+  },
+  {
+   "id": "5b0cc7ce-cee7-59fd-8782-6e05994b6626",
+   "target_id": "11111111-1111-4111-8111-111111111111",
+   "target_kind": "web",
+   "evidence": [
+    {
+     "ref": "scan:s1:discover.web_probe",
+     "scan_id": "s1",
+     "hunt_id": null,
+     "action_id": "discover.web_probe",
+     "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+     "observed_at": "2026-10-01T00:00:00+00:00",
+     "vantage": "w1",
+     "status": "success"
+    },
+    {
+     "ref": "scan:s2:discover.web_probe",
+     "scan_id": "s2",
+     "hunt_id": null,
+     "action_id": null,
+     "sha256": null,
+     "observed_at": "2026-11-01T00:00:00+00:00",
+     "vantage": null,
+     "status": "success"
+    }
+   ],
+   "history": [
+    {
+     "service": "https",
+     "product": "Apache",
+     "version": "2.4.41",
+     "state": "open",
+     "observed_at": "2026-10-01T00:00:00+00:00",
+     "evidence_ref": "scan:s1:discover.web_probe"
+    },
+    {
+     "service": "https",
+     "product": "Apache",
+     "version": "2.4.58",
+     "state": "open",
+     "observed_at": "2026-11-01T00:00:00+00:00",
+     "evidence_ref": "scan:s2:discover.web_probe"
+    }
+   ],
+   "evidence_truncated": false,
+   "first_seen_at": "2026-10-01T00:00:00+00:00",
+   "identity_observed_at": "2026-11-01T00:00:00+00:00",
+   "address": null,
+   "transport": "tcp",
+   "port": 443,
+   "application_origin": "https://app.example.test",
+   "state": "open",
+   "service": "https",
+   "product": "Apache",
+   "version": "2.4.58",
+   "cpes": [],
+   "identity_basis": "http_response",
+   "detection_method": "http_response",
+   "detection_confidence": null,
+   "encrypted": true,
+   "tunnel": null,
+   "locator_generation": null,
+   "last_seen_at": "2026-11-01T00:00:00+00:00",
+   "observation_status": "success",
+   "freshness": "recent",
+   "identity_stale": false,
+   "presence": "observed_open",
+   "binding_status": "observation_only",
+   "findings": [],
+   "cve_candidates": [],
+   "activities": []
+  },
+  {
+   "id": "c51eb268-5a43-5fe3-9793-ae9a36ddbf53",
+   "target_id": "11111111-1111-4111-8111-111111111111",
+   "target_kind": "web",
+   "evidence": [
+    {
+     "ref": "scan:s1:baseline.http",
+     "scan_id": "s1",
+     "hunt_id": null,
+     "action_id": "baseline.http",
+     "sha256": null,
+     "observed_at": "2026-10-01T00:00:01+00:00",
+     "vantage": null,
+     "status": "success"
+    }
+   ],
+   "history": [
+    {
+     "service": "https",
+     "product": null,
+     "version": null,
+     "state": "open",
+     "observed_at": "2026-10-01T00:00:01+00:00",
+     "evidence_ref": "scan:s1:baseline.http"
+    }
+   ],
+   "evidence_truncated": false,
+   "first_seen_at": "2026-10-01T00:00:01+00:00",
+   "identity_observed_at": "2026-10-01T00:00:01+00:00",
+   "address": "192.0.2.10",
+   "transport": "tcp",
+   "port": 443,
+   "application_origin": "https://app.example.test",
+   "state": "open",
+   "service": "https",
+   "product": null,
+   "version": null,
+   "cpes": [],
+   "identity_basis": "http_response",
+   "detection_method": "http_response",
+   "detection_confidence": null,
+   "encrypted": true,
+   "tunnel": null,
+   "locator_generation": null,
+   "last_seen_at": "2026-10-01T00:00:01+00:00",
+   "observation_status": "success",
+   "freshness": "stale",
+   "identity_stale": true,
+   "presence": "observed_open",
+   "binding_status": "observation_only",
+   "findings": [],
+   "cve_candidates": [],
+   "activities": []
+  }
+ ]
+}
