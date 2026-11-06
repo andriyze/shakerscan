@@ -286,3 +286,23 @@ def test_an_authorized_address_beyond_the_child_limit_makes_the_scan_partial():
     ], not_scanned=[{"address": "192.0.2.99", "reason": "address_child_limit"}])
     assert merged["device_posture"]["completeness"]["complete"] is False
     assert "address:192.0.2.99:address_child_limit" in merged["device_posture"]["completeness"]["incomplete_stages"]
+
+
+def test_a_port_that_answers_differently_per_address_claims_neither_identity():
+    """Live run: real Redis on one address, a fake on the other, same port 6379."""
+    real = {"transport": "tcp", "port": 6379, "state": "open", "service_name": "redis", "product": "Redis",
+            "version": "7.4.0", "identity": {"protocol": "redis", "authentication": "not_required"}}
+    fake = {"transport": "tcp", "port": 6379, "state": "open", "service_name": "unknown", "product": "",
+            "version": "", "identity": {"protocol": None, "authentication": "not_tested"}}
+    merged = device_posture.merge_address_children("app.example.test", [
+        _child("192.0.2.10", services=[real]), _child("192.0.2.11", services=[fake]),
+    ])
+    row = merged["device_posture"]["services"][0]
+    assert row["identity_conflict"] is True and row["service_name"] == "unknown"
+    assert row["identity_by_address"]["192.0.2.10"]["protocol"] == "redis"
+    assert row["identity_by_address"]["192.0.2.11"]["protocol"] is None
+    same = device_posture.merge_address_children("app.example.test", [
+        _child("192.0.2.10", services=[real]), _child("192.0.2.11", services=[dict(real)]),
+    ])
+    assert same["device_posture"]["services"][0]["service_name"] == "redis"
+    assert "identity_conflict" not in same["device_posture"]["services"][0]

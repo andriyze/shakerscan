@@ -1443,12 +1443,9 @@ async def _identify_tcp(
             row = None
         if row is None:
             continue
-        if row["status"] == si.STATUS_UNREACHABLE:
-            row["adapters_attempted"] = attempted
-            return row
+        # Identified, excluded, unreachable, or a banner nothing recognised (the listener spoke
+        # first, so payloads would only be answered by the same unknown service).
         row["adapters_attempted"] = attempted
-        # Identified, excluded, or a banner nothing recognised: the listener spoke first, so
-        # payloads would only be answered by the same unknown service.
         return row
     if answers:
         row = _result(port, "tcp", si.STATUS_UNIDENTIFIED, details={"answer_excerpt": excerpt(answers[0])})
