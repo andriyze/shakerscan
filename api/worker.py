@@ -20220,13 +20220,21 @@ async def process_canonical_scanner_capability_job(
                     scope_receipt_id=target.scope_receipt_id,
                     approval_receipt_id=policy.approval_receipt_id,
                 )
-                if (
-                    recomputed_digest != queued_action_digest
-                    or stored.action_digest != queued_action_digest
-                    or dict(stored.record.requested) != requested_budget
-                ):
+                if stored.action_digest != queued_action_digest:
                     raise ReservationConflict(
                         "scanner queue payload does not match its durable action"
+                    )
+                if (
+                    recomputed_digest != queued_action_digest
+                    or dict(stored.record.requested) != requested_budget
+                ):
+                    # Queued with a hold or an input this release does not run (an earlier
+                    # release's, from before an upgrade): nothing is sent, and the hold is
+                    # released and the action settled now rather than left to the sweeper.
+                    raise HuntDispatchRejected(
+                        "this call was queued with a hold or an input this release does not run "
+                        "(queued before an upgrade); nothing was sent, its hold was released, and "
+                        "it can be called again"
                     )
                 lease_seconds = hunt_capability_lease_seconds(
                     requested_budget

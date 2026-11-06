@@ -265,7 +265,7 @@ PERSON_DECISION_SUBMISSION_RECOVERY = (
 
 
 def _person_decision_error(exc: urllib.error.HTTPError, detail: str, method: str, path: str,
-                           body: bytes | None) -> "MCPError | None":
+                           body: bytes | None, gateway: str | None = None) -> "MCPError | None":
     """An Enterprise gateway's ``person_decision_required`` refusal, as the agent should read it:
     outcome person_decision_required, the decision in the gateway's words, the person's command."""
     decision = _person_decision()
@@ -285,7 +285,7 @@ def _person_decision_error(exc: urllib.error.HTTPError, detail: str, method: str
             "decision": parsed.get("decision"), "summary": summary, "proof": "browser",
             "recovery": PERSON_DECISION_BROWSER_RECOVERY,
         }}), http_status=exc.code)
-    command = decision.person_command(method, path, body, parsed)
+    command = decision.person_command(method, path, body, parsed, gateway=gateway)
     submission = bool(parsed.get("submission"))
     started = parsed.get("decision") == "hunt.start"
     after = (
@@ -2029,7 +2029,7 @@ class ArsenalClient:
         except urllib.error.HTTPError as exc:
             raw = exc.read(min(self.max_response_bytes, 64_000))
             detail = raw.decode("utf-8", errors="replace")
-            decided = _person_decision_error(exc, detail, method, path, body)
+            decided = _person_decision_error(exc, detail, method, path, body, self.base_url)
             if decided is not None:
                 raise decided from exc
             # The agent sees the message, not error.data: a refusal must carry its reason there.

@@ -262,6 +262,72 @@ def test_a_thorough_call_admitted_at_the_registry_hold_still_runs_at_that_hold(s
     stack.loop.run_until_complete(scenario())
 
 
+def test_a_call_a_2_11_1_api_queued_at_its_profile_hold_runs_after_the_upgrade(stack, monkeypatch):
+    """2.11.1 admitted a profiled sqli.verify at 900 requests / 540 s. A call it queued is leased
+    by an upgraded worker: accepted as that hold, run within it, and settled."""
+    current = stack.router.agent_tools
+
+    class Release2111Admission:  # labelled double: admission as the 2.11.1 API ran it
+        def __getattr__(self, name):
+            return getattr(current, name)
+
+        @staticmethod
+        def hunt_scanner_dispatch_budgets(name, **_context):
+            return ({**current.canonical_hunt_scanner_budget(name),
+                     "http_requests": 900, "tool_wall_seconds": 540},)
+
+    monkeypatch.setattr(stack.router, "agent_tools", Release2111Admission())
+
+    async def scenario():
+        hunt, standing = await _active_hunt(stack.pool, "thorough")
+        stack.state["scope_receipt_id"] = str(standing["scope_receipt_id"])
+        result = await _call(stack, hunt, "release-2111-sqli-0001")
+        assert not isinstance(result, Exception), getattr(result, "detail", result)
+        assert result["action_result"]["status"] == "success", result
+        status, reservation, decode = await _reservation(stack.pool, hunt, "release-2111-sqli-0001")
+        assert status == "completed" and reservation["status"] == "committed"
+        requested = decode(reservation["requested_json"])
+        assert (requested["http_requests"], requested["tool_wall_seconds"]) == (900, 540)
+        (process,) = stack.processes
+        assert process["hard_budget"]["http_requests"] <= 900
+        assert process["hard_budget"]["tool_wall_seconds"] <= 540
+
+    stack.loop.run_until_complete(scenario())
+
+
+def test_a_call_queued_with_a_hold_no_release_ran_is_released_and_settled(stack, monkeypatch):
+    """A queued call whose durable hold this release cannot match is never run, and its hold is
+    released at once with the action settled blocked: nothing charged, nothing left reserved."""
+    current = stack.router.agent_tools
+
+    class UnknownAdmission:  # labelled double: a hold no release reserved
+        def __getattr__(self, name):
+            return getattr(current, name)
+
+        @staticmethod
+        def hunt_scanner_dispatch_budgets(name, **_context):
+            return ({**current.canonical_hunt_scanner_budget(name),
+                     "http_requests": 777, "tool_wall_seconds": 333},)
+
+    monkeypatch.setattr(stack.router, "agent_tools", UnknownAdmission())
+
+    async def scenario():
+        hunt, standing = await _active_hunt(stack.pool, "thorough")
+        stack.state["scope_receipt_id"] = str(standing["scope_receipt_id"])
+        result = await _call(stack, hunt, "unknown-hold-sqli-0001")
+        assert stack.processes == []
+        status, reservation, decode = await _reservation(stack.pool, hunt, "unknown-hold-sqli-0001")
+        assert status == "blocked", (status, result)
+        assert reservation["status"] == "released"
+        assert not any(decode(reservation["actual_json"]).values())
+        async with stack.pool.acquire() as conn:
+            used = json.loads(await conn.fetchval(
+                "SELECT budget_used_json FROM hunt_runs WHERE id=$1", hunt["id"]))
+        assert used.get("http_requests", 0) == 0 and used.get("tool_wall_seconds", 0) == 0
+
+    stack.loop.run_until_complete(scenario())
+
+
 def test_a_queued_call_with_no_input_to_test_is_released_at_dispatch(stack, monkeypatch):
     """Admission refuses a path with no parameter (sqlmap would inject into the path itself). A
     call an older API admitted anyway is refused by the worker before sqlmap starts, and its

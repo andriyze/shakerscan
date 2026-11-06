@@ -247,7 +247,45 @@ def _word(value: Any) -> str | None:
     return None if not text or text.startswith("-") else shlex.quote(text)
 
 
-def person_command(method: str, path: str, body: bytes | None, detail: Mapping[str, Any] | None = None) -> str:
+def gateway_option(api_url: Any) -> str | None:
+    """``--url <API URL>`` naming the instance a recovery command must reach, one quoted word, or
+    None for what is not an http(s) URL. Never credentials: user information, query and fragment
+    are dropped (a token is never in the URL; this makes sure)."""
+    try:
+        parts = urllib.parse.urlsplit(str(api_url or "").strip())
+        port = parts.port
+    except ValueError:
+        return None
+    if parts.scheme not in {"http", "https"} or not parts.hostname:
+        return None
+    host = parts.hostname
+    host = f"[{host}]" if ":" in host else host
+    authority = f"{host}:{port}" if port is not None else host
+    url = urllib.parse.urlunsplit((parts.scheme, authority, parts.path.rstrip("/"), "", ""))
+    return "--url " + shlex.quote(url)
+
+
+def with_gateway(command: str, api_url: Any) -> str:
+    """``command`` (a ``shakerscan <command> ...`` line) with ``--url`` right after its command
+    word, where every client command takes its connection options; unchanged without a usable
+    URL. A person's recovery command then reaches the instance the refusal came from, never the
+    terminal's default one."""
+    option = gateway_option(api_url)
+    prefix = "shakerscan "
+    if not option or not command.startswith(prefix):
+        return command
+    word, _, rest = command[len(prefix):].partition(" ")
+    return f"{prefix}{word} {option}" + (f" {rest}" if rest else "")
+
+
+def person_command(method: str, path: str, body: bytes | None, detail: Mapping[str, Any] | None = None,
+                   *, gateway: str | None = None) -> str:
+    """``_person_command`` naming the instance (``with_gateway``) when ``gateway`` (the API URL
+    the refused request went to) is given."""
+    return with_gateway(_person_command(method, path, body, detail), gateway)
+
+
+def _person_command(method: str, path: str, body: bytes | None, detail: Mapping[str, Any] | None = None) -> str:
     """The command the person runs in their own terminal to make this decision: the dedicated
     command where there is one (a budget raise, a target's authorization), else exactly this
     request through ``shakerscan api``. For a refused submission (``detail`` names a
@@ -518,7 +556,7 @@ def _touch(post: Post, approve: Any, terminal: Any, *, origin: str, method: str,
     # or a key out of reach over SSH, cannot be helped by waiting.
     if assertion is None and (unready := approve.security_key_readiness(waiting=True)):
         if approve.key_out_of_reach():
-            unready += f": {_inert(person_command(method, path, body, detail), 4 * MAX_BODY)}"
+            unready += f": {_inert(person_command(method, path, body, detail, gateway=origin), 4 * MAX_BODY)}"
         raise PersonDecisionError(f"{unready}; nothing was changed")
     sign = assertion or approve.security_key_assertion
     try:
@@ -564,16 +602,17 @@ def insert_seconds(challenge: Mapping[str, Any], now: float | None = None) -> fl
 
 def handle(post: Post, *, origin: str, method: str, path: str, body: bytes | None, detail: Mapping[str, Any],
            resend: Callable[[str], Any], terminal: Any = None, environ: Mapping[str, str] | None = None,
-           assertion: Callable[..., dict] | None = None) -> Any:
+           assertion: Callable[..., dict] | None = None, gateway: str | None = None) -> Any:
     """The refused request, completed: in an interactive terminal one touch and one resend (its
-    answer is returned, whatever it is); anywhere else PersonDecisionRefused."""
+    answer is returned, whatever it is); anywhere else PersonDecisionRefused, whose command names
+    the instance (``gateway``, the API URL; default ``origin``) with ``--url``."""
     stdin = getattr(terminal, "stdin", None)
     stdout = getattr(terminal, "stdout", None)
     if detail.get("proof") == BROWSER:
         # Never begun, at a terminal or not: the gateway offers no touch for it.
         raise PersonDecisionRefused(refusal_line(detail, ""), detail=detail, command="")
     if not interactive(stdin, stdout, environ):
-        command = person_command(method, path, body, detail)
+        command = person_command(method, path, body, detail, gateway=gateway or origin)
         raise PersonDecisionRefused(refusal_line(detail, command), detail=detail, command=command)
     if terminal is None:
         terminal = _approve().Terminal(sys.stdin, sys.stdout)
@@ -585,6 +624,6 @@ def handle(post: Post, *, origin: str, method: str, path: str, body: bytes | Non
 __all__ = [
     "ERROR", "EXIT_CANCELLED", "EXIT_REFUSED", "INLINE_BODY", "MAX_SUMMARY", "PROOF_HEADER",
     "PersonDecisionCancelled", "PersonDecisionError", "PersonDecisionRefused", "check_challenge", "complete",
-    "detail_of", "handle", "interactive", "json_poster", "person_command", "refusal_line", "required",
-    "saved_body", "summary_lines",
+    "detail_of", "gateway_option", "handle", "interactive", "json_poster", "person_command", "refusal_line",
+    "required", "saved_body", "summary_lines", "with_gateway",
 ]

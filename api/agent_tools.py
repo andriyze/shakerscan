@@ -1037,6 +1037,21 @@ def hunt_scanner_budget_context(
     }
 
 
+# The profile holds earlier releases reserved, for calls they queued that a worker of this release
+# may lease after an upgrade: 2.11.1 held sqli.verify at 900 requests / 540 s; 2.11.2 to 2.11.5 at
+# the current holds. Such a call runs at the floor (``_EXTERNAL_VERIFICATION_CEILINGS``: only a
+# hold covering all of the longer ceiling runs at it) and settles what it used.
+RELEASED_HUNT_SCANNER_HOLDS: dict[str, tuple[dict[str, int], ...]] = {
+    "sqli.verify": (
+        {"http_requests": 900, "tool_wall_seconds": 540},
+        {"http_requests": 1_800, "tool_wall_seconds": 1_200},
+    ),
+    "xss.verify": (
+        {"http_requests": 1_800, "tool_wall_seconds": 480, "browser_actions": 2},
+    ),
+}
+
+
 def hunt_scanner_dispatch_budgets(
     capability_name: str,
     *,
@@ -1046,16 +1061,25 @@ def hunt_scanner_dispatch_budgets(
 ) -> tuple[dict[str, int], ...]:
     """The holds a Hunt scanner call may run at, the current one first.
 
-    The second is the registry hold for a call admitted before profile holds changed. Only
-    the current hold is used for new admission. The worker verifies the action digest against
-    whichever hold the already-queued action reserved.
+    Then the registry hold, for a call admitted before profile holds changed, and the profile
+    holds earlier releases reserved (``RELEASED_HUNT_SCANNER_HOLDS``) where this call would get
+    a profile hold now. Only the current hold is used for new admission. The worker verifies the
+    action digest against whichever hold the already-queued action reserved.
     """
     current = canonical_hunt_scanner_budget(
         capability_name, budget_profile=budget_profile, deep_domxss=deep_domxss,
         device_target=device_target,
     )
     legacy = canonical_hunt_scanner_budget(capability_name)
-    return (current,) if legacy == current else (current, legacy)
+    holds = [current, legacy]
+    if current != legacy:
+        for released in RELEASED_HUNT_SCANNER_HOLDS.get(capability_name, ()):
+            holds.append({**legacy, **released})
+    unique: list[dict[str, int]] = []
+    for hold in holds:
+        if hold not in unique:
+            unique.append(hold)
+    return tuple(unique)
 
 
 def affordable_hunt_scanner_hold(

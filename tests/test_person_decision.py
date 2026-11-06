@@ -2623,3 +2623,85 @@ def test_the_budget_reason_help_says_what_a_touch_records_instead():
     with contextlib.redirect_stdout(out), pytest.raises(SystemExit):
         decisions.hunt_budget_raise(["--help"], ORIGIN)
     assert "the gateway records 'Raised by <you> (terminal security-key touch)'" in " ".join(out.getvalue().split())
+
+
+# ---- the person's command reaches the instance the refusal came from ---------------------------
+
+
+def test_every_recovery_command_names_the_instance_it_came_from():
+    """A person's command printed without --url ran against the terminal's default instance,
+    which may be another one than the refusal came from. The URL is one quoted word, with no
+    user information, query or fragment, and it goes where the client takes connection options."""
+    gateway = "https://gw.example.com:8443"
+    for method, path, body, detail, words in (
+        ("POST", f"/targets/{TARGET}/authorization", b"{}", None,
+         ["shakerscan", "targets", "--url", gateway, "authorize", TARGET]),
+        ("POST", f"/hunts/{HUNT}/budget-amendments", json.dumps({"limits": {"max_hosts": 5}}).encode(), None,
+         ["shakerscan", "hunt", "--url", gateway, "budget", "raise", HUNT, "--limit", "max_hosts=5"]),
+        ("PATCH", f"/targets/{TARGET}", b'{"cohort": "lab"}', None,
+         ["shakerscan", "api", "--url", gateway, "PATCH", f"/targets/{TARGET}", '{"cohort": "lab"}']),
+        ("POST", "/hunts", json.dumps({"target_id": TARGET}).encode(), {"decision": "hunt.start"},
+         ["shakerscan", "api", "--url", gateway, "POST", "/hunts", json.dumps({"target_id": TARGET})]),
+    ):
+        command = decision.person_command(method, path, body, detail, gateway=gateway)
+        assert shlex.split(command) == words, command
+        # Without an instance named, the command is as it was.
+        assert "--url" not in decision.person_command(method, path, body, detail)
+    for hostile, shown in (
+        ("https://user:pass@gw.example.com/api/?token=x#frag", "https://gw.example.com/api"),
+        ("http://[2001:db8::1]:8080/", "http://[2001:db8::1]:8080"),
+        ("https://gw.example.com/a b;rm -rf", "https://gw.example.com/a b;rm -rf"),
+    ):
+        words = shlex.split(decision.with_gateway("shakerscan targets authorize x", hostile))
+        assert words == ["shakerscan", "targets", "--url", shown, "authorize", "x"], words
+    for unusable in ("", "file:///etc/passwd", "--url=https://evil", "ftp://gw.example.com"):
+        assert decision.with_gateway("shakerscan targets authorize x", unusable) == "shakerscan targets authorize x"
+
+
+def test_a_refused_request_outside_a_terminal_names_its_instance(monkeypatch):
+    """handle() outside the person's terminal: the command it hands the agent names the
+    instance the request went to (the caller's API URL, else the origin)."""
+    at_a_terminal(monkeypatch, stdin=False, stdout=False)
+    for gateway, expected in ((None, ORIGIN), (ORIGIN + "/", ORIGIN)):
+        with pytest.raises(decision.PersonDecisionRefused) as refused:
+            decision.handle(lambda *_a: (500, {}), origin=ORIGIN, method="POST",
+                            path=f"/targets/{TARGET}/authorization", body=b"{}", detail=REFUSAL["detail"],
+                            resend=lambda grant: None, gateway=gateway)
+        assert shlex.split(refused.value.command) == [
+            "shakerscan", "targets", "--url", expected, "authorize", TARGET]
+        assert refused.value.line.endswith(refused.value.command)
+
+
+def test_the_clients_own_refusal_names_the_instance_it_addressed(gateway, monkeypatch, capsys):
+    decisions = _client_module(monkeypatch, gateway)
+    at_a_terminal(monkeypatch, stdin=False, stdout=False)
+    import shakerscan.cli as cli
+
+    monkeypatch.setattr(cli, "apply_connection", lambda args: ORIGIN)
+    args = types.SimpleNamespace(action="authorize", target="https://app.example.com", reason=None, json=False,
+                                 timeout=None, url=ORIGIN, token_file=None)
+    assert decisions.cmd_targets(args) == decision.EXIT_REFUSED
+    err = capsys.readouterr().err
+    assert f"shakerscan targets --url {ORIGIN} authorize https://app.example.com" in err
+    assert gateway.sent == []
+    assert decisions.hunt_budget_raise([HUNT, "--limit", "max_hosts=+1"], ORIGIN) == decision.EXIT_REFUSED
+    assert f"shakerscan hunt --url {ORIGIN} budget raise {HUNT} --limit max_hosts=+1" in capsys.readouterr().err
+
+
+# ---- one identity for authorize and unauthorize -------------------------------------------------
+
+
+@pytest.mark.parametrize("value", [
+    "https://[2606:4700:4700::1111]", "http://[2001:db8::1]", "host://[2001:db8::5]", "[2001:db8::1]",
+])
+def test_an_ipv6_literal_target_is_taken_as_named(value):
+    decisions = _decisions_module()
+    assert decisions.checked_target(f" {value} ") == value
+
+
+@pytest.mark.parametrize("value", ["https://[2606:4700:4700::1111].", "https://[2001:db8::1]/]",
+                                   "https://[not-an-address]", "https://app.example.com]"])
+def test_punctuation_after_an_ipv6_literal_or_a_name_is_still_refused(value):
+    decisions = _decisions_module()
+    with pytest.raises(decisions.DecisionError, match="punctuation"):
+        decisions.checked_target(value)

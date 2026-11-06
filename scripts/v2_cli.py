@@ -308,6 +308,7 @@ class ApiClient:
                 decision.json_poster(self.base_url, self.api_token),
                 origin=f"{parsed.scheme}://{parsed.netloc}", method=method, path=path, body=body, detail=detail,
                 resend=lambda grant: self.request(method, path, _person_proof=grant, **again),
+                gateway=self.base_url,
             )
         except decision.PersonDecisionRefused as exc:
             raise CliError(exc.line, error_type="person_decision_required", http_status=403,

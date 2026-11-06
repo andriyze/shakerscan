@@ -52,6 +52,8 @@ REGISTRY_SQLI = {"http_requests": 900, "tool_wall_seconds": 300}
 REGISTRY_XSS = {"http_requests": 400, "tool_wall_seconds": 120, "browser_actions": 2}
 THOROUGH_SQLI = {"http_requests": 1_800, "tool_wall_seconds": 1_200}
 THOROUGH_XSS = {"http_requests": 1_800, "tool_wall_seconds": 480, "browser_actions": 2}
+# The sqli.verify profile hold release 2.11.1 reserved: calls it queued are leased after an upgrade.
+SQLI_2_11_1 = {"http_requests": 900, "tool_wall_seconds": 540}
 # Fixture: the process plan digests that build_enforced_scanner_plan produced at 2.11.0
 # (81caee26d) for the registry holds below. A changed digest means a changed argv, wall,
 # ceiling or proof for the fast and balanced Hunt profiles.
@@ -333,12 +335,16 @@ def test_the_lease_follows_the_thorough_wall():
 
 
 def test_the_worker_accepts_the_current_hold_and_a_call_admitted_before_it_existed():
+    # The current hold, the registry hold, and the profile hold 2.11.1 reserved (900 / 540 s).
     assert agent_tools.hunt_scanner_dispatch_budgets(
         "sqli.verify", budget_profile="thorough",
-    ) == (THOROUGH_SQLI, REGISTRY_SQLI)
+    ) == (THOROUGH_SQLI, REGISTRY_SQLI, SQLI_2_11_1)
     assert agent_tools.hunt_scanner_dispatch_budgets(
         "sqli.verify", budget_profile="balanced",
-    ) == (THOROUGH_SQLI, REGISTRY_SQLI)
+    ) == (THOROUGH_SQLI, REGISTRY_SQLI, SQLI_2_11_1)
+    assert agent_tools.hunt_scanner_dispatch_budgets(
+        "xss.verify", budget_profile="thorough",
+    ) == (THOROUGH_XSS, REGISTRY_XSS)
     assert agent_tools.hunt_scanner_dispatch_budgets(
         "xss.verify", budget_profile="thorough", deep_domxss=True,
     ) == (REGISTRY_XSS,)
@@ -348,6 +354,8 @@ def test_the_worker_accepts_the_current_hold_and_a_call_admitted_before_it_exist
     pick = agent_tools.admitted_hunt_scanner_hold
     assert pick(legacy, [current, legacy]) == legacy
     assert pick(current, [current, legacy]) == current
+    released = {**SQLI_2_11_1, "agent_actions": 1, "active_actions": 1}
+    assert pick(released, [current, legacy, released]) == released
     # Anything else is compared with the current hold, so the digest check refuses it.
     assert pick({**current, "http_requests": 901}, [current, legacy]) == current
 

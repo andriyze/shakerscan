@@ -433,6 +433,56 @@ _GROUPED_TARGET_COLUMNS = """
                 t.created_at"""
 
 
+def _lookup_keys(normalized: str) -> list[str]:
+    """The canonical keys a target registered for ``normalized`` may carry: its own, then its
+    www twin's (``POST /targets`` registers the name that resolves when only the twin does)."""
+    keys = [_canonical_target_key(normalized)]
+    parts = urllib.parse.urlsplit(normalized)
+    host = parts.hostname or ""
+    try:
+        ipaddress.ip_address(host)
+        return keys
+    except ValueError:
+        pass
+    twin = host[4:] if host.startswith("www.") else f"www.{host}"
+    if twin and "." in twin:
+        netloc = twin + (f":{parts.port}" if parts.port else "")
+        keys.append(_canonical_target_key(urllib.parse.urlunsplit((parts.scheme, netloc, "", "", ""))))
+    return list(dict.fromkeys(keys))
+
+
+@router.get("/targets/lookup")
+async def lookup_target(url: str = Query(..., min_length=1, max_length=2048)):
+    """The registered web target a URL names, by the one identity ``POST /targets`` registers it
+    under (``normalize_target_url``, then the canonical key: host and non-default port; scheme,
+    path, query and fragment are not part of it), or ``{"target": null}``. A client that
+    authorizes a target by URL finds the same target here to withdraw it."""
+    try:
+        normalized, _note = normalize_target_url(url)
+    except TargetNormalizationError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    if not normalized:
+        raise HTTPException(status_code=400, detail="Invalid target URL")
+    keys = _lookup_keys(normalized)
+    async with _pool().acquire() as conn:
+        row = await conn.fetchrow(
+            """SELECT id, LEFT(url, 2049) AS url, LEFT(name, 512) AS name, is_active
+               FROM targets
+               WHERE canonical_key = ANY($1::text[])
+                 AND COALESCE(discovery_source, 'manual') NOT IN ('model-intake','host')
+               ORDER BY array_position($1::text[], canonical_key)
+               LIMIT 1""",
+            keys,
+        )
+    if row is None:
+        return {"target": None, "normalized_url": normalized}
+    return {
+        "target": {"id": str(row["id"]), "url": row["url"], "name": row["name"],
+                   "is_active": bool(row["is_active"])},
+        "normalized_url": normalized,
+    }
+
+
 @router.get("/targets/grouped")
 async def list_targets_grouped(
     response: Response = None,
