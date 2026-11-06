@@ -75,6 +75,7 @@ SELECT ds.id,ds.scan_id,ds.transport,ds.port,ds.state,ds.service_name,ds.product
        ds.version,ds.cpe,ds.encrypted,ds.web_origin,ds.first_seen_at,ds.last_seen_at,
        ds.metadata_json->>'address' AS observed_address,
        ds.metadata_json->>'detection_method' AS detection_method,
+       ds.metadata_json->'identity' AS protocol_identity,
        s.target_url AS scanned_locator,s.created_at AS scan_created_at,s.status AS scan_status,
        CASE WHEN s.target_url=d.primary_locator AND s.created_at >= $2
             THEN d.locator_generation ELSE NULL END AS observation_generation
@@ -83,6 +84,15 @@ LEFT JOIN scans s ON s.id=ds.scan_id AND s.device_target_id=ds.device_target_id
 WHERE ds.device_target_id=$1
 ORDER BY ds.transport,ds.port,ds.id LIMIT $3
 """
+
+
+def _adapter_identity(value: Any) -> dict[str, Any]:
+    identity = object_value(value)
+    if identity.get("status") != "identified":
+        return {}
+    return {key: identity.get(key) for key in (
+        "protocol", "version_reported", "version_basis", "authentication", "authentication_proof",
+    )}
 
 
 async def validated_scan_source(conn: Any, row: dict[str, Any]) -> dict[str, Any] | None:
@@ -155,6 +165,9 @@ async def target_inventory(conn: Any, target: dict[str, Any], snapshot: dict[str
                 "locator_generation": row.get("observation_generation"),
                 "observations": [{
                     **{key: row.get(key) for key in ("transport", "port", "state", "service_name", "product", "version", "cpe", "encrypted", "web_origin", "detection_method")},
+                    # The protocol adapter's separate claims (protocol, reported build string,
+                    # authentication and its proof); the inventory allowlists them again.
+                    **_adapter_identity(row.get("protocol_identity")),
                     "kind": "device_service", "address": row.get("observed_address") or row.get("scanned_locator"),
                 }],
             })
