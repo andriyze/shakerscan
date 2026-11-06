@@ -427,7 +427,7 @@ def test_admission_classifies_the_call_by_the_wall_it_is_about_to_reserve():
                 and getattr(call.func, "id", None) == "require_long_action_slot"]
     assert ast.unparse(check) == (
         "require_long_action_slot(conn, run, name, charges.get('tool_wall_seconds'), "
-        "workers=live_agent_tool_workers(get_redis()))")
+        "workers=live_agent_tool_workers(get_redis))")
 
 
 

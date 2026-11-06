@@ -45,12 +45,13 @@ def test_web_dast_workers_never_consume_agent_scanner_jobs():
 
 
 def test_agent_tool_worker_consumes_only_its_dedicated_queue():
+    # Its short lane first (short Hunt calls), then the agent-tool queue.
     assert base_worker_queue_keys(
         device_only=False,
         agent_tool_only=True,
         device_queue_enabled=True,
         **QUEUES,
-    ) == ["agent_tool_jobs"]
+    ) == ["agent_tool_jobs:short", "agent_tool_jobs"]
 
 
 def test_device_worker_and_optional_device_fallback_do_not_gain_agent_queue():

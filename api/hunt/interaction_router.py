@@ -2428,7 +2428,7 @@ async def _execute_hunt_capability_lifecycle(
                     # collect one first, at no cost. A call is long by the wall it is about to
                     # reserve.
                     await require_long_action_slot(conn, run, name, charges.get("tool_wall_seconds"),
-                                                   workers=live_agent_tool_workers(get_redis()))
+                                                   workers=live_agent_tool_workers(get_redis))
                     if durable_budget:
                         durable_action_digest = hunt_capability_action_digest(
                             hunt_id=run["id"],

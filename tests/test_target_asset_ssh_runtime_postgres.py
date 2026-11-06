@@ -100,9 +100,12 @@ def test_hunt_direct_ssh_reuses_streams_cancels_and_revalidates(monkeypatch, tmp
             monkeypatch.setattr(worker,'process_job',lambda job:execute_job(r,None,job))
             async def consume():
                 while not stopped.is_set():
-                    lease = await agent_job_concurrency.lease_when_ready(lambda:lease_job(r,
-                        [worker_queue(base_queue,owner),base_queue],consumer_name=owner,
-                        block_ms=100,visibility_timeout_ms=600000),enabled=True)
+                    # The worker's own queues and lease order: its SSH route, the short lane, the
+                    # agent-tool queue (hunt/agent_job_concurrency.lease_by_lane).
+                    lease = await agent_job_concurrency.lease_by_lane(lambda keys:lease_job(r,
+                        keys,consumer_name=owner,block_ms=100,visibility_timeout_ms=600000),
+                        [worker_queue(base_queue,owner),agent_job_concurrency.short_lane(base_queue),base_queue],
+                        base_queue=base_queue,enabled=True)
                     if lease is None:
                         continue
                     try:
