@@ -170,6 +170,16 @@ class HttpWorkflowExchange:
                     extracted[item["name"]] = _scalar(value)
                 except (KeyError, ValueError):
                     missing.append(item["name"])
+            if self.known_secrets and extracted:
+                # A capture carrying a saved login's secret (in any encoding) would let a later
+                # request send it anywhere the Hunt reaches: it is not kept.
+                from .archive_body_masking import KnownValueScrubber
+                scrubber = KnownValueScrubber(list(self.known_secrets))
+                for name in [name for name, value in extracted.items()
+                             if scrubber.scrub(str(value), lambda _value: "") != str(value)]:
+                    extracted.pop(name)
+                    cookie_names = [item for item in cookie_names if item != name]
+                    missing.append(name)
             if extracted or self.known_secrets:
                 payload_values = {"schema_version": SCHEMA, "hunt_id": self.run_id,
                     "source_action_id": self.action_id, "target_digest": _target_digest(self.target),
@@ -724,14 +734,18 @@ async def _withheld_value(
 
 async def _saved_login_value(
     conn: Any, *, run: Mapping[str, Any], target: TargetBinding, policy: Mapping[str, Any],
-    values: Mapping[str, Any], binding: Mapping[str, Any], destination: str | None,
+    context: Mapping[str, Any], values: Mapping[str, Any], binding: Mapping[str, Any], destination: str | None,
 ) -> str:
     """A saved login's field, worker-private: only under this Hunt's live ``login.use`` grant for
     the profile's current version, only in the login's own POST to the profile's login URL."""
     try:
-        from hunt.saved_logins import live_login_grants, login_url, request_login_url, validate_login_request_shape
+        from hunt.saved_logins import (
+            live_login_grants, profile_login_url, request_login_url, validate_login_request_shape,
+        )
     except ModuleNotFoundError:  # package import layout
-        from ..hunt.saved_logins import live_login_grants, login_url, request_login_url, validate_login_request_shape
+        from ..hunt.saved_logins import (
+            live_login_grants, profile_login_url, request_login_url, validate_login_request_shape,
+        )
     if not _hunt_is_live(run):
         raise ValueError("saved login belongs to a Hunt that is no longer live")
     profile_id = validate_login_request_shape(values)
@@ -749,7 +763,12 @@ async def _saved_login_value(
         if resolved.profile.auth_kind not in {"form_login", "json_login"} or not any(
                 grant["profile_version"] == version for grant in grants):
             raise ValueError("saved login changed after it was attached; a person attaches it again")
-        url = login_url(resolved.interactive_http().endpoint_url)
+        # The Hunt's own registered host, never the host this request was bound to (a destination
+        # granted for this Hunt is another host, and no saved login goes there).
+        target_context = context.get("target") if isinstance(context.get("target"), Mapping) else {}
+        hunt_url = str(target_context.get("url") or "")
+        url = profile_login_url(resolved.interactive_http().endpoint_url, hunt_url,
+                                urllib.parse.urlsplit(hunt_url).hostname)
         if url is None or request_login_url(values, destination) != url:
             raise ValueError("saved_login_destination: a saved login is sent only to its own login URL")
         return str(_scalar(resolved.http_workflow_value(binding["credential_field"])))
@@ -804,7 +823,7 @@ async def prepare_http_exchange(
             exchange.bound_values.append(str(value))
         elif "saved_login" in binding:
             value = await _saved_login_value(
-                conn, run=run, target=target, policy=policy, values=values, binding=binding,
+                conn, run=run, target=target, policy=policy, context=context, values=values, binding=binding,
                 destination=destination,
             )
             exchange.opaque_binding = True
