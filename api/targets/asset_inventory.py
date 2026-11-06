@@ -17,6 +17,7 @@ try:
 except ModuleNotFoundError:
     from ..scope.psl import PSL_PIN_PATH, PublicSuffixError, parse_domain, registrable_domain
 from .scale_summary import ACTIVE_FINDINGS_BY_TARGET_SQL
+from .liveness import LIVENESS_COLUMNS, LIVENESS_JOIN, LIVENESS_STATUS, STATUSES as LIVENESS_STATUSES, public_liveness
 try:
     from list_contract import ListSpec, Page, SortKey, SqlParams, count_total, snapshot_time
 except ModuleNotFoundError:
@@ -28,8 +29,8 @@ ROOT_COLUMNS = """t.id,t.name,t.url,t.is_active,t.created_at,t.updated_at,t.asse
     (p.target_id IS NOT NULL) AS connected_device,
     p.device_class,p.manufacturer,p.model,p.firmware_version,
     p.last_scanned_at AS network_last_scanned_at,p.last_scan_id AS network_last_scan_id,
-    p.last_score AS network_score,p.last_grade AS network_grade"""
-ROOT_FROM = "targets t LEFT JOIN target_device_profiles p ON p.target_id=t.id"
+    p.last_score AS network_score,p.last_grade AS network_grade,""" + LIVENESS_COLUMNS
+ROOT_FROM = "targets t LEFT JOIN target_device_profiles p ON p.target_id=t.id " + LIVENESS_JOIN
 # Active findings per asset (the asset row and its services), from the trigger-maintained finding
 # summary: one hash join instead of a correlated count over ``findings`` per asset. Equal to
 # ACTIVE_FINDINGS below: a finding counts for its target and for that target's owning asset.
@@ -198,6 +199,8 @@ FILTERS = {
         'scanning': SCANNING,
     },
     'asset_type': {'web': WEB_VIEW, 'network': NETWORK_VIEW},
+    # docs/target-liveness.md: the stored status; a target never checked is 'unchecked'.
+    'liveness': {status: f"{LIVENESS_STATUS}='{status}'" for status in LIVENESS_STATUSES},
 }
 SORTS = {
     # (asset order key, group aggregate, direction)
@@ -254,6 +257,8 @@ def public_asset(row: Any) -> dict[str, Any]:
     for key in ('severity_counts', 'origins'):
         if isinstance(result.get(key), str):
             result[key] = json.loads(result[key])
+    liveness = {key: result.pop(key) for key in list(result) if key.startswith('liveness_')}
+    result['liveness'] = public_liveness(liveness)
     return result
 
 
@@ -277,16 +282,45 @@ def _validate(sort: str, chosen: dict[str, Any]) -> None:
 
 
 def _scope_query(*, search: str, connected_only: bool, include_inactive: bool,
-                 include_services: bool) -> _Query:
+                 include_services: bool, domain: str | None = None) -> _Query:
     base = "COALESCE(t.discovery_source,'manual') <> 'model-intake'" if include_services else ROOT_WHERE
     # $1-$3 are fixed: DETAIL_COLUMNS reads $1 to decide whether retired services are listed.
-    return _Query(base + """
+    query = _Query(base + """
         AND ($1::boolean OR t.is_active)
         AND (NOT $2::boolean OR p.target_id IS NOT NULL)
         AND ($3::text='' OR t.name ILIKE '%' || $3 || '%' OR t.url ILIKE '%' || $3 || '%'
              OR EXISTS (SELECT 1 FROM targets member WHERE member.asset_owner_id=t.id
                         AND (member.name ILIKE '%' || $3 || '%' OR member.url ILIKE '%' || $3 || '%')))
     """, [include_inactive, connected_only, search.strip()])
+    if domain:
+        # One domain group (``group_domain``), read through the group cache that
+        # ``fill_domain_cache`` filled for this domain's candidate locators first.
+        query.where += f"""
+        AND EXISTS (SELECT 1 FROM target_inventory_groups dg WHERE dg.locator={_LOCATOR}
+                    AND dg.psl_version={query.bind(psl_version())} AND dg.group_domain={query.bind(domain)})"""
+    return query
+
+
+DOMAIN_PATTERN = r'^[A-Za-z0-9.:_\[\]-]{1,253}$'
+
+
+def clean_domain(domain: str | None) -> str | None:
+    """The ``domain`` filter as the group cache stores it (lower case, no trailing dot)."""
+    value = str(domain or '').strip().lower().rstrip('.')
+    if not value:
+        return None
+    if not re.fullmatch(DOMAIN_PATTERN, value):
+        raise HTTPException(400, 'Unknown domain filter')
+    return value
+
+
+async def fill_domain_cache(conn: Any, domain: str | None) -> None:
+    """Fill the group cache for every locator that could belong to ``domain`` (the domain itself
+    and its subdomains), so the ``domain`` filter reads a complete cache."""
+    if not domain:
+        return
+    await fill_group_cache(conn, 'targets t', _Query(f"""COALESCE(t.discovery_source,'manual') <> 'model-intake'
+        AND ({_LOCATOR} = $1 OR right({_LOCATOR}, char_length($1) + 1) = '.' || $1)""", [domain]))
 
 
 def _apply_filters(query: _Query, chosen: dict[str, Any], environment: str | None,
@@ -311,13 +345,17 @@ async def list_assets(conn: Any, *, search: str = '', connected_only: bool = Fal
                       authorization: str | None = None, findings: str | None = None,
                       activity: str | None = None, sort: str = 'name',
                       include_facets: bool = False, web_only: bool = False,
-                      member_limit: int = DEFAULT_MEMBER_LIMIT) -> dict[str, Any]:
+                      member_limit: int = DEFAULT_MEMBER_LIMIT, liveness: str | None = None,
+                      domain: str | None = None) -> dict[str, Any]:
     """The legacy (limit/offset) inventory response, deprecated for the 2.11.x line. Domain groups
     are bounded (``_list_domain_groups``)."""
-    chosen = {'asset_type': asset_type, 'authorization': authorization, 'findings': findings, 'activity': activity}
+    chosen = {'asset_type': asset_type, 'authorization': authorization, 'findings': findings, 'activity': activity,
+              'liveness': liveness}
     _validate(sort, chosen)
+    domain = clean_domain(domain)
+    await fill_domain_cache(conn, domain)
     query = _scope_query(search=search, connected_only=connected_only, include_inactive=include_inactive,
-                         include_services=include_services)
+                         include_services=include_services, domain=domain)
     facet_query = _Query(query.where, query.parameters)
     _apply_filters(query, chosen, environment, web_only)
     from_sql = SUMMARY_FROM if _needs_summary(sort, chosen) else ROOT_FROM
@@ -402,7 +440,8 @@ async def inventory_facets(conn: Any, query: _Query) -> dict[str, Any]:
             {HAS_FINDINGS} AS has_findings,
             {HAS_CRITICAL_HIGH} AS critical_high,
             {LAST_SCANNED} IS NOT NULL AS scanned,{SCANNING} AS scanning,
-            {_web_view('tal.locator')} AS web,{_network_view('tal.locator')} AS network
+            {_web_view('tal.locator')} AS web,{_network_view('tal.locator')} AS network,
+            {LIVENESS_STATUS} AS liveness
         FROM {SUMMARY_FROM} {_FACET_LOCATOR_FROM} WHERE {query.where}
     )
     SELECT count(*) AS total,
@@ -417,11 +456,16 @@ async def inventory_facets(conn: Any, query: _Query) -> dict[str, Any]:
         count(*) FILTER (WHERE web) AS asset_type_web,
         count(*) FILTER (WHERE network) AS asset_type_network,
         (SELECT COALESCE(jsonb_object_agg(environment,total),'{{}}'::jsonb) FROM (
-            SELECT environment,count(*) AS total FROM scope GROUP BY environment) environments) AS environments
+            SELECT environment,count(*) AS total FROM scope GROUP BY environment) environments) AS environments,
+        (SELECT COALESCE(jsonb_object_agg(liveness,total),'{{}}'::jsonb) FROM (
+            SELECT liveness,count(*) AS total FROM scope GROUP BY liveness) states) AS liveness
     FROM scope""", *query.parameters)
     environments = row['environments']
     if isinstance(environments, str):
         environments = json.loads(environments)
+    states = row['liveness']
+    if isinstance(states, str):
+        states = json.loads(states)
     count = lambda key: int(row[key])
     return {
         'total': count('total'),
@@ -432,6 +476,7 @@ async def inventory_facets(conn: Any, query: _Query) -> dict[str, Any]:
         'activity': {'scanned': count('activity_scanned'), 'never': count('activity_never'),
                      'scanning': count('activity_scanning')},
         'asset_type': {'web': count('asset_type_web'), 'network': count('asset_type_network')},
+        'liveness': {status: int((states or {}).get(status, 0)) for status in LIVENESS_STATUSES},
     }
 
 
@@ -510,18 +555,27 @@ async def list_assets_v1(conn: Any, page: Page, *, search: str = '', connected_o
                          environment: str | None = None, authorization: str | None = None,
                          findings: str | None = None, activity: str | None = None,
                          member_limit: int = DEFAULT_MEMBER_LIMIT,
-                         include_facets: bool = False, web_only: bool = False) -> dict[str, Any]:
+                         include_facets: bool = False, web_only: bool = False,
+                         liveness: str | None = None, domain: str | None = None) -> dict[str, Any]:
     if page.fields is not None:
         raise HTTPException(400, {'error': 'fields_unsupported', 'message': 'the inventory does not support fields='})
-    chosen = {'asset_type': asset_type, 'authorization': authorization, 'findings': findings, 'activity': activity}
+    chosen = {'asset_type': asset_type, 'authorization': authorization, 'findings': findings, 'activity': activity,
+              'liveness': liveness}
     sort_name = (page.sort or 'name').lstrip('-')
     _validate(sort_name, chosen)
-    filters = {**chosen, 'search': search.strip(), 'connected_only': connected_only,
+    domain = clean_domain(domain)
+    # A filter added in 2.12 joins the cursor's filters only when given, so a cursor issued
+    # before it keeps its fingerprint.
+    filters = {**{key: value for key, value in chosen.items() if key != 'liveness' or value},
+               'search': search.strip(), 'connected_only': connected_only,
                'include_inactive': include_inactive, 'include_services': include_services,
                'environment': (environment or '').strip().lower() or None, 'group_by': group_by,
                'member_limit': member_limit, 'web_only': web_only}
+    if domain:
+        filters['domain'] = domain
+    await fill_domain_cache(conn, domain)
     query = _scope_query(search=search, connected_only=connected_only, include_inactive=include_inactive,
-                         include_services=include_services)
+                         include_services=include_services, domain=domain)
     facet_query = _Query(query.where, query.parameters)
     _apply_filters(query, chosen, environment, web_only)
     from_sql = SUMMARY_FROM if _needs_summary(sort_name, chosen) else ROOT_FROM

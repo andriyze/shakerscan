@@ -13,6 +13,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 from .asset_migration import host_url
 from .asset_inventory import DEFAULT_MEMBER_LIMIT, MAX_MEMBER_LIMIT, list_assets_v1
 from .asset_store import asset_detail, asset_history, list_assets, resolve_asset_id
+from .liveness import check_now as liveness_check_now
 
 try:
     from list_compat import direct, mark_deprecated, v1_page, wants_list_v1
@@ -72,6 +73,10 @@ async def target_inventory(response: Response = None,
                            authorization: Literal['authorized','unauthorized'] | None = None,
                            findings: Literal['any','critical_high','none'] | None = None,
                            activity: Literal['never','scanned','scanning'] | None = None,
+                           liveness: Literal['live','reachable','unreachable','no_dns','dns_error',
+                                             'blocked','unchecked'] | None = None,
+                           domain: str | None = Query(None, max_length=253, description=
+                                                      "only this domain group (the group's root_domain)"),
                            sort: Literal['name','risk','recent','created',
                                          '-name','-risk','-recent','-created'] = 'name',
                            include_facets: bool = False,
@@ -91,8 +96,8 @@ async def target_inventory(response: Response = None,
     ``-`` to descend. Otherwise the deprecated limit/offset response (``sort`` names its own
     direction: name ascending, the others descending); with ``group_by=domain`` each group holds at
     most ``member_limit`` assets and a page at most 200 (``member_count``/``members_truncated``)."""
-    limit, cursor, fields, count, since, member_limit, web_only = (direct(value) for value in (
-        limit, cursor, fields, count, since, member_limit, web_only))
+    limit, cursor, fields, count, since, member_limit, web_only, liveness, domain = (direct(value) for value in (
+        limit, cursor, fields, count, since, member_limit, web_only, liveness, domain))
     if wants_list_v1(cursor=cursor, count=count, fields=fields, since=since):
         page = v1_page(limit=limit, cursor=cursor, sort=sort, fields=fields, count=count, since=since)
         async with pool().acquire() as conn:
@@ -101,7 +106,7 @@ async def target_inventory(response: Response = None,
                 include_inactive=include_inactive, include_services=include_services, group_by=group_by,
                 asset_type=asset_type, environment=environment, authorization=authorization,
                 findings=findings, activity=activity, member_limit=member_limit,
-                include_facets=include_facets, web_only=bool(web_only),
+                include_facets=include_facets, web_only=bool(web_only), liveness=liveness, domain=domain,
             )
     if sort.startswith('-'):
         raise HTTPException(400, 'A "-" sort is list/v1 only; add count=none (or a cursor) to use it')
@@ -113,7 +118,22 @@ async def target_inventory(response: Response = None,
                                  limit=limit, offset=offset, group_by=group_by, asset_type=asset_type,
                                  environment=environment, authorization=authorization, findings=findings,
                                  activity=activity, sort=sort, include_facets=include_facets,
-                                 web_only=bool(web_only), member_limit=member_limit)
+                                 web_only=bool(web_only), member_limit=member_limit,
+                                 liveness=liveness, domain=domain)
+
+
+@router.post('/targets/{target_id}/liveness')
+async def check_target_liveness(target_id: str):
+    """Check the target's liveness now (docs/target-liveness.md) and return it. The check belongs
+    to the target's asset (its host); a check younger than 30 s is returned instead of repeated."""
+    try:
+        uuid.UUID(str(target_id))
+    except ValueError:
+        raise HTTPException(400, 'invalid target id')
+    result = await liveness_check_now(pool(), target_id)
+    if result is None:
+        raise HTTPException(404, 'target not found')
+    return result
 
 
 @router.post('/targets/hosts')
