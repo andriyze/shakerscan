@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import datetime, timedelta, timezone
+from itertools import count
 import json
 import os
 from pathlib import Path
@@ -119,6 +120,11 @@ def test_startup_leaves_the_index_build_to_a_background_task_that_rebuilds_an_in
     run(scenario)
 
 
+# A distinct ordinal per inserted action: ``hash()`` of a string differs per process
+# (PYTHONHASHSEED), so ordinals taken from it collided now and then on the (scan_id, ordinal) key.
+_ORDINALS = count(1)
+
+
 async def _action(conn, scan, action_id, status):
     await conn.execute(
         """INSERT INTO scan_capability_actions(
@@ -130,7 +136,7 @@ async def _action(conn, scan, action_id, status):
                   $4::text,'{}'::jsonb,'{}'::jsonb,true,false,$5,
                   CASE WHEN $5 IN ('success','partial','failed','timed_out') THEN $4::text END,
                   CASE WHEN $5 IN ('success','partial','failed','timed_out') THEN $4::text END)""",
-        scan, action_id, abs(hash(action_id)) % 500, DIGEST, status)
+        scan, action_id, next(_ORDINALS), DIGEST, status)
 
 
 async def _settled(conn, owner_kind, owner, action_id, status, minutes_ago):
