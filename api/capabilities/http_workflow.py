@@ -83,6 +83,9 @@ async def prepare_http_operation(
         from runtime.credential_resolver import CredentialResolutionError
         from runtime.credential_refs import CredentialReferenceError
         wire_input, headers = {}, {}
+        # The values this request sends by reference, for the reduced answer's cookie names (the
+        # capture sink clears ``known_secrets`` once it has sealed them).
+        sent: list[str] = []
         try:
             async with pool.acquire() as conn:
                 owner = await conn.fetchrow("SELECT * FROM hunt_runs WHERE id=$1", run['id'])
@@ -97,6 +100,7 @@ async def prepare_http_operation(
                     )
                 except (ValueError, CredentialResolutionError, CredentialReferenceError) as exc:
                     return {"ok": False, "error": "http_workflow_preflight:" + str(exc)[:240]}
+            sent.extend([*exchange.known_secrets, *exchange.bound_values])
             # Every value this request sends by reference is known exactly (a withheld value, a
             # discovered secret, a long session cookie this Hunt's login set): the planner keeps
             # the response, with each of them withheld wherever the target echoes it.
@@ -134,7 +138,7 @@ async def prepare_http_operation(
                     if summary.get('set_cookie_metadata'):
                         # A target names its cookies: a name may echo what this login sent.
                         response['response']['set_cookie_metadata'] = mask_cookie_names(
-                            summary['set_cookie_metadata'], [*exchange.known_secrets, *exchange.bound_values])
+                            summary['set_cookie_metadata'], sent)
                 response.pop('redirect_chain', None)
             if exchange.missing_names and isinstance(response.get('response'), dict):
                 # The request itself stands (a failed login is a result); the capture it asked for
@@ -147,5 +151,6 @@ async def prepare_http_operation(
             wire_input.clear()
             exchange.bound_values.clear()
             exchange.known_secrets.clear()
+            sent.clear()
 
     return execute, exchange, injects_headers
