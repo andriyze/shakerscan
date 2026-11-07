@@ -62,8 +62,10 @@ reference, label and kind only. Never a username or secret value.
   The session cookie it set is a capture reference, sent back only to the origin that set it.
 - The secret is sealed with the action's encrypted private result as an *unreferenced* known
   value: in every later `http.request`, `artifact.inspect` and `javascript.analyze` output of the
-  Hunt, and in every scanner action's observations (the public secrecy boundary), an echo of it in
-  any case or HTML, JSON, URL or base64 encoding is masked, and it is never given a
+  Hunt (the body sample, the page outline, every response header shown, a redirect's Location and
+  the cookie names a response sets, the login's own cookie names included), and in every scanner
+  action's observations (the public secrecy boundary), an echo of it in any case or HTML, JSON, URL
+  or base64 encoding is masked, and it is never given a
   `withheld://` reference, so it cannot be sent anywhere else.
 - Receipts, the Hunt record, permission requests and events hold ids and labels only. The raw
   login body exists only in the explicitly sensitive archive, marked private.
@@ -71,7 +73,8 @@ reference, label and kind only. Never a username or secret value.
 ## Known limits
 
 - A secret shorter than six characters is not masked in later pages (it would match ordinary
-  text); the login's own answer is still reduced to its status.
+  text), and an echo in another encoding (hex, reversed) is not recognised; the login's own answer
+  is still reduced to its status.
 - A form whose page and POST target differ (page `/login`, action `/session`) cannot be used as a
   saved login: the POST must go to the profile's endpoint path.
 - The Enterprise gateway must pass `saved_logins` and the `login.use` bound through unchanged.
