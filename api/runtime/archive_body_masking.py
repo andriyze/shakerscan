@@ -2136,6 +2136,46 @@ def mask_cut_bytes(text: bytes, after: bytes, mask: Any, encoding: str = "utf-8"
                            after_complete=after_complete and len(tail) <= CUT_LOOKAHEAD_CHARS)
 
 
+def mask_cookie_names(metadata: Any, values: Any) -> Any:
+    """``set_cookie_metadata`` with every cookie name that echoes one of ``values`` (in any
+    encoding ``KnownValueScrubber`` knows) withheld: a target chooses its cookie names, so a name
+    can carry a value the request sent (a login's password). In place; returns it."""
+    scrubber = KnownValueScrubber([str(value) for value in values or () if value])
+    if not scrubber.values or not isinstance(metadata, list):
+        return metadata
+    for item in metadata:
+        if isinstance(item, dict) and isinstance(item.get("name"), str):
+            item["name"] = scrubber.scrub(item["name"], lambda _value: MASK)
+    return metadata
+
+
+def _mask_known_in_public_fields(result: dict[str, Any]) -> None:
+    """Known-value masking (the active collector's: unreferenced secrets such as a saved login's
+    password first, then the values this action sent or the Hunt sealed) over the answer fields a
+    target fills outside the body: every selected and security header value, ``location``,
+    ``final_url``, each redirect hop's ``location`` and each Set-Cookie name. The body sample and
+    the page outline are masked where they are built; these fields were masked for URL secrets
+    only, so a target could echo a withheld value back in ``X-Powered-By`` or a cookie name."""
+    summary = result.get("response")
+    if isinstance(summary, dict):
+        for key in ("location", "final_url"):
+            if isinstance(summary.get(key), str):
+                summary[key] = _mask_known_values(summary[key])
+        for headers in (summary.get("selected_headers"), summary.get("security_headers")):
+            if isinstance(headers, dict):
+                for name in list(headers):
+                    if isinstance(headers[name], str):
+                        headers[name] = _mask_known_values(headers[name])
+        for item in summary.get("set_cookie_metadata") or ():
+            if isinstance(item, dict) and isinstance(item.get("name"), str):
+                item["name"] = _mask_known_values(item["name"])
+    if isinstance(result.get("final_url"), str):
+        result["final_url"] = _mask_known_values(result["final_url"])
+    for hop in result.get("redirect_chain") or ():
+        if isinstance(hop, dict) and isinstance(hop.get("location"), str):
+            hop["location"] = _mask_known_values(hop["location"])
+
+
 def mask_public_http_urls(result: dict[str, Any]) -> dict[str, Any]:
     """The one schema-aware pass over an HTTP capability result's public URL fields:
     ``response.location``, ``response.final_url``, the URL-bearing ``selected_headers`` and
@@ -2160,6 +2200,7 @@ def mask_public_http_urls(result: dict[str, Any]) -> dict[str, Any]:
             hop["location"] = mask_url_secrets(hop["location"])
     collector = _COLLECTOR.get()
     if collector is not None:
+        _mask_known_in_public_fields(result)
         holder = summary if isinstance(summary, dict) else result
         holder.pop("withheld_values", None)
         entries = collector.entries(json.dumps(result, ensure_ascii=False, default=str))
@@ -3337,6 +3378,7 @@ __all__ = [
     "KnownValueScrubber",
     "is_credential_shaped",
     "mask_known_values",
+    "mask_cookie_names",
     "MAX_MASKED_BODY_CHARS",
     "copy_evidence",
     "looks_like_dump_head",

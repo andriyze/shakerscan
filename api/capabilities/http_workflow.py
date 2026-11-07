@@ -12,9 +12,9 @@ from runtime.hunt_http_exchange import HttpWorkflowExchange, prepare_http_exchan
 from .http import execute_bound_http_request
 
 try:
-    from runtime.archive_body_masking import active_withheld_values
+    from runtime.archive_body_masking import active_withheld_values, mask_cookie_names
 except ModuleNotFoundError:  # package import layout
-    from api.runtime.archive_body_masking import active_withheld_values
+    from api.runtime.archive_body_masking import active_withheld_values, mask_cookie_names
 
 
 _BOUND_VALUE_MARKER = "[withheld:bound]"
@@ -132,7 +132,9 @@ async def prepare_http_operation(
                     response['response']['workflow_values_visible'] = False
                     # Cookie names and security attributes only, never values: a login's answer.
                     if summary.get('set_cookie_metadata'):
-                        response['response']['set_cookie_metadata'] = summary['set_cookie_metadata']
+                        # A target names its cookies: a name may echo what this login sent.
+                        response['response']['set_cookie_metadata'] = mask_cookie_names(
+                            summary['set_cookie_metadata'], [*exchange.known_secrets, *exchange.bound_values])
                 response.pop('redirect_chain', None)
             if exchange.missing_names and isinstance(response.get('response'), dict):
                 # The request itself stands (a failed login is a result); the capture it asked for
