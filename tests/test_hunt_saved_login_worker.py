@@ -176,8 +176,11 @@ async def hostile_target(wire):
             if head.startswith(b"POST /hub/echo-login "):
                 # A login answer that hands the password back in a header and a JSON body.
                 page = json.dumps({"ok": True, "password": SECRET}).encode()
+                # A cookie name is the target's own choice: one carries the password (base64url).
                 response = (b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nX-Pass: "
-                            + base64.b64encode(raw) + b"\r\nConnection: close\r\nContent-Length: "
+                            + base64.b64encode(raw) + b"\r\nSet-Cookie: "
+                            + base64.urlsafe_b64encode(raw).rstrip(b"=") + b"=1; Path=/hub"
+                            + b"\r\nConnection: close\r\nContent-Length: "
                             + str(len(page)).encode() + b"\r\n\r\n" + page)
             elif head.startswith(b"POST /hub/login "):
                 form = urllib.parse.parse_qs(body.decode())
@@ -189,10 +192,22 @@ async def hostile_target(wire):
                             + (f"Set-Cookie: hub_session={SESSION}; Path=/hub; HttpOnly\r\n".encode() if ok else b"")
                             + b"Content-Type: text/html\r\nConnection: close\r\nContent-Length: "
                             + str(len(page)).encode() + b"\r\n\r\n" + page)
+            elif f"hub_session={SESSION}".encode() in head and head.startswith(b"GET /hub/bounce "):
+                # A later redirect whose Location echoes the password under an innocent name.
+                response = (b"HTTP/1.1 302 Found\r\nLocation: /hub/?m="
+                            + urllib.parse.quote(SECRET, safe="").encode() + b"&b=" + base64.b64encode(raw)
+                            + b"\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
             elif f"hub_session={SESSION}".encode() in head:
                 page = hostile_page()
+                # Every header a target fills outside the body echoes the password: the posture
+                # headers the answer always shows (Server, X-Powered-By, CSP) and a cookie name.
                 response = (b"HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nX-Echo: "
                             + urllib.parse.quote(SECRET, safe="").encode()
+                            + b"\r\nX-Powered-By: " + raw
+                            + b"\r\nServer: hub/" + base64.b64encode(raw)
+                            + b"\r\nContent-Security-Policy: default-src 'self'; report-uri /csp?k="
+                            + urllib.parse.quote(SECRET, safe="").encode()
+                            + b"\r\nSet-Cookie: " + base64.urlsafe_b64encode(raw).rstrip(b"=") + b"=1; Path=/hub"
                             + b"\r\nConnection: close\r\nContent-Length: " + str(len(page)).encode() + b"\r\n\r\n" + page)
             elif head.startswith(b"GET /hub/login "):
                 page = (b"<html><head><title>Sign in</title></head><body><form method=post action=/hub/login>"
@@ -256,7 +271,16 @@ def test_a_saved_login_signs_in_by_reference_and_its_secret_never_reaches_the_pl
             assert len(wire) == 2 and f"hub_session={SESSION}".encode() in wire[1][0]
             public = json.dumps(orders)
             assert "Order 1001" in public, "the signed-in page itself reaches the planner"
-            for where, value in (("login answer", login), ("signed-in answer", orders), ("Hunt actions", conn.actions),
+            # The echoes outside the body are shown, withheld: the posture headers and a cookie.
+            response = orders["typed_output"]["records"][0]["response"]
+            assert {"server", "x-powered-by", "content-security-policy"} <= set(response["security_headers"])
+            assert response["set_cookie_metadata"], "the cookie the page set is listed"
+            bounce, _ = await execute(conn, {"method": "GET", "path": "/hub/bounce", "follow_redirects": False,
+                                             "request_bindings": [{**capture}]}, "signed-in-bounce")
+            assert bounce["status"] == "success", bounce
+            assert bounce["typed_output"]["records"][0]["response"].get("location"), "the redirect is shown"
+            for where, value in (("login answer", login), ("signed-in answer", orders), ("redirect answer", bounce),
+                                 ("Hunt actions", conn.actions),
                                  ("job result", conn.result), ("run", conn.run)):
                 text = json.dumps(value, default=str)
                 assert_no_secret(text, where)
