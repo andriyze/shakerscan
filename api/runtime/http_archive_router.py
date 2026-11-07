@@ -324,7 +324,19 @@ async def _build_export_bytes(
         # A HAR document has a fixed shape; the ShakerScan envelope says what this deployment
         # will export so the raw option is never offered only to be refused.
         encoded.document["raw_har"] = raw_har
-    return encoded.render(), total
+    content = encoded.render()
+    if hunt_run_id and redaction != "raw":
+        # A saved login's secret the target echoed later (a header, a body) is not under a
+        # secret-named key, so the payload redaction keeps it: withhold it in the whole document.
+        try:
+            from runtime.archive_body_masking import withhold_in_document
+            from runtime.hunt_http_exchange import hunt_saved_login_secrets
+        except ModuleNotFoundError:  # package import layout
+            from .archive_body_masking import withhold_in_document
+            from .hunt_http_exchange import hunt_saved_login_secrets
+        async with _pool().acquire() as conn:
+            content = withhold_in_document(content, await hunt_saved_login_secrets(conn, hunt_run_id))
+    return content, total
 
 
 SEARCH_DESCRIPTION = (

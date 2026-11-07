@@ -447,3 +447,56 @@ def _walk(value, key):
     elif isinstance(value, list):
         for v in value:
             yield from _walk(v, key)
+
+
+def test_the_hunts_masked_archive_export_withholds_the_saved_logins_secret(monkeypatch):
+    """A later answer can echo the secret where the payload redaction does not look (a header such
+    as X-Powered-By, a body field with an innocent name). The Hunt's masked archive export, which the
+    agent can read with ``shakerscan api``, withholds it in the whole document; a raw export (the
+    operator's privileged view) keeps the record as sent."""
+    from runtime import http_archive_router as archive_router
+
+    raw = SECRET.encode()
+    echoed = json.dumps({"log": {"entries": [{"response": {
+        "headers": [{"name": "X-Powered-By", "value": SECRET},
+                    {"name": "Server", "value": "hub/" + base64.b64encode(raw).decode()}],
+        "content": {"text": f"<p>note: {SECRET}</p><i>{urllib.parse.quote(SECRET, safe='')}</i>"}}}]}})
+
+    class Encoded:
+        document: dict = {}
+
+        def render(self):
+            return echoed.encode()
+
+    async def nothing(*_args, **_kwargs):
+        return []
+
+    async def one(*_args, **_kwargs):
+        return 1
+
+    async def stats(*_args, **_kwargs):
+        return {}
+
+    async def build(*_args, **_kwargs):
+        return Encoded()
+
+    async def scenario():
+        wire = []
+        server = await hostile_target(wire)
+        async with serving(server):
+            conn = LoginConnection(f"http://fixture.test:{server.sockets[0].getsockname()[1]}")
+            login, _ = await execute(conn, login_input(), "saved-login-archive")
+            assert login["status"] == "success", login
+            monkeypatch.setattr(archive_router, "_pool", lambda: conn)
+            for name, fake in (("count_transactions", one), ("read_archive_stats", stats),
+                               ("read_transactions", nothing), ("build_export", build)):
+                monkeypatch.setattr(archive_router, name, fake)
+            arguments = dict(scan_id=None, hunt_run_id=str(HUNT), export_format="har", method=None,
+                             status_code=None, search=None, limit=10, offset=0, raw_har=None)
+            masked, _ = await archive_router._build_export_bytes(redaction="redacted", **arguments)
+            text = masked.decode()
+            json.loads(text)
+            assert_no_secret(text, "the masked archive export")
+            raw_export, _ = await archive_router._build_export_bytes(redaction="raw", **arguments)
+            assert SECRET in json.loads(raw_export)["log"]["entries"][0]["response"]["headers"][0]["value"]
+    asyncio.run(scenario())

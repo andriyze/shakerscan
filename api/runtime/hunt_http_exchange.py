@@ -455,6 +455,29 @@ async def sealed_hunt_knowledge(conn: Any, *, run_id: Any, target: TargetBinding
             "sql_tables": tables, "context_bytes": context_bytes}
 
 
+async def hunt_saved_login_secrets(conn: Any, run_id: Any) -> list[str]:
+    """Every saved-login secret this Hunt sent, for the Hunt's records (its masked HTTP archive):
+    unlike ``sealed_hunt_knowledge`` it ignores the in-Hunt expiry and the target binding, since
+    a record is read after the Hunt. Six characters or more. API- and worker-private."""
+    rows = await conn.fetch("""SELECT private_http_result FROM hunt_actions
+        WHERE hunt_run_id=$1 AND private_http_result IS NOT NULL
+        ORDER BY completed_at DESC NULLS LAST, id""", uuid.UUID(str(run_id)))
+    found: list[str] = []
+    for row in rows or ():
+        try:
+            ciphertext = str(row["private_http_result"])
+            if len(ciphertext) > MAX_PRIVATE_RESULT_CHARS:
+                continue
+            private = json.loads(decrypt_secret(ciphertext))
+            if private.get("hunt_id") != str(run_id):
+                continue
+            found.extend(str(item) for item in private.get(KNOWN_VALUES_KEY) or ()
+                         if isinstance(item, str) and len(item) >= _MIN_SEEDED_CHARS and item not in found)
+        except Exception:  # noqa: BLE001 - an unreadable row adds nothing
+            continue
+    return found
+
+
 async def saved_login_known_values(pool: Any, run_id: Any, target: TargetBinding) -> list[str]:
     """The saved-login secrets this Hunt sent (worker-private), for the public secrecy boundary of
     actions that do not withhold by reference (scanners). Six characters or more: a shorter one

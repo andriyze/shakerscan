@@ -2136,6 +2136,16 @@ def mask_cut_bytes(text: bytes, after: bytes, mask: Any, encoding: str = "utf-8"
                            after_complete=after_complete and len(tail) <= CUT_LOOKAHEAD_CHARS)
 
 
+def withhold_in_document(content: bytes, values: Any) -> bytes:
+    """A rendered JSON document (an archive export) with every echo of ``values`` replaced by the
+    mask, in any encoding ``KnownValueScrubber`` knows (a JSON-escaped echo included), as whole
+    tokens. The mask holds no JSON special character, so the document stays valid."""
+    scrubber = KnownValueScrubber([str(value) for value in values or () if value], whole_tokens=True)
+    if not scrubber.values:
+        return content
+    return scrubber.scrub(content.decode("utf-8"), lambda _value: MASK).encode("utf-8")
+
+
 def mask_cookie_names(metadata: Any, values: Any) -> Any:
     """``set_cookie_metadata`` with every cookie name that echoes one of ``values`` (in any
     encoding ``KnownValueScrubber`` knows) withheld: a target chooses its cookie names, so a name
@@ -3379,6 +3389,7 @@ __all__ = [
     "is_credential_shaped",
     "mask_known_values",
     "mask_cookie_names",
+    "withhold_in_document",
     "MAX_MASKED_BODY_CHARS",
     "copy_evidence",
     "looks_like_dump_head",
