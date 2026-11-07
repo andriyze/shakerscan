@@ -68,7 +68,9 @@ reference, label and kind only. Never a username or secret value.
   or base64 encoding is masked, and it is never given a
   `withheld://` reference, so it cannot be sent anywhere else.
 - Receipts, the Hunt record, permission requests and events hold ids and labels only. The raw
-  login body exists only in the explicitly sensitive archive, marked private.
+  login body exists only in the explicitly sensitive archive, marked private. The Hunt's masked
+  archive export (`GET /hunts/{id}/http-transactions`, any redaction but `raw`) withholds every
+  saved-login secret the Hunt sent wherever a recorded answer echoes it.
 
 ## Known limits
 
