@@ -441,3 +441,20 @@ export function batchCapNotice(total, source, { memberCount = 0, moreMembers = f
   return `${source} has ${size}; a batch scans at most ${SCAN_BATCH_MAX} at once. `
     + `The first ${Math.min(total, SCAN_BATCH_MAX)} are filled in below; queue the rest in further batches.`
 }
+
+/**
+ * The counts a domain group shows, from one source: the server's member count. A list/v1 group
+ * carries its first members only (`loaded` subdomains); every label counts all of them.
+ */
+export function domainGroupCounts({ memberCount, loaded, hasRoot, truncated }) {
+  const plural = (n, word) => `${n.toLocaleString('en-US')} ${word}${n === 1 ? '' : 's'}`
+  const members = Math.max(Number(memberCount) || 0, (Number(loaded) || 0) + (hasRoot ? 1 : 0))
+  const subdomains = Math.max(0, members - (hasRoot ? 1 : 0))
+  const more = truncated ? Math.max(0, subdomains - (Number(loaded) || 0)) : 0
+  return {
+    badge: `${plural(members, 'target')}${subdomains ? ` · ${plural(subdomains, 'subdomain')}` : ''}`,
+    hiddenLabel: `${plural(subdomains, 'subdomain')} hidden · show`,
+    listedNote: more ? `First ${(Number(loaded) || 0).toLocaleString('en-US')} of ${subdomains.toLocaleString('en-US')} listed.` : null,
+    more,
+  }
+}
