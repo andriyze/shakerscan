@@ -423,6 +423,31 @@ def test_promote_moves_the_value_into_a_profile_and_reveal_is_recorded(monkeypat
     run(scenario)
 
 
+def test_the_listing_names_the_targets_a_secret_was_found_on_and_granted_to():
+    async def scenario(conn):
+        owner, named, unnamed = await _target(conn), await _target(conn), await _target(conn)
+        # A target's name is whatever was typed or discovered: kept as data, never interpreted.
+        hostile = "<img src=x onerror=alert(1)> Shop  \u202e (lab)"
+        await conn.execute("UPDATE targets SET name=$2 WHERE id=$1", named, hostile)
+        await conn.execute("UPDATE targets SET name='Owner app' WHERE id=$1", owner)
+        await store.record_discovered(conn, target_id=owner, values=[(SYNTHETIC, "password")],
+                                      source={"kind": "hunt_action"})
+        ref = (await store.list_for_target(conn, owner))[0]["ref"]
+        secret_id = ref.removeprefix("secret://")
+        for to in (named, unnamed):
+            assert await store.grant(conn, target_id=owner, secret_id=secret_id, to_target_id=to, actor="o")
+        row = (await store.list_for_target(conn, owner))[0]
+        assert row["granted_to"] == [str(named), str(unnamed)]
+        assert row["target_names"] == {
+            str(owner): "Owner app", str(named): hostile,
+            str(unnamed): f"https://{unnamed}.example.invalid",  # no name: its address
+        }
+        # The receiving target's listing names where the secret came from.
+        received = (await store.list_for_target(conn, named))[0]
+        assert received["found_on"] == str(owner) and received["target_names"][str(owner)] == "Owner app"
+    run(scenario)
+
+
 def test_review_fixes_planner_view_promote_once_and_grant_to_an_active_target(monkeypatch):
     import httpx
     from fastapi import FastAPI
@@ -442,7 +467,8 @@ def test_review_fixes_planner_view_promote_once_and_grant_to_an_active_target(mo
         row = (await store.list_for_target(conn, other))[0]
         view = store.planner_view(row, other)
         assert view["granted"] is True and view["ref"] == ref
-        assert not {"granted_to", "found_on", "source", "promoted_profile_id", "reveals"} & set(view)
+        assert not {"granted_to", "found_on", "source", "promoted_profile_id", "reveals",
+                    "target_names"} & set(view)
         async with asyncpg.create_pool(DSN, min_size=1, max_size=2) as pool:
             monkeypatch.setattr(routes, "pool", lambda: pool)
             app = FastAPI()
