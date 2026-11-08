@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { Button, ConfirmDialog, useToast, type ButtonVariant } from '@/components/ui'
 import { featureEnabled } from '@/lib/workspaceCapabilities'
+import { useCan } from '@/lib/useSessionCapabilities'
 import {
   approveRecordDeletion, executeRecordDeletion, previewRecordDeletion, archiveRecordTarget,
   type DeletionPreview, type DeletionResult, type DeletionSelection,
@@ -123,6 +124,7 @@ export function RecordDeletionDialog({ preview, subject, onClose, onDeleted, onA
 
 export function DeleteRecordsButton({ selection, label = 'Delete', subject, onDeleted, onArchived, archived = false, disabled, variant = 'danger', className }: Props) {
   const toast = useToast()
+  const canDeleteRecords = useCan('records.delete')
   const [preview, setPreview] = useState<DeletionPreview | null>(null)
   const [loading, setLoading] = useState(false)
   const loadingRef = useRef(false)
@@ -143,7 +145,7 @@ export function DeleteRecordsButton({ selection, label = 'Delete', subject, onDe
       setPreview(null)
     }
   }, [selectionKey, disabled])
-  if (!featureEnabled('record_deletion')) return null
+  if (!featureEnabled('record_deletion') || !canDeleteRecords) return null
   async function open() {
     if (loadingRef.current) return
     loadingRef.current = true

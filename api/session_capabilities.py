@@ -16,7 +16,7 @@ SCHEMA_VERSION = 'session-capabilities/v1'
 ACTIONS = (
     'targets.add', 'targets.edit', 'targets.check', 'scans.start',
     'findings.retest', 'findings.verify', 'findings.triage', 'findings.accept_risk',
-    'hunts.manage', 'secrets.read', 'secrets.manage', 'secrets.decide',
+    'hunts.manage', 'secrets.read', 'secrets.manage', 'secrets.decide', 'records.delete',
 )
 
 
