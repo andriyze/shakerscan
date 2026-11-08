@@ -12,3 +12,4 @@ export function partitionSharedServices<T extends SharedServicePresenceInput>(se
   notObservedCount: number
 }
 export function sharedServiceHuntHref(service: SharedServicePresenceInput, targetId: string): string | null
+export function summarizeEvidence(evidence: ReadonlyArray<{hunt_id?: string | null; scan_id?: string | null; status?: string}> | null | undefined, fallbackStatus?: string): Array<{label: string; count: number}>

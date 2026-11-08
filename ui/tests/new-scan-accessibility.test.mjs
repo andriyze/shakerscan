@@ -19,7 +19,10 @@ test('New Scan exposes disclosure and validation state to assistive technology',
   assert.match(page, /aria-expanded=\{showAdvanced\}/)
   assert.match(page, /aria-controls="advanced-scan-options"/)
   assert.match(page, /id="advanced-scan-options"/)
-  assert.match(page, /<p role="alert"/)
+  // The submit refusal sits beside Run Scan as an alert that is scrolled into view and focused.
+  assert.match(page, /ref=\{errorRef\} tabIndex=\{-1\} role="alert"/)
+  assert.match(page, /node\.scrollIntoView\(/)
+  assert.match(page, /node\.focus\(/)
 })
 
 test('New Scan clears stale validation when the operator edits the form', () => {
@@ -32,6 +35,9 @@ test('ordinary active scans need one runnable worker, not release-fleet uniformi
   assert.match(page, /require_current_workers: false/)
   assert.match(page, /placementPreviewLabel\(topology, currentWorkerCount\)/)
   assert.match(page, /Expected build:/)
+  // Build hashes and plan schema ids stay out of the main text, in a collapsed disclosure.
+  assert.match(page, /<summary[^>]*>Technical details<\/summary>/)
+  assert.doesNotMatch(page, /Execution topology|Release-authoritative|Resolved families:/)
   assert.match(page, /Reported running builds:/)
   assert.match(page, /activeTesting && !activeWorkerAvailable/)
   assert.doesNotMatch(page, /Active testing is paused until the worker fleet is uniformly current/)

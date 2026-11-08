@@ -273,3 +273,20 @@ test('liveness reads as a label, a tone and a reason with its age', async () => 
   assert.equal(livenessView({ status: 'evil<script>' }, now).status, 'unchecked')
   assert.equal(livenessView({ status: 'reachable', reason: 'r'.repeat(5000) }, now).title.length, 300)
 })
+
+test('a truncated domain group counts its subdomains the same way in every label', async () => {
+  const { domainGroupCounts } = await import('./targetInventoryModel.mjs')
+  // 30 subdomains, no root target, the first 20 loaded.
+  const cut = domainGroupCounts({ memberCount: 30, loaded: 20, hasRoot: false, truncated: true })
+  assert.equal(cut.badge, '30 targets · 30 subdomains')
+  assert.equal(cut.hiddenLabel, '30 subdomains hidden · show')
+  assert.equal(cut.listedNote, 'First 20 of 30 listed.')
+  assert.equal(cut.more, 10)
+  // A root target and 8 loaded subdomains, nothing cut.
+  const whole = domainGroupCounts({ memberCount: 9, loaded: 8, hasRoot: true, truncated: false })
+  assert.equal(whole.badge, '9 targets · 8 subdomains')
+  assert.equal(whole.hiddenLabel, '8 subdomains hidden · show')
+  assert.equal(whole.listedNote, null)
+  assert.equal(whole.more, 0)
+  assert.equal(domainGroupCounts({ memberCount: 2, loaded: 1, hasRoot: true, truncated: false }).badge, '2 targets · 1 subdomain')
+})

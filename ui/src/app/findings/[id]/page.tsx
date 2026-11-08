@@ -676,7 +676,11 @@ function FindingDetailContent() {
     )
   }
 
+  // Why Retest cannot run now, as visible text: a tooltip never shows on a touch screen.
+  const retestBlockedReason = !retestSupported ? `Retest unavailable: ${retestUnsupportedMessage}`
+    : hasPendingRetest && !retestLoading ? 'A proof replay is already queued or running.' : ''
   const retestControls = !deviceFinding && canRetest && (
+    <div className="flex flex-col items-start gap-1 lg:items-end">
     <div className="flex items-center gap-1 rounded-lg border border-gray-800 bg-gray-950/60 p-1">
       <select
         value={selectedRetestMode}
@@ -693,11 +697,14 @@ function FindingDetailContent() {
         type="button"
         onClick={handleRetest}
         disabled={retestLoading || hasPendingRetest || !retestSupported}
+        aria-describedby={retestBlockedReason ? 'retest-blocked-reason' : undefined}
         title={!retestSupported ? retestUnsupportedMessage : hasPendingRetest ? 'A proof replay is already queued or running.' : 'Replay this finding with one bounded verifier'}
         className="rounded-md bg-blue-600 px-3 py-1.5 text-xs font-medium text-white transition-colors hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-50"
       >
         {retestLoading ? 'Queueing...' : hasPendingRetest ? 'Verifying…' : 'Retest'}
       </button>
+    </div>
+    {retestBlockedReason && <p id="retest-blocked-reason" data-testid="retest-blocked-reason" className="max-w-xs text-xs text-amber-300/90 lg:text-right">{retestBlockedReason}</p>}
     </div>
   )
 

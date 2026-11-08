@@ -16,10 +16,11 @@ import {
 import { isAbortError } from '@/lib/fetchLayer.mjs'
 import { totalLabel, type ListV1Page } from '@/lib/listPage.mjs'
 import { usePoll } from '@/lib/usePoll'
-import { cohortScopingNote, coverageScope as describeCoverageScope, outOfScopeSummary, parseCohortView, postureState, type CoverageScope, type OutOfScopeSummary, type PostureState } from '@/lib/dashboardScope.mjs'
+import { cohortScopingNote, coverageScope as describeCoverageScope, hiddenResultsNote, outOfScopeSummary, parseCohortView, postureState, type CoverageScope, type HiddenResultsNote, type OutOfScopeSummary, type PostureState } from '@/lib/dashboardScope.mjs'
 import { useUrlFilters } from '@/lib/useUrlFilters'
 import {
   Badge,
+  Button,
   Card,
   ConfirmDialog,
   ErrorState,
@@ -411,7 +412,7 @@ function DashboardContent() {
             )}
             {!fleetEnabled && workersKnown && (
               <span className="rounded-sm bg-gray-800 px-1.5 py-0.5 text-[10px] font-medium text-gray-300" title={`${workerCount} running worker processes; configured safety maximum ${maxWorkers}`}>
-                {workerCount} running · max {maxWorkers}
+                {workerCount} worker process{workerCount === 1 ? '' : 'es'} · max {maxWorkers}
               </span>
             )}
             <WorkspaceFeature name="worker_admin"><span className="h-5 w-px bg-gray-800" aria-hidden="true" />
@@ -526,7 +527,13 @@ function DashboardContent() {
         unavailable={cohortView !== 'all' && posture === 'unavailable' ? exposurePoll.refresh : null} />
 
       <div className="grid grid-cols-1 gap-6 xl:grid-cols-2">
-        <LatestResults scans={recentScans} loading={dashboardLoading && !data} outOfScope={outOfScope} />
+        <LatestResults
+          scans={recentScans}
+          loading={dashboardLoading && !data}
+          outOfScope={outOfScope}
+          hidden={hiddenResultsNote({ view: cohortView, total: data?.recent_scans?.length || 0, shown: recentScans.length })}
+          onShowAll={showAllCohorts}
+        />
         <WorkspaceFeature name="timeline"><RecentActivity events={meaningfulActivity} loading={overviewLoading} outOfScope={outOfScope} /></WorkspaceFeature>
       </div>
       {cohortNote ? <p className="text-xs text-gray-500" data-testid="cohort-scoping-note">{cohortNote}</p> : null}
@@ -595,7 +602,7 @@ function CohortScopeBar({ value, onChange, counts }: { value: CohortView; onChan
   return (
     <Card className="flex flex-col gap-3 p-4 lg:flex-row lg:items-center lg:justify-between">
       <div>
-        <h2 className="text-sm font-medium text-white">Executive cohort scope</h2>
+        <h2 className="text-sm font-medium text-white">Which targets the dashboard counts</h2>
         <p className="mt-1 text-xs text-gray-400">Operational includes production, staging, and clearly labeled unclassified assets. Lab data is never silently mixed into it.</p>
         <p className="mt-1 text-xs text-gray-500">{nonOperational} non-operational · {unclassified} unclassified</p>
       </div>
@@ -958,7 +965,7 @@ function ProgressRow({ label, value, total, color }: { label: string; value: num
   )
 }
 
-function LatestResults({ scans, loading, outOfScope = null }: { scans: Scan[]; loading: boolean; outOfScope?: OutOfScopeSummary | null }) {
+function LatestResults({ scans, loading, outOfScope = null, hidden = null, onShowAll }: { scans: Scan[]; loading: boolean; outOfScope?: OutOfScopeSummary | null; hidden?: HiddenResultsNote | null; onShowAll?: () => void }) {
   return (
     <Card className="overflow-hidden">
       <div className="flex items-center justify-between border-b border-gray-800 p-4">
@@ -991,7 +998,12 @@ function LatestResults({ scans, loading, outOfScope = null }: { scans: Scan[]; l
               <ScanStatusBadge status={scan.status} />
             </Link>
             )
-          }) : <p className="p-5 text-sm text-gray-500">{outOfScope ? 'No scan results in this scope. Results for the other cohorts show under All cohorts.' : 'No scan results yet. Add a target and run the first scan.'}</p>}
+          }) : hidden ? (
+            <div className="flex flex-wrap items-center gap-3 p-5 text-sm text-gray-400" data-testid="latest-results-hidden">
+              <p>{hidden.text}</p>
+              {onShowAll ? <Button size="sm" variant="secondary" onClick={onShowAll}>Show all cohorts</Button> : null}
+            </div>
+          ) : <p className="p-5 text-sm text-gray-500">{outOfScope ? 'No scan results in this scope. Results for the other cohorts show under All cohorts.' : 'No scan results yet. Add a target and run the first scan.'}</p>}
       </div>
     </Card>
   )

@@ -15,6 +15,7 @@ belong in Git history or immutable release notes rather than the active document
 - [Functionality reference](functionality-reference.md) — exhaustive generated/current product map.
 - [Hunt architecture](hunt-architecture.md) — adaptive investigation model.
 - [DAST and ASM architecture](dast-asm-architecture.md) — deterministic Scan and attack-surface model.
+- [Session capabilities](session-capabilities.md) — what the UI asks to hide controls a person cannot use; a gateway answers it by role.
 - [Service intelligence](service-intelligence.md) — service observations and investigation handoff.
 - [Target liveness](target-liveness.md) — DNS, reachability and live state per target: checks, limits and display.
 - [Multi-node architecture](multi-node-architecture.md) — distributed execution design.

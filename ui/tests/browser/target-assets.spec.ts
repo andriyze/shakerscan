@@ -184,3 +184,26 @@ test('ASSET-007 target details (owner, environment, cohort) are edited on the ta
   await expect(dialog).toBeHidden()
   expect(patches).toEqual([{metadata_json:{owner:'platform team',environment:'staging'},cohort:'lab'}])
 })
+
+for (const width of [390, 1440]) {
+  test(`ASSET-008 a web app added on a known host keeps its display name (${width} px)`, async ({page}) => {
+    await page.setViewportSize({width, height: 900})
+    await mock(page)
+    let web: Record<string,unknown> = {}
+    await page.route(`${MOCK_API_ORIGIN}/targets/hosts`,async route => route.fulfill({json:{id:assetId,status:'already_exists'}}))
+    await page.route(`${MOCK_API_ORIGIN}/targets`,async route => {
+      if (route.request().method() !== 'POST') return route.fallback()
+      web = route.request().postDataJSON()
+      return route.fulfill({json:{id:originId,url:'http://asset.example.test:3000',status:'already_exists'}})
+    })
+    await page.goto('/targets')
+    await page.getByRole('button',{name:'Add targets',exact:true}).first().click()
+    const dialog = page.getByRole('dialog',{name:'Add targets'})
+    await dialog.getByLabel('What do you want to test?').fill('http://asset.example.test:3000/')
+    await dialog.getByLabel('Display name (optional)').fill('Shop (lab)')
+    await page.getByRole('button',{name:'Add target',exact:true}).click()
+    await expect(dialog.getByRole('list',{name:'Results'})).toBeVisible()
+    expect(web.name).toBe('Shop (lab)')
+    expect(String(web.url)).toMatch(/^http:\/\/asset\.example\.test:3000/)
+  })
+}

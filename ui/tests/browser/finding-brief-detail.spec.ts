@@ -100,7 +100,9 @@ test('a proven candidate-titled finding reads as proven, masks redacted values a
   await expect(page.locator('a[title="Open in new tab"]').first()).toHaveAttribute('href', 'https://shop.fixture.invalid/rest/products/search?q=')
   // A proven finding without a replay says its proof stands, not that it needs a new Scan.
   await expect(page.getByText('has no single-request retest', { exact: false })).toHaveCount(0)
-  await expect(page.getByText('the scan-time proof above still stands', { exact: false })).toBeVisible()
+  // The reason shows next to the disabled Retest and again in the verification card.
+  await expect(page.getByText('Automated retest unavailable', { exact: false })).toContainText('the scan-time proof above still stands')
+  await expect(page.getByTestId('retest-blocked-reason')).toContainText('the scan-time proof above still stands')
   const select = page.getByLabel('Analyst verdict')
   const card = page.locator('#triage')
   const [selectBox, cardBox] = [await select.boundingBox(), await card.boundingBox()]

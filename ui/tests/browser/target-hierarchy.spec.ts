@@ -195,3 +195,39 @@ test('HIERARCHY-006 subdomains collapse even when the domain itself is not a tar
   await expect(page.getByRole('button',{name:'Subdomains of many.test',exact:true})).toHaveAttribute('aria-expanded','false')
   await expect(page.getByRole('link',{name:'s1.many.test',exact:true})).toHaveCount(0)
 })
+
+// 2.12.1: a domain group the server cut (its first 20 of 30 subdomains) counts the same 30 in its
+// badge, its collapsed line and its "more" note, and "Show all" lists all of them.
+for (const width of [390, 1440]) {
+  test(`HIERARCHY-007 at ${width} px a cut domain group counts its subdomains the same way everywhere`, async ({page}) => {
+    await page.setViewportSize({width, height: 900})
+    await pinMockApiOrigin(page)
+    const rows = Array.from({length: 30}, (_, index) => ({ id: `00000000-0000-4000-8000-${String(index + 700).padStart(12,'0')}`,
+      asset_id: `00000000-0000-4000-8000-${String(index + 700).padStart(12,'0')}`, name: `h${index}.cut.test`, locator: `h${index}.cut.test`,
+      url: `host://h${index}.cut.test`, root_domain: 'cut.test', is_active: true, environment: 'lab', connected_device: false,
+      origin_count: 0, service_count: 0, active_findings_count: 0 }))
+    await page.route(`${MOCK_API_ORIGIN}/**`, async route => {
+      const url = new URL(route.request().url())
+      if (url.pathname === '/targets/inventory') {
+        // The domain view is a flat list/v1 page of that domain's targets.
+        if (url.searchParams.get('domain') === 'cut.test') {
+          return route.fulfill({json:{items: rows, total: 30, total_kind: 'exact', has_more: false, next_cursor: null}})
+        }
+        return route.fulfill({json:{targets: rows.slice(0, 20), total: 30, total_groups: 1,
+          groups:[{root_domain:'cut.test', discoverable:true, member_count:30, members_truncated: true,
+            targets: rows.slice(0, 20)}]}})
+      }
+      return route.fulfill({json:{status:'healthy',skill:null,revision:0,targets:[],total:0}})
+    })
+    await page.goto('/targets')
+    const group = page.getByRole('region', {name: 'Targets in cut.test'})
+    await expect(group).toContainText('30 targets · 30 subdomains')
+    await group.getByRole('button', {name: '30 subdomains hidden · show'}).click()
+    await expect(page.getByRole('link',{name:'h19.cut.test',exact:true})).toBeVisible()
+    await expect(page.getByTestId('target-group-truncated')).toContainText('First 20 of 30 listed. 10 more subdomains in cut.test.')
+    await page.getByRole('button', {name: 'Show all 30 targets in cut.test'}).click()
+    await expect(page.getByRole('link',{name:'h29.cut.test',exact:true})).toBeVisible()
+    await expect(page.getByTestId('target-group-truncated')).toHaveCount(0)
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true)
+  })
+}

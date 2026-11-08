@@ -11,6 +11,7 @@ import {
   carriedOverFromDecision,
   carriedOverSummary,
   domainRatePresentation,
+  queueWaitPresentation,
   formatResumeTime,
   groupScanFindings,
   isProvenFinding,
@@ -844,4 +845,23 @@ test('a capability gap row names target_unavailable by its label, not as "Target
   assert.equal(coverageReasonText('some_new_code'), 'Some New Code')
   const report = fs.readFileSync(path.join(import.meta.dirname, '../components/ReportView.tsx'), 'utf8')
   assert.match(report, /item\.reason_code \? ` — \$\{coverageReasonText\(item\.reason_code\)\}`/)
+})
+
+
+test('a queued Scan says what it waits behind', () => {
+  const running = [
+    { id: 'a', target_name: 'Juice Shop (lab)', target_url: 'http://10.0.0.4:3000', run_kind: 'web_dast' },
+    { id: 'b', target_name: 'host://10.0.0.4', target_url: 'host://10.0.0.4', run_kind: 'device_posture' },
+  ]
+  const view = queueWaitPresentation('self', running, 2)
+  assert.equal(view.label, 'Waiting behind 2 running Scans.')
+  assert.deepEqual(view.items.map((item) => [item.name, item.kind]), [['Juice Shop (lab)', 'Scan'], ['10.0.0.4', 'network discovery']])
+  assert.equal(view.more, 0)
+  // More running than the bounded sample shows.
+  assert.equal(queueWaitPresentation('self', running, 7).more, 5)
+  // The queued Scan itself is never something it waits behind.
+  assert.equal(queueWaitPresentation('a', running, 2).label, 'Waiting behind 1 running Scan.')
+  const idle = queueWaitPresentation('self', [], 0)
+  assert.equal(idle.label, 'No other Scan is running.')
+  assert.deepEqual(idle.items, [])
 })

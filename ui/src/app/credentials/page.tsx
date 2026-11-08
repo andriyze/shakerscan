@@ -659,9 +659,9 @@ function CredentialsContent() {
                         className="text-blue-300 hover:text-blue-200"
                         onClick={() => setFilters({ target_kind: profile.target_kind === 'web' ? undefined : profile.target_kind, target_id: profile.target_id })}
                       >
-                        {profile.home_target_name || profile.target_id}
+                        {profile.home_target_name || profile.home_target_locator || 'its target'}
                       </button>
-                      {profile.home_target_locator ? <span className="font-mono"> · {profile.home_target_locator}</span> : null}
+                      {profile.home_target_name && profile.home_target_locator ? <span className="font-mono"> · {profile.home_target_locator}</span> : null}
                     </p>
                   )}
                   <p className="mt-1 text-sm text-gray-400">

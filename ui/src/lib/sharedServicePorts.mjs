@@ -75,3 +75,17 @@ export function sharedServiceHuntHref(service, targetId) {
   })
   return `/hunt?${params}`
 }
+
+/**
+ * One label per distinct source of a port's evidence, with how often it was seen: a Hunt that
+ * probed a port twelve times is "Hunt 79d5443a · succeeded ×12", not the same text twelve times.
+ */
+export function summarizeEvidence(evidence, fallbackStatus) {
+  const counts = new Map()
+  for (const item of evidence || []) {
+    const source = item?.hunt_id ? `Hunt ${String(item.hunt_id).slice(0, 8)}` : item?.scan_id ? `Scan ${String(item.scan_id).slice(0, 8)}` : 'Observation'
+    const label = `${source} · ${item?.status || fallbackStatus || 'observed'}`
+    counts.set(label, (counts.get(label) || 0) + 1)
+  }
+  return [...counts.entries()].map(([label, count]) => ({ label, count }))
+}

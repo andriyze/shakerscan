@@ -1,18 +1,30 @@
 'use client'
-import { useCallback, useEffect, useRef, useState } from 'react'
-import { Badge, Button, Card, ErrorState, Field, Input, Modal, Select } from '@/components/ui'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { Badge, Button, Card, Combobox, ErrorState, Field, Input, Modal, Select } from '@/components/ui'
 import { useCan } from '@/lib/useSessionCapabilities'
 import { formatDate } from '@/lib/api'
 import {
   StepUpRequired, grantDiscoveredSecret, listDiscoveredSecrets, promoteDiscoveredSecret, revealDiscoveredSecret,
   setDiscoveredSecretExpiry, setDiscoveredSecretState, terminalCommand, ungrantDiscoveredSecret, type DiscoveredSecret,
 } from '@/lib/discoveredSecretsApi'
+import { SECRETS_PAGE_SIZE, groupSecrets } from '@/lib/discoveredSecretsModel.mjs'
+import { targetOptions, targetSearchNote } from '@/lib/pickerOptions'
+import { useTargetSearch } from '@/lib/useTargetSearch'
 
 type Dialog =
   | { kind: 'reveal'; secret: DiscoveredSecret; value?: string }
   | { kind: 'grant'; secret: DiscoveredSecret; to: string }
   | { kind: 'promote'; secret: DiscoveredSecret; name: string; authKind: string; header: string }
   | { kind: 'expiry'; secret: DiscoveredSecret; days: string }
+
+/** Grant's target choice: the other target by name, never a typed id. The value is its id. */
+function GrantTargetPicker({ value, onChange, exclude }: { value: string; onChange: (id: string) => void; exclude: string[] }) {
+  const search = useTargetSearch({ selectedIds: [value], includeServices: true, accept: asset => !exclude.includes(asset.id) })
+  const options = useMemo(() => targetOptions(search.assets.filter(asset => !exclude.includes(asset.id))), [search.assets, exclude])
+  return <Combobox id="grant-target" value={value} onChange={onChange} options={options} aria-label="Other target"
+    onQueryChange={search.setQuery} loading={search.loading} optionsQuery={search.answeredQuery} footerNote={targetSearchNote(search)}
+    placeholder="Choose a target…" searchPlaceholder="Search targets by name, host or environment…" />
+}
 
 const STATE_TONE: Record<DiscoveredSecret['state'], string> = {
   active: 'text-emerald-300', revoked_by_operator: 'text-amber-200', expired: 'text-gray-400', superseded: 'text-gray-400',
@@ -30,6 +42,9 @@ export function TargetDiscoveredSecrets({ targetId, origin, hideWhenEmpty = fals
   const [rows, setRows] = useState<DiscoveredSecret[] | null>(null)
   const [error, setError] = useState('')
   const [stepUp, setStepUp] = useState('')
+  const [notice, setNotice] = useState('')
+  const [shownGroups, setShownGroups] = useState(SECRETS_PAGE_SIZE)
+  const [openGroups, setOpenGroups] = useState<Record<string, number>>({})
   const [dialog, setDialog] = useState<Dialog | null>(null)
   const [busy, setBusy] = useState(false)
   const [refresh, setRefresh] = useState(0)
@@ -50,7 +65,7 @@ export function TargetDiscoveredSecrets({ targetId, origin, hideWhenEmpty = fals
 
   // 'done', 'step-up' (the terminal command is shown instead) or 'failed' (the error is shown).
   const act = useCallback(async (work: () => Promise<unknown>, command?: string) => {
-    setBusy(true); setError(''); setStepUp('')
+    setBusy(true); setError(''); setStepUp(''); setNotice('')
     try { await work(); setRefresh(value => value + 1); return 'done' as const }
     catch (cause) {
       if (cause instanceof StepUpRequired && command) { setStepUp(command); return 'step-up' as const }
@@ -74,28 +89,25 @@ export function TargetDiscoveredSecrets({ targetId, origin, hideWhenEmpty = fals
       return
     }
     const outcome = dialog.kind === 'grant'
-      ? await act(() => grantDiscoveredSecret(targetId, ref, dialog.to.trim()), terminalCommand('grant', targetId, ref))
+      ? await act(() => grantDiscoveredSecret(targetId, ref, dialog.to.trim()), terminalCommand('grant', targetId, ref, { to: dialog.to }))
       : dialog.kind === 'promote'
         ? await act(() => promoteDiscoveredSecret(targetId, ref, { name: dialog.name.trim(), auth_kind: dialog.authKind,
-          ...(dialog.header.trim() ? { header_name: dialog.header.trim() } : {}) }), terminalCommand('promote', targetId, ref))
+          ...(dialog.header.trim() ? { header_name: dialog.header.trim() } : {}) }),
+          terminalCommand('promote', targetId, ref, { name: dialog.name, authKind: dialog.authKind,
+            headerName: dialog.authKind === 'api_key_header' ? dialog.header : '' }))
         : await act(() => setDiscoveredSecretExpiry(targetId, ref, Number(dialog.days)))
+    if (outcome === 'done' && dialog.kind === 'expiry') {
+      const days = Number(dialog.days)
+      setNotice(`Expiry saved: ${ref} now expires in ${days} day${days === 1 ? '' : 's'}.`)
+    }
     if (outcome !== 'failed') setDialog(null)
   }
 
   const own = (rows || []).filter(row => row.found_on === targetId)
   const granted = (rows || []).filter(row => row.found_on !== targetId)
-  if (hideWhenEmpty && !error && !stepUp && !dialog && (!rows || rows.length === 0)) return null
-  return <Card className="mb-6 scroll-mt-6" id={origin ? undefined : 'discovered-secrets'}>
-    <h2 className="text-lg font-semibold text-white">{origin ? <>Discovered secrets <span className="break-all text-sm font-normal text-gray-400">· {origin}</span></> : 'Discovered secrets'}</h2>
-    <p className="mt-1 text-xs text-gray-500">Values ShakerScan found on this target (a configuration file, a response, a Hunt&apos;s output). Hunts use them by reference and never see them; this list never shows a value.</p>
-    {stepUp && <div className="mt-3 rounded border border-amber-700 bg-amber-950/40 p-3 text-sm text-amber-100" role="status">
-      This decision needs your step-up. Make it in your own terminal: <code className="break-all font-mono text-xs">{stepUp}</code>
-    </div>}
-    {error ? <div className="mt-3"><ErrorState message={error} /></div> : !rows ? <p className="mt-3 text-sm text-gray-500">Loading…</p>
-      : rows.length === 0 ? <p className="mt-3 text-sm text-gray-500">None found yet. A Scan that proves an exposed secret, or a Hunt that withholds one, adds it here.</p>
-      : <div className="mt-3 overflow-x-auto"><table className="w-full text-left text-sm">
-        <thead className="text-xs uppercase text-gray-500"><tr><th className="py-2 pr-3">Secret</th><th className="py-2 pr-3">Seen</th><th className="py-2 pr-3">Use</th><th className="py-2">Actions</th></tr></thead>
-        <tbody className="divide-y divide-gray-800">{[...own, ...granted].map(row => <tr key={row.ref}>
+  const ordered = [...own, ...granted]
+  const groups = groupSecrets(ordered)
+  const renderRow = (row: DiscoveredSecret) => <tr key={row.ref}>
           <td className="py-2 pr-3 align-top">
             <div className="flex flex-wrap items-center gap-2"><Badge className="bg-gray-800 text-gray-200">{row.kind}</Badge><span className="break-all text-gray-200">{row.label || 'unnamed field'}</span><span className="text-xs text-gray-500">{row.length} characters</span></div>
             <div className="mt-1 break-all font-mono text-xs text-gray-500">{row.ref}</div>
@@ -113,13 +125,44 @@ export function TargetDiscoveredSecrets({ targetId, origin, hideWhenEmpty = fals
             {canDecide && row.state !== 'superseded' && <Button variant="secondary" disabled={busy} onClick={() => setDialog({ kind: 'promote', secret: row, name: row.label || 'Discovered secret', authKind: 'bearer_token', header: '' })}>Promote</Button>}
             {canDecide && <Button variant="secondary" disabled={busy} onClick={() => setDialog({ kind: 'reveal', secret: row })}>Reveal</Button>}
           </div> : <span className="text-xs text-gray-500">Managed on the target it was found on</span>}</td>
-        </tr>)}</tbody></table></div>}
+        </tr>
+  if (hideWhenEmpty && !error && !stepUp && !dialog && (!rows || rows.length === 0)) return null
+  return <Card className="mb-6 scroll-mt-6" id={origin ? undefined : 'discovered-secrets'}>
+    <h2 className="text-lg font-semibold text-white">{origin ? <>Discovered secrets <span className="break-all text-sm font-normal text-gray-400">· {origin}</span></> : 'Discovered secrets'}</h2>
+    <p className="mt-1 text-xs text-gray-500">Values ShakerScan found on this target (a configuration file, a response, a Hunt&apos;s output). Hunts use them by reference and never see them; this list never shows a value.</p>
+    {stepUp && <div className="mt-3 rounded border border-amber-700 bg-amber-950/40 p-3 text-sm text-amber-100" role="status">
+      This decision needs your step-up. Make it in your own terminal: <code className="break-all font-mono text-xs">{stepUp}</code>
+    </div>}
+    {notice && <div className="mt-3 rounded border border-emerald-800 bg-emerald-950/30 p-3 text-sm text-emerald-100" role="status">{notice}</div>}
+    {error ? <div className="mt-3"><ErrorState message={error} /></div> : !rows ? <p className="mt-3 text-sm text-gray-500">Loading…</p>
+      : rows.length === 0 ? <p className="mt-3 text-sm text-gray-500">None found yet. A Scan that proves an exposed secret, or a Hunt that withholds one, adds it here.</p>
+      : <div className="mt-3 overflow-x-auto"><table className="w-full text-left text-sm">
+        <thead className="text-xs uppercase text-gray-500"><tr><th className="py-2 pr-3">Secret</th><th className="py-2 pr-3">Seen</th><th className="py-2 pr-3">Use</th><th className="py-2">Actions</th></tr></thead>
+        <tbody className="divide-y divide-gray-800">{groups.slice(0, shownGroups).map(group => {
+          if (group.rows.length === 1) return renderRow(group.rows[0])
+          const open = openGroups[group.key] || 0
+          return [<tr key={group.key} data-testid="secret-group"><td colSpan={4} className="py-2">
+            <button type="button" className="flex flex-wrap items-center gap-2 text-left text-gray-200" aria-expanded={open > 0}
+              aria-label={`${group.label} (${group.kind}): ${group.rows.length} secrets`}
+              onClick={() => setOpenGroups(current => ({ ...current, [group.key]: open > 0 ? 0 : SECRETS_PAGE_SIZE }))}>
+              <span aria-hidden="true">{open > 0 ? '▾' : '▸'}</span><Badge className="bg-gray-800 text-gray-200">{group.kind}</Badge>
+              <span className="break-all">{group.label}</span><span className="text-xs text-gray-400">{group.rows.length} secrets · {open > 0 ? 'hide' : 'show'}</span>
+            </button></td></tr>,
+          ...group.rows.slice(0, open).map(renderRow),
+          ...(open > 0 && open < group.rows.length ? [<tr key={`${group.key}-more`}><td colSpan={4} className="py-2">
+            <Button variant="secondary" onClick={() => setOpenGroups(current => ({ ...current, [group.key]: open + SECRETS_PAGE_SIZE }))}>
+              Show {Math.min(SECRETS_PAGE_SIZE, group.rows.length - open)} more of {group.label}</Button></td></tr>] : [])]
+        })}</tbody></table>
+        {groups.length > shownGroups && <div className="mt-3 flex flex-wrap items-center gap-3 text-xs text-gray-400">
+          <span>Showing {shownGroups} of {groups.length} groups ({ordered.length} secrets)</span>
+          <Button variant="secondary" onClick={() => setShownGroups(value => value + SECRETS_PAGE_SIZE)}>Show {Math.min(SECRETS_PAGE_SIZE, groups.length - shownGroups)} more</Button>
+        </div>}</div>}
     <Modal open={dialog !== null} title={dialog?.kind === 'reveal' ? 'Reveal the value' : dialog?.kind === 'grant' ? 'Let another target use this secret' : dialog?.kind === 'promote' ? 'Move into a credential profile' : 'Set the expiry'} onClose={close}>{dialog && <div className="space-y-4">
       <p className="break-all font-mono text-xs text-gray-400">{dialog.secret.ref}</p>
       {dialog.kind === 'reveal' && (dialog.value === undefined
         ? <><p className="text-sm text-gray-300">The value is shown to you here and recorded as revealed by you. Close this dialog to hide it again.</p><Button loading={busy} onClick={() => void confirm()}>Reveal</Button></>
         : <><pre className="max-h-48 overflow-auto whitespace-pre-wrap break-all rounded bg-gray-950 p-3 font-mono text-xs text-gray-100" data-testid="revealed-value">{dialog.value}</pre><Button variant="secondary" onClick={close}>Hide</Button></>)}
-      {dialog.kind === 'grant' && <><Field label="Other target id"><Input value={dialog.to} placeholder="target id" onChange={event => setDialog({ ...dialog, to: event.target.value })} /></Field><p className="text-xs text-gray-500">Hunts of that target may then send this value by reference, only where they may already go. It never widens their scope.</p><Button disabled={!/^[0-9a-f-]{36}$/i.test(dialog.to.trim())} loading={busy} onClick={() => void confirm()}>Grant</Button></>}
+      {dialog.kind === 'grant' && <><Field label="Other target" htmlFor="grant-target"><GrantTargetPicker value={dialog.to} exclude={[targetId, dialog.secret.found_on]} onChange={to => setDialog({ ...dialog, to })} /></Field><p className="text-xs text-gray-500">Hunts of that target may then send this value by reference, only where they may already go. It never widens their scope.</p><Button disabled={!/^[0-9a-f-]{36}$/i.test(dialog.to.trim())} loading={busy} onClick={() => void confirm()}>Grant</Button></>}
       {dialog.kind === 'promote' && <>
         <Field label="Profile name"><Input value={dialog.name} onChange={event => setDialog({ ...dialog, name: event.target.value })} /></Field>
         <Field label="Credential kind"><Select aria-label="Credential kind" value={dialog.authKind} onChange={event => setDialog({ ...dialog, authKind: event.target.value })}>

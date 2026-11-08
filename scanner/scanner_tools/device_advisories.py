@@ -413,6 +413,18 @@ def _concrete_identity_matches(
     )
 
 
+# Some CVE records name no product in their generated "This issue affects <product>: from <a>
+# before <b>" sentence and print "undefined" instead. That sentence then says nothing a person can
+# use (and the title cut at 500 characters often ends inside it), so it is dropped from the title.
+_UNDEFINED_AFFECTS = re.compile(r"\s*This issue affects undefined\b.*\Z", re.IGNORECASE | re.DOTALL)
+
+
+def readable_advisory_title(title: Any, advisory_id: Any = "") -> str:
+    """An advisory title without the record's broken "This issue affects undefined" sentence."""
+    text = _UNDEFINED_AFFECTS.sub("", str(title or "")).strip()
+    return text or str(advisory_id or "")
+
+
 def match_advisories(
     records: Any, *, cpe: str | None, product: str | None, version: str | None,
     identity_evidence_tier: str | None = None, limit: int = 50,
@@ -478,7 +490,8 @@ def match_advisories(
         )
         matches.append({
             "advisory_id": str(raw.get("advisory_id") or raw.get("cve") or "")[:100],
-            "title": str(raw.get("title") or "")[:500],
+            "title": readable_advisory_title(
+                str(raw.get("title") or "")[:500], raw.get("advisory_id") or raw.get("cve"))[:500],
             "severity": str(raw.get("severity") or "unknown")[:30],
             "reference": str(raw.get("reference") or "")[:1000],
             "match_type": "exact_cpe_version_range" if exact_and_bounded else (
