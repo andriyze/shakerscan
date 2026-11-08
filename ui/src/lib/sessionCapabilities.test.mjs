@@ -59,3 +59,15 @@ test('a request that never answers allows everything after the timeout', async (
   const hang = (_url, init) => new Promise((_resolve, reject) => init.signal.addEventListener('abort', () => reject(new Error('aborted'))))
   assert.equal(await fetchSessionCapabilities('http://api/session/capabilities', hang, 20), ALL_ALLOWED)
 })
+
+test('a refused answer is read to the end, so the request does not stay open', async () => {
+  for (const status of [403, 404, 500]) {
+    let read = false
+    const refused = async () => ({ status, text: async () => { read = true; return '{"detail":"refused"}' }, json: async () => ({}) })
+    assert.equal(await fetchSessionCapabilities('http://api/session/capabilities', refused), ALL_ALLOWED)
+    assert.equal(read, true, `status ${status}`)
+  }
+  // A body that cannot be read still answers "everything allowed".
+  const broken = async () => ({ status: 403, text: async () => { throw new TypeError('stream error') } })
+  assert.equal(await fetchSessionCapabilities('http://api/session/capabilities', broken), ALL_ALLOWED)
+})
