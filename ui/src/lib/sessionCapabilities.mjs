@@ -61,7 +61,12 @@ export async function fetchSessionCapabilities(url, fetchImpl = globalThis.fetch
     const response = await fetchImpl(url, {
       cache: 'no-store', headers: { Accept: 'application/json' }, signal: controller?.signal,
     })
-    if (!response || response.status !== 200) return ALL_ALLOWED
+    if (!response || response.status !== 200) {
+      // Read the refusal's body: an unread body keeps its request open in the browser, so a
+      // page behind a gateway that refuses this route would never settle.
+      try { await response?.text?.() } catch { /* nothing to release */ }
+      return ALL_ALLOWED
+    }
     return parseSessionCapabilities(await response.json())
   } catch {
     return ALL_ALLOWED
