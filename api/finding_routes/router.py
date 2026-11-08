@@ -425,6 +425,7 @@ async def list_findings(
     limit: int = Query(100, ge=1, le=500),
     offset: int = Query(0, ge=0),
     include_details: bool = False,
+    include_retest: bool = False,
     # list/v1 (api/list_contract.py). Plain defaults: in-process callers pass only the legacy set.
     cursor: Optional[str] = None,
     sort: Optional[str] = None,
@@ -456,7 +457,7 @@ async def list_findings(
         "verified_only", "proof_state", "driven_by", "research_campaign_id", "search",
         "seen_within_days", "not_seen_within_days", "first_seen_within_days",
         "resolved_within_days", "sort_by", "sort_order",
-        "include_candidates", "include_details", "limit", "offset", "group_by",
+        "include_candidates", "include_details", "include_retest", "limit", "offset", "group_by",
         *LIST_V1_PARAMETERS,
     }
     unknown_params = sorted({k for k in request.query_params if k not in allowed_params})
@@ -557,12 +558,18 @@ async def list_findings(
                 sort_order=sort_order, window=limit + offset,
             )
 
+        # Each row says whether it can be retested, as its detail does (one read for the page).
+        retest = await _page_retest_capability(conn, [row["id"] for row in page_rows]) if include_retest else {}
+
     findings_out = []
     for row in page_rows:
         row_dict = dict(row)
         if not include_details:
             for key in _FINDING_DETAIL_ONLY_FIELDS:
                 row_dict.pop(key, None)
+        if include_retest:
+            row_dict.update(retest.get(str(row_dict["id"]), {"retest_supported": False, "retest_type": None,
+                                                             "retest_modes": [], "retest_active": False}))
         findings_out.append(row_dict)
 
     included_candidates = 0
@@ -732,53 +739,85 @@ async def get_finding(finding_id: str):
         result["detail"]["related_exposures"] = exposures
     result["related_findings"] = related_findings(result, [dict(row) for row in related_rows])
 
-    # Retest capability hints so the UI can gate the retest button instead of
-    # surfacing a 400 after the click. ``retest_active``: the retest may send active requests
-    # (a prover's payloads, an AI Gate probe, or the AI tier's own requests).
-    result["retest_active"] = False
-    if result.get("source") == "device" or result.get("device_target_id"):
-        result["retest_supported"] = False
-        result["retest_type"] = None
-        result["retest_modes"] = []
-        result["retest_unsupported_reason"] = "device_findings_are_retested_by_a_bounded_device_scan"
-    elif result.get("source") == "ai_gate" or result.get("ai_target_id"):
-        result["retest_supported"] = True
-        result["retest_type"] = None
-        result["retest_modes"] = ["same_probe", "same_family", "strict_replay"]
-        result["retest_active"] = True
+    result.update(retest_capability(result, identity_refusal))
+
+    return result
+
+
+def retest_capability(finding: Mapping[str, Any], identity_refusal: str | None) -> dict[str, Any]:
+    """Whether the finding can be retested here, as the detail and the list report it.
+
+    Retest capability hints so a client can gate the retest control instead of surfacing a 400
+    after the click. ``retest_active``: the retest may send active requests (a prover's payloads,
+    an AI Gate probe, or the AI tier's own requests). ``identity_refusal`` is what
+    ``_retest_identity_refusal`` decided from the source Scan's options.
+    """
+    caps: dict[str, Any] = {"retest_active": False}
+    if finding.get("source") == "device" or finding.get("device_target_id"):
+        caps["retest_supported"] = False
+        caps["retest_type"] = None
+        caps["retest_modes"] = []
+        caps["retest_unsupported_reason"] = "device_findings_are_retested_by_a_bounded_device_scan"
+    elif finding.get("source") == "ai_gate" or finding.get("ai_target_id"):
+        caps["retest_supported"] = True
+        caps["retest_type"] = None
+        caps["retest_modes"] = ["same_probe", "same_family", "strict_replay"]
+        caps["retest_active"] = True
     else:
-        evidence = parse_json_field(result.get("evidence"))
-        retest_type = infer_retest_type(result, evidence)
+        evidence = parse_json_field(finding.get("evidence"))
+        retest_type = infer_retest_type(dict(finding), evidence)
         # A finding of a signed-in Scan whose identity a retest cannot apply is not offered one:
         # an anonymous retest of any type would only ever be inconclusive.
-        refusal = retest_refusal_reason(result, retest_type) or identity_refusal
+        refusal = retest_refusal_reason(finding, retest_type) or identity_refusal
         if refusal is None:
-            result["retest_supported"] = True
-            result["retest_type"] = retest_type
+            caps["retest_supported"] = True
+            caps["retest_type"] = retest_type
             # Not "ai": the AI tier alone is at most inconclusive, so it could never conclude.
             # Tiered runs it after the prover; the API still takes mode=ai.
-            result["retest_modes"] = ["tiered", "deterministic"]
-            result["retest_active"] = retest_sends_active_requests(
+            caps["retest_modes"] = ["tiered", "deterministic"]
+            caps["retest_active"] = retest_sends_active_requests(
                 retest_type, ai_tier_available=_ai_verifier_ready(),
             )
         else:
             # No prover of this finding's kind of check, or only the AI tier (generic_http,
             # 2fa_bypass). The AI tier is not offered alone: it can never mark a finding fixed,
             # so an AI-only retest could not conclude.
-            result["retest_supported"] = False
-            result["retest_type"] = None
-            result["retest_modes"] = []
-            result["retest_unsupported_reason"] = refusal
+            caps["retest_supported"] = False
+            caps["retest_type"] = None
+            caps["retest_modes"] = []
+            caps["retest_unsupported_reason"] = refusal
             # A proven finding whose request cannot be sent again says what is missing, and a
             # signed-in Scan's finding says how to check it again.
             message = (
-                retest_identity_message(result) if refusal == RETEST_REASON_IDENTITY
-                else retest_refusal_message(result)
+                retest_identity_message(finding) if refusal == RETEST_REASON_IDENTITY
+                else retest_refusal_message(finding)
             )
             if message:
-                result["retest_unsupported_message"] = message
+                caps["retest_unsupported_message"] = message
+    return caps
 
-    return result
+
+async def _page_retest_capability(conn, finding_ids: list[Any]) -> dict[str, dict[str, Any]]:
+    """``retest_capability`` for a list page: the finding rows and their source Scans' options
+    in one read, keyed by finding id."""
+    if not finding_ids:
+        return {}
+    rows = await conn.fetch(
+        """SELECT f.*, s.options AS source_scan_options
+           FROM findings f LEFT JOIN scans s ON s.id = f.scan_id
+           WHERE f.id = ANY($1::uuid[])""",
+        [uuid.UUID(str(value)) for value in finding_ids],
+    )
+    out: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        finding = dict(row)
+        options = finding.pop("source_scan_options", None)
+        if candidate_evidence_principals(finding.get("evidence")):
+            identity = RETEST_REASON_IDENTITY
+        else:
+            identity = retest_identity_refusal(options) if options is not None else None
+        out[str(finding["id"])] = retest_capability(finding, identity)
+    return out
 
 
 async def _retest_identity_refusal(conn, finding: Mapping[str, Any]) -> str | None:
