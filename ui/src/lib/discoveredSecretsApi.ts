@@ -19,6 +19,8 @@ export interface DiscoveredSecret {
   last_used_at: string | null
   found_on: string
   granted_to: string[]
+  /** Display names (name, else address) of found_on and granted_to; absent from older engines. */
+  target_names?: Record<string, string>
   promoted_profile_id: string | null
 }
 

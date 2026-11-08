@@ -2,6 +2,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Badge, Button, Card, Combobox, ErrorState, Field, Input, Modal, Select } from '@/components/ui'
 import { useCan } from '@/lib/useSessionCapabilities'
+import Link from '@/components/WorkspaceLink'
+import { boundedDisplayText } from '@/lib/targetChoices'
 import { formatDate } from '@/lib/api'
 import {
   StepUpRequired, grantDiscoveredSecret, listDiscoveredSecrets, promoteDiscoveredSecret, revealDiscoveredSecret,
@@ -18,6 +20,12 @@ type Dialog =
   | { kind: 'expiry'; secret: DiscoveredSecret; days: string }
 
 /** Grant's target choice: the other target by name, never a typed id. The value is its id. */
+/** A target's display name from the listing (its name, else its address), never its raw id. */
+function targetName(row: DiscoveredSecret, id: string): string {
+  const name = row.target_names?.[id]
+  return name ? boundedDisplayText(name, 120) : 'a removed target'
+}
+
 function GrantTargetPicker({ value, onChange, exclude }: { value: string; onChange: (id: string) => void; exclude: string[] }) {
   const search = useTargetSearch({ selectedIds: [value], includeServices: true, accept: asset => !exclude.includes(asset.id) })
   const options = useMemo(() => targetOptions(search.assets.filter(asset => !exclude.includes(asset.id))), [search.assets, exclude])
@@ -111,8 +119,13 @@ export function TargetDiscoveredSecrets({ targetId, origin, hideWhenEmpty = fals
           <td className="py-2 pr-3 align-top">
             <div className="flex flex-wrap items-center gap-2"><Badge className="bg-gray-800 text-gray-200">{row.kind}</Badge><span className="break-all text-gray-200">{row.label || 'unnamed field'}</span><span className="text-xs text-gray-500">{row.length} characters</span></div>
             <div className="mt-1 break-all font-mono text-xs text-gray-500">{row.ref}</div>
-            {row.found_on !== targetId && <div className="mt-1 text-xs text-teal-300">Granted from another target ({row.found_on})</div>}
-            {row.granted_to.length > 0 && row.found_on === targetId && <div className="mt-1 text-xs text-gray-400">Also usable on {row.granted_to.length} other target{row.granted_to.length === 1 ? '' : 's'}: {row.granted_to.map(other => <button key={other} type="button" className="ml-1 text-blue-300 underline" disabled={busy} onClick={() => void act(() => ungrantDiscoveredSecret(targetId, row.ref, other))} title="Stop this target's Hunts using it">{other.slice(0, 8)} ✕</button>)}</div>}
+            {row.found_on !== targetId && <div className="mt-1 break-all text-xs text-teal-300">Granted from <Link href={`/targets/${row.found_on}/asset`} className="underline">{targetName(row, row.found_on)}</Link></div>}
+            {row.granted_to.length > 0 && row.found_on === targetId && <div className="mt-1 text-xs text-gray-400">Also usable on {row.granted_to.length} other target{row.granted_to.length === 1 ? '' : 's'}:
+              <ul className="mt-1 flex flex-wrap gap-1.5">{row.granted_to.map(other => <li key={other} className="inline-flex max-w-full items-center gap-1 rounded border border-gray-800 px-1.5 py-0.5">
+                <Link href={`/targets/${other}/asset`} className="break-all text-blue-300">{targetName(row, other)}</Link>
+                {canDecide && <button type="button" className="rounded px-1 text-gray-400 hover:text-red-300" disabled={busy} onClick={() => void act(() => ungrantDiscoveredSecret(targetId, row.ref, other))}
+                  aria-label={`Stop ${targetName(row, other)} using this secret`} title="Stop this target's Hunts using it">✕</button>}
+              </li>)}</ul></div>}
           </td>
           <td className="py-2 pr-3 align-top text-xs text-gray-400">{row.seen_count}×, last {formatDate(row.last_seen_at)}<div>expires {formatDate(row.expires_at)}</div></td>
           <td className="py-2 pr-3 align-top text-xs"><span className={STATE_TONE[row.state]}>{row.state.replace(/_/g, ' ')}</span><div className="text-gray-400">{row.uses} Hunt use{row.uses === 1 ? '' : 's'}{row.reveals ? ` · revealed ${row.reveals}×` : ''}</div>{row.promoted_profile_id && <div className="text-gray-400">now a credential profile</div>}</td>

@@ -23,7 +23,14 @@ const many = [...Array(39)].map((_, n) => {
   return {...secret, ref:`secret://${id}`, kind:n < 3 ? 'password' : 'other', label:n < 3 ? `DB_PASSWORD_${n}` : ''}
 })
 
-async function mock(page: Page, opts: {stepUp?: boolean; onOrigin?: boolean; many?: boolean} = {}) {
+/** Fixture: this target's secret granted to another, and another target's secret granted here. */
+const grantedSecretId = '00000000-0000-4000-8000-000000000414'
+const grantedRows = [
+  {...secret, granted_to:[otherId], target_names:{[assetId]:'Secrets fixture', [otherId]:'Juice Shop (lab)'}},
+  {...secret, ref:`secret://${grantedSecretId}`, label:'API_TOKEN', found_on:otherId, target_names:{[otherId]:'Juice Shop (lab)'}},
+]
+
+async function mock(page: Page, opts: {stepUp?: boolean; onOrigin?: boolean; many?: boolean; granted?: boolean} = {}) {
   const writes: {method: string; path: string; body: unknown}[] = []
   await pinMockApiOrigin(page)
   await page.route(`${MOCK_API_ORIGIN}/**`, async route => {
@@ -32,7 +39,7 @@ async function mock(page: Page, opts: {stepUp?: boolean; onOrigin?: boolean; man
     if (url.pathname === `/targets/${assetId}/asset`) return route.fulfill({json:{target,origins:opts.onOrigin ? [origin] : [],services:[],service_intelligence:{services:[],warnings:[]},credentials:[],request_collections:[],history:{items:[],total:0},active_findings:{},authorization:{approved_by:'fixture'}}})
     if (url.pathname === '/targets/inventory') return route.fulfill({json:{targets:[target, other],total:2,offset:0,limit:25}})
     if (url.pathname === `/targets/${assetId}/discovered-secrets`) {
-      const secrets = opts.onOrigin ? [] : opts.many ? many : [secret]
+      const secrets = opts.onOrigin ? [] : opts.many ? many : opts.granted ? grantedRows : [secret]
       return route.fulfill({json:{target_id:assetId,secrets,count:secrets.length,values_visible:false}})
     }
     if (url.pathname === `/targets/${originId}/discovered-secrets`) return route.fulfill({json:{target_id:originId,secrets:[{...secret,found_on:originId}],count:1,values_visible:false}})
@@ -175,4 +182,16 @@ test('SECRETS-005 a web Scan records secrets on its origin: the asset page shows
   await expect(page.locator('body')).not.toContainText(VALUE)
   await card.getByRole('button', {name: 'Revoke'}).click()
   await expect.poll(() => writes.map(w => `${w.method} ${w.path}`)).toContain(`POST /targets/${originId}/discovered-secrets/${secretId}/state`)
+})
+
+test('SECRETS-009 grants name the other target, never its id, and ungrant says whose use it stops', async ({page}) => {
+  const writes = await mock(page, {granted: true})
+  await page.goto(`/targets/${assetId}/asset`)
+  const card = page.locator('#discovered-secrets')
+  await expect(card.getByText('Granted from')).toBeVisible()
+  await expect(card.getByRole('link', {name: 'Juice Shop (lab)'})).toHaveCount(2)
+  await expect(card.getByRole('link', {name: 'Juice Shop (lab)'}).first()).toHaveAttribute('href', `/targets/${otherId}/asset`)
+  await expect(card).not.toContainText(otherId)
+  await card.getByRole('button', {name: 'Stop Juice Shop (lab) using this secret'}).click()
+  await expect.poll(() => writes.map(w => `${w.method} ${w.path}`)).toContain(`DELETE /targets/${assetId}/discovered-secrets/${secretId}/grants/${otherId}`)
 })
