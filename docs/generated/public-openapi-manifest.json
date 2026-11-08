@@ -229,7 +229,7 @@
     "ValidationRequest": "cb81c65a5c80da74a19c6bd92e9c6a68f5cdb22fafeb94270481d463450f893e",
     "WorkerScaleRequest": "52e7ac017dfa1d92efa8e4071026b9bf24c0cf2a17f5d9e742349df3f08f6c62"
   },
-  "contract_sha256": "abe4fbaeadffd7bdbe5caae47276abb9e0a628387c1e5fdd98c738e7c9df160b",
+  "contract_sha256": "531d58774ec76c0f8e929e8eb1327e5aebc67a0a219c8d19b1a859dfcd45a5c8",
   "openapi": "3.1.0",
   "operation_count": 498,
   "operations": {
@@ -2132,7 +2132,7 @@
     "GET /investigation/candidates": {
       "deprecated": false,
       "operation_id": "list_investigation_candidates_investigation_candidates_get",
-      "parameters_sha256": "015d31cc4235b7d689a88f647a16ed3706a65387bb587f21f726de03319e74b1",
+      "parameters_sha256": "c62a066c9d91648b93a6577c3ad361b918f06ecbbf0ea2a19f6edbc78e5018c6",
       "request_schema_sha256": null,
       "response_schema_sha256": {
         "200": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",

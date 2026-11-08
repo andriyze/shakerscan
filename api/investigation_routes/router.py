@@ -21,7 +21,7 @@ try:
 except ModuleNotFoundError:  # package import in host-side tests
     from ..list_compat import direct, mark_deprecated, v1_page, wants_list_v1
     from ..list_contract import CURSOR_MAX_LENGTH, SqlParams
-from .list_query import candidate_filters, candidates_page, legacy_candidates
+from .list_query import UNVERSIONED_ADVISORY_MODES, candidate_filters, candidates_page, legacy_candidates
 
 try:
     from action_scope import _decode_json_value
@@ -87,21 +87,30 @@ async def list_investigation_candidates(
     count: Optional[Literal["none", "estimate", "exact"]] = None,
     fields: Optional[str] = Query(None, max_length=2048),
     since: Optional[datetime] = Query(None, description="list/v1: candidates changed at or after this time"),
+    unversioned_advisories: str = Query(
+        "include", description="automatic advisory matches without a known product version: include, exclude or only"),
 ):
     """List non-authoritative hunt candidates and their verifier lifecycle.
 
     list/v1 (any of ``cursor``/``count``/``fields``/``since``; investigation_routes/list_query.py):
     keyset pages of summary rows, newest first. Otherwise the deprecated limit/offset response.
+    ``status`` takes one status or a comma-separated list. Each candidate carries its target's
+    ``target_name`` and ``target_url`` (the host target for a device candidate).
     """
-    plane, target_id, device_target_id, status, limit, offset, cursor, count, fields, since = (
+    plane, target_id, device_target_id, status, limit, offset, cursor, count, fields, since, unversioned = (
         direct(value) for value in (
-            plane, target_id, device_target_id, status, limit, offset, cursor, count, fields, since))
+            plane, target_id, device_target_id, status, limit, offset, cursor, count, fields, since,
+            unversioned_advisories))
     normalized_plane = str(plane or "").strip().lower() or None
-    normalized_status = str(status or "").strip().lower() or None
+    statuses = sorted({item.strip().lower() for item in str(status or "").split(",") if item.strip()})
+    normalized_status: Any = (statuses[0] if len(statuses) == 1 else statuses) if statuses else None
     if normalized_plane not in (None, *sorted(investigation_candidates.PLANES)):
         raise HTTPException(status_code=422, detail="plane must be web or device")
-    if normalized_status not in (None, *sorted(investigation_candidates.STATUSES)):
+    if any(item not in investigation_candidates.STATUSES for item in statuses):
         raise HTTPException(status_code=422, detail="unsupported candidate status")
+    unversioned = str(unversioned or "include").strip().lower()
+    if unversioned not in UNVERSIONED_ADVISORY_MODES:
+        raise HTTPException(status_code=422, detail="unversioned_advisories must be include, exclude or only")
     if target_id and device_target_id:
         raise HTTPException(status_code=422, detail="web and device candidate filters are mutually exclusive")
     try:
@@ -115,12 +124,14 @@ async def list_investigation_candidates(
         raise HTTPException(status_code=422, detail="device candidates cannot use target_id")
     params = SqlParams()
     where = candidate_filters(plane=normalized_plane, target_id=target_uuid, device_target_id=device_uuid,
-                              status=normalized_status, params=params)
+                              status=normalized_status, params=params, unversioned_advisories=unversioned)
     async with _pool().acquire() as conn:
         if wants_list_v1(cursor=cursor, count=count, fields=fields, since=since):
             page = v1_page(limit=limit, cursor=cursor, sort=None, fields=fields, count=count, since=since)
             filters = {"plane": normalized_plane, "target_id": target_uuid, "device_target_id": device_uuid,
-                       "status": normalized_status}
+                       "status": ",".join(statuses) or None}
+            if unversioned != "include":
+                filters["unversioned_advisories"] = unversioned
             return await candidates_page(conn, page, where=where, params=params, filters=filters,
                                          transform=_summary_investigation_candidate)
         limit = 100 if limit is None else limit
