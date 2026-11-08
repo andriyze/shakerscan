@@ -5151,6 +5151,9 @@ export interface InvestigationCandidate {
   verification_context: Record<string, unknown>
   status: InvestigationCandidateStatus
   latest_verification_id?: string | null
+  /** The candidate's target (the host target for a device candidate). */
+  target_name?: string | null
+  target_url?: string | null
   authoritative: false
   promotion_ready: boolean
   observation_count?: number
@@ -5329,7 +5332,10 @@ export async function getInvestigationCandidates(params: {
   plane?: 'web' | 'device'
   target_id?: string
   device_target_id?: string
-  status?: InvestigationCandidateStatus
+  /** One status, or several (sent comma-separated). */
+  status?: InvestigationCandidateStatus | InvestigationCandidateStatus[]
+  /** Automatic advisory matches made without a known product version. */
+  unversioned_advisories?: 'include' | 'exclude' | 'only'
   limit?: number
   offset?: number
 } = {}): Promise<{ candidates: InvestigationCandidate[]; total: number; limit: number; offset: number }> {
@@ -5337,7 +5343,8 @@ export async function getInvestigationCandidates(params: {
   if (params.plane) search.set('plane', params.plane)
   if (params.target_id) search.set('target_id', params.target_id)
   if (params.device_target_id) search.set('device_target_id', params.device_target_id)
-  if (params.status) search.set('status', params.status)
+  if (params.status) search.set('status', Array.isArray(params.status) ? params.status.join(',') : params.status)
+  if (params.unversioned_advisories) search.set('unversioned_advisories', params.unversioned_advisories)
   if (params.limit) search.set('limit', String(params.limit))
   if (params.offset) search.set('offset', String(params.offset))
   const res = await fetch(`${API_URL}/investigation/candidates${queryString(search)}`, { cache: 'no-store' })
