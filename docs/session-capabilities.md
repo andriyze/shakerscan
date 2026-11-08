@@ -71,7 +71,7 @@ The UI sends it to its API origin with the same credentials as every other API r
 | `findings.verify` | Finding page: "Verify finding" |
 | `findings.triage` | Finding page: the status select and the analyst verdict (shown read-only when `false`); Findings list: the selection dock's status actions |
 | `findings.accept_risk` | Finding page: "Accept risk" |
-| `hunts.manage` | Hunt page: "Stop" and "Delete" |
+| `hunts.manage` | Hunt page: "Stop" and "Delete" (Delete also needs the workspace's record deletion feature) |
 | `secrets.read` | Target page: the "Discovered secrets" cards (their list requests are not sent when `false`) |
 | `secrets.manage` | Discovered secrets: "Revoke" / "Reactivate" and "Expiry" |
 | `secrets.decide` | Discovered secrets: "Reveal", "Grant", "Ungrant" and "Promote" (the gateway may still ask for a step-up) |
