@@ -67,4 +67,27 @@ for (const width of [390, 1440]) test.describe(`at ${width} px`, () => {
     await expect(evidence.first()).toHaveText('Hunt 79d5443a · succeeded ×12')
     expect(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth)).toBe(false)
   })
+
+  test('NAMES-003 a disabled Retest states its reason on the page', async ({page}) => {
+    await mock(page)
+    await page.goto(`/findings/${findingId}`)
+    const retest = page.getByRole('button', {name: 'Retest', exact: true})
+    await expect(retest).toBeDisabled()
+    const reason = page.getByTestId('retest-blocked-reason')
+    await expect(reason).toBeVisible()
+    await expect(reason).toContainText('Retest unavailable: Run a new Scan to check this exposure again.')
+    await expect(retest).toHaveAttribute('aria-describedby', 'retest-blocked-reason')
+  })
+
+  test('NAMES-004 every button on the Evidence page has an accessible name', async ({page}) => {
+    // Guard, not a regression test: the audit that reported an unnamed button there read
+    // innerText, which is empty for buttons inside a closed <details> (Chrome lays them out with
+    // content-visibility). Their accessible names were never empty.
+    await mock(page)
+    await page.goto('/evidence')
+    await expect(page.getByRole('heading', {name: 'Evidence', level: 1})).toBeVisible()
+    const buttons = page.getByRole('main').getByRole('button')
+    expect(await buttons.count()).toBeGreaterThan(3)
+    for (const button of await buttons.all()) await expect(button).toHaveAccessibleName(/\S/)
+  })
 })
