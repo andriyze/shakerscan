@@ -65,6 +65,11 @@ function formatLimit(value: number | undefined): string {
   return Number.isFinite(value) ? Number(value).toLocaleString() : 'server default'
 }
 
+/** A refusal because every scan slot is taken (HTTP 429, or a message naming the limit). */
+function isScanSlotRefusal(status: number | undefined, message: string): boolean {
+  return status === 429 || /concurrent scan limit|scan slots?|licensed slots?/i.test(message)
+}
+
 export default function NewScanPage() {
   const router = useRouter()
   const toast = useToast()
@@ -107,6 +112,17 @@ export default function NewScanPage() {
   const [workerReadinessError, setWorkerReadinessError] = useState<string | null>(null)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [slotsBusy, setSlotsBusy] = useState(false)
+  const errorRef = useRef<HTMLDivElement | null>(null)
+  // A refusal lands next to the submit button; bring it into view and focus, wherever the person
+  // scrolled (the form is several screens tall).
+  useEffect(() => {
+    if (!error) { setSlotsBusy(false); return }
+    const node = errorRef.current
+    if (!node) return
+    node.scrollIntoView({ block: 'center', behavior: 'smooth' })
+    node.focus({ preventScroll: true })
+  }, [error])
 
   useEffect(() => {
     const requestedParams = new URLSearchParams(window.location.search)
@@ -411,6 +427,7 @@ export default function NewScanPage() {
   async function handleSubmit(event: React.FormEvent) {
     event.preventDefault()
     setError(null)
+    setSlotsBusy(false)
     const submittedTargets = batchMode ? targets : [target.trim()]
     if (submittedTargets.length === 0 || !submittedTargets[0]) {
       setError('Enter at least one target URL.')
@@ -587,6 +604,8 @@ export default function NewScanPage() {
       }
     } catch (cause) {
       const message = cause instanceof Error ? cause.message : 'Failed to submit scan'
+      const status = cause instanceof Error ? (cause as Error & { status?: number }).status : undefined
+      setSlotsBusy(isScanSlotRefusal(status, message))
       setError(message)
       toast.error(message)
     } finally {
@@ -880,7 +899,10 @@ export default function NewScanPage() {
           )}
         </Card>
 
-        {error && <p role="alert" className="rounded-lg border border-red-800 bg-red-950/30 p-3 text-sm text-red-300">{error}</p>}
+        {error && <div ref={errorRef} tabIndex={-1} role="alert" data-testid="scan-submit-error" className="scroll-mb-24 rounded-lg border border-red-800 bg-red-950/30 p-3 text-sm text-red-300 focus:outline-hidden focus-visible:ring-2 focus-visible:ring-red-500">
+          <p>{error}</p>
+          {slotsBusy && <p className="mt-1 text-red-200">Scans already running or queued hold the available slots. This Scan was not queued; try again when one finishes (<Link href="/scans" className="underline hover:text-white">Scans page</Link>).</p>}
+        </div>}
         <div className="flex items-center justify-end gap-3">
           <Button type="button" variant="secondary" onClick={() => router.back()}>Cancel</Button>
           <Button

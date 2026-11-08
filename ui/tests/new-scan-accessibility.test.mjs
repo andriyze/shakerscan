@@ -19,7 +19,10 @@ test('New Scan exposes disclosure and validation state to assistive technology',
   assert.match(page, /aria-expanded=\{showAdvanced\}/)
   assert.match(page, /aria-controls="advanced-scan-options"/)
   assert.match(page, /id="advanced-scan-options"/)
-  assert.match(page, /<p role="alert"/)
+  // The submit refusal sits beside Run Scan as an alert that is scrolled into view and focused.
+  assert.match(page, /ref=\{errorRef\} tabIndex=\{-1\} role="alert"/)
+  assert.match(page, /node\.scrollIntoView\(/)
+  assert.match(page, /node\.focus\(/)
 })
 
 test('New Scan clears stale validation when the operator edits the form', () => {
