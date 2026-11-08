@@ -460,7 +460,8 @@ async def legacy_page(
 # --- list/v1 ----------------------------------------------------------------------------------
 
 LIST_V1_PARAMETERS = frozenset({"cursor", "sort", "fields", "count", "since"})
-LEGACY_ONLY_PARAMETERS = frozenset({"offset", "sort_by", "sort_order", "include_details", "include_candidates"})
+LEGACY_ONLY_PARAMETERS = frozenset({"offset", "sort_by", "sort_order", "include_details", "include_candidates",
+                                    "include_retest"})
 
 _V1_FIELDS: dict[str, str] = {
     **{name: f"f.{name}" for name in FINDING_SUMMARY_COLUMNS},
