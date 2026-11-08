@@ -8,7 +8,7 @@ import {
 } from '@/lib/api'
 import { Plus } from 'lucide-react'
 import { Button, Card, CardSkeleton, ConfirmDialog, EmptyState, ErrorState, Modal, PageHeader, Select, useToast } from '@/components/ui'
-import { usableWebTargets } from '@/lib/targetChoices'
+import { targetChoiceLabel, usableWebTargets } from '@/lib/targetChoices'
 import { TargetSearchCombobox } from '@/components/targets/TargetSearchCombobox'
 import type { TargetAsset } from '@/lib/targetAssetApi'
 
@@ -414,8 +414,8 @@ function SchedulesContent() {
                 {/* Info */}
                 <div className="flex-1 min-w-0">
                   <div className="flex items-center gap-2">
-                    <span className="font-medium text-white truncate">
-                      {schedule.target_url?.replace(/^https?:\/\//, '')}
+                    <span className="font-medium text-white truncate" title={schedule.target_url}>
+                      {targetChoiceLabel({ name: schedule.target_name, url: schedule.target_url }).label}
                     </span>
                     {schedule.name && (
                       <span className="text-sm text-gray-500 truncate">
@@ -563,7 +563,7 @@ function SchedulesContent() {
                 <label htmlFor="schedule-target" className="block text-sm font-medium text-gray-400 mb-1">Target</label>
                 {editingSchedule ? (
                   <div className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-gray-300">
-                    {editingSchedule.target_url?.replace(/^https?:\/\//, '')}
+                    {targetChoiceLabel({ name: editingSchedule.target_name, url: editingSchedule.target_url }).label}
                   </div>
                 ) : (
                   // Searched on the server: the modal used to offer only the first 100 targets.
@@ -835,7 +835,7 @@ function SchedulesContent() {
         open={confirmDelete !== null}
         title="Delete schedule?"
         message={confirmDelete ? (
-          <>This will permanently delete the schedule for <span className="text-gray-200">{confirmDelete.target_url?.replace(/^https?:\/\//, '')}</span>.</>
+          <>This will permanently delete the schedule for <span className="text-gray-200">{targetChoiceLabel({ name: confirmDelete.target_name, url: confirmDelete.target_url }).label}</span>.</>
         ) : undefined}
         confirmLabel="Delete"
         danger
