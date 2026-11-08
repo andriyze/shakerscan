@@ -100,3 +100,23 @@ export function outOfScopeSummary({ view, exposure, installFindings }) {
       + `${assets + findings === 1 ? 'is' : 'are'} in other cohorts (${where}).`,
   }
 }
+
+/** What each Dashboard cohort scope is called in its select. */
+export const COHORT_VIEW_LABELS = {
+  operational: 'Operational + unclassified',
+  production: 'Production only',
+  staging: 'Staging only',
+  non_operational: 'Lab / demo / calibration / internal',
+  all: 'All cohorts',
+}
+
+/** How many results the cohort filter hides from a list, said in the filter's own name. */
+export function hiddenResultsNote({ view, total, shown }) {
+  if (view === 'all') return null
+  const hidden = Math.max(0, Number(total || 0) - Number(shown || 0))
+  if (!hidden) return null
+  return {
+    hidden,
+    text: `The ${COHORT_VIEW_LABELS[view] || view} filter hides ${hidden.toLocaleString('en-US')} result${hidden === 1 ? '' : 's'}.`,
+  }
+}
