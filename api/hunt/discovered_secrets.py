@@ -553,10 +553,24 @@ def _public(row: Mapping[str, Any]) -> dict[str, Any]:
         "promoted_profile_id": str(row["promoted_profile_id"]) if row.get("promoted_profile_id") else None,
         "reveals": row.get("reveals") or 0,
         "granted_to": [str(item) for item in (row["granted_to"] or [])],
+        # Display names (target name, else its address) for found_on and granted_to, so a person
+        # never reads a raw target id; an id missing here has no target row any more.
+        "target_names": _target_names(row),
         # What the worker read from the value (JWT header and claim names, hash scheme, key
         # type...), never the value; None for a row not derived yet.
         "derived": _transforms().still_valid(_decoded(row.get("derived"))),
     }
+
+
+def _target_names(row: Mapping[str, Any]) -> dict[str, str]:
+    names: dict[str, str] = {}
+    if row.get("found_on_name"):
+        names[str(row["target_id"])] = str(row["found_on_name"])
+    for item in row.get("granted_to_names") or []:
+        target, _, name = str(item).partition(" ")
+        if target and name:
+            names[target] = name
+    return names
 
 
 PLANNER_KEYS = ("ref", "kind", "label", "length", "first_seen_at", "last_seen_at", "seen_count",
@@ -592,7 +606,12 @@ async def list_for_target(
             (SELECT count(*) FROM discovered_secret_uses u
              WHERE u.secret_id=s.id AND u.revealed_by IS NOT NULL) AS reveals,
             ARRAY(SELECT g.target_id FROM discovered_secret_grants g WHERE g.secret_id=s.id
-                  ORDER BY g.granted_at) AS granted_to
+                  ORDER BY g.granted_at) AS granted_to,
+            (SELECT COALESCE(NULLIF(t.name, ''), t.url) FROM targets t
+             WHERE t.id=s.target_id) AS found_on_name,
+            ARRAY(SELECT g.target_id::text || ' ' || COALESCE(NULLIF(t.name, ''), t.url)
+                  FROM discovered_secret_grants g JOIN targets t ON t.id=g.target_id
+                  WHERE g.secret_id=s.id ORDER BY g.granted_at) AS granted_to_names
         FROM discovered_secrets s
         WHERE (s.target_id=$1 OR EXISTS (SELECT 1 FROM discovered_secret_grants g
                                          WHERE g.secret_id=s.id AND g.target_id=$1))
