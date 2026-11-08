@@ -211,6 +211,7 @@ function BrandLockup({ edition, compact = false }: { edition?: string; compact?:
 function NavContent({
   pathname,
   showAll,
+  preferenceLoaded,
   onToggleShowAll,
   buildIdentity,
   fleetEnabled,
@@ -221,6 +222,7 @@ function NavContent({
   managed: boolean
   pathname: string
   showAll: boolean
+  preferenceLoaded: boolean
   onToggleShowAll: (value: boolean) => void
   buildIdentity: BuildIdentity
   fleetEnabled: boolean
@@ -342,7 +344,7 @@ function NavContent({
             target="_blank"
             rel="noopener noreferrer"
             title={SHAKERSCAN_WEBSITE_URL}
-            className="inline-flex items-center gap-1.5 rounded-sm text-gray-400 transition-colors hover:text-white focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-blue-500"
+            className="inline-flex items-center gap-1.5 rounded-sm text-gray-400 transition-colors hover:text-white disabled:cursor-default disabled:hover:text-gray-400 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-blue-500"
           >
             <BrandMark className="h-3.5 w-3.5" />
             shakerscan.com
@@ -368,6 +370,9 @@ function NavContent({
             type="button"
             role="switch"
             aria-checked={showAll}
+            // The server-rendered switch has no handler until the page hydrates, and the saved
+            // preference has not been read yet: a click then would be lost or overwritten.
+            disabled={!preferenceLoaded}
             onClick={() => onToggleShowAll(!showAll)}
             title="Show advanced sections (Records, Governance, Developer, Model Intake)"
             className="inline-flex items-center gap-2 rounded-md py-1 pr-1 text-[12.5px] text-gray-400 transition-colors hover:text-white focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-blue-500"
@@ -412,6 +417,7 @@ export default function Sidebar() {
   const pathname = usePathname()
   const [mobileOpen, setMobileOpen] = useState(false)
   const [showAll, setShowAll] = useState(false)
+  const [preferenceLoaded, setPreferenceLoaded] = useState(false)
   const managed = useWorkspaceIsManaged()
   const bakedVersion = process.env.NEXT_PUBLIC_APP_VERSION
   const bakedExpectedApiFingerprint = process.env.NEXT_PUBLIC_EXPECTED_API_BUILD_FINGERPRINT
@@ -439,6 +445,7 @@ export default function Sidebar() {
     } catch {
       /* localStorage unavailable */
     }
+    setPreferenceLoaded(true)
   }, [])
   const handleToggleShowAll = (value: boolean) => {
     setShowAll(value)
@@ -536,14 +543,14 @@ export default function Sidebar() {
                 <X className="h-5 w-5" aria-hidden="true" />
               </button>
             </div>
-            <NavContent editionLabel={editionLabel} managed={managed} pathname={pathname} showAll={showAll} onToggleShowAll={handleToggleShowAll} buildIdentity={buildIdentity} fleetEnabled={fleetEnabled} />
+            <NavContent editionLabel={editionLabel} managed={managed} pathname={pathname} showAll={showAll} preferenceLoaded={preferenceLoaded} onToggleShowAll={handleToggleShowAll} buildIdentity={buildIdentity} fleetEnabled={fleetEnabled} />
           </aside>
         </div>
       )}
 
       {/* Desktop: persistent sidebar. */}
       <aside className="sticky top-0 hidden h-screen w-64 shrink-0 flex-col overflow-y-auto overscroll-contain border-r border-gray-800 bg-gray-900 p-4 md:flex">
-        <NavContent editionLabel={editionLabel} managed={managed} pathname={pathname} showAll={showAll} onToggleShowAll={handleToggleShowAll} buildIdentity={buildIdentity} fleetEnabled={fleetEnabled} />
+        <NavContent editionLabel={editionLabel} managed={managed} pathname={pathname} showAll={showAll} preferenceLoaded={preferenceLoaded} onToggleShowAll={handleToggleShowAll} buildIdentity={buildIdentity} fleetEnabled={fleetEnabled} />
       </aside>
     </>
   )
