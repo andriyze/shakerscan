@@ -91,6 +91,12 @@ async function mock(page: Page, mode: Mode) {
     if (path.endsWith('/history')) return route.fulfill({ json: { asset_id: assetId, kind: 'scans', items: [], total: 0, offset: 0, limit: 25 } })
     if (path.endsWith('/interpretations')) return route.fulfill({ json: { interpretations: [], count: 0, has_more: false } })
     if (path.endsWith('/negative-results')) return route.fulfill({ json: { rows: [], count: 0, has_more: false } })
+    if (path === '/scans') {
+      const scan = (id: string, status: string) => ({ id, target_url: 'https://caps.example.test', target_id: assetId, status,
+        progress: status === 'running' ? 40 : 100, created_at: now, scan_type: 'standard' })
+      return route.fulfill({ json: { scans: [scan('00000000-0000-4000-8000-000000000921', 'running'),
+        scan('00000000-0000-4000-8000-000000000922', 'completed')], total: 2, limit: 50, offset: 0 } })
+    }
     if (path === `/findings/${findingId}`) return route.fulfill({ json: finding })
     if (path === `/hunts/${huntId}`) return route.fulfill({ json: hunt })
     if (path === `/hunts/${huntId}/http-transactions`) {
@@ -273,6 +279,22 @@ for (const width of [390, 1440]) {
       await page.goto(`/hunt?run=${huntId}`)
       await expect(page.getByRole('button', { name: 'Stop', exact: true })).toBeVisible()
       await expect(page.getByRole('button', { name: 'Delete this Hunt', exact: true })).toHaveCount(0)
+    })
+
+    test('CAPS-010 Scans list: Cancel, Scan again and New Scan follow scans.start', async ({ page }) => {
+      await mock(page, 'viewer')
+      await page.goto('/scans')
+      await expect(page.getByText('Showing 2 scans').first()).toBeVisible()
+      for (const name of ['Cancel', 'Scan again', 'New Scan']) {
+        await expect(page.getByRole('main').getByRole(name === 'New Scan' ? 'link' : 'button', { name, exact: true })).toHaveCount(0)
+      }
+
+      await page.unrouteAll({ behavior: 'ignoreErrors' })
+      await mock(page, 'operator')
+      await page.goto('/scans')
+      await expect(page.getByRole('main').getByRole('button', { name: 'Cancel', exact: true }).first()).toBeVisible()
+      await expect(page.getByRole('main').getByRole('link', { name: 'New Scan', exact: true })).toBeVisible()
+      if (width >= 1440) await expect(page.getByRole('main').getByRole('button', { name: 'Scan again', exact: true })).toBeVisible()
     })
 
     test('CAPS-008 an answer that is not this contract keeps the whole surface (fail open)', async ({ page }) => {

@@ -12,6 +12,7 @@ import { buttonClasses, Card, ConfirmDialog, ErrorState, Input, LastUpdated, Pag
 import { episodesStarted, findingCount, RunStatusBadge, runState } from '@/components/hunt'
 import { boundedTargetDisplay } from '@/lib/targetChoices'
 import { usePoll } from '@/lib/usePoll'
+import { useCan } from '@/lib/useSessionCapabilities'
 import { isAbortError } from '@/lib/fetchLayer.mjs'
 
 const PAGE_SIZE = 50
@@ -162,6 +163,8 @@ interface ScansFilters {
 }
 
 function ScansContent() {
+  // Session capabilities: starting, repeating and cancelling Scans are scans.start controls.
+  const canStartScans = useCan('scans.start')
   const { filters, setFilter, setFilters, buildUrl } = useUrlFilters<ScansFilters>({
     defaults: { page: 1 }
   })
@@ -410,10 +413,10 @@ function ScansContent() {
         actions={
           <>
             <LastUpdated updatedAt={lastUpdated} onRefresh={handleManualRefresh} refreshing={refreshing} />
-            <Link href="/scan/new" className={buttonClasses('primary')}>
+            {canStartScans && <Link href="/scan/new" className={buttonClasses('primary')}>
               <Plus className="h-4 w-4" aria-hidden="true" />
               New Scan
-            </Link>
+            </Link>}
           </>
         }
       />
@@ -609,7 +612,7 @@ function ScansContent() {
                   : parallelParent
                     ? 'Parallel'
                     : aiTargetType || (authenticated ? 'Authenticated' : null)
-              const canCancel = scan.status === 'running' || scan.status === 'pending' || scan.status === 'queued'
+              const canCancel = canStartScans && (scan.status === 'running' || scan.status === 'pending' || scan.status === 'queued')
               return (
                 <div key={scan.id} className="rounded-lg border border-gray-800 bg-gray-900 p-4">
                   <div className="flex items-start justify-between gap-3">
@@ -825,8 +828,8 @@ function ScansContent() {
                     <span className="text-sm text-gray-500">{formatDate(scan.created_at)}</span>
                   </td>
                   <td className="px-4 py-3">
-                    {(scan.status === 'running' || scan.status === 'pending' || scan.status === 'queued') ? (
-                      <button
+                    {!canStartScans && !isAIScan ? null : (scan.status === 'running' || scan.status === 'pending' || scan.status === 'queued') ? (
+                      canStartScans && <button
                         onClick={() => setConfirmCancelId(scan.id)}
                         disabled={cancelling.has(scan.id)}
                         className="px-2 py-1 bg-red-600/20 hover:bg-red-600/40 text-red-400 rounded-sm text-xs font-medium transition-colors disabled:opacity-50 focus:outline-hidden focus-visible:ring-2 focus-visible:ring-red-500"
