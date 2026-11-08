@@ -5,6 +5,8 @@ import { useEffect, useMemo, useState, useRef } from 'react'
 import { placementPreviewLabel } from '@/lib/labels'
 import { useRouter } from 'next/navigation'
 import Link from '@/components/WorkspaceLink'
+import { useCan, useSessionCapabilities } from '@/lib/useSessionCapabilities'
+import { capabilityReason } from '@/lib/sessionCapabilities.mjs'
 import {
   getScanPublicContract,
   getWorkers,
@@ -106,6 +108,9 @@ export default function NewScanPage() {
   const [workerStats, setWorkerStats] = useState<Awaited<ReturnType<typeof getWorkers>> | null>(null)
   const [workerReadinessError, setWorkerReadinessError] = useState<string | null>(null)
   const [loading, setLoading] = useState(false)
+  // Session capabilities: a person who may not start scans sees the form without Run Scan.
+  const canStartScan = useCan('scans.start')
+  const startScanRefusal = capabilityReason(useSessionCapabilities(), 'scans.start')
   const [error, setError] = useState<string | null>(null)
 
   useEffect(() => {
@@ -410,6 +415,7 @@ export default function NewScanPage() {
 
   async function handleSubmit(event: React.FormEvent) {
     event.preventDefault()
+    if (!canStartScan) return
     setError(null)
     const submittedTargets = batchMode ? targets : [target.trim()]
     if (submittedTargets.length === 0 || !submittedTargets[0]) {
@@ -879,13 +885,13 @@ export default function NewScanPage() {
         {error && <p role="alert" className="rounded-lg border border-red-800 bg-red-950/30 p-3 text-sm text-red-300">{error}</p>}
         <div className="flex items-center justify-end gap-3">
           <Button type="button" variant="secondary" onClick={() => router.back()}>Cancel</Button>
-          <Button
+          {canStartScan ? <Button
             type="submit"
             loading={loading}
             disabled={contractPreviewLoading || !contractPreview || ((activeTesting || credentialUse) && !authorized) || (activeTesting && !activeWorkerAvailable)}
           >
             Run Scan
-          </Button>
+          </Button> : <p className="text-sm text-gray-400" data-testid="scan-start-refused">{startScanRefusal || 'Starting scans is not part of your role.'}</p>}
         </div>
       </form>
     </div>

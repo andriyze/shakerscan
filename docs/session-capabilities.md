@@ -62,17 +62,17 @@ The UI sends it to its API origin with the same credentials as every other API r
 | Action | UI controls |
 |---|---|
 | `targets.add` | Targets: "Add targets"; Dashboard: "Add a target" |
-| `targets.edit` | Target page: "Edit details", the target's instructions ("Create instructions"), "Edit Hunt permissions", "Add action", authorize/revoke a target |
+| `targets.edit` | Targets list: "Restore", the target's instructions, "Authorize testing…" / "Revoke authorization", "Archive or delete…", the bulk "Authorize"; target page: "Rename", "Edit details", "Authorize asset", the target's instructions ("Create instructions"), "Edit learned knowledge", "Edit Hunt permissions", "Add action" and its edit/delete |
 | `targets.check` | Target page: "Check now" (liveness) |
-| `scans.start` | Targets and target page: "Scan"; "New Scan"; Run Scan |
-| `findings.retest` | Finding page and lists: "Retest" |
+| `scans.start` | Targets list: "Scan" / "Discover", "Quick scan", "Customize Scan…", "Network scan", domain discovery, "Schedule scans", the bulk "Scan"; target page: "Configure web scan", "Network Hunt" and "Start network scan" (these two also need the `/devices` page); sidebar: "New Scan"; New Scan page: "Run Scan"; Dashboard: "Start a scan" |
+| `findings.retest` | Finding page: "Retest" and its mode |
 | `findings.verify` | Finding page: "Verify finding" |
-| `findings.triage` | Finding page: the status select and the triage verdict |
+| `findings.triage` | Finding page: the status select and the analyst verdict (shown read-only when `false`); Findings list: the selection dock's status actions |
 | `findings.accept_risk` | Finding page: "Accept risk" |
 | `hunts.manage` | Hunt page: "Stop" and "Delete" |
-| `secrets.read` | Target page: the "Discovered secrets" card (its list request is not sent when `false`) |
-| `secrets.manage` | Discovered secrets: "Revoke" and the expiry change |
-| `secrets.decide` | Discovered secrets: "Reveal", "Grant" and "Promote" (the gateway may still ask for a step-up) |
+| `secrets.read` | Target page: the "Discovered secrets" cards (their list requests are not sent when `false`) |
+| `secrets.manage` | Discovered secrets: "Revoke" / "Reactivate" and "Expiry" |
+| `secrets.decide` | Discovered secrets: "Reveal", "Grant", "Ungrant" and "Promote" (the gateway may still ask for a step-up) |
 
 A new UI control that changes state names one of these actions, or a new one added to this table.
 An action the answer does not list follows `default`.
