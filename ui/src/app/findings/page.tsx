@@ -183,7 +183,8 @@ function FindingsContent() {
   // Record deletion is an admin-only lifecycle action, never a front-line triage control.
   // Same double gate as Advanced cleanup; the dock renders no menu at all when it is off.
   const canTriage = useCan('findings.triage')
-  const canDeleteRecords = featureEnabled('record_deletion') && featureEnabled('engine_admin')
+  const mayDeleteRecords = useCan('records.delete')
+  const canDeleteRecords = featureEnabled('record_deletion') && featureEnabled('engine_admin') && mayDeleteRecords
 
   const severityFilter = filters.severity || ''
   const sourceTypeFilter = filters.source_type || ''
