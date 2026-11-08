@@ -395,3 +395,22 @@ def test_the_generator_drops_empty_ranges_and_groups_exact_versions():
     assert [row["cve"] for row in rows] == ["CVE-3", "CVE-1"]
     assert rows[1]["versions"] == ["1.0", "1.1"] and rows[1]["cpe"] == "cpe:2.3:a:v:p:*:*:*:*:*:*:*:*"
     assert all("title" not in row and "reference" not in row for row in rows)
+
+
+def test_a_title_whose_record_names_no_product_drops_the_undefined_sentence():
+    # CVE-2026-44186 in the bundled snapshot: the record's generated sentence printed "undefined"
+    # for the product, and the stored title was cut inside it.
+    title = ("Loop with Unreachable Exit Condition ('Infinite Loop') vulnerability in the mod_proxy_ftp "
+             "module in Apache HTTP Server.\n\nThis issue affects undefined: fr")
+    matches = device_advisories.match_advisories([
+        {"cve": "CVE-2026-44186", "title": title, "severity": "high",
+         "cpe": "cpe:2.3:a:apache:http_server:*:*:*:*:*:*:*:*", "version_end_excluding": "2.4.67"},
+    ], cpe="cpe:2.3:a:apache:http_server:2.4.10:*:*:*:*:*:*:*", product=None, version="2.4.10")
+    assert matches[0]["title"] == (
+        "Loop with Unreachable Exit Condition ('Infinite Loop') vulnerability in the mod_proxy_ftp "
+        "module in Apache HTTP Server.")
+    assert "undefined" not in matches[0]["title"]
+    # Other uses of the word are the advisory's own text and stay.
+    assert device_advisories.readable_advisory_title("may cause undefined behavior") == "may cause undefined behavior"
+    # A title that was only the broken sentence falls back to the advisory id.
+    assert device_advisories.readable_advisory_title("This issue affects undefined: from 1 before 2", "CVE-1") == "CVE-1"

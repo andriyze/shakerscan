@@ -447,6 +447,11 @@ def test_candidates_legacy_pages_equal_the_previous_query_and_list_v1_reaches_ev
                 item.pop("total_count", None)
                 expected.append(item)
             new = await inv.list_investigation_candidates(None, cursor=None, count=None, fields=None, since=None, **args)
+            # 2.12.1 adds the target's name and URL to each row; every earlier field is unchanged.
+            names = await conn.fetch("SELECT id, name, url FROM targets")
+            by_id = {str(row["id"]): (row["name"], row["url"]) for row in names}
+            for item in new["candidates"]:
+                assert (item.pop("target_name"), item.pop("target_url")) == by_id[str(item["target_id"])]
             assert new["candidates"] == expected and expected, case
             assert new["total"] == (int(old[0]["total_count"]) if old else 0)
         walked, cursor = [], None
