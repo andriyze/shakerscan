@@ -4230,6 +4230,8 @@ export async function getScans(params?: {
   include_shards?: boolean
   include_internal?: boolean
   include_model_intake?: boolean
+  /** Device posture, probe and device web Scans too (they take scan slots like any Scan). */
+  include_devices?: boolean
 }, signal?: AbortSignal): Promise<ScansPage> {
   const searchParams = new URLSearchParams()
   if (params?.status) searchParams.set('status', params.status)
@@ -4242,6 +4244,7 @@ export async function getScans(params?: {
   if (params?.include_shards) searchParams.set('include_shards', 'true')
   if (params?.include_internal) searchParams.set('include_internal', 'true')
   if (params?.include_model_intake) searchParams.set('include_model_intake', 'true')
+  if (params?.include_devices) searchParams.set('include_devices', 'true')
   // No list/v1 opt-in (count/cursor) here: /scans serves only limit/offset pages today, and the
   // opt-in would change the response to cursor pages under offset-based pagination.
 

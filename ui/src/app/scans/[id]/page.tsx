@@ -7,7 +7,7 @@ import { usePoll } from '@/lib/usePoll'
 import { isAbortError } from '@/lib/fetchLayer.mjs'
 import { useParams, useRouter, useSearchParams } from 'next/navigation'
 import Link from '@/components/WorkspaceLink'
-import { API_URL, getScan, getScanLogs, getDeviceScanActivity, getHealth, getFindingsPage, getScanDeploymentDecision, getTargetPosture, replayAiScan, getAiScanCampaignHistory, formatDuration, formatDate, type AiScanCampaignHistory, type DeploymentDecision, type Finding, type TargetPosture } from '@/lib/api'
+import { API_URL, getScan, getScans, getScanLogs, getDeviceScanActivity, getHealth, getFindingsPage, getScanDeploymentDecision, getTargetPosture, replayAiScan, getAiScanCampaignHistory, formatDuration, formatDate, type AiScanCampaignHistory, type DeploymentDecision, type Finding, type TargetPosture } from '@/lib/api'
 import { TargetPostureCard } from '@/components/TargetPostureCard'
 import { SEVERITY_BADGE_STYLES, SEVERITY_LEVELS, type SeverityLevel } from '@/lib/constants'
 import { Card, ErrorState, PageHeader, gradeTextColor } from '@/components/ui'
@@ -22,7 +22,7 @@ import { assuranceClass, scanAssurance } from '@/lib/assurance.mjs'
 import { normalizeParentCoverage } from '@/lib/deferredWorkContracts'
 import { boundedDisplayText } from '@/lib/targetChoices'
 import { buildFindingLinkageIndex, linkedPersistedFinding } from '@/lib/findingLinkage'
-import { blockerOrigin, blockerProvenanceText, carriedOverFromDecision, carriedSourceText, carriedOverSummary, domainRatePresentation, groupScanFindings, isProvenFinding, reconciledScanFindings, releaseLine, scanFindingCounts, scanFindingCountsText, scanLogEntry, scanPhasePresentation, scanResultPresentation } from '@/lib/scanDetailPresentation.mjs'
+import { blockerOrigin, blockerProvenanceText, carriedOverFromDecision, carriedSourceText, carriedOverSummary, domainRatePresentation, groupScanFindings, queueWaitPresentation, isProvenFinding, reconciledScanFindings, releaseLine, scanFindingCounts, scanFindingCountsText, scanLogEntry, scanPhasePresentation, scanResultPresentation } from '@/lib/scanDetailPresentation.mjs'
 import { emptyScanLogState, mergeScanLogReply } from '@/lib/scanLogDelta.mjs'
 import { scanFailureRecommendation } from '@/lib/scanFailureRecommendation'
 import { failedScanHeadline } from '@/lib/authorizationStop'
@@ -2351,6 +2351,7 @@ function ScanDetailContent() {
                 </div>
                 <h1 id="scan-progress-heading" className="text-xl font-semibold text-white">{phase.label}</h1>
                 <p className="mt-1 max-w-2xl text-sm text-gray-400">{phase.description}</p>
+                {(scan.status === 'pending' || scan.status === 'queued') && quota?.kind !== 'waiting' && <QueueWaitNotice scanId={scan.id} />}
                 {quota?.kind === 'reduced' && (
                   <p className="mt-2 max-w-2xl rounded-sm border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs text-amber-200" data-testid="domain-rate-notice">
                     {quota.description}
@@ -2610,5 +2611,38 @@ export default function ScanDetailPage() {
     }>
       <ScanDetailContent />
     </Suspense>
+  )
+}
+
+
+/** What a queued Scan waits behind, from the Scans running now (re-read every 15 s). */
+function QueueWaitNotice({ scanId }: { scanId: string }) {
+  const [view, setView] = useState<ReturnType<typeof queueWaitPresentation> | null>(null)
+  usePoll(async (signal) => {
+    try {
+      const page = await getScans({ status: 'running', limit: 5, include_internal: true, include_devices: true }, signal)
+      setView(queueWaitPresentation(scanId, page.scans, page.total))
+    } catch (cause) {
+      if (!isAbortError(cause)) setView(null)
+      throw cause
+    }
+  }, { intervalMs: 15_000, deps: [scanId] })
+  if (!view) return null
+  return (
+    <div className="mt-3 max-w-2xl rounded-sm border border-gray-700 bg-gray-950/50 px-3 py-2 text-sm text-gray-300" data-testid="queue-wait" role="status">
+      <p className="font-medium text-gray-200">{view.label}</p>
+      {view.items.length > 0 && (
+        <ul className="mt-1 space-y-0.5 text-xs">
+          {view.items.map((item) => (
+            <li key={item.id}>
+              <Link href={`/scans/${item.id}`} className="text-blue-300 hover:text-blue-200">{item.name}</Link>
+              <span className="text-gray-500"> · {item.kind}</span>
+            </li>
+          ))}
+          {view.more > 0 && <li className="text-gray-500">and {view.more} more</li>}
+        </ul>
+      )}
+      <p className="mt-1 text-xs text-gray-500">{view.detail}</p>
+    </div>
   )
 }

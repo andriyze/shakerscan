@@ -125,6 +125,41 @@ export function domainRatePresentation(scan, options = {}) {
   return null
 }
 
+const RUN_KIND_WORDS = {
+  device_posture: 'network discovery',
+  device_probe: 'device check',
+  device_web_dast: 'device web Scan',
+}
+
+/** What a queued Scan waits behind: the Scans running now (a bounded sample, newest first) and
+ *  how many run in all. `running` excludes the queued Scan itself. */
+export function queueWaitPresentation(selfId, running, total) {
+  const rows = (Array.isArray(running) ? running : []).filter((item) => item && item.id)
+  const others = rows.filter((item) => item.id !== selfId)
+  const reported = Number.isFinite(Number(total)) ? Number(total) - (rows.length - others.length) : others.length
+  const count = Math.max(others.length, reported)
+  if (count <= 0) {
+    return {
+      label: 'No other Scan is running.',
+      detail: 'It starts as soon as a worker picks it up; a worker that is starting or busy with other work can take a minute.',
+      items: [],
+      more: 0,
+    }
+  }
+  const items = others.map((item) => {
+    const name = String(item.target_name || '').trim()
+    const url = String(item.target_url || '').trim()
+    const kind = RUN_KIND_WORDS[String(item.run_kind || item.scan_type || '')] || 'Scan'
+    return { id: String(item.id), name: name && name !== url ? name : url.replace(/^[a-z]+:\/\//i, '') || 'a target', kind }
+  })
+  return {
+    label: `Waiting behind ${count} running Scan${count === 1 ? '' : 's'}.`,
+    detail: 'Every licensed or configured scan slot is in use. This Scan starts when one of them finishes; cancelling one frees its slot.',
+    items,
+    more: Math.max(0, count - items.length),
+  }
+}
+
 export function scanPhasePresentation(scan, options = {}) {
   const status = String(record(scan).status || 'pending').toLowerCase()
   const rawPhase = String(record(scan).current_phase || '').trim().toLowerCase()
