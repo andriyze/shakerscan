@@ -1,5 +1,6 @@
 import { pathSegment } from './apiPath.mjs'
 import { API_URL, getApiErrorMessage } from './apiConfig'
+import { secretsCommand } from './discoveredSecretsModel.mjs'
 
 /** A secret found on a target: metadata only; the value is never part of a listing. */
 export interface DiscoveredSecret {
@@ -64,6 +65,6 @@ export const promoteDiscoveredSecret = (targetId: string, ref: string, input: { 
   return request<{ profile: { id: string } }>(`/targets/${pathSegment(targetId)}/discovered-secrets/${pathSegment(id)}/promote`, json('POST', input))
 }
 
-/** The terminal command that makes a step-up decision on Enterprise. */
-export const terminalCommand = (action: 'reveal' | 'grant' | 'promote', targetId: string, ref: string) =>
-  `shakerscan secrets ${action} ${targetId} ${ref}${action === 'grant' ? ' --to <target-id>' : action === 'promote' ? ' --name <name> --auth-kind <kind>' : ''}`
+/** The terminal command that makes a step-up decision on Enterprise, with what the person chose. */
+export const terminalCommand = (action: 'reveal' | 'grant' | 'promote', targetId: string, ref: string,
+  choices?: { to?: string; name?: string; authKind?: string; headerName?: string }) => secretsCommand(action, targetId, ref, choices)
