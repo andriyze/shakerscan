@@ -19,6 +19,7 @@ import { AuthorizeDialog } from './inventory/AuthorizeDialog'
 import { InventorySummary, InventoryToolbar, type InventoryFilters } from './inventory/InventoryControls'
 import { ColumnHeader, DomainGroup, NetworkGroup } from './inventory/TargetGroups'
 import { assetKind, type RowActions } from './inventory/TargetRow'
+import { useCan } from '@/lib/useSessionCapabilities'
 
 const PAGE_GROUPS = TARGETS_PAGE_GROUPS
 const plural = (count: number, noun: string) => `${count.toLocaleString()} ${noun}${count === 1 ? '' : 's'}`
@@ -71,6 +72,9 @@ export function TargetInventory() {
   }, [expanded])
   const [selected, setSelected] = useState<Set<string>>(new Set())
   const [busy, setBusy] = useState<string | null>(null)
+  const mayAdd = useCan('targets.add')
+  const mayScan = useCan('scans.start')
+  const mayEdit = useCan('targets.edit')
   const [adding, setAdding] = useState(parameters.get('add') === '1')
   const [authorizing, setAuthorizing] = useState<TargetAsset[]>([])
   const [revoking, setRevoking] = useState<TargetAsset | null>(null)
@@ -239,13 +243,13 @@ export function TargetInventory() {
 
   return <div className={selected.size ? 'pb-24' : ''}>
     <PageHeader title="Targets" description="Every domain, host and device you test — one inventory for Scan and Hunt."
-      actions={<Button onClick={() => setAdding(true)}><Plus className="h-4 w-4" aria-hidden="true" />Add targets</Button>} />
+      actions={mayAdd ? <Button onClick={() => setAdding(true)}><Plus className="h-4 w-4" aria-hidden="true" />Add targets</Button> : undefined} />
 
     {firstRun ? <div className="rounded-2xl border border-dashed border-gray-700 bg-gray-900/40 px-6 py-16 text-center">
       <div className="mx-auto mb-4 flex h-12 w-12 items-center justify-center rounded-xl bg-blue-500/10 text-blue-300"><Globe className="h-6 w-6" aria-hidden="true" /></div>
       <h2 className="text-lg font-semibold text-white">Add what you want to test</h2>
       <p className="mx-auto mt-2 max-w-md text-sm leading-6 text-gray-400">Paste domains, URLs, IP addresses or hostnames. ShakerScan groups them by domain, works out HTTP or HTTPS and finds open ports when you scan.</p>
-      <Button className="mt-6" onClick={() => setAdding(true)}><Plus className="h-4 w-4" aria-hidden="true" />Add targets</Button>
+      {mayAdd && <Button className="mt-6" onClick={() => setAdding(true)}><Plus className="h-4 w-4" aria-hidden="true" />Add targets</Button>}
     </div> : <>
       <InventorySummary facets={facets} filters={filters} onChange={change} />
       <InventoryToolbar filters={filters} facets={facets} onChange={change} searchRef={searchInput} />
@@ -286,13 +290,13 @@ export function TargetInventory() {
     {selected.size > 0 && <div className="fixed inset-x-0 bottom-0 z-40 md:left-64" role="region" aria-label="Selected targets">
       <div className="mx-auto mb-4 flex w-fit max-w-[calc(100%-2rem)] flex-wrap items-center gap-2 rounded-2xl border border-gray-700 bg-gray-900/95 px-3 py-2 shadow-2xl shadow-black/50 backdrop-blur">
         <span className="px-2 text-sm font-medium text-white">{selected.size} selected</span>
-        <Button size="sm" loading={busy === 'bulk'} onClick={() => void bulkScan()}><Play className="h-3.5 w-3.5" aria-hidden="true" />Scan</Button>
-        <Button size="sm" variant="secondary" disabled={!chosenAssets.some(asset => !asset.authorized && asset.is_active)} onClick={() => setAuthorizing(chosenAssets)}><ShieldCheck className="h-3.5 w-3.5" aria-hidden="true" />Authorize</Button>
+        {mayScan && <Button size="sm" loading={busy === 'bulk'} onClick={() => void bulkScan()}><Play className="h-3.5 w-3.5" aria-hidden="true" />Scan</Button>}
+        {mayEdit && <Button size="sm" variant="secondary" disabled={!chosenAssets.some(asset => !asset.authorized && asset.is_active)} onClick={() => setAuthorizing(chosenAssets)}><ShieldCheck className="h-3.5 w-3.5" aria-hidden="true" />Authorize</Button>}
         <Button size="sm" variant="ghost" aria-label="Clear selection" onClick={() => setSelected(new Set())}><X className="h-4 w-4" aria-hidden="true" /></Button>
       </div>
     </div>}
 
-    <AddTargetsDialog open={adding} onClose={() => setAdding(false)} onAdded={() => { firstPage(); refresh() }} />
+    <AddTargetsDialog open={adding && mayAdd} onClose={() => setAdding(false)} onAdded={() => { firstPage(); refresh() }} />
     {authorizing.length > 0 && <AuthorizeDialog assets={authorizing} onClose={() => setAuthorizing([])} onDone={(count, failures) => {
       setAuthorizing([])
       if (count) toast.success(`Authorized ${count} target${count === 1 ? '' : 's'} for testing`)

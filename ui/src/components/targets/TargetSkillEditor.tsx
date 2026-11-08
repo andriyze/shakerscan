@@ -6,6 +6,7 @@ import ReactMarkdown from 'react-markdown'
 import { Button, Card, Field, Input, Modal, Textarea } from '@/components/ui'
 import { targetInstructionState } from '@/lib/targetInstructionState.mjs'
 import { deleteTargetSkill, getTargetSkill, saveTargetSkill, type TargetSkillState } from '@/lib/targetSkillApi'
+import { useCan } from '@/lib/useSessionCapabilities'
 
 const TEMPLATE = `## About this target
 Describe the application or device, its services, and anything Hunt should know.
@@ -42,6 +43,7 @@ export function TargetSkillEditor({targetId, targetName, compact = false, hasSki
   const [preview, setPreview] = useState(false)
   const [confirmation, setConfirmation] = useState<'discard' | 'delete' | null>(null)
   const [notice, setNotice] = useState('')
+  const canEdit = useCan('targets.edit')
   const instructionState = targetInstructionState(saved)
   const dirty = title !== (instructionState.editable?.title || 'Target instructions') || text !== (instructionState.editable?.methodology || '')
   const exists = saved ? instructionState.exists : hasSkill
@@ -90,7 +92,7 @@ export function TargetSkillEditor({targetId, targetName, compact = false, hasSki
     } catch (cause) {setError(cause instanceof Error ? cause.message : 'Could not delete target instructions');setConfirmation(null)}
     finally {setBusy(false)}
   }
-  const trigger = menuItem
+  const trigger = !canEdit ? null : menuItem
     ? <button type="button" role="menuitem" onClick={() => void edit()} aria-label={`${exists ? 'Edit' : 'Create'} instructions for ${targetName}`} className="flex w-full items-center gap-2.5 rounded-md px-3 py-2 text-left text-sm text-gray-200 hover:bg-gray-800 focus:bg-gray-800 focus:outline-none"><FilePenLine className="h-4 w-4 text-gray-400" aria-hidden="true" />{exists ? 'Edit Hunt instructions' : 'Add Hunt instructions'}</button>
     : <Button size={compact ? 'sm' : 'md'} variant="secondary" onClick={() => void edit()} aria-label={`${exists ? 'Edit' : 'Create'} instructions for ${targetName}`}><FilePenLine className="h-4 w-4" aria-hidden="true" />{compact ? 'Instructions' : exists ? 'Edit instructions' : 'Create instructions'}</Button>
 

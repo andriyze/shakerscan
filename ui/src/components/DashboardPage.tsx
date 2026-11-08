@@ -32,6 +32,7 @@ import {
 import { ChangesStrip } from '@/app/exposure/ChangesStrip'
 import { boundedDisplayText } from '@/lib/targetChoices'
 import { assuranceClass, scanAssurance } from '@/lib/assurance.mjs'
+import { useCan } from '@/lib/useSessionCapabilities'
 
 // The server caches /dashboard for 15 s: polling it faster only re-reads the same answer.
 const DASHBOARD_REFRESH_MS = 15000
@@ -751,6 +752,10 @@ function SecurityPosture({ exposure, state, onRetry, outOfScope = false, onShowA
       : assetCount > 0
         ? { href: '/scan/new', label: 'Start a scan' }
         : { href: '/targets', label: 'Add a target' }
+  const canAdd = useCan('targets.add')
+  const canScan = useCan('scans.start')
+  // Only offer the next step this person can take (session capabilities).
+  const offerPrimary = primary.href === '/targets' ? canAdd : primary.href === '/scan/new' ? canScan : true
 
   return (
     <Card className="overflow-hidden">
@@ -763,7 +768,7 @@ function SecurityPosture({ exposure, state, onRetry, outOfScope = false, onShowA
           <button type="button" onClick={onShowAll} className={`inline-flex items-center gap-1 self-start rounded-lg border border-blue-500/40 bg-blue-500/10 px-3 py-2 text-sm font-medium text-blue-200 hover:bg-blue-500/20 ${FOCUS_RING}`}>
             Show all cohorts <ArrowRight className="h-4 w-4" />
           </button>
-        ) : state === 'ready' ? (
+        ) : state === 'ready' && offerPrimary ? (
           <Link href={primary.href} className={`inline-flex items-center gap-1 self-start rounded-lg border border-blue-500/40 bg-blue-500/10 px-3 py-2 text-sm font-medium text-blue-200 hover:bg-blue-500/20 ${FOCUS_RING}`}>
             {primary.label} <ArrowRight className="h-4 w-4" />
           </Link>

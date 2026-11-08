@@ -71,3 +71,26 @@ test('the edition label comes from a managed manifest and defaults to Open Sourc
   assert.equal(workspaceEdition(), undefined, 'unknown contracts fail closed')
   delete global.window
 })
+
+test('the session answer is loaded once, and allows everything until it arrives', async () => {
+  const { sessionActionAllowed, sessionPageAllowed, sessionCapabilities, subscribeSessionCapabilities } =
+    await import('../src/lib/workspaceCapabilities.ts')
+  global.window = {}
+  assert.equal(sessionActionAllowed('targets.add'), true)
+  let loads = 0
+  let resolve
+  const load = () => { loads += 1; return new Promise(done => { resolve = done }) }
+  let notified = 0
+  const stopA = subscribeSessionCapabilities(() => { notified += 1 }, load)
+  const stopB = subscribeSessionCapabilities(() => { notified += 1 }, load)
+  assert.equal(loads, 1)
+  assert.equal(sessionPageAllowed('/devices'), true)
+  resolve({ default: 'deny', actions: { 'secrets.read': false }, pages: { '/devices': false }, reasons: {}, role: 'viewer' })
+  await new Promise(done => setImmediate(done))
+  assert.equal(notified, 2)
+  assert.equal(sessionCapabilities().role, 'viewer')
+  assert.equal(sessionActionAllowed('targets.add'), false)
+  assert.equal(sessionPageAllowed('/devices/x'), false)
+  assert.equal(sessionPageAllowed('/targets'), true)
+  stopA(); stopB()
+})

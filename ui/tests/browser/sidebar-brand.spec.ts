@@ -170,3 +170,22 @@ test('BRAND-005 a managed Enterprise edition names nested and missing pages too'
   await page.goto('/nonexistent-page', { waitUntil: 'domcontentloaded' })
   await expect(page).toHaveTitle('ShakerScan Enterprise')
 })
+
+test('BRAND-006 the section switch takes a click only once it can act on it', async ({ page }) => {
+  // A loaded machine serves the page scripts late: the server-rendered switch is on screen before
+  // it has a handler. It must not look clickable then, and a click once it is must hold.
+  test.skip(test.info().project.name !== 'chromium', 'desktop sidebar only')
+  await mockPageApi(page, health)
+  await page.route('**/_next/static/chunks/**', async (route) => {
+    await new Promise((resolve) => setTimeout(resolve, 1500))
+    await route.continue()
+  })
+  await page.goto('/docs', { waitUntil: 'domcontentloaded' })
+  const allSections = page.locator('aside:visible').getByRole('switch', { name: 'All sections', exact: true })
+  await expect(allSections).toBeDisabled()
+  await allSections.click()
+  await expect(allSections).toHaveAttribute('aria-checked', 'true')
+  await page.waitForTimeout(1000)
+  await expect(allSections).toHaveAttribute('aria-checked', 'true')
+  await expect(page.locator('aside:visible').getByRole('link', { name: 'Evidence' })).toBeVisible()
+})

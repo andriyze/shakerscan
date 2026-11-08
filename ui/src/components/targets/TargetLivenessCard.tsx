@@ -7,6 +7,7 @@ import { checkTargetLiveness, type TargetLiveness } from '@/lib/targetAssetApi'
 import { livenessView } from '@/lib/targetInventoryModel.mjs'
 import { boundedDisplayText } from '@/lib/targetChoices'
 import { LivenessPill } from './inventory/TargetRow'
+import { useCan } from '@/lib/useSessionCapabilities'
 
 const DNS_LABEL: Record<string, string> = { resolves: 'Resolves', no_record: 'No address record', error: 'Resolver error' }
 const TCP_LABEL: Record<string, string> = {
@@ -23,6 +24,7 @@ export function TargetLivenessCard({ targetId, liveness }: { targetId: string; l
   const [current, setCurrent] = useState<TargetLiveness | undefined>(liveness)
   const [busy, setBusy] = useState(false)
   const [message, setMessage] = useState<string | null>(null)
+  const canCheck = useCan('targets.check')
   useEffect(() => { setCurrent(liveness) }, [liveness])
   const view = livenessView(current)
 
@@ -64,8 +66,8 @@ export function TargetLivenessCard({ targetId, liveness }: { targetId: string; l
         </ul>}
       </div>
       <div className="flex flex-col items-end gap-2">
-        <Button variant="secondary" size="sm" loading={busy} onClick={() => void checkNow()} aria-label="Check liveness now">
-          <RefreshCw className="h-3.5 w-3.5" aria-hidden="true" />Check now</Button>
+        {canCheck && <Button variant="secondary" size="sm" loading={busy} onClick={() => void checkNow()} aria-label="Check liveness now">
+          <RefreshCw className="h-3.5 w-3.5" aria-hidden="true" />Check now</Button>}
         {message && <p className="max-w-xs text-right text-xs text-gray-400" role="status">{message}</p>}
       </div>
     </div>
