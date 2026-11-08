@@ -102,3 +102,28 @@ test('target creation accepts an authorized local service on a nonstandard HTTPS
   // The nonstandard HTTPS port is kept exactly as entered: no scheme or port is guessed.
   expect(submissions).toEqual([{ url: 'https://fixture-255:18443', cohort: 'production' }])
 })
+
+test('one failed side request keeps the device page and offers a retry for that part', async ({ page }) => {
+  let credentialReads = 0
+  await pinMockApiOrigin(page)
+  await page.route(`${MOCK_API_ORIGIN}/**`, async route => {
+    const path = new URL(route.request().url()).pathname
+    if (path === `/devices/${id}/credentials`) {
+      credentialReads += 1
+      if (credentialReads === 1) return route.fulfill({ status: 502, json: { detail: 'Bad gateway' } })
+      return route.fulfill({ json: { profiles: [{ id: 'p-1', name: 'Printer admin', auth_kind: 'web_form', username: 'admin', status: 'active', execution_compatible: true }] } })
+    }
+    if (path === `/devices/${id}`) return route.fulfill({ json: { device, interfaces: [], locator_history: [], services: [], scans: [] } })
+    if (path === '/devices/readiness') return route.fulfill({ json: { enabled: true, status: 'ready' } })
+    return route.fulfill({ json: { status: 'healthy', workers: [], policies: [], profiles: [], collections: [], runs: [], sessions: [], total: 0 } })
+  })
+  await page.goto(`/devices/${id}`)
+  await expect(page.getByRole('heading', { name: device.name })).toBeVisible()
+  await expect(page.getByText('Could not load connected device')).toHaveCount(0)
+  const notice = page.getByTestId('device-partial-load')
+  await expect(notice).toContainText('Could not load authentication profiles')
+  await expect(page.getByText('Could not load the authentication profiles')).toBeVisible()
+  await notice.getByRole('button', { name: 'Retry' }).click()
+  await expect(notice).toHaveCount(0)
+  await expect(page.getByText('Printer admin')).toBeVisible()
+})
