@@ -67,7 +67,7 @@ The UI sends it to its API origin with the same credentials as every other API r
 | `targets.add` | Targets: "Add targets"; Dashboard: "Add a target" |
 | `targets.edit` | Targets list: "Restore", the target's instructions, "Authorize testing…" / "Revoke authorization", "Archive or delete…" (with `records.delete`), the bulk "Authorize"; target page: "Rename", "Edit details", "Authorize asset", the target's instructions ("Create instructions"), "Edit learned knowledge", "Edit Hunt permissions", "Add action" and its edit/delete |
 | `targets.check` | Target page: "Check now" (liveness) |
-| `scans.start` | Targets list: "Scan" / "Discover", "Quick scan", "Customize Scan…", "Network scan", domain discovery, "Schedule scans", the bulk "Scan"; target page: "Configure web scan", "Network Hunt" and "Start network scan" (these two also need the `/devices` page); sidebar: "New Scan"; New Scan page: "Run Scan"; Dashboard: "Start a scan" |
+| `scans.start` | Targets list: "Scan" / "Discover", "Quick scan", "Customize Scan…", "Network scan", domain discovery, "Schedule scans", the bulk "Scan"; target page: "Configure web scan", "Network Hunt" and "Start network scan" (these two also need the `/devices` page); sidebar: "New Scan"; New Scan page: "Run Scan"; Scans list: "New Scan", "Cancel" and "Scan again"; Dashboard: "Start a scan" |
 | `findings.retest` | Finding page: "Retest" and its mode |
 | `findings.verify` | Finding page: "Verify finding" |
 | `findings.triage` | Finding page: the status select and the analyst verdict (shown read-only when `false`); Findings list: the selection dock's status actions |
