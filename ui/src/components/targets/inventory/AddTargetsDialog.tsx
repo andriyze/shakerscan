@@ -64,7 +64,7 @@ export function AddTargetsDialog({ open, onClose, onAdded }: { open: boolean; on
         let webCreated = false
         if (wantsWeb(entry)) {
           try {
-            const web = await createWebTarget(entry.webUrl, environment)
+            const web = await createWebTarget(entry.webUrl, environment, single && name.trim() ? name.trim() : undefined)
             webCreated = web.status !== 'already_exists'
             const label = entry.scheme ? web.url : `${String(web.url || entry.webUrl).replace(/^https?:\/\//, '')} — HTTP/HTTPS detected on first scan`
             notes.push(webCreated ? `Web app ${label}` : `Web app ${label} was already tracked`)
