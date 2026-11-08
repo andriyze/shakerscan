@@ -1,6 +1,7 @@
 'use client'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { Badge, Button, Card, ErrorState, Field, Input, Modal, Select } from '@/components/ui'
+import { useCan } from '@/lib/useSessionCapabilities'
 import { formatDate } from '@/lib/api'
 import {
   StepUpRequired, grantDiscoveredSecret, listDiscoveredSecrets, promoteDiscoveredSecret, revealDiscoveredSecret,
@@ -32,6 +33,9 @@ export function TargetDiscoveredSecrets({ targetId, origin, hideWhenEmpty = fals
   const [dialog, setDialog] = useState<Dialog | null>(null)
   const [busy, setBusy] = useState(false)
   const [refresh, setRefresh] = useState(0)
+  // Session capabilities: Revoke/Reactivate/Expiry are secrets.manage, Grant/Promote/Reveal secrets.decide.
+  const canManage = useCan('secrets.manage')
+  const canDecide = useCan('secrets.decide')
   const onLoadedRef = useRef(onLoaded)
   onLoadedRef.current = onLoaded
   useEffect(() => { if (rows) onLoadedRef.current?.(rows.length) }, [rows])
@@ -102,12 +106,12 @@ export function TargetDiscoveredSecrets({ targetId, origin, hideWhenEmpty = fals
           <td className="py-2 pr-3 align-top text-xs"><span className={STATE_TONE[row.state]}>{row.state.replace(/_/g, ' ')}</span><div className="text-gray-400">{row.uses} Hunt use{row.uses === 1 ? '' : 's'}{row.reveals ? ` · revealed ${row.reveals}×` : ''}</div>{row.promoted_profile_id && <div className="text-gray-400">now a credential profile</div>}</td>
           <td className="py-2 align-top">{row.found_on === targetId ? <div className="flex flex-wrap gap-2">
             {row.state === 'active'
-              ? <Button variant="secondary" disabled={busy} onClick={() => void act(() => setDiscoveredSecretState(targetId, row.ref, 'revoked_by_operator'))}>Revoke</Button>
-              : row.state !== 'superseded' && <Button variant="secondary" disabled={busy} onClick={() => void act(() => setDiscoveredSecretState(targetId, row.ref, 'active'))}>Reactivate</Button>}
-            <Button variant="secondary" disabled={busy} onClick={() => setDialog({ kind: 'expiry', secret: row, days: '30' })}>Expiry</Button>
-            {row.state !== 'superseded' && <Button variant="secondary" disabled={busy} onClick={() => setDialog({ kind: 'grant', secret: row, to: '' })}>Grant</Button>}
-            {row.state !== 'superseded' && <Button variant="secondary" disabled={busy} onClick={() => setDialog({ kind: 'promote', secret: row, name: row.label || 'Discovered secret', authKind: 'bearer_token', header: '' })}>Promote</Button>}
-            <Button variant="secondary" disabled={busy} onClick={() => setDialog({ kind: 'reveal', secret: row })}>Reveal</Button>
+              ? canManage && <Button variant="secondary" disabled={busy} onClick={() => void act(() => setDiscoveredSecretState(targetId, row.ref, 'revoked_by_operator'))}>Revoke</Button>
+              : canManage && row.state !== 'superseded' && <Button variant="secondary" disabled={busy} onClick={() => void act(() => setDiscoveredSecretState(targetId, row.ref, 'active'))}>Reactivate</Button>}
+            {canManage && <Button variant="secondary" disabled={busy} onClick={() => setDialog({ kind: 'expiry', secret: row, days: '30' })}>Expiry</Button>}
+            {canDecide && row.state !== 'superseded' && <Button variant="secondary" disabled={busy} onClick={() => setDialog({ kind: 'grant', secret: row, to: '' })}>Grant</Button>}
+            {canDecide && row.state !== 'superseded' && <Button variant="secondary" disabled={busy} onClick={() => setDialog({ kind: 'promote', secret: row, name: row.label || 'Discovered secret', authKind: 'bearer_token', header: '' })}>Promote</Button>}
+            {canDecide && <Button variant="secondary" disabled={busy} onClick={() => setDialog({ kind: 'reveal', secret: row })}>Reveal</Button>}
           </div> : <span className="text-xs text-gray-500">Managed on the target it was found on</span>}</td>
         </tr>)}</tbody></table></div>}
     <Modal open={dialog !== null} title={dialog?.kind === 'reveal' ? 'Reveal the value' : dialog?.kind === 'grant' ? 'Let another target use this secret' : dialog?.kind === 'promote' ? 'Move into a credential profile' : 'Set the expiry'} onClose={close}>{dialog && <div className="space-y-4">

@@ -29,6 +29,7 @@ import { productEdition } from '@/lib/pageTitle'
 import { SHAKERSCAN_REPOSITORY_URL, SHAKERSCAN_WEBSITE_URL } from '@/lib/repository'
 import { usePoll } from '@/lib/usePoll'
 import { DEFAULT_EDITION_LABEL, navigationAllowed, workspaceEdition } from '@/lib/workspaceCapabilities'
+import { useCan, usePageAllowed } from '@/lib/useSessionCapabilities'
 import { useWorkspaceIsManaged } from '@/components/hunt/TerminalHuntStart'
 import {
   deriveBuildIdentity,
@@ -226,6 +227,8 @@ function NavContent({
 }) {
   const buildLabel = formatBuildIdentity(buildIdentity)
   const edition = productEdition(editionLabel)
+  const pageAllowed = usePageAllowed()
+  const canStartScan = useCan('scans.start')
   // Default view hides advanced groups/items; the footer switch reveals them. A managed
   // workspace shows every page its navigation list allows and renders no switch.
   const showAdvanced = managed || showAll
@@ -237,6 +240,7 @@ function NavContent({
         (showAdvanced || !item.advanced)
         && (!item.fleetOnly || fleetEnabled)
         && navigationAllowed(item.href)
+        && pageAllowed(item.href)
       )),
     }))
     .filter((group) => group.items.length > 0)
@@ -319,7 +323,7 @@ function NavContent({
         ))}
       </nav>
 
-      <div className="pt-4 mt-4 border-t border-gray-800">
+      {canStartScan && pageAllowed('/scan/new') && <div className="pt-4 mt-4 border-t border-gray-800">
         <Link
           href="/scan/new"
           className={`${buttonClasses('primary', 'md')} w-full`}
@@ -329,7 +333,7 @@ function NavContent({
           </svg>
           New Scan
         </Link>
-      </div>
+      </div>}
 
       <div className="pt-3 mt-4 border-t border-gray-800">
         <div className="flex items-center gap-1.5 px-1 text-[12.5px]">

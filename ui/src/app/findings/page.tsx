@@ -46,6 +46,7 @@ import { BadgeLegendModal } from './BadgeLegendModal'
 import { FindingRow } from './FindingRow'
 import { FindingsToolbar, type FreshnessView } from './FindingsToolbar'
 import { TriageDock } from './TriageDock'
+import { useCan } from '@/lib/useSessionCapabilities'
 import { triageOutcomeMessage } from './triage'
 
 const PAGE_SIZE = 50
@@ -181,6 +182,7 @@ function FindingsContent() {
 
   // Record deletion is an admin-only lifecycle action, never a front-line triage control.
   // Same double gate as Advanced cleanup; the dock renders no menu at all when it is off.
+  const canTriage = useCan('findings.triage')
   const canDeleteRecords = featureEnabled('record_deletion') && featureEnabled('engine_admin')
 
   const severityFilter = filters.severity || ''
@@ -831,7 +833,7 @@ function FindingsContent() {
         </div>
       )}
 
-      {dockVisible && (
+      {dockVisible && canTriage && (
         <TriageDock
           count={selectedIds.size}
           busy={triageBusy || deleteBusy}

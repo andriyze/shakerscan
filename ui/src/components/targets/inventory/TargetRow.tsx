@@ -10,6 +10,7 @@ import { Button, gradeTextColor } from '@/components/ui'
 import { DeleteRecordsButton } from '@/components/lifecycle/DeleteRecordsButton'
 import type { TargetAsset } from '@/lib/targetAssetApi'
 import { featureEnabled } from '@/lib/workspaceCapabilities'
+import { useCan } from '@/lib/useSessionCapabilities'
 import { TERMINAL_HUNT_START_LABEL, terminalHuntStartCommand, useWorkspaceIsManaged } from '@/components/hunt/TerminalHuntStart'
 import { assetAuthorizationStatus } from '@/lib/assetAuthorization.mjs'
 import { configureScanHref, latestGrade, livenessView, originLabel, relativeTime, scanUrls, severitySummary } from '@/lib/targetInventoryModel.mjs'
@@ -133,6 +134,8 @@ export function TargetRow({ asset, selected, onSelect, actions, busy, nested = f
   const name = asset.name && asset.name !== asset.locator ? boundedDisplayText(asset.name, 120) : null
   const devices = featureEnabled('devices')
   const managed = useWorkspaceIsManaged()
+  const mayScan = useCan('scans.start')
+  const mayEdit = useCan('targets.edit')
   const webApps = (asset.origins || []).filter(origin => origin.is_active).length
   const domain = assetKind(asset) === 'domain'
   const canScan = asset.is_active && (webApps > 0 || domain || devices)
@@ -171,34 +174,34 @@ export function TargetRow({ asset, selected, onSelect, actions, busy, nested = f
     <span role="cell" className="mt-1 block pl-7 lg:mt-0 lg:pl-0"><LastScan asset={asset} /></span>
     <span role="cell" className="mt-3 flex items-center justify-end gap-1.5 lg:mt-0">
       {asset.is_active
-        ? <Button size="sm" variant={asset.scanning ? 'secondary' : 'primary'} disabled={!canScan} loading={busy} onClick={() => actions.scan(asset)} aria-label={`${scanLabel}: ${locator}`} title={scanLabel}>
+        ? mayScan && <Button size="sm" variant={asset.scanning ? 'secondary' : 'primary'} disabled={!canScan} loading={busy} onClick={() => actions.scan(asset)} aria-label={`${scanLabel}: ${locator}`} title={scanLabel}>
             {webApps || domain ? <><Play className="h-3.5 w-3.5" aria-hidden="true" />Scan</> : <><Radar className="h-3.5 w-3.5" aria-hidden="true" />Discover</>}
           </Button>
-        : <Button size="sm" variant="secondary" loading={busy} onClick={() => actions.restore(asset)} aria-label={`Restore ${locator}`}><RotateCcw className="h-3.5 w-3.5" aria-hidden="true" />Restore</Button>}
+        : mayEdit && <Button size="sm" variant="secondary" loading={busy} onClick={() => actions.restore(asset)} aria-label={`Restore ${locator}`}><RotateCcw className="h-3.5 w-3.5" aria-hidden="true" />Restore</Button>}
       <RowMenu label={`More actions for ${locator}`}>
         {asset.is_active && <>
-          <MenuItem icon={<Play />} disabled={!webApps && !domain} onSelect={() => actions.scan(asset)}
+          {mayScan && <><MenuItem icon={<Play />} disabled={!webApps && !domain} onSelect={() => actions.scan(asset)}
             description="Balanced budget · passive policy">{webApps > 1 ? `Quick scan (${webApps} web apps)` : 'Quick scan'}</MenuItem>
           <MenuItem icon={<SlidersHorizontal />} disabled={!scanUrls(asset).length} href={configureScanHref(scanUrls(asset))}
             description="Choose budget, permissions, credentials, and coverage">Customize Scan…</MenuItem>
           {devices && <MenuItem icon={<Radar />} onSelect={() => actions.networkScan(asset)} description="Open ports, services and web apps">Network scan</MenuItem>}
-          {discoverDomain && featureEnabled('discovery') && <TargetDomainDiscovery menuItem domain={discoverDomain} onSettled={actions.refresh} />}
+          {discoverDomain && featureEnabled('discovery') && <TargetDomainDiscovery menuItem domain={discoverDomain} onSettled={actions.refresh} />}</>}
           {managed
             ? <MenuItem icon={<Crosshair />} disabled>{TERMINAL_HUNT_START_LABEL} <code className="font-mono text-xs">{terminalHuntStartCommand(asset.id)}</code></MenuItem>
             : <MenuItem icon={<Crosshair />} href={`/hunt?target=${asset.id}`} description="AI investigation with this target's instructions">Start Hunt</MenuItem>}
-          <TargetSkillEditor menuItem targetId={asset.id} targetName={name || locator} hasSkill={asset.has_target_skill} />
-          <MenuSeparator />
+          {mayEdit && <TargetSkillEditor menuItem targetId={asset.id} targetName={name || locator} hasSkill={asset.has_target_skill} />}
+          {mayEdit && <><MenuSeparator />
           {asset.authorized
             ? <MenuItem icon={<ShieldOff />} onSelect={() => actions.revoke(asset)}>Revoke authorization</MenuItem>
-            : <MenuItem icon={<ShieldCheck />} onSelect={() => actions.authorize([asset])}>{authorization.state === 'web_apps' ? 'Authorize the whole asset…' : 'Authorize testing…'}</MenuItem>}
-          <MenuItem icon={<CalendarClock />} href={`/schedules?create=true&target_id=${schedule}`}>Schedule scans</MenuItem>
+            : <MenuItem icon={<ShieldCheck />} onSelect={() => actions.authorize([asset])}>{authorization.state === 'web_apps' ? 'Authorize the whole asset…' : 'Authorize testing…'}</MenuItem>}</>}
+          {mayScan && <MenuItem icon={<CalendarClock />} href={`/schedules?create=true&target_id=${schedule}`}>Schedule scans</MenuItem>}
         </>}
         <MenuItem icon={<ExternalLink />} href={`/targets/${asset.id}/asset`}>Open details</MenuItem>
-        <MenuSeparator />
+        {mayEdit && <><MenuSeparator />
         <DeleteRecordsButton selection={{ kind: 'target', target_id: asset.id }} archived={!asset.is_active} subject={boundedDisplayText(asset.url || asset.locator, 200)}
           label={asset.is_active ? 'Archive or delete…' : 'Delete…'} variant="ghost"
           className="w-full justify-start px-3! text-red-300 hover:bg-red-500/10"
-          onDeleted={actions.refresh} onArchived={actions.refresh} />
+          onDeleted={actions.refresh} onArchived={actions.refresh} /></>}
       </RowMenu>
     </span>
   </div>

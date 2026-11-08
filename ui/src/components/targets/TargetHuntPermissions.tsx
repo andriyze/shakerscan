@@ -8,6 +8,7 @@ import { targetOptions, targetSearchNote } from '@/lib/pickerOptions'
 import { useTargetSearch } from '@/lib/useTargetSearch'
 import { listCredentialProfiles } from '@/lib/credentialApi'
 import { listRequestCollections } from '@/lib/requestCollectionApi'
+import { useCan } from '@/lib/useSessionCapabilities'
 
 export function TargetHuntPermissions({targetId}: {targetId: string}) {
   const [saved,setSaved] = useState<TargetHuntAuthority | null>(null)
@@ -16,6 +17,7 @@ export function TargetHuntPermissions({targetId}: {targetId: string}) {
   const [busy,setBusy] = useState(false)
   const [error,setError] = useState('')
   const [notice,setNotice] = useState('')
+  const canEdit = useCan('targets.edit')
   const [source,setSource] = useState(targetId)
   const [inputs,setInputs] = useState<{profiles:Array<{id:string;name:string}>;collections:Array<{id:string;name:string}>}>({profiles:[],collections:[]})
   const [inputError,setInputError] = useState('')
@@ -64,7 +66,7 @@ export function TargetHuntPermissions({targetId}: {targetId: string}) {
   return <>
     <Card className="mb-6 flex flex-wrap items-center justify-between gap-4 border-blue-400/15 bg-gradient-to-r from-blue-500/5 to-gray-900 p-5">
       <div className="flex items-start gap-3"><ShieldCheck className="mt-0.5 h-5 w-5 text-blue-300" /><div><h2 className="font-medium text-gray-100">Hunt permissions</h2><p className="mt-1 text-sm text-gray-400">{saved?.metadata_changes ? 'Hunt can manage target metadata and advisory knowledge.' : 'Delegate target changes and selected inputs once.'} {saved?.instruction_changes ? 'Hunt may also edit this target’s instructions and saved actions.' : 'Hunt proposes instruction and saved-action changes for your review.'} Sharing and SSH trust stay under your control.</p>{notice && <p role="status" className="mt-2 text-xs text-emerald-300">{notice}</p>}</div></div>
-      <Button variant="secondary" onClick={() => void edit()}><Settings2 className="mr-2 h-4 w-4" />Edit Hunt permissions</Button>
+      {canEdit && <Button variant="secondary" onClick={() => void edit()}><Settings2 className="mr-2 h-4 w-4" />Edit Hunt permissions</Button>}
     </Card>
     {!open && error && <p role="alert" className="mb-4 text-sm text-amber-300">{error}</p>}
     <Modal open={open} title="Hunt permissions" size="xl" onClose={() => {if(!busy) setOpen(false)}} footer={<div className="flex justify-end gap-2"><Button variant="secondary" disabled={busy} onClick={() => setOpen(false)}>Cancel</Button><Button loading={busy} disabled={!draft} onClick={() => void save()}>Save permissions</Button></div>}>
