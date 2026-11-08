@@ -3658,7 +3658,23 @@ async def save_device_findings(
                 device_uuid,
                 seen_web_fingerprints,
             )
+        # The rows carry the host target's id (findings.target_id), so its badge moves with them;
+        # the device_targets view only reaches the device profile's count.
+        await _refresh_target_active_finding_count(conn, device_uuid)
     return saved
+
+
+async def refresh_device_finding_badges(device_target_id: str) -> None:
+    """Recount a host's active findings on its device profile and on the host target."""
+    device_uuid = uuid.UUID(device_target_id)
+    async with db_pool.acquire() as conn:
+        await conn.execute("""
+            UPDATE device_targets SET active_findings_count=(
+                SELECT COUNT(*) FROM findings
+                WHERE device_target_id=$1 AND status='active'
+            ), updated_at=NOW() WHERE id=$1
+        """, device_uuid)
+        await _refresh_target_active_finding_count(conn, device_uuid)
 
 
 async def prepare_device_candidate_probe_result(
@@ -13621,13 +13637,7 @@ async def process_scan_job(job_data: dict):
         if device_target_id and not error and (options or {}).get("run_kind") == "device_posture":
             try:
                 await persist_device_inventory(scan_id, device_target_id, result)
-                async with db_pool.acquire() as conn:
-                    await conn.execute("""
-                        UPDATE device_targets SET active_findings_count=(
-                            SELECT COUNT(*) FROM findings
-                            WHERE device_target_id=$1 AND status='active'
-                        ), updated_at=NOW() WHERE id=$1
-                    """, uuid.UUID(device_target_id))
+                await refresh_device_finding_badges(device_target_id)
             except Exception as e:
                 print(f"[{job_id[:8]}] persist_device_inventory error: {e}", flush=True)
 
