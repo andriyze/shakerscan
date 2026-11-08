@@ -26,3 +26,6 @@ export function outOfScopeSummary(input: {
   exposure: { total?: number; metrics?: { asset_count?: number }; cohort_counts?: Record<string, number> } | null | undefined
   installFindings: number | null | undefined
 }): OutOfScopeSummary | null
+export const COHORT_VIEW_LABELS: Readonly<Record<CohortView, string>>
+export interface HiddenResultsNote { hidden: number; text: string }
+export function hiddenResultsNote(input: { view: string; total: number; shown: number }): HiddenResultsNote | null
