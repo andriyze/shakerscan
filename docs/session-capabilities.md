@@ -1,5 +1,7 @@
 # Session capabilities (`session-capabilities/v1`)
 
+**Status:** maintained interface reference for the UI's capability hint (engine 2.12.1).
+
 The web UI asks once per page load what the person using it may do, and hides the controls and
 links that would only end in a refusal. The open-source engine answers that everything is
 allowed. A gateway in front of the engine (for example an authenticating deployment with roles)
