@@ -16,14 +16,25 @@ const originId = '00000000-0000-4000-8000-000000000413'
 const originUrl = 'https://app.example.test'
 const origin = {id:originId,url:originUrl,name:'Web app',is_active:true,current_membership:true,authorized:true,last_scanned_at:null,active_findings_count:0}
 
-async function mock(page: Page, opts: {stepUp?: boolean; onOrigin?: boolean} = {}) {
+const other = {id:otherId,asset_id:otherId,name:'Juice Shop (lab)',url:'http://shop.example.test:3000',locator:'shop.example.test:3000',is_active:true,environment:'lab',connected_device:false,created_at:'2026-01-01T00:00:00Z',updated_at:'2026-01-01T00:00:00Z'}
+/** Fixture: 39 secrets, most of them the same unnamed field, as a long Hunt leaves them. */
+const many = [...Array(39)].map((_, n) => {
+  const id = `00000000-0000-4000-8000-${String(1000 + n).padStart(12, '0')}`
+  return {...secret, ref:`secret://${id}`, kind:n < 3 ? 'password' : 'other', label:n < 3 ? `DB_PASSWORD_${n}` : ''}
+})
+
+async function mock(page: Page, opts: {stepUp?: boolean; onOrigin?: boolean; many?: boolean} = {}) {
   const writes: {method: string; path: string; body: unknown}[] = []
   await pinMockApiOrigin(page)
   await page.route(`${MOCK_API_ORIGIN}/**`, async route => {
     const request = route.request(), url = new URL(request.url())
     if (!['GET','OPTIONS'].includes(request.method())) writes.push({method:request.method(),path:url.pathname,body:request.postDataJSON()})
     if (url.pathname === `/targets/${assetId}/asset`) return route.fulfill({json:{target,origins:opts.onOrigin ? [origin] : [],services:[],service_intelligence:{services:[],warnings:[]},credentials:[],request_collections:[],history:{items:[],total:0},active_findings:{},authorization:{approved_by:'fixture'}}})
-    if (url.pathname === `/targets/${assetId}/discovered-secrets`) return route.fulfill({json:{target_id:assetId,secrets:opts.onOrigin ? [] : [secret],count:opts.onOrigin ? 0 : 1,values_visible:false}})
+    if (url.pathname === '/targets/inventory') return route.fulfill({json:{targets:[target, other],total:2,offset:0,limit:25}})
+    if (url.pathname === `/targets/${assetId}/discovered-secrets`) {
+      const secrets = opts.onOrigin ? [] : opts.many ? many : [secret]
+      return route.fulfill({json:{target_id:assetId,secrets,count:secrets.length,values_visible:false}})
+    }
     if (url.pathname === `/targets/${originId}/discovered-secrets`) return route.fulfill({json:{target_id:originId,secrets:[{...secret,found_on:originId}],count:1,values_visible:false}})
     if (url.pathname.endsWith('/reveal') || url.pathname.endsWith('/grants') || url.pathname.endsWith('/promote')) {
       if (opts.stepUp) return route.fulfill({status:403,headers:{'x-shakerscan-step-up':'required','access-control-expose-headers':'x-shakerscan-step-up'},json:{detail:'revealing, granting or promoting a discovered secret needs your step-up'}})
@@ -77,16 +88,78 @@ test('SECRETS-003 on Enterprise a step-up decision names the terminal command an
   await expect(page.locator('body')).not.toContainText(VALUE)
 })
 
-test('SECRETS-004 grant sends exactly the other target id', async ({page}) => {
-  const writes = await mock(page)
-  await page.goto(`/targets/${assetId}/asset`)
-  await page.getByRole('button', {name: 'Grant'}).click()
+async function chooseOther(page: Page) {
   const dialog = page.getByRole('dialog', {name: 'Let another target use this secret'})
-  await expect(dialog.getByRole('button', {name: 'Grant'})).toBeDisabled()
-  await dialog.getByPlaceholder('target id').fill(otherId)
-  await dialog.getByRole('button', {name: 'Grant'}).click()
-  await expect(dialog).toBeHidden()
-  expect(writes).toEqual([{method:'POST',path:`/targets/${assetId}/discovered-secrets/${secretId}/grants`,body:{target_id:otherId}}])
+  await dialog.getByRole('button', {name: 'Other target'}).click()
+  await page.getByRole('combobox', {name: /Search targets/}).fill('Juice')
+  await page.getByRole('option', {name: /Juice Shop \(lab\)/}).click()
+  return dialog
+}
+
+for (const width of [390, 1440]) test.describe(`at ${width} px`, () => {
+  test.use({viewport: {width, height: 900}})
+
+  test('SECRETS-004 grant picks the other target by name and sends exactly its id', async ({page}) => {
+    const writes = await mock(page)
+    await page.goto(`/targets/${assetId}/asset`)
+    await page.getByRole('button', {name: 'Grant'}).click()
+    const dialog = page.getByRole('dialog', {name: 'Let another target use this secret'})
+    await expect(dialog.getByRole('button', {name: 'Grant'})).toBeDisabled()
+    await expect(dialog.getByPlaceholder('target id')).toHaveCount(0)
+    await chooseOther(page)
+    await expect(dialog.getByRole('button', {name: 'Other target'})).toContainText('Juice Shop (lab)')
+    await dialog.getByRole('button', {name: 'Grant'}).click()
+    await expect(dialog).toBeHidden()
+    expect(writes).toEqual([{method:'POST',path:`/targets/${assetId}/discovered-secrets/${secretId}/grants`,body:{target_id:otherId}}])
+  })
+
+  test('SECRETS-006 a long list is grouped and paged', async ({page}) => {
+    await mock(page, {many: true})
+    await page.goto(`/targets/${assetId}/asset`)
+    await expect(page.getByText('DB_PASSWORD_0')).toBeVisible()
+    // 36 unnamed "other" secrets are one collapsed group, not 36 rows of five buttons.
+    const group = page.getByRole('button', {name: 'unnamed field (other): 36 secrets'})
+    await expect(group).toHaveAttribute('aria-expanded', 'false')
+    await expect(page.getByRole('button', {name: 'Reveal'})).toHaveCount(3)
+    await group.click()
+    await expect(page.getByRole('button', {name: 'Reveal'})).toHaveCount(13)
+    await page.getByRole('button', {name: 'Show 10 more of unnamed field'}).click()
+    await expect(page.getByRole('button', {name: 'Reveal'})).toHaveCount(23)
+    await group.click()
+    await expect(page.getByRole('button', {name: 'Reveal'})).toHaveCount(3)
+    expect(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth)).toBe(false)
+  })
+
+  test('SECRETS-007 the terminal fallback carries what the person chose', async ({page}) => {
+    await mock(page, {stepUp: true})
+    await page.goto(`/targets/${assetId}/asset`)
+    await page.getByRole('button', {name: 'Grant'}).click()
+    const dialog = await chooseOther(page)
+    await dialog.getByRole('button', {name: 'Grant'}).click()
+    const notice = page.getByRole('status').filter({hasText: 'needs your step-up'})
+    await expect(notice).toContainText(`shakerscan secrets grant ${assetId} ${ref} --to ${otherId}`)
+    await page.getByRole('button', {name: 'Promote'}).click()
+    const promote = page.getByRole('dialog', {name: 'Move into a credential profile'})
+    await promote.getByLabel('Profile name').fill("Admin API token's")
+    await promote.getByLabel('Credential kind').selectOption('api_key_header')
+    await promote.getByLabel('Header name').fill('X-Api-Key')
+    await promote.getByRole('button', {name: 'Promote'}).click()
+    await expect(notice).toContainText(
+      `shakerscan secrets promote ${assetId} ${ref} --name 'Admin API token'"'"'s' --auth-kind api_key_header --header-name X-Api-Key`)
+    await expect(notice).not.toContainText('<name>')
+  })
+
+  test('SECRETS-008 saving an expiry confirms it', async ({page}) => {
+    const writes = await mock(page)
+    await page.goto(`/targets/${assetId}/asset`)
+    await page.getByRole('button', {name: 'Expiry'}).click()
+    const dialog = page.getByRole('dialog', {name: 'Set the expiry'})
+    await dialog.getByLabel(/Days from now/).fill('7')
+    await dialog.getByRole('button', {name: 'Save'}).click()
+    await expect(dialog).toBeHidden()
+    await expect(page.getByRole('status').filter({hasText: 'Expiry saved'})).toContainText(`${ref} now expires in 7 days`)
+    expect(writes).toEqual([{method:'POST',path:`/targets/${assetId}/discovered-secrets/${secretId}/expiry`,body:{days:7}}])
+  })
 })
 
 test('SECRETS-005 a web Scan records secrets on its origin: the asset page shows them under that origin', async ({page}) => {
