@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { partitionSharedServices, presenceOf, sharedServiceHuntHref } from './sharedServicePorts.mjs'
+import { partitionSharedServices, presenceOf, sharedServiceHuntHref, summarizeEvidence } from './sharedServicePorts.mjs'
 
 const targetId = '00000000-0000-4000-8000-000000000294'
 const ssh = { id: 'a', port: 22, transport: 'tcp', presence: 'observed_open', state: 'open', evidence: [] }
@@ -55,4 +55,15 @@ test('one port seen by a Hunt and by a scan is listed once, with both as evidenc
   assert.equal(partitionSharedServices([fromScan, other]).confirmed.length, 2)
   // The input records are not mutated.
   assert.deepEqual(fromScan.evidence, [{ scan_id: 'c2e71720-0000' }])
+})
+
+test('repeated evidence from one source is one label with a count', () => {
+  const hunt = '79d5443a-0000-4000-8000-000000000001'
+  const evidence = [...Array(12)].map(() => ({ hunt_id: hunt, status: 'succeeded' }))
+  evidence.push({ scan_id: 'abcdef01-0000-4000-8000-000000000002', status: 'completed' }, {})
+  assert.deepEqual(summarizeEvidence(evidence, 'observed'), [
+    { label: 'Hunt 79d5443a · succeeded', count: 12 },
+    { label: 'Scan abcdef01 · completed', count: 1 },
+    { label: 'Observation · observed', count: 1 },
+  ])
 })
