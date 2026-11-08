@@ -129,13 +129,13 @@ function DeviceDetailContent() {
   const load = useCallback(async () => {
     // Only the device itself is essential: a side request that fails (credentials, collections,
     // Hunt history, readiness) marks its own section and keeps the rest of the page.
-    const [device, credentialData, collectionData, huntData, readiness] = await Promise.allSettled([getDevice(deviceId), getDeviceCredentials(deviceId), getDeviceRequestCollections(deviceId), listDeviceAgentSessions({ device_target_id: deviceId, limit: 5 }), getDeviceReadiness()])
+    const [device, credentialData, collectionData, huntData, readinessData] = await Promise.allSettled([getDevice(deviceId), getDeviceCredentials(deviceId), getDeviceRequestCollections(deviceId), listDeviceAgentSessions({ device_target_id: deviceId, limit: 5 }), getDeviceReadiness()])
     const unavailable: DevicePagePart[] = []
     if (device.status === 'fulfilled') { setData(device.value); setFailed(false) } else setFailed(true)
     if (credentialData.status === 'fulfilled') setCredentials(credentialData.value.profiles || []); else unavailable.push('credentials')
     if (collectionData.status === 'fulfilled') setRequestCollections(collectionData.value.collections || []); else unavailable.push('collections')
     if (huntData.status === 'fulfilled') setDeviceHunts(huntData.value.runs || []); else unavailable.push('hunts')
-    if (readiness.status === 'fulfilled') { setWorkerReady(readiness.value.enabled && readiness.value.status === 'ready'); setReadinessState(readiness.value) } else unavailable.push('readiness')
+    if (readinessData.status === 'fulfilled') { const readiness = readinessData.value; setWorkerReady(readiness.enabled && readiness.status === 'ready'); setReadinessState(readiness) } else unavailable.push('readiness')
     setUnavailableParts(unavailable)
     setLoading(false)
   }, [deviceId])
