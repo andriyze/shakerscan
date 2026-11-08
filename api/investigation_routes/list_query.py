@@ -31,6 +31,12 @@ SUMMARY_FIELDS = {
 SUMMARY_FIELDS["evidence_ref_count"] = (
     "(CASE WHEN jsonb_typeof(c.evidence_refs) = 'array' THEN jsonb_array_length(c.evidence_refs) ELSE 0 END)"
 )
+SUMMARY_FIELDS["target_name"] = (
+    "(SELECT t.name FROM targets t WHERE t.id = COALESCE(c.target_id, c.device_target_id))"
+)
+SUMMARY_FIELDS["target_url"] = (
+    "(SELECT t.url FROM targets t WHERE t.id = COALESCE(c.target_id, c.device_target_id))"
+)
 SUMMARY_FIELDS["observation_count"] = (
     "(SELECT COUNT(*) FROM investigation_candidate_observations o WHERE o.candidate_id = c.id)"
 )
@@ -46,8 +52,15 @@ CANDIDATES_V1 = ListSpec(
 )
 
 
-def candidate_filters(*, plane: str | None, target_id: Any, device_target_id: Any, status: str | None,
-                      params: SqlParams) -> list[str]:
+#: An automatic advisory match made without a known product version: a lead at most, and usually
+#: the bulk of a host's candidates. ``canonical_locus`` drops empty values, so no ``version`` key.
+UNVERSIONED_ADVISORY_SQL = "(c.family = 'device_firmware_advisory' AND NOT (c.canonical_locus ? 'version'))"
+UNVERSIONED_ADVISORY_MODES = ("include", "exclude", "only")
+
+
+def candidate_filters(*, plane: str | None, target_id: Any, device_target_id: Any, status: Any,
+                      params: SqlParams, unversioned_advisories: str = "include") -> list[str]:
+    """Filters of the candidate list. ``status`` is one status or a list of statuses."""
     where = []
     if plane:
         where.append(f"c.plane = {params.add(plane)}")
@@ -55,8 +68,14 @@ def candidate_filters(*, plane: str | None, target_id: Any, device_target_id: An
         where.append(f"c.target_id = {params.add(target_id)}")
     if device_target_id:
         where.append(f"c.device_target_id = {params.add(device_target_id)}")
-    if status:
+    if isinstance(status, (list, tuple)):
+        where.append(f"c.status = ANY({params.add(list(status))}::text[])")
+    elif status:
         where.append(f"c.status = {params.add(status)}")
+    if unversioned_advisories == "exclude":
+        where.append(f"NOT {UNVERSIONED_ADVISORY_SQL}")
+    elif unversioned_advisories == "only":
+        where.append(UNVERSIONED_ADVISORY_SQL)
     return where or ["true"]
 
 
@@ -68,10 +87,12 @@ async def legacy_candidates(conn: Any, *, where: list[str], params: SqlParams, l
     rows = await conn.fetch(
         f"""SELECT c.*,
                    (SELECT COUNT(*) FROM investigation_candidate_observations o
-                    WHERE o.candidate_id = c.id) AS observation_count
+                    WHERE o.candidate_id = c.id) AS observation_count,
+                   t.name AS target_name, t.url AS target_url
             FROM (SELECT c.id, c.last_seen_at FROM investigation_candidates c WHERE {where_sql}
                   ORDER BY c.last_seen_at DESC, c.id DESC LIMIT {int(limit)} OFFSET {int(offset)}) page
             JOIN investigation_candidates c ON c.id = page.id
+            LEFT JOIN targets t ON t.id = COALESCE(c.target_id, c.device_target_id)
             ORDER BY page.last_seen_at DESC, page.id DESC""",
         *values,
     )
@@ -99,4 +120,4 @@ async def candidates_page(conn: Any, page: Page, *, where: list[str], params: Sq
                          transform=transform)
 
 
-__all__ = ["CANDIDATES_V1", "candidate_filters", "candidates_page", "legacy_candidates"]
+__all__ = ["CANDIDATES_V1", "UNVERSIONED_ADVISORY_MODES", "candidate_filters", "candidates_page", "legacy_candidates"]
