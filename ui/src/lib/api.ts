@@ -4354,7 +4354,12 @@ export async function submitScanV2(request: ScanStartRequest) {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(request),
   })
-  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to submit scan'))
+  if (!res.ok) {
+    // The status travels with the message, so the form can tell a busy-slot refusal (429) apart.
+    const refusal: Error & { status?: number } = new Error(await getApiErrorMessage(res, 'Failed to submit scan'))
+    refusal.status = res.status
+    throw refusal
+  }
   return res.json()
 }
 
