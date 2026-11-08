@@ -38,7 +38,9 @@ test('dashboard distinguishes logical scans, worker jobs, and worker processes',
   assert.match(dashboard, /Scan and work queue/)
   assert.match(dashboard, /work unit\{workRunning === 1 \? '' : 's'\} running/)
   assert.match(dashboard, /ready to scan/)
-  assert.match(dashboard, /\{workerCount\} running · max \{maxWorkers\}/)
+  // Worker processes are not running Scans: the strip never calls them "running".
+  assert.match(dashboard, /\{workerCount\} worker process\{workerCount === 1 \? '' : 'es'\} · max \{maxWorkers\}/)
+  assert.doesNotMatch(dashboard, /\{workerCount\} running · max/)
   assert.match(dashboard, /\{pendingWorkerCount\} starting/)
   assert.match(dashboard, /\{unavailableWorkerCount\} unavailable/)
   assert.doesNotMatch(dashboard, /workers · limit/)

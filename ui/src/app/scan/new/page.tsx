@@ -723,7 +723,7 @@ export default function NewScanPage() {
           )}
           <div className="grid gap-3 md:grid-cols-2">
             {featureEnabled('scan_discovery') && <label className="flex items-center gap-3 text-sm text-gray-300"><input type="checkbox" checked={subdomainDiscovery} onChange={(event) => setSubdomainDiscovery(event.target.checked)} /><span>Discover subdomains<span className="block text-xs text-gray-500">Found names are listed in the report and added as targets; this scan does not test them.</span></span></label>}
-            {featureEnabled('network_testing') && <label className={`flex items-center gap-3 text-sm ${activeTesting ? 'text-gray-300' : 'text-gray-600'}`}><input type="checkbox" disabled={!activeTesting} checked={networkDiscovery} onChange={(event) => setNetworkDiscovery(event.target.checked)} />Discover network services</label>}
+            {featureEnabled('network_testing') && <label className={`flex items-center gap-3 text-sm ${activeTesting ? 'text-gray-300' : 'text-gray-600'}`}><input type="checkbox" disabled={!activeTesting} checked={networkDiscovery} onChange={(event) => setNetworkDiscovery(event.target.checked)} /><span>Discover network services{!activeTesting && <span data-testid="network-discovery-needs-active" className="block text-xs text-gray-500">Needs active testing: turn it on above to use this.</span>}</span></label>}
             <label className={`flex items-center gap-3 text-sm ${activeTesting ? 'text-gray-300' : 'text-gray-600'}`}><input type="checkbox" disabled={!activeTesting} checked={allowStateChanging} onChange={(event) => { setAllowStateChanging(event.target.checked); if (!event.target.checked) removeConfirmedActiveSelections() }} /><span>Allow explicitly selected state-changing HTTP requests <span className="text-gray-500">(includes default-login attempts, which can lock accounts, and exploit templates that send attack input)</span></span></label>
           </div>
           {scanContract && (
@@ -731,9 +731,8 @@ export default function NewScanPage() {
               <div className="flex flex-wrap items-center justify-between gap-2">
                 <div>
                   <h3 className="text-sm font-medium text-gray-200">Coverage families</h3>
-                  <p className="mt-1 text-xs text-gray-500">The server resolves this preset into one exact persisted family set before queueing.</p>
+                  <p className="mt-1 text-xs text-gray-500">Choose which kinds of checks this Scan runs. The server records the exact set when the Scan is queued.</p>
                 </div>
-                <span className="text-[11px] text-gray-600">{scanContract.action_plan_schema}</span>
               </div>
               <div className="mt-3 grid gap-2 md:grid-cols-3">
                 {([
@@ -765,7 +764,7 @@ export default function NewScanPage() {
                 </div>
               )}
               <div className="mt-3 rounded-sm border border-gray-800 bg-black/20 p-3 text-xs text-gray-400">
-                <span className="font-medium text-gray-200">Resolved families:</span> {resolvedFamilies.length ? resolvedFamilies.join(', ') : 'none'}
+                <span className="font-medium text-gray-200">Checks this Scan runs:</span> {resolvedFamilies.length ? resolvedFamilies.map((name) => scanContract.families.find((family) => family.name === name)?.label || name).join(', ') : 'none'}
                 {contractPreview && Object.keys(contractPreview.minimum_family_quotas).length > 0 && (
                   <span className="mt-1 block">Minimum attempts: {Object.entries(contractPreview.minimum_family_quotas).map(([family, quota]) => `${family} ${quota}`).join(' · ')}</span>
                 )}
@@ -787,27 +786,32 @@ export default function NewScanPage() {
         </Card>
 
         <Card className="p-5">
-          <h2 className="font-medium text-white">Execution topology</h2>
-          <p className="mt-1 text-xs text-gray-500">Choose placement independently from the resource budget.</p>
+          <h2 className="font-medium text-white">Where the Scan runs</h2>
+          <p className="mt-1 text-xs text-gray-500">Run the Scan on one worker or split it across several. This does not change its budget.</p>
           <div className="mt-4 grid gap-3 md:grid-cols-2">
             <label className={`rounded-lg border p-4 ${topology === 'single' ? 'border-emerald-600 bg-emerald-950/20' : 'border-gray-800'}`}>
               <span className="flex items-start gap-3">
                 <input type="radio" name="scan-topology" value="single" checked={topology === 'single'} onChange={() => setTopology('single')} />
-                <span><span className="block text-sm font-medium text-white">Single worker — recommended</span><span className="mt-1 block text-xs text-gray-500">Release-authoritative execution with one coherent action graph.</span></span>
+                <span><span className="block text-sm font-medium text-white">One worker — recommended</span><span className="mt-1 block text-xs text-gray-500">The whole Scan runs in order on one worker, which gives the most consistent results.</span></span>
               </span>
             </label>
             {(featureEnabled('parallel_scan') || featureEnabled('worker_admin')) && <label className={`rounded-lg border p-4 ${topology === 'parallel' ? 'border-amber-600 bg-amber-950/20' : 'border-gray-800'}`}>
               <span className="flex items-start gap-3">
                 <input type="radio" name="scan-topology" value="parallel" checked={topology === 'parallel'} onChange={() => setTopology('parallel')} />
-                <span><span className="block text-sm font-medium text-white">Parallel — experimental</span><span className="mt-1 block text-xs text-gray-500">Explicit multi-worker fan-out; validate results against single-worker execution.</span></span>
+                <span><span className="block text-sm font-medium text-white">Several workers — experimental</span><span className="mt-1 block text-xs text-gray-500">Splits the Scan across workers to finish sooner; compare its results with a one-worker Scan.</span></span>
               </span>
             </label>}
           </div>
           <div className="mt-3 rounded-sm border border-gray-800 bg-gray-950/50 p-3 text-xs text-gray-400">
             <p>Placement preview: {workerStats ? placementPreviewLabel(topology, currentWorkerCount) : 'checking compatible current workers…'}.</p>
-            <p className="mt-1">Compatible current workers: <strong className="font-medium text-gray-300">{workerStats ? currentWorkerCount : '—'}</strong>{workerStats && <> · stale {staleWorkers} · identity pending {pendingWorkers}</>}</p>
-            <p className="mt-1 break-all">Expected build: <span className="font-mono text-gray-300">{workerStats?.expected_build_fingerprint || 'unavailable'}</span></p>
-            <p className="mt-1 break-all">Reported running builds: <span className="font-mono text-gray-300">{reportedFingerprints.length ? reportedFingerprints.join(', ') : 'none reported'}</span></p>
+            <p className="mt-1">Workers ready for this Scan: <strong className="font-medium text-gray-300">{workerStats ? currentWorkerCount : '—'}</strong>{workerStats && (staleWorkers > 0 || pendingWorkers > 0) && <> · {staleWorkers} on an older version · {pendingWorkers} still starting</>}</p>
+            <details className="mt-2" data-testid="scan-technical-details">
+              <summary className="cursor-pointer text-gray-500 hover:text-gray-300">Technical details</summary>
+              <p className="mt-1 break-all">Expected build: <span className="font-mono text-gray-300">{workerStats?.expected_build_fingerprint || 'unavailable'}</span></p>
+              <p className="mt-1 break-all">Reported running builds: <span className="font-mono text-gray-300">{reportedFingerprints.length ? reportedFingerprints.join(', ') : 'none reported'}</span></p>
+              {scanContract && <p className="mt-1 break-all">Plan format: <span className="font-mono text-gray-300">{scanContract.action_plan_schema}</span></p>}
+              <p className="mt-1 break-all">Check families: <span className="font-mono text-gray-300">{resolvedFamilies.length ? resolvedFamilies.join(', ') : 'none'}</span></p>
+            </details>
           </div>
         </Card>
 
@@ -843,7 +847,7 @@ export default function NewScanPage() {
                 </div>
               )}
               {credentialError && <p className="text-xs text-amber-300">{credentialError}</p>}
-              <p className="text-xs text-gray-500">Only opaque IDs enter the Scan request and queue. The worker revalidates target authorization and decrypts the selected version immediately before execution. <Link href="/credentials" className="text-blue-300 hover:text-blue-200">Manage credentials</Link></p>
+              <p className="text-xs text-gray-500">The Scan request stores only a reference to each selected credential, never the secret. Right before it runs, the worker checks the target is still authorized and unlocks the credential. <Link href="/credentials" className="text-blue-300 hover:text-blue-200">Manage credentials</Link></p>
               <RequestCollectionPicker
                 targetId={batchMode ? undefined : selectedRegisteredTarget?.id}
                 targetKind={targetKind}

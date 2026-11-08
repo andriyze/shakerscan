@@ -13,7 +13,7 @@ const publicApiContract = fs.readFileSync(path.join(root, 'src/lib/publicApi.gen
 test('canonical Scan UI submits only opaque exact-target credential profile IDs', () => {
   assert.match(scan, /listCredentialProfiles/)
   assert.match(scan, /credential_profile_ids: selectedCredentialIds/)
-  assert.match(scan, /Only opaque IDs enter the Scan request and queue/)
+  assert.match(scan, /The Scan request stores only a reference to each selected credential, never the secret/)
   assert.match(api, /ScanStartRequest/)
   assert.match(scanContract, /SubmitScanScansPostRequest as ScanStartRequest/)
   assert.match(publicApiContract, /credential_profile_ids\?: Array<string>/)
