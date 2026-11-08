@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import test from 'node:test'
 
-import { boundedDisplayText, boundedTargetDisplay, usableWebTargets } from '../src/lib/targetChoices.ts'
+import { boundedDisplayText, boundedTargetDisplay, targetChoiceLabel, usableWebTargets } from '../src/lib/targetChoices.ts'
 
 const credentialsPage = fs.readFileSync(new URL('../src/app/credentials/page.tsx', import.meta.url), 'utf8')
 const collectionsPage = fs.readFileSync(new URL('../src/app/request-collections/page.tsx', import.meta.url), 'utf8')
@@ -49,7 +49,7 @@ test('historical malformed target labels stay bounded in read-only selectors', (
   assert.equal(boundedDisplayText(`target-${'x'.repeat(500)}`, 40).length, 40)
   assert.equal(boundedDisplayText('  normal target  '), 'normal target')
   assert.equal(boundedTargetDisplay({ url: 'https://example.test' }, { stripScheme: true }), 'example.test')
-  for (const surface of [evidencePanel, targetsPage, targetSearchPicker]) {
+  for (const surface of [evidencePanel, targetsPage]) {
     assert.match(surface, /boundedTargetDisplay/)
   }
   // Timeline, Schedules and the evidence retention sweep pick targets through the server-searched
@@ -58,6 +58,27 @@ test('historical malformed target labels stay bounded in read-only selectors', (
     assert.match(surface, /<TargetSearchCombobox/)
     assert.doesNotMatch(surface, /getTargets\(/)
   }
-  assert.match(targetSearchPicker, /label: boundedTargetDisplay\(asset\)/)
+  assert.match(targetSearchPicker, /\.\.\.targetChoiceLabel\(asset\)/)
   assert.match(targetGroups, /boundedDisplayText\(group\.root_domain/)
+})
+
+
+test('a target picker names targets, not raw origin URLs', () => {
+  assert.deepEqual(targetChoiceLabel({ name: 'Juice Shop (lab)', url: 'http://10.0.0.4:3000' }),
+    { label: 'Juice Shop (lab)', description: 'http://10.0.0.4:3000' })
+  // A name that only repeats the URL, or no name, shows the host a person recognizes.
+  assert.deepEqual(targetChoiceLabel({ name: 'http://shakerscan.example:2052', url: 'http://shakerscan.example:2052' }),
+    { label: 'shakerscan.example:2052', description: 'http://shakerscan.example:2052' })
+  assert.deepEqual(targetChoiceLabel({ name: null, url: 'https://app.example.test/' }),
+    { label: 'app.example.test', description: 'https://app.example.test/' })
+  assert.deepEqual(targetChoiceLabel({ name: 'app.example.test', url: 'https://app.example.test' }),
+    { label: 'app.example.test', description: 'https://app.example.test' })
+  assert.equal(targetChoiceLabel({ name: 'Portal', url: 'https://app.example.test/portal' }).label, 'Portal')
+  assert.equal(targetChoiceLabel({ name: '', url: 'https://app.example.test/portal/' }).label, 'app.example.test/portal')
+  // Hostile lengths stay bounded.
+  const long = targetChoiceLabel({ name: 'x'.repeat(5000), url: `https://${'a'.repeat(5000)}.test` })
+  assert.equal(long.label.length, 160)
+  assert.equal(long.description.length, 160)
+  // Schedules show the schedule's target by name too.
+  assert.match(schedulesPage, /targetChoiceLabel\(\{ name: schedule\.target_name, url: schedule\.target_url \}\)/)
 })
