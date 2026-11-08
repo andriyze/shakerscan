@@ -7,6 +7,8 @@ import {
   Network, Play, Printer, Radar, RotateCcw, Router, Server, ShieldCheck, ShieldOff, SlidersHorizontal, Tv,
 } from 'lucide-react'
 import { Button, gradeTextColor } from '@/components/ui'
+import { useToast } from '@/components/ui/Toast'
+import { copyText } from '@/lib/copyText'
 import { DeleteRecordsButton } from '@/components/lifecycle/DeleteRecordsButton'
 import type { TargetAsset } from '@/lib/targetAssetApi'
 import { featureEnabled } from '@/lib/workspaceCapabilities'
@@ -128,6 +130,7 @@ export function TargetRow({ asset, selected, onSelect, actions, busy, nested = f
   /** A standalone root domain carries its subdomain discovery in its own menu. */
   discoverDomain?: string
 }) {
+  const toast = useToast()
   // Historical rows can carry pathological labels; keep every rendered label bounded.
   const locator = boundedDisplayText(asset.locator, 120)
   const name = asset.name && asset.name !== asset.locator ? boundedDisplayText(asset.name, 120) : null
@@ -184,7 +187,8 @@ export function TargetRow({ asset, selected, onSelect, actions, busy, nested = f
           {devices && <MenuItem icon={<Radar />} onSelect={() => actions.networkScan(asset)} description="Open ports, services and web apps">Network scan</MenuItem>}
           {discoverDomain && featureEnabled('discovery') && <TargetDomainDiscovery menuItem domain={discoverDomain} onSettled={actions.refresh} />}
           {managed
-            ? <MenuItem icon={<Crosshair />} disabled>{TERMINAL_HUNT_START_LABEL} <code className="font-mono text-xs">{terminalHuntStartCommand(asset.id)}</code></MenuItem>
+            ? <MenuItem icon={<Crosshair />} onSelect={() => void copyText(terminalHuntStartCommand(asset.id)).then(result => result.ok ? toast.success('Hunt command copied') : toast.warning(`Copy this command by hand: ${result.text}`))}
+                description={`${TERMINAL_HUNT_START_LABEL} ${terminalHuntStartCommand(asset.id)}`}>Copy the Hunt command</MenuItem>
             : <MenuItem icon={<Crosshair />} href={`/hunt?target=${asset.id}`} description="AI investigation with this target's instructions">Start Hunt</MenuItem>}
           <TargetSkillEditor menuItem targetId={asset.id} targetName={name || locator} hasSkill={asset.has_target_skill} />
           <MenuSeparator />
