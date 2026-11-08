@@ -57,6 +57,7 @@ import { Fact, Section } from '@/components/findings/detail/Section'
 import { WhatWeFound } from '@/components/findings/detail/WhatWeFound'
 import { FindingBriefView } from '@/components/findings/detail/FindingBriefView'
 import { displayTitle, maskedUrl, parseFindingBrief, parseRelatedFindings, severityLine } from '@/lib/findingBrief'
+import { useCan } from '@/lib/useSessionCapabilities'
 
 function getFindingSourceType(finding: Finding): FindingSourceType {
   if (finding.source === 'device') {
@@ -286,6 +287,10 @@ function FindingDetailContent() {
   const [autonomousLoading, setAutonomousLoading] = useState(false)
   const [retestLoading, setRetestLoading] = useState(false)
   const [retestMessage, setRetestMessage] = useState<string | null>(null)
+  const canRetest = useCan('findings.retest')
+  const canVerify = useCan('findings.verify')
+  const canTriage = useCan('findings.triage')
+  const canAcceptRisk = useCan('findings.accept_risk')
   const [retestMode, setRetestMode] = useState<'tiered' | 'deterministic' | 'ai' | 'same_probe' | 'same_family' | 'strict_replay'>('tiered')
   const [retestHistory, setRetestHistory] = useState<RetestRecord[]>([])
   const [targetInactive, setTargetInactive] = useState(false)
@@ -674,7 +679,7 @@ function FindingDetailContent() {
   // Why Retest cannot run now, as visible text: a tooltip never shows on a touch screen.
   const retestBlockedReason = !retestSupported ? `Retest unavailable: ${retestUnsupportedMessage}`
     : hasPendingRetest && !retestLoading ? 'A proof replay is already queued or running.' : ''
-  const retestControls = !deviceFinding && (
+  const retestControls = !deviceFinding && canRetest && (
     <div className="flex flex-col items-start gap-1 lg:items-end">
     <div className="flex items-center gap-1 rounded-lg border border-gray-800 bg-gray-950/60 p-1">
       <select
@@ -766,7 +771,7 @@ function FindingDetailContent() {
             <CopyButton text={() => findingLink(finding.id)} label="Copy link to this finding" testId="finding-copy-link">
               Copy link
             </CopyButton>
-            <label className="flex items-center gap-2 text-xs text-gray-500">
+            {canTriage ? <label className="flex items-center gap-2 text-xs text-gray-500">
               Status
               <select
                 value={finding.status}
@@ -779,7 +784,11 @@ function FindingDetailContent() {
                   <option key={status} value={status}>{STATUS_LABELS[status] || status.replaceAll('_', ' ')}</option>
                 ))}
               </select>
-            </label>
+            </label> : (
+              <span className="text-xs text-gray-500" data-testid="finding-status-readonly">
+                Status <span className="text-gray-200">{STATUS_LABELS[finding.status] || finding.status.replaceAll('_', ' ')}</span>
+              </span>
+            )}
             {retirementLabel(finding) && (
               <span
                 data-testid="finding-retired-badge"
@@ -790,7 +799,7 @@ function FindingDetailContent() {
               </span>
             )}
             {retestControls}
-            {verifyApplicable && (
+            {verifyApplicable && canVerify && (
               <button
                 type="button"
                 onClick={() => setAutonomousConfirmOpen(true)}
@@ -1245,7 +1254,7 @@ function FindingDetailContent() {
         <aside className="min-w-0 space-y-5" aria-label="Finding status and history">
           <Section id="triage" title="Triage">
             <div className="space-y-3">
-              <label className="grid min-w-0 gap-1 text-xs text-gray-500">
+              {canTriage ? <label className="grid min-w-0 gap-1 text-xs text-gray-500">
                 Analyst verdict
                 <select
                   value={finding.analyst_verdict || ''}
@@ -1261,14 +1270,18 @@ function FindingDetailContent() {
                     <option key={verdict.value} value={verdict.value}>{verdictOptionLabel(finding.status, verdict)}</option>
                   ))}
                 </select>
-              </label>
-              <p className="text-xs text-gray-500">
+              </label> : (
+                <p className="text-xs text-gray-500" data-testid="finding-verdict-readonly">
+                  Analyst verdict <span className="text-gray-200">{ANALYST_VERDICTS.find((item) => item.value === finding.analyst_verdict)?.label || 'No verdict recorded'}</span>
+                </p>
+              )}
+              {canTriage && <p className="text-xs text-gray-500">
                 {finding.analyst_verdict && finding.analyst_verdict_at
                   ? `Recorded ${formatRelativeTime(finding.analyst_verdict_at)}. `
                   : ''}
                 A verdict that contradicts the status changes it, as the option says. Choose
                 {' '}&ldquo;No verdict recorded&rdquo; to clear the verdict without changing the status.
-              </p>
+              </p>}
               {finding.notes && (
                 <div className="rounded-md bg-gray-950/70 p-3">
                   <p className="mb-1 text-xs text-gray-500">Analyst notes</p>
@@ -1336,11 +1349,11 @@ function FindingDetailContent() {
           <Section
             id="exceptions"
             title="Policy exceptions"
-            actions={
+            actions={canAcceptRisk ? (
               <Button size="sm" variant="secondary" onClick={() => setExceptionDialogOpen(true)}>
                 Accept risk…
               </Button>
-            }
+            ) : undefined}
           >
             {findingExceptions.length > 0 ? (
               <ul className="space-y-2">

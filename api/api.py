@@ -5688,6 +5688,12 @@ except ModuleNotFoundError:
 app.include_router(public_check_router)
 
 try:
+    from session_capabilities import router as session_capabilities_router
+except ModuleNotFoundError:
+    from .session_capabilities import router as session_capabilities_router
+app.include_router(session_capabilities_router)
+
+try:
     from scan import sharding_policy
     from schedules import router as schedule_ops
     from schedules.router import (

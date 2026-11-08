@@ -19,6 +19,15 @@ function isExplicit(answer: MockAnswer): answer is { status: number; json: unkno
 }
 
 /**
+ * Every page asks once what the person may do (docs/session-capabilities.md); unless a spec
+ * scripts it, the fixture answers as the open-source engine does: everything allowed.
+ */
+export const engineCapabilities: MockHandler = () => ({
+  schema_version: 'session-capabilities/v1', source: 'engine', role: null, default: 'allow',
+  actions: {}, pages: {}, reasons: {},
+})
+
+/**
  * Browser contract fixture for one page: pin the mock API origin and answer it from `routes`,
  * keyed by `METHOD /path` or bare `/path` (any method). A request no route answers gets a 404 and
  * is recorded in `unhandled`, so a spec can prove its fixture covers everything the page asks for.
@@ -33,7 +42,7 @@ export async function mockPageApi(page: Page, routes: Record<string, MockHandler
     const url = new URL(request.url())
     const key = `${request.method()} ${url.pathname}`
     requests.push(`${key}${url.search}`)
-    const handler = routes[key] ?? routes[url.pathname]
+    const handler = routes[key] ?? routes[url.pathname] ?? (key === 'GET /session/capabilities' ? engineCapabilities : undefined)
     if (!handler) {
       unhandled.push(`${key}${url.search}`)
       return route.fulfill({ status: 404, json: { detail: 'No fixture for this route' } })

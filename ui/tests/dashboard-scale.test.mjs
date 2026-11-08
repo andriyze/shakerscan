@@ -16,7 +16,9 @@ test('a dashboard exposure failure belongs to its cohort and renders as unavaila
   assert.match(dashboard, /exposureState === 'unavailable' \? <ExposureUnavailable onRetry=\{onRetry\} compact \/>/)
   assert.match(dashboard, /unavailable=\{cohortView !== 'all' && posture === 'unavailable' \? exposurePoll\.refresh : null\}/)
   // No primary call to action ("Add a target") is offered from missing data.
-  assert.match(dashboard, /\) : state === 'ready' \? \(\s*<Link href=\{primary\.href\}/)
+  // ...and only a next step this person may take (session capabilities: targets.add, scans.start).
+  assert.match(dashboard, /\) : state === 'ready' && offerPrimary \? \(\s*<Link href=\{primary\.href\}/)
+  assert.match(dashboard, /offerPrimary = primary\.href === '\/targets' \? canAdd : primary\.href === '\/scan\/new' \? canScan : true/)
   // An empty scope on a populated install offers "Show all cohorts", never "Add a target".
   assert.match(dashboard, /state === 'ready' && outOfScope && onShowAll \? \(/)
 })
