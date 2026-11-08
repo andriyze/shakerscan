@@ -28,7 +28,10 @@ test('reviewed metadata stays separate from secrets and failed saves preserve in
   })
   await page.goto(`/credentials?target_id=${targetId}`)
   const section = page.getByRole('region', { name: 'Authentication profiles' })
-  await expect(section).toContainText('Scan selection is not supported')
+  // Profiles are not selectable in a Scan, and saving one authorizes nothing: said plainly.
+  await expect(section).toContainText('Scans pick credentials, not profiles')
+  await expect(section).toContainText('does not authorize testing the target')
+  await expect(section).not.toContainText('preview')
   await section.getByRole('button', { name: 'New authentication profile' }).click()
   await section.getByLabel('Name', { exact: true }).fill('Staging user')
   await section.getByLabel('Environment', { exact: true }).fill('staging')
