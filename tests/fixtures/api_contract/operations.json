@@ -1920,6 +1920,11 @@
     "operation_id": "update_schedule_schedules__schedule_id__patch"
   },
   {
+    "path": "/session/capabilities",
+    "method": "get",
+    "operation_id": "session_capabilities_session_capabilities_get"
+  },
+  {
     "path": "/session/start",
     "method": "post",
     "operation_id": "start_session_session_start_post"
