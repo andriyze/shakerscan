@@ -117,3 +117,44 @@ test('the dashboard fits a phone viewport', async ({ page }) => {
   await visitAndAuditPage(page, '/', 800)
   await expect(page.getByRole('heading', { name: 'Latest target results' })).toBeVisible()
 })
+
+// 2.12.1: Scans that finished on lab targets are not "no results yet" in the default cohort: the
+// card says the filter hides them, and one click shows every cohort.
+function labOnly(): Record<string, MockHandler> {
+  const labTarget = { ...target, cohort: 'lab' }
+  const labAsset = { id: targetId, node_id: `target:${targetId}`, kind: 'web_target', label: 'Fixture app', url: target.url,
+    root_domain: 'example.test', cohort: 'lab', active_total: 4, active_critical: 1, active_high: 2,
+    active_verified: 1, active_needs_verification: 3, last_scanned_at: now, coverage_posture: 'fresh' }
+  const otherId = '33333333-3333-4333-8333-333333333333'
+  const otherAsset = { ...labAsset, id: otherId, node_id: `target:${otherId}`, url: 'https://other.example.test', label: 'Other',
+    cohort: 'unclassified', active_total: 0, active_critical: 0, active_high: 0, active_verified: 0, active_needs_verification: 0 }
+  return {
+    ...populated(),
+    '/exposure/assets': (url) => {
+      const all = url.searchParams.get('cohort') === 'all'
+      const assets = all ? [labAsset, otherAsset] : [otherAsset]
+      return { assets, count: assets.length, total: assets.length, new_count: 0, cohort: url.searchParams.get('cohort') || 'operational',
+        cohort_counts: { lab: 1, unclassified: 1 },
+        metrics: { asset_count: assets.length, active_critical: all ? 1 : 0, active_high: all ? 2 : 0, ai_surfaces: 0 } }
+    },
+    '/targets/grouped': () => ({
+      items: [{ root_domain: 'example.test', root_target: null, subdomains: [labTarget], subdomain_count: 1, total_count: 1 }],
+      next_cursor: null, has_more: false, total: 1, total_kind: 'exact', generated_at: now,
+    }),
+  }
+}
+
+for (const width of [390, 1440]) {
+  test(`DASHBOARD-COHORT at ${width} px: the cohort filter says what it hides and "Show all cohorts" shows it`, async ({ page }) => {
+    await page.setViewportSize({ width, height: 900 })
+    await mockPageApi(page, labOnly())
+    await page.goto('/')
+    const hidden = page.getByTestId('latest-results-hidden')
+    await expect(hidden).toContainText('The Operational + unclassified filter hides 1 result.')
+    await expect(page.getByText('No scan results yet. Add a target and run the first scan.')).toHaveCount(0)
+    await hidden.getByRole('button', { name: 'Show all cohorts' }).click()
+    await expect(page.getByLabel('Dashboard cohort scope')).toHaveValue('all')
+    await expect(latestResult(page)).toBeVisible()
+    await expect(hidden).toHaveCount(0)
+  })
+}

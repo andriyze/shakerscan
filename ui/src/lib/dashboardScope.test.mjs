@@ -63,3 +63,16 @@ test('an empty scope with data in other cohorts says so; the scope comes from th
   // Members of the chosen scope never count as "elsewhere".
   assert.equal(outOfScopeSummary({ view: 'operational', exposure: { metrics: { asset_count: 0 }, cohort_counts: { unclassified: 0, lab: 2 } }, installFindings: 0 }).where, '2 lab')
 })
+
+test('an empty scoped result list says the cohort filter hides results, never "no results yet"', async () => {
+  const { hiddenResultsNote } = await import('./dashboardScope.mjs')
+  assert.deepEqual(hiddenResultsNote({ view: 'operational', total: 2, shown: 0 }), {
+    hidden: 2, text: 'The Operational + unclassified filter hides 2 results.',
+  })
+  assert.equal(hiddenResultsNote({ view: 'production', total: 1, shown: 0 }).text, 'The Production only filter hides 1 result.')
+  // Nothing hidden: the true first-run state, or a scope that shows everything.
+  assert.equal(hiddenResultsNote({ view: 'operational', total: 0, shown: 0 }), null)
+  assert.equal(hiddenResultsNote({ view: 'all', total: 3, shown: 0 }), null)
+  assert.equal(hiddenResultsNote({ view: 'operational', total: 3, shown: 3 }), null)
+  assert.equal(hiddenResultsNote({ view: 'operational', total: 3, shown: 1 }).hidden, 2)
+})
