@@ -46,7 +46,7 @@ export function InventorySummary({ facets, filters, onChange }: {
       active={activeFilterCount(filters) === 0} onClick={() => onChange({ environment: '', authorization: '', findings: '', activity: '', asset_type: '', liveness: '', archived: false })} />
     <Tile icon={<ShieldOff />} tone="gray" label="Not authorized"
       value={count(facets?.authorization.unauthorized)} active={filters.authorization === 'unauthorized'} onClick={() => only({ authorization: 'unauthorized' })} />
-    <Tile icon={<AlertTriangle />} tone="red" label="Critical or high findings" value={count(facets?.findings.critical_high)}
+    <Tile icon={<AlertTriangle />} tone="red" label="Targets with critical or high findings" value={count(facets?.findings.critical_high)}
       active={filters.findings === 'critical_high'} onClick={() => only({ findings: 'critical_high' })} />
     <Tile icon={<Clock />} tone="amber" label="Never scanned" value={count(facets?.activity.never)}
       active={filters.activity === 'never'} onClick={() => only({ activity: 'never' })} />

@@ -79,3 +79,6 @@ export const DOMAIN_LOOKUP_MAX_PAGES: number
 export function findDomainGroup(rootDomain: string, fetchPage: (cursor: string | null) => Promise<unknown>, maxPages?: number): Promise<{
   targets: string[]; total: number; found: boolean; moreMembers: boolean; memberCount?: number; exhausted: boolean
 }>
+export function domainGroupCounts(input: { memberCount: number; loaded: number; hasRoot: boolean; truncated: boolean }): {
+  badge: string; hiddenLabel: string; listedNote: string | null; more: number
+}

@@ -4,7 +4,7 @@ import { ChevronDown, ChevronRight, Globe, Server, SlidersHorizontal } from 'luc
 import Link from '@/components/WorkspaceLink'
 import type { TargetAsset, TargetAssetGroup } from '@/lib/targetAssetApi'
 import { featureEnabled } from '@/lib/workspaceCapabilities'
-import { SCAN_BATCH_MAX, domainBatchHref, scanUrls } from '@/lib/targetInventoryModel.mjs'
+import { SCAN_BATCH_MAX, domainBatchHref, domainGroupCounts, scanUrls } from '@/lib/targetInventoryModel.mjs'
 import { boundedDisplayText } from '@/lib/targetChoices'
 import { TargetDomainDiscovery } from '../TargetDomainDiscovery'
 import { DeleteRecordsButton } from '@/components/lifecycle/DeleteRecordsButton'
@@ -62,7 +62,9 @@ export function DomainGroup({ group, open, onToggle, onDiscovered, onDomainDelet
   const batch = [...new Set(group.targets.filter(asset => asset.is_active).flatMap(asset => scanUrls(asset)))]
   // A list/v1 group carries its first members only; say how many more exist.
   const memberCount = Math.max(group.member_count ?? 0, group.targets.length)
-  const hiddenMembers = group.members_truncated ? memberCount - group.targets.length : 0
+  const counts = domainGroupCounts({ memberCount, loaded: children.length, hasRoot: Boolean(root),
+    truncated: Boolean(group.members_truncated) })
+  const hiddenMembers = counts.more
   // A domain with nothing beneath it reads as one row, with discovery in its menu.
   if (root && !children.length) {
     return <section data-testid="target-domain-group" aria-label={`Targets in ${domain}`} className={GROUP_CARD}>
@@ -82,7 +84,7 @@ export function DomainGroup({ group, open, onToggle, onDiscovered, onDomainDelet
           </button>
         : <span className="flex min-w-0 items-center gap-2 text-sm font-semibold text-white"><Globe className="h-4 w-4 shrink-0 text-blue-300/80" aria-hidden="true" /><span className="truncate">{domain}</span></span>}
       <span className="rounded-full bg-gray-800 px-2 py-0.5 text-[11px] text-gray-400">
-        {memberCount.toLocaleString()} target{memberCount === 1 ? '' : 's'}{children.length ? ` · ${hiddenMembers ? `${children.length.toLocaleString()} shown` : `${children.length} subdomain${children.length === 1 ? '' : 's'}`}` : ''}
+        {counts.badge}
       </span>
       {!open && children.length > 0 && <SeverityPills compact counts={combinedSeverity(group.targets)} />}
       <span className="ml-auto flex items-center gap-2">
@@ -104,7 +106,7 @@ export function DomainGroup({ group, open, onToggle, onDiscovered, onDomainDelet
       {/* Collapsing hides the subdomains whether or not the domain itself is a target. */}
       {open && children.map(asset => row(asset, Boolean(root)))}
       {open && hiddenMembers > 0 && <div className="flex flex-wrap items-center gap-2 px-4 py-2 text-xs text-gray-500" data-testid="target-group-truncated">
-        <span>{hiddenMembers.toLocaleString()} more target{hiddenMembers === 1 ? '' : 's'} in {domain}.</span>
+        <span>{counts.listedNote} {hiddenMembers.toLocaleString()} more subdomain{hiddenMembers === 1 ? '' : 's'} in {domain}.</span>
         {onShowAll
           ? <button type="button" onClick={onShowAll} className="rounded-md px-2 py-1 font-medium text-blue-300 hover:bg-blue-500/10 hover:text-blue-200">
               Show all {memberCount.toLocaleString()} targets in {domain}</button>
@@ -112,7 +114,7 @@ export function DomainGroup({ group, open, onToggle, onDiscovered, onDomainDelet
       </div>}
       {!open && children.length > 0 && !root && <button type="button" onClick={onToggle}
         className="w-full px-4 py-2 text-left text-xs text-gray-500 hover:bg-gray-800/40 hover:text-gray-300">
-        {children.length} subdomain{children.length === 1 ? '' : 's'} hidden · show
+        {counts.hiddenLabel}
       </button>}
     </div>
   </section>
