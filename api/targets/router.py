@@ -654,6 +654,13 @@ async def create_target(request: TargetCreate):
                     INSERT INTO targets (url, name, root_domain, is_root, scan_options, metadata_json, asm_enabled, asm_config)
                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
                     ON CONFLICT (canonical_key) DO UPDATE SET url = targets.url,
+                        -- A name the person gives fills a target that has none of its own (one
+                        -- discovery or a host's service record created, named by its URL);
+                        -- a name someone chose is never replaced.
+                        name = CASE WHEN EXCLUDED.name IS NOT NULL AND btrim(EXCLUDED.name) <> ''
+                                         AND (targets.name IS NULL OR btrim(targets.name) = ''
+                                              OR targets.name = targets.url)
+                                    THEN EXCLUDED.name ELSE targets.name END,
                         discovery_source = CASE WHEN targets.discovery_source = 'scan' THEN 'manual'
                                                 ELSE targets.discovery_source END,
                         metadata_json = CASE WHEN targets.metadata_json->>'created_via' = 'hunt'
