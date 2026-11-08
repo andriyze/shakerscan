@@ -3,33 +3,18 @@
 import { useSyncExternalStore } from 'react'
 import { API_URL } from '@/lib/apiConfig'
 import {
-  ALL_ALLOWED, actionAllowed, fetchSessionCapabilities, pageAllowed,
-  type SessionAction, type SessionCapabilities,
+  ALL_ALLOWED, actionAllowed, fetchSessionCapabilities, pageAllowed, type SessionAction, type SessionCapabilities,
 } from '@/lib/sessionCapabilities.mjs'
+import { sessionCapabilities, subscribeSessionCapabilities } from '@/lib/workspaceCapabilities'
 
-// One request per page load, shared by every component; until it answers (and on any failure)
-// everything is allowed, as before the contract. Presentation only.
-let current: SessionCapabilities = ALL_ALLOWED
-let requested = false
-const listeners = new Set<() => void>()
-
-function subscribe(listener: () => void): () => void {
-  listeners.add(listener)
-  if (!requested && typeof window !== 'undefined') {
-    requested = true
-    void fetchSessionCapabilities(`${API_URL}/session/capabilities`).then(answer => {
-      current = answer
-      listeners.forEach(notify => notify())
-    })
-  }
-  return () => { listeners.delete(listener) }
-}
-
-const snapshot = () => current
+// React views of the session answer kept in workspaceCapabilities.ts: one request per page load,
+// shared by every component; until it answers (and on any failure) everything is allowed.
 const serverSnapshot = () => ALL_ALLOWED
+const load = () => fetchSessionCapabilities(`${API_URL}/session/capabilities`)
+const subscribe = (listener: () => void) => subscribeSessionCapabilities(listener, load)
 
 export function useSessionCapabilities(): SessionCapabilities {
-  return useSyncExternalStore(subscribe, snapshot, serverSnapshot)
+  return useSyncExternalStore(subscribe, sessionCapabilities, serverSnapshot)
 }
 
 export function useCan(action: SessionAction): boolean {

@@ -1,4 +1,8 @@
 // UI presentation only. The deployment gateway must independently enforce every API request.
+import {
+  ALL_ALLOWED, actionAllowed, pageAllowed, type SessionAction, type SessionCapabilities,
+} from './sessionCapabilities.mjs'
+
 export type WorkspaceCapabilities = {
   schema: 'shakerscan.workspace-capabilities/v1'
   mode: 'managed'
@@ -84,4 +88,43 @@ export function navigationAllowed(href: string): boolean {
     if (typeof pattern !== 'string') return false
     try { return new RegExp('^(?:' + pattern + ')$').test(path) } catch { return false }
   })
+}
+
+// ---- Session capabilities (session-capabilities/v1, docs/session-capabilities.md) ------------
+// The policy above (window.__SHAKERSCAN_CAPABILITIES__) is the deployment's workspace surface:
+// which features and pages exist at all, published with the page by the runtime config. The
+// session answer below is per person: which of the existing controls and pages this signed-in
+// person may use, read once per page load from GET /session/capabilities (a gateway answers it by
+// role; the engine answers "everything allowed"). A control is offered only when both allow it.
+// Both are presentation only; the server decides every request.
+let sessionAnswer: SessionCapabilities = ALL_ALLOWED
+let sessionRequested = false
+const sessionListeners = new Set<() => void>()
+
+export function sessionCapabilities(): SessionCapabilities {
+  return sessionAnswer
+}
+
+/** Subscribe to the session answer; the first subscriber in a browser starts `load` (once). */
+export function subscribeSessionCapabilities(
+  listener: () => void, load: () => Promise<SessionCapabilities>,
+): () => void {
+  sessionListeners.add(listener)
+  if (!sessionRequested && typeof window !== 'undefined') {
+    sessionRequested = true
+    void load().then(answer => {
+      sessionAnswer = answer
+      sessionListeners.forEach(notify => notify())
+    }, () => undefined)
+  }
+  return () => { sessionListeners.delete(listener) }
+}
+
+export function sessionActionAllowed(action: SessionAction): boolean {
+  return actionAllowed(sessionAnswer, action)
+}
+
+/** A page the signed-in person may open (session answer); navigationAllowed says whether it exists. */
+export function sessionPageAllowed(href: string): boolean {
+  return pageAllowed(sessionAnswer, href)
 }

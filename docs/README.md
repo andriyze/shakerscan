@@ -72,6 +72,7 @@ contracts and release notes describe what ships.
 - [API image boundary](api-image-boundary.md)
 - [Compatibility](compatibility.md)
 - [Hosted connector](hosted-connector.md)
+- [Session capabilities](session-capabilities.md) — what the UI hides for the signed-in person (`GET /session/capabilities`).
 - [OWASP coverage matrix](owasp-coverage-matrix.md)
 - [Decisions](decisions/)
 - [Integrity ledgers](ledgers/)
