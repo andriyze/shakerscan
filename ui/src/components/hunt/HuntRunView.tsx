@@ -162,6 +162,11 @@ export function HuntRunView({ hunt, onChange, target }: {
 
   const findingCount = hunt.outcome_summary?.finding_count ?? hunt.outcome_summary?.finding_ids.length ?? 0
   const candidateCount = hunt.outcome_summary?.candidate_ids.length ?? hunt.budget_used.candidates ?? 0
+  // A permission request is answered in the terminal of the person running the Hunt; budget and
+  // SSH plan decisions are made here.
+  const decisionHeading = decisions.length === 0 ? 'Decision made'
+    : planDecisions.length > 0 || budgetDecision ? 'Needs your decision'
+      : 'Waiting for a decision in the terminal'
   const stoppable = !hunt.completed_at && ['active', 'awaiting_planner', 'budget_exhausted'].includes(hunt.status)
 
   return <div className="space-y-5">
@@ -198,19 +203,20 @@ export function HuntRunView({ hunt, onChange, target }: {
 
     {live && <AgentHandoff hunt={hunt} started={actions.length > 0} />}
 
-    {(planDecisions.length > 0 || showBudget || permissionDecisions.length > 0) && <section aria-label="Needs your decision"
+    {(planDecisions.length > 0 || showBudget || permissionDecisions.length > 0) && <section aria-label={decisionHeading}
       className={`space-y-3 rounded-xl border p-4 ${decisions.length > 0 ? 'border-amber-500/40 bg-amber-500/5' : 'border-gray-800 bg-gray-900/60'}`}>
       <h2 className={`flex items-center gap-2 text-sm font-semibold ${decisions.length > 0 ? 'text-amber-100' : 'text-gray-200'}`}>
-        <AlertTriangle className="h-4 w-4" aria-hidden="true" />{decisions.length > 0 ? 'Needs your decision' : 'Decision made'}
+        <AlertTriangle className="h-4 w-4" aria-hidden="true" />{decisionHeading}
       </h2>
       {permissionDecisions.length > 0 && <div className="space-y-2">
-        <p className="text-sm text-amber-100/90">
-          The agent is waiting for your permission. Approve or deny each request in your own terminal; the rest of the Hunt continues meanwhile.
+        <p className="text-sm text-amber-100/90" data-testid="permission-decision-owner">
+          The agent is waiting for permission from the person running this Hunt from their terminal. They approve or deny each request there, with a command like the one below (it needs the operator role and their re-authentication); the rest of the Hunt continues meanwhile.
         </p>
         <ul className="space-y-1">
           {permissionDecisions.map(decision => <li key={decision.id} className="flex flex-wrap items-center gap-2 text-sm text-gray-200">
             <span>{decision.title}</span>
-            <code className="rounded bg-gray-950 px-1.5 py-0.5 text-xs text-amber-200">{decision.command}</code>
+            <code className="min-w-0 break-all rounded bg-gray-950 px-1.5 py-0.5 text-xs text-amber-200">{decision.command}</code>
+            <CopyButton text={decision.command} label="Copy command" />
           </li>)}
         </ul>
       </div>}
@@ -231,13 +237,14 @@ export function HuntRunView({ hunt, onChange, target }: {
     <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
       {[
         { label: 'HTTP requests', value: (hunt.budget_used.http_requests || 0).toLocaleString(), tab: 'requests' },
-        { label: 'Capability calls', value: `${hunt.budget_used.agent_actions || 0} / ${hunt.budget.max_capability_calls || 0}`, tab: 'timeline' },
+        { label: 'Capability calls', value: (hunt.budget_used.agent_actions || 0).toLocaleString(), note: hunt.budget.max_capability_calls ? `limit ${hunt.budget.max_capability_calls.toLocaleString()}` : undefined, tab: 'timeline' },
         { label: 'Findings · candidates', value: `${findingCount} · ${candidateCount}`, tab: 'results' },
         { label: hunt.completed_at ? 'Duration' : 'Running for', value: formatHuntDuration(hunt.created_at, hunt.completed_at) || '—', tab: 'details' },
       ].map(item => <button key={item.label} type="button" onClick={() => selectTab(item.tab)}
         className="rounded-xl border border-gray-800 bg-gray-900/60 p-3 text-left transition-colors hover:border-gray-700">
         <span className="block text-xs text-gray-500">{item.label}</span>
         <span className="text-lg font-semibold text-white">{item.value}</span>
+        {'note' in item && item.note && <span className="block text-xs text-gray-500">{item.note}</span>}
       </button>)}
     </div>
 
