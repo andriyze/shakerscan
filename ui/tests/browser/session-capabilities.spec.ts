@@ -16,7 +16,27 @@ const VIEWER = {
   actions: {}, pages: { '/devices': false, '/credentials': false, '/scan/new': false, '/schedules': false },
   reasons: { 'targets.add': 'this action needs the operator role' },
 }
-type Mode = 'viewer' | 'absent'
+// The answers an Enterprise gateway gives (fixtures copied from its session_capabilities.answer):
+// an operator on an installation with Hunt and network scans off, and an administrator with Hunt on.
+const OPERATOR = {
+  schema_version: 'session-capabilities/v1', source: 'gateway', role: 'operator', default: 'allow',
+  actions: { 'targets.add': true, 'targets.edit': true, 'targets.check': true, 'scans.start': true, 'findings.retest': true,
+    'findings.verify': false, 'findings.triage': true, 'findings.accept_risk': true, 'hunts.manage': false,
+    'secrets.read': true, 'secrets.manage': true, 'secrets.decide': true },
+  pages: { '/': true, '/scan/new': true, '/credentials': true, '/hunt': false, '/hunts': false, '/deep-hunt': false,
+    '/devices': false, '/schedules': true, '/settings': false },
+  reasons: { 'findings.verify': 'Hunt is not enabled on this installation', 'hunts.manage': 'Hunt is not enabled on this installation' },
+}
+const ADMIN = {
+  schema_version: 'session-capabilities/v1', source: 'gateway', role: 'admin', default: 'allow',
+  actions: { 'targets.add': true, 'targets.edit': true, 'targets.check': true, 'scans.start': true, 'findings.retest': true,
+    'findings.verify': true, 'findings.triage': true, 'findings.accept_risk': true, 'hunts.manage': true,
+    'secrets.read': true, 'secrets.manage': true, 'secrets.decide': true },
+  pages: { '/': true, '/scan/new': true, '/credentials': true, '/hunt': true, '/devices': false, '/schedules': true },
+  reasons: {},
+}
+type Mode = 'viewer' | 'operator' | 'admin' | 'absent' | 'malformed'
+const ANSWERS = { viewer: VIEWER, operator: OPERATOR, admin: ADMIN }
 
 const target = {
   id: assetId, asset_id: assetId, name: 'Capabilities fixture', url: 'host://caps.example.test', locator: 'caps.example.test',
@@ -46,7 +66,10 @@ async function mock(page: Page, mode: Mode) {
     const url = new URL(route.request().url()), path = url.pathname
     requests.push(`${route.request().method()} ${path}`)
     if (path === '/session/capabilities') {
-      return mode === 'viewer' ? route.fulfill({ json: VIEWER }) : route.fulfill({ status: 404, json: { detail: 'Not Found' } })
+      if (mode === 'absent') return route.fulfill({ status: 404, json: { detail: 'Not Found' } })
+      // Another schema (or any answer that is not this contract) means everything is allowed.
+      if (mode === 'malformed') return route.fulfill({ json: { schema_version: 'session-capabilities/v9', default: 'deny', actions: {} } })
+      return route.fulfill({ json: ANSWERS[mode] })
     }
     if (path === '/targets/inventory') {
       return route.fulfill({ json: { targets: [target], total: 1, total_groups: 1,
@@ -100,6 +123,13 @@ for (const width of [390, 1440]) {
       await page.goto('/targets')
       await expect(page.getByRole('button', { name: /Add targets/ }).first()).toBeVisible()
       await expect(page.getByRole('button', { name: /^Scan .*caps\.example\.test|^Discover services: caps/ })).toBeVisible()
+
+      // Opened by address, New Scan shows a viewer the form without Run Scan, and says why.
+      await page.unrouteAll({ behavior: 'ignoreErrors' })
+      await mock(page, 'viewer')
+      await page.goto('/scan/new')
+      await expect(page.getByTestId('scan-start-refused')).toBeVisible()
+      await expect(page.getByRole('button', { name: 'Run Scan' })).toHaveCount(0)
     })
 
     test('CAPS-002 target page: a viewer gets no edit, check, scan or secret controls, and no device link', async ({ page }) => {
@@ -192,6 +222,59 @@ for (const width of [390, 1440]) {
       await mockPageApi(page, empty)
       await page.goto('/')
       await expect(page.getByRole('link', { name: /Add a target/ })).toBeVisible()
+    })
+
+    test('CAPS-006 an operator without Hunt keeps scans, edits, triage and secrets but gets no Verify or Hunt link', async ({ page }) => {
+      await mock(page, 'operator')
+      await page.goto('/targets')
+      await expect(page.getByRole('button', { name: /Add targets/ }).first()).toBeVisible()
+      await expect(page.getByRole('button', { name: /^Scan .*caps\.example\.test|^Discover services: caps/ })).toBeVisible()
+      if (width >= 768) await expect(page.getByRole('link', { name: 'New Scan', exact: true })).toBeVisible()
+
+      await page.goto(`/targets/${assetId}/asset`)
+      await expect(page.getByRole('heading', { name: 'Capabilities fixture' })).toBeVisible()
+      for (const name of ['Rename', 'Edit details', 'Authorize asset', 'Add action']) {
+        await expect(page.getByRole('button', { name, exact: true })).toBeVisible()
+      }
+      await expect(page.getByRole('button', { name: 'Check liveness now' })).toBeVisible()
+      await expect(page.getByRole('link', { name: 'Configure web scan' })).toBeVisible()
+      // Network scans are off for this installation: no network scan, and the device view is text.
+      await expect(page.getByRole('button', { name: 'Start network scan', exact: true })).toHaveCount(0)
+      await expect(page.getByRole('link', { name: 'Connected Devices view →' })).toHaveCount(0)
+      for (const name of ['Reveal', 'Grant', 'Promote', 'Revoke', 'Expiry']) {
+        await expect(page.getByRole('button', { name, exact: true }).first()).toBeVisible()
+      }
+
+      await page.goto(`/findings/${findingId}`)
+      await expect(page.getByRole('button', { name: 'Retest', exact: true })).toBeVisible()
+      await expect(page.getByRole('combobox', { name: 'Status' })).toBeVisible()
+      await expect(page.getByRole('button', { name: 'Accept risk…' })).toBeVisible()
+      await expect(page.getByRole('button', { name: 'Verify finding' })).toHaveCount(0)
+    })
+
+    test('CAPS-007 an administrator with Hunt gets every control, Verify and Stop included', async ({ page }) => {
+      await mock(page, 'admin')
+      await page.goto(`/findings/${findingId}`)
+      await expect(page.getByRole('button', { name: 'Retest', exact: true })).toBeVisible()
+      await expect(page.getByRole('button', { name: 'Verify finding' })).toBeVisible()
+      await expect(page.getByRole('button', { name: 'Accept risk…' })).toBeVisible()
+      await page.goto(`/hunt?run=${huntId}`)
+      await expect(page.getByRole('button', { name: 'Stop', exact: true })).toBeVisible()
+      await expect(page.getByRole('button', { name: 'Delete this Hunt', exact: true })).toBeVisible()
+      await page.goto(`/targets/${assetId}/asset`)
+      await expect(page.getByRole('button', { name: 'Edit details', exact: true })).toBeVisible()
+      await expect(page.getByRole('heading', { name: 'Discovered secrets' }).first()).toBeVisible()
+    })
+
+    test('CAPS-008 an answer that is not this contract keeps the whole surface (fail open)', async ({ page }) => {
+      await mock(page, 'malformed')
+      await page.goto(`/targets/${assetId}/asset`)
+      await expect(page.getByRole('button', { name: 'Edit details', exact: true })).toBeVisible()
+      await expect(page.getByRole('link', { name: 'Connected Devices view →' })).toBeVisible()
+      await expect(page.getByRole('heading', { name: 'Discovered secrets' }).first()).toBeVisible()
+      await page.goto('/scan/new')
+      await expect(page.getByRole('button', { name: 'Run Scan' })).toBeVisible()
+      await expect(page.getByTestId('scan-start-refused')).toHaveCount(0)
     })
   })
 }
