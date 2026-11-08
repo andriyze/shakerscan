@@ -3,7 +3,7 @@
 import { useEffect, useMemo } from 'react'
 import { Combobox, type ComboboxOption } from '@/components/ui'
 import { targetSearchNote } from '@/lib/pickerOptions'
-import { boundedTargetDisplay } from '@/lib/targetChoices'
+import { targetChoiceLabel } from '@/lib/targetChoices'
 import type { TargetAsset } from '@/lib/targetAssetApi'
 import { useTargetSearch } from '@/lib/useTargetSearch'
 
@@ -38,9 +38,8 @@ export function TargetSearchCombobox({
     .filter((asset) => !accept || accept(asset))
     .map((asset) => ({
       value: asset.id,
-      label: boundedTargetDisplay(asset),
-      description: asset.name ? boundedTargetDisplay({ url: asset.url }) : undefined,
-      keywords: `${asset.url} ${asset.root_domain || ''}`,
+      ...targetChoiceLabel(asset),
+      keywords: `${asset.name || ''} ${asset.url} ${asset.root_domain || ''}`,
     })), [accept, search.assets])
   const selected = value ? search.byId(value) : undefined
   useEffect(() => { onSelectedAsset?.(selected) }, [onSelectedAsset, selected])
