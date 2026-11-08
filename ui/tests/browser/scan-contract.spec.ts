@@ -172,7 +172,7 @@ test('authorized active Scan authorizes the target once and submits it in one fl
   const submit = page.getByRole('button', { name: 'Run Scan' })
   await expect(submit).toBeDisabled()
   await page.getByLabel(/I own or have explicit authorization/).check()
-  await expect(page.getByText(/Resolved families:.*xss/)).toBeVisible()
+  await expect(page.getByText(/Checks this Scan runs:.*Cross-site Scripting/)).toBeVisible()
   await expect(page.getByText(/Approval receipt/i)).toHaveCount(0)
 
   await expect(submit).toBeEnabled()

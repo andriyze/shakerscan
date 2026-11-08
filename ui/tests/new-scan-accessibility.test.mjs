@@ -32,6 +32,9 @@ test('ordinary active scans need one runnable worker, not release-fleet uniformi
   assert.match(page, /require_current_workers: false/)
   assert.match(page, /placementPreviewLabel\(topology, currentWorkerCount\)/)
   assert.match(page, /Expected build:/)
+  // Build hashes and plan schema ids stay out of the main text, in a collapsed disclosure.
+  assert.match(page, /<summary[^>]*>Technical details<\/summary>/)
+  assert.doesNotMatch(page, /Execution topology|Release-authoritative|Resolved families:/)
   assert.match(page, /Reported running builds:/)
   assert.match(page, /activeTesting && !activeWorkerAvailable/)
   assert.doesNotMatch(page, /Active testing is paused until the worker fleet is uniformly current/)

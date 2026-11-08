@@ -411,7 +411,7 @@ function DashboardContent() {
             )}
             {!fleetEnabled && workersKnown && (
               <span className="rounded-sm bg-gray-800 px-1.5 py-0.5 text-[10px] font-medium text-gray-300" title={`${workerCount} running worker processes; configured safety maximum ${maxWorkers}`}>
-                {workerCount} running · max {maxWorkers}
+                {workerCount} worker process{workerCount === 1 ? '' : 'es'} · max {maxWorkers}
               </span>
             )}
             <WorkspaceFeature name="worker_admin"><span className="h-5 w-px bg-gray-800" aria-hidden="true" />
@@ -601,7 +601,7 @@ function CohortScopeBar({ value, onChange, counts }: { value: CohortView; onChan
   return (
     <Card className="flex flex-col gap-3 p-4 lg:flex-row lg:items-center lg:justify-between">
       <div>
-        <h2 className="text-sm font-medium text-white">Executive cohort scope</h2>
+        <h2 className="text-sm font-medium text-white">Which targets the dashboard counts</h2>
         <p className="mt-1 text-xs text-gray-400">Operational includes production, staging, and clearly labeled unclassified assets. Lab data is never silently mixed into it.</p>
         <p className="mt-1 text-xs text-gray-500">{nonOperational} non-operational · {unclassified} unclassified</p>
       </div>
