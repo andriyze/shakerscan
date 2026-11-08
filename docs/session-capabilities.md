@@ -42,7 +42,8 @@ The UI sends it to its API origin with the same credentials as every other API r
     "hunts.manage": true,
     "secrets.read": true,
     "secrets.manage": true,
-    "secrets.decide": true
+    "secrets.decide": true,
+    "records.delete": true
   },
   "pages": {},
   "reasons": {}
@@ -64,17 +65,18 @@ The UI sends it to its API origin with the same credentials as every other API r
 | Action | UI controls |
 |---|---|
 | `targets.add` | Targets: "Add targets"; Dashboard: "Add a target" |
-| `targets.edit` | Targets list: "Restore", the target's instructions, "Authorize testing…" / "Revoke authorization", "Archive or delete…", the bulk "Authorize"; target page: "Rename", "Edit details", "Authorize asset", the target's instructions ("Create instructions"), "Edit learned knowledge", "Edit Hunt permissions", "Add action" and its edit/delete |
+| `targets.edit` | Targets list: "Restore", the target's instructions, "Authorize testing…" / "Revoke authorization", "Archive or delete…" (with `records.delete`), the bulk "Authorize"; target page: "Rename", "Edit details", "Authorize asset", the target's instructions ("Create instructions"), "Edit learned knowledge", "Edit Hunt permissions", "Add action" and its edit/delete |
 | `targets.check` | Target page: "Check now" (liveness) |
 | `scans.start` | Targets list: "Scan" / "Discover", "Quick scan", "Customize Scan…", "Network scan", domain discovery, "Schedule scans", the bulk "Scan"; target page: "Configure web scan", "Network Hunt" and "Start network scan" (these two also need the `/devices` page); sidebar: "New Scan"; New Scan page: "Run Scan"; Dashboard: "Start a scan" |
 | `findings.retest` | Finding page: "Retest" and its mode |
 | `findings.verify` | Finding page: "Verify finding" |
 | `findings.triage` | Finding page: the status select and the analyst verdict (shown read-only when `false`); Findings list: the selection dock's status actions |
 | `findings.accept_risk` | Finding page: "Accept risk" |
-| `hunts.manage` | Hunt page: "Stop" and "Delete" (Delete also needs the workspace's record deletion feature) |
+| `hunts.manage` | Hunt page: "Stop" |
 | `secrets.read` | Target page: the "Discovered secrets" cards (their list requests are not sent when `false`) |
 | `secrets.manage` | Discovered secrets: "Revoke" / "Reactivate" and "Expiry" |
 | `secrets.decide` | Discovered secrets: "Reveal", "Grant", "Ungrant" and "Promote" (the gateway may still ask for a step-up) |
+| `records.delete` | Every record deletion control (each also needs the workspace's record deletion feature): Hunt page "Delete", Targets list "Archive or delete…" / "Delete…", Findings list "Delete selected findings", and the other "Delete" buttons that open the deletion preview |
 
 A new UI control that changes state names one of these actions, or a new one added to this table.
 An action the answer does not list follows `default`.

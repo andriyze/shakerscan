@@ -91,6 +91,8 @@ export function HuntRunView({ hunt, onChange, target }: {
   const [objectiveOpen, setObjectiveOpen] = useState(false)
   const [confirmStop, setConfirmStop] = useState(false)
   const canManage = useCan('hunts.manage')
+  // Deleting a Hunt deletes its record: a records.delete control, not a hunts.manage one.
+  const canDelete = useCan('records.delete')
   const [stopping, setStopping] = useState(false)
   const [confirmingPlanId, setConfirmingPlanId] = useState<string | null>(null)
   const actions = hunt.actions || []
@@ -197,7 +199,7 @@ export function HuntRunView({ hunt, onChange, target }: {
           <HttpArchiveExport ownerKind="hunt" ownerId={hunt.hunt_id} variant="menu" />
           {stoppable && canManage && <Button size="sm" variant="danger" onClick={() => setConfirmStop(true)}><Square className="h-3.5 w-3.5" aria-hidden="true" />Stop</Button>}
           {/* A running Hunt blocks its own deletion; the preview says so and an abandoned one is cancelled. */}
-          {canManage && <DeleteRecordsButton selection={{ kind: 'hunt', id: hunt.hunt_id }} label="Delete" subject="this Hunt"
+          {canDelete && <DeleteRecordsButton selection={{ kind: 'hunt', id: hunt.hunt_id }} label="Delete" subject="this Hunt"
             variant="secondary" className="px-2.5 py-1 text-sm" onDeleted={() => router.push('/hunt')} />}
         </div>
       </div>

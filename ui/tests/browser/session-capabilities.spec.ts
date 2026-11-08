@@ -22,7 +22,7 @@ const OPERATOR = {
   schema_version: 'session-capabilities/v1', source: 'gateway', role: 'operator', default: 'allow',
   actions: { 'targets.add': true, 'targets.edit': true, 'targets.check': true, 'scans.start': true, 'findings.retest': true,
     'findings.verify': false, 'findings.triage': true, 'findings.accept_risk': true, 'hunts.manage': false,
-    'secrets.read': true, 'secrets.manage': true, 'secrets.decide': true },
+    'secrets.read': true, 'secrets.manage': true, 'secrets.decide': true, 'records.delete': false },
   pages: { '/': true, '/scan/new': true, '/credentials': true, '/hunt': false, '/hunts': false, '/deep-hunt': false,
     '/devices': false, '/schedules': true, '/settings': false },
   reasons: { 'findings.verify': 'Hunt is not enabled on this installation', 'hunts.manage': 'Hunt is not enabled on this installation' },
@@ -31,12 +31,14 @@ const ADMIN = {
   schema_version: 'session-capabilities/v1', source: 'gateway', role: 'admin', default: 'allow',
   actions: { 'targets.add': true, 'targets.edit': true, 'targets.check': true, 'scans.start': true, 'findings.retest': true,
     'findings.verify': true, 'findings.triage': true, 'findings.accept_risk': true, 'hunts.manage': true,
-    'secrets.read': true, 'secrets.manage': true, 'secrets.decide': true },
+    'secrets.read': true, 'secrets.manage': true, 'secrets.decide': true, 'records.delete': true },
   pages: { '/': true, '/scan/new': true, '/credentials': true, '/hunt': true, '/devices': false, '/schedules': true },
   reasons: {},
 }
-type Mode = 'viewer' | 'operator' | 'admin' | 'absent' | 'malformed'
-const ANSWERS = { viewer: VIEWER, operator: OPERATOR, admin: ADMIN }
+// An operator with Hunt on: Stop is theirs, deleting the Hunt's record is an administrator's.
+const OPERATOR_HUNT = { ...ADMIN, role: 'operator', actions: { ...ADMIN.actions, 'records.delete': false } }
+type Mode = 'viewer' | 'operator' | 'operator-hunt' | 'admin' | 'absent' | 'malformed'
+const ANSWERS = { viewer: VIEWER, operator: OPERATOR, 'operator-hunt': OPERATOR_HUNT, admin: ADMIN }
 
 const target = {
   id: assetId, asset_id: assetId, name: 'Capabilities fixture', url: 'host://caps.example.test', locator: 'caps.example.test',
@@ -264,6 +266,13 @@ for (const width of [390, 1440]) {
       await page.goto(`/targets/${assetId}/asset`)
       await expect(page.getByRole('button', { name: 'Edit details', exact: true })).toBeVisible()
       await expect(page.getByRole('heading', { name: 'Discovered secrets' }).first()).toBeVisible()
+    })
+
+    test('CAPS-009 an operator with Hunt can Stop it but is not offered Delete (records.delete)', async ({ page }) => {
+      await mock(page, 'operator-hunt')
+      await page.goto(`/hunt?run=${huntId}`)
+      await expect(page.getByRole('button', { name: 'Stop', exact: true })).toBeVisible()
+      await expect(page.getByRole('button', { name: 'Delete this Hunt', exact: true })).toHaveCount(0)
     })
 
     test('CAPS-008 an answer that is not this contract keeps the whole surface (fail open)', async ({ page }) => {
