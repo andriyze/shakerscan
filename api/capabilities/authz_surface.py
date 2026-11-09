@@ -215,6 +215,9 @@ def password_hash_disclosure_finding(
         "response_body_sha256": authed.body_sha256,
         "response_body_len": authed.body_len,
         "hash_count": len(digests),
+        # Installation-keyed digests (never the hashes): the finalizer counts the distinct hashes
+        # one principal read across every batch of the Scan.
+        "hash_digests": sorted(digests)[:50],
         "hash_fields": [{"field": name} for name in comparison.authenticated[0].hash_fields[:10]],
         "other_accounts_hashes": other_accounts,
         "anonymous_reads_hashes": anonymous_reads,
