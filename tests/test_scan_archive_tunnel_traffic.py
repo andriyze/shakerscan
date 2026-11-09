@@ -410,6 +410,100 @@ def test_a_batch_attempt_archives_its_tunnel_under_the_batch_capability(monkeypa
     assert requests[0]["host_header"] == "evil.example.test"
 
 
+def _seeded_form_plan(capability: str):
+    """A seeded form POST (``POST /hub/login form:username=,password=``) as the batch's one
+    candidate: the whole body is tested, which needs state-changing authority."""
+    scan_id = str(uuid.uuid4())
+    endpoints = build_endpoint_manifest(
+        scan_id=scan_id, target_binding_digest=TARGET.digest,
+        surface_manifest={
+            "schema_version": "endpoint-manifest/v2", "status": "complete", "reason": None,
+            "endpoints": [{
+                "method": "POST", "scheme": "https", "host": "app.example.test", "port": 443,
+                "normalized_path": "/hub/login", "concrete_path": "/hub/login", "query_keys": [],
+                "content_type": "application/x-www-form-urlencoded",
+                "body_field_names": ["username", "password"], "source": "known_endpoints",
+            }],
+        },
+        source_action_ids=("inputs.known_endpoints",),
+    )
+    candidates = build_candidate_manifest(
+        endpoints, source_action_ids=("inputs.known_endpoints",), maximum=10,
+        allow_state_changing_http=True,
+    )
+    assert candidates.entries, "the seeded form is a candidate"
+    action = _action("verify.batch.00000", capability, 0, capability_args={
+        "candidate_manifest_ref": candidates.reference().canonical_dict(),
+        "endpoint_manifest_ref": endpoints.reference().canonical_dict(),
+        "slice": {"start": 0, "count": 1}, "profile": "balanced", "proof_policy": "deterministic",
+    })
+    action = type(action)(**{**action.digest_material(), "requested_budget": {
+        **dict(action.requested_budget), "state_changing_requests": int(action.requested_budget["http_requests"]),
+    }})
+    plan = ScanActionPlan(scan_id=scan_id, execution_plan_digest="a" * 64,
+                          target_binding_digest=TARGET.digest, actions=(action,))
+    return plan, action, Backend(manifests={
+        endpoints.manifest_id: endpoints, candidates.manifest_id: candidates,
+    })
+
+
+@pytest.mark.parametrize("capability", ["xss.verify_batch"])
+def test_an_encrypted_tunnel_names_the_seeded_form_its_verifier_tested(monkeypatch, capability):
+    """Over HTTPS a verifier's payloads are ciphertext to the engine, so the archive held only a
+    bare CONNECT and a seeded form POST looked untested. The tunnel row now names the request the
+    tool was given (method, masked URL, body field names) and the HAR entry says what it stands for."""
+    from runtime.http_archive import har_entry
+
+    plan, action, backend = _seeded_form_plan(capability)
+    payloads = _run_real_scanner_adapter(monkeypatch, _fixture_tunnel(readable=False))
+    dispatcher = _dispatcher(plan, backend, policy=ScanPolicy(
+        active_testing=True, allow_state_changing_http=True, approval_receipt_id="approval-1"))
+
+    capture.start_capture()
+    try:
+        asyncio.run(dispatcher(action, _lease(plan, action), _noop))
+    finally:
+        rows = _drained_rows(plan.scan_id)
+    assert payloads, "an attempt ran"
+    tunnels = [row for row in rows if row["fidelity"] == "pinned_tunnel"]
+    assert tunnels and all(row["method"] == "CONNECT" for row in tunnels)
+    assert tunnels[0]["tunnel"]["tool_input"] == {
+        "method": "POST", "url": "https://app.example.test/hub/login",
+        "body_field_names": ["password", "username"],
+    }
+    entry = har_entry({"method": "CONNECT", "url": tunnels[0]["url"], "capability_name": capability,
+                       "metadata_json": json.dumps({"tunnel": tunnels[0]["tunnel"]})},
+                      request_body=None, response_body=None)
+    assert "encrypted pinned tunnel of " + capability in entry["comment"]
+    assert "POST https://app.example.test/hub/login" in entry["comment"]
+    assert "body fields: password, username" in entry["comment"]
+
+
+def test_the_tool_input_a_tunnel_names_keeps_no_values():
+    capture.start_capture()
+    try:
+        capture.record_tunnel(
+            _fixture_tunnel(readable=False), capability_name="sqli.verify_batch", tool="sqlmap",
+            tool_input={"url": "https://user:pw@app.example.test/search?q=secret-value&token=abc",
+                        "method": "get", "body_field_names": None},
+        )
+        rows = _drained_rows(str(uuid.uuid4()))
+    finally:
+        capture.drain_capture()
+    given = rows[0]["tunnel"]["tool_input"]
+    assert given["method"] == "GET" and "body_field_names" not in given
+    assert "secret-value" not in given["url"] and "abc" not in given["url"] and "pw" not in given["url"]
+    assert given["url"].startswith("https://app.example.test/search?")
+
+
+def test_a_har_entry_of_another_call_carries_no_tunnel_comment():
+    from runtime.http_archive import har_entry
+
+    entry = har_entry({"method": "GET", "url": "https://app.example.test/", "metadata_json": {"fidelity": "wire_request"}},
+                      request_body=None, response_body=None)
+    assert entry["comment"] == ""
+
+
 def test_outside_a_scan_capture_a_tunnel_records_nothing():
     """A Hunt (or any work without an open Scan capture) is unchanged."""
     assert not capture.capture_active()
