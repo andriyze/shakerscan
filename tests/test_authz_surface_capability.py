@@ -268,3 +268,38 @@ def test_finalizer_reports_another_accounts_password_hash_as_verified_high():
     assert finding["cwe"] == "CWE-639"
     assert finding["verified"] is True
     assert finding["evidence"]["hash_fields"] == [{"field": "password_hash"}]
+
+
+def test_two_batches_each_with_one_hash_still_prove_another_accounts_hash():
+    """/me and /users/1 fell into different slices on a live Scan: each batch saw one hash."""
+    first = _action("verify.authz_surface", 0, capability_name="authz_surface.verify_batch")
+    second = _action("verify.authz_surface.001", 1, capability_name="authz_surface.verify_batch")
+    final = _action("finalize.report", 2, dependencies=(first.action_id, second.action_id))
+    plan = ScanActionPlan(
+        scan_id=SCAN_ID, execution_plan_digest="b" * 64,
+        target_binding_digest="a" * 64, actions=(first, second, final),
+    )
+
+    def proof(path, digest):
+        return {
+            "kind": "authz_surface_proof", "proof_state": "verified", "finding_verdict": "verified",
+            "proof_contract": "authz_surface_password_hash_disclosure/v1",
+            "route_id": path, "request_url": f"https://app.example.test{path}",
+            "authenticated_status": 200, "anonymous_status": 401, "hash_count": 1,
+            "hash_digests": [digest], "hash_fields": [{"field": "password_hash"}],
+            "other_accounts_hashes": False, "anonymous_reads_hashes": False, "repetitions": 2,
+        }
+
+    report = finalize_scan_report(
+        plan=plan, target_url="https://app.example.test",
+        action_results={
+            first.action_id: _result_with_observation_count(first, 1),
+            second.action_id: _result_with_observation_count(second, 1),
+        },
+        observations={
+            first.action_id: (proof("/hub/api/me", "hmac-sha256-x:own"),),
+            second.action_id: (proof("/hub/api/users/1", "hmac-sha256-x:admin"),),
+        },
+    )
+    assert {f["severity"] for f in report["findings"]} == {"high"}
+    assert all(f["evidence"]["distinct_hashes_read_in_scan"] == 2 for f in report["findings"])

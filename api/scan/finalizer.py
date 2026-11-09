@@ -954,6 +954,7 @@ def _findings_for_action(
     *,
     unobserved_response_urls: frozenset[str] = frozenset(),
     target_url: str = "",
+    scan_password_hashes: frozenset[str] = frozenset(),
 ) -> list[dict[str, Any]]:
     findings: list[dict[str, Any]] = []
     header_origin_findings: dict[tuple[str, str], dict[str, Any]] = {}
@@ -1530,7 +1531,11 @@ def _findings_for_action(
             # Another account's hash (two distinct ones reached one principal) or a hash any
             # anonymous caller reads is cracked offline at the attacker's pace: high. The
             # principal's own hash in its own record is excessive data exposure: medium.
-            other_accounts = item.get("other_accounts_hashes") is True
+            # Two distinct hashes read by the one principal anywhere in the Scan (one batch may
+            # hold /me and another /users/1) prove it reads another account's hash.
+            other_accounts = (
+                item.get("other_accounts_hashes") is True or len(scan_password_hashes) >= 2
+            )
             anonymous = item.get("anonymous_reads_hashes") is True
             finding = _base_finding(
                 tool="shakerscan_authz_surface",
@@ -1550,6 +1555,7 @@ def _findings_for_action(
                     "authenticated_status": item.get("authenticated_status"),
                     "response_body_sha256": item.get("response_body_sha256"),
                     "hash_count": item.get("hash_count"),
+                    "distinct_hashes_read_in_scan": len(scan_password_hashes),
                     "hash_fields": [
                         {"field": str(entry.get("field") or "")[:120]}
                         for entry in list(item.get("hash_fields") or ())[:10]
@@ -3077,6 +3083,16 @@ def finalize_scan_report(
             key = _observed_url_key(request.get("origin") or response.get("final_url"))
             if key:
                 unobserved_response_urls.add(key)
+    # Every stored password hash (keyed digest) the signed-in principal read in this Scan.
+    scan_password_hashes = frozenset(
+        str(digest)
+        for action in expected_actions
+        if action_results[action.action_id].capability_name == "authz_surface.verify_batch"
+        for item in observations.get(action.action_id, ())
+        if isinstance(item, Mapping)
+        and item.get("proof_contract") == "authz_surface_password_hash_disclosure/v1"
+        for digest in list(item.get("hash_digests") or ())[:50]
+    )
     for action in expected_actions:
         result = action_results[action.action_id]
         if result.action_digest != action.action_digest:
@@ -3094,6 +3110,7 @@ def finalize_scan_report(
             rows,
             unobserved_response_urls=frozenset(unobserved_response_urls),
             target_url=target_url,
+            scan_password_hashes=scan_password_hashes,
         ):
             identity = _finding_identity(finding)
             existing = findings_by_id.get(identity)
