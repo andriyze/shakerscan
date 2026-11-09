@@ -20,6 +20,7 @@ import {
   type ScanBudgetProfile,
   type ScanPublicContract,
   type ScanContractPreview,
+  type TargetAuthorization,
 } from '@/lib/api'
 import { listCredentialProfiles, type CredentialProfile } from '@/lib/credentialApi'
 import { preferredCredentialId } from '@/lib/credentialDefaults'
@@ -212,6 +213,25 @@ export default function NewScanPage() {
   )
   const selectedCredentialIds = [primaryCredentialId, secondaryCredentialId].filter(Boolean)
   const credentialUse = selectedCredentialIds.length > 0
+  // A registered target with a valid standing authorization (Targets, Authorize testing) needs no
+  // second confirmation for active testing: submission reuses that authorization. Credential use
+  // keeps the confirmation, as it records its own credential-tier receipt.
+  const [standingAuthorization, setStandingAuthorization] = useState<TargetAuthorization | null>(null)
+  useEffect(() => {
+    let cancelled = false
+    setStandingAuthorization(null)
+    if (batchMode || !selectedRegisteredTarget) return () => { cancelled = true }
+    getTargetAuthorization(selectedRegisteredTarget.id)
+      .then((authorization) => {
+        if (cancelled || !authorization?.standing) return
+        const expired = authorization.expires_at ? Date.parse(authorization.expires_at) <= Date.now() : false
+        if (!expired) setStandingAuthorization(authorization)
+      })
+      .catch(() => {})
+    return () => { cancelled = true }
+  }, [batchMode, selectedRegisteredTarget?.id])
+  const standingCoversScan = Boolean(standingAuthorization) && !credentialUse && !batchMode
+  const confirmationNeeded = (activeTesting || credentialUse) && !standingCoversScan
   const selectedPrimaryProfile = credentialProfiles.find((profile) => profile.id === primaryCredentialId)
   const selectedSecondaryProfile = credentialProfiles.find((profile) => profile.id === secondaryCredentialId)
   const approvalRequired = activeTesting || networkDiscovery || credentialUse || allowStateChanging
@@ -457,7 +477,7 @@ export default function NewScanPage() {
       setError(invalid)
       return
     }
-    if ((activeTesting || credentialUse) && !authorized) {
+    if (confirmationNeeded && !authorized) {
       setError('Confirm that you own or are authorized to test every target with the selected permissions and identities.')
       return
     }
@@ -745,7 +765,12 @@ export default function NewScanPage() {
               <span className="block text-xs text-gray-500">{batchMode ? 'Active testing is available for one target at a time.' : 'Permit bounded XSS, SQL injection, authorization, and other proof-oriented probes.'}</span>
             </span>
           </label>
-          {(activeTesting || credentialUse) && (
+          {activeTesting && standingCoversScan && (
+            <p data-testid="standing-authorization" className="rounded-lg border border-emerald-800/60 bg-emerald-950/20 p-4 text-sm text-emerald-100">
+              Authorized for active testing{standingAuthorization?.approved_by ? ` by ${standingAuthorization.approved_by}` : ''}: this Scan uses the target&apos;s standing authorization. You can revoke it from the target menu.
+            </p>
+          )}
+          {confirmationNeeded && (
             <label className="flex items-start gap-3 rounded-lg border border-amber-800/70 bg-amber-950/20 p-4 text-sm text-amber-100">
               <input className="mt-1" type="checkbox" checked={authorized} onChange={(event) => setAuthorized(event.target.checked)} />
               <span>I own or have explicit authorization to test every submitted target with the selected permissions and identities.</span>
@@ -919,7 +944,7 @@ export default function NewScanPage() {
           {canStartScan ? <Button
             type="submit"
             loading={loading}
-            disabled={contractPreviewLoading || !contractPreview || ((activeTesting || credentialUse) && !authorized) || (activeTesting && !activeWorkerAvailable)}
+            disabled={contractPreviewLoading || !contractPreview || (confirmationNeeded && !authorized) || (activeTesting && !activeWorkerAvailable)}
           >
             Run Scan
           </Button> : <p className="text-sm text-gray-400" data-testid="scan-start-refused">{startScanRefusal || 'Starting scans is not part of your role.'}</p>}
