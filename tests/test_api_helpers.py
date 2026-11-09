@@ -21107,6 +21107,8 @@ def test_create_target_reuse_reports_stored_host_metadata(monkeypatch):
     assert response["is_root"] is False
     assert response["cohort"] == "internal"
     assert response["status"] == "already_exists"
+    # The stored name, not the one requested: a reused target keeps a name someone chose.
+    assert response["name"] == "stored internal target"
     # The reuse must also be announced. Returning only the stored metadata let a caller believe it
     # had registered https://localhost:9090; a scope receipt and a Hunt were then bound to one
     # application while the work ran against another on the same host, and the result looked

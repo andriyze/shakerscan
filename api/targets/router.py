@@ -688,7 +688,10 @@ async def create_target(request: TargetCreate):
                         discovery_source=row.get('discovery_source'),
                         metadata=_decode_json_value(row.get('metadata_json')) or {},
                     ),
-                    'status': 'created' if row['created'] else 'already_exists'
+                    'status': 'created' if row['created'] else 'already_exists',
+                    # The stored name: a reused target with no name of its own takes the one given
+                    # here, which a caller only learned by reading the target again (eval SV-17).
+                    'name': row.get('name'),
                 }
                 # Surface warning if path/query was stripped
                 if target_note:
