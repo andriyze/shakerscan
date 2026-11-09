@@ -10,7 +10,7 @@ SCAN_FINDING = uuid.uuid4()
 HYPOTHESIS = uuid.uuid4()
 
 
-def _rows(url="https://honey.example.test/id_rsa", tool="shakerscan_exposure_probe"):
+def _rows(url="https://app.example.test/id_rsa", tool="shakerscan_exposure_probe"):
     return [{"id": SCAN_FINDING, "status": "active", "tool": tool, "cwe": "CWE-538",
              "title": "Sensitive exposure: private key material", "url": url, "evidence": {}, "request": {}}]
 
@@ -56,7 +56,7 @@ def test_a_hunt_proof_is_added_to_the_scan_finding_instead_of_a_new_row(monkeypa
     proof = {"family": "data_exposure", "verdict": "verified", "proof_routes": ["/id_rsa"],
              "proof_methods": ["GET"], "stable_predicates": ["sensitive_value_present"]}
     promoted = asyncio.run(promotion.promote_trusted_workflow_finding(
-        Conn(), target_uuid=TARGET, target_url="https://honey.example.test",
+        Conn(), target_uuid=TARGET, target_url="https://app.example.test",
         hypothesis_id=str(HYPOTHESIS), workflow_id=str(uuid.uuid4()), proof=proof,
         first={}, replay={}, evidence_instance_id=None, tool_receipt_id=None,
     ))
