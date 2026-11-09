@@ -43,3 +43,17 @@ def test_sealed_configuration_lifetime_and_permissions():
     with pytest.raises(OSError):
         os.fstat(descriptor)
 
+
+
+def test_a_short_cookie_value_does_not_rewrite_every_url_in_the_output():
+    """A target's own one-character session cookie (``sess=1``) was masked wherever a "1"
+    appeared, so the output's URLs read ``http://***0.***0.***0.***03:***8999/`` and the Scan's
+    finalization failed on the port. Pieces shorter than MIN_REDACTION_PIECE protect nothing and
+    are left alone; real secrets are still masked."""
+    headers = {"Cookie": "sess=1; session=fixture-cookie-value"}
+    values = agent_tools.scanner_credential_redaction_values(headers)
+    assert "1" not in values and "fixture-cookie-value" in values
+    payload = {"records": [{"url": "http://10.10.10.103:18999/login", "note": "fixture-cookie-value"}]}
+    safe = redact_sensitive(payload, redact_strings=True, scrub_text=True, known_values=values)
+    assert safe["records"][0]["url"] == "http://10.10.10.103:18999/login"
+    assert "fixture-cookie-value" not in json.dumps(safe)
