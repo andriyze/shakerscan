@@ -269,7 +269,9 @@ function CredentialsContent() {
 
   // The target picker searches the inventory on the server, one bounded page per query; the
   // selected target (from a link or a choice) is read on its own below.
-  const targetSearch = useTargetSearch({ includeServices: true })
+  // A web or API credential belongs to a web app: the scan form offers only the profiles of the web
+  // target it scans, so a web credential saved on the app's host was never offered there.
+  const targetSearch = useTargetSearch({ includeServices: true, webOnly: targetKind === 'web' || targetKind === 'api' })
   const { remember } = targetSearch
   const selectedAsset = targetId ? targetSearch.byId(targetId) : undefined
   // The matches, plus the selection (read on its own below) so it stays a choice while the
