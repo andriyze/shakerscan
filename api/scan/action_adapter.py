@@ -56,8 +56,10 @@ try:
         AUTHZ_SURFACE_PARSER_VERSION,
         PrincipalProbe,
         RouteComparison,
+        account_password_hashes,
         bfla_finding,
         boundary_established,
+        password_hash_disclosure_finding,
     )
     from capabilities.hint_files import ingest_hint_documents, HINT_DISCOVERY_PATHS
     from capabilities.spec_ingest import ingest_spec_bodies, SPEC_DISCOVERY_PATHS
@@ -150,8 +152,10 @@ except (ImportError, ModuleNotFoundError):
         AUTHZ_SURFACE_PARSER_VERSION,
         PrincipalProbe,
         RouteComparison,
+        account_password_hashes,
         bfla_finding,
         boundary_established,
+        password_hash_disclosure_finding,
     )
     from ..capabilities.hint_files import ingest_hint_documents, HINT_DISCOVERY_PATHS
     from ..capabilities.spec_ingest import ingest_spec_bodies, SPEC_DISCOVERY_PATHS
@@ -4255,6 +4259,12 @@ class DatabaseNeutralScanActionDispatcher:
                 str(value).lower() for name, value in result.response_headers.items()
                 if str(name).lower() == "content-type"
             ), "")
+            is_json = "json" in content_type
+            hashes = (
+                account_password_hashes(result.response_body, is_json=is_json)
+                if result.status_code is not None and 200 <= int(result.status_code) < 300
+                else []
+            )
             return PrincipalProbe(
                 status=result.status_code,
                 # Keyed (HMAC): four probes per endpoint, up to 100 endpoints a batch; scrypt
@@ -4262,8 +4272,13 @@ class DatabaseNeutralScanActionDispatcher:
                 # no guess.
                 body_sha256=keyed_body_digest(result.response_body),
                 body_len=len(result.response_body),
-                is_json="json" in content_type,
+                is_json=is_json,
                 error=bool(result.error_code),
+                # The hashes themselves never leave this function: keyed digests only.
+                hash_digests=tuple(sorted({
+                    keyed_body_digest(value.encode("utf-8")) for _field, value in hashes
+                })),
+                hash_fields=tuple(field for field, _value in hashes[:10]),
             )
 
         async def send(url: str, headers: tuple, ordinal: int) -> Any:
@@ -4378,22 +4393,29 @@ class DatabaseNeutralScanActionDispatcher:
         # A finding needs proof the app gates function access somewhere; without an
         # established boundary a fully-public app yields nothing.
         boundary = boundary_established(compared.values())
+        # Every password hash the signed-in principal read in this batch: two distinct ones
+        # show it reads another account's hash.
+        principal_hashes = {
+            digest for comparison in compared.values()
+            for probe in comparison.authenticated for digest in probe.hash_digests
+        }
         observations: list[Mapping[str, Any]] = []
         reported: set[str] = set()
         for attempt_id, comparison in entry_heads:
             proven = bfla_finding(comparison) if boundary else None
+            disclosed = password_hash_disclosure_finding(comparison, principal_hashes)
             observations.append({
                 "kind": "candidate_attempt",
                 "attempt_id": attempt_id,
                 "candidate_id": comparison.route_id,
                 "family": "authz_surface",
                 "status": "success",
-                "proof_state": "verified" if proven else "not_proven",
+                "proof_state": "verified" if proven or disclosed else "not_proven",
             })
             # One finding per route, however many entries the route has.
-            if proven is not None and comparison.route_id not in reported:
+            if comparison.route_id not in reported and (proven or disclosed):
                 reported.add(comparison.route_id)
-                observations.append(proven)
+                observations.extend(item for item in (proven, disclosed) if item is not None)
         unattempted = max(0, len(window) - attempted)
         _batch_status, _batch_partial, _batch_timed_out = batch_outcome(
             attempt_statuses, unattempted,
