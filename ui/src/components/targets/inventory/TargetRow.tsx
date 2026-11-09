@@ -139,6 +139,8 @@ export function TargetRow({ asset, selected, onSelect, actions, busy, nested = f
   const managed = useWorkspaceIsManaged()
   const mayScan = useCan('scans.start')
   const mayEdit = useCan('targets.edit')
+  // Starting a Hunt (POST /hunts) is decided as Stop is: hunts.manage.
+  const mayHunt = useCan('hunts.manage')
   const webApps = (asset.origins || []).filter(origin => origin.is_active).length
   const domain = assetKind(asset) === 'domain'
   const canScan = asset.is_active && (webApps > 0 || domain || devices)
@@ -189,7 +191,7 @@ export function TargetRow({ asset, selected, onSelect, actions, busy, nested = f
             description="Choose budget, permissions, credentials, and coverage">Customize Scan…</MenuItem>
           {devices && <MenuItem icon={<Radar />} onSelect={() => actions.networkScan(asset)} description="Open ports, services and web apps">Network scan</MenuItem>}
           {discoverDomain && featureEnabled('discovery') && <TargetDomainDiscovery menuItem domain={discoverDomain} onSettled={actions.refresh} />}</>}
-          {managed
+          {!mayHunt ? null : managed
             ? <MenuItem icon={<Crosshair />} onSelect={() => void copyText(terminalHuntStartCommand(asset.id)).then(result => result.ok ? toast.success('Hunt command copied') : toast.warning(`Copy this command by hand: ${result.text}`))}
                 description={`${TERMINAL_HUNT_START_LABEL} ${terminalHuntStartCommand(asset.id)}`}>Copy the Hunt command</MenuItem>
             : <MenuItem icon={<Crosshair />} href={`/hunt?target=${asset.id}`} description="AI investigation with this target's instructions">Start Hunt</MenuItem>}

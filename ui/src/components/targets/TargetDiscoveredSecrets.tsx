@@ -144,7 +144,7 @@ export function TargetDiscoveredSecrets({ targetId, origin, hideWhenEmpty = fals
     <h2 className="text-lg font-semibold text-white">{origin ? <>Discovered secrets <span className="break-all text-sm font-normal text-gray-400">· {origin}</span></> : 'Discovered secrets'}</h2>
     <p className="mt-1 text-xs text-gray-500">Values ShakerScan found on this target (a configuration file, a response, a Hunt&apos;s output). Hunts use them by reference and never see them; this list never shows a value.</p>
     {stepUp && <div className="mt-3 rounded border border-amber-700 bg-amber-950/40 p-3 text-sm text-amber-100" role="status">
-      This decision needs your step-up. Make it in your own terminal: <code className="break-all font-mono text-xs">{stepUp}</code>
+      This decision needs your step-up and was not made. Choose it again to confirm it in this browser, or make it in your own terminal: <code className="break-all font-mono text-xs">{stepUp}</code>
     </div>}
     {notice && <div className="mt-3 rounded border border-emerald-800 bg-emerald-950/30 p-3 text-sm text-emerald-100" role="status">{notice}</div>}
     {error ? <div className="mt-3"><ErrorState message={error} /></div> : !rows ? <p className="mt-3 text-sm text-gray-500">Loading…</p>

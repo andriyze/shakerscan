@@ -91,6 +91,9 @@ test('SECRETS-003 on Enterprise a step-up decision names the terminal command an
   await page.getByRole('button', {name: 'Reveal'}).click()
   await page.getByRole('dialog', {name: 'Reveal the value'}).getByRole('button', {name: 'Reveal'}).click()
   const notice = page.getByRole('status').filter({hasText: 'needs your step-up'})
+  // The browser step-up was cancelled or is not offered: the decision can be chosen again here, or
+  // made in the terminal.
+  await expect(notice).toContainText('Choose it again to confirm it in this browser')
   await expect(notice).toContainText(`shakerscan secrets reveal ${assetId} ${ref}`)
   await expect(page.locator('body')).not.toContainText(VALUE)
 })
