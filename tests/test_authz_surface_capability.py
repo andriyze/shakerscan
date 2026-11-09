@@ -268,20 +268,3 @@ def test_finalizer_reports_another_accounts_password_hash_as_verified_high():
     assert finding["cwe"] == "CWE-639"
     assert finding["verified"] is True
     assert finding["evidence"]["hash_fields"] == [{"field": "password_hash"}]
-
-
-def test_a_signed_in_standard_active_scan_reads_access_control():
-    from api.scan.contracts import resolve_scan_contract
-
-    policy = {"active_testing": True}
-    anonymous = resolve_scan_contract(budget_profile="fast", policy=policy)
-    signed_in = resolve_scan_contract(budget_profile="fast", policy=policy, signed_in=True)
-    assert "authz_surface" not in anonymous.execution_plan.resolved_families
-    assert "authz_surface" in signed_in.execution_plan.resolved_families
-    passive = resolve_scan_contract(budget_profile="fast", policy={}, signed_in=True)
-    assert "authz_surface" not in passive.execution_plan.resolved_families
-    excluded = resolve_scan_contract(
-        budget_profile="fast", signed_in=True,
-        policy={"active_testing": True, "exclude_families": ["authz_surface"]},
-    )
-    assert "authz_surface" not in excluded.execution_plan.resolved_families

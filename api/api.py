@@ -11103,7 +11103,6 @@ async def _submit_scan(
             policy=request.policy,
             advanced=scan_advanced_limits,
             approval_receipt_id=approval_receipt_id,
-            signed_in=bool(request.credential_profile_ids),
         )
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
