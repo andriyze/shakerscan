@@ -2794,6 +2794,65 @@ def _family_action_reason(action: Any, result: Any) -> str:
     return reason
 
 
+# Answers that say the service, not the application, decided what a check saw.
+_COVERAGE_UNAVAILABLE = frozenset({408, 429, 502, 503, 504})
+
+
+def scan_check_coverage(
+    observations: Mapping[str, Sequence[Mapping[str, Any]]],
+    capability_by_action: Mapping[str, str],
+) -> dict[str, Any]:
+    """What this Scan's passive checks examined, URL by URL, and what they saw (value-free).
+
+    A later Scan that examined the same URL with the same check and did not see a finding again
+    is evidence the finding was fixed (``rescan_verification``). Only answers the check could
+    judge are kept: a read with no answer, or an answer a service gave (408, 429, 502-504), is
+    no evidence of anything. ``exposure``: each URL the exposure probe read, its status and the
+    class it matched (None for no match). ``baseline_headers``: each origin's recorded baseline
+    response, the request line, status, principal and the posture headers it carried.
+    """
+    exposure: dict[str, dict[str, Any]] = {}
+    for action_id, rows in observations.items():
+        if capability_by_action.get(action_id) != "exposure.verify_batch":
+            continue
+        for item in rows or ():
+            examined = item.get("examined") if isinstance(item, Mapping) else None
+            if (
+                not isinstance(examined, Mapping) or item.get("kind") != "candidate_attempt"
+                or item.get("family") != "sensitive_exposure"
+            ):
+                continue
+            url, status = str(examined.get("request_url") or ""), examined.get("response_status")
+            if (
+                not url or type(status) is not int or not 100 <= status <= 599
+                or status in _COVERAGE_UNAVAILABLE or examined.get("indistinguishable_from_absent")
+            ):
+                continue
+            exposure[url] = {
+                "url": url[:2_000], "response_status": status,
+                "exposure_class": (
+                    str(examined["exposure_class"])[:80] if examined.get("exposure_class") else None
+                ),
+            }
+    headers = [
+        {
+            "request_line": response["request_line"], "response_status": response["response_status"],
+            "principal": response.get("principal") or "anonymous",
+            "present_headers": sorted(
+                name for name, value in dict(response.get("observed_headers") or {}).items()
+                if str(value or "").strip()
+            ),
+        }
+        for response in _baseline_header_responses(observations).values()
+        if response["response_status"] not in _COVERAGE_UNAVAILABLE
+    ]
+    return {
+        "schema_version": "scan-check-coverage/v1",
+        "exposure": [exposure[url] for url in sorted(exposure)][:5_000],
+        "baseline_headers": sorted(headers, key=lambda row: row["request_line"]),
+    }
+
+
 def finalize_scan_report(
     *,
     plan: ScanActionPlan,
@@ -3890,6 +3949,10 @@ def finalize_scan_report(
         # level deeper is documented as `result.tls` and served as `result.result.tls`.
         **posture_sections,
         "coverage": coverage_block,
+        # What the passive checks examined (rescan verification of findings not seen again).
+        "check_coverage": scan_check_coverage(
+            observations, {action.action_id: action.capability_name for action in plan.actions},
+        ),
         "verification_summary": {
             "verified": verified,
             "suspected": suspected,
