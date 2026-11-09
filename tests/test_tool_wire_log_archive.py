@@ -153,3 +153,15 @@ def test_a_logged_request_to_another_origin_is_never_archived():
         calls = capture.drain_capture()["calls"]
     assert [call["method"] for call in calls] == ["CONNECT"]
     assert "wire_log_archived" not in calls[0]["tunnel"]
+
+
+def test_a_har_its_tool_was_stopped_writing_still_yields_every_finished_entry():
+    """Dalfox writes its HAR as it goes; a run stopped at its wall leaves the document open (seen
+    live: 190 sign-in POSTs sent, the HAR unterminated, nothing archived). Every complete entry is
+    still read, and the one the stop cut off is not."""
+    whole = _har((f"{ORIGIN}/hub/login", "POST"), (f"{ORIGIN}/hub/login", "POST"), (f"{ORIGIN}/a", "GET"))
+    cut = whole[: whole.rindex('{"request"') + 40]  # the third entry half written, no closing
+    found, _dropped = tool_wire_log.wire_log_transactions("dalfox", cut, ORIGIN)
+    assert [(item["method"], item["url"]) for item in found] == [("POST", f"{ORIGIN}/hub/login")] * 2
+    assert tool_wire_log.wire_log_transactions("dalfox", '{"log":{"entries":[', ORIGIN) == ([], 0)
+    assert tool_wire_log.wire_log_transactions("dalfox", "not a har", ORIGIN) == ([], 0)

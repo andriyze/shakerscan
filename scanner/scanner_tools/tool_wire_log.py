@@ -113,14 +113,40 @@ def sqlmap_transactions(text: str, origin: str) -> list[dict[str, Any]]:
     return [requests[number] for number in order]
 
 
-def har_transactions(text: str) -> list[dict[str, Any]]:
-    """The transactions of a HAR document (Dalfox's ``--har-file-path``)."""
+_ENTRIES_START = re.compile(r'"entries"\s*:\s*\[')
+
+
+def _har_entries(text: str) -> list[Any]:
+    """A HAR's entries. Dalfox writes the document as it goes, so a run its wall stopped leaves it
+    unterminated: every entry it finished is still read, one complete object at a time."""
     try:
-        entries = json.loads(str(text or ""))["log"]["entries"]
+        entries = json.loads(text)["log"]["entries"]
+        return entries if isinstance(entries, list) else []
     except (TypeError, ValueError, KeyError):
+        pass
+    start = _ENTRIES_START.search(text)
+    if start is None:
         return []
+    decoder = json.JSONDecoder()
+    found: list[Any] = []
+    position = start.end()
+    while True:
+        while position < len(text) and text[position] in " \t\r\n,":
+            position += 1
+        if position >= len(text) or text[position] != "{":
+            return found
+        try:
+            entry, position = decoder.raw_decode(text, position)
+        except ValueError:
+            return found  # the entry the stop cut off
+        found.append(entry)
+
+
+def har_transactions(text: str) -> list[dict[str, Any]]:
+    """The transactions of a HAR document (Dalfox's ``--har-file-path``), complete or cut off."""
+    entries = _har_entries(str(text or ""))
     found: list[dict[str, Any]] = []
-    for entry in entries if isinstance(entries, list) else ():
+    for entry in entries:
         if not isinstance(entry, Mapping):
             continue
         request = entry.get("request") if isinstance(entry.get("request"), Mapping) else {}
