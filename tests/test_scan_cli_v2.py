@@ -306,6 +306,13 @@ def test_scan_help_documents_the_active_confirmation_and_the_receipt():
     assert "standing authorization" in receipt_line.split("--idempotency-key")[0]
 
 
+def test_the_endpoint_flag_explains_its_format_as_new_scan_does():
+    help_text = " ".join(scan_cli._parser().format_help().split())
+    options = help_text[help_text.index("options:"):]
+    flag_help = options[options.index("--endpoint SPEC"):].split("--require-current-workers")[0]
+    assert "form:" in flag_help and "json:" in flag_help and "METHOD /path" in flag_help
+
+
 def test_the_state_changing_flag_says_it_includes_default_login_attempts():
     # The Scan form says so next to its switch; the terminal flag says the same.
     help_text = " ".join(scan_cli._parser().format_help().split())
