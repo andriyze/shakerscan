@@ -524,8 +524,7 @@ def _escalated(
     severity = base or _CLASS_SEVERITY[exposure_class]
     categories = {item.category for item in secrets}
     # A live provider credential is critical in whatever file it is found: a Stripe live secret
-    # key in /.env is as usable as an AWS key in /settings.py (eval SV-12 found the first rated
-    # high and the second critical).
+    # key in /.env is as usable as an AWS key in /settings.py.
     if categories & _CRITICAL_SECRET_CATEGORIES:
         return "critical"
     if secrets and severity in {"info", "low", "medium"}:

@@ -147,7 +147,7 @@ test('components behind one listener show their own evidence and their unknowns'
 
 test('a distribution build lists its upstream candidates as probable and has no severity', async ({ page }) => {
   // Fixture: the GoAhead listener as served, plus an Ubuntu OpenSSH package whose 17 upstream
-  // candidates are all unresolved for the distribution's backports (eval SV-11).
+  // candidates are all unresolved for the distribution's backports.
   const target = fixture.targets[0]
   const ssh = {
     ...target.listener_groups[0], key: 'tcp/22/openssh/10.2p1 Ubuntu 2ubuntu3.8', port: 22, service: 'ssh',

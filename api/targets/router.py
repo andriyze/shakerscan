@@ -690,7 +690,7 @@ async def create_target(request: TargetCreate):
                     ),
                     'status': 'created' if row['created'] else 'already_exists',
                     # The stored name: a reused target with no name of its own takes the one given
-                    # here, which a caller only learned by reading the target again (eval SV-17).
+                    # here, which a caller only learned by reading the target again.
                     'name': row.get('name'),
                 }
                 # Surface warning if path/query was stripped
