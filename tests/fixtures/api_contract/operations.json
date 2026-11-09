@@ -1770,6 +1770,11 @@
     "operation_id": "get_latest_result_results__target_folder__latest_get"
   },
   {
+    "path": "/retests",
+    "method": "get",
+    "operation_id": "list_retests_retests_get"
+  },
+  {
     "path": "/retests/finding/{finding_id}",
     "method": "get",
     "operation_id": "list_finding_retests_retests_finding__finding_id__get"

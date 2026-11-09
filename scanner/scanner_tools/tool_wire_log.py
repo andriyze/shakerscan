@@ -194,4 +194,20 @@ def wire_log_transactions(tool: str, text: str, origin: str) -> tuple[list[dict[
     return kept[:MAX_TRANSACTIONS], max(0, len(kept) - MAX_TRANSACTIONS)
 
 
-__all__ = ["MAX_TRANSACTIONS", "har_transactions", "sqlmap_transactions", "wire_log_transactions"]
+def scanner_archive_origin(url: str) -> str:
+    """``scheme://host[:port]`` of the URL the tool was given, without userinfo."""
+    parts = urllib.parse.urlsplit(str(url or ""))
+    return f"{parts.scheme.lower()}://{parts.netloc.rsplit('@', 1)[-1]}"
+
+
+def tunnel_with_wire_log(tunnel: Any, wire_log: tuple[list[dict[str, Any]], int] | None) -> Any:
+    """The tunnel's account plus the transactions the tool's own wire log recorded."""
+    if not isinstance(tunnel, dict) or not wire_log or not wire_log[0]:
+        return tunnel
+    return {**tunnel, "wire_log_transactions": wire_log[0], "wire_log_dropped": wire_log[1]}
+
+
+__all__ = [
+    "MAX_TRANSACTIONS", "har_transactions", "scanner_archive_origin", "sqlmap_transactions",
+    "tunnel_with_wire_log", "wire_log_transactions",
+]

@@ -2517,6 +2517,13 @@
     "name": "get_latest_result"
   },
   {
+    "path": "/retests",
+    "methods": [
+      "GET"
+    ],
+    "name": "list_retests"
+  },
+  {
     "path": "/retests/finding/{finding_id:path}",
     "methods": [
       "GET"

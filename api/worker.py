@@ -310,7 +310,8 @@ from scan.execution_backend import (
 from runtime import http_archive
 from scan import scoring as scan_scoring
 from scanner_tools import http_archive_capture as scanner_http_capture
-from scan.rescan_verification import record_rescan_verifications
+from scanner_tools.tool_wire_log import scanner_archive_origin, tunnel_with_wire_log
+from scan.rescan_verification import verify_fixed_after_scan
 from scanner_tools.browser_profile import seed_browser_profile
 from scanner_tools.process_memory import ProcessTreeMemoryCeiling, kill_process_tree
 from scan.finalizer import finalize_scan_report
@@ -13613,18 +13614,8 @@ async def process_scan_job(job_data: dict):
                 saved_count = None
                 print(f"[{job_id[:8]}] save_findings error: {e}", flush=True)
         if target_id and not error and saved_count is not None:
-            # Open passive findings this Scan re-checked on their own URL and no longer saw:
-            # a likely_fixed verification each (scan/rescan_verification.py). No status changes.
-            try:
-                async with db_pool.acquire() as conn:
-                    rescanned = await record_rescan_verifications(
-                        conn, scan_id=scan_id, target_id=target_id, report=result,
-                    )
-                if rescanned:
-                    print(f"[{job_id[:8]}] {rescanned} open finding(s) not seen again on a re-checked URL: "
-                          "verified fixed by this scan", flush=True)
-            except Exception as e:  # noqa: BLE001 - never decides the scan
-                print(f"[{job_id[:8]}] rescan verification error: {type(e).__name__}: {e}", flush=True)
+            # Open passive findings this Scan re-checked and no longer saw (scan/rescan_verification.py).
+            await verify_fixed_after_scan(db_pool, scan_id=scan_id, target_id=target_id, report=result, label=job_id[:8])
         elif ai_target_id and findings:
             try:
                 saved_count = await save_ai_findings(scan_id, ai_target_id, findings)
@@ -18822,7 +18813,7 @@ async def _execute_agent_scanner_process(
             # record (sqlmap's traffic file, Dalfox's HAR), archived with the tunnel.
             try:
                 wire_log_archive = agent_tools.scanner_wire_log_transactions(
-                    name, scratch_dir, origin=_scanner_archive_origin(execution_target),
+                    name, scratch_dir, origin=scanner_archive_origin(execution_target),
                 )
             except Exception:  # noqa: BLE001 - the archive never decides the run
                 wire_log_archive = None
@@ -18924,25 +18915,11 @@ async def _execute_agent_scanner_process(
         "execution_uncertain": execution_uncertain,
         "network_binding": _agent_scanner_network_binding(name),
         # The tunnel's account for the Scan request archive (recorded by capabilities/scanner.py).
-        "tunnel": _tunnel_with_wire_log(
+        "tunnel": tunnel_with_wire_log(
             pinned_proxy.tunnel_record(scheme=urllib.parse.urlsplit(execution_target).scheme),
             wire_log_archive,
         ) if process_started and hasattr(pinned_proxy, "tunnel_record") else None,
     }
-
-
-def _scanner_archive_origin(url: str) -> str:
-    parts = urllib.parse.urlsplit(str(url or ""))
-    return f"{parts.scheme.lower()}://{parts.netloc.rsplit('@', 1)[-1]}"
-
-
-def _tunnel_with_wire_log(
-    tunnel: Any, wire_log: tuple[list[dict[str, Any]], int] | None,
-) -> Any:
-    """The tunnel's account plus the transactions the tool's own wire log recorded."""
-    if not isinstance(tunnel, dict) or not wire_log or not wire_log[0]:
-        return tunnel
-    return {**tunnel, "wire_log_transactions": wire_log[0], "wire_log_dropped": wire_log[1]}
 
 
 # Its pinned transport awaits a batch's shared request gate before each target connection,
