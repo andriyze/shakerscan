@@ -104,9 +104,10 @@ def _uuid_or_422(value: str, field_name: str) -> uuid.UUID:
 def _validate_finding_exception_accountability(req: FindingExceptionRequest) -> datetime | None:
     if req.status not in EFFECTIVE_EXCEPTION_STATUSES:
         return _parse_iso_datetime(req.expires_at) if req.expires_at else None
+    # policy_id is checked against the configured profiles in _require_active_policy_profile:
+    # it is required only while at least one active policy profile exists.
     missing = [
         label for label, value in (
-            ("policy_id", req.policy_id),
             ("target_id", req.target_id),
             ("owner", req.owner),
             ("approver", req.approver),
@@ -120,7 +121,8 @@ def _validate_finding_exception_accountability(req: FindingExceptionRequest) -> 
             status_code=422,
             detail=f"effective exceptions require: {', '.join(missing)}",
         )
-    _uuid_or_422(str(req.policy_id), "policy_id")
+    if str(req.policy_id or "").strip():
+        _uuid_or_422(str(req.policy_id), "policy_id")
     _uuid_or_422(str(req.target_id), "target_id")
     expires_at = _parse_iso_datetime(req.expires_at)
     if expires_at <= datetime.now(timezone.utc):
@@ -128,11 +130,35 @@ def _validate_finding_exception_accountability(req: FindingExceptionRequest) -> 
     return expires_at
 
 
-async def _require_active_policy_profile(conn: Any, policy_id: str | None) -> None:
-    if not policy_id:
+_ACTIVE_POLICY_PROFILE_SQL = (
+    "is_active=true AND (active_from IS NULL OR active_from <= NOW())"
+    " AND (active_until IS NULL OR active_until > NOW())"
+)
+
+
+async def _require_active_policy_profile(conn: Any, policy_id: str | None, *, effective: bool = True) -> None:
+    """An exception names an active policy profile, or none when no profile is configured.
+
+    A fresh install has no policy profile and the release gate then runs on its built-in
+    policy; an exception without a policy applies under it, so accepting a risk works out of
+    the box. Once an operator configures a profile, every new effective exception must name
+    the exact profile it applies to, so a waiver cannot cover a stricter policy by default.
+    """
+    if not str(policy_id or "").strip():
+        if not effective:
+            return
+        configured = await conn.fetchval(
+            f"SELECT EXISTS (SELECT 1 FROM policy_profiles WHERE {_ACTIVE_POLICY_PROFILE_SQL})"
+        )
+        if configured:
+            raise HTTPException(
+                status_code=422,
+                detail="effective exceptions require: policy_id (a policy profile is configured; "
+                       "select the exact policy this exception applies to)",
+            )
         return
     row = await conn.fetchrow(
-        "SELECT id FROM policy_profiles WHERE id=$1 AND is_active=true",
+        f"SELECT id FROM policy_profiles WHERE id=$1 AND {_ACTIVE_POLICY_PROFILE_SQL}",
         _uuid_or_422(policy_id, "policy_id"),
     )
     if not row:
@@ -333,7 +359,8 @@ async def create_finding_exception(req: FindingExceptionRequest, http_request: R
             from ..targets.triage_receipts import created_exception_id
         created_id = created_exception_id(decision)
     async with _pool().acquire() as conn:
-        await _require_active_policy_profile(conn, req.policy_id)
+        await _require_active_policy_profile(
+            conn, req.policy_id, effective=req.status in EFFECTIVE_EXCEPTION_STATUSES)
 
         async def apply(_actor: str | None = None) -> dict[str, Any]:
             row = await conn.fetchrow(
