@@ -1954,6 +1954,96 @@ def _fold_duplicate_header_findings(findings: list[dict[str, Any]]) -> list[dict
     return kept
 
 
+def _route_key(origin: Any, url: Any) -> tuple[str, str]:
+    """(origin, path without a trailing slash) of a finding's route; the origin may be ''."""
+    text = str(url or "")
+    origin_text = _http_origin(origin) or _http_origin(text) or ""
+    try:
+        path = urllib.parse.urlsplit(text).path or "/"
+    except ValueError:
+        return origin_text, ""
+    return origin_text, path.rstrip("/") or "/"
+
+
+def _fold_sqli_candidates_into_proofs(findings: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """One finding per proven SQL injection: a candidate for the same input joins its proof.
+
+    sqlmap's "Potential SQL injection" on a parameter, or the request verifier's candidate, and
+    the deterministic proof on the same route, method and input are one issue: the Scan reported
+    it twice, once verified and once still to verify (soak eval SV-09: Juice Shop's product
+    search). The candidate is kept on the proof as corroborating evidence (tool, input, database
+    named); a candidate on another input, method or route stays a finding of its own.
+    """
+    proofs: dict[tuple[str, str, str, str], dict[str, Any]] = {}
+    by_candidate: dict[str, dict[str, Any]] = {}
+    for finding in findings:
+        if finding.get("tool") != "shakerscan_sqli_proof" or finding.get("proof_state") != "verified":
+            continue
+        evidence = finding.get("evidence") if isinstance(finding.get("evidence"), Mapping) else {}
+        origin, path = _route_key(evidence.get("origin"), finding.get("url"))
+        field = str(evidence.get("field_path") or "")
+        method = str(evidence.get("method") or "GET").upper()
+        if path and field:
+            proofs.setdefault((origin, path, method, field), finding)
+            proofs.setdefault(("", path, method, field), finding)
+        if evidence.get("candidate_id"):
+            by_candidate.setdefault(str(evidence["candidate_id"]), finding)
+    if not proofs and not by_candidate:
+        return findings
+    kept: list[dict[str, Any]] = []
+    for finding in findings:
+        evidence = finding.get("evidence") if isinstance(finding.get("evidence"), Mapping) else {}
+        target = None
+        if finding.get("proof_state") != "verified" and finding.get("cwe") == "CWE-89":
+            if finding.get("tool") == "sqlmap":
+                origin, path = _route_key(None, finding.get("url"))
+                key = (path, str(evidence.get("method") or "GET").upper(), str(evidence.get("param") or ""))
+                target = proofs.get((origin, *key)) or proofs.get(("", *key))
+            elif finding.get("tool") == "request_sqli_differential" and evidence.get("candidate_id"):
+                target = by_candidate.get(str(evidence["candidate_id"]))
+        if target is None:
+            kept.append(finding)
+            continue
+        target["evidence"].setdefault("corroborating_candidates", []).append({
+            "tool": finding.get("tool"),
+            "title": finding.get("title"),
+            "input": evidence.get("param") or evidence.get("field_path"),
+            **({"dbms": evidence["dbms"]} if evidence.get("dbms") else {}),
+        })
+    return kept
+
+
+def _fold_directory_listing_slash_twins(findings: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """One directory-listing finding per directory: ``/ftp`` and ``/ftp/`` are one directory.
+
+    A listing seeded without the slash links its own slash form, and the probe followed it, so the
+    Scan reported the same directory twice (soak eval SV-09: Juice Shop ``/ftp`` and ``/ftp/``,
+    ``/.well-known`` and ``/.well-known/``). The first is kept and names the other URL; listings
+    of different directories (``/ftp/quarantine``) stay findings of their own.
+    """
+    first: dict[str, dict[str, Any]] = {}
+    kept: list[dict[str, Any]] = []
+    for finding in findings:
+        evidence = finding.get("evidence") if isinstance(finding.get("evidence"), Mapping) else {}
+        location = (
+            _exposure_location(finding.get("url"))
+            if finding.get("tool") == "shakerscan_exposure_probe"
+            and evidence.get("exposure_class") == "directory_listing"
+            and not urllib.parse.urlsplit(str(finding.get("url") or "")).query
+            else None
+        )
+        if location is None:
+            kept.append(finding)
+            continue
+        twin = first.get(location)
+        if twin is None:
+            first[location] = finding
+            kept.append(finding)
+            continue
+        twin["evidence"].setdefault("also_listed_at", []).append(finding.get("url"))
+    return kept
+
+
 def _finding_identity(finding: Mapping[str, Any]) -> str:
     evidence = finding.get("evidence") if isinstance(finding.get("evidence"), Mapping) else {}
     material = {
@@ -2986,9 +3076,11 @@ def finalize_scan_report(
             "budget_reserved": dict(result.budget_reserved),
             "budget_consumed": dict(result.budget_consumed),
         })
-    findings = _fold_duplicate_header_findings(
-        _merge_template_candidates_into_exposure_proofs(list(findings_by_id.values())),
-    )
+    findings = _fold_directory_listing_slash_twins(_fold_sqli_candidates_into_proofs(
+        _fold_duplicate_header_findings(
+            _merge_template_candidates_into_exposure_proofs(list(findings_by_id.values())),
+        ),
+    ))
     _attach_observed_header_responses(
         findings, observations,
         {
