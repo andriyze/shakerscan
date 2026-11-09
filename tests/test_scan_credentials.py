@@ -484,6 +484,30 @@ def test_browser_crawl_is_a_selectable_scan_credential_capability():
     assert "web.crawl" in SCAN_SEMANTIC_CREDENTIAL_CAPABILITIES
 
 
+def test_a_profile_can_grant_the_access_control_batch_its_principal():
+    """authz_surface needs the signed-in principal; a profile could not grant it, so the batch was
+    skipped (prerequisite unavailable) on every signed-in Scan that selected it."""
+    from api.credential_api import _credential_capabilities, _safe_credential_capabilities
+    from api.runtime.scan_credentials import SCAN_SEMANTIC_CREDENTIAL_CAPABILITIES
+
+    assert "authz_surface.verify_batch" in SCAN_SEMANTIC_CREDENTIAL_CAPABILITIES
+    # Still never a default: it is an active capability and needs the profile's elevation.
+    assert "authz_surface.verify_batch" not in _safe_credential_capabilities(
+        target_kind="web", auth_kind="form_login")
+    granted = _credential_capabilities(["authz_surface.verify_batch"], target_kind="web",
+                                       auth_kind="form_login", allow_active=True)
+    assert granted == ["authz_surface.verify_batch"]
+    options = {
+        "auth_cookies": "session=primary-secret",
+        "resolved_credential_profiles": [{
+            "profile_id": "p1", "profile_version": 1, "scan_lane": "primary",
+            "auth_kind": "form_login", "allowed_capabilities": granted,
+        }],
+    }
+    principal = resolve_scan_http_principal(options, capability_name="authz_surface.verify_batch")
+    assert principal.authenticated is True
+
+
 def test_scan_action_identity_binds_credential_metadata_revision():
     from api.scan.action_plan import credential_profile_action_refs, ScanActionPlanError
 
