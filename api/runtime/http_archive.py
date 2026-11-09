@@ -407,7 +407,11 @@ def tunnel_comment(row: Mapping[str, Any]) -> str:
     who = " ".join(part for part in (
         str(row.get("capability_name") or ""), f"({tunnel['tool']})" if tunnel.get("tool") else "",
     ) if part)
-    if tunnel.get("content_readable") is False:
+    logged = int(tunnel.get("wire_log_archived") or 0) if str(tunnel.get("wire_log_archived") or "0").isdigit() else 0
+    if logged:
+        text = (f"pinned tunnel of {who or 'an external tool'}: the {logged} request(s) the tool's own "
+                "wire log recorded are archived as their own entries")
+    elif tunnel.get("content_readable") is False:
         text = (f"encrypted pinned tunnel of {who or 'an external tool'}: the requests it carried "
                 "were not readable and are not archived")
     else:
