@@ -1297,6 +1297,13 @@ def httpx_credential_config_bytes(trusted_headers: Mapping[str, Any]) -> bytes:
     return encoded
 
 
+# A credential piece shorter than this is not masked on its own in scanner output: it protects
+# nothing (a few thousand guesses find it), and masking every occurrence of a value such as a
+# target's ``sess=1`` cookie rewrote each "1" in every URL, host and port of the output, so a
+# port read as ``***8999`` and the Scan's finalization failed.
+MIN_REDACTION_PIECE = 6
+
+
 def scanner_credential_redaction_values(headers: Mapping[str, Any] | None) -> tuple[str, ...]:
     """Worker-local reflection redaction, including supported Authorization and Cookie forms."""
     values = set()
@@ -1313,7 +1320,7 @@ def scanner_credential_redaction_values(headers: Mapping[str, Any] | None) -> tu
                     pass
         if str(name).lower() == "cookie":
             values.update(part.partition("=")[2].strip().strip('"') for part in value.split(";"))
-    return tuple(value for value in values if value)
+    return tuple(value for value in values if len(value) >= MIN_REDACTION_PIECE)
 
 
 def build_scanner_argv(

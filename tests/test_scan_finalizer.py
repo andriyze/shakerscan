@@ -1807,3 +1807,12 @@ def test_corroborating_templates_past_the_sample_cap_are_counted():
     ) == [proof]
     assert len(proof["evidence"]["corroborating_templates"]) == 10
     assert proof["evidence"]["corroborating_template_count"] == 13
+
+
+def test_a_url_with_an_unreadable_port_does_not_fail_finalization():
+    """Tool output can carry a URL whose port is not a number (a masked or malformed URL);
+    comparing it must not raise, which failed the whole Scan and lost its results."""
+    assert finalizer_module._observed_url_key("http://10.10.10.103:***8999/login") is None
+    assert finalizer_module._observed_url_key("http://10.10.10.103:18999/login/") == (
+        "http://10.10.10.103:18999/login"
+    )
