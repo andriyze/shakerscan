@@ -52,7 +52,7 @@ try:
     )
     from finding_detail import RELATED_SQL, build_finding_detail, related_findings, related_sql_args
     from finding_detail.evidence_commands import current_evidence_commands
-    from proof_retest import proof_retest_request
+    from proof_retest import PASSIVE_RETEST_CHECK_TYPES, passive_retest_type, proof_retest_request
     from exposure.finding_link import related_exposures
     from list_contract import DEFAULT_LIMIT, MAX_LIMIT, SqlParams, page_params
 except ModuleNotFoundError:  # package import in host-side tests
@@ -80,7 +80,7 @@ except ModuleNotFoundError:  # package import in host-side tests
     )
     from ..finding_detail import RELATED_SQL, build_finding_detail, related_findings, related_sql_args
     from ..finding_detail.evidence_commands import current_evidence_commands
-    from ..proof_retest import proof_retest_request
+    from ..proof_retest import PASSIVE_RETEST_CHECK_TYPES, passive_retest_type, proof_retest_request
     from ..exposure.finding_link import related_exposures
     from ..list_contract import DEFAULT_LIMIT, MAX_LIMIT, SqlParams, page_params
 
@@ -775,8 +775,12 @@ def retest_capability(finding: Mapping[str, Any], identity_refusal: str | None) 
             # Not "ai": the AI tier alone is at most inconclusive, so it could never conclude.
             # Tiered runs it after the prover; the API still takes mode=ai.
             caps["retest_modes"] = ["tiered", "deterministic"]
-            caps["retest_active"] = retest_sends_active_requests(
-                retest_type, ai_tier_available=_ai_verifier_ready(),
+            # A passive check repeated by its own check (``proof_retest``) never reaches the AI
+            # tier: it sends one GET the Scan already sent.
+            passive = proof_retest_request(finding)[0]
+            caps["retest_active"] = (
+                False if passive is not None and passive.capability in PASSIVE_RETEST_CHECK_TYPES
+                else retest_sends_active_requests(retest_type, ai_tier_available=_ai_verifier_ready())
             )
         else:
             # No prover of this finding's kind of check, or only the AI tier (generic_http,
@@ -2207,6 +2211,11 @@ def infer_retest_type(finding: dict[str, Any], evidence: dict[str, Any], overrid
         return "bola"
     if autonomous_family:
         return "generic_http"
+
+    # A passive check the retest repeats by its own check: an exposure read, a missing header.
+    passive = passive_retest_type(finding)
+    if passive:
+        return passive
 
     # Shared title/tool inference from retest_contract so API, worker, and
     # auto-retest policy always agree on whether a finding is retestable.

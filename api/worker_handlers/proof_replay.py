@@ -79,6 +79,15 @@ _BUDGETS: dict[str, dict[str, int]] = {
 }
 _REFUSALS = frozenset({"authentication_required", "target_refused"})
 _LIKELY_FIXED = "The check that proved the finding sent the same request again and did not reproduce it."
+_REPRODUCED = {
+    "": "The check that proved the finding sent the same request again and reproduced it.",
+    "exposure.probe": "The same URL still serves the exposed content: the exposure check matched it again.",
+    "http.header_check": "The same page still answers without the header.",
+}
+_FIXED = {
+    "exposure.probe": "The same URL no longer serves the exposed content: the exposure check did not match it.",
+    "http.header_check": "The same page now answers with the header.",
+}
 # Answers that say the service, not a fix, decided what the check saw. One of these anywhere (down,
 # overloaded, rate-limiting) leaves the check's comparisons meaningless; so does a missing page or
 # a server error when every request met one. A check that reproduces still proves the finding.
@@ -249,6 +258,87 @@ async def _differential_check(
         proof["unavailable_status"] = unavailable
         return "unavailable", proof
     return "not_reproduced", proof
+
+
+# The exposure probe's own classifier and excerpt redactor: a retest judges the answer as the Scan did.
+def _exposure_classifier() -> tuple[Callable[..., Any], Callable[..., str]]:
+    try:
+        from capabilities.exposure_probe import classify_exposure, redacted_exposure_excerpt
+    except ModuleNotFoundError:  # package import in host-side tests
+        from ..capabilities.exposure_probe import classify_exposure, redacted_exposure_excerpt
+    return classify_exposure, redacted_exposure_excerpt
+
+
+# Headers shown in a header retest's evidence: the posture set the Scan records, never cookies.
+_SHOWN_HEADERS = frozenset({
+    "content-security-policy", "content-security-policy-report-only", "strict-transport-security",
+    "x-frame-options", "x-content-type-options", "referrer-policy", "permissions-policy",
+    "cross-origin-opener-policy", "cross-origin-resource-policy", "cross-origin-embedder-policy",
+    "content-type", "server", "location",
+})
+
+
+async def _passive_check(
+    request: ProofRetestRequest, *, fetch: Callable[..., Awaitable[Mapping[str, Any]]],
+) -> tuple[str, dict[str, Any]]:
+    """One GET of the URL the Scan's passive check read, judged by that check.
+
+    ``(outcome, proof)``: ``reproduced`` (the same exposure class, or the header still missing),
+    ``not_reproduced``, ``unavailable``, ``unjudged`` (an answer the check cannot judge: a header
+    check needs the 2xx/3xx page it judged) or ``failed``. The request is sent as the Scan sent it:
+    a GET with no body, redirects not followed.
+    """
+    response = await fetch(request.url, method="GET", timeout=15, follow_redirects=False)
+    status = int(response.get("status_code") or 0)
+    headers = {str(k).lower(): str(v) for k, v in dict(response.get("headers") or {}).items()}
+    proof: dict[str, Any] = {
+        "technique": (
+            "exposure_signature_replay" if request.capability == "exposure.probe"
+            else "header_presence_replay"
+        ),
+        "request": f"GET {redact_url(request.url)}",
+        "response_status": status or None,
+        "content_type": headers.get("content-type", "")[:200],
+        "checked_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+    }
+    if not status:
+        proof["errors"] = [_error_code(response)]
+        return "failed", proof
+    if request.capability == "exposure.probe":
+        classify, excerpt = _exposure_classifier()
+        body = str(response.get("body") or "").encode("utf-8", "replace")
+        proof["expected_exposure_class"] = request.expected
+        proof["response_bytes"] = len(body)
+        signature = await asyncio.to_thread(
+            classify, path=request.url, status=status, headers=headers, body=body,
+        )
+        if signature is not None:
+            proof["exposure_class"] = signature.exposure_class
+            proof["matched_signature"] = signature.matched_pattern
+        if signature is not None and signature.exposure_class == request.expected:
+            # The probe's own redaction: a secret-bearing body is never excerpted.
+            proof["redacted_excerpt"] = await asyncio.to_thread(excerpt, body, signature)
+            return "reproduced", proof
+        # A stack-trace exposure is judged on a 5xx answer; any other on the file's own 200.
+        if status in _UNAVAILABLE:
+            proof["unavailable_status"] = status
+            return "unavailable", proof
+        return "not_reproduced", proof
+    header = request.expected
+    value = headers.get(header, "").strip()
+    proof["header"] = header
+    proof["header_present"] = bool(value)
+    proof["observed_headers"] = {
+        name: (redact_url(value_) if name == "location" else value_)[:500]
+        for name, value_ in sorted(headers.items()) if name in _SHOWN_HEADERS
+    }
+    if status in _UNAVAILABLE:
+        proof["unavailable_status"] = status
+        return "unavailable", proof
+    if not 200 <= status < 400:
+        # The Scan judged the header on the page's 2xx/3xx answer; an error page proves nothing.
+        return "unjudged", proof
+    return ("not_reproduced" if value else "reproduced"), proof
 
 
 # What the browser proof lets a page send: same-origin reads, at most this many requests.
@@ -652,7 +742,9 @@ async def run_proof_retest(
     except Exception:
         pass
     try:
-        if request.capability == "xss.browser_prove_batch":
+        if request.capability in ("exposure.probe", "http.header_check"):
+            outcome, proof = await _passive_check(request, fetch=poe.fetch_with_capture)
+        elif request.capability == "xss.browser_prove_batch":
             outcome, proof = await _browser_check(
                 request, poe=poe, auth_headers=auth_headers, cancelled=cancelled,
                 proved=_proof_page_requests(verification),
@@ -675,7 +767,7 @@ async def run_proof_retest(
     artifacts = {"outcome": outcome}
     if outcome == "reproduced":
         return _result(status="completed", result_status="still_vulnerable", verdict="exploited",
-                       reason="The check that proved the finding sent the same request again and reproduced it.",
+                       reason=_REPRODUCED.get(request.capability, _REPRODUCED[""]),
                        confidence=0.95, proof=proof, artifacts=artifacts, **common)
     if outcome == "unavailable":
         return _result(status="completed", result_status="inconclusive", verdict="inconclusive",
@@ -700,6 +792,12 @@ async def run_proof_retest(
         return _result(status="completed", result_status="inconclusive", verdict="inconclusive",
                        reason=_page_incomplete_reason(proof.get("page_incomplete") or {}),
                        proof=proof, artifacts=artifacts, **common)
+    if outcome == "unjudged":
+        return _result(status="completed", result_status="inconclusive", verdict="inconclusive",
+                       reason=f"The page answered HTTP {proof.get('response_status')}, not the page "
+                              "the check read when it found the header missing, so the header "
+                              "could not be judged; the finding stays open.",
+                       proof=proof, artifacts=artifacts, **common)
     if outcome == "failed":
         return _result(status="completed", result_status="inconclusive", verdict="inconclusive",
                        reason="The retest's requests did not all get an answer, so nothing was "
@@ -714,7 +812,7 @@ async def run_proof_retest(
         origin_reached=True, reach_reason=None,
     )
     if verdict == "likely_fixed":
-        reason = _LIKELY_FIXED
+        reason = _FIXED.get(request.capability, _LIKELY_FIXED)
     return _result(status="completed", result_status=result_status, verdict=verdict, reason=reason,
                    confidence=0.9 if verdict == "likely_fixed" else None, proof=proof,
                    artifacts=artifacts, **common)
