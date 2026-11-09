@@ -154,12 +154,20 @@ class ScannerExecutionAdapter:
         if isinstance(tunnel, Mapping):
             # Only a Scan worker has a capture open; elsewhere this records nothing. The
             # archive never decides the action's outcome.
+            options = self._process_payload.get("scanner_options")
+            options = options if isinstance(options, Mapping) else {}
             try:
                 _scan_capture.record_tunnel(
                     tunnel, capability_name=self._archive_capability_name,
                     tool=str(self._process_payload.get("tool_name") or ""),
                     elapsed_ms=max(0, int(process_result.get("elapsed_seconds") or 0)) * 1_000,
                     error=str(process_result.get("error") or "") or None,
+                    # The request the tool was given: an encrypted tunnel's only record of it.
+                    tool_input={
+                        "url": self._process_payload.get("execution_target"),
+                        "method": options.get("method"),
+                        "body_field_names": options.get("body_field_names"),
+                    },
                 )
             except Exception as exc:  # noqa: BLE001
                 print(f"[http-archive] {self._archive_capability_name}: tunnel not recorded: "
