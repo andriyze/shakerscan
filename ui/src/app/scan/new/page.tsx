@@ -290,7 +290,7 @@ export default function NewScanPage() {
         .catch((cause) => { if (!cancelled) { setContractPreview(null); setContractPreviewError(cause instanceof Error ? cause.message : 'Preview unavailable'); setContractPreviewLoading(false) } })
     }, 150)
     return () => { cancelled = true; window.clearTimeout(timer) }
-  }, [familyPreset, budgetProfile, customFamilies, activeTesting, allowStateChanging, networkDiscovery, subdomainDiscovery, topology, previewCeilingsKey, credentialUse])
+  }, [familyPreset, budgetProfile, customFamilies, activeTesting, allowStateChanging, networkDiscovery, subdomainDiscovery, credentialUse, topology, previewCeilingsKey])
 
   /** Searchable choices for one lane; incompatible profiles stay visible with the reason. */
   function slotOptions(lane: 'primary' | 'secondary'): ComboboxOption[] {
