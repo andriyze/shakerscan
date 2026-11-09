@@ -379,20 +379,31 @@ async def run_gungnir(domains: list[str], cap: "ApexDailyCap | None" = None):
 async def _stop(proc, readers) -> None:
     """Terminate the gungnir process group (kill it after 5 s), reap the process and cancel its
     output readers. Shielded, so a cancellation of the caller still waits for the process to go."""
-    def signal_group(signum):
+    def signal_all(signum):
+        # The leader through asyncio, then its group (gungnir runs in its own session).
         try:
-            os.killpg(proc.pid, signum)
+            proc.kill() if signum == signal.SIGKILL else proc.terminate()
+        except ProcessLookupError:
+            pass
+        signal_group(signum)
+
+    def signal_group(signum):
+        pid = getattr(proc, "pid", None)
+        if not pid:
+            return
+        try:
+            os.killpg(pid, signum)
         except (ProcessLookupError, PermissionError):
             pass
 
     async def stop():
         if proc is not None:
             if proc.returncode is None:
-                signal_group(signal.SIGTERM)
+                signal_all(signal.SIGTERM)
                 try:
                     await asyncio.wait_for(proc.wait(), timeout=5)
                 except asyncio.TimeoutError:
-                    signal_group(signal.SIGKILL)
+                    signal_all(signal.SIGKILL)
                     await proc.wait()
             # The leader may be gone while a child it started still runs in its group.
             signal_group(signal.SIGKILL)
