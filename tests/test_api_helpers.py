@@ -23489,3 +23489,47 @@ def test_results_listing_serialises_cache_access_across_threads(tmp_path):
         thread.join()
     assert not errors
     assert isinstance(operations_router._RESULT_SUMMARIES_LOCK, type(_threading.Lock()))
+
+
+def test_deployment_decision_reads_each_exceptions_compensating_controls(monkeypatch):
+    """GET /scans/{id}/deployment-decision loaded exceptions without their compensating
+    controls, so its hygiene summary said every exception lacked them."""
+    scan_id, target_id = uuid.uuid4(), uuid.uuid4()
+    expires = datetime.now(timezone.utc) + timedelta(days=14)
+
+    class Conn:
+        async def fetchrow(self, query, *args):
+            if "FROM scans" in query:
+                return {"id": scan_id, "target_id": target_id, "status": "completed", "scan_type": "scan",
+                        "run_kind": "scan", "result": json.dumps({"findings": []}), "score": 100,
+                        "grade": "A", "completed_at": datetime.now(timezone.utc)}
+            if "FROM targets WHERE id" in query:
+                return {"url": "https://app.example.test", "discovery_source": "manual"}
+            return None
+
+        async def fetch(self, query, *args):
+            if "FROM finding_exceptions" in query:
+                return [{"finding_id": "f1", "fingerprint": None, "policy_id": None, "status": "active",
+                         "approver": "security lead", "owner": "payments", "scope": "x",
+                         "reason": "accepted", "compensating_controls": "blocked at the edge",
+                         "expires_at": expires}]
+            if "FROM targets" in query:
+                return [{"id": target_id, "url": "https://app.example.test", "discovery_source": "manual"}]
+            return []
+
+    empty = {"rows": [], "total": 0, "complete": True}
+
+    async def no_rows(*_args, **_kwargs):
+        return dict(empty)
+
+    async def no_ids(*_args, **_kwargs):
+        return {}
+
+    monkeypatch.setattr(api_module, "db_pool", _pool_for(Conn()))
+    monkeypatch.setattr(api_module, "load_target_blocking_rows", no_rows)
+    monkeypatch.setattr(api_module, "load_target_history", no_rows)
+    monkeypatch.setattr(api_module, "load_scan_finding_ids", no_ids)
+    decision = asyncio.run(api_module.get_scan_deployment_decision(str(scan_id)))
+    summary = decision["exception_summary"]
+    assert summary["total"] == 1
+    assert summary["missing_compensating_controls"] == 0

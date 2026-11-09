@@ -12094,6 +12094,7 @@ async def get_scan_deployment_decision(scan_id: str):
         "owner": r["owner"],
         "scope": r["scope"],
         "reason": r["reason"],
+        "compensating_controls": r["compensating_controls"],
         "expires_at": r["expires_at"].isoformat() if r["expires_at"] else None,
     } for r in exc_rows]
 
