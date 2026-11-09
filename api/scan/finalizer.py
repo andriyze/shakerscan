@@ -1518,6 +1518,68 @@ def _findings_for_action(
             findings.append(finding)
         elif (
             kind == "authz_surface_proof"
+            and result.capability_name == "authz_surface.verify_batch"
+            and item.get("proof_state") == "verified"
+            and item.get("finding_verdict") == "verified"
+            and item.get("proof_contract") == "authz_surface_password_hash_disclosure/v1"
+            and str(item.get("request_url") or "")
+            and int(item.get("repetitions") or 0) >= 2
+            and int(item.get("hash_count") or 0) >= 1
+        ):
+            # The signed-in principal read stored password hashes, the same on every read.
+            # Another account's hash (two distinct ones reached one principal) or a hash any
+            # anonymous caller reads is cracked offline at the attacker's pace: high. The
+            # principal's own hash in its own record is excessive data exposure: medium.
+            other_accounts = item.get("other_accounts_hashes") is True
+            anonymous = item.get("anonymous_reads_hashes") is True
+            finding = _base_finding(
+                tool="shakerscan_authz_surface",
+                title=(
+                    "API returns other accounts' password hashes" if other_accounts
+                    else "API returns password hashes"
+                ),
+                severity="high" if other_accounts or anonymous else "medium",
+                cwe="CWE-639" if other_accounts else "CWE-200",
+                url=item.get("request_url"),
+                evidence={
+                    "route_id": item.get("route_id"),
+                    "request_url": item.get("request_url"),
+                    "technique": item.get("technique"),
+                    "proof_contract": item.get("proof_contract"),
+                    "anonymous_status": item.get("anonymous_status"),
+                    "authenticated_status": item.get("authenticated_status"),
+                    "response_body_sha256": item.get("response_body_sha256"),
+                    "hash_count": item.get("hash_count"),
+                    "hash_fields": [
+                        {"field": str(entry.get("field") or "")[:120]}
+                        for entry in list(item.get("hash_fields") or ())[:10]
+                        if isinstance(entry, Mapping)
+                    ],
+                    "other_accounts_hashes": other_accounts,
+                    "anonymous_reads_hashes": anonymous,
+                    "repetitions": item.get("repetitions"),
+                    "canonical_capability": result.capability_name,
+                    "capability_receipt": receipt,
+                    "proof_producer": "shakerscan",
+                    "evidence_type": "deterministic_response_signature",
+                },
+            )
+            finding.update({
+                "verified": True,
+                "suspected": False,
+                "needs_verification": False,
+                "proof_state": "verified",
+                "proof_contract_v2": _canonical_proof_contract_v2(
+                    capability_name=result.capability_name, kind=str(kind), receipt=receipt,
+                ),
+                "verification_reason": (
+                    "The signed-in response carried the same stored password hash fields on "
+                    "repeated reads"
+                ),
+            })
+            findings.append(finding)
+        elif (
+            kind == "authz_surface_proof"
             and item.get("proof_state") == "verified"
             and item.get("finding_verdict") == "verified"
             and str(item.get("proof_contract") or "").startswith("authz_surface_")
