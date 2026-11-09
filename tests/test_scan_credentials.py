@@ -506,6 +506,17 @@ def test_a_profile_can_grant_the_access_control_batch_its_principal():
     }
     principal = resolve_scan_http_principal(options, capability_name="authz_surface.verify_batch")
     assert principal.authenticated is True
+    # A default profile (its safe defaults let the crawl use the session) covers it too: the
+    # batch sends the signed-in principal only the read-only GETs the crawl would.
+    defaults = list(_safe_credential_capabilities(target_kind="web", auth_kind="form_login"))
+    assert "web.crawl" in defaults
+    default_options = {**options, "resolved_credential_profiles": [{
+        **options["resolved_credential_profiles"][0], "allowed_capabilities": defaults}]}
+    assert resolve_scan_http_principal(
+        default_options, capability_name="authz_surface.verify_batch").authenticated is True
+    # An active verifier is still not covered by the defaults.
+    assert resolve_scan_http_principal(
+        default_options, capability_name="xss.verify_batch").authenticated is False
 
 
 def test_scan_action_identity_binds_credential_metadata_revision():
