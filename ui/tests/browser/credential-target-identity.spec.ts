@@ -181,3 +181,29 @@ for (const failure of Object.keys(failureReasons) as LinkFailure[]) {
     expect(consumers).not.toContain(exactId)
   })
 }
+
+// 2026-11 evaluation: with Target type Web the picker listed each host ("host · production") before
+// its web app under the same name; a form login saved on the host was then never offered by New
+// Scan, which lists the scanned web target's profiles. Web and API credentials pick web apps only.
+test('web credentials are offered web apps only, network credentials their hosts', async ({page}) => {
+  const rows = [assetRow(1, 'corp.example', 'host://corp.example'), assetRow(2, 'corp.example', 'https://corp.example')]
+  const pickerSearches: (string | null)[] = []
+  await pinMockApiOrigin(page)
+  await page.route(`${MOCK_API_ORIGIN}/**`, async route => {
+    const url = new URL(route.request().url())
+    if (url.pathname === '/targets/inventory') {
+      pickerSearches.push(url.searchParams.get('web_only'))
+      return route.fulfill({json: servePage(rows, url)})
+    }
+    return route.fulfill({json: {profiles: [], targets: [], items: [], has_more: false, next_cursor: null, total: 0}})
+  })
+  await page.goto('/credentials')
+  await page.getByLabel('Target', {exact: true}).click()
+  await expect(page.getByRole('option').filter({hasText: 'web app ·'})).toHaveCount(1)
+  await expect(page.getByRole('option').filter({hasText: 'host ·'})).toHaveCount(0)
+  expect(pickerSearches).toContain('true')
+  await page.keyboard.press('Escape')
+  await page.getByLabel('Target type', {exact: true}).selectOption('network')
+  await page.getByLabel('Target', {exact: true}).click()
+  await expect(page.getByRole('option').filter({hasText: 'host ·'})).toHaveCount(1)
+})
