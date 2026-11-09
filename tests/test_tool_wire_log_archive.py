@@ -165,3 +165,28 @@ def test_a_har_its_tool_was_stopped_writing_still_yields_every_finished_entry():
     assert [(item["method"], item["url"]) for item in found] == [("POST", f"{ORIGIN}/hub/login")] * 2
     assert tool_wire_log.wire_log_transactions("dalfox", '{"log":{"entries":[', ORIGIN) == ([], 0)
     assert tool_wire_log.wire_log_transactions("dalfox", "not a har", ORIGIN) == ([], 0)
+
+
+def test_a_body_the_tools_log_does_not_keep_is_said_to_be_unknown():
+    """Dalfox's HAR records every POST with postData.text "" (seen live on 186 sign-in POSTs): the
+    archive row and its HAR entry say the body was not logged, never that it was empty."""
+    from runtime.http_archive import har_entry
+
+    found, _dropped = tool_wire_log.wire_log_transactions(
+        "dalfox", json.dumps({"log": {"entries": [{"request": {
+            "method": "POST", "url": f"{ORIGIN}/hub/login", "postData": {"text": ""}},
+            "response": {"status": 401}}]}}), ORIGIN)
+    assert found[0]["request_body_not_logged"] is True and found[0]["request_body"] is None
+    capture.start_capture()
+    try:
+        capture.record_tunnel(_tunnel(wire_log_transactions=found), capability_name="xss.verify_batch", tool="dalfox")
+    finally:
+        calls = capture.drain_capture()["calls"]
+    logged = calls[1]
+    assert logged["tunnel_request"]["request_body"] == "not_logged_by_tool"
+    entry = har_entry({"method": "POST", "url": logged["url"],
+                       "metadata_json": {"tunnel_request": logged["tunnel_request"]}},
+                      request_body=None, response_body=None)
+    assert "body sent is unknown, not empty" in entry["comment"]
+    # sqlmap's log keeps bodies: nothing is said.
+    assert "request_body_not_logged" not in tool_wire_log.sqlmap_transactions(SQLMAP_LOG, ORIGIN)[1]

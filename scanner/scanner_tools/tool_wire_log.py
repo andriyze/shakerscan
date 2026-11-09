@@ -166,12 +166,17 @@ def har_transactions(text: str) -> list[dict[str, Any]]:
             status = int(response.get("status") or 0) or None
         except (TypeError, ValueError):
             status = None
-        found.append(_transaction(
+        item = _transaction(
             method=str(request.get("method") or "GET"), url=str(request["url"]),
             request_headers=pairs(request.get("headers")), request_body=str(post.get("text") or ""),
             status=status, response_headers=pairs(response.get("headers")),
             response_body=str(content.get("text") or ""),
-        ))
+        )
+        # Dalfox's HAR leaves every request body empty (postData.text ""), whatever it sent: the
+        # entry says the body was not logged rather than read as an empty one.
+        if item["method"] not in {"GET", "HEAD", "OPTIONS"} and not item["request_body"]:
+            item["request_body_not_logged"] = True
+        found.append(item)
     return found
 
 
