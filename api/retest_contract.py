@@ -275,6 +275,7 @@ SUPPORTED_RETEST_TYPES: tuple[str, ...] = (
     "idor",
     "bola",
     "exposed_file",
+    "missing_header",
     "generic_http",
 )
 
@@ -364,6 +365,8 @@ RETEST_TYPE_ALIASES: dict[str, str] = {
     "sensitive_file_exposure": "exposed_file",
     "forced_browsing": "exposed_file",
     "forced-browsing": "exposed_file",
+    "missing_header": "missing_header",
+    "missing-header": "missing_header",
     "generic_http": "generic_http",
 }
 
@@ -466,7 +469,7 @@ _RETEST_REASON_BY_TOOL: dict[str, str] = {
 # Retests whose prover sends only what the Scan's own check sent: a plain GET of the exposed
 # file, or a GET with an Origin header. Every other prover sends attack payloads, a forged token
 # or a request as another principal, and the AI tier may send requests of its own choosing.
-PASSIVE_RETEST_TYPES: frozenset[str] = frozenset({"exposed_file", "cors"})
+PASSIVE_RETEST_TYPES: frozenset[str] = frozenset({"exposed_file", "cors", "missing_header"})
 
 DEFAULT_REPLAY_PAYLOADS: dict[str, str] = {
     "xss": "<script>alert(1)</script>",
@@ -483,6 +486,7 @@ DEFAULT_REPLAY_PAYLOADS: dict[str, str] = {
     "idor": "",
     "bola": "",
     "exposed_file": "",
+    "missing_header": "",
     "generic_http": "",
 }
 
@@ -503,6 +507,7 @@ ATTEMPT_LADDERS: dict[str, list[str]] = {
     "idor": ["cross_user_access", "sequential_id_probe", "ai_reasoning"],
     "bola": ["cross_user_access", "sequential_id_probe", "ai_reasoning"],
     "exposed_file": ["content_marker_replay", "ai_reasoning"],
+    "missing_header": ["header_presence_replay"],
     "generic_http": ["ai_reasoning"],
 }
 
@@ -912,7 +917,7 @@ def build_replay_commands(inputs: dict[str, Any]) -> list[str]:
     param = str(inputs.get("param") or "").strip()
     payload = str(inputs.get("payload") or "").strip() or DEFAULT_REPLAY_PAYLOADS.get(finding_type, "test")
     marked = _sqlmap_marked_segment_urls(target_url, param, payload) if method != "POST" else None
-    if marked and finding_type not in ("exposed_file", "generic_http"):
+    if marked and finding_type not in ("exposed_file", "missing_header", "generic_http"):
         return [f"curl -i -k {shell_word(_replay_url(url))}" for url in marked]
 
     if not target_url:
@@ -923,7 +928,7 @@ def build_replay_commands(inputs: dict[str, Any]) -> list[str]:
     if not _has_masked_query_value(target_url):
         commands.append(f"curl -i -k {url}")
 
-    if finding_type in ("exposed_file", "generic_http"):
+    if finding_type in ("exposed_file", "missing_header", "generic_http"):
         # Exposure replays are a plain GET; injection-style payload commands
         # would be misleading here.
         return commands
