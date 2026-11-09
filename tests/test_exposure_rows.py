@@ -171,3 +171,26 @@ def test_a_verify_scan_is_credited_only_to_the_listener_on_its_own_origin():
     # A Scan of another origin of the same target says nothing about this listener.
     _scan, elsewhere = _scan_records(["cve-x"], [_step(["cve-x"])], target_url="https://app.example.test:8443/")
     assert candidate_verification(TARGET, _service("d"), candidate, elsewhere)["status"] == "available"
+
+
+def test_a_distribution_builds_upstream_advisories_do_not_rate_the_listener():
+    """Two Ubuntu OpenSSH package revisions got the same 17 upstream candidates and read "high";
+    the distribution may have backported every fix (eval SV-11)."""
+    def distro(cve, severity="high", **extra):
+        return {**_candidate(cve, severity), "match_type": "cpe_product_version",
+                "applicability_status": "unresolved", "unresolved_reason": "distribution_package", **extra}
+
+    rows = listener_groups([
+        _service("u8", port=22, product="OpenSSH", version="10.2p1 Ubuntu 2ubuntu3.8",
+                 candidates=[distro("CVE-2025-0001"), distro("CVE-2025-0002", "critical")]),
+        _service("upstream", port=2222, product="OpenSSH", version="9.1",
+                 candidates=[{**_candidate("CVE-2023-0003", "medium"), "applicability_status": "affected"}]),
+    ])
+    by_port = {row["port"]: row for row in rows}
+    assert by_port[22]["max_severity"] is None
+    assert (by_port[22]["candidate_count"], by_port[22]["distribution_build_candidates"]) == (2, 2)
+    assert by_port[2222]["max_severity"] == "medium" and by_port[2222]["distribution_build_candidates"] == 0
+    # A check that matched on the listener rates it whatever the package says.
+    matched = listener_groups([_service("m", port=22, product="OpenSSH", version="10.2p1 Ubuntu 2ubuntu3.2",
+                                        candidates=[distro("CVE-2025-0001", verification={"status": "check_matched"})])])
+    assert matched[0]["max_severity"] == "high"

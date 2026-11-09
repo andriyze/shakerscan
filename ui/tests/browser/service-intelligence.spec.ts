@@ -144,3 +144,26 @@ test('components behind one listener show their own evidence and their unknowns'
   await expect(details).toContainText('Unresolved: version not reported')
   expect(await page.evaluate(() => document.documentElement.scrollWidth > document.documentElement.clientWidth)).toBe(false)
 })
+
+test('a distribution build lists its upstream candidates as probable and has no severity', async ({ page }) => {
+  // Fixture: the GoAhead listener as served, plus an Ubuntu OpenSSH package whose 17 upstream
+  // candidates are all unresolved for the distribution's backports (eval SV-11).
+  const target = fixture.targets[0]
+  const ssh = {
+    ...target.listener_groups[0], key: 'tcp/22/openssh/10.2p1 Ubuntu 2ubuntu3.8', port: 22, service: 'ssh',
+    product: 'OpenSSH', version: '10.2p1 Ubuntu 2ubuntu3.8', max_severity: null, known_exploited: 0,
+    candidate_count: 17, distribution_build_candidates: 17, checks_available: 0,
+  }
+  const served = { ...fixture, targets: [{ ...target, listener_groups: [...target.listener_groups, ssh] }] }
+  await pinMockApiOrigin(page)
+  await page.route(`${MOCK_API_ORIGIN}/**`, async (route) => {
+    const url = new URL(route.request().url())
+    if (url.pathname === '/exposure/services') return route.fulfill({ json: served })
+    return route.fulfill({ json: { status: 'healthy', workers: [], targets: [], devices: [], domains: [], total: 0 } })
+  })
+  await page.goto('/exposure')
+  const row = page.getByTestId('listener-row').filter({ hasText: 'OpenSSH' })
+  await expect(row).toContainText('17 CVE candidates')
+  await expect(row.getByTestId('distribution-build-candidates')).toHaveText(' · all probable: distribution build, check vendor backports')
+  await expect(row.locator('td').nth(2)).toHaveText('—')
+})

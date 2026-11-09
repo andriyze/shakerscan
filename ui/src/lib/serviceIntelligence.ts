@@ -115,6 +115,8 @@ export interface ListenerGroup {
   max_severity: 'critical' | 'high' | 'medium' | 'low' | null
   known_exploited: number
   candidate_count: number
+  /** Candidates for a distribution build's upstream version: probable, they do not rate the row. */
+  distribution_build_candidates?: number
   finding_count: number
   checks_available: number
   check_matched: number
