@@ -1970,9 +1970,9 @@ def _fold_sqli_candidates_into_proofs(findings: list[dict[str, Any]]) -> list[di
 
     sqlmap's "Potential SQL injection" on a parameter, or the request verifier's candidate, and
     the deterministic proof on the same route, method and input are one issue: the Scan reported
-    it twice, once verified and once still to verify (soak eval SV-09: Juice Shop's product
-    search). The candidate is kept on the proof as corroborating evidence (tool, input, database
-    named); a candidate on another input, method or route stays a finding of its own.
+    it twice, once verified and once still to verify (Juice Shop's product search). The
+    candidate is kept on the proof as corroborating evidence (tool, input, database named); a
+    candidate on another input, method or route stays a finding of its own.
     """
     proofs: dict[tuple[str, str, str, str], dict[str, Any]] = {}
     by_candidate: dict[str, dict[str, Any]] = {}
@@ -2017,8 +2017,8 @@ def _fold_directory_listing_slash_twins(findings: list[dict[str, Any]]) -> list[
     """One directory-listing finding per directory: ``/ftp`` and ``/ftp/`` are one directory.
 
     A listing seeded without the slash links its own slash form, and the probe followed it, so the
-    Scan reported the same directory twice (soak eval SV-09: Juice Shop ``/ftp`` and ``/ftp/``,
-    ``/.well-known`` and ``/.well-known/``). The first is kept and names the other URL; listings
+    Scan reported the same directory twice (Juice Shop ``/ftp`` and ``/ftp/``, ``/.well-known``
+    and ``/.well-known/``). The first is kept and names the other URL; listings
     of different directories (``/ftp/quarantine``) stay findings of their own.
     """
     first: dict[str, dict[str, Any]] = {}

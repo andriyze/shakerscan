@@ -201,7 +201,7 @@ def _rates_the_listener(candidate: Mapping[str, Any]) -> bool:
     A distribution build (``OpenSSH 10.2p1 Ubuntu 2ubuntu3.8``) carries the distribution's
     backports, so the upstream advisories for its upstream version are probable at most: two
     different package revisions got the same 17 candidates, a client-side one among them, and
-    the row read "high" (eval SV-11). Such a candidate stays listed with its unresolved reason
+    the row read "high". Such a candidate stays listed with its unresolved reason
     and does not rate the row; a verified check or finding still does.
     """
     return not (

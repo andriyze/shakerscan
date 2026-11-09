@@ -95,7 +95,7 @@ def test_a_dotenv_with_only_a_configuration_password_stays_high():
 
 
 def test_a_live_provider_token_is_critical_in_any_exposure_class():
-    # A GitHub token in a .env rates as an AWS key in settings.py does (eval SV-12).
+    # A GitHub token in a .env rates as an AWS key in settings.py does.
     dotenv = _classify("/.env", f"APP_ENV=production\nGITHUB_TOKEN={GITHUB}\nPORT=3000\n".encode())
     assert _verified(dotenv) and dotenv.severity == "critical"
 

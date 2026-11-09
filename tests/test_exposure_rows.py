@@ -175,7 +175,7 @@ def test_a_verify_scan_is_credited_only_to_the_listener_on_its_own_origin():
 
 def test_a_distribution_builds_upstream_advisories_do_not_rate_the_listener():
     """Two Ubuntu OpenSSH package revisions got the same 17 upstream candidates and read "high";
-    the distribution may have backported every fix (eval SV-11)."""
+    the distribution may have backported every fix."""
     def distro(cve, severity="high", **extra):
         return {**_candidate(cve, severity), "match_type": "cpe_product_version",
                 "applicability_status": "unresolved", "unresolved_reason": "distribution_package", **extra}
