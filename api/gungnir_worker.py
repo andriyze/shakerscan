@@ -21,6 +21,7 @@ Control via API:
 """
 
 import asyncio
+import ipaddress
 import os
 import signal
 import tempfile
@@ -91,11 +92,22 @@ def monitored_roots(roots: list[str]) -> list[str]:
         name = str(root or "").strip().lower().rstrip(".")
         if not name or name in kept:
             continue
+        if _is_address(name):
+            # An IP target's root is its address: no certificate-transparency name is under it.
+            continue
         if spans_public_suffix(name):
             print(f"[gungnir] Not monitoring {name}: it is or covers a public suffix", flush=True)
             continue
         kept.append(name)
     return kept
+
+
+def _is_address(name: str) -> bool:
+    try:
+        ipaddress.ip_address(name.strip("[]"))
+    except ValueError:
+        return False
+    return True
 
 
 class ApexDailyCap:
@@ -309,6 +321,8 @@ async def run_gungnir(domains: list[str], cap: "ApexDailyCap | None" = None):
             f.write(domain + '\n')
         roots_file = f.name
 
+    proc = None
+    readers: list[asyncio.Task] = []
     try:
         print(f"[gungnir] Starting monitor for {len(domains)} domains: {', '.join(domains[:5])}{'...' if len(domains) > 5 else ''}", flush=True)
 
@@ -339,8 +353,7 @@ async def run_gungnir(domains: list[str], cap: "ApexDailyCap | None" = None):
                     print(f"[gungnir] stderr: {err}", flush=True)
 
         # Run readers until shutdown or process ends
-        stdout_task = asyncio.create_task(read_stdout())
-        stderr_task = asyncio.create_task(read_stderr())
+        readers = [asyncio.create_task(read_stdout()), asyncio.create_task(read_stderr())]
 
         # Wait for shutdown signal or process to end
         while not shutdown_event.is_set():
@@ -349,22 +362,43 @@ async def run_gungnir(domains: list[str], cap: "ApexDailyCap | None" = None):
                 break
             await asyncio.sleep(1)
 
-        # Cleanup
-        if proc.returncode is None:
-            proc.terminate()
-            try:
-                await asyncio.wait_for(proc.wait(), timeout=5)
-            except asyncio.TimeoutError:
-                proc.kill()
-
-        stdout_task.cancel()
-        stderr_task.cancel()
-
     finally:
+        # Stop the process on every way out, the reload timeout included: monitor_loop's
+        # wait_for cancels this coroutine every DOMAIN_RELOAD_INTERVAL, and a cleanup outside
+        # `finally` was skipped then, so each reload left one more gungnir running until the
+        # container's memory limit killed them.
+        await _stop(proc, readers)
         try:
             os.unlink(roots_file)
         except Exception:
             pass
+
+
+async def _stop(proc, readers) -> None:
+    """Terminate the gungnir process (kill it after 5 s) and cancel its output readers. Shielded,
+    so a cancellation of the caller still waits for the process to go."""
+    async def stop():
+        if proc is not None and proc.returncode is None:
+            try:
+                proc.terminate()
+            except ProcessLookupError:
+                pass
+            try:
+                await asyncio.wait_for(proc.wait(), timeout=5)
+            except asyncio.TimeoutError:
+                try:
+                    proc.kill()
+                except ProcessLookupError:
+                    pass
+                await proc.wait()
+        for task in readers:
+            task.cancel()
+    task = asyncio.ensure_future(stop())
+    try:
+        await asyncio.shield(task)
+    except asyncio.CancelledError:
+        await task
+        raise
 
 
 async def monitor_loop():
