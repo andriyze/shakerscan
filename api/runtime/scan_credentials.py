@@ -51,6 +51,10 @@ SCAN_SEMANTIC_CREDENTIAL_CAPABILITIES = frozenset({
     "sqli.request_verify",
     "xss.request_verify_batch",
     "sqli.request_verify_batch",
+    # The single-identity access-control batch reads each route anonymously and as the
+    # signed-in principal; without it here no profile could grant it the principal, so the
+    # family ran anonymously or not at all (skipped, prerequisite unavailable).
+    "authz_surface.verify_batch",
 })
 _INTERACTIVE_HTTP_KINDS = frozenset({
     "form_login", "oauth_client_credentials", "oauth_password",
