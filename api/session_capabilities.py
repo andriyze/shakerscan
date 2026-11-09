@@ -17,6 +17,7 @@ ACTIONS = (
     'targets.add', 'targets.edit', 'targets.check', 'scans.start',
     'findings.retest', 'findings.verify', 'findings.triage', 'findings.accept_risk',
     'hunts.manage', 'secrets.read', 'secrets.manage', 'secrets.decide', 'records.delete',
+    'ct_monitor.toggle',
 )
 
 
