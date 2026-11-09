@@ -297,6 +297,34 @@ for (const width of [390, 1440]) {
       if (width >= 1440) await expect(page.getByRole('main').getByRole('button', { name: 'Scan again', exact: true })).toBeVisible()
     })
 
+    test('CAPS-011 Targets row menu: the Hunt command and Start Hunt follow hunts.manage', async ({ page }) => {
+      const managed = { schema: 'shakerscan.workspace-capabilities/v1', mode: 'managed', edition: 'Enterprise Edition',
+        features: { hunt: { state: 'enabled' }, targets: { state: 'enabled' } }, navigation: { '/hunt': 'hunt', '/targets': 'targets' },
+        ui_routes: ['/hunt', '/targets', '/targets/[^/]+/asset'] }
+      const menu = async () => {
+        await page.goto('/targets')
+        await page.getByRole('button', { name: 'More actions for caps.example.test', exact: true }).click()
+        await expect(page.getByRole('menuitem', { name: /Open details/ })).toBeVisible()
+      }
+      // Open-source edition: the menu links to the Hunt page.
+      await mock(page, 'viewer')
+      await menu()
+      await expect(page.getByRole('menuitem', { name: /Start Hunt/ })).toHaveCount(0)
+      await page.unrouteAll({ behavior: 'ignoreErrors' })
+      await mock(page, 'absent')
+      await menu()
+      await expect(page.getByRole('menuitem', { name: /Start Hunt/ })).toBeVisible()
+
+      // A managed workspace copies the terminal command instead; a viewer cannot start a Hunt.
+      await page.addInitScript(policy => { (window as unknown as { __SHAKERSCAN_CAPABILITIES__: unknown }).__SHAKERSCAN_CAPABILITIES__ = policy }, managed)
+      for (const [mode, count] of [['viewer', 0], ['operator', 0], ['operator-hunt', 1]] as const) {
+        await page.unrouteAll({ behavior: 'ignoreErrors' })
+        await mock(page, mode)
+        await menu()
+        await expect(page.getByRole('menuitem', { name: /Copy the Hunt command/ })).toHaveCount(count)
+      }
+    })
+
     test('CAPS-008 an answer that is not this contract keeps the whole surface (fail open)', async ({ page }) => {
       await mock(page, 'malformed')
       await page.goto(`/targets/${assetId}/asset`)

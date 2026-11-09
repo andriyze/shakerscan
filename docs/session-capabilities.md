@@ -1,6 +1,6 @@
 # Session capabilities (`session-capabilities/v1`)
 
-**Status:** maintained interface reference for the UI's capability hint (engine 2.12.1).
+**Status:** maintained interface reference for the UI's capability hint (engine 2.12.2).
 
 The web UI asks once per page load what the person using it may do, and hides the controls and
 links that would only end in a refusal. The open-source engine answers that everything is
@@ -72,7 +72,7 @@ The UI sends it to its API origin with the same credentials as every other API r
 | `findings.verify` | Finding page: "Verify finding" |
 | `findings.triage` | Finding page: the status select and the analyst verdict (shown read-only when `false`); Findings list: the selection dock's status actions |
 | `findings.accept_risk` | Finding page: "Accept risk" |
-| `hunts.manage` | Hunt page: "Stop" |
+| `hunts.manage` | Hunt page: "Stop"; Targets list menu: "Start Hunt", or "Copy the Hunt command" on a managed workspace (starting a Hunt is decided as stopping one) |
 | `secrets.read` | Target page: the "Discovered secrets" cards (their list requests are not sent when `false`) |
 | `secrets.manage` | Discovered secrets: "Revoke" / "Reactivate" and "Expiry" |
 | `secrets.decide` | Discovered secrets: "Reveal", "Grant", "Ungrant" and "Promote" (the gateway may still ask for a step-up) |
