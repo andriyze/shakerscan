@@ -9,6 +9,7 @@ export type SessionAction =
   | 'targets.add' | 'targets.edit' | 'targets.check' | 'scans.start'
   | 'findings.retest' | 'findings.verify' | 'findings.triage' | 'findings.accept_risk'
   | 'hunts.manage' | 'secrets.read' | 'secrets.manage' | 'secrets.decide' | 'records.delete'
+  | 'ct_monitor.toggle'
 export const SCHEMA_VERSION: 'session-capabilities/v1'
 export const ALL_ALLOWED: SessionCapabilities
 export function parseSessionCapabilities(body: unknown): SessionCapabilities
