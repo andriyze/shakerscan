@@ -3312,6 +3312,7 @@ class DatabaseNeutralScanActionDispatcher:
             nonlocal ordinal, absent_bodies, indistinguishable, follow_up_spent, attempted
             if result.error_code:
                 errors.append(str(result.error_code))
+            set_aside = False
             # Classification parses up to a megabyte of hostile content: it runs off the
             # event loop so heartbeats and cancellation keep working while it does.
             signature = await asyncio.to_thread(
@@ -3338,6 +3339,7 @@ class DatabaseNeutralScanActionDispatcher:
                 if bytes(result.response_body) in absent_bodies:
                     indistinguishable += 1
                     signature = None
+                    set_aside = True
             attempt_observations: list[Mapping[str, Any]] = []
             if signature is not None:
                 attempt_observations.append(await asyncio.to_thread(
@@ -3444,6 +3446,15 @@ class DatabaseNeutralScanActionDispatcher:
                     "verified" if proven else "not_proven"
                 ),
                 "budget_consumed": {"http_requests": 1},
+                # What this read examined and saw (scan check coverage): a later Scan that read
+                # the same URL and no longer saw the exposure is evidence it was fixed.
+                "examined": {
+                    "request_url": probe_url,
+                    "response_status": result.status_code,
+                    "exposure_class": signature.exposure_class if signature is not None else None,
+                    # A match set aside as the host's answer for any path judges nothing.
+                    **({"indistinguishable_from_absent": True} if set_aside else {}),
+                },
             }, *attempt_observations)
             attempt = {
                 "attempt_id": attempt_id, "candidate_id": attempt_id[:32],

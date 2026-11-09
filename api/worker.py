@@ -310,6 +310,7 @@ from scan.execution_backend import (
 from runtime import http_archive
 from scan import scoring as scan_scoring
 from scanner_tools import http_archive_capture as scanner_http_capture
+from scan.rescan_verification import record_rescan_verifications
 from scanner_tools.browser_profile import seed_browser_profile
 from scanner_tools.process_memory import ProcessTreeMemoryCeiling, kill_process_tree
 from scan.finalizer import finalize_scan_report
@@ -13611,6 +13612,19 @@ async def process_scan_job(job_data: dict):
             except Exception as e:
                 saved_count = None
                 print(f"[{job_id[:8]}] save_findings error: {e}", flush=True)
+        if target_id and not error and saved_count is not None:
+            # Open passive findings this Scan re-checked on their own URL and no longer saw:
+            # a likely_fixed verification each (scan/rescan_verification.py). No status changes.
+            try:
+                async with db_pool.acquire() as conn:
+                    rescanned = await record_rescan_verifications(
+                        conn, scan_id=scan_id, target_id=target_id, report=result,
+                    )
+                if rescanned:
+                    print(f"[{job_id[:8]}] {rescanned} open finding(s) not seen again on a re-checked URL: "
+                          "verified fixed by this scan", flush=True)
+            except Exception as e:  # noqa: BLE001 - never decides the scan
+                print(f"[{job_id[:8]}] rescan verification error: {type(e).__name__}: {e}", flush=True)
         elif ai_target_id and findings:
             try:
                 saved_count = await save_ai_findings(scan_id, ai_target_id, findings)

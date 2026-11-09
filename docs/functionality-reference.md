@@ -2068,8 +2068,8 @@ for the profile contract, invocation, limits and acceptance gates.
 
 | Surface | Count | Source |
 |---|---|---|
-| Public REST operations | 509 | `api/**/*.py` FastAPI decorators |
-| Unique REST paths | 426 | `api/**/*.py` |
+| Public REST operations | 510 | `api/**/*.py` FastAPI decorators |
+| Unique REST paths | 427 | `api/**/*.py` |
 | Check families | 20 | `api/check_registry.py` |
 | Command Arsenal commands | 85 | `api/command_arsenal.py` |
 | Tool adapters | 0 | `api/command_arsenal.py` |
@@ -2455,6 +2455,7 @@ for the profile contract, invocation, limits and acceptance gates.
 | `GET` | `/research/readiness` | `research_readiness` |
 | `GET` | `/results` | `list_results` |
 | `GET` | `/results/{target_folder}/latest` | `get_latest_result` |
+| `GET` | `/retests` | `list_retests` |
 | `GET` | `/retests/finding/{finding_id:path}` | `list_finding_retests` |
 | `GET` | `/retests/{retest_id}` | `get_retest` |
 | `GET` | `/scan/contracts` | `get_scan_public_contract` |
