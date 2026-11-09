@@ -1402,7 +1402,7 @@ def build_parser() -> argparse.ArgumentParser:
     secret_commands = secrets.add_subparsers(dest="store_command", required=True)
     listed = secret_commands.add_parser("list", help="A target's discovered secrets: reference, kind, field, "
                                                      "length, when seen, uses (never the value)")
-    listed.add_argument("target_id")
+    listed.add_argument("target_id", metavar="TARGET", help="the target's id or its URL")
     listed.add_argument("--usable", action="store_true", help="only those a Hunt can use now")
     listed.add_argument("--limit", type=_reference_list_limit, default=REFERENCE_LIST_DEFAULT, metavar="N",
                         help=f"show at most N, newest sighting first (default {REFERENCE_LIST_DEFAULT}, "
@@ -1422,7 +1422,7 @@ def build_parser() -> argparse.ArgumentParser:
         command = secret_commands.add_parser(name, help=text)
         command.add_argument("target_id")
         command.add_argument("reference", metavar="SECRET")
-        command.add_argument("--to", required=True, metavar="TARGET_ID", help="the other target")
+        command.add_argument("--to", required=True, metavar="TARGET", help="the other target: its id or URL")
     promote = secret_commands.add_parser(
         "promote", help="Move a secret into a new credential profile of the target (your step-up on Enterprise)")
     promote.add_argument("target_id")
@@ -2552,11 +2552,33 @@ def _reference_id(value: str) -> str:
     return str(value or "").strip().removeprefix("secret://")
 
 
+def _secrets_target(client: ApiClient, value: Any) -> str:
+    """A target named by its id, or by its URL as `targets authorize` takes it: the instance says
+    which registered target the URL names (GET /targets/lookup). A URL used to go into the path
+    as it was and came back as the engine's "noncanonical request path"."""
+    text = str(value or "").strip()
+    try:
+        return str(uuid.UUID(text))
+    except ValueError:
+        pass
+    url = text if "://" in text else "https://" + text
+    try:
+        answer = client.request("GET", "/targets/lookup?" + urllib.parse.urlencode({"url": url}))
+    except CliError as exc:
+        raise CliError(f"name the target by its id (this instance cannot look up {url}: {exc})") from None
+    found = answer.get("target") if isinstance(answer, Mapping) else None
+    if not isinstance(found, Mapping) or not found.get("id"):
+        raise CliError(f"no target is registered for {url}; name it by its id or its registered URL")
+    return str(found["id"]).lower()
+
+
 def _run_secrets(args: argparse.Namespace, client: ApiClient) -> int:
     """``shakerscan secrets``: a target's discovered secrets. Listing never shows a value; reveal,
     grant and promote are the person's decisions, made in their own terminal (Enterprise: with
     their step-up, applied by the gateway; an open-source engine: a keypress)."""
-    command, target = args.store_command, str(args.target_id).strip().lower()
+    command, target = args.store_command, _secrets_target(client, args.target_id)
+    if getattr(args, "to", None):
+        args.to = _secrets_target(client, args.to)
     base = f"/targets/{_quoted(target)}/discovered-secrets"
     if command == "list":
         # One more than shown, so "there are more" is known rather than guessed. An engine before

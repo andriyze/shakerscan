@@ -54,6 +54,9 @@ class Stub:
                 stub.seen.append(("GET", self.path, None))
                 if self.path.startswith("/_enterprise/"):
                     return self._reply(404, {"detail": "Not Found"})
+                if self.path.startswith("/targets/lookup?"):
+                    known = "app.example" in self.path
+                    return self._reply(200, {"target": {"id": TARGET, "url": "https://app.example"} if known else None})
                 return self._reply(200, {"secrets": [{
                     "ref": f"secret://{SECRET}", "kind": "password", "label": "DB_\x1b]0;xPASSWORD",
                     "length": 22, "state": "active", "seen_count": 2, "last_seen_at": "2026-10-13",
@@ -228,3 +231,17 @@ def test_list_sends_a_limit_and_says_when_there_are_more(monkeypatch, capsys):
     for bad in ("0", "201", "x"):
         with pytest.raises(SystemExit):
             v2_cli.main(["--api-url", "http://127.0.0.1:9", "secrets", "list", TARGET, "--limit", bad])
+
+
+def test_a_target_may_be_named_by_its_url_as_the_help_says(monkeypatch, capsys):
+    """2026-11 evaluation: `shakerscan secrets list https://app.example` sent the URL as the path
+    segment and printed the engine's "noncanonical request path"; the top-level help names the
+    argument <target>, and `targets authorize` takes a URL or an id."""
+    with Stub() as stub:
+        assert _run(stub, None, "list", "https://app.example", monkeypatch=monkeypatch) == 0
+        assert _run(stub, None, "ungrant", "app.example", SECRET, "--to", OTHER, monkeypatch=monkeypatch) == 0
+        assert _run(stub, None, "list", "https://unknown.example", monkeypatch=monkeypatch) == 2
+    assert any(path.startswith(f"/targets/{TARGET}/discovered-secrets?") for _m, path, _b in stub.seen)
+    assert ("DELETE", f"/targets/{TARGET}/discovered-secrets/{SECRET}/grants/{OTHER}", None) in stub.writes()
+    assert not any("unknown.example" in path and "discovered-secrets" in path for _m, path, _b in stub.seen)
+    assert "no target is registered for https://unknown.example" in capsys.readouterr().err
