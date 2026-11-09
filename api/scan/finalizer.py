@@ -955,6 +955,7 @@ def _findings_for_action(
     unobserved_response_urls: frozenset[str] = frozenset(),
     target_url: str = "",
     scan_password_hashes: frozenset[str] = frozenset(),
+    scan_self_password_hashes: frozenset[str] = frozenset(),
 ) -> list[dict[str, Any]]:
     findings: list[dict[str, Any]] = []
     header_origin_findings: dict[tuple[str, str], dict[str, Any]] = {}
@@ -1528,14 +1529,20 @@ def _findings_for_action(
             and int(item.get("hash_count") or 0) >= 1
         ):
             # The signed-in principal read stored password hashes, the same on every read.
-            # Another account's hash (two distinct ones reached one principal) or a hash any
-            # anonymous caller reads is cracked offline at the attacker's pace: high. The
-            # principal's own hash in its own record is excessive data exposure: medium.
-            # Two distinct hashes read by the one principal anywhere in the Scan (one batch may
-            # hold /me and another /users/1) prove it reads another account's hash.
-            other_accounts = (
-                item.get("other_accounts_hashes") is True or len(scan_password_hashes) >= 2
-            )
+            # Whose they are: a route that names the signed-in user (/me, /profile ...) holds the
+            # principal's own hash. A hash that is not it, or a response with several hashes, is
+            # another account's: cracked offline at the attacker's pace, high. The principal's own
+            # hash in its own record is excessive data exposure: medium. Without a self route,
+            # two distinct hashes read in one Scan prove another account's is among them, but not
+            # which route holds it: high, without the "other accounts" claim.
+            digests = {str(value) for value in item.get("hash_digests") or ()}
+            own_hashes = scan_self_password_hashes
+            if own_hashes:
+                other_accounts = bool(digests - own_hashes) or int(item.get("hash_count") or 0) >= 2
+                some_other = other_accounts
+            else:
+                other_accounts = int(item.get("hash_count") or 0) >= 2
+                some_other = other_accounts or len(scan_password_hashes) >= 2
             anonymous = item.get("anonymous_reads_hashes") is True
             finding = _base_finding(
                 tool="shakerscan_authz_surface",
@@ -1543,7 +1550,7 @@ def _findings_for_action(
                     "API returns other accounts' password hashes" if other_accounts
                     else "API returns password hashes"
                 ),
-                severity="high" if other_accounts or anonymous else "medium",
+                severity="high" if some_other or anonymous else "medium",
                 cwe="CWE-639" if other_accounts else "CWE-200",
                 url=item.get("request_url"),
                 evidence={
@@ -1556,6 +1563,7 @@ def _findings_for_action(
                     "response_body_sha256": item.get("response_body_sha256"),
                     "hash_count": item.get("hash_count"),
                     "distinct_hashes_read_in_scan": len(scan_password_hashes),
+                    "signed_in_users_own_record": bool(own_hashes) and not other_accounts,
                     "hash_fields": [
                         {"field": str(entry.get("field") or "")[:120]}
                         for entry in list(item.get("hash_fields") or ())[:10]
@@ -1603,7 +1611,9 @@ def _findings_for_action(
             finding = _base_finding(
                 tool="shakerscan_authz_surface",
                 title="Endpoint serves identical data to anonymous and authenticated principals",
-                severity="medium",
+                # Informational: on a public file or a health route this is intended, and nothing
+                # here tells the two apart; it rated medium beside the real findings.
+                severity="info",
                 cwe="CWE-862",
                 url=item.get("request_url"),
                 evidence={
@@ -1958,6 +1968,12 @@ def _fold_duplicate_header_findings(findings: list[dict[str, Any]]) -> list[dict
         twin_evidence["matched_urls"] = list(evidence.get("matched_urls") or ())[:5]
         twin_evidence["also_reported_by"] = "nuclei:http-missing-security-headers"
     return kept
+
+
+# A route that answers for the signed-in user rather than an object id: /me, /api/v1/profile.
+_SELF_ROUTE_RE = re.compile(
+    r"/(?:me|self|whoami|profile|account|current[-_]?user|userinfo)/?$", re.IGNORECASE,
+)
 
 
 def _route_key(origin: Any, url: Any) -> tuple[str, str]:
@@ -3025,14 +3041,23 @@ def finalize_scan_report(
             if key:
                 unobserved_response_urls.add(key)
     # Every stored password hash (keyed digest) the signed-in principal read in this Scan.
-    scan_password_hashes = frozenset(
-        str(digest)
+    disclosures = [
+        item
         for action in expected_actions
         if action_results[action.action_id].capability_name == "authz_surface.verify_batch"
         for item in observations.get(action.action_id, ())
         if isinstance(item, Mapping)
         and item.get("proof_contract") == "authz_surface_password_hash_disclosure/v1"
-        for digest in list(item.get("hash_digests") or ())[:50]
+    ]
+    scan_password_hashes = frozenset(
+        str(digest) for item in disclosures for digest in list(item.get("hash_digests") or ())[:50]
+    )
+    # The signed-in user's own hash: the one a route naming the signed-in user returned.
+    scan_self_password_hashes = frozenset(
+        str(digest) for item in disclosures
+        if _SELF_ROUTE_RE.search(urllib.parse.urlsplit(str(item.get("request_url") or "")).path)
+        and int(item.get("hash_count") or 0) == 1
+        for digest in list(item.get("hash_digests") or ())[:1]
     )
     for action in expected_actions:
         result = action_results[action.action_id]
@@ -3052,6 +3077,7 @@ def finalize_scan_report(
             unobserved_response_urls=frozenset(unobserved_response_urls),
             target_url=target_url,
             scan_password_hashes=scan_password_hashes,
+            scan_self_password_hashes=scan_self_password_hashes,
         ):
             identity = _finding_identity(finding)
             existing = findings_by_id.get(identity)
