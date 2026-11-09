@@ -289,7 +289,7 @@ surfaces:
     disposition: KEEP_AND_SPLIT
     canonical_replacement: null
     new_writes_allowed: false
-    routes: ["/retests/*"]
+    routes: ["/retests", "/retests/*"]
     files: ["api/retest_routes/router.py"]
 
   - id: investigation-candidates

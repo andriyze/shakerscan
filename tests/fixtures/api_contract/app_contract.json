@@ -18,5 +18,5 @@
     "ValueError",
     "WebSocketRequestValidationError"
   ],
-  "route_count": 504
+  "route_count": 505
 }

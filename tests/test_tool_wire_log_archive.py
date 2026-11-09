@@ -105,12 +105,13 @@ def test_the_worker_reads_the_log_from_the_job_scratch_directory(tmp_path):
 def test_the_worker_attaches_the_log_to_the_tunnel_account():
     import worker
 
+    assert worker.tunnel_with_wire_log is tool_wire_log.tunnel_with_wire_log
     tunnel = {"host": "app.example.test", "scheme": "https"}
-    attached = worker._tunnel_with_wire_log(tunnel, ([{"url": f"{ORIGIN}/x"}], 4))
+    attached = tool_wire_log.tunnel_with_wire_log(tunnel, ([{"url": f"{ORIGIN}/x"}], 4))
     assert attached["wire_log_transactions"] == [{"url": f"{ORIGIN}/x"}] and attached["wire_log_dropped"] == 4
-    assert worker._tunnel_with_wire_log(tunnel, None) is tunnel
-    assert worker._tunnel_with_wire_log(None, ([{"url": "x"}], 0)) is None
-    assert worker._scanner_archive_origin("https://user@app.example.test/hub/login?q=1") == ORIGIN
+    assert tool_wire_log.tunnel_with_wire_log(tunnel, None) is tunnel
+    assert tool_wire_log.tunnel_with_wire_log(None, ([{"url": "x"}], 0)) is None
+    assert tool_wire_log.scanner_archive_origin("https://user@app.example.test/hub/login?q=1") == ORIGIN
 
 
 def _tunnel(**extra):

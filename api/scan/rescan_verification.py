@@ -165,4 +165,26 @@ async def record_rescan_verifications(
     return recorded
 
 
-__all__ = ["VERIFICATION_MODE", "record_rescan_verifications", "rescan_verdict", "rescan_verdicts"]
+async def verify_fixed_after_scan(
+    pool: Any, *, scan_id: str, target_id: str, report: Mapping[str, Any], label: str = "",
+) -> int:
+    """The worker's call after a Scan's findings are saved: ``record_rescan_verifications`` in
+    its own connection, logged, never raising (it never decides the Scan)."""
+    try:
+        async with pool.acquire() as conn:
+            recorded = await record_rescan_verifications(
+                conn, scan_id=scan_id, target_id=target_id, report=report,
+            )
+    except Exception as exc:  # noqa: BLE001
+        print(f"[{label}] rescan verification error: {type(exc).__name__}: {exc}", flush=True)
+        return 0
+    if recorded:
+        print(f"[{label}] {recorded} open finding(s) not seen again on a re-checked URL: "
+              "verified fixed by this scan", flush=True)
+    return recorded
+
+
+__all__ = [
+    "VERIFICATION_MODE", "record_rescan_verifications", "rescan_verdict", "rescan_verdicts",
+    "verify_fixed_after_scan",
+]
