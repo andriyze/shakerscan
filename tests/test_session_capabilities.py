@@ -37,7 +37,7 @@ def test_engine_answers_everything_allowed_and_uncached():
 def test_every_documented_action_is_answered_and_none_other():
     documented = {line.split("`")[1] for line in DOC.splitlines()
                   if line.startswith("| `") and "." in line.split("`")[1]
-                  and line.split("`")[1].split(".")[0] in {"targets", "scans", "findings", "hunts", "secrets", "records"}}
+                  and line.split("`")[1].split(".")[0] in {"targets", "scans", "findings", "hunts", "secrets", "records", "ct_monitor"}}
     assert documented == set(session_capabilities.ACTIONS)
 
 

@@ -32,7 +32,8 @@ import {
 import { ChangesStrip } from '@/app/exposure/ChangesStrip'
 import { boundedDisplayText } from '@/lib/targetChoices'
 import { assuranceClass, scanAssurance } from '@/lib/assurance.mjs'
-import { useCan } from '@/lib/useSessionCapabilities'
+import { capabilityReason } from '@/lib/sessionCapabilities.mjs'
+import { useCan, useSessionCapabilities } from '@/lib/useSessionCapabilities'
 
 // The server caches /dashboard for 15 s: polling it faster only re-reads the same answer.
 const DASHBOARD_REFRESH_MS = 15000
@@ -89,6 +90,10 @@ function DashboardContent() {
   const dashboardLoadedOnce = useRef(false)
   const workersVisible = featureEnabled('worker_status') || featureEnabled('worker_admin')
   const gungnirVisible = featureEnabled('ct_monitor')
+  // A gateway may run the monitor from its own deployment option: then start/stop is not the
+  // person's to press here, and the chip is a status (session-capabilities/v1 ct_monitor.toggle).
+  const canToggleGungnir = useCan('ct_monitor.toggle')
+  const gungnirLockedReason = capabilityReason(useSessionCapabilities(), 'ct_monitor.toggle')
 
   // Each loader throws on failure (after recording it) so the poll loop backs off; an abort is
   // the page moving on and records nothing.
@@ -451,12 +456,18 @@ function DashboardContent() {
 
           </WorkspaceFeature><WorkspaceFeature name="ct_monitor"><button
             type="button"
-            onClick={handleGungnirToggle}
+            onClick={canToggleGungnir ? handleGungnirToggle : undefined}
             disabled={gungnirActionLoading}
-            aria-label={gungnir?.running ? 'Stop Gungnir CT monitor' : 'Start Gungnir CT monitor'}
-            title={gungnir?.running
-              ? `Stop CT monitor · ${gungnir.domains_monitored} domains · ${gungnir.session_found} found this session`
-              : 'Start Certificate Transparency monitor'}
+            aria-disabled={!canToggleGungnir || undefined}
+            aria-label={!canToggleGungnir
+              ? `CT monitor ${gungnir?.running ? 'on' : 'off'}`
+              : gungnir?.running ? 'Stop Gungnir CT monitor' : 'Start Gungnir CT monitor'}
+            title={!canToggleGungnir
+              ? `CT monitor ${gungnir?.running ? `on · ${gungnir.domains_monitored} domains · ${gungnir.session_found} found this session` : 'off'}`
+                + (gungnirLockedReason ? ` · ${gungnirLockedReason}` : '')
+              : gungnir?.running
+                ? `Stop CT monitor · ${gungnir.domains_monitored} domains · ${gungnir.session_found} found this session`
+                : 'Start Certificate Transparency monitor'}
             className={`flex h-10 items-center gap-2 rounded-lg border px-3 text-xs font-medium transition-colors disabled:opacity-50 ${FOCUS_RING} ${
               gungnir?.running
                 ? 'border-emerald-800/60 bg-emerald-500/10 text-emerald-300 hover:bg-emerald-500/15'

@@ -232,6 +232,32 @@ for (const width of [390, 1440]) {
       await expect(page.getByRole('link', { name: /Add a target/ })).toBeVisible()
     })
 
+    test('CAPS-011 dashboard: the CT monitor chip is a status, not a start/stop button, without ct_monitor.toggle', async ({ page }) => {
+      // A gateway runs the monitor from its deployment option: pressing Stop only ended in a
+      // refusal toast (2026-11 evaluation).
+      const dashboard = {
+        '/health': () => ({ status: 'healthy' }),
+        '/dashboard': () => ({ metrics: { total_targets: 0, total_scans: 0, running_scans: 0, active_findings: 0, critical_findings: 0,
+          high_findings: 0, avg_score: null }, recent_scans: [], recent_findings: [], action_center: [] }),
+        '/queue/stats': () => ({ pending: 0, queued: 0, running: 0, completed: 0, failed: 0 }),
+        '/gungnir/status': () => ({ running: true, domains_monitored: 4, subdomains_found: 0, session_found: 0, last_discovery: '',
+          started_at: now, uptime_seconds: 60 }),
+        '/targets/grouped': () => ({ items: [], next_cursor: null, has_more: false, total: 0, total_kind: 'exact', generated_at: now }),
+        '/timeline': () => ({ events: [], upcoming: [] }),
+      }
+      const locked = { ...ADMIN, actions: { ...ADMIN.actions, 'ct_monitor.toggle': false },
+        reasons: { 'ct_monitor.toggle': 'an administrator switches the CT monitor in the deployment' } }
+      await mockPageApi(page, { ...dashboard, '/session/capabilities': () => locked })
+      await page.goto('/')
+      await expect(page.getByRole('button', { name: 'CT monitor on' })).toBeVisible()
+      await expect(page.getByRole('button', { name: 'Stop Gungnir CT monitor' })).toHaveCount(0)
+
+      await page.unrouteAll({ behavior: 'ignoreErrors' })
+      await mockPageApi(page, dashboard)
+      await page.goto('/')
+      await expect(page.getByRole('button', { name: 'Stop Gungnir CT monitor' })).toBeVisible()
+    })
+
     test('CAPS-006 an operator without Hunt keeps scans, edits, triage and secrets but gets no Verify or Hunt link', async ({ page }) => {
       await mock(page, 'operator')
       await page.goto('/targets')
