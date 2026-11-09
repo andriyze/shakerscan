@@ -318,7 +318,7 @@ export const SCAN_PUBLIC_CONTRACT_SNAPSHOT = {
       "name": "authz_surface",
       "requires_active_testing": true,
       "requires_credentials": true,
-      "risk_level": "high"
+      "risk_level": "medium"
     },
     {
       "capabilities": [
