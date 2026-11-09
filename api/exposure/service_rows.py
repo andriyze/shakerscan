@@ -195,9 +195,26 @@ def attach_verification(target: Mapping[str, Any], services: list[dict[str, Any]
                 candidate["local_validation"] = "check_not_matched"
 
 
+def _rates_the_listener(candidate: Mapping[str, Any]) -> bool:
+    """Whether an advisory candidate may set the listener's severity.
+
+    A distribution build (``OpenSSH 10.2p1 Ubuntu 2ubuntu3.8``) carries the distribution's
+    backports, so the upstream advisories for its upstream version are probable at most: two
+    different package revisions got the same 17 candidates, a client-side one among them, and
+    the row read "high" (eval SV-11). Such a candidate stays listed with its unresolved reason
+    and does not rate the row; a verified check or finding still does.
+    """
+    return not (
+        candidate.get("applicability_status") == "unresolved"
+        and candidate.get("unresolved_reason") == "distribution_package"
+        and (candidate.get("verification") or {}).get("status") != "check_matched"
+    )
+
+
 def _severity(service: Mapping[str, Any]) -> str | None:
     best, rank = None, 0
-    for item in [*(service.get("cve_candidates") or ()), *(service.get("findings") or ())]:
+    candidates = [item for item in service.get("cve_candidates") or () if _rates_the_listener(item)]
+    for item in [*candidates, *(service.get("findings") or ())]:
         value = str(item.get("severity") or "").lower()
         if SEVERITY_RANK.get(value, 0) > rank:
             best, rank = value, SEVERITY_RANK[value]
@@ -219,11 +236,14 @@ def listener_groups(services: list[Mapping[str, Any]]) -> list[dict[str, Any]]:
                 "service": service.get("service"), "product": service.get("product"),
                 "version": service.get("version"), "service_ids": [], "primary_service_id": service["id"],
                 "max_severity": None, "kev_ids": set(), "cve_ids": set(), "finding_ids": set(),
+                # Candidates for a distribution build only: listed, but probable, not matches.
+                "distribution_ids": set(),
                 "checks_available": 0, "check_matched": 0, "identity_stale": True, "last_seen_at": None,
                 "quiet": True,
             }
         group["service_ids"].append(service["id"])
         group["cve_ids"].update(item.get("id") for item in candidates)
+        group["distribution_ids"].update(item.get("id") for item in candidates if not _rates_the_listener(item))
         group["finding_ids"].update(item.get("id") for item in service.get("findings") or ())
         group["kev_ids"].update(item.get("id") for item in candidates if item.get("known_exploited"))
         group["checks_available"] += sum(1 for item in candidates if candidate_check_ids(item))
@@ -244,6 +264,7 @@ def listener_groups(services: list[Mapping[str, Any]]) -> list[dict[str, Any]]:
         group["known_exploited"] = len(group.pop("kev_ids") - {None})
         group["candidate_count"] = len(group.pop("cve_ids") - {None})
         group["finding_count"] = len(group.pop("finding_ids") - {None})
+        group["distribution_build_candidates"] = len(group.pop("distribution_ids") - {None})
         rows.append(group)
     return sorted(rows, key=lambda row: (
         -SEVERITY_RANK.get(row["max_severity"] or "", 0), -row["known_exploited"], -row["finding_count"],
