@@ -59,3 +59,43 @@ def test_reload_timeout_stops_the_running_gungnir(gungnir, tmp_path, monkeypatch
 
 def test_an_address_root_is_not_monitored(gungnir):
     assert gungnir.monitored_roots(["172.17.0.1", "example.com", "2001:db8::1", "[::1]", "10.0.0.5"]) == ["example.com"]
+
+
+def test_reload_also_stops_a_process_gungnir_started(gungnir, tmp_path, monkeypatch):
+    pidfile, childfile = tmp_path / "pid", tmp_path / "child"
+    fake = tmp_path / "gungnir"
+    fake.write_text(f"#!/bin/sh\nsleep 60 &\necho $! > {childfile}\necho $$ > {pidfile}\nwait\n")
+    fake.chmod(0o755)
+    monkeypatch.setattr(gungnir, "GUNGNIR_BIN", str(fake))
+
+    async def reload_once():
+        with pytest.raises(asyncio.TimeoutError):
+            await asyncio.wait_for(gungnir.run_gungnir(["example.com"]), timeout=1.5)
+
+    asyncio.run(reload_once())
+    pids = [int(pidfile.read_text()), int(childfile.read_text())]
+    deadline = time.time() + 2
+    while any(alive(pid) for pid in pids) and time.time() < deadline:
+        time.sleep(0.05)
+    assert not any(alive(pid) for pid in pids), "the reload left gungnir or a process it started running"
+
+
+def test_shutdown_stops_gungnir(gungnir, tmp_path, monkeypatch):
+    # The worker's SIGTERM handler sets shutdown_event; run_gungnir returns and stops the process.
+    pidfile = tmp_path / "pid"
+    fake = tmp_path / "gungnir"
+    fake.write_text(f"#!/bin/sh\necho $$ > {pidfile}\nexec sleep 60\n")
+    fake.chmod(0o755)
+    monkeypatch.setattr(gungnir, "GUNGNIR_BIN", str(fake))
+
+    async def run_then_shut_down():
+        gungnir.shutdown_event.clear()
+        task = asyncio.ensure_future(gungnir.run_gungnir(["example.com"]))
+        while not pidfile.exists():
+            await asyncio.sleep(0.05)
+        gungnir.shutdown_event.set()
+        await asyncio.wait_for(task, timeout=10)
+
+    asyncio.run(run_then_shut_down())
+    pid = int(pidfile.read_text())
+    assert not alive(pid), "worker shutdown left gungnir running"

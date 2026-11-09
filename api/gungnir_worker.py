@@ -330,6 +330,8 @@ async def run_gungnir(domains: list[str], cap: "ApexDailyCap | None" = None):
             GUNGNIR_BIN, '-r', roots_file,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            # Its own process group, so a stop reaches anything it starts as well.
+            start_new_session=True,
         )
 
         # Track seen subdomains to avoid duplicate DB calls
@@ -375,22 +377,25 @@ async def run_gungnir(domains: list[str], cap: "ApexDailyCap | None" = None):
 
 
 async def _stop(proc, readers) -> None:
-    """Terminate the gungnir process (kill it after 5 s) and cancel its output readers. Shielded,
-    so a cancellation of the caller still waits for the process to go."""
+    """Terminate the gungnir process group (kill it after 5 s), reap the process and cancel its
+    output readers. Shielded, so a cancellation of the caller still waits for the process to go."""
+    def signal_group(signum):
+        try:
+            os.killpg(proc.pid, signum)
+        except (ProcessLookupError, PermissionError):
+            pass
+
     async def stop():
-        if proc is not None and proc.returncode is None:
-            try:
-                proc.terminate()
-            except ProcessLookupError:
-                pass
-            try:
-                await asyncio.wait_for(proc.wait(), timeout=5)
-            except asyncio.TimeoutError:
+        if proc is not None:
+            if proc.returncode is None:
+                signal_group(signal.SIGTERM)
                 try:
-                    proc.kill()
-                except ProcessLookupError:
-                    pass
-                await proc.wait()
+                    await asyncio.wait_for(proc.wait(), timeout=5)
+                except asyncio.TimeoutError:
+                    signal_group(signal.SIGKILL)
+                    await proc.wait()
+            # The leader may be gone while a child it started still runs in its group.
+            signal_group(signal.SIGKILL)
         for task in readers:
             task.cancel()
     task = asyncio.ensure_future(stop())
