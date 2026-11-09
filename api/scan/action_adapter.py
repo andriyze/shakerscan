@@ -36,6 +36,7 @@ try:
     from capabilities.takeover import bound_takeover_hosts, check_takeovers
     from scan.recon_active_actions import RECON_ACTIVE_CAPABILITIES, execute_recon_active
     from scan.web_identify_actions import execute_web_identify
+    from scan import xss_reflection
     from capabilities.replay import RecordedReplayTransport
     from capabilities.inline import (
         AuthSessionExecutionAdapter,
@@ -132,6 +133,7 @@ except (ImportError, ModuleNotFoundError):
     from ..capabilities.takeover import bound_takeover_hosts, check_takeovers
     from .recon_active_actions import RECON_ACTIVE_CAPABILITIES, execute_recon_active
     from .web_identify_actions import execute_web_identify
+    from . import xss_reflection
     from ..capabilities.replay import RecordedReplayTransport
     from ..capabilities.inline import (
         AuthSessionExecutionAdapter,
@@ -5483,6 +5485,43 @@ class DatabaseNeutralScanActionDispatcher:
             route = str(row.get("candidate_id") or row.get("route_id") or "")
             return identity not in carried and not (route and route in admitted)
 
+        http_ceiling_total = int(action.requested_budget.get("http_requests") or 0)
+        reflection_transport: Any = None
+
+        async def reflection_precheck(url: str, body_request: Mapping[str, Any]) -> bool | None:
+            """Whether any input reflects a canary; None when the check got no answer."""
+            nonlocal reflection_transport
+            if reflection_transport is None:
+                reflection_transport = self._scan_replay_transport(action, private=True)
+            principal = resolve_scan_http_principal(
+                self.options, lane="primary", capability_name=action.capability_name,
+            )
+            canary = xss_reflection.new_canary()
+            method, target, body, content_type = xss_reflection.canary_request_parts(
+                url, body_request, canary, nested_json_body=nested_json_body,
+            )
+            headers = tuple(principal.headers().items()) if principal.authenticated else ()
+            if content_type:
+                headers = tuple(item for item in headers if str(item[0]).lower() != "content-type") + (
+                    ("Content-Type", content_type),
+                )
+            try:
+                result = await reflection_transport.send(
+                    ReplayRequest(
+                        request_id=f"xss-reflection:{position}", ordinal=position,
+                        name="xss reflection check", folder="", method=method, url=target,
+                        headers=headers, body=body, body_mode="raw" if body else "none",
+                        auth_type="broker_session" if principal.authenticated else "none",
+                        has_sensitive_material=bool(principal.authenticated),
+                    ),
+                    target=self.target, timeout_seconds=15.0, follow_redirects=False,
+                )
+            except Exception:
+                return None
+            if result.error_code:
+                return None
+            return xss_reflection.reflects(result.status_code, result.response_body, canary)
+
         try:
             while True:
                 if position >= len(work):
@@ -5674,6 +5713,40 @@ class DatabaseNeutralScanActionDispatcher:
                             sign_in, attempt_id, candidate_id, retry_round, manifest_index,
                         )
                         continue
+                    if (
+                        tool == "dalfox" and sign_in is None and not retry_round
+                        and xss_reflection.has_inputs(execution_target, body_request)
+                        and consumed.get("http_requests", 0) < http_ceiling_total
+                        and (not body_request or consumed.get("state_changing_requests", 0)
+                             < int(action.requested_budget.get("state_changing_requests", 0)))
+                    ):
+                        # One request with a canary in every input before Dalfox's payload set:
+                        # nothing reflected means no reflected XSS to find (xss_reflection).
+                        verdict = await reflection_precheck(execution_target, body_request)
+                        if verdict is False:
+                            spent = {"http_requests": 1,
+                                     **({"state_changing_requests": 1} if body_request else {})}
+                            for name, amount in spent.items():
+                                consumed[name] = consumed.get(name, 0) + amount
+                            attempted += 1
+                            attempt_log.append((candidate_id, retry_round, True, False))
+                            settled = {
+                                "kind": "candidate_attempt", "attempt_id": attempt_id,
+                                "candidate_id": candidate_id, "family": family,
+                                "status": "success", "proof_state": "not_proven",
+                                "verdict": "negative",
+                                "negative_reason": xss_reflection.NO_REFLECTION,
+                                "budget_consumed": spent,
+                            }
+                            observations.append(settled)
+                            if not self.cancelled():
+                                await checkpoint_attempt(action.action_id, {
+                                    "attempt_id": attempt_id, "candidate_id": candidate_id,
+                                    "status": "success", "timed_out": False,
+                                    "budget_consumed": spent, "observations": (settled,),
+                                    "errors": (), "proof_state": "not_proven",
+                                })
+                            continue
                     # This entry and every later one that will actually be funded.
                     remaining_attempts = 1 + sum(1 for entry in work[position:] if needs_hold(entry))
                     # What the slice has neither consumed nor lent to a running candidate.
