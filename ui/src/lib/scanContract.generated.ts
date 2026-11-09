@@ -166,6 +166,7 @@ export const SCAN_PUBLIC_CONTRACT_SNAPSHOT = {
     "semantic_capabilities": [
       "auth.session.establish",
       "authz.verify",
+      "authz_surface.verify_batch",
       "collections.replay_active",
       "collections.replay_authentication",
       "collections.replay_safe",
