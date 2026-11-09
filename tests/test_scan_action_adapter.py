@@ -931,6 +931,85 @@ def test_database_neutral_batch_checkpoints_and_resumes_each_candidate(monkeypat
     assert all(len(attempt_id) == 64 for attempt_id in backend.attempts[action.action_id])
 
 
+def test_xss_batch_skips_dalfox_where_no_input_reflects(monkeypatch):
+    """Dalfox sends its whole payload set whether or not an input comes back; one request with a
+    canary in every input decides first. /one never reflects (negative, no Dalfox run); /two
+    echoes its query (Dalfox runs as before)."""
+    scan_id = str(uuid.uuid4())
+    endpoint_manifest = build_endpoint_manifest(
+        scan_id=scan_id, target_binding_digest=TARGET.digest,
+        surface_manifest={
+            "schema_version": "endpoint-manifest/v2", "status": "complete", "reason": None,
+            "endpoints": [
+                {"method": "GET", "scheme": "https", "host": "app.example.test", "port": 443,
+                 "normalized_path": "/one", "concrete_path": "/one",
+                 "query_keys": ["first"], "source": "web.crawl"},
+                {"method": "GET", "scheme": "https", "host": "app.example.test", "port": 443,
+                 "normalized_path": "/two", "concrete_path": "/two",
+                 "query_keys": ["second"], "source": "web.crawl"},
+            ],
+        },
+        source_action_ids=("discover.web_crawl",),
+    )
+    candidates = build_candidate_manifest(
+        endpoint_manifest, source_action_ids=("discover.web_crawl",), maximum=10,
+    )
+    action = _action(
+        "verify.xss.batch.00000", "xss.verify_batch", 0,
+        capability_args={
+            "candidate_manifest_ref": candidates.reference().canonical_dict(),
+            "endpoint_manifest_ref": endpoint_manifest.reference().canonical_dict(),
+            "slice": {"start": 0, "count": 2}, "profile": "balanced",
+            "proof_policy": "deterministic",
+        },
+    )
+    plan = ScanActionPlan(
+        scan_id=scan_id, execution_plan_digest="a" * 64,
+        target_binding_digest=TARGET.digest, actions=(action,),
+    )
+    sent = []
+
+    class EchoTransport:
+        async def send(self, request, **_kwargs):
+            sent.append(request.url)
+            query = urllib.parse.urlsplit(request.url).query
+            body = (b"<p>" + query.encode() + b"</p>") if "/two" in request.url else b"<p>nothing</p>"
+            return ReplayTransportResult(
+                status_code=200, connected_address="192.0.2.10", final_url=request.url,
+                response_headers={"Content-Type": "text/html"}, response_body=body, elapsed_ms=5,
+            )
+
+    monkeypatch.setattr(action_adapter_module, "PinnedAiohttpReplayTransport", EchoTransport)
+    calls = []
+
+    async def execute(_self, context, adapter, **_kwargs):
+        calls.append(adapter._process_payload["execution_target"])
+        return CapabilityAdapterResult(
+            status="success", actual_budget={name: 1 for name in context.requested_budget},
+            observations=({"kind": "xss_probe", "response_sha256": "e" * 64},),
+            execution_started=True, parser_version="dalfox-jsonl/v1",
+        )
+
+    monkeypatch.setattr(action_adapter_module.CapabilityExecutor, "execute", execute)
+    backend = Backend(manifests={
+        endpoint_manifest.manifest_id: endpoint_manifest, candidates.manifest_id: candidates,
+    })
+    dispatcher = _dispatcher(
+        plan, backend, policy=ScanPolicy(active_testing=True, approval_receipt_id="approval-1"),
+    )
+    result = asyncio.run(dispatcher(action, _lease(plan, action), _noop))
+
+    assert result.status == "success"
+    assert len(sent) == 2
+    assert [urllib.parse.urlsplit(url).path for url in calls] == ["/two"]
+    skipped = [item for item in result.observations if item.get("negative_reason") == "no_reflection"]
+    assert len(skipped) == 1 and skipped[0]["verdict"] == "negative"
+    # Both candidates are checkpointed: a resumed batch sends nothing again.
+    assert len(backend.attempts[action.action_id]) == 2
+    asyncio.run(dispatcher(action, _lease(plan, action), _noop))
+    assert len(sent) == 2 and len(calls) == 1
+
+
 def test_one_unresolvable_candidate_does_not_fail_the_whole_verify_batch(monkeypatch, capsys):
     """A candidate whose request cannot be resolved must fail only its own attempt.
 
