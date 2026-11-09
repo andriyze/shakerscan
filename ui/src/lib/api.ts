@@ -4336,8 +4336,6 @@ export async function previewScanContract(request: {
   network_discovery: boolean
   subdomain_discovery: boolean
   execution_topology: 'single_worker' | 'parallel'
-  /** The Scan carries a credential profile: a signed-in preset may add families. */
-  signed_in?: boolean
   /** The Scan's lowered ceilings: one far below the profile's leaves the active templates out of the standard set. */
   advanced?: { max_http_requests?: number; max_state_changing_requests?: number }
 }): Promise<ScanContractPreview> {

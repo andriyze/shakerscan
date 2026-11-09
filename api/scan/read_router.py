@@ -65,8 +65,6 @@ class ScanFamilyPreviewRequest(BaseModel):
     execution_topology: Literal["single_worker", "parallel"] = "single_worker"
     # The Scan's lowered ceilings, so the preview resolves exactly as its submission will.
     advanced: ScanFamilyPreviewLimits | None = None
-    # The Scan will carry a credential profile (a signed-in preset may add families).
-    signed_in: bool = False
 
 PUBLIC_SCAN_ACTIONS_SQL = """
     SELECT a.action_id, a.stage, a.ordinal, a.capability_name, a.adapter_name,
@@ -279,7 +277,6 @@ async def preview_scan_contract(request: ScanFamilyPreviewRequest):
             approval_receipt_id=(
                 "preview-only" if request.allow_state_changing_http or request.network_discovery else None
             ),
-            signed_in=request.signed_in,
         )
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
