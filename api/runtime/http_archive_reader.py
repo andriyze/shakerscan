@@ -543,6 +543,8 @@ async def read_archive_stats(
 # Rows a pinned tunnel wrote (http_archive_capture.record_tunnel): one per tunnel, naming its
 # destination; the cleartext request lines it relayed are ordinary capture-limited rows.
 TUNNEL_FIDELITY = "pinned_tunnel"
+# Rows read from an external tool's own wire log (http_archive_capture.record_tunnel): full detail.
+TOOL_WIRE_LOG_FIDELITY = "tool_wire_log"
 # Distinct destinations an archive read names; past it the list says it is truncated.
 MAX_STATED_DESTINATIONS = 50
 
@@ -564,12 +566,15 @@ async def _capture_detail(conn, owner_clause: str, owner_param: Any) -> dict[str
     row = await conn.fetchrow(
         f"""SELECT
                COUNT(*) FILTER (WHERE COALESCE(metadata_json->>'fidelity','')
-                   NOT IN ('wire_request','attempted_no_response','{TUNNEL_FIDELITY}'))
+                   NOT IN ('wire_request','attempted_no_response','{TUNNEL_FIDELITY}',
+                           '{TOOL_WIRE_LOG_FIDELITY}'))
                    AS capture_limited,
                COUNT(*) FILTER (WHERE metadata_json->>'fidelity'='{TUNNEL_FIDELITY}')
                    AS tunnel_records,
                COUNT(*) FILTER (WHERE metadata_json->>'fidelity'='{TUNNEL_FIDELITY}'
-                   AND metadata_json->'tunnel'->>'content_readable'='false')
+                   AND metadata_json->'tunnel'->>'content_readable'='false'
+                   -- A tunnel whose tool's own wire log was archived is not opaque.
+                   AND COALESCE(metadata_json->'tunnel'->>'wire_log_archived','0')='0')
                    AS opaque_tunnels
            FROM http_transactions WHERE {owner_clause}""",
         owner_param,

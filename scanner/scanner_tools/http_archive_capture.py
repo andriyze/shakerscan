@@ -146,6 +146,9 @@ def note_dropped(count: int) -> None:
 
 TUNNEL_FIDELITY = "pinned_tunnel"
 TUNNEL_REQUEST_FIDELITY = "tunnel_request_line"
+# A transaction an external tool recorded in its own wire log (sqlmap's traffic file, Dalfox's
+# HAR): method, URL, headers, bodies and status as the tool sent and received them.
+TOOL_WIRE_LOG_FIDELITY = "tool_wire_log"
 
 
 def _tunnel_origin(tunnel: Mapping[str, Any]) -> str:
@@ -228,6 +231,17 @@ def record_tunnel(
     given = _tool_input(tool_input)
     if given:
         summary["tool_input"] = given
+    # The tool's own log of what it sent (``tool_wire_log``), to this tunnel's destination only.
+    logged = [
+        item for item in tunnel.get("wire_log_transactions") or ()
+        if isinstance(item, Mapping) and _same_origin(str(item.get("url") or ""), origin)
+    ]
+    if logged:
+        summary["wire_log_archived"] = len(logged)
+        # The log is the fuller record of the same requests: their request lines are not
+        # archived a second time (nor counted as lines it could not keep).
+        request_lines, dropped = [], 0
+        summary["request_lines_archived"] = 0
     record({
         "plane": "scan",
         "source": "pinned_tunnel",
@@ -277,7 +291,38 @@ def record_tunnel(
                 **({"request_target": target} if not target.startswith("/") else {}),
             },
         })
-    note_dropped(dropped)
+    for item in logged:
+        record({
+            "plane": "scan",
+            "source": "tool_wire_log",
+            "capability_name": capability_name,
+            "method": str(item.get("method") or "GET"),
+            "url": str(item["url"]),
+            "request_headers": dict(item.get("request_headers") or {}),
+            "request_body": item.get("request_body"),
+            "response_headers": dict(item.get("response_headers") or {}),
+            "response_body": item.get("response_body"),
+            "response_body_truncated": bool(item.get("response_body_truncated")),
+            "status_code": item.get("status_code"),
+            "remote_ip": connected[0] if len(connected) == 1 else None,
+            "fidelity": TOOL_WIRE_LOG_FIDELITY,
+            "tunnel_request": {"tool": str(tool or ""), "source": "tool_wire_log"},
+        })
+    note_dropped(dropped + max(0, int(tunnel.get("wire_log_dropped") or 0)))
+
+
+def _same_origin(url: str, origin: str) -> bool:
+    def key(value: str) -> tuple[str, str, int] | None:
+        try:
+            parts = urllib.parse.urlsplit(value)
+            port = parts.port or (443 if parts.scheme.lower() == "https" else 80)
+        except ValueError:
+            return None
+        if not parts.hostname:
+            return None
+        return parts.scheme.lower(), parts.hostname.lower().rstrip("."), port
+
+    return key(url) is not None and key(url) == key(origin)
 
 
 def parse_curl_command(cmd: Sequence[str]) -> dict[str, Any]:

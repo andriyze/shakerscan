@@ -16,6 +16,7 @@ Requires ``TARGET_ASSET_TEST_DATABASE_URL`` (a disposable local PostgreSQL).
 from __future__ import annotations
 
 import asyncio
+import json
 from dataclasses import replace
 
 from runtime.http_archive import archive_scan_capture
@@ -118,5 +119,59 @@ def test_without_its_tunnel_row_the_template_capability_is_named(template_databa
             assert stats["unarchived_external_tool_capabilities"] == ["templates.scan"]
             assert stats["unarchived_engine_capabilities"] == []  # the stopped verifier is not one
             assert stats["refused_destinations"] == []
+
+    asyncio.run(run())
+
+
+def _encrypted_capture_with_wire_log():
+    """An HTTPS verifier's tunnel (encrypted: the engine reads no request) with the requests its
+    own wire log recorded, as the worker attaches them (fixture records): two sign-in POSTs and
+    one request the log names on another host, which is never archived."""
+    capture.start_capture()
+    capture.record_tunnel({
+        "scheme": "https", "host": "revocation.test", "port": 443,
+        "address_connections": {"192.0.2.10": 1}, "connections_attempted": 1,
+        "connections_opened": 1, "connections_rejected": 0, "bytes_to_target": 4000,
+        "bytes_from_target": 9000, "http_requests_observed": 0, "content_readable": False,
+        "methods_observed": {}, "request_lines": [], "request_lines_dropped": 0,
+        "refused_destinations": [], "refused_destinations_other": 0,
+        "wire_log_transactions": [
+            {"method": "POST", "url": "https://revocation.test/hub/login",
+             "request_headers": {"content-type": "application/x-www-form-urlencoded"},
+             "request_body": f"username=admin%27--&password={secret}", "status_code": 200,
+             "response_headers": {"content-type": "text/html"}, "response_body": "<p>bad</p>"}
+            for secret in ("Fixture-Secret-1", "Fixture-Secret-2")
+        ] + [{"method": "GET", "url": "https://other.test/", "request_headers": {},
+              "request_body": None, "status_code": 200, "response_headers": {}, "response_body": None}],
+    }, capability_name="templates.scan", tool="sqlmap",
+        tool_input={"url": "https://revocation.test/hub/login", "method": "POST",
+                    "body_field_names": ["password", "username"]})
+    return capture.drain_capture()
+
+
+def test_an_encrypted_tunnels_wire_log_is_archived_and_masked_on_export(template_database, tmp_path):  # noqa: F811
+    """Over HTTPS the sign-in POSTs a verifier sent were only a CONNECT row. Its own wire log now
+    puts each one in the archive (method, URL, status, headers, body), the tunnel no longer
+    counts as opaque, and a masked export withholds the password values."""
+    from runtime.http_archive_reader import project, read_transactions
+
+    async def run():
+        async with scan_database(template_database) as pool:
+            scan = await _scan(pool, plan=_plan)
+            async with pool.acquire() as conn:
+                await archive_scan_capture(conn, _encrypted_capture_with_wire_log(),
+                                           scan_id=str(scan.scan_id), target_id=scan.target_id,
+                                           results_dir=tmp_path)
+                stats = await read_archive_stats(conn, scan_id=str(scan.scan_id), hunt_run_id=None)
+                rows = await read_transactions(conn, scan_id=str(scan.scan_id), hunt_run_id=None,
+                                               payloads=True, results_dir=tmp_path)
+            assert stats["opaque_tunnels"] == 0 and stats["capture_limited"] == 0
+            logins = [row for row in rows if row["method"] == "POST"]
+            assert len(logins) == 2 and {row["url"] for row in logins} == {"https://revocation.test/hub/login"}
+            assert all(row["status_code"] == 200 for row in logins)
+            assert not any("other.test" in str(row["url"]) for row in rows)
+            shown = json.dumps([project(row, redaction="redacted") for row in logins], default=str)
+            assert "Fixture-Secret-1" not in shown and "Fixture-Secret-2" not in shown
+            assert "/hub/login" in shown
 
     asyncio.run(run())

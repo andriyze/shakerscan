@@ -18508,6 +18508,8 @@ async def _execute_agent_scanner_process(
     process_enforcement: dict[str, Any] = {}
     browser_profile_receipt: dict[str, Any] = {}
     wire_log_counter: dict[str, Any] | None = None
+    # The tool's own logged transactions, for the Scan archive (read with the counter).
+    wire_log_archive: tuple[list[dict[str, Any]], int] | None = None
     memory_ceiling: ProcessTreeMemoryCeiling | None = None
     name = str(job_data.get("tool_name") or "").strip().lower()
     execution_target = str(job_data.get("execution_target") or "")
@@ -18802,6 +18804,14 @@ async def _execute_agent_scanner_process(
                 wire_log_counter = agent_tools.scanner_file_request_counter(name, scratch_dir)
             except Exception:  # noqa: BLE001 - an unreadable log keeps the full hold
                 wire_log_counter = None
+            # Over HTTPS the tunnel cannot read the tool's requests; its own log is their only
+            # record (sqlmap's traffic file, Dalfox's HAR), archived with the tunnel.
+            try:
+                wire_log_archive = agent_tools.scanner_wire_log_transactions(
+                    name, scratch_dir, origin=_scanner_archive_origin(execution_target),
+                )
+            except Exception:  # noqa: BLE001 - the archive never decides the run
+                wire_log_archive = None
             shutil.rmtree(scratch_dir, ignore_errors=True)
 
     typed_output = agent_tools.parse_scanner_output(
@@ -18900,9 +18910,25 @@ async def _execute_agent_scanner_process(
         "execution_uncertain": execution_uncertain,
         "network_binding": _agent_scanner_network_binding(name),
         # The tunnel's account for the Scan request archive (recorded by capabilities/scanner.py).
-        "tunnel": pinned_proxy.tunnel_record(scheme=urllib.parse.urlsplit(execution_target).scheme)
-        if process_started and hasattr(pinned_proxy, "tunnel_record") else None,
+        "tunnel": _tunnel_with_wire_log(
+            pinned_proxy.tunnel_record(scheme=urllib.parse.urlsplit(execution_target).scheme),
+            wire_log_archive,
+        ) if process_started and hasattr(pinned_proxy, "tunnel_record") else None,
     }
+
+
+def _scanner_archive_origin(url: str) -> str:
+    parts = urllib.parse.urlsplit(str(url or ""))
+    return f"{parts.scheme.lower()}://{parts.netloc.rsplit('@', 1)[-1]}"
+
+
+def _tunnel_with_wire_log(
+    tunnel: Any, wire_log: tuple[list[dict[str, Any]], int] | None,
+) -> Any:
+    """The tunnel's account plus the transactions the tool's own wire log recorded."""
+    if not isinstance(tunnel, dict) or not wire_log or not wire_log[0]:
+        return tunnel
+    return {**tunnel, "wire_log_transactions": wire_log[0], "wire_log_dropped": wire_log[1]}
 
 
 # Its pinned transport awaits a batch's shared request gate before each target connection,

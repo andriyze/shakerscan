@@ -2086,6 +2086,30 @@ def scanner_file_request_counter(name: str, scratch_dir: str | None) -> dict[str
     }
 
 
+def scanner_wire_log_transactions(
+    name: str, scratch_dir: str | None, *, origin: str,
+) -> tuple[list[dict[str, Any]], int] | None:
+    """The transactions the tool's own wire log recorded to ``origin`` (``tool_wire_log``), with
+    the count left out past the bound, or None without a readable log."""
+    scanner = str(name or "").strip().lower()
+    filename = SCANNER_WIRE_LOG_FILES.get(scanner)
+    if not filename or not scratch_dir:
+        return None
+    path = os.path.join(str(scratch_dir), filename)
+    try:
+        if os.path.getsize(path) > _MAX_WIRE_LOG_BYTES:
+            return None
+        with open(path, "r", encoding="utf-8", errors="replace") as handle:
+            text = handle.read()
+    except OSError:
+        return None
+    try:
+        from scanner_tools.tool_wire_log import wire_log_transactions
+    except ModuleNotFoundError:  # package import in host-side tests
+        from scanner.scanner_tools.tool_wire_log import wire_log_transactions
+    return wire_log_transactions(scanner, text, origin)
+
+
 def scanner_request_reservation(name: str, options: dict[str, Any] | None = None) -> int:
     """Return the fail-closed wire-request reservation for one external scanner invocation."""
     template = SCANNER_ARG_TEMPLATES.get(str(name or "").strip().lower())
