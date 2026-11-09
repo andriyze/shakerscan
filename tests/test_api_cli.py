@@ -63,6 +63,19 @@ def test_token_comes_from_a_file_by_preference_and_travels_only_over_https(tmp_p
     assert plain.get_header("Authorization") is None
 
 
+def test_a_url_in_the_query_is_a_parameter_not_a_full_url():
+    """GET /targets/lookup?url=https://app.example is a path whose query names a URL: refusing it
+    as "not a full URL" sent people to percent-encode a value the engine documents unencoded."""
+    request = api_cli.build_request(
+        "GET", "/targets/lookup?url=https://t.example/app", None, api_url="https://a.example", token="sse_secret"
+    )
+    assert request.full_url == "https://a.example/targets/lookup?url=https://t.example/app"
+    assert request.host == "a.example"
+    for whole in ("https://other.example/findings", "/https://other.example/findings"):
+        with pytest.raises(api_cli.ApiCliError, match="not a full URL"):
+            api_cli.build_request("GET", whole, None, api_url="https://a.example", token="sse_secret")
+
+
 def test_post_sends_compact_json_and_errors_show_the_instance_detail():
     request = api_cli.build_request("POST", "/scans", '{"target": "https://t.example", "policy": {"active_testing": false}}', api_url="https://a.example", token=None)
     assert request.data == b'{"target":"https://t.example","policy":{"active_testing":false}}'
