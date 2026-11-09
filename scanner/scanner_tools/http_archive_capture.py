@@ -306,7 +306,10 @@ def record_tunnel(
             "status_code": item.get("status_code"),
             "remote_ip": connected[0] if len(connected) == 1 else None,
             "fidelity": TOOL_WIRE_LOG_FIDELITY,
-            "tunnel_request": {"tool": str(tool or ""), "source": "tool_wire_log"},
+            "tunnel_request": {
+                "tool": str(tool or ""), "source": "tool_wire_log",
+                **({"request_body": "not_logged_by_tool"} if item.get("request_body_not_logged") else {}),
+            },
         })
     note_dropped(dropped + max(0, int(tunnel.get("wire_log_dropped") or 0)))
 

@@ -401,6 +401,10 @@ def tunnel_comment(row: Mapping[str, Any]) -> str:
             metadata = json.loads(metadata)
         except ValueError:
             metadata = None
+    relayed = metadata.get("tunnel_request") if isinstance(metadata, Mapping) else None
+    if isinstance(relayed, Mapping) and relayed.get("request_body") == "not_logged_by_tool":
+        return (f"from {relayed.get('tool') or 'the tool'}'s own wire log, which does not keep "
+                "request bodies: the body sent is unknown, not empty")
     tunnel = metadata.get("tunnel") if isinstance(metadata, Mapping) else None
     if not isinstance(tunnel, Mapping):
         return ""
