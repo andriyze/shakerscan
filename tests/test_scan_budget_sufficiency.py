@@ -146,7 +146,13 @@ def test_a_later_round_steps_down_to_the_tier_the_residual_funds():
     assert [action.capability_args["slice"] for action in sweeps] == [
         {"start": 33, "count": 11}, {"start": 44, "count": 11},
     ]
-    assert all(dict(action.requested_budget) == dict(balanced) for action in sweeps)
+    # A later round's slice holds the tier's positions plus one retry of a window the wall cut off.
+    for action in sweeps:
+        retry = dict(action.capability_args["window_retry_hold"])
+        assert 45 < retry["tool_wall_seconds"] <= 135
+        assert dict(action.requested_budget) == {
+            name: amount + retry[name] for name, amount in balanced.items()
+        }
     assert sum(action.requested_budget["state_changing_requests"] for action in sweeps) <= (
         residual["state_changing_requests"]
     )
