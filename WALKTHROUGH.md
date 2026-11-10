@@ -79,21 +79,19 @@ deterministic replay, principal/control comparison, and linked evidence.
 
 | Goal | UI area |
 |---|---|
-| Maintain endpoint inventory and close coverage gaps | **Continuous ASM** |
+| Maintain endpoint inventory and close coverage gaps | **Coverage** (Continuous ASM) |
 | Review assets, relationships, and attack paths | **Exposure** |
 | Test chat, RAG, agent, widget, or MCP endpoints | **AI Gate** (preview) |
 | Check a model artifact before deployment | **Model Intake** (preview) |
-| Reproduce browser/auth workflows manually | **Interactive Testing** |
 | Review evidence cleanup or exports | **Evidence** |
 | Follow scans, scheduled work, investigations, and exports | **Timeline** |
 | Start an AI-driven investigation with bounded active testing | **Hunt** |
-| Preview a natural-language operation without executing it | **AI Operations Router** |
 
 The **Campaigns** page is a read-only mission-action ledger. Start an investigation from **Hunt**,
 then continue its keyless turn loop from the coding-agent session. The UI shows the current
 transcript, evidence-backed suspected findings, and deterministic verification results. Gated
 execution is enabled in standard installs, so no extra server setting or stored LLM key is needed;
-the target authorization and expiring approval prompts still apply.
+the target's standing authorization and any pending permission requests still apply.
 
 ## 6. Useful agent requests
 

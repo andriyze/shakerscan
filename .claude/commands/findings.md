@@ -2,7 +2,7 @@
 
 Show security findings from scans.
 
-**Usage**: `/findings [severity|dast|ai|ai_gate|ai_session|autonomous|model_intake|asm|manual]`
+**Usage**: `/findings [severity|dast|device|ai|ai_gate|ai_session|deep_hunt|autonomous|model_intake|asm|manual]`
 
 ## Instructions
 

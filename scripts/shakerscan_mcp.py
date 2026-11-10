@@ -2221,7 +2221,7 @@ class ArsenalClient:
     def _ssh_action_unrecorded(self, hunt_id: str, action_id: Any) -> bool:
         """True only when the engine answers that it recorded no such SSH action: nothing ran.
 
-        Any other answer, including a gateway's 404 for a route it keeps closed, is not proof."""
+        Any other answer, including a gateway's 403 for a route it keeps closed, is not proof."""
         try:
             canonical = str(uuid.UUID(str(action_id)))
         except (TypeError, ValueError, AttributeError):

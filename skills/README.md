@@ -40,6 +40,7 @@ session hook automatically.
 | [`hunt`](hunt/SKILL.md) | Canonical target-kind-aware investigation with bounded semantic capabilities, evidence, and deterministic promotion |
 | [`research-agent`](research-agent/SKILL.md) | Compatibility entry point for older Deep Hunt wording; delegates to canonical Hunt |
 | [`device-hunt`](device-hunt/SKILL.md) | Compatibility entry point for older Device Hunt wording; delegates to canonical Hunt with a device target |
+| [`device-triage`](device-triage/SKILL.md) | Read-only explanation and comparison of one connected device from existing evidence |
 | [`review-skills`](review-skills/SKILL.md) | Audit the skills, slash commands, and specialized agents |
 
 The [`web`](web/README.md) directory is the server-shipped Hunt methodology catalog: web-testing

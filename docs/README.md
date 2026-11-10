@@ -50,7 +50,7 @@ contracts and release notes describe what ships.
 - [Agent authorization direction](agent-authorization-workflow-direction.md) — proposed AI Gate/Hunt direction.
 - [Agent boundary discovery](agent-boundary-discovery.md) — evidence-driven topology and hypothesis phase.
 - [Model Intake security roadmap](model-intake-security-review-roadmap.md)
-- [Hunt permission requests](hunt-permission-requests.md) — proposed live grants for refused Hunt actions (design, not implemented).
+- [Hunt permission requests](hunt-permission-requests.md) — live permission requests, pre-authorization and terminal approval (`shakerscan approve|deny`).
 - [Hunt saved logins](hunt-saved-logins.md) — sign in by reference with a login a person attached (`login.use`); the agent never sees the values.
 
 ## Operations
@@ -73,7 +73,6 @@ contracts and release notes describe what ships.
 - [API image boundary](api-image-boundary.md)
 - [Compatibility](compatibility.md)
 - [Hosted connector](hosted-connector.md)
-- [Session capabilities](session-capabilities.md) — what the UI hides for the signed-in person (`GET /session/capabilities`).
 - [OWASP coverage matrix](owasp-coverage-matrix.md)
 - [Decisions](decisions/)
 - [Integrity ledgers](ledgers/)

@@ -8,5 +8,5 @@ description: Legacy flat-file redirect. Superseded by the canonical skills/shake
 This compatibility file keeps older Claude Code installations from loading stale scanner
 instructions. Read and follow [`skills/shakerscan/SKILL.md`](shakerscan/SKILL.md).
 
-For exact API bodies and safety rules, read [`AGENTS.md`](../AGENTS.md). For a modern global skill
+For safety rules, read [`AGENTS.md`](../AGENTS.md); exact API bodies come from the live `GET /scan/contracts` and `GET /hunts/contract`. For a modern global skill
 installation, copy the complete `skills/shakerscan/` directory rather than this flat file.

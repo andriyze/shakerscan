@@ -17,7 +17,7 @@ shakerscan record https://app.example.com   # browse in a recorded browser (need
 
 It installs the same `shakerscan` command name as the engine installer
 (`curl -fsSL https://install.shakerscan.com | sh`): `mcp`, `hunt`, `doctor` and `version` work
-without Docker, and any engine subcommand (`start`, `stop`, `status`, `update`, ...) is handed to
+without Docker, and any engine subcommand (`start`, `stop`, `status`, `restart`, ...) is handed to
 a local engine install when one exists. The adapter and CLI are the runtime's own code, vendored
 at build time, and the tools an agent sees come from the instance's live contracts.
 

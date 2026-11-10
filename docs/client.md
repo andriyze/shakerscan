@@ -21,7 +21,7 @@ the Arsenal and Hunt tools come from the instance's live contracts (`GET /arsena
 | Channel | What lands on the PATH | Runs the engine | `mcp`, `hunt` |
 |---|---|---|---|
 | `curl -fsSL https://install.shakerscan.com \| sh` | the launcher shim at `~/.local/bin/shakerscan` | yes | yes |
-| `pipx install shakerscan`, `uv tool install shakerscan`, `brew install andriyze/shakerscan/shakerscan` | the client, as `shakerscan` | hands `start`, `stop`, `status`, `update`, … to a local engine install when one exists | yes |
+| `pipx install shakerscan`, `uv tool install shakerscan`, `brew install andriyze/shakerscan/shakerscan` | the client, as `shakerscan` | hands `start`, `stop`, `status`, `restart`, … to a local engine install when one exists | yes |
 
 The client looks for the engine at `SHAKERSCAN_HOME` (default `~/.shakerscan`, where the
 installer puts it) and runs its `scanner.sh` with the same defaults as the launcher shim. Without

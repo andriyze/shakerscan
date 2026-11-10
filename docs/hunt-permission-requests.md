@@ -438,9 +438,8 @@ Fix (PR E1). Hunt verification keeps using the attached credentials, so no capab
   - `POST /_enterprise/approvals/begin` and `/finish`, for the terminal: a token plus the
     person's TOTP or security-key assertion, with the person's role at least operator. Both are
     rate-limited and lock out like login.
-  - `POST /_enterprise/approvals/session` and `DELETE`, for the opt-in 30-minute approver
-    session.
-  - `POST /_enterprise/preauthorizations`, for start bounds with step-up.
+  - `POST /_enterprise/approvals/session/revoke`, ending the opt-in 30-minute approver
+    session; the session itself and pre-authorized start bounds are purposes of `begin`.
   - A UI Allow from an operator browser session reuses `finish` without a code, since the
     session already passed MFA.
   - Every route sets `decided_by` to the person and writes audit entries
