@@ -94,3 +94,37 @@ test('the session answer is loaded once, and allows everything until it arrives'
   assert.equal(sessionPageAllowed('/targets'), true)
   stopA(); stopB()
 })
+
+test('extensions are read from a managed policy only, and validated', async () => {
+  const { workspaceExtensions } = await import('../src/lib/workspaceCapabilities.ts')
+  const extensions = {
+    schema: 'shakerscan.ui-extensions/v1',
+    pages: [{ id: 'reports', title: 'Reports', src: '/deployment/embed/reports' }],
+    nav: [{ label: 'Reports', page: 'reports' }, { label: 'Elsewhere', href: 'https://elsewhere.example/' }],
+  }
+  delete global.window
+  assert.deepEqual(workspaceExtensions().nav, [], 'the server render has none')
+  global.window = {}
+  assert.deepEqual(workspaceExtensions().nav, [], 'a standalone UI has none')
+  window.__SHAKERSCAN_CAPABILITIES__ = { ...policy, extensions }
+  assert.deepEqual(workspaceExtensions().nav.map(entry => entry.href), ['/ext/reports'])
+  assert.equal(workspaceExtensions(), workspaceExtensions(), 'one validation per declared block')
+  window.__SHAKERSCAN_CAPABILITIES__ = { ...policy }
+  assert.deepEqual(workspaceExtensions().nav, [], 'a policy without the member is the UI as it was')
+  window.__SHAKERSCAN_CAPABILITIES__ = { ...policy, schema: 'future', extensions }
+  assert.deepEqual(workspaceExtensions().nav, [], 'unknown capability contracts fail closed')
+  window.__SHAKERSCAN_CAPABILITIES__ = { ...policy, mode: 'standalone', extensions }
+  assert.deepEqual(workspaceExtensions().nav, [])
+  // A hosted page is a route like any other: the policy lists it or the UI does not open it.
+  window.__SHAKERSCAN_CAPABILITIES__ = { ...policy, extensions }
+  assert.equal(navigationAllowed('/ext/reports'), false)
+  window.__SHAKERSCAN_CAPABILITIES__ = {
+    ...policy, extensions,
+    features: { ...policy.features, extensions: { state: 'enabled' } },
+    navigation: { ...policy.navigation, '/ext': 'extensions' },
+    ui_routes: [...policy.ui_routes, '/ext/reports'],
+  }
+  assert.equal(navigationAllowed('/ext/reports'), true)
+  assert.equal(navigationAllowed('/ext/other'), false)
+  delete global.window
+})
