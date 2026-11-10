@@ -150,6 +150,16 @@ test('EXT-001 declared entries and sections are placed in the sidebar; hostile e
   await expect(account.getByRole('link', { name: 'Sign out', exact: true })).toHaveAttribute('href', '/deployment/sign-out')
   await expect(account.getByRole('link', { name: 'Elsewhere' })).toHaveCount(0)
   await noSidewaysScroll(page)
+
+  // In a window shorter than the menu the block stays in view; the menu scrolls behind it.
+  const size = page.viewportSize()!
+  await page.setViewportSize({ width: size.width, height: 480 })
+  const menu = page.locator('aside:visible').first()
+  expect(await menu.evaluate((aside) => aside.scrollHeight > aside.clientHeight)).toBe(true)
+  await expect(account.getByText('Dana Example')).toBeInViewport({ ratio: 1 })
+  await expect(account.getByRole('link', { name: 'Sign out', exact: true })).toBeInViewport({ ratio: 1 })
+  await menu.evaluate((aside) => aside.scrollTo(0, aside.scrollHeight))
+  await expect(account.getByRole('link', { name: 'Sign out', exact: true })).toBeInViewport({ ratio: 1 })
 })
 
 test('EXT-002 a hosted page renders inside the shell under its declared title, at the linked item', async ({ page }) => {
