@@ -1004,10 +1004,16 @@ def test_xss_batch_skips_dalfox_where_no_input_reflects(monkeypatch):
     assert [urllib.parse.urlsplit(url).path for url in calls] == ["/two"]
     skipped = [item for item in result.observations if item.get("negative_reason") == "no_reflection"]
     assert len(skipped) == 1 and skipped[0]["verdict"] == "negative"
-    # Both candidates are checkpointed: a resumed batch sends nothing again.
-    assert len(backend.attempts[action.action_id]) == 2
-    asyncio.run(dispatcher(action, _lease(plan, action), _noop))
+    # Every request sent is counted, the check on the reflecting endpoint included: two checks
+    # and the one request the Dalfox stand-in reports.
+    assert result.budget_consumed["http_requests"] == 3
+    # Both candidates are checkpointed: a resumed batch sends nothing again, and counts the same.
+    attempts = backend.attempts[action.action_id]
+    assert len(attempts) == 2
+    assert sorted(item["budget_consumed"]["http_requests"] for item in attempts.values()) == [1, 2]
+    resumed = asyncio.run(dispatcher(action, _lease(plan, action), _noop))
     assert len(sent) == 2 and len(calls) == 1
+    assert resumed.budget_consumed["http_requests"] == 3
 
 
 def test_one_unresolvable_candidate_does_not_fail_the_whole_verify_batch(monkeypatch, capsys):

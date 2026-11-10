@@ -5153,6 +5153,11 @@ class DatabaseNeutralScanActionDispatcher:
             execution_target = str(row["execution_target"])
             body_request = dict(row["body_request"])
             sub_budget = dict(row["sub_budget"])
+            # What the attempt sent: the tool's own requests plus a reflection check before it
+            # (already counted against the slice when it was sent).
+            attempt_budget = dict(result.actual_budget)
+            for name, amount in dict(row.get("precheck_spent") or {}).items():
+                attempt_budget[name] = int(attempt_budget.get(name, 0) or 0) + int(amount)
             if tool == "sqlmap":
                 for stage in result.stages:
                     key = (
@@ -5190,7 +5195,7 @@ class DatabaseNeutralScanActionDispatcher:
                     "status": result.status,
                     "proof_state": proof_state,
                     "response_hashes": response_hashes,
-                    "budget_consumed": dict(result.actual_budget),
+                    "budget_consumed": dict(attempt_budget),
                     **({"retry_round": retry_round} if retry_round else {}),
                     # An unfinished SQLi candidate names the least wall its next attempt needs:
                     # its unfinished stage's checkpoint, never less than the attempt floor. The
@@ -5295,7 +5300,7 @@ class DatabaseNeutralScanActionDispatcher:
                    if candidate_id in template_windows else {}),
                 "status": result.status,
                 "timed_out": bool(result.timed_out),
-                "budget_consumed": dict(result.actual_budget),
+                "budget_consumed": dict(attempt_budget),
                 "observations": attempt_observations,
                 "errors": tuple(result.errors),
                 "proof_state": proof_state,
@@ -5483,6 +5488,9 @@ class DatabaseNeutralScanActionDispatcher:
 
         http_ceiling_total = int(action.requested_budget.get("http_requests") or 0)
         reflection_transport: Any = None
+        # attempt id -> what its reflection check sent; the Dalfox attempt that follows records
+        # it, so a resumed slice counts the request too.
+        reflection_spent: dict[str, dict[str, int]] = {}
 
         async def reflection_precheck(url: str, body_request: Mapping[str, Any]) -> bool | None:
             """Whether any input reflects a canary; None when the check got no answer."""
@@ -5711,6 +5719,7 @@ class DatabaseNeutralScanActionDispatcher:
                         continue
                     if (
                         tool == "dalfox" and sign_in is None and not retry_round
+                        and attempt_id not in reflection_spent
                         and xss_reflection.has_inputs(execution_target, body_request)
                         and consumed.get("http_requests", 0) < http_ceiling_total
                         and (not body_request or consumed.get("state_changing_requests", 0)
@@ -5719,11 +5728,14 @@ class DatabaseNeutralScanActionDispatcher:
                         # One request with a canary in every input before Dalfox's payload set:
                         # nothing reflected means no reflected XSS to find (xss_reflection).
                         verdict = await reflection_precheck(execution_target, body_request)
+                        # The request was sent whatever it showed, so it is counted now; a
+                        # candidate the loop comes back to is not checked a second time.
+                        spent = {"http_requests": 1,
+                                 **({"state_changing_requests": 1} if body_request else {})}
+                        for name, amount in spent.items():
+                            consumed[name] = consumed.get(name, 0) + amount
+                        reflection_spent[attempt_id] = spent
                         if verdict is False:
-                            spent = {"http_requests": 1,
-                                     **({"state_changing_requests": 1} if body_request else {})}
-                            for name, amount in spent.items():
-                                consumed[name] = consumed.get(name, 0) + amount
                             attempted += 1
                             attempt_log.append((candidate_id, retry_round, True, False))
                             settled = {
@@ -6172,6 +6184,7 @@ class DatabaseNeutralScanActionDispatcher:
                         "sign_in_key": sign_in.key if sign_in is not None else None,
                         "sign_in_endpoint": sign_in.label if sign_in is not None else None,
                         "auth_parameters": auth_parameters, "manifest_index": manifest_index,
+                        "precheck_spent": reflection_spent.get(attempt_id, {}),
                     }
                     if concurrent:
                         # The candidate's records keep its place in the slice whenever it finishes.
