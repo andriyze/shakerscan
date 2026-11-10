@@ -5635,7 +5635,7 @@ def _call_model_intake_signer(
 async def _verify_model_intake_admission_v2_request(
     request: ModelAdmissionV2VerifyRequest,
     http_request: Request,
-) -> tuple[dict[str, Any], ResolvedScanContract]:
+) -> tuple[dict[str, Any], Any]:
     _model_intake_authenticated_subject(http_request)
     async with _pool().acquire() as conn:
         anchors = await conn.fetch(

@@ -124,6 +124,14 @@ jobs:
           python scripts/check_documentation_policy.py
           python scripts/check_surface_dispositions.py
           python scripts/check_scan_target_transport.py
+      # A name used but never imported raises only when its line runs, so tests miss the ones on
+      # paths they do not reach. pyflakes is a gate tool, not a runtime dependency: its own lock.
+      - name: Reject undefined names
+        if: steps.changes.outputs.python_mode == 'full'
+        run: |
+          python -m pip install --disable-pip-version-check --require-hashes -r .github/requirements/pyflakes.lock
+          python scripts/check_undefined_names.py
+          python -m pytest -q -p no:cacheprovider tests/test_undefined_names_gate.py
 
   # Every database-backed test (scripts/run_postgres_suite.py discovers them) against a real
   # PostgreSQL and Redis. The shards above have no database, so these tests skip there; this job

@@ -18,6 +18,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "api"))
 
 from ai_gate.budget import RequestBudget, TokenBudget  # noqa: E402
+from ai_gate.models import Probe  # noqa: E402
 from ai_gate.runner import ConversationRunner, PackRunResult  # noqa: E402
 import ai_gate_scan  # noqa: E402
 

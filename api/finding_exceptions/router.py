@@ -202,7 +202,7 @@ async def finding_exception_lifecycle_sweep(req: FindingExceptionLifecycleSweepR
 async def _finding_exception_lifecycle_sweep(
     req: FindingExceptionLifecycleSweepRequest,
     *,
-    pool: asyncpg.Pool,
+    pool: Any,
 ) -> dict[str, Any]:
     """Preview or expire elapsed exceptions without renewing or deleting them."""
     try:

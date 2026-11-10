@@ -28,7 +28,7 @@ import ipaddress
 import json
 import os
 import re
-from typing import Any, Callable, Literal, Mapping, Optional
+from typing import Any, Callable, Literal, Mapping, Optional, Sequence
 import urllib.parse
 import uuid
 
@@ -73,7 +73,7 @@ try:
     from scan.action_plan import ScanActionPlanError
     from scan.action_store import PostgresScanActionStore
     from scan.contracts import (
-        bind_scan_scope_receipt, raw_scan_authentication_keys, resolve_scan_contract,
+        ResolvedScanContract, bind_scan_scope_receipt, raw_scan_authentication_keys, resolve_scan_contract,
     )
     from action_scope import scope_origin_matches_target
     from asset_cohorts import target_cohort, target_exposure_class
@@ -118,7 +118,7 @@ except ModuleNotFoundError:  # package import in host-side tests
     from ..scan.action_plan import ScanActionPlanError
     from ..scan.action_store import PostgresScanActionStore
     from ..scan.contracts import (
-        bind_scan_scope_receipt, raw_scan_authentication_keys, resolve_scan_contract,
+        ResolvedScanContract, bind_scan_scope_receipt, raw_scan_authentication_keys, resolve_scan_contract,
     )
     from ..action_scope import scope_origin_matches_target
     from ..scan.jobs import CanonicalScanJob, admitted_credential_profile_ids
