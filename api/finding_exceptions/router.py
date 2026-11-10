@@ -123,6 +123,8 @@ def _validate_finding_exception_accountability(req: FindingExceptionRequest) -> 
     _uuid_or_422(str(req.policy_id), "policy_id")
     _uuid_or_422(str(req.target_id), "target_id")
     expires_at = _parse_iso_datetime(req.expires_at)
+    if expires_at is None:
+        raise HTTPException(status_code=422, detail="expires_at must be an ISO 8601 date-time")
     if expires_at <= datetime.now(timezone.utc):
         raise HTTPException(status_code=422, detail="expires_at must be in the future")
     return expires_at

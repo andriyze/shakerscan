@@ -6852,7 +6852,7 @@ async def build_report(target: str,
                 directories = list(set(directories))
 
                 adaptive_depth, adaptive_paths = calculate_adaptive_depth(nuclei_signals, base_depth=3)
-                refinement_url_budget = int(discovery_max_urls or config.get("max_urls", 1000))
+                refinement_url_budget = int(discovery_max_urls or base_discovery_config.get("max_urls") or 1000)
                 max_refinement_bases = min(max(8, refinement_url_budget // 2), 40)
                 if len(directories) > max_refinement_bases:
                     before_dirs = len(directories)

@@ -28,7 +28,7 @@ from pydantic import BaseModel, Field, model_validator
 
 try:
     from api_utils import (
-        SEVERITY_ORDER, _clean_string_list, _int_or_none, _iso_or_none,
+        SEVERITY_ORDER, _clean_string_list, _direct_query_value, _int_or_none, _iso_or_none,
         _optional_uuid, _row_value, _uuid_or_400, utc_now, utc_now_iso,
     )
     import asm_inventory
@@ -57,7 +57,7 @@ try:
     from list_contract import DEFAULT_LIMIT, MAX_LIMIT, SqlParams, page_params
 except ModuleNotFoundError:  # package import in host-side tests
     from ..api_utils import (
-        SEVERITY_ORDER, _clean_string_list, _int_or_none, _iso_or_none,
+        SEVERITY_ORDER, _clean_string_list, _direct_query_value, _int_or_none, _iso_or_none,
         _optional_uuid, _row_value, _uuid_or_400, utc_now, utc_now_iso,
     )
     from .. import asm_inventory, family_proof
