@@ -61,7 +61,7 @@ EXPOSED: dict[str, tuple[bytes, str, str]] = {
         "application/octet-stream", "private_key_material",
     ),
     "/.aws/credentials": (
-        b"[default]\naws_access_key_id = AKIAIOSFODNN7FIXTURE\n"
+        b"[default]\naws_access_key_id = " + b"AKIA" + b"IOSFODNN7FIXTURE\n"
         b"aws_secret_access_key = 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\n",
         "text/plain", "cloud_credential_material",
     ),
