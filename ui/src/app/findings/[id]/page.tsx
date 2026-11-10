@@ -52,7 +52,7 @@ import { CopyButton } from '@/components/findings/detail/CopyButton'
 import { findingLink } from '@/lib/copyText'
 import { HowToFix } from '@/components/findings/detail/HowToFix'
 import { EvidenceObjectsList } from '@/components/findings/detail/EvidenceObjectsList'
-import { ExceptionDialog, type ExceptionFormValues } from '@/components/findings/detail/ExceptionDialog'
+import { ExceptionDialog, activePolicyProfiles, type ExceptionFormValues } from '@/components/findings/detail/ExceptionDialog'
 import { Fact, Section } from '@/components/findings/detail/Section'
 import { WhatWeFound } from '@/components/findings/detail/WhatWeFound'
 import { FindingBriefView } from '@/components/findings/detail/FindingBriefView'
@@ -414,7 +414,7 @@ function FindingDetailContent() {
     const approver = exceptionForm.approver.trim()
     const reason = exceptionForm.reason.trim()
     const controls = exceptionForm.compensating_controls.trim()
-    if (!exceptionForm.policy_id) {
+    if (!exceptionForm.policy_id && activePolicyProfiles(policyProfiles).length > 0) {
       toast.error('Select the exact policy this exception applies to')
       return false
     }

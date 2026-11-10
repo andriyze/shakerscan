@@ -242,8 +242,12 @@ export default function NewScanPage() {
         ? ['recon', 'nuclei_passive', 'xss', 'sqli', 'sensitive_exposure']
         : ['recon', 'nuclei_passive', 'sensitive_exposure']
     )
-    const chosen = new Set([...base, ...additions])
-    const order = scanContract?.families?.map((family) => family.name) ?? [...base, ...additions]
+    // A signed-in Scan's preset also reads what its principal reaches (access control).
+    const signedIn = credentialUse ? (scanContract?.family_preset_signed_in_additions?.[preset] ?? (
+      preset === 'standard_active' ? ['authz_surface'] : []
+    )) : []
+    const chosen = new Set([...base, ...additions, ...signedIn])
+    const order = scanContract?.families?.map((family) => family.name) ?? [...base, ...additions, ...signedIn]
     return order.filter((name) => chosen.has(name))
   }
   const resolvedFamilies = contractPreview?.resolved_families ?? (
@@ -279,13 +283,14 @@ export default function NewScanPage() {
         network_discovery: networkDiscovery,
         subdomain_discovery: subdomainDiscovery,
         execution_topology: topology === 'parallel' ? 'parallel' : 'single_worker',
+        signed_in: credentialUse,
         ...(Object.keys(advanced).length ? { advanced } : {}),
       })
         .then((preview) => { if (!cancelled) { setContractPreview(preview); setContractPreviewError(null); setContractPreviewLoading(false) } })
         .catch((cause) => { if (!cancelled) { setContractPreview(null); setContractPreviewError(cause instanceof Error ? cause.message : 'Preview unavailable'); setContractPreviewLoading(false) } })
     }, 150)
     return () => { cancelled = true; window.clearTimeout(timer) }
-  }, [familyPreset, budgetProfile, customFamilies, activeTesting, allowStateChanging, networkDiscovery, subdomainDiscovery, topology, previewCeilingsKey])
+  }, [familyPreset, budgetProfile, customFamilies, activeTesting, allowStateChanging, networkDiscovery, subdomainDiscovery, credentialUse, topology, previewCeilingsKey])
 
   /** Searchable choices for one lane; incompatible profiles stay visible with the reason. */
   function slotOptions(lane: 'primary' | 'secondary'): ComboboxOption[] {

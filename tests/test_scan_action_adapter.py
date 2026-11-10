@@ -931,6 +931,85 @@ def test_database_neutral_batch_checkpoints_and_resumes_each_candidate(monkeypat
     assert all(len(attempt_id) == 64 for attempt_id in backend.attempts[action.action_id])
 
 
+def test_xss_batch_skips_dalfox_where_no_input_reflects(monkeypatch):
+    """Dalfox sends its whole payload set whether or not an input comes back; one request with a
+    canary in every input decides first. /one never reflects (negative, no Dalfox run); /two
+    echoes its query (Dalfox runs as before)."""
+    scan_id = str(uuid.uuid4())
+    endpoint_manifest = build_endpoint_manifest(
+        scan_id=scan_id, target_binding_digest=TARGET.digest,
+        surface_manifest={
+            "schema_version": "endpoint-manifest/v2", "status": "complete", "reason": None,
+            "endpoints": [
+                {"method": "GET", "scheme": "https", "host": "app.example.test", "port": 443,
+                 "normalized_path": "/one", "concrete_path": "/one",
+                 "query_keys": ["first"], "source": "web.crawl"},
+                {"method": "GET", "scheme": "https", "host": "app.example.test", "port": 443,
+                 "normalized_path": "/two", "concrete_path": "/two",
+                 "query_keys": ["second"], "source": "web.crawl"},
+            ],
+        },
+        source_action_ids=("discover.web_crawl",),
+    )
+    candidates = build_candidate_manifest(
+        endpoint_manifest, source_action_ids=("discover.web_crawl",), maximum=10,
+    )
+    action = _action(
+        "verify.xss.batch.00000", "xss.verify_batch", 0,
+        capability_args={
+            "candidate_manifest_ref": candidates.reference().canonical_dict(),
+            "endpoint_manifest_ref": endpoint_manifest.reference().canonical_dict(),
+            "slice": {"start": 0, "count": 2}, "profile": "balanced",
+            "proof_policy": "deterministic",
+        },
+    )
+    plan = ScanActionPlan(
+        scan_id=scan_id, execution_plan_digest="a" * 64,
+        target_binding_digest=TARGET.digest, actions=(action,),
+    )
+    sent = []
+
+    class EchoTransport:
+        async def send(self, request, **_kwargs):
+            sent.append(request.url)
+            query = urllib.parse.urlsplit(request.url).query
+            body = (b"<p>" + query.encode() + b"</p>") if "/two" in request.url else b"<p>nothing</p>"
+            return ReplayTransportResult(
+                status_code=200, connected_address="192.0.2.10", final_url=request.url,
+                response_headers={"Content-Type": "text/html"}, response_body=body, elapsed_ms=5,
+            )
+
+    monkeypatch.setattr(action_adapter_module, "PinnedAiohttpReplayTransport", EchoTransport)
+    calls = []
+
+    async def execute(_self, context, adapter, **_kwargs):
+        calls.append(adapter._process_payload["execution_target"])
+        return CapabilityAdapterResult(
+            status="success", actual_budget={name: 1 for name in context.requested_budget},
+            observations=({"kind": "xss_probe", "response_sha256": "e" * 64},),
+            execution_started=True, parser_version="dalfox-jsonl/v1",
+        )
+
+    monkeypatch.setattr(action_adapter_module.CapabilityExecutor, "execute", execute)
+    backend = Backend(manifests={
+        endpoint_manifest.manifest_id: endpoint_manifest, candidates.manifest_id: candidates,
+    })
+    dispatcher = _dispatcher(
+        plan, backend, policy=ScanPolicy(active_testing=True, approval_receipt_id="approval-1"),
+    )
+    result = asyncio.run(dispatcher(action, _lease(plan, action), _noop))
+
+    assert result.status == "success"
+    assert len(sent) == 2
+    assert [urllib.parse.urlsplit(url).path for url in calls] == ["/two"]
+    skipped = [item for item in result.observations if item.get("negative_reason") == "no_reflection"]
+    assert len(skipped) == 1 and skipped[0]["verdict"] == "negative"
+    # Both candidates are checkpointed: a resumed batch sends nothing again.
+    assert len(backend.attempts[action.action_id]) == 2
+    asyncio.run(dispatcher(action, _lease(plan, action), _noop))
+    assert len(sent) == 2 and len(calls) == 1
+
+
 def test_one_unresolvable_candidate_does_not_fail_the_whole_verify_batch(monkeypatch, capsys):
     """A candidate whose request cannot be resolved must fail only its own attempt.
 
@@ -1593,6 +1672,95 @@ def test_authz_surface_batch_proves_bfla_only_with_an_established_boundary(monke
         item for item in second.observations
         if item.get("kind") == "authz_surface_proof"
     ]) == 1
+
+
+def test_authz_surface_batch_reports_another_accounts_password_hash(monkeypatch):
+    """A signed-in low-privileged user reads the admin record with its password hash (the
+    record of another account: two distinct hashes reach one principal)."""
+    scan_id = str(uuid.uuid4())
+    endpoints = [
+        {
+            "method": "GET", "scheme": "https", "host": "app.example.test",
+            "port": 443, "normalized_path": path, "concrete_path": path,
+            "query_keys": [], "source": "seed",
+        }
+        for path in ("/hub/api/me", "/hub/api/users/1", "/hub/api/orders/1001")
+    ]
+    endpoint_manifest = build_endpoint_manifest(
+        scan_id=scan_id, target_binding_digest=TARGET.digest,
+        surface_manifest={
+            "schema_version": "endpoint-manifest/v2", "status": "complete", "reason": None,
+            "endpoints": endpoints,
+        },
+        source_action_ids=("discover.web_crawl",),
+    )
+    own = "$2b$10$" + "VXNlclR3b0hhc2hWYWx1ZUZvclRlc3RzT25seS4uLi4uLi4uLi4uLi4u"[:53]
+    admin = "$2b$10$" + "Qm9yZWRBZG1pbkhhc2hWYWx1ZUZvclRlc3RzT25seS4uLi4uLi4uLi4u"[:53]
+    bodies = {
+        "/hub/api/me": b'{"id":2,"username":"user","role":"user","password_hash":"%s"}' % own.encode(),
+        "/hub/api/users/1": (
+            b'{"id":1,"username":"admin","role":"admin","salary":182000,"password_hash":"%s"}'
+            % admin.encode()
+        ),
+        "/hub/api/orders/1001": b'{"id":1001,"user_id":2,"total":12.5,"status":"shipped"}',
+    }
+
+    class HubTransport:
+        async def send(self, request, **_kwargs):
+            authed = any(name.lower() == "authorization" for name, _ in request.headers)
+            path = urllib.parse.urlsplit(request.url).path
+            if not authed:
+                return ReplayTransportResult(
+                    status_code=401, connected_address="192.0.2.10", final_url=request.url,
+                    response_headers={"Content-Type": "application/json"},
+                    response_body=b'{"error":"Unauthorized"}', elapsed_ms=5,
+                )
+            return ReplayTransportResult(
+                status_code=200, connected_address="192.0.2.10", final_url=request.url,
+                response_headers={"Content-Type": "application/json"},
+                response_body=bodies[path], elapsed_ms=5,
+            )
+
+    monkeypatch.setattr(action_adapter_module, "PinnedAiohttpReplayTransport", HubTransport)
+    monkeypatch.setattr(
+        action_adapter_module, "resolve_scan_http_principal",
+        lambda _options, *, lane, capability_name=None: _principal(lane),
+    )
+    action = _action(
+        "verify.authz_surface", "authz_surface.verify_batch", 0,
+        capability_args={
+            "endpoint_manifest_ref": endpoint_manifest.reference().canonical_dict(),
+            "slice": {"start": 0, "count": 100},
+            "profile": "fast",
+            "proof_policy": "deterministic_proof_contract_required",
+        },
+    )
+    plan = ScanActionPlan(
+        scan_id=scan_id, execution_plan_digest="a" * 64,
+        target_binding_digest=TARGET.digest, actions=(action,),
+    )
+    backend = Backend(manifests={endpoint_manifest.manifest_id: endpoint_manifest})
+    dispatcher = _dispatcher(
+        plan, backend, policy=ScanPolicy(active_testing=True, approval_receipt_id="approval-1"),
+    )
+
+    result = asyncio.run(dispatcher(action, _lease(plan, action), _noop))
+    disclosed = {
+        item["request_url"].rsplit("/hub", 1)[-1]: item for item in result.observations
+        if item.get("proof_contract") == "authz_surface_password_hash_disclosure/v1"
+    }
+    assert set(disclosed) == {"/api/me", "/api/users/1"}
+    assert disclosed["/api/users/1"]["other_accounts_hashes"] is True
+    assert disclosed["/api/users/1"]["anonymous_reads_hashes"] is False
+    # Never the hash itself, anywhere in the receipt.
+    dumped = json.dumps([list(result.observations), result.redacted_execution], default=str)
+    assert own not in dumped
+    assert admin not in dumped
+    # The anonymous 401s and signed-in 200s are a boundary, but no route serves both alike.
+    assert not [
+        item for item in result.observations
+        if item.get("proof_contract") == "authz_surface_anonymous_access/v1"
+    ]
 
 
 def test_authz_surface_batch_makes_no_claim_on_a_fully_public_app(monkeypatch):

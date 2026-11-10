@@ -11103,6 +11103,7 @@ async def _submit_scan(
             policy=request.policy,
             advanced=scan_advanced_limits,
             approval_receipt_id=approval_receipt_id,
+            signed_in=bool(request.credential_profile_ids),
         )
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
@@ -12093,6 +12094,7 @@ async def get_scan_deployment_decision(scan_id: str):
         "owner": r["owner"],
         "scope": r["scope"],
         "reason": r["reason"],
+        "compensating_controls": r["compensating_controls"],
         "expires_at": r["expires_at"].isoformat() if r["expires_at"] else None,
     } for r in exc_rows]
 

@@ -417,7 +417,10 @@ CHECK_REGISTRY: tuple[CheckFamilySpec, ...] = (
         label="Function-Level Authorization",
         is_active=True,
         requires_credentials=True,
-        risk_level="high",
+        # Read-only: it sends GETs to routes the Scan already discovered, once anonymously and
+        # once as the signed-in principal, and never enumerates object ids. It is not the
+        # Lab/deep tier of the exploit families, so a signed-in standard Scan may run it.
+        risk_level="medium",
         telemetry_schema="active_endpoint_attempt_v1",
         proof_contract=("route", "anonymous_access", "authenticated_access", "boundary_established"),
         severity_rules={

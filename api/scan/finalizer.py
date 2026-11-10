@@ -954,6 +954,8 @@ def _findings_for_action(
     *,
     unobserved_response_urls: frozenset[str] = frozenset(),
     target_url: str = "",
+    scan_password_hashes: frozenset[str] = frozenset(),
+    scan_self_password_hashes: frozenset[str] = frozenset(),
 ) -> list[dict[str, Any]]:
     findings: list[dict[str, Any]] = []
     header_origin_findings: dict[tuple[str, str], dict[str, Any]] = {}
@@ -1518,6 +1520,80 @@ def _findings_for_action(
             findings.append(finding)
         elif (
             kind == "authz_surface_proof"
+            and result.capability_name == "authz_surface.verify_batch"
+            and item.get("proof_state") == "verified"
+            and item.get("finding_verdict") == "verified"
+            and item.get("proof_contract") == "authz_surface_password_hash_disclosure/v1"
+            and str(item.get("request_url") or "")
+            and int(item.get("repetitions") or 0) >= 2
+            and int(item.get("hash_count") or 0) >= 1
+        ):
+            # The signed-in principal read stored password hashes, the same on every read.
+            # Whose they are: a route that names the signed-in user (/me, /profile ...) holds the
+            # principal's own hash. A hash that is not it, or a response with several hashes, is
+            # another account's: cracked offline at the attacker's pace, high. The principal's own
+            # hash in its own record is excessive data exposure: medium. Without a self route,
+            # two distinct hashes read in one Scan prove another account's is among them, but not
+            # which route holds it: high, without the "other accounts" claim.
+            digests = {str(value) for value in item.get("hash_digests") or ()}
+            own_hashes = scan_self_password_hashes
+            if own_hashes:
+                other_accounts = bool(digests - own_hashes) or int(item.get("hash_count") or 0) >= 2
+                some_other = other_accounts
+            else:
+                other_accounts = int(item.get("hash_count") or 0) >= 2
+                some_other = other_accounts or len(scan_password_hashes) >= 2
+            anonymous = item.get("anonymous_reads_hashes") is True
+            finding = _base_finding(
+                tool="shakerscan_authz_surface",
+                title=(
+                    "API returns other accounts' password hashes" if other_accounts
+                    else "API returns password hashes"
+                ),
+                severity="high" if some_other or anonymous else "medium",
+                cwe="CWE-639" if other_accounts else "CWE-200",
+                url=item.get("request_url"),
+                evidence={
+                    "route_id": item.get("route_id"),
+                    "request_url": item.get("request_url"),
+                    "technique": item.get("technique"),
+                    "proof_contract": item.get("proof_contract"),
+                    "anonymous_status": item.get("anonymous_status"),
+                    "authenticated_status": item.get("authenticated_status"),
+                    "response_body_sha256": item.get("response_body_sha256"),
+                    "hash_count": item.get("hash_count"),
+                    "distinct_hashes_read_in_scan": len(scan_password_hashes),
+                    "signed_in_users_own_record": bool(own_hashes) and not other_accounts,
+                    "hash_fields": [
+                        {"field": str(entry.get("field") or "")[:120]}
+                        for entry in list(item.get("hash_fields") or ())[:10]
+                        if isinstance(entry, Mapping)
+                    ],
+                    "other_accounts_hashes": other_accounts,
+                    "anonymous_reads_hashes": anonymous,
+                    "repetitions": item.get("repetitions"),
+                    "canonical_capability": result.capability_name,
+                    "capability_receipt": receipt,
+                    "proof_producer": "shakerscan",
+                    "evidence_type": "deterministic_response_signature",
+                },
+            )
+            finding.update({
+                "verified": True,
+                "suspected": False,
+                "needs_verification": False,
+                "proof_state": "verified",
+                "proof_contract_v2": _canonical_proof_contract_v2(
+                    capability_name=result.capability_name, kind=str(kind), receipt=receipt,
+                ),
+                "verification_reason": (
+                    "The signed-in response carried the same stored password hash fields on "
+                    "repeated reads"
+                ),
+            })
+            findings.append(finding)
+        elif (
+            kind == "authz_surface_proof"
             and item.get("proof_state") == "verified"
             and item.get("finding_verdict") == "verified"
             and str(item.get("proof_contract") or "").startswith("authz_surface_")
@@ -1535,7 +1611,9 @@ def _findings_for_action(
             finding = _base_finding(
                 tool="shakerscan_authz_surface",
                 title="Endpoint serves identical data to anonymous and authenticated principals",
-                severity="medium",
+                # Informational: on a public file or a health route this is intended, and nothing
+                # here tells the two apart; it rated medium beside the real findings.
+                severity="info",
                 cwe="CWE-862",
                 url=item.get("request_url"),
                 evidence={
@@ -1889,6 +1967,102 @@ def _fold_duplicate_header_findings(findings: list[dict[str, Any]]) -> list[dict
         twin_evidence["matched_url_count"] = int(evidence.get("matched_url_count") or 0)
         twin_evidence["matched_urls"] = list(evidence.get("matched_urls") or ())[:5]
         twin_evidence["also_reported_by"] = "nuclei:http-missing-security-headers"
+    return kept
+
+
+# A route that answers for the signed-in user rather than an object id: /me, /api/v1/profile.
+_SELF_ROUTE_RE = re.compile(
+    r"/(?:me|self|whoami|profile|account|current[-_]?user|userinfo)/?$", re.IGNORECASE,
+)
+
+
+def _route_key(origin: Any, url: Any) -> tuple[str, str]:
+    """(origin, path without a trailing slash) of a finding's route; the origin may be ''."""
+    text = str(url or "")
+    origin_text = _http_origin(origin) or _http_origin(text) or ""
+    try:
+        path = urllib.parse.urlsplit(text).path or "/"
+    except ValueError:
+        return origin_text, ""
+    return origin_text, path.rstrip("/") or "/"
+
+
+def _fold_sqli_candidates_into_proofs(findings: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """One finding per proven SQL injection: a candidate for the same input joins its proof.
+
+    sqlmap's "Potential SQL injection" on a parameter, or the request verifier's candidate, and
+    the deterministic proof on the same route, method and input are one issue: the Scan reported
+    it twice, once verified and once still to verify (Juice Shop's product search). The
+    candidate is kept on the proof as corroborating evidence (tool, input, database named); a
+    candidate on another input, method or route stays a finding of its own.
+    """
+    proofs: dict[tuple[str, str, str, str], dict[str, Any]] = {}
+    by_candidate: dict[str, dict[str, Any]] = {}
+    for finding in findings:
+        if finding.get("tool") != "shakerscan_sqli_proof" or finding.get("proof_state") != "verified":
+            continue
+        evidence = finding.get("evidence") if isinstance(finding.get("evidence"), Mapping) else {}
+        origin, path = _route_key(evidence.get("origin"), finding.get("url"))
+        field = str(evidence.get("field_path") or "")
+        method = str(evidence.get("method") or "GET").upper()
+        if path and field:
+            proofs.setdefault((origin, path, method, field), finding)
+            proofs.setdefault(("", path, method, field), finding)
+        if evidence.get("candidate_id"):
+            by_candidate.setdefault(str(evidence["candidate_id"]), finding)
+    if not proofs and not by_candidate:
+        return findings
+    kept: list[dict[str, Any]] = []
+    for finding in findings:
+        evidence = finding.get("evidence") if isinstance(finding.get("evidence"), Mapping) else {}
+        target = None
+        if finding.get("proof_state") != "verified" and finding.get("cwe") == "CWE-89":
+            if finding.get("tool") == "sqlmap":
+                origin, path = _route_key(None, finding.get("url"))
+                key = (path, str(evidence.get("method") or "GET").upper(), str(evidence.get("param") or ""))
+                target = proofs.get((origin, *key)) or proofs.get(("", *key))
+            elif finding.get("tool") == "request_sqli_differential" and evidence.get("candidate_id"):
+                target = by_candidate.get(str(evidence["candidate_id"]))
+        if target is None:
+            kept.append(finding)
+            continue
+        target["evidence"].setdefault("corroborating_candidates", []).append({
+            "tool": finding.get("tool"),
+            "title": finding.get("title"),
+            "input": evidence.get("param") or evidence.get("field_path"),
+            **({"dbms": evidence["dbms"]} if evidence.get("dbms") else {}),
+        })
+    return kept
+
+
+def _fold_directory_listing_slash_twins(findings: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """One directory-listing finding per directory: ``/ftp`` and ``/ftp/`` are one directory.
+
+    A listing seeded without the slash links its own slash form, and the probe followed it, so the
+    Scan reported the same directory twice (Juice Shop ``/ftp`` and ``/ftp/``, ``/.well-known``
+    and ``/.well-known/``). The first is kept and names the other URL; listings
+    of different directories (``/ftp/quarantine``) stay findings of their own.
+    """
+    first: dict[str, dict[str, Any]] = {}
+    kept: list[dict[str, Any]] = []
+    for finding in findings:
+        evidence = finding.get("evidence") if isinstance(finding.get("evidence"), Mapping) else {}
+        location = (
+            _exposure_location(finding.get("url"))
+            if finding.get("tool") == "shakerscan_exposure_probe"
+            and evidence.get("exposure_class") == "directory_listing"
+            and not urllib.parse.urlsplit(str(finding.get("url") or "")).query
+            else None
+        )
+        if location is None:
+            kept.append(finding)
+            continue
+        twin = first.get(location)
+        if twin is None:
+            first[location] = finding
+            kept.append(finding)
+            continue
+        twin["evidence"].setdefault("also_listed_at", []).append(finding.get("url"))
     return kept
 
 
@@ -2925,6 +3099,25 @@ def finalize_scan_report(
             key = _observed_url_key(request.get("origin") or response.get("final_url"))
             if key:
                 unobserved_response_urls.add(key)
+    # Every stored password hash (keyed digest) the signed-in principal read in this Scan.
+    disclosures = [
+        item
+        for action in expected_actions
+        if action_results[action.action_id].capability_name == "authz_surface.verify_batch"
+        for item in observations.get(action.action_id, ())
+        if isinstance(item, Mapping)
+        and item.get("proof_contract") == "authz_surface_password_hash_disclosure/v1"
+    ]
+    scan_password_hashes = frozenset(
+        str(digest) for item in disclosures for digest in list(item.get("hash_digests") or ())[:50]
+    )
+    # The signed-in user's own hash: the one a route naming the signed-in user returned.
+    scan_self_password_hashes = frozenset(
+        str(digest) for item in disclosures
+        if _SELF_ROUTE_RE.search(urllib.parse.urlsplit(str(item.get("request_url") or "")).path)
+        and int(item.get("hash_count") or 0) == 1
+        for digest in list(item.get("hash_digests") or ())[:1]
+    )
     for action in expected_actions:
         result = action_results[action.action_id]
         if result.action_digest != action.action_digest:
@@ -2942,6 +3135,8 @@ def finalize_scan_report(
             rows,
             unobserved_response_urls=frozenset(unobserved_response_urls),
             target_url=target_url,
+            scan_password_hashes=scan_password_hashes,
+            scan_self_password_hashes=scan_self_password_hashes,
         ):
             identity = _finding_identity(finding)
             existing = findings_by_id.get(identity)
@@ -2983,9 +3178,11 @@ def finalize_scan_report(
             "budget_reserved": dict(result.budget_reserved),
             "budget_consumed": dict(result.budget_consumed),
         })
-    findings = _fold_duplicate_header_findings(
-        _merge_template_candidates_into_exposure_proofs(list(findings_by_id.values())),
-    )
+    findings = _fold_directory_listing_slash_twins(_fold_sqli_candidates_into_proofs(
+        _fold_duplicate_header_findings(
+            _merge_template_candidates_into_exposure_proofs(list(findings_by_id.values())),
+        ),
+    ))
     _attach_observed_header_responses(
         findings, observations,
         {

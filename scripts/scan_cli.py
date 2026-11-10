@@ -104,7 +104,15 @@ def _parser(prog: str | None = None) -> argparse.ArgumentParser:
         metavar="KEY",
         help="Stable retry key (never put credentials or other secrets in this value)",
     )
-    parser.add_argument("--endpoint", action="append", default=[], metavar="SPEC")
+    parser.add_argument(
+        "--endpoint", action="append", default=[], metavar="SPEC",
+        help=(
+            "A known endpoint to test (repeatable): METHOD /path, then field names "
+            "(username,password) or name=value pairs: a JSON body on POST, PUT and PATCH, a query "
+            "on GET. Prefix an HTML form's fields with form: (form:username,password); json:{...} "
+            "sets a JSON body exactly. Example: --endpoint 'POST /login form:username=,password='"
+        ),
+    )
     parser.add_argument("--require-current-workers", action="store_true")
     parser.add_argument(
         "--placement", choices=("auto", "local", "remote"), default="auto",

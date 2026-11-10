@@ -79,13 +79,25 @@ def test_dotenv_with_an_entropy_screened_secret_verifies_and_its_fixed_twin_does
         assert _verified(signature), path
         assert signature.exposure_class == "environment_secret_file"
         assert signature.proof_contract == "dotenv_secret_exposure/v1"
-        assert signature.severity == "high"
+        # A live Stripe secret key opens the payment account: critical, like a cloud key.
+        assert signature.severity == "critical"
         # Key names are evidence; the provider category wins for a value it recognises.
         assert _keys(signature) == {"DB_PASSWORD": "config_secret_assignment",
                                     "STRIPE_SECRET_KEY": "stripe_key"}
     for status in (401, 403, 404):
         assert _classify("/.env", body, status=status) is None
     assert _classify("/.env", b"") is None
+
+
+def test_a_dotenv_with_only_a_configuration_password_stays_high():
+    signature = _classify("/.env", f"APP_ENV=production\nDB_PASSWORD={PASSWORD}\n".encode())
+    assert _verified(signature) and signature.severity == "high"
+
+
+def test_a_live_provider_token_is_critical_in_any_exposure_class():
+    # A GitHub token in a .env rates as an AWS key in settings.py does.
+    dotenv = _classify("/.env", f"APP_ENV=production\nGITHUB_TOKEN={GITHUB}\nPORT=3000\n".encode())
+    assert _verified(dotenv) and dotenv.severity == "critical"
 
 
 def test_dotenv_example_files_and_masked_or_indirect_values_are_not_secrets():
