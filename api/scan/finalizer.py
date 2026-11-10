@@ -457,12 +457,14 @@ def _observed_url_key(value: Any) -> str | None:
     """Canonicalize one exact response URL for cross-capability comparison."""
     try:
         parsed = urllib.parse.urlsplit(str(value or ""))
+        # A port that is not a number (a masked or malformed URL in tool output) names no
+        # comparable response: it must not fail the Scan's whole finalization.
+        port = parsed.port
     except ValueError:
         return None
     if parsed.scheme.lower() not in {"http", "https"} or not parsed.hostname:
         return None
     host = parsed.hostname.lower().rstrip(".")
-    port = parsed.port
     authority = host if port is None else f"{host}:{port}"
     path = (parsed.path or "/").rstrip("/") or "/"
     return urllib.parse.urlunsplit((parsed.scheme.lower(), authority, path, parsed.query, ""))
