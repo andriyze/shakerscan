@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 import json
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Literal, Optional
 import uuid
 
 from fastapi import APIRouter, HTTPException, Query, Request
@@ -80,7 +80,7 @@ class FindingExceptionRequest(BaseModel):
     approver: Optional[str] = None
     reason: Optional[str] = None
     compensating_controls: Optional[str] = None
-    status: str = "active"
+    status: Literal["active", "approved", "accepted_risk", "revoked", "expired"] = "active"
     expires_at: Optional[str] = None
 
 
@@ -369,10 +369,14 @@ async def update_finding_exception(exception_id: str, req: FindingExceptionReque
             raise HTTPException(status_code=404, detail="Finding exception not found")
         if _decision_id(http_request) is not None:
             async def apply(_actor: str | None = None) -> dict[str, Any]:
-                return json.loads(json.dumps(await _update_exception(conn, exception_uuid, req), default=str))
+                async with conn.transaction():
+                    return json.loads(json.dumps(await _update_exception(conn, exception_uuid, req), default=str))
             return await _triage_receipt(conn, http_request, "exception_update", apply, exception_id=exception_uuid,
                                          target_id=current["target_id"], finding_id=current["finding_id"])
-        return await _update_exception(conn, exception_uuid, req)
+        # The row lock below holds only inside a transaction; without one the read and the write
+        # were two statements and two concurrent edits could each overwrite the other's.
+        async with conn.transaction():
+            return await _update_exception(conn, exception_uuid, req)
 
 
 async def _update_exception(conn: Any, exception_uuid: uuid.UUID, req: FindingExceptionRequest) -> dict[str, Any]:
