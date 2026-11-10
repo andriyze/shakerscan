@@ -512,6 +512,66 @@ def test_a_hunt_that_ends_withdraws_its_requests_and_a_later_approval_grants_not
     assert run(env, env.conn.fetchval("SELECT COUNT(*) FROM hunt_permission_grants")) == 0
 
 
+def test_a_decision_on_an_ended_hunt_keeps_the_withdrawal_its_refusal_rolled_back(env, monkeypatch):
+    """A Hunt can end without its requests being settled (the settling step failed, or an older
+    engine ended it). The decision route then withdraws the request and answers 409; the 409
+    rolled the withdrawal back with it, so the request stayed pending and every retry repeated
+    the same refusal."""
+    from hunt import permission_router
+
+    hunt = run(env, env.hunt(budget={"max_capability_calls": 1}, used={"agent_actions": 1}))
+    with pytest.raises(HTTPException):
+        run(env, env.call(hunt, "ended-0002"))
+    (request,) = run(env, env.requests(hunt))
+    assert request["status"] == "pending"
+    run(env, env.conn.execute(
+        "UPDATE hunt_runs SET status='cancelled', completed_at=NOW() WHERE id=$1", hunt["id"]))
+    monkeypatch.setattr(permission_router, "_pool_provider", lambda: env.pool)
+    body = permission_router.PermissionDecisionRequest(
+        decision="allow", subject_digest=request["subject_digest"], idempotency_key="decision-0002",
+        decided_by="alice@example.test", decision_via="terminal_stepup",
+    )
+    with pytest.raises(HTTPException) as refused:
+        run(env, permission_router.decide_hunt_permission_request(str(hunt["id"]), str(request["id"]), body))
+    assert refused.value.status_code == 409
+    assert refused.value.detail["error"] == "permission_withdrawn"
+    (request,) = run(env, env.requests(hunt))
+    assert request["status"] == "withdrawn"
+    events = run(env, env.conn.fetch(
+        "SELECT event, source FROM hunt_permission_events WHERE request_id=$1 AND event='withdrawn'",
+        request["id"]))
+    assert [(row["event"], row["source"]) for row in events] == [("withdrawn", "hunt_ended")]
+    assert run(env, env.conn.fetchval("SELECT COUNT(*) FROM hunt_permission_grants")) == 0
+
+
+def test_an_expired_ssh_plan_is_recorded_expired_although_its_confirmation_is_refused(env):
+    """Confirming a proposed plan after its time answers 409. The plan was marked ``expired``
+    in the transaction that 409 rolled back, so it stayed ``proposed`` for ever."""
+    hunt = run(env, env.hunt())
+    plan_id, other_id = uuid.uuid4(), uuid.uuid4()
+    past = (datetime.now(timezone.utc) - timedelta(minutes=5)).isoformat()
+    future = (datetime.now(timezone.utc) + timedelta(minutes=5)).isoformat()
+    context = json.loads(hunt["context_pack"]) if isinstance(hunt["context_pack"], str) else dict(hunt["context_pack"])
+    context["device_runtime"] = {"shell_plans": [
+        {"plan_id": str(other_id), "status": "proposed", "expires_at": future},
+        {"plan_id": str(plan_id), "status": "proposed", "expires_at": past},
+    ]}
+    run(env, env.conn.execute(
+        "UPDATE hunt_runs SET context_pack=$2::jsonb WHERE id=$1", hunt["id"], json.dumps(context)))
+    confirmation = router.DeviceAgentShellConfirmRequest(
+        plan_digest="0" * 64, confirmation_phrase="RUN", confirm_exact_commands=True,
+        confirm_remote_device_effects=True,
+    )
+    with pytest.raises(HTTPException) as refused:
+        run(env, router.confirm_hunt_shell_plan(str(hunt["id"]), str(plan_id), confirmation))
+    assert refused.value.status_code == 409 and "expired" in refused.value.detail
+    saved = run(env, env.run(hunt))["context_pack"]
+    saved = json.loads(saved) if isinstance(saved, str) else saved
+    assert {plan["plan_id"]: plan["status"] for plan in saved["device_runtime"]["shell_plans"]} == {
+        str(other_id): "proposed", str(plan_id): "expired",
+    }
+
+
 def test_a_parked_action_never_retried_is_labelled_by_its_requests_outcome_when_the_hunt_ends(env):
     """D42: every parked action settled ``permission_withdrawn`` at the end, even when its request
     was denied or had expired (live: cda6999c, 65e6b4b6, 99f3fbe6 denied; 360d5f1c expired)."""

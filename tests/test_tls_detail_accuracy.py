@@ -516,3 +516,18 @@ def test_refused_versions_exclude_the_scans_own_fallback_label():
         legacy_protocol_probes=[{"protocol": "SSLv3", "supported": False}, {"protocol": "TLSv1", "supported": True}])
     refused = next(fact["value"] for fact in brief["observed"] if fact["label"] == "Protocol versions refused")
     assert refused == "SSLv3, TLSv1.2, TLSv1.3"
+
+
+def test_a_certificate_whose_key_cannot_be_read_still_reports_the_rest(monkeypatch):
+    # An unsupported public-key algorithm raised out of the leaf details and failed the whole
+    # inspection; the chain details already treated it as "strength unknown".
+    key = _key()
+    leaf = _cert(HOST, HOST, key.public_key(), key, ca=False, sans=(HOST,))
+
+    def unsupported(*_args, **_kwargs):
+        raise tls.UnsupportedAlgorithm("unsupported key type")
+
+    monkeypatch.setattr(tls, "_key_and_signature", unsupported)
+    details = tls._certificate_details(leaf.public_bytes(serialization.Encoding.DER), hostname=HOST)
+    assert details["certificate_parse_status"] == "parsed"
+    assert HOST in details["certificate_subject"]

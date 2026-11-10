@@ -455,3 +455,22 @@ def test_doh_is_never_asked_about_an_internal_name(monkeypatch, name):
     monkeypatch.setattr(dns_capability, "_DOH_RESOLVERS", ("https://doh.example/dns-query",))
     monkeypatch.setattr(dns_capability, "_doh_query", doh)
     assert asyncio.run(takeover.doh_nxdomain(name)) is None
+
+
+def test_one_host_whose_check_raises_leaves_the_others_checked():
+    # One candidate must never fail the whole batch: the resolver error for one name used to
+    # escape the gather and fail the action with every other host's evidence.
+    class OneNameRaises(FixtureDns):
+        async def __call__(self, name, rdtype):
+            if name == "broken.example.com":
+                raise RuntimeError("resolver library error")
+            return await super().__call__(name, rdtype)
+
+    dns = OneNameRaises({
+        ("gone.example.com", "CNAME"): cname("gone-app.herokuapp.com"),
+        ("broken.example.com", "CNAME"): cname("x.herokuapp.com"),
+    })
+    result = _check(dns, ["broken.example.com", "gone.example.com"])
+    checked = _by_host(result)
+    assert "gone.example.com" in checked
+    assert "broken.example.com" not in checked

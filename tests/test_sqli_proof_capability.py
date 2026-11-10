@@ -399,3 +399,63 @@ def test_a_captured_login_form_401_is_its_answer_and_other_refusals_stay_inconcl
     proof = result.observations[0]
     assert (proof.get("finding_verdict") == "inconclusive") is refused
     assert any(str(item).startswith(("authentication_required", "target_refused")) for item in result.errors) is refused
+
+
+# ------------------------------------------------------------------ 2026-11 audit regressions
+class _Clock:
+    """Stands in for the adapter's ``time`` module; each request the transport sends costs
+    ``per_request`` seconds."""
+
+    def __init__(self, per_request: float):
+        self.now, self.per_request, self.sent = 1_000.0, per_request, 0
+
+    def monotonic(self) -> float:
+        return self.now
+
+    async def send(self, request, **_kwargs):
+        self.sent += 1
+        self.now += self.per_request
+        return _json_result(b'{"items":[]}')
+
+
+def test_the_wall_reservation_stops_the_proof_as_a_kept_partial(monkeypatch):
+    from api.capabilities import sqli_proof
+    from api.hunt.capability_executor import CapabilityExecutionContext, CapabilityExecutor
+
+    clock = _Clock(per_request=1.2)
+    monkeypatch.setattr(sqli_proof, "time", clock)
+    spec = CAPABILITY_REGISTRY.require("sqli.prove_batch")
+    budget = {"http_requests": 14, "tool_wall_seconds": 3}
+    adapter = SQLiProofAdapter(
+        specification=spec, target=_target(),
+        request=_request(url="https://app.example.test/search?q=apple"),
+        candidate={"candidate_id": "9" * 64, "method": "GET", "parameter_name": "q",
+                   "request_class": "safe_read"},
+        transport=clock, requested_budget=budget,
+    )
+    result = asyncio.run(CapabilityExecutor().execute(
+        CapabilityExecutionContext(
+            specification=spec, target=_target(), requested_budget=budget,
+            adapter_managed_cancellation=True,
+        ),
+        adapter, heartbeat=lambda: asyncio.sleep(0), cancelled=lambda: False,
+    ))
+    # The requests split the wall that is left: the fourth would start with none, so it is not
+    # sent, and 3.6 s spent settles as the 3 s reserved instead of failing as 4 s.
+    assert clock.sent == 3
+    assert result.status == "partial" and result.timed_out
+    assert result.actual_budget == {"http_requests": 3, "tool_wall_seconds": 3}
+    assert "adapter_budget_contract_violation" not in " ".join(result.errors)
+
+
+def test_wall_seconds_are_not_settled_when_the_caller_did_not_reserve_them():
+    spec = CAPABILITY_REGISTRY.require("sqli.prove_batch")
+    adapter = SQLiProofAdapter(
+        specification=spec, target=_target(),
+        request=_request(url="https://app.example.test/search?q=apple"),
+        candidate={"candidate_id": "a" * 64, "method": "GET", "parameter_name": "q",
+                   "request_class": "safe_read"},
+        transport=NoSignalTransport(), requested_budget={"http_requests": 4},
+    )
+    result = asyncio.run(adapter.execute(heartbeat=lambda: asyncio.sleep(0), cancelled=lambda: False))
+    assert result.actual_budget == {"http_requests": 4}

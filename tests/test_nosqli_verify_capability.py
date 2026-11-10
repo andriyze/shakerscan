@@ -516,3 +516,101 @@ def test_body_reflection_without_a_session_is_never_auth_bypass():
     )
     proof = result.observations[0]
     assert proof["proof_state"] == "not_proven"
+
+
+# ------------------------------------------------------------------ 2026-11 audit regressions
+def test_a_captured_get_is_tested_through_its_query():
+    # A captured request has a request_ref_id; routing by that sent a GET to the JSON-body
+    # mutator, which blocked the candidate before any request.
+    result = _run(
+        _request(url="https://app.example.test/rest/products/search?q=apple"),
+        {
+            "candidate_id": "5" * 64, "method": "GET", "parameter_name": "q",
+            "request_class": "safe_read", "request_ref_id": "exact-request",
+        },
+        OperatorInterpretedTransport(),
+    )
+    assert result.status == "success"
+    assert result.observations[0]["proof_state"] == "verified"
+    assert result.actual_budget["http_requests"] == 4
+
+
+def test_a_later_field_that_cannot_be_mutated_keeps_the_earlier_differential():
+    result = _run(
+        _request(
+            method="POST", url="https://app.example.test/rest/user/login",
+            body=json.dumps({"email": "a@b.test"}), content_type="application/json",
+        ),
+        {
+            "candidate_id": "6" * 64, "method": "POST", "parameter_name": "email",
+            "body_field_names": ["email", "profile.name"], "request_class": "safe_read",
+        },
+        LiteralOperatorTransport(),
+    )
+    assert result.status == "partial" and result.errors
+    assert [item["field_path"] for item in result.observations] == ["email"]
+    assert result.actual_budget["http_requests"] == 4
+
+
+class _Clock:
+    """Stands in for the adapter's ``time`` module; each request the transport sends costs
+    ``per_request`` seconds."""
+
+    def __init__(self, per_request: float):
+        self.now, self.per_request, self.sent = 1_000.0, per_request, 0
+
+    def monotonic(self) -> float:
+        return self.now
+
+    async def send(self, request, **_kwargs):
+        self.sent += 1
+        self.now += self.per_request
+        return _result(200, b'{"results":[]}')
+
+
+def test_the_wall_reservation_stops_the_proof_as_a_kept_partial(monkeypatch):
+    from api.capabilities import nosqli_verify
+    from api.hunt.capability_executor import CapabilityExecutionContext, CapabilityExecutor
+
+    clock = _Clock(per_request=1.2)
+    monkeypatch.setattr(nosqli_verify, "time", clock)
+    spec = CAPABILITY_REGISTRY.require("nosqli.verify_batch")
+    budget = {"http_requests": 16, "tool_wall_seconds": 3}
+    adapter = NoSQLiVerifyAdapter(
+        specification=spec, target=_target(),
+        request=_request(url="https://app.example.test/rest/products/search?q=apple"),
+        candidate={"candidate_id": "7" * 64, "method": "GET", "parameter_name": "q",
+                   "request_class": "safe_read"},
+        transport=clock, requested_budget=budget,
+    )
+    result = asyncio.run(CapabilityExecutor().execute(
+        CapabilityExecutionContext(
+            specification=spec, target=_target(), requested_budget=budget,
+            adapter_managed_cancellation=True,
+        ),
+        adapter, heartbeat=lambda: asyncio.sleep(0), cancelled=lambda: False,
+    ))
+    # Three requests fit in 3 s; the fourth is never sent, and the 3.6 s spent settles as the
+    # 3 s reserved, not as a 4 s over-reservation that fails the action.
+    assert clock.sent == 3
+    assert result.status == "partial" and result.timed_out
+    assert result.actual_budget == {"http_requests": 3, "tool_wall_seconds": 3}
+    assert "adapter_budget_contract_violation" not in " ".join(result.errors)
+
+
+def test_writes_are_settled_when_the_caller_reserved_them():
+    request = _request(
+        method="POST", url="https://app.example.test/rest/user/login",
+        body=json.dumps({"email": "a@b.test"}), content_type="application/json",
+    )
+    adapter = NoSQLiVerifyAdapter(
+        specification=CAPABILITY_REGISTRY.require("nosqli.verify_batch"), target=_target(),
+        request=request,
+        candidate={"candidate_id": "8" * 64, "method": "POST", "parameter_name": "email",
+                   "request_class": "safe_read"},
+        transport=LiteralOperatorTransport(),
+        requested_budget={"http_requests": 16, "state_changing_requests": 16, "tool_wall_seconds": 12},
+    )
+    result = asyncio.run(adapter.execute(heartbeat=lambda: asyncio.sleep(0), cancelled=lambda: False))
+    assert result.actual_budget["http_requests"] == 4
+    assert result.actual_budget["state_changing_requests"] == 4
