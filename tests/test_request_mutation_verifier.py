@@ -263,3 +263,41 @@ def test_upstream_detector_does_not_fire_on_harmless_prose():
     result = _run_sqli_request_verify(HarmlessErrorTransport())
     assert result.observations[0]["proof_status"] == "not_proven"
     assert result.observations[0]["finding_verdict"] == "not_proven"
+
+
+def test_two_requests_that_use_the_whole_wall_settle_as_the_reservation(monkeypatch):
+    # Each request may use half the reserved wall. Two that do end a rounding second past it;
+    # that settled as an over-reservation, which failed the action and voided the evidence.
+    from api.capabilities import request_mutation
+
+    spec = CAPABILITY_REGISTRY.require("xss.request_verify")
+    budget = dict(spec.budget_cost)
+    reserved = budget["tool_wall_seconds"]
+
+    class SlowReflectingTransport(ReflectingTransport):
+        now = 1_000.0
+
+        def monotonic(self) -> float:
+            return self.now
+
+        async def send(self, request, **kwargs):
+            self.now += reserved / 2 + 0.05
+            return await super().send(request, **kwargs)
+
+    transport = SlowReflectingTransport()
+    monkeypatch.setattr(request_mutation, "time", transport)
+    adapter = RequestMutationVerificationAdapter(
+        specification=spec, target=_target(),
+        request=_request(body='{"comment":"hello","sku":"A-1"}', content_type="application/json"),
+        candidate=_candidate(), transport=transport, requested_budget=budget,
+    )
+    result = asyncio.run(CapabilityExecutor().execute(
+        CapabilityExecutionContext(
+            specification=spec, target=_target(), requested_budget=budget,
+            adapter_managed_cancellation=True,
+        ),
+        adapter, heartbeat=lambda: asyncio.sleep(0), cancelled=lambda: False,
+    ))
+    assert result.status == "success"
+    assert result.actual_budget["tool_wall_seconds"] == reserved
+    assert result.observations[0]["proof_status"] == "reflected_candidate_only"

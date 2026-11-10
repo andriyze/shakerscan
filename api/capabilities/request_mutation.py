@@ -349,6 +349,11 @@ class RequestMutationVerificationAdapter:
         self.request_class = request_class
 
     def _actual_budget(self, *, attempted: int, wall_seconds: int) -> dict[str, int]:
+        # Two requests that each use their half of the wall end a rounding second past it; that
+        # settles as an over-reservation, which fails the action and voids a completed proof.
+        reserved_wall = self.requested_budget.get("tool_wall_seconds")
+        if reserved_wall is not None:
+            wall_seconds = min(wall_seconds, max(1, int(reserved_wall)))
         actual = {
             "http_requests": attempted,
             "tool_wall_seconds": wall_seconds,
