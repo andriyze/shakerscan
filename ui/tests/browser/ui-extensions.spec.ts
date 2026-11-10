@@ -158,7 +158,12 @@ test('EXT-001 declared entries and sections are placed in the sidebar; hostile e
   expect(await menu.evaluate((aside) => aside.scrollHeight > aside.clientHeight)).toBe(true)
   await expect(account.getByText('Dana Example')).toBeInViewport({ ratio: 1 })
   await expect(account.getByRole('link', { name: 'Sign out', exact: true })).toBeInViewport({ ratio: 1 })
+  // Flush with the sidebar's foot: no strip of the menu shows beneath it.
+  const gap = async () => Math.abs((await menu.boundingBox())!.y + (await menu.boundingBox())!.height
+    - (await account.boundingBox())!.y - (await account.boundingBox())!.height)
+  expect(await gap()).toBeLessThanOrEqual(1)
   await menu.evaluate((aside) => aside.scrollTo(0, aside.scrollHeight))
+  expect(await gap()).toBeLessThanOrEqual(1)
   await expect(account.getByRole('link', { name: 'Sign out', exact: true })).toBeInViewport({ ratio: 1 })
 })
 
