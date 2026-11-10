@@ -17,3 +17,11 @@ test('New Scan offers Multiple targets only where batch submission is available'
   assert.match(capabilities, /if \(!policy\) return true/)
   assert.match(capabilities, /policy\.features\?\.\[feature\]\?\.state === 'enabled'/)
 })
+
+test('where batch submission is unavailable a several-address link still prefills the target', () => {
+  const groups = fs.readFileSync(path.join(root, 'src/components/targets/inventory/TargetGroups.tsx'), 'utf8')
+  assert.match(page, /\} else if \(requestedTargets\.length > 0\) \{[\s\S]*?setTarget\(prefill\.target\)[\s\S]*?\} else if \(requestedTarget\) \{/)
+  assert.match(page, /data-testid="other-addresses-notice"/)
+  // The domain row's batch link leads to a form that cannot take it, so it is not offered either.
+  assert.match(groups, /batch\.length > 1 && featureEnabled\('batch_scan'\) && <Link href=\{domainBatchHref\(/)
+})

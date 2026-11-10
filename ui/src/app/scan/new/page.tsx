@@ -28,7 +28,7 @@ import { Button, Card, Combobox, Field, useToast, type ComboboxOption } from '@/
 import { useTargetSearch } from '@/lib/useTargetSearch'
 import { getTargetAssets, type TargetAsset } from '@/lib/targetAssetApi'
 import { credentialScanCoverageNote } from '@/lib/credentialScanCoverage.mjs'
-import { DOMAIN_LOOKUP_MAX_PAGES, DOMAIN_LOOKUP_PAGE, INVENTORY_MEMBER_LIMIT, SCAN_BATCH_MAX, batchCapNotice, capBatchTargets, findDomainGroup } from '@/lib/targetInventoryModel.mjs'
+import { DOMAIN_LOOKUP_MAX_PAGES, DOMAIN_LOOKUP_PAGE, INVENTORY_MEMBER_LIMIT, SCAN_BATCH_MAX, batchCapNotice, capBatchTargets, findDomainGroup, singleScanPrefill } from '@/lib/targetInventoryModel.mjs'
 import { credentialDescription, credentialOptions } from '@/lib/pickerOptions'
 import {
   RequestCollectionPicker,
@@ -81,6 +81,7 @@ export default function NewScanPage() {
   const [batchTargets, setBatchTargets] = useState('')
   // Why the batch holds fewer targets than were asked for, or that a domain is still being read.
   const [batchNotice, setBatchNotice] = useState<string | null>(null)
+  const [otherAddresses, setOtherAddresses] = useState<string[]>([])
   const [batchResolving, setBatchResolving] = useState(false)
   const [targetKind, setTargetKind] = useState<'web' | 'api'>('web')
   const [budgetProfile, setBudgetProfile] = useState<ScanBudgetProfile>('balanced')
@@ -171,6 +172,11 @@ export default function NewScanPage() {
       setBatchMode(true)
       setBatchTargets(capped.targets.join('\n'))
       setBatchNotice(batchCapNotice(capped.total, 'This selection'))
+    } else if (requestedTargets.length > 0) {
+      // No batch submission here: a target with several web addresses still opens prefilled.
+      const prefill = singleScanPrefill(requestedTargets)
+      setTarget(prefill.target)
+      setOtherAddresses(prefill.others)
     } else if (requestedTarget) {
       setTarget(requestedTarget)
     }
@@ -689,16 +695,20 @@ export default function NewScanPage() {
             {batchResolving && <p className="mt-2 text-xs text-gray-400" role="status">Reading the domain&apos;s web apps…</p>}
             {batchNotice && <p className="mt-2 text-xs text-amber-200" role="status" data-testid="batch-notice">{batchNotice}</p>}
             {targets.length > SCAN_BATCH_MAX && <p className="mt-2 text-xs text-red-300" role="alert">{targets.length} targets listed; a batch scans at most {SCAN_BATCH_MAX}. Remove {targets.length - SCAN_BATCH_MAX} to continue.</p>}
-          </>) : (
+          </>) : (<>
             <Field label="Target URL or hostname" required>
               <input value={target} onChange={(event) => {
                 setTarget(event.target.value)
+                setOtherAddresses([])
                 setApprovalReceipt('')
                 setPrimaryCredentialId('')
                 setSecondaryCredentialId('')
               }} list="known-targets" placeholder="https://example.com" className="w-full rounded-lg border border-gray-700 bg-gray-950 px-3 py-2 text-sm text-white placeholder:text-gray-600" />
             </Field>
-          )}
+            {otherAddresses.length > 0 && <p className="mt-2 text-xs text-amber-200" role="status" data-testid="other-addresses-notice">
+              This target has {otherAddresses.length + 1} web addresses and a Scan here takes one. Not in this Scan: {otherAddresses.join(', ')}
+            </p>}
+          </>)}
           {!batchMode && (selectedPrimaryProfile || selectedSecondaryProfile) && (
             <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2 rounded-lg border border-blue-900/60 bg-blue-950/20 px-3 py-2 text-sm text-gray-300" data-testid="credential-defaults">
               <span>

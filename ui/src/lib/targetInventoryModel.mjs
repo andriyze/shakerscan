@@ -379,6 +379,16 @@ export function configureScanHref(targets, forceBatch = false) {
 }
 
 /**
+ * Where batch submission is unavailable, a link naming several addresses still prefills New Scan:
+ * the first https address (else the first), with the rest named so they can be scanned next.
+ */
+export function singleScanPrefill(targets) {
+  const unique = uniqueScanTargets(targets)
+  const target = unique.find(value => /^https:\/\//i.test(value)) || unique[0] || ''
+  return { target, others: unique.filter(value => value !== target) }
+}
+
+/**
  * New Scan for a whole domain group. Up to one batch of web apps travels in the link; a larger
  * domain is passed by reference (`domain=`), and New Scan reads its web apps from the inventory.
  * Listing every URL made a 450 KB link that the UI server refused (HTTP 431) at 10k targets.

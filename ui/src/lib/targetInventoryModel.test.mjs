@@ -125,6 +125,18 @@ test('a scan covers live web apps, else a bare domain, and New Scan opens prefil
   assert.equal(configureScanHref(['only.example.com'], true), '/scan/new?targets=only.example.com')
 })
 
+test('without batch submission a several-address link prefills one address and names the rest', async () => {
+  // A host with two live web addresses opened New Scan with an empty target where batch
+  // submission is not offered: the link carried `targets=` and the form read it only in batch mode.
+  const { singleScanPrefill } = await import('./targetInventoryModel.mjs')
+  assert.deepEqual(singleScanPrefill(['http://app.example.com:443', 'https://app.example.com']),
+    { target: 'https://app.example.com', others: ['http://app.example.com:443'] })
+  assert.deepEqual(singleScanPrefill(['http://a.example.com', ' http://b.example.com ', 'http://a.example.com']),
+    { target: 'http://a.example.com', others: ['http://b.example.com'] })
+  assert.deepEqual(singleScanPrefill(['only.example.com']), { target: 'only.example.com', others: [] })
+  assert.deepEqual(singleScanPrefill([]), { target: '', others: [] })
+})
+
 // UI audit 2.11 #2: at 10k targets a domain's "Customize batch" link listed every URL (450 KB) and
 // /scan/new answered HTTP 431. A large domain now travels by reference and New Scan reads it.
 test('a large domain group opens New Scan by reference, capped at one batch', async () => {
