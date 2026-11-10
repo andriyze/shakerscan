@@ -215,7 +215,8 @@ const footLink = 'rounded-sm text-gray-400 transition-colors hover:text-white fo
 // Who is signed in, where a managed deployment says so (ui-extensions/v1). Its links are the
 // deployment's own pages: ordinary navigations on this origin, never requests the UI makes.
 // The block stays at the foot of the sidebar when the menu is taller than the window (the menu
-// scrolls behind it), so the person's name and Sign out never need a scroll to be found.
+// scrolls behind it), so the person's name and Sign out never need a scroll to be found. The
+// negative offset and margins take it over the sidebar's own padding, flush with its edges.
 function AccountBlock({ account }: { account: ExtensionAccount }) {
   const origin = window.location.origin
   const links = account.links
@@ -223,7 +224,7 @@ function AccountBlock({ account }: { account: ExtensionAccount }) {
     .filter((link): link is { label: string; href: string } => link.href !== null)
   const signOut = account.sign_out ? sameOriginPath(account.sign_out, origin) : null
   return (
-    <section aria-label="Account" className="sticky bottom-0 -mx-4 -mb-4 mt-4 border-t border-gray-800 bg-gray-900 px-4 pb-4 pt-3">
+    <section aria-label="Account" className="sticky -bottom-4 -mx-4 -mb-4 mt-4 border-t border-gray-800 bg-gray-900 px-4 pb-4 pt-3">
       <div className="flex items-center gap-2.5 px-1">
         <span aria-hidden="true" className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-gray-800 text-xs font-semibold uppercase text-gray-200">
           {Array.from(account.name)[0]}
