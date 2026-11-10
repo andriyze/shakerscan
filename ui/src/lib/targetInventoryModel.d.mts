@@ -49,6 +49,7 @@ export function inventoryParams(filters: TargetFilters, offset: number, limit: n
 export function activeFilterCount(filters: TargetFilters): number
 export function scanUrls(asset: { locator?: string | null; origins?: Array<{ url: string; is_active: boolean }> } | null | undefined): string[]
 export function configureScanHref(targets: string[], forceBatch?: boolean): string
+export function singleScanPrefill(targets: string[]): { target: string; others: string[] }
 export const SCAN_BATCH_MAX: number
 export function domainBatchHref(rootDomain: string, targets: string[], membersTruncated?: boolean): string
 export function domainBatchTargets(rootDomain: string, page: unknown): {
