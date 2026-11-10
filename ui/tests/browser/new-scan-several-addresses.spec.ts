@@ -22,6 +22,19 @@ async function mock(page: Page) {
   await page.route(`${MOCK_API_ORIGIN}/**`, async (route) => {
     const url = new URL(route.request().url())
     if (url.pathname === '/scan/contracts') return route.fulfill({ json: SCAN_PUBLIC_CONTRACT_SNAPSHOT })
+    if (url.pathname === '/scan/contracts/preview') {
+      const request = route.request().postDataJSON()
+      return route.fulfill({ json: {
+        preset: request.preset,
+        requested_families: request.include_families || [],
+        resolved_families: ['recon', 'nuclei_passive', 'sensitive_exposure'],
+        derived_prerequisites: [],
+        active_permissions: { active_testing: false, state_changing_http: false, network_discovery: false },
+        minimum_family_quotas: {},
+        execution_topology: request.execution_topology,
+        ai_used: false,
+      } })
+    }
     if (url.pathname === '/workers') return route.fulfill({ json: { count: 1, current_count: 1, stale_count: 0, pending_count: 0, fleet_uniform: true, stale_workers: [] } })
     if (url.pathname === '/targets/inventory') return route.fulfill({ json: { items: [], next_cursor: null, has_more: false } })
     if (url.pathname === '/credential-profiles') return route.fulfill({ json: { profiles: [], count: 0 } })
