@@ -240,6 +240,8 @@ export const HYPOTHESIS_STATUS_BADGE_STYLES: Record<string, string> = {
   testing: 'bg-indigo-500/20 text-indigo-300',
   supported: 'bg-emerald-500/20 text-emerald-300',
   refuted: 'bg-red-500/20 text-red-400',
+  blocked: 'bg-amber-500/20 text-amber-300',
+  exhausted: 'bg-gray-700/40 text-gray-400',
   promoted: 'bg-green-500/20 text-green-400',
   dead: 'bg-gray-700/40 text-gray-500',
 }

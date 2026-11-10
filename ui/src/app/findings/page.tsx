@@ -108,7 +108,7 @@ function getFindingSourceType(finding: Finding): FindingSourceType {
   if (finding.source === 'ai_session') {
     return 'Interactive'
   }
-  if (finding.source === 'autonomous' || finding.tool === 'autonomous_workflow' || getFindingResearchProvenance(finding)) {
+  if (finding.source === 'deep_hunt' || finding.source === 'autonomous' || finding.tool === 'autonomous_workflow' || getFindingResearchProvenance(finding)) {
     return 'Hunt'
   }
   if (finding.source === 'asm') {

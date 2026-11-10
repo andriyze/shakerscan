@@ -180,7 +180,7 @@ function DeviceDetailContent() {
 
   // 10 s while a device scan is queued/running or the network worker is not ready yet, then a
   // slow refresh; usePoll pauses in a hidden tab and backs off on errors.
-  const deviceLive = !workerReady || Boolean(data?.scans?.some((item) => item.status === 'pending' || item.status === 'running'))
+  const deviceLive = !workerReady || Boolean(data?.scans?.some((item) => item.status === 'pending' || item.status === 'queued' || item.status === 'running'))
   usePoll(load, { intervalMs: DEVICE_LIVE_REFRESH_MS, idleIntervalMs: DEVICE_IDLE_REFRESH_MS, live: deviceLive, deps: [load] })
 
   useEffect(() => {
