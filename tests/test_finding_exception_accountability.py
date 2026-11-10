@@ -75,3 +75,13 @@ def test_effective_exception_with_an_unparsable_expiry_is_a_422_not_a_500(value)
         _validate_finding_exception_accountability(_effective_request(expires_at=value))
     assert refused.value.status_code == 422
     assert "ISO 8601" in refused.value.detail
+
+
+def test_an_unknown_status_is_refused_before_it_reaches_the_check_constraint():
+    # The table accepts five statuses; any other used to reach the INSERT and answer 500.
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError):
+        FindingExceptionRequest(status="waived")
+    for known in ("active", "approved", "accepted_risk", "revoked", "expired"):
+        assert FindingExceptionRequest(status=known).status == known

@@ -158,17 +158,17 @@ def _address(value: Any) -> str:
 
 
 # Denied host -> (resolved at, its addresses). Resolved off the event loop, bounded in time, and
-# reused for RESOLVE_TTL; an unresolvable host keeps only the name rule.
+# reused for RESOLVE_TTL. A lookup that fails keeps the addresses last seen (a deny rule must not
+# lapse because DNS did for a moment) and is tried again after RESOLVE_RETRY, not a full TTL; a
+# host never resolved keeps only the name rule.
 _RESOLVED: dict[str, tuple[float, frozenset[str]]] = {}
 RESOLVE_TTL = 600.0
+RESOLVE_RETRY = 30.0
 RESOLVE_TIMEOUT = 2.0
 
 
 def _resolve_host(host: str) -> frozenset[str]:
-    try:
-        infos = socket.getaddrinfo(host, None, proto=socket.IPPROTO_TCP)
-    except OSError:
-        return frozenset()
+    infos = socket.getaddrinfo(host, None, proto=socket.IPPROTO_TCP)  # OSError: the caller's
     return frozenset(_address(info[4][0]) for info in infos) - {""}
 
 
@@ -186,7 +186,9 @@ async def denied_addresses() -> None:
         try:
             found = await asyncio.wait_for(asyncio.to_thread(resolve_denied_host, denied_host), RESOLVE_TIMEOUT)
         except (asyncio.TimeoutError, OSError):
-            found = frozenset()
+            held = cached[1] if cached is not None else frozenset()
+            _RESOLVED[denied_host] = (now - RESOLVE_TTL + RESOLVE_RETRY, held)
+            continue
         _RESOLVED[denied_host] = (now, frozenset(found))
 
 

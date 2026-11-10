@@ -14254,8 +14254,24 @@ class _FindingExceptionEditConn:
         self.current_row = current_row
         self.update_query = None
         self.update_args = None
+        self.transactions = 0
+
+    def transaction(self):
+        conn = self
+
+        class _Transaction:
+            async def __aenter__(self):
+                conn.transactions += 1
+
+            async def __aexit__(self, *exc):
+                return False
+
+        return _Transaction()
 
     async def fetchrow(self, query, *args):
+        if "SELECT * FROM finding_exceptions" in query:
+            # The row lock only holds inside a transaction.
+            assert "FOR UPDATE" not in query or self.transactions
         if "SELECT * FROM finding_exceptions" in query:
             return dict(self.current_row) if self.current_row else None
         if "UPDATE finding_exceptions" in query:

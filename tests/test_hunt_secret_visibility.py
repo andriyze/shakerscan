@@ -250,6 +250,32 @@ def test_a_denied_login_is_recognised_by_the_address_a_request_is_pinned_to(monk
     assert not asyncio.run(secret_try.denied_destination_resolved(*alias, ("203.0.113.9",)))
 
 
+def test_a_dns_failure_keeps_the_denied_addresses_and_is_retried_soon(monkeypatch):
+    """The deny rule's address half must not lapse for a whole cache period because one lookup
+    failed: the addresses last seen stay denied and the lookup is tried again shortly."""
+    import asyncio
+    monkeypatch.delenv("SHAKERSCAN_SECRET_TRY_DENY", raising=False)
+    monkeypatch.setattr(secret_try, "_RESOLVED", {})
+    clock = [1000.0]
+    monkeypatch.setattr(secret_try.time, "monotonic", lambda: clock[0])
+    answers = [frozenset({"198.51.100.7"})]
+
+    def resolve(_host):  # labelled double: no DNS leaves the test
+        if not answers:
+            raise OSError("temporary failure in name resolution")
+        return answers[0]
+    monkeypatch.setattr(secret_try, "resolve_denied_host", resolve)
+    alias = ("alias.example.test", "/hub/login")
+    assert asyncio.run(secret_try.denied_destination_resolved(*alias, ("198.51.100.7",)))
+    answers.clear()
+    clock[0] += secret_try.RESOLVE_TTL + 1
+    assert asyncio.run(secret_try.denied_destination_resolved(*alias, ("198.51.100.7",)))
+    # Not cached as "no addresses" for a full period: once DNS answers again, it is used.
+    answers.append(frozenset({"198.51.100.8"}))
+    clock[0] += secret_try.RESOLVE_RETRY + 1
+    assert asyncio.run(secret_try.denied_destination_resolved(*alias, ("198.51.100.8",)))
+
+
 def test_a_request_carrying_a_discovered_secret_follows_no_redirect_even_on_its_own_origin(monkeypatch):
     """A same-origin 302 to the denied hub login: the secret-bearing request is sent once and the
     redirect is not followed (httpx MockTransport; no network)."""
