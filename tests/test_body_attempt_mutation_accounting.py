@@ -209,16 +209,20 @@ def test_the_soak_slice_funds_both_body_candidates():
     assert len(calls) == 2, "the second body candidate must get its real allowance"
     assert receipt.status == "success"
     assert receipt.redacted_execution["unattempted_count"] == 0
-    assert receipt.budget_consumed["state_changing_requests"] == 12
+    # Six from each Dalfox run and one reflection check per candidate: each is a POST.
+    assert receipt.budget_consumed["state_changing_requests"] == 14
 
 
 def test_an_unfunded_body_candidate_names_the_mutation_allowance():
-    # The pre-fix single hold: even settled exactly, 234 left cannot fund a 240 floor.
+    # The pre-fix single hold: even settled exactly, what is left cannot fund a second allowance.
     receipt, calls = _two_body_candidate_batch(
         {"http_requests": 1400, "state_changing_requests": 240, "tool_wall_seconds": 400},
     )
 
+    # One allowance covers the first candidate's reflection check and its Dalfox run.
     assert len(calls) == 1
+    assert calls[0]["state_changing_requests"] == 239
     assert receipt.status == "partial"
     assert receipt.errors[0] == "state_changing_budget_exhausted"
-    assert receipt.budget_consumed["state_changing_requests"] == 6
+    # Six from the Dalfox run and both candidates' reflection checks, which were sent.
+    assert receipt.budget_consumed["state_changing_requests"] == 8
