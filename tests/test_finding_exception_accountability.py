@@ -119,3 +119,13 @@ def test_an_unknown_policy_is_refused_even_without_configured_profiles():
 
 def test_a_revoked_exception_without_policy_needs_no_profile_lookup():
     asyncio.run(_require_active_policy_profile(_ProfilesConn([POLICY_ID]), None, effective=False))
+
+
+def test_an_unknown_status_is_refused_before_it_reaches_the_check_constraint():
+    # The table accepts five statuses; any other used to reach the INSERT and answer 500.
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError):
+        FindingExceptionRequest(status="waived")
+    for known in ("active", "approved", "accepted_risk", "revoked", "expired"):
+        assert FindingExceptionRequest(status=known).status == known
