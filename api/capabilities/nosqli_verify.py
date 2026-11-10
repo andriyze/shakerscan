@@ -227,7 +227,9 @@ class NoSQLiVerifyAdapter:
         # anchor only supplies stable identity and ranking; try it first, then
         # its siblings while another bounded four-request differential fits.
         self.fields = tuple(dict.fromkeys([field, *declared_fields]))
-        self.request_mode = bool(request_ref) or request.method not in {"GET", "HEAD"}
+        # By method, as sqli_proof routes: a captured GET carries its fields in the query, and
+        # sending it to the JSON-body mutator blocked the candidate before any request.
+        self.request_mode = request.method not in {"GET", "HEAD"}
         # A form-encoded body carries bracket-style operators (field[$ne]=x), not a
         # JSON document, so routing it through the JSON mutator raised "private JSON
         # request body is invalid" and no form NoSQL candidate could execute.
@@ -250,6 +252,24 @@ class NoSQLiVerifyAdapter:
             return _json_body(self.request, field, {operator: value})
         return _query_operator(self.request, field, operator, value)
 
+    def _spent(self, started: float, attempted: int) -> dict[str, int]:
+        """What to settle: requests sent, writes when the caller reserved them, and wall seconds
+        only when reserved and never above the reservation."""
+        spent = {"http_requests": attempted}
+        if (
+            "state_changing_requests" in self.requested_budget
+            and self.request.method not in {"GET", "HEAD", "OPTIONS"}
+        ):
+            spent["state_changing_requests"] = min(
+                attempted, int(self.requested_budget["state_changing_requests"]),
+            )
+        reserved = self.requested_budget.get("tool_wall_seconds")
+        if reserved is not None:
+            spent["tool_wall_seconds"] = min(
+                max(1, int(reserved)), max(1, math.ceil(time.monotonic() - started)),
+            )
+        return spent
+
     async def execute(self, *, heartbeat: Heartbeat, cancelled: Cancelled) -> CapabilityAdapterResult:
         started = time.monotonic()
         attempted = 0
@@ -261,12 +281,17 @@ class NoSQLiVerifyAdapter:
                 raise NoSQLiVerifyError("cancelled")
             remaining = max(1, self.requested_budget["http_requests"] - attempted)
             wall = max(1, int(self.requested_budget.get("tool_wall_seconds") or 1))
+            # Split the wall that is left, not the whole reservation (as sqli_proof does).
+            wall_left = wall - (time.monotonic() - started)
+            if "tool_wall_seconds" in self.requested_budget and wall_left < 0.5:
+                raise NoSQLiVerifyError("deadline")
+            # Counted before it is sent: a request cut off in flight still reached the target.
+            attempted += 1
             result = await self.transport.send(
                 request, target=self.target,
-                timeout_seconds=max(0.5, min(15.0, wall / remaining)),
+                timeout_seconds=max(0.5, min(15.0, wall_left / remaining)),
                 follow_redirects=False,
             )
-            attempted += 1
             results.append(result)
             await heartbeat()
             return result
@@ -395,14 +420,18 @@ class NoSQLiVerifyAdapter:
                 if verified:
                     break
         except NoSQLiVerifyError as exc:
-            status = "cancelled" if str(exc) == "cancelled" else "blocked"
+            reason = str(exc)
+            timed_out = reason == "deadline"
+            # A later field's error keeps the differentials already completed for earlier fields.
+            status = (
+                "cancelled" if reason == "cancelled"
+                else "partial" if timed_out or observations else "blocked"
+            )
             return CapabilityAdapterResult(
-                status=status, errors=(str(exc),), execution_started=bool(attempted),
-                actual_budget={
-                    "http_requests": attempted,
-                    "tool_wall_seconds": max(1, math.ceil(time.monotonic() - started)),
-                },
-                partial=bool(attempted), parser_version=NOSQLI_VERIFY_PARSER_VERSION,
+                status=status, observations=tuple(observations), errors=(reason,),
+                execution_started=bool(attempted), timed_out=timed_out,
+                actual_budget=self._spent(started, attempted),
+                partial=bool(attempted) or timed_out, parser_version=NOSQLI_VERIFY_PARSER_VERSION,
             )
 
         errors = tuple(item.error_code for item in results if item.error_code)
@@ -412,10 +441,7 @@ class NoSQLiVerifyAdapter:
         return CapabilityAdapterResult(
             status="partial" if errors or fields_exhausted else "success",
             observations=tuple(observations), errors=errors,
-            actual_budget={
-                "http_requests": attempted,
-                "tool_wall_seconds": max(1, math.ceil(time.monotonic() - started)),
-            },
+            actual_budget=self._spent(started, attempted),
             partial=bool(errors or fields_exhausted),
             timed_out=any(item.timed_out for item in results),
             execution_started=True, parser_version=NOSQLI_VERIFY_PARSER_VERSION,

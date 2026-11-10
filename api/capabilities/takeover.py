@@ -387,6 +387,8 @@ async def check_takeovers(
                 )
             except asyncio.TimeoutError:
                 return host, None, 1, 0, False
+            except Exception:  # noqa: BLE001 - one host's failure leaves it unchecked, not all
+                return host, None, 1, 0, False
             return host, observation, queries, gets, True
 
     results = await asyncio.gather(*(one(host) for host in checked))

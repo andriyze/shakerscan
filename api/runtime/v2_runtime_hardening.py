@@ -49,8 +49,11 @@ def _redact_string(value: str) -> str:
     # replace it with its older URL-only implementation, silently removing new
     # shared free-text coverage from the actual runtime.
     text = _native_redact_string(str(value))
-    parsed = urllib.parse.urlsplit(text)
-    if parsed.scheme.lower() in {"http", "https"} and parsed.netloc:
+    try:
+        parsed = urllib.parse.urlsplit(text)
+    except ValueError:  # e.g. an unbalanced IPv6 bracket in a target-controlled string
+        parsed = None  # not a URL to rewrite; the inline patterns below still apply
+    if parsed is not None and parsed.scheme.lower() in {"http", "https"} and parsed.netloc:
         query = urllib.parse.urlencode([
             (str(name)[:200], "<redacted>")
             for name, _item in urllib.parse.parse_qsl(parsed.query, keep_blank_values=True)

@@ -115,6 +115,14 @@ def _origin_in_scope(origin: Any, run: Mapping[str, Any], policy: Mapping[str, A
         return False
 
 
+def _ledger_to_budget() -> dict[str, str]:
+    try:
+        from hunt.permission_grants import LEDGER_TO_BUDGET
+    except ModuleNotFoundError:  # package import in host-side tests
+        from .permission_grants import LEDGER_TO_BUDGET
+    return LEDGER_TO_BUDGET
+
+
 def authority_for(suggestion: Mapping[str, Any], run: Mapping[str, Any] | None) -> dict[str, Any]:
     """Whether the caller's current authority covers a suggested experiment.
 
@@ -145,7 +153,8 @@ def authority_for(suggestion: Mapping[str, Any], run: Mapping[str, Any] | None) 
     budget = _json(run.get("budget_json"), {}) or {}
     used = _json(run.get("budget_used_json"), {}) or {}
     for dimension in spec.budget_cost:
-        limit = budget.get(dimension)
+        # The ledger counts by dimension (http_requests); the Hunt's ceilings are keyed max_*.
+        limit = budget.get(_ledger_to_budget().get(dimension, dimension))
         if isinstance(limit, (int, float)) and not isinstance(limit, bool) and float(used.get(dimension) or 0) >= limit:
             return {"status": "outside_authority", "reason": f"the Hunt's {dimension} budget is spent"}
     values = suggestion.get("input") or {}

@@ -456,6 +456,46 @@ async def execute_hunt_capability(
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
+async def _expire_due_shell_plan(conn: Any, hunt_id: str, plan_uuid: uuid.UUID) -> bool:
+    """Record a proposed SSH plan whose time has passed as ``expired``, in a transaction of its
+    own, and say whether it did. The confirmation refuses such a plan with a 409; a write made
+    in the same transaction as that refusal is rolled back, so the expiry is committed first."""
+    async with conn.transaction():
+        try:
+            run = await _hunt_run_or_404(conn, hunt_id, for_update=True)
+        except HTTPException:
+            return False  # the confirmation itself answers a missing Hunt
+        context = _hunt_json(run["context_pack"], {})
+        runtime = context.get("device_runtime")
+        plans = runtime.get("shell_plans") if isinstance(runtime, Mapping) else None
+        if not isinstance(plans, list):
+            return False
+        now = datetime.now(timezone.utc)
+        for index, plan in enumerate(plans):
+            if not isinstance(plan, Mapping) or str(plan.get("plan_id")) != str(plan_uuid):
+                continue
+            if plan.get("status") != "proposed":
+                return False
+            try:
+                expires_at = datetime.fromisoformat(str(plan["expires_at"]).replace("Z", "+00:00"))
+            except (KeyError, TypeError, ValueError):
+                return False  # the confirmation refuses an invalid expiry itself
+            if expires_at.tzinfo is None:
+                expires_at = expires_at.replace(tzinfo=timezone.utc)
+            if expires_at > now:
+                return False
+            updated = [*plans]
+            updated[index] = {**plan, "status": "expired"}
+            await conn.execute(
+                "UPDATE hunt_runs SET context_pack=$2, updated_at=NOW() WHERE id=$1",
+                run["id"],
+                json.dumps({**context, "device_runtime": {**runtime, "shell_plans": updated}}, default=str),
+            )
+            return True
+    return False
+
+
+
 @router.post("/hunts/{hunt_id}/shell-plans/{plan_id}/confirm")
 async def confirm_hunt_shell_plan(
     hunt_id: str, plan_id: str, request: DeviceAgentShellConfirmRequest,
@@ -488,6 +528,8 @@ async def confirm_hunt_shell_plan(
     admission_error: HTTPException | None = None
     capability_input: dict[str, Any] = {}
     async with _pool().acquire() as conn:
+        if await _expire_due_shell_plan(conn, hunt_id, plan_uuid):
+            raise HTTPException(status_code=409, detail="SSH shell plan expired; ask the agent to propose it again")
         async with conn.transaction():
             run = await _hunt_run_or_404(conn, hunt_id, for_update=True)
             if str(run["target_kind"]) != "device" or not run["device_target_id"]:
@@ -554,12 +596,9 @@ async def confirm_hunt_shell_plan(
                 plan.get("status") == "proposed"
                 and expires_at <= datetime.now(timezone.utc)
             ):
-                plans[index] = {**plan, "status": "expired"}
-                runtime["shell_plans"], context["device_runtime"] = plans, runtime
-                await conn.execute(
-                    "UPDATE hunt_runs SET context_pack=$2, updated_at=NOW() WHERE id=$1",
-                    run["id"], json.dumps(context, default=str),
-                )
+                # _expire_due_shell_plan recorded the expiry before this transaction; a plan that
+                # expired since then is recorded on the next attempt (a write here would be rolled
+                # back by this raise).
                 raise HTTPException(status_code=409, detail="SSH shell plan expired; ask the agent to propose it again")
             bound_ssh_ref = _devices._device_agent_credential_reference(state, "ssh")
             if (
@@ -1216,7 +1255,12 @@ async def prepare_hunt_boundary_discovery(hunt_id: str, draft_id: str):
             try:
                 candidate = investigation_candidates.normalize_candidate(
                     plane="device" if run["device_target_id"] else "web",
-                    target_id=str(run["target_id"]) if run["target_id"] else None,
+                    # A device Hunt's run row carries the device id in both columns; a device
+                    # candidate names it only as device_target_id.
+                    target_id=(
+                        str(run["target_id"])
+                        if run["target_id"] and not run["device_target_id"] else None
+                    ),
                     device_target_id=(
                         str(run["device_target_id"]) if run["device_target_id"] else None
                     ),

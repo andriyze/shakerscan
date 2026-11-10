@@ -169,11 +169,14 @@ def test_release_is_declared_on_its_own_key(monkeypatch, capsys):
 def test_authority_for_follows_the_current_policy():
     from api.hunt.knowledge_continue import authority_for
     run = {"status": "active", "policy_json": {"allowed_capabilities": ["http.request"]},
-           "budget_json": {"http_requests": 5}, "budget_used_json": {"http_requests": 1}}
+           "budget_json": {"max_http_requests": 5}, "budget_used_json": {"http_requests": 1}}
     get = {"capability": "http.request", "input": {"method": "GET", "path": "/a"}}
     post = {"capability": "http.request", "input": {"method": "POST", "path": "/a"}}
     assert authority_for(get, run)["status"] == "allowed"
     assert authority_for(post, run)["status"] == "outside_authority"
+    # The ceilings are keyed max_*, the ledger by dimension: a spent budget is outside authority.
+    spent = {**run, "budget_used_json": {"http_requests": 5}}
+    assert authority_for(get, spent)["status"] == "outside_authority"
     assert authority_for({"capability": "authz.verify"}, run)["status"] == "outside_authority"
     granted = {**run, "policy_json": {"allowed_capabilities": ["authz.verify"]}}
     assert authority_for({"capability": "authz.verify"}, granted)["status"] == "needs_approval"

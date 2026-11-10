@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sys
 from typing import Any, Mapping, Sequence
 
 from hunt.capability_executor import CapabilityAdapterResult, Cancelled, Heartbeat
@@ -171,6 +172,12 @@ class RecordedReplayTransport:
             result = await self.transport.send(request, **kwargs)
             return result
         finally:
+            self._record(request, result, started_at)
+
+    def _record(self, request: Any, result: Any, started_at: Any) -> None:
+        """The archive is best effort (as capabilities/http.py treats it): a recorder failure
+        must not replace the transport's result or its exception."""
+        try:
             self.recorder({"method": request.method, "url": request.url,
                 "request_headers": dict(request.headers), "request_body": request.body,
                 "response_headers": dict(result.response_headers) if result else None,
@@ -183,6 +190,9 @@ class RecordedReplayTransport:
                 "started_at": started_at, "principal_slot": self.principal_slot,
                 "workflow_values_private": self.private,
                 "fidelity": "exact_replay_plan_bounded_response"})
+        except Exception as exc:  # noqa: BLE001
+            print(f"[http-archive] transaction not recorded: {type(exc).__name__}",
+                  file=sys.stderr, flush=True)
 
 
 class RecordedHuntReplayTransport(RecordedReplayTransport):
