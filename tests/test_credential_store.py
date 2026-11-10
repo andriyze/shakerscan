@@ -480,3 +480,27 @@ def test_metadata_parser_rejects_invalid_record_versions():
             "created_at": NOW,
             "updated_at": NOW,
         })
+
+
+def _edited(conn, *, is_active):
+    return asyncio.run(PostgresCredentialProfileStore().update_profile_metadata(
+        conn, profile_id=PROFILE_ID, expected_record_version=1, name="Primary API",
+        principal_label="primary-user", principal_slot="primary", expires_at=None,
+        expires_at_changed=False, is_active=is_active, allowed_capabilities=None,
+        now=NOW + timedelta(minutes=1),
+    ))
+
+
+def test_switching_a_profile_off_ends_its_live_sessions_as_deleting_it_does():
+    conn, _ = asyncio.run(_created())
+    edited = _edited(conn, is_active=False)
+    assert edited.is_active is False
+    [(revoked_profile, destroyed, _)] = conn.revoked_sessions
+    assert str(revoked_profile) == edited.profile_id
+    assert destroyed.startswith("enc:fernet:")
+
+
+def test_an_edit_that_keeps_a_profile_active_keeps_its_live_sessions():
+    conn, _ = asyncio.run(_created())
+    assert _edited(conn, is_active=True).is_active is True
+    assert not getattr(conn, "revoked_sessions", [])

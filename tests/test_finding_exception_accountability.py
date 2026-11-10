@@ -66,3 +66,12 @@ def test_revoked_exception_does_not_require_active_waiver_fields():
     assert _validate_finding_exception_accountability(
         FindingExceptionRequest(status="revoked")
     ) is None
+
+
+@pytest.mark.parametrize("value", ["next tuesday", "2099-13-45", "never"])
+def test_effective_exception_with_an_unparsable_expiry_is_a_422_not_a_500(value):
+    # The parser answers None for text it cannot read; comparing None to now() raised TypeError.
+    with pytest.raises(HTTPException) as refused:
+        _validate_finding_exception_accountability(_effective_request(expires_at=value))
+    assert refused.value.status_code == 422
+    assert "ISO 8601" in refused.value.detail
