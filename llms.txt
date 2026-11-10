@@ -51,7 +51,6 @@ Source-of-truth and safety rules:
 - [Functionality reference](https://raw.githubusercontent.com/andriyze/shakerscan/main/docs/functionality-reference.md): Exhaustive current-main product map and generated code-surface inventory; large and potentially ahead of stable.
 - [Agent operating guide](https://raw.githubusercontent.com/andriyze/shakerscan/main/AGENTS.md): Compact always-loaded architecture, safety, judgment, and workflow rules; use OpenAPI for mechanics.
 - [Model Intake security boundary](https://raw.githubusercontent.com/andriyze/shakerscan/main/docs/model-intake-security-review-roadmap.md): Current subject, acquisition, isolation, trust, and acceptance boundary.
-- [DAST and Continuous ASM architecture](https://raw.githubusercontent.com/andriyze/shakerscan/main/docs/dast-asm-architecture.md): One-shot scans, scatter/gather execution, coverage inventory, and continuous scheduling.
 - [Multi-node architecture](https://raw.githubusercontent.com/andriyze/shakerscan/main/docs/multi-node-architecture.md): Fleet trust, transport, scheduling, leases, evidence, lifecycle, and acceptance design.
 - [OWASP coverage matrix](https://raw.githubusercontent.com/andriyze/shakerscan/main/docs/owasp-coverage-matrix.md): Implemented DAST mechanisms and named gaps; category coverage is not proof of recall, precision, or exploitability.
 - [Release process](https://raw.githubusercontent.com/andriyze/shakerscan/main/docs/release-process.md): Candidate validation, immutable digest publication, promotion, public smoke, and stable-channel sequence.

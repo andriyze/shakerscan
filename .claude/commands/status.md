@@ -42,5 +42,5 @@ Call the API with `shakerscan api METHOD PATH [JSON]` (it knows the instance add
 
    Access:
    - UI: ${UI_BASE}
-   - API: ${API_BASE}
+   - API: the address `shakerscan api` is using (`SHAKERSCAN_API_BASE`, default http://localhost:8080)
    ```

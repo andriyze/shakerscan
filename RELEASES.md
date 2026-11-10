@@ -104,20 +104,8 @@ The release process itself is documented once, in
 checks, one immutable **Release candidate** build per exact SHA, **Promote release** by digest,
 public smoke, and a separate stable-channel bump. This file is only the provenance ledger.
 
-Version 2.8.3 is the pending candidate. It fixes the defects the 2.8.2 release acceptance found:
-the 2.8.2 migrations now run on upgraded databases (POST /discovery returned 500 there), a Hunt
-secret holding `&`, a quote or a separator is withheld whole, a device scan started from the
-/devices list is re-checked against the device's standing authorization, and client 0.8.3 tightens
-an existing state directory. See [`docs/releases/2.8.3.md`](docs/releases/2.8.3.md). The candidate
-has not been published or promoted.
-
-Version 2.8.2 is a fixes-only patch: Hunt withholds target secrets it
-finds and binds them by reference, masked archive exports are bounded and carry no raw body digest,
-Hunt bounds use one strict IDNA 2008/UTS #46 spelling, scope respects public-suffix boundaries, the
-running-scan authorization re-check gains a deadline and covers device, AI and fleet work, and
-client 0.8.2 hardens its state and data directories.
-See [`docs/releases/2.8.2.md`](docs/releases/2.8.2.md) for scope, upgrade notes and validation state.
-2.8.2 is published but was not promoted to the stable channel: its release acceptance found defects.
+The current stable version is in [`install/STABLE_VERSION`](install/STABLE_VERSION); each release's
+scope, upgrade notes and validation state are in [`docs/releases/`](docs/releases/).
 
 Ledger rules:
 

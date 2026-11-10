@@ -2028,16 +2028,15 @@ backup, and containers. §17 inventories the canonical wrapper commands.
 - `content-discovery`: builds generic and app-specific route/file/API lists and scanner/ffuf inputs.
 - `research-agent`: compatibility skill for older prompts; it routes new investigations to canonical
   Hunt and keeps specialized guided experiments bounded.
-- `device-hunt`: drives one authorized connected-device investigation through immutable scope,
-  context, memory, fragility, health, and deterministic-evidence boundaries.
+- `device-hunt`: compatibility alias for older Device Hunt wording; delegates to canonical Hunt with
+  a device target.
 - `device-triage`: explains and compares existing connected-device evidence without sending traffic.
 - `review-skills`: audits skills, commands, and subagents for broken references, unsafe prompts, and
   missing gates or output contracts.
 
 The slash-command layer provides canonical Scan, Hunt, AI Gate, interactive session, finding list/
 save, subdomain, worker, status, JS analysis, content discovery, bounded research, and skill-review
-workflows. Historical smart/full command files are compatibility shims that translate to explicit
-Scan policy/budget input and carry the same 2026-12-31 sunset. Three specialized Claude subagents
+workflows. Three specialized Claude subagents
 back JS analysis, content discovery, and skill review.
 The product also
 catalogs Codex, Claude Code, OpenCode, and Hermes local-agent capabilities. The Codex research runner

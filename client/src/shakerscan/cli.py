@@ -1531,7 +1531,7 @@ def build_parser() -> argparse.ArgumentParser:
         prog="shakerscan",
         description="ShakerScan client: the MCP adapter and Hunt CLI for a ShakerScan instance.",
         epilog=(
-            "Any other subcommand (start, stop, status, update, ...) runs the local engine from "
+            "Any other subcommand (start, stop, status, restart, ...) runs the local engine from "
             f"{ENV_HOME} (default ~/.shakerscan) when it is installed: {INSTALL_ONE_LINER}"
         ),
     )

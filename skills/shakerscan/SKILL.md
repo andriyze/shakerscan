@@ -53,7 +53,7 @@ target binding, approvals, budgets, evidence, and finding proof.
 | Content-discovery seeds | Use the `content-discovery` skill |
 | Health, queue, and workers | `/health`, `/queue/stats`, `/workers` |
 | Multi-node fleet setup or operations | Check `/workers.fleet`, then use `shakerscan fleet *`, `shakerscan join`, and `/fleet/*` only when supported/enabled |
-| Exhaustive operation or schema lookup | Read `AGENTS.md` and the live `/openapi.json` (open-source engine; an Enterprise gateway refuses it, use `/hunts/contract`, `/scan/contracts` and the MCP tool schemas) |
+| Exhaustive operation or schema lookup | Read the live `/openapi.json` (open-source engine; an Enterprise gateway refuses it, use `/hunts/contract`, `/scan/contracts` and the MCP tool schemas) |
 
 Web Scan and Hunt use one durable target per host. Different HTTP(S) schemes and ports share
 findings, inventory, credentials, and history, while each scan or hunt keeps its exact concrete
@@ -165,9 +165,9 @@ Host-side `shakerscan fleet` commands resolve the API bind persisted by `scanner
 loopback after a Tailscale-only `--remote` start unless the operator explicitly overrides
 `--local-api`.
 
-For the 0.8.17 release boundary, initialize and join production fleets with `--network broker` and
+Initialize and join production fleets with `--network broker` and
 `--transport broker`. The outbound-only HTTPS broker transport has passed physical multi-host
-acceptance. WireGuard fleet transport is implemented preview code but is not a supported 0.8.17
+acceptance. WireGuard fleet transport is implemented preview code but is not a supported
 production topology; do not present it as release-accepted until its separate physical matrix passes.
 
 Use node-level placement, not a worker-container identity. `node_id=local` selects control-plane
@@ -223,7 +223,7 @@ credentials, active authority, budgets, evidence, and proof.
 
 ## Read Detailed References
 
-- Read `AGENTS.md` for exact request bodies, filters, authentication options, and operational rules.
+- Read `GET /scan/contracts`, `GET /hunts/contract` and `/openapi.json` for exact request bodies and filters; read `AGENTS.md` for safety and judgment rules.
 - Read `skills/ai-security-session/references/api.md` for interactive session schemas.
 - Read `skills/shakerscan/references/model-intake.md` before corporate Model Intake admission, Firecracker,
   conversion, or Codex-guided Model Intake operations.

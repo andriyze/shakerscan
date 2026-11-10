@@ -21,8 +21,8 @@ to the API URL printed by `./scanner.sh status`.
 
 3. Extract discovery_id from the response
 
-4. Report that discovery was started and STOP — do not poll or wait. This matches the global
-   asynchronous-handoff rule in AGENTS.md ("Report that discovery was started - done (don't wait)").
+4. Report that discovery was started and STOP — do not poll or wait. This matches the
+   submission-only rule in AGENTS.md (report the ID and UI link, then stop).
    Discovery can take a while; the user can check results later:
    ```bash
    # later, on request only:

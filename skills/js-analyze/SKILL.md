@@ -43,7 +43,7 @@ authorization and asks for active probes.
 
 - Read `references/shakerscan.md` for the exact result fields, API calls, and output contract.
 - Read `skills/shakerscan/SKILL.md` for general scan safety and handoff rules.
-- Read `AGENTS.md` when you need exact details for `custom_endpoints`, `focus_rules_json`, or authenticated scans.
+- Read `GET /scan/contracts` when you need exact details for `custom_endpoints`, `focus_rules_json`, or authenticated scans; read `AGENTS.md` for the safety rules.
 
 ## Workflow
 
