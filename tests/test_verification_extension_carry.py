@@ -96,8 +96,9 @@ def test_an_extension_reruns_only_the_candidates_its_slice_could_not_finish(monk
     execution = receipt.redacted_execution
     assert execution["extends"] == "verify.xss.r01" and execution["carried_count"] == 1
     assert execution["attempted_count"] == 2 and execution["unattempted_count"] == 0
-    # A carried candidate is neither re-run nor re-charged.
-    assert receipt.budget_consumed["http_requests"] == 30
+    # A carried candidate is neither re-run nor re-charged; the rerun one costs its Dalfox
+    # run and the reflection check sent before it.
+    assert receipt.budget_consumed["http_requests"] == 31
     carried = [
         item for item in receipt.observations
         if item.get("kind") == "candidate_attempt" and item.get("carried_from")

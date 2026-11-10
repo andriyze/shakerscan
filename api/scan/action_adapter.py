@@ -5779,6 +5779,11 @@ class DatabaseNeutralScanActionDispatcher:
                     floor = batch_attempt_floor(
                         action.capability_name, body_candidate=bool(body_request),
                     )
+                    # The reflection check came out of this candidate's own allowance, so a
+                    # slice that holds exactly one allowance still funds the attempt.
+                    for name, amount in reflection_spent.get(attempt_id, {}).items():
+                        if name in floor:
+                            floor[name] = max(0, int(floor[name]) - amount)
                     if tool == "sqlmap" and staged_sources:
                         # A resumed SQLi candidate runs one unit at a time; once its rate is
                         # measured, its wall floor is what its next unit needs, not the
