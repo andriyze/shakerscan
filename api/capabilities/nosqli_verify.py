@@ -253,16 +253,15 @@ class NoSQLiVerifyAdapter:
         return _query_operator(self.request, field, operator, value)
 
     def _spent(self, started: float, attempted: int) -> dict[str, int]:
-        """What to settle: requests sent, writes when the caller reserved them, and wall seconds
-        only when reserved and never above the reservation."""
+        """What to settle: requests sent, writes when the caller reserved them (every one sent:
+        a write past the reservation is a violation to surface, not to round away), and wall
+        seconds only when reserved and never above the reservation."""
         spent = {"http_requests": attempted}
         if (
             "state_changing_requests" in self.requested_budget
             and self.request.method not in {"GET", "HEAD", "OPTIONS"}
         ):
-            spent["state_changing_requests"] = min(
-                attempted, int(self.requested_budget["state_changing_requests"]),
-            )
+            spent["state_changing_requests"] = attempted
         reserved = self.requested_budget.get("tool_wall_seconds")
         if reserved is not None:
             spent["tool_wall_seconds"] = min(
