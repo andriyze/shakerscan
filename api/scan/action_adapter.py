@@ -5057,17 +5057,21 @@ class DatabaseNeutralScanActionDispatcher:
         # pack inside its share needs the pack's latency bound (template_retry_wall), and its
         # retry holds that much of what the batch has left.
         retry_partial_timeouts = action.capability_name == "templates.passive_batch"
-        # A further template window (a thorough or deep slice's positions) the wall cut off is
-        # retried even when it already reported a match: its other templates never ran, and
-        # zoo d0a8d43c8 lost one or two windows on 16 of 57 hosts that way. The slice holds
-        # the retry's wall and requests beside its positions (``window_retry_hold``); the
-        # positions' planned shares are what the slice holds without it.
-        retry_cut_off = retry_partial_timeouts or window_endpoints is not None
+        # A template window the wall cut off is retried even when it already reported a match:
+        # its other templates never ran, and zoo d0a8d43c8 lost one or two windows on 16 of 57
+        # hosts that way. This holds for every attempt that runs one window, not only for the
+        # positions planned past a host's endpoints: a host with as many endpoints as windows
+        # plans the same windows as its endpoints' own positions, and lost them the same way.
+        # A slice may hold the retry's wall and requests beside its positions
+        # (``window_retry_hold``); the positions' planned shares are what it holds without it.
+        # A slice that holds none retries from what its other windows left.
+        window_attempts = windowed or window_endpoints is not None
+        retry_cut_off = retry_partial_timeouts or window_attempts
         raw_retry = action.capability_args.get("window_retry_hold")
         positions_budget = {
             name: int(amount) - (
                 int(raw_retry[name])
-                if window_endpoints is not None and isinstance(raw_retry, Mapping)
+                if window_attempts and isinstance(raw_retry, Mapping)
                 and isinstance(raw_retry.get(name), int) and not isinstance(raw_retry[name], bool)
                 and 0 < int(raw_retry[name]) < int(amount)
                 else 0
@@ -5848,7 +5852,7 @@ class DatabaseNeutralScanActionDispatcher:
                                 ),
                             )
                         )
-                        if window_endpoints is not None:
+                        if window_attempts:
                             sub_budget = window_template_attempt_hold(
                                 sub_budget, remaining_budget=remaining_budget,
                                 remaining_attempts=remaining_attempts,

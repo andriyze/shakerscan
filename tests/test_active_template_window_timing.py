@@ -280,9 +280,126 @@ def test_a_cut_off_window_is_retried_once_and_its_reproduced_match_kept_once(mon
     assert 3 in _windows_record(resumed)["windows_run"]
 
 
-def test_an_endpoints_own_slice_without_planned_windows_keeps_its_retry_rule(monkeypatch, bundle):  # noqa: F811
-    """A fast or balanced slice (no ``endpoint_entries``) is planned and run as before: an
-    attempt the wall cut off after reporting a match is not retried."""
+def _own_slice(host, number, start, count, retry_hold=None):
+    """A slice of a host's own endpoint positions (no ``endpoint_entries``): what a host with
+    39 or more endpoints, or any fast or balanced Scan, is planned. A later round's slice also
+    holds the window retry when the ledger has room."""
+    action = host.action(f"active.templates.r{number:02d}", start=start, count=count, windows=False)
+    if not retry_hold:
+        return action
+    return replace(
+        action,
+        capability_args={**action.capability_args, "window_retry_hold": dict(retry_hold)},
+        requested_budget={
+            name: int(amount) + int(retry_hold.get(name, 0))
+            for name, amount in action.requested_budget.items()
+        },
+        action_digest=None,
+    )
+
+
+def _inside_the_reservation(actions, receipts):
+    """Every slice, and the family as a whole, consumed no more than the plan reserved."""
+    for name in ("http_requests", "state_changing_requests", "tool_wall_seconds"):
+        for action, receipt in zip(actions, receipts):
+            assert int(receipt.budget_consumed.get(name, 0)) <= int(action.requested_budget[name])
+        assert sum(int(receipt.budget_consumed.get(name, 0)) for receipt in receipts) <= sum(
+            int(action.requested_budget[name]) for action in actions
+        )
+
+
+def test_a_carried_wall_keeps_the_planned_rate_on_an_endpoints_own_slice(monkeypatch, bundle):  # noqa: F811
+    """A host with 39 or more endpoints plans its windows as the endpoints' own positions, with
+    no ``endpoint_entries``. Three light windows left wall for the fourth, but its request hold
+    stayed the even split: 127 requests on 84 s paced at 1 request/s, and a 111-request window
+    was cut off with a match already reported. The carried wall now carries the requests that
+    keep the planned 2 requests/s there too, and the window finishes in its first attempt."""
+    timing = _ZooTiming(bundle, requests={0: 66, 1: 44, 2: 38, 3: 111})
+    host = _host(45)
+    actions = [
+        _own_slice(host, 1, 0, 33),
+        _own_slice(host, 3, 33, 12, retry_hold=RETRY_HOLD),
+    ]
+    receipts = [_dispatch(monkeypatch, host, bundle, action, timing) for action in actions]
+    assert [receipt.status for receipt in receipts] == ["success", "success"]
+    assert not any(receipt.timed_out for receipt in receipts)
+    run = set()
+    for receipt in receipts:
+        run |= set(_windows_record(receipt)["windows_run"])
+    assert run == set(range(39))
+    # No attempt was cut off, none was retried, and none ran below its planned 2 requests/s.
+    assert all(item["seconds"] <= item["budget"]["tool_wall_seconds"] for item in timing.attempts)
+    assert [receipt.redacted_execution["retried_count"] for receipt in receipts] == [0, 0]
+    assert min(item["rate"] for item in timing.attempts) == 2
+    fourth = next(item for item in timing.attempts if item["window"] == 3)
+    assert fourth["budget"]["http_requests"] >= 2 * fourth["budget"]["tool_wall_seconds"]
+    # A slice's opening attempt holds its planned share, 120 requests / 45 s. Where the slice
+    # holds a retry beside its positions, that hold is headroom for the opening attempt at the
+    # same 2 requests/s, and the positions' shares are still counted without it.
+    opening = next(item for item in timing.attempts if item["window"] == 0)
+    assert (opening["budget"]["http_requests"], opening["budget"]["tool_wall_seconds"]) == (120, 45)
+    later = next(item for item in timing.attempts if item["window"] == 33)
+    assert later["budget"]["tool_wall_seconds"] == ACTIVE_TEMPLATE_WINDOW_RETRY_SECONDS
+    assert later["rate"] == 2
+    _inside_the_reservation(actions, receipts)
+
+
+def test_a_window_cut_off_after_a_match_is_retried_on_an_endpoints_own_slice(monkeypatch, bundle):  # noqa: F811
+    """A slice's opening attempt has no carried wall: 45 s at 2 requests/s is 90 requests, and
+    a 100-request window is cut off. It had reported a match, so on a slice of the endpoints'
+    own positions it was never retried and its other templates never ran. It is now retried
+    once, from what the slice's other windows left, and its match is recorded once."""
+    timing = _ZooTiming(bundle, requests={0: 100})
+    host = _host(45)
+    action = _own_slice(host, 1, 0, 33)
+    receipt = _dispatch(monkeypatch, host, bundle, action, timing)
+    opening = [item for item in timing.attempts if item["window"] == 0]
+    assert len(opening) == 2
+    assert opening[0]["budget"]["tool_wall_seconds"] == 45 < opening[0]["seconds"]
+    assert opening[1]["seconds"] <= opening[1]["budget"]["tool_wall_seconds"]
+    assert opening[1]["rate"] >= 2
+    assert receipt.status == "success" and not receipt.timed_out
+    assert _windows_record(receipt)["windows_run"] == list(range(33))
+    assert receipt.redacted_execution["retried_count"] == 1
+    assert receipt.redacted_execution["recovered_count"] == 1
+    matches = [
+        item for item in receipt.observations
+        if item.get("kind") == "template_match" and item.get("template_id") == "synthetic-window-0"
+    ]
+    assert len(matches) == 1
+    _inside_the_reservation([action], [receipt])
+    # A resume re-sends nothing and keeps the recovered window.
+    sent = len(timing.attempts)
+    resumed = _dispatch(monkeypatch, host, bundle, action, timing)
+    assert len(timing.attempts) == sent
+    assert resumed.status == "success"
+    assert 0 in _windows_record(resumed)["windows_run"]
+
+
+def test_every_window_cut_off_at_once_stays_inside_the_reservation(monkeypatch, bundle):  # noqa: F811
+    """The worst case for the holds: every window needs more than any attempt can be given, so
+    every first attempt is cut off and the retries take whatever is left. The slices and the
+    family never consume more requests, mutations or wall than the plan reserved."""
+    timing = _ZooTiming(bundle, requests={window: 400 for window in range(39)})
+    host = _host(45)
+    actions = [
+        _own_slice(host, 1, 0, 33),
+        _own_slice(host, 3, 33, 12, retry_hold=RETRY_HOLD),
+    ]
+    receipts = [_dispatch(monkeypatch, host, bundle, action, timing) for action in actions]
+    assert all(receipt.timed_out for receipt in receipts)
+    _inside_the_reservation(actions, receipts)
+    # Every window was tried, and each at most twice: one attempt and one retry.
+    tried = [item["window"] for item in timing.attempts]
+    assert set(tried) == set(range(39))
+    assert max(tried.count(window) for window in set(tried)) <= 2
+
+
+def test_a_short_endpoints_own_slice_with_nothing_left_is_not_retried(monkeypatch, bundle):  # noqa: F811
+    """A two-position slice whose first window is cut off and whose second leaves less wall
+    than the first attempt had: the retry would get no more wall than the attempt that was cut
+    off, so it is not run and the window is reported as not finished. The positions' holds are
+    the even split, as before."""
     host = _Host(("/", "/a"))
     action = host.action("active.templates.r01", start=0, count=2, windows=False)
     timing = _ZooTiming(bundle, requests={0: 150, 1: 45})
@@ -290,8 +407,9 @@ def test_an_endpoints_own_slice_without_planned_windows_keeps_its_retry_rule(mon
     assert [item["window"] for item in timing.attempts] == [0, 1]
     assert receipt.redacted_execution["retried_count"] == 0
     assert receipt.timed_out
-    # The even split of 2.11.0, unchanged: 120 requests / 45 s, then what is left.
+    assert _windows_record(receipt)["windows_run"] == [1]
     assert [item["budget"]["http_requests"] for item in timing.attempts] == [120, 150]
+    _inside_the_reservation([action], [receipt])
 
 
 def test_a_window_attempt_keeps_its_planned_rate_inside_the_slice_holds():
