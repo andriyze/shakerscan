@@ -121,6 +121,42 @@ def test_a_two_endpoint_host_plans_all_39_windows_over_three_rounds(profile):
             }
 
 
+@pytest.mark.parametrize("endpoints", [45, 80])
+def test_a_host_with_more_endpoints_than_windows_holds_the_retry_in_later_rounds(endpoints):
+    """A host with 39 or more endpoints plans its windows as the endpoints' own positions, with no
+    ``endpoint_entries``. Its later rounds' slices hold one retry of a cut-off window exactly as
+    a smaller host's further windows do; its first round is planned as before."""
+    planned = _plan_rounds("thorough", endpoints=endpoints, rounds=6)
+    r01, = planned[1]
+    assert r01.capability_args["slice"] == {"start": 0, "count": 33}
+    assert "endpoint_entries" not in r01.capability_args
+    assert "window_retry_hold" not in r01.capability_args
+    assert dict(r01.requested_budget) == {name: amount * 33 for name, amount in POSITION.items()}
+    later = [action for number in planned if number >= 2 for action in planned[number]]
+    assert later
+    for action in later:
+        count = action.capability_args["slice"]["count"]
+        assert "endpoint_entries" not in action.capability_args
+        retry = dict(action.capability_args["window_retry_hold"])
+        assert 45 < retry["tool_wall_seconds"] <= ACTIVE_TEMPLATE_WINDOW_RETRY_SECONDS
+        assert retry["http_requests"] == retry["state_changing_requests"] == (
+            2 * retry["tool_wall_seconds"]
+        )
+        assert dict(action.requested_budget) == {
+            name: amount * count + retry[name] for name, amount in POSITION.items()
+        }
+
+
+@pytest.mark.parametrize("profile, endpoints", [("deep", 80), ("thorough", 45)])
+def test_the_first_rounds_slices_hold_no_retry(profile, endpoints):
+    for action in _plan_rounds(profile, endpoints=endpoints, rounds=1)[1]:
+        count = action.capability_args["slice"]["count"]
+        assert "window_retry_hold" not in action.capability_args
+        assert dict(action.requested_budget) == {
+            name: amount * count for name, amount in POSITION.items()
+        }
+
+
 def test_a_window_retry_hold_is_capped_by_what_the_lane_leaves_of_the_ledger():
     shape = {"http_requests": 3960, "state_changing_requests": 3960, "tool_wall_seconds": 1485}
     roomy = {"http_requests": 60_000, "state_changing_requests": 6_000, "tool_wall_seconds": 10_800}
@@ -631,3 +667,4 @@ def test_a_slice_whose_every_position_is_past_the_bases_ran_nothing_by_design():
     assert "active_verifier_zero_attempts" not in report["coverage"]["grade_reliability"]["reasons"]
     family = next(row for row in report["coverage"]["family_coverage"] if row["family"] == "nuclei_active")
     assert family["template_windows"]["run"] == 39 and family["template_windows"]["total"] == 39
+

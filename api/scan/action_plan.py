@@ -1934,13 +1934,15 @@ class ScanActionPlanCompiler:
                 ACTIVE_TEMPLATE_PLANNED_WINDOWS if policy.allow_state_changing_http
                 else ACTIVE_TEMPLATE_PLANNED_GET_ONLY_WINDOWS
             )
-            work_count = (
-                planned_windows
-                if capability_name == "templates.active_batch"
+            window_sweep = (
+                capability_name == "templates.active_batch"
                 and active_template_windows
                 and budget_sufficiency(execution_plan.budget_profile)
                 and not shard_authority
-                and 0 < entry_count < planned_windows
+            )
+            work_count = (
+                planned_windows
+                if window_sweep and 0 < entry_count < planned_windows
                 else entry_count
             )
             planned_entries = work_count if continuation_round >= 2 else entry_count
@@ -2051,10 +2053,16 @@ class ScanActionPlanCompiler:
                     f"required batch action {base_action_id} exceeds plan graph capacity"
                 )
             # A slice of further template windows also holds one retry of a window its wall
-            # cut off, from what the ledger has left once this lane's slices are paid.
+            # cut off, from what the ledger has left once this lane's slices are paid. So does
+            # a later round's slice on a host with as many endpoints as windows: its positions
+            # are the endpoints' own, and they run the same windows. The first round's slices
+            # are planned as before and retry from what their other windows leave.
+            later_window_slices = (
+                window_sweep and work_count == entry_count and continuation_round >= 2
+            )
             window_retry = (
                 window_retry_hold(batch_budget, limits=limits, reserved=reserved, slices=count)
-                if work_count != entry_count else {}
+                if work_count != entry_count or later_window_slices else {}
             )
             for batch_index in range(count):
                 start = manifest_offset + batch_index * batch_size
@@ -2090,7 +2098,8 @@ class ScanActionPlanCompiler:
                         ),
                         **(
                             {"window_retry_hold": dict(window_retry)}
-                            if window_retry and start >= entry_count else {}
+                            if window_retry and (later_window_slices or start >= entry_count)
+                            else {}
                         ),
                         "scheduled_batches": int(count),
                         "total_batches": int(total_batches),
