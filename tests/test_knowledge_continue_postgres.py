@@ -311,7 +311,7 @@ def test_authority_outside_and_revoked_keeps_required_retests_visible(monkeypatc
                 await _allow(conn, hunt.id, 'http.request')
                 result = (await hunt.ok('knowledge.continue', {}))['result']
                 assert result['next_experiments']['required_retests']['outside_authority'] == 0
-                await conn.execute("""UPDATE hunt_runs SET budget_json=COALESCE(budget_json,'{}'::jsonb) || '{"http_requests": 1}'::jsonb,
+                await conn.execute("""UPDATE hunt_runs SET budget_json=COALESCE(budget_json,'{}'::jsonb) || '{"max_http_requests": 1}'::jsonb,
                     budget_used_json=COALESCE(budget_used_json,'{}'::jsonb) || '{"http_requests": 1}'::jsonb
                     WHERE id=$1""", UUID(hunt.id))
                 result = (await hunt.ok('knowledge.continue', {}))['result']

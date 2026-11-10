@@ -421,6 +421,8 @@ class PortsDiscoverAdapter:
                 continue
             try:
                 row = json.loads(line)
+                if not isinstance(row, dict):
+                    raise ValueError("record is not an object")
                 address = str(ipaddress.ip_address(str(row.get("ip") or row.get("host"))))
                 port = int(row.get("port"))
                 if not 1 <= port <= 65_535:

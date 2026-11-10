@@ -234,6 +234,14 @@ class SQLiProofAdapter:
         # action's scanner): no request starts after it, and none outlives it.
         self.deadline = deadline
 
+    def _wall_spent(self, started: float) -> dict[str, int]:
+        """Wall seconds to settle: never a dimension the caller did not reserve, and never more
+        than it reserved (the last request may end a rounding second past the reservation)."""
+        reserved = self.requested_budget.get("tool_wall_seconds")
+        if reserved is None:
+            return {}
+        return {"tool_wall_seconds": min(max(1, int(reserved)), max(1, math.ceil(time.monotonic() - started)))}
+
     async def execute(self, *, heartbeat: Heartbeat, cancelled: Cancelled) -> CapabilityAdapterResult:
         started = time.monotonic()
         attempted = 0
@@ -253,7 +261,12 @@ class SQLiProofAdapter:
                 raise SQLiProofError("budget_exhausted")
             remaining = max(1, budget - attempted)
             wall = max(1, int(self.requested_budget.get("tool_wall_seconds") or 1))
-            timeout = max(0.5, min(15.0, wall / remaining))
+            # Split the wall that is left, not the whole reservation, so the requests together
+            # stay inside it; with none left the proof stops as a deadline (a kept partial).
+            wall_left = wall - (time.monotonic() - started)
+            if "tool_wall_seconds" in self.requested_budget and wall_left < 0.5:
+                raise SQLiProofError("deadline")
+            timeout = max(0.5, min(15.0, wall_left / remaining))
             if self.deadline is not None:
                 left = self.deadline - time.monotonic()
                 if left < 0.5:
@@ -271,12 +284,12 @@ class SQLiProofAdapter:
         original = _field_value(self.request, self.field, self.path_index)
         invalid = f"shakerscan_invalid_{str(self.candidate.get('candidate_id') or '')[:12]}"
         request_class = str(self.candidate.get("request_class") or "safe_read")
-        control_request = (
-            self.mutate(self.request, self.field, invalid)
-            if request_class == "safe_authentication" else self.request
-        )
-        error_request = self.mutate(self.request, self.field, f"{original}'")
         try:
+            control_request = (
+                self.mutate(self.request, self.field, invalid)
+                if request_class == "safe_authentication" else self.request
+            )
+            error_request = self.mutate(self.request, self.field, f"{original}'")
             pairs = [(await send(control_request), await send(error_request)) for _ in range(2)]
             control_signatures = [set(_signatures(control)) for control, _payload in pairs]
             payload_signatures = [set(_signatures(payload)) for _control, payload in pairs]
@@ -383,7 +396,7 @@ class SQLiProofAdapter:
                     "http_requests": attempted,
                     **({"state_changing_requests": attempted}
                        if self.request.method not in {"GET", "HEAD", "OPTIONS"} else {}),
-                    "tool_wall_seconds": max(1, math.ceil(time.monotonic() - started)),
+                    **self._wall_spent(started),
                 },
                 partial=bool(attempted) or timed_out, parser_version=SQLI_PROOF_PARSER_VERSION,
             )
@@ -449,7 +462,7 @@ class SQLiProofAdapter:
                 "http_requests": attempted,
                 **({"state_changing_requests": attempted}
                    if self.request.method not in {"GET", "HEAD", "OPTIONS"} else {}),
-                "tool_wall_seconds": max(1, math.ceil(time.monotonic() - started)),
+                **self._wall_spent(started),
             },
             partial=bool(errors), timed_out=any(item.timed_out for item in results),
             execution_started=True, parser_version=SQLI_PROOF_PARSER_VERSION,

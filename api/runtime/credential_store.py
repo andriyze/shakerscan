@@ -672,6 +672,9 @@ class PostgresCredentialProfileStore:
             timestamp,
             profile_uuid,
         )
+        if not is_active:
+            # Switching a profile off ends its live logins exactly as deleting it does.
+            await self._end_live_sessions(conn, profile_uuid, timestamp)
         return await self.get_profile(conn, profile_id=profile_uuid)
 
     async def rotate_profile(
@@ -857,9 +860,14 @@ class PostgresCredentialProfileStore:
             timestamp,
             profile_uuid,
         )
-        # A deactivated credential's live logins end now, not at their expiry: the captured
-        # cookies and headers are destroyed the same way an operator revocation destroys them.
-        # (Stores without the session table, such as the bare credential schema, have none.)
+        await self._end_live_sessions(conn, profile_uuid, timestamp)
+        return await self.get_profile(conn, profile_id=profile_uuid)
+
+    @staticmethod
+    async def _end_live_sessions(conn: CredentialDatabase, profile_uuid: Any, timestamp: datetime) -> None:
+        """A deactivated credential's live logins end now, not at their expiry: the captured
+        cookies and headers are destroyed the same way an operator revocation destroys them.
+        (Stores without the session table, such as the bare credential schema, have none.)"""
         if await conn.fetchval("SELECT to_regclass('public.auth_sessions') IS NOT NULL"):
             await conn.execute(
                 """UPDATE auth_sessions
@@ -870,7 +878,6 @@ class PostgresCredentialProfileStore:
                 timestamp,
                 profile_uuid,
             )
-        return await self.get_profile(conn, profile_id=profile_uuid)
 
     async def has_active_grant(
         self,

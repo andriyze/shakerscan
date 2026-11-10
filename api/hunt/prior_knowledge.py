@@ -110,7 +110,7 @@ async def web_prior_knowledge(conn: Any, target_id: Any) -> dict[str, Any]:
     )
     candidates_open = await conn.fetchval(
         "SELECT count(*) FROM investigation_candidates WHERE target_id=$1 "
-        "AND COALESCE(status,'') NOT IN ('verified', 'refuted', 'withdrawn')",
+        "AND COALESCE(status,'') NOT IN ('verified', 'refuted', 'expired')",
         target_id,
     )
     by_status = _counts(endpoints_by_status, "test_status")

@@ -1514,6 +1514,12 @@ def _browser_result(
 ) -> CapabilityAdapterResult:
     partial = status == "partial"
     elapsed = max(0, math.ceil(time.monotonic() - started))
+    # ``started`` precedes proxy and browser launch, which the reservation (the navigation
+    # timeout) does not cover: a navigation that used its whole timeout must settle as the
+    # reservation, not as an over-reservation that fails the action and drops what it observed.
+    reserved_wall = prepared.estimated_budget.get("tool_wall_seconds")
+    if reserved_wall is not None:
+        elapsed = min(elapsed, max(1, int(reserved_wall)))
     return CapabilityAdapterResult(
         status=status,
         observations=tuple([*observations, *blocked][

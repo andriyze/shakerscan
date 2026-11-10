@@ -57,6 +57,8 @@ def parse_spec_document(body: bytes, *, content_type: str | None = None) -> dict
     try:
         parsed = json.loads(text)
         return parsed if isinstance(parsed, dict) else None
+    except RecursionError:  # a hostile, deeply nested document is not a specification
+        return None
     except json.JSONDecodeError:
         pass
     try:
@@ -211,7 +213,11 @@ def _server_bases(
             _issue(issues, "spec_invalid_server")
             continue
         # Relative Server URLs are relative to the specification document, not the target root.
-        resolved = urllib.parse.urljoin(source, url)
+        try:
+            resolved = urllib.parse.urljoin(source, url)
+        except ValueError:  # e.g. an unbalanced IPv6 bracket
+            _issue(issues, "spec_invalid_server")
+            continue
         if _origin_key(resolved) != _origin_key(origin) or _origin_key(origin) is None:
             off_origin += 1
             continue
@@ -442,10 +448,17 @@ def ingest_spec_bodies(
     """
     by_identity: dict[tuple[str, str], dict[str, Any]] = {}
     for _url, body, content_type in documents:
-        spec = parse_spec_document(body, content_type=content_type)
-        if spec is None:
+        # One document that cannot be read must not lose the routes of the others.
+        try:
+            spec = parse_spec_document(body, content_type=content_type)
+            records = (
+                [] if spec is None
+                else list(discovered_route_records(spec, origin=origin, document_url=_url, issues=issues))
+            )
+        except Exception:  # noqa: BLE001 - untrusted document; recorded, never raised
+            _issue(issues, "spec_document_failed")
             continue
-        for record in discovered_route_records(spec, origin=origin, document_url=_url, issues=issues):
+        for record in records:
             identity = (record["method"], record["url"])
             existing = by_identity.get(identity)
             if existing is None or (

@@ -1015,9 +1015,12 @@ class HuntRunService:
                 bounded_signals.append(text)
                 seen_signals.add(text.casefold())
         requested = _requested_skill_ids(context)
-        specs = skill_library().resolve_for_hunt(
-            requested, target_kind=str(item.get("target_kind") or "web"),
-        )
+        try:
+            specs = skill_library().resolve_for_hunt(
+                requested, target_kind=str(item.get("target_kind") or "web"),
+            )
+        except HuntSkillError as exc:  # as bind/unbind answer it, not a 500
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
         suggestions = skill_library().suggest(
             goal=str(item.get("objective") or ""),
             signals=bounded_signals,

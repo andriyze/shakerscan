@@ -109,6 +109,19 @@ def _json(value: Any, default: Any) -> Any:
     return default if value is None else dict(value) if isinstance(value, Mapping) else value
 
 
+class HuntEndedRefusal(HTTPException):
+    """A decision on a request whose Hunt has ended. ``decide`` withdraws the request and raises
+    this inside the caller's transaction, which the raise rolls back: the caller repeats the
+    withdrawal after its transaction (``withdraw_after_refusal``) so it is kept."""
+
+    def __init__(self, actor: str) -> None:
+        super().__init__(409, {
+            "error": "permission_withdrawn",
+            "message": "This Hunt has ended; nothing was granted, and nothing was remembered.",
+        })
+        self.actor = actor
+
+
 def hunt_finished(run: Mapping[str, Any]) -> bool:
     return str(run.get("status") or "") in FINISHED_STATUSES or run.get("completed_at") is not None
 
@@ -567,8 +580,7 @@ async def decide(conn: Any, hunt_id: Any, request_id: Any, body: Mapping[str, An
     via = str(body.get("decision_via") or "local_confirm")
     if hunt_finished(run):
         await withdraw_request(conn, run["id"], request["id"], actor=actor, source="hunt_ended")
-        raise HTTPException(409, {"error": "permission_withdrawn",
-                                  "message": "This Hunt has ended; nothing was granted, and nothing was remembered."})
+        raise HuntEndedRefusal(actor)
     if decision == "deny":
         await conn.execute(
             """UPDATE hunt_permission_requests
@@ -698,7 +710,7 @@ async def settle_for_ended_hunt(conn: Any, hunt_id: Any, *, actor: str, source: 
     )
 
 __all__ = [
-    "GrantRefused", "LEDGER_TO_BUDGET", "PARKED_ENDINGS", "apply_grant", "decide", "hunt_finished", "revoke_grant",
+    "GrantRefused", "HuntEndedRefusal", "LEDGER_TO_BUDGET", "PARKED_ENDINGS", "apply_grant", "decide", "hunt_finished", "revoke_grant",
     "revoked_coverage", "settle_for_ended_hunt", "standing_authorization", "try_preauthorized_grant",
     "withdraw_request",
 ]

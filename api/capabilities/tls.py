@@ -754,18 +754,23 @@ def _certificate_details(
             "certificate_parse_status": "failed",
             **_certificate_chain_summary(chain_certificates or (certificate,), captured=chain_captured),
         }
+    parse_status = "parsed"
     try:
         dns_names = tuple(parsed.extensions.get_extension_for_class(
             x509.SubjectAlternativeName,
         ).value.get_values_for_type(x509.DNSName))
     except x509.ExtensionNotFound:
         dns_names = ()
+    except (ValueError, x509.DuplicateExtension):
+        dns_names, parse_status = (), "partial"
     try:
         ip_names = tuple(str(item) for item in parsed.extensions.get_extension_for_class(
             x509.SubjectAlternativeName,
         ).value.get_values_for_type(x509.IPAddress))
     except x509.ExtensionNotFound:
         ip_names = ()
+    except (ValueError, x509.DuplicateExtension):
+        ip_names, parse_status = (), "partial"
     not_before = getattr(parsed, "not_valid_before_utc", None)
     not_after = getattr(parsed, "not_valid_after_utc", None)
     if not_before is None:
@@ -773,9 +778,12 @@ def _certificate_details(
     if not_after is None:
         not_after = parsed.not_valid_after.replace(tzinfo=timezone.utc)
     now = datetime.now(timezone.utc)
-    strength = _key_and_signature(parsed.public_key(), parsed)
+    try:
+        strength = _key_and_signature(parsed.public_key(), parsed)
+    except (TypeError, ValueError, UnsupportedAlgorithm):  # as _chain_details guards it
+        strength = {}
     return {
-        "certificate_parse_status": "parsed",
+        "certificate_parse_status": parse_status,
         "certificate_subject": parsed.subject.rfc4514_string(),
         "certificate_issuer": parsed.issuer.rfc4514_string(),
         "certificate_serial_hex": format(parsed.serial_number, "x"),

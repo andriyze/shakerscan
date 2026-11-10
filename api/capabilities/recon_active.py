@@ -135,8 +135,11 @@ def _bound_roots(roots: Iterable[Any]) -> list[str]:
     ))
 
 
-def _elapsed(started: float) -> int:
-    return max(1, int(time.monotonic() - started + 0.999))
+def _elapsed(started: float, deadline_seconds: float) -> int:
+    """Whole wall seconds spent, never more than the deadline the caller reserved: a loop that
+    stops at its deadline has spent the reservation, not the reservation plus a rounding second
+    (which settles as an over-reservation and loses the partial result)."""
+    return min(max(1, int(deadline_seconds)), max(1, int(time.monotonic() - started + 0.999)))
 
 
 # ---------------------------------------------------------------------------------------------
@@ -261,7 +264,7 @@ async def enumerate_dns_names(
         "status": "cancelled" if stopped == "cancelled" else "partial" if partial else "success",
         "partial": partial,
         "observations": observations,
-        "budget_consumed": {"hosts_attempted": attempted, "tool_wall_seconds": _elapsed(started)},
+        "budget_consumed": {"hosts_attempted": attempted, "tool_wall_seconds": _elapsed(started, deadline_seconds)},
     }
 
 
@@ -394,7 +397,7 @@ async def discover_virtual_hosts(
     def finish(status: str, observation: dict[str, Any]) -> dict[str, Any]:
         return {"status": status, "partial": status != "success",
                 "observations": observation.pop("_leads") + [observation],
-                "budget_consumed": {"http_requests": used, "tool_wall_seconds": _elapsed(started)}}
+                "budget_consumed": {"http_requests": used, "tool_wall_seconds": _elapsed(started, deadline_seconds)}}
 
     def shared_edge(name: str, basis: str) -> dict[str, Any]:
         return finish("success", {**summary, "tested": 0, "skipped": "not_applicable",
@@ -668,7 +671,7 @@ async def discover_parameters(
         "status": "cancelled" if stopped == "cancelled" else "partial" if partial else "success",
         "partial": partial,
         "observations": observations,
-        "budget_consumed": {"http_requests": used, "tool_wall_seconds": _elapsed(started)},
+        "budget_consumed": {"http_requests": used, "tool_wall_seconds": _elapsed(started, deadline_seconds)},
     }
 
 

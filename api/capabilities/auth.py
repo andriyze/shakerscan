@@ -7,6 +7,7 @@ from datetime import datetime, timedelta, timezone
 import hashlib
 from html.parser import HTMLParser
 import json
+import math
 import re
 from typing import Any, Awaitable, Callable, Mapping
 import urllib.parse
@@ -492,12 +493,15 @@ def _session_timing(
     ttl = DEFAULT_SESSION_TTL_SECONDS
     try:
         payload = json.loads(response.body().decode("utf-8", errors="strict"))
-    except (UnicodeDecodeError, json.JSONDecodeError):
+    except (UnicodeDecodeError, json.JSONDecodeError, RecursionError):
         payload = None
     supplied_ttl = False
     if isinstance(payload, Mapping):
         raw_ttl = payload.get("expires_in")
-        if isinstance(raw_ttl, (int, float)) and not isinstance(raw_ttl, bool):
+        if (
+            isinstance(raw_ttl, (int, float)) and not isinstance(raw_ttl, bool)
+            and math.isfinite(raw_ttl)  # json accepts Infinity/NaN and 1e999; int() of them raises
+        ):
             ttl = int(raw_ttl)
             supplied_ttl = True
         elif isinstance(raw_ttl, str) and raw_ttl.strip().isdigit():

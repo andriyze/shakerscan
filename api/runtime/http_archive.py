@@ -160,9 +160,11 @@ def normalized_headers(headers: Mapping[str, str] | None) -> dict[str, str]:
     used = 0
     for raw_name, raw_value in headers.items():
         name = str(raw_name).strip().lower()
+        if not name:
+            continue  # one nameless header must not drop every header after it
         value = str(raw_value)
         used += len(name.encode("utf-8")) + len(value.encode("utf-8"))
-        if not name or used > MAX_HEADER_BYTES:
+        if used > MAX_HEADER_BYTES:
             break
         result[name] = value
     return result

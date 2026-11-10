@@ -21,7 +21,7 @@ try:
 except ModuleNotFoundError:  # package import layout
     from ..list_contract import ListSpec, Page, SortKey, SqlParams, count_total, snapshot_time
 
-from .permission_grants import decide, revoke_grant
+from .permission_grants import HuntEndedRefusal, decide, revoke_grant, withdraw_request
 from .permission_store import (
     REQUEST_STATUSES,
     expire_due,
@@ -133,8 +133,15 @@ async def decide_hunt_permission_request(hunt_id: str, request_id: str, body: Pe
     """A person's allow or deny. Not delegated to the planner; no MCP tool calls it."""
     hunt_uuid, request_uuid = _uuid(hunt_id, "hunt id"), _uuid(request_id, "request id")
     async with _pool().acquire() as conn:
-        async with conn.transaction():
-            return await decide(conn, hunt_uuid, request_uuid, body.model_dump())
+        try:
+            async with conn.transaction():
+                return await decide(conn, hunt_uuid, request_uuid, body.model_dump())
+        except HuntEndedRefusal as refusal:
+            # The 409 rolled back the withdrawal decide() made; keep it, so the request does not
+            # stay pending and repeat this on every retry.
+            async with conn.transaction():
+                await withdraw_request(conn, hunt_uuid, request_uuid, actor=refusal.actor, source="hunt_ended")
+            raise
 
 
 @router.get("/hunts/{hunt_id}/permission-grants", tags=["Hunt"])
