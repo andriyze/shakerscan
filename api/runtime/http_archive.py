@@ -389,6 +389,48 @@ async def _search_url_column(conn) -> bool:
     return _search_url_column_present
 
 
+def tunnel_comment(row: Mapping[str, Any]) -> str:
+    """What a pinned tunnel's entry stands for, in words, or "" for any other entry.
+
+    A HAR reader sees a tunnel as a bare ``CONNECT``. An encrypted tunnel carried an external
+    tool's requests the engine could not read, so the entry says so, and names the request the
+    engine gave the tool to test (``tool_input``: method, masked URL, body field names): for a
+    verifier, the endpoint, such as a seeded form POST, its payloads went to.
+    """
+    metadata = row.get("metadata_json")
+    if isinstance(metadata, str):
+        try:
+            metadata = json.loads(metadata)
+        except ValueError:
+            metadata = None
+    relayed = metadata.get("tunnel_request") if isinstance(metadata, Mapping) else None
+    if isinstance(relayed, Mapping) and relayed.get("request_body") == "not_logged_by_tool":
+        return (f"from {relayed.get('tool') or 'the tool'}'s own wire log, which does not keep "
+                "request bodies: the body sent is unknown, not empty")
+    tunnel = metadata.get("tunnel") if isinstance(metadata, Mapping) else None
+    if not isinstance(tunnel, Mapping):
+        return ""
+    who = " ".join(part for part in (
+        str(row.get("capability_name") or ""), f"({tunnel['tool']})" if tunnel.get("tool") else "",
+    ) if part)
+    logged = int(tunnel.get("wire_log_archived") or 0) if str(tunnel.get("wire_log_archived") or "0").isdigit() else 0
+    if logged:
+        text = (f"pinned tunnel of {who or 'an external tool'}: the {logged} request(s) the tool's own "
+                "wire log recorded are archived as their own entries")
+    elif tunnel.get("content_readable") is False:
+        text = (f"encrypted pinned tunnel of {who or 'an external tool'}: the requests it carried "
+                "were not readable and are not archived")
+    else:
+        text = (f"pinned tunnel of {who or 'an external tool'}: each request line it relayed is "
+                "its own entry")
+    given = tunnel.get("tool_input")
+    if isinstance(given, Mapping) and given.get("url"):
+        fields = [str(name) for name in given.get("body_field_names") or () if str(name)]
+        text += (f"; the tool was given {str(given.get('method') or 'GET')} {given['url']} to test"
+                 + (f" (body fields: {', '.join(fields)})" if fields else ""))
+    return text
+
+
 def har_entry(row: Mapping[str, Any], *, request_body: str | None, response_body: str | None) -> dict[str, Any]:
     """Project one archived transaction into a HAR 1.2 entry.
 
@@ -437,7 +479,9 @@ def har_entry(row: Mapping[str, Any], *, request_body: str | None, response_body
         "serverIPAddress": row.get("remote_ip"),
         # Truncation is stated on the entry, so a reader never mistakes a stored prefix for
         # the whole body when comparing against a live response.
-        "comment": "truncated" if row.get("truncated") else "",
+        "comment": "; ".join(part for part in (
+            "truncated" if row.get("truncated") else "", tunnel_comment(row),
+        ) if part),
     }
 
 
