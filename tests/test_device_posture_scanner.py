@@ -505,6 +505,63 @@ def test_web_detection_checks_nonstandard_ports(monkeypatch):
     assert calls == [(49152, False), (49152, True)]
 
 
+def _origin_probe(answers, calls):
+    async def fake_probe(locator, port, *, tls, origin_locator=None, timeout=3.0):
+        calls.append((port, tls))
+        status = answers.get((port, tls))
+        if status is None:
+            return None
+        scheme = "https" if tls else "http"
+        return {
+            "origin": f"{scheme}://app.test:{port}", "port": port, "scheme": scheme, "tls": tls,
+            "status_line": status,
+        }
+    return fake_probe
+
+
+def test_a_tls_listener_that_refuses_a_plain_request_is_an_https_origin(monkeypatch):
+    # A TLS listener answers a plain request with 400 ("sent to HTTPS port"); a port scan
+    # names the port without naming the service, so the plain probe goes first.
+    calls = []
+    monkeypatch.setattr(device_posture, "_probe_http", _origin_probe({
+        (443, False): "HTTP/1.0 400 Bad Request", (443, True): "HTTP/1.1 200 OK",
+    }, calls))
+    origins = asyncio.run(device_posture.detect_web_origins(
+        "192.0.2.8", [{"transport": "tcp", "port": 443, "state": "open", "service_name": "unknown"}],
+        origin_locator="app.test",
+    ))
+    assert [(item["origin"], item["tls"]) for item in origins] == [("https://app.test:443", True)]
+    assert calls == [(443, False), (443, True)]
+
+
+def test_a_plain_listener_that_answers_400_stays_a_plain_origin(monkeypatch):
+    calls = []
+    monkeypatch.setattr(device_posture, "_probe_http", _origin_probe({
+        (8080, False): "HTTP/1.1 400 Bad Request",
+    }, calls))
+    origins = asyncio.run(device_posture.detect_web_origins(
+        "192.0.2.8", [{"transport": "tcp", "port": 8080, "state": "open", "service_name": "unknown"}],
+        origin_locator="app.test",
+    ))
+    assert [(item["origin"], item["tls"]) for item in origins] == [("http://app.test:8080", False)]
+    assert calls == [(8080, False), (8080, True)]
+
+
+def test_a_plain_listener_that_serves_the_request_gets_no_tls_probe(monkeypatch):
+    calls = []
+    monkeypatch.setattr(device_posture, "_probe_http", _origin_probe({
+        (80, False): "HTTP/1.1 301 Moved Permanently", (8000, False): "HTTP/1.1 200 OK",
+    }, calls))
+    origins = asyncio.run(device_posture.detect_web_origins(
+        "192.0.2.8", [
+            {"transport": "tcp", "port": 80, "state": "open", "service_name": "unknown"},
+            {"transport": "tcp", "port": 8000, "state": "open", "service_name": "unknown"},
+        ], origin_locator="app.test", max_concurrency=1,
+    ))
+    assert [item["origin"] for item in origins] == ["http://app.test:80", "http://app.test:8000"]
+    assert calls == [(80, False), (8000, False)]
+
+
 def test_device_scan_emits_independent_safety_and_normalized_evidence(monkeypatch):
     services = [{
         "transport": "tcp", "port": 8443, "state": "open", "service_name": "https",
