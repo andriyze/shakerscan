@@ -2081,7 +2081,7 @@ for the profile contract, invocation, limits and acceptance gates.
 | Release gates | 17 | `scripts/release_gates.py` |
 | Runtime environment keys | 430 | Python sources + Compose manifests |
 | Internal compatibility scanner modules | 147 | `scanner/scanner_tools/` |
-| UI pages | 40 | `ui/src/app/` |
+| UI pages | 41 | `ui/src/app/` |
 | Skills | 9 | `skills/` |
 | Canonical slash commands | 14 | `.claude/commands/` |
 | Deprecated Scan-name slash shims | 0 | `.claude/commands/` |
@@ -3368,6 +3368,7 @@ Only key names and declaring sources are documented; secret values are never rea
 | `/docs` | `ui/src/app/docs/page.tsx` |
 | `/evidence` | `ui/src/app/evidence/page.tsx` |
 | `/exposure` | `ui/src/app/exposure/page.tsx` |
+| `/ext/{id}` | `ui/src/app/ext/[id]/page.tsx` |
 | `/findings/{id}` | `ui/src/app/findings/[id]/page.tsx` |
 | `/findings/candidates` | `ui/src/app/findings/candidates/page.tsx` |
 | `/findings` | `ui/src/app/findings/page.tsx` |

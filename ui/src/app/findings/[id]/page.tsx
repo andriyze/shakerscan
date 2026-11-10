@@ -54,6 +54,7 @@ import { HowToFix } from '@/components/findings/detail/HowToFix'
 import { EvidenceObjectsList } from '@/components/findings/detail/EvidenceObjectsList'
 import { ExceptionDialog, type ExceptionFormValues } from '@/components/findings/detail/ExceptionDialog'
 import { Fact, Section } from '@/components/findings/detail/Section'
+import { ExtensionSlot } from '@/components/extensions/ExtensionSlot'
 import { WhatWeFound } from '@/components/findings/detail/WhatWeFound'
 import { FindingBriefView } from '@/components/findings/detail/FindingBriefView'
 import { displayTitle, maskedUrl, parseFindingBrief, parseRelatedFindings, severityLine } from '@/lib/findingBrief'
@@ -1252,6 +1253,8 @@ function FindingDetailContent() {
         </div>
 
         <aside className="min-w-0 space-y-5" aria-label="Finding status and history">
+          {/* Panels a managed deployment declares for a finding; nothing in a standalone UI. */}
+          <ExtensionSlot name="finding.detail" values={{ finding_id: finding.id }} />
           <Section id="triage" title="Triage">
             <div className="space-y-3">
               {canTriage ? <label className="grid min-w-0 gap-1 text-xs text-gray-500">

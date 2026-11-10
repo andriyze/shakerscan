@@ -35,3 +35,11 @@ export function editionTitle(title: string, edition: string | undefined): string
   const suffix = `${TITLE_SEPARATOR}${PRODUCT_NAME}`
   return title.endsWith(suffix) ? `${title.slice(0, -PRODUCT_NAME.length)}${product}` : title
 }
+
+// The tab title with its page name replaced: for a route whose name is only known in the browser
+// (a page a managed deployment declares). `from` is the name the route's metadata carries. A
+// title that does not start with it is left alone.
+export function renamedTitle(title: string, from: string, to: string): string {
+  const prefix = `${from}${TITLE_SEPARATOR}`
+  return title.startsWith(prefix) ? `${to}${TITLE_SEPARATOR}${title.slice(prefix.length)}` : title
+}
