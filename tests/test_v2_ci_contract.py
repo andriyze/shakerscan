@@ -48,8 +48,11 @@ def test_required_python_check_runs_full_or_focused_suite_by_change():
         "scripts/check_documentation_policy.py",
         "scripts/check_surface_dispositions.py",
         "scripts/check_scan_target_transport.py",
+        "scripts/check_undefined_names.py",
     ):
         assert static_gate in text, static_gate
+    # The undefined-name gate's tool is installed from its own hash-locked file.
+    assert "--require-hashes -r .github/requirements/pyflakes.lock" in text
     assert "name: python-suite-${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha || github.sha }}" in text
 
 

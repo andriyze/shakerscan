@@ -72,7 +72,7 @@ try:
     from scan.broker_execution import BrokerScanExecutionError, heartbeat_broker_scan_execution, settle_broker_scan_execution
     from scan.budget_allocator import ScanBudgetAllocationError, allocate_scan_action_plan
     from scan.collection_replay import EXECUTABLE_REPLAY_POLICIES, ScanCollectionReplayContractError, ScanCollectionReplayWithheld, narrow_replay_plan_to_request_manifest, scan_replay_authorization, scan_replay_selector
-    from scan.continuation import ContinuationBudgetCeiling, reconciled_continuation_ceiling, ScanContinuationError, amended_scan_plan_revision, build_discovery_continuation_manifests, merge_scan_action_continuation
+    from scan.continuation import ContinuationBudgetCeiling, ScanContinuationAllocation, ScanPlanRevision, reconciled_continuation_ceiling, ScanContinuationError, amended_scan_plan_revision, build_discovery_continuation_manifests, merge_scan_action_continuation
     from scan.continuation_rounds import compile_continuation_round, compile_next_continuation
     from scan.scan_deadline import (
         TIME_LIMIT_STOP_GRACE_SECONDS, lease_time_limit, load_scan_deadline, scan_time_limits,
@@ -89,7 +89,7 @@ try:
     import action_scope
     import target_resolution
     from scan.private_state import SCAN_PRIVATE_STATE_KEY_OPTION
-    from scan.work_manifests import ScanWorkManifestError, ScanWorkManifestReference, build_request_candidate_manifest, unique_work_manifest_reference_dicts, work_manifest_references_in
+    from scan.work_manifests import ScanWorkManifest, ScanWorkManifestError, ScanWorkManifestReference, build_request_candidate_manifest, unique_work_manifest_reference_dicts, work_manifest_references_in
     from scan.worker_dispatch import is_deterministic_dast, prepare_worker_dispatch
     from scanner_tools.request_replay import build_selected_replay_plan
     from secret_store import decrypt_secret
@@ -130,7 +130,7 @@ except ModuleNotFoundError:  # package import in host-side tests
     from ..scan.broker_execution import BrokerScanExecutionError, heartbeat_broker_scan_execution, settle_broker_scan_execution
     from ..scan.budget_allocator import ScanBudgetAllocationError, allocate_scan_action_plan
     from ..scan.collection_replay import EXECUTABLE_REPLAY_POLICIES, ScanCollectionReplayContractError, ScanCollectionReplayWithheld, narrow_replay_plan_to_request_manifest, scan_replay_authorization, scan_replay_selector
-    from ..scan.continuation import ContinuationBudgetCeiling, ScanContinuationError, amended_scan_plan_revision, build_discovery_continuation_manifests, merge_scan_action_continuation
+    from ..scan.continuation import ContinuationBudgetCeiling, ScanContinuationAllocation, ScanPlanRevision, ScanContinuationError, amended_scan_plan_revision, build_discovery_continuation_manifests, merge_scan_action_continuation
     from ..scan.continuation_rounds import compile_continuation_round, compile_next_continuation
     from ..scan.scan_deadline import (
         TIME_LIMIT_STOP_GRACE_SECONDS, lease_time_limit, load_scan_deadline, scan_time_limits,
@@ -145,7 +145,7 @@ except ModuleNotFoundError:  # package import in host-side tests
     from ..scan.operational_metrics import record_operational_event
     from ..scan.private_inputs import BROKER_PRIVATE_SCAN_INPUT_SCHEMA, private_replay_plan_payload
     from ..scan.private_state import SCAN_PRIVATE_STATE_KEY_OPTION
-    from ..scan.work_manifests import ScanWorkManifestError, ScanWorkManifestReference, build_request_candidate_manifest, unique_work_manifest_reference_dicts, work_manifest_references_in
+    from ..scan.work_manifests import ScanWorkManifest, ScanWorkManifestError, ScanWorkManifestReference, build_request_candidate_manifest, unique_work_manifest_reference_dicts, work_manifest_references_in
     from ..scan.worker_dispatch import is_deterministic_dast, prepare_worker_dispatch
     from scanner.scanner_tools.request_replay import build_selected_replay_plan
     from ..secret_store import decrypt_secret

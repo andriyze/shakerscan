@@ -60,7 +60,7 @@ try:
 except ModuleNotFoundError:  # package import in host-side tests
     from ..ai_control_requirements import AI_CONTROL_REQUIREMENTS
     from ..api_utils import (
-        SEVERITY_ORDER, _clean_string_list, _direct_query_value, _int_or_none, _iso_or_none, _optional_uuid,
+        SEVERITY_ORDER, _clean_string_list, _record_map, _direct_query_value, _int_or_none, _iso_or_none, _optional_uuid,
         _parse_iso_datetime, _row_value, _severity_sort_value, _uuid_or_400, utc_now, utc_now_iso,
     )
     from .. import asm_inventory, parallel_scan, target_resolution

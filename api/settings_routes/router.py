@@ -20,7 +20,7 @@ import urllib.request
 import json
 import os
 import re
-from typing import Any, Callable, Literal, Mapping, Optional
+from typing import Any, Callable, Literal, Mapping, Optional, Sequence
 import uuid
 
 from fastapi import APIRouter, HTTPException, Query, Request

@@ -465,6 +465,7 @@ counts, migration/crash logs, and the affected workflow through API and UI.
 make test
 npm --prefix ui test
 python3 scripts/check_module_size.py
+python3 scripts/check_undefined_names.py
 python3 scripts/generate_capability_inventory.py --check
 ```
 
