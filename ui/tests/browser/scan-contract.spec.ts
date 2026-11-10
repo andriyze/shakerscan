@@ -179,11 +179,66 @@ test('authorized active Scan authorizes the target once and submits it in one fl
   await submit.click()
 
   await expect(page).toHaveURL(/\/scans\/55555555-5555-4555-8555-555555555555$/)
-  expect(authorizationCalls).toEqual(['GET', 'POST'])
+  // The page reads the authorization when the target is chosen and again on submit, and
+  // records it exactly once.
+  expect(authorizationCalls).toEqual(['GET', 'GET', 'POST'])
   expect(submittedPayload).toMatchObject({
     target: target.url,
     approval_receipt_id: approvalId,
     policy: { preset: 'standard_active', active_testing: true },
     options: { require_current_workers: false },
+  })
+})
+
+test('active Scan on a target with a standing authorization asks for no second confirmation', async ({ page }) => {
+  const approvalId = '33333333-3333-4333-8333-333333333333'
+  const scopeId = '44444444-4444-4444-8444-444444444444'
+  let submittedPayload: any = null
+  const authorizationCalls: string[] = []
+
+  await page.route(`**/targets/${target.id}/authorization`, async (route) => {
+    authorizationCalls.push(route.request().method())
+    if (route.request().method() !== 'GET') {
+      await route.fulfill({ status: 500, body: 'a standing authorization must not be recorded again' })
+      return
+    }
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({ target_id: target.id, authorization: { approval_receipt_id: approvalId, scope_receipt_id: scopeId, approved_by: 'operator@example.test', standing: true } }),
+    })
+  })
+  await page.route('**/arsenal/approvals', (route) => route.fulfill({ status: 500, body: 'a plain active scan must not mint a bounded receipt' }))
+  await page.route('**/scans', async (route) => {
+    submittedPayload = route.request().postDataJSON()
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({ scan_id: '55555555-5555-4555-8555-555555555555' }),
+    })
+  })
+
+  await page.goto('/scan/new')
+  await page.getByLabel('Target URL or hostname').fill(target.url)
+  const selected = page.getByTestId('credential-defaults')
+  await expect(selected).toContainText(`Scans as ${credential.name}`)
+  // With the credential selected the confirmation stays: credential use records its own receipt.
+  await page.getByLabel('Allow active testing').check()
+  await expect(page.getByLabel(/I own or have explicit authorization/)).toBeVisible()
+  await selected.getByRole('button', { name: 'Scan anonymously' }).click()
+  await expect(selected).toHaveCount(0)
+
+  await expect(page.getByTestId('standing-authorization')).toContainText('by operator@example.test')
+  await expect(page.getByLabel(/I own or have explicit authorization/)).toHaveCount(0)
+  const submit = page.getByRole('button', { name: 'Run Scan' })
+  await expect(submit).toBeEnabled()
+  await submit.click()
+
+  await expect(page).toHaveURL(/\/scans\/55555555-5555-4555-8555-555555555555$/)
+  expect(authorizationCalls).not.toContain('POST')
+  expect(submittedPayload).toMatchObject({
+    target: target.url,
+    approval_receipt_id: approvalId,
+    policy: { preset: 'standard_active', active_testing: true },
   })
 })
