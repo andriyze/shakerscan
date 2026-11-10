@@ -4,7 +4,8 @@ import { createRequire } from 'node:module'
 import path from 'node:path'
 import test from 'node:test'
 import { fileURLToPath } from 'node:url'
-import { editionTitle, PRODUCT_NAME, productEdition, TITLE_SEPARATOR, TITLE_TEMPLATE } from '../src/lib/pageTitle.ts'
+import { editionTitle, PRODUCT_NAME, productEdition, renamedTitle, TITLE_SEPARATOR, TITLE_TEMPLATE } from '../src/lib/pageTitle.ts'
+import { HOSTED_PAGE_TITLE } from '../src/lib/uiExtensions.mjs'
 
 // Next.js's own title resolver (the function its metadata merge calls for every segment), so this
 // test resolves a route's title the way the server does.
@@ -91,6 +92,8 @@ test('every rendered route, nested ones included, resolves to "Page · ShakerSca
   assert.equal(titles.get('/targets/[id]/graph'), 'Application graph · ShakerScan')
   assert.equal(titles.get('/settings/policy-profiles'), 'Policy profiles · ShakerScan')
   assert.equal(titles.get('/docs'), 'Docs · ShakerScan')
+  // A page a deployment declares is renamed in the browser from this placeholder.
+  assert.equal(titles.get('/ext/[id]'), `${HOSTED_PAGE_TITLE}${TITLE_SEPARATOR}${PRODUCT_NAME}`)
 })
 
 test('a layout title carries the template; a plain string would leave nested routes bare', () => {
@@ -157,4 +160,15 @@ test('the tab icons are the S mark: SVG, a 16 and 32 px ICO, and a 180 px apple-
   const sidebar = read(path.join(root, 'src/components/Sidebar.tsx'))
   assert.ok(sidebar.includes('d="M23 8H13L9 12L13 16H19L23 20L19 24H9" stroke="#3b82f6"'))
   assert.ok(sidebar.includes('fill="#07090e"'))
+})
+
+test('a page named in the browser replaces only the name its route carries', () => {
+  assert.equal(renamedTitle('Page · ShakerScan', 'Page', 'Schedules'), 'Schedules · ShakerScan')
+  assert.equal(renamedTitle('Page · ShakerScan Enterprise', 'Page', 'Schedules'), 'Schedules · ShakerScan Enterprise')
+  // Idempotent, and back again when the page closes.
+  assert.equal(renamedTitle('Schedules · ShakerScan', 'Page', 'Schedules'), 'Schedules · ShakerScan')
+  assert.equal(renamedTitle('Schedules · ShakerScan', 'Schedules', 'Page'), 'Page · ShakerScan')
+  // Another page's title is not this page's to change.
+  assert.equal(renamedTitle('Pages · ShakerScan', 'Page', 'Schedules'), 'Pages · ShakerScan')
+  assert.equal(renamedTitle('Findings · ShakerScan', 'Page', 'Schedules'), 'Findings · ShakerScan')
 })

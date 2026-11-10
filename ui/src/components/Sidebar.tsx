@@ -24,11 +24,13 @@ import {
   X,
 } from 'lucide-react'
 import { buttonClasses, ToggleVisual } from '@/components/ui'
+import { ExtensionIcon } from '@/components/extensions/ExtensionIcon'
 import { API_URL } from '@/lib/api'
 import { productEdition } from '@/lib/pageTitle'
 import { SHAKERSCAN_REPOSITORY_URL, SHAKERSCAN_WEBSITE_URL } from '@/lib/repository'
 import { usePoll } from '@/lib/usePoll'
-import { DEFAULT_EDITION_LABEL, navigationAllowed, workspaceEdition } from '@/lib/workspaceCapabilities'
+import { DEFAULT_EDITION_LABEL, navigationAllowed, workspaceEdition, workspaceExtensions } from '@/lib/workspaceCapabilities'
+import { placeNavigation, sameOriginPath, type ExtensionAccount } from '@/lib/uiExtensions.mjs'
 import { useCan, usePageAllowed } from '@/lib/useSessionCapabilities'
 import { useWorkspaceIsManaged } from '@/components/hunt/TerminalHuntStart'
 import {
@@ -208,6 +210,40 @@ function BrandLockup({ edition, compact = false }: { edition?: string; compact?:
   )
 }
 
+const footLink = 'rounded-sm text-gray-400 transition-colors hover:text-white focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-blue-500'
+
+// Who is signed in, where a managed deployment says so (ui-extensions/v1). Its links are the
+// deployment's own pages: ordinary navigations on this origin, never requests the UI makes.
+// The block stays at the foot of the sidebar when the menu is taller than the window (the menu
+// scrolls behind it), so the person's name and Sign out never need a scroll to be found. The
+// negative offset and margins take it over the sidebar's own padding, flush with its edges.
+function AccountBlock({ account }: { account: ExtensionAccount }) {
+  const origin = window.location.origin
+  const links = account.links
+    .map((link) => ({ label: link.label, href: sameOriginPath(link.href, origin) }))
+    .filter((link): link is { label: string; href: string } => link.href !== null)
+  const signOut = account.sign_out ? sameOriginPath(account.sign_out, origin) : null
+  return (
+    <section aria-label="Account" className="sticky -bottom-4 -mx-4 -mb-4 mt-4 border-t border-gray-800 bg-gray-900 px-4 pb-4 pt-3">
+      <div className="flex items-center gap-2.5 px-1">
+        <span aria-hidden="true" className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-gray-800 text-xs font-semibold uppercase text-gray-200">
+          {Array.from(account.name)[0]}
+        </span>
+        <div className="min-w-0">
+          <p className="truncate text-sm font-medium leading-5 text-gray-200" title={account.name}>{account.name}</p>
+          {account.detail && <p className="truncate text-xs leading-4 text-gray-500">{account.detail}</p>}
+        </div>
+      </div>
+      {(links.length > 0 || signOut) && (
+        <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 px-1 text-[12.5px]">
+          {links.map((link) => <a key={`${link.label} ${link.href}`} href={link.href} className={footLink}>{link.label}</a>)}
+          {signOut && <a href={signOut} className={footLink}>Sign out</a>}
+        </div>
+      )}
+    </section>
+  )
+}
+
 function NavContent({
   pathname,
   showAll,
@@ -234,16 +270,24 @@ function NavContent({
   // Default view hides advanced groups/items; the footer switch reveals them. A managed
   // workspace shows every page its navigation list allows and renders no switch.
   const showAdvanced = managed || showAll
-  const visibleGroups = navGroups
+  // A managed deployment may add entries and sections of its own (ui-extensions/v1). A hosted
+  // page is a route of this UI and is filtered like one; any other entry is the deployment's
+  // own same-origin page, offered as declared.
+  const extensions = workspaceExtensions()
+  const origin = typeof window === 'undefined' ? '' : window.location.origin
+  const visibleGroups = placeNavigation(navGroups, extensions)
     .filter((group) => showAdvanced || !group.advanced)
     .map((group) => ({
       ...group,
-      items: group.items.filter((item) => (
-        (showAdvanced || !item.advanced)
-        && (!item.fleetOnly || fleetEnabled)
-        && navigationAllowed(item.href)
-        && pageAllowed(item.href)
-      )),
+      items: group.items.filter((item) => {
+        if ('extension' in item) {
+          return item.hosted ? navigationAllowed(item.href) && pageAllowed(item.href) : sameOriginPath(item.href, origin) !== null
+        }
+        return (showAdvanced || !item.advanced)
+          && (!item.fleetOnly || fleetEnabled)
+          && navigationAllowed(item.href)
+          && pageAllowed(item.href)
+      }),
     }))
     .filter((group) => group.items.length > 0)
   // Only the Settings landing lights the gear. The /settings/* sub-routes
@@ -288,7 +332,7 @@ function NavContent({
 
       <nav className="flex-1">
         {visibleGroups.map((group, groupIndex) => (
-          <div key={group.heading ?? 'overview'} className={`space-y-1 ${groupIndex === 0 ? '' : 'mt-4'}`}>
+          <div key={`${groupIndex} ${group.heading ?? 'overview'}`} className={`space-y-1 ${groupIndex === 0 ? '' : 'mt-4'}`}>
             {group.heading ? (
               <div className="flex items-center gap-1.5 px-3 pb-0.5 text-[10px] font-semibold uppercase tracking-wider text-gray-600">
                 <span>{group.heading}</span>
@@ -300,7 +344,22 @@ function NavContent({
               </div>
             ) : null}
             {group.items.map((item) => {
-              const active = isActive(item.href)
+              const declared = 'extension' in item
+              const active = declared ? pathname === item.href : isActive(item.href)
+              const className = `flex items-center gap-3 px-3 py-2 text-sm rounded-lg transition-colors focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-blue-500 ${
+                active
+                  ? 'bg-blue-600/20 text-blue-400 border-l-2 border-blue-500 ml-[-2px] pl-[14px]'
+                  : 'hover:bg-gray-800 text-gray-300'
+              }`
+              // A deployment's own page is not a route of this UI: a plain navigation.
+              if (declared && !item.hosted) {
+                return (
+                  <a key={`${item.label} ${item.href}`} href={sameOriginPath(item.href, origin) ?? undefined} className={className}>
+                    <ExtensionIcon name={item.icon} />
+                    {item.label}
+                  </a>
+                )
+              }
               return (
                 <Link
                   key={item.href}
@@ -310,13 +369,9 @@ function NavContent({
                   // pair per link that the page's real API calls then queue behind.
                   prefetch={false}
                   aria-current={active ? 'page' : undefined}
-                  className={`flex items-center gap-3 px-3 py-2 text-sm rounded-lg transition-colors focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-blue-500 ${
-                    active
-                      ? 'bg-blue-600/20 text-blue-400 border-l-2 border-blue-500 ml-[-2px] pl-[14px]'
-                      : 'hover:bg-gray-800 text-gray-300'
-                  }`}
+                  className={className}
                 >
-                  {item.icon}
+                  {declared ? <ExtensionIcon name={item.icon} /> : item.icon}
                   {item.label}
                 </Link>
               )
@@ -404,6 +459,8 @@ function NavContent({
           </Link>
         </div>
       </div>
+
+      {extensions.account && <AccountBlock account={extensions.account} />}
     </>
   )
 }
