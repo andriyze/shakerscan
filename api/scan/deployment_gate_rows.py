@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from typing import Any, Mapping, Sequence
 
+from .finding_observations import observed_by_scan_sql
 from .carried_over import HISTORY_ROW_CAP, SEVERITY_ORDER, attach_persisted_ids
 from .finding_identity import canonical_finding_fingerprint
 
@@ -29,10 +30,10 @@ TARGET_BLOCKING_COUNT_SQL = """
     WHERE target_id = ANY($1::uuid[]) AND status = 'active'
       AND severity IN ('critical', 'high')
 """
-# The rows a scan wrote or saw, in any status: the persisted identity of each report row.
-SCAN_FINDING_IDS_SQL = """
+# The rows a scan observed, in any status: the persisted identity of each report row.
+SCAN_FINDING_IDS_SQL = f"""
     SELECT id, fingerprint FROM findings
-    WHERE scan_id = $1 OR first_seen_scan_id = $1 OR last_seen_scan_id = $1
+    WHERE {observed_by_scan_sql("id", "$1")}
 """
 
 
