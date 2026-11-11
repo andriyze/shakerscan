@@ -232,30 +232,88 @@ for (const width of [390, 1440]) {
       await expect(page.getByRole('link', { name: /Add a target/ })).toBeVisible()
     })
 
-    test('CAPS-011 dashboard: the CT monitor chip is a status, not a start/stop button, without ct_monitor.toggle', async ({ page }) => {
-      // A gateway runs the monitor from its deployment option: pressing Stop only ended in a
-      // refusal toast (2026-11 evaluation).
+    test('CAPS-011 dashboard: without ct_monitor.toggle the CT monitor switch is locked and says why when pressed', async ({ page }) => {
+      // A gateway may keep the switch for administrators. The reason was in the hover text
+      // only, so pressing the control looked like a dead button (2026-11 evaluation).
+      let running = true
       const dashboard = {
         '/health': () => ({ status: 'healthy' }),
         '/dashboard': () => ({ metrics: { total_targets: 0, total_scans: 0, running_scans: 0, active_findings: 0, critical_findings: 0,
           high_findings: 0, avg_score: null }, recent_scans: [], recent_findings: [], action_center: [] }),
         '/queue/stats': () => ({ pending: 0, queued: 0, running: 0, completed: 0, failed: 0 }),
-        '/gungnir/status': () => ({ running: true, domains_monitored: 4, subdomains_found: 0, session_found: 0, last_discovery: '',
+        '/gungnir/status': () => ({ running, domains_monitored: 4, subdomains_found: 0, session_found: 0, last_discovery: '',
           started_at: now, uptime_seconds: 60 }),
         '/targets/grouped': () => ({ items: [], next_cursor: null, has_more: false, total: 0, total_kind: 'exact', generated_at: now }),
         '/timeline': () => ({ events: [], upcoming: [] }),
       }
       const locked = { ...ADMIN, actions: { ...ADMIN.actions, 'ct_monitor.toggle': false },
-        reasons: { 'ct_monitor.toggle': 'an administrator switches the CT monitor in the deployment' } }
-      await mockPageApi(page, { ...dashboard, '/session/capabilities': () => locked })
+        reasons: { 'ct_monitor.toggle': 'only an administrator turns the CT monitor on or off' } }
+      const lockedApi = await mockPageApi(page, { ...dashboard, '/session/capabilities': () => locked })
       await page.goto('/')
-      await expect(page.getByRole('button', { name: 'CT monitor on' })).toBeVisible()
-      await expect(page.getByRole('button', { name: 'Stop Gungnir CT monitor' })).toHaveCount(0)
+      const lockedSwitch = page.getByRole('switch', { name: 'CT monitor' })
+      await expect(lockedSwitch).toBeVisible()
+      await expect(lockedSwitch).toHaveAttribute('aria-checked', 'true')
+      await expect(lockedSwitch).toHaveAttribute('aria-readonly', 'true')
+      await expect(lockedSwitch).toHaveAttribute('aria-description', 'only an administrator turns the CT monitor on or off')
+      await expect(page.getByTestId('ct-monitor-state')).toHaveText('on')
+      await lockedSwitch.click()
+      await expect(page.getByText('Only an administrator turns the CT monitor on or off')).toBeVisible()
+      // The keyboard reaches it and gets the same answer; no request to change the monitor is sent.
+      await lockedSwitch.focus()
+      await page.keyboard.press('Enter')
+      await expect(page.getByText('Only an administrator turns the CT monitor on or off').first()).toBeVisible()
+      expect(lockedApi.requests.filter((entry) => entry.startsWith('POST /gungnir/'))).toEqual([])
 
+      // A session that may switch it: the label follows the request, then the monitor's state.
       await page.unrouteAll({ behavior: 'ignoreErrors' })
+      let release: () => void = () => {}
+      const held = new Promise<void>((resolve) => { release = resolve })
+      const openApi = await mockPageApi(page, {
+        ...dashboard,
+        'POST /gungnir/stop': async () => { await held; running = false; return { status: 'stopped' } },
+        'POST /gungnir/start': () => { running = true; return { status: 'started' } },
+      })
+      await page.goto('/')
+      const open = page.getByRole('switch', { name: 'CT monitor' })
+      await expect(open).toHaveAttribute('aria-checked', 'true')
+      await expect(open).not.toHaveAttribute('aria-readonly', 'true')
+      const widthAtRest = (await open.boundingBox())?.width ?? 0
+      await open.click()
+      await expect(page.getByTestId('ct-monitor-state')).toHaveText('stopping…')
+      await expect(open).toBeDisabled()
+      // The control keeps its size while the change is applied, so the row around it does not move.
+      expect(Math.abs(((await open.boundingBox())?.width ?? 0) - widthAtRest)).toBeLessThanOrEqual(1)
+      release()
+      await expect(page.getByTestId('ct-monitor-state')).toHaveText('off')
+      await expect(open).toHaveAttribute('aria-checked', 'false')
+      await expect(open).toBeEnabled()
+      await open.click()
+      await expect(page.getByTestId('ct-monitor-state')).toHaveText('on')
+      await expect(open).toHaveAttribute('aria-checked', 'true')
+      expect(openApi.requests.filter((entry) => entry.startsWith('POST /gungnir/'))).toEqual(['POST /gungnir/stop', 'POST /gungnir/start'])
+    })
+
+    test('CAPS-012 dashboard: a refused CT monitor change leaves the switch showing the monitor as it is', async ({ page }) => {
+      const dashboard = {
+        '/health': () => ({ status: 'healthy' }),
+        '/dashboard': () => ({ metrics: { total_targets: 0, total_scans: 0, running_scans: 0, active_findings: 0, critical_findings: 0,
+          high_findings: 0, avg_score: null }, recent_scans: [], recent_findings: [], action_center: [] }),
+        '/queue/stats': () => ({ pending: 0, queued: 0, running: 0, completed: 0, failed: 0 }),
+        '/gungnir/status': () => ({ running: false, domains_monitored: 0, subdomains_found: 0, session_found: 0, last_discovery: '',
+          started_at: '', uptime_seconds: 0 }),
+        '/targets/grouped': () => ({ items: [], next_cursor: null, has_more: false, total: 0, total_kind: 'exact', generated_at: now }),
+        '/timeline': () => ({ events: [], upcoming: [] }),
+        'POST /gungnir/start': () => ({ status: 503, json: { detail: 'the CT monitor was not changed: fixture' } }),
+      }
       await mockPageApi(page, dashboard)
       await page.goto('/')
-      await expect(page.getByRole('button', { name: 'Stop Gungnir CT monitor' })).toBeVisible()
+      const toggle = page.getByRole('switch', { name: 'CT monitor' })
+      await expect(toggle).toHaveAttribute('aria-checked', 'false')
+      await toggle.click()
+      await expect(page.getByText('the CT monitor was not changed: fixture')).toBeVisible()
+      await expect(page.getByTestId('ct-monitor-state')).toHaveText('off')
+      await expect(toggle).toHaveAttribute('aria-checked', 'false')
+      await expect(toggle).toBeEnabled()
     })
 
     test('CAPS-006 an operator without Hunt keeps scans, edits, triage and secrets but gets no Verify or Hunt link', async ({ page }) => {

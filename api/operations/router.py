@@ -128,6 +128,10 @@ def docker_socket_request(*a: Any, **k: Any) -> Any:
     return _dep("docker_socket_request")(*a, **k)
 
 
+def local_compose_project(*a: Any, **k: Any) -> Any:
+    return _dep("local_compose_project")(*a, **k)
+
+
 def _results_dir() -> Any:
     return _dep("results_dir")()
 
@@ -547,6 +551,38 @@ async def get_system_resources():
         return {"available": False, "error": "Docker resource query failed"}
 
 
+GUNGNIR_SERVICE = "gungnir-worker"
+GUNGNIR_OTHER_STACK = (
+    "This API cannot see its own Compose stack through the Docker socket, so it starts or "
+    "stops no container. Use the CLI in the installation's directory: ./scanner.sh gungnir {verb}"
+)
+
+
+def _in_compose_project(container: dict, project: str) -> bool:
+    return ((container.get("Labels") or {}).get("com.docker.compose.project")) == project
+
+
+def _own_gungnir_container(containers: Any, project: str) -> Optional[dict]:
+    """The CT monitor's container of this API's own Compose stack, or None.
+
+    A host can run more than one stack (a second installation, a Fleet node next to a
+    standalone one). A match on the container name alone picked whichever monitor the Docker
+    listing named first, so the dashboard's switch of one installation could start or stop the
+    monitor of another."""
+    for container in containers if isinstance(containers, list) else []:
+        labels = container.get("Labels") or {}
+        if _in_compose_project(container, project) and labels.get("com.docker.compose.service") == GUNGNIR_SERVICE:
+            return container
+    return None
+
+
+def _require_own_project(verb: str) -> str:
+    project = local_compose_project()
+    if not project:
+        raise HTTPException(status_code=503, detail=GUNGNIR_OTHER_STACK.format(verb=verb))
+    return project
+
+
 @router.get("/gungnir/status")
 async def gungnir_status():
     """Get Gungnir CT monitor status."""
@@ -578,13 +614,19 @@ async def gungnir_start():
     r = get_redis()
 
     try:
+        own_project = _require_own_project("start")
+
         def ensure_gungnir_container() -> dict:
             """Find or create a gungnir container from current compose context."""
             status_code, all_containers = docker_socket_request("GET", "/containers/json?all=true")
             if status_code != 200:
                 raise HTTPException(500, f"Failed to query containers: status {status_code}")
 
-            project, network, image = get_compose_context(all_containers if isinstance(all_containers, list) else [])
+            # Only this stack's containers: the image and network of another installation on
+            # the same host are not this monitor's.
+            own = [c for c in (all_containers if isinstance(all_containers, list) else [])
+                   if _in_compose_project(c, own_project)]
+            project, network, image = get_compose_context(own)
             if not image or not network:
                 raise HTTPException(
                     status_code=404,
@@ -653,14 +695,8 @@ async def gungnir_start():
         if status_code != 200:
             raise HTTPException(500, f"Failed to query containers: status {status_code}")
 
-        # Find the gungnir-worker container
-        gungnir = None
-        for c in containers if isinstance(containers, list) else []:
-            names = c.get('Names', [])
-            name = names[0].lstrip('/') if names else ''
-            if 'gungnir' in name.lower():
-                gungnir = c
-                break
+        # This stack's gungnir-worker container
+        gungnir = _own_gungnir_container(containers, own_project)
 
         if not gungnir:
             gungnir = ensure_gungnir_container()
@@ -720,6 +756,8 @@ async def gungnir_stop():
     r = get_redis()
 
     try:
+        own_project = _require_own_project("stop")
+
         # Find gungnir container via socket API
         filters = urllib.parse.quote('{"name":["gungnir"]}')
         status_code, containers = docker_socket_request(
@@ -730,14 +768,8 @@ async def gungnir_stop():
         if status_code != 200:
             raise HTTPException(500, f"Failed to query containers: status {status_code}")
 
-        # Find the gungnir-worker container
-        gungnir = None
-        for c in containers if isinstance(containers, list) else []:
-            names = c.get('Names', [])
-            name = names[0].lstrip('/') if names else ''
-            if 'gungnir' in name.lower():
-                gungnir = c
-                break
+        # This stack's gungnir-worker container
+        gungnir = _own_gungnir_container(containers, own_project)
 
         if not gungnir:
             # Update Redis status anyway

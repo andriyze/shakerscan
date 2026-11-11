@@ -5,7 +5,7 @@ import { WorkspaceFeature } from '@/components/WorkspaceBoundary'
 import { Suspense, useCallback, useMemo, useRef, useState } from 'react'
 import { workerCapacityLabel, workerCountLabel } from '@/lib/labels'
 import Link from '@/components/WorkspaceLink'
-import { AlertTriangle, ArrowRight, CheckCircle2, CircleHelp, ListTodo, Minus, Plus, RadioTower, ScanLine, Server, ShieldAlert, Target, Trash2, Workflow } from 'lucide-react'
+import { AlertTriangle, ArrowRight, CheckCircle2, CircleHelp, ListTodo, Lock, Minus, Plus, RadioTower, ScanLine, Server, ShieldAlert, Target, Trash2, Workflow } from 'lucide-react'
 import {
   clearQueue, formatDate, getDashboard, getExposureAssets, getGradeColor, getGungnirStatus,
   getMissionTimeline, getQueueStats, getTargetsGroupedPage, getWorkers, scaleWorkers, startGungnir,
@@ -82,6 +82,8 @@ function DashboardContent() {
   const [workersError, setWorkersError] = useState<string | null>(null)
   const [scaling, setScaling] = useState(false)
   const [gungnirActionLoading, setGungnirActionLoading] = useState(false)
+  // What the switch is being changed to, for its label while the request is open.
+  const [gungnirChangingTo, setGungnirChangingTo] = useState<'on' | 'off' | null>(null)
   // The scope lives in the URL (?cohort=), so reload, Back and shared links keep it.
   const { filters: scopeFilters, setFilter: setScopeFilter } = useUrlFilters<{ cohort?: string }>()
   const cohortView: CohortView = parseCohortView(scopeFilters.cohort)
@@ -90,8 +92,8 @@ function DashboardContent() {
   const dashboardLoadedOnce = useRef(false)
   const workersVisible = featureEnabled('worker_status') || featureEnabled('worker_admin')
   const gungnirVisible = featureEnabled('ct_monitor')
-  // A gateway may run the monitor from its own deployment option: then start/stop is not the
-  // person's to press here, and the chip is a status (session-capabilities/v1 ct_monitor.toggle).
+  // A gateway may keep the monitor's switch for some roles only: then the switch is locked for
+  // this session and pressing it says why (session-capabilities/v1 ct_monitor.toggle).
   const canToggleGungnir = useCan('ct_monitor.toggle')
   const gungnirLockedReason = capabilityReason(useSessionCapabilities(), 'ct_monitor.toggle')
 
@@ -246,6 +248,7 @@ function DashboardContent() {
     if (gungnirActionLoading) return
     setGungnirActionLoading(true)
     const wasRunning = Boolean(gungnir?.running)
+    setGungnirChangingTo(wasRunning ? 'off' : 'on')
     try {
       if (wasRunning) {
         await stopGungnir()
@@ -257,9 +260,19 @@ function DashboardContent() {
     } catch (err) {
       console.error('Failed to toggle gungnir:', err)
       toast.error(err instanceof Error ? err.message : 'Failed to toggle Gungnir CT monitor')
+      // The switch shows what the monitor is doing now, not what was asked.
+      await settle(fetchGungnirStatus())
     } finally {
       setGungnirActionLoading(false)
+      setGungnirChangingTo(null)
     }
+  }
+
+  // A session that may not change the monitor: pressing the switch says why, in view (the
+  // reason used to be in the hover text only, which a keyboard or touch screen never shows).
+  const explainGungnirLock = () => {
+    const reason = (gungnirLockedReason || 'this session cannot turn the CT monitor on or off').trim()
+    toast.info(reason.charAt(0).toUpperCase() + reason.slice(1))
   }
 
   const queuePending = queue ? queue.pending : '--'
@@ -456,28 +469,47 @@ function DashboardContent() {
 
           </WorkspaceFeature><WorkspaceFeature name="ct_monitor"><button
             type="button"
-            onClick={canToggleGungnir ? handleGungnirToggle : undefined}
+            role="switch"
+            aria-checked={Boolean(gungnir?.running)}
+            aria-busy={gungnirActionLoading || undefined}
+            // Read-only, not disabled: a locked switch still takes a press, and answers it with the reason.
+            aria-readonly={!canToggleGungnir || undefined}
+            aria-description={!canToggleGungnir ? (gungnirLockedReason || 'This session cannot turn the CT monitor on or off') : undefined}
+            aria-label="CT monitor"
+            data-testid="ct-monitor-switch"
+            onClick={canToggleGungnir ? handleGungnirToggle : explainGungnirLock}
             disabled={gungnirActionLoading}
-            aria-disabled={!canToggleGungnir || undefined}
-            aria-label={!canToggleGungnir
-              ? `CT monitor ${gungnir?.running ? 'on' : 'off'}`
-              : gungnir?.running ? 'Stop Gungnir CT monitor' : 'Start Gungnir CT monitor'}
-            title={!canToggleGungnir
-              ? `CT monitor ${gungnir?.running ? `on · ${gungnir.domains_monitored} domains · ${gungnir.session_found} found this session` : 'off'}`
-                + (gungnirLockedReason ? ` · ${gungnirLockedReason}` : '')
-              : gungnir?.running
-                ? `Stop CT monitor · ${gungnir.domains_monitored} domains · ${gungnir.session_found} found this session`
-                : 'Start Certificate Transparency monitor'}
-            className={`flex h-10 items-center gap-2 rounded-lg border px-3 text-xs font-medium transition-colors disabled:opacity-50 ${FOCUS_RING} ${
+            title={(gungnir?.running
+              ? `Certificate Transparency monitor on · ${gungnir.domains_monitored} domains · ${gungnir.session_found} found this session`
+              : 'Certificate Transparency monitor off')
+              + (canToggleGungnir
+                ? ` · press to turn it ${gungnir?.running ? 'off' : 'on'}`
+                : gungnirLockedReason ? ` · ${gungnirLockedReason}` : '')}
+            className={`flex h-10 items-center gap-2 rounded-lg border px-3 text-xs font-medium transition-colors disabled:cursor-progress ${FOCUS_RING} ${
               gungnir?.running
                 ? 'border-emerald-800/60 bg-emerald-500/10 text-emerald-300 hover:bg-emerald-500/15'
-                : 'border-gray-800 bg-gray-900 text-gray-400 hover:bg-gray-800 hover:text-gray-200'
+                : 'border-gray-800 bg-gray-900 text-gray-300 hover:bg-gray-800 hover:text-gray-100'
             }`}
           >
-            <RadioTower className={`h-4 w-4 ${gungnir?.running ? 'text-emerald-400' : 'text-gray-500'}`} aria-hidden="true" />
-            <span>CT</span>
-            <span className={`h-2 w-2 rounded-full ${gungnir?.running ? 'animate-pulse bg-emerald-400' : 'bg-gray-600'}`} aria-hidden="true" />
-            <span className="text-gray-500">{gungnirActionLoading ? '…' : gungnir?.running ? 'on' : 'off'}</span>
+            <RadioTower className={`h-4 w-4 shrink-0 ${gungnir?.running ? 'text-emerald-400' : 'text-gray-500'}`} aria-hidden="true" />
+            <span className="whitespace-nowrap">CT<span className="hidden sm:inline"> monitor</span></span>
+            {/* The track and the state share a box of one width, and "starting…" takes the track's
+                place, so the control (and the row it sits in) keeps its size while a change is applied. */}
+            <span className={`inline-flex items-center gap-2 ${canToggleGungnir ? 'min-w-[4rem]' : ''}`}>
+              {!canToggleGungnir ? (
+                <Lock className="h-3 w-3 shrink-0 text-gray-500" aria-hidden="true" />
+              ) : gungnirChangingTo ? null : (
+                <span
+                  aria-hidden="true"
+                  className={`relative h-4 w-7 shrink-0 rounded-full transition-colors ${gungnir?.running ? 'bg-emerald-500' : 'bg-gray-600'}`}
+                >
+                  <span className={`absolute left-0.5 top-0.5 h-3 w-3 rounded-full bg-white transition-transform ${gungnir?.running ? 'translate-x-3' : ''}`} />
+                </span>
+              )}
+              <span data-testid="ct-monitor-state" className={`whitespace-nowrap ${gungnirChangingTo ? 'animate-pulse' : ''} ${gungnir?.running ? 'text-emerald-300' : 'text-gray-400'}`}>
+                {gungnirChangingTo === 'on' ? 'starting…' : gungnirChangingTo === 'off' ? 'stopping…' : gungnir?.running ? 'on' : 'off'}
+              </span>
+            </span>
           </button>
 
           </WorkspaceFeature>

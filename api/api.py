@@ -4231,6 +4231,7 @@ configure_operations_router(
     get_redis=lambda *a, **k: get_redis(*a, **k),
     enqueue_job=lambda *a, **k: enqueue_job(*a, **k),
     docker_socket_request=lambda *a, **k: docker_socket_request(*a, **k),
+    local_compose_project=lambda *a, **k: _local_compose_project_best_effort(*a, **k),
     results_dir=lambda: RESULTS_DIR,
     get_scan=lambda *a, **k: get_scan(*a, **k),
     worker_freshness_snapshot=lambda *a, **k: _worker_freshness_snapshot(*a, **k),
