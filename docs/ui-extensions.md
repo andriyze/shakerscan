@@ -121,8 +121,14 @@ UUID. A `src` with any other `{name}` is dropped.
 
 Who is signed in. `name` is required; `detail` is one more line (a role, for example); `links`
 are same-origin paths of the deployment (at most 6); `sign_out` is the same-origin path of the
-deployment's sign-out page. The block is drawn at the foot of the sidebar and in the navigation
-drawer on a narrow screen. All of its links are plain links: they leave the UI's shell.
+deployment's sign-out page. The block is one row at the foot of the sidebar, and of the navigation
+drawer on a narrow screen: the person's initial, the name and the detail (a detail that only
+repeats the name is not printed). Pressing the row opens a panel above it with the links, Sign out
+and the running version; Escape or a press elsewhere closes it. All of its links are plain links:
+they leave the UI's shell. With nothing to open, the row is plain text.
+
+A managed sidebar shows no link to another site: the website and source-code links of a standalone
+install are not drawn.
 
 The policy script that carries an account block is specific to one signed-in person. A deployment
 that declares one serves the policy per session and with `Cache-Control: no-store`.
