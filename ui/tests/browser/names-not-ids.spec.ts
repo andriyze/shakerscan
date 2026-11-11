@@ -40,6 +40,10 @@ async function mock(page: Page, {managed = false} = {}) {
       first_seen_at:'2026-10-01T00:00:00Z',last_seen_at:'2026-10-10T00:00:00Z',retest_supported:false,
       retest_unsupported_reason:'retest_exposure_by_rescan'}})
     if (path.endsWith('/discovered-secrets')) return route.fulfill({json:{secrets:[],count:0,values_visible:false}})
+    // One record: the Evidence page shows its proof states and search only over a list that holds something.
+    if (path === '/evidence/instances') return route.fulfill({json:{count:1,execution_enabled:true,evidence_instances:[{
+      id:'e1111111-1111-4111-8111-111111111111',proof_state:'verified',concrete_url:'http://shop.fixture.test/search',
+      metadata_json:{family:'sqli',objective:'Fixture objective',source:'research_http_experiment'},created_at:'2026-10-10T00:00:00Z'}]}})
     return route.fulfill({json:{status:'healthy',profiles:[],targets:[],rows:[],items:[],instances:[],total:0,has_more:false}})
   })
 }
