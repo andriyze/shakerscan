@@ -277,3 +277,31 @@ test('ASSET-HISTORY-001 the history names what each record is in words', async (
   await expect(history).not.toContainText('web_dast')
   await expect(history).not.toContainText('device_posture')
 })
+
+test('ASSET-009 a Targets row shows the whole host name at laptop width', async ({page}) => {
+  await mock(page)
+  const host = 'app.staging.example.test'
+  await page.route(`${MOCK_API_ORIGIN}/targets/inventory*`, route => route.fulfill({json:{targets:[{...target,name:host,url:`host://${host}`,locator:host}],total:1,offset:0,limit:50}}))
+  await page.setViewportSize({width:1280,height:800})
+  await page.goto('/targets')
+  const name = page.getByTestId('target-asset-row').getByRole('link',{name:host,exact:true})
+  await expect(name).toBeVisible()
+  // Nothing of the name is cut off sideways or clamped away below.
+  expect(await name.evaluate(element => element.scrollWidth <= element.clientWidth && element.scrollHeight <= element.clientHeight + 1)).toBe(true)
+  expect(await page.evaluate(() => document.documentElement.scrollWidth>document.documentElement.clientWidth)).toBe(false)
+})
+
+test('ASSET-010 a very long target label stays inside its row', async ({page}) => {
+  await mock(page)
+  const label = 'a'.repeat(120)
+  await page.route(`${MOCK_API_ORIGIN}/targets/inventory*`, route => route.fulfill({json:{targets:[{...target,name:label,url:`host://${label}`,locator:label}],total:1,offset:0,limit:50}}))
+  await page.setViewportSize({width:1280,height:800})
+  await page.goto('/targets')
+  const row = page.getByTestId('target-asset-row')
+  const name = row.getByRole('link',{name:label,exact:true})
+  await expect(name).toBeVisible()
+  // Two lines at most, inside the row, and the page does not scroll sideways.
+  expect(await name.evaluate(element => element.clientHeight <= 2 * parseFloat(getComputedStyle(element).lineHeight) + 1)).toBe(true)
+  expect(await row.evaluate(element => element.scrollWidth <= element.clientWidth)).toBe(true)
+  expect(await page.evaluate(() => document.documentElement.scrollWidth>document.documentElement.clientWidth)).toBe(false)
+})
