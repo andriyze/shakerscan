@@ -226,3 +226,11 @@ test('a since= delta replaces changed rows in place and puts new rows first', ()
   assert.equal(mergeSinceDelta(rows, []), rows, 'an empty delta keeps the same array (no re-render)')
   assert.deepEqual(mergeSinceDelta(rows, [{ id: 'd' }], { limit: 2 }).map((row) => row.id), ['d', 'b'])
 })
+
+test('isNotFoundError is true only for an error that carries HTTP 404', async () => {
+  const { isNotFoundError } = await import('./fetchLayer.mjs')
+  assert.equal(isNotFoundError(new ApiError('Scan not found', { status: 404 })), true)
+  assert.equal(isNotFoundError(new ApiError('Failed', { status: 500 })), false)
+  assert.equal(isNotFoundError(new Error('Scan not found')), false)
+  assert.equal(isNotFoundError(null), false)
+})

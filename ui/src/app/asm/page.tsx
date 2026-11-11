@@ -386,6 +386,15 @@ function RollupView({
           </table>
         </div>
       )}
+      {/* An inventory with nothing completed reads as a failed scan unless the page says what
+          completes a route. */}
+      {visible.length > 0 && visible.every(({ target }) => currentCompletedVariantCount(target.asm_coverage!) === 0) && (
+        <p data-testid="asm-nothing-tested" className="rounded-lg border border-gray-800 bg-gray-950/40 px-3 py-2 text-sm text-gray-400">
+          No route has been tested from this page yet. A scan adds the routes it discovers to a target’s inventory;
+          a route variant counts as completed once a coverage test batch has tested it. Open a target and choose
+          “Improve coverage” to test its next batch of routes.
+        </p>
+      )}
       {visibleUninventoried.length > 0 && (
         <div data-testid="asm-uninventoried" className="space-y-2 border-t border-gray-800 pt-3">
           <p className="text-xs text-gray-500">

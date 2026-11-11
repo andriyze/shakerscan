@@ -28,6 +28,7 @@ export {
 } from './Badge'
 export { EmptyState, type EmptyStateAction } from './EmptyState'
 export { ErrorState } from './ErrorState'
+export { RecordNotFound } from './RecordNotFound'
 export { CardSkeleton, Skeleton, TableSkeleton } from './Skeleton'
 export { ConfirmDialog, type ConfirmDialogProps } from './ConfirmDialog'
 export { useModalA11y } from './useModalA11y'

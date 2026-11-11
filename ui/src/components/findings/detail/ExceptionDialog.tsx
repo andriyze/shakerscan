@@ -57,6 +57,10 @@ export function ExceptionDialog({
   const activeProfiles = activePolicyProfiles(policyProfiles)
   // With no policy profile configured the exception applies under the built-in release policy.
   const policyRequired = activeProfiles.length > 0
+  const days = Number(form.expires_days)
+  // Every field is required: the button stays off until the form can be submitted.
+  const complete = [form.owner, form.approver, form.reason, form.compensating_controls].every((value) => value.trim() !== '')
+    && Number.isInteger(days) && days >= 1 && (!policyRequired || Boolean(form.policy_id))
   const label = 'grid gap-1 text-sm text-gray-300'
 
   return (
@@ -68,7 +72,7 @@ export function ExceptionDialog({
       footer={
         <>
           <Button variant="secondary" onClick={onClose} disabled={saving}>Cancel</Button>
-          <Button type="submit" form="finding-exception-form" loading={saving} disabled={policyRequired && !form.policy_id}>
+          <Button type="submit" form="finding-exception-form" loading={saving} disabled={!complete}>
             {saving ? 'Creating...' : 'Create Exception'}
           </Button>
         </>
@@ -118,6 +122,7 @@ export function ExceptionDialog({
           Compensating controls
           <textarea value={form.compensating_controls} onChange={set('compensating_controls')} className={`min-h-20 ${fieldClasses()}`} placeholder="Controls, monitoring, or rollout constraints" required />
         </label>
+        {!complete && <p className="text-xs text-gray-500" data-testid="exception-incomplete">Every field is required before the exception can be created.</p>}
       </form>
     </Modal>
   )

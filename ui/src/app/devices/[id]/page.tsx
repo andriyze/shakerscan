@@ -12,7 +12,8 @@ import { Suspense, useCallback, useEffect, useRef, useState } from 'react'
 import { useParams, useSearchParams, useRouter } from 'next/navigation'
 import { Activity, Bot, ChevronDown, ChevronUp, CircleHelp, ExternalLink, FileJson, Globe, KeyRound, MapPin, Pencil, Router, Trash2, Upload, Wifi, WifiOff } from 'lucide-react'
 import { changeDeviceLocator, createDeviceCredential, createDeviceRequestCollection, deactivateDeviceCredential, deactivateDeviceRequestCollection, formatDate, getDevice, getDeviceCredentials, getDeviceReadiness, getDeviceRequestCollection, getDeviceRequestCollections, getDeviceScanActivity, getScan, listDeviceAgentSessions, renameDevice, scanDevice, type DeviceAgentRunSummary, type DeviceCredentialProfile, type DeviceDetailResponse, type DeviceRequestCollection, type DeviceRequestCollectionRequest, type DeviceScanActivity, type DeviceService, type Scan } from '@/lib/api'
-import { Button, Card, EmptyState, ErrorState, Field, Input, Modal, PageHeader, ScanStatusBadge, Select, TableSkeleton, Textarea, useToast } from '@/components/ui'
+import { Button, Card, EmptyState, ErrorState, Field, Input, Modal, PageHeader, RecordNotFound, ScanStatusBadge, Select, TableSkeleton, Textarea, useToast } from '@/components/ui'
+import { isNotFoundError } from '@/lib/fetchLayer.mjs'
 import { devicePortCoverage, deviceReachabilityServiceSummary, deviceScorePresentation, deviceServiceDetails, deviceTargetScorePresentation } from '@/lib/deviceScanPresentation.mjs'
 import { networkScanTcpHints } from '@/lib/networkScanHints.mjs'
 import { usePoll } from '@/lib/usePoll'
@@ -88,6 +89,7 @@ function DeviceDetailContent() {
   const [data, setData] = useState<DeviceDetailResponse | null>(null)
   const [loading, setLoading] = useState(true)
   const [failed, setFailed] = useState(false)
+  const [missing, setMissing] = useState(false)
   const [unavailableParts, setUnavailableParts] = useState<DevicePagePart[]>([])
   const [retryingParts, setRetryingParts] = useState(false)
   const [workerReady, setWorkerReady] = useState(false)
@@ -129,9 +131,12 @@ function DeviceDetailContent() {
   const load = useCallback(async () => {
     // Only the device itself is essential: a side request that fails (credentials, collections,
     // Hunt history, readiness) marks its own section and keeps the rest of the page.
-    const [device, credentialData, collectionData, huntData, readinessData] = await Promise.allSettled([getDevice(deviceId), getDeviceCredentials(deviceId), getDeviceRequestCollections(deviceId), listDeviceAgentSessions({ device_target_id: deviceId, limit: 5 }), getDeviceReadiness()])
+    // The parts stored under the device are read once the device answered, so an id that is no
+    // device costs one refused read, not three.
+    const deviceRead = getDevice(deviceId)
+    const [device, credentialData, collectionData, huntData, readinessData] = await Promise.allSettled([deviceRead, deviceRead.then(() => getDeviceCredentials(deviceId)), deviceRead.then(() => getDeviceRequestCollections(deviceId)), listDeviceAgentSessions({ device_target_id: deviceId, limit: 5 }), getDeviceReadiness()])
     const unavailable: DevicePagePart[] = []
-    if (device.status === 'fulfilled') { setData(device.value); setFailed(false) } else setFailed(true)
+    if (device.status === 'fulfilled') { setData(device.value); setFailed(false); setMissing(false) } else { setFailed(true); setMissing(isNotFoundError(device.reason)) }
     if (credentialData.status === 'fulfilled') setCredentials(credentialData.value.profiles || []); else unavailable.push('credentials')
     if (collectionData.status === 'fulfilled') setRequestCollections(collectionData.value.collections || []); else unavailable.push('collections')
     if (huntData.status === 'fulfilled') setDeviceHunts(huntData.value.runs || []); else unavailable.push('hunts')
@@ -181,7 +186,9 @@ function DeviceDetailContent() {
   // 10 s while a device scan is queued/running or the network worker is not ready yet, then a
   // slow refresh; usePoll pauses in a hidden tab and backs off on errors.
   const deviceLive = !workerReady || Boolean(data?.scans?.some((item) => item.status === 'pending' || item.status === 'queued' || item.status === 'running'))
-  usePoll(load, { intervalMs: DEVICE_LIVE_REFRESH_MS, idleIntervalMs: DEVICE_IDLE_REFRESH_MS, live: deviceLive, deps: [load] })
+  // An id that is no device is not asked for again.
+  useEffect(() => { setMissing(false) }, [deviceId])
+  usePoll(load, { intervalMs: DEVICE_LIVE_REFRESH_MS, idleIntervalMs: DEVICE_IDLE_REFRESH_MS, live: deviceLive, enabled: !missing, deps: [load] })
 
   useEffect(() => {
     setSelectedScan(null)
@@ -349,6 +356,7 @@ function DeviceDetailContent() {
   }
 
   if (loading) return <div className="mx-auto max-w-7xl"><TableSkeleton rows={6} /></div>
+  if (missing && !data) return <div className="mx-auto max-w-7xl"><RecordNotFound title="Device not found" message="There is no connected device at this address." listHref="/devices" listLabel="Back to connected devices" /></div>
   if (failed || !data) return <div className="mx-auto max-w-7xl"><ErrorState message="Could not load connected device" onRetry={load} /></div>
   const { device, interfaces, services, scans, locator_history: locatorHistory } = data
   const storedPosturePresentation = deviceTargetScorePresentation(device)

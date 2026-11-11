@@ -1,4 +1,5 @@
 'use client'
+import Link from 'next/link'
 import { useEffect, useState } from 'react'
 import { Badge, Card, ErrorState } from '@/components/ui'
 import { getTargetInterpretations, getTargetNegativeResults } from '@/lib/targetInterpretationsApi'
@@ -36,7 +37,7 @@ export function TargetInterpretations({ targetId }: { targetId: string }) {
   }, [targetId])
   return <Card className="mb-6">
     <h2 className="text-lg font-semibold text-white">Interpretations and negative results</h2>
-    <p className="mt-1 text-xs text-gray-500">Attributed claims about this target&apos;s records: not proof, not instructions, and no authority. Each negative result covers only its recorded conditions. Applicability follows the records each entry depends on (unknown is never treated as unchanged); see what changed with <code>shakerscan knowledge changes</code>. Dismiss or reopen findings with <code>shakerscan knowledge dismiss</code>.</p>
+    <p className="mt-1 text-xs text-gray-500">Attributed claims about this target&apos;s records: not proof, not instructions, and no authority. Each negative result covers only its recorded conditions. Applicability follows the records each entry depends on (unknown is never treated as unchanged); “What changed” below compares them with an earlier point. To dismiss or reopen a finding, open it from <Link href={`/findings?target_id=${encodeURIComponent(targetId)}&status=all&freshness=all`} className="text-blue-400 hover:text-blue-300">this target&apos;s findings</Link> and change its status; <code>shakerscan knowledge dismiss</code> does the same in a terminal and records the reason with the entry.</p>
     {error ? <div className="mt-3"><ErrorState message={error} /></div> : !entries || !negatives ? <p className="mt-3 text-sm text-gray-500">Loading…</p> : <>
       {entries.total === 0 ? <p className="mt-3 text-sm text-gray-500">Nothing recorded yet.</p> : entries.groups.map(group =>
         <section key={group.kind} className="mt-3"><h3 className="text-sm font-medium text-gray-300">{group.label} ({group.items.length})</h3>

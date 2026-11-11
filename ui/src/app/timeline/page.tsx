@@ -88,7 +88,13 @@ function effectiveEventStatus(event: TimelineEvent): string {
 
 function eventKindLabel(event: TimelineEvent): string {
   const kind = event.kind.replace(/_/g, ' ')
-  if (kind.includes('command')) return 'investigation'
+  if (kind.includes('command')) {
+    // A command result is named for what the command was, not always an investigation.
+    const command = String(event.command || event.action_name || '')
+    if (command.startsWith('scan.')) return 'scan'
+    if (command.startsWith('data.')) return 'records'
+    return 'investigation'
+  }
   if (kind.includes('campaign')) return 'hunt'
   if (kind.includes('refuter')) return 'verification'
   return kind
@@ -116,7 +122,7 @@ function EventRow({ event }: { event: TimelineEvent }) {
       <div className="min-w-0 flex-1">
         <div className="flex flex-wrap items-center gap-2">
           <TimelineStatusBadge status={effectiveEventStatus(event)} />
-          <RiskTierBadge tier={event.risk_tier} />
+          <RiskTierBadge tier={event.risk_tier} labelled />
           <span className="text-sm font-medium text-white">{eventTitle(event)}</span>
           <span className="rounded-sm bg-gray-800 px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-gray-400">
             {eventKindLabel(event)}

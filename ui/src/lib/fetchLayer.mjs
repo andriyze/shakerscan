@@ -30,6 +30,11 @@ export function isAbortError(error) {
   return Boolean(error) && (error.name === 'AbortError' || error.code === 20)
 }
 
+/** True when the server answered that the record does not exist (404). */
+export function isNotFoundError(error) {
+  return Boolean(error) && error.status === 404
+}
+
 function abortError() {
   try {
     return new DOMException('The read was aborted', 'AbortError')

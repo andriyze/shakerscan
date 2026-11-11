@@ -235,6 +235,11 @@ export function scanLogEntry(rawLine) {
   } else if (structuredLogFailure(raw, source)) {
     kind = 'error'
     label = 'error'
+  } else if (notApplicableStep(raw)) {
+    // A step that did not apply to this target is the plan working, not something to look at.
+    const step = message.match(/^Diagnostic\s+(.+?)\s+·/)
+    label = 'not applicable'
+    message = `${step ? step[1] : 'This step'} did not run: it does not apply to this target. Nothing was sent.`
   } else if (structuredLogWarning(raw, source)) {
     kind = 'warning'
     label = 'attention'
@@ -275,6 +280,12 @@ function structuredLogFailure(raw, source) {
     .replace(/(?:^|[\s·])(?:error|reason)=(?:none|null|false|no|0|nil|success|ok|-)(?=$|[\s·])/gi, ' ')
     .replace(/(?:^|[\s·])(?:outcome|status|result)=(?:success|ok|complete|completed)(?=$|[\s·])/gi, ' ')
   return /(?:^|[\s:])(error|failed|failure|traceback|exception|fatal)(?:$|[\s:])/i.test(withoutBenignFields)
+}
+
+function notApplicableStep(raw) {
+  if (structuredValue(raw, '(?:outcome|status|result)') !== 'skipped') return false
+  if (structuredValue(raw, 'reason') !== 'not_applicable') return false
+  return ['', 'none', 'null', 'false', 'no', '0', 'nil', '-'].includes(structuredValue(raw, 'error'))
 }
 
 function structuredLogWarning(raw, source) {
@@ -334,6 +345,96 @@ const COVERAGE_REASON_LABELS = {
 export function coverageReasonText(code) {
   const raw = String(code || '')
   return COVERAGE_REASON_LABELS[raw] || raw.replace(/_/g, ' ').replace(/\b\w/g, (char) => char.toUpperCase())
+}
+
+// A planned step as a reader would name it. Steps are planned by capability; the baseline
+// requests share one capability, so those are named by step.
+const STEP_LABELS = {
+  'baseline.http': 'Baseline HTTP request',
+  'baseline.http_redirect': 'HTTP to HTTPS redirect check',
+  'baseline.security_txt': 'security.txt check',
+  'baseline.cors': 'Cross-origin (CORS) check',
+  'baseline.cors_null': 'Cross-origin (CORS) null-origin check',
+}
+
+const CAPABILITY_LABELS = {
+  'web.probe': 'Reachability check',
+  'web.crawl': 'Page crawl',
+  'web.browser_crawl': 'Browser crawl',
+  'web.content_discover': 'Content discovery',
+  'web.param_discover': 'Parameter discovery',
+  'web.spec_ingest': 'API description import',
+  'web.identify': 'Technology identification',
+  'http.request': 'Baseline HTTP check',
+  'dns.inspect': 'DNS check',
+  'dns.enumerate': 'DNS enumeration',
+  'tls.inspect': 'TLS check',
+  'templates.passive_batch': 'Passive templates',
+  'templates.passive_scan': 'Passive templates',
+  'templates.active_batch': 'Active templates',
+  'templates.scan': 'Active templates',
+  'exposure.verify_batch': 'Exposure checks',
+  'xss.verify_batch': 'Cross-site scripting checks',
+  'xss.verify': 'Cross-site scripting checks',
+  'xss.request_verify_batch': 'Cross-site scripting checks',
+  'xss.request_verify': 'Cross-site scripting checks',
+  'xss.browser_prove_batch': 'Cross-site scripting proof in a browser',
+  'sqli.verify_batch': 'SQL injection checks',
+  'sqli.verify': 'SQL injection checks',
+  'sqli.request_verify_batch': 'SQL injection checks',
+  'sqli.request_verify': 'SQL injection checks',
+  'sqli.prove_batch': 'SQL injection proof',
+  'redirect.verify_batch': 'Open redirect checks',
+  'graphql.verify_batch': 'GraphQL checks',
+  'scan.finalize': 'Report assembly',
+}
+
+const STEP_STATUS_LABELS = {
+  success: 'completed',
+  complete: 'completed',
+  partial: 'partly completed',
+  skipped: 'did not run',
+  timed_out: 'timed out',
+  failed: 'failed',
+  blocked: 'blocked',
+  cancelled: 'cancelled',
+  pending: 'did not start',
+  planned: 'did not start',
+}
+
+/** The plain name of one planned step: "sqli.verify_batch" reads "SQL injection checks". A name
+ *  this table does not know is shown as words ("auth.session_probe" -> "Auth session probe"). */
+export function scanStepLabel(action) {
+  const item = record(action)
+  const stepId = String(item.action_id || '')
+  if (STEP_LABELS[stepId]) return STEP_LABELS[stepId]
+  const capability = String(item.capability_name || '')
+  if (CAPABILITY_LABELS[capability]) return CAPABILITY_LABELS[capability]
+  const words = (capability || stepId || 'step').replace(/[._]+/g, ' ').replace(/\s+batch$/i, '').trim()
+  return words ? words.charAt(0).toUpperCase() + words.slice(1) : 'Step'
+}
+
+/** A step status in words ("timed_out" -> "timed out", "skipped" -> "did not run"). */
+export function scanStepStatusLabel(status) {
+  const raw = String(status || '')
+  return STEP_STATUS_LABELS[raw] || raw.replace(/_/g, ' ') || 'incomplete'
+}
+
+/** The planned steps of a scan that did not complete, split into gaps and steps that did not apply.
+ *
+ *  A step that did not apply to the target is not a gap: nothing was left untested. Those are
+ *  counted apart so the gap list holds only work that was planned and is missing. */
+export function coverageGapRows(actions) {
+  const rows = (Array.isArray(actions) ? actions : [])
+    .filter((item) => item && typeof item === 'object' && String(item.status || '') !== 'success')
+  const notApplicable = rows.filter(
+    (item) => String(item.status || '') === 'skipped' && String(item.reason_code || '') === 'not_applicable',
+  )
+  return {
+    gaps: rows.filter((item) => !notApplicable.includes(item)),
+    reasonCodes: Array.from(new Set(rows.map((item) => String(item.reason_code || '')).filter(Boolean))),
+    notApplicable: notApplicable.length,
+  }
 }
 
 // What a family's slow endpoint could not finish: the template pack, or an exposure probe that

@@ -13,9 +13,10 @@ import type {
   ModelIntakeScanRequest as GeneratedModelIntakeScanRequest,
 } from './publicApi.generated'
 import { API_URL, getApiErrorMessage } from './apiConfig'
+import { apiFailure } from './apiFailure'
 import { pathSegment, queryString } from './apiPath.mjs'
 import { fetchHeavyRead } from './busyRetry.mjs'
-import { getJson } from './fetchLayer.mjs'
+import { ApiError, getJson } from './fetchLayer.mjs'
 import { exposureAssetsFromBody, exposureAssetsParams } from './exposureAssets.mjs'
 import { LIST_V1_MAX_LIMIT, isListV1, isUnknownListParamError, listV1Params, type ListV1Page, type TotalKind } from './listPage.mjs'
 import { isGroupingTooBroadError, isServerGroupsPage } from './findingGroups'
@@ -3345,7 +3346,7 @@ export async function getCampaigns(params?: {
 
 export async function getCampaign(id: string, actionLimit: number = 50): Promise<CampaignDetailResponse> {
   const res = await fetch(`${API_URL}/arsenal/campaigns/${pathSegment(id)}?action_limit=${encodeURIComponent(actionLimit)}`)
-  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to load campaign'))
+  if (!res.ok) throw await apiFailure(res, 'Failed to load campaign')
   return res.json()
 }
 
@@ -5334,7 +5335,7 @@ export async function getDevices(params?: {
 
 export async function getDevice(deviceId: string): Promise<DeviceDetailResponse> {
   const res = await fetch(`${API_URL}/devices/${pathSegment(deviceId)}`, { cache: 'no-store' })
-  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to fetch connected device'))
+  if (!res.ok) throw await apiFailure(res, 'Failed to fetch connected device')
   return res.json()
 }
 
@@ -5601,7 +5602,7 @@ export async function updateDevicePolicy(policyId: string, payload: Partial<{
 // Targets
 export async function getTarget(targetId: string): Promise<Target> {
   const res = await fetch(`${API_URL}/targets/${pathSegment(targetId)}`)
-  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to fetch target'))
+  if (!res.ok) throw await apiFailure(res, 'Failed to fetch target')
   return res.json()
 }
 
@@ -6195,7 +6196,7 @@ export async function getDomains(): Promise<{ domains: string[] }> {
 
 export async function getFinding(id: string): Promise<Finding> {
   const res = await fetch(`${API_URL}/findings/${pathSegment(id)}`)
-  if (!res.ok) throw new Error('Failed to fetch finding')
+  if (!res.ok) throw new ApiError('Failed to fetch finding', { status: res.status })
   return res.json()
 }
 

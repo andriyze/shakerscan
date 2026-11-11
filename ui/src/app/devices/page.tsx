@@ -4,7 +4,7 @@ import Link from '@/components/WorkspaceLink'
 import { RetireDeviceButton } from '@/components/RetireDeviceButton'
 import { NetworkScanReadiness, type NetworkReadiness } from '@/components/NetworkScanReadiness'
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { Plus, Router, ShieldCheck } from 'lucide-react'
+import { Plus, ShieldCheck } from 'lucide-react'
 import {
   createDevice,
   getDevicePolicies,
@@ -15,6 +15,7 @@ import {
   type DeviceTarget,
 } from '@/lib/api'
 import { Button, Card, CardSkeleton, EmptyState, ErrorState, Field, Input, Modal, PageHeader, Select, useToast } from '@/components/ui'
+import { devicePolicyLabel } from '@/lib/devicePolicyLabel.mjs'
 import { deviceTargetScorePresentation } from '@/lib/deviceScanPresentation.mjs'
 import { usePoll } from '@/lib/usePoll'
 
@@ -153,7 +154,6 @@ export default function DevicesPage() {
       <PageHeader
         title="Connected Devices"
         description="Discover services on TVs, cameras, routers, and other network targets. Ports and results are shared with the target inventory and Hunt."
-        icon={<Router className="h-6 w-6" />}
         actions={<>
           <Link href="/devices/policies" className="inline-flex items-center gap-2 rounded-lg border border-gray-700 bg-gray-800 px-3 py-2 text-sm text-gray-200 hover:bg-gray-700"><ShieldCheck className="h-4 w-4" /> Service policies</Link>
           <Button onClick={() => setAddOpen(true)} disabled={!enabled}><Plus className="h-4 w-4" /> Add device</Button>
@@ -191,7 +191,7 @@ export default function DevicesPage() {
           <Field label="Display name"><Input value={form.name} onChange={(event) => setForm({ ...form, name: event.target.value })} placeholder="Living room TV" /></Field>
           <Field label="Device class"><Select value={form.device_class} onChange={(event) => setForm({ ...form, device_class: event.target.value })}>{DEVICE_CLASSES.map(([value, label]) => <option key={value} value={value}>{label}</option>)}</Select></Field>
           <div className="grid gap-4 sm:grid-cols-2"><Field label="Manufacturer"><Input value={form.manufacturer} onChange={(event) => setForm({ ...form, manufacturer: event.target.value })} /></Field><Field label="Model"><Input value={form.model} onChange={(event) => setForm({ ...form, model: event.target.value })} /></Field></div>
-          <Field label="Service policy"><Select value={form.policy_id} onChange={(event) => setForm({ ...form, policy_id: event.target.value })}><option value="">Default connected-device policy</option>{policies.map((policy) => <option key={policy.id} value={policy.id}>{policy.name}</option>)}</Select></Field>
+          <Field label="Service policy" hint={policies.find((policy) => policy.id === form.policy_id)?.description || undefined}><Select value={form.policy_id} onChange={(event) => setForm({ ...form, policy_id: event.target.value })}><option value="">Default connected-device policy</option>{policies.map((policy) => <option key={policy.id} value={policy.id}>{devicePolicyLabel(policy)}</option>)}</Select></Field>
         </div>
       </Modal>
 

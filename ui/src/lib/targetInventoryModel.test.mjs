@@ -40,6 +40,11 @@ test('malformed input explains itself', () => {
   assert.match(parseTargetInput('').error, /Enter/)
   assert.match(parseTargetInput('ftp://example.com').error, /Only http/)
   assert.match(parseTargetInput('example.com:99999').error, /1 to 65535/)
+  // Not a host with a port: the message is about the address, not about port numbers.
+  for (const text of ['javascript:alert(1)', 'mailto:someone', 'example.com:http']) {
+    assert.match(parseTargetInput(text).error, /Not an address to test/, text)
+  }
+  assert.equal(parseTargetInput('example.com:8443').port, 8443)
   assert.match(parseTargetInput('https://user:pass@example.com').error, /user name/)
   assert.match(parseTargetInput('exa mple.com').error, /One target/)
   assert.match(parseTargetInput('bad_host.example').error, /hostname/)

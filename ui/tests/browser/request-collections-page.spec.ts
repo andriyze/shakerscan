@@ -62,6 +62,9 @@ test('no collections: the library and a target say how to start', async ({ page 
   const api = await mockPageApi(page, routes({ collections: [] }))
   await visitAndAuditPage(page, '/request-collections', 800)
   await expect(page.getByText('No request collections yet', { exact: true })).toBeVisible()
+  // The page's own way in is Upload; recording runs on the person's machine and is named as that.
+  await expect(page.getByText(/then use Upload to add a Postman, HAR, OpenAPI or Swagger document/)).toBeVisible()
+  await expect(page.getByText(/Recording your own browsing is not done from this page: it runs on your machine/)).toBeVisible()
   await page.goto(`/request-collections?target_id=${targetId}`)
   await expect(page.getByText('No shared request collections for this target', { exact: true })).toBeVisible()
   await expect(page.getByRole('button', { name: 'Upload collection' })).toBeVisible()

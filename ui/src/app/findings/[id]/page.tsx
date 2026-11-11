@@ -36,6 +36,7 @@ import { retestAuthorizationStopNotice } from '@/lib/authorizationStop'
 import { formatRelativeTime } from '@/lib/format'
 import { retirementLabel } from '@/lib/findingFreshness'
 import { usePoll } from '@/lib/usePoll'
+import { isNotFoundError } from '@/lib/fetchLayer.mjs'
 import { findingObservation, hostOf, pathOf, verificationSource } from '@/lib/findingObservation'
 import { ANALYST_VERDICTS, FINDING_STATUS_LABELS, verdictChangeMessage, verdictOptionLabel, verdictRequestStatus, type AnalystVerdict } from '@/lib/analystVerdict'
 import {
@@ -43,6 +44,7 @@ import {
   ConfirmDialog,
   ErrorState,
   ProofStateBadge,
+  RecordNotFound,
   RetestVerdictBadge,
   SeverityBadge,
   SourceTypeBadge,
@@ -281,6 +283,7 @@ function FindingDetailContent() {
   }>({})
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
+  const [missing, setMissing] = useState(false)
   const [statusUpdating, setStatusUpdating] = useState(false)
   const [exceptionToDelete, setExceptionToDelete] = useState<string | null>(null)
   const [exceptionDeleting, setExceptionDeleting] = useState(false)
@@ -339,7 +342,9 @@ function FindingDetailContent() {
       setFindingExceptions(exceptions)
       setPolicyProfiles(policyData?.policy_profiles || [])
       setError(null)
-    } catch {
+    } catch (cause) {
+      // getFinding is the only read here that can fail the page; a 404 from it means no such finding.
+      setMissing(isNotFoundError(cause))
       setError('Failed to load finding details')
     } finally {
       setLoading(false)
@@ -665,6 +670,17 @@ function FindingDetailContent() {
       <div className="flex items-center justify-center h-64">
         <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-500"></div>
       </div>
+    )
+  }
+
+  if (missing && !finding) {
+    return (
+      <RecordNotFound
+        title="Finding not found"
+        message="There is no finding at this address."
+        listHref={backUrl}
+        listLabel="Back to findings"
+      />
     )
   }
 

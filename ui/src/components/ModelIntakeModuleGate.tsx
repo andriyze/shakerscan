@@ -51,8 +51,9 @@ export function ModelIntakeModuleGate({ children }: { children: ReactNode }) {
             signed admission decision.
           </p>
           <p>
-            It ships as two extra images (about 4.8 GB), so a new install leaves it off. To install it, run this on the
-            host where ShakerScan runs:
+            It ships as two extra images (about 4.8 GB), so a new install leaves it off. Installing it downloads those
+            images and restarts services, so it is done on the host by its operator and cannot be done from this page.
+            On the host where ShakerScan runs:
           </p>
           <div className="flex flex-wrap items-center gap-2">
             <code className="rounded-sm border border-gray-700 bg-gray-950 px-3 py-2 font-mono text-gray-100">{ENABLE_COMMAND}</code>
