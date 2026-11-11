@@ -74,6 +74,10 @@ test('populated dashboard shows queue, posture, latest results and activity', as
   await expect(page.getByText('scans pending', { exact: true })).toBeVisible()
   await expect(page.getByRole('heading', { name: 'Security posture' })).toBeVisible()
   await expect(page.getByText('Proven active risk', { exact: true })).toBeVisible()
+  // One asset is "1 asset", not "1 assets".
+  for (const text of ['1 affected asset', '1 high-impact asset', 'of 1 known asset', '1 asset']) {
+    await expect(page.getByText(text, { exact: true })).toBeVisible()
+  }
   await expect(latestResult(page)).toBeVisible()
   await expect(page.getByRole('heading', { name: 'Recent activity' })).toBeVisible()
   await expect(page.getByText('No scan results yet. Add a target and run the first scan.')).toHaveCount(0)
