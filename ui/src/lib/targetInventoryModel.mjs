@@ -43,6 +43,10 @@ export function parseTargetInput(raw) {
   host = host.toLowerCase().replace(/\.$/, '')
   let port = null
   if (portText !== null) {
+    // "javascript:alert(1)" or "mailto:someone" is not a host with a bad port.
+    if (!/^\d+$/.test(portText)) {
+      return { ok: false, error: 'Not an address to test: use a hostname, an IP address, or an http:// or https:// URL' }
+    }
     if (!/^\d{1,5}$/.test(portText) || Number(portText) < 1 || Number(portText) > 65535) {
       return { ok: false, error: 'Ports are numbers from 1 to 65535' }
     }

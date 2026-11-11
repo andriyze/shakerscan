@@ -169,3 +169,33 @@ test('a domain group deletes every target in it through one previewed approval',
   await expect(page.getByText('Deleted. Records and their files were erased.')).toBeVisible()
   expect(writes.filter(w => w.path === '/data-deletion/execute')).toHaveLength(1)
 })
+
+test('the deletion preview names what is removed and gathers working records under one total', async ({ page }) => {
+  await mockApi(page, { grouped: true })
+  // Registered after the scripted API, so this preview answers instead.
+  await page.route(`${MOCK_API_ORIGIN}/data-deletion/preview`, route => route.fulfill({ json: {
+    schema: 'shakerscan.record-deletion/v1', kind: 'domain', preview_id: previewId, preview_hash: 'a'.repeat(64),
+    scope_receipt_id: `record-delete:${previewId}`, expires_at: new Date(Date.now() + 600000).toISOString(),
+    root_ids: [targetId, subdomainId], would_delete: 1, dry_run: true, external_files_deleted: false,
+    records: { delete: {
+      evidence_objects: { count: 2278 }, findings: { count: 44 }, http_transactions: { count: 1255 },
+      scan_action_attempt_checkpoints: { count: 212 }, scan_work_manifests: { count: 7 }, scans: { count: 2 }, targets: { count: 2 },
+    }, detach: {}, retain: {}, restrict: {} },
+    blockers: [], retained: ['Nothing is kept.'],
+  } }))
+  await page.goto('/targets')
+  await page.getByRole('button', { name: 'Delete example.invalid and all its subdomains', exact: true }).click()
+  const counts = page.getByRole('dialog').getByTestId('deletion-record-counts')
+  await expect(counts.locator('dl').first().locator('dt')).toHaveText([
+    'Targets', 'Scans', 'Findings', 'Evidence files', 'Recorded requests and responses',
+  ])
+  await expect(counts.locator('dl').first().locator('dd')).toHaveText(['2', '2', '44', '2,278', '1,255'])
+  // Storage names are not what a person approves.
+  await expect(counts.getByText(/http transactions|evidence objects/)).toHaveCount(0)
+  const working = counts.locator('summary')
+  await expect(working).toHaveText('Working records of these scans: 219 in 2 kinds')
+  await expect(counts.getByText('Scan work manifests', { exact: true })).toBeHidden()
+  await working.click()
+  await expect(counts.getByText('Scan action attempt checkpoints', { exact: true })).toBeVisible()
+  await expect(counts.getByText('Scan work manifests', { exact: true })).toBeVisible()
+})

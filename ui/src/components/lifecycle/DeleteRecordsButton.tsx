@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from 'react'
 import { Button, ConfirmDialog, useToast, type ButtonVariant } from '@/components/ui'
 import { featureEnabled } from '@/lib/workspaceCapabilities'
 import { useCan } from '@/lib/useSessionCapabilities'
+import { deletionRecordRows } from '@/lib/deletionRecordLabels.mjs'
 import {
   approveRecordDeletion, executeRecordDeletion, previewRecordDeletion, archiveRecordTarget,
   type DeletionPreview, type DeletionResult, type DeletionSelection,
@@ -21,6 +22,24 @@ interface Props {
   /** Visual weight only; the preview/approval flow is identical. Defaults to the danger button. */
   variant?: ButtonVariant
   className?: string
+}
+
+/** What the approval removes: the record kinds people know by name, then the scans' working
+ * records under one total. Every counted kind stays readable; none is left out. */
+function RecordCounts({ records }: { records: unknown }) {
+  const { named, other, otherTotal } = deletionRecordRows(records)
+  const row = (item: { key: string; label: string; count: number }) => <div key={item.key} className="contents">
+    <dt className="wrap-break-word">{item.label}</dt><dd>{item.count.toLocaleString('en-US')}</dd>
+  </div>
+  return <div data-testid="deletion-record-counts" className="space-y-2">
+    {named.length > 0 && <dl className="grid grid-cols-[minmax(0,1fr)_auto] gap-x-4 gap-y-1">{named.map(row)}</dl>}
+    {other.length > 0 && <details>
+      <summary className="cursor-pointer text-gray-300">
+        Working records of these scans: {otherTotal.toLocaleString('en-US')} in {other.length} kind{other.length === 1 ? '' : 's'}
+      </summary>
+      <dl className="mt-2 grid grid-cols-[minmax(0,1fr)_auto] gap-x-4 gap-y-1 text-gray-400">{other.map(row)}</dl>
+    </details>}
+  </div>
 }
 
 export function RecordDeletionDialog({ preview, subject, onClose, onDeleted, onArchived, archived = false, archiveTargetId }: {
@@ -106,11 +125,7 @@ export function RecordDeletionDialog({ preview, subject, onClose, onDeleted, onA
         {preview.root_ids.length} target{preview.root_ids.length === 1 ? '' : 's'}
         {preview.kind === 'domain' ? ' in this domain, its subdomains and their linked services' : ', including its linked services'}
       </p>}
-      <dl className="grid grid-cols-2 gap-x-3 gap-y-1">
-        {Object.entries(preview.records.delete).map(([table, value]) => <div key={table} className="contents">
-          <dt className="wrap-break-word">{table.replaceAll('_', ' ')}</dt><dd>{value.count}</dd>
-        </div>)}
-      </dl>
+      <RecordCounts records={preview.records.delete} />
       <p className="font-medium text-gray-200">What is kept</p>
       {preview.retained.map(text => <p key={text}>{text}</p>)}
       {preview.blockers.map(text => <p role="alert" key={text} className="text-amber-300">{text}</p>)}
