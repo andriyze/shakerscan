@@ -167,3 +167,42 @@ test('a distribution build lists its upstream candidates as probable and has no 
   await expect(row.getByTestId('distribution-build-candidates')).toHaveText(' · all probable: distribution build, check vendor backports')
   await expect(row.locator('td').nth(2)).toHaveText('—')
 })
+
+test('on a phone the page does not scroll sideways and a target line wraps between words', async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 })
+  await mockServices(page)
+  // The same fixture with an address long enough that the target's summary line has to wrap.
+  await page.route(`${MOCK_API_ORIGIN}/exposure/services**`, (route) => route.fulfill({ json: {
+    ...fixture,
+    targets: fixture.targets.map((target) => ({ ...target, locator: 'https://inventory.app.example.test:8443', source_count: 6 })),
+  } }))
+  await page.goto('/exposure')
+  const line = page.getByText('web · https://inventory.app.example.test:8443 · 6 evidence sources', { exact: true })
+  await expect(line).toBeVisible()
+  const { lines, brokenWords } = await line.evaluate((element) => {
+    const broken: string[] = []
+    const tops = new Set<number>()
+    for (const word of (element.textContent || '').matchAll(/\S+/g)) {
+      const range = document.createRange()
+      // The line is rendered as several text nodes; find the word through a tree walk.
+      const walker = document.createTreeWalker(element, NodeFilter.SHOW_TEXT)
+      let offset = word.index
+      let node = walker.nextNode() as Text | null
+      while (node && offset >= node.length) { offset -= node.length; node = walker.nextNode() as Text | null }
+      if (!node || offset + word[0].length > node.length) continue
+      range.setStart(node, offset)
+      range.setEnd(node, offset + word[0].length)
+      const wordTops = new Set([...range.getClientRects()].map((box) => Math.round(box.top)))
+      wordTops.forEach((top) => tops.add(top))
+      if (wordTops.size > 1) broken.push(word[0])
+    }
+    return { lines: tops.size, brokenWords: broken }
+  })
+  expect(lines).toBeGreaterThan(1)
+  expect(brokenWords).toEqual([])
+  // Neither the document nor the scrolling page area is wider than the screen.
+  expect(await page.evaluate(() => {
+    const main = document.querySelector('main')!
+    return document.documentElement.scrollWidth <= document.documentElement.clientWidth && main.scrollWidth <= main.clientWidth
+  })).toBe(true)
+})

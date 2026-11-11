@@ -16,12 +16,19 @@
 
 .pageGlow {
   position: absolute;
-  inset: -1.5rem;
+  /* Reaches into the page padding and no further: 1rem on a phone, 1.5rem from the md breakpoint. */
+  inset: -1rem;
   pointer-events: none;
   background:
     radial-gradient(60% 45% at 70% 0%, rgba(94, 234, 212, 0.05), transparent 70%),
     radial-gradient(45% 35% at 10% 100%, rgba(59, 130, 246, 0.04), transparent 70%);
   z-index: 0;
+}
+
+@media (min-width: 768px) {
+  .pageGlow {
+    inset: -1.5rem;
+  }
 }
 
 .content {
