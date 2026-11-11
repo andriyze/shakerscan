@@ -26,6 +26,7 @@ import { blockerOrigin, blockerProvenanceText, carriedOverFromDecision, carriedS
 import { checkFamilyLabel } from '@/lib/checkFamilyLabel'
 import { emptyScanLogState, mergeScanLogReply } from '@/lib/scanLogDelta.mjs'
 import { isDiscoveryRun } from '@/lib/discoveryRun.mjs'
+import { scanCountLine } from '@/lib/scanCountLine.mjs'
 import { scanFailureRecommendation } from '@/lib/scanFailureRecommendation'
 import { failedScanHeadline } from '@/lib/authorizationStop'
 
@@ -168,6 +169,9 @@ function ScanVerdictCard({ scan, buildVersion, buildFingerprint, decision, targe
   const scanTypeLabel = formatScanTypeLabel(scan)
   // A discovery run maps the target with active testing off: it is headed as that, not as a DAST scan.
   const discoveryRun = isDiscoveryRun(scan)
+  // The headline, the release line, the severity chips and the Findings tab each give a count of
+  // this run's findings; this line says how they relate.
+  const countLine = scanCountLine(scan)
   const duration = scan.duration_seconds ? formatDuration(scan.duration_seconds) : null
   const scanVersion: string | null = scan?.result?.scanner_version || null
   const scanFingerprint: string | null =
@@ -221,6 +225,9 @@ function ScanVerdictCard({ scan, buildVersion, buildFingerprint, decision, targe
                 <span className={`rounded-sm px-2 py-0.5 text-xs font-semibold uppercase ${releaseClass}`}>{release.verdict.replace(/_/g, ' ')}</span>
                 <span>{release.text}</span>
               </p>
+            )}
+            {countLine && (
+              <p className="mt-3 text-sm text-gray-300" data-testid="scan-count-line">{countLine}</p>
             )}
             <p className={`mt-3 text-sm font-medium ${resultPresentation.confidenceTone === 'qualified' ? 'text-amber-200' : assuranceClass(assurance?.band)}`}>
               {resultPresentation.confidence}

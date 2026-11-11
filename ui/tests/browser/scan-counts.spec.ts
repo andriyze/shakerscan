@@ -67,3 +67,30 @@ test.describe('Scans list and discovery runs', () => {
     await expect(page.getByText('Run conclusion', { exact: true })).toBeVisible()
   })
 })
+
+test('one line on the Scan page relates its totals', async ({ page }) => {
+  await pinMockApiOrigin(page)
+  await page.route(`${MOCK_API_ORIGIN}/**`, route => route.fulfill({ status: 503, json: { detail: 'fixture_unavailable' } }))
+  const finding = (severity: string, proven: boolean, index: number) => ({
+    title: `Fixture ${severity} finding ${index}`, severity, tool: 'fixture', verified: proven,
+    proof_state: proven ? 'verified' : 'suspected', url: `https://counts.example.test/item/${severity}/${index}`,
+  })
+  // 8 findings: 3 critical and 1 high proven, 1 high and 1 medium not yet verified, 1 low and 1 informational proven.
+  const findings = [
+    finding('critical', true, 1), finding('critical', true, 2), finding('critical', true, 3),
+    finding('high', true, 1), finding('high', false, 2), finding('medium', false, 1),
+    finding('low', true, 1), finding('info', true, 1),
+  ]
+  await page.route(`${MOCK_API_ORIGIN}/scans/${APPLICATION_SCAN}`, route => route.fulfill({ json: {
+    ...scanRow(APPLICATION_SCAN, 'standalone', 'F', 0, findings.length),
+    result: { result: { risk_score: 0, risk_grade: 'F', assurance_score: 60, assurance_band: 'moderate' }, findings },
+  } }))
+  await page.goto(`/scans/${APPLICATION_SCAN}`)
+  // The headline counts proven findings at medium or higher; the tab counts all of them.
+  await expect(page.getByRole('heading', { name: '4 confirmed material issues require action' })).toBeVisible()
+  await expect(page.getByTestId('scan-count-line')).toHaveText(
+    '8 findings in this run: 6 proven, 2 awaiting verification. Critical or high: 5. Proven at medium or higher: 4.')
+  await expect(page.getByTestId('scan-findings-counts')).toHaveText('6 proven (4 medium or higher) · 2 need verification')
+  await expect(page.getByText('8 observed in this scan', { exact: true })).toBeVisible()
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth + 1)).toBe(true)
+})
