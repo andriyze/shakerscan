@@ -58,15 +58,21 @@ test('production shell sends browser security headers', async ({ page }) => {
 })
 
 
-test('README badge links have accessible image names', async ({ page }) => {
-  await page.goto('/docs', { waitUntil: 'domcontentloaded' })
-  // The badge images are external (shields.io, GitHub, scorecard.dev). A link whose image has not
-  // loaded yet has no box, so asserting visibility made this test wait on third-party latency (the
-  // Scorecard badge redirect alone can take over 10 seconds). The accessible name is the contract:
-  // each link exists once and its image carries the alt text that names it.
+test('README badges are linked text and the page loads nothing from other hosts', async ({ page }) => {
+  // The README's badge images are served by other hosts (shields.io, GitHub, scorecard.dev). The
+  // documentation page is read inside a self-hosted scanner, so it renders each badge as its text
+  // and requests no image from them.
+  const imageHosts = new Set<string>()
+  page.on('request', (request) => {
+    if (request.resourceType() === 'image') imageHosts.add(new URL(request.url()).host)
+  })
+  await page.goto('/docs', { waitUntil: 'load' })
+  const pageHost = new URL(page.url()).host
   for (const name of ['License: AGPL-3.0-only', 'Latest release', 'Python suite', 'CodeQL', 'OpenSSF Scorecard']) {
-    const link = page.getByRole('link', { name })
+    const link = page.getByRole('link', { name, exact: true })
     await expect(link).toHaveCount(1)
-    await expect(link.locator('img')).toHaveAttribute('alt', name)
+    await expect(link).toHaveText(name)
   }
+  await expect(page.locator('article img')).toHaveCount(0)
+  expect([...imageHosts].filter((host) => host !== pageHost)).toEqual([])
 })

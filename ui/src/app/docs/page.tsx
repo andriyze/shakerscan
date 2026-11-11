@@ -91,6 +91,9 @@ const markdownComponents: Components = {
       </a>
     )
   },
+  // The README's images are status badges served by other hosts. This page is read inside a
+  // self-hosted scanner, so it loads nothing from them: a badge shows as its text.
+  img: ({ alt }) => (alt ? <span className="mr-2 inline-block rounded-sm border border-gray-700 px-1.5 py-0.5 text-xs font-normal text-gray-300 no-underline">{alt}</span> : null),
   ul: ({ children }) => <ul className="my-4 list-disc space-y-2 pl-6 text-gray-300 marker:text-gray-600">{children}</ul>,
   ol: ({ children }) => <ol className="my-4 list-decimal space-y-2 pl-6 text-gray-300 marker:text-gray-500">{children}</ol>,
   li: ({ children }) => <li className="pl-1 leading-7">{children}</li>,
