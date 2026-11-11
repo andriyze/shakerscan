@@ -22,6 +22,7 @@ import {
   type ScanContractPreview,
   type TargetAuthorization,
 } from '@/lib/api'
+import { checkFamilyLabel } from '@/lib/checkFamilyLabel'
 import { listCredentialProfiles, type CredentialProfile } from '@/lib/credentialApi'
 import { preferredCredentialId } from '@/lib/credentialDefaults'
 import { Button, Card, Combobox, Field, useToast, type ComboboxOption } from '@/components/ui'
@@ -831,7 +832,7 @@ export default function NewScanPage() {
               <div className="mt-3 rounded-sm border border-gray-800 bg-black/20 p-3 text-xs text-gray-400">
                 <span className="font-medium text-gray-200">Checks this Scan runs:</span> {resolvedFamilies.length ? resolvedFamilies.map((name) => scanContract.families.find((family) => family.name === name)?.label || name).join(', ') : 'none'}
                 {contractPreview && Object.keys(contractPreview.minimum_family_quotas).length > 0 && (
-                  <span className="mt-1 block">Minimum attempts: {Object.entries(contractPreview.minimum_family_quotas).map(([family, quota]) => `${family} ${quota}`).join(' · ')}</span>
+                  <span className="mt-1 block" data-testid="scan-minimum-attempts">Minimum attempts: {Object.entries(contractPreview.minimum_family_quotas).map(([family, quota]) => `${checkFamilyLabel(family)} ${quota}`).join(' · ')}</span>
                 )}
                 {contractPreviewError && <span className="mt-1 block text-amber-300">{contractPreviewError}</span>}
               </div>
