@@ -4,7 +4,7 @@ import Link from '@/components/WorkspaceLink'
 import { RetireDeviceButton } from '@/components/RetireDeviceButton'
 import { NetworkScanReadiness, type NetworkReadiness } from '@/components/NetworkScanReadiness'
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { Plus, Router, ShieldCheck } from 'lucide-react'
+import { Plus, ShieldCheck } from 'lucide-react'
 import {
   createDevice,
   getDevicePolicies,
@@ -154,7 +154,6 @@ export default function DevicesPage() {
       <PageHeader
         title="Connected Devices"
         description="Discover services on TVs, cameras, routers, and other network targets. Ports and results are shared with the target inventory and Hunt."
-        icon={<Router className="h-6 w-6" />}
         actions={<>
           <Link href="/devices/policies" className="inline-flex items-center gap-2 rounded-lg border border-gray-700 bg-gray-800 px-3 py-2 text-sm text-gray-200 hover:bg-gray-700"><ShieldCheck className="h-4 w-4" /> Service policies</Link>
           <Button onClick={() => setAddOpen(true)} disabled={!enabled}><Plus className="h-4 w-4" /> Add device</Button>
