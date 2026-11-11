@@ -13918,6 +13918,35 @@ def test_command_result_event_uses_live_scan_status_over_frozen_status():
     assert ev["mission_campaign_id"] == "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
 
 
+def test_a_finished_submission_event_does_not_say_queued():
+    # The message is stored when the Scan is queued; the event reports the scan's live status.
+    row = {
+        "id": "cmd-3", "command": "scan.submit", "status": "queued", "risk_tier": "active",
+        "dry_run": False, "scan_id": "44444444-4444-4444-8444-444444444444",
+        "operation_plan_id": None, "campaign_id": None, "scope_receipt_id": None,
+        "approval_receipt_id": None, "finding_ids": [], "evidence_object_ids": [],
+        "tool_receipt_ids": [], "blocked_by": [], "next_action": None,
+        "operator_message": "Queued Scan for https://app.example.com",
+        "created_at": datetime(2026, 7, 6, tzinfo=timezone.utc),
+        "scan_status": "completed", "scan_target_url": "https://app.example.com", "scan_target_id": None,
+    }
+    done = ops_router_module._command_result_timeline_event(row)
+    assert (done["status"], done["operator_message"]) == ("completed", "Scan for https://app.example.com")
+    running = ops_router_module._command_result_timeline_event({**row, "scan_status": "running"})
+    assert running["operator_message"] == "Scan for https://app.example.com"
+    # While the Scan waits, the stored message is still true.
+    waiting = ops_router_module._command_result_timeline_event({**row, "scan_status": "queued"})
+    assert (waiting["status"], waiting["operator_message"]) == ("queued", "Queued Scan for https://app.example.com")
+    # Other messages are passed through as stored.
+    other = ops_router_module._command_result_timeline_event({**row, "operator_message": "Blocked by scope"})
+    assert other["operator_message"] == "Blocked by scope"
+    action = ops_router_module._campaign_action_timeline_event({
+        **row, "action_name": "asm.test", "command": "asm.test", "target_id": None,
+        "operator_message": "Queued ASM test batch for https://app.example.com"})
+    assert (action["status"], action["operator_message"]) == (
+        "completed", "ASM test batch for https://app.example.com")
+
+
 def test_timeline_sort_orders_newest_first_and_none_last():
     older = {"created_at": "2026-07-05T00:00:00+00:00", "event_id": "old"}
     newer = {"created_at": "2026-07-06T00:00:00+00:00", "event_id": "new"}
