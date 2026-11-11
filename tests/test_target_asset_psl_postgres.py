@@ -119,6 +119,8 @@ def test_legacy_public_suffix_roots_are_recomputed_once(monkeypatch):
                 ('https://example.co.uk', 'apex', 'co.uk', false),
                 ('https://victim.github.io', 'pages', 'github.io', false),
                 ('https://bucket.s3.amazonaws.com', 'bucket', 'amazonaws.com', false),
+                ('https://10-0-0-5.sslip.io', 'by address', 'sslip.io', false),
+                ('https://203-0-113-9.sslip.io', 'another address', 'sslip.io', false),
                 ('https://api.example.com', 'api', 'example.com', false)""")
             changed = await recompute_spanning_target_roots(conn)
             rows = {row["url"]: (row["root_domain"], row["is_root"]) for row in await conn.fetch(
@@ -126,12 +128,14 @@ def test_legacy_public_suffix_roots_are_recomputed_once(monkeypatch):
             return changed, rows, await recompute_spanning_target_roots(conn)
 
     changed, rows, again = asyncio.run(run())
-    assert changed == 4 and again == 0
+    assert changed == 6 and again == 0
     assert rows == {
         "https://shop.example.co.uk": ("example.co.uk", False),
         "https://example.co.uk": ("example.co.uk", True),
         "https://victim.github.io": ("victim.github.io", True),
         "https://bucket.s3.amazonaws.com": ("bucket.s3.amazonaws.com", True),
+        "https://10-0-0-5.sslip.io": ("10-0-0-5.sslip.io", True),
+        "https://203-0-113-9.sslip.io": ("203-0-113-9.sslip.io", True),
         "https://api.example.com": ("example.com", False),
     }
 

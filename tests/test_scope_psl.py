@@ -69,6 +69,10 @@ def test_a_modified_or_missing_snapshot_fails_closed(tmp_path, monkeypatch):
     # Private section.
     ("github.io", None), ("user.github.io", "user.github.io"), ("herokuapp.com", None),
     ("app.herokuapp.com", "app.herokuapp.com"), ("s3.amazonaws.com", None),
+    # Wildcard-DNS services: every name carries its user's address, so each name stands alone.
+    ("sslip.io", None), ("nip.io", None), ("10-0-0-5.sslip.io", "10-0-0-5.sslip.io"),
+    ("app.10-0-0-5.sslip.io", "app.10-0-0-5.sslip.io"), ("app.10.0.0.5.nip.io", "app.10.0.0.5.nip.io"),
+    ("10.0.0.5.nip.io", "10.0.0.5.nip.io"),
     # Normalization.
     ("EXAMPLE.COM.", "example.com"), ("a.b.example.co.uk", "example.co.uk"),
     ("bücher.de", "xn--bcher-kva.de"),
@@ -169,7 +173,7 @@ def test_wildcard_rule_parents_are_public_suffixes_as_in_the_reference(host, suf
 
 @pytest.mark.parametrize("host", [
     "amazonaws.com", "compute.amazonaws.com", "0e.vc", "kawasaki.jp", "on.aws", "crm.dev",
-    "co.uk", "github.io", "com",
+    "co.uk", "github.io", "com", "sslip.io", "nip.io", "xip.io", "traefik.me",
 ])
 def test_a_wildcard_or_root_spanning_public_suffixes_is_refused(host):
     assert psl.spans_public_suffix(host)
@@ -191,7 +195,8 @@ def test_a_name_with_a_suffix_below_is_fine_as_an_exact_host_only():
 
 
 @pytest.mark.parametrize("host", ["example.com", "example.co.uk", "user.github.io", "www.ck",
-                                  "city.kawasaki.jp", "b.a.kawasaki.jp", "bucket.s3.amazonaws.com"])
+                                  "city.kawasaki.jp", "b.a.kawasaki.jp", "bucket.s3.amazonaws.com",
+                                  "10-0-0-5.sslip.io", "app.10.0.0.5.nip.io"])
 def test_names_owned_by_one_registrant_do_not_span(host):
     assert not psl.spans_public_suffix(host)
     assert require_registrable_or_below(host, wildcard=True)
