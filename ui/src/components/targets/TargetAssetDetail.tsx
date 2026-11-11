@@ -13,7 +13,8 @@ import { AssetCollections } from '@/components/collections/AssetCollections'
 import { AssetCredentials } from '@/components/collections/AssetCredentials'
 import { useRouter } from 'next/navigation'
 import Link from '@/components/WorkspaceLink'
-import { Button, Card, CardSkeleton, EmptyState, ErrorState, Field, Input, Modal, PageHeader, Select } from '@/components/ui'
+import { Button, Card, CardSkeleton, EmptyState, ErrorState, Field, Input, Modal, PageHeader, RecordNotFound, Select } from '@/components/ui'
+import { isNotFoundError } from '@/lib/fetchLayer.mjs'
 import { formatDate, updateTargetMetadata } from '@/lib/api'
 import { featureEnabled } from '@/lib/workspaceCapabilities'
 import { useCan, usePageAllowed } from '@/lib/useSessionCapabilities'
@@ -23,6 +24,7 @@ export function TargetAssetDetail({ id }: {id: string}) {
   const router = useRouter()
   const [data,setData] = useState<AssetDetail | null>(null)
   const [error,setError] = useState<string | null>(null)
+  const [missing,setMissing] = useState(false)
   const [busy,setBusy] = useState(false)
   const [refresh,setRefresh] = useState(0)
   const [edit,setEdit] = useState<'name' | 'authority' | null>(null)
@@ -45,7 +47,7 @@ export function TargetAssetDetail({ id }: {id: string}) {
   useEffect(() => {
     const controller = new AbortController()
     getTargetAsset(id,controller.signal).then((result) => {if (!controller.signal.aborted) {setData(result);setError(null)}})
-      .catch((cause) => {if (!controller.signal.aborted) setError(cause instanceof Error ? cause.message : 'Could not load target')})
+      .catch((cause) => {if (!controller.signal.aborted) {setMissing(isNotFoundError(cause));setError(cause instanceof Error ? cause.message : 'Could not load target')}})
     return () => controller.abort()
   },[id,refresh])
   const assetId = data?.target.id
@@ -86,7 +88,8 @@ export function TargetAssetDetail({ id }: {id: string}) {
     } catch (cause) {setError(cause instanceof Error ? cause.message : 'Could not update target details')}
     finally {setBusy(false)}
   }
-  if (!data) return error ? <ErrorState message={error} /> : <CardSkeleton count={4} />
+  if (!data && missing) return <RecordNotFound title="Target not found" message="There is no target at this address." listHref="/targets" listLabel="Back to targets" />
+  if (!data) return error ? <ErrorState message={error} onRetry={() => {setError(null);setRefresh((current) => current+1)}} /> : <CardSkeleton count={4} />
   const secretOrigins = data.origins.filter(origin => origin.current_membership && origin.id !== data.target.id)
   const originSecretsListed = secretOrigins.some(origin => (originSecretCounts[origin.id] ?? 0) > 0)
   const target = data.target

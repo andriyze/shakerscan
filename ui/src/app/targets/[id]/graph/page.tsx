@@ -7,11 +7,13 @@ import Link from '@/components/WorkspaceLink'
 import {
   generateApplicationGraphHypotheses,
   getApplicationGraph,
+  getTarget,
   type ApplicationGraph,
   type ApplicationGraphNode,
   type GraphHypothesisGenerationResult,
 } from '@/lib/api'
-import { SectionCard, ErrorState, Button } from '@/components/ui'
+import { SectionCard, EmptyState, ErrorState, Button, RecordNotFound } from '@/components/ui'
+import { isNotFoundError } from '@/lib/fetchLayer.mjs'
 
 function nodeLabel(node: ApplicationGraphNode): string {
   return node.label || node.node_key.replace(/^(route|object|principal):/, '')
@@ -33,6 +35,9 @@ function GraphContent() {
   const [graph, setGraph] = useState<ApplicationGraph | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
+  // The graph read answers an empty graph for any id, so the target itself says whether it exists.
+  const [targetMissing, setTargetMissing] = useState(false)
+  const [targetName, setTargetName] = useState('')
   const [search, setSearch] = useState('')
   const [nodeType, setNodeType] = useState('all')
   const [edgeType, setEdgeType] = useState('all')
@@ -43,7 +48,15 @@ function GraphContent() {
 
   const fetchGraph = useCallback(async () => {
     try {
-      const data = await getApplicationGraph(targetId)
+      const [data, target] = await Promise.all([
+        getApplicationGraph(targetId),
+        getTarget(targetId).catch((cause) => {
+          if (isNotFoundError(cause)) return 'missing' as const
+          return null
+        }),
+      ])
+      setTargetMissing(target === 'missing')
+      setTargetName(target && target !== 'missing' ? target.name || target.url || '' : '')
       setGraph(data)
       setError(null)
     } catch {
@@ -133,6 +146,17 @@ function GraphContent() {
     )
   }
 
+  if (targetMissing) {
+    return (
+      <RecordNotFound
+        title="Target not found"
+        message="There is no target at this address, so there is no application graph to show."
+        listHref="/targets"
+        listLabel="Back to targets"
+      />
+    )
+  }
+
   if (error || !graph) {
     return (
       <ErrorState
@@ -159,8 +183,19 @@ function GraphContent() {
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
           </svg>
         </Link>
-        <h1 className="text-2xl font-bold text-white">Application Graph</h1>
+        <div className="min-w-0">
+          <h1 className="text-2xl font-bold text-white">Application Graph</h1>
+          {targetName && <p className="mt-0.5 break-all text-sm text-gray-400" data-testid="graph-target">{targetName}</p>}
+        </div>
       </div>
+
+      {summary.node_count === 0 && (
+        <EmptyState
+          message="No application graph has been recorded for this target yet."
+          hint="A scan of the application records its routes, objects and principals here."
+          action={{ label: 'Open the target', href: `/targets/${targetId}/asset` }}
+        />
+      )}
 
       <SectionCard
         title="Summary"
