@@ -1,6 +1,6 @@
 import { expect, test, type Locator, type Page } from '@playwright/test'
 
-import { mockPageApi, serverError } from './mock-page-api'
+import { mockPageApi, serverError, uiBuildVersion } from './mock-page-api'
 
 // Browser contract fixture for ui-extensions/v1 (docs/ui-extensions.md): the real sidebar, the
 // real /ext/<id> route and the real finding page over a scripted API, with a managed workspace
@@ -55,8 +55,12 @@ const finding = {
   first_seen_at: '2026-10-01T00:00:00Z', last_seen_at: '2026-10-10T00:00:00Z',
 }
 
+// The scripted engine reports the version the UI under test was built with: the builds agree.
+let version = ''
+test.beforeEach(async ({ page }) => { version = await uiBuildVersion(page) })
+
 const api = {
-  '/health': () => ({ status: 'healthy', scanner_version: 'fixture' }),
+  '/health': () => ({ status: 'healthy', scanner_version: version }),
   [`/findings/${findingId}`]: () => finding,
 }
 
@@ -154,7 +158,7 @@ test('EXT-001 declared entries and sections are placed in the sidebar; hostile e
   await expect(opened.getByRole('link')).toHaveText(['My account', 'Sign out'])
   await expect(opened.getByRole('link', { name: 'My account', exact: true })).toHaveAttribute('href', '/deployment/account')
   await expect(opened.getByRole('link', { name: 'Sign out', exact: true })).toHaveAttribute('href', '/deployment/sign-out')
-  await expect(opened.getByText('Open Source fixture', { exact: true })).toBeVisible()
+  await expect(opened.getByText(`Open Source ${version}`, { exact: true })).toBeVisible()
   // Another origin never becomes a link, and a managed sidebar links to no other site at all.
   await expect(account.locator('a').filter({ hasText: 'Elsewhere' })).toHaveCount(0)
   await expect(nav.locator('a[href^="http"]')).toHaveCount(0)
@@ -415,11 +419,12 @@ test('EXT-009 the account row says a role that repeats the name once', async ({ 
   // An Enterprise edition is named in the lockup, so the panel's last line is the version alone.
   await row.click()
   await expect(account.getByRole('link')).toHaveText(['Sign out'])
-  await expect(account.getByText('Version fixture', { exact: true })).toBeVisible()
+  await expect(account.getByText(`Version ${version}`, { exact: true })).toBeVisible()
 })
 
 test('EXT-010 an account with nothing to open is a name, not a button', async ({ page }) => {
-  // No links, no sign-out page, and the engine does not say what it runs.
+  // No links, no sign-out page, and the engine does not say what it runs. A UI built with a
+  // version still knows its own: the row then opens that one line and nothing else.
   const bare = { ...extensions, account: { name: 'Dana Example', detail: 'Operator', links: [] } }
   await page.addInitScript((value) => { window.__SHAKERSCAN_CAPABILITIES__ = value as never },
     { ...managedPolicy, edition: 'Enterprise Edition', extensions: bare })
@@ -427,6 +432,16 @@ test('EXT-010 an account with nothing to open is a name, not a button', async ({
   await mockDeployment(page)
   await page.goto('/docs', { waitUntil: 'domcontentloaded' })
   const account = (await sidebar(page)).getByRole('region', { name: 'Account' })
-  await expect(account).toHaveText('DDana ExampleOperator')
-  await expect(account.getByRole('button')).toHaveCount(0)
+  await expect(account.getByRole('link')).toHaveCount(0)
+  if (version === 'dev') {
+    await expect(account).toHaveText('DDana ExampleOperator')
+    await expect(account.getByRole('button')).toHaveCount(0)
+    return
+  }
+  const row = account.getByRole('button')
+  await expect(row).toHaveText('DDana ExampleOperator')
+  await row.click()
+  await expect(row).toHaveAttribute('aria-expanded', 'true')
+  await expect(account).toHaveText(`DDana ExampleOperatorVersion ${version}`)
+  await expect(account.getByRole('link')).toHaveCount(0)
 })

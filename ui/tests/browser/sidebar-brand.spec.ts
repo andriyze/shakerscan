@@ -1,10 +1,13 @@
 import { expect, test, type Page } from '@playwright/test'
 
-import { mockPageApi } from './mock-page-api'
+import { mockPageApi, uiBuildVersion } from './mock-page-api'
 
 // Browser contract fixture: the real sidebar, tab title and icons over a scripted API that answers
-// only the sidebar's health poll; no page data is needed and nothing runs.
-const health = { '/health': () => ({ status: 'healthy', scanner_version: 'fixture' }) }
+// only the sidebar's health poll; no page data is needed and nothing runs. The scripted engine
+// reports the version the UI under test was built with, so the builds agree in every run.
+let version = ''
+test.beforeEach(async ({ page }) => { version = await uiBuildVersion(page) })
+const health = { '/health': () => ({ status: 'healthy', scanner_version: version }) }
 
 const enterprisePolicy = {
   schema: 'shakerscan.workspace-capabilities/v1',
@@ -77,7 +80,7 @@ test('BRAND-002 the sidebar lockup, the foot and the More row', async ({ page })
   await expect(nav.getByText('Open Source Edition', { exact: true })).toHaveCount(0)
   await expect(nav.getByText(/^Version /)).toHaveCount(0)
   await expect(nav.getByRole('status')).toHaveCount(0)
-  const about = nav.getByText('Open Source fixture', { exact: true })
+  const about = nav.getByText(`Open Source ${version}`, { exact: true })
   await expect(about).toBeVisible()
 
   // The two ways out are icons with names, beside that line, below every page of the menu.
@@ -157,7 +160,7 @@ test('BRAND-003 a managed Enterprise edition names itself in the lockup and ever
   await expect(nav.locator('a[href^="http"]')).toHaveCount(0)
   await expect(nav.getByRole('link', { name: 'Settings', exact: true })).toHaveCount(0)
   await expect(nav.getByRole('link', { name: 'New Scan', exact: true })).toHaveCount(0)
-  await expect(nav.getByText('Version fixture', { exact: true })).toBeVisible()
+  await expect(nav.getByText(`Version ${version}`, { exact: true })).toBeVisible()
 
   // Next.js swaps the title on client navigation; the edition stays.
   await nav.getByRole('link', { name: 'Schedules' }).click()
@@ -231,4 +234,26 @@ test('BRAND-006 the More row takes a click only once it can act on it', async ({
   await page.waitForTimeout(1000)
   await expect(more).toHaveAttribute('aria-expanded', 'true')
   await expect(page.locator('aside:visible').getByRole('link', { name: 'Evidence' })).toBeVisible()
+})
+
+test('BRAND-007 a build mismatch is spelled out under the logo, and the foot names no version', async ({ page }) => {
+  // One worker of two still runs another build.
+  await mockPageApi(page, {
+    '/health': () => ({
+      status: 'healthy', scanner_version: version,
+      worker_build: { available: true, fleet_uniform: false, expected_count: 2, reported_count: 2, stale_count: 1, pending_count: 0 },
+    }),
+  })
+  await page.goto('/docs', { waitUntil: 'domcontentloaded' })
+  const nav = await sidebar(page)
+  const mismatch = nav.getByRole('status')
+  await expect(mismatch).toContainText('Build mismatch: ')
+  await expect(mismatch).toContainText(`API ${version} · Workers mixed/stale (1)`)
+  const home = nav.getByRole('link', { name: 'ShakerScan dashboard', exact: true })
+  const newScan = nav.getByRole('link', { name: 'New Scan', exact: true })
+  const [homeBox, mismatchBox, newScanBox] = [await home.boundingBox(), await mismatch.boundingBox(), await newScan.boundingBox()]
+  expect(mismatchBox!.y).toBeGreaterThanOrEqual(homeBox!.y + homeBox!.height)
+  expect(newScanBox!.y).toBeGreaterThanOrEqual(mismatchBox!.y + mismatchBox!.height)
+  await expect(nav.getByText('Open Source', { exact: true })).toBeVisible()
+  await expect(nav.getByText(`Open Source ${version}`, { exact: true })).toHaveCount(0)
 })
