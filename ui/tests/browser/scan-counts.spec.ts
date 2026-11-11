@@ -94,3 +94,33 @@ test('one line on the Scan page relates its totals', async ({ page }) => {
   await expect(page.getByText('8 observed in this scan', { exact: true })).toBeVisible()
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth + 1)).toBe(true)
 })
+
+test('a target row counts every open finding, informational ones included', async ({ page }) => {
+  await pinMockApiOrigin(page)
+  const row = (id: string, locator: string, severity_counts: Record<string, number>) => ({
+    id, asset_id: id, locator, name: locator, url: `https://${locator}`, is_active: true, environment: 'production',
+    connected_device: false, origin_count: 1, severity_counts,
+  })
+  const targets = [
+    row('00000000-0000-4000-8000-0000000000c1', 'counts.example.test', { critical: 21, high: 17, low: 2, info: 4 }),
+    row('00000000-0000-4000-8000-0000000000c2', 'notes.example.test', { info: 3 }),
+  ]
+  await page.route(`${MOCK_API_ORIGIN}/**`, route => {
+    const url = new URL(route.request().url())
+    if (url.pathname === '/targets/inventory') {
+      return route.fulfill({ json: { targets, total: 2, total_groups: 1,
+        groups: [{ root_domain: 'example.test', discoverable: true, targets }] } })
+    }
+    return route.fulfill({ json: { skill: null, revision: 0 } })
+  })
+  await page.goto('/targets')
+  const rows = page.getByTestId('target-asset-row')
+  const first = rows.filter({ hasText: 'counts.example.test' }).getByTestId('severity-pills')
+  await expect(first).toHaveText('21C17H2L4I', { ignoreCase: true })
+  await expect(first.getByTitle('4 info')).toBeVisible()
+  // Informational findings are open findings: the row no longer reads "No open findings".
+  const second = rows.filter({ hasText: 'notes.example.test' })
+  await expect(second.getByTestId('severity-pills')).toHaveText('3I', { ignoreCase: true })
+  await expect(second.getByText('No open findings')).toHaveCount(0)
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth + 1)).toBe(true)
+})

@@ -63,9 +63,10 @@ function Pill({ children, className = '', title }: { children: ReactNode; classN
 }
 
 export function SeverityPills({ counts, compact = false }: { counts?: TargetAsset['severity_counts']; compact?: boolean }) {
-  const items = severitySummary(counts).filter(item => item.severity !== 'info')
+  // Every severity, informational included, so the chips add up to the target's open findings.
+  const items = severitySummary(counts)
   if (!items.length) return <span className="text-xs text-gray-600">{compact ? '' : 'No open findings'}</span>
-  return <span className="flex flex-wrap gap-1 lg:flex-nowrap">{items.map(item =>
+  return <span className="flex flex-wrap gap-1" data-testid="severity-pills">{items.map(item =>
     <Pill key={item.severity} title={`${item.count} ${item.severity}`} className={`ring-1 ring-inset tabular-nums ${SEVERITY_STYLE[item.severity]}`}>
       {item.count}<span className="uppercase opacity-80">{item.severity.slice(0, 1)}</span>
     </Pill>)}</span>
