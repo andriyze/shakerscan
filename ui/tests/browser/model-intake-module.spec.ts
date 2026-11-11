@@ -18,6 +18,14 @@ async function mock(page: Page, enabled: boolean | undefined) {
   return intakeRequests
 }
 
+// Space, in pixels, between the edges of the card around `text` and the text itself.
+async function cardInset(page: Page, text: string | RegExp): Promise<{ left: number; top: number }> {
+  const paragraph = page.getByText(text).first()
+  const card = paragraph.locator('xpath=ancestor::div[contains(@class, "rounded-lg")][1]')
+  const [inner, outer] = [(await paragraph.boundingBox())!, (await card.boundingBox())!]
+  return { left: inner.x - outer.x, top: inner.y - outer.y }
+}
+
 test('MODULE-001 with Model Intake off the page shows how to install it and runs nothing', async ({ page }) => {
   const intakeRequests = await mock(page, false)
   await page.goto('/model-intake')
@@ -25,6 +33,10 @@ test('MODULE-001 with Model Intake off the page shows how to install it and runs
   await expect(page.getByText('shakerscan model-intake enable', { exact: true })).toBeVisible()
   await expect(page.getByText(/about 4\.8 GB/)).toBeVisible()
   expect(intakeRequests).toEqual([])
+  // The explanation sits inside its card, not against the card's border.
+  const inset = await cardInset(page, /Model Intake checks AI models before you deploy them/)
+  expect(inset.left).toBeGreaterThanOrEqual(12)
+  expect(inset.top).toBeGreaterThanOrEqual(12)
 })
 
 test('MODULE-002 with Model Intake on (or an engine that predates the setting) the page loads', async ({ page }) => {
@@ -60,4 +72,7 @@ test('MODULE-004 in a managed deployment the page says it is not available and n
   await expect(page.getByText('Not available in this deployment.')).toBeVisible()
   await expect(page.getByText('shakerscan model-intake enable')).toHaveCount(0)
   expect(intakeRequests).toEqual([])
+  const inset = await cardInset(page, /This deployment does not include it/)
+  expect(inset.left).toBeGreaterThanOrEqual(12)
+  expect(inset.top).toBeGreaterThanOrEqual(12)
 })
