@@ -1,6 +1,6 @@
 'use client'
 
-import type { ReactNode } from 'react'
+import { Fragment, type ReactNode } from 'react'
 import Link from '@/components/WorkspaceLink'
 import {
   Archive, BookOpen, CalendarClock, Camera, Cpu, Crosshair, ExternalLink, Globe, HardDrive, Lock,
@@ -22,7 +22,8 @@ import { TargetDomainDiscovery } from '../TargetDomainDiscovery'
 import { TargetSkillEditor } from '../TargetSkillEditor'
 import { MenuItem, MenuSeparator, RowMenu } from './RowMenu'
 
-export const ROW_GRID = 'lg:grid lg:grid-cols-[1.75rem_minmax(0,2fr)_minmax(0,1.5fr)_7.5rem_12rem_7rem_9.5rem] lg:items-center lg:gap-4'
+// The columns need about 900 px of row; below the xl breakpoint (the sidebar takes 256 px) a row stacks.
+export const ROW_GRID = 'xl:grid xl:grid-cols-[1.75rem_minmax(0,2.5fr)_minmax(0,1.25fr)_6.5rem_11.5rem_6.5rem_8rem] xl:items-center xl:gap-4'
 
 const SEVERITY_STYLE: Record<string, string> = {
   critical: 'bg-red-500/15 text-red-300 ring-red-500/30',
@@ -57,6 +58,12 @@ function AssetIcon({ asset }: { asset: TargetAsset }) {
     : kind === 'device' ? 'bg-violet-500/10 text-violet-300 ring-violet-400/20'
       : kind === 'address' ? 'bg-cyan-500/10 text-cyan-300 ring-cyan-400/20' : 'bg-blue-500/10 text-blue-300 ring-blue-400/20'
   return <span className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-lg ring-1 ring-inset ${tone}`} aria-hidden="true"><Icon className="h-4.5 w-4.5" /></span>
+}
+
+/** A host name that may wrap after a dot, so a narrow column still shows all of it. */
+function WrappableName({ text }: { text: string }) {
+  const parts = text.split('.')
+  return <>{parts.map((part, index) => <Fragment key={index}>{part}{index < parts.length - 1 && <>.<wbr /></>}</Fragment>)}</>
 }
 
 function Pill({ children, className = '', title }: { children: ReactNode; className?: string; title?: string }) {
@@ -153,15 +160,15 @@ export function TargetRow({ asset, selected, onSelect, actions, busy, nested = f
   const authorization = assetAuthorizationStatus(asset)
   return <div role="row" data-testid="target-asset-row" aria-selected={selected}
     className={`group/row relative px-4 py-3 transition-colors ${selected ? 'bg-blue-500/[0.06]' : 'hover:bg-gray-800/30'} ${ROW_GRID}`}>
-    <span role="cell" className="absolute left-4 top-4 lg:static">
+    <span role="cell" className="absolute left-4 top-4 xl:static">
       <input type="checkbox" aria-label={`Select ${name || locator}`} checked={selected} onChange={event => onSelect(event.target.checked)}
         className="h-4 w-4 cursor-pointer rounded border-gray-600 bg-gray-900 accent-blue-500" />
     </span>
-    <span role="cell" className={`flex min-w-0 items-start gap-3 pl-7 lg:pl-0 ${nested ? 'lg:pl-6' : ''}`}>
+    <span role="cell" className={`flex min-w-0 items-start gap-3 pl-7 xl:pl-0 ${nested ? 'xl:pl-6' : ''}`}>
       <AssetIcon asset={asset} />
       <span className="min-w-0">
-        <Link href={`/targets/${asset.id}/asset`} className="block truncate font-medium text-gray-100 hover:text-blue-300" title={boundedTargetDisplay({ url: asset.url }, { maxLength: 300 })}>
-          {name || locator}
+        <Link href={`/targets/${asset.id}/asset`} className="line-clamp-2 font-medium text-gray-100 [overflow-wrap:anywhere] hover:text-blue-300" title={boundedTargetDisplay({ url: asset.url }, { maxLength: 300 })}>
+          <WrappableName text={name || locator} />
         </Link>
         {name && <span className="block truncate font-mono text-xs text-gray-500">{locator}</span>}
         <span className="mt-1 flex flex-wrap items-center gap-1.5">
@@ -177,11 +184,11 @@ export function TargetRow({ asset, selected, onSelect, actions, busy, nested = f
         </span>
       </span>
     </span>
-    <span role="cell" className="mt-2 block pl-7 lg:mt-0 lg:pl-0"><WebApps asset={asset} /></span>
-    <span role="cell" className="mt-2 block pl-7 lg:mt-0 lg:pl-0"><LivenessPill liveness={asset.liveness} /></span>
-    <span role="cell" className="mt-2 flex items-center gap-4 pl-7 lg:mt-0 lg:block lg:pl-0"><SeverityPills counts={asset.severity_counts} /></span>
-    <span role="cell" className="mt-1 block pl-7 lg:mt-0 lg:pl-0"><LastScan asset={asset} /></span>
-    <span role="cell" className="mt-3 flex items-center justify-end gap-1.5 lg:mt-0">
+    <span role="cell" className="mt-2 block pl-7 xl:mt-0 xl:pl-0"><WebApps asset={asset} /></span>
+    <span role="cell" className="mt-2 block pl-7 xl:mt-0 xl:pl-0"><LivenessPill liveness={asset.liveness} /></span>
+    <span role="cell" className="mt-2 flex items-center gap-4 pl-7 xl:mt-0 xl:block xl:pl-0"><SeverityPills counts={asset.severity_counts} /></span>
+    <span role="cell" className="mt-1 block pl-7 xl:mt-0 xl:pl-0"><LastScan asset={asset} /></span>
+    <span role="cell" className="mt-3 flex items-center justify-end gap-1.5 xl:mt-0">
       {asset.is_active
         ? mayScan && <Button size="sm" variant={asset.scanning ? 'secondary' : 'primary'} disabled={!canScan} loading={busy} onClick={() => actions.scan(asset)} aria-label={`${scanLabel}: ${locator}`} title={scanLabel}>
             {webApps || domain ? <><Play className="h-3.5 w-3.5" aria-hidden="true" />Scan</> : <><Radar className="h-3.5 w-3.5" aria-hidden="true" />Discover</>}
