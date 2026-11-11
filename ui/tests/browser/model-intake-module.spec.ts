@@ -76,3 +76,10 @@ test('MODULE-004 in a managed deployment the page says it is not available and n
   expect(inset.left).toBeGreaterThanOrEqual(12)
   expect(inset.top).toBeGreaterThanOrEqual(12)
 })
+
+test('MODULE-005 with Model Intake off the page says plainly that installing is a host task, not a page control', async ({ page }) => {
+  await mock(page, false)
+  await page.goto('/model-intake')
+  await expect(page.getByText(/it is done on the host by its operator and cannot be done from this page/)).toBeVisible()
+  await expect(page.getByRole('button', { name: 'Copy install command' })).toBeVisible()
+})

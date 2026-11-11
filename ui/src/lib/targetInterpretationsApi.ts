@@ -44,3 +44,12 @@ export async function getTargetNegativeResults(id: string, signal?: AbortSignal)
   if (!Array.isArray(value.rows)) throw new Error('The server returned an invalid negative-result list.')
   return { rows: value.rows as TargetNegativeResult[], hasMore: Boolean(value.has_more) }
 }
+
+/** What changed on a target since a point, built from existing records: the read sends nothing to the target. */
+export async function getTargetKnowledgeChanges(id: string, since: string, signal?: AbortSignal): Promise<unknown> {
+  const response = await fetch(
+    `${API_URL}/targets/${pathSegment(id)}/knowledge/changes?since=${encodeURIComponent(since)}&limit=25`,
+    { cache: 'no-store', signal })
+  if (!response.ok) throw new Error(await getApiErrorMessage(response, 'Could not load what changed'))
+  return response.json()
+}

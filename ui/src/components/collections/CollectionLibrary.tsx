@@ -50,7 +50,7 @@ export function CollectionLibrary({ onManage }: { onManage: (collection: Library
     {error ? <div className="p-4"><ErrorState message={error} /></div>
       : loading && !rows.length ? <div className="space-y-2 p-4">{Array.from({ length: 4 }, (_, index) => <Skeleton key={index} className="h-12 w-full rounded-lg" />)}</div>
       : !rows.length ? <div className="p-4"><EmptyState message={debounced ? 'No collections match' : 'No request collections yet'}
-          hint={debounced ? 'Try a collection name, a format such as openapi, or the owner target.' : 'Choose a target above, then upload a Postman, HAR, OpenAPI or Swagger document, or record one with shakerscan record.'} /></div>
+          hint={debounced ? 'Try a collection name, a format such as openapi, or the owner target.' : 'Choose a target above, then use Upload to add a Postman, HAR, OpenAPI or Swagger document. Recording your own browsing is not done from this page: it runs on your machine, with shakerscan record in a terminal there.'} /></div>
       : <div className={loading ? 'opacity-60' : ''}>
         <div className="hidden grid-cols-[minmax(0,2fr)_minmax(0,1.5fr)_7rem_6rem_11rem] gap-4 px-4 py-2 text-[11px] font-medium uppercase tracking-wider text-gray-500 lg:grid">
           <span>Collection</span><span>Owner</span><span>Requests</span><span>Bound APIs</span><span className="text-right">Updated</span>
