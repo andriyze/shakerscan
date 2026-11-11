@@ -2039,7 +2039,7 @@ function ScanDetailContent() {
     } finally {
       if (!signal.aborted) setLoading(false)
     }
-  }, { intervalMs: SCAN_REFRESH_MS, idleIntervalMs: null, live: (scan === null && !missing) || scanLive, deps: [scanId, retryNonce] })
+  }, { intervalMs: SCAN_REFRESH_MS, idleIntervalMs: null, live: scan === null || scanLive, enabled: !missing, deps: [scanId, retryNonce] })
 
   // Read only new numbered lines. Older engines and aggregated parent/device feeds keep
   // their full-tail replacement behavior. Quiet polls back off; a terminal status gets a final read.
