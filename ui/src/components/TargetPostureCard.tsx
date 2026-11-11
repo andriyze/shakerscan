@@ -5,6 +5,7 @@ import type { ReactElement } from 'react'
 
 import { Card } from '@/components/ui'
 import { formatDate, type TargetPosture, type TargetPostureSection } from '@/lib/api'
+import { signatureAlgorithmLabel } from '@/lib/tlsNames.mjs'
 
 // The results page for one run also shows what earlier runs established about the target, because
 // fast profiles skip some checks. Every section states where its facts came from: this run, an
@@ -113,7 +114,7 @@ function TlsBody({ payload }: { payload: Record<string, any> }) {
         ['Issuer', cert.issuer],
         ['Expires', cert.not_after ? formatDate(cert.not_after) : null],
         ['Key', [cert.key_algorithm, cert.key_bits ? `${cert.key_bits} bits` : null].filter(Boolean).join(' ')],
-        ['Signature', cert.signature_algorithm],
+        ['Signature', signatureAlgorithmLabel(cert.signature_algorithm)],
         ['OCSP stapling', payload.ocsp_stapled === true ? 'yes' : payload.ocsp_stapled === false ? 'no' : null],
       ]} />
       {weak.length > 0 ? (
@@ -142,7 +143,7 @@ function DnsBody({ payload }: { payload: Record<string, any> }) {
         {records.map(([name, values]) => (
           <li key={name} className="grid grid-cols-[auto_minmax(0,1fr)] gap-x-2">
             <span className="font-mono uppercase text-gray-400">{name.replace(/^(host|root)_/, '')}</span>
-            <span className="min-w-0 truncate text-gray-200" title={values.join(', ')}>{values.join(', ')}</span>
+            <span className="min-w-0 wrap-break-word text-gray-200">{values.join('; ')}</span>
           </li>
         ))}
       </ul>

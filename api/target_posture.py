@@ -131,10 +131,32 @@ def shape_tls(tls: Mapping[str, Any]) -> dict[str, Any] | None:
     }
 
 
+# Structured answers (SOA, DS, MX, CAA, DNSKEY) are written as named fields in a fixed order,
+# never as the text of the Python mapping.
+_DNS_FIELDS = (
+    ("primary_nameserver", "primary"), ("responsible_mailbox", "mailbox"), ("serial", "serial"),
+    ("refresh", "refresh"), ("retry", "retry"), ("expire", "expire"), ("minimum", "minimum"),
+    ("priority", "priority"), ("host", "host"), ("flags", "flags"), ("tag", "tag"), ("value", "value"),
+    ("protocol", "protocol"), ("key_tag", "key tag"), ("algorithm", "algorithm"),
+    ("digest_type", "digest type"), ("digest", "digest"),
+)
+
+
+def _dns_record_text(item: Any) -> str | None:
+    if not isinstance(item, Mapping):
+        return _text(item, 120)
+    known = {key for key, _label in _DNS_FIELDS}
+    fields = [(label, item[key]) for key, label in _DNS_FIELDS if key in item]
+    fields += [(str(key).replace("_", " "), value) for key, value in item.items() if key not in known]
+    return _text(
+        ", ".join(f"{label} {value}" for label, value in fields if value not in (None, "")), 240,
+    )
+
+
 def shape_dns(dns: Mapping[str, Any]) -> dict[str, Any] | None:
     dns = _record(dns)
     records = {
-        str(name): [_text(item, 120) for item in _listing(values, 10)]
+        str(name): [_dns_record_text(item) for item in _listing(values, 10)]
         for name, values in _record(dns.get("records")).items()
         if _listing(values, 1)
     }

@@ -70,7 +70,11 @@ function scopeLabel(scope: string): { label: string; tone: string } {
 }
 
 
-export default function InfrastructureIntelligenceSection({ infrastructure }: { infrastructure: any }) {
+export default function InfrastructureIntelligenceSection({ infrastructure, certificateShownInTls = false }: {
+  infrastructure: any
+  /** The report's TLS section shows this certificate in full, so it is not repeated here. */
+  certificateShownInTls?: boolean
+}) {
   if (!infrastructure || typeof infrastructure !== 'object' || Array.isArray(infrastructure)) return null
 
   const registration = infrastructure.registration && typeof infrastructure.registration === 'object'
@@ -188,7 +192,7 @@ export default function InfrastructureIntelligenceSection({ infrastructure }: { 
           </div>
         </div>
 
-        <div className="grid gap-6 lg:grid-cols-2">
+        <div className={certificateShownInTls ? 'grid gap-6' : 'grid gap-6 lg:grid-cols-2'}>
           <div>
             <h3 className="text-sm font-semibold text-gray-200">DNS topology</h3>
             <div className="mt-3 space-y-2 text-sm text-gray-300">
@@ -213,7 +217,7 @@ export default function InfrastructureIntelligenceSection({ infrastructure }: { 
             </div>
           </div>
 
-          <div>
+          {!certificateShownInTls && <div>
             <h3 className="text-sm font-semibold text-gray-200">Certificate identity</h3>
             {certificate ? (
               <div className="mt-3 space-y-2 text-sm text-gray-300">
@@ -230,7 +234,7 @@ export default function InfrastructureIntelligenceSection({ infrastructure }: { 
             ) : (
               <p className="mt-3 text-sm text-gray-500">No parsed HTTPS certificate was observed.</p>
             )}
-          </div>
+          </div>}
         </div>
 
         {related.length > 0 && (

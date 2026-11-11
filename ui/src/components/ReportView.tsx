@@ -25,6 +25,7 @@ import { coverageReasonText } from '@/lib/scanDetailPresentation.mjs'
 import { buildFindingLinkageIndex, linkedPersistedFinding, observedReportFinding } from '@/lib/findingLinkage'
 import ScanCoverageSection, { type ScanCoverage } from '@/components/report/ScanCoverageSection'
 import InfrastructureIntelligenceSection from '@/components/report/InfrastructureIntelligenceSection'
+import { signatureAlgorithmLabel } from '@/lib/tlsNames.mjs'
 import SubdomainDiscoverySection from '@/components/report/SubdomainDiscoverySection'
 
 type RemediationStatus = 'open' | 'in_progress' | 'remediated' | 'false_positive' | 'accepted_risk'
@@ -2446,7 +2447,8 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
       )}
 
       {/* Informational target infrastructure */}
-      {show('posture') && <InfrastructureIntelligenceSection infrastructure={infrastructure} />}
+      {/* The certificate is shown once: in full by the TLS section below when this report has one. */}
+      {show('posture') && <InfrastructureIntelligenceSection infrastructure={infrastructure} certificateShownInTls={Boolean(tls?.certificate)} />}
 
       {/* DNS */}
       {show('posture') && dns && Object.keys(dns).length > 0 && (
@@ -2536,7 +2538,7 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
               </div>
               <div className="bg-gray-900 rounded-lg p-4">
                 <h4 className="text-sm text-gray-400 mb-1">Signature</h4>
-                <p className="font-mono text-sm text-white">{tls.certificate.sig_algo || '—'}</p>
+                <p className="font-mono text-sm text-white">{signatureAlgorithmLabel(tls.certificate.signature_algorithm || tls.certificate.sig_algo) || '—'}</p>
               </div>
               {tls.certificate.serial && (
                 <div className="bg-gray-900 rounded-lg p-4">
