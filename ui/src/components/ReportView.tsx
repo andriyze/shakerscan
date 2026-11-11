@@ -21,7 +21,7 @@ import { AlertTriangle, CheckCircle2, Download } from 'lucide-react'
 import { normalizeSkipReasons } from '@/lib/deferredWorkContracts'
 import { authorizationStopNotice } from '@/lib/authorizationStop'
 import { deviceScorePresentation } from '@/lib/deviceScanPresentation.mjs'
-import { coverageReasonText } from '@/lib/scanDetailPresentation.mjs'
+import { coverageGapRows, coverageReasonText, scanStepLabel, scanStepStatusLabel } from '@/lib/scanDetailPresentation.mjs'
 import { buildFindingLinkageIndex, linkedPersistedFinding, observedReportFinding } from '@/lib/findingLinkage'
 import ScanCoverageSection, { type ScanCoverage } from '@/components/report/ScanCoverageSection'
 import InfrastructureIntelligenceSection from '@/components/report/InfrastructureIntelligenceSection'
@@ -644,28 +644,17 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
   const partiallyPersistedFindings = !persistedFindingsTruncated && rawFindings.length > 0 && persistedFindings.length > 0 && rawFindingsWithoutRecords.length > 0
   const result = scanData.result || {}
   const triage = scanData.triage || {}
+  const hasTriageSummary = triage?.confirmed?.count !== undefined
   const coverage = scanData.coverage || {}
   const coverageGaps = scanData.coverage_gaps || {}
   const explicitCoverageGapIssues = Array.isArray(coverageGaps.issues)
     ? coverageGaps.issues.filter((item: any) => typeof item === 'string' && item.trim())
     : []
-  const coverageActionRows = Array.isArray(coverage?.capability_coverage?.actions)
-    ? coverage.capability_coverage.actions.filter(
-      (item: any) => item && typeof item === 'object' && String(item.status || '') !== 'success',
-    )
-    : []
-  const actionGapReasonCodes = new Set(
-    coverageActionRows.map((item: any) => String(item.reason_code || '')).filter(Boolean),
-  )
-  const canonicalActionGapIssues = coverageActionRows.map((item: any) => {
-    const capability = formatScanToken(
-      String(item.capability_name || item.action_id || 'Capability').replace(/\./g, ' '),
-    )
-      .replace(/^Dns\b/, 'DNS')
-      .replace(/^Http\b/, 'HTTP')
-    const status = formatScanToken(item.status || 'incomplete')
+  const coverageActionRows = coverageGapRows(coverage?.capability_coverage?.actions)
+  const actionGapReasonCodes = new Set(coverageActionRows.reasonCodes)
+  const canonicalActionGapIssues = coverageActionRows.gaps.map((item: any) => {
     const reason = item.reason_code ? ` — ${coverageReasonText(item.reason_code)}` : ''
-    return `${capability}: ${status}${reason}`
+    return `${scanStepLabel(item)}: ${scanStepStatusLabel(item.status || 'incomplete')}${reason}`
   })
   const canonicalCoverageReasonIssues = (Array.isArray(coverage.reasons) ? coverage.reasons : [])
     .filter((item: any) => typeof item === 'string' && item.trim() && !actionGapReasonCodes.has(item))
@@ -2366,41 +2355,52 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
       )}
 
       {/* Triage + Coverage Gaps */}
-      {show('coverage') && (triage?.confirmed?.count !== undefined || coverageGapIssues.length > 0) && (
-        <div className="bg-gray-800/50 backdrop-blur-lg rounded-lg p-6 mb-8">
-          <h2 className="text-2xl font-bold mb-4">Triage & Coverage</h2>
-          <div className="grid grid-cols-1 md:grid-cols-5 gap-3 mb-4">
-            <div className="bg-gray-700/40 rounded-lg p-3">
-              <div className="text-xs text-gray-400">Confirmed</div>
-              <div className="text-lg font-semibold text-green-400">{triage?.confirmed?.count || 0}</div>
+      {show('coverage') && (hasTriageSummary || coverageGapIssues.length > 0 || coverageActionRows.notApplicable > 0) && (
+        <div className="bg-gray-800/50 backdrop-blur-lg rounded-lg p-6 mb-8" data-testid="coverage-gaps">
+          <h2 className="text-2xl font-bold mb-4">{hasTriageSummary ? 'Triage and coverage gaps' : 'Coverage gaps'}</h2>
+          {/* Only a scan that carries a triage summary has these numbers; without one the tiles
+              would read zero beside a scan that has findings. */}
+          {hasTriageSummary && (
+            <div className="grid grid-cols-1 md:grid-cols-5 gap-3 mb-4">
+              <div className="bg-gray-700/40 rounded-lg p-3">
+                <div className="text-xs text-gray-400">Confirmed</div>
+                <div className="text-lg font-semibold text-green-400">{triage?.confirmed?.count || 0}</div>
+              </div>
+              <div className="bg-gray-700/40 rounded-lg p-3">
+                <div className="text-xs text-gray-400">Suspected High</div>
+                <div className="text-lg font-semibold text-orange-400">{triage?.suspected_high?.count || 0}</div>
+              </div>
+              <div className="bg-gray-700/40 rounded-lg p-3">
+                <div className="text-xs text-gray-400">Needs Review</div>
+                <div className="text-lg font-semibold text-yellow-400">{triage?.needs_review?.count || 0}</div>
+              </div>
+              <div className="bg-gray-700/40 rounded-lg p-3">
+                <div className="text-xs text-gray-400">AI False Positives</div>
+                <div className="text-lg font-semibold text-slate-300">{triage?.ai_false_positive?.count || 0}</div>
+              </div>
+              <div className="bg-gray-700/40 rounded-lg p-3">
+                <div className="text-xs text-gray-400">Verification Skipped</div>
+                <div className="text-lg font-semibold text-slate-300">{triage?.verification_skipped?.count || 0}</div>
+              </div>
             </div>
-            <div className="bg-gray-700/40 rounded-lg p-3">
-              <div className="text-xs text-gray-400">Suspected High</div>
-              <div className="text-lg font-semibold text-orange-400">{triage?.suspected_high?.count || 0}</div>
-            </div>
-            <div className="bg-gray-700/40 rounded-lg p-3">
-              <div className="text-xs text-gray-400">Needs Review</div>
-              <div className="text-lg font-semibold text-yellow-400">{triage?.needs_review?.count || 0}</div>
-            </div>
-            <div className="bg-gray-700/40 rounded-lg p-3">
-              <div className="text-xs text-gray-400">AI False Positives</div>
-              <div className="text-lg font-semibold text-slate-300">{triage?.ai_false_positive?.count || 0}</div>
-            </div>
-            <div className="bg-gray-700/40 rounded-lg p-3">
-              <div className="text-xs text-gray-400">Verification Skipped</div>
-              <div className="text-lg font-semibold text-slate-300">{triage?.verification_skipped?.count || 0}</div>
-            </div>
-          </div>
+          )}
           <div>
-            <h3 className="text-sm text-gray-400 mb-2">Coverage Gaps</h3>
+            {hasTriageSummary && <h3 className="text-sm text-gray-400 mb-2">Coverage gaps</h3>}
             {coverageGapIssues.length > 0 ? (
-              <ul className="list-disc list-inside text-sm text-gray-300 space-y-1">
+              <ul className="list-disc space-y-1 pl-5 text-sm text-gray-300">
                 {coverageGapIssues.map((issue: string, idx: number) => (
                   <li key={idx}>{issue}</li>
                 ))}
               </ul>
             ) : (
               <p className="text-sm text-gray-400">No coverage gaps flagged.</p>
+            )}
+            {coverageActionRows.notApplicable > 0 && (
+              <p className="mt-3 text-xs text-gray-500">
+                {coverageActionRows.notApplicable === 1
+                  ? '1 planned step did not apply to this target and was not needed.'
+                  : `${coverageActionRows.notApplicable} planned steps did not apply to this target and were not needed.`}
+              </p>
             )}
           </div>
         </div>
