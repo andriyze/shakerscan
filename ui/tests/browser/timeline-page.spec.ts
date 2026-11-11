@@ -142,3 +142,24 @@ test('timeline fits a phone viewport', async ({ page }) => {
   await expectNoHorizontalOverflow(page)
   expect(api.unhandled).toEqual([])
 })
+
+test('a submitted scan is labelled a scan, and its risk tier does not read as a second status', async ({ page }) => {
+  const submitted = event({
+    event_id: 'command:77777777-7777-4777-8777-777777777777', kind: 'command_result', command: 'scan.submit',
+    action_name: 'scan.submit', status: 'completed', risk_tier: 'active', scan_id: '11111111-1111-4111-8111-111111111111',
+  })
+  const preview = event({
+    event_id: 'command:88888888-8888-4888-8888-888888888888', kind: 'command_result', command: 'data.records.delete',
+    action_name: 'data.records.delete', status: 'approval_required', risk_tier: 'dangerous', dry_run: true,
+  })
+  await mockTimeline(page, () => timeline([submitted, preview]))
+  await page.goto('/timeline', { waitUntil: 'domcontentloaded' })
+  const main = page.locator('main')
+  const row = main.getByText('Scan completed', { exact: true }).locator('xpath=..')
+  await expect(row.getByText('scan', { exact: true })).toBeVisible()
+  await expect(row.getByText('risk: active', { exact: true })).toBeVisible()
+  await expect(row.getByText('active', { exact: true })).toHaveCount(0)
+  await expect(main.getByText('investigation', { exact: true })).toHaveCount(0)
+  await expect(main.getByText('records', { exact: true })).toBeVisible()
+  await expect(main.getByText('risk: dangerous', { exact: true })).toBeVisible()
+})

@@ -130,10 +130,12 @@ export function ProofStateBadge({
   return null
 }
 
-export function RiskTierBadge({ tier, className = '' }: { tier?: string | null; className?: string }) {
+/** `labelled` is for places with no "Risk" column heading: the tier "active" next to a status
+ * chip would otherwise read as a second status. */
+export function RiskTierBadge({ tier, className = '', labelled = false }: { tier?: string | null; className?: string; labelled?: boolean }) {
   if (!tier) return null
   const style = RISK_TIER_BADGE_STYLES[tier as RiskTier] ?? RISK_TIER_BADGE_STYLES.read_only
-  return <Badge className={`${style} ${className}`}>{tier.replace(/_/g, ' ')}</Badge>
+  return <Badge className={`${style} ${className}`}>{labelled ? 'risk: ' : ''}{tier.replace(/_/g, ' ')}</Badge>
 }
 
 export function TimelineStatusBadge({ status, className = '' }: { status: string; className?: string }) {
