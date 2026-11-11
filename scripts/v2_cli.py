@@ -2552,7 +2552,7 @@ def _reference_id(value: str) -> str:
     return str(value or "").strip().removeprefix("secret://")
 
 
-def _secrets_target(client: ApiClient, value: Any) -> str:
+def _named_target(client: ApiClient, value: Any) -> str:
     """A target named by its id, or by its URL as `targets authorize` takes it: the instance says
     which registered target the URL names (GET /targets/lookup). A URL used to go into the path
     as it was and came back as the engine's "noncanonical request path"."""
@@ -2576,9 +2576,9 @@ def _run_secrets(args: argparse.Namespace, client: ApiClient) -> int:
     """``shakerscan secrets``: a target's discovered secrets. Listing never shows a value; reveal,
     grant and promote are the person's decisions, made in their own terminal (Enterprise: with
     their step-up, applied by the gateway; an open-source engine: a keypress)."""
-    command, target = args.store_command, _secrets_target(client, args.target_id)
+    command, target = args.store_command, _named_target(client, args.target_id)
     if getattr(args, "to", None):
-        args.to = _secrets_target(client, args.to)
+        args.to = _named_target(client, args.to)
     base = f"/targets/{_quoted(target)}/discovered-secrets"
     if command == "list":
         # One more than shown, so "there are more" is known rather than guessed. An engine before
