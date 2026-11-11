@@ -214,9 +214,9 @@ const footLink = 'rounded-sm text-gray-400 transition-colors hover:text-white fo
 
 // Who is signed in, where a managed deployment says so (ui-extensions/v1). Its links are the
 // deployment's own pages: ordinary navigations on this origin, never requests the UI makes.
-// The block stays at the foot of the sidebar when the menu is taller than the window (only the
-// menu scrolls), so the person's name and Sign out never need a scroll to be found. The negative
-// margins take it over the sidebar's own padding, flush with its edges.
+// It is drawn inside the sidebar's foot (see NavContent), which stays in view when the menu is
+// taller than the window (only the menu scrolls), so the person's name and Sign out never need
+// a scroll to be found.
 function AccountBlock({ account }: { account: ExtensionAccount }) {
   const origin = window.location.origin
   const links = account.links
@@ -224,7 +224,7 @@ function AccountBlock({ account }: { account: ExtensionAccount }) {
     .filter((link): link is { label: string; href: string } => link.href !== null)
   const signOut = account.sign_out ? sameOriginPath(account.sign_out, origin) : null
   return (
-    <section aria-label="Account" className="-mx-4 -mb-4 mt-4 shrink-0 border-t border-gray-800 bg-gray-900 px-4 pb-4 pt-3">
+    <section aria-label="Account" className="pb-4 pt-3">
       <div className="flex items-center gap-2.5 px-1">
         <span aria-hidden="true" className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-gray-800 text-xs font-semibold uppercase text-gray-200">
           {Array.from(account.name)[0]}
@@ -290,6 +290,20 @@ function NavContent({
       }),
     }))
     .filter((group) => group.items.length > 0)
+  // Where a deployment names who is signed in, the sidebar's foot holds the account block and,
+  // above it, the primary action, so the account block can never sit on top of New Scan.
+  const account = extensions.account
+  const newScan = canStartScan && pageAllowed('/scan/new') ? (
+    <Link
+      href="/scan/new"
+      className={`${buttonClasses('primary', 'md')} w-full`}
+    >
+      <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" aria-hidden="true">
+        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
+      </svg>
+      New Scan
+    </Link>
+  ) : null
   // Only the Settings landing lights the gear. The /settings/* sub-routes
   // (research-agent, arsenal) belong to their own nav groups.
   const settingsActive = pathname === '/settings'
@@ -404,17 +418,7 @@ function NavContent({
         ))}
       </nav>
 
-      {canStartScan && pageAllowed('/scan/new') && <div className="pt-4 mt-4 shrink-0 border-t border-gray-800">
-        <Link
-          href="/scan/new"
-          className={`${buttonClasses('primary', 'md')} w-full`}
-        >
-          <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
-          </svg>
-          New Scan
-        </Link>
-      </div>}
+      {newScan && !account && <div className="pt-4 mt-4 shrink-0 border-t border-gray-800">{newScan}</div>}
 
       <div className="pt-3 mt-4 shrink-0 border-t border-gray-800">
         <div className="flex items-center gap-1.5 px-1 text-[12.5px]">
@@ -460,7 +464,7 @@ function NavContent({
             All sections
           </button>
           )}
-          <Link
+          {navigationAllowed('/settings') && pageAllowed('/settings') && <Link
             href="/settings"
             aria-label="Settings"
             title="Settings"
@@ -480,11 +484,18 @@ function NavContent({
               />
               <circle cx="13.5" cy="12" r="2.5" strokeWidth={2} />
             </svg>
-          </Link>
+          </Link>}
         </div>
       </div>
 
-      {extensions.account && <AccountBlock account={extensions.account} />}
+      {/* The negative offset and margins take the foot over the sidebar's own padding, flush
+          with its edges. */}
+      {account && (
+        <div className="sticky -bottom-4 -mx-4 -mb-4 mt-4 shrink-0 border-t border-gray-800 bg-gray-900 px-4">
+          {newScan && <div className="-mx-4 border-b border-gray-800 px-4 py-3">{newScan}</div>}
+          <AccountBlock account={account} />
+        </div>
+      )}
     </>
   )
 }
