@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 
-import { assetAuthorizationStatus } from './assetAuthorization.mjs'
+import { assetAuthorizationStatus, authorizedByPhrase } from './assetAuthorization.mjs'
 
 const origin = (authorized, is_active = true) => ({ id: 'o', url: 'https://app.test', is_active, authorized })
 
@@ -37,4 +37,11 @@ test('nothing authorized, and an older API without the count, fall back safely',
   assert.equal(assetAuthorizationStatus({ authorized: false, origins: [origin(true)] }).state, 'web_apps')
   assert.equal(assetAuthorizationStatus({ authorized: true }).state, 'authorized')
   assert.equal(assetAuthorizationStatus(null).state, 'none')
+})
+
+test('an authorization names the person who recorded it, never the screen it was recorded on', () => {
+  assert.equal(authorizedByPhrase('operator@example.test'), ' by operator@example.test')
+  assert.equal(authorizedByPhrase('interactive-ui'), '')
+  assert.equal(authorizedByPhrase(''), '')
+  assert.equal(authorizedByPhrase(undefined), '')
 })

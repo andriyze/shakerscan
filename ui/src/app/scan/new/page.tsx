@@ -29,6 +29,7 @@ import { Button, Card, Combobox, Field, useToast, type ComboboxOption } from '@/
 import { useTargetSearch } from '@/lib/useTargetSearch'
 import { getTargetAssets, type TargetAsset } from '@/lib/targetAssetApi'
 import { credentialScanCoverageNote } from '@/lib/credentialScanCoverage.mjs'
+import { authorizedByPhrase } from '@/lib/assetAuthorization.mjs'
 import { DOMAIN_LOOKUP_MAX_PAGES, DOMAIN_LOOKUP_PAGE, INVENTORY_MEMBER_LIMIT, SCAN_BATCH_MAX, batchCapNotice, capBatchTargets, findDomainGroup, singleScanPrefill } from '@/lib/targetInventoryModel.mjs'
 import { credentialDescription, credentialOptions } from '@/lib/pickerOptions'
 import {
@@ -778,7 +779,7 @@ export default function NewScanPage() {
           </label>
           {activeTesting && standingCoversScan && (
             <p data-testid="standing-authorization" className="rounded-lg border border-emerald-800/60 bg-emerald-950/20 p-4 text-sm text-emerald-100">
-              Authorized for active testing{standingAuthorization?.approved_by ? ` by ${standingAuthorization.approved_by}` : ''}: this Scan uses the target&apos;s standing authorization. You can revoke it from the target menu.
+              Authorized for active testing{authorizedByPhrase(standingAuthorization?.approved_by)}: this Scan uses the target&apos;s standing authorization. You can revoke it from the target menu.
             </p>
           )}
           {confirmationNeeded && (

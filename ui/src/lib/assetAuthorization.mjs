@@ -35,3 +35,12 @@ export function assetAuthorizationStatus(asset) {
   }
   return { state: 'none', label: 'Not authorized', title: 'No standing authorization: only passive checks run until you authorize it' }
 }
+
+// The name the UI records when no person is signed in. It names the screen, not a person.
+const BUILT_IN_APPROVERS = new Set(['interactive-ui'])
+
+/** " by <name>" for an authorization a named person recorded, and nothing for the UI's own label. */
+export function authorizedByPhrase(approvedBy) {
+  const name = String(approvedBy ?? '').trim()
+  return name && !BUILT_IN_APPROVERS.has(name) ? ` by ${name}` : ''
+}
