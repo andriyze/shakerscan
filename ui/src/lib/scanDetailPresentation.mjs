@@ -235,6 +235,11 @@ export function scanLogEntry(rawLine) {
   } else if (structuredLogFailure(raw, source)) {
     kind = 'error'
     label = 'error'
+  } else if (notApplicableStep(raw)) {
+    // A step that did not apply to this target is the plan working, not something to look at.
+    const step = message.match(/^Diagnostic\s+(.+?)\s+·/)
+    label = 'not applicable'
+    message = `${step ? step[1] : 'This step'} did not run: it does not apply to this target. Nothing was sent.`
   } else if (structuredLogWarning(raw, source)) {
     kind = 'warning'
     label = 'attention'
@@ -275,6 +280,12 @@ function structuredLogFailure(raw, source) {
     .replace(/(?:^|[\s·])(?:error|reason)=(?:none|null|false|no|0|nil|success|ok|-)(?=$|[\s·])/gi, ' ')
     .replace(/(?:^|[\s·])(?:outcome|status|result)=(?:success|ok|complete|completed)(?=$|[\s·])/gi, ' ')
   return /(?:^|[\s:])(error|failed|failure|traceback|exception|fatal)(?:$|[\s:])/i.test(withoutBenignFields)
+}
+
+function notApplicableStep(raw) {
+  if (structuredValue(raw, '(?:outcome|status|result)') !== 'skipped') return false
+  if (structuredValue(raw, 'reason') !== 'not_applicable') return false
+  return ['', 'none', 'null', 'false', 'no', '0', 'nil', '-'].includes(structuredValue(raw, 'error'))
 }
 
 function structuredLogWarning(raw, source) {

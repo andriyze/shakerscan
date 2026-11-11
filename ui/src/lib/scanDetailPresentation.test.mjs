@@ -65,6 +65,16 @@ test('structured diagnostic failures and real exceptions remain errors', () => {
   assert.equal(scanLogEntry('Diagnostic · outcome=success · error=connection_refused').kind, 'error')
 })
 
+test('a step that did not apply to the target is plain activity in plain words, not a warning', () => {
+  const entry = scanLogEntry('[scan] Diagnostic Baseline HTTP Redirect · outcome=skipped · reason=not_applicable · error=none · execution=not_started · http=0/4 accounted/reserved · wall=0s/15s accounted/reserved')
+  assert.equal(entry.kind, 'detail')
+  assert.equal(entry.label, 'not applicable')
+  assert.equal(entry.message, 'Baseline HTTP Redirect did not run: it does not apply to this target. Nothing was sent.')
+  assert.match(entry.raw, /reason=not_applicable/)
+  // A not-applicable step that still reports an error keeps the operator's attention.
+  assert.equal(scanLogEntry('Diagnostic Prove XSS R01 · outcome=skipped · reason=not_applicable · error=adapter_missing').kind, 'warning')
+})
+
 test('budget-skipped diagnostics are warnings even when the adapter records an error class', () => {
   const entry = scanLogEntry('Diagnostic Discover Web Content · outcome=skipped · reason=insufficient_plan_budget · error=unclassified_adapter_error · execution=not_started')
   assert.equal(entry.kind, 'warning')
