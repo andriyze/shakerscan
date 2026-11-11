@@ -1,5 +1,5 @@
 import { pathSegment } from './apiPath.mjs'
-import { API_URL, getApiErrorMessage } from './apiConfig'
+import { API_URL, apiFailure } from './apiConfig'
 import { fetchHeavyRead } from './busyRetry.mjs'
 import { getJson } from './fetchLayer.mjs'
 import { isListV1, listV1Params } from './listPage.mjs'
@@ -140,7 +140,7 @@ async function request<T>(path: string, init?: RequestInit, heavy = false): Prom
   const options: RequestInit = { cache: 'no-store', ...init }
   // A heavy read waits out admission (429/503 + Retry-After) instead of failing.
   const response = heavy ? await fetchHeavyRead(`${API_URL}${path}`, options) : await fetch(`${API_URL}${path}`, options)
-  if (!response.ok) throw new Error(await getApiErrorMessage(response, 'Target request failed'))
+  if (!response.ok) throw await apiFailure(response, 'Target request failed')
   return response.json() as Promise<T>
 }
 const json = (method: string, body: unknown): RequestInit => ({ method, headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body) })

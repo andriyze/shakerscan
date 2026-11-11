@@ -6,11 +6,13 @@ import { useParams } from 'next/navigation'
 import { ArrowLeft } from 'lucide-react'
 import { getCampaign, formatDate, type CampaignDetailResponse } from '@/lib/api'
 import { CAMPAIGN_TYPE_LABELS } from '@/lib/constants'
+import { isNotFoundError } from '@/lib/fetchLayer.mjs'
 import {
   CampaignStatusBadge,
   Card,
   EmptyState,
   ErrorState,
+  RecordNotFound,
   RiskTierBadge,
   ScanStatusBadge,
   SectionCard,
@@ -36,13 +38,16 @@ export default function CampaignDetailPage() {
   const [data, setData] = useState<CampaignDetailResponse | null>(null)
   const [loading, setLoading] = useState(true)
   const [loadError, setLoadError] = useState(false)
+  const [missing, setMissing] = useState(false)
 
   const load = useCallback(async () => {
     try {
       const res = await getCampaign(campaignId)
       setData(res)
       setLoadError(false)
-    } catch {
+      setMissing(false)
+    } catch (cause) {
+      setMissing(isNotFoundError(cause))
       setLoadError(true)
     } finally {
       setLoading(false)
@@ -57,6 +62,17 @@ export default function CampaignDetailPage() {
   const campaign = data?.campaign
   const impact = data?.deployment_impact
   const statusRollup = data?.status_rollup || {}
+
+  if (missing && !data) {
+    return (
+      <RecordNotFound
+        title="Campaign not found"
+        message="There is no campaign at this address."
+        listHref="/campaigns"
+        listLabel="Back to campaigns"
+      />
+    )
+  }
 
   return (
     <div className="space-y-6">

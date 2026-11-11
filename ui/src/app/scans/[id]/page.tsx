@@ -4,13 +4,13 @@ import { pathSegment } from '@/lib/apiPath.mjs'
 import { CopyButton } from '@/components/CopyButton'
 import { useEffect, useMemo, useState, Suspense, useRef } from 'react'
 import { usePoll } from '@/lib/usePoll'
-import { isAbortError } from '@/lib/fetchLayer.mjs'
+import { isAbortError, isNotFoundError } from '@/lib/fetchLayer.mjs'
 import { useParams, useRouter, useSearchParams } from 'next/navigation'
 import Link from '@/components/WorkspaceLink'
 import { API_URL, getScan, getScans, getScanLogs, getDeviceScanActivity, getHealth, getFindingsPage, getScanDeploymentDecision, getTargetPosture, replayAiScan, getAiScanCampaignHistory, formatDuration, formatDate, type AiScanCampaignHistory, type DeploymentDecision, type Finding, type TargetPosture } from '@/lib/api'
 import { TargetPostureCard } from '@/components/TargetPostureCard'
 import { SEVERITY_BADGE_STYLES, SEVERITY_LEVELS, type SeverityLevel } from '@/lib/constants'
-import { Card, ErrorState, PageHeader, gradeTextColor } from '@/components/ui'
+import { Card, ErrorState, PageHeader, RecordNotFound, gradeTextColor } from '@/components/ui'
 import ReportView, { ReportDownloads } from '@/components/ReportView'
 import FindingCard from '@/components/FindingCard'
 import { SectionTabPanel, SectionTabs, useSectionTab, type SectionTab } from '@/components/ui/SectionTabs'
@@ -1935,6 +1935,8 @@ function ScanDetailContent() {
   const [scan, setScan] = useState<any | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
+  // The API answered 404 for this id: nothing to wait for, so the read is not repeated.
+  const [missing, setMissing] = useState(false)
   const [retryNonce, setRetryNonce] = useState(0)
   const [logs, setLogs] = useState<string[]>([])
   const [logsPartial, setLogsPartial] = useState(false)
@@ -2012,6 +2014,7 @@ function ScanDetailContent() {
     setLogs([])
     setLogsPartial(false)
     setLoading(true)
+    setMissing(false)
   }, [scanId])
 
   // The scan record: every 5 s while it is pending or running, then the loop stops (idle null).
@@ -2025,13 +2028,18 @@ function ScanDetailContent() {
       setError(null)
     } catch (err) {
       if (isAbortError(err)) return
+      // No such scan: say so once. Returning (not throwing) ends the loop instead of backing off.
+      if (isNotFoundError(err) && !scanRef.current) {
+        setMissing(true)
+        return
+      }
       // A failed background refresh keeps the page; only a scan never loaded shows the error.
       if (!scanRef.current) setError('Failed to load scan details')
       throw err
     } finally {
       if (!signal.aborted) setLoading(false)
     }
-  }, { intervalMs: SCAN_REFRESH_MS, idleIntervalMs: null, live: scan === null || scanLive, deps: [scanId, retryNonce] })
+  }, { intervalMs: SCAN_REFRESH_MS, idleIntervalMs: null, live: (scan === null && !missing) || scanLive, deps: [scanId, retryNonce] })
 
   // Read only new numbered lines. Older engines and aggregated parent/device feeds keep
   // their full-tail replacement behavior. Quiet polls back off; a terminal status gets a final read.
@@ -2307,6 +2315,17 @@ function ScanDetailContent() {
       <div className="flex items-center justify-center h-64">
         <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-500"></div>
       </div>
+    )
+  }
+
+  if (missing && !scan) {
+    return (
+      <RecordNotFound
+        title="Scan not found"
+        message="There is no scan at this address."
+        listHref={backUrl}
+        listLabel="Back to scans"
+      />
     )
   }
 
