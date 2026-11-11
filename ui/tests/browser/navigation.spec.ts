@@ -33,7 +33,7 @@ test('sidebar links are internal, unique, and navigable', async ({ page }) => {
   const external = hrefs.filter((href) => !href.startsWith('/'))
 
   expect(hrefs.length).toBeGreaterThan(15)
-  // The footer's two plain links out: the website and the source code. Nothing else leaves.
+  // The foot's two icon links out: the website and the source code. Nothing else leaves.
   expect(external).toEqual(['https://shakerscan.com', 'https://github.com/andriyze/shakerscan'])
   const duplicates = Array.from(new Set(
     internal.filter((href, index) => internal.indexOf(href) !== index),

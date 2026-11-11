@@ -40,10 +40,12 @@ async function shortWindow(page: Page, allSections: boolean, path: string): Prom
 for (const allSections of [false, true]) {
   const sections = allSections ? 'every section shown' : 'the default sections'
 
-  test(`NAV-SHORT-001 a short window keeps New Scan, the section switch and Settings in view (${sections})`, async ({ page }) => {
+  test(`NAV-SHORT-001 a short window keeps New Scan, Settings and the links out in view (${sections})`, async ({ page }) => {
     const nav = await shortWindow(page, allSections, '/docs')
     // The menu is taller than this window, so it has to scroll.
-    await expect(nav.getByRole('switch', { name: 'All sections' })).toBeEnabled()
+    const more = nav.getByRole('navigation').getByRole('button', { name: /^More/ })
+    await expect(more).toBeEnabled()
+    await expect(more).toHaveAttribute('aria-expanded', String(allSections))
     expect(await nav.getByRole('navigation').evaluate((list) => {
       const side = list.closest('aside')!
       return list.scrollHeight > list.clientHeight || side.scrollHeight > side.clientHeight
@@ -51,20 +53,36 @@ for (const allSections of [false, true]) {
 
     for (const control of [
       nav.getByRole('link', { name: 'New Scan', exact: true }),
-      nav.getByRole('switch', { name: 'All sections' }),
       nav.getByRole('link', { name: 'Settings', exact: true }),
+      nav.getByRole('link', { name: 'shakerscan.com', exact: true }),
+      nav.getByRole('link', { name: 'ShakerScan on GitHub' }),
+      // Closed, the More row holds the foot of the menu: it is never below the fold.
+      ...(allSections ? [] : [more]),
     ]) {
       await expect(control).toBeInViewport({ ratio: 1 })
       expect(await uncovered(control)).toBe(true)
     }
 
     // Every page stays reachable: the last entry of the menu, focused from the keyboard, is
-    // scrolled clear of the block that stays at the foot.
-    const last = nav.getByRole('navigation').getByRole('link').last()
-    await last.focus()
-    await expect(last).toBeInViewport({ ratio: 1 })
-    expect(await uncovered(last)).toBe(true)
+    // scrolled clear of the foot and of the closed More row above it. So is the More row, which
+    // scrolls with the menu once it is open.
+    for (const entry of [nav.getByRole('navigation').getByRole('link').last(), more]) {
+      await entry.focus()
+      await expect(entry).toBeInViewport({ ratio: 1 })
+      expect(await uncovered(entry)).toBe(true)
+    }
     await expect(nav.getByRole('link', { name: 'New Scan', exact: true })).toBeInViewport({ ratio: 1 })
+
+    // Opening the row in a window this short brings the pages it adds into view.
+    if (!allSections) {
+      await more.click()
+      const opened = nav.locator(`[id="${await more.getAttribute('aria-controls')}"]`).getByRole('link')
+      await expect(opened).toHaveCount(5)
+      for (const link of await opened.all()) {
+        await expect(link).toBeInViewport({ ratio: 1 })
+        expect(await uncovered(link)).toBe(true)
+      }
+    }
   })
 }
 

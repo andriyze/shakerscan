@@ -49,14 +49,14 @@ test('MODULE-002 with Model Intake on (or an engine that predates the setting) t
   }
 })
 
-test('MODULE-003 the sidebar lists Model Intake only under the advanced switch', async ({ page }) => {
+test('MODULE-003 the sidebar lists Model Intake only behind the More row', async ({ page }) => {
   await page.setViewportSize({ width: 1400, height: 900 })
   await mock(page, false)
   await page.goto('/model-intake')
   const visibleLink = (name: string) => page.locator('aside:visible a[href], nav:visible a[href]').filter({ hasText: name })
   await expect(visibleLink('AI Gate')).not.toHaveCount(0)
   await expect(visibleLink('Model Intake')).toHaveCount(0)
-  await page.getByRole('switch', { name: 'All sections', exact: true }).first().click()
+  await page.locator('aside:visible').getByRole('button', { name: /^More/ }).click()
   await expect(visibleLink('Model Intake')).not.toHaveCount(0)
 })
 

@@ -59,7 +59,7 @@ test('BRAND-001 the tab names the page first and shows the S mark', async ({ pag
   expect(await (await page.request.get('/favicon.svg')).text()).toContain('stroke="#3b82f6"')
 })
 
-test('BRAND-002 the sidebar lockup, footer links and labelled section switch', async ({ page }) => {
+test('BRAND-002 the sidebar lockup, the foot and the More row', async ({ page }) => {
   await mockPageApi(page, health)
   await page.goto('/docs', { waitUntil: 'domcontentloaded' })
   const nav = await sidebar(page)
@@ -67,16 +67,41 @@ test('BRAND-002 the sidebar lockup, footer links and labelled section switch', a
   const home = nav.getByRole('link', { name: 'ShakerScan dashboard', exact: true })
   await expect(home).toHaveText('ShakerScan')
   await expect(home.locator('svg path')).toHaveAttribute('stroke', '#3b82f6')
-  await expect(nav.getByText('Open Source Edition', { exact: true })).toBeVisible()
+  // The corner is the logo and the primary action: the edition and the version are one quiet
+  // line at the foot, and no build line sits under the logo while the builds agree.
+  const newScan = nav.getByRole('link', { name: 'New Scan', exact: true })
+  const firstPage = nav.getByRole('navigation').getByRole('link').first()
+  const [homeBox, newScanBox, firstPageBox] = [await home.boundingBox(), await newScan.boundingBox(), await firstPage.boundingBox()]
+  expect(newScanBox!.y).toBeGreaterThanOrEqual(homeBox!.y + homeBox!.height)
+  expect(firstPageBox!.y).toBeGreaterThanOrEqual(newScanBox!.y + newScanBox!.height)
+  await expect(nav.getByText('Open Source Edition', { exact: true })).toHaveCount(0)
+  await expect(nav.getByText(/^Version /)).toHaveCount(0)
+  await expect(nav.getByRole('status')).toHaveCount(0)
+  const about = nav.getByText('Open Source fixture', { exact: true })
+  await expect(about).toBeVisible()
 
+  // The two ways out are icons with names, beside that line, below every page of the menu.
   const website = nav.getByRole('link', { name: 'shakerscan.com', exact: true })
+  await expect(website).toHaveText('')
+  await expect(website).toHaveAttribute('title', 'shakerscan.com')
   await expect(website).toHaveAttribute('href', 'https://shakerscan.com')
   await expect(website).toHaveAttribute('target', '_blank')
   await expect(website).toHaveAttribute('rel', /\bnoopener\b/)
   const github = nav.getByRole('link', { name: 'ShakerScan on GitHub' })
   await expect(github).toHaveAttribute('href', 'https://github.com/andriyze/shakerscan')
   await expect(github).toHaveAttribute('rel', /\bnoopener\b/)
-  await expect(nav.getByRole('link', { name: 'Settings' })).toBeVisible()
+  await expect(github).toHaveText('')
+  await expect(github).toHaveAttribute('title', 'Source code on GitHub')
+  const settings = nav.getByRole('link', { name: 'Settings', exact: true })
+  await expect(settings).toHaveText('Settings')
+  const [aboutBox, websiteBox, githubBox, settingsBox] = [
+    await about.boundingBox(), await website.boundingBox(), await github.boundingBox(), await settings.boundingBox(),
+  ]
+  expect(aboutBox!.y).toBeGreaterThanOrEqual(settingsBox!.y + settingsBox!.height)
+  for (const box of [websiteBox!, githubBox!]) {
+    expect(box.x).toBeGreaterThanOrEqual(aboutBox!.x + aboutBox!.width)
+    expect(Math.abs((box.y + box.height / 2) - (aboutBox!.y + aboutBox!.height / 2))).toBeLessThanOrEqual(2)
+  }
   // OSS shows no way to a gateway console.
   await expect(nav.getByRole('link', { name: /console/i })).toHaveCount(0)
 
@@ -84,13 +109,26 @@ test('BRAND-002 the sidebar lockup, footer links and labelled section switch', a
   await expect(nav.getByText('Agentic', { exact: true })).toBeVisible()
   await expect(nav.locator('.animate-pulse')).toHaveCount(0)
 
-  const allSections = nav.getByRole('switch', { name: 'All sections', exact: true })
-  await expect(allSections).toBeVisible()
-  await expect(allSections).toHaveAttribute('aria-checked', 'false')
+  // The advanced pages wait behind the row that ends the menu. It says how many, opens them in
+  // place, and the choice is kept.
+  await expect(nav.getByRole('switch')).toHaveCount(0)
+  const more = nav.getByRole('navigation').getByRole('button', { name: /^More/ })
+  await expect(more).toHaveAccessibleName('More 5 pages')
+  await expect(more).toBeInViewport({ ratio: 1 })
+  await expect(more).toHaveAttribute('aria-expanded', 'false')
   await expect(nav.getByRole('link', { name: 'Evidence' })).toHaveCount(0)
-  await allSections.click()
-  await expect(allSections).toHaveAttribute('aria-checked', 'true')
-  await expect(nav.getByRole('link', { name: 'Evidence' })).toBeVisible()
+  await more.click()
+  await expect(more).toHaveAttribute('aria-expanded', 'true')
+  await expect(more).toHaveAccessibleName('More')
+  await expect(more).toBeInViewport({ ratio: 1 })
+  const opened = nav.locator(`[id="${await more.getAttribute('aria-controls')}"]`).getByRole('link')
+  await expect(opened).toHaveText(['Evidence', 'Timeline', 'Model Intake', 'Policy Profiles', 'Command Arsenal'])
+  for (const link of await opened.all()) await expect(link).toBeInViewport({ ratio: 1 })
+  expect(await page.evaluate(() => window.localStorage.getItem('shakerscan.sidebar.show_all'))).toBe('true')
+  await more.click()
+  await expect(more).toHaveAttribute('aria-expanded', 'false')
+  await expect(nav.getByRole('link', { name: 'Evidence' })).toHaveCount(0)
+  expect(await page.evaluate(() => window.localStorage.getItem('shakerscan.sidebar.show_all'))).toBe('false')
 })
 
 test('BRAND-003 a managed Enterprise edition names itself in the lockup and every tab title', async ({ page }) => {
@@ -105,16 +143,21 @@ test('BRAND-003 a managed Enterprise edition names itself in the lockup and ever
   await expect(nav.getByRole('link', { name: 'ShakerScan dashboard', exact: true })).toHaveCount(0)
   await expect(nav.getByText('Enterprise Edition', { exact: true })).toHaveCount(0)
 
-  // A managed workspace has no section switch: its navigation list decides. Evidence (allowed
+  // A managed workspace has no More row: its navigation list decides. Evidence (allowed
   // here) is listed under Records without a click; Timeline and Model Intake (not allowed) are not.
   await expect(nav.getByRole('switch')).toHaveCount(0)
+  await expect(nav.getByRole('button', { name: /^More/ })).toHaveCount(0)
   await expect(nav.getByRole('link', { name: 'Evidence' })).toBeVisible()
   await expect(nav.getByText('Records', { exact: true })).toBeVisible()
   await expect(nav.getByRole('link', { name: 'Timeline' })).toHaveCount(0)
   await expect(nav.getByRole('link', { name: 'Model Intake' })).toHaveCount(0)
-  // The footer stays "[S] shakerscan.com · GitHub".
-  await expect(nav.getByRole('link', { name: 'shakerscan.com', exact: true })).toHaveAttribute('href', 'https://shakerscan.com')
-  await expect(nav.getByRole('link', { name: 'ShakerScan on GitHub' })).toBeVisible()
+  // A managed deployment links to neither the website nor the source code: nothing in its
+  // sidebar leaves the deployment. With no account row, the foot says what is running; the engine
+  // settings page and the scan form are not among this deployment's pages, so nothing leads to them.
+  await expect(nav.locator('a[href^="http"]')).toHaveCount(0)
+  await expect(nav.getByRole('link', { name: 'Settings', exact: true })).toHaveCount(0)
+  await expect(nav.getByRole('link', { name: 'New Scan', exact: true })).toHaveCount(0)
+  await expect(nav.getByText('Version fixture', { exact: true })).toBeVisible()
 
   // Next.js swaps the title on client navigation; the edition stays.
   await nav.getByRole('link', { name: 'Schedules' }).click()
@@ -171,8 +214,8 @@ test('BRAND-005 a managed Enterprise edition names nested and missing pages too'
   await expect(page).toHaveTitle('ShakerScan Enterprise')
 })
 
-test('BRAND-006 the section switch takes a click only once it can act on it', async ({ page }) => {
-  // A loaded machine serves the page scripts late: the server-rendered switch is on screen before
+test('BRAND-006 the More row takes a click only once it can act on it', async ({ page }) => {
+  // A loaded machine serves the page scripts late: the server-rendered row is on screen before
   // it has a handler. It must not look clickable then, and a click once it is must hold.
   test.skip(test.info().project.name !== 'chromium', 'desktop sidebar only')
   await mockPageApi(page, health)
@@ -181,11 +224,11 @@ test('BRAND-006 the section switch takes a click only once it can act on it', as
     await route.continue()
   })
   await page.goto('/docs', { waitUntil: 'domcontentloaded' })
-  const allSections = page.locator('aside:visible').getByRole('switch', { name: 'All sections', exact: true })
-  await expect(allSections).toBeDisabled()
-  await allSections.click()
-  await expect(allSections).toHaveAttribute('aria-checked', 'true')
+  const more = page.locator('aside:visible').getByRole('button', { name: /^More/ })
+  await expect(more).toBeDisabled()
+  await more.click()
+  await expect(more).toHaveAttribute('aria-expanded', 'true')
   await page.waitForTimeout(1000)
-  await expect(allSections).toHaveAttribute('aria-checked', 'true')
+  await expect(more).toHaveAttribute('aria-expanded', 'true')
   await expect(page.locator('aside:visible').getByRole('link', { name: 'Evidence' })).toBeVisible()
 })

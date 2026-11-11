@@ -82,7 +82,9 @@ test('docs and mobile operations expose truthful accessible labels', () => {
   assert.match(docs, /h1: \(\{ children \}\) => \(\s*<h2/)
   assert.match(dashboard, />Emergency clear<\/span>/)
   assert.match(dashboard, /ready to scan/)
-  assert.match(sidebar, /Show advanced sections \(Records, Governance, Developer, Model Intake\)/)
+  // The row that opens the less used pages says whether it is open and names the list it opens.
+  assert.match(sidebar, /aria-expanded=\{showAll\}\s+aria-controls=\{moreId\}/)
+  assert.match(sidebar, /<div id=\{moreId\} ref=\{moreRef\} hidden=\{!showAll\}/)
   assert.doesNotMatch(sidebar, /Interactive Testing, Leads/)
 })
 
