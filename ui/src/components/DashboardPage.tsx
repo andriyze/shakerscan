@@ -3,7 +3,7 @@ import { featureEnabled, navigationAllowed } from '@/lib/workspaceCapabilities'
 import { WorkspaceFeature } from '@/components/WorkspaceBoundary'
 
 import { Suspense, useCallback, useMemo, useRef, useState } from 'react'
-import { workerCapacityLabel, workerCountLabel } from '@/lib/labels'
+import { pluralize, workerCapacityLabel, workerCountLabel } from '@/lib/labels'
 import Link from '@/components/WorkspaceLink'
 import { AlertTriangle, ArrowRight, CheckCircle2, CircleHelp, ListTodo, Lock, Minus, Plus, RadioTower, ScanLine, Server, ShieldAlert, Target, Trash2, Workflow } from 'lucide-react'
 import {
@@ -826,10 +826,10 @@ function SecurityPosture({ exposure, state, onRetry, outOfScope = false, onShowA
       ) : (
         <>
           <div className="grid divide-y divide-gray-800 sm:grid-cols-2 sm:divide-x sm:divide-y-0 xl:grid-cols-4">
-            <PostureStat href="/exposure?posture=verified" icon={<CheckCircle2 className="h-4 w-4" />} label="Proven active risk" value={verified} hint={`${metrics?.verified_assets || 0} affected assets`} tone="emerald" />
-            <PostureStat href="/exposure?posture=needs_verification" icon={<CircleHelp className="h-4 w-4" />} label="Needs verification" value={needsVerification} hint={`${metrics?.unverified_high_assets || 0} high-impact assets`} tone="amber" />
+            <PostureStat href="/exposure?posture=verified" icon={<CheckCircle2 className="h-4 w-4" />} label="Proven active risk" value={verified} hint={`${metrics?.verified_assets || 0} affected ${pluralize(metrics?.verified_assets || 0, 'asset')}`} tone="emerald" />
+            <PostureStat href="/exposure?posture=needs_verification" icon={<CircleHelp className="h-4 w-4" />} label="Needs verification" value={needsVerification} hint={`${metrics?.unverified_high_assets || 0} high-impact ${pluralize(metrics?.unverified_high_assets || 0, 'asset')}`} tone="amber" />
             <PostureStat href="/exposure?posture=p1" icon={<ShieldAlert className="h-4 w-4" />} label="P1 assets" value={p1} hint="highest action priority" tone="red" />
-            <PostureStat href="/exposure" icon={<Target className="h-4 w-4" />} label="Freshly assessed" value={fresh} hint={`of ${assetCount} known assets`} tone="blue" />
+            <PostureStat href="/exposure" icon={<Target className="h-4 w-4" />} label="Freshly assessed" value={fresh} hint={`of ${assetCount} known ${pluralize(assetCount, 'asset')}`} tone="blue" />
           </div>
           <div className="border-t border-gray-800 px-4 py-3">
             <div className="mb-1.5 flex flex-wrap items-center justify-between gap-2 text-xs">
@@ -955,7 +955,7 @@ function CoverageOverview({ exposure, exposureState, onRetry, coverage, scope, l
             <div className="mb-3 flex items-center gap-2">
               <Target className="h-4 w-4 text-gray-500" />
               <h3 className="text-sm font-medium text-gray-200">Asset freshness</h3>
-              {metrics ? <span className="ml-auto text-xs text-gray-600">{totalAssets} assets</span> : null}
+              {metrics ? <span className="ml-auto text-xs text-gray-600">{totalAssets} {pluralize(totalAssets, 'asset')}</span> : null}
             </div>
             {exposureState === 'unavailable' ? <ExposureUnavailable onRetry={onRetry} compact /> : (
               <div className="grid gap-2.5">
