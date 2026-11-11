@@ -214,9 +214,9 @@ const footLink = 'rounded-sm text-gray-400 transition-colors hover:text-white fo
 
 // Who is signed in, where a managed deployment says so (ui-extensions/v1). Its links are the
 // deployment's own pages: ordinary navigations on this origin, never requests the UI makes.
-// The block stays at the foot of the sidebar when the menu is taller than the window (the menu
-// scrolls behind it), so the person's name and Sign out never need a scroll to be found. The
-// negative offset and margins take it over the sidebar's own padding, flush with its edges.
+// The block stays at the foot of the sidebar when the menu is taller than the window (only the
+// menu scrolls), so the person's name and Sign out never need a scroll to be found. The negative
+// margins take it over the sidebar's own padding, flush with its edges.
 function AccountBlock({ account }: { account: ExtensionAccount }) {
   const origin = window.location.origin
   const links = account.links
@@ -224,7 +224,7 @@ function AccountBlock({ account }: { account: ExtensionAccount }) {
     .filter((link): link is { label: string; href: string } => link.href !== null)
   const signOut = account.sign_out ? sameOriginPath(account.sign_out, origin) : null
   return (
-    <section aria-label="Account" className="sticky -bottom-4 -mx-4 -mb-4 mt-4 border-t border-gray-800 bg-gray-900 px-4 pb-4 pt-3">
+    <section aria-label="Account" className="-mx-4 -mb-4 mt-4 shrink-0 border-t border-gray-800 bg-gray-900 px-4 pb-4 pt-3">
       <div className="flex items-center gap-2.5 px-1">
         <span aria-hidden="true" className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-gray-800 text-xs font-semibold uppercase text-gray-200">
           {Array.from(account.name)[0]}
@@ -294,6 +294,29 @@ function NavContent({
   // (research-agent, arsenal) belong to their own nav groups.
   const settingsActive = pathname === '/settings'
 
+  // In a window shorter than the menu only the list of pages scrolls; the brand above it and
+  // New Scan, the footer and the account block below it stay in view. Keep the current page,
+  // which may sit below the fold of that list, in view when the page opens and whenever the
+  // room left for the list changes.
+  const menuRef = useRef<HTMLElement>(null)
+  useEffect(() => {
+    const menu = menuRef.current
+    if (!menu) return
+    const showCurrent = () => {
+      const current = menu.querySelector<HTMLElement>('[aria-current="page"]')
+      if (!current) return
+      const frame = menu.getBoundingClientRect()
+      const box = current.getBoundingClientRect()
+      if (box.top < frame.top) menu.scrollTop -= frame.top - box.top + 8
+      else if (box.bottom > frame.bottom) menu.scrollTop += box.bottom - frame.bottom + 8
+    }
+    showCurrent()
+    if (typeof ResizeObserver === 'undefined') return
+    const observer = new ResizeObserver(showCurrent)
+    observer.observe(menu)
+    return () => observer.disconnect()
+  }, [pathname, showAdvanced])
+
   const isActive = (href: string) => {
     if (href === '/') {
       return pathname === '/'
@@ -306,7 +329,7 @@ function NavContent({
 
   return (
     <>
-      <div className="mb-8">
+      <div className="mb-8 shrink-0">
         {/* The link's name keeps the lockup's visible words ("ShakerScan Enterprise") in it. */}
         <Link
           href="/"
@@ -330,7 +353,8 @@ function NavContent({
         )}
       </div>
 
-      <nav className="flex-1">
+      {/* The margins and padding keep focus rings and the active marker inside the scrolling box. */}
+      <nav ref={menuRef} className="-mx-4 -my-1 min-h-24 flex-1 overflow-y-auto overscroll-contain px-4 py-1">
         {visibleGroups.map((group, groupIndex) => (
           <div key={`${groupIndex} ${group.heading ?? 'overview'}`} className={`space-y-1 ${groupIndex === 0 ? '' : 'mt-4'}`}>
             {group.heading ? (
@@ -380,7 +404,7 @@ function NavContent({
         ))}
       </nav>
 
-      {canStartScan && pageAllowed('/scan/new') && <div className="pt-4 mt-4 border-t border-gray-800">
+      {canStartScan && pageAllowed('/scan/new') && <div className="pt-4 mt-4 shrink-0 border-t border-gray-800">
         <Link
           href="/scan/new"
           className={`${buttonClasses('primary', 'md')} w-full`}
@@ -392,7 +416,7 @@ function NavContent({
         </Link>
       </div>}
 
-      <div className="pt-3 mt-4 border-t border-gray-800">
+      <div className="pt-3 mt-4 shrink-0 border-t border-gray-800">
         <div className="flex items-center gap-1.5 px-1 text-[12.5px]">
           <a
             href={SHAKERSCAN_WEBSITE_URL}
