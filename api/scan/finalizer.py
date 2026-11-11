@@ -3326,7 +3326,7 @@ def finalize_scan_report(
             # manifest holds more entries than its slices cover has work that was never attempted,
             # and comparing attempts with slices alone reports that as complete coverage.
             "_manifest_entries": {}, "_scheduled_entries": {}, "_slow_endpoints": [],
-            "_refused_candidates": [], "_sign_in_limited": [],
+            "_refused_candidates": [], "_sign_in_limited": [], "_continued": [],
             "_proofs_attempted": set(), "_proofs_pace_unfunded": {}, "_proofs_resolved": {},
             "proof_escalation": {
                 "actions": 0, "attempted_candidates": 0,
@@ -3338,6 +3338,11 @@ def finalize_scan_report(
             # Its extension re-plans the same slice and is counted instead. A proof's attempts
             # that reached no verdict still need one: they stay unresolved unless the extension
             # (or a retry) settles the same attempt, which it does only for those it re-runs.
+            if result.status is not CapabilityResultStatus.SUCCESS:
+                row["_continued"].append((
+                    result.reason_code.value if result.reason_code is not None else None,
+                    superseded[action.action_id].status is CapabilityResultStatus.SUCCESS,
+                ))
             if action.capability_name in _PROOF_CAPABILITIES:
                 _merge_proof_resolution(row, observations.get(action.action_id, ()))
         elif action.capability_name in _PROOF_CAPABILITIES:
@@ -3521,6 +3526,17 @@ def finalize_scan_report(
         if slow_endpoints:
             row["slow_endpoints"] = slow_endpoints
             row["slow_endpoint_count"] = len(slow_endpoints)
+        continued = row.pop("_continued")
+        if continued:
+            # Slices that did not finish (a spent request allowance, a timeout) and were carried
+            # into a later action. The continuation's outcome decides the family's status; this
+            # states that it happened, why, and how many the continuation finished, so a family
+            # that reads complete beside actions that ran out of budget explains itself.
+            row["continued_actions"] = {
+                "count": len(continued),
+                "finished": sum(1 for _reason, finished in continued if finished),
+                "reasons": sorted({reason for reason, _finished in continued if reason}),
+            }
         proof = row["proof_escalation"]
         proof_statuses = proof.pop("_statuses")
         proof_reasons = proof.pop("_reasons")
@@ -3955,6 +3971,12 @@ def finalize_scan_report(
         for action in coverage_actions
         if not action.required
         and action_results[action.action_id].status is not CapabilityResultStatus.SUCCESS
+        # A slice its continuation finished left no gap; its own outcome stays on its action
+        # row below, with the action that continued it.
+        and not (
+            action.action_id in superseded
+            and superseded[action.action_id].status is CapabilityResultStatus.SUCCESS
+        )
     ]
     capability_coverage = {
         "total": len(coverage_actions),
@@ -3974,6 +3996,11 @@ def finalize_scan_report(
             "required": row["required"],
             "status": row["status"],
             "reason_code": row["reason_code"],
+            # The newest action that continued this one, and how that one ended.
+            **({
+                "continued_by": superseded[row["action_id"]].action_id,
+                "continued_status": superseded[row["action_id"]].status.value,
+            } if row["action_id"] in superseded else {}),
         } for row in coverage_action_rows],
     }
     principal_contexts = sorted({
