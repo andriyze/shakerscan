@@ -34,12 +34,14 @@ try:
     from api_utils import _parse_graph_json
     from asset_cohorts import target_cohort, target_exposure_class
     from list_contract import ListSpec, SortKey, SqlParams
+    from scan.discovery_runs import not_discovery_run_sql
     from targets.scale_summary import TICK_HOOKS as summary_tick_hooks
 except ModuleNotFoundError:  # package import in host-side tests
     from ..ai_assurance import build_agent_blast_radius
     from ..api_utils import _parse_graph_json
     from ..asset_cohorts import target_cohort, target_exposure_class
     from ..list_contract import ListSpec, SortKey, SqlParams
+    from ..scan.discovery_runs import not_discovery_run_sql
     from ..targets.scale_summary import TICK_HOOKS as summary_tick_hooks
 
 from .proof_rollup import INVESTIGATOR_TOOLS, NEEDS_VERIFICATION_SQL, asset_finding_counts_sql, proof_counts_sql
@@ -433,7 +435,8 @@ def _ranked_sql(params: SqlParams, *, root_domain: str | None, kind: str | None,
                COALESCE(sus.n, 0)::bigint AS suspected
         FROM targets t
         LEFT JOIN exposure_target_facts x ON x.target_id = t.id
-        {_latest_scan_sql("s.target_id = t.id AND (s.scan_role IS NULL OR s.scan_role <> 'shard')")}
+        {_latest_scan_sql("s.target_id = t.id AND (s.scan_role IS NULL OR s.scan_role <> 'shard') AND "
+                          + not_discovery_run_sql("s"))}
         LEFT JOIN web_counts c ON c.asset_id = t.id
         LEFT JOIN web_settled st ON st.asset_id = t.id
         LEFT JOIN web_proof pr ON pr.asset_id = t.id

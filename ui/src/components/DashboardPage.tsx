@@ -32,6 +32,7 @@ import {
 import { ChangesStrip } from '@/app/exposure/ChangesStrip'
 import { boundedDisplayText } from '@/lib/targetChoices'
 import { assuranceClass, scanAssurance } from '@/lib/assurance.mjs'
+import { isDiscoveryRun } from '@/lib/discoveryRun.mjs'
 import { capabilityReason } from '@/lib/sessionCapabilities.mjs'
 import { useCan, useSessionCapabilities } from '@/lib/useSessionCapabilities'
 
@@ -1091,6 +1092,7 @@ function shortHost(url?: string | null): string {
 }
 
 function friendlyScanType(scan: Scan): string {
+  if (isDiscoveryRun(scan)) return 'Discovery run'
   const value = String(scan.run_kind || scan.scan_type || 'scan').replace(/_/g, ' ')
   return value
     .replace(/\b\w/g, (character) => character.toUpperCase())

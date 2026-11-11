@@ -4213,6 +4213,8 @@ export interface ScansPage {
   /** Absent when the request asked for no count (`count: 'none'`) on an engine with list/v1. */
   total?: number
   total_kind?: TotalKind
+  /** Discovery and internal runs matching the same filters that the list leaves out (0 when shown). */
+  hidden_internal?: number
   limit?: number
   offset?: number
 }

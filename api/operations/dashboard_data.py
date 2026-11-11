@@ -22,10 +22,12 @@ from typing import Any, Awaitable, Callable
 
 try:
     from list_contract import SqlParams
+    from scan.discovery_runs import not_discovery_run_sql
     from target_cohort_sql import COHORT_VIEWS, cohort_filter_sql, fill_url_classes, row_cohorts
     from targets.scale_summary import FINDING_TOTALS_SQL, SCAN_TOTALS_SQL, compact
 except ModuleNotFoundError:  # package import layout
     from ..list_contract import SqlParams
+    from ..scan.discovery_runs import not_discovery_run_sql
     from ..target_cohort_sql import COHORT_VIEWS, cohort_filter_sql, fill_url_classes, row_cohorts
     from ..targets.scale_summary import FINDING_TOTALS_SQL, SCAN_TOTALS_SQL, compact
 
@@ -134,6 +136,8 @@ _RECENT_SCAN_FILTER = """status = 'completed'
           AND device_target_id IS NULL
           AND COALESCE(scan_role, '') <> 'device_web_origin'
           AND COALESCE(run_kind, '') NOT IN ('device_posture','device_probe','device_web_dast')"""
+# "Latest target results" lists application Scans; a discovery run is not a target's result.
+_RECENT_SCAN_FILTER += f"\n          AND {not_discovery_run_sql()}"
 
 
 def _recent_scan_key(row: Any) -> str | None:
