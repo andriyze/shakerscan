@@ -15,6 +15,7 @@ import { usePoll } from '@/lib/usePoll'
 import { useCan } from '@/lib/useSessionCapabilities'
 import { isAbortError } from '@/lib/fetchLayer.mjs'
 import { hiddenRunsNote, isDiscoveryRun, scansShownText } from '@/lib/discoveryRun.mjs'
+import { OBSERVED_GRADE_TITLE, PROVISIONAL_GRADE_TITLE, observedGrade } from '@/lib/observedGrade.mjs'
 
 const PAGE_SIZE = 50
 const SEARCH_DEBOUNCE_MS = 300
@@ -61,22 +62,25 @@ function ObservedPosture({ scan, compact = false }: { scan: Scan; compact?: bool
   if (scan.risk_assessment_state === 'not_examined' || scan.application_observed === false) {
     return <span className="text-amber-200">Application not examined</span>
   }
-  if (!scan.grade) {
+  const grade = observedGrade(scan.grade)
+  if (!grade) {
     return <span className="text-gray-500">No observed posture</span>
   }
   const assurance = scanAssurance(scan)
   const weak = assurance && ['none', 'weak', 'limited'].includes(String(assurance.band || 'none'))
   return (
-    <div className="min-w-0">
-      <div className="text-[11px] font-medium uppercase tracking-wide text-gray-500">Observed posture</div>
+    <div className="min-w-0" data-testid="observed-posture">
+      {/* The table names this column in its header; a card has no header, so it carries the label. */}
+      {compact && <div className="text-[11px] font-medium uppercase tracking-wide text-gray-500">Observed posture</div>}
       <div className="mt-0.5 flex flex-wrap items-center gap-1.5">
         <span
-          className={`${compact ? 'text-base' : 'text-lg'} font-bold ${weak ? 'text-gray-200' : getGradeColor(scan.grade)}`}
-          title={scan.grade.includes('*') ? 'The asterisk marks assurance limitations; this is not a clean bill of health.' : 'Risk observed by this run; this is not an overall safety score.'}
+          className={`${compact ? 'text-base' : 'text-lg'} font-bold ${weak ? 'text-gray-200' : getGradeColor(grade.letter)}`}
+          title={grade.provisional ? PROVISIONAL_GRADE_TITLE : OBSERVED_GRADE_TITLE}
         >
-          {scan.grade}
+          {grade.letter}
         </span>
         <span className="text-sm text-gray-500">{scan.score}/100</span>
+        {grade.provisional && <span className="text-xs text-amber-200/80" title={PROVISIONAL_GRADE_TITLE}>provisional</span>}
         <AssuranceChip scan={scan} />
       </div>
     </div>
@@ -885,16 +889,11 @@ function ScansContent() {
       </Card>
       )}
 
-      {/* Bottom Pagination */}
-      {total > 0 && (
-        <div className="flex items-center justify-between">
-          <span className="text-sm text-gray-400">
-            {total <= PAGE_SIZE
-              ? `Showing ${total} scan${total !== 1 ? 's' : ''}`
-              : `Showing ${(page - 1) * PAGE_SIZE + 1}-${Math.min(page * PAGE_SIZE, total)} of ${total}`
-            }
-            {visibleHunts.length > 0 ? ` · ${visibleHunts.length} active hunt${visibleHunts.length === 1 ? '' : 's'}` : ''}
-          </span>
+      {/* Bottom pagination: only when there is more than one page. A list that fits one page
+          already says how many scans it shows at the top. */}
+      {total > PAGE_SIZE && (
+        <div className="flex items-center justify-between" data-testid="scans-count-bottom">
+          <span className="text-sm text-gray-400">{scansShownText(total, page, PAGE_SIZE)}</span>
           <PaginationControls />
         </div>
       )}
