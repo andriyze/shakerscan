@@ -333,6 +333,59 @@ def test_the_legacy_response_equals_the_previous_implementation(monkeypatch):
     run(scenario)
 
 
+def test_a_host_that_only_holds_a_scanned_application_is_not_a_second_asset(monkeypatch):
+    async def scenario(conn, pool, ids):
+        async def application(url, *, scans=1, active=True):
+            target_id = await conn.fetchval(
+                """INSERT INTO targets (url, name, root_domain, discovery_source, metadata_json, total_scans,
+                                        last_scanned_at, is_active)
+                   VALUES ($1, $1, 'holder.test', 'manual', '{}', $2, $3, $4) RETURNING id""",
+                url, scans, _ago(1) if scans else None, active)
+            # The asset model's trigger made (or found) the host row and attached the application.
+            holder = await conn.fetchval("SELECT asset_owner_id FROM targets WHERE id = $1", target_id)
+            assert holder is not None, url
+            assert await conn.fetchval("SELECT discovery_source FROM targets WHERE id = $1", holder) == "host"
+            return str(target_id), holder
+
+        app, holder = await application("https://shop.holder.test")
+        second_app, same_holder = await application("https://shop.holder.test:8443", scans=0)
+        assert same_holder == holder
+        _, scanned_holder = await application("https://scanned.holder.test")
+        await conn.execute("UPDATE targets SET total_scans = 1, last_scanned_at = $2 WHERE id = $1",
+                           scanned_holder, _ago(1))
+        _, device_holder = await application("https://device.holder.test")
+        await conn.execute("INSERT INTO target_device_profiles (target_id) VALUES ($1)", device_holder)
+        _, emptied_holder = await application("https://retired.holder.test", active=False)
+        alone = await conn.fetchval(
+            """INSERT INTO targets (url, name, root_domain, discovery_source, metadata_json)
+               VALUES ('host://alone.holder.test', 'alone.holder.test', 'holder.test', 'host', '{}') RETURNING id""")
+
+        for kind in (None, "web"):
+            params = {"root_domain": "holder.test", "kind": kind, "cohort": None, "limit": 1000, "offset": 0}
+            body, _ = await assets(pool, monkeypatch, **params)
+            listed = {asset["id"]: asset for asset in body["assets"]}
+            # One host, two applications: the applications are the assets, the holder is not a third.
+            assert str(holder) not in listed
+            assert {app, second_app} <= set(listed)
+            assert "never_scanned" not in listed[app]["action_reasons"]
+            assert "never_scanned" in listed[second_app]["action_reasons"]
+            # A holder that is an asset in its own right stays: scanned itself, a device, no live application,
+            # or a host a person added that has no application yet.
+            for kept in (scanned_holder, device_holder, emptied_holder, alone):
+                assert str(kept) in listed, kept
+            # app, second_app, scanned + its holder, device + its holder, the retired one's holder, alone.
+            assert body["metrics"]["asset_count"] == len(listed) == 8
+            assert body["total"] == 8
+            expected = await reference_exposure_assets(pool, **params)
+            assert _comparable(body) == _comparable(expected)
+
+        counted, _ = await assets(pool, monkeypatch, root_domain="holder.test", kind=None, cohort=None,
+                                  limit=3, count="exact", cursor=None, fields=None)
+        assert counted["total"] == 8
+
+    run(scenario, data=False)
+
+
 def test_list_v1_walks_the_same_ranking_with_a_cursor(monkeypatch):
     async def scenario(conn, pool, ids):
         for case in ({}, {"cohort": "operational"}, {"kind": "web", "root_domain": "alpha.test"}):
@@ -579,12 +632,21 @@ def test_a_cold_read_classifies_a_bounded_batch_and_ranks_the_rest_provisionally
     async def scenario(conn, pool, ids):
         active = await conn.fetchval("SELECT count(*) FROM targets WHERE is_active")
         assert active > 20
+        # A never-scanned host row that only holds web applications is listed through them (the
+        # fixture has no device profiles).
+        holders = await conn.fetchval(
+            """SELECT count(*) FROM targets t
+               WHERE t.is_active AND t.discovery_source = 'host' AND COALESCE(t.total_scans, 0) = 0
+                 AND EXISTS (SELECT 1 FROM targets m WHERE m.asset_owner_id = t.id AND m.is_active
+                             AND m.url ~* '^https?://')""")
+        assert holders > 0
+        listed = active - holders
         body, _ = await assets(pool, monkeypatch, limit=2000)
         written = await conn.fetchval("SELECT count(*) FROM exposure_target_facts WHERE state = $1",
                                       asset_rank.FRESH_STATE)
         assert written <= 6 + 3 and body["classification_pending"] is True and len(started) == 1
         # Every asset is ranked; an unclassified one carries the provisional facts.
-        assert body["total"] == active == len(body["assets"])
+        assert body["total"] == listed == len(body["assets"])
         assert {a["cohort"] for a in body["assets"]} >= {asset_rank.PROVISIONAL_COHORT}
         v1, _ = await assets(pool, monkeypatch, limit=5, count="none")
         assert v1["summary"]["classification_pending"] is True and len(started) == 2

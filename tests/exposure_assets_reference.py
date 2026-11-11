@@ -1,4 +1,7 @@
-"""The 2.11-milestone-1 GET /exposure/assets, kept verbatim as the oracle for equality tests.
+"""The 2.11-milestone-1 GET /exposure/assets, kept as the oracle for equality tests.
+
+One rule was added after it: a host row that only holds web applications is not listed beside
+them (``_holds_only_applications``, written here independently of the route's SQL).
 
 It ranked every asset in Python (cohort, exposure class, action reasons, priority). The route now
 ranks in SQL (api/exposure/asset_rank.py); tests/test_exposure_assets_rank_postgres.py runs this
@@ -19,6 +22,13 @@ from finding_routes.list_query import without_jit
 from exposure.proof_rollup import asset_finding_counts_sql, undetermined_adjustments, undetermined_rows_sql
 
 _EXPOSURE_PRIORITY_WEIGHT = {"P1": 300, "P2": 200, "P3": 100}
+
+
+def _holds_only_applications(row: dict[str, Any]) -> bool:
+    """A never-scanned ``host`` row without a device profile whose active members include a web application."""
+    if row.get("discovery_source") != "host" or int(row.get("total_scans") or 0) or row.get("device_profiles"):
+        return False
+    return any(str(url).lower().startswith(("http://", "https://")) for url in row.get("member_urls") or [])
 
 
 def _exposure_datetime(value: Any) -> datetime | None:
@@ -232,6 +242,10 @@ async def reference_exposure_assets(
                 SELECT t.id, t.url, t.name, t.root_domain, t.discovery_source,
                        {_metadata_subset_sql("t.metadata_json", _TARGET_METADATA_KEYS)} AS metadata_json,
                        t.last_grade, t.last_score, t.last_scanned_at, t.created_at, t.total_scans,
+                       (SELECT array_agg(member.url) FROM targets member
+                         WHERE member.asset_owner_id = t.id AND member.is_active) AS member_urls,
+                       (SELECT COUNT(*) FROM target_device_profiles profile
+                         WHERE profile.target_id = t.id) AS device_profiles,
                        ls.id AS latest_scan_id, ls.status AS latest_scan_status,
                        ls.scan_type AS latest_scan_type, ls.completion_status, ls.top_coverage_status,
                        ls.completed_at AS latest_scan_completed_at,
@@ -320,6 +334,8 @@ async def reference_exposure_assets(
 
     for row in target_rows:
         row = row_to_dict(row)
+        if _holds_only_applications(row):
+            continue
         is_model = row.get("discovery_source") == "model-intake"
         asset_kind = "model" if is_model else "web"
         if kind and kind != asset_kind:
