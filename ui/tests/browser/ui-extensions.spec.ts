@@ -151,18 +151,19 @@ test('EXT-001 declared entries and sections are placed in the sidebar; hostile e
   await expect(account.getByRole('link', { name: 'Elsewhere' })).toHaveCount(0)
   await noSidewaysScroll(page)
 
-  // In a window shorter than the menu the block stays in view; the menu scrolls behind it.
+  // In a window shorter than the menu the block stays in view; the list of pages scrolls above it.
   const size = page.viewportSize()!
   await page.setViewportSize({ width: size.width, height: 480 })
-  const menu = page.locator('aside:visible').first()
-  expect(await menu.evaluate((aside) => aside.scrollHeight > aside.clientHeight)).toBe(true)
+  const side = page.locator('aside:visible').first()
+  const menu = side.getByRole('navigation')
+  expect(await menu.evaluate((list) => list.scrollHeight > list.clientHeight)).toBe(true)
   await expect(account.getByText('Dana Example')).toBeInViewport({ ratio: 1 })
   await expect(account.getByRole('link', { name: 'Sign out', exact: true })).toBeInViewport({ ratio: 1 })
   // Flush with the sidebar's foot: no strip of the menu shows beneath it.
-  const gap = async () => Math.abs((await menu.boundingBox())!.y + (await menu.boundingBox())!.height
+  const gap = async () => Math.abs((await side.boundingBox())!.y + (await side.boundingBox())!.height
     - (await account.boundingBox())!.y - (await account.boundingBox())!.height)
   expect(await gap()).toBeLessThanOrEqual(1)
-  await menu.evaluate((aside) => aside.scrollTo(0, aside.scrollHeight))
+  await menu.evaluate((list) => list.scrollTo(0, list.scrollHeight))
   expect(await gap()).toBeLessThanOrEqual(1)
   await expect(account.getByRole('link', { name: 'Sign out', exact: true })).toBeInViewport({ ratio: 1 })
 })
