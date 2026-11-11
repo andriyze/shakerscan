@@ -70,6 +70,15 @@ def test_revoked_exception_does_not_require_active_waiver_fields():
     ) is None
 
 
+@pytest.mark.parametrize("value", ["next tuesday", "2099-13-45", "never"])
+def test_effective_exception_with_an_unparsable_expiry_is_a_422_not_a_500(value):
+    # The parser answers None for text it cannot read; comparing None to now() raised TypeError.
+    with pytest.raises(HTTPException) as refused:
+        _validate_finding_exception_accountability(_effective_request(expires_at=value))
+    assert refused.value.status_code == 422
+    assert "ISO 8601" in refused.value.detail
+
+
 class _ProfilesConn:
     """Answers the policy-profile lookups the exception routes make."""
 
@@ -110,3 +119,13 @@ def test_an_unknown_policy_is_refused_even_without_configured_profiles():
 
 def test_a_revoked_exception_without_policy_needs_no_profile_lookup():
     asyncio.run(_require_active_policy_profile(_ProfilesConn([POLICY_ID]), None, effective=False))
+
+
+def test_an_unknown_status_is_refused_before_it_reaches_the_check_constraint():
+    # The table accepts five statuses; any other used to reach the INSERT and answer 500.
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError):
+        FindingExceptionRequest(status="waived")
+    for known in ("active", "approved", "accepted_risk", "revoked", "expired"):
+        assert FindingExceptionRequest(status=known).status == known

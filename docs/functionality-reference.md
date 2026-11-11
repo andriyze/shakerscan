@@ -2080,7 +2080,7 @@ for the profile contract, invocation, limits and acceptance gates.
 | Make targets | 20 | `Makefile` |
 | Release gates | 17 | `scripts/release_gates.py` |
 | Runtime environment keys | 430 | Python sources + Compose manifests |
-| Internal compatibility scanner modules | 147 | `scanner/scanner_tools/` |
+| Internal compatibility scanner modules | 148 | `scanner/scanner_tools/` |
 | UI pages | 41 | `ui/src/app/` |
 | Skills | 9 | `skills/` |
 | Canonical slash commands | 14 | `.claude/commands/` |

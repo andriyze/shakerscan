@@ -354,7 +354,11 @@ test('EXT-007 with an account row the primary action stays under the logo, never
   await page.setViewportSize({ width: size.width, height: 360 })
   const nav = await sidebar(page)
   const menu = page.locator('aside:visible').first()
-  expect(await menu.evaluate((aside) => aside.scrollHeight > aside.clientHeight)).toBe(true)
+  const list = nav.getByRole('navigation')
+  expect(await list.evaluate((pages) => {
+    const side = pages.closest('aside')!
+    return pages.scrollHeight > pages.clientHeight || side.scrollHeight > side.clientHeight
+  })).toBe(true)
   const newScan = nav.getByRole('link', { name: 'New Scan', exact: true })
   const account = nav.getByRole('region', { name: 'Account' })
   // The element at the middle of the button is the button: nothing is drawn over it.
@@ -364,6 +368,7 @@ test('EXT-007 with an account row the primary action stays under the logo, never
   })
   for (const scrollTo of [0, 100_000]) {
     await menu.evaluate((aside, top) => aside.scrollTo(0, top), scrollTo)
+    await list.evaluate((pages, top) => pages.scrollTo(0, top), scrollTo)
     await expect(newScan).toBeInViewport({ ratio: 1 })
     expect(await uncovered()).toBe(true)
     await expect(account.getByRole('button')).toBeInViewport({ ratio: 1 })
