@@ -1,5 +1,3 @@
-import { ApiError } from './fetchLayer.mjs'
-
 function sameAddressApiUrl(configured: string): string | null {
   // The configured API URL names one address. Opened at any other address that reaches the
   // same engine -- the public IP of the host, or a forwarded port -- the page kept fetching
@@ -74,9 +72,4 @@ export async function getApiErrorMessage(response: Response, fallback: string): 
     // Intermediaries are not required to return JSON errors.
   }
   return fallback
-}
-
-/** A failed response as an error that keeps its HTTP status, so a page can tell 404 from a failure. */
-export async function apiFailure(response: Response, fallback: string): Promise<ApiError> {
-  return new ApiError(await getApiErrorMessage(response, fallback), { status: response.status })
 }

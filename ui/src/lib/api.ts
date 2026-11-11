@@ -12,7 +12,8 @@ import type {
 import type {
   ModelIntakeScanRequest as GeneratedModelIntakeScanRequest,
 } from './publicApi.generated'
-import { API_URL, apiFailure, getApiErrorMessage } from './apiConfig'
+import { API_URL, getApiErrorMessage } from './apiConfig'
+import { apiFailure } from './apiFailure'
 import { pathSegment, queryString } from './apiPath.mjs'
 import { fetchHeavyRead } from './busyRetry.mjs'
 import { ApiError, getJson } from './fetchLayer.mjs'

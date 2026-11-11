@@ -1,5 +1,6 @@
 import { pathSegment } from './apiPath.mjs'
-import { API_URL, apiFailure } from './apiConfig'
+import { API_URL } from './apiConfig'
+import { apiFailure } from './apiFailure'
 import { fetchHeavyRead } from './busyRetry.mjs'
 import { getJson } from './fetchLayer.mjs'
 import { isListV1, listV1Params } from './listPage.mjs'
