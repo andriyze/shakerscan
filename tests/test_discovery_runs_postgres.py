@@ -167,10 +167,10 @@ def test_a_discovery_run_does_not_decide_the_latest_result(template_database, mo
                         limit=50, offset=0, include_details=False, cursor=None, count=None,
                         fields=None, since=None)
             listed = await api.list_scans(None, target_id=str(target), include_internal=False, **args)
-            assert [row["id"] for row in listed["scans"]] == [str(application)]
+            assert [str(row["id"]) for row in listed["scans"]] == [str(application)]
             assert (listed["total"], listed["hidden_internal"]) == (1, 2)
             shown = await api.list_scans(None, target_id=str(target), include_internal=True, **args)
-            assert {row["id"] for row in shown["scans"]} == {
+            assert {str(row["id"]) for row in shown["scans"]} == {
                 str(application), str(discovery), str(parallel_step)}
             assert (shown["total"], shown["hidden_internal"]) == (3, 0)
             everything = await api.list_scans(None, target_id=None, include_internal=False, **args)
