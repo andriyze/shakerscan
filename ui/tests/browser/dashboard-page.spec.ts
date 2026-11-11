@@ -139,6 +139,9 @@ test('a latest result shows the whole host name and the grade the Scan page show
   await expect(row).toHaveCount(1)
   await expect(row).toContainText('44 findings')
   await expect(row).toContainText('Observed posture F (provisional)')
+  // The examination strength the API sends for the run, as the Scans list shows it.
+  await expect(row).toContainText('83/100')
+  await expect(row).not.toContainText('Examination strength unavailable')
   await expect(row).not.toContainText('F*')
   const name = row.getByText(host, { exact: true })
   await expect(name).toBeVisible()

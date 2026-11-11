@@ -305,3 +305,19 @@ test('ASSET-010 a very long target label stays inside its row', async ({page}) =
   expect(await row.evaluate(element => element.scrollWidth <= element.clientWidth)).toBe(true)
   expect(await page.evaluate(() => document.documentElement.scrollWidth>document.documentElement.clientWidth)).toBe(false)
 })
+
+test('ASSET-011 a provisional grade on a Targets row is the letter, with the reason in a tooltip', async ({page}) => {
+  await mock(page)
+  const scanned = '2026-01-02T03:04:05Z'
+  await page.route(`${MOCK_API_ORIGIN}/targets/inventory*`, route => route.fulfill({json:{targets:[{...target,last_scanned_at:scanned,
+    origins:[{id:originId,url:'https://asset.example.test',is_active:true,last_grade:'F*',last_scanned_at:scanned}]}],total:1,offset:0,limit:50}}))
+  await page.setViewportSize({width:1280,height:800})
+  await page.goto('/targets')
+  const row = page.getByTestId('target-asset-row')
+  // The web application's chip and the last-scan cell show the same letter; neither shows "F*".
+  for (const id of ['origin-grade', 'last-scan-grade']) {
+    await expect(row.getByTestId(id).locator('visible=true')).toHaveText('F')
+    await expect(row.getByTestId(id).locator('visible=true')).toHaveAttribute('title', /^Provisional: the run was incomplete/)
+  }
+  await expect(row).not.toContainText('F*')
+})
