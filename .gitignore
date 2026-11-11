@@ -18,6 +18,8 @@ backups/
 .shakerscan-model-intake-runner-stage/
 .shakerscan-local-build
 .shakerscan-local-build.tmp.*
+# The installed releases' image records (scripts/upgrade_safety.sh)
+.release-images.*
 .shakerscan-build-receipt.json
 .shakerscan-build-receipt.json.tmp.*
 
