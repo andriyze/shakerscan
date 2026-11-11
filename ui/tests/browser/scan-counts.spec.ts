@@ -68,6 +68,30 @@ test.describe('Scans list and discovery runs', () => {
   })
 })
 
+test('the Scans list names the posture column once, counts once and shows the grade the Scan page shows', async ({ page }) => {
+  // The stored grade of an incomplete run ends in an asterisk.
+  const application = scanRow(APPLICATION_SCAN, 'standalone', 'F*', 0, 44)
+  await mockPageApi(page, {
+    '/scans': () => ({ scans: [application], total: 1, hidden_internal: 0, limit: 50, offset: 0 }),
+    '/domains': () => ({ domains: [] }),
+    '/campaigns': () => ({ campaigns: [], total: 0 }),
+  })
+  await page.goto('/scans')
+  await expect(page.getByTestId('scans-count')).toContainText('Showing 1 scan')
+  // One page of scans is counted once, not again under the list.
+  await expect(page.getByText(/Showing 1 scan/)).toHaveCount(1)
+  await expect(page.getByTestId('scans-count-bottom')).toHaveCount(0)
+  // The column header (or, on a narrow screen, the card) names the value once.
+  await expect(page.getByText('Observed posture', { exact: true }).locator('visible=true')).toHaveCount(1)
+  const posture = page.getByTestId('observed-posture').locator('visible=true')
+  await expect(posture).toHaveCount(1)
+  await expect(posture).toContainText('F')
+  await expect(posture).toContainText('0/100')
+  await expect(posture).toContainText('provisional')
+  await expect(posture).not.toContainText('*')
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth + 1)).toBe(true)
+})
+
 test('one line on the Scan page relates its totals', async ({ page }) => {
   await pinMockApiOrigin(page)
   await page.route(`${MOCK_API_ORIGIN}/**`, route => route.fulfill({ status: 503, json: { detail: 'fixture_unavailable' } }))
@@ -124,3 +148,4 @@ test('a target row counts every open finding, informational ones included', asyn
   await expect(second.getByText('No open findings')).toHaveCount(0)
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth + 1)).toBe(true)
 })
+

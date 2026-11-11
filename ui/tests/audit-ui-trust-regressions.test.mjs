@@ -129,7 +129,7 @@ test('scoped dashboard keeps global activity visible without attributing it to a
   assert.match(scans, />Observed posture</)
   assert.match(scans, /Examination strength \$\{assurance\.score\}\/100/)
   assert.match(scans, /scan\.status !== 'completed'/)
-  assert.match(scans, /asterisk marks assurance limitations/)
+  assert.match(scans, /grade\.provisional \? PROVISIONAL_GRADE_TITLE : OBSERVED_GRADE_TITLE/)
   assert.doesNotMatch(dashboard, /text-lg font-semibold[^\n]+scan\.grade/)
 })
 
