@@ -417,6 +417,16 @@ async def _stop(proc, readers) -> None:
         raise
 
 
+async def idle(seconds: float) -> None:
+    """Wait between rounds, ending at once when a stop is requested: a monitor with no domain
+    to watch slept through the stop signal and was killed ten seconds later, before it could
+    record that it had stopped."""
+    try:
+        await asyncio.wait_for(shutdown_event.wait(), timeout=seconds)
+    except asyncio.TimeoutError:
+        pass
+
+
 async def monitor_loop():
     """Main monitoring loop with periodic domain reload."""
     stats['running'] = True
@@ -433,7 +443,7 @@ async def monitor_loop():
 
         if not domains:
             print("[gungnir] No domains to monitor, waiting...", flush=True)
-            await asyncio.sleep(60)
+            await idle(60)
             continue
 
         # Run gungnir with timeout for domain reload
@@ -447,7 +457,7 @@ async def monitor_loop():
             print("[gungnir] Reloading domains...", flush=True)
         except Exception as e:
             print(f"[gungnir] Error: {e}", flush=True)
-            await asyncio.sleep(10)
+            await idle(10)
 
     stats['running'] = False
     print("[gungnir] Monitor stopped", flush=True)

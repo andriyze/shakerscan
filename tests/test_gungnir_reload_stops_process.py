@@ -99,3 +99,25 @@ def test_shutdown_stops_gungnir(gungnir, tmp_path, monkeypatch):
     asyncio.run(run_then_shut_down())
     pid = int(pidfile.read_text())
     assert not alive(pid), "worker shutdown left gungnir running"
+
+
+def test_a_stop_ends_an_idle_monitor_at_once(gungnir, monkeypatch):
+    """With no domain to watch the monitor waits a minute between looks; a stop signal must not
+    wait for that minute to pass (Docker kills the container ten seconds after the signal)."""
+
+    async def no_domains():
+        return []
+
+    monkeypatch.setattr(gungnir, "get_monitored_domains", no_domains)
+
+    async def stop_while_idle() -> float:
+        loop = asyncio.create_task(gungnir.monitor_loop())
+        await asyncio.sleep(0.2)
+        assert gungnir.stats["running"] is True
+        asked = time.monotonic()
+        gungnir.handle_shutdown(15, None)
+        await asyncio.wait_for(loop, timeout=3)
+        return time.monotonic() - asked
+
+    assert asyncio.run(stop_while_idle()) < 1
+    assert gungnir.stats["running"] is False
