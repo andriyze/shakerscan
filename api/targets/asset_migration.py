@@ -372,6 +372,13 @@ async def run_unified_startup(pool: Any, baseline: Any, *, redis_provider: Any =
                 except ModuleNotFoundError:
                     from api.scan.assessment_columns import install_scan_assessment_columns
                 await install_scan_assessment_columns(conn)
+                # Which findings each Scan observed, kept by a trigger; a Scan's own list reads it.
+                # Backfilled once from the scan columns of existing findings.
+                try:
+                    from scan.finding_observations import install_finding_scan_observations
+                except ModuleNotFoundError:
+                    from api.scan.finding_observations import install_finding_scan_observations
+                await install_finding_scan_observations(conn)
             # After the schema commits, still under the startup lock: Hunts granted something by
             # 2.8.0 have no recorded baseline, so their authority is rebuilt from their live
             # grants once (R1), each Hunt in its own short transaction. A Hunt that cannot be

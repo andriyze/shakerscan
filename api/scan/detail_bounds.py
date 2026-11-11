@@ -3,7 +3,8 @@
 The detail answered every persisted finding of the Scan with its evidence, however many there
 were, and read every child Scan's whole report and options to compute a few contribution facts.
 
-* Findings: at most ``findings_limit`` rows (default ``DEFAULT_DETAIL_FINDINGS``, at most
+* Findings: every finding the Scan observed (``finding_scan_observations``), also one a later
+  run saw again; at most ``findings_limit`` rows (default ``DEFAULT_DETAIL_FINDINGS``, at most
   ``MAX_DETAIL_FINDINGS``, in the same severity order, then most recently seen), with
   ``findings_total`` and ``findings_truncated``; the complete set stays available from
   ``GET /findings?scan_id=``. ``findings_limit=0`` leaves them out (a poller that only needs the
@@ -25,6 +26,7 @@ import uuid
 
 from fastapi import Query
 
+from .finding_observations import observed_by_scan_sql
 from .finding_verification_overrides import matching_verification_override, scan_result_verification_overrides
 
 try:
@@ -149,7 +151,8 @@ def detail_params(findings_limit: Any, include_result: Any) -> tuple[int, bool]:
     return int(direct(findings_limit)), bool(direct(include_result))
 
 
-_SCAN_FILTER = "WHERE f.scan_id = $1"
+_OBSERVED = observed_by_scan_sql("f.id", "$1")
+_SCAN_FILTER = f"WHERE {_OBSERVED}"
 _VERIFIED_FILTER = "(f.last_verification_verdict = 'exploited' OR f.fingerprint = ANY($2::text[]))"
 
 
@@ -162,10 +165,10 @@ async def scan_detail_findings(
     """
     assert _SCAN_FILTER in base_sql
     args: list[Any] = [scan_id]
-    where = "scan_id = $1"
+    where = _OBSERVED
     if proven_fingerprints is not None:
         base_sql = base_sql.replace(_SCAN_FILTER, f"{_SCAN_FILTER} AND {_VERIFIED_FILTER}", 1)
-        where = f"f.{where} AND {_VERIFIED_FILTER}"
+        where = f"{where} AND {_VERIFIED_FILTER}"
         args.append(proven_fingerprints)
     if limit <= 0:
         rows: list[Any] = []
