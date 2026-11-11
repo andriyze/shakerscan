@@ -1,10 +1,13 @@
 import { expect, test, type Locator, type Page } from '@playwright/test'
 
-import { mockPageApi } from './mock-page-api'
+import { mockPageApi, uiBuildVersion, type MockHandler } from './mock-page-api'
 
 // Browser contract fixture: the real sidebar over a scripted API that answers only the sidebar's
-// health poll; no page data is needed and nothing runs.
-const health = { '/health': () => ({ status: 'healthy', scanner_version: 'fixture' }) }
+// health poll; no page data is needed and nothing runs. The scripted engine reports the version
+// the UI under test was built with, so the builds agree unless a test says otherwise.
+let version = ''
+test.beforeEach(async ({ page }) => { version = await uiBuildVersion(page) })
+const health: Record<string, MockHandler> = { '/health': () => ({ status: 'healthy', scanner_version: version }) }
 
 // The sidebar on a desktop viewport, or the drawer the mobile bar opens.
 async function sidebar(page: Page): Promise<Locator> {
@@ -29,9 +32,9 @@ function uncovered(target: Locator): Promise<boolean> {
   })
 }
 
-async function shortWindow(page: Page, allSections: boolean, path: string): Promise<Locator> {
+async function shortWindow(page: Page, allSections: boolean, path: string, routes = health): Promise<Locator> {
   await page.addInitScript((value) => window.localStorage.setItem('shakerscan.sidebar.show_all', value), String(allSections))
-  await mockPageApi(page, health)
+  await mockPageApi(page, routes)
   await page.setViewportSize({ width: page.viewportSize()!.width, height: 600 })
   await page.goto(path, { waitUntil: 'domcontentloaded' })
   return sidebar(page)
@@ -98,6 +101,20 @@ test('NAV-SHORT-002 a short window opens with the current page visible in the me
   const nav = await shortWindow(page, true, '/settings/arsenal')
   const current = nav.getByRole('navigation').getByRole('link', { name: 'Command Arsenal', exact: true })
   await expect(current).toHaveAttribute('aria-current', 'page')
+  await expect(current).toBeInViewport({ ratio: 1 })
+  expect(await uncovered(current)).toBe(true)
+})
+
+test('NAV-SHORT-003 a build mismatch line leaves the current page visible in the menu', async ({ page }) => {
+  // The line appears under the logo once the engine has answered, and takes room from the menu.
+  const nav = await shortWindow(page, true, '/settings/arsenal', {
+    '/health': () => ({
+      status: 'healthy', scanner_version: version,
+      worker_build: { available: true, fleet_uniform: false, expected_count: 2, reported_count: 2, stale_count: 1, pending_count: 0 },
+    }),
+  })
+  await expect(nav.getByRole('status')).toContainText('Build mismatch: ')
+  const current = nav.getByRole('navigation').getByRole('link', { name: 'Command Arsenal', exact: true })
   await expect(current).toBeInViewport({ ratio: 1 })
   expect(await uncovered(current)).toBe(true)
 })

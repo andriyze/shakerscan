@@ -424,11 +424,13 @@ function NavContent({
       showCurrent()
     }
     if (typeof ResizeObserver === 'undefined') return
-    // An observer reports once when it starts; that report is no change of room.
-    let started = false
+    // An observer also reports once when it starts. Only a report of another height is a change
+    // of room, and one that happened before that first report is not lost.
+    let height = menu.clientHeight
     const observer = new ResizeObserver(() => {
-      if (started) showCurrent()
-      started = true
+      if (menu.clientHeight === height) return
+      height = menu.clientHeight
+      showCurrent()
     })
     observer.observe(menu)
     return () => observer.disconnect()
