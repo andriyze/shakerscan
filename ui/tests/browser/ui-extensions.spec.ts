@@ -1,6 +1,6 @@
 import { expect, test, type Locator, type Page } from '@playwright/test'
 
-import { mockPageApi } from './mock-page-api'
+import { mockPageApi, serverError } from './mock-page-api'
 
 // Browser contract fixture for ui-extensions/v1 (docs/ui-extensions.md): the real sidebar, the
 // real /ext/<id> route and the real finding page over a scripted API, with a managed workspace
@@ -142,30 +142,65 @@ test('EXT-001 declared entries and sections are placed in the sidebar; hostile e
   await expect(plain.locator('svg')).toHaveCount(1)
   expect(await plain.locator('svg').getAttribute('onload')).toBeNull()
 
-  // The account block: who is signed in, the deployment's links and its sign-out page.
+  // The account row: who is signed in. Pressed, it opens the deployment's links, its sign-out
+  // page and what is running; until then the foot shows the person and nothing else.
   const account = nav.getByRole('region', { name: 'Account' })
-  await expect(account).toContainText('Dana Example')
-  await expect(account).toContainText('Operator')
-  await expect(account.getByRole('link', { name: 'My account', exact: true })).toHaveAttribute('href', '/deployment/account')
-  await expect(account.getByRole('link', { name: 'Sign out', exact: true })).toHaveAttribute('href', '/deployment/sign-out')
-  await expect(account.getByRole('link', { name: 'Elsewhere' })).toHaveCount(0)
+  const row = account.getByRole('button', { name: 'Dana Example Operator', exact: true })
+  await expect(row).toHaveAttribute('aria-expanded', 'false')
+  await expect(account.getByRole('link')).toHaveCount(0)
+  await row.click()
+  await expect(row).toHaveAttribute('aria-expanded', 'true')
+  const opened = account.locator(`[id="${await row.getAttribute('aria-controls')}"]`)
+  await expect(opened.getByRole('link')).toHaveText(['My account', 'Sign out'])
+  await expect(opened.getByRole('link', { name: 'My account', exact: true })).toHaveAttribute('href', '/deployment/account')
+  await expect(opened.getByRole('link', { name: 'Sign out', exact: true })).toHaveAttribute('href', '/deployment/sign-out')
+  await expect(opened.getByText('Open Source fixture', { exact: true })).toBeVisible()
+  // Another origin never becomes a link, and a managed sidebar links to no other site at all.
+  await expect(account.locator('a').filter({ hasText: 'Elsewhere' })).toHaveCount(0)
+  await expect(nav.locator('a[href^="http"]')).toHaveCount(0)
+  // The panel opens above the row and covers neither it nor New Scan.
+  expect((await opened.boundingBox())!.y + (await opened.boundingBox())!.height).toBeLessThanOrEqual((await row.boundingBox())!.y)
   await noSidewaysScroll(page)
 
-  // In a window shorter than the menu the block stays in view; the list of pages scrolls above it.
+  // Escape closes the panel, not the drawer a phone shows the sidebar in, and the row has focus.
+  await page.keyboard.press('Escape')
+  await expect(row).toHaveAttribute('aria-expanded', 'false')
+  await expect(row).toBeFocused()
+  await expect(account.getByRole('link')).toHaveCount(0)
+  await expect(nav.getByRole('navigation')).toBeVisible()
+  // The keyboard opens it and reaches every entry in order; a press elsewhere closes it.
+  await page.keyboard.press('Enter')
+  await expect(row).toHaveAttribute('aria-expanded', 'true')
+  await page.keyboard.press('Tab')
+  await expect(opened.getByRole('link', { name: 'My account', exact: true })).toBeFocused()
+  await page.keyboard.press('Tab')
+  await expect(opened.getByRole('link', { name: 'Sign out', exact: true })).toBeFocused()
+  await nav.getByText('Follow-up', { exact: true }).click()
+  await expect(row).toHaveAttribute('aria-expanded', 'false')
+
+  // In a window shorter than the menu the row stays in view; the list of pages scrolls above it.
   const size = page.viewportSize()!
   await page.setViewportSize({ width: size.width, height: 480 })
   const side = page.locator('aside:visible').first()
   const menu = side.getByRole('navigation')
   expect(await menu.evaluate((list) => list.scrollHeight > list.clientHeight)).toBe(true)
-  await expect(account.getByText('Dana Example')).toBeInViewport({ ratio: 1 })
-  await expect(account.getByRole('link', { name: 'Sign out', exact: true })).toBeInViewport({ ratio: 1 })
+  await expect(row).toBeInViewport({ ratio: 1 })
   // Flush with the sidebar's foot: no strip of the menu shows beneath it.
   const gap = async () => Math.abs((await side.boundingBox())!.y + (await side.boundingBox())!.height
     - (await account.boundingBox())!.y - (await account.boundingBox())!.height)
   expect(await gap()).toBeLessThanOrEqual(1)
   await menu.evaluate((list) => list.scrollTo(0, list.scrollHeight))
   expect(await gap()).toBeLessThanOrEqual(1)
-  await expect(account.getByRole('link', { name: 'Sign out', exact: true })).toBeInViewport({ ratio: 1 })
+  await expect(row).toBeInViewport({ ratio: 1 })
+  // Sign out is one press away in that window too: the whole panel fits above the row.
+  await row.click()
+  for (const entry of await opened.getByRole('link').all()) {
+    await expect(entry).toBeInViewport({ ratio: 1 })
+    expect(await entry.evaluate((link) => {
+      const box = link.getBoundingClientRect()
+      return link.contains(document.elementFromPoint(box.x + box.width / 2, box.y + box.height / 2))
+    })).toBe(true)
+  }
 })
 
 test('EXT-002 a hosted page renders inside the shell under its declared title, at the linked item', async ({ page }) => {
@@ -307,16 +342,16 @@ test('EXT-006 a managed policy without the block, or with another schema, adds n
   expect((await hrefs(nav)).filter((href) => href?.startsWith('/ext') || href?.startsWith('/deployment'))).toEqual([])
 })
 
-test('EXT-007 with an account block the primary action is pinned above it, never behind it', async ({ page }) => {
+test('EXT-007 with an account row the primary action stays under the logo, never behind the foot', async ({ page }) => {
   await managed(page, {
     ...managedPolicy,
     navigation: { ...managedPolicy.navigation, '/scan': 'scans' },
     ui_routes: [...managedPolicy.ui_routes, '/scan/new'],
   })
   await page.goto('/docs', { waitUntil: 'domcontentloaded' })
-  // A window shorter than the menu, as on a laptop with the full menu.
+  // A window shorter than the menu, as on a small laptop with the full menu.
   const size = page.viewportSize()!
-  await page.setViewportSize({ width: size.width, height: 480 })
+  await page.setViewportSize({ width: size.width, height: 360 })
   const nav = await sidebar(page)
   const menu = page.locator('aside:visible').first()
   const list = nav.getByRole('navigation')
@@ -336,21 +371,62 @@ test('EXT-007 with an account block the primary action is pinned above it, never
     await list.evaluate((pages, top) => pages.scrollTo(0, top), scrollTo)
     await expect(newScan).toBeInViewport({ ratio: 1 })
     expect(await uncovered()).toBe(true)
-    await expect(account.getByRole('link', { name: 'Sign out', exact: true })).toBeInViewport({ ratio: 1 })
+    await expect(account.getByRole('button')).toBeInViewport({ ratio: 1 })
     const button = (await newScan.boundingBox())!
     expect((await account.boundingBox())!.y).toBeGreaterThanOrEqual(button.y + button.height)
+    // It sits above every page of the menu, wherever the menu is scrolled to.
+    expect(button.y + button.height).toBeLessThanOrEqual((await list.boundingBox())!.y + 4)
   }
-  // The engine settings page is not one of this deployment's pages: no gear leads to a refusal.
+  // The open account panel does not reach it either.
+  await account.getByRole('button').click()
+  await expect(account.getByRole('link', { name: 'Sign out', exact: true })).toBeInViewport({ ratio: 1 })
+  expect(await uncovered()).toBe(true)
+  // The engine settings page is not one of this deployment's pages: no row leads to a refusal.
   await expect(nav.getByRole('link', { name: 'Settings', exact: true })).toHaveCount(0)
 })
 
-test('EXT-008 a standalone sidebar keeps New Scan in the menu flow and its Settings gear', async ({ page }) => {
+test('EXT-008 a standalone sidebar has New Scan under the logo, in the flow, and a Settings row', async ({ page }) => {
   await mockPageApi(page, api)
   await page.goto('/docs', { waitUntil: 'domcontentloaded' })
   const nav = await sidebar(page)
   await expect(nav.getByRole('region', { name: 'Account' })).toHaveCount(0)
-  await expect(nav.getByRole('link', { name: 'New Scan', exact: true })).toHaveAttribute('href', '/scan/new')
-  await expect(nav.getByRole('link', { name: 'Settings', exact: true })).toHaveAttribute('href', '/settings')
-  expect(await nav.getByRole('link', { name: 'New Scan', exact: true })
-    .evaluate((link) => getComputedStyle(link.parentElement!).position)).toBe('static')
+  const newScan = nav.getByRole('link', { name: 'New Scan', exact: true })
+  await expect(newScan).toHaveAttribute('href', '/scan/new')
+  const settings = nav.getByRole('link', { name: 'Settings', exact: true })
+  await expect(settings).toHaveAttribute('href', '/settings')
+  await expect(settings).toHaveText('Settings')
+  expect(await newScan.evaluate((link) => getComputedStyle(link.parentElement!).position)).toBe('static')
+  // Logo, New Scan, the pages, Settings: in that order from the top.
+  const tops = []
+  for (const part of [nav.getByRole('link', { name: 'ShakerScan dashboard', exact: true }), newScan, nav.getByRole('navigation'), settings]) {
+    tops.push((await part.boundingBox())!.y)
+  }
+  expect(tops).toEqual([...tops].sort((a, b) => a - b))
+})
+
+test('EXT-009 the account row says a role that repeats the name once', async ({ page }) => {
+  // The role only repeats the name: it is not printed under it.
+  const named = { ...extensions, account: { name: 'Administrator', detail: 'administrator', links: [], sign_out: '/deployment/sign-out' } }
+  await managed(page, { ...managedPolicy, edition: 'Enterprise Edition', extensions: named })
+  await page.goto('/docs', { waitUntil: 'domcontentloaded' })
+  const account = (await sidebar(page)).getByRole('region', { name: 'Account' })
+  const row = account.getByRole('button', { name: 'Administrator', exact: true })
+  await expect(row).toHaveText('AAdministrator')
+  // An Enterprise edition is named in the lockup, so the panel's last line is the version alone.
+  await row.click()
+  await expect(account.getByRole('link')).toHaveText(['Sign out'])
+  await expect(account.getByText('Version fixture', { exact: true })).toBeVisible()
+})
+
+test('EXT-010 an account with nothing to open is a name, not a button', async ({ page }) => {
+  // No links, no sign-out page, and the engine does not say what it runs.
+  const bare = { ...extensions, account: { name: 'Dana Example', detail: 'Operator', links: [] } }
+  await page.addInitScript((value) => { window.__SHAKERSCAN_CAPABILITIES__ = value as never },
+    { ...managedPolicy, edition: 'Enterprise Edition', extensions: bare })
+  await mockPageApi(page, { ...api, '/health': () => serverError() })
+  await mockDeployment(page)
+  await page.goto('/docs', { waitUntil: 'domcontentloaded' })
+  const account = (await sidebar(page)).getByRole('region', { name: 'Account' })
+  await expect(account).toHaveText('DDana ExampleOperator')
+  await expect(account.getByRole('button')).toHaveCount(0)
 })
