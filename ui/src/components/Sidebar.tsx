@@ -523,7 +523,7 @@ function NavContent({
                 below the fold; open, it heads the pages it added and scrolls with them. */}
             <div
               ref={moreRowRef}
-              className={showAll ? 'mt-4' : 'sticky bottom-0 z-[1] -mb-1 mt-4 bg-gray-900 pb-1 before:pointer-events-none before:absolute before:inset-x-0 before:-top-4 before:h-4 before:bg-linear-to-t before:from-gray-900 before:to-transparent'}
+              className={showAll ? 'mt-4' : 'sticky -bottom-1 z-[1] -mb-1 mt-4 bg-gray-900 pb-1 before:pointer-events-none before:absolute before:inset-x-0 before:-top-4 before:h-4 before:bg-linear-to-t before:from-gray-900 before:to-transparent'}
             >
             <button
               type="button"

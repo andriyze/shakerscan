@@ -63,6 +63,14 @@ for (const allSections of [false, true]) {
       expect(await uncovered(control)).toBe(true)
     }
 
+    // The closed row reaches the menu's lower edge: no sliver of a scrolled entry shows under it.
+    if (!allSections) {
+      expect(await more.evaluate((button) => {
+        const list = button.closest('nav')!.getBoundingClientRect()
+        return list.bottom - button.parentElement!.getBoundingClientRect().bottom
+      })).toBeLessThan(1)
+    }
+
     // Every page stays reachable: the last entry of the menu, focused from the keyboard, is
     // scrolled clear of the foot and of the closed More row above it. So is the More row, which
     // scrolls with the menu once it is open.
