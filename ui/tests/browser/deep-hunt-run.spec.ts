@@ -5,6 +5,7 @@ import type {
   Campaign, CampaignDetailResponse, Finding, ResearchBudget, ResearchEpisode, ResearchEpisodeDetail,
 } from '../../src/lib/api'
 import type { HuntV2 } from '../../src/lib/huntV2'
+import { MOCK_API_ORIGIN } from './mock-api-origin'
 import { mockPageApi, queryNames, unavailable, type MockHandler, type MockedApi } from './mock-page-api'
 import { visitAndAuditPage } from './page-quality'
 
@@ -103,6 +104,21 @@ async function expectNoHorizontalOverflow(page: Page) {
   expect(layout.scrollWidth, 'horizontal page overflow').toBeLessThanOrEqual(layout.clientWidth)
 }
 
+// The parts that describe a run: its state, its controls, its counters and its activity.
+async function expectNoRunShown(page: Page) {
+  const main = page.locator('main')
+  for (const state of ['Working', 'Running', 'Paused', 'Done']) {
+    await expect(main.getByText(state, { exact: true })).toHaveCount(0)
+  }
+  for (const control of ['Pause', 'Resume', 'Stop']) {
+    await expect(main.getByRole('button', { name: control, exact: true })).toHaveCount(0)
+  }
+  await expect(main.getByText('This run has no episode activity yet.')).toHaveCount(0)
+  for (const counter of ['Linked findings', 'Episodes', 'Time']) {
+    await expect(main.getByText(counter, { exact: true })).toHaveCount(0)
+  }
+}
+
 test.describe('/deep-hunt/runs/<id>', () => {
   test('a finished run shows its outcome, findings and activity', async ({ page }) => {
     const api = await mockRun(page, finished)
@@ -148,6 +164,31 @@ test.describe('/deep-hunt/runs/<id>', () => {
     await expect(page.getByRole('heading', { name: 'Autonomous run', level: 1 })).toBeVisible()
     await expect(page.locator('body')).not.toContainText('Application error')
     expect(errors).toEqual([])
+    // No run is on screen, so none is described: no state, controls, counters or empty activity.
+    await expectNoRunShown(page)
+    await expect(page.getByRole('link', { name: 'All hunts' })).toHaveAttribute('href', '/deep-hunt')
+
+    // Retry reads the run again.
+    await page.unroute(`${MOCK_API_ORIGIN}/**`)
+    await mockRun(page, finished)
+    await page.getByRole('button', { name: 'Retry' }).click()
+    await expect(page.getByRole('heading', { name: 'Synthetic fixture run', level: 1 })).toBeVisible()
+  })
+
+  test('an address that is no run says so and offers no run controls', async ({ page }) => {
+    const notFound = (detail: string) => ({ status: 404, json: { detail } })
+    await mockPageApi(page, {
+      'GET /health': () => ({ status: 'healthy' }),
+      [`GET /arsenal/campaigns/${RUN}`]: () => notFound('Campaign not found'),
+      [`GET /research/episodes/${RUN}`]: () => notFound('Research episode not found'),
+    })
+    await page.goto(`/deep-hunt/runs/${RUN}`)
+    await expect(page.locator('main').getByRole('alert')).toHaveText(/This run was not found\./)
+    await expect(page.getByRole('heading', { name: 'Autonomous run', level: 1 })).toBeVisible()
+    await expectNoRunShown(page)
+    await expect(page.getByRole('button', { name: 'Retry' })).toHaveCount(0)
+    await expect(page.getByRole('link', { name: 'All hunts' })).toHaveAttribute('href', '/deep-hunt')
+    await expectNoHorizontalOverflow(page)
   })
 
   test('a live run follows its episode every 2.5 s', async ({ page }) => {
