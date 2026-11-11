@@ -5,7 +5,7 @@ import { DeleteRecordsButton } from '@/components/lifecycle/DeleteRecordsButton'
 import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useUrlFilters } from '@/lib/useUrlFilters'
 import { UploadAttempt } from '@/lib/uploadAttempt'
-import { Braces, ChevronLeft, ChevronRight, Copy, Pencil, Plus, RefreshCw, Trash2 } from 'lucide-react'
+import { ChevronLeft, ChevronRight, Copy, Pencil, Plus, RefreshCw, Trash2 } from 'lucide-react'
 import { getTargetAsset, type AssetOrigin } from '@/lib/targetAssetApi'
 import { targetOptions, targetSearchNote } from '@/lib/pickerOptions'
 import { targetSearchProvesEmpty } from '@/lib/targetSearchModel.mjs'
@@ -446,11 +446,10 @@ function RequestCollectionsContent() {
   if ((error || targetSearch.error) && !assets.length && !targetSearch.query.trim()) return <ErrorState message={error || targetSearch.error || 'Failed to load targets'} />
 
   return (
-    <div className="mx-auto max-w-7xl space-y-6 p-6">
+    <div className="mx-auto max-w-7xl space-y-6">
       <PageHeader
         title="Request Collections"
         description="Upload once for an asset, bind the same collection to its exact application origins, and attach immutable selection IDs to Scan or Hunt. Documents and environment values stay encrypted."
-        icon={<Braces className="h-6 w-6" />}
         actions={<>
           <Button variant="secondary" onClick={() => void loadCollections()} disabled={!targetId}>
             <RefreshCw className="h-4 w-4" /> Refresh
