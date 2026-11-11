@@ -175,6 +175,37 @@ def test_targets_list_groups_and_domain_deletion_never_span_registrants(monkeypa
     assert not {ids["victim.github.io"], ids["attacker.github.io"]} & suffix
 
 
+def test_a_group_cached_under_earlier_rules_is_recomputed(monkeypatch):
+    """A host under a wildcard-DNS service was once grouped under the service. The cached group
+    carries the rules it was computed under, so the list never shows it after the rules changed."""
+    encryption(monkeypatch)
+    import hashlib
+
+    from scope.psl import PSL_PIN_PATH
+    from targets.asset_inventory import psl_version
+
+    earlier = "group-domain/v1:" + hashlib.sha256(PSL_PIN_PATH.read_bytes()).hexdigest()[:32]
+    assert psl_version() != earlier
+
+    async def run():
+        async with database() as conn:
+            await _converted(conn)
+            for host in ("10-0-0-5.sslip.io", "203-0-113-9.sslip.io"):
+                await conn.execute("INSERT INTO targets(url, name, root_domain) VALUES ($1, $2, $2)",
+                                   f"https://{host}", host)
+                await conn.execute(
+                    "INSERT INTO target_inventory_groups(locator, group_domain, psl_version) VALUES ($1, $2, $3)",
+                    host, "sslip.io", earlier)
+            listing = await list_assets(conn, group_by="domain", limit=50)
+            cached = {row["locator"]: (row["group_domain"], row["psl_version"]) for row in await conn.fetch(
+                "SELECT locator, group_domain, psl_version FROM target_inventory_groups")}
+            return listing, cached
+
+    listing, cached = asyncio.run(run())
+    assert {group["root_domain"] for group in listing["groups"]} == {"10-0-0-5.sslip.io", "203-0-113-9.sslip.io"}
+    assert cached == {host: (host, psl_version()) for host in ("10-0-0-5.sslip.io", "203-0-113-9.sslip.io")}
+
+
 def test_a_host_a_person_added_keeps_declaring_its_domain_after_a_scan(monkeypatch):
     """Adding a host, then scanning its URL, attaches the scan's row under the host. The host is
     still the person's declaration, so discovery for its domain stays admitted."""
