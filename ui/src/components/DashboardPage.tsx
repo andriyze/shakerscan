@@ -493,18 +493,22 @@ function DashboardContent() {
           >
             <RadioTower className={`h-4 w-4 shrink-0 ${gungnir?.running ? 'text-emerald-400' : 'text-gray-500'}`} aria-hidden="true" />
             <span className="whitespace-nowrap">CT<span className="hidden sm:inline"> monitor</span></span>
-            {canToggleGungnir ? (
-              <span
-                aria-hidden="true"
-                className={`relative h-4 w-7 shrink-0 rounded-full transition-colors ${gungnir?.running ? 'bg-emerald-500' : 'bg-gray-600'} ${gungnirActionLoading ? 'animate-pulse' : ''}`}
-              >
-                <span className={`absolute left-0.5 top-0.5 h-3 w-3 rounded-full bg-white transition-transform ${gungnir?.running ? 'translate-x-3' : ''}`} />
+            {/* The track and the state share a box of one width, and "starting…" takes the track's
+                place, so the control (and the row it sits in) keeps its size while a change is applied. */}
+            <span className={`inline-flex items-center gap-2 ${canToggleGungnir ? 'min-w-[4rem]' : ''}`}>
+              {!canToggleGungnir ? (
+                <Lock className="h-3 w-3 shrink-0 text-gray-500" aria-hidden="true" />
+              ) : gungnirChangingTo ? null : (
+                <span
+                  aria-hidden="true"
+                  className={`relative h-4 w-7 shrink-0 rounded-full transition-colors ${gungnir?.running ? 'bg-emerald-500' : 'bg-gray-600'}`}
+                >
+                  <span className={`absolute left-0.5 top-0.5 h-3 w-3 rounded-full bg-white transition-transform ${gungnir?.running ? 'translate-x-3' : ''}`} />
+                </span>
+              )}
+              <span data-testid="ct-monitor-state" className={`whitespace-nowrap ${gungnirChangingTo ? 'animate-pulse' : ''} ${gungnir?.running ? 'text-emerald-300' : 'text-gray-400'}`}>
+                {gungnirChangingTo === 'on' ? 'starting…' : gungnirChangingTo === 'off' ? 'stopping…' : gungnir?.running ? 'on' : 'off'}
               </span>
-            ) : (
-              <Lock className="h-3 w-3 shrink-0 text-gray-500" aria-hidden="true" />
-            )}
-            <span data-testid="ct-monitor-state" className={`whitespace-nowrap ${gungnir?.running ? 'text-emerald-300' : 'text-gray-400'}`}>
-              {gungnirChangingTo === 'on' ? 'starting…' : gungnirChangingTo === 'off' ? 'stopping…' : gungnir?.running ? 'on' : 'off'}
             </span>
           </button>
 

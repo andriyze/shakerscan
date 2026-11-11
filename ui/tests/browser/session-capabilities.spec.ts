@@ -277,9 +277,12 @@ for (const width of [390, 1440]) {
       const open = page.getByRole('switch', { name: 'CT monitor' })
       await expect(open).toHaveAttribute('aria-checked', 'true')
       await expect(open).not.toHaveAttribute('aria-readonly', 'true')
+      const widthAtRest = (await open.boundingBox())?.width ?? 0
       await open.click()
       await expect(page.getByTestId('ct-monitor-state')).toHaveText('stopping…')
       await expect(open).toBeDisabled()
+      // The control keeps its size while the change is applied, so the row around it does not move.
+      expect(Math.abs(((await open.boundingBox())?.width ?? 0) - widthAtRest)).toBeLessThanOrEqual(1)
       release()
       await expect(page.getByTestId('ct-monitor-state')).toHaveText('off')
       await expect(open).toHaveAttribute('aria-checked', 'false')
