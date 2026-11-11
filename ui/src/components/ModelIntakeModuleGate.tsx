@@ -31,7 +31,7 @@ export function ModelIntakeModuleGate({ children }: { children: ReactNode }) {
     return (
       <div className="min-w-0 max-w-full space-y-6">
         <PageHeader title="Model Intake" description="Not available in this deployment." />
-        <Card>
+        <Card className="p-5">
           <p className="text-sm text-gray-300">
             Model Intake checks AI models before you deploy them. This deployment does not include it; ask your administrator
             if you need it.
@@ -43,7 +43,7 @@ export function ModelIntakeModuleGate({ children }: { children: ReactNode }) {
   return (
     <div className="min-w-0 max-w-full space-y-6">
       <PageHeader title="Model Intake" description="Optional module: not installed on this instance." />
-      <Card>
+      <Card className="p-5">
         <div className="space-y-4 text-sm text-gray-300">
           <p>
             Model Intake checks AI models before you deploy them: it fetches a model from a registry such as Hugging Face,
