@@ -6,7 +6,8 @@ and target bindings, ``POST /discovery`` and the CT monitor. Such a
 pattern must sit at or below a registrable domain (eTLD+1). Counting labels is not enough:
 ``*.co.uk``, ``*.github.io`` and ``*.herokuapp.com`` each cover every site under a shared
 suffix. The list includes its PRIVATE section, so ``github.io`` and ``herokuapp.com`` are public
-suffixes here.
+suffixes here. So are the wildcard-DNS services in ``SHARED_DNS_SUFFIXES`` (``sslip.io``,
+``nip.io``), which the list does not carry.
 
 The snapshot is ``data/public_suffix_list.dat`` (Mozilla Public License 2.0; the file is
 unmodified and keeps its MPL notice; see THIRD_PARTY_NOTICES.md). Its SHA-256 is pinned in
@@ -53,6 +54,12 @@ PSL_PIN_PATH = DATA_DIR / "public_suffix_list.sha256"
 PSL_LICENSE = "MPL-2.0"
 MAX_DOMAIN_LENGTH = 253
 _LABEL = re.compile(r"^(?!-)[a-z0-9-]{1,63}(?<!-)$")
+
+
+# Wildcard-DNS services the list does not carry. Every name under one resolves to the address
+# written in it (``10-0-0-5.sslip.io`` is 10.0.0.5) and belongs to whoever uses that address, so
+# each is a public suffix here: a root or wildcard on ``sslip.io`` would cover strangers' hosts.
+SHARED_DNS_SUFFIXES = frozenset({"sslip.io", "nip.io", "xip.io", "traefik.me"})
 
 
 class PublicSuffixListError(RuntimeError):
@@ -128,6 +135,7 @@ def _rules() -> _RuleSet:
             exact.add(_ascii_rule(rule))
     # As publicsuffixlist/publicsuffix2 do: the parent of "*.kawasaki.jp" is itself a suffix.
     exact |= wildcard
+    exact |= SHARED_DNS_SUFFIXES
     below: dict[str, str] = {}
     for name in sorted(exact | exception, key=lambda item: (item.count("."), item)):
         shown = name if name in exception or name not in wildcard else "*." + name
@@ -237,13 +245,17 @@ def spans_public_suffix(host: str) -> bool:
 
 def registrable_domain(host: str) -> str | None:
     """eTLD+1 of ``host`` (``example.co.uk`` for ``api.example.co.uk``); None for a public
-    suffix, an address, or an empty or invalid host."""
+    suffix, an address, or an empty or invalid host. A name below a wildcard-DNS service is its
+    own registrable domain: the address in it may be written with dots (``app.10.0.0.5.nip.io``),
+    so no label count finds the part one user holds."""
     try:
         host = _clean(host)
     except PublicSuffixError:
         return None
     if not host or _is_address(host) or _numeric_tld(host):
         return None
+    if any(host.endswith("." + suffix) for suffix in SHARED_DNS_SUFFIXES):
+        return host
     suffix = public_suffix(host)
     if suffix == host:
         return None

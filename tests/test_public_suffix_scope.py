@@ -150,6 +150,8 @@ def test_api_scope_matchers_ignore_public_suffix_roots():
     ("https://api.example.com:8443", "example.com"),
     ("https://localhost", "localhost"),
     ("https://192.0.2.1", "192.0.2.1"),
+    ("http://10-0-0-5.sslip.io:3000", "10-0-0-5.sslip.io"),
+    ("https://app.10.0.0.5.nip.io", "app.10.0.0.5.nip.io"),
 ])
 def test_target_root_domain_is_the_registrable_domain(url, root):
     assert extract_root_domain(url) == root

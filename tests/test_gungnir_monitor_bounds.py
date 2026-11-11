@@ -84,6 +84,22 @@ def test_public_suffix_roots_are_never_monitored(gungnir):
     ]
 
 
+def test_a_wildcard_dns_service_is_never_monitored_and_its_names_never_become_targets(gungnir):
+    # A target at 10-0-0-5.sslip.io is one user's host; every other name there is a stranger's.
+    # A name below the target's own is not taken either: no label count says whose it is.
+    roots = gungnir.monitored_roots(["sslip.io", "nip.io", "10-0-0-5.sslip.io", "example.com"])
+    assert roots == ["10-0-0-5.sslip.io", "example.com"]
+    outcomes, stored, _redis, _cap = run(gungnir, [
+        "203-0-113-9.sslip.io", "fit.198-51-100-7.sslip.io", "api.10-0-0-5.sslip.io", "10.0.0.5.nip.io",
+        "new.example.com",
+    ], roots, cap=10)
+    assert outcomes == ["out_of_scope"] * 4 + ["added"]
+    assert stored == [("new.example.com", "example.com")]
+    # The stored root an earlier version gave such a target admits nothing.
+    outcomes, stored, _redis, _cap = run(gungnir, ["203-0-113-9.sslip.io"], ["sslip.io"], cap=10)
+    assert outcomes == ["out_of_scope"] and stored == []
+
+
 def test_names_are_matched_on_dot_boundaries_and_deduplicated(gungnir):
     outcomes, stored, _redis, _cap = run(gungnir, [
         "a.example.com", "evilexample.com", "a.example.com", "*.a.example.com", "x.other.test",
@@ -139,9 +155,11 @@ def test_a_legacy_public_suffix_root_keeps_monitoring_under_the_customers_domain
     class Conn:
         async def fetch(self, query, *args):
             if "DISTINCT root_domain" in query:
-                return [{"root_domain": "co.uk"}, {"root_domain": "example.com"}, {"root_domain": "github.io"}]
-            assert sorted(args[0]) == ["co.uk", "github.io"]
+                return [{"root_domain": "co.uk"}, {"root_domain": "example.com"}, {"root_domain": "github.io"},
+                        {"root_domain": "sslip.io"}]
+            assert sorted(args[0]) == ["co.uk", "github.io", "sslip.io"]
             return [{"root_domain": "co.uk", "url": "https://shop.example.co.uk"},
+                    {"root_domain": "sslip.io", "url": "http://10-0-0-5.sslip.io:3000"},
                     {"root_domain": "co.uk", "url": "https://example.co.uk"},
                     {"root_domain": "github.io", "url": "https://victim.github.io"},
                     {"root_domain": "co.uk", "url": "https://co.uk"}]
@@ -159,7 +177,8 @@ def test_a_legacy_public_suffix_root_keeps_monitoring_under_the_customers_domain
 
     gungnir.db_pool = Pool()
     roots = gungnir.monitored_roots(asyncio.run(gungnir.get_monitored_domains()))
-    assert roots == ["example.com", "example.co.uk", "victim.github.io"]
+    assert roots == ["example.com", "example.co.uk", "10-0-0-5.sslip.io", "victim.github.io"]
+    assert gungnir.match_root_domain("203-0-113-9.sslip.io", roots) is None
     assert gungnir.match_root_domain("new.example.co.uk", roots) == "example.co.uk"
     assert gungnir.match_root_domain("shop.other.co.uk", roots) is None
 
