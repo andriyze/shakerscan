@@ -81,5 +81,6 @@ test('MODULE-005 with Model Intake off the page says plainly that installing is 
   await mock(page, false)
   await page.goto('/model-intake')
   await expect(page.getByText(/it is done on the host by its operator and cannot be done from this page/)).toBeVisible()
-  await expect(page.getByRole('button', { name: 'Copy install command' })).toBeVisible()
+  // The command is still one click to copy; the button's visible name is "Copy".
+  await expect(page.getByTitle('Copy install command')).toBeVisible()
 })
