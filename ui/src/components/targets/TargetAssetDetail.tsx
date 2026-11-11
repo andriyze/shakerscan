@@ -7,6 +7,7 @@ import { TargetActionsEditor } from './TargetActionsEditor'
 import { TargetKnowledgeEditor } from './TargetKnowledgeEditor'
 import { TargetHuntPermissions } from './TargetHuntPermissions'
 import { TargetInterpretations } from './TargetInterpretations'
+import { TargetKnowledgeChanges } from './TargetKnowledgeChanges'
 import { TargetDiscoveredSecrets } from './TargetDiscoveredSecrets'
 import { TargetLivenessCard } from './TargetLivenessCard'
 import { AssetCollections } from '@/components/collections/AssetCollections'
@@ -107,6 +108,7 @@ export function TargetAssetDetail({ id }: {id: string}) {
     <div className="mb-6"><TargetKnowledgeEditor targetId={target.id} /></div>
     <TargetHuntPermissions targetId={target.id} />
     <TargetInterpretations targetId={target.id} />
+    <TargetKnowledgeChanges targetId={target.id} />
     {/* The host's own card says "None found yet" only when no origin card below lists secrets. */}
     {canReadSecrets && <TargetDiscoveredSecrets targetId={target.id} hideWhenEmpty={originSecretsListed} />}
     {canReadSecrets && secretOrigins.map(origin =>
