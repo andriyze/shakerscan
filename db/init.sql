@@ -1810,6 +1810,34 @@ $$ LANGUAGE plpgsql;
 CREATE TRIGGER trg_bind_finding_observation_scans
 BEFORE INSERT OR UPDATE OF scan_id ON findings
 FOR EACH ROW EXECUTE FUNCTION bind_finding_observation_scans();
+
+-- Which findings each Scan observed: one row per Scan and finding, written by a trigger whenever
+-- a finding is saved with a scan_id. findings.scan_id moves to the latest Scan that saw the
+-- finding, so a Scan's own list is read from here and keeps everything that Scan observed. The
+-- startup migration (api/targets/asset_migration.py, with the SQL in
+-- api/scan/finding_observations.py) installs this exact definition on existing databases.
+CREATE TABLE IF NOT EXISTS finding_scan_observations (
+    scan_id UUID NOT NULL REFERENCES scans(id) ON DELETE CASCADE,
+    finding_id UUID NOT NULL REFERENCES findings(id) ON DELETE CASCADE,
+    observed_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (scan_id, finding_id)
+);
+CREATE INDEX IF NOT EXISTS idx_finding_scan_observations_finding
+    ON finding_scan_observations(finding_id);
+CREATE OR REPLACE FUNCTION record_finding_scan_observation() RETURNS TRIGGER AS $$
+BEGIN
+    IF NEW.scan_id IS NOT NULL THEN
+        INSERT INTO finding_scan_observations (scan_id, finding_id)
+        VALUES (NEW.scan_id, NEW.id)
+        ON CONFLICT (scan_id, finding_id) DO NOTHING;
+    END IF;
+    RETURN NULL;
+END;
+$$ LANGUAGE plpgsql;
+CREATE TRIGGER trg_record_finding_scan_observation
+AFTER INSERT OR UPDATE OF scan_id ON findings
+FOR EACH ROW EXECUTE FUNCTION record_finding_scan_observation();
+
 CREATE INDEX idx_findings_target_id ON findings(target_id);
 CREATE INDEX idx_findings_ai_target_id ON findings(ai_target_id) WHERE ai_target_id IS NOT NULL;
 CREATE UNIQUE INDEX idx_findings_device_fingerprint ON findings(device_target_id, fingerprint) WHERE device_target_id IS NOT NULL;
@@ -1912,25 +1940,40 @@ SELECT
 -- FUNCTIONS
 -- ============================================================
 
--- Update target stats after scan completion
+-- Update target stats after scan completion. A discovery run (scan_role asm_recon or
+-- parallel_discovery) refreshes only the active-finding count: the target's latest result and
+-- Scan count come from application Scans. The startup migration installs this exact definition
+-- on existing databases (api/scan/discovery_runs.py).
 CREATE OR REPLACE FUNCTION update_target_stats()
 RETURNS TRIGGER AS $$
 BEGIN
     IF NEW.status = 'completed'
        AND NEW.target_id IS NOT NULL
        AND COALESCE(NEW.scan_role, 'standalone') <> 'shard' THEN
-        UPDATE targets SET
-            last_scan_id = NEW.id,
-            last_scanned_at = NEW.completed_at,
-            last_score = NEW.score,
-            last_grade = NEW.grade,
-            total_scans = total_scans + 1,
-            active_findings_count = (
-                SELECT COUNT(*) FROM findings
-                WHERE target_id = NEW.target_id AND status = 'active'
-            ),
-            updated_at = NOW()
-        WHERE id = NEW.target_id;
+        IF COALESCE(NEW.scan_role, 'standalone') IN ('asm_recon', 'parallel_discovery') THEN
+            -- A discovery run maps the target; it does not grade the application.
+            UPDATE targets SET
+                active_findings_count = (
+                    SELECT COUNT(*) FROM findings
+                    WHERE target_id = NEW.target_id AND status = 'active'
+                ),
+                updated_at = NOW()
+            WHERE id = NEW.target_id;
+        ELSE
+            UPDATE targets SET
+                last_scan_id = NEW.id,
+                last_scanned_at = NEW.completed_at,
+                last_score = NEW.score,
+                last_grade = NEW.grade,
+                last_assurance_score = NEW.assurance_score,
+                total_scans = total_scans + 1,
+                active_findings_count = (
+                    SELECT COUNT(*) FROM findings
+                    WHERE target_id = NEW.target_id AND status = 'active'
+                ),
+                updated_at = NOW()
+            WHERE id = NEW.target_id;
+        END IF;
     END IF;
     RETURN NEW;
 END;

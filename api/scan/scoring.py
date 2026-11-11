@@ -74,6 +74,13 @@ ACTIVE_VERIFIER_FAMILIES = frozenset({
 })
 
 
+# Discovery maps the surface the check families then examine. Its coverage row reports whether
+# the discovery actions settled; it is not a check family, so it earns no family credit here.
+# What discovery fell short of already reaches the score through the reliability reasons and
+# the action counts.
+DISCOVERY_FAMILIES = frozenset({"recon"})
+
+
 def _ratio(done: float, planned: float) -> float:
     """Proportion of planned work that happened.
 
@@ -110,7 +117,10 @@ def assurance(
         item for item in (coverage.get("family_coverage") or ())
         if isinstance(item, Mapping)
     ]
-    selected = [item for item in families if item.get("selected")]
+    selected = [
+        item for item in families
+        if item.get("selected") and str(item.get("family") or "") not in DISCOVERY_FAMILIES
+    ]
     complete = [
         item for item in selected
         if str(item.get("status") or item.get("coverage_status") or "") == "complete"
@@ -402,6 +412,7 @@ __all__ = [
     "ACTIVE_VERIFIER_FAMILIES",
     "ASSURANCE_BANDS",
     "ASSURANCE_COMPONENTS",
+    "DISCOVERY_FAMILIES",
     "GRADE_BANDS",
     "HTTP_POSTURE_WEIGHT",
     "PROVEN_CEILING",

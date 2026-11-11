@@ -25,6 +25,9 @@ import { buildFindingLinkageIndex, linkedPersistedFinding } from '@/lib/findingL
 import { blockerOrigin, blockerProvenanceText, carriedOverFromDecision, carriedSourceText, carriedOverSummary, domainRatePresentation, groupScanFindings, queueWaitPresentation, isProvenFinding, reconciledScanFindings, releaseLine, scanFindingCounts, scanFindingCountsText, scanLogEntry, scanPhasePresentation, scanResultPresentation, scanStepLabel, scanStepStatusLabel } from '@/lib/scanDetailPresentation.mjs'
 import { checkFamilyLabel } from '@/lib/checkFamilyLabel'
 import { emptyScanLogState, mergeScanLogReply } from '@/lib/scanLogDelta.mjs'
+import { isDiscoveryRun } from '@/lib/discoveryRun.mjs'
+import { scanCountLine } from '@/lib/scanCountLine.mjs'
+import { releaseProfileReason } from '@/lib/releaseProfile.mjs'
 import { scanFailureRecommendation } from '@/lib/scanFailureRecommendation'
 import { failedScanHeadline } from '@/lib/authorizationStop'
 
@@ -165,6 +168,11 @@ function ScanVerdictCard({ scan, buildVersion, buildFingerprint, decision, targe
   const hasGrade = Boolean(scorePresentation.grade)
   const hasScore = typeof scorePresentation.score === 'number'
   const scanTypeLabel = formatScanTypeLabel(scan)
+  // A discovery run maps the target with active testing off: it is headed as that, not as a DAST scan.
+  const discoveryRun = isDiscoveryRun(scan)
+  // The headline, the release line, the severity chips and the Findings tab each give a count of
+  // this run's findings; this line says how they relate.
+  const countLine = scanCountLine(scan)
   const duration = scan.duration_seconds ? formatDuration(scan.duration_seconds) : null
   const scanVersion: string | null = scan?.result?.scanner_version || null
   const scanFingerprint: string | null =
@@ -206,7 +214,9 @@ function ScanVerdictCard({ scan, buildVersion, buildFingerprint, decision, targe
       <section className={`border-b p-6 ${conclusionTone}`} aria-labelledby="scan-conclusion-heading">
         <div className="flex flex-wrap items-start justify-between gap-4">
           <div className="max-w-3xl">
-            <p className="text-xs font-semibold uppercase tracking-wide text-gray-400">Run conclusion</p>
+            <p className="text-xs font-semibold uppercase tracking-wide text-gray-400">
+              {discoveryRun ? 'Discovery run conclusion' : 'Run conclusion'}
+            </p>
             <h2 id="scan-conclusion-heading" className="mt-2 text-2xl font-semibold text-white">
               {resultPresentation.headline}
             </h2>
@@ -216,6 +226,9 @@ function ScanVerdictCard({ scan, buildVersion, buildFingerprint, decision, targe
                 <span className={`rounded-sm px-2 py-0.5 text-xs font-semibold uppercase ${releaseClass}`}>{release.verdict.replace(/_/g, ' ')}</span>
                 <span>{release.text}</span>
               </p>
+            )}
+            {countLine && (
+              <p className="mt-3 text-sm text-gray-300" data-testid="scan-count-line">{countLine}</p>
             )}
             <p className={`mt-3 text-sm font-medium ${resultPresentation.confidenceTone === 'qualified' ? 'text-amber-200' : assuranceClass(assurance?.band)}`}>
               {resultPresentation.confidence}
@@ -236,7 +249,9 @@ function ScanVerdictCard({ scan, buildVersion, buildFingerprint, decision, targe
             )}
           </div>
           <div className="text-right text-xs text-gray-500">
-            {scanTypeLabel && <p className="text-sm text-gray-300">{scanTypeLabel} scan</p>}
+            {discoveryRun
+              ? <p className="text-sm text-gray-300" data-testid="scan-kind">Discovery run</p>
+              : scanTypeLabel && <p className="text-sm text-gray-300" data-testid="scan-kind">{scanTypeLabel} scan</p>}
             {duration && <p className="mt-0.5">Completed in {duration}</p>}
             <p className="mt-0.5 capitalize">{scopeSummary}</p>
             {/* Whose traffic the findings describe is part of reading them, so it stays beside the conclusion. */}
@@ -522,7 +537,10 @@ function DeploymentDecisionCard({
           <div className="mt-2 flex flex-wrap items-center gap-2 text-xs">
             <span className={`rounded-sm px-2 py-1 font-medium uppercase ${verdictClass}`}>{verdict.replace(/_/g, ' ')}</span>
             {decision?.policy_profile && (
-              <span className="rounded-sm bg-gray-800 px-2 py-1 text-gray-300"><span className="text-gray-500">profile</span> {String(decision.policy_profile)}</span>
+              <span className="rounded-sm bg-gray-800 px-2 py-1 text-gray-300" data-testid="release-profile">
+                <span className="text-gray-500">profile</span> {String(decision.policy_profile)}
+                {releaseProfileReason(decision) && <span className="text-gray-500"> · {releaseProfileReason(decision)}</span>}
+              </span>
             )}
             {decision?.policy_name && (
               <span className="rounded-sm bg-gray-800 px-2 py-1 text-gray-300"><span className="text-gray-500">policy</span> {String(decision.policy_name)}</span>

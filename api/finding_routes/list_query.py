@@ -31,10 +31,12 @@ try:
     from list_contract import (
         ListSpec, Page, SortKey, SqlParams, count_total, snapshot_time,
     )
+    from scan.finding_observations import observed_by_scan_sql
 except ModuleNotFoundError:  # package import in host-side tests
     from ..list_contract import (
         ListSpec, Page, SortKey, SqlParams, count_total, snapshot_time,
     )
+    from ..scan.finding_observations import observed_by_scan_sql
 
 from .hunt_scope import finding_hunt_predicate
 from .retirement import not_retired_sql, resolution_reason_sql, retirement_record, retirement_sql
@@ -224,7 +226,9 @@ class FindingFilters:
             where.append(
                 f"f.device_target_id = {params.add(_uuid(self.device_target_id, 'device_target_id'))}")
         if self.scan_id:
-            where.append(f"f.scan_id = {params.add(_uuid(self.scan_id, 'scan_id'))}")
+            # Every finding the Scan observed, not only those no later run has seen again
+            # (findings.scan_id names the latest Scan that saw a finding).
+            where.append(observed_by_scan_sql("f.id", params.add(_uuid(self.scan_id, "scan_id"))))
         if self.hunt_id:
             # A family-proof promotion may have no direct hunt_run_id. Its actual producing
             # verification is durable; another run's observation is not proof.

@@ -20,7 +20,11 @@ from .capability_result import (
     CapabilityResultReference,
     CapabilityResultStatus,
 )
-from .contracts import SCAN_APPLICATION_SURFACE_FAMILIES, budget_sufficiency
+from .contracts import (
+    SCAN_APPLICATION_SURFACE_FAMILIES,
+    budget_sufficiency,
+    scan_family_capabilities,
+)
 from .finding_evidence import template_classification, tls_finding_evidence, tls_untrusted_by_leaf_weakness
 from .external_process import (
     ACTIVE_TEMPLATE_WINDOWS_RECORD_KIND,
@@ -269,6 +273,39 @@ _CRAWL_EXAMINED_STATUSES = frozenset({
     CapabilityResultStatus.SUCCESS, CapabilityResultStatus.PARTIAL,
     CapabilityResultStatus.TIMED_OUT,
 })
+
+
+def _discovery_family_row(
+    family: str, actions: Sequence[Any], action_results: Mapping[str, Any], *, reason: str | None,
+) -> dict[str, Any]:
+    """Coverage for the discovery family: whether the plan's discovery actions settled.
+
+    Discovery has no verifier and no candidates, so its counters are zero and it carries no
+    proof escalation. ``reason`` is why discovery fell short, by the rules the Scan's own
+    coverage uses; None means it settled.
+    """
+    reserved: dict[str, int] = {}
+    consumed: dict[str, int] = {}
+    for action in actions:
+        result = action_results[action.action_id]
+        for name, amount in result.budget_reserved.items():
+            reserved[name] = reserved.get(name, 0) + int(amount)
+        for name, amount in result.budget_consumed.items():
+            consumed[name] = consumed.get(name, 0) + int(amount)
+    return {
+        "family": family, "selected": True,
+        "required": any(action.required for action in actions),
+        "batch_actions": len(actions), "planned_candidates": 0, "attempted_candidates": 0,
+        "unattempted_candidates": 0, "manifest_candidates": 0, "unscheduled_candidates": 0,
+        "verified_findings": 0, "suspected_findings": 0,
+        "budget_reserved": reserved, "budget_consumed": consumed,
+        # How each discovery action ended; the actions themselves are in capability_coverage.
+        "action_statuses": dict(sorted(Counter(
+            action_results[action.action_id].status.value for action in actions
+        ).items())),
+        "coverage_status": "partial" if reason else "complete",
+        "reason": reason,
+    }
 
 
 def _unplanned_family_row(
@@ -3326,7 +3363,7 @@ def finalize_scan_report(
             # manifest holds more entries than its slices cover has work that was never attempted,
             # and comparing attempts with slices alone reports that as complete coverage.
             "_manifest_entries": {}, "_scheduled_entries": {}, "_slow_endpoints": [],
-            "_refused_candidates": [], "_sign_in_limited": [],
+            "_refused_candidates": [], "_sign_in_limited": [], "_continued": [],
             "_proofs_attempted": set(), "_proofs_pace_unfunded": {}, "_proofs_resolved": {},
             "proof_escalation": {
                 "actions": 0, "attempted_candidates": 0,
@@ -3338,6 +3375,11 @@ def finalize_scan_report(
             # Its extension re-plans the same slice and is counted instead. A proof's attempts
             # that reached no verdict still need one: they stay unresolved unless the extension
             # (or a retry) settles the same attempt, which it does only for those it re-runs.
+            if result.status is not CapabilityResultStatus.SUCCESS:
+                row["_continued"].append((
+                    result.reason_code.value if result.reason_code is not None else None,
+                    superseded[action.action_id].status is CapabilityResultStatus.SUCCESS,
+                ))
             if action.capability_name in _PROOF_CAPABILITIES:
                 _merge_proof_resolution(row, observations.get(action.action_id, ()))
         elif action.capability_name in _PROOF_CAPABILITIES:
@@ -3521,6 +3563,17 @@ def finalize_scan_report(
         if slow_endpoints:
             row["slow_endpoints"] = slow_endpoints
             row["slow_endpoint_count"] = len(slow_endpoints)
+        continued = row.pop("_continued")
+        if continued:
+            # Slices that did not finish (a spent request allowance, a timeout) and were carried
+            # into a later action. The continuation's outcome decides the family's status; this
+            # states that it happened, why, and how many the continuation finished, so a family
+            # that reads complete beside actions that ran out of budget explains itself.
+            row["continued_actions"] = {
+                "count": len(continued),
+                "finished": sum(1 for _reason, finished in continued if finished),
+                "reasons": sorted({reason for reason, _finished in continued if reason}),
+            }
         proof = row["proof_escalation"]
         proof_statuses = proof.pop("_statuses")
         proof_reasons = proof.pop("_reasons")
@@ -3690,7 +3743,8 @@ def finalize_scan_report(
                 row["no_candidates_reasons"] = empty_reasons
     # Every selected check family is reported, including one the plan gave no action: an
     # absent family read as nothing to report, and the Scan as complete. `recon` is
-    # discovery, not a check family with a verifier, so it has no row.
+    # discovery, not a check family with a verifier: its row is built below from the
+    # discovery actions.
     unplanned_families = sorted(
         {str(item).strip() for item in resolved_families or ()}
         & set(_FAMILY_BY_CAPABILITY.values())
@@ -3880,6 +3934,36 @@ def finalize_scan_report(
         and action_results[action.action_id].reason_code is not None
         and action_results[action.action_id].reason_code.value in _DISCOVERY_TRUNCATION_REASONS
     )
+    # Discovery is a selected family too. Its row says whether the discovery actions this plan
+    # ran settled, by the rules above: a required one that fell short, optional ones that
+    # failed with nothing else producing the surface, or ones cut short. The reasons above
+    # already carry the effect on the Scan's coverage and grade, so the row is not a selected
+    # family gap as well. A plan with no discovery action (an endpoint shard) and a caller
+    # without the execution plan add no row.
+    for family in sorted(
+        scoring.DISCOVERY_FAMILIES & {str(item).strip() for item in resolved_families or ()}
+    ):
+        capabilities = set(scan_family_capabilities(family))
+        discovery_actions = [
+            action for action in coverage_actions if action.capability_name in capabilities
+        ]
+        if not discovery_actions:
+            continue
+        required_short = sorted(
+            result.reason_code.value if result.reason_code is not None
+            else "required_capability_incomplete"
+            for action, result in required_incomplete
+            if action.capability_name in capabilities
+        )
+        family_coverage[family] = _discovery_family_row(
+            family, discovery_actions, action_results,
+            reason=(
+                required_short[0] if required_short
+                else "discovery_failed" if discovery_gap
+                else "discovery_truncated" if truncated_discovery
+                else None
+            ),
+        )
     # A Scan whose execution plan resolved no check family examined nothing a grade is about:
     # only the baseline probes ran (soak 89770439, graded A 100 "complete"). Admission refuses
     # such a policy; a plan stored before that refusal must still not read as clean and complete.
@@ -3955,6 +4039,12 @@ def finalize_scan_report(
         for action in coverage_actions
         if not action.required
         and action_results[action.action_id].status is not CapabilityResultStatus.SUCCESS
+        # A slice its continuation finished left no gap; its own outcome stays on its action
+        # row below, with the action that continued it.
+        and not (
+            action.action_id in superseded
+            and superseded[action.action_id].status is CapabilityResultStatus.SUCCESS
+        )
     ]
     capability_coverage = {
         "total": len(coverage_actions),
@@ -3974,6 +4064,11 @@ def finalize_scan_report(
             "required": row["required"],
             "status": row["status"],
             "reason_code": row["reason_code"],
+            # The newest action that continued this one, and how that one ended.
+            **({
+                "continued_by": superseded[row["action_id"]].action_id,
+                "continued_status": superseded[row["action_id"]].status.value,
+            } if row["action_id"] in superseded else {}),
         } for row in coverage_action_rows],
     }
     principal_contexts = sorted({

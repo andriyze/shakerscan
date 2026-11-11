@@ -13918,6 +13918,35 @@ def test_command_result_event_uses_live_scan_status_over_frozen_status():
     assert ev["mission_campaign_id"] == "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
 
 
+def test_a_finished_submission_event_does_not_say_queued():
+    # The message is stored when the Scan is queued; the event reports the scan's live status.
+    row = {
+        "id": "cmd-3", "command": "scan.submit", "status": "queued", "risk_tier": "active",
+        "dry_run": False, "scan_id": "44444444-4444-4444-8444-444444444444",
+        "operation_plan_id": None, "campaign_id": None, "scope_receipt_id": None,
+        "approval_receipt_id": None, "finding_ids": [], "evidence_object_ids": [],
+        "tool_receipt_ids": [], "blocked_by": [], "next_action": None,
+        "operator_message": "Queued Scan for https://app.example.com",
+        "created_at": datetime(2026, 7, 6, tzinfo=timezone.utc),
+        "scan_status": "completed", "scan_target_url": "https://app.example.com", "scan_target_id": None,
+    }
+    done = ops_router_module._command_result_timeline_event(row)
+    assert (done["status"], done["operator_message"]) == ("completed", "Scan for https://app.example.com")
+    running = ops_router_module._command_result_timeline_event({**row, "scan_status": "running"})
+    assert running["operator_message"] == "Scan for https://app.example.com"
+    # While the Scan waits, the stored message is still true.
+    waiting = ops_router_module._command_result_timeline_event({**row, "scan_status": "queued"})
+    assert (waiting["status"], waiting["operator_message"]) == ("queued", "Queued Scan for https://app.example.com")
+    # Other messages are passed through as stored.
+    other = ops_router_module._command_result_timeline_event({**row, "operator_message": "Blocked by scope"})
+    assert other["operator_message"] == "Blocked by scope"
+    action = ops_router_module._campaign_action_timeline_event({
+        **row, "action_name": "asm.test", "command": "asm.test", "target_id": None,
+        "operator_message": "Queued ASM test batch for https://app.example.com"})
+    assert (action["status"], action["operator_message"]) == (
+        "completed", "ASM test batch for https://app.example.com")
+
+
 def test_timeline_sort_orders_newest_first_and_none_last():
     older = {"created_at": "2026-07-05T00:00:00+00:00", "event_id": "old"}
     newer = {"created_at": "2026-07-06T00:00:00+00:00", "event_id": "new"}
@@ -23533,3 +23562,68 @@ def test_deployment_decision_reads_each_exceptions_compensating_controls(monkeyp
     summary = decision["exception_summary"]
     assert summary["total"] == 1
     assert summary["missing_compensating_controls"] == 0
+
+
+def test_deployment_decision_judges_a_web_scan_under_its_targets_environment(monkeypatch):
+    """GET /scans/{id}/deployment-decision never read the target's environment, so a web Scan of
+    a production target was reported under the default profile."""
+    scan_id, target_id = uuid.uuid4(), uuid.uuid4()
+    state = {"metadata": {"environment": "production"}, "profiles": []}
+
+    def profile(area, minimum):
+        return {"id": uuid.uuid4(), "name": f"{area}-production", "product_area": area,
+                "environment": "production", "minimum_block_severity": minimum, "expires_days": 7,
+                "strict_model_intake": False, "allow_active_exceptions": True,
+                "required_trust_anchor_ids": [], "owner": None, "version": None}
+
+    class Conn:
+        async def fetchrow(self, query, *args):
+            if "FROM scans" in query:
+                return {"id": scan_id, "target_id": target_id, "status": "completed", "scan_type": "scan",
+                        "run_kind": "web_dast", "score": 40, "grade": "D",
+                        "result": json.dumps({"findings": [{"id": "f-high", "severity": "high", "title": "x"}]}),
+                        "completed_at": datetime.now(timezone.utc)}
+            if "FROM targets WHERE id" in query:
+                assert "metadata_json" in query
+                return {"url": "https://app.example.test", "discovery_source": "manual",
+                        "metadata_json": json.dumps(state["metadata"])}
+            return None
+
+        async def fetch(self, query, *args):
+            if "FROM policy_profiles" in query:
+                return list(state["profiles"])
+            if "FROM targets" in query:
+                return [{"id": target_id, "url": "https://app.example.test", "discovery_source": "manual"}]
+            return []
+
+    async def no_rows(*_args, **_kwargs):
+        return {"rows": [], "total": 0, "complete": True}
+
+    async def no_ids(*_args, **_kwargs):
+        return {}
+
+    monkeypatch.setattr(api_module, "db_pool", _pool_for(Conn()))
+    monkeypatch.setattr(api_module, "load_target_blocking_rows", no_rows)
+    monkeypatch.setattr(api_module, "load_target_history", no_rows)
+    monkeypatch.setattr(api_module, "load_scan_finding_ids", no_ids)
+
+    def decide():
+        return asyncio.run(api_module.get_scan_deployment_decision(str(scan_id)))
+
+    decision = decide()
+    assert (decision["policy_profile"], decision["policy_profile_basis"], decision["target_environment"]) == (
+        "production", "target_environment", "production")
+    state["metadata"] = {"cohort": "staging"}
+    assert decide()["policy_profile"] == "staging"
+    # A target without a tag is a production target, as its row shows.
+    state["metadata"] = {}
+    assert decide()["target_environment"] == "production"
+    # Of two stored profiles for the environment, the one written for web Scans applies,
+    # in whichever order they are read.
+    state["metadata"] = {"environment": "production"}
+    for rows in ([profile("ai_gate", "low"), profile("dast", "critical")],
+                 [profile("dast", "critical"), profile("ai_gate", "low")]):
+        state["profiles"] = rows
+        stored = decide()
+        assert stored["policy_profile"] == "production"
+        assert stored["blocking_findings"] == []

@@ -120,7 +120,7 @@ test('scoped dashboard keeps global activity visible without attributing it to a
   assert.match(dashboard, /isGlobalActivity\(event\.target_id, event\.target_url\)/)
   assert.match(dashboard, /return !targetId && !targetUrl/)
   assert.match(dashboard, /Recent changes are shown per cohort/)
-  assert.match(dashboard, /Observed posture \{scan\.grade\}/)
+  assert.match(dashboard, /Observed posture \{grade\.letter\}/)
   assert.match(dashboard, /assurance\.label.*assurance\.score/)
   assert.match(targets, /gradeTextColor\(grade\)/)
   assert.match(targets, /gradeTextColor\(origin\.last_grade\)/)
@@ -129,7 +129,7 @@ test('scoped dashboard keeps global activity visible without attributing it to a
   assert.match(scans, />Observed posture</)
   assert.match(scans, /Examination strength \$\{assurance\.score\}\/100/)
   assert.match(scans, /scan\.status !== 'completed'/)
-  assert.match(scans, /asterisk marks assurance limitations/)
+  assert.match(scans, /grade\.provisional \? PROVISIONAL_GRADE_TITLE : OBSERVED_GRADE_TITLE/)
   assert.doesNotMatch(dashboard, /text-lg font-semibold[^\n]+scan\.grade/)
 })
 

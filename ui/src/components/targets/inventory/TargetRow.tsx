@@ -15,6 +15,7 @@ import { featureEnabled } from '@/lib/workspaceCapabilities'
 import { useCan } from '@/lib/useSessionCapabilities'
 import { TERMINAL_HUNT_START_LABEL, terminalHuntStartCommand, useWorkspaceIsManaged } from '@/components/hunt/TerminalHuntStart'
 import { assetAuthorizationStatus } from '@/lib/assetAuthorization.mjs'
+import { observedGrade } from '@/lib/observedGrade.mjs'
 import { configureScanHref, latestGrade, livenessView, originLabel, relativeTime, scanUrls, severitySummary } from '@/lib/targetInventoryModel.mjs'
 import { boundedDisplayText, boundedTargetDisplay } from '@/lib/targetChoices'
 import { TargetDomainDiscovery } from '../TargetDomainDiscovery'
@@ -63,9 +64,10 @@ function Pill({ children, className = '', title }: { children: ReactNode; classN
 }
 
 export function SeverityPills({ counts, compact = false }: { counts?: TargetAsset['severity_counts']; compact?: boolean }) {
-  const items = severitySummary(counts).filter(item => item.severity !== 'info')
+  // Every severity, informational included, so the chips add up to the target's open findings.
+  const items = severitySummary(counts)
   if (!items.length) return <span className="text-xs text-gray-600">{compact ? '' : 'No open findings'}</span>
-  return <span className="flex flex-wrap gap-1 lg:flex-nowrap">{items.map(item =>
+  return <span className="flex flex-wrap gap-1" data-testid="severity-pills">{items.map(item =>
     <Pill key={item.severity} title={`${item.count} ${item.severity}`} className={`ring-1 ring-inset tabular-nums ${SEVERITY_STYLE[item.severity]}`}>
       {item.count}<span className="uppercase opacity-80">{item.severity.slice(0, 1)}</span>
     </Pill>)}</span>
@@ -117,9 +119,11 @@ function LastScan({ asset }: { asset: TargetAsset }) {
   }
   const when = relativeTime(asset.last_scanned_at)
   if (!when) return <span className="text-xs text-gray-600">Never scanned</span>
-  const grade = latestGrade(asset)
+  // The letter the Scan page shows; a provisional result is named in the label, not by a mark.
+  const observed = observedGrade(latestGrade(asset))
+  const grade = observed?.letter
   return <span className="inline-flex items-center gap-2 text-xs text-gray-400" title={asset.last_scanned_at ? new Date(asset.last_scanned_at).toLocaleString() : undefined}>
-    {grade && <span title="Observed posture from the latest scan · review coverage before relying on it" aria-label={`Observed posture ${grade} · review coverage`}
+    {grade && <span title="Observed posture from the latest scan · review coverage before relying on it" aria-label={`Observed posture ${grade}${observed?.provisional ? ' (provisional)' : ''} · review coverage`}
       className={`flex h-6 w-6 items-center justify-center rounded-md bg-gray-800/80 text-sm font-semibold ${gradeTextColor(grade)}`}>{grade}</span>}
     {when}
   </span>

@@ -14,6 +14,8 @@ import { boundedTargetDisplay } from '@/lib/targetChoices'
 import { usePoll } from '@/lib/usePoll'
 import { useCan } from '@/lib/useSessionCapabilities'
 import { isAbortError } from '@/lib/fetchLayer.mjs'
+import { hiddenRunsNote, isDiscoveryRun, scansShownText } from '@/lib/discoveryRun.mjs'
+import { OBSERVED_GRADE_TITLE, PROVISIONAL_GRADE_TITLE, observedGrade } from '@/lib/observedGrade.mjs'
 
 const PAGE_SIZE = 50
 const SEARCH_DEBOUNCE_MS = 300
@@ -60,22 +62,25 @@ function ObservedPosture({ scan, compact = false }: { scan: Scan; compact?: bool
   if (scan.risk_assessment_state === 'not_examined' || scan.application_observed === false) {
     return <span className="text-amber-200">Application not examined</span>
   }
-  if (!scan.grade) {
+  const grade = observedGrade(scan.grade)
+  if (!grade) {
     return <span className="text-gray-500">No observed posture</span>
   }
   const assurance = scanAssurance(scan)
   const weak = assurance && ['none', 'weak', 'limited'].includes(String(assurance.band || 'none'))
   return (
-    <div className="min-w-0">
-      <div className="text-[11px] font-medium uppercase tracking-wide text-gray-500">Observed posture</div>
+    <div className="min-w-0" data-testid="observed-posture">
+      {/* The table names this column in its header; a card has no header, so it carries the label. */}
+      {compact && <div className="text-[11px] font-medium uppercase tracking-wide text-gray-500">Observed posture</div>}
       <div className="mt-0.5 flex flex-wrap items-center gap-1.5">
         <span
-          className={`${compact ? 'text-base' : 'text-lg'} font-bold ${weak ? 'text-gray-200' : getGradeColor(scan.grade)}`}
-          title={scan.grade.includes('*') ? 'The asterisk marks assurance limitations; this is not a clean bill of health.' : 'Risk observed by this run; this is not an overall safety score.'}
+          className={`${compact ? 'text-base' : 'text-lg'} font-bold ${weak ? 'text-gray-200' : getGradeColor(grade.letter)}`}
+          title={grade.provisional ? PROVISIONAL_GRADE_TITLE : OBSERVED_GRADE_TITLE}
         >
-          {scan.grade}
+          {grade.letter}
         </span>
         <span className="text-sm text-gray-500">{scan.score}/100</span>
+        {grade.provisional && <span className="text-xs text-amber-200/80" title={PROVISIONAL_GRADE_TITLE}>provisional</span>}
         <AssuranceChip scan={scan} />
       </div>
     </div>
@@ -102,6 +107,10 @@ function isAuthenticatedScan(scan: Scan): boolean {
 function formatScanTypeLabel(scan: Scan): string {
   if (scan.scan_type === 'ai_gate' || scan.run_kind?.startsWith('ai_')) {
     return 'AI Gate'
+  }
+  // A discovery run maps the target with active testing off; it is not an application Scan.
+  if (isDiscoveryRun(scan)) {
+    return 'Discovery run'
   }
   const options = scan.options && typeof scan.options === 'object' ? scan.options : {}
   if (options.scan_generation === 'v2' && !options.legacy_scan_type) {
@@ -181,6 +190,8 @@ function ScansContent() {
   const [cancelling, setCancelling] = useState<Set<string>>(new Set())
   const [confirmCancelId, setConfirmCancelId] = useState<string | null>(null)
   const [total, setTotal] = useState(0)
+  // Discovery and internal runs that match the filters and are left out of the list.
+  const [hiddenInternal, setHiddenInternal] = useState(0)
   const [durationTickMs, setDurationTickMs] = useState<number>(Date.now())
   const searchTimeout = useRef<NodeJS.Timeout | null>(null)
 
@@ -257,6 +268,7 @@ function ScansContent() {
         }
         setTotal(fetchedTotal)
       }
+      setHiddenInternal(typeof data.hidden_internal === 'number' ? data.hidden_internal : 0)
 
       setScans(data.scans || [])
       setLoadError(false)
@@ -373,6 +385,7 @@ function ScansContent() {
   }
 
   const totalPages = Math.ceil(total / PAGE_SIZE)
+  const hiddenNote = includeInternal ? null : hiddenRunsNote(hiddenInternal)
   const visibleHunts = useMemo(
     () => activeHunts.filter((campaign) => huntMatchesFilters(campaign, statusFilter, domainFilter, searchQuery)),
     [activeHunts, statusFilter, domainFilter, searchQuery],
@@ -510,15 +523,27 @@ function ScansContent() {
         )}
       </div>
 
-      {/* Top Pagination */}
-      {total > 0 && (
-        <div className="flex items-center justify-between">
-          <span className="text-sm text-gray-400">
-            {total <= PAGE_SIZE
-              ? `Showing ${total} scan${total !== 1 ? 's' : ''}`
-              : `Showing ${(page - 1) * PAGE_SIZE + 1}-${Math.min(page * PAGE_SIZE, total)} of ${total}`
-            }
+      {/* Top Pagination. The count is of the rows listed; runs the list leaves out are named
+          beside it with the control that shows them, so the count and the list agree. */}
+      {(total > 0 || hiddenNote) && (
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <span className="text-sm text-gray-400" data-testid="scans-count">
+            {scansShownText(total, page, PAGE_SIZE)}
             {visibleHunts.length > 0 ? ` · ${visibleHunts.length} active hunt${visibleHunts.length === 1 ? '' : 's'}` : ''}
+            {hiddenNote && (
+              <>
+                {' · '}
+                <span data-testid="scans-hidden-note">{hiddenNote}</span>
+                {' '}
+                <button
+                  type="button"
+                  onClick={() => setFilter('include_internal', 'true')}
+                  className="rounded-sm text-blue-400 underline-offset-2 hover:text-blue-300 hover:underline focus:outline-hidden focus-visible:ring-2 focus-visible:ring-blue-500"
+                >
+                  Show them
+                </button>
+              </>
+            )}
           </span>
           <PaginationControls />
         </div>
@@ -864,16 +889,11 @@ function ScansContent() {
       </Card>
       )}
 
-      {/* Bottom Pagination */}
-      {total > 0 && (
-        <div className="flex items-center justify-between">
-          <span className="text-sm text-gray-400">
-            {total <= PAGE_SIZE
-              ? `Showing ${total} scan${total !== 1 ? 's' : ''}`
-              : `Showing ${(page - 1) * PAGE_SIZE + 1}-${Math.min(page * PAGE_SIZE, total)} of ${total}`
-            }
-            {visibleHunts.length > 0 ? ` · ${visibleHunts.length} active hunt${visibleHunts.length === 1 ? '' : 's'}` : ''}
-          </span>
+      {/* Bottom pagination: only when there is more than one page. A list that fits one page
+          already says how many scans it shows at the top. */}
+      {total > PAGE_SIZE && (
+        <div className="flex items-center justify-between" data-testid="scans-count-bottom">
+          <span className="text-sm text-gray-400">{scansShownText(total, page, PAGE_SIZE)}</span>
           <PaginationControls />
         </div>
       )}

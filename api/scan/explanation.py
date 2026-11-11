@@ -883,6 +883,8 @@ def build_scan_execution_explanation(
         }
         for item in capability_rows
         if not item["required"] and item["status"] != "success"
+        # A slice its continuation finished left no gap; its own outcome stays on its action row.
+        and not (item["action_id"] in extensions and effective_row(item)["status"] == "success")
     ]
     capability_coverage = {
         "total": len(capability_rows),
@@ -902,6 +904,11 @@ def build_scan_execution_explanation(
             "required": item["required"],
             "status": item["status"],
             "reason_code": item["reason_code"],
+            # The newest action that continued this one, and how that one ended.
+            **({
+                "continued_by": effective_row(item)["action_id"],
+                "continued_status": effective_row(item)["status"],
+            } if item["action_id"] in extensions else {}),
         } for item in capability_rows],
     }
     selected_backends = sorted({

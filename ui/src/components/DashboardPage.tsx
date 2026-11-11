@@ -32,6 +32,8 @@ import {
 import { ChangesStrip } from '@/app/exposure/ChangesStrip'
 import { boundedDisplayText } from '@/lib/targetChoices'
 import { assuranceClass, scanAssurance } from '@/lib/assurance.mjs'
+import { isDiscoveryRun } from '@/lib/discoveryRun.mjs'
+import { OBSERVED_GRADE_TITLE, PROVISIONAL_GRADE_TITLE, observedGrade } from '@/lib/observedGrade.mjs'
 import { capabilityReason } from '@/lib/sessionCapabilities.mjs'
 import { useCan, useSessionCapabilities } from '@/lib/useSessionCapabilities'
 
@@ -1022,23 +1024,31 @@ function LatestResults({ scans, loading, outOfScope = null, hidden = null, onSho
         {loading ? Array.from({ length: 4 }).map((_, index) => <Skeleton key={index} className="m-4 h-10" />)
           : scans.length ? scans.slice(0, 5).map((scan) => {
             const assurance = scanAssurance(scan)
+            const grade = observedGrade(scan.grade)
+            const host = shortHost(scan.target_url)
+            // The host has the first line to itself (beside the status), so a long name is cut
+            // only when the card itself is too narrow; the run's details wrap underneath.
             return (
-            <Link key={scan.id} href={`/scans/${scan.id}`} className={`flex items-center gap-3 p-4 hover:bg-gray-800/40 ${FOCUS_RING} focus-visible:ring-inset`}>
+            <Link key={scan.id} href={`/scans/${scan.id}`} data-testid="latest-result-row" className={`flex items-start gap-3 p-4 hover:bg-gray-800/40 ${FOCUS_RING} focus-visible:ring-inset`}>
               <span className="rounded-lg bg-blue-500/10 p-2 text-blue-300"><ScanLine className="h-4 w-4" /></span>
               <span className="min-w-0 flex-1">
-                <span className="block truncate text-sm font-medium text-gray-200">{shortHost(scan.target_url)}</span>
-                <span className="block text-xs text-gray-500">{friendlyScanType(scan)} · {formatDate(scan.completed_at || scan.created_at)}</span>
-              </span>
-              {typeof scan.findings_count === 'number' ? <span className="hidden text-xs tabular-nums text-gray-500 sm:block">{scan.findings_count} findings</span> : null}
-              {scan.grade ? (
-                <span className="hidden text-right sm:block">
-                  <span className={`block text-xs font-medium ${getGradeColor(scan.grade)}`} title="Risk observed by this run; not an overall safety score">Observed posture {scan.grade}</span>
-                  <span className={`block text-[11px] ${assuranceClass(assurance?.band)}`}>
-                    {assurance ? `${assurance.label} · ${assurance.score}/100` : 'Examination strength unavailable'}
-                  </span>
+                <span className="flex items-center gap-3">
+                  <span className="min-w-0 flex-1 truncate text-sm font-medium text-gray-200" title={host} data-testid="latest-result-host">{host}</span>
+                  <ScanStatusBadge status={scan.status} />
                 </span>
-              ) : null}
-              <ScanStatusBadge status={scan.status} />
+                <span className="mt-1 flex flex-wrap items-baseline gap-x-3 gap-y-0.5 text-xs text-gray-500">
+                  <span>{friendlyScanType(scan)} · {formatDate(scan.completed_at || scan.created_at)}</span>
+                  {typeof scan.findings_count === 'number' ? <span className="tabular-nums">{scan.findings_count} findings</span> : null}
+                  {grade ? (
+                    <span className="sm:ml-auto">
+                      <span className={`font-medium ${getGradeColor(grade.letter)}`} title={grade.provisional ? PROVISIONAL_GRADE_TITLE : OBSERVED_GRADE_TITLE}>Observed posture {grade.letter}{grade.provisional ? ' (provisional)' : ''}</span>
+                      <span className={`ml-2 text-[11px] ${assuranceClass(assurance?.band)}`}>
+                        {assurance ? `${assurance.label} · ${assurance.score}/100` : 'Examination strength unavailable'}
+                      </span>
+                    </span>
+                  ) : null}
+                </span>
+              </span>
             </Link>
             )
           }) : hidden ? (
@@ -1091,6 +1101,7 @@ function shortHost(url?: string | null): string {
 }
 
 function friendlyScanType(scan: Scan): string {
+  if (isDiscoveryRun(scan)) return 'Discovery run'
   const value = String(scan.run_kind || scan.scan_type || 'scan').replace(/_/g, ' ')
   return value
     .replace(/\b\w/g, (character) => character.toUpperCase())

@@ -1075,7 +1075,7 @@ def _command_result_timeline_event(row: Any) -> dict[str, Any]:
         "tool_receipt_ids": _decode_json_value(r.get("tool_receipt_ids")) or [],
         "blocked_by": blocked_by,
         "next_action": r.get("next_action"),
-        "operator_message": r.get("operator_message"),
+        "operator_message": _event_operator_message(r.get("operator_message"), status),
         "created_at": r.get("created_at"),
     }
 
@@ -1116,7 +1116,7 @@ def _campaign_action_timeline_event(row: Any) -> dict[str, Any]:
         "tool_receipt_ids": _decode_json_value(r.get("tool_receipt_ids")) or [],
         "blocked_by": blocked_by,
         "next_action": r.get("next_action"),
-        "operator_message": r.get("operator_message"),
+        "operator_message": _event_operator_message(r.get("operator_message"), status),
         "created_at": r.get("created_at"),
     }
 
@@ -1361,6 +1361,24 @@ _SUBMISSION_COMMANDS = {
     "scan.submit", "scan.focused_family", "asm.improve", "asm.test",
     "asm.recon", "finding.retest", "ai_gate.scan", "model_intake.scan",
 }
+
+
+_QUEUED_MESSAGE_PREFIX = "Queued "
+
+
+def _event_operator_message(message: Any, status: str) -> Any:
+    """The message to show beside an event's status.
+
+    A submission stores its message when the work is queued ("Queued Scan for <target>"), and
+    the event later reports the live status of that work. Once the work is no longer waiting,
+    the message keeps what it names and drops the word that no longer holds.
+    """
+    if not isinstance(message, str) or status in ("queued", "accepted"):
+        return message
+    if message.startswith(_QUEUED_MESSAGE_PREFIX) and len(message) > len(_QUEUED_MESSAGE_PREFIX):
+        rest = message[len(_QUEUED_MESSAGE_PREFIX):]
+        return rest[:1].upper() + rest[1:]
+    return message
 
 
 def _normalized_timeline_event_status(

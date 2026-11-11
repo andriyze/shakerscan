@@ -27,6 +27,8 @@ _PROJECTION_INPUTS = ("evidence", "latest_retest_mode")
 
 # The scan detail's persisted findings, with what the projection needs: the stored evidence
 # and the latest retest's mode, selected exactly as the findings routes select them.
+# The rows are every finding the Scan observed (finding_scan_observations), so a later run that
+# sees a finding again does not remove it from this Scan.
 SCAN_DETAIL_FINDINGS_SQL = """
     SELECT f.id, f.fingerprint, f.title, f.severity, f.cvss_score, f.status, f.tool, f.url,
            f.first_seen_at, f.last_seen_at,
@@ -42,7 +44,7 @@ SCAN_DETAIL_FINDINGS_SQL = """
         ORDER BY created_at DESC, id DESC
         LIMIT 1
     ) latest_retest ON TRUE
-    WHERE f.scan_id = $1
+    WHERE f.id IN (SELECT fso.finding_id FROM finding_scan_observations fso WHERE fso.scan_id = $1)
     ORDER BY
         CASE f.severity
             WHEN 'critical' THEN 1
