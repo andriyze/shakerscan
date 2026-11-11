@@ -3,12 +3,14 @@
 import type { ReactNode } from 'react'
 import Link from '@/components/WorkspaceLink'
 import { Card, PageHeader } from '@/components/ui'
-import { featureEnabled } from '@/lib/workspaceCapabilities'
+import { featureEnabled, navigationAllowed } from '@/lib/workspaceCapabilities'
+import { usePageAllowed } from '@/lib/useSessionCapabilities'
 
 // The server still ships the installed standalone documentation. Managed workspaces
 // use their server-owned capability manifest, not a second hard-coded product edition.
 // A managed workspace may be hosted or self-hosted, so this copy names neither.
 export default function WorkspaceDocs({ children }: { children: ReactNode }) {
+  const pageAllowed = usePageAllowed()
   const policy = typeof window === 'undefined' ? undefined : window.__SHAKERSCAN_CAPABILITIES__
   if (!policy) return children
   if (policy.schema !== 'shakerscan.workspace-capabilities/v1' || policy.mode !== 'managed') {
@@ -17,6 +19,9 @@ export default function WorkspaceDocs({ children }: { children: ReactNode }) {
   const unavailable = Object.entries(policy.features)
     .filter(([, value]) => value.state === 'unavailable' || value.state === 'setup_required')
     .map(([key]) => key.replaceAll('_', ' '))
+  // A workspace, or a role in it, that cannot start scans gets the step in words: a sentence
+  // built around a link that is not rendered would read "Open , select the target".
+  const canStartScans = navigationAllowed('/scan/new') && pageAllowed('/scan/new')
 
   return (
     <div className="mx-auto max-w-4xl space-y-6">
@@ -26,7 +31,9 @@ export default function WorkspaceDocs({ children }: { children: ReactNode }) {
         <p>Your platform administrator controls approved domains, testing permissions, workspace access and capacity. Adding a target does not grant permission to test another domain.</p>
         <ol className="list-decimal space-y-3 pl-5">
           <li>Open <Link href="/targets" className="text-blue-400 underline">Targets</Link> and add your application URL within an approved domain. If it is rejected, ask your platform administrator to review the domain policy.</li>
-          <li>Open <Link href="/scan/new" className="text-blue-400 underline">New Scan</Link>, select the target and choose a coverage budget. Start with passive checks. Active checks require the administrator's testing permission and can affect the target application.</li>
+          {canStartScans
+            ? <li>Open <Link href="/scan/new" className="text-blue-400 underline">New Scan</Link>, select the target and choose a coverage budget. Start with passive checks. Active checks require the administrator's testing permission and can affect the target application.</li>
+            : <li data-guide-step="start-scan-unavailable">Starting a scan is not available to your account in this workspace. Ask your platform administrator if you need it; scans that others start appear in the next step.</li>}
           <li>Follow progress under <Link href="/scans" className="text-blue-400 underline">DAST Scans</Link>. Keep the scan ID if you need help. Refresh the existing run after a connection interruption rather than submitting it again.</li>
           <li>Review the conclusion, examination strength, coverage gaps and <Link href="/findings" className="text-blue-400 underline">Findings</Link>. A completed run or a high observed-risk score is not proof that the application is safe.</li>
         </ol>
