@@ -91,14 +91,18 @@ export default function RunDetailPage() {
     return getResearchEpisode(id)
   }, [id])
 
-  useEffect(() => {
+  const reload = useCallback(() => {
     let cancelled = false
+    setLoading(true)
+    setError(null)
     load()
       .then((d) => { if (!cancelled) setDetail(d) })
       .catch((err) => { if (!cancelled) setError(err instanceof Error ? err.message : 'Could not load this run') })
       .finally(() => { if (!cancelled) setLoading(false) })
     return () => { cancelled = true }
   }, [load])
+
+  useEffect(() => reload(), [reload])
 
   // The run is live until its campaign (and the episode on screen) reached a terminal state;
   // after that nothing changes and polling stops.
@@ -190,6 +194,31 @@ export default function RunDetailPage() {
   }
 
   if (loading) return <div><Skeleton className="h-96" /></div>
+
+  // Nothing answered for this address: say so, without a state, controls or counters for a run
+  // that is not on screen.
+  if (!campaign && !detail) {
+    const missing = /not found/i.test(error || '')
+    return (
+      <div>
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+          <Link href="/deep-hunt" className="inline-flex items-center gap-1.5 text-sm text-gray-400 hover:text-white">
+            <ArrowLeft className="h-4 w-4" />All hunts
+          </Link>
+          <InvestigatorTabs />
+        </div>
+        <h1 className="mt-3 text-xl font-semibold text-white">Autonomous run</h1>
+        <div className="mt-4">
+          <ErrorState
+            message={missing
+              ? 'This run was not found. It may have been deleted, or the link may be out of date.'
+              : error || 'This run could not be loaded.'}
+            onRetry={missing ? undefined : reload}
+          />
+        </div>
+      </div>
+    )
+  }
 
   const campaignState = campaign ? runState(campaign) : (detail?.episode.terminal ? 'completed' : 'running')
   const automaticallyStopped = Boolean(yieldMetrics?.stop_recommended && yieldMetrics.stop_reason)
