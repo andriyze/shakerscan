@@ -907,3 +907,16 @@ test('coverage gaps hold unfinished work; a step that did not apply is counted a
   assert.deepEqual(rows.reasonCodes.sort(), ['http_request_budget_exhausted', 'not_applicable', 'policy_disabled', 'timed_out'])
   assert.deepEqual(coverageGapRows(undefined), { gaps: [], reasonCodes: [], notApplicable: 0 })
 })
+
+test('a step whose continuation finished is not a coverage gap; one whose continuation did not is', () => {
+  const rows = coverageGapRows([
+    { status: 'partial', action_id: 'verify.sqli.r01', reason_code: 'http_request_budget_exhausted',
+      continued_by: 'verify.sqli.r01.ext.r02', continued_status: 'success' },
+    { status: 'success', action_id: 'verify.sqli.r01.ext.r02' },
+    { status: 'partial', action_id: 'verify.sqli.r03', reason_code: 'http_request_budget_exhausted',
+      continued_by: 'verify.sqli.r03.ext.r04', continued_status: 'timed_out' },
+    { status: 'timed_out', action_id: 'verify.sqli.r03.ext.r04', reason_code: 'timed_out' },
+  ])
+  assert.deepEqual(rows.gaps.map((item) => item.action_id), ['verify.sqli.r03', 'verify.sqli.r03.ext.r04'])
+  assert.deepEqual(rows.reasonCodes.sort(), ['http_request_budget_exhausted', 'timed_out'])
+})

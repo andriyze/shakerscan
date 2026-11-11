@@ -423,10 +423,12 @@ export function scanStepStatusLabel(status) {
 /** The planned steps of a scan that did not complete, split into gaps and steps that did not apply.
  *
  *  A step that did not apply to the target is not a gap: nothing was left untested. Those are
- *  counted apart so the gap list holds only work that was planned and is missing. */
+ *  counted apart so the gap list holds only work that was planned and is missing. A step that
+ *  stopped early and whose continuation then finished is not a gap either: its work was done. */
 export function coverageGapRows(actions) {
   const rows = (Array.isArray(actions) ? actions : [])
     .filter((item) => item && typeof item === 'object' && String(item.status || '') !== 'success')
+    .filter((item) => String(item.continued_status || '') !== 'success')
   const notApplicable = rows.filter(
     (item) => String(item.status || '') === 'skipped' && String(item.reason_code || '') === 'not_applicable',
   )
