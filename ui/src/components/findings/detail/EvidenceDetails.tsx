@@ -7,7 +7,7 @@ export function EvidenceDetails({ details }: { details: DetailEvidence }) {
       <dl className="grid gap-x-6 gap-y-3 sm:grid-cols-2">
         {group.facts.map(fact => <div key={fact.label} className="min-w-0">
           <dt className="text-xs text-gray-500">{fact.label}</dt>
-          <dd className="mt-0.5 whitespace-pre-wrap break-all text-sm text-gray-200">{fact.value}</dd>
+          <dd className="mt-0.5 whitespace-pre-wrap wrap-anywhere text-sm text-gray-200">{fact.value}</dd>
         </div>)}
       </dl>
     </div>)}
