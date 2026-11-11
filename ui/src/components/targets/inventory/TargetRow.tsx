@@ -15,7 +15,7 @@ import { featureEnabled } from '@/lib/workspaceCapabilities'
 import { useCan } from '@/lib/useSessionCapabilities'
 import { TERMINAL_HUNT_START_LABEL, terminalHuntStartCommand, useWorkspaceIsManaged } from '@/components/hunt/TerminalHuntStart'
 import { assetAuthorizationStatus } from '@/lib/assetAuthorization.mjs'
-import { observedGrade } from '@/lib/observedGrade.mjs'
+import { OBSERVED_GRADE_TITLE, PROVISIONAL_GRADE_TITLE, observedGrade } from '@/lib/observedGrade.mjs'
 import { configureScanHref, latestGrade, livenessView, originLabel, relativeTime, scanUrls, severitySummary } from '@/lib/targetInventoryModel.mjs'
 import { boundedDisplayText, boundedTargetDisplay } from '@/lib/targetChoices'
 import { TargetDomainDiscovery } from '../TargetDomainDiscovery'
@@ -90,11 +90,14 @@ function WebApps({ asset }: { asset: TargetAsset }) {
   return <span className="flex min-w-0 flex-wrap items-center gap-1.5">
     {shown.map(origin => {
       const label = originLabel(origin.url)
+      // The letter the last-scan cell and the Scan page show; a tooltip says when it is provisional.
+      const grade = observedGrade(origin.last_grade)
       return <Link key={origin.id} href={`/targets/${origin.id}/asset`} title={origin.url}
         className="group inline-flex max-w-full items-center gap-1 rounded-md border border-gray-700/70 bg-gray-800/40 px-1.5 py-0.5 font-mono text-[11px] text-gray-300 transition-colors hover:border-blue-400/40 hover:text-blue-200">
         {label.secure ? <Lock className="h-3 w-3 text-emerald-300/90" aria-label="HTTPS" /> : <Globe className="h-3 w-3 text-gray-500" aria-label="HTTP" />}
         <span>{label.scheme ? `${label.scheme}:${label.port}` : label.label}</span>
-        {origin.last_grade && <span className={`font-sans font-semibold ${gradeTextColor(origin.last_grade)}`}>{origin.last_grade}</span>}
+        {grade && <span className={`font-sans font-semibold ${gradeTextColor(grade.letter)}`} data-testid="origin-grade"
+          title={grade.provisional ? PROVISIONAL_GRADE_TITLE : OBSERVED_GRADE_TITLE}>{grade.letter}</span>}
       </Link>
     })}
     {origins.length > shown.length && <Link href={`/targets/${asset.id}/asset`} className="text-[11px] text-gray-400 hover:text-blue-300">+{origins.length - shown.length} more</Link>}
@@ -130,7 +133,7 @@ function LastScan({ asset }: { asset: TargetAsset }) {
   const observed = observedGrade(latestGrade(asset))
   const grade = observed?.letter
   return <span className="inline-flex items-center gap-2 text-xs text-gray-400" title={asset.last_scanned_at ? new Date(asset.last_scanned_at).toLocaleString() : undefined}>
-    {grade && <span title="Observed posture from the latest scan · review coverage before relying on it" aria-label={`Observed posture ${grade}${observed?.provisional ? ' (provisional)' : ''} · review coverage`}
+    {grade && <span data-testid="last-scan-grade" title={observed?.provisional ? PROVISIONAL_GRADE_TITLE : 'Observed posture from the latest scan · review coverage before relying on it'} aria-label={`Observed posture ${grade}${observed?.provisional ? ' (provisional)' : ''} · review coverage`}
       className={`flex h-6 w-6 items-center justify-center rounded-md bg-gray-800/80 text-sm font-semibold ${gradeTextColor(grade)}`}>{grade}</span>}
     {when}
   </span>

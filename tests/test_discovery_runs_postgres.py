@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 from datetime import datetime, timedelta, timezone
 import importlib
+import json
 from pathlib import Path
 import sys
 import uuid
@@ -144,6 +145,7 @@ def test_a_discovery_run_does_not_decide_the_latest_result(template_database, mo
                 recent = await dashboard_data.recent_latest_scans(conn, limit=10)
                 assert [row["id"] for row in recent] == [application]
                 assert (recent[0]["grade"], recent[0]["findings_count"]) == ("F*", 3)
+                assert recent[0]["assurance_score"] == 83
 
             # The exposure inventory links the same Scan as the asset's latest.
             monkeypatch.setattr(exposure_router, "_pool", lambda: pool)
@@ -175,6 +177,43 @@ def test_a_discovery_run_does_not_decide_the_latest_result(template_database, mo
             assert (shown["total"], shown["hidden_internal"]) == (3, 0)
             everything = await api.list_scans(None, target_id=None, include_internal=False, **args)
             assert (everything["total"], everything["hidden_internal"]) == (1, 3)
+    asyncio.run(run())
+
+
+def test_a_latest_result_reads_on_the_dashboard_as_in_the_scans_list(template_database, monkeypatch):
+    """The dashboard row of a Scan carries the examination strength the Scans list shows, and a
+    Scan that never reached the application has no grade in either place."""
+    from operations import dashboard_data
+
+    async def run():
+        async with scan_database(template_database) as pool:
+            async with pool.acquire() as conn:
+                examined = await _target(conn, "examined.observed.test")
+                await _completed(conn, examined, "examined.observed.test", role="standalone",
+                                 score=40, grade="D", assurance=83, minutes_ago=20)
+                unreached = await _target(conn, "unreached.observed.test")
+                missed = await _completed(conn, unreached, "unreached.observed.test",
+                                          role="standalone", score=100, grade="A", assurance=64,
+                                          minutes_ago=10)
+                await conn.execute(
+                    "UPDATE scans SET result=$2::jsonb WHERE id=$1", missed,
+                    json.dumps({"result": {"application_observed": False,
+                                           "risk_assessment_state": "not_examined"}}))
+                recent = await dashboard_data.recent_latest_scans(conn, limit=10)
+            api = importlib.import_module("api")
+            api = importlib.import_module("api.api") if hasattr(api, "__path__") else api
+            monkeypatch.setattr(api, "db_pool", pool)
+            listed = await api.list_scans(
+                None, status=None, target=None, target_id=None, root_domain=None,
+                created_within_days=None, include_shards=False, include_model_intake=False,
+                include_devices=False, include_internal=False, limit=50, offset=0,
+                include_details=False, cursor=None, count=None, fields=None, since=None)
+            fields = ("grade", "score", "assurance_score", "risk_assessment_state", "application_observed")
+            in_list = {str(row["id"]): tuple(row[name] for name in fields) for row in listed["scans"]}
+            on_dashboard = {str(row["id"]): tuple(row[name] for name in fields) for row in recent}
+            assert len(on_dashboard) == 2 and on_dashboard == in_list
+            assert on_dashboard[str(missed)] == (None, None, 64, "not_examined", False)
+            assert [row["assurance_score"] for row in recent] == [64, 83]
     asyncio.run(run())
 
 

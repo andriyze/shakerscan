@@ -41,3 +41,25 @@ test('DEVICE-ADD-001 built-in service policies are offered by name, not by ident
   await expect.poll(() => posted.length).toBe(1)
   expect(posted[0].policy_id).toBe(cameraPolicy)
 })
+
+test('DEVICE-POLICY-001 the rule table keeps its columns apart on a phone', async ({ page }) => {
+  await mockPageApi(page, {
+    'GET /health': () => ({ status: 'healthy', scanner_version: 'fixture' }),
+    'GET /device-policies': () => ({ policies: [{
+      ...policy(cameraPolicy, 'camera-baseline-v1', 'IP camera and video endpoint baseline.', true),
+      rules: [{ action: 'review', transport: 'any', service: 'unknown', ports: [], reason: 'Unexpected camera service.' }],
+    }] }),
+  })
+  await page.setViewportSize({ width: 390, height: 844 })
+  await page.goto('/devices/policies')
+  const table = page.getByRole('table')
+  await expect(table.getByRole('columnheader', { name: 'Decision' })).toBeVisible()
+  // The text of one cell never touches the text of the next ("DecisionTransport", "unknownany").
+  const gaps = await table.evaluate((element) => [...element.querySelectorAll('tr')].flatMap((row) => {
+    const cells = [...row.children] as HTMLElement[]
+    const text = (cell: HTMLElement) => { const range = document.createRange(); range.selectNodeContents(cell); return range.getBoundingClientRect() }
+    return cells.slice(1).map((cell, index) => text(cell).left - text(cells[index]).right)
+  }))
+  expect(gaps.length).toBe(8)
+  expect(Math.min(...gaps)).toBeGreaterThanOrEqual(8)
+})
