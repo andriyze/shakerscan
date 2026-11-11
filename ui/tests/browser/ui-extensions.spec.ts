@@ -305,3 +305,46 @@ test('EXT-006 a managed policy without the block, or with another schema, adds n
   await expect(nav.getByRole('region', { name: 'Account' })).toHaveCount(0)
   expect((await hrefs(nav)).filter((href) => href?.startsWith('/ext') || href?.startsWith('/deployment'))).toEqual([])
 })
+
+test('EXT-007 with an account block the primary action is pinned above it, never behind it', async ({ page }) => {
+  await managed(page, {
+    ...managedPolicy,
+    navigation: { ...managedPolicy.navigation, '/scan': 'scans' },
+    ui_routes: [...managedPolicy.ui_routes, '/scan/new'],
+  })
+  await page.goto('/docs', { waitUntil: 'domcontentloaded' })
+  // A window shorter than the menu, as on a laptop with the full menu.
+  const size = page.viewportSize()!
+  await page.setViewportSize({ width: size.width, height: 480 })
+  const nav = await sidebar(page)
+  const menu = page.locator('aside:visible').first()
+  expect(await menu.evaluate((aside) => aside.scrollHeight > aside.clientHeight)).toBe(true)
+  const newScan = nav.getByRole('link', { name: 'New Scan', exact: true })
+  const account = nav.getByRole('region', { name: 'Account' })
+  // The element at the middle of the button is the button: nothing is drawn over it.
+  const uncovered = () => newScan.evaluate((link) => {
+    const box = link.getBoundingClientRect()
+    return link.contains(document.elementFromPoint(box.x + box.width / 2, box.y + box.height / 2))
+  })
+  for (const scrollTo of [0, 100_000]) {
+    await menu.evaluate((aside, top) => aside.scrollTo(0, top), scrollTo)
+    await expect(newScan).toBeInViewport({ ratio: 1 })
+    expect(await uncovered()).toBe(true)
+    await expect(account.getByRole('link', { name: 'Sign out', exact: true })).toBeInViewport({ ratio: 1 })
+    const button = (await newScan.boundingBox())!
+    expect((await account.boundingBox())!.y).toBeGreaterThanOrEqual(button.y + button.height)
+  }
+  // The engine settings page is not one of this deployment's pages: no gear leads to a refusal.
+  await expect(nav.getByRole('link', { name: 'Settings', exact: true })).toHaveCount(0)
+})
+
+test('EXT-008 a standalone sidebar keeps New Scan in the menu flow and its Settings gear', async ({ page }) => {
+  await mockPageApi(page, api)
+  await page.goto('/docs', { waitUntil: 'domcontentloaded' })
+  const nav = await sidebar(page)
+  await expect(nav.getByRole('region', { name: 'Account' })).toHaveCount(0)
+  await expect(nav.getByRole('link', { name: 'New Scan', exact: true })).toHaveAttribute('href', '/scan/new')
+  await expect(nav.getByRole('link', { name: 'Settings', exact: true })).toHaveAttribute('href', '/settings')
+  expect(await nav.getByRole('link', { name: 'New Scan', exact: true })
+    .evaluate((link) => getComputedStyle(link.parentElement!).position)).toBe('static')
+})
