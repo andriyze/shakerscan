@@ -28,7 +28,7 @@ function Tile({ icon, label, value, hint, active, tone, onClick }: {
     <span className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-lg ${tones[tone]} [&>svg]:h-4.5 [&>svg]:w-4.5`} aria-hidden="true">{icon}</span>
     <span className="min-w-0">
       <span className="block text-xl font-semibold leading-6 tabular-nums text-white">{value}</span>
-      <span className="block truncate text-xs text-gray-400">{label}{hint && <span className="text-gray-500"> · {hint}</span>}</span>
+      <span className="block text-xs leading-4 text-gray-400">{label}{hint && <span className="text-gray-500"> · {hint}</span>}</span>
     </span>
   </button>
 }
