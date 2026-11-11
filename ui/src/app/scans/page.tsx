@@ -14,6 +14,7 @@ import { boundedTargetDisplay } from '@/lib/targetChoices'
 import { usePoll } from '@/lib/usePoll'
 import { useCan } from '@/lib/useSessionCapabilities'
 import { isAbortError } from '@/lib/fetchLayer.mjs'
+import { hiddenRunsNote, isDiscoveryRun, scansShownText } from '@/lib/discoveryRun.mjs'
 
 const PAGE_SIZE = 50
 const SEARCH_DEBOUNCE_MS = 300
@@ -103,6 +104,10 @@ function formatScanTypeLabel(scan: Scan): string {
   if (scan.scan_type === 'ai_gate' || scan.run_kind?.startsWith('ai_')) {
     return 'AI Gate'
   }
+  // A discovery run maps the target with active testing off; it is not an application Scan.
+  if (isDiscoveryRun(scan)) {
+    return 'Discovery run'
+  }
   const options = scan.options && typeof scan.options === 'object' ? scan.options : {}
   if (options.scan_generation === 'v2' && !options.legacy_scan_type) {
     const budget = typeof options.budget_profile === 'string' ? options.budget_profile : 'balanced'
@@ -181,6 +186,8 @@ function ScansContent() {
   const [cancelling, setCancelling] = useState<Set<string>>(new Set())
   const [confirmCancelId, setConfirmCancelId] = useState<string | null>(null)
   const [total, setTotal] = useState(0)
+  // Discovery and internal runs that match the filters and are left out of the list.
+  const [hiddenInternal, setHiddenInternal] = useState(0)
   const [durationTickMs, setDurationTickMs] = useState<number>(Date.now())
   const searchTimeout = useRef<NodeJS.Timeout | null>(null)
 
@@ -257,6 +264,7 @@ function ScansContent() {
         }
         setTotal(fetchedTotal)
       }
+      setHiddenInternal(typeof data.hidden_internal === 'number' ? data.hidden_internal : 0)
 
       setScans(data.scans || [])
       setLoadError(false)
@@ -373,6 +381,7 @@ function ScansContent() {
   }
 
   const totalPages = Math.ceil(total / PAGE_SIZE)
+  const hiddenNote = includeInternal ? null : hiddenRunsNote(hiddenInternal)
   const visibleHunts = useMemo(
     () => activeHunts.filter((campaign) => huntMatchesFilters(campaign, statusFilter, domainFilter, searchQuery)),
     [activeHunts, statusFilter, domainFilter, searchQuery],
@@ -510,15 +519,27 @@ function ScansContent() {
         )}
       </div>
 
-      {/* Top Pagination */}
-      {total > 0 && (
-        <div className="flex items-center justify-between">
-          <span className="text-sm text-gray-400">
-            {total <= PAGE_SIZE
-              ? `Showing ${total} scan${total !== 1 ? 's' : ''}`
-              : `Showing ${(page - 1) * PAGE_SIZE + 1}-${Math.min(page * PAGE_SIZE, total)} of ${total}`
-            }
+      {/* Top Pagination. The count is of the rows listed; runs the list leaves out are named
+          beside it with the control that shows them, so the count and the list agree. */}
+      {(total > 0 || hiddenNote) && (
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <span className="text-sm text-gray-400" data-testid="scans-count">
+            {scansShownText(total, page, PAGE_SIZE)}
             {visibleHunts.length > 0 ? ` · ${visibleHunts.length} active hunt${visibleHunts.length === 1 ? '' : 's'}` : ''}
+            {hiddenNote && (
+              <>
+                {' · '}
+                <span data-testid="scans-hidden-note">{hiddenNote}</span>
+                {' '}
+                <button
+                  type="button"
+                  onClick={() => setFilter('include_internal', 'true')}
+                  className="rounded-sm text-blue-400 underline-offset-2 hover:text-blue-300 hover:underline focus:outline-hidden focus-visible:ring-2 focus-visible:ring-blue-500"
+                >
+                  Show them
+                </button>
+              </>
+            )}
           </span>
           <PaginationControls />
         </div>

@@ -1940,25 +1940,40 @@ SELECT
 -- FUNCTIONS
 -- ============================================================
 
--- Update target stats after scan completion
+-- Update target stats after scan completion. A discovery run (scan_role asm_recon or
+-- parallel_discovery) refreshes only the active-finding count: the target's latest result and
+-- Scan count come from application Scans. The startup migration installs this exact definition
+-- on existing databases (api/scan/discovery_runs.py).
 CREATE OR REPLACE FUNCTION update_target_stats()
 RETURNS TRIGGER AS $$
 BEGIN
     IF NEW.status = 'completed'
        AND NEW.target_id IS NOT NULL
        AND COALESCE(NEW.scan_role, 'standalone') <> 'shard' THEN
-        UPDATE targets SET
-            last_scan_id = NEW.id,
-            last_scanned_at = NEW.completed_at,
-            last_score = NEW.score,
-            last_grade = NEW.grade,
-            total_scans = total_scans + 1,
-            active_findings_count = (
-                SELECT COUNT(*) FROM findings
-                WHERE target_id = NEW.target_id AND status = 'active'
-            ),
-            updated_at = NOW()
-        WHERE id = NEW.target_id;
+        IF COALESCE(NEW.scan_role, 'standalone') IN ('asm_recon', 'parallel_discovery') THEN
+            -- A discovery run maps the target; it does not grade the application.
+            UPDATE targets SET
+                active_findings_count = (
+                    SELECT COUNT(*) FROM findings
+                    WHERE target_id = NEW.target_id AND status = 'active'
+                ),
+                updated_at = NOW()
+            WHERE id = NEW.target_id;
+        ELSE
+            UPDATE targets SET
+                last_scan_id = NEW.id,
+                last_scanned_at = NEW.completed_at,
+                last_score = NEW.score,
+                last_grade = NEW.grade,
+                last_assurance_score = NEW.assurance_score,
+                total_scans = total_scans + 1,
+                active_findings_count = (
+                    SELECT COUNT(*) FROM findings
+                    WHERE target_id = NEW.target_id AND status = 'active'
+                ),
+                updated_at = NOW()
+            WHERE id = NEW.target_id;
+        END IF;
     END IF;
     RETURN NEW;
 END;

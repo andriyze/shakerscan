@@ -11841,21 +11841,23 @@ async def list_scans(
     from_sql = """scans s
             LEFT JOIN targets t ON s.target_id = t.id
             LEFT JOIN ai_targets ait ON s.ai_target_id = ait.id"""
-    where_sql = "1=1"
     hidden_roles = _hidden_scan_roles_for_list(
         include_shards=include_shards,
         include_internal=include_internal,
     )
+    role_sql = ""
     if hidden_roles:
         role_values = ", ".join(f"'{role}'" for role in hidden_roles)
-        where_sql += f" AND (s.scan_role IS NULL OR s.scan_role NOT IN ({role_values}))"
+        role_sql = f" AND (s.scan_role IS NULL OR s.scan_role NOT IN ({role_values}))"
+    # Every other filter; the count of hidden discovery and internal runs reuses it.
+    rest_sql = ""
     if not include_model_intake:
-        where_sql += """
+        rest_sql += """
             AND COALESCE(s.run_kind, '') <> 'model_intake'
             AND COALESCE(s.scan_type, '') <> 'model_intake'
         """
     if not include_devices:
-        where_sql += """
+        rest_sql += """
             AND COALESCE(s.run_kind, '') NOT IN ('device_posture', 'device_probe', 'device_web_dast')
             AND COALESCE(s.scan_type, '') NOT IN ('device_posture', 'device_probe')
         """
@@ -11866,7 +11868,8 @@ async def list_scans(
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    where_sql += filter_sql
+    rest_sql += filter_sql
+    where_sql = f"1=1{role_sql}{rest_sql}"
 
     def row_to_item(row: dict[str, Any]) -> dict[str, Any]:
         scan = project_scan_assessment_row(dict(row))
@@ -11913,10 +11916,20 @@ async def list_scans(
             *params, limit, offset,
         )
         total = await conn.fetchval(f"SELECT COUNT(*) FROM {from_sql} WHERE {where_sql}", *count_params)
+        # Discovery and internal runs that match the same filters and are left out of this
+        # list, so the page can say how many it hides and offer the control that shows them.
+        hidden_internal = 0
+        if not include_internal:
+            internal_values = ", ".join(
+                f"'{role}'" for role in _hidden_scan_roles_for_list(include_shards=True))
+            hidden_internal = await conn.fetchval(
+                f"SELECT COUNT(*) FROM {from_sql} WHERE s.scan_role IN ({internal_values}){rest_sql}",
+                *count_params)
 
     return {
         'scans': [row_to_item(dict(row)) for row in rows],
         'total': total,
+        'hidden_internal': int(hidden_internal or 0),
         'limit': limit,
         'offset': offset
     }

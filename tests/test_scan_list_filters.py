@@ -50,10 +50,18 @@ def test_list_scans_uses_the_same_shared_filters_for_rows_and_count(monkeypatch)
     result = asyncio.run(module.list_scans(**filters, limit=10, offset=3))
     sql, values = scan_list_filters(**filters)
     assert result['total'] == 7 and result['scans'] == []
-    assert len(calls) == 2
+    # Rows, their total, and the count of discovery and internal runs the list leaves out.
+    assert len(calls) == 3
     assert all(sql in query and list(params[:len(values)]) == values for query, params in calls)
     assert calls[0][1][-2:] == (10, 3)
     assert calls[1][1] == tuple(values)
+    assert calls[2][1] == tuple(values)
+    assert "s.scan_role IN ('asm_batch', 'asm_recon', 'parallel_discovery', 'device_web_origin')" in calls[2][0]
+    assert result['hidden_internal'] == 7
+    # Showing them leaves nothing hidden, so nothing is counted.
+    calls.clear()
+    shown = asyncio.run(module.list_scans(**filters, include_internal=True, limit=10, offset=3))
+    assert len(calls) == 2 and shown['hidden_internal'] == 0
 
 
 def test_exposure_links_open_the_whole_finding_history_they_count():
