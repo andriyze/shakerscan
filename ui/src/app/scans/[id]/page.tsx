@@ -22,7 +22,8 @@ import { assuranceClass, scanAssurance } from '@/lib/assurance.mjs'
 import { normalizeParentCoverage } from '@/lib/deferredWorkContracts'
 import { boundedDisplayText } from '@/lib/targetChoices'
 import { buildFindingLinkageIndex, linkedPersistedFinding } from '@/lib/findingLinkage'
-import { blockerOrigin, blockerProvenanceText, carriedOverFromDecision, carriedSourceText, carriedOverSummary, domainRatePresentation, groupScanFindings, queueWaitPresentation, isProvenFinding, reconciledScanFindings, releaseLine, scanFindingCounts, scanFindingCountsText, scanLogEntry, scanPhasePresentation, scanResultPresentation } from '@/lib/scanDetailPresentation.mjs'
+import { blockerOrigin, blockerProvenanceText, carriedOverFromDecision, carriedSourceText, carriedOverSummary, domainRatePresentation, groupScanFindings, queueWaitPresentation, isProvenFinding, reconciledScanFindings, releaseLine, scanFindingCounts, scanFindingCountsText, scanLogEntry, scanPhasePresentation, scanResultPresentation, scanStepLabel, scanStepStatusLabel } from '@/lib/scanDetailPresentation.mjs'
+import { checkFamilyLabel } from '@/lib/checkFamilyLabel'
 import { emptyScanLogState, mergeScanLogReply } from '@/lib/scanLogDelta.mjs'
 import { scanFailureRecommendation } from '@/lib/scanFailureRecommendation'
 import { failedScanHeadline } from '@/lib/authorizationStop'
@@ -425,7 +426,7 @@ function ScanRunLimitsPanel({ scan }: { scan: any }) {
           <div><dt className="inline text-gray-500">Testing </dt><dd className="inline text-gray-200">{resultPresentation.testingSummary}</dd></div>
           <div><dt className="inline text-gray-500">HTTP requests used </dt><dd className="inline text-gray-200">{resultPresentation.requestCount === null ? 'Unavailable' : resultPresentation.requestCount.toLocaleString()}</dd></div>
           {resultPresentation.resolvedFamilies.length > 0 && (
-            <div><dt className="inline text-gray-500">Selected check families </dt><dd className="inline text-gray-200">{resultPresentation.resolvedFamilies.map((family: string) => family.replaceAll('_', ' ')).join(', ')}</dd></div>
+            <div><dt className="inline text-gray-500">Selected check families </dt><dd className="inline text-gray-200">{resultPresentation.resolvedFamilies.map((family: string) => checkFamilyLabel(family)).join(', ')}</dd></div>
           )}
           {resultPresentation.templateWindows && (
             <div data-testid="template-windows"><dt className="inline text-gray-500">Active template windows </dt><dd className="inline text-gray-200">{resultPresentation.templateWindows.detail}</dd></div>
@@ -455,13 +456,13 @@ function ScanRunLimitsPanel({ scan }: { scan: any }) {
               {resultPresentation.incompleteFamilies.length > 0 && (
                 <li>
                   • Check {resultPresentation.incompleteFamilies.length === 1 ? 'family' : 'families'} that did not finish:{' '}
-                  <span className="font-medium text-amber-100">{resultPresentation.incompleteFamilies.join(', ')}</span>.
+                  <span className="font-medium text-amber-100">{resultPresentation.incompleteFamilies.map((family: string) => checkFamilyLabel(family)).join(', ')}</span>.
                 </li>
               )}
               {resultPresentation.candidateGapFamilies.length > 0 && (
                 <li>
                   • Selected check families with no testable candidates recorded:{' '}
-                  <span className="font-medium text-amber-100">{resultPresentation.candidateGapFamilies.join(', ')}</span>.
+                  <span className="font-medium text-amber-100">{resultPresentation.candidateGapFamilies.map((family: string) => checkFamilyLabel(family)).join(', ')}</span>.
                   Their absence of findings does not establish that those vulnerability classes were tested.
                   {resultPresentation.injectionCandidateGap ? ` ${resultPresentation.injectionCandidateGap}` : ''}
                 </li>
@@ -1804,9 +1805,9 @@ function ExecutionPlanCard({ scan }: { scan: any }) {
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-2">
-          <span className={`rounded-sm px-2 py-1 text-xs ${parity.consistent === false ? 'bg-red-500/10 text-red-300' : 'bg-green-500/10 text-green-300'}`}>
-            {parity.consistent === false ? 'Execution record mismatch' : 'Same local / fleet contract'}
-          </span>
+          {parity.consistent === false && (
+            <span className="rounded-sm bg-red-500/10 px-2 py-1 text-xs text-red-300">Execution record mismatch</span>
+          )}
           <a
             href={apiRecordUrl}
             target="_blank"
@@ -1816,24 +1817,6 @@ function ExecutionPlanCard({ scan }: { scan: any }) {
             Open execution record
           </a>
         </div>
-      </div>
-
-      <div className="mt-3 grid gap-2 text-[11px] text-gray-500 md:grid-cols-2">
-        <div className="rounded-sm border border-gray-800 bg-gray-950/50 p-2">
-          <span className="text-gray-400">Plan:</span>{' '}
-          <span className="font-mono">{String(explanation?.plan_digest || 'pending')}</span>
-        </div>
-        <div className="rounded-sm border border-gray-800 bg-gray-950/50 p-2">
-          <span className="text-gray-400">Plan version:</span>{' '}
-          {String(planRevision.schema_version || explanation?.schema_version || 'unknown')}
-          {planRevision.revision !== undefined ? ` · revision ${Number(planRevision.revision)}` : ''}
-        </div>
-        {planRevision.continuation_plan_digest && (
-          <div className="rounded-sm border border-gray-800 bg-gray-950/50 p-2 md:col-span-2">
-            <span className="text-gray-400">Continuation:</span>{' '}
-            <span className="font-mono">{String(planRevision.continuation_plan_digest)}</span>
-          </div>
-        )}
       </div>
 
       {reliability.reliable === false && (
@@ -1888,7 +1871,7 @@ function ExecutionPlanCard({ scan }: { scan: any }) {
 
       <details className="mt-4 rounded-sm border border-gray-800 bg-gray-950/40">
         <summary className="cursor-pointer px-3 py-2 text-xs font-medium text-gray-300 hover:text-white">
-          Capability details ({actions.length})
+          Step details ({actions.length})
         </summary>
         <div className="divide-y divide-gray-800 border-t border-gray-800">
           {actions.map((action: any) => {
@@ -1901,10 +1884,11 @@ function ExecutionPlanCard({ scan }: { scan: any }) {
             return (
               <div id={occurrenceId} key={occurrenceId} className="p-3">
                 <div className="flex flex-wrap items-center gap-2">
-                  <span className="text-xs font-medium text-gray-200">{String(action.label || action.action_id)}</span>
+                  <span className="text-xs font-medium text-gray-200">{scanStepLabel(action)}</span>
                   <span className={`rounded-sm px-1.5 py-0.5 text-[11px] ${executionStatusClass(String(action.status || 'planned'))}`}>
-                    {String(action.status || 'planned').replace(/_/g, ' ')}
+                    {scanStepStatusLabel(action.status || 'planned')}
                   </span>
+                  <span className="font-mono text-[11px] text-gray-600">{String(action.action_id || '')}</span>
                   {action.required && <span className="rounded-sm bg-gray-800 px-1.5 py-0.5 text-[11px] text-gray-400">required</span>}
                 </div>
                 {action.reason && <p className="mt-1 text-xs text-amber-300/80">{String(action.reason)}</p>}
@@ -1921,6 +1905,34 @@ function ExecutionPlanCard({ scan }: { scan: any }) {
               </div>
             )
           })}
+        </div>
+      </details>
+
+      {/* Identifiers of the plan record: for support and audit, not for reading the result. */}
+      <details className="mt-4 rounded-sm border border-gray-800 bg-gray-950/40" data-testid="plan-technical-details">
+        <summary className="cursor-pointer px-3 py-2 text-xs font-medium text-gray-300 hover:text-white">
+          Technical details
+        </summary>
+        <div className="grid gap-2 border-t border-gray-800 p-3 text-[11px] text-gray-500 md:grid-cols-2">
+          <div className="rounded-sm border border-gray-800 bg-gray-950/50 p-2 md:col-span-2">
+            <span className="text-gray-400">Plan digest:</span>{' '}
+            <span className="font-mono break-all">{String(explanation?.plan_digest || 'pending')}</span>
+          </div>
+          <div className="rounded-sm border border-gray-800 bg-gray-950/50 p-2">
+            <span className="text-gray-400">Plan format:</span>{' '}
+            {String(planRevision.schema_version || explanation?.schema_version || 'unknown')}
+            {planRevision.revision !== undefined ? ` · revision ${Number(planRevision.revision)}` : ''}
+          </div>
+          <div className="rounded-sm border border-gray-800 bg-gray-950/50 p-2">
+            <span className="text-gray-400">Execution record:</span>{' '}
+            {parity.consistent === false ? 'Execution record mismatch' : 'Same local / fleet contract'}
+          </div>
+          {planRevision.continuation_plan_digest && (
+            <div className="rounded-sm border border-gray-800 bg-gray-950/50 p-2 md:col-span-2">
+              <span className="text-gray-400">Continuation digest:</span>{' '}
+              <span className="font-mono break-all">{String(planRevision.continuation_plan_digest)}</span>
+            </div>
+          )}
         </div>
       </details>
     </Card>
