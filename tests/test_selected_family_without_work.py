@@ -140,8 +140,12 @@ def test_a_selected_family_with_no_candidates_is_reported_not_omitted():
     assert coverage["status"] == "complete"
     assert coverage["reasons"] == ["selected_family_no_candidates"]
     assert "xss" not in coverage["selected_family_gaps"]
-    # recon is discovery, not a check family with a verifier row.
-    assert "recon" not in {row["family"] for row in coverage["family_coverage"]}
+    # recon is discovery, not a check family with a verifier: its row reports that the
+    # discovery actions settled, counts no candidates and is no family gap.
+    recon = _family(report, "recon")
+    assert (recon["selected"], recon["coverage_status"], recon["reason"]) == (True, "complete", None)
+    assert recon["batch_actions"] > 0 and recon["planned_candidates"] == 0
+    assert "recon" not in coverage["selected_family_gaps"]
 
 
 def test_a_selected_family_with_candidates_but_no_action_is_a_coverage_gap():
