@@ -149,6 +149,8 @@ function EvidenceContent() {
     return c
   }, [instances])
 
+  // Loaded, and the list holds nothing: there is nothing to filter or search.
+  const listEmpty = !loading && !loadError && instances.length === 0
   const countLabel = visible.length === instances.length ? `${instances.length}` : `${visible.length} of ${instances.length}`
 
   return (
@@ -174,7 +176,8 @@ function EvidenceContent() {
       {!findingFilter && (
         <Card className="p-4">
           <div className="flex flex-col gap-3">
-            <div className="flex flex-wrap items-center gap-2">
+            {/* Proof-state chips and search filter the list; with nothing in it they would only show zeros. */}
+            {!listEmpty && <div className="flex flex-wrap items-center gap-2">
               {PROOF_FILTERS.map((pf) => {
                 const count = pf === 'all' ? instances.length : proofCounts[pf] || 0
                 const active = proofFilter === pf
@@ -194,17 +197,17 @@ function EvidenceContent() {
                   </button>
                 )
               })}
-            </div>
-            <p className="text-xs text-gray-500">
+            </div>}
+            {!listEmpty && <p className="text-xs text-gray-500">
               Proven evidence is shown first. Choose another proof state to inspect incomplete or unverified records.
-            </p>
-            <Input
+            </p>}
+            {!listEmpty && <Input
               type="text"
               value={search}
               onChange={(e) => setSearch(e.target.value)}
               placeholder="Search by vulnerability type, objective, target, or ID"
               aria-label="Search evidence"
-            />
+            />}
             <details className="rounded-lg border border-gray-800 bg-gray-950/40">
               <summary className="cursor-pointer list-none px-3 py-2 text-xs font-medium text-gray-500 hover:text-gray-300">
                 Advanced: filter by finding ID / fingerprint
@@ -280,7 +283,8 @@ function EvidenceContent() {
             // on the finding, so an empty list here does not mean nothing was stored.
             <EmptyState
               message="No autonomous test evidence yet"
-              hint="Scan findings keep their evidence on each finding: open a finding, or filter this page by finding ID to list its evidence objects."
+              hint="This list fills when a Hunt records evidence. Scan findings keep their evidence on each finding: open a finding, or filter this page by finding ID to list its evidence objects."
+              action={{ label: 'Open findings', href: '/findings' }}
             />
           ) : visible.length === 0 ? (
             <EmptyState message="No evidence matches these filters" hint="Try a different proof state or clear the search." />
