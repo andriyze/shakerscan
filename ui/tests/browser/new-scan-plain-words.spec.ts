@@ -78,3 +78,27 @@ test('NEWSCAN-WORDS-002 state-changing requests say when the default-login templ
   await page.getByText('Thorough', { exact: true }).first().click()
   await expect(page.getByTestId('state-changing-templates-note')).toHaveCount(0)
 })
+
+test('NEWSCAN-WORDS-003 minimum attempts name the checks by their labels', async ({ page }) => {
+  await pinMockApiOrigin(page)
+  await page.route(`${MOCK_API_ORIGIN}/**`, async (route) => {
+    const url = new URL(route.request().url())
+    if (url.pathname === '/scan/contracts') return route.fulfill({ json: SCAN_PUBLIC_CONTRACT_SNAPSHOT })
+    if (url.pathname === '/scan/contracts/preview') {
+      return route.fulfill({ json: { preset: 'passive', requested_families: [], resolved_families: ['recon', 'nuclei_passive', 'sensitive_exposure'],
+        derived_prerequisites: [], active_permissions: { active_testing: false, state_changing_http: false, network_discovery: false },
+        minimum_family_quotas: { sensitive_exposure: 10, some_future_check: 2 }, execution_topology: 'single', ai_used: false } })
+    }
+    if (url.pathname === '/workers') {
+      return route.fulfill({ json: { count: 1, current_count: 1, stale_count: 0, pending_count: 0, fleet_uniform: true, stale_workers: [],
+        expected_build_fingerprint: 'c8947ceb0123456789', distinct_fingerprints: ['c8947ceb0123456789'] } })
+    }
+    if (url.pathname === '/targets/inventory') return route.fulfill({ json: { items: [], next_cursor: null, has_more: false } })
+    return route.fulfill({ json: {} })
+  })
+  await page.goto('/scan/new')
+  const label = SCAN_PUBLIC_CONTRACT_SNAPSHOT.families.find((family) => family.name === 'sensitive_exposure')!.label
+  const line = page.getByTestId('scan-minimum-attempts')
+  await expect(line).toHaveText(`Minimum attempts: ${label} 10 · some future check 2`)
+  await expect(line).not.toContainText('_')
+})
