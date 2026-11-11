@@ -345,6 +345,7 @@ _rules()  # verify the pinned snapshot at import: a mismatch fails closed, loudl
 
 __all__ = [
     "DomainNameError", "MAX_DOMAIN_LENGTH", "PSL_LICENSE", "PSL_PATH", "PSL_PIN_PATH",
+    "SHARED_DNS_SUFFIXES",
     "PublicSuffixError", "PublicSuffixListError", "is_public_suffix", "parse_domain",
     "public_suffix", "public_suffix_refusal", "registrable_domain", "require_registrable_or_below",
     "snapshot", "spans_public_suffix", "suffix_below",
