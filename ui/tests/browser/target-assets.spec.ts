@@ -263,3 +263,17 @@ for (const width of [390, 1440]) {
     expect(String(web.url)).toMatch(/^http:\/\/asset\.example\.test:3000/)
   })
 }
+
+test('ASSET-HISTORY-001 the history names what each record is in words', async ({page}) => {
+  await mock(page)
+  await page.route(`${MOCK_API_ORIGIN}/targets/${assetId}/history*`, route => route.fulfill({json:{asset_id:assetId,kind:'scans',total:2,offset:0,limit:25,items:[
+    {id:'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1',target_id:assetId,target_url:'https://fixture.example.test',run_kind:'web_dast',status:'completed',created_at:'2026-01-02T03:04:05Z'},
+    {id:'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa2',target_id:'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',target_url:'https://fixture.example.test:8443',run_kind:'device_posture',status:'completed',created_at:'2026-01-02T03:04:05Z'},
+  ]}}))
+  await page.goto(`/targets/${assetId}/asset`, {waitUntil:'domcontentloaded'})
+  const history = page.locator('section', {has: page.getByRole('heading', {name:'Asset history', exact:true})})
+  await expect(history.getByText('Web scan · Host', {exact:true})).toBeVisible()
+  await expect(history.getByText('Network discovery · Application service', {exact:true})).toBeVisible()
+  await expect(history).not.toContainText('web_dast')
+  await expect(history).not.toContainText('device_posture')
+})
