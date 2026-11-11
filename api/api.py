@@ -8008,10 +8008,18 @@ def _policy_profile_for_scan(
     result: dict[str, Any],
     product: str,
     db_profiles: dict[str, dict[str, Any]] | None = None,
+    target_environment: str | None = None,
 ) -> dict[str, Any]:
+    """The policy profile a release decision is made under, and what selected it.
+
+    The Scan's own options name it first, then what the product recorded for the run. A web
+    Scan records neither, so it is judged under its target's environment. ``basis`` says which
+    of these applied; ``default`` means none did and the product's default profile is used.
+    """
     options = _sanitize_scan_options(scan.get("options")) if scan.get("options") is not None else {}
     raw_options = _decode_json_value(scan.get("options")) if scan.get("options") is not None else {}
     policy_profile = ""
+    basis = "scan"
     if isinstance(raw_options, dict):
         policy_profile = str(
             raw_options.get("policy_profile")
@@ -8026,10 +8034,19 @@ def _policy_profile_for_scan(
     if not policy_profile and product == "model_intake":
         summary = (result.get("model_intake") or {}).get("summary") if isinstance(result.get("model_intake"), dict) else {}
         policy_profile = str((summary or {}).get("deployment_environment") or "").strip().lower()
+    environment = str(target_environment or "").strip().lower()
+    from_target = False
+    if not policy_profile and product == "dast" and environment:
+        policy_profile = environment
+        basis = "target_environment"
+        from_target = True
     # A durable DB-backed policy profile (R4) for this environment/name overrides
     # the built-in defaults.
     db_profiles = db_profiles or {}
     db_match = db_profiles.get(policy_profile)
+    if db_match is not None and from_target and str(db_match.get("product_area") or "dast") != "dast":
+        # A profile written for another product does not judge a web Scan by its target's tag.
+        db_match = None
     if db_match is None and isinstance(raw_options, dict):
         requested = str(raw_options.get("policy_profile") or "").strip().lower()
         db_match = db_profiles.get(requested)
@@ -8037,12 +8054,15 @@ def _policy_profile_for_scan(
         profile = dict(db_match)
         profile.setdefault("id", policy_profile or profile.get("environment") or "custom")
         profile["source"] = "db"
+        profile["basis"] = basis
         return profile
     if policy_profile not in POLICY_PROFILES:
         policy_profile = "production" if product in {"ai_gate", "model_intake"} else "staging"
+        basis = "default"
     profile = dict(POLICY_PROFILES[policy_profile])
     profile["id"] = policy_profile
     profile["source"] = "builtin"
+    profile["basis"] = basis
     if isinstance(options, dict) and options.get("policy_profile"):
         profile["requested_profile"] = options.get("policy_profile")
     return profile
@@ -8121,6 +8141,7 @@ def build_deployment_decision(
     target_history: dict[str, Any] | None = None,
     persisted_finding_ids: dict[str, str] | None = None,
     target_active: dict[str, Any] | None = None,
+    target_environment: str | None = None,
 ) -> dict[str, Any]:
     result = _decode_json_value(scan.get("result")) or {}
     run_kind = str(scan.get("run_kind") or "")
@@ -8138,7 +8159,9 @@ def build_deployment_decision(
         product_for_policy = "ai_gate"
     elif isinstance(result, dict) and (result.get("model_intake") or run_kind == "model_intake"):
         product_for_policy = "model_intake"
-    policy_profile = _policy_profile_for_scan(scan, result if isinstance(result, dict) else {}, product_for_policy, db_profiles=db_policy_profiles)
+    policy_profile = _policy_profile_for_scan(
+        scan, result if isinstance(result, dict) else {}, product_for_policy,
+        db_profiles=db_policy_profiles, target_environment=target_environment)
 
     if run_kind in DEVICE_RUN_KINDS or (isinstance(result, dict) and result.get("device_posture")):
         product = "device_posture"
@@ -8245,6 +8268,10 @@ def build_deployment_decision(
         "product": product,
         "policy_name": policy_name,
         "policy_profile": policy_profile["id"],
+        # What selected the profile: "scan" (the run named or recorded it), "target_environment",
+        # or "default" (neither did; the product's default profile applies).
+        "policy_profile_basis": policy_profile.get("basis"),
+        "target_environment": (str(target_environment).strip().lower() or None) if target_environment else None,
         "rationale": rationale,
         "blocking_count": len(blocking_findings),
         "blocking_findings": blocking_findings,
@@ -12062,11 +12089,14 @@ async def get_scan_deployment_decision(scan_id: str):
         # the origin is split across scheme/slash duplicate target rows (so scanning a
         # zero-finding duplicate cannot hide a sibling's criticals). Fail-closed.
         sibling_ids: list = [target_id] if target_id else []
+        target_environment: str | None = None
         if target_id:
             this_target = await conn.fetchrow(
-                "SELECT url, discovery_source FROM targets WHERE id = $1", target_id
+                "SELECT url, discovery_source, metadata_json FROM targets WHERE id = $1", target_id
             )
             if this_target:
+                target_environment = target_authorization.effective_target_environment(
+                    _decode_json_value(this_target.get("metadata_json")))
                 canon = _canonical_target_key(
                     this_target["url"], this_target.get("discovery_source")
                 )
@@ -12081,6 +12111,11 @@ async def get_scan_deployment_decision(scan_id: str):
 
     target_active_findings = gate_findings_from_rows(target_active["rows"])
 
+    # One profile per environment; where several are active, the one written for web Scans
+    # judges a web Scan.
+    web_scan = not (str(scan["run_kind"] or "").startswith("ai_") or scan["run_kind"] == "model_intake")
+    if web_scan:
+        profile_rows = sorted(profile_rows, key=lambda r: str(r.get("product_area") or "") != "dast")
     db_policy_profiles: dict[str, dict[str, Any]] = {}
     for r in profile_rows:
         env = str(r["environment"] or "").strip().lower()
@@ -12088,6 +12123,7 @@ async def get_scan_deployment_decision(scan_id: str):
             continue
         db_policy_profiles.setdefault(env, {
             "name": r["name"],
+            "product_area": r.get("product_area"),
             "environment": env,
             "minimum_block_severity": r["minimum_block_severity"],
             "expires_days": r["expires_days"],
@@ -12120,6 +12156,7 @@ async def get_scan_deployment_decision(scan_id: str):
         target_history=target_history,
         persisted_finding_ids=persisted_finding_ids,
         target_active=target_active,
+        target_environment=target_environment,
     )
 
 

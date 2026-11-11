@@ -26,6 +26,7 @@ import { blockerOrigin, blockerProvenanceText, carriedOverFromDecision, carriedS
 import { emptyScanLogState, mergeScanLogReply } from '@/lib/scanLogDelta.mjs'
 import { isDiscoveryRun } from '@/lib/discoveryRun.mjs'
 import { scanCountLine } from '@/lib/scanCountLine.mjs'
+import { releaseProfileReason } from '@/lib/releaseProfile.mjs'
 import { scanFailureRecommendation } from '@/lib/scanFailureRecommendation'
 import { failedScanHeadline } from '@/lib/authorizationStop'
 
@@ -535,7 +536,10 @@ function DeploymentDecisionCard({
           <div className="mt-2 flex flex-wrap items-center gap-2 text-xs">
             <span className={`rounded-sm px-2 py-1 font-medium uppercase ${verdictClass}`}>{verdict.replace(/_/g, ' ')}</span>
             {decision?.policy_profile && (
-              <span className="rounded-sm bg-gray-800 px-2 py-1 text-gray-300"><span className="text-gray-500">profile</span> {String(decision.policy_profile)}</span>
+              <span className="rounded-sm bg-gray-800 px-2 py-1 text-gray-300" data-testid="release-profile">
+                <span className="text-gray-500">profile</span> {String(decision.policy_profile)}
+                {releaseProfileReason(decision) && <span className="text-gray-500"> · {releaseProfileReason(decision)}</span>}
+              </span>
             )}
             {decision?.policy_name && (
               <span className="rounded-sm bg-gray-800 px-2 py-1 text-gray-300"><span className="text-gray-500">policy</span> {String(decision.policy_name)}</span>
