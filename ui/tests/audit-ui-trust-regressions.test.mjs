@@ -123,7 +123,9 @@ test('scoped dashboard keeps global activity visible without attributing it to a
   assert.match(dashboard, /Observed posture \{grade\.letter\}/)
   assert.match(dashboard, /assurance\.label.*assurance\.score/)
   assert.match(targets, /gradeTextColor\(grade\)/)
-  assert.match(targets, /gradeTextColor\(origin\.last_grade\)/)
+  // A web application's chip colours the letter of its grade, as the last-scan cell does.
+  assert.match(targets, /observedGrade\(origin\.last_grade\)/)
+  assert.match(targets, /gradeTextColor\(grade\.letter\)/)
   assert.match(targets, /· review coverage/)
   const scans = read('src/app/scans/page.tsx')
   assert.match(scans, />Observed posture</)
