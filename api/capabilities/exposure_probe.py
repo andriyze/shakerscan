@@ -509,12 +509,23 @@ def _secrets(
     return _dedupe(found)
 
 
+# Self-evident credentials that open a provider account on their own (secret_material
+# SELF_EVIDENT_SECRET_PATTERNS): a private key, a cloud access key, a live payment key, and the
+# source-control, chat, package and mail provider tokens.
+_CRITICAL_SECRET_CATEGORIES = frozenset({
+    "private_key", "aws_access_key", "stripe_key", "github_token", "slack_token", "npm_token",
+    "sendgrid_key",
+})
+
+
 def _escalated(
     exposure_class: str, secrets: tuple[SecretEvidence, ...], base: str | None = None,
 ) -> str:
     severity = base or _CLASS_SEVERITY[exposure_class]
     categories = {item.category for item in secrets}
-    if categories & {"private_key", "aws_access_key"}:
+    # A live provider credential is critical in whatever file it is found: a Stripe live secret
+    # key in /.env is as usable as an AWS key in /settings.py.
+    if categories & _CRITICAL_SECRET_CATEGORIES:
         return "critical"
     if secrets and severity in {"info", "low", "medium"}:
         return "high"

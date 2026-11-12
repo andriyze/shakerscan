@@ -118,6 +118,58 @@ async def research_promotion_provenance(conn: Any, hypothesis_id: uuid.UUID) -> 
     }
 
 
+# Hunt families whose proof is the same issue a Scan's exposure probe proves at one URL.
+_HUNT_EXPOSURE_FAMILIES = frozenset({"data_exposure"})
+_SCAN_EXPOSURE_TOOLS = frozenset({"shakerscan_exposure_probe"})
+
+
+def scan_record_for_hunt_proof(
+    rows: Any, *, family: Any, route: Any,
+) -> Any:
+    """The Scan's finding a Hunt proof on the same URL and family belongs to, or None.
+
+    A Hunt that proves an exposed file the Scan already proved (``/id_rsa``, ``/.env``) reported
+    the same issue as a second finding: the two keys differ (the Scan's probe classifies the file,
+    the Hunt names a data-exposure family), so the vulnerability-key match never saw them as one.
+    The route is compared as ``canonical_vulnerability_route`` normalizes it (ids templated, a
+    trailing slash dropped).
+    """
+    if family_proof.canonical_family(family) not in _HUNT_EXPOSURE_FAMILIES:
+        return None
+    wanted = canonical_vulnerability_route(route)
+    if not wanted:
+        return None
+    for row in rows or ():
+        if str(row.get("tool") or "") not in _SCAN_EXPOSURE_TOOLS:
+            continue
+        if canonical_vulnerability_route(row.get("url")) == wanted:
+            return row
+    return None
+
+
+async def _optional_provenance(conn: Any, hypothesis_id: str) -> dict[str, Any]:
+    """The Hunt run a proof came from, when it can be read; a link never fails on it."""
+    try:
+        return await research_promotion_provenance(conn, uuid.UUID(hypothesis_id))
+    except Exception:
+        return {}
+
+
+def hunt_corroboration(
+    *, family: Any, route: Any, method: Any, hypothesis_id: Any, workflow_id: Any,
+    provenance: Any, evidence_instance_id: Any,
+) -> dict[str, Any]:
+    """What a Scan finding records of a Hunt that proved the same issue: references, no values."""
+    provenance = provenance if isinstance(provenance, dict) else {}
+    return {
+        "source": "hunt", "family": str(family or ""), "route": str(route or ""),
+        "method": str(method or "") or None, "hypothesis_id": str(hypothesis_id or ""),
+        "workflow_id": str(workflow_id or "") or None,
+        "campaign_id": provenance.get("campaign_id"), "episode_id": provenance.get("episode_id"),
+        "evidence_instance_id": str(evidence_instance_id or "") or None,
+    }
+
+
 async def promote_trusted_workflow_finding(
     conn: Any,
     *,
@@ -208,7 +260,7 @@ async def promote_trusted_workflow_finding(
             if _finding_vulnerability_key(row) in candidate_vulnerability_keys
         ),
         None,
-    )
+    ) or scan_record_for_hunt_proof(known_rows, family=family, route=finding_route)
     # A prior SUSPECTED autonomous-agent finding for this same vuln is exactly the thing being
     # UPGRADED to verified — it must not suppress its own promotion. This is DEDUP logic only; the
     # proof gate above (promotion_gate) is unchanged, so recognizing the upgrade cannot promote
@@ -218,6 +270,25 @@ async def promote_trusted_workflow_finding(
     if known_match and str(known_match.get("tool") or "") not in _upgradeable_prior_tools:
         proof["novelty_gate"] = "known_vulnerability_already_covered"
         proof["known_finding_id"] = str(known_match["id"])
+        # The Scan's finding stays the record (triage, retest and the release gate act on it);
+        # the Hunt's proof is added to it, linked, instead of becoming a second row.
+        await conn.execute(
+            """
+            UPDATE findings SET evidence = jsonb_set(
+                    COALESCE(evidence, '{}'::jsonb), '{hunt_corroboration}',
+                    COALESCE(evidence->'hunt_corroboration', '[]'::jsonb) || $2::jsonb),
+                updated_at=NOW()
+            WHERE id=$1 AND NOT (COALESCE(evidence->'hunt_corroboration', '[]'::jsonb) @> $3::jsonb)
+            """,
+            known_match["id"],
+            json.dumps([hunt_corroboration(
+                family=family, route=finding_route, method=proven_method,
+                hypothesis_id=hypothesis_id, workflow_id=workflow_id,
+                provenance=await _optional_provenance(conn, hypothesis_id),
+                evidence_instance_id=evidence_instance_id,
+            )]),
+            json.dumps([{"hypothesis_id": hypothesis_id}]),
+        )
         await conn.execute(
             """
             UPDATE hypotheses SET status='dead',

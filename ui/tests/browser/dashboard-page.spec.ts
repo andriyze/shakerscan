@@ -74,6 +74,10 @@ test('populated dashboard shows queue, posture, latest results and activity', as
   await expect(page.getByText('scans pending', { exact: true })).toBeVisible()
   await expect(page.getByRole('heading', { name: 'Security posture' })).toBeVisible()
   await expect(page.getByText('Proven active risk', { exact: true })).toBeVisible()
+  // One asset is "1 asset", not "1 assets".
+  for (const text of ['1 affected asset', '1 high-impact asset', 'of 1 known asset', '1 asset']) {
+    await expect(page.getByText(text, { exact: true })).toBeVisible()
+  }
   await expect(latestResult(page)).toBeVisible()
   await expect(page.getByRole('heading', { name: 'Recent activity' })).toBeVisible()
   await expect(page.getByText('No scan results yet. Add a target and run the first scan.')).toHaveCount(0)
@@ -116,6 +120,36 @@ test('the dashboard fits a phone viewport', async ({ page }) => {
   await mockPageApi(page, populated())
   await visitAndAuditPage(page, '/', 800)
   await expect(page.getByRole('heading', { name: 'Latest target results' })).toBeVisible()
+})
+
+test('a latest result shows the whole host name and the grade the Scan page shows', async ({ page }, testInfo) => {
+  const routes = populated()
+  const healthy = routes['/dashboard']
+  const host = 'checkout.staging.example.test'
+  routes['/dashboard'] = (url, request) => {
+    const body = healthy(url, request) as { recent_scans: Array<Record<string, unknown>> }
+    // The stored grade of an incomplete run ends in an asterisk.
+    body.recent_scans = [{ ...body.recent_scans[0], target_url: `https://${host}`, grade: 'F*', score: 0, findings_count: 44,
+      assurance_score: 83, assurance_band: 'adequate', assurance_label: 'Adequate' }]
+    return body
+  }
+  await mockPageApi(page, routes)
+  await page.goto('/')
+  const row = page.getByTestId('latest-result-row')
+  await expect(row).toHaveCount(1)
+  await expect(row).toContainText('44 findings')
+  await expect(row).toContainText('Observed posture F (provisional)')
+  // The examination strength the API sends for the run, as the Scans list shows it.
+  await expect(row).toContainText('83/100')
+  await expect(row).not.toContainText('Examination strength unavailable')
+  await expect(row).not.toContainText('F*')
+  const name = row.getByText(host, { exact: true })
+  await expect(name).toBeVisible()
+  if (testInfo.project.name === 'chromium') {
+    // On a desktop the name is not cut while the card has room for it.
+    expect(await name.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true)
+  }
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth + 1)).toBe(true)
 })
 
 // 2.12.1: Scans that finished on lab targets are not "no results yet" in the default cohort: the

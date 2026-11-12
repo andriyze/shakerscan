@@ -24,6 +24,7 @@ from .capability_execution import scan_discovery_reservation
 from .continuation import ScanContinuationAllocation
 from .execution import ScanExecutionPlan
 from .jobs import ScanShardBudget
+from .scoring import DISCOVERY_FAMILIES
 
 
 PARALLEL_ACTION_PARTITION_SCHEMA = "parallel-action-partition/v2"
@@ -2209,5 +2210,7 @@ def summarize_parallel_action_coverage(
             if isinstance(item, Mapping)
             and item.get("required") is True
             and str(item.get("coverage_status") or "").lower() != "complete"
+            # A discovery row's shortfall is stated by the discovery reasons, as in a direct Scan.
+            and str(item.get("family")) not in DISCOVERY_FAMILIES
         }),
     }

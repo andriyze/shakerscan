@@ -1406,6 +1406,12 @@ async def _probe_http(
         return None
 
 
+def _plain_request_refused(found: dict[str, Any]) -> bool:
+    """True when a plain HTTP probe was answered with 400 Bad Request."""
+    parts = str(found.get("status_line") or "").split()
+    return len(parts) >= 2 and parts[1] == "400"
+
+
 async def detect_web_origins(
     connect_address: str,
     services: list[dict[str, Any]],
@@ -1446,6 +1452,17 @@ async def detect_web_origins(
                     origin_locator=origin_locator,
                 )
                 if found:
+                    if not use_tls and not tls_first and _plain_request_refused(found):
+                        # A TLS listener answers a plain request with 400. The origin is
+                        # the TLS one when the same port then answers over TLS.
+                        await wait_for_rate_slot()
+                        secure = await _probe_http(
+                            connect_address,
+                            port,
+                            tls=True,
+                            origin_locator=origin_locator,
+                        )
+                        found = secure or found
                     found["detected_service"] = hint or "unknown"
                     return found
             return None

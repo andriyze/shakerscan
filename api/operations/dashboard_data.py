@@ -22,10 +22,16 @@ from typing import Any, Awaitable, Callable
 
 try:
     from list_contract import SqlParams
+    from scan.assessment import project_scan_assessment_row
+    from scan.assessment_columns import assessment_sql
+    from scan.discovery_runs import not_discovery_run_sql
     from target_cohort_sql import COHORT_VIEWS, cohort_filter_sql, fill_url_classes, row_cohorts
     from targets.scale_summary import FINDING_TOTALS_SQL, SCAN_TOTALS_SQL, compact
 except ModuleNotFoundError:  # package import layout
     from ..list_contract import SqlParams
+    from ..scan.assessment import project_scan_assessment_row
+    from ..scan.assessment_columns import assessment_sql
+    from ..scan.discovery_runs import not_discovery_run_sql
     from ..target_cohort_sql import COHORT_VIEWS, cohort_filter_sql, fill_url_classes, row_cohorts
     from ..targets.scale_summary import FINDING_TOTALS_SQL, SCAN_TOTALS_SQL, compact
 
@@ -125,8 +131,13 @@ async def dashboard_metrics(conn: Any, counts: DashboardCounts) -> dict[str, Any
     }
 
 
+# The examination strength and the two assessment fields are what the Scans list carries for a
+# row, so a latest result reads the same on the dashboard as in the list.
 _RECENT_SCAN_COLUMNS = ("id, target_id, ai_target_id, target_url, status, score, grade, "
-                        "scan_type, run_kind, findings_count, created_at, completed_at")
+                        "assurance_score, scan_type, run_kind, findings_count, created_at, "
+                        "completed_at, "
+                        f"{assessment_sql('risk_assessment_state', '')} AS risk_assessment_state, "
+                        f"{assessment_sql('application_observed', '')} AS application_observed")
 _RECENT_SCAN_FILTER = """status = 'completed'
           AND (scan_role IS NULL OR scan_role <> 'shard')
           AND COALESCE(run_kind, '') <> 'model_intake'
@@ -134,6 +145,8 @@ _RECENT_SCAN_FILTER = """status = 'completed'
           AND device_target_id IS NULL
           AND COALESCE(scan_role, '') <> 'device_web_origin'
           AND COALESCE(run_kind, '') NOT IN ('device_posture','device_probe','device_web_dast')"""
+# "Latest target results" lists application Scans; a discovery run is not a target's result.
+_RECENT_SCAN_FILTER += f"\n          AND {not_discovery_run_sql()}"
 
 
 def _recent_scan_key(row: Any) -> str | None:
@@ -172,7 +185,7 @@ async def recent_latest_scans(conn: Any, limit: int = 10, *,
     where = f"{_RECENT_SCAN_FILTER}{cohort_sql}"
 
     async def take(rows: Any) -> bool:
-        batch_rows = [dict(row) for row in rows]
+        batch_rows = [project_scan_assessment_row(row) for row in rows]
         labels = await row_cohorts(conn, batch_rows)
         for row, label in zip(batch_rows, labels):
             key = _recent_scan_key(row)

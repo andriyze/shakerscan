@@ -166,6 +166,7 @@ export const SCAN_PUBLIC_CONTRACT_SNAPSHOT = {
     "semantic_capabilities": [
       "auth.session.establish",
       "authz.verify",
+      "authz_surface.verify_batch",
       "collections.replay_active",
       "collections.replay_authentication",
       "collections.replay_safe",
@@ -317,7 +318,7 @@ export const SCAN_PUBLIC_CONTRACT_SNAPSHOT = {
       "name": "authz_surface",
       "requires_active_testing": true,
       "requires_credentials": true,
-      "risk_level": "high"
+      "risk_level": "medium"
     },
     {
       "capabilities": [
@@ -361,6 +362,11 @@ export const SCAN_PUBLIC_CONTRACT_SNAPSHOT = {
         "nuclei_active"
       ]
     }
+  },
+  "family_preset_signed_in_additions": {
+    "standard_active": [
+      "authz_surface"
+    ]
   },
   "family_presets": {
     "custom": [],
@@ -437,6 +443,7 @@ export interface ScanPublicContract {
   }>
   family_presets: Record<'passive' | 'standard_active' | 'custom', string[]>
   family_preset_profile_additions: Record<string, Record<string, string[]>>
+  family_preset_signed_in_additions: Record<string, string[]>
   family_preset_addition_floors: Record<string, Record<string, number>>
   passive_coverage: {
     description: string

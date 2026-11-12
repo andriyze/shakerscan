@@ -43,8 +43,10 @@ test('the Hunts page opens no browser launcher in a managed workspace', () => {
   assert.match(source, /\{launcherOpen && !managed && <Card/)
 })
 
-test('a managed sidebar renders no section switch and shows every allowed page', () => {
+test('a managed sidebar renders no More row and shows every allowed page', () => {
   const source = read('src/components/Sidebar.tsx')
-  assert.match(source, /const showAdvanced = managed \|\| showAll/)
-  assert.match(source, /\{managed \? <span \/> : \(\s*<button\s+type="button"\s+role="switch"/)
+  assert.match(source, /const inMore = [^\n]+\n\s+!managed && \(group\.advanced === true/)
+  assert.match(source, /const moreItems = managed \? \[\] : /)
+  assert.match(source, /\{moreItems\.length > 0 && \(/)
+  assert.doesNotMatch(source, /role="switch"/)
 })

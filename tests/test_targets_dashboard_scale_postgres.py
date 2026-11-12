@@ -455,9 +455,14 @@ def test_dashboard_numbers_equal_the_full_table_queries():
 
         old_scans = [dict(r) for r in await conn.fetch(ref.DASHBOARD_RECENT_SCANS)]
         recent = await dd.recent_latest_scans(conn, limit=10)
-        # 2.11 labels each row with its subject's cohort; the rows are the 2.10 ones.
-        assert all("target_cohort" in row for row in recent)
-        assert [{k: v for k, v in row.items() if k != "target_cohort"} for row in recent] == old_scans
+        # 2.11 labels each row with its subject's cohort, and a row carries the examination
+        # strength and the two assessment fields of the Scans list; the rest is the 2.10 row.
+        added = ("target_cohort", "assurance_score", "risk_assessment_state", "application_observed")
+        assert all(name in row for row in recent for name in added)
+        assert [{k: v for k, v in row.items() if k not in added} for row in recent] == old_scans
+        assert [row["assurance_score"] for row in recent] == [
+            await conn.fetchval("SELECT assurance_score FROM scans WHERE id=$1", row["id"])
+            for row in recent]
         old_findings = [dict(r) for r in await conn.fetch(ref.DASHBOARD_RECENT_FINDINGS)]
         assert await dd.recent_blocker_findings(conn, limit=10) == old_findings
 

@@ -105,6 +105,18 @@ function CandidateVerification({ candidate }: { candidate: ServiceCandidate }) {
   </div>
 }
 
+// The inventory also lists the host record a web target belongs to. With no address, evidence,
+// warning or finding of its own it only repeats the target next to it, as an empty card.
+function repeatsListedTarget(target: ServiceTarget, targets: ServiceTarget[]) {
+  if (target.kind !== 'web' || target.locator || target.services.length > 0) return false
+  if (target.warnings.length > 0 || target.unlinked_findings_count > 0) return false
+  const name = target.label.trim().toLowerCase()
+  return targets.some((other) => {
+    if (other === target || !other.locator) return false
+    try { return new URL(other.locator).hostname.toLowerCase() === name } catch { return false }
+  })
+}
+
 // Older engines return no groups: one row per observation keeps the page usable.
 function groupsFor(target: ServiceTarget): ListenerGroup[] {
   if (target.listener_groups) return target.listener_groups
@@ -284,6 +296,8 @@ export function ServicesView({ rootDomain, revision, onBusyChange }: { rootDomai
   const selectedTarget = data?.targets.find((target) => target.services.some((service) => service.id === selectedId))
   const selected = selectedTarget?.services.find((service) => service.id === selectedId)
   const updateFilters = (updates: Record<string, string | undefined>) => setFilters({ service_page: undefined, service_id: undefined, ...updates })
+  const listed = data ? data.targets.filter((target) => !repeatsListedTarget(target, data.targets)) : []
+  const repeated = data ? data.targets.length - listed.length : 0
   return (
     <section className="space-y-4" aria-label="Service Intelligence">
       <Card className="p-4">
@@ -298,12 +312,12 @@ export function ServicesView({ rootDomain, revision, onBusyChange }: { rootDomai
       {loading && <p role="status" className="text-sm text-gray-400">Loading retained service evidence…</p>}
       {error && <ErrorState message={error} onRetry={() => setRetry((value) => value + 1)} />}
       {data && <>
-        <p className="text-sm text-gray-400">{data.total_targets} matching targets · {data.targets.reduce((sum, target) => sum + target.services.length, 0)} service observations on this page. Counts are separate from web vulnerability scores.</p>
+        <p className="text-sm text-gray-400" data-testid="service-target-count">{data.total_targets - repeated} matching target{data.total_targets - repeated === 1 ? '' : 's'} · {data.targets.reduce((sum, target) => sum + target.services.length, 0)} service observations on this page. Counts are separate from web vulnerability scores.</p>
         <details className="rounded-sm border border-gray-800 p-3 text-xs text-gray-400"><summary className="cursor-pointer">Intelligence: {data.intelligence.status} · {data.intelligence.record_count} records · {data.intelligence.source === 'external_bundle' ? `signed bundle v${data.intelligence.bundle?.bundle_version ?? '?'}` : data.intelligence.source === 'operator_pinned' ? 'operator-pinned snapshot' : 'built-in snapshot'} · generated {when(data.intelligence.generated_at)}</summary><div className="mt-2 space-y-1">{data.intelligence.bundle && !['absent', 'verified'].includes(data.intelligence.bundle.status) && <p className="text-amber-200">An installed intelligence bundle is not in use: {readable(data.intelligence.bundle.status)}.</p>}{[...data.intelligence.limitations, ...data.limitations].map((item) => <p key={item}>{item}</p>)}</div></details>
         {data.intelligence.status !== 'available' && <p role="status" className="text-sm text-amber-200">Intelligence is unavailable or failed integrity checks. Empty candidate lists must not be read as a clean result.</p>}
         {data.targets.length === 0 && <EmptyState message="No targets on this page" hint="Clear a filter or return to the first page. Missing service evidence is not a clean scan." />}
-        {data.targets.map((target) => <Card key={`${target.kind}:${target.id}`} className="overflow-hidden">
-          <div className="border-b border-gray-800 p-4"><h3 className="wrap-break-word font-medium text-white">{target.root_domain ? `${target.root_domain} → ` : ''}{target.label}</h3><p className="mt-1 break-all text-xs text-gray-500">{target.kind} · {target.locator} · {target.source_count} evidence sources</p>{target.warnings.map((warning) => <p key={warning} className="mt-2 text-xs text-amber-200">{warning}</p>)}{target.unlinked_findings_count > 0 && <p role="status" className="mt-2 rounded-sm border border-amber-500/30 bg-amber-500/5 p-2 text-xs text-amber-200"><strong className="font-semibold">{target.unlinked_findings_count} active findings are not shown below.</strong> They are scoped to this target but could not be tied to one listener, so the table understates what is known. Open Findings for this target to see them.</p>}{target.findings_truncated && <p className="mt-2 text-xs text-amber-200">Active-finding association window is truncated.</p>}</div>
+        {listed.map((target) => <Card key={`${target.kind}:${target.id}`} className="overflow-hidden" data-testid="service-target">
+          <div className="border-b border-gray-800 p-4"><h3 className="wrap-break-word font-medium text-white">{target.root_domain ? `${target.root_domain} → ` : ''}{target.label}</h3><p className="mt-1 wrap-anywhere text-xs text-gray-500">{[target.kind, target.locator, `${target.source_count} evidence source${target.source_count === 1 ? '' : 's'}`].filter(Boolean).join(' · ')}</p>{target.warnings.map((warning) => <p key={warning} className="mt-2 text-xs text-amber-200">{warning}</p>)}{target.unlinked_findings_count > 0 && <p role="status" className="mt-2 rounded-sm border border-amber-500/30 bg-amber-500/5 p-2 text-xs text-amber-200"><strong className="font-semibold">{target.unlinked_findings_count} active findings are not shown below.</strong> They are scoped to this target but could not be tied to one listener, so the table understates what is known. Open Findings for this target to see them.</p>}{target.findings_truncated && <p className="mt-2 text-xs text-amber-200">Active-finding association window is truncated.</p>}</div>
           {target.services.length === 0 ? <p className="p-4 text-sm text-gray-500">No positive service evidence retained in this window. Run an authorized Scan or Hunt with the relevant discovery policy to collect evidence.</p> : (() => {
             const byId = new Map(target.services.map((service) => [service.id, service]))
             const all = groupsFor(target)
@@ -324,7 +338,7 @@ export function ServicesView({ rootDomain, revision, onBusyChange }: { rootDomai
                   <td className="px-4 py-3"><p className={quiet ? 'text-gray-400' : 'font-medium text-gray-100'}>{group.transport.toUpperCase()}/{group.port} · {group.service}</p><p className="mt-1 text-xs text-gray-500">{primary ? readable(primary.presence) : ''}{primary?.address && <> · {primary.address}</>}{group.service_ids.length > 1 && <> · {group.service_ids.length} observations</>}</p></td>
                   <td className="px-4 py-3 text-gray-300">{group.product ? <>{group.product}{group.version && <> {group.version}</>}</> : <span className="text-gray-600">&mdash;</span>}<p className="mt-1 text-xs text-gray-500">{primary ? readable(primary.identity_basis) : ''}{group.identity_stale && <> · <span className="text-gray-400">identity stale</span></>}</p></td>
                   <td className="px-4 py-3">{group.max_severity ? <span className={`rounded-sm px-2 py-1 text-xs ${SEVERITY_STYLE[group.max_severity] || ''}`}>{group.max_severity}</span> : <span className="text-gray-600">&mdash;</span>}</td>
-                  <td className="px-4 py-3">{group.finding_count > 0 ? <span className="font-medium text-amber-200">{group.finding_count} finding{group.finding_count === 1 ? '' : 's'}</span> : <span className="text-gray-600">&mdash;</span>}<p className="mt-1 text-xs text-gray-500">{group.candidate_count > 0 ? `${group.candidate_count} CVE candidate${group.candidate_count === 1 ? '' : 's'}` : ''}{group.known_exploited > 0 && <span className="text-red-300"> · {group.known_exploited} known exploited</span>}{group.checks_available > 0 && <span> · {group.checks_available} with a check</span>}{group.check_matched > 0 && <span className="text-red-300"> · {group.check_matched} check matched</span>}</p></td>
+                  <td className="px-4 py-3">{group.finding_count > 0 ? <span className="font-medium text-amber-200">{group.finding_count} finding{group.finding_count === 1 ? '' : 's'}</span> : <span className="text-gray-600">&mdash;</span>}<p className="mt-1 text-xs text-gray-500">{group.candidate_count > 0 ? `${group.candidate_count} CVE candidate${group.candidate_count === 1 ? '' : 's'}` : ''}{(group.distribution_build_candidates ?? 0) > 0 && <span data-testid="distribution-build-candidates"> · {group.distribution_build_candidates === group.candidate_count ? 'all' : group.distribution_build_candidates} probable: distribution build, check vendor backports</span>}{group.known_exploited > 0 && <span className="text-red-300"> · {group.known_exploited} known exploited</span>}{group.checks_available > 0 && <span> · {group.checks_available} with a check</span>}{group.check_matched > 0 && <span className="text-red-300"> · {group.check_matched} check matched</span>}</p></td>
                   <td className="px-4 py-3 text-gray-400">{seen || (primary ? readable(primary.freshness) : '')}<p className="mt-1 text-xs text-gray-500">{primary ? readable(primary.observation_status) : ''}</p></td>
                   <td className="px-4 py-3"><button type="button" aria-label={`Inspect ${group.transport}/${group.port} on ${target.label}`} aria-expanded={selectedHere} onClick={() => setFilters({ service_id: selectedHere ? undefined : group.primary_service_id })} className="rounded-sm px-2 py-1 text-blue-300 hover:bg-gray-700 focus-visible:outline-solid focus-visible:outline-2">Inspect</button></td>
                 </tr>
@@ -334,7 +348,7 @@ export function ServicesView({ rootDomain, revision, onBusyChange }: { rootDomai
         </Card>)}
         {selected && selectedTarget && <ServiceDetails key={selected.id} service={selected} target={selectedTarget} onClose={() => setFilters({ service_id: undefined })} />}
         {selectedId && !selected && <p role="status" className="text-sm text-amber-200">The selected service is not in this evidence window. Refresh or inspect its owning target; no stale details are displayed.</p>}
-        <div className="flex items-center justify-between"><Button disabled={page <= 1} onClick={() => setFilters({ service_page: page <= 2 ? undefined : String(page - 1), service_id: undefined })}>Previous</Button><span className="text-sm text-gray-400">Target page {page}</span><Button disabled={!data.has_more} onClick={() => setFilters({ service_page: String(page + 1), service_id: undefined })}>Next</Button></div>
+        <div className="flex items-center justify-between"><Button variant="secondary" disabled={page <= 1} onClick={() => setFilters({ service_page: page <= 2 ? undefined : String(page - 1), service_id: undefined })}>Previous</Button><span className="text-sm text-gray-400">Target page {page}</span><Button variant="secondary" disabled={!data.has_more} onClick={() => setFilters({ service_page: String(page + 1), service_id: undefined })}>Next</Button></div>
       </>}
     </section>
   )

@@ -45,9 +45,16 @@ export default function RootLayout({
         <EditionTitle />
         <ToastProvider>
           <WorkspaceBoundary managed={process.env.SHAKERSCAN_MANAGED_UI === 'true'}>
+            {/* First tab stop: keyboard and screen-reader users reach the page without passing the sidebar. */}
+            <a
+              href="#main-content"
+              className="sr-only focus:not-sr-only focus:fixed focus:left-3 focus:top-3 focus:z-[100] focus:rounded-lg focus:bg-blue-600 focus:px-4 focus:py-2 focus:text-sm focus:font-medium focus:text-white focus:outline-hidden focus:ring-2 focus:ring-white"
+            >
+              Skip to content
+            </a>
             <div className="flex min-h-screen flex-col md:flex-row">
               <Sidebar />
-              <main className="min-w-0 flex-1 overflow-auto p-4 md:p-6">
+              <main id="main-content" tabIndex={-1} className="min-w-0 flex-1 overflow-auto p-4 focus:outline-hidden md:p-6">
                 {children}
               </main>
             </div>

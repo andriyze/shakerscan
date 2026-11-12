@@ -1,6 +1,7 @@
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { NextResponse } from 'next/server'
+import { SCHEMA as UI_EXTENSIONS } from '@/lib/uiExtensions.mjs'
 
 export const dynamic = 'force-dynamic'
 
@@ -37,6 +38,9 @@ export async function GET() {
       ui_version: bakedUiVersion(),
       source_revision: bakedSourceRevision(),
       expected_api_build_fingerprint: bakedExpectedApiFingerprint(),
+      // The optional contracts this build of the UI reads from a managed workspace policy. A
+      // deployment declares a block only to a UI that lists its contract here.
+      ui_contracts: [UI_EXTENSIONS],
     },
     { headers: { 'Cache-Control': 'no-store' } },
   )

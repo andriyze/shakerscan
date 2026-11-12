@@ -20,7 +20,9 @@ cohort rules, action reasons, priority) before slicing a page. Now:
   SQL over those per-asset values; Python builds only the returned page's rows.
 
 The legacy limit/offset response is unchanged (tests/exposure_assets_reference.py is the previous
-implementation, kept as the oracle). ``count``/``cursor``/``fields`` select list/v1.
+implementation, kept as the oracle), except that a host row which only holds web applications is
+no longer listed beside them (``not_application_holder_sql``). ``count``/``cursor``/``fields``
+select list/v1.
 """
 from __future__ import annotations
 
@@ -34,12 +36,14 @@ try:
     from api_utils import _parse_graph_json
     from asset_cohorts import target_cohort, target_exposure_class
     from list_contract import ListSpec, SortKey, SqlParams
+    from scan.discovery_runs import not_discovery_run_sql
     from targets.scale_summary import TICK_HOOKS as summary_tick_hooks
 except ModuleNotFoundError:  # package import in host-side tests
     from ..ai_assurance import build_agent_blast_radius
     from ..api_utils import _parse_graph_json
     from ..asset_cohorts import target_cohort, target_exposure_class
     from ..list_contract import ListSpec, SortKey, SqlParams
+    from ..scan.discovery_runs import not_discovery_run_sql
     from ..targets.scale_summary import TICK_HOOKS as summary_tick_hooks
 
 from .proof_rollup import INVESTIGATOR_TOOLS, NEEDS_VERIFICATION_SQL, asset_finding_counts_sql, proof_counts_sql
@@ -365,6 +369,20 @@ def _latest_scan_sql(owner_filter: str) -> str:
         ) ls ON true"""
 
 
+def not_application_holder_sql(t: str) -> str:
+    """False for a ``host`` row that is only the holder of web applications.
+
+    The asset model keeps one ``host`` row per host name and attaches each web application on that
+    host to it. Scans and findings belong to the applications, so listing the holder as well showed
+    one host twice: once assessed, once "never scanned". The holder is an asset of its own when it
+    was scanned itself, has a device profile, or holds no active web application."""
+    return f"""NOT (
+        {t}.discovery_source IS NOT DISTINCT FROM 'host' AND COALESCE({t}.total_scans, 0) = 0
+        AND NOT EXISTS (SELECT 1 FROM target_device_profiles profile WHERE profile.target_id = {t}.id)
+        AND EXISTS (SELECT 1 FROM targets member WHERE member.asset_owner_id = {t}.id
+                    AND member.is_active = true AND member.url ~* '^https?://'))"""
+
+
 def _ranked_sql(params: SqlParams, *, root_domain: str | None, kind: str | None, now: datetime,
                 adjustments: Mapping[tuple[str, str], Mapping[str, int]]) -> str:
     """CTEs ``scored`` (every asset the kind/root filters keep) with ranking columns."""
@@ -433,13 +451,14 @@ def _ranked_sql(params: SqlParams, *, root_domain: str | None, kind: str | None,
                COALESCE(sus.n, 0)::bigint AS suspected
         FROM targets t
         LEFT JOIN exposure_target_facts x ON x.target_id = t.id
-        {_latest_scan_sql("s.target_id = t.id AND (s.scan_role IS NULL OR s.scan_role <> 'shard')")}
+        {_latest_scan_sql("s.target_id = t.id AND (s.scan_role IS NULL OR s.scan_role <> 'shard') AND "
+                          + not_discovery_run_sql("s"))}
         LEFT JOIN web_counts c ON c.asset_id = t.id
         LEFT JOIN web_settled st ON st.asset_id = t.id
         LEFT JOIN web_proof pr ON pr.asset_id = t.id
         LEFT JOIN web_suspected sus ON sus.asset_id = t.id
         LEFT JOIN adj ON adj.asset_kind = 'target' AND adj.asset_id = t.id
-        WHERE {p_web} AND t.is_active = true
+        WHERE {p_web} AND t.is_active = true AND {not_application_holder_sql('t')}
           AND ({p_root}::text IS NULL OR t.root_domain = {p_root}::text)
           AND ({p_web_kind}::text IS NULL
                OR ({p_web_kind}::text = 'model') = (t.discovery_source IS NOT DISTINCT FROM 'model-intake'))

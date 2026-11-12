@@ -67,6 +67,47 @@ def test_db_policy_profile_overrides_block_threshold():
     assert overridden["policy_profile"] == "staging"
 
 
+def test_a_web_scan_is_judged_under_its_targets_environment():
+    scan = {
+        "id": "s-env", "status": "completed", "scan_type": "smart", "run_kind": "web_dast",
+        "result": {"findings": [{"id": "f-high", "severity": "high", "title": "x"}]},
+    }
+    # A web Scan names no profile of its own; without a target it gets the default.
+    default = api_module.build_deployment_decision(scan)
+    assert (default["policy_profile"], default["policy_profile_basis"]) == ("staging", "default")
+    assert default["target_environment"] is None
+    tagged = api_module.build_deployment_decision(scan, target_environment="Production")
+    assert (tagged["policy_profile"], tagged["policy_profile_basis"]) == ("production", "target_environment")
+    assert tagged["target_environment"] == "production"
+    # An environment without a profile falls back to the default, and the decision says so.
+    lab = api_module.build_deployment_decision(scan, target_environment="lab")
+    assert (lab["policy_profile"], lab["policy_profile_basis"], lab["target_environment"]) == (
+        "staging", "default", "lab")
+    # What the Scan itself names still comes first.
+    named = api_module.build_deployment_decision(
+        {**scan, "options": json.dumps({"environment": "staging"})}, target_environment="production")
+    assert (named["policy_profile"], named["policy_profile_basis"]) == ("staging", "scan")
+
+
+def test_a_stored_profile_for_the_targets_environment_judges_a_web_scan():
+    scan = {
+        "id": "s-env-db", "status": "completed", "scan_type": "smart", "run_kind": "web_dast",
+        "result": {"findings": [{"id": "f-high", "severity": "high", "title": "x"}]},
+    }
+    profile = {"name": "web-production", "environment": "production", "id": "production",
+               "minimum_block_severity": "critical", "expires_days": 7, "product_area": "dast"}
+    applied = api_module.build_deployment_decision(
+        scan, db_policy_profiles={"production": profile}, target_environment="production")
+    assert not applied["blocking_findings"]
+    assert (applied["policy_profile"], applied["policy_profile_basis"]) == ("production", "target_environment")
+    # A profile written for another product does not judge a web Scan by its target's tag.
+    other = api_module.build_deployment_decision(
+        scan, db_policy_profiles={"production": {**profile, "product_area": "ai_gate"}},
+        target_environment="production")
+    assert any(f["id"] == "f-high" for f in other["blocking_findings"])
+    assert (other["policy_profile"], other["policy_profile_basis"]) == ("production", "target_environment")
+
+
 def test_profile_disallowing_active_exceptions_keeps_block():
     # A profile with allow_active_exceptions=False must ignore active exceptions.
     scan = {

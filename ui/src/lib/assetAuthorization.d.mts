@@ -10,3 +10,5 @@ export declare function assetAuthorizationStatus(asset: {
   origin_count?: number
   origins?: Array<{ is_active?: boolean; authorized?: boolean }>
 } | null | undefined): AssetAuthorizationStatus
+
+export declare function authorizedByPhrase(approvedBy: string | null | undefined): string

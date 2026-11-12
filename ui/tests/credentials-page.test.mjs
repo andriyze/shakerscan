@@ -94,7 +94,8 @@ test('credential target pickers search the server instead of loading every targe
   const dialog = fs.readFileSync(path.join(root, 'src/components/credentials/ShareCredentialDialog.tsx'), 'utf8')
   // 2.11: the page loaded the whole inventory (500 per request, every page) before rendering.
   assert.doesNotMatch(page, /getAllTargetAssets/)
-  assert.match(page, /useTargetSearch\(\{ includeServices: true \}\)/)
+  // Web and API credentials search web apps only; the other kinds search every target.
+  assert.match(page, /useTargetSearch\(\{ includeServices: true, webOnly: targetKind === 'web' \|\| targetKind === 'api' \}\)/)
   assert.match(page, /onQueryChange=\{targetSearch\.setQuery\}/)
   // A link by URL is resolved by a host search read page by page (bounded) for its origin
   // (behaviour: resolveTargetByOrigin in targetSearchModel.test.mjs); a link by id is read directly.

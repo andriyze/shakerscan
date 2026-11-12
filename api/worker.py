@@ -310,6 +310,8 @@ from scan.execution_backend import (
 from runtime import http_archive
 from scan import scoring as scan_scoring
 from scanner_tools import http_archive_capture as scanner_http_capture
+from scanner_tools.tool_wire_log import scanner_archive_origin, tunnel_with_wire_log
+from scan.rescan_verification import verify_fixed_after_scan
 from scanner_tools.browser_profile import seed_browser_profile
 from scanner_tools.process_memory import ProcessTreeMemoryCeiling, kill_process_tree
 from scan.finalizer import finalize_scan_report
@@ -13611,6 +13613,9 @@ async def process_scan_job(job_data: dict):
             except Exception as e:
                 saved_count = None
                 print(f"[{job_id[:8]}] save_findings error: {e}", flush=True)
+        if target_id and not error and saved_count is not None:
+            # Open passive findings this Scan re-checked and no longer saw (scan/rescan_verification.py).
+            await verify_fixed_after_scan(db_pool, scan_id=scan_id, target_id=target_id, report=result, label=job_id[:8])
         elif ai_target_id and findings:
             try:
                 saved_count = await save_ai_findings(scan_id, ai_target_id, findings)
@@ -18508,6 +18513,8 @@ async def _execute_agent_scanner_process(
     process_enforcement: dict[str, Any] = {}
     browser_profile_receipt: dict[str, Any] = {}
     wire_log_counter: dict[str, Any] | None = None
+    # The tool's own logged transactions, for the Scan archive (read with the counter).
+    wire_log_archive: tuple[list[dict[str, Any]], int] | None = None
     memory_ceiling: ProcessTreeMemoryCeiling | None = None
     name = str(job_data.get("tool_name") or "").strip().lower()
     execution_target = str(job_data.get("execution_target") or "")
@@ -18802,6 +18809,14 @@ async def _execute_agent_scanner_process(
                 wire_log_counter = agent_tools.scanner_file_request_counter(name, scratch_dir)
             except Exception:  # noqa: BLE001 - an unreadable log keeps the full hold
                 wire_log_counter = None
+            # Over HTTPS the tunnel cannot read the tool's requests; its own log is their only
+            # record (sqlmap's traffic file, Dalfox's HAR), archived with the tunnel.
+            try:
+                wire_log_archive = agent_tools.scanner_wire_log_transactions(
+                    name, scratch_dir, origin=scanner_archive_origin(execution_target),
+                )
+            except Exception:  # noqa: BLE001 - the archive never decides the run
+                wire_log_archive = None
             shutil.rmtree(scratch_dir, ignore_errors=True)
 
     typed_output = agent_tools.parse_scanner_output(
@@ -18900,8 +18915,10 @@ async def _execute_agent_scanner_process(
         "execution_uncertain": execution_uncertain,
         "network_binding": _agent_scanner_network_binding(name),
         # The tunnel's account for the Scan request archive (recorded by capabilities/scanner.py).
-        "tunnel": pinned_proxy.tunnel_record(scheme=urllib.parse.urlsplit(execution_target).scheme)
-        if process_started and hasattr(pinned_proxy, "tunnel_record") else None,
+        "tunnel": tunnel_with_wire_log(
+            pinned_proxy.tunnel_record(scheme=urllib.parse.urlsplit(execution_target).scheme),
+            wire_log_archive,
+        ) if process_started and hasattr(pinned_proxy, "tunnel_record") else None,
     }
 
 

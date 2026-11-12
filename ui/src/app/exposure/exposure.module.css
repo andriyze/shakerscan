@@ -1,36 +1,6 @@
 /* Tactical-console theme for the Exposure Graph page.
    HUD chrome is teal; severity colors are owned by lib/constants. */
 
-.page {
-  --hud: rgba(94, 234, 212, 0.6);
-  --hud-dim: rgba(94, 234, 212, 0.16);
-  --hud-faint: rgba(94, 234, 212, 0.07);
-  --hud-text: #99f6e4;
-  --panel-top: rgba(13, 18, 28, 0.92);
-  --panel-bottom: rgba(8, 11, 19, 0.97);
-  --font-display: 'Avenir Next Condensed', 'Segoe UI Semibold', system-ui, sans-serif;
-  --font-mono: 'SFMono-Regular', 'Roboto Mono', 'Cascadia Code', ui-monospace, monospace;
-  font-family: var(--font-mono), ui-monospace, 'SFMono-Regular', monospace;
-  position: relative;
-}
-
-.pageGlow {
-  position: absolute;
-  inset: -1.5rem;
-  pointer-events: none;
-  background:
-    radial-gradient(60% 45% at 70% 0%, rgba(94, 234, 212, 0.05), transparent 70%),
-    radial-gradient(45% 35% at 10% 100%, rgba(59, 130, 246, 0.04), transparent 70%);
-  z-index: 0;
-}
-
-.content {
-  position: relative;
-  z-index: 1;
-}
-
-/* ---- type ---- */
-
 .displayTitle {
   font-family: var(--font-display), system-ui, sans-serif;
   text-transform: uppercase;
@@ -179,22 +149,6 @@
   }
 }
 
-/* ---- inputs ---- */
-
-.input {
-  background: rgba(8, 11, 19, 0.85);
-  border: 1px solid var(--hud-dim);
-  border-radius: 2px;
-  transition: border-color 150ms ease, box-shadow 150ms ease;
-}
-
-.input:focus-within,
-.input:focus {
-  border-color: var(--hud);
-  box-shadow: 0 0 0 1px var(--hud-faint), 0 0 16px rgba(94, 234, 212, 0.12);
-  outline: none;
-}
-
 /* ---- rank index for priority targets ---- */
 
 .rank {
@@ -205,36 +159,9 @@
   opacity: 0.6;
 }
 
-/* ---- staggered load reveal ---- */
-
-.rise {
-  opacity: 0;
-  animation: riseIn 540ms cubic-bezier(0.22, 0.9, 0.3, 1) forwards;
-}
-
-.d1 { animation-delay: 40ms; }
-.d2 { animation-delay: 110ms; }
-.d3 { animation-delay: 180ms; }
-.d4 { animation-delay: 250ms; }
-.d5 { animation-delay: 330ms; }
-
-@keyframes riseIn {
-  from {
-    opacity: 0;
-    transform: translateY(10px);
-  }
-  to {
-    opacity: 1;
-    transform: translateY(0);
-  }
-}
-
 @media (prefers-reduced-motion: reduce) {
   .sweep,
   .liveDot {
     animation: none;
-  }
-  .rise {
-    animation-duration: 1ms;
   }
 }

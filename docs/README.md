@@ -16,6 +16,7 @@ belong in Git history or immutable release notes rather than the active document
 - [Hunt architecture](hunt-architecture.md) — adaptive investigation model.
 - [DAST and ASM architecture](dast-asm-architecture.md) — deterministic Scan and attack-surface model.
 - [Session capabilities](session-capabilities.md) — what the UI asks to hide controls a person cannot use; a gateway answers it by role.
+- [UI extensions](ui-extensions.md) — how a managed deployment places its own pages, panels and account block inside the UI.
 - [Service intelligence](service-intelligence.md) — service observations and investigation handoff.
 - [Target liveness](target-liveness.md) — DNS, reachability and live state per target: checks, limits and display.
 - [Multi-node architecture](multi-node-architecture.md) — distributed execution design.

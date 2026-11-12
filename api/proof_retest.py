@@ -18,6 +18,18 @@ body, a path segment, a templated route (``/products/{int}``), a masked value th
 a payload placed in a fragment or on another page -- cannot be sent the way the proof sent it, so
 the finding is checked again by a new Scan (``retest_by_rescan_only``) and the gap says why.
 
+Two passive checks are retested the same way, by the check that found them over the request it
+sent, which changes nothing on the target:
+
+* a sensitive-exposure finding (``shakerscan_exposure_probe``) records the URL it read; the retest
+  reads it again with a plain GET and classifies the answer with the probe's own classifier
+  (``classify_exposure``). A body proved by its binary header (an archive, ``.DS_Store``) is not
+  retested: the retest's client reads bodies as text. GraphQL reads keep their own check and are
+  checked again by a new Scan;
+* a missing-header finding (``http_baseline`` ``missing_header_*``, or the passive template
+  ``http-missing-security-headers``) records the response that lacked the header; the retest sends
+  that GET again and reads the header.
+
 A queued retest is sent exactly as it was admitted: the worker rebuilds the request from the
 finding on the site of the URL the API admitted, and sends nothing when the rebuilt request is not
 that URL (the finding changed after the retest was queued).
@@ -47,6 +59,19 @@ PROOF_RETEST_TOOLS: dict[str, str] = {
     "request_xss_differential": "xss.request_verify_batch",
 }
 _ROUTELESS_TOOLS = frozenset({"request_sqli_differential", "request_xss_differential"})
+
+# The passive checks retested by their own check over the request they sent (see the module doc),
+# and the retest type each is queued as.
+EXPOSURE_RETEST_CHECK = "exposure.probe"
+HEADER_RETEST_CHECK = "http.header_check"
+PASSIVE_RETEST_CHECK_TYPES: dict[str, str] = {
+    EXPOSURE_RETEST_CHECK: "exposed_file",
+    HEADER_RETEST_CHECK: "missing_header",
+}
+_HEADER_TEMPLATE = "http-missing-security-headers"
+_HEADER_NAME = re.compile(r"[a-z0-9][a-z0-9-]{0,63}\Z")
+# Signatures read from a body's leading bytes; the retest's client returns bodies as text.
+_BINARY_SIGNATURES = frozenset({"ds_store_bud1_header", "backup_archive_magic"})
 
 # The value ``execution_url_for_endpoint`` gives the tested query parameter of a crawled endpoint.
 SYNTHETIC_QUERY_VALUE = "1"
@@ -98,6 +123,10 @@ PROOF_RETEST_GAPS: dict[str, str] = {
         "The finding does not keep the payload the browser proof ran, so a retest cannot send the "
         "same input." + _AGAIN
     ),
+    "binary_body": (
+        "The exposure was proved by the file's binary header (an archive or directory metadata "
+        "file), and a retest reads answers as text, so it cannot apply the same check." + _AGAIN
+    ),
     # Only a queued retest (the worker's view) can meet this one.
     "not_admitted": (
         "The finding changed after this retest was queued: the request rebuilt from it is not the "
@@ -120,6 +149,9 @@ class ProofRetestRequest:
     route: str = ""
     request_class: str = "safe_read"
     candidate_id: str = ""
+    # A passive check's expectation: the exposure class the probe proved, or the header that
+    # was missing.
+    expected: str = ""
 
 
 def _json_object(value: Any) -> dict[str, Any]:
@@ -245,6 +277,87 @@ def _browser_request(
     ), None
 
 
+def _exposure_request(
+    record: Mapping[str, Any], evidence: Mapping[str, Any],
+) -> tuple[ProofRetestRequest | None, str | None]:
+    exposure_class = str(evidence.get("exposure_class") or "").strip()
+    discovered = str(evidence.get("discovered_via") or "")
+    if not exposure_class or "graphql" in exposure_class or "graphql" in discovered:
+        # A GraphQL read sends its own document and headers and has its own check.
+        return None, None
+    if str(evidence.get("matched_signature") or "") in _BINARY_SIGNATURES:
+        return None, "binary_body"
+    url = str(evidence.get("request_url") or record.get("url") or record.get("finding_url") or "").strip()
+    if _origin(url) is None:
+        return None, "no_origin"
+    if urllib.parse.urlsplit(url).fragment:
+        return None, "request_shape"
+    return ProofRetestRequest(
+        EXPOSURE_RETEST_CHECK, url, "GET", "", route=urllib.parse.urlsplit(url).path,
+        expected=exposure_class,
+    ), None
+
+
+def _header_request(
+    record: Mapping[str, Any], evidence: Mapping[str, Any], header: str,
+) -> tuple[ProofRetestRequest | None, str | None]:
+    header = header.strip().lower()
+    if not _HEADER_NAME.fullmatch(header):
+        return None, "no_parameter"
+    stored = str(record.get("url") or record.get("finding_url") or evidence.get("url") or "").strip()
+    url = stored
+    observed = _json_object(evidence.get("observed_response"))
+    line = str(observed.get("request_line") or "").strip()
+    # The recorded response that lacked the header is the proof: its request is sent again.
+    if line:
+        method, _sep, recorded = line.partition(" ")
+        if method.upper() == "GET" and _origin(recorded) and _origin(recorded) == _origin(stored or recorded):
+            url = recorded.strip()
+    if _origin(url) is None:
+        return None, "no_origin"
+    if urllib.parse.urlsplit(url).fragment:
+        return None, "request_shape"
+    if any(_masked(value) for _name, value in urllib.parse.parse_qsl(
+            urllib.parse.urlsplit(url).query, keep_blank_values=True)):
+        return None, "masked_value"
+    return ProofRetestRequest(
+        HEADER_RETEST_CHECK, url, "GET", header, route=urllib.parse.urlsplit(url).path or "/",
+        expected=header,
+    ), None
+
+
+def _passive_request(
+    record: Mapping[str, Any],
+) -> tuple[ProofRetestRequest | None, str | None] | None:
+    """The request of a passive check the retest repeats, its gap, or None for any other finding."""
+    tool = str(record.get("tool") or "").strip().lower()
+    evidence = _json_object(record.get("evidence"))
+    if tool == "shakerscan_exposure_probe":
+        request, gap = _exposure_request(record, evidence)
+        return None if request is None and gap is None else (request, gap)
+    if tool == "http_baseline":
+        check = str(evidence.get("check") or "")
+        if check.startswith("missing_header_"):
+            return _header_request(record, evidence, str(evidence.get("header") or check[15:]))
+        return None
+    if tool == "nuclei" and evidence.get("template_id") == _HEADER_TEMPLATE and evidence.get("header_name"):
+        return _header_request(record, evidence, str(evidence.get("header_name")))
+    return None
+
+
+def passive_retest_type(record: Mapping[str, Any]) -> str | None:
+    """The retest type of a passive check this module can repeat (``PASSIVE_RETEST_CHECK_TYPES``),
+    or None. A finding whose request has a gap still names its type; the gap refuses it."""
+    passive = _passive_request(record)
+    if passive is None:
+        return None
+    request, _gap = passive
+    if request is not None:
+        return PASSIVE_RETEST_CHECK_TYPES[request.capability]
+    tool = str(record.get("tool") or "").strip().lower()
+    return "exposed_file" if tool == "shakerscan_exposure_probe" else "missing_header"
+
+
 def proof_retest_request(record: Mapping[str, Any]) -> tuple[ProofRetestRequest | None, str | None]:
     """``(request, None)`` when a proven finding's request can be sent again exactly, ``(None,
     gap)`` when it cannot (``PROOF_RETEST_GAPS``), and ``(None, None)`` for any other finding.
@@ -254,13 +367,16 @@ def proof_retest_request(record: Mapping[str, Any]) -> tuple[ProofRetestRequest 
     whose rebuilt request is not the URL it was admitted for gets ``not_admitted``.
     """
     tool = proof_retest_tool(record)
-    if tool is None:
+    passive = _passive_request(record) if tool is None else None
+    if passive is not None:
+        request, gap = passive
+    elif tool is None:
         return None, None
-    evidence = _json_object(record.get("evidence"))
-    if tool == "shakerscan_browser_proof":
+    elif tool == "shakerscan_browser_proof":
+        evidence = _json_object(record.get("evidence"))
         request, gap = _browser_request(record, evidence)
     else:
-        request, gap = _differential_request(tool, record, evidence)
+        request, gap = _differential_request(tool, record, _json_object(record.get("evidence")))
     admitted = str(record.get("original_url") or "").strip()
     if request is not None and _origin(admitted) and request.url != admitted:
         return None, "not_admitted"

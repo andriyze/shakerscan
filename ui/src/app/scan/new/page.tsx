@@ -20,14 +20,17 @@ import {
   type ScanBudgetProfile,
   type ScanPublicContract,
   type ScanContractPreview,
+  type TargetAuthorization,
 } from '@/lib/api'
+import { checkFamilyLabel } from '@/lib/checkFamilyLabel'
 import { listCredentialProfiles, type CredentialProfile } from '@/lib/credentialApi'
 import { preferredCredentialId } from '@/lib/credentialDefaults'
 import { Button, Card, Combobox, Field, useToast, type ComboboxOption } from '@/components/ui'
 import { useTargetSearch } from '@/lib/useTargetSearch'
 import { getTargetAssets, type TargetAsset } from '@/lib/targetAssetApi'
 import { credentialScanCoverageNote } from '@/lib/credentialScanCoverage.mjs'
-import { DOMAIN_LOOKUP_MAX_PAGES, DOMAIN_LOOKUP_PAGE, INVENTORY_MEMBER_LIMIT, SCAN_BATCH_MAX, batchCapNotice, capBatchTargets, findDomainGroup } from '@/lib/targetInventoryModel.mjs'
+import { authorizedByPhrase } from '@/lib/assetAuthorization.mjs'
+import { DOMAIN_LOOKUP_MAX_PAGES, DOMAIN_LOOKUP_PAGE, INVENTORY_MEMBER_LIMIT, SCAN_BATCH_MAX, batchCapNotice, capBatchTargets, findDomainGroup, singleScanPrefill } from '@/lib/targetInventoryModel.mjs'
 import { credentialDescription, credentialOptions } from '@/lib/pickerOptions'
 import {
   RequestCollectionPicker,
@@ -80,6 +83,7 @@ export default function NewScanPage() {
   const [batchTargets, setBatchTargets] = useState('')
   // Why the batch holds fewer targets than were asked for, or that a domain is still being read.
   const [batchNotice, setBatchNotice] = useState<string | null>(null)
+  const [otherAddresses, setOtherAddresses] = useState<string[]>([])
   const [batchResolving, setBatchResolving] = useState(false)
   const [targetKind, setTargetKind] = useState<'web' | 'api'>('web')
   const [budgetProfile, setBudgetProfile] = useState<ScanBudgetProfile>('balanced')
@@ -170,6 +174,11 @@ export default function NewScanPage() {
       setBatchMode(true)
       setBatchTargets(capped.targets.join('\n'))
       setBatchNotice(batchCapNotice(capped.total, 'This selection'))
+    } else if (requestedTargets.length > 0) {
+      // No batch submission here: a target with several web addresses still opens prefilled.
+      const prefill = singleScanPrefill(requestedTargets)
+      setTarget(prefill.target)
+      setOtherAddresses(prefill.others)
     } else if (requestedTarget) {
       setTarget(requestedTarget)
     }
@@ -212,6 +221,25 @@ export default function NewScanPage() {
   )
   const selectedCredentialIds = [primaryCredentialId, secondaryCredentialId].filter(Boolean)
   const credentialUse = selectedCredentialIds.length > 0
+  // A registered target with a valid standing authorization (Targets, Authorize testing) needs no
+  // second confirmation for active testing: submission reuses that authorization. Credential use
+  // keeps the confirmation, as it records its own credential-tier receipt.
+  const [standingAuthorization, setStandingAuthorization] = useState<TargetAuthorization | null>(null)
+  useEffect(() => {
+    let cancelled = false
+    setStandingAuthorization(null)
+    if (batchMode || !selectedRegisteredTarget) return () => { cancelled = true }
+    getTargetAuthorization(selectedRegisteredTarget.id)
+      .then((authorization) => {
+        if (cancelled || !authorization?.standing) return
+        const expired = authorization.expires_at ? Date.parse(authorization.expires_at) <= Date.now() : false
+        if (!expired) setStandingAuthorization(authorization)
+      })
+      .catch(() => {})
+    return () => { cancelled = true }
+  }, [batchMode, selectedRegisteredTarget?.id])
+  const standingCoversScan = Boolean(standingAuthorization) && !credentialUse && !batchMode
+  const confirmationNeeded = (activeTesting || credentialUse) && !standingCoversScan
   const selectedPrimaryProfile = credentialProfiles.find((profile) => profile.id === primaryCredentialId)
   const selectedSecondaryProfile = credentialProfiles.find((profile) => profile.id === secondaryCredentialId)
   const approvalRequired = activeTesting || networkDiscovery || credentialUse || allowStateChanging
@@ -242,8 +270,12 @@ export default function NewScanPage() {
         ? ['recon', 'nuclei_passive', 'xss', 'sqli', 'sensitive_exposure']
         : ['recon', 'nuclei_passive', 'sensitive_exposure']
     )
-    const chosen = new Set([...base, ...additions])
-    const order = scanContract?.families?.map((family) => family.name) ?? [...base, ...additions]
+    // A signed-in Scan's preset also reads what its principal reaches (access control).
+    const signedIn = credentialUse ? (scanContract?.family_preset_signed_in_additions?.[preset] ?? (
+      preset === 'standard_active' ? ['authz_surface'] : []
+    )) : []
+    const chosen = new Set([...base, ...additions, ...signedIn])
+    const order = scanContract?.families?.map((family) => family.name) ?? [...base, ...additions, ...signedIn]
     return order.filter((name) => chosen.has(name))
   }
   const resolvedFamilies = contractPreview?.resolved_families ?? (
@@ -279,13 +311,14 @@ export default function NewScanPage() {
         network_discovery: networkDiscovery,
         subdomain_discovery: subdomainDiscovery,
         execution_topology: topology === 'parallel' ? 'parallel' : 'single_worker',
+        signed_in: credentialUse,
         ...(Object.keys(advanced).length ? { advanced } : {}),
       })
         .then((preview) => { if (!cancelled) { setContractPreview(preview); setContractPreviewError(null); setContractPreviewLoading(false) } })
         .catch((cause) => { if (!cancelled) { setContractPreview(null); setContractPreviewError(cause instanceof Error ? cause.message : 'Preview unavailable'); setContractPreviewLoading(false) } })
     }, 150)
     return () => { cancelled = true; window.clearTimeout(timer) }
-  }, [familyPreset, budgetProfile, customFamilies, activeTesting, allowStateChanging, networkDiscovery, subdomainDiscovery, topology, previewCeilingsKey])
+  }, [familyPreset, budgetProfile, customFamilies, activeTesting, allowStateChanging, networkDiscovery, subdomainDiscovery, credentialUse, topology, previewCeilingsKey])
 
   /** Searchable choices for one lane; incompatible profiles stay visible with the reason. */
   function slotOptions(lane: 'primary' | 'secondary'): ComboboxOption[] {
@@ -452,7 +485,7 @@ export default function NewScanPage() {
       setError(invalid)
       return
     }
-    if ((activeTesting || credentialUse) && !authorized) {
+    if (confirmationNeeded && !authorized) {
       setError('Confirm that you own or are authorized to test every target with the selected permissions and identities.')
       return
     }
@@ -664,16 +697,20 @@ export default function NewScanPage() {
             {batchResolving && <p className="mt-2 text-xs text-gray-400" role="status">Reading the domain&apos;s web apps…</p>}
             {batchNotice && <p className="mt-2 text-xs text-amber-200" role="status" data-testid="batch-notice">{batchNotice}</p>}
             {targets.length > SCAN_BATCH_MAX && <p className="mt-2 text-xs text-red-300" role="alert">{targets.length} targets listed; a batch scans at most {SCAN_BATCH_MAX}. Remove {targets.length - SCAN_BATCH_MAX} to continue.</p>}
-          </>) : (
+          </>) : (<>
             <Field label="Target URL or hostname" required>
               <input value={target} onChange={(event) => {
                 setTarget(event.target.value)
+                setOtherAddresses([])
                 setApprovalReceipt('')
                 setPrimaryCredentialId('')
                 setSecondaryCredentialId('')
               }} list="known-targets" placeholder="https://example.com" className="w-full rounded-lg border border-gray-700 bg-gray-950 px-3 py-2 text-sm text-white placeholder:text-gray-600" />
             </Field>
-          )}
+            {otherAddresses.length > 0 && <p className="mt-2 text-xs text-amber-200" role="status" data-testid="other-addresses-notice">
+              This target has {otherAddresses.length + 1} web addresses and a Scan here takes one. Not in this Scan: {otherAddresses.join(', ')}
+            </p>}
+          </>)}
           {!batchMode && (selectedPrimaryProfile || selectedSecondaryProfile) && (
             <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2 rounded-lg border border-blue-900/60 bg-blue-950/20 px-3 py-2 text-sm text-gray-300" data-testid="credential-defaults">
               <span>
@@ -740,7 +777,12 @@ export default function NewScanPage() {
               <span className="block text-xs text-gray-500">{batchMode ? 'Active testing is available for one target at a time.' : 'Permit bounded XSS, SQL injection, authorization, and other proof-oriented probes.'}</span>
             </span>
           </label>
-          {(activeTesting || credentialUse) && (
+          {activeTesting && standingCoversScan && (
+            <p data-testid="standing-authorization" className="rounded-lg border border-emerald-800/60 bg-emerald-950/20 p-4 text-sm text-emerald-100">
+              Authorized for active testing{authorizedByPhrase(standingAuthorization?.approved_by)}: this Scan uses the target&apos;s standing authorization. You can revoke it from the target menu.
+            </p>
+          )}
+          {confirmationNeeded && (
             <label className="flex items-start gap-3 rounded-lg border border-amber-800/70 bg-amber-950/20 p-4 text-sm text-amber-100">
               <input className="mt-1" type="checkbox" checked={authorized} onChange={(event) => setAuthorized(event.target.checked)} />
               <span>I own or have explicit authorization to test every submitted target with the selected permissions and identities.</span>
@@ -749,7 +791,7 @@ export default function NewScanPage() {
           <div className="grid gap-3 md:grid-cols-2">
             {featureEnabled('scan_discovery') && <label className="flex items-center gap-3 text-sm text-gray-300"><input type="checkbox" checked={subdomainDiscovery} onChange={(event) => setSubdomainDiscovery(event.target.checked)} /><span>Discover subdomains<span className="block text-xs text-gray-500">Found names are listed in the report and added as targets; this scan does not test them.</span></span></label>}
             {featureEnabled('network_testing') && <label className={`flex items-center gap-3 text-sm ${activeTesting ? 'text-gray-300' : 'text-gray-600'}`}><input type="checkbox" disabled={!activeTesting} checked={networkDiscovery} onChange={(event) => setNetworkDiscovery(event.target.checked)} /><span>Discover network services{!activeTesting && <span data-testid="network-discovery-needs-active" className="block text-xs text-gray-500">Needs active testing: turn it on above to use this.</span>}</span></label>}
-            <label className={`flex items-center gap-3 text-sm ${activeTesting ? 'text-gray-300' : 'text-gray-600'}`}><input type="checkbox" disabled={!activeTesting} checked={allowStateChanging} onChange={(event) => { setAllowStateChanging(event.target.checked); if (!event.target.checked) removeConfirmedActiveSelections() }} /><span>Allow explicitly selected state-changing HTTP requests <span className="text-gray-500">(includes default-login attempts, which can lock accounts, and exploit templates that send attack input)</span></span></label>
+            <label className={`flex items-center gap-3 text-sm ${activeTesting ? 'text-gray-300' : 'text-gray-600'}`}><input type="checkbox" disabled={!activeTesting} checked={allowStateChanging} onChange={(event) => { setAllowStateChanging(event.target.checked); if (!event.target.checked) removeConfirmedActiveSelections() }} /><span>Allow explicitly selected state-changing HTTP requests <span className="text-gray-500">(includes default-login attempts, which can lock accounts, and exploit templates that send attack input)</span>{allowStateChanging && !resolvedFamilies.includes('nuclei_active') && <span className="mt-1 block text-xs text-amber-300/90" data-testid="state-changing-templates-note">Default-login attempts and exploit templates are active templates, which this Scan does not run: choose Thorough or Deep, or Custom with the active templates.</span>}</span></label>
           </div>
           {scanContract && (
             <div className="rounded-lg border border-gray-800 bg-gray-950 p-4">
@@ -791,7 +833,7 @@ export default function NewScanPage() {
               <div className="mt-3 rounded-sm border border-gray-800 bg-black/20 p-3 text-xs text-gray-400">
                 <span className="font-medium text-gray-200">Checks this Scan runs:</span> {resolvedFamilies.length ? resolvedFamilies.map((name) => scanContract.families.find((family) => family.name === name)?.label || name).join(', ') : 'none'}
                 {contractPreview && Object.keys(contractPreview.minimum_family_quotas).length > 0 && (
-                  <span className="mt-1 block">Minimum attempts: {Object.entries(contractPreview.minimum_family_quotas).map(([family, quota]) => `${family} ${quota}`).join(' · ')}</span>
+                  <span className="mt-1 block" data-testid="scan-minimum-attempts">Minimum attempts: {Object.entries(contractPreview.minimum_family_quotas).map(([family, quota]) => `${checkFamilyLabel(family)} ${quota}`).join(' · ')}</span>
                 )}
                 {contractPreviewError && <span className="mt-1 block text-amber-300">{contractPreviewError}</span>}
               </div>
@@ -914,7 +956,7 @@ export default function NewScanPage() {
           {canStartScan ? <Button
             type="submit"
             loading={loading}
-            disabled={contractPreviewLoading || !contractPreview || ((activeTesting || credentialUse) && !authorized) || (activeTesting && !activeWorkerAvailable)}
+            disabled={contractPreviewLoading || !contractPreview || (confirmationNeeded && !authorized) || (activeTesting && !activeWorkerAvailable)}
           >
             Run Scan
           </Button> : <p className="text-sm text-gray-400" data-testid="scan-start-refused">{startScanRefusal || 'Starting scans is not part of your role.'}</p>}

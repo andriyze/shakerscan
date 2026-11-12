@@ -146,6 +146,36 @@ def public_retest_row(row: Any) -> dict[str, Any]:
     return result
 
 
+@router.get("/retests")
+async def list_retests(
+    verification_mode: str = Query("scan_rescan", pattern="^scan_rescan$"),
+    since: Optional[str] = Query(None, description="ISO-8601: completed at or after this moment"),
+    limit: int = Query(200, ge=1, le=1000),
+):
+    """Completed verifications a Scan recorded (``scan_rescan``: an open finding a later Scan
+    re-checked on its own URL and no longer saw), newest last, for a follower that closes findings
+    on a ``likely_fixed`` verification. Retests a person queued are read by finding or by id."""
+    from datetime import datetime
+
+    after = None
+    if since:
+        try:
+            after = datetime.fromisoformat(since.replace("Z", "+00:00"))
+        except ValueError:
+            raise HTTPException(status_code=400, detail="since must be an ISO-8601 moment")
+    async with _pool().acquire() as conn:
+        rows = await conn.fetch(
+            """SELECT fv.*, f.severity, f.target_id AS finding_target_id
+               FROM finding_verifications fv JOIN findings f ON f.id = fv.finding_id
+               WHERE fv.verification_mode = $1 AND fv.status = 'completed'
+                 AND ($2::timestamptz IS NULL OR fv.completed_at >= $2)
+               ORDER BY fv.completed_at, fv.id
+               LIMIT $3""",
+            verification_mode, after, limit,
+        )
+    return {"retests": [public_retest_row(row) for row in rows], "count": len(rows)}
+
+
 @router.get("/retests/finding/{finding_id:path}")
 async def list_finding_retests(finding_id: str, limit: int = Query(20, ge=1, le=200)):
     """List retest history for a finding."""

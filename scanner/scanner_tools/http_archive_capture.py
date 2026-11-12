@@ -146,6 +146,9 @@ def note_dropped(count: int) -> None:
 
 TUNNEL_FIDELITY = "pinned_tunnel"
 TUNNEL_REQUEST_FIDELITY = "tunnel_request_line"
+# A transaction an external tool recorded in its own wire log (sqlmap's traffic file, Dalfox's
+# HAR): method, URL, headers, bodies and status as the tool sent and received them.
+TOOL_WIRE_LOG_FIDELITY = "tool_wire_log"
 
 
 def _tunnel_origin(tunnel: Mapping[str, Any]) -> str:
@@ -160,6 +163,26 @@ def _tunnel_origin(tunnel: Mapping[str, Any]) -> str:
     return f"{scheme}://{host}:{port}"
 
 
+def _tool_input(value: Mapping[str, Any] | None) -> dict[str, Any] | None:
+    """What the engine asked the tool to test, value-free: the method, the URL with its query
+    values and userinfo withheld, and the names of the body fields the tool fills in."""
+    if not isinstance(value, Mapping) or not value.get("url"):
+        return None
+    try:
+        from .url_redaction import redact_url
+    except ImportError:  # flat import layout
+        from scanner_tools.url_redaction import redact_url
+    names = [
+        str(name)[:120] for name in list(value.get("body_field_names") or ())[:50]
+        if isinstance(name, str) and name
+    ]
+    return {
+        "method": str(value.get("method") or "GET").upper()[:16],
+        "url": redact_url(str(value["url"])),
+        **({"body_field_names": names} if names else {}),
+    }
+
+
 def record_tunnel(
     tunnel: Mapping[str, Any],
     *,
@@ -167,6 +190,7 @@ def record_tunnel(
     tool: str | None,
     elapsed_ms: int | None = None,
     error: str | None = None,
+    tool_input: Mapping[str, Any] | None = None,
 ) -> None:
     """Archive what an external tool sent through its pinned tunnel.
 
@@ -177,7 +201,9 @@ def record_tunnel(
     capabilities contacted is in the archive. A cleartext tunnel adds one row per request line
     it relayed (method, request target and Host header; no other headers, no bodies). An
     encrypted tunnel is ciphertext to the engine: its row proves where the traffic went and
-    says the content was not readable.
+    says the content was not readable. ``tool_input`` is the request the engine gave the tool
+    (``_tool_input``): with an encrypted tunnel it is the only record of what the tool tested,
+    such as a seeded form POST a verifier sent its payloads to.
     """
     if not capture_active() or not isinstance(tunnel, Mapping) or not tunnel.get("host"):
         return
@@ -202,6 +228,20 @@ def record_tunnel(
     }
     summary["tool"] = str(tool or "")
     summary["request_lines_archived"] = len(request_lines)
+    given = _tool_input(tool_input)
+    if given:
+        summary["tool_input"] = given
+    # The tool's own log of what it sent (``tool_wire_log``), to this tunnel's destination only.
+    logged = [
+        item for item in tunnel.get("wire_log_transactions") or ()
+        if isinstance(item, Mapping) and _same_origin(str(item.get("url") or ""), origin)
+    ]
+    if logged:
+        summary["wire_log_archived"] = len(logged)
+        # The log is the fuller record of the same requests: their request lines are not
+        # archived a second time (nor counted as lines it could not keep).
+        request_lines, dropped = [], 0
+        summary["request_lines_archived"] = 0
     record({
         "plane": "scan",
         "source": "pinned_tunnel",
@@ -251,7 +291,41 @@ def record_tunnel(
                 **({"request_target": target} if not target.startswith("/") else {}),
             },
         })
-    note_dropped(dropped)
+    for item in logged:
+        record({
+            "plane": "scan",
+            "source": "tool_wire_log",
+            "capability_name": capability_name,
+            "method": str(item.get("method") or "GET"),
+            "url": str(item["url"]),
+            "request_headers": dict(item.get("request_headers") or {}),
+            "request_body": item.get("request_body"),
+            "response_headers": dict(item.get("response_headers") or {}),
+            "response_body": item.get("response_body"),
+            "response_body_truncated": bool(item.get("response_body_truncated")),
+            "status_code": item.get("status_code"),
+            "remote_ip": connected[0] if len(connected) == 1 else None,
+            "fidelity": TOOL_WIRE_LOG_FIDELITY,
+            "tunnel_request": {
+                "tool": str(tool or ""), "source": "tool_wire_log",
+                **({"request_body": "not_logged_by_tool"} if item.get("request_body_not_logged") else {}),
+            },
+        })
+    note_dropped(dropped + max(0, int(tunnel.get("wire_log_dropped") or 0)))
+
+
+def _same_origin(url: str, origin: str) -> bool:
+    def key(value: str) -> tuple[str, str, int] | None:
+        try:
+            parts = urllib.parse.urlsplit(value)
+            port = parts.port or (443 if parts.scheme.lower() == "https" else 80)
+        except ValueError:
+            return None
+        if not parts.hostname:
+            return None
+        return parts.scheme.lower(), parts.hostname.lower().rstrip("."), port
+
+    return key(url) is not None and key(url) == key(origin)
 
 
 def parse_curl_command(cmd: Sequence[str]) -> dict[str, Any]:

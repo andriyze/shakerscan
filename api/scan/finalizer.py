@@ -20,7 +20,11 @@ from .capability_result import (
     CapabilityResultReference,
     CapabilityResultStatus,
 )
-from .contracts import SCAN_APPLICATION_SURFACE_FAMILIES, budget_sufficiency
+from .contracts import (
+    SCAN_APPLICATION_SURFACE_FAMILIES,
+    budget_sufficiency,
+    scan_family_capabilities,
+)
 from .finding_evidence import template_classification, tls_finding_evidence, tls_untrusted_by_leaf_weakness
 from .external_process import (
     ACTIVE_TEMPLATE_WINDOWS_RECORD_KIND,
@@ -271,6 +275,39 @@ _CRAWL_EXAMINED_STATUSES = frozenset({
 })
 
 
+def _discovery_family_row(
+    family: str, actions: Sequence[Any], action_results: Mapping[str, Any], *, reason: str | None,
+) -> dict[str, Any]:
+    """Coverage for the discovery family: whether the plan's discovery actions settled.
+
+    Discovery has no verifier and no candidates, so its counters are zero and it carries no
+    proof escalation. ``reason`` is why discovery fell short, by the rules the Scan's own
+    coverage uses; None means it settled.
+    """
+    reserved: dict[str, int] = {}
+    consumed: dict[str, int] = {}
+    for action in actions:
+        result = action_results[action.action_id]
+        for name, amount in result.budget_reserved.items():
+            reserved[name] = reserved.get(name, 0) + int(amount)
+        for name, amount in result.budget_consumed.items():
+            consumed[name] = consumed.get(name, 0) + int(amount)
+    return {
+        "family": family, "selected": True,
+        "required": any(action.required for action in actions),
+        "batch_actions": len(actions), "planned_candidates": 0, "attempted_candidates": 0,
+        "unattempted_candidates": 0, "manifest_candidates": 0, "unscheduled_candidates": 0,
+        "verified_findings": 0, "suspected_findings": 0,
+        "budget_reserved": reserved, "budget_consumed": consumed,
+        # How each discovery action ended; the actions themselves are in capability_coverage.
+        "action_statuses": dict(sorted(Counter(
+            action_results[action.action_id].status.value for action in actions
+        ).items())),
+        "coverage_status": "partial" if reason else "complete",
+        "reason": reason,
+    }
+
+
 def _unplanned_family_row(
     family: str, manifests: Sequence[Mapping[str, Any]], *, no_crawl_examined: bool = False,
 ) -> dict[str, Any]:
@@ -457,12 +494,14 @@ def _observed_url_key(value: Any) -> str | None:
     """Canonicalize one exact response URL for cross-capability comparison."""
     try:
         parsed = urllib.parse.urlsplit(str(value or ""))
+        # A port that is not a number (a masked or malformed URL in tool output) names no
+        # comparable response: it must not fail the Scan's whole finalization.
+        port = parsed.port
     except ValueError:
         return None
     if parsed.scheme.lower() not in {"http", "https"} or not parsed.hostname:
         return None
     host = parsed.hostname.lower().rstrip(".")
-    port = parsed.port
     authority = host if port is None else f"{host}:{port}"
     path = (parsed.path or "/").rstrip("/") or "/"
     return urllib.parse.urlunsplit((parsed.scheme.lower(), authority, path, parsed.query, ""))
@@ -954,6 +993,8 @@ def _findings_for_action(
     *,
     unobserved_response_urls: frozenset[str] = frozenset(),
     target_url: str = "",
+    scan_password_hashes: frozenset[str] = frozenset(),
+    scan_self_password_hashes: frozenset[str] = frozenset(),
 ) -> list[dict[str, Any]]:
     findings: list[dict[str, Any]] = []
     header_origin_findings: dict[tuple[str, str], dict[str, Any]] = {}
@@ -1518,6 +1559,80 @@ def _findings_for_action(
             findings.append(finding)
         elif (
             kind == "authz_surface_proof"
+            and result.capability_name == "authz_surface.verify_batch"
+            and item.get("proof_state") == "verified"
+            and item.get("finding_verdict") == "verified"
+            and item.get("proof_contract") == "authz_surface_password_hash_disclosure/v1"
+            and str(item.get("request_url") or "")
+            and int(item.get("repetitions") or 0) >= 2
+            and int(item.get("hash_count") or 0) >= 1
+        ):
+            # The signed-in principal read stored password hashes, the same on every read.
+            # Whose they are: a route that names the signed-in user (/me, /profile ...) holds the
+            # principal's own hash. A hash that is not it, or a response with several hashes, is
+            # another account's: cracked offline at the attacker's pace, high. The principal's own
+            # hash in its own record is excessive data exposure: medium. Without a self route,
+            # two distinct hashes read in one Scan prove another account's is among them, but not
+            # which route holds it: high, without the "other accounts" claim.
+            digests = {str(value) for value in item.get("hash_digests") or ()}
+            own_hashes = scan_self_password_hashes
+            if own_hashes:
+                other_accounts = bool(digests - own_hashes) or int(item.get("hash_count") or 0) >= 2
+                some_other = other_accounts
+            else:
+                other_accounts = int(item.get("hash_count") or 0) >= 2
+                some_other = other_accounts or len(scan_password_hashes) >= 2
+            anonymous = item.get("anonymous_reads_hashes") is True
+            finding = _base_finding(
+                tool="shakerscan_authz_surface",
+                title=(
+                    "API returns other accounts' password hashes" if other_accounts
+                    else "API returns password hashes"
+                ),
+                severity="high" if some_other or anonymous else "medium",
+                cwe="CWE-639" if other_accounts else "CWE-200",
+                url=item.get("request_url"),
+                evidence={
+                    "route_id": item.get("route_id"),
+                    "request_url": item.get("request_url"),
+                    "technique": item.get("technique"),
+                    "proof_contract": item.get("proof_contract"),
+                    "anonymous_status": item.get("anonymous_status"),
+                    "authenticated_status": item.get("authenticated_status"),
+                    "response_body_sha256": item.get("response_body_sha256"),
+                    "hash_count": item.get("hash_count"),
+                    "distinct_hashes_read_in_scan": len(scan_password_hashes),
+                    "signed_in_users_own_record": bool(own_hashes) and not other_accounts,
+                    "hash_fields": [
+                        {"field": str(entry.get("field") or "")[:120]}
+                        for entry in list(item.get("hash_fields") or ())[:10]
+                        if isinstance(entry, Mapping)
+                    ],
+                    "other_accounts_hashes": other_accounts,
+                    "anonymous_reads_hashes": anonymous,
+                    "repetitions": item.get("repetitions"),
+                    "canonical_capability": result.capability_name,
+                    "capability_receipt": receipt,
+                    "proof_producer": "shakerscan",
+                    "evidence_type": "deterministic_response_signature",
+                },
+            )
+            finding.update({
+                "verified": True,
+                "suspected": False,
+                "needs_verification": False,
+                "proof_state": "verified",
+                "proof_contract_v2": _canonical_proof_contract_v2(
+                    capability_name=result.capability_name, kind=str(kind), receipt=receipt,
+                ),
+                "verification_reason": (
+                    "The signed-in response carried the same stored password hash fields on "
+                    "repeated reads"
+                ),
+            })
+            findings.append(finding)
+        elif (
+            kind == "authz_surface_proof"
             and item.get("proof_state") == "verified"
             and item.get("finding_verdict") == "verified"
             and str(item.get("proof_contract") or "").startswith("authz_surface_")
@@ -1535,7 +1650,9 @@ def _findings_for_action(
             finding = _base_finding(
                 tool="shakerscan_authz_surface",
                 title="Endpoint serves identical data to anonymous and authenticated principals",
-                severity="medium",
+                # Informational: on a public file or a health route this is intended, and nothing
+                # here tells the two apart; it rated medium beside the real findings.
+                severity="info",
                 cwe="CWE-862",
                 url=item.get("request_url"),
                 evidence={
@@ -1889,6 +2006,102 @@ def _fold_duplicate_header_findings(findings: list[dict[str, Any]]) -> list[dict
         twin_evidence["matched_url_count"] = int(evidence.get("matched_url_count") or 0)
         twin_evidence["matched_urls"] = list(evidence.get("matched_urls") or ())[:5]
         twin_evidence["also_reported_by"] = "nuclei:http-missing-security-headers"
+    return kept
+
+
+# A route that answers for the signed-in user rather than an object id: /me, /api/v1/profile.
+_SELF_ROUTE_RE = re.compile(
+    r"/(?:me|self|whoami|profile|account|current[-_]?user|userinfo)/?$", re.IGNORECASE,
+)
+
+
+def _route_key(origin: Any, url: Any) -> tuple[str, str]:
+    """(origin, path without a trailing slash) of a finding's route; the origin may be ''."""
+    text = str(url or "")
+    origin_text = _http_origin(origin) or _http_origin(text) or ""
+    try:
+        path = urllib.parse.urlsplit(text).path or "/"
+    except ValueError:
+        return origin_text, ""
+    return origin_text, path.rstrip("/") or "/"
+
+
+def _fold_sqli_candidates_into_proofs(findings: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """One finding per proven SQL injection: a candidate for the same input joins its proof.
+
+    sqlmap's "Potential SQL injection" on a parameter, or the request verifier's candidate, and
+    the deterministic proof on the same route, method and input are one issue: the Scan reported
+    it twice, once verified and once still to verify (Juice Shop's product search). The
+    candidate is kept on the proof as corroborating evidence (tool, input, database named); a
+    candidate on another input, method or route stays a finding of its own.
+    """
+    proofs: dict[tuple[str, str, str, str], dict[str, Any]] = {}
+    by_candidate: dict[str, dict[str, Any]] = {}
+    for finding in findings:
+        if finding.get("tool") != "shakerscan_sqli_proof" or finding.get("proof_state") != "verified":
+            continue
+        evidence = finding.get("evidence") if isinstance(finding.get("evidence"), Mapping) else {}
+        origin, path = _route_key(evidence.get("origin"), finding.get("url"))
+        field = str(evidence.get("field_path") or "")
+        method = str(evidence.get("method") or "GET").upper()
+        if path and field:
+            proofs.setdefault((origin, path, method, field), finding)
+            proofs.setdefault(("", path, method, field), finding)
+        if evidence.get("candidate_id"):
+            by_candidate.setdefault(str(evidence["candidate_id"]), finding)
+    if not proofs and not by_candidate:
+        return findings
+    kept: list[dict[str, Any]] = []
+    for finding in findings:
+        evidence = finding.get("evidence") if isinstance(finding.get("evidence"), Mapping) else {}
+        target = None
+        if finding.get("proof_state") != "verified" and finding.get("cwe") == "CWE-89":
+            if finding.get("tool") == "sqlmap":
+                origin, path = _route_key(None, finding.get("url"))
+                key = (path, str(evidence.get("method") or "GET").upper(), str(evidence.get("param") or ""))
+                target = proofs.get((origin, *key)) or proofs.get(("", *key))
+            elif finding.get("tool") == "request_sqli_differential" and evidence.get("candidate_id"):
+                target = by_candidate.get(str(evidence["candidate_id"]))
+        if target is None:
+            kept.append(finding)
+            continue
+        target["evidence"].setdefault("corroborating_candidates", []).append({
+            "tool": finding.get("tool"),
+            "title": finding.get("title"),
+            "input": evidence.get("param") or evidence.get("field_path"),
+            **({"dbms": evidence["dbms"]} if evidence.get("dbms") else {}),
+        })
+    return kept
+
+
+def _fold_directory_listing_slash_twins(findings: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """One directory-listing finding per directory: ``/ftp`` and ``/ftp/`` are one directory.
+
+    A listing seeded without the slash links its own slash form, and the probe followed it, so the
+    Scan reported the same directory twice (Juice Shop ``/ftp`` and ``/ftp/``, ``/.well-known``
+    and ``/.well-known/``). The first is kept and names the other URL; listings
+    of different directories (``/ftp/quarantine``) stay findings of their own.
+    """
+    first: dict[str, dict[str, Any]] = {}
+    kept: list[dict[str, Any]] = []
+    for finding in findings:
+        evidence = finding.get("evidence") if isinstance(finding.get("evidence"), Mapping) else {}
+        location = (
+            _exposure_location(finding.get("url"))
+            if finding.get("tool") == "shakerscan_exposure_probe"
+            and evidence.get("exposure_class") == "directory_listing"
+            and not urllib.parse.urlsplit(str(finding.get("url") or "")).query
+            else None
+        )
+        if location is None:
+            kept.append(finding)
+            continue
+        twin = first.get(location)
+        if twin is None:
+            first[location] = finding
+            kept.append(finding)
+            continue
+        twin["evidence"].setdefault("also_listed_at", []).append(finding.get("url"))
     return kept
 
 
@@ -2794,6 +3007,65 @@ def _family_action_reason(action: Any, result: Any) -> str:
     return reason
 
 
+# Answers that say the service, not the application, decided what a check saw.
+_COVERAGE_UNAVAILABLE = frozenset({408, 429, 502, 503, 504})
+
+
+def scan_check_coverage(
+    observations: Mapping[str, Sequence[Mapping[str, Any]]],
+    capability_by_action: Mapping[str, str],
+) -> dict[str, Any]:
+    """What this Scan's passive checks examined, URL by URL, and what they saw (value-free).
+
+    A later Scan that examined the same URL with the same check and did not see a finding again
+    is evidence the finding was fixed (``rescan_verification``). Only answers the check could
+    judge are kept: a read with no answer, or an answer a service gave (408, 429, 502-504), is
+    no evidence of anything. ``exposure``: each URL the exposure probe read, its status and the
+    class it matched (None for no match). ``baseline_headers``: each origin's recorded baseline
+    response, the request line, status, principal and the posture headers it carried.
+    """
+    exposure: dict[str, dict[str, Any]] = {}
+    for action_id, rows in observations.items():
+        if capability_by_action.get(action_id) != "exposure.verify_batch":
+            continue
+        for item in rows or ():
+            examined = item.get("examined") if isinstance(item, Mapping) else None
+            if (
+                not isinstance(examined, Mapping) or item.get("kind") != "candidate_attempt"
+                or item.get("family") != "sensitive_exposure"
+            ):
+                continue
+            url, status = str(examined.get("request_url") or ""), examined.get("response_status")
+            if (
+                not url or type(status) is not int or not 100 <= status <= 599
+                or status in _COVERAGE_UNAVAILABLE or examined.get("indistinguishable_from_absent")
+            ):
+                continue
+            exposure[url] = {
+                "url": url[:2_000], "response_status": status,
+                "exposure_class": (
+                    str(examined["exposure_class"])[:80] if examined.get("exposure_class") else None
+                ),
+            }
+    headers = [
+        {
+            "request_line": response["request_line"], "response_status": response["response_status"],
+            "principal": response.get("principal") or "anonymous",
+            "present_headers": sorted(
+                name for name, value in dict(response.get("observed_headers") or {}).items()
+                if str(value or "").strip()
+            ),
+        }
+        for response in _baseline_header_responses(observations).values()
+        if response["response_status"] not in _COVERAGE_UNAVAILABLE
+    ]
+    return {
+        "schema_version": "scan-check-coverage/v1",
+        "exposure": [exposure[url] for url in sorted(exposure)][:5_000],
+        "baseline_headers": sorted(headers, key=lambda row: row["request_line"]),
+    }
+
+
 def finalize_scan_report(
     *,
     plan: ScanActionPlan,
@@ -2866,6 +3138,25 @@ def finalize_scan_report(
             key = _observed_url_key(request.get("origin") or response.get("final_url"))
             if key:
                 unobserved_response_urls.add(key)
+    # Every stored password hash (keyed digest) the signed-in principal read in this Scan.
+    disclosures = [
+        item
+        for action in expected_actions
+        if action_results[action.action_id].capability_name == "authz_surface.verify_batch"
+        for item in observations.get(action.action_id, ())
+        if isinstance(item, Mapping)
+        and item.get("proof_contract") == "authz_surface_password_hash_disclosure/v1"
+    ]
+    scan_password_hashes = frozenset(
+        str(digest) for item in disclosures for digest in list(item.get("hash_digests") or ())[:50]
+    )
+    # The signed-in user's own hash: the one a route naming the signed-in user returned.
+    scan_self_password_hashes = frozenset(
+        str(digest) for item in disclosures
+        if _SELF_ROUTE_RE.search(urllib.parse.urlsplit(str(item.get("request_url") or "")).path)
+        and int(item.get("hash_count") or 0) == 1
+        for digest in list(item.get("hash_digests") or ())[:1]
+    )
     for action in expected_actions:
         result = action_results[action.action_id]
         if result.action_digest != action.action_digest:
@@ -2883,6 +3174,8 @@ def finalize_scan_report(
             rows,
             unobserved_response_urls=frozenset(unobserved_response_urls),
             target_url=target_url,
+            scan_password_hashes=scan_password_hashes,
+            scan_self_password_hashes=scan_self_password_hashes,
         ):
             identity = _finding_identity(finding)
             existing = findings_by_id.get(identity)
@@ -2924,9 +3217,11 @@ def finalize_scan_report(
             "budget_reserved": dict(result.budget_reserved),
             "budget_consumed": dict(result.budget_consumed),
         })
-    findings = _fold_duplicate_header_findings(
-        _merge_template_candidates_into_exposure_proofs(list(findings_by_id.values())),
-    )
+    findings = _fold_directory_listing_slash_twins(_fold_sqli_candidates_into_proofs(
+        _fold_duplicate_header_findings(
+            _merge_template_candidates_into_exposure_proofs(list(findings_by_id.values())),
+        ),
+    ))
     _attach_observed_header_responses(
         findings, observations,
         {
@@ -3068,7 +3363,7 @@ def finalize_scan_report(
             # manifest holds more entries than its slices cover has work that was never attempted,
             # and comparing attempts with slices alone reports that as complete coverage.
             "_manifest_entries": {}, "_scheduled_entries": {}, "_slow_endpoints": [],
-            "_refused_candidates": [], "_sign_in_limited": [],
+            "_refused_candidates": [], "_sign_in_limited": [], "_continued": [],
             "_proofs_attempted": set(), "_proofs_pace_unfunded": {}, "_proofs_resolved": {},
             "proof_escalation": {
                 "actions": 0, "attempted_candidates": 0,
@@ -3080,6 +3375,11 @@ def finalize_scan_report(
             # Its extension re-plans the same slice and is counted instead. A proof's attempts
             # that reached no verdict still need one: they stay unresolved unless the extension
             # (or a retry) settles the same attempt, which it does only for those it re-runs.
+            if result.status is not CapabilityResultStatus.SUCCESS:
+                row["_continued"].append((
+                    result.reason_code.value if result.reason_code is not None else None,
+                    superseded[action.action_id].status is CapabilityResultStatus.SUCCESS,
+                ))
             if action.capability_name in _PROOF_CAPABILITIES:
                 _merge_proof_resolution(row, observations.get(action.action_id, ()))
         elif action.capability_name in _PROOF_CAPABILITIES:
@@ -3263,6 +3563,17 @@ def finalize_scan_report(
         if slow_endpoints:
             row["slow_endpoints"] = slow_endpoints
             row["slow_endpoint_count"] = len(slow_endpoints)
+        continued = row.pop("_continued")
+        if continued:
+            # Slices that did not finish (a spent request allowance, a timeout) and were carried
+            # into a later action. The continuation's outcome decides the family's status; this
+            # states that it happened, why, and how many the continuation finished, so a family
+            # that reads complete beside actions that ran out of budget explains itself.
+            row["continued_actions"] = {
+                "count": len(continued),
+                "finished": sum(1 for _reason, finished in continued if finished),
+                "reasons": sorted({reason for reason, _finished in continued if reason}),
+            }
         proof = row["proof_escalation"]
         proof_statuses = proof.pop("_statuses")
         proof_reasons = proof.pop("_reasons")
@@ -3432,7 +3743,8 @@ def finalize_scan_report(
                 row["no_candidates_reasons"] = empty_reasons
     # Every selected check family is reported, including one the plan gave no action: an
     # absent family read as nothing to report, and the Scan as complete. `recon` is
-    # discovery, not a check family with a verifier, so it has no row.
+    # discovery, not a check family with a verifier: its row is built below from the
+    # discovery actions.
     unplanned_families = sorted(
         {str(item).strip() for item in resolved_families or ()}
         & set(_FAMILY_BY_CAPABILITY.values())
@@ -3622,6 +3934,36 @@ def finalize_scan_report(
         and action_results[action.action_id].reason_code is not None
         and action_results[action.action_id].reason_code.value in _DISCOVERY_TRUNCATION_REASONS
     )
+    # Discovery is a selected family too. Its row says whether the discovery actions this plan
+    # ran settled, by the rules above: a required one that fell short, optional ones that
+    # failed with nothing else producing the surface, or ones cut short. The reasons above
+    # already carry the effect on the Scan's coverage and grade, so the row is not a selected
+    # family gap as well. A plan with no discovery action (an endpoint shard) and a caller
+    # without the execution plan add no row.
+    for family in sorted(
+        scoring.DISCOVERY_FAMILIES & {str(item).strip() for item in resolved_families or ()}
+    ):
+        capabilities = set(scan_family_capabilities(family))
+        discovery_actions = [
+            action for action in coverage_actions if action.capability_name in capabilities
+        ]
+        if not discovery_actions:
+            continue
+        required_short = sorted(
+            result.reason_code.value if result.reason_code is not None
+            else "required_capability_incomplete"
+            for action, result in required_incomplete
+            if action.capability_name in capabilities
+        )
+        family_coverage[family] = _discovery_family_row(
+            family, discovery_actions, action_results,
+            reason=(
+                required_short[0] if required_short
+                else "discovery_failed" if discovery_gap
+                else "discovery_truncated" if truncated_discovery
+                else None
+            ),
+        )
     # A Scan whose execution plan resolved no check family examined nothing a grade is about:
     # only the baseline probes ran (soak 89770439, graded A 100 "complete"). Admission refuses
     # such a policy; a plan stored before that refusal must still not read as clean and complete.
@@ -3697,6 +4039,12 @@ def finalize_scan_report(
         for action in coverage_actions
         if not action.required
         and action_results[action.action_id].status is not CapabilityResultStatus.SUCCESS
+        # A slice its continuation finished left no gap; its own outcome stays on its action
+        # row below, with the action that continued it.
+        and not (
+            action.action_id in superseded
+            and superseded[action.action_id].status is CapabilityResultStatus.SUCCESS
+        )
     ]
     capability_coverage = {
         "total": len(coverage_actions),
@@ -3716,6 +4064,11 @@ def finalize_scan_report(
             "required": row["required"],
             "status": row["status"],
             "reason_code": row["reason_code"],
+            # The newest action that continued this one, and how that one ended.
+            **({
+                "continued_by": superseded[row["action_id"]].action_id,
+                "continued_status": superseded[row["action_id"]].status.value,
+            } if row["action_id"] in superseded else {}),
         } for row in coverage_action_rows],
     }
     principal_contexts = sorted({
@@ -3890,6 +4243,10 @@ def finalize_scan_report(
         # level deeper is documented as `result.tls` and served as `result.result.tls`.
         **posture_sections,
         "coverage": coverage_block,
+        # What the passive checks examined (rescan verification of findings not seen again).
+        "check_coverage": scan_check_coverage(
+            observations, {action.action_id: action.capability_name for action in plan.actions},
+        ),
         "verification_summary": {
             "verified": verified,
             "suspected": suspected,

@@ -2,6 +2,7 @@
 import {
   ALL_ALLOWED, actionAllowed, pageAllowed, type SessionAction, type SessionCapabilities,
 } from './sessionCapabilities.mjs'
+import { NO_EXTENSIONS, parseUiExtensions, type UiExtensions } from './uiExtensions.mjs'
 
 export type WorkspaceCapabilities = {
   schema: 'shakerscan.workspace-capabilities/v1'
@@ -13,6 +14,9 @@ export type WorkspaceCapabilities = {
   // Label shown under the product name instead of "Open Source Edition" (e.g. an Enterprise
   // gateway names its edition here). Presentation only.
   edition?: string
+  // What the deployment adds to this UI (ui-extensions/v1, docs/ui-extensions.md): sidebar
+  // entries, hosted pages, slot panels and an account block. Read through workspaceExtensions().
+  extensions?: unknown
 }
 
 export const DEFAULT_EDITION_LABEL = 'Open Source Edition'
@@ -31,6 +35,21 @@ export function workspaceEdition(): string | undefined {
   if (!policy || policy.schema !== 'shakerscan.workspace-capabilities/v1' || policy.mode !== 'managed') return undefined
   const label = typeof policy.edition === 'string' ? policy.edition.trim() : ''
   return label && label.length <= 60 ? label : undefined
+}
+
+// The deployment's extensions, validated once per declared block. Client-only like the edition
+// label: a standalone UI and the server render have none.
+let extensionsSource: unknown
+let extensionsParsed: UiExtensions = NO_EXTENSIONS
+
+export function workspaceExtensions(): UiExtensions {
+  const policy = typeof window === 'undefined' ? undefined : window.__SHAKERSCAN_CAPABILITIES__
+  if (!policy || policy.schema !== 'shakerscan.workspace-capabilities/v1' || policy.mode !== 'managed') return NO_EXTENSIONS
+  if (policy.extensions !== extensionsSource) {
+    extensionsSource = policy.extensions
+    extensionsParsed = parseUiExtensions(policy.extensions)
+  }
+  return extensionsParsed
 }
 
 export function workspaceScanCeiling(name: string, engineCeiling?: number): number | undefined {

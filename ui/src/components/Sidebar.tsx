@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useRef, useState, type ReactNode } from 'react'
+import { useEffect, useId, useRef, useState, type ReactNode } from 'react'
 import { usePathname } from 'next/navigation'
 import Link from '@/components/WorkspaceLink'
 import {
@@ -9,8 +9,12 @@ import {
   Bot,
   Boxes,
   Braces,
+  ChevronDown,
+  ChevronRight,
+  ChevronsUpDown,
   Compass,
   FileArchive,
+  Globe,
   KeyRound,
   Menu,
   Network,
@@ -19,16 +23,19 @@ import {
   Router,
   Server,
   ServerCog,
+  Settings,
   ShieldCheck,
   TriangleAlert,
   X,
 } from 'lucide-react'
-import { buttonClasses, ToggleVisual } from '@/components/ui'
+import { buttonClasses } from '@/components/ui'
+import { ExtensionIcon } from '@/components/extensions/ExtensionIcon'
 import { API_URL } from '@/lib/api'
 import { productEdition } from '@/lib/pageTitle'
 import { SHAKERSCAN_REPOSITORY_URL, SHAKERSCAN_WEBSITE_URL } from '@/lib/repository'
 import { usePoll } from '@/lib/usePoll'
-import { DEFAULT_EDITION_LABEL, navigationAllowed, workspaceEdition } from '@/lib/workspaceCapabilities'
+import { DEFAULT_EDITION_LABEL, navigationAllowed, workspaceEdition, workspaceExtensions } from '@/lib/workspaceCapabilities'
+import { placeNavigation, sameOriginPath, type ExtensionAccount } from '@/lib/uiExtensions.mjs'
 import { useCan, usePageAllowed } from '@/lib/useSessionCapabilities'
 import { useWorkspaceIsManaged } from '@/components/hunt/TerminalHuntStart'
 import {
@@ -208,6 +215,110 @@ function BrandLockup({ edition, compact = false }: { edition?: string; compact?:
   )
 }
 
+const focusRing = 'focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-blue-500'
+// One row of the menu: a page link, the "More" row and Settings share it.
+const menuRow = `flex items-center gap-3 px-3 py-2 text-sm rounded-lg transition-colors ${focusRing}`
+const menuRowActive = 'bg-blue-600/20 text-blue-400 border-l-2 border-blue-500 ml-[-2px] pl-[14px]'
+const menuRowIdle = 'hover:bg-gray-800 text-gray-300'
+const accountLink = `block rounded-md px-2.5 py-1.5 text-[13.5px] text-gray-300 transition-colors hover:bg-gray-800 hover:text-white ${focusRing}`
+
+// The quiet line that says what is running: "Open Source 2.12.3". An Enterprise edition is
+// already named in the lockup, so there it is "Version 2.12.3". A build mismatch is spelled out
+// under the logo instead, and this line then carries no version.
+function aboutLine(editionLabel: string, edition: string | undefined, identity: BuildIdentity): string {
+  const name = edition ? '' : editionLabel.replace(/\s+Edition$/i, '')
+  if (identity.skew) return name
+  const build = formatBuildIdentity(identity)
+  if (!name) return build
+  return build.startsWith('Version ') ? `${name} ${build.slice('Version '.length)}` : [name, build].filter(Boolean).join(' · ')
+}
+
+// Who is signed in, where a managed deployment says so (ui-extensions/v1): one row that opens
+// the deployment's own links, Sign out and the running version above it. The links are
+// ordinary navigations on this origin, never requests the UI makes. The row is drawn inside the
+// sidebar's foot (see NavContent), which stays in view when the menu is taller than the window
+// (only the menu scrolls), so the person's name never needs a scroll to be found.
+function AccountMenu({ account, about }: { account: ExtensionAccount; about: string }) {
+  const [open, setOpen] = useState(false)
+  const root = useRef<HTMLElement>(null)
+  const trigger = useRef<HTMLButtonElement>(null)
+  const id = useId()
+  const origin = window.location.origin
+  const links = account.links
+    .map((link) => ({ label: link.label, href: sameOriginPath(link.href, origin) }))
+    .filter((link): link is { label: string; href: string } => link.href !== null)
+  const signOut = account.sign_out ? sameOriginPath(account.sign_out, origin) : null
+  // A role that only repeats the name ("Administrator / Administrator") is left out.
+  const detail = account.detail && account.detail.trim().toLowerCase() !== account.name.trim().toLowerCase()
+    ? account.detail
+    : null
+
+  useEffect(() => {
+    if (!open) return
+    const onPointer = (event: PointerEvent) => {
+      if (!root.current?.contains(event.target as Node)) setOpen(false)
+    }
+    // Capture phase: Escape closes this panel first, not the phone drawer around it.
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape') return
+      event.stopPropagation()
+      setOpen(false)
+      trigger.current?.focus()
+    }
+    document.addEventListener('pointerdown', onPointer)
+    document.addEventListener('keydown', onKey, true)
+    return () => {
+      document.removeEventListener('pointerdown', onPointer)
+      document.removeEventListener('keydown', onKey, true)
+    }
+  }, [open])
+
+  const who = (
+    <>
+      <span aria-hidden="true" className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-gray-800 text-xs font-semibold uppercase text-gray-200">
+        {Array.from(account.name)[0]}
+      </span>
+      <span className="min-w-0 flex-1">
+        <span className="block truncate text-sm font-medium leading-5 text-gray-200" title={account.name}>{account.name}</span>
+        {detail && <span className="block truncate text-xs leading-4 text-gray-400">{detail}</span>}
+      </span>
+    </>
+  )
+  // With nothing to open, the row only names the person.
+  if (links.length === 0 && !signOut && !about) {
+    return <section aria-label="Account" className="flex items-center gap-2.5 px-1.5 py-3.5">{who}</section>
+  }
+  return (
+    <section ref={root} aria-label="Account" className="relative py-2">
+      <button
+        ref={trigger}
+        type="button"
+        aria-expanded={open}
+        aria-controls={id}
+        onClick={() => setOpen(!open)}
+        className={`flex w-full items-center gap-2.5 rounded-lg px-1.5 py-1.5 text-left transition-colors hover:bg-gray-800 ${focusRing} ${open ? 'bg-gray-800' : ''}`}
+      >
+        {who}
+        <ChevronsUpDown className="h-4 w-4 shrink-0 text-gray-500" aria-hidden="true" />
+      </button>
+      {/* After the row in the document, above it on screen: Tab goes from the row into the panel. */}
+      <div
+        id={id}
+        hidden={!open}
+        className="absolute inset-x-0 bottom-full z-10 mb-1 rounded-xl border border-gray-700 bg-gray-900 p-1.5 shadow-2xl shadow-black/60"
+      >
+        {links.map((link) => <a key={`${link.label} ${link.href}`} href={link.href} className={accountLink}>{link.label}</a>)}
+        {signOut && <a href={signOut} className={accountLink}>Sign out</a>}
+        {about && (
+          <p className={`px-2.5 pb-0.5 text-[11.5px] tabular-nums text-gray-400 ${links.length > 0 || signOut ? 'mt-1.5 border-t border-gray-800 pt-2' : 'pt-0.5'}`}>
+            {about}
+          </p>
+        )}
+      </div>
+    </section>
+  )
+}
+
 function NavContent({
   pathname,
   showAll,
@@ -231,24 +342,99 @@ function NavContent({
   const edition = productEdition(editionLabel)
   const pageAllowed = usePageAllowed()
   const canStartScan = useCan('scans.start')
-  // Default view hides advanced groups/items; the footer switch reveals them. A managed
-  // workspace shows every page its navigation list allows and renders no switch.
-  const showAdvanced = managed || showAll
-  const visibleGroups = navGroups
-    .filter((group) => showAdvanced || !group.advanced)
-    .map((group) => ({
-      ...group,
-      items: group.items.filter((item) => (
-        (showAdvanced || !item.advanced)
-        && (!item.fleetOnly || fleetEnabled)
-        && navigationAllowed(item.href)
-        && pageAllowed(item.href)
-      )),
-    }))
+  // A managed deployment may add entries and sections of its own (ui-extensions/v1). A hosted
+  // page is a route of this UI and is filtered like one; any other entry is the deployment's
+  // own same-origin page, offered as declared.
+  const extensions = workspaceExtensions()
+  const origin = typeof window === 'undefined' ? '' : window.location.origin
+  const groups = placeNavigation(navGroups, extensions).map((group) => ({
+    ...group,
+    items: group.items.filter((item) => {
+      if ('extension' in item) {
+        return item.hosted ? navigationAllowed(item.href) && pageAllowed(item.href) : sameOriginPath(item.href, origin) !== null
+      }
+      return (!item.fleetOnly || fleetEnabled) && navigationAllowed(item.href) && pageAllowed(item.href)
+    }),
+  }))
+  type NavItem = (typeof groups)[number]['items'][number]
+  // A managed workspace shows every page its navigation list allows, each in its own section.
+  // Standalone, the advanced pages wait behind the "More" row that ends the menu.
+  const inMore = (group: (typeof groups)[number], item: NavItem) =>
+    !managed && (group.advanced === true || (!('extension' in item) && item.advanced === true))
+  const visibleGroups = groups
+    .map((group) => ({ ...group, items: group.items.filter((item) => !inMore(group, item)) }))
     .filter((group) => group.items.length > 0)
-  // Only the Settings landing lights the gear. The /settings/* sub-routes
+  const moreItems = managed ? [] : groups.flatMap((group) => group.items.filter((item) => inMore(group, item)))
+  const moreId = useId()
+  const moreRef = useRef<HTMLDivElement>(null)
+  const moreRowRef = useRef<HTMLDivElement>(null)
+  // The closed row stays at the foot of the menu; a page scrolled into view must clear it.
+  const pinnedMore = moreItems.length > 0 && !showAll
+  // Set by a press that opens the row: the menu then shows what the press added.
+  const moreOpenedByHand = useRef(false)
+  const toggleMore = () => {
+    moreOpenedByHand.current = !showAll
+    onToggleShowAll(!showAll)
+  }
+  // Where a deployment names who is signed in, the sidebar's foot is that person's row.
+  const account = extensions.account
+  const about = aboutLine(editionLabel, edition, buildIdentity)
+  const settingsAllowed = navigationAllowed('/settings') && pageAllowed('/settings')
+  const newScan = canStartScan && pageAllowed('/scan/new') ? (
+    <Link
+      href="/scan/new"
+      className={`${buttonClasses('primary', 'md')} w-full`}
+    >
+      <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" aria-hidden="true">
+        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
+      </svg>
+      New Scan
+    </Link>
+  ) : null
+  // Only the Settings landing lights the Settings row. The /settings/* sub-routes
   // (research-agent, arsenal) belong to their own nav groups.
   const settingsActive = pathname === '/settings'
+
+  // In a window shorter than the menu only the list of pages scrolls; the brand and New Scan
+  // above it and the foot below it stay in view. Keep the current page, which may sit below the
+  // fold of that list, in view when the page opens and whenever the room left for the list
+  // changes. A press on "More" is the exception: the pages it adds sit below the fold of a full
+  // menu, so the menu scrolls to them, as far as the row itself stays in view.
+  const menuRef = useRef<HTMLElement>(null)
+  useEffect(() => {
+    const menu = menuRef.current
+    if (!menu) return
+    const showCurrent = () => {
+      const current = menu.querySelector<HTMLElement>('[aria-current="page"]')
+      if (!current) return
+      const frame = menu.getBoundingClientRect()
+      const box = current.getBoundingClientRect()
+      const pinned = showAll ? 0 : moreRowRef.current?.getBoundingClientRect().height ?? 0
+      if (box.top < frame.top) menu.scrollTop -= frame.top - box.top + 8
+      else if (box.bottom > frame.bottom - pinned) menu.scrollTop += box.bottom - (frame.bottom - pinned) + 8
+    }
+    const opened = moreOpenedByHand.current ? moreRef.current : null
+    moreOpenedByHand.current = false
+    if (opened && moreRowRef.current) {
+      const frame = menu.getBoundingClientRect()
+      const below = opened.getBoundingClientRect().bottom - frame.bottom + 8
+      const room = moreRowRef.current.getBoundingClientRect().top - frame.top - 8
+      if (below > 0) menu.scrollTop += Math.max(0, Math.min(below, room))
+    } else {
+      showCurrent()
+    }
+    if (typeof ResizeObserver === 'undefined') return
+    // An observer also reports once when it starts. Only a report of another height is a change
+    // of room, and one that happened before that first report is not lost.
+    let height = menu.clientHeight
+    const observer = new ResizeObserver(() => {
+      if (menu.clientHeight === height) return
+      height = menu.clientHeight
+      showCurrent()
+    })
+    observer.observe(menu)
+    return () => observer.disconnect()
+  }, [pathname, showAll, managed])
 
   const isActive = (href: string) => {
     if (href === '/') {
@@ -260,35 +446,66 @@ function NavContent({
     return pathname.startsWith(href)
   }
 
+  const renderItem = (item: NavItem) => {
+    const declared = 'extension' in item
+    const active = declared ? pathname === item.href : isActive(item.href)
+    const className = `${menuRow} ${active ? menuRowActive : menuRowIdle}`
+    // A deployment's own page is not a route of this UI: a plain navigation.
+    if (declared && !item.hosted) {
+      return (
+        <a key={`${item.label} ${item.href}`} href={sameOriginPath(item.href, origin) ?? undefined} className={className}>
+          <ExtensionIcon name={item.icon} />
+          {item.label}
+        </a>
+      )
+    }
+    return (
+      <Link
+        key={item.href}
+        href={item.href}
+        // Every page fetches its own data on the client, so prefetching the route
+        // shell for all fourteen links on each navigation only adds a 307+200
+        // pair per link that the page's real API calls then queue behind.
+        prefetch={false}
+        aria-current={active ? 'page' : undefined}
+        className={className}
+      >
+        {declared ? <ExtensionIcon name={item.icon} /> : item.icon}
+        {item.label}
+      </Link>
+    )
+  }
+
   return (
     <>
-      <div className="mb-8">
+      <div className="mb-4 shrink-0">
         {/* The link's name keeps the lockup's visible words ("ShakerScan Enterprise") in it. */}
         <Link
           href="/"
           aria-label={edition ? `ShakerScan ${edition} dashboard` : 'ShakerScan dashboard'}
-          className="flex items-center gap-2.5 rounded-sm py-0.5 text-white focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-blue-500"
+          className={`flex items-center gap-2.5 rounded-sm py-0.5 text-white ${focusRing}`}
         >
           <BrandLockup edition={edition} />
         </Link>
-        {/* The lockup already names an Enterprise edition; any other label stays on its own line. */}
-        {!edition && <p className="text-xs text-gray-500 mt-2">{editionLabel}</p>}
-        {(buildIdentity.ui || buildIdentity.api || buildIdentity.workers) && (
+        {/* The corner is the logo and the primary action. Only a build mismatch adds a line. */}
+        {buildIdentity.skew && buildLabel && (
           <p
-            className={`${edition ? 'mt-2' : 'mt-1'} flex items-center gap-1 text-[11px] ${buildIdentity.skew ? 'text-amber-300' : 'text-gray-400'}`}
-            title={buildIdentity.skew ? 'Component build mismatch detected' : 'Component build identities'}
-            role={buildIdentity.skew ? 'status' : undefined}
-            aria-live={buildIdentity.skew ? 'polite' : undefined}
+            className="mt-2 flex items-center gap-1 text-[11px] text-amber-300"
+            title="Component build mismatch detected"
+            role="status"
+            aria-live="polite"
           >
-            {buildIdentity.skew && <TriangleAlert className="h-3 w-3 shrink-0" aria-hidden="true" />}
-            <span>{buildIdentity.skew ? `Build mismatch: ${buildLabel}` : buildLabel}</span>
+            <TriangleAlert className="h-3 w-3 shrink-0" aria-hidden="true" />
+            <span>{`Build mismatch: ${buildLabel}`}</span>
           </p>
         )}
+        {newScan && <div className="mt-4">{newScan}</div>}
       </div>
 
-      <nav className="flex-1">
+      {/* The margins and padding keep focus rings and the active marker inside the scrolling box. */}
+      <nav ref={menuRef} className={`-mx-4 -my-1 min-h-24 flex-1 overflow-y-auto overscroll-contain px-4 py-1 ${pinnedMore ? 'scroll-pb-11' : ''}`}>
         {visibleGroups.map((group, groupIndex) => (
-          <div key={group.heading ?? 'overview'} className={`space-y-1 ${groupIndex === 0 ? '' : 'mt-4'}`}>
+          <div key={`${groupIndex} ${group.heading ?? 'overview'}`} className={`space-y-1 ${groupIndex === 0 ? '' : 'mt-4'}`}>
             {group.heading ? (
               <div className="flex items-center gap-1.5 px-3 pb-0.5 text-[10px] font-semibold uppercase tracking-wider text-gray-600">
                 <span>{group.heading}</span>
@@ -299,111 +516,101 @@ function NavContent({
                 ) : null}
               </div>
             ) : null}
-            {group.items.map((item) => {
-              const active = isActive(item.href)
-              return (
-                <Link
-                  key={item.href}
-                  href={item.href}
-                  // Every page fetches its own data on the client, so prefetching the route
-                  // shell for all fourteen links on each navigation only adds a 307+200
-                  // pair per link that the page's real API calls then queue behind.
-                  prefetch={false}
-                  aria-current={active ? 'page' : undefined}
-                  className={`flex items-center gap-3 px-3 py-2 text-sm rounded-lg transition-colors focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-blue-500 ${
-                    active
-                      ? 'bg-blue-600/20 text-blue-400 border-l-2 border-blue-500 ml-[-2px] pl-[14px]'
-                      : 'hover:bg-gray-800 text-gray-300'
-                  }`}
-                >
-                  {item.icon}
-                  {item.label}
-                </Link>
-              )
-            })}
+            {group.items.map(renderItem)}
           </div>
         ))}
+        {moreItems.length > 0 && (
+          <>
+            {/* Closed, the row holds the foot of a menu taller than its window, so it is never
+                below the fold; open, it heads the pages it added and scrolls with them. */}
+            <div
+              ref={moreRowRef}
+              className={showAll ? 'mt-4' : 'sticky -bottom-1 z-[1] -mb-1 mt-4 bg-gray-900 pb-1 before:pointer-events-none before:absolute before:inset-x-0 before:-top-4 before:h-4 before:bg-linear-to-t before:from-gray-900 before:to-transparent'}
+            >
+            <button
+              type="button"
+              aria-expanded={showAll}
+              aria-controls={moreId}
+              // The server-rendered row has no handler until the page hydrates, and the saved
+              // preference has not been read yet: a click then would be lost or overwritten.
+              disabled={!preferenceLoaded}
+              onClick={toggleMore}
+              className={`${menuRow} w-full text-left text-gray-400 hover:bg-gray-800 hover:text-gray-200`}
+            >
+              {showAll
+                ? <ChevronDown className="h-5 w-5 shrink-0" aria-hidden="true" />
+                : <ChevronRight className="h-5 w-5 shrink-0" aria-hidden="true" />}
+              More
+              {!showAll && (
+                <span className="ml-auto text-xs text-gray-500">
+                  {moreItems.length} {moreItems.length === 1 ? 'page' : 'pages'}
+                </span>
+              )}
+            </button>
+            </div>
+            <div id={moreId} ref={moreRef} hidden={!showAll} className="mt-1 space-y-1">
+              {showAll && moreItems.map(renderItem)}
+            </div>
+          </>
+        )}
       </nav>
 
-      {canStartScan && pageAllowed('/scan/new') && <div className="pt-4 mt-4 border-t border-gray-800">
-        <Link
-          href="/scan/new"
-          className={`${buttonClasses('primary', 'md')} w-full`}
-        >
-          <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
-          </svg>
-          New Scan
-        </Link>
-      </div>}
-
-      <div className="pt-3 mt-4 border-t border-gray-800">
-        <div className="flex items-center gap-1.5 px-1 text-[12.5px]">
-          <a
-            href={SHAKERSCAN_WEBSITE_URL}
-            target="_blank"
-            rel="noopener noreferrer"
-            title={SHAKERSCAN_WEBSITE_URL}
-            className="inline-flex items-center gap-1.5 rounded-sm text-gray-400 transition-colors hover:text-white disabled:cursor-default disabled:hover:text-gray-400 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-blue-500"
-          >
-            <BrandMark className="h-3.5 w-3.5" />
-            shakerscan.com
-          </a>
-          <span className="text-gray-700" aria-hidden="true">·</span>
-          <a
-            href={SHAKERSCAN_REPOSITORY_URL}
-            target="_blank"
-            rel="noopener noreferrer"
-            aria-label="ShakerScan on GitHub"
-            title="Source code on GitHub"
-            className="inline-flex items-center gap-1.5 rounded-sm text-gray-400 transition-colors hover:text-white focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-blue-500"
-          >
-            <svg className="h-3.5 w-3.5" fill="currentColor" viewBox="0 0 24 24" aria-hidden="true">
-              <path fillRule="evenodd" clipRule="evenodd" d="M12 2C6.477 2 2 6.477 2 12c0 4.42 2.865 8.17 6.839 9.49.5.092.682-.217.682-.482 0-.237-.008-.866-.013-1.7-2.782.604-3.369-1.34-3.369-1.34-.454-1.156-1.11-1.464-1.11-1.464-.908-.62.069-.608.069-.608 1.003.07 1.531 1.03 1.531 1.03.892 1.529 2.341 1.087 2.91.831.092-.646.35-1.086.636-1.336-2.22-.253-4.555-1.11-4.555-4.943 0-1.091.39-1.984 1.029-2.683-.103-.253-.446-1.27.098-2.647 0 0 .84-.269 2.75 1.025A9.578 9.578 0 0112 6.836c.85.004 1.705.114 2.504.336 1.909-1.294 2.747-1.025 2.747-1.025.546 1.377.203 2.394.1 2.647.64.699 1.028 1.592 1.028 2.683 0 3.842-2.339 4.687-4.566 4.935.359.309.678.919.678 1.852 0 1.336-.012 2.415-.012 2.743 0 .267.18.578.688.48C19.138 20.167 22 16.418 22 12c0-5.523-4.477-10-10-10z" />
-            </svg>
-            GitHub
-          </a>
-        </div>
-        <div className="mt-2 flex items-center justify-between pl-1">
-          {managed ? <span /> : (
-          <button
-            type="button"
-            role="switch"
-            aria-checked={showAll}
-            // The server-rendered switch has no handler until the page hydrates, and the saved
-            // preference has not been read yet: a click then would be lost or overwritten.
-            disabled={!preferenceLoaded}
-            onClick={() => onToggleShowAll(!showAll)}
-            title="Show advanced sections (Records, Governance, Developer, Model Intake)"
-            className="inline-flex items-center gap-2 rounded-md py-1 pr-1 text-[12.5px] text-gray-400 transition-colors hover:text-white focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-blue-500"
-          >
-            <ToggleVisual checked={showAll} />
-            All sections
-          </button>
+      {(settingsAllowed || !account) && (
+        <div className="mt-4 shrink-0 space-y-2 border-t border-gray-800 pt-3">
+          {settingsAllowed && (
+            <Link
+              href="/settings"
+              prefetch={false}
+              aria-current={settingsActive ? 'page' : undefined}
+              className={`${menuRow} ${settingsActive ? menuRowActive : menuRowIdle}`}
+            >
+              <Settings className="h-5 w-5" aria-hidden="true" />
+              Settings
+            </Link>
           )}
-          <Link
-            href="/settings"
-            aria-label="Settings"
-            title="Settings"
-            aria-current={settingsActive ? 'page' : undefined}
-            className={`p-2 rounded-md transition-colors focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-blue-500 ${
-              settingsActive
-                ? 'bg-blue-600/20 text-blue-400'
-                : 'text-gray-400 hover:text-white hover:bg-gray-800'
-            }`}
-          >
-            <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" aria-hidden="true">
-              <path
-                strokeLinecap="round"
-                strokeLinejoin="round"
-                strokeWidth={2}
-                d="M11.983 5.5a1.5 1.5 0 013.034 0l.184 1.145a1.5 1.5 0 001.126 1.192l1.132.286a1.5 1.5 0 01.76 2.49l-.773.862a1.5 1.5 0 000 1.998l.773.862a1.5 1.5 0 01-.76 2.49l-1.132.286a1.5 1.5 0 00-1.126 1.192l-.184 1.145a1.5 1.5 0 01-3.034 0l-.184-1.145a1.5 1.5 0 00-1.126-1.192l-1.132-.286a1.5 1.5 0 01-.76-2.49l.773-.862a1.5 1.5 0 000-1.998l-.773-.862a1.5 1.5 0 01.76-2.49l1.132-.286a1.5 1.5 0 001.126-1.192l.184-1.145z"
-              />
-              <circle cx="13.5" cy="12" r="2.5" strokeWidth={2} />
-            </svg>
-          </Link>
+          {/* What is running and, in a standalone install, the two ways out: the website and the
+              source code. A managed deployment links to neither. */}
+          {!account && (about || !managed) && (
+            <div className="flex min-h-6 items-center justify-between gap-2 px-3 text-[11.5px] tabular-nums text-gray-400">
+              <span className="truncate" title={about}>{about}</span>
+              {!managed && (
+                <span className="flex shrink-0 items-center gap-2">
+                  <a
+                    href={SHAKERSCAN_WEBSITE_URL}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    aria-label="shakerscan.com"
+                    title="shakerscan.com"
+                    className={`rounded-sm p-1 text-gray-400 transition-colors hover:text-white ${focusRing}`}
+                  >
+                    <Globe className="h-4 w-4" aria-hidden="true" />
+                  </a>
+                  <a
+                    href={SHAKERSCAN_REPOSITORY_URL}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    aria-label="ShakerScan on GitHub"
+                    title="Source code on GitHub"
+                    className={`-mr-1 rounded-sm p-1 text-gray-400 transition-colors hover:text-white ${focusRing}`}
+                  >
+                    <svg className="h-4 w-4" fill="currentColor" viewBox="0 0 24 24" aria-hidden="true">
+                      <path fillRule="evenodd" clipRule="evenodd" d="M12 2C6.477 2 2 6.477 2 12c0 4.42 2.865 8.17 6.839 9.49.5.092.682-.217.682-.482 0-.237-.008-.866-.013-1.7-2.782.604-3.369-1.34-3.369-1.34-.454-1.156-1.11-1.464-1.11-1.464-.908-.62.069-.608.069-.608 1.003.07 1.531 1.03 1.531 1.03.892 1.529 2.341 1.087 2.91.831.092-.646.35-1.086.636-1.336-2.22-.253-4.555-1.11-4.555-4.943 0-1.091.39-1.984 1.029-2.683-.103-.253-.446-1.27.098-2.647 0 0 .84-.269 2.75 1.025A9.578 9.578 0 0112 6.836c.85.004 1.705.114 2.504.336 1.909-1.294 2.747-1.025 2.747-1.025.546 1.377.203 2.394.1 2.647.64.699 1.028 1.592 1.028 2.683 0 3.842-2.339 4.687-4.566 4.935.359.309.678.919.678 1.852 0 1.336-.012 2.415-.012 2.743 0 .267.18.578.688.48C19.138 20.167 22 16.418 22 12c0-5.523-4.477-10-10-10z" />
+                    </svg>
+                  </a>
+                </span>
+              )}
+            </div>
+          )}
         </div>
-      </div>
+      )}
+
+      {/* The negative offset and margins take the foot over the sidebar's own padding, flush
+          with its edges. */}
+      {account && (
+        <div className="sticky -bottom-4 -mx-4 -mb-4 mt-4 shrink-0 border-t border-gray-800 bg-gray-900 px-2.5">
+          <AccountMenu account={account} about={about} />
+        </div>
+      )}
     </>
   )
 }
@@ -438,7 +645,7 @@ export default function Sidebar() {
     setFleetEnabled(health?.fleet?.enabled === true)
   }, { intervalMs: HEALTH_BUILD_IDENTITY_REFRESH_MS, deps: [bakedExpectedApiFingerprint, bakedVersion] })
 
-  // Persist the "show all sections" preference across reloads (default off).
+  // Whether the "More" row is open is kept across reloads (closed by default).
   useEffect(() => {
     try {
       setShowAll(window.localStorage.getItem('shakerscan.sidebar.show_all') === 'true')

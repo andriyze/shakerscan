@@ -159,8 +159,203 @@ def test_finalizer_promotes_only_boundary_gated_authz_surface_proof():
     assert finding["evidence"]["canonical_capability"] == "authz_surface.verify_batch"
     # The differential shows the endpoint is public; only knowing the function
     # is privileged would make that a broken control, and nothing here does.
-    # It is reported for verification rather than asserted as proven.
-    assert finding["severity"] == "medium"
+    # It is reported for verification rather than asserted as proven, and only informationally:
+    # public files and health routes serve everyone the same on purpose.
+    assert finding["severity"] == "info"
     assert finding["verified"] is False
     assert finding["suspected"] is True
     assert finding["needs_verification"] is True
+
+
+# --- Stored password hashes in a signed-in API response ------------------------------------
+
+from api.capabilities.authz_surface import (  # noqa: E402
+    account_password_hashes,
+    password_hash_disclosure_finding,
+)
+
+_BCRYPT_ADMIN = "$2b$10$" + "Qm9yZWRBZG1pbkhhc2hWYWx1ZUZvclRlc3RzT25seS4uLi4uLi4uLi4u"[:53]
+_BCRYPT_USER = "$2b$10$" + "VXNlclR3b0hhc2hWYWx1ZUZvclRlc3RzT25seS4uLi4uLi4uLi4uLi4u"[:53]
+
+
+def test_password_hash_fields_are_found_in_json_bodies():
+    body = (
+        '{"id":1,"username":"admin","role":"admin","salary":182000,"password_hash":"%s"}'
+        % _BCRYPT_ADMIN
+    ).encode()
+    assert account_password_hashes(body, is_json=True) == [("password_hash", _BCRYPT_ADMIN)]
+    # An MD5 digest under the account's password key (Juice Shop's user records).
+    md5 = '{"data":[{"id":1,"email":"a@b.test","password":"0192023a7bbd73250516f069df18b500"}]}'
+    assert account_password_hashes(md5.encode(), is_json=True) == [
+        ("data[0].password", "0192023a7bbd73250516f069df18b500"),
+    ]
+
+
+def test_ordinary_values_are_not_password_hashes():
+    for body in (
+        # A hex id under an unrelated key, a hex-looking placeholder, a plaintext password.
+        '{"request_id":"0192023a7bbd73250516f069df18b500"}',
+        '{"password":"00000000000000000000000000000000"}',
+        '{"password":"hunter2-but-long-enough"}',
+        '{"password_hash":"[REDACTED]"}',
+        '"not an object"',
+    ):
+        assert account_password_hashes(body.encode(), is_json=True) == [], body
+    # Not JSON: never parsed.
+    assert account_password_hashes(_BCRYPT_ADMIN.encode(), is_json=False) == []
+
+
+def _hash_probe(status, sha, digests=(), fields=()):
+    return PrincipalProbe(
+        status=status, body_sha256=sha, body_len=200, is_json=True,
+        hash_digests=tuple(digests), hash_fields=tuple(fields),
+    )
+
+
+def test_another_accounts_hash_read_by_one_principal_is_high():
+    denied = (_probe(401, "z", 5, False), _probe(401, "z", 5, False))
+    me = _route("me", denied, (_hash_probe(200, "m", ["d-user"], ["password_hash"]),) * 2)
+    other = _route("users/1", denied, (_hash_probe(200, "u", ["d-admin"], ["password_hash"]),) * 2)
+    seen = {"d-user", "d-admin"}
+    finding = password_hash_disclosure_finding(other, seen)
+    assert finding["proof_contract"] == "authz_surface_password_hash_disclosure/v1"
+    assert finding["other_accounts_hashes"] is True
+    assert finding["anonymous_reads_hashes"] is False
+    assert finding["hash_fields"] == [{"field": "password_hash"}]
+    # The principal's own record alone shows one hash: excessive exposure, not cross-account.
+    alone = password_hash_disclosure_finding(me, {"d-user"})
+    assert alone["other_accounts_hashes"] is False
+
+
+def test_hash_disclosure_needs_the_same_hashes_on_every_read():
+    flapping = _route("x", (), (
+        _hash_probe(200, "a", ["d1"]), _hash_probe(200, "a", ["d2"]),
+    ))
+    assert password_hash_disclosure_finding(flapping, {"d1", "d2"}) is None
+    none = _route("y", (), (_hash_probe(200, "b"), _hash_probe(200, "b")))
+    assert password_hash_disclosure_finding(none, set()) is None
+    denied = _route("z", (), (_hash_probe(403, "c", ["d1"]), _hash_probe(403, "c", ["d1"])))
+    assert password_hash_disclosure_finding(denied, {"d1"}) is None
+
+
+def test_finalizer_reports_another_accounts_password_hash_as_verified_high():
+    verify = _action("verify.authz_surface", 0, capability_name="authz_surface.verify_batch")
+    final = _action("finalize.report", 1, dependencies=(verify.action_id,))
+    plan = ScanActionPlan(
+        scan_id=SCAN_ID, execution_plan_digest="b" * 64,
+        target_binding_digest="a" * 64, actions=(verify, final),
+    )
+    results = {verify.action_id: _result_with_observation_count(verify, 1)}
+    observations = {verify.action_id: ({
+        "kind": "authz_surface_proof",
+        "proof_state": "verified", "finding_verdict": "verified",
+        "proof_contract": "authz_surface_password_hash_disclosure/v1",
+        "technique": "authenticated_response_password_hash_fields_repeated",
+        "route_id": "users", "request_url": "https://app.example.test/hub/api/users/1",
+        "anonymous_status": 401, "authenticated_status": 200,
+        # One response carrying two accounts' hashes: one of them is another account's.
+        "response_body_sha256": "h" * 64, "hash_count": 2, "hash_digests": ["d1", "d2"],
+        "hash_fields": [{"field": "password_hash"}],
+        "other_accounts_hashes": True, "anonymous_reads_hashes": False,
+        "repetitions": 2,
+    },)}
+    report = finalize_scan_report(
+        plan=plan, target_url="https://app.example.test",
+        action_results=results, observations=observations,
+    )
+    assert len(report["findings"]) == 1
+    finding = report["findings"][0]
+    assert finding["title"] == "API returns other accounts' password hashes"
+    assert finding["severity"] == "high"
+    assert finding["cwe"] == "CWE-639"
+    assert finding["verified"] is True
+    assert finding["evidence"]["hash_fields"] == [{"field": "password_hash"}]
+
+
+def test_two_batches_each_with_one_hash_still_prove_another_accounts_hash():
+    """/me and /users/1 fell into different slices on a live Scan: each batch saw one hash."""
+    first = _action("verify.authz_surface", 0, capability_name="authz_surface.verify_batch")
+    second = _action("verify.authz_surface.001", 1, capability_name="authz_surface.verify_batch")
+    final = _action("finalize.report", 2, dependencies=(first.action_id, second.action_id))
+    plan = ScanActionPlan(
+        scan_id=SCAN_ID, execution_plan_digest="b" * 64,
+        target_binding_digest="a" * 64, actions=(first, second, final),
+    )
+
+    def proof(path, digest):
+        return {
+            "kind": "authz_surface_proof", "proof_state": "verified", "finding_verdict": "verified",
+            "proof_contract": "authz_surface_password_hash_disclosure/v1",
+            "route_id": path, "request_url": f"https://app.example.test{path}",
+            "authenticated_status": 200, "anonymous_status": 401, "hash_count": 1,
+            "hash_digests": [digest], "hash_fields": [{"field": "password_hash"}],
+            "other_accounts_hashes": False, "anonymous_reads_hashes": False, "repetitions": 2,
+        }
+
+    report = finalize_scan_report(
+        plan=plan, target_url="https://app.example.test",
+        action_results={
+            first.action_id: _result_with_observation_count(first, 1),
+            second.action_id: _result_with_observation_count(second, 1),
+        },
+        observations={
+            first.action_id: (proof("/hub/api/me", "hmac-sha256-x:own"),),
+            second.action_id: (proof("/hub/api/users/1", "hmac-sha256-x:admin"),),
+        },
+    )
+    by_url = {f["url"].rsplit("/hub", 1)[-1]: f for f in report["findings"]}
+    # /me names the signed-in user: its hash is the principal's own (medium, not "other accounts").
+    assert (by_url["/api/me"]["title"], by_url["/api/me"]["severity"]) == ("API returns password hashes", "medium")
+    assert by_url["/api/me"]["evidence"]["signed_in_users_own_record"] is True
+    assert (by_url["/api/users/1"]["title"], by_url["/api/users/1"]["severity"]) == (
+        "API returns other accounts' password hashes", "high")
+    assert all(f["evidence"]["distinct_hashes_read_in_scan"] == 2 for f in report["findings"])
+
+
+def test_without_a_self_route_two_hashes_are_high_but_not_attributed():
+    verify = _action("verify.authz_surface", 0, capability_name="authz_surface.verify_batch")
+    final = _action("finalize.report", 1, dependencies=(verify.action_id,))
+    plan = ScanActionPlan(scan_id=SCAN_ID, execution_plan_digest="b" * 64,
+                          target_binding_digest="a" * 64, actions=(verify, final))
+
+    def proof(path, digest):
+        return {
+            "kind": "authz_surface_proof", "proof_state": "verified", "finding_verdict": "verified",
+            "proof_contract": "authz_surface_password_hash_disclosure/v1",
+            "route_id": path, "request_url": f"https://app.example.test{path}",
+            "authenticated_status": 200, "hash_count": 1, "hash_digests": [digest],
+            "repetitions": 2,
+        }
+
+    report = finalize_scan_report(
+        plan=plan, target_url="https://app.example.test",
+        action_results={verify.action_id: _result_with_observation_count(verify, 2)},
+        observations={verify.action_id: (proof("/api/users/2", "d2"), proof("/api/users/1", "d1"))},
+    )
+    assert {(f["title"], f["severity"]) for f in report["findings"]} == {("API returns password hashes", "high")}
+
+
+def test_a_signed_in_standard_active_scan_reads_access_control():
+    from api.scan.contracts import resolve_scan_contract
+
+    policy = {"active_testing": True}
+    anonymous = resolve_scan_contract(budget_profile="fast", policy=policy)
+    signed_in = resolve_scan_contract(budget_profile="fast", policy=policy, signed_in=True)
+    assert "authz_surface" not in anonymous.execution_plan.resolved_families
+    assert "authz_surface" in signed_in.execution_plan.resolved_families
+    passive = resolve_scan_contract(budget_profile="fast", policy={}, signed_in=True)
+    assert "authz_surface" not in passive.execution_plan.resolved_families
+    excluded = resolve_scan_contract(
+        budget_profile="fast", signed_in=True,
+        policy={"active_testing": True, "exclude_families": ["authz_surface"]},
+    )
+    assert "authz_surface" not in excluded.execution_plan.resolved_families
+
+
+def test_the_read_only_access_control_family_needs_no_lab_policy_when_signed_in():
+    from api.check_registry import family_precondition_error
+
+    signed_in = {"managed_credential_profiles": [{"auth_state": "user1"}]}
+    assert family_precondition_error("authz_surface", signed_in, exploit_depth=False) is None
+    # Without a principal it still cannot run.
+    assert "credentials" in family_precondition_error("authz_surface", {}, exploit_depth=False)

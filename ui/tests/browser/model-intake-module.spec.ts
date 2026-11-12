@@ -18,6 +18,14 @@ async function mock(page: Page, enabled: boolean | undefined) {
   return intakeRequests
 }
 
+// Space, in pixels, between the edges of the card around `text` and the text itself.
+async function cardInset(page: Page, text: string | RegExp): Promise<{ left: number; top: number }> {
+  const paragraph = page.getByText(text).first()
+  const card = paragraph.locator('xpath=ancestor::div[contains(@class, "rounded-lg")][1]')
+  const [inner, outer] = [(await paragraph.boundingBox())!, (await card.boundingBox())!]
+  return { left: inner.x - outer.x, top: inner.y - outer.y }
+}
+
 test('MODULE-001 with Model Intake off the page shows how to install it and runs nothing', async ({ page }) => {
   const intakeRequests = await mock(page, false)
   await page.goto('/model-intake')
@@ -25,6 +33,10 @@ test('MODULE-001 with Model Intake off the page shows how to install it and runs
   await expect(page.getByText('shakerscan model-intake enable', { exact: true })).toBeVisible()
   await expect(page.getByText(/about 4\.8 GB/)).toBeVisible()
   expect(intakeRequests).toEqual([])
+  // The explanation sits inside its card, not against the card's border.
+  const inset = await cardInset(page, /Model Intake checks AI models before you deploy them/)
+  expect(inset.left).toBeGreaterThanOrEqual(12)
+  expect(inset.top).toBeGreaterThanOrEqual(12)
 })
 
 test('MODULE-002 with Model Intake on (or an engine that predates the setting) the page loads', async ({ page }) => {
@@ -37,14 +49,14 @@ test('MODULE-002 with Model Intake on (or an engine that predates the setting) t
   }
 })
 
-test('MODULE-003 the sidebar lists Model Intake only under the advanced switch', async ({ page }) => {
+test('MODULE-003 the sidebar lists Model Intake only behind the More row', async ({ page }) => {
   await page.setViewportSize({ width: 1400, height: 900 })
   await mock(page, false)
   await page.goto('/model-intake')
   const visibleLink = (name: string) => page.locator('aside:visible a[href], nav:visible a[href]').filter({ hasText: name })
   await expect(visibleLink('AI Gate')).not.toHaveCount(0)
   await expect(visibleLink('Model Intake')).toHaveCount(0)
-  await page.getByRole('switch', { name: 'All sections', exact: true }).first().click()
+  await page.locator('aside:visible').getByRole('button', { name: /^More/ }).click()
   await expect(visibleLink('Model Intake')).not.toHaveCount(0)
 })
 
@@ -60,4 +72,15 @@ test('MODULE-004 in a managed deployment the page says it is not available and n
   await expect(page.getByText('Not available in this deployment.')).toBeVisible()
   await expect(page.getByText('shakerscan model-intake enable')).toHaveCount(0)
   expect(intakeRequests).toEqual([])
+  const inset = await cardInset(page, /This deployment does not include it/)
+  expect(inset.left).toBeGreaterThanOrEqual(12)
+  expect(inset.top).toBeGreaterThanOrEqual(12)
+})
+
+test('MODULE-005 with Model Intake off the page says plainly that installing is a host task, not a page control', async ({ page }) => {
+  await mock(page, false)
+  await page.goto('/model-intake')
+  await expect(page.getByText(/it is done on the host by its operator and cannot be done from this page/)).toBeVisible()
+  // The command is still one click to copy; the button's visible name is "Copy".
+  await expect(page.getByTitle('Copy install command')).toBeVisible()
 })

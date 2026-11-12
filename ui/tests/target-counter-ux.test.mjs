@@ -32,7 +32,8 @@ test('finding counters have an accessible text label', () => {
 })
 
 test('pathological domain labels stay inside their row', () => {
-  assert.match(row, /block truncate font-medium text-gray-100/)
+  // The name wraps (after a dot where it can, anywhere where it must) and stops at two lines.
+  assert.match(row, /line-clamp-2 font-medium text-gray-100 \[overflow-wrap:anywhere\]/)
   assert.match(groups, /<span className="truncate">\{domain\}<\/span>/)
 })
 

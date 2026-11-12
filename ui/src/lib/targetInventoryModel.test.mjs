@@ -40,6 +40,11 @@ test('malformed input explains itself', () => {
   assert.match(parseTargetInput('').error, /Enter/)
   assert.match(parseTargetInput('ftp://example.com').error, /Only http/)
   assert.match(parseTargetInput('example.com:99999').error, /1 to 65535/)
+  // Not a host with a port: the message is about the address, not about port numbers.
+  for (const text of ['javascript:alert(1)', 'mailto:someone', 'example.com:http']) {
+    assert.match(parseTargetInput(text).error, /Not an address to test/, text)
+  }
+  assert.equal(parseTargetInput('example.com:8443').port, 8443)
   assert.match(parseTargetInput('https://user:pass@example.com').error, /user name/)
   assert.match(parseTargetInput('exa mple.com').error, /One target/)
   assert.match(parseTargetInput('bad_host.example').error, /hostname/)
@@ -123,6 +128,18 @@ test('a scan covers live web apps, else a bare domain, and New Scan opens prefil
   assert.equal(configureScanHref(['https://example.com']), '/scan/new?target=https%3A%2F%2Fexample.com')
   assert.equal(configureScanHref(['a.example.com', 'b.example.com', 'a.example.com']), '/scan/new?targets=a.example.com%0Ab.example.com')
   assert.equal(configureScanHref(['only.example.com'], true), '/scan/new?targets=only.example.com')
+})
+
+test('without batch submission a several-address link prefills one address and names the rest', async () => {
+  // A host with two live web addresses opened New Scan with an empty target where batch
+  // submission is not offered: the link carried `targets=` and the form read it only in batch mode.
+  const { singleScanPrefill } = await import('./targetInventoryModel.mjs')
+  assert.deepEqual(singleScanPrefill(['http://app.example.com:443', 'https://app.example.com']),
+    { target: 'https://app.example.com', others: ['http://app.example.com:443'] })
+  assert.deepEqual(singleScanPrefill(['http://a.example.com', ' http://b.example.com ', 'http://a.example.com']),
+    { target: 'http://a.example.com', others: ['http://b.example.com'] })
+  assert.deepEqual(singleScanPrefill(['only.example.com']), { target: 'only.example.com', others: [] })
+  assert.deepEqual(singleScanPrefill([]), { target: '', others: [] })
 })
 
 // UI audit 2.11 #2: at 10k targets a domain's "Customize batch" link listed every URL (450 KB) and

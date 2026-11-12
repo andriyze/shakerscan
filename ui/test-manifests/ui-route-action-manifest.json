@@ -150,6 +150,13 @@
       "smokePath": "/evidence"
     },
     {
+      "route": "/ext/[id]",
+      "source": "src/app/ext/[id]/page.tsx",
+      "owner": "workspace",
+      "caseId": "EXT-001",
+      "stateAssertion": "A page a managed deployment declares renders inside the shell under its declared title."
+    },
+    {
       "route": "/exposure",
       "source": "src/app/exposure/page.tsx",
       "owner": "exposure",

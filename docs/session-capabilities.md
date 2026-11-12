@@ -76,6 +76,7 @@ The UI sends it to its API origin with the same credentials as every other API r
 | `secrets.read` | Target page: the "Discovered secrets" cards (their list requests are not sent when `false`) |
 | `secrets.manage` | Discovered secrets: "Revoke" / "Reactivate" and "Expiry" |
 | `secrets.decide` | Discovered secrets: "Reveal", "Grant", "Ungrant" and "Promote" (the gateway may still ask for a step-up) |
+| `ct_monitor.toggle` | Dashboard: the CT monitor switch (when `false` the switch still shows whether the monitor runs, is locked, and a press shows the answer's reason for this action instead of sending a request) |
 | `records.delete` | Every record deletion control (each also needs the workspace's record deletion feature): Hunt page "Delete", Targets list "Archive or delete…" / "Delete…", Findings list "Delete selected findings", and the other "Delete" buttons that open the deletion preview |
 
 A new UI control that changes state names one of these actions, or a new one added to this table.

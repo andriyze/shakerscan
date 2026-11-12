@@ -145,3 +145,20 @@ test('TARGETS-LIVENESS-002 the target page shows DNS, reachable, live and the re
   expect(checks).toBe(1)
   expect(api.requests).toContain(`POST /targets/${target.id}/liveness`)
 })
+
+test('TARGETS-SUMMARY-001 every summary tile shows its whole label at desktop and phone widths', async ({ page }) => {
+  await inventory(page)
+  for (const width of [1440, 1280, 390]) {
+    await page.setViewportSize({ width, height: 900 })
+    await page.goto('/targets')
+    const tiles = page.getByRole('button', { pressed: false }).filter({ hasText: /Not authorized|critical or high|Never scanned|Scanning now/ })
+    await expect(tiles).toHaveCount(4)
+    await expect(page.getByRole('button', { name: /Targets with critical or high findings/ })).toBeVisible()
+    // No label is cut off: the text needs no more room than its box gives it.
+    const cut = await tiles.evaluateAll((buttons) => buttons.flatMap((button) => [...button.querySelectorAll('span')]
+      .filter((span) => span.scrollWidth > span.clientWidth + 1 && getComputedStyle(span).overflow !== 'visible')
+      .map((span) => span.textContent)))
+    expect(cut, `labels cut off at ${width} px`).toEqual([])
+    expect(await page.evaluate(() => document.documentElement.scrollWidth > document.documentElement.clientWidth)).toBe(false)
+  }
+})

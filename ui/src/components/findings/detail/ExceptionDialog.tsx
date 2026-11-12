@@ -22,6 +22,10 @@ export const EMPTY_EXCEPTION_FORM: ExceptionFormValues = {
   expires_days: '30',
 }
 
+export function activePolicyProfiles(policyProfiles: PolicyProfile[]): PolicyProfile[] {
+  return policyProfiles.filter((profile) => profile.is_active)
+}
+
 // Accepting risk records a time-limited policy exception the release gate honours. It is a
 // deliberate act, so it lives in a dialog rather than an always-open form on the page.
 export function ExceptionDialog({
@@ -50,7 +54,13 @@ export function ExceptionDialog({
     }
   }
 
-  const activeProfiles = policyProfiles.filter((profile) => profile.is_active)
+  const activeProfiles = activePolicyProfiles(policyProfiles)
+  // With no policy profile configured the exception applies under the built-in release policy.
+  const policyRequired = activeProfiles.length > 0
+  const days = Number(form.expires_days)
+  // Every field is required: the button stays off until the form can be submitted.
+  const complete = [form.owner, form.approver, form.reason, form.compensating_controls].every((value) => value.trim() !== '')
+    && Number.isInteger(days) && days >= 1 && (!policyRequired || Boolean(form.policy_id))
   const label = 'grid gap-1 text-sm text-gray-300'
 
   return (
@@ -62,7 +72,7 @@ export function ExceptionDialog({
       footer={
         <>
           <Button variant="secondary" onClick={onClose} disabled={saving}>Cancel</Button>
-          <Button type="submit" form="finding-exception-form" loading={saving} disabled={!form.policy_id}>
+          <Button type="submit" form="finding-exception-form" loading={saving} disabled={!complete}>
             {saving ? 'Creating...' : 'Create Exception'}
           </Button>
         </>
@@ -81,15 +91,24 @@ export function ExceptionDialog({
             Approver
             <input value={form.approver} onChange={set('approver')} className={fieldClasses()} placeholder="security approver" required />
           </label>
-          <label className={label}>
-            Policy
-            <select value={form.policy_id} onChange={set('policy_id')} className={fieldClasses()} required>
-              <option value="">Select an exact policy…</option>
-              {activeProfiles.map((profile) => (
-                <option key={profile.id} value={profile.id}>{profile.name} ({profile.environment})</option>
-              ))}
-            </select>
-          </label>
+          {policyRequired ? (
+            <label className={label}>
+              Policy
+              <select value={form.policy_id} onChange={set('policy_id')} className={fieldClasses()} required>
+                <option value="">Select an exact policy…</option>
+                {activeProfiles.map((profile) => (
+                  <option key={profile.id} value={profile.id}>{profile.name} ({profile.environment})</option>
+                ))}
+              </select>
+            </label>
+          ) : (
+            <div className={label} data-testid="exception-default-policy">
+              Policy
+              <p className="text-xs text-gray-500">
+                No policy profile is configured, so this exception applies under the default release policy.
+              </p>
+            </div>
+          )}
           <label className={label}>
             Expires in days
             <input value={form.expires_days} onChange={set('expires_days')} className={fieldClasses()} inputMode="numeric" min="1" required />
@@ -103,6 +122,7 @@ export function ExceptionDialog({
           Compensating controls
           <textarea value={form.compensating_controls} onChange={set('compensating_controls')} className={`min-h-20 ${fieldClasses()}`} placeholder="Controls, monitoring, or rollout constraints" required />
         </label>
+        {!complete && <p className="text-xs text-gray-500" data-testid="exception-incomplete">Every field is required before the exception can be created.</p>}
       </form>
     </Modal>
   )

@@ -4,13 +4,13 @@ import { pathSegment } from '@/lib/apiPath.mjs'
 import { CopyButton } from '@/components/CopyButton'
 import { useEffect, useMemo, useState, Suspense, useRef } from 'react'
 import { usePoll } from '@/lib/usePoll'
-import { isAbortError } from '@/lib/fetchLayer.mjs'
+import { isAbortError, isNotFoundError } from '@/lib/fetchLayer.mjs'
 import { useParams, useRouter, useSearchParams } from 'next/navigation'
 import Link from '@/components/WorkspaceLink'
 import { API_URL, getScan, getScans, getScanLogs, getDeviceScanActivity, getHealth, getFindingsPage, getScanDeploymentDecision, getTargetPosture, replayAiScan, getAiScanCampaignHistory, formatDuration, formatDate, type AiScanCampaignHistory, type DeploymentDecision, type Finding, type TargetPosture } from '@/lib/api'
 import { TargetPostureCard } from '@/components/TargetPostureCard'
 import { SEVERITY_BADGE_STYLES, SEVERITY_LEVELS, type SeverityLevel } from '@/lib/constants'
-import { Card, ErrorState, PageHeader, gradeTextColor } from '@/components/ui'
+import { Card, ErrorState, PageHeader, RecordNotFound, gradeTextColor } from '@/components/ui'
 import ReportView, { ReportDownloads } from '@/components/ReportView'
 import FindingCard from '@/components/FindingCard'
 import { SectionTabPanel, SectionTabs, useSectionTab, type SectionTab } from '@/components/ui/SectionTabs'
@@ -22,8 +22,12 @@ import { assuranceClass, scanAssurance } from '@/lib/assurance.mjs'
 import { normalizeParentCoverage } from '@/lib/deferredWorkContracts'
 import { boundedDisplayText } from '@/lib/targetChoices'
 import { buildFindingLinkageIndex, linkedPersistedFinding } from '@/lib/findingLinkage'
-import { blockerOrigin, blockerProvenanceText, carriedOverFromDecision, carriedSourceText, carriedOverSummary, domainRatePresentation, groupScanFindings, queueWaitPresentation, isProvenFinding, reconciledScanFindings, releaseLine, scanFindingCounts, scanFindingCountsText, scanLogEntry, scanPhasePresentation, scanResultPresentation } from '@/lib/scanDetailPresentation.mjs'
+import { blockerOrigin, blockerProvenanceText, carriedOverFromDecision, carriedSourceText, carriedOverSummary, domainRatePresentation, groupScanFindings, queueWaitPresentation, isProvenFinding, reconciledScanFindings, releaseLine, scanFindingCounts, scanFindingCountsText, scanLogEntry, scanPhasePresentation, scanResultPresentation, scanStepLabel, scanStepStatusLabel } from '@/lib/scanDetailPresentation.mjs'
+import { checkFamilyLabel } from '@/lib/checkFamilyLabel'
 import { emptyScanLogState, mergeScanLogReply } from '@/lib/scanLogDelta.mjs'
+import { isDiscoveryRun } from '@/lib/discoveryRun.mjs'
+import { scanCountLine } from '@/lib/scanCountLine.mjs'
+import { releaseProfileReason } from '@/lib/releaseProfile.mjs'
 import { scanFailureRecommendation } from '@/lib/scanFailureRecommendation'
 import { failedScanHeadline } from '@/lib/authorizationStop'
 
@@ -164,6 +168,11 @@ function ScanVerdictCard({ scan, buildVersion, buildFingerprint, decision, targe
   const hasGrade = Boolean(scorePresentation.grade)
   const hasScore = typeof scorePresentation.score === 'number'
   const scanTypeLabel = formatScanTypeLabel(scan)
+  // A discovery run maps the target with active testing off: it is headed as that, not as a DAST scan.
+  const discoveryRun = isDiscoveryRun(scan)
+  // The headline, the release line, the severity chips and the Findings tab each give a count of
+  // this run's findings; this line says how they relate.
+  const countLine = scanCountLine(scan)
   const duration = scan.duration_seconds ? formatDuration(scan.duration_seconds) : null
   const scanVersion: string | null = scan?.result?.scanner_version || null
   const scanFingerprint: string | null =
@@ -205,7 +214,9 @@ function ScanVerdictCard({ scan, buildVersion, buildFingerprint, decision, targe
       <section className={`border-b p-6 ${conclusionTone}`} aria-labelledby="scan-conclusion-heading">
         <div className="flex flex-wrap items-start justify-between gap-4">
           <div className="max-w-3xl">
-            <p className="text-xs font-semibold uppercase tracking-wide text-gray-400">Run conclusion</p>
+            <p className="text-xs font-semibold uppercase tracking-wide text-gray-400">
+              {discoveryRun ? 'Discovery run conclusion' : 'Run conclusion'}
+            </p>
             <h2 id="scan-conclusion-heading" className="mt-2 text-2xl font-semibold text-white">
               {resultPresentation.headline}
             </h2>
@@ -215,6 +226,9 @@ function ScanVerdictCard({ scan, buildVersion, buildFingerprint, decision, targe
                 <span className={`rounded-sm px-2 py-0.5 text-xs font-semibold uppercase ${releaseClass}`}>{release.verdict.replace(/_/g, ' ')}</span>
                 <span>{release.text}</span>
               </p>
+            )}
+            {countLine && (
+              <p className="mt-3 text-sm text-gray-300" data-testid="scan-count-line">{countLine}</p>
             )}
             <p className={`mt-3 text-sm font-medium ${resultPresentation.confidenceTone === 'qualified' ? 'text-amber-200' : assuranceClass(assurance?.band)}`}>
               {resultPresentation.confidence}
@@ -235,7 +249,9 @@ function ScanVerdictCard({ scan, buildVersion, buildFingerprint, decision, targe
             )}
           </div>
           <div className="text-right text-xs text-gray-500">
-            {scanTypeLabel && <p className="text-sm text-gray-300">{scanTypeLabel} scan</p>}
+            {discoveryRun
+              ? <p className="text-sm text-gray-300" data-testid="scan-kind">Discovery run</p>
+              : scanTypeLabel && <p className="text-sm text-gray-300" data-testid="scan-kind">{scanTypeLabel} scan</p>}
             {duration && <p className="mt-0.5">Completed in {duration}</p>}
             <p className="mt-0.5 capitalize">{scopeSummary}</p>
             {/* Whose traffic the findings describe is part of reading them, so it stays beside the conclusion. */}
@@ -425,7 +441,7 @@ function ScanRunLimitsPanel({ scan }: { scan: any }) {
           <div><dt className="inline text-gray-500">Testing </dt><dd className="inline text-gray-200">{resultPresentation.testingSummary}</dd></div>
           <div><dt className="inline text-gray-500">HTTP requests used </dt><dd className="inline text-gray-200">{resultPresentation.requestCount === null ? 'Unavailable' : resultPresentation.requestCount.toLocaleString()}</dd></div>
           {resultPresentation.resolvedFamilies.length > 0 && (
-            <div><dt className="inline text-gray-500">Selected check families </dt><dd className="inline text-gray-200">{resultPresentation.resolvedFamilies.map((family: string) => family.replaceAll('_', ' ')).join(', ')}</dd></div>
+            <div><dt className="inline text-gray-500">Selected check families </dt><dd className="inline text-gray-200">{resultPresentation.resolvedFamilies.map((family: string) => checkFamilyLabel(family)).join(', ')}</dd></div>
           )}
           {resultPresentation.templateWindows && (
             <div data-testid="template-windows"><dt className="inline text-gray-500">Active template windows </dt><dd className="inline text-gray-200">{resultPresentation.templateWindows.detail}</dd></div>
@@ -455,13 +471,13 @@ function ScanRunLimitsPanel({ scan }: { scan: any }) {
               {resultPresentation.incompleteFamilies.length > 0 && (
                 <li>
                   • Check {resultPresentation.incompleteFamilies.length === 1 ? 'family' : 'families'} that did not finish:{' '}
-                  <span className="font-medium text-amber-100">{resultPresentation.incompleteFamilies.join(', ')}</span>.
+                  <span className="font-medium text-amber-100">{resultPresentation.incompleteFamilies.map((family: string) => checkFamilyLabel(family)).join(', ')}</span>.
                 </li>
               )}
               {resultPresentation.candidateGapFamilies.length > 0 && (
                 <li>
                   • Selected check families with no testable candidates recorded:{' '}
-                  <span className="font-medium text-amber-100">{resultPresentation.candidateGapFamilies.join(', ')}</span>.
+                  <span className="font-medium text-amber-100">{resultPresentation.candidateGapFamilies.map((family: string) => checkFamilyLabel(family)).join(', ')}</span>.
                   Their absence of findings does not establish that those vulnerability classes were tested.
                   {resultPresentation.injectionCandidateGap ? ` ${resultPresentation.injectionCandidateGap}` : ''}
                 </li>
@@ -521,7 +537,10 @@ function DeploymentDecisionCard({
           <div className="mt-2 flex flex-wrap items-center gap-2 text-xs">
             <span className={`rounded-sm px-2 py-1 font-medium uppercase ${verdictClass}`}>{verdict.replace(/_/g, ' ')}</span>
             {decision?.policy_profile && (
-              <span className="rounded-sm bg-gray-800 px-2 py-1 text-gray-300"><span className="text-gray-500">profile</span> {String(decision.policy_profile)}</span>
+              <span className="rounded-sm bg-gray-800 px-2 py-1 text-gray-300" data-testid="release-profile">
+                <span className="text-gray-500">profile</span> {String(decision.policy_profile)}
+                {releaseProfileReason(decision) && <span className="text-gray-500"> · {releaseProfileReason(decision)}</span>}
+              </span>
             )}
             {decision?.policy_name && (
               <span className="rounded-sm bg-gray-800 px-2 py-1 text-gray-300"><span className="text-gray-500">policy</span> {String(decision.policy_name)}</span>
@@ -1804,9 +1823,9 @@ function ExecutionPlanCard({ scan }: { scan: any }) {
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-2">
-          <span className={`rounded-sm px-2 py-1 text-xs ${parity.consistent === false ? 'bg-red-500/10 text-red-300' : 'bg-green-500/10 text-green-300'}`}>
-            {parity.consistent === false ? 'Execution record mismatch' : 'Same local / fleet contract'}
-          </span>
+          {parity.consistent === false && (
+            <span className="rounded-sm bg-red-500/10 px-2 py-1 text-xs text-red-300">Execution record mismatch</span>
+          )}
           <a
             href={apiRecordUrl}
             target="_blank"
@@ -1816,24 +1835,6 @@ function ExecutionPlanCard({ scan }: { scan: any }) {
             Open execution record
           </a>
         </div>
-      </div>
-
-      <div className="mt-3 grid gap-2 text-[11px] text-gray-500 md:grid-cols-2">
-        <div className="rounded-sm border border-gray-800 bg-gray-950/50 p-2">
-          <span className="text-gray-400">Plan:</span>{' '}
-          <span className="font-mono">{String(explanation?.plan_digest || 'pending')}</span>
-        </div>
-        <div className="rounded-sm border border-gray-800 bg-gray-950/50 p-2">
-          <span className="text-gray-400">Plan version:</span>{' '}
-          {String(planRevision.schema_version || explanation?.schema_version || 'unknown')}
-          {planRevision.revision !== undefined ? ` · revision ${Number(planRevision.revision)}` : ''}
-        </div>
-        {planRevision.continuation_plan_digest && (
-          <div className="rounded-sm border border-gray-800 bg-gray-950/50 p-2 md:col-span-2">
-            <span className="text-gray-400">Continuation:</span>{' '}
-            <span className="font-mono">{String(planRevision.continuation_plan_digest)}</span>
-          </div>
-        )}
       </div>
 
       {reliability.reliable === false && (
@@ -1888,7 +1889,7 @@ function ExecutionPlanCard({ scan }: { scan: any }) {
 
       <details className="mt-4 rounded-sm border border-gray-800 bg-gray-950/40">
         <summary className="cursor-pointer px-3 py-2 text-xs font-medium text-gray-300 hover:text-white">
-          Capability details ({actions.length})
+          Step details ({actions.length})
         </summary>
         <div className="divide-y divide-gray-800 border-t border-gray-800">
           {actions.map((action: any) => {
@@ -1901,10 +1902,11 @@ function ExecutionPlanCard({ scan }: { scan: any }) {
             return (
               <div id={occurrenceId} key={occurrenceId} className="p-3">
                 <div className="flex flex-wrap items-center gap-2">
-                  <span className="text-xs font-medium text-gray-200">{String(action.label || action.action_id)}</span>
+                  <span className="text-xs font-medium text-gray-200">{scanStepLabel(action)}</span>
                   <span className={`rounded-sm px-1.5 py-0.5 text-[11px] ${executionStatusClass(String(action.status || 'planned'))}`}>
-                    {String(action.status || 'planned').replace(/_/g, ' ')}
+                    {scanStepStatusLabel(action.status || 'planned')}
                   </span>
+                  <span className="font-mono text-[11px] text-gray-600">{String(action.action_id || '')}</span>
                   {action.required && <span className="rounded-sm bg-gray-800 px-1.5 py-0.5 text-[11px] text-gray-400">required</span>}
                 </div>
                 {action.reason && <p className="mt-1 text-xs text-amber-300/80">{String(action.reason)}</p>}
@@ -1923,6 +1925,34 @@ function ExecutionPlanCard({ scan }: { scan: any }) {
           })}
         </div>
       </details>
+
+      {/* Identifiers of the plan record: for support and audit, not for reading the result. */}
+      <details className="mt-4 rounded-sm border border-gray-800 bg-gray-950/40" data-testid="plan-technical-details">
+        <summary className="cursor-pointer px-3 py-2 text-xs font-medium text-gray-300 hover:text-white">
+          Technical details
+        </summary>
+        <div className="grid gap-2 border-t border-gray-800 p-3 text-[11px] text-gray-500 md:grid-cols-2">
+          <div className="rounded-sm border border-gray-800 bg-gray-950/50 p-2 md:col-span-2">
+            <span className="text-gray-400">Plan digest:</span>{' '}
+            <span className="font-mono break-all">{String(explanation?.plan_digest || 'pending')}</span>
+          </div>
+          <div className="rounded-sm border border-gray-800 bg-gray-950/50 p-2">
+            <span className="text-gray-400">Plan format:</span>{' '}
+            {String(planRevision.schema_version || explanation?.schema_version || 'unknown')}
+            {planRevision.revision !== undefined ? ` · revision ${Number(planRevision.revision)}` : ''}
+          </div>
+          <div className="rounded-sm border border-gray-800 bg-gray-950/50 p-2">
+            <span className="text-gray-400">Execution record:</span>{' '}
+            {parity.consistent === false ? 'Execution record mismatch' : 'Same local / fleet contract'}
+          </div>
+          {planRevision.continuation_plan_digest && (
+            <div className="rounded-sm border border-gray-800 bg-gray-950/50 p-2 md:col-span-2">
+              <span className="text-gray-400">Continuation digest:</span>{' '}
+              <span className="font-mono break-all">{String(planRevision.continuation_plan_digest)}</span>
+            </div>
+          )}
+        </div>
+      </details>
     </Card>
   )
 }
@@ -1935,6 +1965,8 @@ function ScanDetailContent() {
   const [scan, setScan] = useState<any | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
+  // The API answered 404 for this id: nothing to wait for, so the read is not repeated.
+  const [missing, setMissing] = useState(false)
   const [retryNonce, setRetryNonce] = useState(0)
   const [logs, setLogs] = useState<string[]>([])
   const [logsPartial, setLogsPartial] = useState(false)
@@ -2012,6 +2044,7 @@ function ScanDetailContent() {
     setLogs([])
     setLogsPartial(false)
     setLoading(true)
+    setMissing(false)
   }, [scanId])
 
   // The scan record: every 5 s while it is pending or running, then the loop stops (idle null).
@@ -2025,13 +2058,18 @@ function ScanDetailContent() {
       setError(null)
     } catch (err) {
       if (isAbortError(err)) return
+      // No such scan: say so once. Returning (not throwing) ends the loop instead of backing off.
+      if (isNotFoundError(err) && !scanRef.current) {
+        setMissing(true)
+        return
+      }
       // A failed background refresh keeps the page; only a scan never loaded shows the error.
       if (!scanRef.current) setError('Failed to load scan details')
       throw err
     } finally {
       if (!signal.aborted) setLoading(false)
     }
-  }, { intervalMs: SCAN_REFRESH_MS, idleIntervalMs: null, live: scan === null || scanLive, deps: [scanId, retryNonce] })
+  }, { intervalMs: SCAN_REFRESH_MS, idleIntervalMs: null, live: scan === null || scanLive, enabled: !missing, deps: [scanId, retryNonce] })
 
   // Read only new numbered lines. Older engines and aggregated parent/device feeds keep
   // their full-tail replacement behavior. Quiet polls back off; a terminal status gets a final read.
@@ -2307,6 +2345,17 @@ function ScanDetailContent() {
       <div className="flex items-center justify-center h-64">
         <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-500"></div>
       </div>
+    )
+  }
+
+  if (missing && !scan) {
+    return (
+      <RecordNotFound
+        title="Scan not found"
+        message="There is no scan at this address."
+        listHref={backUrl}
+        listLabel="Back to scans"
+      />
     )
   }
 

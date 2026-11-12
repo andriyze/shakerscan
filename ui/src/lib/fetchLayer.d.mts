@@ -6,6 +6,7 @@ export class ApiError extends Error {
   detail: unknown
 }
 export function isAbortError(error: unknown): boolean
+export function isNotFoundError(error: unknown): boolean
 
 export interface GetJsonOptions {
   signal?: AbortSignal

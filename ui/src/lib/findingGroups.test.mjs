@@ -57,6 +57,9 @@ test('a different subject, proof, or triage state is a different group', () => {
 test('the location names the route and parameter names, never their values', () => {
   assert.equal(findingLocation({ id: 'x', url: 'https://app.test/rest/search?q=secret-value&lang=en&q=again' }), '/rest/search?q&lang')
   assert.equal(findingLocation({ id: 'x', url: 'https://app.test' }), '/')
+  // A doubled slash after the host reads as one; a doubled slash inside the path is kept.
+  assert.equal(findingLocation({ id: 'x', url: 'https://app.test//api/.env' }), '/api/.env')
+  assert.equal(findingLocation({ id: 'x', url: 'https://app.test/a//b?x=1' }), '/a//b?x')
   assert.equal(findingLocation({ id: 'x' }), '')
   assert.equal(findingHost({ id: 'x', url: 'https://app.test:8443/a' }), 'app.test:8443')
   assert.equal(findingSubject({ id: 'x', ai_target_name: 'support-bot' }), 'support-bot')

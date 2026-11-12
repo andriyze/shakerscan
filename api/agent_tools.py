@@ -1297,6 +1297,13 @@ def httpx_credential_config_bytes(trusted_headers: Mapping[str, Any]) -> bytes:
     return encoded
 
 
+# A credential piece shorter than this is not masked on its own in scanner output: it protects
+# nothing (a few thousand guesses find it), and masking every occurrence of a value such as a
+# target's ``sess=1`` cookie rewrote each "1" in every URL, host and port of the output, so a
+# port read as ``***8999`` and the Scan's finalization failed.
+MIN_REDACTION_PIECE = 6
+
+
 def scanner_credential_redaction_values(headers: Mapping[str, Any] | None) -> tuple[str, ...]:
     """Worker-local reflection redaction, including supported Authorization and Cookie forms."""
     values = set()
@@ -1313,7 +1320,7 @@ def scanner_credential_redaction_values(headers: Mapping[str, Any] | None) -> tu
                     pass
         if str(name).lower() == "cookie":
             values.update(part.partition("=")[2].strip().strip('"') for part in value.split(";"))
-    return tuple(value for value in values if value)
+    return tuple(value for value in values if len(value) >= MIN_REDACTION_PIECE)
 
 
 def build_scanner_argv(
@@ -2084,6 +2091,30 @@ def scanner_file_request_counter(name: str, scratch_dir: str | None) -> dict[str
         # went to a sign-in page: no header value, body or URL is kept.
         **({"baseline": baseline} if baseline is not None else {}),
     }
+
+
+def scanner_wire_log_transactions(
+    name: str, scratch_dir: str | None, *, origin: str,
+) -> tuple[list[dict[str, Any]], int] | None:
+    """The transactions the tool's own wire log recorded to ``origin`` (``tool_wire_log``), with
+    the count left out past the bound, or None without a readable log."""
+    scanner = str(name or "").strip().lower()
+    filename = SCANNER_WIRE_LOG_FILES.get(scanner)
+    if not filename or not scratch_dir:
+        return None
+    path = os.path.join(str(scratch_dir), filename)
+    try:
+        if os.path.getsize(path) > _MAX_WIRE_LOG_BYTES:
+            return None
+        with open(path, "r", encoding="utf-8", errors="replace") as handle:
+            text = handle.read()
+    except OSError:
+        return None
+    try:
+        from scanner_tools.tool_wire_log import wire_log_transactions
+    except ModuleNotFoundError:  # package import in host-side tests
+        from scanner.scanner_tools.tool_wire_log import wire_log_transactions
+    return wire_log_transactions(scanner, text, origin)
 
 
 def scanner_request_reservation(name: str, options: dict[str, Any] | None = None) -> int:

@@ -82,7 +82,9 @@ test('docs and mobile operations expose truthful accessible labels', () => {
   assert.match(docs, /h1: \(\{ children \}\) => \(\s*<h2/)
   assert.match(dashboard, />Emergency clear<\/span>/)
   assert.match(dashboard, /ready to scan/)
-  assert.match(sidebar, /Show advanced sections \(Records, Governance, Developer, Model Intake\)/)
+  // The row that opens the less used pages says whether it is open and names the list it opens.
+  assert.match(sidebar, /aria-expanded=\{showAll\}\s+aria-controls=\{moreId\}/)
+  assert.match(sidebar, /<div id=\{moreId\} ref=\{moreRef\} hidden=\{!showAll\}/)
   assert.doesNotMatch(sidebar, /Interactive Testing, Leads/)
 })
 
@@ -120,16 +122,18 @@ test('scoped dashboard keeps global activity visible without attributing it to a
   assert.match(dashboard, /isGlobalActivity\(event\.target_id, event\.target_url\)/)
   assert.match(dashboard, /return !targetId && !targetUrl/)
   assert.match(dashboard, /Recent changes are shown per cohort/)
-  assert.match(dashboard, /Observed posture \{scan\.grade\}/)
+  assert.match(dashboard, /Observed posture \{grade\.letter\}/)
   assert.match(dashboard, /assurance\.label.*assurance\.score/)
   assert.match(targets, /gradeTextColor\(grade\)/)
-  assert.match(targets, /gradeTextColor\(origin\.last_grade\)/)
+  // A web application's chip colours the letter of its grade, as the last-scan cell does.
+  assert.match(targets, /observedGrade\(origin\.last_grade\)/)
+  assert.match(targets, /gradeTextColor\(grade\.letter\)/)
   assert.match(targets, /· review coverage/)
   const scans = read('src/app/scans/page.tsx')
   assert.match(scans, />Observed posture</)
   assert.match(scans, /Examination strength \$\{assurance\.score\}\/100/)
   assert.match(scans, /scan\.status !== 'completed'/)
-  assert.match(scans, /asterisk marks assurance limitations/)
+  assert.match(scans, /grade\.provisional \? PROVISIONAL_GRADE_TITLE : OBSERVED_GRADE_TITLE/)
   assert.doesNotMatch(dashboard, /text-lg font-semibold[^\n]+scan\.grade/)
 })
 

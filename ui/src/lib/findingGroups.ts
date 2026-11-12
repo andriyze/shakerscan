@@ -181,7 +181,9 @@ export function findingHost(finding: GroupableFinding): string {
 
 /**
  * Where on the subject it was observed: the path plus the names (never values) of any query
- * parameters. Titles repeat; the location is what tells rows apart.
+ * parameters. Titles repeat; the location is what tells rows apart. A path that begins with a
+ * doubled slash (a check appended its path to an origin that already ended in one) reads with
+ * one, so the row shows `host/path`; the row's title and the finding page keep the exact address.
  */
 export function findingLocation(finding: GroupableFinding): string {
   const raw = String(finding.url || '')
@@ -189,7 +191,8 @@ export function findingLocation(finding: GroupableFinding): string {
   try {
     const parsed = new URL(raw)
     const names = Array.from(new Set(parsed.searchParams.keys())).slice(0, 4)
-    return `${parsed.pathname || '/'}${names.length ? `?${names.join('&')}` : ''}`
+    const path = (parsed.pathname || '/').replace(/^\/{2,}/, '/')
+    return `${path}${names.length ? `?${names.join('&')}` : ''}`
   } catch {
     return raw.length > 80 ? `${raw.slice(0, 77)}…` : raw
   }

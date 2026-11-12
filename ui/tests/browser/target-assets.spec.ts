@@ -163,6 +163,62 @@ test('ASSET-INTERP-001 the asset page lists interpretations and negative results
   expect(writes).toEqual([])
 })
 
+const changeReport = {ok:true,kind:'changes',target_id:assetId,since:{kind:'last_hunt',at:'2026-01-02T03:04:05+00:00',resolved:true},sends_traffic:false,
+  sections:{endpoints:{added:{count:1,at_least:false,items:[{method:'GET',path:'/api/orders/<b>new</b>',auth_state:'authenticated'}]},removed:{count:0,at_least:false,items:[]},auth_surface:{significant:false}},
+    deployment:{compared:true,changes:[{field:'technology_version',before:'nginx 1.24',after:'nginx 1.26',significance:'significant'}]},responses:{changed:[]},services:{added:[],no_longer_observed:[]},findings:{new:{count:2,at_least:false}},subdomains:{new_targets:[]}},
+  knowledge:{active_by_applicability:{applicable:1,needs_revalidation:1},affected:[{id:'00000000-0000-4000-8000-000000000301',kind:'next_step',applicability:'needs_revalidation',caused_by:[{type:'deployment',key:'scan',field:'technology_version'}]}],affected_truncated:false}}
+
+test('ASSET-CHANGES-001 what changed on a target is read and shown on its page, on request', async ({page}) => {
+  const writes = await mock(page)
+  const reads: string[] = []
+  await page.route(`${MOCK_API_ORIGIN}/targets/${assetId}/knowledge/changes*`, async route => {
+    reads.push(new URL(route.request().url()).search)
+    return route.fulfill({json:changeReport})
+  })
+  await page.goto(`/targets/${assetId}/asset`)
+  const card = page.getByTestId('target-changes')
+  await expect(card.getByRole('heading',{name:'What changed',exact:true})).toBeVisible()
+  await expect(card.getByText(/Nothing is sent to the target/)).toBeVisible()
+  // Nothing is read until the person asks.
+  expect(reads).toEqual([])
+  await card.getByRole('button',{name:'See what changed',exact:true}).click()
+  await expect(card.getByText(/^Since the last Hunt \(.+\):$/)).toBeVisible()
+  await expect(card.getByRole('heading',{name:'Routes added (1)',exact:true})).toBeVisible()
+  // A path observed from the target is text, not markup.
+  await expect(card.getByText('GET /api/orders/<b>new</b> (authenticated)',{exact:true})).toBeVisible()
+  await expect(card.getByText('technology version: nginx 1.24 → nginx 1.26 (significant)',{exact:true})).toBeVisible()
+  await expect(card.getByText('2 new findings',{exact:true})).toBeVisible()
+  await expect(card.getByText('Next step: needs re-testing (deployment scan technology version)',{exact:true})).toBeVisible()
+  await expect(card.getByText('Active interpretations: 1 still applies, 1 needs re-testing.',{exact:true})).toBeVisible()
+  expect(reads).toEqual(['?since=last_hunt&limit=25'])
+  await card.getByLabel('Compare with').selectOption('release')
+  await card.getByRole('button',{name:'See what changed',exact:true}).click()
+  await expect(card.getByRole('heading',{name:'Routes added (1)',exact:true})).toBeVisible()
+  expect(reads).toEqual(['?since=last_hunt&limit=25','?since=release&limit=25'])
+  // The terminal command stays as an alternative, and dismissing a finding is pointed at its page.
+  await expect(card.getByText('shakerscan knowledge changes',{exact:true})).toBeVisible()
+  await expect(page.getByRole('link',{name:"this target's findings",exact:true}))
+    .toHaveAttribute('href',`/findings?target_id=${assetId}&status=all&freshness=all`)
+  expect(writes).toEqual([])
+  expect(await page.evaluate(() => document.documentElement.scrollWidth>document.documentElement.clientWidth)).toBe(false)
+})
+
+test('ASSET-CHANGES-002 with nothing to compare with, and when the read fails, the card says so', async ({page}) => {
+  await mock(page)
+  let fail = false
+  await page.route(`${MOCK_API_ORIGIN}/targets/${assetId}/knowledge/changes*`, async route => fail
+    ? route.fulfill({status:422,json:{detail:{error:'invalid_since',message:'No release is recorded for this target.'}}})
+    : route.fulfill({json:{...changeReport,since:{kind:'last_hunt',at:null,resolved:false,note:'No earlier Hunt on this target; nothing to compare with.'},sections:{},knowledge:{active_by_applicability:{},affected:[]}}}))
+  await page.goto(`/targets/${assetId}/asset`)
+  const card = page.getByTestId('target-changes')
+  await card.getByRole('button',{name:'See what changed',exact:true}).click()
+  await expect(card.getByText('No earlier Hunt on this target; nothing to compare with.',{exact:true})).toBeVisible()
+  fail = true
+  await card.getByRole('button',{name:'See what changed',exact:true}).click()
+  await expect(card.getByRole('alert')).toBeVisible()
+  await expect(card.getByText('No earlier Hunt on this target; nothing to compare with.',{exact:true})).toHaveCount(0)
+})
+
 test('ASSET-007 target details (owner, environment, cohort) are edited on the target page', async ({page}) => {
   // Moved from the removed Exposure triage drawer in 2.10: the only place to set these after creation.
   await mock(page)
@@ -207,3 +263,61 @@ for (const width of [390, 1440]) {
     expect(String(web.url)).toMatch(/^http:\/\/asset\.example\.test:3000/)
   })
 }
+
+test('ASSET-HISTORY-001 the history names what each record is in words', async ({page}) => {
+  await mock(page)
+  await page.route(`${MOCK_API_ORIGIN}/targets/${assetId}/history*`, route => route.fulfill({json:{asset_id:assetId,kind:'scans',total:2,offset:0,limit:25,items:[
+    {id:'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1',target_id:assetId,target_url:'https://fixture.example.test',run_kind:'web_dast',status:'completed',created_at:'2026-01-02T03:04:05Z'},
+    {id:'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa2',target_id:'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',target_url:'https://fixture.example.test:8443',run_kind:'device_posture',status:'completed',created_at:'2026-01-02T03:04:05Z'},
+  ]}}))
+  await page.goto(`/targets/${assetId}/asset`, {waitUntil:'domcontentloaded'})
+  const history = page.locator('section', {has: page.getByRole('heading', {name:'Asset history', exact:true})})
+  await expect(history.getByText('Web scan · Host', {exact:true})).toBeVisible()
+  await expect(history.getByText('Network discovery · Application service', {exact:true})).toBeVisible()
+  await expect(history).not.toContainText('web_dast')
+  await expect(history).not.toContainText('device_posture')
+})
+
+test('ASSET-009 a Targets row shows the whole host name at laptop width', async ({page}) => {
+  await mock(page)
+  const host = 'app.staging.example.test'
+  await page.route(`${MOCK_API_ORIGIN}/targets/inventory*`, route => route.fulfill({json:{targets:[{...target,name:host,url:`host://${host}`,locator:host}],total:1,offset:0,limit:50}}))
+  await page.setViewportSize({width:1280,height:800})
+  await page.goto('/targets')
+  const name = page.getByTestId('target-asset-row').getByRole('link',{name:host,exact:true})
+  await expect(name).toBeVisible()
+  // Nothing of the name is cut off sideways or clamped away below.
+  expect(await name.evaluate(element => element.scrollWidth <= element.clientWidth && element.scrollHeight <= element.clientHeight + 1)).toBe(true)
+  expect(await page.evaluate(() => document.documentElement.scrollWidth>document.documentElement.clientWidth)).toBe(false)
+})
+
+test('ASSET-010 a very long target label stays inside its row', async ({page}) => {
+  await mock(page)
+  const label = 'a'.repeat(120)
+  await page.route(`${MOCK_API_ORIGIN}/targets/inventory*`, route => route.fulfill({json:{targets:[{...target,name:label,url:`host://${label}`,locator:label}],total:1,offset:0,limit:50}}))
+  await page.setViewportSize({width:1280,height:800})
+  await page.goto('/targets')
+  const row = page.getByTestId('target-asset-row')
+  const name = row.getByRole('link',{name:label,exact:true})
+  await expect(name).toBeVisible()
+  // Two lines at most, inside the row, and the page does not scroll sideways.
+  expect(await name.evaluate(element => element.clientHeight <= 2 * parseFloat(getComputedStyle(element).lineHeight) + 1)).toBe(true)
+  expect(await row.evaluate(element => element.scrollWidth <= element.clientWidth)).toBe(true)
+  expect(await page.evaluate(() => document.documentElement.scrollWidth>document.documentElement.clientWidth)).toBe(false)
+})
+
+test('ASSET-011 a provisional grade on a Targets row is the letter, with the reason in a tooltip', async ({page}) => {
+  await mock(page)
+  const scanned = '2026-01-02T03:04:05Z'
+  await page.route(`${MOCK_API_ORIGIN}/targets/inventory*`, route => route.fulfill({json:{targets:[{...target,last_scanned_at:scanned,
+    origins:[{id:originId,url:'https://asset.example.test',is_active:true,last_grade:'F*',last_scanned_at:scanned}]}],total:1,offset:0,limit:50}}))
+  await page.setViewportSize({width:1280,height:800})
+  await page.goto('/targets')
+  const row = page.getByTestId('target-asset-row')
+  // The web application's chip and the last-scan cell show the same letter; neither shows "F*".
+  for (const id of ['origin-grade', 'last-scan-grade']) {
+    await expect(row.getByTestId(id).locator('visible=true')).toHaveText('F')
+    await expect(row.getByTestId(id).locator('visible=true')).toHaveAttribute('title', /^Provisional: the run was incomplete/)
+  }
+  await expect(row).not.toContainText('F*')
+})

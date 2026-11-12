@@ -12,7 +12,9 @@ import { Suspense, useCallback, useEffect, useRef, useState } from 'react'
 import { useParams, useSearchParams, useRouter } from 'next/navigation'
 import { Activity, Bot, ChevronDown, ChevronUp, CircleHelp, ExternalLink, FileJson, Globe, KeyRound, MapPin, Pencil, Router, Trash2, Upload, Wifi, WifiOff } from 'lucide-react'
 import { changeDeviceLocator, createDeviceCredential, createDeviceRequestCollection, deactivateDeviceCredential, deactivateDeviceRequestCollection, formatDate, getDevice, getDeviceCredentials, getDeviceReadiness, getDeviceRequestCollection, getDeviceRequestCollections, getDeviceScanActivity, getScan, listDeviceAgentSessions, renameDevice, scanDevice, type DeviceAgentRunSummary, type DeviceCredentialProfile, type DeviceDetailResponse, type DeviceRequestCollection, type DeviceRequestCollectionRequest, type DeviceScanActivity, type DeviceService, type Scan } from '@/lib/api'
-import { Button, Card, EmptyState, ErrorState, Field, Input, Modal, PageHeader, ScanStatusBadge, Select, TableSkeleton, Textarea, useToast } from '@/components/ui'
+import { Button, Card, EmptyState, ErrorState, Field, Input, Modal, PageHeader, RecordNotFound, ScanStatusBadge, Select, TableSkeleton, Textarea, useToast } from '@/components/ui'
+import { isNotFoundError } from '@/lib/fetchLayer.mjs'
+import { authorizedByPhrase } from '@/lib/assetAuthorization.mjs'
 import { devicePortCoverage, deviceReachabilityServiceSummary, deviceScorePresentation, deviceServiceDetails, deviceTargetScorePresentation } from '@/lib/deviceScanPresentation.mjs'
 import { networkScanTcpHints } from '@/lib/networkScanHints.mjs'
 import { usePoll } from '@/lib/usePoll'
@@ -88,6 +90,7 @@ function DeviceDetailContent() {
   const [data, setData] = useState<DeviceDetailResponse | null>(null)
   const [loading, setLoading] = useState(true)
   const [failed, setFailed] = useState(false)
+  const [missing, setMissing] = useState(false)
   const [unavailableParts, setUnavailableParts] = useState<DevicePagePart[]>([])
   const [retryingParts, setRetryingParts] = useState(false)
   const [workerReady, setWorkerReady] = useState(false)
@@ -129,9 +132,12 @@ function DeviceDetailContent() {
   const load = useCallback(async () => {
     // Only the device itself is essential: a side request that fails (credentials, collections,
     // Hunt history, readiness) marks its own section and keeps the rest of the page.
-    const [device, credentialData, collectionData, huntData, readinessData] = await Promise.allSettled([getDevice(deviceId), getDeviceCredentials(deviceId), getDeviceRequestCollections(deviceId), listDeviceAgentSessions({ device_target_id: deviceId, limit: 5 }), getDeviceReadiness()])
+    // The parts stored under the device are read once the device answered, so an id that is no
+    // device costs one refused read, not three.
+    const deviceRead = getDevice(deviceId)
+    const [device, credentialData, collectionData, huntData, readinessData] = await Promise.allSettled([deviceRead, deviceRead.then(() => getDeviceCredentials(deviceId)), deviceRead.then(() => getDeviceRequestCollections(deviceId)), listDeviceAgentSessions({ device_target_id: deviceId, limit: 5 }), getDeviceReadiness()])
     const unavailable: DevicePagePart[] = []
-    if (device.status === 'fulfilled') { setData(device.value); setFailed(false) } else setFailed(true)
+    if (device.status === 'fulfilled') { setData(device.value); setFailed(false); setMissing(false) } else { setFailed(true); setMissing(isNotFoundError(device.reason)) }
     if (credentialData.status === 'fulfilled') setCredentials(credentialData.value.profiles || []); else unavailable.push('credentials')
     if (collectionData.status === 'fulfilled') setRequestCollections(collectionData.value.collections || []); else unavailable.push('collections')
     if (huntData.status === 'fulfilled') setDeviceHunts(huntData.value.runs || []); else unavailable.push('hunts')
@@ -181,7 +187,9 @@ function DeviceDetailContent() {
   // 10 s while a device scan is queued/running or the network worker is not ready yet, then a
   // slow refresh; usePoll pauses in a hidden tab and backs off on errors.
   const deviceLive = !workerReady || Boolean(data?.scans?.some((item) => item.status === 'pending' || item.status === 'queued' || item.status === 'running'))
-  usePoll(load, { intervalMs: DEVICE_LIVE_REFRESH_MS, idleIntervalMs: DEVICE_IDLE_REFRESH_MS, live: deviceLive, deps: [load] })
+  // An id that is no device is not asked for again.
+  useEffect(() => { setMissing(false) }, [deviceId])
+  usePoll(load, { intervalMs: DEVICE_LIVE_REFRESH_MS, idleIntervalMs: DEVICE_IDLE_REFRESH_MS, live: deviceLive, enabled: !missing, deps: [load] })
 
   useEffect(() => {
     setSelectedScan(null)
@@ -349,6 +357,7 @@ function DeviceDetailContent() {
   }
 
   if (loading) return <div className="mx-auto max-w-7xl"><TableSkeleton rows={6} /></div>
+  if (missing && !data) return <div className="mx-auto max-w-7xl"><RecordNotFound title="Device not found" message="There is no connected device at this address." listHref="/devices" listLabel="Back to connected devices" /></div>
   if (failed || !data) return <div className="mx-auto max-w-7xl"><ErrorState message="Could not load connected device" onRetry={load} /></div>
   const { device, interfaces, services, scans, locator_history: locatorHistory } = data
   const storedPosturePresentation = deviceTargetScorePresentation(device)
@@ -638,7 +647,7 @@ function DeviceDetailContent() {
           {scan.include_web_dast && <Field label="Web coverage"><Select value={scan.web_scan_type} onChange={(event) => setScan({ ...scan, web_scan_type: event.target.value })}><option value="quick">Quick</option><option value="standard">Standard request-aware</option><option value="deep">Deep request-aware</option></Select></Field>}
           {scan.include_web_dast && requestCollections.length > 0 && <div className="rounded-lg border border-orange-500/20 bg-orange-500/5 p-4"><p className="text-sm font-medium text-orange-100">Use real imported API requests</p><p className="mt-1 text-xs text-gray-400">Selected collections are resolved in the worker and pinned to web origins discovered on this device.</p><div className="mt-3 space-y-2">{requestCollections.map((collection) => { const checked = scan.request_collection_ids.includes(collection.id); return <label key={collection.id} className="flex items-start gap-3 rounded-sm border border-gray-800 bg-gray-950/60 p-3 text-sm text-gray-300"><input type="checkbox" checked={checked} onChange={(event) => { const ids = event.target.checked ? [...scan.request_collection_ids, collection.id] : scan.request_collection_ids.filter((id) => id !== collection.id); setScan({ ...scan, request_collection_ids: ids, confirm_request_replay: ids.length ? scan.confirm_request_replay : false, allow_state_changing_requests: ids.length ? scan.allow_state_changing_requests : false }) }} className="mt-1" /><span><strong className="block text-white">{collection.name}</strong>{collection.summary.request_count} requests · {collection.summary.state_changing_request_count} POST/PUT/PATCH/DELETE</span></label>})}</div>{scan.request_collection_ids.length > 0 && <div className="mt-3 space-y-2"><label className="flex items-start gap-3 text-sm text-amber-100"><input type="checkbox" checked={scan.confirm_request_replay} onChange={(event) => setScan({ ...scan, confirm_request_replay: event.target.checked })} className="mt-1" /><span>I authorize replay of safe imported requests against this device. Collection scripts are ignored and secrets stay encrypted.</span></label><label className={`flex items-start gap-3 text-sm ${scan.safety_profile === 'authenticated_active' ? 'text-red-200' : 'text-gray-600'}`}><input type="checkbox" checked={scan.allow_state_changing_requests} disabled={scan.safety_profile !== 'authenticated_active'} onChange={(event) => setScan({ ...scan, allow_state_changing_requests: event.target.checked })} className="mt-1" /><span><strong className="block">Also replay POST, PUT, PATCH, and DELETE exactly as saved</strong>This can change device state. It requires Authenticated active safety and is never enabled by the AI itself.</span></label></div>}</div>}
           {scan.include_web_dast && scan.request_collection_ids.length > 0 && <DeviceCollectionEnvironments ids={scan.request_collection_ids} selected={collectionEnvironments} onChange={setCollectionEnvironments} />}
-          {data?.authorization ? <p className="rounded-lg border border-emerald-500/30 bg-emerald-500/5 p-3 text-sm text-emerald-200">Standing asset authorization by {data.authorization.approved_by} will be rechecked when the scan starts.</p> : (<label className="flex items-start gap-3 rounded-lg border border-amber-500/30 bg-amber-500/5 p-3 text-sm text-amber-100"><input type="checkbox" checked={scan.confirm_authorized} onChange={(event) => setScan({ ...scan, confirm_authorized: event.target.checked })} className="mt-1" />I confirm I am authorized to scan this device and its listening services{scan.ssh_credential_profile_id || scan.web_credential_profile_id ? ', and I authorize one bounded attempt with each selected credential' : ''}.</label>)}
+          {data?.authorization ? <p className="rounded-lg border border-emerald-500/30 bg-emerald-500/5 p-3 text-sm text-emerald-200">Standing asset authorization{authorizedByPhrase(data.authorization.approved_by)} will be rechecked when the scan starts.</p> : (<label className="flex items-start gap-3 rounded-lg border border-amber-500/30 bg-amber-500/5 p-3 text-sm text-amber-100"><input type="checkbox" checked={scan.confirm_authorized} onChange={(event) => setScan({ ...scan, confirm_authorized: event.target.checked })} className="mt-1" />I confirm I am authorized to scan this device and its listening services{scan.ssh_credential_profile_id || scan.web_credential_profile_id ? ', and I authorize one bounded attempt with each selected credential' : ''}.</label>)}
         </div>
       </Modal>
 

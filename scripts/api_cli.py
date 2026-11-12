@@ -75,7 +75,9 @@ def build_request(
         raise ApiCliError(f"method must be one of {', '.join(METHODS)}")
     if not path.startswith("/"):
         path = "/" + path
-    if "://" in path:
+    # Only the path part can name another origin; a query may carry a URL as a value
+    # (GET /targets/lookup?url=https://app.example). The request always goes to api_url + path.
+    if "://" in path.split("?", 1)[0]:
         raise ApiCliError("give a path such as /findings?limit=20, not a full URL")
     if token and not api_url.startswith("https://"):
         raise ApiCliError("a token is only ever sent over https://; the API URL is plain http")

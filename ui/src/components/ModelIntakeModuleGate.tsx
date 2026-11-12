@@ -31,7 +31,7 @@ export function ModelIntakeModuleGate({ children }: { children: ReactNode }) {
     return (
       <div className="min-w-0 max-w-full space-y-6">
         <PageHeader title="Model Intake" description="Not available in this deployment." />
-        <Card>
+        <Card className="p-5">
           <p className="text-sm text-gray-300">
             Model Intake checks AI models before you deploy them. This deployment does not include it; ask your administrator
             if you need it.
@@ -43,7 +43,7 @@ export function ModelIntakeModuleGate({ children }: { children: ReactNode }) {
   return (
     <div className="min-w-0 max-w-full space-y-6">
       <PageHeader title="Model Intake" description="Optional module: not installed on this instance." />
-      <Card>
+      <Card className="p-5">
         <div className="space-y-4 text-sm text-gray-300">
           <p>
             Model Intake checks AI models before you deploy them: it fetches a model from a registry such as Hugging Face,
@@ -51,8 +51,9 @@ export function ModelIntakeModuleGate({ children }: { children: ReactNode }) {
             signed admission decision.
           </p>
           <p>
-            It ships as two extra images (about 4.8 GB), so a new install leaves it off. To install it, run this on the
-            host where ShakerScan runs:
+            It ships as two extra images (about 4.8 GB), so a new install leaves it off. Installing it downloads those
+            images and restarts services, so it is done on the host by its operator and cannot be done from this page.
+            On the host where ShakerScan runs:
           </p>
           <div className="flex flex-wrap items-center gap-2">
             <code className="rounded-sm border border-gray-700 bg-gray-950 px-3 py-2 font-mono text-gray-100">{ENABLE_COMMAND}</code>

@@ -88,7 +88,7 @@ export function DomainGroup({ group, open, onToggle, onDiscovered, onDomainDelet
       </span>
       {!open && children.length > 0 && <SeverityPills compact counts={combinedSeverity(group.targets)} />}
       <span className="ml-auto flex items-center gap-2">
-        {batch.length > 1 && <Link href={domainBatchHref(group.root_domain, batch, group.members_truncated)}
+        {batch.length > 1 && featureEnabled('batch_scan') && <Link href={domainBatchHref(group.root_domain, batch, group.members_truncated)}
           title={batch.length > SCAN_BATCH_MAX || group.members_truncated
             ? `Open New Scan with this domain's first ${SCAN_BATCH_MAX} web apps (a batch scans at most ${SCAN_BATCH_MAX})`
             : 'Open New Scan with every web app in this domain'}

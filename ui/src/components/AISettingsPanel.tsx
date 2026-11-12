@@ -514,7 +514,7 @@ export default function AISettingsPanel() {
               value={aiURLInput}
               onChange={(e) => setAIURLInput(e.target.value)}
               className={INPUT_CLASS}
-              placeholder="https://api.openai.com/v1/chat/completions"
+              placeholder="e.g. https://api.openai.com/v1/chat/completions"
             />
           </Field>
           <Field label="AI Model" hint="Primary model for scan-time AI calls.">
@@ -523,7 +523,7 @@ export default function AISettingsPanel() {
               value={aiModelInput}
               onChange={(e) => setAIModelInput(e.target.value)}
               className={INPUT_CLASS}
-              placeholder="gpt-4o-mini"
+              placeholder="e.g. gpt-4o-mini"
             />
           </Field>
           <Field
@@ -535,7 +535,7 @@ export default function AISettingsPanel() {
               value={aiModelFallbackInput}
               onChange={(e) => setAIModelFallbackInput(e.target.value)}
               className={INPUT_CLASS}
-              placeholder="deepseek/deepseek-chat,openai/gpt-4o-mini"
+              placeholder="e.g. deepseek/deepseek-chat,openai/gpt-4o-mini"
             />
           </Field>
           <Field
@@ -547,7 +547,7 @@ export default function AISettingsPanel() {
               value={aiMaskHostInput}
               onChange={(e) => setAIMaskHostInput(e.target.value)}
               className={INPUT_CLASS}
-              placeholder="example.com"
+              placeholder="e.g. example.com"
             />
           </Field>
           <Field label="AI API Key" hint="Shared provider key used unless a dedicated retest key is configured.">

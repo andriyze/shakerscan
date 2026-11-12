@@ -923,7 +923,7 @@ export default function AIGateSettingsPage() {
             </div>
             <button onClick={loadInventory} className="inline-flex items-center gap-2 rounded-lg border border-gray-700 px-3 py-2 text-sm text-gray-300 hover:bg-gray-800">
               <RefreshCw className="h-4 w-4" />
-              Refresh
+              Refresh inventory
             </button>
           </div>
           {inventoryCandidates.length > 0 && (
@@ -1259,7 +1259,7 @@ export default function AIGateSettingsPage() {
               )}
               <button onClick={loadTargets} disabled={loading} className="inline-flex items-center gap-2 rounded-lg border border-gray-700 px-3 py-2 text-sm text-gray-300 hover:bg-gray-800 disabled:opacity-50">
                 <RefreshCw className={`h-4 w-4 ${loading ? 'animate-spin' : ''}`} />
-                Refresh
+                Refresh targets
               </button>
             </div>
           </div>

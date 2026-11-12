@@ -15,3 +15,9 @@ test('installed V2 documentation links do not drift to the moving main branch', 
   assert.match(docs, /SHAKERSCAN_DOCUMENTATION_BLOB_URL/)
   assert.match(fleet, /SHAKERSCAN_DOCUMENTATION_BLOB_URL/)
 })
+
+test('the documentation page loads no images from other hosts', () => {
+  // README badges are remote images; the page renders each as its text instead of an image element.
+  assert.match(docs, /img: \(\{ alt \}\) => \(alt \? <span/)
+  assert.doesNotMatch(docs, /<img\b/)
+})

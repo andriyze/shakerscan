@@ -4,7 +4,7 @@ import { DeleteRecordsButton } from '@/components/lifecycle/DeleteRecordsButton'
 import AuthenticationProfiles from '@/components/AuthenticationProfiles'
 
 import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { KeyRound, Plus, RefreshCw, RotateCw, Search, Share2, ShieldCheck, Trash2, X } from 'lucide-react'
+import { Plus, RefreshCw, RotateCw, Search, Share2, ShieldCheck, Trash2, X } from 'lucide-react'
 import { targetOptions, targetSearchNote } from '@/lib/pickerOptions'
 import { ShareCredentialDialog } from '@/components/credentials/ShareCredentialDialog'
 import {
@@ -269,7 +269,9 @@ function CredentialsContent() {
 
   // The target picker searches the inventory on the server, one bounded page per query; the
   // selected target (from a link or a choice) is read on its own below.
-  const targetSearch = useTargetSearch({ includeServices: true })
+  // A web or API credential belongs to a web app: the scan form offers only the profiles of the web
+  // target it scans, so a web credential saved on the app's host was never offered there.
+  const targetSearch = useTargetSearch({ includeServices: true, webOnly: targetKind === 'web' || targetKind === 'api' })
   const { remember } = targetSearch
   const selectedAsset = targetId ? targetSearch.byId(targetId) : undefined
   // The matches, plus the selection (read on its own below) so it stays a choice while the
@@ -548,11 +550,10 @@ function CredentialsContent() {
 
 
   return (
-    <div className="mx-auto max-w-6xl p-6">
+    <div className="mx-auto max-w-6xl">
       <PageHeader
         title="Credentials"
         description="Encrypted identities for Scan and Hunt. Each belongs to one target and can be shared with others. Secret values are accepted only when creating or rotating, and never shown again."
-        icon={<KeyRound className="h-6 w-6" />}
         actions={<><Button variant="secondary" onClick={() => void loadProfiles()} disabled={!targetId || profilesLoading}><RefreshCw className="h-4 w-4" /> Refresh</Button><Button onClick={openCreate} disabled={!targetId}><Plus className="h-4 w-4" /> New profile</Button></>}
       />
 

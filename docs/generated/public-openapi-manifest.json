@@ -182,7 +182,7 @@
     "ScanAdvancedLimits": "fa65891f9d6c4246fd33f557a45842cc04624d02998fc4ddcec07d3f49b97469",
     "ScanExecutionSettingsUpdate": "8c4659d76962d531391fe7e9631bc1fe46106aeb0e1b9b39aa05b1bede9ae5a6",
     "ScanFamilyPreviewLimits": "3f7ff16f3929d992308fece08665d5db63bdf6af2df0937adcbf5d879621ba68",
-    "ScanFamilyPreviewRequest": "0e4e4fe3c0d50fb13c2e338196a64eabf09900e72ed255e763660520220311e6",
+    "ScanFamilyPreviewRequest": "628a259c5c0c14e1211cedb1978f59ca22ee1d8bdf182d6cbe76225df6521a54",
     "ScanPublicCompatibilityOptions": "7529119d6bc845fd0f87c41d50f09e24cd74763242d14c7beb09a4b5e92fea30",
     "ScanPublicPlacement": "ffe892bcf7b67ff35dfde48ba80b47c081da4860cf82854371a6ae9b099b23e9",
     "ScheduleCreate": "7230e00073484dc22b21ab387323ec1c8a2f3596134b7712e04e892052d7d731",
@@ -229,9 +229,9 @@
     "ValidationRequest": "cb81c65a5c80da74a19c6bd92e9c6a68f5cdb22fafeb94270481d463450f893e",
     "WorkerScaleRequest": "52e7ac017dfa1d92efa8e4071026b9bf24c0cf2a17f5d9e742349df3f08f6c62"
   },
-  "contract_sha256": "2c2324fdc87a99ba74fe505436c7cd736f5011e09b5a1cb03833060a05ee9acf",
+  "contract_sha256": "9e66b0eb086538c755df83fb63ec4891bd0e83f88eb95d863acee9ecf59e6b63",
   "openapi": "3.1.0",
-  "operation_count": 499,
+  "operation_count": 500,
   "operations": {
     "DELETE /ai/scans/{scan_id}/transcript": {
       "deprecated": false,
@@ -2689,6 +2689,19 @@
       "deprecated": false,
       "operation_id": "get_latest_result_results__target_folder__latest_get",
       "parameters_sha256": "f72667715d308a25e0c865e0fe1d62d0b019997c295af8a42975309a91be178c",
+      "request_schema_sha256": null,
+      "response_schema_sha256": {
+        "200": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "422": "e1fe533ef371cc6965d4015e800b2b5ca90e470f4aae3d57c2754a32b61e8c2d"
+      },
+      "security_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "surface": null,
+      "tags": []
+    },
+    "GET /retests": {
+      "deprecated": false,
+      "operation_id": "list_retests_retests_get",
+      "parameters_sha256": "cbd40ba0c02f039b96890c4a812283c814cea874ce6ac542789a93985600d739",
       "request_schema_sha256": null,
       "response_schema_sha256": {
         "200": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",

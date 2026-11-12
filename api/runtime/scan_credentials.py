@@ -51,6 +51,10 @@ SCAN_SEMANTIC_CREDENTIAL_CAPABILITIES = frozenset({
     "sqli.request_verify",
     "xss.request_verify_batch",
     "sqli.request_verify_batch",
+    # The single-identity access-control batch reads each route anonymously and as the
+    # signed-in principal; without it here no profile could grant it the principal, so the
+    # family ran anonymously or not at all (skipped, prerequisite unavailable).
+    "authz_surface.verify_batch",
 })
 _INTERACTIVE_HTTP_KINDS = frozenset({
     "form_login", "oauth_client_credentials", "oauth_password",
@@ -90,6 +94,9 @@ def scan_credential_resolution_capability(
     return compatible[0] if compatible else None
 
 
+READ_ONLY_ACCESS_CONTROL_CAPABILITY = "authz_surface.verify_batch"
+
+
 def scan_credential_allows_capability(
     allowed_capabilities: Sequence[str], capability_name: str,
 ) -> bool:
@@ -97,9 +104,14 @@ def scan_credential_allows_capability(
     allowed = {
         str(item or "").strip() for item in allowed_capabilities if str(item or "").strip()
     }
+    name = str(capability_name or "").strip()
     return (
         SCAN_CREDENTIAL_CAPABILITY in allowed
-        or str(capability_name or "").strip() in allowed
+        or name in allowed
+        # The access-control batch sends the signed-in principal only read-only GETs to routes the
+        # crawl discovered: a profile that lets the crawl use its session lets this batch too, so a
+        # default profile covers it (its safe defaults include web.crawl).
+        or (name == READ_ONLY_ACCESS_CONTROL_CAPABILITY and "web.crawl" in allowed)
     )
 
 

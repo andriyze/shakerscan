@@ -54,6 +54,16 @@ export async function mockPageApi(page: Page, routes: Record<string, MockHandler
   return { requests, unhandled }
 }
 
+/**
+ * The version the UI under test was built with (`/api/build-identity`; `dev` for a build that was
+ * given none). A health fixture that names it is an engine whose builds agree, as in an install.
+ * Any other name is a build mismatch: the sidebar spells it out and takes the version off its foot.
+ */
+export async function uiBuildVersion(page: Page): Promise<string> {
+  const identity = await (await page.request.get('/api/build-identity')).json()
+  return identity.ui_version
+}
+
 /** The query parameter names the page sent to `path` (for the gateway's allowlist review). */
 export function queryNames(api: MockedApi, path: string): string[] {
   const names = new Set<string>()

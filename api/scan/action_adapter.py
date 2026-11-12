@@ -36,6 +36,7 @@ try:
     from capabilities.takeover import bound_takeover_hosts, check_takeovers
     from scan.recon_active_actions import RECON_ACTIVE_CAPABILITIES, execute_recon_active
     from scan.web_identify_actions import execute_web_identify
+    from scan import xss_reflection
     from capabilities.replay import RecordedReplayTransport
     from capabilities.inline import (
         AuthSessionExecutionAdapter,
@@ -56,8 +57,10 @@ try:
         AUTHZ_SURFACE_PARSER_VERSION,
         PrincipalProbe,
         RouteComparison,
+        account_password_hashes,
         bfla_finding,
         boundary_established,
+        password_hash_disclosure_finding,
     )
     from capabilities.hint_files import ingest_hint_documents, HINT_DISCOVERY_PATHS
     from capabilities.spec_ingest import ingest_spec_bodies, SPEC_DISCOVERY_PATHS
@@ -130,6 +133,7 @@ except (ImportError, ModuleNotFoundError):
     from ..capabilities.takeover import bound_takeover_hosts, check_takeovers
     from .recon_active_actions import RECON_ACTIVE_CAPABILITIES, execute_recon_active
     from .web_identify_actions import execute_web_identify
+    from . import xss_reflection
     from ..capabilities.replay import RecordedReplayTransport
     from ..capabilities.inline import (
         AuthSessionExecutionAdapter,
@@ -150,8 +154,10 @@ except (ImportError, ModuleNotFoundError):
         AUTHZ_SURFACE_PARSER_VERSION,
         PrincipalProbe,
         RouteComparison,
+        account_password_hashes,
         bfla_finding,
         boundary_established,
+        password_hash_disclosure_finding,
     )
     from ..capabilities.hint_files import ingest_hint_documents, HINT_DISCOVERY_PATHS
     from ..capabilities.spec_ingest import ingest_spec_bodies, SPEC_DISCOVERY_PATHS
@@ -3312,6 +3318,7 @@ class DatabaseNeutralScanActionDispatcher:
             nonlocal ordinal, absent_bodies, indistinguishable, follow_up_spent, attempted
             if result.error_code:
                 errors.append(str(result.error_code))
+            set_aside = False
             # Classification parses up to a megabyte of hostile content: it runs off the
             # event loop so heartbeats and cancellation keep working while it does.
             signature = await asyncio.to_thread(
@@ -3338,6 +3345,7 @@ class DatabaseNeutralScanActionDispatcher:
                 if bytes(result.response_body) in absent_bodies:
                     indistinguishable += 1
                     signature = None
+                    set_aside = True
             attempt_observations: list[Mapping[str, Any]] = []
             if signature is not None:
                 attempt_observations.append(await asyncio.to_thread(
@@ -3444,6 +3452,15 @@ class DatabaseNeutralScanActionDispatcher:
                     "verified" if proven else "not_proven"
                 ),
                 "budget_consumed": {"http_requests": 1},
+                # What this read examined and saw (scan check coverage): a later Scan that read
+                # the same URL and no longer saw the exposure is evidence it was fixed.
+                "examined": {
+                    "request_url": probe_url,
+                    "response_status": result.status_code,
+                    "exposure_class": signature.exposure_class if signature is not None else None,
+                    # A match set aside as the host's answer for any path judges nothing.
+                    **({"indistinguishable_from_absent": True} if set_aside else {}),
+                },
             }, *attempt_observations)
             attempt = {
                 "attempt_id": attempt_id, "candidate_id": attempt_id[:32],
@@ -4255,6 +4272,12 @@ class DatabaseNeutralScanActionDispatcher:
                 str(value).lower() for name, value in result.response_headers.items()
                 if str(name).lower() == "content-type"
             ), "")
+            is_json = "json" in content_type
+            hashes = (
+                account_password_hashes(result.response_body, is_json=is_json)
+                if result.status_code is not None and 200 <= int(result.status_code) < 300
+                else []
+            )
             return PrincipalProbe(
                 status=result.status_code,
                 # Keyed (HMAC): four probes per endpoint, up to 100 endpoints a batch; scrypt
@@ -4262,8 +4285,13 @@ class DatabaseNeutralScanActionDispatcher:
                 # no guess.
                 body_sha256=keyed_body_digest(result.response_body),
                 body_len=len(result.response_body),
-                is_json="json" in content_type,
+                is_json=is_json,
                 error=bool(result.error_code),
+                # The hashes themselves never leave this function: keyed digests only.
+                hash_digests=tuple(sorted({
+                    keyed_body_digest(value.encode("utf-8")) for _field, value in hashes
+                })),
+                hash_fields=tuple(field for field, _value in hashes[:10]),
             )
 
         async def send(url: str, headers: tuple, ordinal: int) -> Any:
@@ -4378,22 +4406,29 @@ class DatabaseNeutralScanActionDispatcher:
         # A finding needs proof the app gates function access somewhere; without an
         # established boundary a fully-public app yields nothing.
         boundary = boundary_established(compared.values())
+        # Every password hash the signed-in principal read in this batch: two distinct ones
+        # show it reads another account's hash.
+        principal_hashes = {
+            digest for comparison in compared.values()
+            for probe in comparison.authenticated for digest in probe.hash_digests
+        }
         observations: list[Mapping[str, Any]] = []
         reported: set[str] = set()
         for attempt_id, comparison in entry_heads:
             proven = bfla_finding(comparison) if boundary else None
+            disclosed = password_hash_disclosure_finding(comparison, principal_hashes)
             observations.append({
                 "kind": "candidate_attempt",
                 "attempt_id": attempt_id,
                 "candidate_id": comparison.route_id,
                 "family": "authz_surface",
                 "status": "success",
-                "proof_state": "verified" if proven else "not_proven",
+                "proof_state": "verified" if proven or disclosed else "not_proven",
             })
             # One finding per route, however many entries the route has.
-            if proven is not None and comparison.route_id not in reported:
+            if comparison.route_id not in reported and (proven or disclosed):
                 reported.add(comparison.route_id)
-                observations.append(proven)
+                observations.extend(item for item in (proven, disclosed) if item is not None)
         unattempted = max(0, len(window) - attempted)
         _batch_status, _batch_partial, _batch_timed_out = batch_outcome(
             attempt_statuses, unattempted,
@@ -5122,6 +5157,11 @@ class DatabaseNeutralScanActionDispatcher:
             execution_target = str(row["execution_target"])
             body_request = dict(row["body_request"])
             sub_budget = dict(row["sub_budget"])
+            # What the attempt sent: the tool's own requests plus a reflection check before it
+            # (already counted against the slice when it was sent).
+            attempt_budget = dict(result.actual_budget)
+            for name, amount in dict(row.get("precheck_spent") or {}).items():
+                attempt_budget[name] = int(attempt_budget.get(name, 0) or 0) + int(amount)
             if tool == "sqlmap":
                 for stage in result.stages:
                     key = (
@@ -5159,7 +5199,7 @@ class DatabaseNeutralScanActionDispatcher:
                     "status": result.status,
                     "proof_state": proof_state,
                     "response_hashes": response_hashes,
-                    "budget_consumed": dict(result.actual_budget),
+                    "budget_consumed": dict(attempt_budget),
                     **({"retry_round": retry_round} if retry_round else {}),
                     # An unfinished SQLi candidate names the least wall its next attempt needs:
                     # its unfinished stage's checkpoint, never less than the attempt floor. The
@@ -5264,7 +5304,7 @@ class DatabaseNeutralScanActionDispatcher:
                    if candidate_id in template_windows else {}),
                 "status": result.status,
                 "timed_out": bool(result.timed_out),
-                "budget_consumed": dict(result.actual_budget),
+                "budget_consumed": dict(attempt_budget),
                 "observations": attempt_observations,
                 "errors": tuple(result.errors),
                 "proof_state": proof_state,
@@ -5449,6 +5489,46 @@ class DatabaseNeutralScanActionDispatcher:
                 return True
             route = str(row.get("candidate_id") or row.get("route_id") or "")
             return identity not in carried and not (route and route in admitted)
+
+        http_ceiling_total = int(action.requested_budget.get("http_requests") or 0)
+        reflection_transport: Any = None
+        # attempt id -> what its reflection check sent; the Dalfox attempt that follows records
+        # it, so a resumed slice counts the request too.
+        reflection_spent: dict[str, dict[str, int]] = {}
+
+        async def reflection_precheck(url: str, body_request: Mapping[str, Any]) -> bool | None:
+            """Whether any input reflects a canary; None when the check got no answer."""
+            nonlocal reflection_transport
+            if reflection_transport is None:
+                reflection_transport = self._scan_replay_transport(action, private=True)
+            principal = resolve_scan_http_principal(
+                self.options, lane="primary", capability_name=action.capability_name,
+            )
+            canary = xss_reflection.new_canary()
+            method, target, body, content_type = xss_reflection.canary_request_parts(
+                url, body_request, canary, nested_json_body=nested_json_body,
+            )
+            headers = tuple(principal.headers().items()) if principal.authenticated else ()
+            if content_type:
+                headers = tuple(item for item in headers if str(item[0]).lower() != "content-type") + (
+                    ("Content-Type", content_type),
+                )
+            try:
+                result = await reflection_transport.send(
+                    ReplayRequest(
+                        request_id=f"xss-reflection:{position}", ordinal=position,
+                        name="xss reflection check", folder="", method=method, url=target,
+                        headers=headers, body=body, body_mode="raw" if body else "none",
+                        auth_type="broker_session" if principal.authenticated else "none",
+                        has_sensitive_material=bool(principal.authenticated),
+                    ),
+                    target=self.target, timeout_seconds=15.0, follow_redirects=False,
+                )
+            except Exception:
+                return None
+            if result.error_code:
+                return None
+            return xss_reflection.reflects(result.status_code, result.response_body, canary)
 
         try:
             while True:
@@ -5641,6 +5721,44 @@ class DatabaseNeutralScanActionDispatcher:
                             sign_in, attempt_id, candidate_id, retry_round, manifest_index,
                         )
                         continue
+                    if (
+                        tool == "dalfox" and sign_in is None and not retry_round
+                        and attempt_id not in reflection_spent
+                        and xss_reflection.has_inputs(execution_target, body_request)
+                        and consumed.get("http_requests", 0) < http_ceiling_total
+                        and (not body_request or consumed.get("state_changing_requests", 0)
+                             < int(action.requested_budget.get("state_changing_requests", 0)))
+                    ):
+                        # One request with a canary in every input before Dalfox's payload set:
+                        # nothing reflected means no reflected XSS to find (xss_reflection).
+                        verdict = await reflection_precheck(execution_target, body_request)
+                        # The request was sent whatever it showed, so it is counted now; a
+                        # candidate the loop comes back to is not checked a second time.
+                        spent = {"http_requests": 1,
+                                 **({"state_changing_requests": 1} if body_request else {})}
+                        for name, amount in spent.items():
+                            consumed[name] = consumed.get(name, 0) + amount
+                        reflection_spent[attempt_id] = spent
+                        if verdict is False:
+                            attempted += 1
+                            attempt_log.append((candidate_id, retry_round, True, False))
+                            settled = {
+                                "kind": "candidate_attempt", "attempt_id": attempt_id,
+                                "candidate_id": candidate_id, "family": family,
+                                "status": "success", "proof_state": "not_proven",
+                                "verdict": "negative",
+                                "negative_reason": xss_reflection.NO_REFLECTION,
+                                "budget_consumed": spent,
+                            }
+                            observations.append(settled)
+                            if not self.cancelled():
+                                await checkpoint_attempt(action.action_id, {
+                                    "attempt_id": attempt_id, "candidate_id": candidate_id,
+                                    "status": "success", "timed_out": False,
+                                    "budget_consumed": spent, "observations": (settled,),
+                                    "errors": (), "proof_state": "not_proven",
+                                })
+                            continue
                     # This entry and every later one that will actually be funded.
                     remaining_attempts = 1 + sum(1 for entry in work[position:] if needs_hold(entry))
                     # What the slice has neither consumed nor lent to a running candidate.
@@ -5661,6 +5779,11 @@ class DatabaseNeutralScanActionDispatcher:
                     floor = batch_attempt_floor(
                         action.capability_name, body_candidate=bool(body_request),
                     )
+                    # The reflection check came out of this candidate's own allowance, so a
+                    # slice that holds exactly one allowance still funds the attempt.
+                    for name, amount in reflection_spent.get(attempt_id, {}).items():
+                        if name in floor:
+                            floor[name] = max(0, int(floor[name]) - amount)
                     if tool == "sqlmap" and staged_sources:
                         # A resumed SQLi candidate runs one unit at a time; once its rate is
                         # measured, its wall floor is what its next unit needs, not the
@@ -6070,6 +6193,7 @@ class DatabaseNeutralScanActionDispatcher:
                         "sign_in_key": sign_in.key if sign_in is not None else None,
                         "sign_in_endpoint": sign_in.label if sign_in is not None else None,
                         "auth_parameters": auth_parameters, "manifest_index": manifest_index,
+                        "precheck_spent": reflection_spent.get(attempt_id, {}),
                     }
                     if concurrent:
                         # The candidate's records keep its place in the slice whenever it finishes.

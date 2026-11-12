@@ -93,6 +93,13 @@ STANDARD_ACTIVE_TEMPLATE_HEADROOM = 2
 # own ceiling runs. A quarter above the hold (5,000) stays under every profile that adds them.
 STANDARD_ACTIVE_TEMPLATE_MUTATION_PERCENT = 125
 _ACTIVE_TEMPLATE_SWEEP = "templates.active_batch"
+# Families a preset adds when the Scan signs in. A signed-in standard active Scan also reads what
+# its principal reaches: the read-only access-control batch contrasts anonymous and signed-in
+# answers and finds stored password hashes in API responses. It needs a signed-in principal, so
+# an anonymous Scan never selects it (it could only report the family as not run).
+SCAN_FAMILY_PRESET_SIGNED_IN_ADDITIONS: Mapping[str, tuple[str, ...]] = {
+    "standard_active": ("authz_surface",),
+}
 
 
 def standard_active_template_floors(*, state_changing_allowed: bool) -> dict[str, int]:
@@ -112,15 +119,19 @@ def standard_active_template_floors(*, state_changing_allowed: bool) -> dict[str
 
 def scan_family_preset_families(
     preset: str, budget_profile: str | None, *, lowered_request_ceiling: bool = False,
+    signed_in: bool = False,
 ) -> tuple[str, ...]:
     """The families ``preset`` selects on ``budget_profile``, in canonical family order.
 
     ``lowered_request_ceiling``: the Scan's ceilings were lowered below what the profile's
     additions hold at admission (``_ceiling_below_template_floor``), so none is added.
+    ``signed_in``: the Scan carries a credential profile (SCAN_FAMILY_PRESET_SIGNED_IN_ADDITIONS).
     """
     additions = () if lowered_request_ceiling else SCAN_FAMILY_PRESET_PROFILE_ADDITIONS.get(
         preset, {},
     ).get(str(budget_profile or "balanced").strip().lower(), ())
+    if signed_in and not lowered_request_ceiling:
+        additions = (*additions, *SCAN_FAMILY_PRESET_SIGNED_IN_ADDITIONS.get(preset, ()))
     chosen = set(SCAN_FAMILY_PRESETS[preset]) | set(additions)
     return tuple(family for family in SCAN_V2_FAMILY_NAMES if family in chosen)
 
@@ -349,6 +360,10 @@ def public_scan_contract() -> dict[str, Any]:
             preset: {profile: list(families) for profile, families in additions.items()}
             for preset, additions in SCAN_FAMILY_PRESET_PROFILE_ADDITIONS.items()
         },
+        # What a preset adds when the Scan signs in with a credential profile.
+        "family_preset_signed_in_additions": {
+            preset: list(families) for preset, families in SCAN_FAMILY_PRESET_SIGNED_IN_ADDITIONS.items()
+        },
         # Below these lowered ceilings a preset's profile additions are left out (the mutation
         # ceiling counts only when state-changing HTTP is allowed).
         "family_preset_addition_floors": {
@@ -575,8 +590,13 @@ def resolve_scan_contract(
     policy: Mapping[str, Any] | None = None,
     advanced: Mapping[str, Any] | None = None,
     approval_receipt_id: str | None = None,
+    signed_in: bool = False,
 ) -> ResolvedScanContract:
-    """Resolve one immutable V2 Scan plan from canonical policy and budget input."""
+    """Resolve one immutable V2 Scan plan from canonical policy and budget input.
+
+    ``signed_in``: the Scan carries a credential profile; its preset may add families that
+    need a signed-in principal (SCAN_FAMILY_PRESET_SIGNED_IN_ADDITIONS).
+    """
     profile = str(budget_profile or "balanced").strip().lower()
 
     policy_data = policy if isinstance(policy, Mapping) else {}
@@ -627,6 +647,7 @@ def resolve_scan_contract(
             profile, advanced,
             state_changing_allowed=bool(policy_data.get("allow_state_changing_http", False)),
         ),
+        signed_in=bool(signed_in),
     ))
     resolved = tuple(
         family for family in SCAN_V2_FAMILY_NAMES

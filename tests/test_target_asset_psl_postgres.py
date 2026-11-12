@@ -119,6 +119,8 @@ def test_legacy_public_suffix_roots_are_recomputed_once(monkeypatch):
                 ('https://example.co.uk', 'apex', 'co.uk', false),
                 ('https://victim.github.io', 'pages', 'github.io', false),
                 ('https://bucket.s3.amazonaws.com', 'bucket', 'amazonaws.com', false),
+                ('https://10-0-0-5.sslip.io', 'by address', 'sslip.io', false),
+                ('https://203-0-113-9.sslip.io', 'another address', 'sslip.io', false),
                 ('https://api.example.com', 'api', 'example.com', false)""")
             changed = await recompute_spanning_target_roots(conn)
             rows = {row["url"]: (row["root_domain"], row["is_root"]) for row in await conn.fetch(
@@ -126,12 +128,14 @@ def test_legacy_public_suffix_roots_are_recomputed_once(monkeypatch):
             return changed, rows, await recompute_spanning_target_roots(conn)
 
     changed, rows, again = asyncio.run(run())
-    assert changed == 4 and again == 0
+    assert changed == 6 and again == 0
     assert rows == {
         "https://shop.example.co.uk": ("example.co.uk", False),
         "https://example.co.uk": ("example.co.uk", True),
         "https://victim.github.io": ("victim.github.io", True),
         "https://bucket.s3.amazonaws.com": ("bucket.s3.amazonaws.com", True),
+        "https://10-0-0-5.sslip.io": ("10-0-0-5.sslip.io", True),
+        "https://203-0-113-9.sslip.io": ("203-0-113-9.sslip.io", True),
         "https://api.example.com": ("example.com", False),
     }
 
@@ -169,6 +173,37 @@ def test_targets_list_groups_and_domain_deletion_never_span_registrants(monkeypa
     assert ids["api.victim.github.io"] in victim
     assert ids["github.io"] in suffix
     assert not {ids["victim.github.io"], ids["attacker.github.io"]} & suffix
+
+
+def test_a_group_cached_under_earlier_rules_is_recomputed(monkeypatch):
+    """A host under a wildcard-DNS service was once grouped under the service. The cached group
+    carries the rules it was computed under, so the list never shows it after the rules changed."""
+    encryption(monkeypatch)
+    import hashlib
+
+    from scope.psl import PSL_PIN_PATH
+    from targets.asset_inventory import psl_version
+
+    earlier = "group-domain/v1:" + hashlib.sha256(PSL_PIN_PATH.read_bytes()).hexdigest()[:32]
+    assert psl_version() != earlier
+
+    async def run():
+        async with database() as conn:
+            await _converted(conn)
+            for host in ("10-0-0-5.sslip.io", "203-0-113-9.sslip.io"):
+                await conn.execute("INSERT INTO targets(url, name, root_domain) VALUES ($1, $2, $2)",
+                                   f"https://{host}", host)
+                await conn.execute(
+                    "INSERT INTO target_inventory_groups(locator, group_domain, psl_version) VALUES ($1, $2, $3)",
+                    host, "sslip.io", earlier)
+            listing = await list_assets(conn, group_by="domain", limit=50)
+            cached = {row["locator"]: (row["group_domain"], row["psl_version"]) for row in await conn.fetch(
+                "SELECT locator, group_domain, psl_version FROM target_inventory_groups")}
+            return listing, cached
+
+    listing, cached = asyncio.run(run())
+    assert {group["root_domain"] for group in listing["groups"]} == {"10-0-0-5.sslip.io", "203-0-113-9.sslip.io"}
+    assert cached == {host: (host, psl_version()) for host in ("10-0-0-5.sslip.io", "203-0-113-9.sslip.io")}
 
 
 def test_a_host_a_person_added_keeps_declaring_its_domain_after_a_scan(monkeypatch):

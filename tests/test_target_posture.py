@@ -68,6 +68,30 @@ def test_every_section_is_shaped_from_one_result_and_secrets_never_leak():
     assert shaped["network"]["informational_only"] is True
 
 
+def test_structured_dns_answers_are_named_fields_not_mapping_text():
+    result = _result()
+    result["dns"]["records"].update({
+        "root_soa": [{"retry": 2400, "expire": 604800, "serial": 2419478529, "minimum": 1800, "refresh": 10000,
+                      "primary_nameserver": "ns1.example.net", "responsible_mailbox": "dns.example.net"}],
+        "root_ds": [{"digest": "2CDA41A2F000036A2539D4386CE231A0ECA14092386B4CB5B2AEF3B7BD2AC78C",
+                     "key_tag": 2371, "algorithm": 13, "digest_type": 2}],
+        "host_mx": [{"priority": 10, "host": "mail.example.net"}],
+    })
+    records = posture_sections_from_result(result)["dns"]["records"]
+    assert records["root_soa"] == [
+        "primary ns1.example.net, mailbox dns.example.net, serial 2419478529, refresh 10000, retry 2400, "
+        "expire 604800, minimum 1800"
+    ]
+    # Whole, in a fixed order: the digest is not cut off and no field is lost.
+    assert records["root_ds"] == [
+        "key tag 2371, algorithm 13, digest type 2, "
+        "digest 2CDA41A2F000036A2539D4386CE231A0ECA14092386B4CB5B2AEF3B7BD2AC78C"
+    ]
+    assert records["host_mx"] == ["priority 10, host mail.example.net"]
+    assert records["host_a"] == ["10.0.0.1"]
+    assert not any("{" in value or "'" in value for values in records.values() for value in values)
+
+
 def test_sections_the_scan_did_not_observe_are_absent_not_empty():
     assert shape_http_headers({"status": 200}) is None
     assert shape_tls({"endpoints": [], "certificate": {}}) is None

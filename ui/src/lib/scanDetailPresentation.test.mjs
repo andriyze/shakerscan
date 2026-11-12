@@ -27,6 +27,9 @@ import {
   coverageReasonText,
   scanFindingCounts,
   scanFindingCountsText,
+  coverageGapRows,
+  scanStepLabel,
+  scanStepStatusLabel,
 } from './scanDetailPresentation.mjs'
 
 test('running phases are explained in operator language', () => {
@@ -60,6 +63,16 @@ test('structured diagnostic failures and real exceptions remain errors', () => {
   assert.equal(scanLogEntry('[error] worker aborted').kind, 'error')
   assert.equal(scanLogEntry('Traceback: connection failed').kind, 'error')
   assert.equal(scanLogEntry('Diagnostic · outcome=success · error=connection_refused').kind, 'error')
+})
+
+test('a step that did not apply to the target is plain activity in plain words, not a warning', () => {
+  const entry = scanLogEntry('[scan] Diagnostic Baseline HTTP Redirect · outcome=skipped · reason=not_applicable · error=none · execution=not_started · http=0/4 accounted/reserved · wall=0s/15s accounted/reserved')
+  assert.equal(entry.kind, 'detail')
+  assert.equal(entry.label, 'not applicable')
+  assert.equal(entry.message, 'Baseline HTTP Redirect did not run: it does not apply to this target. Nothing was sent.')
+  assert.match(entry.raw, /reason=not_applicable/)
+  // A not-applicable step that still reports an error keeps the operator's attention.
+  assert.equal(scanLogEntry('Diagnostic Prove XSS R01 · outcome=skipped · reason=not_applicable · error=adapter_missing').kind, 'warning')
 })
 
 test('budget-skipped diagnostics are warnings even when the adapter records an error class', () => {
@@ -864,4 +877,46 @@ test('a queued Scan says what it waits behind', () => {
   const idle = queueWaitPresentation('self', [], 0)
   assert.equal(idle.label, 'No other Scan is running.')
   assert.deepEqual(idle.items, [])
+})
+
+test('a planned step is named in plain words, not by its capability name', () => {
+  assert.equal(scanStepLabel({ action_id: 'verify.sqli.r01', capability_name: 'sqli.verify_batch' }), 'SQL injection checks')
+  assert.equal(scanStepLabel({ action_id: 'prove.xss.r01', capability_name: 'xss.browser_prove_batch' }), 'Cross-site scripting proof in a browser')
+  assert.equal(scanStepLabel({ action_id: 'discover.spec', capability_name: 'web.spec_ingest' }), 'API description import')
+  // The baseline requests share one capability and are told apart by step.
+  assert.equal(scanStepLabel({ action_id: 'baseline.http_redirect', capability_name: 'http.request' }), 'HTTP to HTTPS redirect check')
+  assert.equal(scanStepLabel({ action_id: 'baseline.other', capability_name: 'http.request' }), 'Baseline HTTP check')
+  // An unknown capability is still words, without the planner's "batch" suffix.
+  assert.equal(scanStepLabel({ capability_name: 'auth.session_probe_batch' }), 'Auth session probe')
+  assert.equal(scanStepStatusLabel('timed_out'), 'timed out')
+  assert.equal(scanStepStatusLabel('skipped'), 'did not run')
+  assert.equal(scanStepStatusLabel('partial'), 'partly completed')
+})
+
+test('coverage gaps hold unfinished work; a step that did not apply is counted apart', () => {
+  const rows = coverageGapRows([
+    { status: 'success', action_id: 'baseline.http', capability_name: 'http.request' },
+    { status: 'partial', action_id: 'verify.sqli.r01', capability_name: 'sqli.verify_batch', reason_code: 'http_request_budget_exhausted' },
+    { status: 'timed_out', action_id: 'verify.sqli.r01.ext.r02', capability_name: 'sqli.verify_batch', reason_code: 'timed_out' },
+    { status: 'skipped', action_id: 'prove.sqli.r01', capability_name: 'sqli.prove_batch', reason_code: 'not_applicable' },
+    { status: 'skipped', action_id: 'prove.xss.r01', capability_name: 'xss.browser_prove_batch', reason_code: 'not_applicable' },
+    { status: 'skipped', action_id: 'active.templates.r01', capability_name: 'templates.active_batch', reason_code: 'policy_disabled' },
+  ])
+  assert.deepEqual(rows.gaps.map((item) => item.action_id), ['verify.sqli.r01', 'verify.sqli.r01.ext.r02', 'active.templates.r01'])
+  assert.equal(rows.notApplicable, 2)
+  assert.deepEqual(rows.reasonCodes.sort(), ['http_request_budget_exhausted', 'not_applicable', 'policy_disabled', 'timed_out'])
+  assert.deepEqual(coverageGapRows(undefined), { gaps: [], reasonCodes: [], notApplicable: 0 })
+})
+
+test('a step whose continuation finished is not a coverage gap; one whose continuation did not is', () => {
+  const rows = coverageGapRows([
+    { status: 'partial', action_id: 'verify.sqli.r01', reason_code: 'http_request_budget_exhausted',
+      continued_by: 'verify.sqli.r01.ext.r02', continued_status: 'success' },
+    { status: 'success', action_id: 'verify.sqli.r01.ext.r02' },
+    { status: 'partial', action_id: 'verify.sqli.r03', reason_code: 'http_request_budget_exhausted',
+      continued_by: 'verify.sqli.r03.ext.r04', continued_status: 'timed_out' },
+    { status: 'timed_out', action_id: 'verify.sqli.r03.ext.r04', reason_code: 'timed_out' },
+  ])
+  assert.deepEqual(rows.gaps.map((item) => item.action_id), ['verify.sqli.r03', 'verify.sqli.r03.ext.r04'])
+  assert.deepEqual(rows.reasonCodes.sort(), ['http_request_budget_exhausted', 'timed_out'])
 })
