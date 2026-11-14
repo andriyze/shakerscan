@@ -790,7 +790,7 @@ services:
   juice-shop:
     # Multi-platform digest resolved 2026-07-21. Pinning prevents an upstream
     # latest-image change from silently changing release-gate ground truth.
-    image: bkimminich/juice-shop@sha256:73c53fbf442e8337b3ea3d98c7e8550308854701ebdfce4cc39768f36b75430e
+    image: bkimminich/juice-shop@sha256:877fc77b12d72b42e486eb09b6b1711cc56514306d92006b284e7e7cf076a809
     profiles:
       - e2e
     ports:
