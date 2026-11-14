@@ -17,7 +17,7 @@ COPY posture/src ./src
 RUN npm run typecheck && npm run build && \
     printf '{}' | node dist/instance.cjs | grep -q '"status":400'
 
-FROM mcr.microsoft.com/playwright/python:v1.63.0-noble@sha256:72bd171a9ffc2b4b59532aaa6210e21014d07093120dc25528870c0b840da1f0
+FROM mcr.microsoft.com/playwright/python:v1.65.2-noble@sha256:38dd67fc654b56b3cba611e4c8eb71cd33750e1cd29eea2a5dc00b484817a75f
 
 # Naming the base image's OpenSSL here upgrades it to the current noble-security build (the
 # scanner image already does); otherwise the API keeps whatever the pinned Playwright base
