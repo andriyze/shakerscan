@@ -1200,38 +1200,65 @@ async def arsenal_claim_hypothesis(hypothesis_id: str, req: HypothesisClaimReque
         hypothesis_uuid = uuid.UUID(str(hypothesis_id))
     except ValueError:
         raise HTTPException(status_code=400, detail="hypothesis_id must be a UUID")
-    lease_expires_at = datetime.now(timezone.utc) + timedelta(seconds=req.lease_seconds)
     async with _pool().acquire() as conn:
-        row = await conn.fetchrow(
-            """
-            UPDATE hypotheses
-            SET status = 'claimed',
-                claim_owner = $3,
-                claim_lease_expires_at = $4,
-                version = version + 1,
-                updated_at = NOW()
-            WHERE id = $1
-              AND version = $2
-              AND status NOT IN ('refuted','promoted','dead','blocked','exhausted')
-              AND (
-                claim_lease_expires_at IS NULL
-                OR claim_lease_expires_at < NOW()
-                OR claim_owner = $3
-              )
-            RETURNING *
-            """,
-            hypothesis_uuid,
-            req.expected_version,
-            req.owner.strip(),
-            lease_expires_at,
+        return await claim_hypothesis_row(
+            conn, hypothesis_uuid, expected_version=req.expected_version,
+            owner=req.owner.strip(), lease_seconds=req.lease_seconds,
         )
-        if row:
-            return {
-                "hypothesis": _public_hypothesis_row(row),
-                "claimed": True,
-                "execution_enabled": False,
-            }
-        current = await conn.fetchrow("SELECT id, status, version, claim_owner, claim_lease_expires_at FROM hypotheses WHERE id=$1", hypothesis_uuid)
+
+
+async def claim_hypothesis_row(
+    conn,
+    hypothesis_uuid: uuid.UUID,
+    *,
+    expected_version: int,
+    owner: str,
+    lease_seconds: int,
+    target_uuid: uuid.UUID | None = None,
+) -> dict[str, Any]:
+    """The one compare-and-set claim of a hypothesis, shared by Arsenal and Hunt.
+
+    ``target_uuid`` fences the claim to one target's leads: a hypothesis on another target (or on
+    none) is reported as not found, never claimed. Terminal and parked leads are not claimable, an
+    active claim held by another owner is refused, and an expired claim can be taken over.
+    """
+    lease_expires_at = datetime.now(timezone.utc) + timedelta(seconds=lease_seconds)
+    row = await conn.fetchrow(
+        """
+        UPDATE hypotheses
+        SET status = 'claimed',
+            claim_owner = $3,
+            claim_lease_expires_at = $4,
+            version = version + 1,
+            updated_at = NOW()
+        WHERE id = $1
+          AND version = $2
+          AND ($5::uuid IS NULL OR target_id = $5)
+          AND status NOT IN ('refuted','promoted','dead','blocked','exhausted')
+          AND (
+            claim_lease_expires_at IS NULL
+            OR claim_lease_expires_at < NOW()
+            OR claim_owner = $3
+          )
+        RETURNING *
+        """,
+        hypothesis_uuid,
+        expected_version,
+        owner,
+        lease_expires_at,
+        target_uuid,
+    )
+    if row:
+        return {
+            "hypothesis": _public_hypothesis_row(row),
+            "claimed": True,
+            "execution_enabled": False,
+        }
+    current = await conn.fetchrow(
+        """SELECT id, status, version, claim_owner, claim_lease_expires_at FROM hypotheses
+           WHERE id=$1 AND ($2::uuid IS NULL OR target_id=$2)""",
+        hypothesis_uuid, target_uuid,
+    )
     if not current:
         raise HTTPException(status_code=404, detail="Hypothesis not found")
     raise HTTPException(
@@ -1258,114 +1285,165 @@ async def arsenal_transition_hypothesis(hypothesis_id: str, req: HypothesisTrans
         hypothesis_uuid = uuid.UUID(str(hypothesis_id))
     except ValueError:
         raise HTTPException(status_code=400, detail="hypothesis_id must be a UUID")
-    to_state = str(req.to or "").strip().lower()
     async with _pool().acquire() as conn:
-        row = await conn.fetchrow("SELECT * FROM hypotheses WHERE id=$1", hypothesis_uuid)
-        if not row:
-            raise HTTPException(status_code=404, detail="Hypothesis not found")
-        hyp = _public_hypothesis_row(row)
-        # Legality is based on the persisted state. A time-derived effective status must not enable
-        # an edge the versioned row itself cannot take.
-        from_state = hyp.get("status")
-        ok, reason = hypothesis_lifecycle.evaluate_transition(
-            from_state,
-            to_state,
-            next_test_action=hyp.get("next_test_action"),
-            metadata=hyp.get("metadata_json"),
+        return await transition_hypothesis_row(
+            conn, hypothesis_uuid, to_state=req.to, expected_version=req.expected_version,
+            reason=req.reason, refuted_by=req.refuted_by, blockers=req.blockers,
+            created_by=req.created_by,
         )
-        if not ok:
+
+
+async def transition_hypothesis_row(
+    conn,
+    hypothesis_uuid: uuid.UUID,
+    *,
+    to_state: str,
+    expected_version: int,
+    reason: str | None = None,
+    refuted_by: Any = None,
+    blockers: Sequence[str] = (),
+    created_by: str | None = None,
+    target_uuid: uuid.UUID | None = None,
+    required_owner: str | None = None,
+    test_record: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """The one gated lifecycle transition of a hypothesis, shared by Arsenal and Hunt.
+
+    ``target_uuid`` fences the transition to one target's leads (another target's lead is not
+    found). ``required_owner`` additionally requires the caller to hold the lead's active claim.
+    ``test_record`` is the falsifier and expected signal the owner tests with: it satisfies the
+    ``testing`` gate and is kept under ``metadata_json.tests[<owner>]``, so one caller's record
+    never overwrites another's.
+    """
+    to_state = str(to_state or "").strip().lower()
+    row = await conn.fetchrow(
+        "SELECT * FROM hypotheses WHERE id=$1 AND ($2::uuid IS NULL OR target_id=$2)",
+        hypothesis_uuid, target_uuid,
+    )
+    if not row:
+        raise HTTPException(status_code=404, detail="Hypothesis not found")
+    hyp = _public_hypothesis_row(row)
+    if required_owner is not None:
+        claim = hyp.get("claim_state") or {}
+        if not (claim.get("active") and claim.get("owner") == required_owner):
             raise HTTPException(
                 status_code=409,
-                detail={"error": "illegal_transition", "reason": reason, "from": from_state, "to": to_state},
+                detail={"error": "hypothesis_not_claimed_by_caller", "status": hyp.get("status"),
+                        "version": hyp.get("version"), "claim_owner": claim.get("owner"),
+                        "claim_active": bool(claim.get("active"))},
             )
-        if to_state == "promoted":
+    # Legality is based on the persisted state. A time-derived effective status must not enable
+    # an edge the versioned row itself cannot take.
+    from_state = hyp.get("status")
+    metadata = hyp.get("metadata_json") if isinstance(hyp.get("metadata_json"), dict) else {}
+    if test_record:
+        metadata = {**metadata, **test_record}
+    ok, gate_reason = hypothesis_lifecycle.evaluate_transition(
+        from_state,
+        to_state,
+        next_test_action=hyp.get("next_test_action"),
+        metadata=metadata,
+    )
+    if not ok:
+        raise HTTPException(
+            status_code=409,
+            detail={"error": "illegal_transition", "reason": gate_reason, "from": from_state, "to": to_state},
+        )
+    if to_state == "promoted":
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "error": "promotion_requires_proof_reconciliation",
+                "reason": "use the approval-gated hypothesis proof reconciliation path",
+            },
+        )
+    refuted_by = refuted_by if isinstance(refuted_by, dict) else {}
+    if to_state in hypothesis_lifecycle.REFUTING_TARGETS:
+        gate_ok, refutation_reason = adjudicate.require_deterministic_refutation({
+            "verdict_basis": refuted_by.get("basis") or refuted_by.get("verdict_basis"),
+            "refuted_by": refuted_by,
+        })
+        if not gate_ok:
             raise HTTPException(
                 status_code=422,
-                detail={
-                    "error": "promotion_requires_proof_reconciliation",
-                    "reason": "use the approval-gated hypothesis proof reconciliation path",
-                },
+                detail={"error": "refutation_not_deterministic", "reason": refutation_reason},
             )
-        refuted_by = req.refuted_by if isinstance(req.refuted_by, dict) else {}
-        if to_state in hypothesis_lifecycle.REFUTING_TARGETS:
-            gate_ok, gate_reason = adjudicate.require_deterministic_refutation({
-                "verdict_basis": refuted_by.get("basis") or refuted_by.get("verdict_basis"),
-                "refuted_by": refuted_by,
-            })
-            if not gate_ok:
-                raise HTTPException(
-                    status_code=422,
-                    detail={"error": "refutation_not_deterministic", "reason": gate_reason},
-                )
-            verification_id = str(refuted_by.get("verification_id") or "").strip()
-            if not verification_id:
-                raise HTTPException(
-                    status_code=422,
-                    detail={"error": "refutation_reference_not_verified", "reason": "verification_id_required"},
-                )
-            reference_valid = await _refuter_verification_reference_valid(
-                conn,
-                verification_id=verification_id,
-                finding_uuid=None,
-                target_uuid=_optional_uuid(hyp.get("target_id")),
-                hypothesis=hyp,
-            )
-            if not reference_valid:
-                raise HTTPException(
-                    status_code=422,
-                    detail={"error": "refutation_reference_not_verified", "reason": "verification_not_bound_to_hypothesis_proof"},
-                )
-        meta_patch: dict[str, Any] = {
-            "last_transition": {
-                "from": from_state,
-                "to": to_state,
-                "reason": req.reason or None,
-                "by": req.created_by,
-                "at": datetime.now(timezone.utc).isoformat(),
-            }
-        }
-        if to_state in hypothesis_lifecycle.REFUTING_TARGETS:
-            meta_patch["refuted_by"] = {
-                key: refuted_by.get(key)
-                for key in ("verification_id", "basis", "ref")
-                if refuted_by.get(key)
-            }
-        if req.blockers:
-            meta_patch["blockers"] = _clean_string_list(req.blockers, max_items=20)
-        terminal_reason = (req.reason or f"transition:{to_state}")[:500]
-        updated = await conn.fetchrow(
-            """
-            UPDATE hypotheses
-            SET status = $3,
-                terminal_reason = CASE WHEN $3 IN ('refuted','promoted','dead','exhausted','blocked')
-                    THEN $4 ELSE terminal_reason END,
-                claim_owner = CASE WHEN $3 IN ('refuted','promoted','dead','exhausted')
-                    THEN NULL ELSE claim_owner END,
-                claim_lease_expires_at = CASE WHEN $3 IN ('refuted','promoted','dead','exhausted')
-                    THEN NULL ELSE claim_lease_expires_at END,
-                metadata_json = metadata_json || $5::jsonb,
-                version = version + 1,
-                updated_at = NOW()
-            WHERE id = $1 AND version = $2 AND status = $6
-            RETURNING *
-            """,
-            hypothesis_uuid,
-            req.expected_version,
-            to_state,
-            terminal_reason,
-            json.dumps(meta_patch),
-            from_state,
-        )
-        if not updated:
-            current = await conn.fetchrow("SELECT status, version FROM hypotheses WHERE id=$1", hypothesis_uuid)
+        verification_id = str(refuted_by.get("verification_id") or "").strip()
+        if not verification_id:
             raise HTTPException(
-                status_code=409,
-                detail={
-                    "error": "version_conflict",
-                    "status": current["status"] if current else None,
-                    "version": current["version"] if current else None,
-                },
+                status_code=422,
+                detail={"error": "refutation_reference_not_verified", "reason": "verification_id_required"},
             )
+        reference_valid = await _refuter_verification_reference_valid(
+            conn,
+            verification_id=verification_id,
+            finding_uuid=None,
+            target_uuid=_optional_uuid(hyp.get("target_id")),
+            hypothesis=hyp,
+        )
+        if not reference_valid:
+            raise HTTPException(
+                status_code=422,
+                detail={"error": "refutation_reference_not_verified", "reason": "verification_not_bound_to_hypothesis_proof"},
+            )
+    meta_patch: dict[str, Any] = {
+        "last_transition": {
+            "from": from_state,
+            "to": to_state,
+            "reason": reason or None,
+            "by": created_by,
+            "at": datetime.now(timezone.utc).isoformat(),
+        }
+    }
+    if to_state in hypothesis_lifecycle.REFUTING_TARGETS:
+        meta_patch["refuted_by"] = {
+            key: refuted_by.get(key)
+            for key in ("verification_id", "basis", "ref")
+            if refuted_by.get(key)
+        }
+    if blockers:
+        meta_patch["blockers"] = _clean_string_list(list(blockers), max_items=20)
+    test_patch = None
+    if test_record and required_owner:
+        test_patch = {required_owner: {**test_record, "at": datetime.now(timezone.utc).isoformat()}}
+    terminal_reason = (reason or f"transition:{to_state}")[:500]
+    updated = await conn.fetchrow(
+        """
+        UPDATE hypotheses
+        SET status = $3,
+            terminal_reason = CASE WHEN $3 IN ('refuted','promoted','dead','exhausted','blocked')
+                THEN $4 ELSE terminal_reason END,
+            claim_owner = CASE WHEN $3 IN ('refuted','promoted','dead','exhausted')
+                THEN NULL ELSE claim_owner END,
+            claim_lease_expires_at = CASE WHEN $3 IN ('refuted','promoted','dead','exhausted')
+                THEN NULL ELSE claim_lease_expires_at END,
+            metadata_json = CASE WHEN $6::jsonb IS NULL THEN metadata_json || $5::jsonb
+                ELSE jsonb_set(metadata_json || $5::jsonb, '{tests}',
+                     COALESCE(CASE WHEN jsonb_typeof(metadata_json->'tests')='object'
+                                   THEN metadata_json->'tests' END, '{}'::jsonb) || $6::jsonb) END,
+            version = version + 1,
+            updated_at = NOW()
+        WHERE id = $1 AND version = $2 AND status = $7
+        RETURNING *
+        """,
+        hypothesis_uuid,
+        expected_version,
+        to_state,
+        terminal_reason,
+        json.dumps(meta_patch),
+        json.dumps(test_patch) if test_patch else None,
+        from_state,
+    )
+    if not updated:
+        current = await conn.fetchrow("SELECT status, version FROM hypotheses WHERE id=$1", hypothesis_uuid)
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error": "version_conflict",
+                "status": current["status"] if current else None,
+                "version": current["version"] if current else None,
+            },
+        )
     return {
         "hypothesis": _public_hypothesis_row(updated),
         "transitioned": True,
