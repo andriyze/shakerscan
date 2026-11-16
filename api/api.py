@@ -5855,6 +5855,8 @@ app.include_router(interactive_router)
 try:
     from arsenal_routes.router import (
         configure_arsenal_router,
+        claim_hypothesis_row,
+        transition_hypothesis_row,
         router as arsenal_router,
         AgentDecisionTraceStep,
         OperationPlanAction,
@@ -6151,6 +6153,8 @@ try:
 except ModuleNotFoundError:  # package import in host-side tests
     from api.arsenal_routes.router import (
         configure_arsenal_router,
+        claim_hypothesis_row,
+        transition_hypothesis_row,
         router as arsenal_router,
         AgentDecisionTraceStep,
         OperationPlanAction,
@@ -6508,6 +6512,11 @@ configure_arsenal_router(
     results_dir=lambda: RESULTS_DIR,
 )
 app.include_router(arsenal_router)
+try:
+    from hunt.hunt_hypotheses import configure_hunt_hypotheses
+except ModuleNotFoundError:  # package import in host-side tests
+    from api.hunt.hunt_hypotheses import configure_hunt_hypotheses
+configure_hunt_hypotheses(upsert=lambda *a, **k: _upsert_hypothesis(*a, **k), claim=claim_hypothesis_row, transition=transition_hypothesis_row, request_model=HypothesisRequest)
 try:
     from evidence_routes.router import (
         configure_evidence_router,

@@ -1051,7 +1051,7 @@ async def retract_run(conn: Any, target_id: Any, hunt_id: Any, *, actor: str, no
             RETURNING *""",
             row["id"], f"hunt:{hunt}", actor, note)
         await _withhold_knowledge(conn, row["id"], rows, actor=actor, note=note)
-        from .hunt_hypotheses import retract_hunt_hypotheses
+        from .hypothesis_retraction import retract_hunt_hypotheses
         hypotheses = await retract_hunt_hypotheses(conn, row["id"], hunt, actor=actor, note=note)
         # The Hunt is recorded as retracted: for the rest of its run it can no longer write
         # interpretations, knowledge, instructions or saved actions (proposals remain).

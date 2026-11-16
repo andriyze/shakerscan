@@ -193,20 +193,23 @@ def page_row(row: Mapping[str, Any]) -> dict[str, Any]:
     return item
 
 
-def _arsenal():
-    try:
-        from arsenal_routes import router as arsenal
-    except ModuleNotFoundError:  # package import layout
-        from ..arsenal_routes import router as arsenal
-    return arsenal
+#: The lead-board operations this module shares with Arsenal (``_upsert_hypothesis``,
+#: ``claim_hypothesis_row``, ``transition_hypothesis_row``) and the request model they take. The
+#: composition root supplies them (``configure_hunt_hypotheses``); importing them here would make
+#: Hunt and Arsenal import each other.
+_board: dict[str, Any] = {}
 
 
-def _hypothesis_request(**fields: Any) -> Any:
-    try:
-        from request_models import HypothesisRequest
-    except ModuleNotFoundError:  # package import layout
-        from ..request_models import HypothesisRequest
-    return HypothesisRequest(**fields)
+def configure_hunt_hypotheses(*, upsert: Any, claim: Any, transition: Any, request_model: Any) -> None:
+    _board.update(upsert=upsert, claim=claim, transition=transition, request_model=request_model)
+
+
+def _shared(name: str) -> Any:
+    call = _board.get(name)
+    if call is None:
+        raise HTTPException(503, {"error": "hypothesis_board_not_ready", "reason_code": "hypothesis_board_not_ready",
+                                  "message": "The lead board is not configured in this process"})
+    return call
 
 
 async def proposed_count(conn: Any, hunt_run_id: Any) -> int:
@@ -256,12 +259,12 @@ async def propose(conn: Any, run: Mapping[str, Any], values: Mapping[str, Any]) 
                            f"This Hunt already proposed {MAX_HYPOTHESES_PER_HUNT} leads; claim and settle existing ones")
         endorsement = {"source": "ai_planner", "created_by": owner, "hunt_run_id": str(run["id"]),
                        "confidence": float(confidence), "derived_from": derived_from}
-        request = _hypothesis_request(
+        request = _shared("request_model")(
             source="ai_planner", family=family, dedupe_key=f"hunt:{family}",
             dedupe_dimensions=dimensions, target_id=str(target), cwe=cwe, title=title,
             description=description, severity_guess=severity, confidence=float(confidence),
             endorsement=endorsement, created_by=owner)
-        result = await _arsenal()._upsert_hypothesis(conn, request)
+        result = await _shared("upsert")(conn, request)
         hypothesis = result["hypothesis"]
         created = bool(result.get("created"))
         if created and (derived_from or test):
@@ -293,7 +296,7 @@ async def claim(conn: Any, run: Mapping[str, Any], values: Mapping[str, Any]) ->
         raise _refused(422, "invalid_lease_seconds",
                        f"lease_seconds is {MIN_CLAIM_LEASE_SECONDS}-{MAX_CLAIM_LEASE_SECONDS}")
     owner = _owner(run)
-    result = await _arsenal().claim_hypothesis_row(
+    result = await _shared("claim")(
         conn, _hypothesis_id(values), expected_version=_version(values), owner=owner,
         lease_seconds=lease, target_uuid=_target(run))
     row = await conn.fetchrow("SELECT * FROM hypotheses WHERE id=$1", uuid.UUID(str(result["hypothesis"]["id"])))
@@ -343,7 +346,7 @@ async def transition(conn: Any, run: Mapping[str, Any], values: Mapping[str, Any
     record["reason_code"] = reason_code
     record["action_ids"] = sorted(set(previous.get("action_ids") or []) | set(ran))[-50:]
     record["evidence_refs"] = sorted(set(previous.get("evidence_refs") or []) | set(evidence))[-50:]
-    result = await _arsenal().transition_hypothesis_row(
+    result = await _shared("transition")(
         conn, hypothesis_id, to_state=to_state, expected_version=_version(values),
         reason=reason_code, refuted_by=refuted_by,
         created_by=owner, target_uuid=target, required_owner=owner, test_record=record)
@@ -373,45 +376,3 @@ async def frontier(conn: Any, run: Mapping[str, Any], *, limit: int = MAX_FRONTI
             "truncated": total > len(rows), "limit": limit,
             "read_with": "POST /hunts/{hunt_id}/query kind=hypotheses",
             "work_with": ["hypothesis.propose", "hypothesis.claim", "hypothesis.transition"]}
-
-
-async def retract_hunt_hypotheses(conn: Any, target_id: Any, hunt_id: Any, *, actor: str, note: str) -> dict[str, int]:
-    """An operator retracted this Hunt's entries: withhold every hypothesis text it wrote on the target.
-
-    Leads it created are withheld from Hunts and closed when no other source endorsed them (one an
-    operator or another source also recorded stays open for them); its test records are removed
-    from every lead; leads it held are released back to open. Proof-backed state is untouched.
-    """
-    writer = f"hunt:{hunt_id}"
-    flag = json.dumps({"by": actor, "note": note, "hunt_id": str(hunt_id),
-                       "at": datetime.now(timezone.utc).isoformat()})
-    owned = await conn.fetch(
-        """UPDATE hypotheses SET metadata_json = jsonb_set(metadata_json, '{hunt_withheld}', $3::jsonb),
-               status = CASE WHEN status IN ('open','claimed','testing','supported','blocked','exhausted')
-                              AND NOT EXISTS (SELECT 1 FROM jsonb_array_elements(endorsements) e
-                                              WHERE e->>'created_by' IS DISTINCT FROM $2)
-                             THEN 'dead' ELSE status END,
-               terminal_reason = CASE WHEN status IN ('open','claimed','testing','supported','blocked','exhausted')
-                              AND NOT EXISTS (SELECT 1 FROM jsonb_array_elements(endorsements) e
-                                              WHERE e->>'created_by' IS DISTINCT FROM $2)
-                             THEN 'hunt_entries_retracted' ELSE terminal_reason END,
-               version = version + 1, updated_at = NOW()
-           WHERE target_asset_access_owner(target_id)=target_asset_access_owner($1) AND created_by = $2
-           RETURNING id""",
-        target_id, writer, flag)
-    released = await conn.fetch(
-        """UPDATE hypotheses SET status = 'open', claim_owner = NULL, claim_lease_expires_at = NULL,
-               metadata_json = metadata_json || jsonb_build_object('released_by_retraction', $3::jsonb),
-               version = version + 1, updated_at = NOW()
-           WHERE target_asset_access_owner(target_id)=target_asset_access_owner($1)
-             AND claim_owner = $2 AND status IN ('claimed','testing','supported')
-           RETURNING id""",
-        target_id, writer, flag)
-    scrubbed = await conn.fetch(
-        """UPDATE hypotheses SET metadata_json = metadata_json #- ARRAY['tests', $2::text],
-               version = version + 1, updated_at = NOW()
-           WHERE target_asset_access_owner(target_id)=target_asset_access_owner($1)
-             AND metadata_json->'tests' ? $2
-           RETURNING id""",
-        target_id, writer)
-    return {"withheld": len(owned), "released": len(released), "test_records_removed": len(scrubbed)}
