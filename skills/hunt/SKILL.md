@@ -239,6 +239,19 @@ Choose the next smallest action that can answer or falsify a useful hypothesis:
   with `GET /hunts/{hunt_id}/coverage-angles?status=...&family=...`, which reports `truncated` too.
   Coverage and checkpoint state are advisory investigation memory; neither can grant authority
   or verify a finding.
+- Work the target's lead frontier with `hypothesis.propose`, `hypothesis.claim` and
+  `hypothesis.transition`. The frontier is the target's shared lead board, so later Hunts see your
+  leads and you can work leads others recorded. Read it with query `kind=hypotheses`; the
+  checkpoint's `hypotheses` lists open leads, those you hold first. Propose a lead with its
+  `family`, a one-line `title`, `dedupe_dimensions` saying exactly where it applies (the same lead
+  from another source merges instead of duplicating), `derived_from` citing the action, candidate,
+  finding or interpretation it follows from, and a `falsifier` plus `expected_signal`. Claim a lead
+  with the `version` you read before testing it; a claim is a lease, so claim again to renew it.
+  `testing` needs a falsifier and expected signal. `supported` cites your own completed testing
+  actions in `evidence_refs`. `refuted` needs a completed deterministic verification. Release a
+  lead with `open` when you stop. Transitions take a `reason_code`, not prose. `supported` is
+  still a lead: verify it with `candidate.verify` or a registered verifier, because only
+  deterministic proof marks a finding verified.
 - Browser capabilities return `browser_surface` observations containing safe CSS selectors,
   visible control structure, a redacted SPA route, and a `state_id`, not page text or secrets.
   `browser.interact` accepts either one `selector` or up to eight `steps` (`click` or non-secret

@@ -318,6 +318,9 @@ async def query_knowledge_page(
         row.pop("page_timestamp", None)
     if kind == "graph_nodes":
         rows = [project_graph_node(row) for row in rows]
+    if kind == "hypotheses":
+        from .hunt_hypotheses import page_row
+        rows = [page_row(row) for row in rows]
     if kind == "interpretations":
         from .interpretations import KNOWLEDGE_IMPORT_WRITER, public_interpretation, target_withheld_digests
         mirrored = [row["target_id"] for row in rows if row.get("written_by") == KNOWLEDGE_IMPORT_WRITER]

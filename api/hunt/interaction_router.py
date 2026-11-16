@@ -4545,6 +4545,16 @@ def _hunt_redacted_capability_input(
                 text = str(values.pop(key))
                 values[key + '_sha256'] = hashlib.sha256(text.encode('utf-8')).hexdigest()
                 values[key + '_characters'] = len(text)
+    if capability_name in {'hypothesis.propose', 'hypothesis.transition'}:
+        # Lead text is stored once on the lead (and withheld on retraction); the ledger keeps digests.
+        for key in ('title', 'description', 'falsifier', 'expected_signal'):
+            if key in values:
+                text = str(values.pop(key))
+                values[key + '_sha256'] = hashlib.sha256(text.encode('utf-8')).hexdigest()
+                values[key + '_characters'] = len(text)
+        if isinstance(values.get('dedupe_dimensions'), dict):
+            values['dedupe_dimensions_sha256'] = hashlib.sha256(json.dumps(
+                values.pop('dedupe_dimensions'), sort_keys=True, default=str).encode()).hexdigest()
     if capability_name in {'knowledge.record', 'knowledge.check_experiment'} and 'conditions' in values:
         values['conditions_sha256'] = hashlib.sha256(json.dumps(
             values.pop('conditions'), sort_keys=True, default=str).encode()).hexdigest()

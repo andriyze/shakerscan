@@ -40,7 +40,7 @@ STANDARD_WEB_WORKFLOW = (
     "web.browser_crawl", "web.content_discover", "javascript.analyze", "artifact.inspect", "http.request",
     "browser.navigate", "browser.interact", "tls.inspect", "templates.scan", "collections.replay_safe",
     "sqli.verify", "xss.verify", "authz.verify", "candidate.verify", "findings.create", "findings.update",
-    "knowledge.record",
+    "knowledge.record", "hypothesis.propose", "hypothesis.claim", "hypothesis.transition",
 )
 MAX_WARNINGS = 12
 
