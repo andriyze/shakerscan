@@ -63,6 +63,7 @@ def test_inline_hunt_capability_set_is_explicit_and_bounded():
         "targets.skill.read", "targets.skill.create", "targets.skill.update", "targets.skill.delete",
         "targets.skill.propose",
         "knowledge.record", "knowledge.check_experiment", "knowledge.changes", "knowledge.continue",
+        "hypothesis.propose", "hypothesis.claim", "hypothesis.transition",
         "targets.actions.read", "targets.actions.create", "targets.actions.update", "targets.actions.delete",
     }
     assert hunt_capability_lease_seconds({"tool_wall_seconds": 10}) == 90

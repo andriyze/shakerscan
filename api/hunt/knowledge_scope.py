@@ -20,7 +20,10 @@ class QuerySpec:
 QUERIES = {
     "endpoints": QuerySpec("target_endpoints", "method, path, auth_state, test_status, last_verdict, param_shape, content_type, priority_score, first_seen_at, last_seen_at", "last_seen_at", ("path_contains", "method", "test_status", "auth_state")),
     "findings": QuerySpec("findings", "title, severity, status, tool, url, last_verification_verdict, last_seen_at", "last_seen_at", ("severity", "status", "verified_only")),
-    "hypotheses": QuerySpec("hypotheses", "family, title, status, confidence, source, dedupe_key, updated_at", "updated_at", ("family", "status")),
+    # metadata_json is read only to withhold retracted text and expose the dedupe dimensions; it is
+    # projected away before a row leaves the page (hunt/hunt_hypotheses.py page_row). version and the
+    # claim are what hypothesis.claim and hypothesis.transition need.
+    "hypotheses": QuerySpec("hypotheses", "family, title, status, version, claim_owner, claim_lease_expires_at, confidence, source, dedupe_key, metadata_json, updated_at", "updated_at", ("family", "status")),
     "principals": QuerySpec("target_principals", "label, role, tenant_id, auth_state, is_active, updated_at", "updated_at", ("role", "auth_state")),
     "graph_nodes": QuerySpec("application_graph_nodes", "node_type, node_key, label, attributes, last_seen_at", "last_seen_at", ("node_type", "hunt_id")),
     "graph_edges": QuerySpec("application_graph_edges", "src_key, edge_type, dst_key, last_seen_at", "last_seen_at"),

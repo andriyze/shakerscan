@@ -919,6 +919,117 @@ export const HUNT_START_CONTRACT = {
     {
       "call": {
         "method": "POST",
+        "url_template": "/hunts/{hunt_id}/capabilities/hypothesis.propose"
+      },
+      "description": "Propose a lead on this target’s hypothesis frontier (the shared lead board later Hunts and Arsenal also work), or endorse the identical lead already there: family, a one-line title, and dedupe_dimensions saying exactly where it applies. derived_from cites the records it follows from (an action, candidate, finding, hypothesis or interpretation of this target). falsifier and expected_signal state how you will try to disprove it. Advisory: not proof, sends nothing, grants nothing. At most 200 per Hunt.",
+      "input": {
+        "fields": [
+          "family",
+          "title",
+          "description",
+          "dedupe_dimensions",
+          "derived_from",
+          "falsifier",
+          "expected_signal",
+          "cwe",
+          "severity_guess",
+          "confidence"
+        ],
+        "required": [
+          "family",
+          "title",
+          "dedupe_dimensions"
+        ]
+      },
+      "name": "hypothesis.propose",
+      "required_approval": null,
+      "target_kinds": [
+        "api",
+        "device",
+        "network",
+        "web"
+      ],
+      "tool": {
+        "adapter": "hypothesis.propose",
+        "alternate_adapters": [],
+        "binary": null,
+        "name": "hypothesis.propose"
+      }
+    },
+    {
+      "call": {
+        "method": "POST",
+        "url_template": "/hunts/{hunt_id}/capabilities/hypothesis.claim"
+      },
+      "description": "Take (or renew) this Hunt’s working lease on one lead of this target before testing it, with the version you read. Another holder’s active lease is refused; an expired one is taken over. Grants no testing authority.",
+      "input": {
+        "fields": [
+          "hypothesis_id",
+          "expected_version",
+          "lease_seconds"
+        ],
+        "required": [
+          "hypothesis_id",
+          "expected_version"
+        ]
+      },
+      "name": "hypothesis.claim",
+      "required_approval": null,
+      "target_kinds": [
+        "api",
+        "device",
+        "network",
+        "web"
+      ],
+      "tool": {
+        "adapter": "hypothesis.claim",
+        "alternate_adapters": [],
+        "binary": null,
+        "name": "hypothesis.claim"
+      }
+    },
+    {
+      "call": {
+        "method": "POST",
+        "url_template": "/hunts/{hunt_id}/capabilities/hypothesis.transition"
+      },
+      "description": "Move a lead this Hunt holds: testing (needs falsifier and expected_signal, here or already on the lead), supported (cite completed testing actions of this Hunt in evidence_refs), refuted (refuted_by a completed deterministic verification), blocked, exhausted, or open to release it. A closed reason_code, no free text. supported is a lead, never a finding; verification stays with the registered verifiers.",
+      "input": {
+        "fields": [
+          "hypothesis_id",
+          "expected_version",
+          "to",
+          "reason_code",
+          "evidence_refs",
+          "falsifier",
+          "expected_signal",
+          "refuted_by"
+        ],
+        "required": [
+          "hypothesis_id",
+          "expected_version",
+          "to",
+          "reason_code"
+        ]
+      },
+      "name": "hypothesis.transition",
+      "required_approval": null,
+      "target_kinds": [
+        "api",
+        "device",
+        "network",
+        "web"
+      ],
+      "tool": {
+        "adapter": "hypothesis.transition",
+        "alternate_adapters": [],
+        "binary": null,
+        "name": "hypothesis.transition"
+      }
+    },
+    {
+      "call": {
+        "method": "POST",
         "url_template": "/hunts/{hunt_id}/capabilities/targets.create"
       },
       "description": "Register a hostname or IP as a canonical target without testing it.",

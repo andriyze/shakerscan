@@ -1051,6 +1051,8 @@ async def retract_run(conn: Any, target_id: Any, hunt_id: Any, *, actor: str, no
             RETURNING *""",
             row["id"], f"hunt:{hunt}", actor, note)
         await _withhold_knowledge(conn, row["id"], rows, actor=actor, note=note)
+        from .hunt_hypotheses import retract_hunt_hypotheses
+        hypotheses = await retract_hunt_hypotheses(conn, row["id"], hunt, actor=actor, note=note)
         # The Hunt is recorded as retracted: for the rest of its run it can no longer write
         # interpretations, knowledge, instructions or saved actions (proposals remain).
         await conn.execute("""UPDATE hunt_runs SET notes = COALESCE(notes,'[]'::jsonb) || $2::jsonb, updated_at=NOW()
@@ -1058,7 +1060,7 @@ async def retract_run(conn: Any, target_id: Any, hunt_id: Any, *, actor: str, no
             hunt, json.dumps([{"kind": RETRACTED_HUNT_NOTE, "by": actor, "note": note, "target_id": str(row["id"]),
                                "at": datetime.now(timezone.utc).isoformat()}]))
         return {"target_id": str(row["id"]), "hunt_id": str(hunt), "retracted": len(rows), "hunt_quarantined": True,
-                "ids": [str(item["id"]) for item in rows]}
+                "ids": [str(item["id"]) for item in rows], "hypotheses": hypotheses}
 
 
 async def _withhold_knowledge(conn: Any, target: Any, rows: list[Any], *, actor: str, note: str) -> None:

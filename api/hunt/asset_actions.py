@@ -31,7 +31,8 @@ NAMES = frozenset({'targets.create','targets.update','credentials.grant','collec
                    'targets.skill.propose',
                    'targets.actions.read','targets.actions.create','targets.actions.update','targets.actions.delete',
                    'knowledge.record','knowledge.check_experiment','knowledge.changes',
-                   'knowledge.continue'})
+                   'knowledge.continue',
+                   'hypothesis.propose','hypothesis.claim','hypothesis.transition'})
 
 
 async def execute_asset_action(pool, run, name, values):
@@ -52,13 +53,14 @@ async def execute_asset_action(pool, run, name, values):
 
 #: Writes refused once an operator retracted this Hunt's entries (proposals and reads remain): every
 #: write of text other Hunts or operators later read, target names included, and collection bindings
-#: (the origins a later Hunt replays a collection against). Hunts write no hypotheses, and their only
-#: graph writes are the authorization workflow's server-built nodes (a fixed label and attributes
-#: projected by reference allowlist, hunt/graph_projection.py), so neither carries a Hunt's text.
+#: (the origins a later Hunt replays a collection against), and hypothesis proposals and transitions
+#: (a lead's text and the Hunt's test record; hunt/hunt_hypotheses.py, withheld again on retraction).
+#: A claim stores no text. A Hunt's only graph writes are the authorization workflow's server-built
+#: nodes (a fixed label and attributes projected by reference allowlist, hunt/graph_projection.py).
 QUARANTINED_WRITES = frozenset({'knowledge.record', 'targets.skill.create', 'targets.skill.update',
                                 'targets.skill.delete', 'targets.actions.create', 'targets.actions.update',
                                 'targets.actions.delete', 'targets.create', 'targets.update',
-                                'collections.bind'})
+                                'collections.bind', 'hypothesis.propose', 'hypothesis.transition'})
 
 
 async def _perform_asset_action(pool, run, name, values):
@@ -72,6 +74,12 @@ async def _perform_asset_action(pool, run, name, values):
     policy = run.get('policy_json') or {}
     if isinstance(policy,str):
         policy = json.loads(policy)
+    if name.startswith('hypothesis.'):
+        from . import hunt_hypotheses
+        operation = {'hypothesis.propose': hunt_hypotheses.propose, 'hypothesis.claim': hunt_hypotheses.claim,
+                     'hypothesis.transition': hunt_hypotheses.transition}[name]
+        async with pool.acquire() as conn:
+            return await operation(conn, run, values)
     if name.startswith('knowledge.'):
         from .interpretations import InterpretationInput, check_experiment, record_interpretation
         async with pool.acquire() as conn:

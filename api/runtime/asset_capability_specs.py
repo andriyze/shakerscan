@@ -3,6 +3,12 @@
 MAX_TARGET_SKILL_CHARACTERS = 12_000
 MAX_PROPOSALS_PER_HUNT = 5
 MAX_INTERPRETATIONS_PER_HUNT = 200  # hunt/interpretations.py MAX_PER_HUNT
+MAX_HYPOTHESES_PER_HUNT = 200  # hunt/hunt_hypotheses.py MAX_HYPOTHESES_PER_HUNT
+HYPOTHESIS_DIMENSIONS = ('method','route','object_key','principal_actor','principal_other','tenant',
+                         'parameter_path','body_path','proof_surface')  # hunt/hunt_hypotheses.py DIMENSIONS
+HYPOTHESIS_REASON_CODES = ('testing_started','expected_signal_observed','expected_signal_absent',
+                           'deterministic_refutation','missing_prerequisite','policy_refused',
+                           'budget_exhausted','released')  # hunt/hunt_hypotheses.py REASON_CODES
 
 def asset_capability_specs(spec, schema, kinds):
     confirmed = {'type':'boolean','description':'Deprecated compatibility field; grants no authority. Metadata edits default on but obey operator opt-outs; instruction edits need the operator’s explicit instruction_changes opt-in; sharing needs saved grants.'}
@@ -123,6 +129,47 @@ def asset_capability_specs(spec, schema, kinds):
                    'description':'Ranked items per page (default 25).'},
           'after':{'type':'string','maxLength':2048,
                    'description':'next_experiments.next_after from the previous page; omit for the first page.'}},()),
+        ('hypothesis.propose',('Propose a lead on this target\u2019s hypothesis frontier (the shared lead board later Hunts '
+         'and Arsenal also work), or endorse the identical lead already there: family, a one-line title, and '
+         'dedupe_dimensions saying exactly where it applies. derived_from cites the records it follows from '
+         '(an action, candidate, finding, hypothesis or interpretation of this target). falsifier and '
+         'expected_signal state how you will try to disprove it. Advisory: not proof, sends nothing, grants '
+         f'nothing. At most {MAX_HYPOTHESES_PER_HUNT} per Hunt.'),
+         {'family':{'type':'string','minLength':1,'maxLength':80,'description':'Vulnerability family, e.g. bola, sqli, ssrf.'},
+          'title':{'type':'string','minLength':1,'maxLength':200},
+          'description':{'type':'string','maxLength':2000},
+          'dedupe_dimensions':{'type':'object','additionalProperties':False,'minProperties':1,
+                               'properties':{key:text for key in HYPOTHESIS_DIMENSIONS},
+                               'description':'Where the lead applies; the same lead from another source merges with it.'},
+          'derived_from':{'type':'array','maxItems':20,'uniqueItems':True,'items':identifier},
+          'falsifier':{'type':'string','maxLength':1000},
+          'expected_signal':{'type':'string','maxLength':1000},
+          'cwe':{'type':'string','maxLength':20},
+          'severity_guess':{'type':'string','enum':['critical','high','medium','low','info']},
+          'confidence':{'type':'number','minimum':0,'maximum':1}},
+         ('family','title','dedupe_dimensions')),
+        ('hypothesis.claim',('Take (or renew) this Hunt\u2019s working lease on one lead of this target before testing '
+         'it, with the version you read. Another holder\u2019s active lease is refused; an expired one is taken over. '
+         'Grants no testing authority.'),
+         {'hypothesis_id':identifier,'expected_version':{'type':'integer','minimum':1},
+          'lease_seconds':{'type':'integer','minimum':60,'maximum':3600,'default':900}},
+         ('hypothesis_id','expected_version')),
+        ('hypothesis.transition',('Move a lead this Hunt holds: testing (needs falsifier and expected_signal, here or '
+         'already on the lead), supported (cite completed testing actions of this Hunt in evidence_refs), '
+         'refuted (refuted_by a completed deterministic verification), blocked, exhausted, or open to release it. '
+         'A closed reason_code, no free text. supported is a lead, never a finding; verification stays with the '
+         'registered verifiers.'),
+         {'hypothesis_id':identifier,'expected_version':{'type':'integer','minimum':1},
+          'to':{'type':'string','enum':['testing','supported','refuted','blocked','exhausted','open']},
+          'reason_code':{'type':'string','enum':list(HYPOTHESIS_REASON_CODES)},
+          'evidence_refs':{'type':'array','maxItems':20,'uniqueItems':True,'items':identifier},
+          'falsifier':{'type':'string','maxLength':1000},
+          'expected_signal':{'type':'string','maxLength':1000},
+          'refuted_by':{'type':'object','additionalProperties':False,
+                        'properties':{'verification_id':identifier,
+                                      'basis':{'type':'string','enum':['deterministic_replay','parser_protocol','cryptographic']},
+                                      'ref':{'type':'string','maxLength':200}}}},
+         ('hypothesis_id','expected_version','to','reason_code')),
         ('targets.create','Register a hostname or IP as a canonical target without testing it.',
          {'locator':{'type':'string','minLength':1,'maxLength':253},
           'name':{'type':'string','maxLength':255},
@@ -145,11 +192,11 @@ def asset_capability_specs(spec, schema, kinds):
         {'tool_wall_seconds':5},{'control_plane':True},
         schema({'action_id':identifier,'parameters':{'type':'object','maxProperties':16}}),
         'target-management/v1',('target_management_observation','tool_receipt'),hunt_executor='inline')
-    advisory = ('targets.','knowledge.')
+    advisory = ('targets.','knowledge.','hypothesis.')
     return (read,action_read) + tuple(spec(name,description,'internal',
         'read_only' if name.startswith(advisory) else 'active',kinds,name,'1',
         None if name.startswith(advisory) else 'active_testing',
         {'tool_wall_seconds':5},{'control_plane':True,**({} if name.startswith(advisory) else {'user_confirmation':True})},
-        schema({**properties,**({} if name.startswith('knowledge.') else {'operator_confirmed':confirmed})},required=required),
+        schema({**properties,**({} if name.startswith(('knowledge.','hypothesis.')) else {'operator_confirmed':confirmed})},required=required),
         'target-management/v1',('target_management_observation','tool_receipt'),hunt_executor='inline')
         for name,description,properties,required in definitions)

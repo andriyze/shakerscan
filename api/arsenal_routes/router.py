@@ -1261,6 +1261,7 @@ async def claim_hypothesis_row(
     )
     if not current:
         raise HTTPException(status_code=404, detail="Hypothesis not found")
+    expires = current["claim_lease_expires_at"]
     raise HTTPException(
         status_code=409,
         detail={
@@ -1268,7 +1269,9 @@ async def claim_hypothesis_row(
             "status": current["status"],
             "version": current["version"],
             "claim_owner": current["claim_owner"],
-            "claim_lease_expires_at": current["claim_lease_expires_at"],
+            # ISO text, as the HTTP response always encoded it: a Hunt records the refusal in its
+            # action ledger as JSON, where a datetime cannot be serialized.
+            "claim_lease_expires_at": expires.isoformat() if hasattr(expires, "isoformat") else expires,
         },
     )
 

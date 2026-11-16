@@ -838,6 +838,10 @@ async def build_hunt_checkpoint(
         if continuation_rows else 0
     )
 
+    # The open lead frontier on this Hunt's target (shared hypotheses), leads this Hunt holds first.
+    from .hunt_hypotheses import frontier as hypothesis_frontier
+    hypotheses = await hypothesis_frontier(conn, run)
+
     return {
         "schema_version": HUNT_CHECKPOINT_SCHEMA,
         "hunt_id": hunt_run_id,
@@ -861,6 +865,10 @@ async def build_hunt_checkpoint(
         "candidate_count": candidate_total,
         "candidates_truncated": candidate_total > len(candidates),
         "review_queue": review_queue,
+        "hypotheses": hypotheses["hypotheses"],
+        "hypothesis_count": len(hypotheses["hypotheses"]),
+        "hypothesis_total": hypotheses["total"],
+        "hypotheses_truncated": hypotheses["truncated"],
         "action_outcomes": {
             str(row["status"]): int(row["count"]) for row in action_rows
         },
