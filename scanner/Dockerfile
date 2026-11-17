@@ -103,7 +103,7 @@ RUN --mount=type=cache,target=/go/pkg/mod,sharing=locked \
     done
 
 # --- Stage 2: Runtime with Playwright (Chromium) ---
-FROM mcr.microsoft.com/playwright/python:v1.65.2-noble@sha256:38dd67fc654b56b3cba611e4c8eb71cd33750e1cd29eea2a5dc00b484817a75f
+FROM mcr.microsoft.com/playwright/python:v1.63.0-noble@sha256:72bd171a9ffc2b4b59532aaa6210e21014d07093120dc25528870c0b840da1f0
 
 # System deps for network tooling and additional scanners. Retry with fresh signed
 # indexes when a mirror rotates between update and install; omit no packages.
@@ -226,9 +226,6 @@ RUN python3 -m pip uninstall -y --break-system-packages virtualenv python-discov
 # build when any distribution is still installed twice under /usr/local.
 COPY scanner/requirements.txt /app/requirements.txt
 COPY scanner/requirements.lock /app/requirements.lock
-# The Playwright base image ships its own packaging distribution; installing the locked one over it
-# with --ignore-installed would leave two, which the duplicate check below rejects.
-RUN pip uninstall -y --break-system-packages packaging
 RUN pip install --no-cache-dir --break-system-packages --ignore-installed --require-hashes \
     -r /app/requirements.lock && \
     pip uninstall -y --break-system-packages msgpack setuptools && \
