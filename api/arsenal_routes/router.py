@@ -1215,14 +1215,36 @@ async def claim_hypothesis_row(
     owner: str,
     lease_seconds: int,
     target_uuid: uuid.UUID | None = None,
+    renewal_keeps_state: bool = False,
 ) -> dict[str, Any]:
     """The one compare-and-set claim of a hypothesis, shared by Arsenal and Hunt.
 
     ``target_uuid`` fences the claim to one target's leads: a hypothesis on another target (or on
     none) is reported as not found, never claimed. Terminal and parked leads are not claimable, an
     active claim held by another owner is refused, and an expired claim can be taken over.
+    ``renewal_keeps_state`` makes a holder's own renewal a pure lease extension: a lead it already
+    moved to ``testing`` or ``supported`` stays there instead of returning to ``claimed``. A
+    different owner taking over always starts from ``claimed``.
     """
     lease_expires_at = datetime.now(timezone.utc) + timedelta(seconds=lease_seconds)
+    if renewal_keeps_state:
+        renewed = await conn.fetchrow(
+            """
+            UPDATE hypotheses
+            SET claim_lease_expires_at = $4, version = version + 1, updated_at = NOW()
+            WHERE id = $1 AND version = $2 AND claim_owner = $3
+              AND ($5::uuid IS NULL OR target_id = $5)
+              AND status IN ('testing','supported')
+            RETURNING *
+            """,
+            hypothesis_uuid,
+            expected_version,
+            owner,
+            lease_expires_at,
+            target_uuid,
+        )
+        if renewed:
+            return {"hypothesis": _public_hypothesis_row(renewed), "claimed": True, "execution_enabled": False}
     row = await conn.fetchrow(
         """
         UPDATE hypotheses
@@ -1309,6 +1331,7 @@ async def transition_hypothesis_row(
     target_uuid: uuid.UUID | None = None,
     required_owner: str | None = None,
     test_record: dict[str, Any] | None = None,
+    release_claim: bool = False,
 ) -> dict[str, Any]:
     """The one gated lifecycle transition of a hypothesis, shared by Arsenal and Hunt.
 
@@ -1316,7 +1339,8 @@ async def transition_hypothesis_row(
     found). ``required_owner`` additionally requires the caller to hold the lead's active claim.
     ``test_record`` is the falsifier and expected signal the owner tests with: it satisfies the
     ``testing`` gate and is kept under ``metadata_json.tests[<owner>]``, so one caller's record
-    never overwrites another's.
+    never overwrites another's. ``release_claim`` drops the claim with the transition (a holder
+    handing the lead back), as closing transitions always do.
     """
     to_state = str(to_state or "").strip().lower()
     row = await conn.fetchrow(
@@ -1416,9 +1440,9 @@ async def transition_hypothesis_row(
         SET status = $3,
             terminal_reason = CASE WHEN $3 IN ('refuted','promoted','dead','exhausted','blocked')
                 THEN $4 ELSE terminal_reason END,
-            claim_owner = CASE WHEN $3 IN ('refuted','promoted','dead','exhausted')
+            claim_owner = CASE WHEN $3 IN ('refuted','promoted','dead','exhausted') OR $7::boolean
                 THEN NULL ELSE claim_owner END,
-            claim_lease_expires_at = CASE WHEN $3 IN ('refuted','promoted','dead','exhausted')
+            claim_lease_expires_at = CASE WHEN $3 IN ('refuted','promoted','dead','exhausted') OR $7::boolean
                 THEN NULL ELSE claim_lease_expires_at END,
             metadata_json = CASE WHEN $6::jsonb IS NULL THEN metadata_json || $5::jsonb
                 ELSE jsonb_set(metadata_json || $5::jsonb, '{tests}',
@@ -1426,7 +1450,7 @@ async def transition_hypothesis_row(
                                    THEN metadata_json->'tests' END, '{}'::jsonb) || $6::jsonb) END,
             version = version + 1,
             updated_at = NOW()
-        WHERE id = $1 AND version = $2 AND status = $7
+        WHERE id = $1 AND version = $2 AND status = $8
         RETURNING *
         """,
         hypothesis_uuid,
@@ -1435,6 +1459,7 @@ async def transition_hypothesis_row(
         terminal_reason,
         json.dumps(meta_patch),
         json.dumps(test_patch) if test_patch else None,
+        release_claim,
         from_state,
     )
     if not updated:

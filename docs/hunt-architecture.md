@@ -107,10 +107,16 @@ A Hunt works this through the target's shared lead board (`hypotheses`) with
 These capabilities call the same dedupe, compare-and-set claim, lifecycle gate and deterministic
 refutation check as Arsenal; they do not add a second lifecycle. Writes are limited to the Hunt's
 own target. A Hunt cannot promote a lead or close it as `dead`. `supported` must cite completed
-testing actions of that Hunt, and `refuted` needs a completed deterministic verification. The text
-a Hunt writes, the title of a lead it created and its own test record, is withheld again when an
-operator retracts that Hunt's entries. The checkpoint hands over the open frontier, with the leads
-the Hunt holds listed first.
+testing actions of that Hunt, and `refuted` needs a completed deterministic verification. Each
+move takes a reason code that fits it. Proposing a lead twice is a no-op, and endorsing another
+source's lead never changes its text or confidence. Renewing a lease keeps the state the Hunt
+reached; moving a lead to `open` releases it at once.
+
+A lead is its writer's words: the title, and also the family, dimensions and dedupe key. When an
+operator retracts a Hunt's entries, every lead that Hunt created is masked in all Hunt reads, each
+one still live is closed and gives up its dedupe key so a trusted source can raise the same lead
+again, its test records are removed, and it can no longer write or hold leads. The checkpoint
+hands over the open frontier, with the leads the Hunt holds listed first.
 
 ## Coverage angles and planner checkpoints
 
