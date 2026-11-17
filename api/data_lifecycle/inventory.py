@@ -20,8 +20,8 @@ from . import erasure, inputs, records
 
 MAX_RECORDS = 100000
 MAX_DOMAIN_TARGETS = 500
-EXECUTION_TABLES = ('scans', 'hunt_runs', 'agent_hunt_runs', 'device_agent_runs',
-                    'research_episodes', 'campaigns', 'scan_campaigns', 'finding_verifications')
+EXECUTION_TABLES = ('scans', 'hunt_runs', 'research_episodes', 'campaigns', 'scan_campaigns',
+                    'finding_verifications')
 PROTECTED = ('legal_hold', 'audit')
 # Unfinished rows that were never picked up can be cancelled by an approved deletion; so can
 # rows nothing has touched for this long (a crashed or abandoned run). A row a worker is

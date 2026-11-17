@@ -1,7 +1,7 @@
 """The legacy web and device Hunt engines are removed: routes, middleware, client and helpers.
 
-Their rows stay in ``agent_hunt_runs`` and ``device_agent_runs`` as history. Startup settles any
-run those engines left waiting for a planner, because nothing can continue or cancel it now.
+Their tables (``agent_hunt_runs``, ``device_agent_runs``, ``device_agent_actions``) are dropped at
+startup.
 """
 from __future__ import annotations
 
@@ -69,25 +69,18 @@ def test_research_keeps_its_internal_launcher_and_planner_without_their_public_a
     assert "await hub._plan_research_episode_step(" in tree
 
 
-def test_startup_settles_runs_the_removed_engines_left_waiting_and_keeps_history():
+def test_startup_drops_the_removed_engines_tables_and_keeps_what_pointed_at_them():
     async def run():
         async with startup_database() as conn:
             module = importlib.import_module('retest_contract')
             await module.run_schema_migrations(BoundConnectionPool(conn))
-            target = await conn.fetchval("INSERT INTO targets(url) VALUES('https://legacy.test') RETURNING id")
-            waiting, planning, finished = [await conn.fetchval(
-                "INSERT INTO agent_hunt_runs(target_id, status, objective) VALUES($1,$2,'old') RETURNING id",
-                target, status) for status in ('awaiting_planner', 'planning', 'completed')]
-
+            # A second start, as on every restart, finds nothing to drop and nothing missing.
             await module.run_schema_migrations(BoundConnectionPool(conn))
 
-            rows = {row['id']: row for row in await conn.fetch(
-                "SELECT id, status, stop_reason, objective FROM agent_hunt_runs")}
-            assert len(rows) == 3 and all(row['objective'] == 'old' for row in rows.values())
-            for settled in (waiting, planning):
-                assert (rows[settled]['status'], rows[settled]['stop_reason']) == (
-                    'cancelled', 'legacy_engine_removed')
-            assert rows[finished]['status'] == 'completed' and rows[finished]['stop_reason'] is None
-            assert await conn.fetchval(
-                "SELECT count(*) FROM device_agent_runs WHERE status IN ('awaiting_planner','planning')") == 0
+            for table in ('agent_hunt_runs', 'device_agent_runs', 'device_agent_actions'):
+                assert await conn.fetchval("SELECT to_regclass($1)", table) is None
+            # A candidate that named a legacy run keeps the identifier as plain data.
+            columns = {row['column_name'] for row in await conn.fetch(
+                "SELECT column_name FROM information_schema.columns WHERE table_name='investigation_candidates'")}
+            assert {'agent_hunt_run_id', 'device_agent_run_id'} <= columns
     asyncio.run(run())

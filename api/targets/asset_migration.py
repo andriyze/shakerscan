@@ -298,15 +298,11 @@ async def run_unified_startup(pool: Any, baseline: Any, *, redis_provider: Any =
                 except ModuleNotFoundError:
                     from api.hunt.followup_leads import LEAD_SOURCE_SCHEMA_SQL
                 await conn.execute(LEAD_SOURCE_SCHEMA_SQL)
-                # The legacy web and device Hunt engines and their read and cancel routes are
-                # removed. A run they left waiting for a planner can never be continued or
-                # cancelled; settle it. The rows stay as history. No rows match after the first run.
-                for legacy_runs in ("agent_hunt_runs", "device_agent_runs"):
-                    await conn.execute(
-                        f"""UPDATE {legacy_runs}
-                            SET status='cancelled', stop_reason='legacy_engine_removed',
-                                planning_token=NULL, updated_at=NOW()
-                            WHERE status IN ('awaiting_planner','planning')""")
+                # The legacy web and device Hunt engines are removed, and so are their tables. The
+                # frozen baseline still creates them on a fresh install; they are dropped here.
+                # Columns elsewhere that pointed at a legacy run keep their value without the link.
+                await conn.execute(
+                    "DROP TABLE IF EXISTS device_agent_actions, device_agent_runs, agent_hunt_runs CASCADE")
                 # Data migrations added after the conversion must run here: the baseline above
                 # never runs again on a converted database. Each is marker-gated.
                 try:
