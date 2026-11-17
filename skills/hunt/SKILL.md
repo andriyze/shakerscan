@@ -213,6 +213,14 @@ Choose the next smallest action that can answer or falsify a useful hypothesis:
   `protocol`, `service`, `service_name`, `operation`, `operation_id`, `object`, `object_id`,
   `object_kind`, `resource_kind`, `parameter`, `input`, `input_path`, `sink`,
   `application_state`, `variant`.
+  When the angle works a lead from the board, name it as `hypothesis_id`: the angle is then the
+  one record of that work and moves the lead for you (the response's `lead` says what happened).
+  `planned` holds the lead for you; `testing` or `partial` starts it (give `mechanism`, what you
+  run, and `hypothesis`, what you expect, when the lead states neither); `negative` counts a
+  test that found nothing and hands the lead back to the board; `candidate` marks it supported;
+  `blocked` releases it. Do not also call `hypothesis.claim` or `hypothesis.transition` for the
+  same step. A lead another Hunt holds stays with it: your angle is recorded and `lead.moved`
+  is false.
   After execution append the final `negative`, `partial`, `blocked`, or `candidate` state with
   the same-Hunt action IDs that settled it. `negative` must cite only completed actions that sent
   target traffic; `partial`, and `blocked` when it cites actions, need at least one such action.
@@ -259,7 +267,9 @@ Choose the next smallest action that can answer or falsify a useful hypothesis:
   `refuted` (`deterministic_refutation`, with a completed deterministic verification). When you
   stop, hand the lead back with `open`: `released`, `budget_exhausted`, or
   `expected_signal_absent` when your angle found nothing and another might. `open` frees the
-  lead at once. `exhausted` and `blocked` park a lead until an operator reopens it, so use them
+  lead at once. Use these two capabilities directly for moves an angle does not express
+  (`exhausted`, a deterministic `refuted`, a longer lease); for ordinary work the coverage angle
+  that names the lead makes them. `exhausted` and `blocked` park a lead until an operator reopens it, so use them
   only when nothing more can be tried or a prerequisite is missing. `supported` is still a
   lead: verify it with `candidate.verify` or a registered verifier, because only deterministic
   proof marks a finding verified.
@@ -580,14 +590,19 @@ another host's origin. Read `final_debrief.saved_action`: `proposed`, `updated`,
 retained. The finish retry is idempotent. Use explicit
 `targets.actions.*` calls when a curated recipe needs different steps or instructions.
 
-Record what you learn as attributed interpretations with `knowledge.record`: an `observation`,
-`hypothesis`, `explanation`, `next_step` or `note`, or a `negative_result`. Cite existing records in
+Record what the records mean as attributed interpretations with `knowledge.record`: an
+`observation`, `explanation` or `note`, or a `negative_result`. Something worth testing is not a
+note: it is a lead, recorded with `hypothesis.propose` (the kinds `hypothesis` and `next_step` are
+refused). Cite existing records in
 `evidence_refs` (required for observations, explanations and negative results); never write your own
 account of what ran. A negative result is narrow: `experiment_completed_negative` cites your own testing
 action that ran it and names the exact `conditions` it covered (technique, method and route or
 operation, and the principals, objects or inputs); wildcards, patterns, "all", "any" and "every" are
 refused. `experiment_inconclusive`
-suppresses nothing and is unfinished work; `hypothesis_refuted` refutes one hypothesis only. Only an
+suppresses nothing and is unfinished work; `hypothesis_refuted` says one lead did not hold under
+these conditions: name the lead as `subject` (`{type: hypothesis, id}`), and it is counted against
+that lead for every Hunt's ranking. It is a claim, so the lead stays open until a deterministic
+verification refutes it. Only an
 operator dismisses a finding. Before repeating an experiment, call `knowledge.check_experiment`:
 `skip` is true only for an applicable result whose conditions are what one of your own cited plain
 `http.request` actions asked (only method, path, origin and session_ref recorded; name the `origin`;

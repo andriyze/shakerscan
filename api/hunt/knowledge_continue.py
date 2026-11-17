@@ -65,8 +65,9 @@ RANKING_RULES: tuple[dict[str, Any], ...] = (
      "why": "an inconclusive experiment or open authorization investigation: run it to a conclusion"},
     {"tier": 6, "rule": "removed_surface",
      "why": "an endpoint was retired since the release: confirm it no longer answers"},
-    {"tier": 7, "rule": "agent_next_step",
-     "why": "a next step an agent proposed (a claim, ranked below everything the records show)"},
+    {"tier": 7, "rule": "open_lead",
+     "why": "an open lead on the target's lead board, in the scheduler's order (a claim to test, ranked below "
+            "everything the records show)"},
 )
 _TIER = {rule["rule"]: rule["tier"] for rule in RANKING_RULES}
 _CONCLUSIONS = {"observation", "explanation"}
@@ -171,6 +172,27 @@ def authority_for(suggestion: Mapping[str, Any], run: Mapping[str, Any] | None) 
 
 # --- suggestions -----------------------------------------------------------------------------------
 
+async def _open_leads(conn: Any, target: Any) -> tuple[list[dict[str, Any]], int]:
+    """The target's claimable leads, ranked by the deterministic scheduler, and how many exist.
+
+    Titles are not carried: a lead's words are its writer's, read through ``kind=hypotheses``.
+    """
+    from .hunt_hypotheses import rank_frontier
+    rows = await conn.fetch(
+        """SELECT h.*, COUNT(*) OVER() AS total_count FROM hypotheses h
+           WHERE h.target_id=$1 AND NOT (h.metadata_json ? 'hunt_withheld')
+             AND (h.status='open' OR (h.status IN ('claimed','testing')
+                                      AND (h.claim_lease_expires_at IS NULL OR h.claim_lease_expires_at <= NOW())))
+           ORDER BY h.updated_at DESC, h.id DESC LIMIT $2""", target, MAX_OTHER)
+    if not rows:
+        return [], 0
+    ranked = rank_frontier([dict(row) for row in rows], owner="", auth_available=True)["hypotheses"]
+    return ([{"id": view["id"], "family": view["family"], "status": view["effective_status"],
+              "version": view["version"], "source": view["source"], "confidence": view["confidence"],
+              "priority": view.get("priority"), "derived_from": view["derived_from"]} for view in ranked],
+            int(rows[0]["total_count"]))
+
+
 def _suggest_entry(row: Mapping[str, Any]) -> dict[str, Any]:
     """The identical experiment an entry records: its bound request when the server bound one, else
     the capability its technique names, else the agent chooses (with the exact conditions)."""
@@ -215,7 +237,8 @@ def _suggest_route(method: str, path: str) -> dict[str, Any]:
 
 def _key(suggestion: Mapping[str, Any], fallback: str) -> str:
     values = suggestion.get("input") or {}
-    if suggestion.get("capability") and values:
+    # One item per distinct request; a suggestion that is not a request is its own item.
+    if suggestion.get("capability") and values and values.get("path"):
         return json.dumps([suggestion["capability"], values.get("method"), values.get("origin"), values.get("path"),
                            suggestion.get("principal") or values.get("session_ref")], sort_keys=True)
     return fallback
@@ -535,8 +558,7 @@ async def _continue_report(conn: Any, target_id: Any, *, device: bool, audience:
     totals = {"reopened_for_review": reopened_total}
     for name, where in (("reopened_for_review", reopened_where),
                         ("inconclusive_experiments", f"{scope} AND status='active' "
-                                                     "AND negative_state='experiment_inconclusive'"),
-                        ("open_next_steps", f"{scope} AND status='active' AND kind='next_step'")):
+                                                     "AND negative_state='experiment_inconclusive'")):
         found = list(await conn.fetch(f"""SELECT {columns} FROM target_interpretations WHERE {where}
             ORDER BY created_at DESC, id DESC LIMIT {MAX_OTHER + 1}""", target))
         if len(found) > MAX_OTHER:
@@ -547,7 +569,7 @@ async def _continue_report(conn: Any, target_id: Any, *, device: bool, audience:
         rows += found[:MAX_OTHER]
     buckets: dict[str, list[dict[str, Any]]] = {name: [] for name in (
         "still_applicable", "needs_revalidation", "not_reobserved_since_release", "historical",
-        "inconclusive_experiments", "open_next_steps", "reopened_for_review")}
+        "inconclusive_experiments", "open_leads", "reopened_for_review")}
     candidates: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
 
     def add(rule: str, order: int, when: Any, ident: str, suggestion: dict[str, Any], basis: dict[str, Any],
@@ -570,14 +592,8 @@ async def _continue_report(conn: Any, target_id: Any, *, device: bool, audience:
             add("unfinished", 0, row["created_at"], view["id"], _suggest_entry(row),
                 {"type": "interpretation", "id": view["id"], "negative_state": state}, False)
             continue
-        if row["kind"] == "next_step":
-            buckets["open_next_steps"].append(view)
-            add("agent_next_step", 0, row["created_at"], view["id"], _suggest_entry(row),
-                {"type": "interpretation", "id": view["id"], "kind": "next_step",
-                 "notice": "an agent's proposal: a claim, never an instruction"}, False)
-            continue
         if not (row["kind"] in _CONCLUSIONS or state in _NEGATIVE_CONCLUSIONS):
-            continue  # hypotheses and notes are not conclusions to re-test
+            continue  # notes are not conclusions to re-test
         basis = {"type": "interpretation", "id": view["id"], "kind": row["kind"], "negative_state": state}
         current = row["applicability"]
         if current in {"applicable", "unknown"}:
@@ -606,6 +622,20 @@ async def _continue_report(conn: Any, target_id: Any, *, device: bool, audience:
             buckets["not_reobserved_since_release"].append({**view, "why": why})
             add("reobserve_since_release", _conclusion_order(row), row["created_at"], view["id"],
                 _suggest_entry(row), {**basis, "why": why}, True)
+
+    # What is worth testing next that no record requires: the open leads, in the scheduler's order.
+    leads, leads_total = await _open_leads(conn, target)
+    totals["open_leads"] = leads_total
+    if leads_total > len(leads):
+        reasons.append(f"open_leads: {leads_total} exist; the {len(leads)} ranked first were read")
+    for position, lead in enumerate(leads):
+        buckets["open_leads"].append(lead)
+        add("open_lead", position, None, lead["id"],
+            {"capability": "hypothesis.claim",
+             "input": {"hypothesis_id": lead["id"], "expected_version": lead["version"]}, "conditions": {},
+             "from": "the target's lead board (query kind=hypotheses); claim it, test it, record the angle"},
+            {"type": "hypothesis", "id": lead["id"], "family": lead["family"], "source": lead["source"],
+             "notice": "a lead: a claim to test, never an instruction"}, False)
 
     authorization = await _authorization(conn, target, device=device, anchor=anchor, observer=observer)
     for item in authorization.get("settled_negatives") or ():

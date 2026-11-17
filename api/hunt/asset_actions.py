@@ -127,8 +127,15 @@ async def _perform_asset_action(pool, run, name, values):
                     for error in exc.errors(include_input=False))[:2000]}) from None
             entry = await record_interpretation(conn, target_id, parsed,
                                                 writer=f"hunt:{run['id']}", hunt_run_id=run['id'])
-            return {'ok':True, 'interpretation':entry, 'is_proof':False, 'authority_granted':False,
-                    'hunt_snapshot_unchanged':True}
+            lead = None
+            if parsed.negative_state == 'hypothesis_refuted':
+                # The lead it names carries this as a test that found against it (hunt/lead_link.py).
+                from .lead_link import count_refutation_claim
+                async with conn.transaction():
+                    lead = await count_refutation_claim(conn, run, parsed.subject.id, entry['id'],
+                                                        list(parsed.evidence_refs))
+            return {'ok':True, 'interpretation':entry, **({'lead':lead} if lead else {}), 'is_proof':False,
+                    'authority_granted':False, 'hunt_snapshot_unchanged':True}
     if name.startswith('targets.actions.'):
         from targets.actions import read_target_actions, write_target_action, TargetActionWrite, resolve_steps
         async with pool.acquire() as conn, conn.transaction():

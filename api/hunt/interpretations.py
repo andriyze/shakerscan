@@ -70,6 +70,10 @@ BRIEFING_TITLE_CHARACTERS = 120
 BRIEFING_SECTION_BYTES = 4_000
 
 EXPERIMENT_STATES = frozenset({"experiment_completed_negative", "experiment_inconclusive"})
+#: Kinds that say "this is worth testing". They are leads now (``hypothesis.propose``); entries of
+#: these kinds written before stay readable and are no longer written.
+LEAD_KINDS = frozenset({"hypothesis", "next_step"})
+WRITABLE_KINDS = ("observation", "explanation", "note", "negative_result")
 #: Kinds whose entries must cite at least one existing record.
 EVIDENCE_REQUIRED = frozenset({"observation", "explanation", "negative_result"})
 TERMINAL_ACTION_STATES = frozenset({"completed", "partial", "failed", "blocked", "cancelled"})
@@ -721,6 +725,13 @@ async def record_interpretation(conn: Any, target_id: Any, entry: Interpretation
                                 hunt_run_id: Any = None) -> dict[str, Any]:
     """Append one entry. Never changes a finding, hypothesis, candidate, guidance or authority."""
     kind = writer_kind(writer)
+    if entry.kind in LEAD_KINDS:
+        # "Worth testing" has one home: the lead board, where it is deduplicated, ranked and claimed.
+        raise _refusal(422, "kind_moved_to_lead_board",
+                       f"A {entry.kind} is a lead: record it with the hypothesis.propose capability (family, "
+                       "title, where it applies, and derived_from citing what it follows from). knowledge.record "
+                       "takes " + ", ".join(WRITABLE_KINDS) + ".", reason_code="kind_moved_to_lead_board",
+                       use="hypothesis.propose", accepted=list(WRITABLE_KINDS))
     if (entry.kind == "negative_result") != (entry.negative_state is not None):
         raise _refusal(422, "negative_state_mismatch",
                        "Set negative_state exactly when kind is negative_result.")
@@ -744,6 +755,11 @@ async def record_interpretation(conn: Any, target_id: Any, entry: Interpretation
         raise _refusal(403, "finding_dismissal_is_human_only",
                        "A Hunt's negative result cannot name a finding as its subject; record an observation or "
                        "explanation about the finding instead.", reason_code="finding_dismissal_is_human_only")
+    if entry.negative_state == "hypothesis_refuted" and (entry.subject is None or entry.subject.type != "hypothesis"):
+        raise _refusal(422, "refutation_names_no_lead",
+                       "hypothesis_refuted says one lead did not hold: name it as subject "
+                       "({type: hypothesis, id: <lead id from query kind=hypotheses>}). A test with no lead is an "
+                       "experiment_completed_negative.", reason_code="refutation_names_no_lead")
     try:
         conditions = validate_conditions(entry.conditions, required=entry.kind == "negative_result",
                                          experiment=entry.negative_state in EXPERIMENT_STATES)
@@ -1364,14 +1380,14 @@ async def briefing_section(conn: Any, target_id: Any, *, device: bool) -> dict[s
         "counts": {"active_by_kind": by_kind, "active_negative_by_state": negative,
                    "reopened_dismissals": reopened, "total_entries": min(total, 5000),
                    "at_least": total > 5000},
-        "open_next_steps": await headlines("kind='next_step'"),
         "inconclusive_experiments": await headlines("negative_state='experiment_inconclusive'"),
         "applicability": {"tracked": True, "active_by_state": by_state,
                           "note": ("needs_revalidation: a dependency changed significantly; unknown: a dependency "
                                    "was not observable, never treated as unchanged. Age changes nothing.")},
         "read_with": ("POST /hunts/{hunt_id}/query kind=interpretations (filter kind, status, negative_state, "
                       "provenance, hunt_id, text_contains) or kind=negative_results; record with the "
-                      "knowledge.record capability"),
+                      "knowledge.record capability. What is worth testing next is the lead board: your "
+                      "checkpoint's ranked hypotheses"),
     }
 
 

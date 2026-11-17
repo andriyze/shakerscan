@@ -113,7 +113,7 @@
     "HuntCandidateUpdateRequest": "d8bf357f06e099fa5b57be30706a1bc654509f14c1c01f3281f9e22a86ab8568",
     "HuntCandidateVerifyRequest": "112cf562326c66072257c087dc2226b394ac6b7379296d3c3e5ad125a59847aa",
     "HuntCapabilityRequest": "0048d34cbebc4635761f66c0b54ca394a513e170ad6b043fc394ed4b4398414b",
-    "HuntCoverageAngleRequest": "0efdcfdea799e578bf07cd2e75d573aed321425d34dea44a0ea5913b555cfb51",
+    "HuntCoverageAngleRequest": "5eaaf84f357a8edfd4aee9b03494cdcf2d02c594b2bb95fc136f99b7b5f8f45d",
     "HuntFinishRequest": "a1b31b0b8ab44686e0049d9f83d07ad12fcf749bc9d68f93424a6abaff3fee1b",
     "HuntQueryRequest": "1a575a0e43aeec593f42028b20b7632b7cf509341497e965c51daaee53f454bc",
     "HuntSkillBindRequest": "89c12e18f3f55a126cb209590bca6163c97e3300b987c1173fafeff762ed13ac",
@@ -229,7 +229,7 @@
     "ValidationRequest": "cb81c65a5c80da74a19c6bd92e9c6a68f5cdb22fafeb94270481d463450f893e",
     "WorkerScaleRequest": "52e7ac017dfa1d92efa8e4071026b9bf24c0cf2a17f5d9e742349df3f08f6c62"
   },
-  "contract_sha256": "651108bee9f9c120efcc4d260367aa533f482efd9dccaf47826e64b968e9612d",
+  "contract_sha256": "7a8953dbfca6b5cb1096b7360b8137f9c55cd6dca7bd7756d26e1699665f3a4c",
   "openapi": "3.1.0",
   "operation_count": 495,
   "operations": {

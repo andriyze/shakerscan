@@ -794,7 +794,7 @@ export const HUNT_START_CONTRACT = {
         "method": "POST",
         "url_template": "/hunts/{hunt_id}/capabilities/knowledge.record"
       },
-      "description": "Record one attributed interpretation of this target: an observation, hypothesis, explanation, next_step or note, or a narrow negative_result (experiment_completed_negative, experiment_inconclusive or hypothesis_refuted). Cite existing records in evidence_refs (required for observations, explanations and negative results) and the exact conditions a negative result covers; never broaden it. Advisory: it is not proof, changes no finding and grants nothing. Only an operator dismisses a finding. At most 200 per Hunt.",
+      "description": "Record one attributed interpretation of this target: an observation, explanation or note, or a narrow negative_result (experiment_completed_negative, experiment_inconclusive or hypothesis_refuted). Something worth testing is a lead: use hypothesis.propose. Cite existing records in evidence_refs (required for observations, explanations and negative results) and the exact conditions a negative result covers; never broaden it. hypothesis_refuted names the lead it is about as subject and counts against it. Advisory: it is not proof, changes no finding and grants nothing. Only an operator dismisses a finding. At most 200 per Hunt.",
       "input": {
         "fields": [
           "kind",

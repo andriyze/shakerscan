@@ -248,24 +248,23 @@ def _briefing(**interpretation_section):
     return {"schema_version": "hunt-briefing/v1",
             "instructions": {"present": True, "mode": "full", "text": "## Scope\n" + "i" * 9_000},
             "unconfirmed_instructions": {"present": False}, "objective": {"text": "goal"},
-            "interpretations": {"counts": {"active_by_kind": {"next_step": 5}}, **interpretation_section},
+            "interpretations": {"counts": {"active_by_kind": {"note": 5}}, **interpretation_section},
             "trimmed": []}
 
 
 def test_interpretation_headlines_give_way_first_and_every_cut_is_stated():
-    headline = {"id": str(uuid.uuid4()), "kind": "next_step", "title": "t" * 120, "written_by": "hunt:x"}
-    briefing = _briefing(open_next_steps=[headline] * 5, inconclusive_experiments=[headline] * 5)
-    room = len(json.dumps(_briefing(open_next_steps=[], inconclusive_experiments=[headline] * 5))) + 200
+    headline = {"id": str(uuid.uuid4()), "kind": "negative_result", "title": "t" * 120, "written_by": "hunt:x"}
+    briefing = _briefing(inconclusive_experiments=[headline] * 5)
+    room = len(json.dumps(_briefing(inconclusive_experiments=[]))) + 200
     bounded = hunt_briefing.bound_briefing(briefing, limit=room)
-    assert bounded["interpretations"]["open_next_steps"] == []
-    assert bounded["interpretations"]["counts"] == {"active_by_kind": {"next_step": 5}}
-    assert any(item.startswith("interpretations.open_next_steps removed") for item in bounded["trimmed"])
+    assert bounded["interpretations"]["inconclusive_experiments"] == []
+    assert bounded["interpretations"]["counts"] == {"active_by_kind": {"note": 5}}
+    assert any(item.startswith("interpretations.inconclusive_experiments removed") for item in bounded["trimmed"])
     assert bounded["instructions"]["mode"] == "full"  # guidance kept whole: the headlines made room
-    assert bounded["interpretations"]["inconclusive_experiments"] == [headline] * 5  # cut only as needed
     assert len(json.dumps(bounded)) <= room
-    section = {"open_next_steps": [{**headline, "title": "t" * 4_000}], "inconclusive_experiments": []}
+    section = {"inconclusive_experiments": [{**headline, "title": "t" * 4_000}]}
     holder = {"trimmed": []}
-    assert hunt_briefing._bounded_interpretations(section, holder)["open_next_steps"] == []
+    assert hunt_briefing._bounded_interpretations(section, holder)["inconclusive_experiments"] == []
     assert holder["trimmed"]
 
 
@@ -276,11 +275,8 @@ class _Connection:
         if "GROUP BY applicability" in query:
             return [{"applicability": "unknown", "count": 2}]
         if "GROUP BY kind, negative_state, status" in query:
-            return [{"kind": "next_step", "negative_state": None, "status": "active", "count": 1},
+            return [{"kind": "observation", "negative_state": None, "status": "active", "count": 1},
                     {"kind": "note", "negative_state": None, "status": "active", "count": 1}]
-        if "kind='next_step'" in query:
-            return [{"id": uuid.uuid4(), "kind": "next_step", "negative_state": None, "title": "Check /admin",
-                     "provenance": "inferred", "written_by": "hunt:x", "created_at": None}]
         if "target_interpretations" in query:
             return [{"id": uuid.uuid4(), "kind": "negative_result", "negative_state": "experiment_inconclusive",
                      "title": "Planted banner", "provenance": "quoted_from_target", "written_by": "hunt:x",
@@ -298,12 +294,12 @@ def test_live_briefing_carries_interpretations_and_withholds_quoted_titles():
            "context_pack": {}, "budget_profile": "balanced"}
     result = asyncio.run(hunt_briefing.with_live_briefing(_Connection(), public_hunt_run(row), row))
     section = result["briefing"]["interpretations"]
-    assert section["counts"]["active_by_kind"] == {"next_step": 1, "note": 1}
+    assert section["counts"]["active_by_kind"] == {"observation": 1, "note": 1}
     assert section["applicability"]["active_by_state"] == {"unknown": 2}
     # A section this fixture cannot answer says so instead of failing the briefing.
     assert result["briefing"]["changed_since_last_hunt"]["available"] is False
-    assert section["open_next_steps"][0]["title"] is None
-    assert section["open_next_steps"][0]["agent_claim"]["title"] == "Check /admin"
+    # What is worth testing next is the lead board, not a list of notes.
+    assert "open_next_steps" not in section and "lead board" in section["read_with"]
     inconclusive = section["inconclusive_experiments"][0]
     assert inconclusive["title"] is None and "quoted_from_target" in inconclusive["title_withheld"]
     assert "Planted banner" not in json.dumps(result["briefing"], default=str)
@@ -318,12 +314,12 @@ MCP_SPEC.loader.exec_module(mcp)
 
 
 def test_compact_mcp_view_keeps_the_briefing_with_its_interpretations():
-    headline = {"id": "x", "kind": "next_step", "title": "Compare roles", "written_by": "hunt:x"}
-    briefing = hunt_briefing.bound_briefing({**_briefing(open_next_steps=[headline]), "knowledge": {"counts": {}}})
+    headline = {"id": "x", "kind": "negative_result", "title": "Compare roles", "written_by": "hunt:x"}
+    briefing = hunt_briefing.bound_briefing({**_briefing(inconclusive_experiments=[headline]), "knowledge": {"counts": {}}})
     from tests.test_hunt_briefing import _record
     record = _record(briefing)
     compact = mcp._compact_hunt(record)
-    assert compact["briefing"]["interpretations"]["open_next_steps"] == [headline]
+    assert compact["briefing"]["interpretations"]["inconclusive_experiments"] == [headline]
     assert "briefing" not in compact["mcp_view"]["omitted"]
     oversized = {**briefing, "instructions": {"present": True, "mode": "full", "text": "y" * 40_000}}
     trimmed = mcp._compact_hunt({**record, "briefing": oversized})["briefing"]

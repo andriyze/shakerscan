@@ -74,13 +74,14 @@ def asset_capability_specs(spec, schema, kinds):
                            'items':{'type':'string','format':'uuid'},
                            'description':'Ids of Hunt actions or receipts, findings, candidates or scans on this target’s asset.'}},
          ('title','methodology','reason','base_revision')),
-        ('knowledge.record',('Record one attributed interpretation of this target: an observation, hypothesis, '
-         'explanation, next_step or note, or a narrow negative_result (experiment_completed_negative, '
-         'experiment_inconclusive or hypothesis_refuted). Cite existing records in evidence_refs (required for '
+        ('knowledge.record',('Record one attributed interpretation of this target: an observation, '
+         'explanation or note, or a narrow negative_result (experiment_completed_negative, '
+         'experiment_inconclusive or hypothesis_refuted). Something worth testing is a lead: use '
+         'hypothesis.propose. Cite existing records in evidence_refs (required for '
          'observations, explanations and negative results) and the exact conditions a negative result covers; '
-         'never broaden it. Advisory: it is not proof, changes no finding and grants nothing. Only an operator '
+         'never broaden it. hypothesis_refuted names the lead it is about as subject and counts against it. Advisory: it is not proof, changes no finding and grants nothing. Only an operator '
          f'dismisses a finding. At most {MAX_INTERPRETATIONS_PER_HUNT} per Hunt.'),
-         {'kind':{'type':'string','enum':['observation','hypothesis','explanation','next_step','note','negative_result']},
+         {'kind':{'type':'string','enum':['observation','explanation','note','negative_result']},
           'negative_state':{'type':'string','enum':['experiment_completed_negative','experiment_inconclusive','hypothesis_refuted'],
                             'description':'Required exactly when kind is negative_result.'},
           'title':{'type':'string','minLength':1,'maxLength':200},

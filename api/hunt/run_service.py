@@ -972,7 +972,7 @@ class HuntRunService:
                     )
                 return await _record_coverage_angle(
                     connection, hunt_run_id=str(hunt_uuid), values=values,
-                    run_status=status,
+                    run_status=status, run=row,
                 )
 
     async def coverage_angles(
