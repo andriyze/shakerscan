@@ -15,21 +15,6 @@
     "operation_id": "get_agent_two_tier_findings_agent_findings__target_id__get"
   },
   {
-    "path": "/agent/hunt/runs",
-    "method": "get",
-    "operation_id": "list_agent_hunt_runs_agent_hunt_runs_get"
-  },
-  {
-    "path": "/agent/hunt/session/{run_id}",
-    "method": "get",
-    "operation_id": "get_agent_hunt_session_agent_hunt_session__run_id__get"
-  },
-  {
-    "path": "/agent/hunt/session/{run_id}/cancel",
-    "method": "post",
-    "operation_id": "cancel_agent_hunt_session_agent_hunt_session__run_id__cancel_post"
-  },
-  {
     "path": "/agent/tools/readiness",
     "method": "get",
     "operation_id": "get_agent_tool_readiness_agent_tools_readiness_get"
@@ -573,21 +558,6 @@
     "path": "/data-deletion/preview",
     "method": "post",
     "operation_id": "preview_record_deletion_data_deletion_preview_post"
-  },
-  {
-    "path": "/device-agent/runs",
-    "method": "get",
-    "operation_id": "list_device_agent_runs_device_agent_runs_get"
-  },
-  {
-    "path": "/device-agent/session/{run_id}",
-    "method": "get",
-    "operation_id": "get_device_agent_session_device_agent_session__run_id__get"
-  },
-  {
-    "path": "/device-agent/session/{run_id}/cancel",
-    "method": "post",
-    "operation_id": "cancel_device_agent_session_device_agent_session__run_id__cancel_post"
   },
   {
     "path": "/device-policies",

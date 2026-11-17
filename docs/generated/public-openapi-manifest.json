@@ -229,9 +229,9 @@
     "ValidationRequest": "cb81c65a5c80da74a19c6bd92e9c6a68f5cdb22fafeb94270481d463450f893e",
     "WorkerScaleRequest": "52e7ac017dfa1d92efa8e4071026b9bf24c0cf2a17f5d9e742349df3f08f6c62"
   },
-  "contract_sha256": "82800c691c3c674697d9d3417328c2138fb97d215c1cfd5913736a84ccf0072d",
+  "contract_sha256": "651108bee9f9c120efcc4d260367aa533f482efd9dccaf47826e64b968e9612d",
   "openapi": "3.1.0",
-  "operation_count": 501,
+  "operation_count": 495,
   "operations": {
     "DELETE /ai/scans/{scan_id}/transcript": {
       "deprecated": false,
@@ -702,32 +702,6 @@
       "deprecated": false,
       "operation_id": "get_agent_two_tier_findings_agent_findings__target_id__get",
       "parameters_sha256": "0e652a1353ac5088b31df5125ab3c2a41bcb6d5c92385081a88d4c5e899d0c50",
-      "request_schema_sha256": null,
-      "response_schema_sha256": {
-        "200": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
-        "422": "e1fe533ef371cc6965d4015e800b2b5ca90e470f4aae3d57c2754a32b61e8c2d"
-      },
-      "security_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
-      "surface": null,
-      "tags": []
-    },
-    "GET /agent/hunt/runs": {
-      "deprecated": false,
-      "operation_id": "list_agent_hunt_runs_agent_hunt_runs_get",
-      "parameters_sha256": "d178ac40a84fe6760dde9b7963ef49bfc746dac06fe885659fa76ad2a8f58f0c",
-      "request_schema_sha256": null,
-      "response_schema_sha256": {
-        "200": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
-        "422": "e1fe533ef371cc6965d4015e800b2b5ca90e470f4aae3d57c2754a32b61e8c2d"
-      },
-      "security_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
-      "surface": null,
-      "tags": []
-    },
-    "GET /agent/hunt/session/{run_id}": {
-      "deprecated": false,
-      "operation_id": "get_agent_hunt_session_agent_hunt_session__run_id__get",
-      "parameters_sha256": "c0e5887313ffd165f0c855eb4ee8b5061d5b7ada82cb8eee38ce2d9409684486",
       "request_schema_sha256": null,
       "response_schema_sha256": {
         "200": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
@@ -1365,32 +1339,6 @@
       "request_schema_sha256": null,
       "response_schema_sha256": {
         "200": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a"
-      },
-      "security_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
-      "surface": null,
-      "tags": []
-    },
-    "GET /device-agent/runs": {
-      "deprecated": false,
-      "operation_id": "list_device_agent_runs_device_agent_runs_get",
-      "parameters_sha256": "c99b206aef32facce3abdff0ad65f5adaaeb5ccf63ef0594eb1f1e843e7ebab3",
-      "request_schema_sha256": null,
-      "response_schema_sha256": {
-        "200": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
-        "422": "e1fe533ef371cc6965d4015e800b2b5ca90e470f4aae3d57c2754a32b61e8c2d"
-      },
-      "security_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
-      "surface": null,
-      "tags": []
-    },
-    "GET /device-agent/session/{run_id}": {
-      "deprecated": false,
-      "operation_id": "get_device_agent_session_device_agent_session__run_id__get",
-      "parameters_sha256": "c0e5887313ffd165f0c855eb4ee8b5061d5b7ada82cb8eee38ce2d9409684486",
-      "request_schema_sha256": null,
-      "response_schema_sha256": {
-        "200": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
-        "422": "e1fe533ef371cc6965d4015e800b2b5ca90e470f4aae3d57c2754a32b61e8c2d"
       },
       "security_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
       "surface": null,
@@ -3808,19 +3756,6 @@
       "surface": null,
       "tags": []
     },
-    "POST /agent/hunt/session/{run_id}/cancel": {
-      "deprecated": false,
-      "operation_id": "cancel_agent_hunt_session_agent_hunt_session__run_id__cancel_post",
-      "parameters_sha256": "c0e5887313ffd165f0c855eb4ee8b5061d5b7ada82cb8eee38ce2d9409684486",
-      "request_schema_sha256": null,
-      "response_schema_sha256": {
-        "200": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
-        "422": "e1fe533ef371cc6965d4015e800b2b5ca90e470f4aae3d57c2754a32b61e8c2d"
-      },
-      "security_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
-      "surface": null,
-      "tags": []
-    },
     "POST /agents/local/plan": {
       "deprecated": false,
       "operation_id": "local_agent_dry_run_plan_agents_local_plan_post",
@@ -4524,19 +4459,6 @@
       "tags": [
         "Data lifecycle"
       ]
-    },
-    "POST /device-agent/session/{run_id}/cancel": {
-      "deprecated": false,
-      "operation_id": "cancel_device_agent_session_device_agent_session__run_id__cancel_post",
-      "parameters_sha256": "c0e5887313ffd165f0c855eb4ee8b5061d5b7ada82cb8eee38ce2d9409684486",
-      "request_schema_sha256": null,
-      "response_schema_sha256": {
-        "200": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
-        "422": "e1fe533ef371cc6965d4015e800b2b5ca90e470f4aae3d57c2754a32b61e8c2d"
-      },
-      "security_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
-      "surface": null,
-      "tags": []
     },
     "POST /device-policies": {
       "deprecated": false,

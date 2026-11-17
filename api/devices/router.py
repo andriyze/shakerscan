@@ -2,8 +2,7 @@
 
 Extracted verbatim from the api.py monolith. Owns the separate connected-device
 namespace — inventory, credentials, imported request collections, posture and
-inventory scans, service verification, device policies, and the retired
-device-agent read/cancel surface — kept apart from Web DAST targets.
+inventory scans, service verification and device policies — kept apart from Web DAST targets.
 
 Collaborators that are still hubs inside api.py (approval validation, the
 command-result ledger, agent-payload redaction, Redis, the job queue, and the
@@ -558,15 +557,6 @@ async def _change_device_primary_locator(
         raise HTTPException(
             status_code=409,
             detail="Wait for the active connected-device scan or probe to finish before changing its address",
-        )
-    if await conn.fetchval(
-        """SELECT 1 FROM device_agent_runs
-           WHERE device_target_id=$1 AND status IN ('awaiting_planner','planning') LIMIT 1""",
-        device_uuid,
-    ):
-        raise HTTPException(
-            status_code=409,
-            detail="Finish or cancel the active AI device investigation before changing its address",
         )
     await conn.execute(
         "UPDATE device_targets SET primary_locator=$1, locator_generation=locator_generation+1, updated_at=NOW() WHERE id=$2",
@@ -2081,182 +2071,6 @@ async def verify_device_service(device_id: str, request: DeviceServiceVerifyRequ
     }
 
 
-async def _build_device_agent_context_pack(
-    conn: Any,
-    device: Any,
-    credential_refs: list[dict[str, Any]],
-    max_turns: int,
-) -> dict[str, Any]:
-    device_id = device["id"]
-    services = await conn.fetch(
-        """SELECT transport, port, state, service_name, product, version, cpe,
-                  encrypted, web_origin, policy_disposition, policy_reason, last_seen_at
-           FROM device_services WHERE device_target_id=$1
-           ORDER BY state='open' DESC, transport, port LIMIT 100""",
-        device_id,
-    )
-    scans = await conn.fetch(
-        """SELECT id, result, score, grade, created_at FROM scans
-           WHERE device_target_id=$1 AND run_kind='device_posture' AND status='completed'
-           ORDER BY created_at DESC LIMIT 2""",
-        device_id,
-    )
-    policy = None
-    if device["policy_id"]:
-        policy = await conn.fetchrow("SELECT name, rules FROM device_policies WHERE id=$1", device["policy_id"])
-    if not policy:
-        policy = await conn.fetchrow(
-            """SELECT name, rules FROM device_policies
-               WHERE is_active=true AND is_builtin=true AND device_class IN ($1,'generic')
-               ORDER BY (device_class=$1) DESC, updated_at DESC LIMIT 1""",
-            str(device["device_class"]),
-        )
-    prior_runs = await conn.fetch(
-        """SELECT id, state, result, created_at FROM device_agent_runs
-           WHERE device_target_id=$1 AND status='completed'
-           ORDER BY created_at DESC LIMIT 5""",
-        device_id,
-    )
-    memory = []
-    for run in prior_runs:
-        state = _decode_json_value(run["state"]) or {}
-        result = _decode_json_value(run["result"]) or {}
-        memory.append({
-            "run_id": str(run["id"]),
-            "created_at": run["created_at"],
-            "notes": list(state.get("notes") or [])[-20:],
-            "summary": str(result.get("summary") or "")[:2000],
-            "leads": list(result.get("leads") or [])[:20],
-        })
-    snapshots = [_device_scan_snapshot(row) for row in scans]
-    latest_diff = _diff_device_scan_snapshots(snapshots[1], snapshots[0]) if len(snapshots) == 2 else None
-    latest_result = _decode_json_value(scans[0]["result"]) if scans else {}
-    latest_posture = latest_result.get("device_posture") if isinstance(latest_result, dict) and isinstance(latest_result.get("device_posture"), dict) else {}
-    completed_capabilities = {
-        str(item.get("capability_id"))
-        for item in latest_posture.get("capability_coverage") or []
-        if isinstance(item, dict) and item.get("status") == "completed"
-    }
-    capability_pack = device_capabilities.capability_catalog_for_device(
-        _decode_device_row(device),
-        services=[row_to_dict(row) for row in services],
-        credential_kinds={str(ref.get("auth_kind") or "") for ref in credential_refs},
-        completed_capabilities=completed_capabilities,
-    )
-    return {
-        "schema_version": "device-agent-context/v1",
-        "device": {
-            "id": str(device_id),
-            "name": device["name"],
-            "primary_locator": device["primary_locator"],
-            "device_class": device["device_class"],
-            "manufacturer": device["manufacturer"],
-            "model": device["model"],
-            "firmware_version": device["firmware_version"],
-            "environment": device["environment"],
-        },
-        "current_services": [row_to_dict(row) for row in services],
-        "effective_policy": {
-            "name": policy["name"] if policy else None,
-            "rules": _decode_json_value(policy["rules"]) if policy else [],
-        },
-        "latest_completed_scan": snapshots[0] if snapshots else None,
-        "diff_from_previous": latest_diff,
-        "prior_investigation_memory": memory,
-        "capability_pack": capability_pack,
-        "credential_capabilities": [
-            {"role": ref.get("role"), "profile_id": ref.get("profile_id"), "auth_kind": ref.get("auth_kind")}
-            for ref in credential_refs
-        ],
-        "budgets": {
-            "turns": max_turns,
-            "actions": device_agent.MAX_ACTIONS_PER_SESSION,
-            "scans": device_agent.MAX_SCANS_PER_SESSION,
-            "fragility_units": device_agent.MAX_FRAGILITY_PER_SESSION,
-        },
-        "stop_condition": "Stop when the objective is answered; do not maximize scan count.",
-    }
-
-
-def _device_agent_run_public(row: Any, *, summary: bool = False) -> dict[str, Any]:
-    item = row_to_dict(row) if row is not None and not isinstance(row, dict) else dict(row or {})
-    state = _decode_json_value(item.get("state")) or {}
-    result = _decode_json_value(item.get("result")) or {}
-    status = str(item.get("status") or "")
-    action_history = item.pop("_action_history", [])
-    candidate_counts = item.pop("_candidate_counts", {})
-    response = {
-        "id": str(item.get("id") or ""),
-        "device_target_id": str(item.get("device_target_id") or ""),
-        "objective": item.get("objective") or "",
-        "status": status,
-        "stop_reason": item.get("stop_reason"),
-        "planner_mode": item.get("planner_mode") or "agent",
-        "safety_profile": item.get("safety_profile") or state.get("safety_profile"),
-        "max_turns": int(item.get("max_turns") or state.get("max_turns") or 0),
-        "turns": int(state.get("turns") or 0),
-        "actions_used": int(state.get("actions_used") or 0),
-        "scans_queued": int(state.get("scans_queued") or 0),
-        "budgets": {
-            "actions_remaining": max(0, device_agent.MAX_ACTIONS_PER_SESSION - int(state.get("actions_used") or 0)),
-            "scans_remaining": max(0, device_agent.MAX_SCANS_PER_SESSION - int(state.get("scans_queued") or 0)),
-            "turns_remaining": max(0, int(item.get("max_turns") or 0) - int(state.get("turns") or 0)),
-            "fragility_remaining": max(0, int(state.get("fragility_budget") or 0) - int(state.get("fragility_used") or 0)),
-            "device_http_requests_remaining": max(
-                0, device_agent.DEVICE_HTTP_REQUEST_SESSION_LIMIT - int(state.get("device_http_requests_used") or 0)
-            ),
-        },
-        "capabilities": {
-            "tools": sorted(device_agent.CALLABLE_TOOL_NAMES),
-            "target_fixed": True,
-            "safety_profile_fixed": True,
-            "credentials_visible_to_planner": False,
-            "request_collection_secrets_visible_to_planner": False,
-            "request_collections_bound": len(state.get("device_request_collections") or []),
-            "state_changing_requests_authorized": bool(state.get("allow_state_changing_requests")),
-            "untrusted_tls_credentials_authorized": bool(state.get("allow_untrusted_tls_credentials")),
-            "agent_findings_authoritative": False,
-            "remote_shell_scope": "registered_device_only",
-            "remote_shell_requires_exact_user_confirmation": True,
-            "local_host_shell_available": False,
-            "traffic_frozen": bool(state.get("traffic_frozen")),
-        },
-        "transcript": state.get("messages") or [],
-        "events": state.get("events") or [],
-        "actions": [_device_agent_action_public(action) for action in action_history],
-        "candidate_summary": {
-            "total": sum(int(count or 0) for count in candidate_counts.values()),
-            "verified": int(candidate_counts.get("verified") or 0),
-            "open": sum(
-                int(candidate_counts.get(candidate_status) or 0)
-                for candidate_status in ("new", "verification_queued", "verifying", "inconclusive", "blocked")
-            ),
-            "refuted": int(candidate_counts.get("refuted") or 0),
-        },
-        "notes": state.get("notes") or [],
-        "shell_plans": [
-            _sanitize_device_agent_value(plan)
-            for plan in list(state.get("shell_plans") or [])[-10:]
-            if isinstance(plan, dict)
-        ],
-        "next_action": (
-            f"POST /device-agent/session/{item.get('id')}/reply with tool_calls or a final debrief"
-            if status == "awaiting_planner" else status
-        ),
-        "result": result or None,
-        "created_at": item.get("created_at"),
-        "updated_at": item.get("updated_at"),
-    }
-    if summary:
-        summary_keys = {
-            "id", "device_target_id", "objective", "status", "stop_reason", "planner_mode",
-            "safety_profile", "max_turns", "turns", "actions_used", "scans_queued", "actions",
-            "candidate_summary", "created_at", "updated_at",
-        }
-        return {key: response[key] for key in summary_keys}
-    return response
-
-
 def _sanitize_device_agent_value(value: Any, *, depth: int = 0) -> Any:
     """Strip control characters from untrusted device evidence before persistence."""
     if depth > 8:
@@ -2278,83 +2092,6 @@ def _sanitize_device_agent_value(value: Any, *, depth: int = 0) -> Any:
     return value
 
 
-
-
-@router.get("/device-agent/session/{run_id}")
-async def get_device_agent_session(run_id: str):
-    async with _pool().acquire() as conn:
-        row = await _device_agent_run_or_404(conn, run_id)
-        return await _device_agent_run_with_history(conn, row)
-
-
-
-
-
-
-@router.post("/device-agent/session/{run_id}/cancel")
-async def cancel_device_agent_session(run_id: str):
-    async with _pool().acquire() as conn:
-        row = await conn.fetchrow(
-            """UPDATE device_agent_runs
-               SET status='cancelled', stop_reason='cancelled', planning_token=NULL, updated_at=NOW()
-               WHERE id=$1 AND status IN ('awaiting_planner','planning') RETURNING *""",
-            _device_uuid(run_id, "device agent run"),
-        )
-        if not row:
-            row = await _device_agent_run_or_404(conn, run_id)
-    return _device_agent_run_public(row)
-
-
-@router.get("/device-agent/runs")
-async def list_device_agent_runs(
-    device_target_id: Optional[str] = None,
-    status: Optional[str] = None,
-    limit: int = Query(50, ge=1, le=200),
-):
-    clauses: list[str] = []
-    params: list[Any] = []
-    if device_target_id:
-        params.append(_device_uuid(device_target_id))
-        clauses.append(f"device_target_id=${len(params)}")
-    if status:
-        normalized = status.strip().lower()
-        if normalized not in {"awaiting_planner", "planning", "completed", "cancelled", "failed"}:
-            raise HTTPException(status_code=400, detail="Invalid device agent status")
-        params.append(normalized)
-        clauses.append(f"status=${len(params)}")
-    where = " WHERE " + " AND ".join(clauses) if clauses else ""
-    async with _pool().acquire() as conn:
-        total = int(await conn.fetchval("SELECT COUNT(*) FROM device_agent_runs" + where, *params) or 0)
-        query_params = [*params, limit]
-        rows = await conn.fetch(
-            "SELECT * FROM device_agent_runs" + where + f" ORDER BY created_at DESC LIMIT ${len(query_params)}",
-            *query_params,
-        )
-        run_ids = [row["id"] for row in rows]
-        actions = await conn.fetch(
-            "SELECT * FROM device_agent_actions WHERE run_id = ANY($1::uuid[]) ORDER BY created_at DESC",
-            run_ids,
-        ) if run_ids else []
-        candidates = await conn.fetch(
-            """SELECT device_agent_run_id, status, COUNT(*) AS count
-               FROM investigation_candidates
-               WHERE device_agent_run_id = ANY($1::uuid[])
-               GROUP BY device_agent_run_id, status""",
-            run_ids,
-        ) if run_ids else []
-    actions_by_run: dict[str, list[dict[str, Any]]] = {}
-    for action in actions:
-        actions_by_run.setdefault(str(action["run_id"]), []).append(row_to_dict(action))
-    candidates_by_run: dict[str, dict[str, int]] = {}
-    for candidate in candidates:
-        candidates_by_run.setdefault(str(candidate["device_agent_run_id"]), {})[str(candidate["status"])] = int(candidate["count"])
-    public_runs = []
-    for row in rows:
-        item = row_to_dict(row)
-        item["_action_history"] = actions_by_run.get(str(row["id"]), [])[:100]
-        item["_candidate_counts"] = candidates_by_run.get(str(row["id"]), {})
-        public_runs.append(_device_agent_run_public(item, summary=True))
-    return {"runs": public_runs, "count": total}
 
 
 async def _confirm_device_queue_handoff(
@@ -2530,54 +2267,6 @@ def _diff_device_scan_snapshots(older: dict[str, Any], newer: dict[str, Any]) ->
     }
 
 
-def _device_agent_action_public(row: Any) -> dict[str, Any]:
-    item = row_to_dict(row) if row is not None and not isinstance(row, dict) else dict(row or {})
-    result_summary = _decode_json_value(item.get("result_summary")) or {}
-    evidence_refs = _decode_json_value(item.get("evidence_refs")) or []
-    return {
-        "id": str(item.get("id") or ""),
-        "tool_name": str(item.get("tool_name") or "unknown"),
-        "tool_tier": int(item.get("tool_tier") or 0),
-        "fragility_cost": int(item.get("fragility_cost") or 0),
-        "outcome": str(item.get("outcome") or "failed"),
-        "rationale": str(item.get("rationale") or "")[:1000] or None,
-        "evidence_count": len(evidence_refs) if isinstance(evidence_refs, list) else 0,
-        "scan_ids": sorted(set(_device_agent_scan_ids(result_summary))),
-        "created_at": item.get("created_at"),
-    }
-
-
-async def _device_agent_run_with_history(conn: Any, row: Any) -> dict[str, Any]:
-    item = row_to_dict(row)
-    run_uuid = item["id"]
-    item["_action_history"] = [
-        row_to_dict(action)
-        for action in await conn.fetch(
-            "SELECT * FROM device_agent_actions WHERE run_id=$1 ORDER BY created_at DESC LIMIT 100",
-            run_uuid,
-        )
-    ]
-    item["_candidate_counts"] = {
-        str(candidate["status"]): int(candidate["count"])
-        for candidate in await conn.fetch(
-            """SELECT status, COUNT(*) AS count FROM investigation_candidates
-               WHERE device_agent_run_id=$1 GROUP BY status""",
-            run_uuid,
-        )
-    }
-    return _device_agent_run_public(item)
-
-
-async def _device_agent_run_or_404(conn: Any, run_id: str, *, for_update: bool = False) -> Any:
-    query = "SELECT * FROM device_agent_runs WHERE id=$1"
-    if for_update:
-        query += " FOR UPDATE"
-    row = await conn.fetchrow(query, _device_uuid(run_id, "device agent run"))
-    if not row:
-        raise HTTPException(status_code=404, detail="Connected-device agent run not found")
-    return row
-
-
 async def _execute_device_capability_operation(
     *,
     run_id: uuid.UUID,
@@ -2689,28 +2378,6 @@ async def _execute_device_capability_operation(
             device_agent.resolve_local_intel,
             cpe=args.get("cpe"), product=args.get("product"), version=args.get("version"),
         )
-        return {"ok": True, "evidence_ref": _device_agent_add_evidence(state, payload), "data": payload}
-
-    if name == "recall_hypotheses":
-        async with _pool().acquire() as conn:
-            runs = await conn.fetch(
-                """SELECT id, state, result, created_at FROM device_agent_runs
-                   WHERE device_target_id=$1 AND status='completed'
-                   ORDER BY created_at DESC LIMIT 10""",
-                device_target_id,
-            )
-        items = []
-        for run in runs:
-            prior_state = _decode_json_value(run["state"]) or {}
-            prior_result = _decode_json_value(run["result"]) or {}
-            items.append({
-                "run_id": str(run["id"]),
-                "created_at": run["created_at"],
-                "notes": list(prior_state.get("notes") or [])[-25:],
-                "summary": str(prior_result.get("summary") or "")[:2000],
-                "leads": list(prior_result.get("leads") or [])[:25],
-            })
-        payload = {"runs": items, "count": len(items), "authoritative": False}
         return {"ok": True, "evidence_ref": _device_agent_add_evidence(state, payload), "data": payload}
 
     if name == "query_policy":
@@ -3033,29 +2700,6 @@ async def _device_queue_handoff_readback_confirmed(
         and str(row.get("device_target_id") or "") == str(device_target_id)
         and _scan_queue_handoff_confirmed(row)
     )
-
-
-def _device_agent_scan_ids(value: Any, *, depth: int = 0) -> list[str]:
-    """Return only scan identifiers from a sanitized action summary."""
-    if depth > 5:
-        return []
-    if isinstance(value, dict):
-        found: list[str] = []
-        for key, item in value.items():
-            if str(key) in {"scan_id", "queued_scan_id"} and item:
-                try:
-                    found.append(str(uuid.UUID(str(item))))
-                except (TypeError, ValueError):
-                    pass
-            else:
-                found.extend(_device_agent_scan_ids(item, depth=depth + 1))
-        return found
-    if isinstance(value, list):
-        found = []
-        for item in value[:100]:
-            found.extend(_device_agent_scan_ids(item, depth=depth + 1))
-        return found
-    return []
 
 
 def _device_agent_add_evidence(state: dict[str, Any], payload: dict[str, Any]) -> str:

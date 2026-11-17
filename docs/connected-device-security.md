@@ -372,8 +372,7 @@ Connected devices use ShakerScan's canonical, target-kind-aware Hunt runtime. Th
 Claude, OpenCode, or Pi session is the planner, while ShakerScan executes a closed device capability
 contract. Start through `POST /hunts`, drive only capabilities returned by that run, and confirm an
 immutable SSH plan through `POST /hunts/{hunt_id}/shell-plans/{plan_id}/confirm`. The former
-`/devices/{device_id}/agent/session` and `/device-agent/session/*` writes are quarantined migration
-surfaces; their UI URL redirects to `/hunt`.
+`/devices/{device_id}/agent/session` and `/device-agent/*` routes and their UI page are removed.
 
 Device Hunt compatibility wording refers to the device-target Hunt capability pack derived from the Smart TV assessment
 playbooks. `GET /devices/{device_id}/capabilities` resolves each capability as ready, completed,

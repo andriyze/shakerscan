@@ -5140,8 +5140,6 @@ export interface AIOpsRouteResponse {
   blast_radius?: Record<string, unknown>
 }
 
-export type DeviceAgentStatus = 'awaiting_planner' | 'planning' | 'completed' | 'cancelled' | 'failed'
-
 export type InvestigationCandidateStatus =
   | 'new' | 'verification_queued' | 'verifying' | 'verified' | 'refuted'
   | 'inconclusive' | 'blocked' | 'expired'
@@ -5193,77 +5191,6 @@ export interface DeviceAgentShellPlan {
   scan_id?: string
   last_queue_error?: string
 }
-
-export interface DeviceAgentSession {
-  id: string
-  device_target_id: string
-  objective: string
-  status: DeviceAgentStatus
-  stop_reason?: string | null
-  planner_mode: 'agent'
-  safety_profile: 'observe_only' | 'safe_remote' | 'authenticated_active' | 'lab_invasive'
-  max_turns: number
-  turns: number
-  actions_used: number
-  scans_queued: number
-  budgets: { actions_remaining: number; scans_remaining: number; turns_remaining: number; fragility_remaining: number }
-  capabilities: {
-    tools: string[]
-    target_fixed: boolean
-    safety_profile_fixed: boolean
-    credentials_visible_to_planner: boolean
-    request_collection_secrets_visible_to_planner?: boolean
-    request_collections_bound?: number
-    state_changing_requests_authorized?: boolean
-    agent_findings_authoritative: boolean
-    remote_shell_scope?: 'registered_device_only'
-    remote_shell_requires_exact_user_confirmation?: boolean
-    local_host_shell_available?: boolean
-    traffic_frozen: boolean
-  }
-  transcript: Array<{ role: 'system' | 'user' | 'assistant'; content: string }>
-  events: Array<Record<string, unknown>>
-  actions: Array<{
-    id: string
-    tool_name: string
-    tool_tier: number
-    fragility_cost: number
-    outcome: 'completed' | 'blocked' | 'failed'
-    rationale?: string | null
-    evidence_count: number
-    scan_ids: string[]
-    created_at?: string
-  }>
-  candidate_summary: { total: number; verified: number; open: number; refuted: number }
-  notes: Array<{ kind: string; content: string; turn: number }>
-  shell_plans: DeviceAgentShellPlan[]
-  next_action: string
-  result?: {
-    summary?: string
-    leads?: Array<{
-      title: string
-      rationale: string
-      evidence_refs: string[]
-      status: InvestigationCandidateStatus | 'hypothesis'
-      candidate_id?: string
-      family?: string
-      severity?: string
-      locus?: Record<string, string | number>
-      verifier_contract_id?: string
-      authoritative?: false
-    }>
-    next_actions?: string[]
-    authoritative_findings?: boolean
-  } | null
-  created_at?: string
-  updated_at?: string
-}
-
-export type DeviceAgentRunSummary = Pick<DeviceAgentSession,
-  'id' | 'device_target_id' | 'objective' | 'status' | 'stop_reason' | 'planner_mode' |
-  'safety_profile' | 'max_turns' | 'turns' | 'actions_used' | 'scans_queued' | 'actions' |
-  'candidate_summary' | 'created_at' | 'updated_at'
->
 
 export async function routeAiOps(payload: {
   prompt?: string
@@ -5503,32 +5430,6 @@ export async function deactivateDeviceRequestCollection(deviceId: string, collec
 export async function getDeviceScanActivity(scanId: string): Promise<DeviceScanActivity> {
   const res = await fetch(`${API_URL}/scans/${pathSegment(scanId)}/device-activity?limit=100`, { cache: 'no-store' })
   if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to load device scan activity'))
-  return res.json()
-}
-
-export async function getDeviceAgentSession(runId: string): Promise<DeviceAgentSession> {
-  const res = await fetch(`${API_URL}/device-agent/session/${pathSegment(runId)}`, { cache: 'no-store' })
-  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to load device Hunt'))
-  return res.json()
-}
-
-export async function listDeviceAgentSessions(params: {
-  device_target_id?: string
-  status?: DeviceAgentStatus
-  limit?: number
-} = {}): Promise<{ runs: DeviceAgentRunSummary[]; count: number }> {
-  const search = new URLSearchParams()
-  if (params.device_target_id) search.set('device_target_id', params.device_target_id)
-  if (params.status) search.set('status', params.status)
-  if (params.limit) search.set('limit', String(params.limit))
-  const res = await fetch(`${API_URL}/device-agent/runs${queryString(search)}`, { cache: 'no-store' })
-  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to list device Hunt runs'))
-  return res.json()
-}
-
-export async function cancelDeviceAgentSession(runId: string): Promise<DeviceAgentSession> {
-  const res = await fetch(`${API_URL}/device-agent/session/${pathSegment(runId)}/cancel`, { method: 'POST' })
-  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to cancel device Hunt'))
   return res.json()
 }
 

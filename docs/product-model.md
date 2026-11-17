@@ -59,9 +59,8 @@ command plan in the UI. Imported Postman, HAR 1.2, OpenAPI 3.x, and Swagger 2.0 
 are encrypted and pinned to the device; Hunt sees only their redacted request inventory and
 can include them in a scan only when the user fixed that authority at session start. Postman scripts,
 HAR responses, and external specification references never execute, and state-changing HTTP
-methods require a separate authenticated-active approval. The old `device-agent` API is migration-only:
-historical reads and cancellation remain available, but new starts, replies, and shell confirmations
-always return `410 Gone` and point to `/hunts`.
+methods require a separate authenticated-active approval. The old `device-agent` API is removed; device
+investigations run through `/hunts`.
 
 ## Hunt
 

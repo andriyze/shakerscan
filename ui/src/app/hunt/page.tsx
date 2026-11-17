@@ -6,10 +6,8 @@ import Link from '@/components/WorkspaceLink'
 import { Compass, Plus } from 'lucide-react'
 import {
   authorizeTarget,
-  getDeviceAgentSession,
   getTarget,
   getTargetAuthorization,
-  type DeviceAgentSession,
 } from '@/lib/api'
 import {
   listCredentialProfiles,
@@ -32,7 +30,6 @@ import {
 import { Button, Card, Combobox, EmptyState, Field, Select, Textarea, useToast } from '@/components/ui'
 import { credentialOptions, targetOptions, targetSearchNote } from '@/lib/pickerOptions'
 import { targetSearchProvesEmpty } from '@/lib/targetSearchModel.mjs'
-import { LegacyDeviceInvestigation } from '@/components/history/LegacyDeviceInvestigation'
 import { RequestCollectionPicker } from '@/components/RequestCollectionPicker'
 import { managedTargetAuthorizationIsAutomatic } from '@/lib/workspaceCapabilities'
 import { HuntHistoryList } from '@/components/hunt/HuntHistoryList'
@@ -117,8 +114,6 @@ function HuntContent() {
   const [launcherOpen, setLauncherOpen] = useState(() => Boolean(searchParams.get('target') && !searchParams.get('run')))
   // A managed (Enterprise) workspace starts Hunts from the terminal: no browser launcher.
   const managed = useWorkspaceIsManaged()
-  const [legacyDeviceRun, setLegacyDeviceRun] = useState<DeviceAgentSession | null>(null)
-  const [legacyRunLoading, setLegacyRunLoading] = useState(false)
   const [starting, setStarting] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
@@ -128,29 +123,6 @@ function HuntContent() {
     if (requested) setTargetId(requested)
     const requestedObjective = searchParams.get('objective')
     if (requestedObjective) setObjective(requestedObjective)
-  }, [searchParams])
-
-  useEffect(() => {
-    const legacyRunId = searchParams.get('legacy_run')
-    if (!legacyRunId) {
-      setLegacyDeviceRun(null)
-      setLegacyRunLoading(false)
-      return
-    }
-    let cancelled = false
-    setLegacyRunLoading(true)
-    setError(null)
-    getDeviceAgentSession(legacyRunId)
-      .then((run) => {
-        if (cancelled) return
-        setLegacyDeviceRun(run)
-        setTargetId(run.device_target_id)
-      })
-      .catch((cause) => {
-        if (!cancelled) setError(cause instanceof Error ? cause.message : 'Failed to load legacy device investigation')
-      })
-      .finally(() => { if (!cancelled) setLegacyRunLoading(false) })
-    return () => { cancelled = true }
   }, [searchParams])
 
   useEffect(() => {
@@ -173,7 +145,7 @@ function HuntContent() {
 
   // The launcher searches the inventory on the server (one bounded page per query) instead of
   // loading every target; a preselected target is read on its own.
-  const launcherSearchOpen = launcherOpen && !managed && !searchParams.get('run') && !searchParams.get('legacy_run')
+  const launcherSearchOpen = launcherOpen && !managed && !searchParams.get('run')
   const targetSearch = useTargetSearch({
     selectedIds: [targetId],
     includeServices: true,
@@ -195,7 +167,7 @@ function HuntContent() {
   // Opening a run also selects its target, but the launcher is not on screen then. Its target
   // authorization and credential reads are launcher state: issuing them on a run page cost two
   // calls the run view never used, and a viewer role is refused both.
-  const launcherVisible = launcherOpen && !managed && !hunt && !legacyDeviceRun && !searchParams.get('run')
+  const launcherVisible = launcherOpen && !managed && !hunt && !searchParams.get('run')
   const launcherChoice = launcherVisible ? selectedChoice : undefined
   // The run detail carries no target name. Inactive targets are not launch choices, so read those directly.
   const [runTargetRecord, setRunTargetRecord] = useState<{ id: string; name?: string; url?: string } | null>(null)
@@ -399,11 +371,7 @@ function HuntContent() {
         </div>
       )}
 
-      {legacyRunLoading ? (
-        <Card className="p-5 text-sm text-gray-400">Loading historical device investigation…</Card>
-      ) : legacyDeviceRun ? (
-        <LegacyDeviceInvestigation run={legacyDeviceRun} />
-      ) : !hunt && searchParams.get('run') && !error ? (
+      {!hunt && searchParams.get('run') && !error ? (
         <p role="status" className="text-sm text-gray-400">Loading Hunt…</p>
       ) : !hunt ? (
         <>

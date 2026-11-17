@@ -756,12 +756,6 @@ async def confirm_hunt_shell_plan(
                     or policy.get("scope_receipt_id")
                     or ""
                 ) or None
-                legacy_daily = int(await conn.fetchval(
-                    """SELECT COALESCE(SUM(fragility_cost),0) FROM device_agent_actions
-                       WHERE device_target_id=$1 AND outcome <> 'blocked'
-                         AND created_at >= date_trunc('day', NOW())""",
-                    run["device_target_id"],
-                ) or 0)
                 hunt_daily = int(await conn.fetchval(
                     """SELECT COALESCE(SUM(COALESCE((budget_used_json->>'device_fragility_points')::int,0)),0)
                        FROM hunt_runs WHERE device_target_id=$1
@@ -769,7 +763,7 @@ async def confirm_hunt_shell_plan(
                     run["device_target_id"],
                 ) or 0)
                 if (
-                    legacy_daily + hunt_daily
+                    hunt_daily
                     + charges["device_fragility_points"]
                     > device_agent.MAX_FRAGILITY_PER_DEVICE_DAY
                 ):
@@ -1594,23 +1588,6 @@ async def verify_hunt_candidate(
         "verification": verification,
         "action": action,
     }
-async def _agent_tool_query_kb(target_uuid: uuid.UUID, kind: str, flt: dict[str, Any]) -> dict[str, Any]:
-    """Compatibility entrypoint using the same paged target knowledge as Hunt."""
-    values = dict(flt)
-    limit = values.pop("limit", 25)
-    cursor = values.pop("cursor", None)
-    try:
-        async with _pool().acquire() as conn:
-            result = await query_knowledge_page(
-                conn, target_id=target_uuid, kind=kind,
-                filters=values, limit=limit, cursor=cursor,
-            )
-    except KnowledgeQueryError as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
-    result["rows"] = [
-        _arsenal_routes._redact_agent_payload(_json_safe_row(row)) for row in result["rows"]
-    ]
-    return result
 
 
 class HuntCapabilityRequest(BaseModel):

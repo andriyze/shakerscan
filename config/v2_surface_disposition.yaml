@@ -100,35 +100,6 @@ surfaces:
     files: ["api/public_check.py"]
 
   # ------------------------------------------------------------ legacy: delete
-  - id: legacy-agent-hunt
-    owner: compatibility
-    disposition: QUARANTINE_READ_ONLY
-    canonical_replacement: /hunts
-    new_writes_allowed: false
-    historical_reads_required: true
-    cancellation_required: true
-    sunset: 2026-09-30
-    caller_telemetry: required
-    pending_write_removals:
-    routes: ["/agent/hunt", "/agent/hunt/*"]
-    files: ["api/agent_routes/router.py", "api/hunt/legacy.py"]
-
-  - id: legacy-device-agent
-    owner: compatibility
-    disposition: QUARANTINE_READ_ONLY
-    canonical_replacement: /hunts
-    new_writes_allowed: false
-    historical_reads_required: true
-    cancellation_required: true
-    sunset: 2026-09-30
-    caller_telemetry: required
-    pending_write_removals:
-    routes:
-      - /device-agent
-      - /device-agent/*
-      - /devices/{device_id}/agent/session
-    files: ["api/devices/router.py"]
-
   - id: v1-read-compatibility
     owner: compatibility
     disposition: QUARANTINE_READ_ONLY

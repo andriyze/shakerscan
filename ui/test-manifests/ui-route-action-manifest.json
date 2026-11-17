@@ -119,13 +119,6 @@
       "stateAssertion": "Device posture, services, scans, and findings reconcile for one ID."
     },
     {
-      "route": "/devices/[id]/agent",
-      "source": "src/app/devices/[id]/agent/page.tsx",
-      "owner": "devices",
-      "caseId": "DEV-015",
-      "stateAssertion": "Device-agent compatibility route preserves context into Hunt."
-    },
-    {
       "route": "/devices/policies",
       "source": "src/app/devices/policies/page.tsx",
       "owner": "devices",

@@ -1520,87 +1520,6 @@ def test_device_http_observation_redacts_query_values_from_path_and_reflection()
     assert "mode=full" not in safe_body
 
 
-def test_device_hunt_public_history_exposes_only_bounded_action_metadata():
-    scan_id = str(uuid.uuid4())
-    row = {
-        "id": uuid.uuid4(),
-        "device_target_id": uuid.uuid4(),
-        "objective": "Review TV",
-        "status": "completed",
-        "max_turns": 4,
-        "state": {"turns": 2, "actions_used": 1, "scans_queued": 1},
-        "result": {"summary": "Done"},
-        "_candidate_counts": {"verified": 1, "new": 2, "refuted": 1},
-        "_action_history": [{
-            "id": uuid.uuid4(),
-            "tool_name": "queue_device_scan",
-            "tool_tier": 1,
-            "fragility_cost": 5,
-            "outcome": "completed",
-            "rationale": "Confirm the service inventory",
-            "evidence_refs": ["devref_1"],
-            "result_summary": {"queued": {"scan_id": scan_id}, "authorization": "must-not-be-returned"},
-        }],
-    }
-    public = api_module._device_agent_run_public(row)
-    summary = api_module._device_agent_run_public(row, summary=True)
-
-    assert public["candidate_summary"] == {"total": 4, "verified": 1, "open": 2, "refuted": 1}
-    assert public["actions"] == [{
-        "id": public["actions"][0]["id"],
-        "tool_name": "queue_device_scan",
-        "tool_tier": 1,
-        "fragility_cost": 5,
-        "outcome": "completed",
-        "rationale": "Confirm the service inventory",
-        "evidence_count": 1,
-        "scan_ids": [scan_id],
-        "created_at": None,
-    }]
-    assert "authorization" not in json.dumps(public["actions"])
-    assert summary["actions"] == public["actions"]
-    assert "transcript" not in summary and "events" not in summary and "capabilities" not in summary
-
-
-def test_retired_legacy_run_tool_is_rejected_without_execution(monkeypatch):
-    state = api_module._agent_new_state("budget test", [], [])
-    state["wire_request_budget_limit"] = 100
-    state["action_budget_limit"] = 12
-    state["request_budget_limit"] = 12
-    state["active_action_budget_limit"] = 4
-
-    async def should_not_execute(*_args, **_kwargs):
-        raise AssertionError("over-budget scanner reached the executor")
-
-    monkeypatch.setattr(api_module, "_execute_agent_tool", should_not_execute)
-    monkeypatch.setattr(agent_router_module, "_execute_agent_tool", should_not_execute)
-    reply = json.dumps({"tool_calls": [{
-        "name": "run_tool",
-        "arguments": {"name": "nuclei", "target": "http://device.test/", "options": {}},
-    }]})
-    outcome = asyncio.run(api_module._agent_apply_reply(
-        state,
-        reply,
-        target_uuid=uuid.uuid4(),
-        target_url="http://device.test/",
-        created_by="test",
-        allow_write=False,
-        allow_active=True,
-        approval_receipt_id=None,
-        hypothesis_id=None,
-        iteration=0,
-        max_iterations=4,
-    ))
-
-    assert outcome["stop"] is False
-    assert state["tool_calls_made"] == 0
-    assert state["events"][-1] == {
-        "iteration": 0,
-        "tool": "run_tool",
-        "hallucinated": True,
-    }
-    assert "run_tool" in state["messages"][-1]["content"]
-
 
 def test_model_intake_stage_manifest_is_bound_to_guest_build_inputs(tmp_path, monkeypatch):
     stage = tmp_path / "stage"
@@ -18553,25 +18472,6 @@ def test_discover_create_object_shape_finds_envelope_and_id():
     assert d("not-json") is None
 
 
-def test_agent_finding_locus_requires_an_exact_cited_operation():
-    evidence = [
-        {"content": json.dumps({"request": {"method": "GET", "path": "/api/items/7"}})},
-        {"content": json.dumps({"request": {"method": "POST", "path": "/api/items"}})},
-    ]
-    # Multi-operation evidence is ambiguous without an explicit operation.
-    assert api_module._agent_finding_locus({"evidence": evidence}) == (None, None)
-    # An exact operation named by the debrief is accepted only when cited.
-    assert api_module._agent_finding_locus({
-        "evidence": evidence,
-        "route": "/api/items",
-        "method": "POST",
-    }) == ("/api/items", "POST")
-    assert api_module._agent_finding_locus({
-        "evidence": evidence,
-        "route": "/api/admin",
-        "method": "POST",
-    }) == (None, None)
-
 
 def test_mass_assignment_verification_requires_evidenced_post_method():
     with pytest.raises(api_module.HTTPException) as exc:
@@ -18595,108 +18495,6 @@ def test_mass_assignment_verification_requires_evidenced_post_method():
     assert workflow["server_materialize"] is True
     assert (route, method, metadata) == ("/api/users", "POST", {"create_based": True})
 
-
-def test_device_control_verifier_restores_query_state_before_promotion(monkeypatch):
-    device_id = uuid.uuid4()
-    run_id = uuid.uuid4()
-    candidate_id = uuid.uuid4()
-    collection_id = uuid.uuid4()
-    payload = {"fixture": "owned-tv-control"}
-    raw_payload = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
-    digest = hashlib.sha256(raw_payload.encode()).hexdigest()
-    request = {
-        "id": "power-on", "method": "POST",
-        "url": "http://owned-tv.test:7345/api/power?state=on",
-        "headers": {}, "body": b"",
-    }
-
-    class _Transaction:
-        async def __aenter__(self): return self
-        async def __aexit__(self, *_args): return False
-
-    class _Conn:
-        def __init__(self):
-            self.fetchval_calls = 0
-            self.executed = []
-
-        async def fetch(self, _query, *_args):
-            return [{
-                "id": collection_id, "name": "TV controls",
-                "document_sha256": digest, "encrypted_payload": "encrypted",
-            }]
-
-        def transaction(self): return _Transaction()
-
-        async def fetchval(self, query, *_args):
-            if "SELECT environment FROM device_targets" in query:
-                # The replay pins its connect address under the device's environment.
-                return "production"
-            self.fetchval_calls += 1
-            return uuid.uuid4()
-
-        async def execute(self, query, *args):
-            self.executed.append((query, args))
-            return "OK"
-
-    class _Pool:
-        def __init__(self): self.conn = _Conn()
-        def acquire(self): return self
-        async def __aenter__(self): return self.conn
-        async def __aexit__(self, *_args): return False
-
-    async def _origins(_device_id):
-        return [{
-            "scheme": "http", "port": 7345, "hostname": "owned-tv.test",
-            "connect_address": "192.0.2.10", "origin": "http://owned-tv.test:7345",
-        }]
-
-    reads = iter([
-        {"status": 200, "body": b'{"power":"off","counter":1}'},
-        {"status": 200, "body": b'{"power":"on","counter":2}'},
-        {"status": 200, "body": b'{"power":"off","counter":3}'},
-    ])
-    control_paths = []
-
-    async def _read(**_kwargs): return next(reads)
-
-    async def _control(**kwargs):
-        control_paths.append(kwargs["path"])
-        return {"status": 200, "body": b'{"accepted":true}'}
-
-    pool = _Pool()
-    monkeypatch.setattr(api_module, "db_pool", pool)
-    monkeypatch.setattr(devices_router_module, "decrypt_secret", lambda _value: raw_payload)
-    monkeypatch.setattr(devices_router_module, "_resolve_imported_device_requests", lambda _payload: [request])
-    monkeypatch.setattr(devices_router_module, "_device_confirmed_web_origins", _origins)
-    monkeypatch.setattr(devices_router_module, "_device_request_pinned_http", _read)
-    monkeypatch.setattr(devices_router_module, "_device_request_pinned_control_http", _control)
-    monkeypatch.setattr(devices_router_module, "expected_build_fingerprint", lambda: "test-build")
-
-    state = api_module.device_agent.seed_state(
-        objective="verify owned TV power authorization",
-        safety_profile="authenticated_active", max_turns=4,
-    )
-    state.update({
-        "confirm_request_replay": True,
-        "allow_state_changing_requests": True,
-        "device_request_collections": [{
-            "collection_id": str(collection_id), "state_changing_request_count": 1,
-        }],
-    })
-    result = asyncio.run(api_module._verify_device_control_authorization_candidate(
-        run_id=run_id, device_target_id=device_id, candidate_id=candidate_id,
-        state=state,
-        locus={
-            "collection_id": str(collection_id), "request_id": "power-on",
-            "state_path": "/api/status", "state_json_pointer": "/power",
-            "cleanup_adapter": "restore_query_parameter", "mutation_field": "state",
-        },
-    ))
-
-    assert result["verified"] is True
-    assert result["cleanup_outcome"] == "cleanup_restored_exact_pre_state"
-    assert control_paths == ["/api/power?state=on", "/api/power?state=off"]
-    assert pool.conn.fetchval_calls == 2
 
 
 def test_probe_create_surface_cleans_trackable_artifact_with_same_cookie():
@@ -19893,62 +19691,6 @@ def test_autonomous_workflow_finding_uses_canonical_retest_inputs_and_source_fil
 
 
 
-def test_agent_hunt_public_shape_exposes_product_mode_and_capability_boundary():
-    passive = api_module._agent_hunt_run_public({
-        "id": uuid.uuid4(),
-        "target_id": uuid.uuid4(),
-        "objective": "inspect",
-        "status": "awaiting_planner",
-        "max_iterations": 12,
-        "allow_write": False,
-        "allow_active": False,
-        "state": {
-            "messages": [], "iterations": 0,
-            "target_url": "http://example.test:8080",
-            "target_origins": ["http://example.test:8080", "https://example.test:9090"],
-        },
-        "result": {},
-    })
-    deep_hunt = api_module._agent_hunt_run_public({
-        "id": uuid.uuid4(),
-        "target_id": uuid.uuid4(),
-        "objective": "hunt",
-        "status": "awaiting_planner",
-        "max_iterations": 12,
-        "allow_write": False,
-        "allow_active": True,
-        "state": {"messages": [], "iterations": 0},
-        "result": {},
-    })
-
-    assert passive["mode"] == "read_only"
-    assert passive["target_url"] == "http://example.test:8080"
-    assert passive["target_origins"] == [
-        "http://example.test:8080", "https://example.test:9090",
-    ]
-    assert passive["tool_surface"]["allow_active"] is False
-    assert deep_hunt["mode"] == "deep_hunt"
-    assert deep_hunt["tool_surface"]["allow_active"] is True
-    assert deep_hunt["tool_surface"]["allow_write"] is False
-    assert "arbitrary state-changing HTTP remains blocked" in deep_hunt["tool_surface"]["note"]
-
-
-def test_deep_hunt_origin_selection_is_port_aware_but_host_bound():
-    origins = ["https://target.test:9090", "http://target.test:8080"]
-
-    assert api_module._resolve_hunt_origin("http://target.test", origins) == \
-        "https://target.test:9090"
-    assert api_module._resolve_hunt_origin(
-        "http://target.test", origins, "http://TARGET.test:8080/path?ignored=yes"
-    ) == "http://target.test:8080"
-
-    with pytest.raises(api_module.HTTPException) as exc:
-        api_module._resolve_hunt_origin(
-            "http://target.test", origins, "https://other.test:9090"
-        )
-    assert exc.value.status_code == 400
-    assert "same host" in str(exc.value.detail)
-
 
 def test_target_origin_inventory_keeps_exact_scheme_and_port():
     assert api_module._normalized_web_origins(
@@ -19964,21 +19706,6 @@ def test_target_origin_inventory_keeps_exact_scheme_and_port():
         "http://target.test",
     ]
 
-
-def test_deep_hunt_tool_url_preserves_same_host_scheme_port_and_path():
-    assert api_module._resolve_hunt_tool_url(
-        "http://target.test:8080", "https://TARGET.test:9090/admin?q=1"
-    ) == "https://target.test:9090/admin?q=1"
-    assert api_module._resolve_hunt_tool_url(
-        "http://target.test:8080", "/api/health"
-    ) == "http://target.test:8080/api/health"
-
-    with pytest.raises(api_module.HTTPException) as exc:
-        api_module._resolve_hunt_tool_url(
-            "http://target.test:8080", "https://other.test:9090/admin"
-        )
-    assert exc.value.status_code == 400
-    assert "selected target host" in str(exc.value.detail)
 
 
 def test_research_autobind_requires_ranked_live_operation_identity():
@@ -20686,82 +20413,6 @@ def test_verification_route_abstains_when_finding_has_no_concrete_route():
     assert f(None) is None
 
 
-def test_explorer_injection_finding_routes_to_deterministic_prover():
-    """An Explorer SUSPECTED injection finding (source=autonomous, evidence.retest_type set, with
-    param+payload columns) must resolve to the DETERMINISTIC DAST prover — not the generic_http AI
-    tier — so it is promotable through the retest pipeline."""
-    finding = {
-        "title": "Reflected XSS in q",
-        "tool": "autonomous_agent",
-        "source": "autonomous",
-        "url": "http://t.example.com/search",
-        # Explorer stores the injection point in evidence (findings has no param/payload column),
-        # unredacted so the prover can replay it verbatim.
-        "evidence": json.dumps({
-            "family": "xss",
-            "retest_type": "xss",
-            "method": "GET",
-            "route": "/search",
-            "param": "q",
-            "payload": "<script>alert(1)</script>",
-        }),
-    }
-    inputs = api_module.extract_retest_inputs(finding)
-    assert inputs["finding_type"] == "xss"                       # deterministic prover, not generic_http
-    assert inputs["target_url"] == "http://t.example.com/search"
-    assert inputs["param"] == "q"
-    assert inputs["payload"] == "<script>alert(1)</script>"
-    assert inputs["method"] == "GET"
-    # Every DAST-retest family maps to a real (non-AI) deterministic prover type, and the route-only
-    # set is a subset. Injection stays covered; Phase 1 adds the GET-observable provers.
-    fams = api_module._AGENT_DAST_RETEST_FAMILIES
-    assert {"xss", "sqli", "nosqli", "ssrf"}.issubset(fams)
-    assert {"path_traversal", "open_redirect", "ssti", "command_injection", "cors"}.issubset(fams)
-    for t in fams:
-        assert t in api_module.SUPPORTED_RETEST_TYPES
-        assert t not in api_module.AI_ONLY_RETEST_TYPES   # each has a deterministic prover ladder
-    assert api_module._AGENT_ROUTE_ONLY_RETEST_FAMILIES <= fams
-
-
-def test_explorer_pathtraversal_and_cors_findings_resolve_to_deterministic_provers():
-    """Phase 1: a path_traversal lead (param+payload) and a route-only cors lead both resolve to their
-    deterministic prover type — not the generic_http AI tier."""
-    lfi = {
-        "title": "LFI in file param", "tool": "autonomous_agent", "source": "autonomous",
-        "url": "http://t.example.com/download",
-        "evidence": json.dumps({"family": "path_traversal", "retest_type": "path_traversal",
-                                 "method": "GET", "param": "file", "payload": "../../../../etc/passwd"}),
-    }
-    li = api_module.extract_retest_inputs(lfi)
-    assert li["finding_type"] == "path_traversal" and li["param"] == "file"
-    # cors is route-only: no param needed, still resolves to the cors prover
-    cors = {
-        "title": "CORS reflects arbitrary Origin with credentials", "tool": "autonomous_agent",
-        "source": "autonomous", "url": "http://t.example.com/api/account",
-        "evidence": json.dumps({"family": "cors", "retest_type": "cors", "method": "GET"}),
-    }
-    ci = api_module.extract_retest_inputs(cors)
-    assert ci["finding_type"] == "cors"
-    assert "cors" in api_module._AGENT_ROUTE_ONLY_RETEST_FAMILIES
-
-
-def test_access_control_is_invariant_gated_verifiable_family():
-    """Phase 0: access_control is auto-verifiable, GET-only (not mutating), and NOT in the auto-verify
-    exclusion (unlike bola) — because the operator-approved invariant contract supplies the role oracle
-    that makes an unattended promotion sound."""
-    assert "access_control" in api_module._AGENT_VERIFIABLE_FAMILIES
-    assert "access_control" not in api_module._AGENT_MUTATING_VERIFY_FAMILIES
-    assert "access_control" not in api_module._AGENT_AUTO_VERIFY_EXCLUDED_FAMILIES
-    wf = api_module._materialize_accesscontrol_verification_workflow("/api/users/1234/orders")
-    assert wf["proof_family"] == "access_control"                 # matches the contract's proof_family
-    assert [s["principal"] for s in wf["steps"]] == ["user1", "user2"]  # role-differential
-    assert all(s["method"] == "GET" for s in wf["steps"])         # GET-only -> read-only hunt safe
-    assert all(s.get("checkpoint") != "mutation" for s in wf["steps"])
-    # Steps must carry the CONCRETE path — a canonical {id} route has no substitution here and would
-    # 404 every run (audit M1). Materializer renders input verbatim; the BRANCH must pass `path`.
-    assert all(s["path"] == "/api/users/1234/orders" and "{" not in s["path"] for s in wf["steps"])
-    assert wf["assertions"] == []                                  # predicates come from the invariant binder, not static assertions
-
 
 def test_field_constraint_probe_values_always_violate():
     """A1: every probe the materializer would submit VIOLATES its constraint — the binder recomputes
@@ -20840,180 +20491,6 @@ def test_workflow_transition_materializer_attempts_forbidden_state_and_restores(
     assert {"workflow"} <= api_module._AGENT_VERIFIABLE_FAMILIES
     assert {"workflow"} <= api_module._AGENT_MUTATING_VERIFY_FAMILIES
 
-
-def test_every_advertised_debrief_family_is_promotable():
-    """The debrief contract's `family` vocabulary must agree with what the promoters accept.
-
-    A family the prompt advertises but no server path accepts is a SILENT recall hole: the finding
-    passes the provenance gate, persists as SUSPECTED, and can never be promoted. Two such values
-    shipped — `injection` (advertised in the schema line; the DAST prover wants the specific type)
-    and `workflow_transition` (the invariant CONTRACT KIND; the family is `workflow`). This pins the
-    contract↔promoter agreement in BOTH directions so the next drift fails here instead of quietly
-    costing findings.
-    """
-    import agent_text_toolcalls as tc
-    import agent_tools
-    import family_proof
-
-    moat = api_module._AGENT_VERIFIABLE_FAMILIES
-    dast = api_module._AGENT_DAST_RETEST_FAMILIES
-
-    # 1. Everything advertised is promotable by the moat (after canonicalization) or the DAST prover.
-    for fam in tc.ADVERTISED_FAMILIES:
-        canonical = family_proof.canonical_family(fam)
-        routable = canonical in moat or api_module.normalize_retest_type(fam) in dast
-        assert routable, f"contract advertises {fam!r} but no promotion path accepts it"
-
-    # 2. Conversely, every promotable family is advertised — an accepted-but-unadvertised family is
-    #    recall the model never knows it can claim.
-    for fam in moat:
-        assert fam in tc.ADVERTISED_FAMILIES, f"{fam!r} is moat-verifiable but not advertised"
-    for fam in dast:
-        assert fam in tc.ADVERTISED_FAMILIES, f"{fam!r} is DAST-retestable but not advertised"
-
-    # 3. The two known-bad spellings must never be advertised again, and the schema line must stay a
-    #    CLOSED enum — an "…" invites exactly the guess that produced them. Assert on the parsed enum
-    #    VALUES, not substrings: "injection|" also matches "command_injection|", which is legitimate.
-    assert "injection" not in tc.ADVERTISED_FAMILIES  # generic; the prover needs xss/sqli/…
-    assert "workflow_transition" not in tc.ADVERTISED_FAMILIES  # contract kind, not a family
-    assert len(set(tc.ADVERTISED_FAMILIES)) == len(tc.ADVERTISED_FAMILIES)
-
-    contract = tc.render_tool_contract(agent_tools.AGENT_TOOL_SCHEMAS)
-    advertised_enum = '"family":"' + "|".join(tc.ADVERTISED_FAMILIES) + '"'
-    assert advertised_enum in contract
-    # The rendered enum itself must be closed and contain only promotable values.
-    rendered = re.search(r'"family":"([^"]+)"', contract).group(1).split("|")
-    assert "…" not in rendered and "..." not in rendered
-    assert set(rendered) == set(tc.ADVERTISED_FAMILIES)
-
-
-def test_auto_verify_reports_unverifiable_families_without_spending_the_attempt_cap(monkeypatch):
-    """A family the moat cannot verify must be REPORTED, not silently dropped — and reporting it
-    must not consume _AGENT_AUTO_VERIFY_LIMIT.
-
-    Before this, the unverifiable branch was a bare `continue`: a taxonomy mismatch produced a
-    permanently unpromotable SUSPECTED finding that looked identical to "nothing to verify" in every
-    run summary. The cap counts real verification work (target traffic); a mismatch costs none, so
-    padding `attempts` with skip notes would let unpromotable findings starve a verifiable one.
-    """
-    monkeypatch.setattr(api_module, "_ai_ops_execute_enabled", lambda: True)
-
-    verified_ids = []
-
-    async def _fake_verify(finding_uuid, approval_receipt_id, *, created_by):
-        verified_ids.append(str(finding_uuid))
-        return {"verified": True, "verified_finding_id": "v-1", "family_proof": {"verdict": "verified"}}
-
-    monkeypatch.setattr(api_module, "_verify_suspected_finding_workflow", _fake_verify)
-
-    def _entry(family, fid):
-        return {"finding": {"family": family}, "persisted": {"id": fid, "persisted": "created"}}
-
-    # More unverifiable findings than the cap, with a verifiable one LAST.
-    gated = [
-        _entry("workflow_transition", "00000000-0000-4000-8000-000000000001"),  # contract kind, not a family
-        _entry("injection", "00000000-0000-4000-8000-000000000002"),            # generic; DAST wants xss/sqli
-        _entry("totally_made_up", "00000000-0000-4000-8000-000000000003"),
-        _entry("xss", "00000000-0000-4000-8000-000000000004"),                  # DAST-routed, also not moat
-        _entry("data_exposure", "00000000-0000-4000-8000-000000000005"),        # genuinely moat-verifiable
-    ]
-
-    out = asyncio.run(api_module._agent_auto_verify(
-        gated, approval_receipt_id="receipt-1", created_by="test"))
-
-    # The verifiable finding was still attempted despite four unverifiable ones ahead of it.
-    assert verified_ids == ["00000000-0000-4000-8000-000000000005"]
-    assert sum(1 for r in out if r.get("verified")) == 1
-
-    # Every unverifiable finding is reported with its claimed spelling, and DAST-routed leads are
-    # distinguished from genuine taxonomy mismatches.
-    by_id = {r["finding_id"]: r for r in out if r.get("finding_id")}
-    assert by_id["00000000-0000-4000-8000-000000000001"]["skipped"] == "family_not_verifiable"
-    assert by_id["00000000-0000-4000-8000-000000000001"]["claimed_family"] == "workflow_transition"
-    assert by_id["00000000-0000-4000-8000-000000000002"]["skipped"] == "family_not_verifiable"
-    assert by_id["00000000-0000-4000-8000-000000000003"]["skipped"] == "family_not_verifiable"
-    assert by_id["00000000-0000-4000-8000-000000000004"]["skipped"] == "family_eligible_for_dast_retest"
-
-    # Telemetry carries no budget reservations, so the caller's *_reserved sums are unaffected.
-    assert all(
-        not r.get("request_units_reserved") and not r.get("seconds_reserved")
-        for r in out if r.get("skipped", "").startswith("family_")
-    )
-
-
-def test_auto_verify_classifies_findings_after_attempt_cap_and_without_approval(monkeypatch):
-    monkeypatch.setattr(api_module, "_ai_ops_execute_enabled", lambda: True)
-
-    async def _fake_verify(_finding_uuid, _approval_receipt_id, *, created_by):
-        return {"verified": False, "family_proof": {"verdict": "not_verified"}}
-
-    monkeypatch.setattr(api_module, "_verify_suspected_finding_workflow", _fake_verify)
-
-    def _entry(family, suffix):
-        return {
-            "finding": {"family": family},
-            "persisted": {
-                "id": f"00000000-0000-4000-8000-{suffix:012d}",
-                "persisted": "created",
-            },
-        }
-
-    # Eight real attempts consume the traffic cap; the later taxonomy mismatch must still appear.
-    gated = [
-        _entry("data_exposure", 1),
-        _entry("data_exposure", 2),
-        _entry("data_exposure", 3),
-        _entry("data_exposure", 4),
-        _entry("data_exposure", 5),
-        _entry("data_exposure", 6),
-        _entry("data_exposure", 7),
-        _entry("data_exposure", 8),
-        _entry("totally_made_up", 9),
-        _entry("data_exposure", 10),
-    ]
-    capped = asyncio.run(api_module._agent_auto_verify(
-        gated, approval_receipt_id="receipt", created_by="test"
-    ))
-    capped_by_id = {row.get("finding_id"): row for row in capped}
-    assert capped_by_id["00000000-0000-4000-8000-000000000009"]["skipped"] == "family_not_verifiable"
-    assert capped_by_id["00000000-0000-4000-8000-000000000010"]["skipped"] == "auto_verify_attempt_limit_reached"
-
-    # Read-only/no-approval runs do not execute traffic, but they still expose taxonomy truth.
-    no_approval = asyncio.run(api_module._agent_auto_verify(
-        [_entry("totally_made_up", 6), _entry("data_exposure", 7)],
-        approval_receipt_id=None,
-        created_by="test",
-    ))
-    no_approval_by_id = {row.get("finding_id"): row for row in no_approval}
-    assert no_approval_by_id["00000000-0000-4000-8000-000000000006"]["skipped"] == "family_not_verifiable"
-    assert no_approval_by_id["00000000-0000-4000-8000-000000000007"]["skipped"] == "auto_verify_requires_approval"
-
-
-def test_auto_verify_skip_noise_cannot_starve_taxonomy_telemetry(monkeypatch):
-    monkeypatch.setattr(api_module, "_ai_ops_execute_enabled", lambda: True)
-
-    def _entry(family, suffix):
-        return {
-            "finding": {"family": family},
-            "persisted": {
-                "id": f"00000000-0000-4000-8000-{suffix:012d}",
-                "persisted": "created",
-            },
-        }
-
-    # More approval skips than the operational telemetry cap precede the taxonomy mismatch.
-    gated = [_entry("data_exposure", index) for index in range(1, 15)]
-    gated.append(_entry("unknown_family_name", 99))
-    out = asyncio.run(api_module._agent_auto_verify(
-        gated,
-        approval_receipt_id=None,
-        created_by="test",
-    ))
-
-    assert sum(row.get("skipped") == "auto_verify_requires_approval" for row in out) == 10
-    taxonomy = next(row for row in out if row.get("finding_id", "").endswith("000000000099"))
-    assert taxonomy["skipped"] == "family_not_verifiable"
-    assert taxonomy["claimed_family"] == "unknown_family_name"
 
 
 def test_context_pack_sections_render_observed_artifacts_and_invariant_candidates():
@@ -23627,3 +23104,115 @@ def test_deployment_decision_judges_a_web_scan_under_its_targets_environment(mon
         stored = decide()
         assert stored["policy_profile"] == "production"
         assert stored["blocking_findings"] == []
+
+def _device_state(*, objective: str, safety_profile: str, max_turns: int) -> dict:
+    """A device execution state as the tests need it: counters at zero, nothing recorded."""
+    return {
+        "objective": objective, "safety_profile": safety_profile, "max_turns": max_turns,
+        "turns": 0, "actions_used": 0, "scans_queued": 0, "device_http_requests_used": 0,
+        "fragility_budget": api_module.device_agent.MAX_FRAGILITY_PER_SESSION, "fragility_used": 0,
+        "traffic_frozen": False, "next_evidence_ref": 1, "evidence": {}, "notes": [], "events": [],
+    }
+
+
+def test_device_control_verifier_restores_query_state_before_promotion(monkeypatch):
+    device_id = uuid.uuid4()
+    run_id = uuid.uuid4()
+    candidate_id = uuid.uuid4()
+    collection_id = uuid.uuid4()
+    payload = {"fixture": "owned-tv-control"}
+    raw_payload = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    digest = hashlib.sha256(raw_payload.encode()).hexdigest()
+    request = {
+        "id": "power-on", "method": "POST",
+        "url": "http://owned-tv.test:7345/api/power?state=on",
+        "headers": {}, "body": b"",
+    }
+
+    class _Transaction:
+        async def __aenter__(self): return self
+        async def __aexit__(self, *_args): return False
+
+    class _Conn:
+        def __init__(self):
+            self.fetchval_calls = 0
+            self.executed = []
+
+        async def fetch(self, _query, *_args):
+            return [{
+                "id": collection_id, "name": "TV controls",
+                "document_sha256": digest, "encrypted_payload": "encrypted",
+            }]
+
+        def transaction(self): return _Transaction()
+
+        async def fetchval(self, query, *_args):
+            if "SELECT environment FROM device_targets" in query:
+                # The replay pins its connect address under the device's environment.
+                return "production"
+            self.fetchval_calls += 1
+            return uuid.uuid4()
+
+        async def execute(self, query, *args):
+            self.executed.append((query, args))
+            return "OK"
+
+    class _Pool:
+        def __init__(self): self.conn = _Conn()
+        def acquire(self): return self
+        async def __aenter__(self): return self.conn
+        async def __aexit__(self, *_args): return False
+
+    async def _origins(_device_id):
+        return [{
+            "scheme": "http", "port": 7345, "hostname": "owned-tv.test",
+            "connect_address": "192.0.2.10", "origin": "http://owned-tv.test:7345",
+        }]
+
+    reads = iter([
+        {"status": 200, "body": b'{"power":"off","counter":1}'},
+        {"status": 200, "body": b'{"power":"on","counter":2}'},
+        {"status": 200, "body": b'{"power":"off","counter":3}'},
+    ])
+    control_paths = []
+
+    async def _read(**_kwargs): return next(reads)
+
+    async def _control(**kwargs):
+        control_paths.append(kwargs["path"])
+        return {"status": 200, "body": b'{"accepted":true}'}
+
+    pool = _Pool()
+    monkeypatch.setattr(api_module, "db_pool", pool)
+    monkeypatch.setattr(devices_router_module, "decrypt_secret", lambda _value: raw_payload)
+    monkeypatch.setattr(devices_router_module, "_resolve_imported_device_requests", lambda _payload: [request])
+    monkeypatch.setattr(devices_router_module, "_device_confirmed_web_origins", _origins)
+    monkeypatch.setattr(devices_router_module, "_device_request_pinned_http", _read)
+    monkeypatch.setattr(devices_router_module, "_device_request_pinned_control_http", _control)
+    monkeypatch.setattr(devices_router_module, "expected_build_fingerprint", lambda: "test-build")
+
+    state = _device_state(
+        objective="verify owned TV power authorization",
+        safety_profile="authenticated_active", max_turns=4,
+    )
+    state.update({
+        "confirm_request_replay": True,
+        "allow_state_changing_requests": True,
+        "device_request_collections": [{
+            "collection_id": str(collection_id), "state_changing_request_count": 1,
+        }],
+    })
+    result = asyncio.run(api_module._verify_device_control_authorization_candidate(
+        run_id=run_id, device_target_id=device_id, candidate_id=candidate_id,
+        state=state,
+        locus={
+            "collection_id": str(collection_id), "request_id": "power-on",
+            "state_path": "/api/status", "state_json_pointer": "/power",
+            "cleanup_adapter": "restore_query_parameter", "mutation_field": "state",
+        },
+    ))
+
+    assert result["verified"] is True
+    assert result["cleanup_outcome"] == "cleanup_restored_exact_pre_state"
+    assert control_paths == ["/api/power?state=on", "/api/power?state=off"]
+    assert pool.conn.fetchval_calls == 2

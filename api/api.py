@@ -551,16 +551,12 @@ import invariant_contracts
 import invariant_proposals
 import source_ingest
 import agent_context_pack
-import agent_loop
-import agent_provenance
-import agent_text_toolcalls
 import agent_tools
 import target_authorization
 from targets import skill as target_skill
 import target_resolution
 import target_dns_alias
 import deployment_policy
-import agent_budget
 try:
     from scan.contracts import (
         ResolvedScanContract,
@@ -892,7 +888,6 @@ try:
         current_hunt_credential_scope,
         resolve_hunt_workflow_principal_contexts,
     )
-    from hunt.legacy import LegacyHuntIsolationMiddleware
     from hunt.run_router import (
         HuntFinishRequest,
         cancel_hunt,
@@ -963,7 +958,6 @@ except ModuleNotFoundError:
         current_hunt_credential_scope,
         resolve_hunt_workflow_principal_contexts,
     )
-    from api.hunt.legacy import LegacyHuntIsolationMiddleware
     from api.hunt.run_router import (
         HuntFinishRequest,
         cancel_hunt,
@@ -2866,13 +2860,6 @@ async def cleanup_stale_device_lifecycle(pool: asyncpg.Pool) -> None:
                         "current_phase": "queue_handoff_failed",
                     })
                     r.expire(f"job:{job_id}", 86400)
-        await conn.execute(
-            """UPDATE device_agent_runs
-               SET status='awaiting_planner', planning_token=NULL,
-                   stop_reason='planning_lease_recovered', updated_at=NOW()
-               WHERE status='planning' AND updated_at < $1""",
-            now - timedelta(minutes=10),
-        )
 
 
 async def cleanup_orphaned_scan_queue_handoffs(pool: asyncpg.Pool) -> int:
@@ -5471,7 +5458,6 @@ try:
         DeviceTargetCreate,
         _HUNT_DEVICE_QUEUE_CORRELATION,
         _QUEUE_HANDOFF_CONFIRMATION_KEY,
-        _build_device_agent_context_pack,
         list_device_scans,
         _confirm_device_queue_handoff,
         _device_agent_credential_reference,
@@ -5485,7 +5471,6 @@ try:
         _target_credential_profile_status,
         _validate_device_policy_rules,
         _decode_device_row,
-        _device_agent_run_public,
         _device_uuid,
         _device_worker_readiness,
         _hunt_device_queue_metadata,
@@ -5507,7 +5492,6 @@ except ModuleNotFoundError:  # package import in host-side tests
         DeviceTargetCreate,
         _HUNT_DEVICE_QUEUE_CORRELATION,
         _QUEUE_HANDOFF_CONFIRMATION_KEY,
-        _build_device_agent_context_pack,
         list_device_scans,
         _confirm_device_queue_handoff,
         _device_agent_credential_reference,
@@ -5521,7 +5505,6 @@ except ModuleNotFoundError:  # package import in host-side tests
         _target_credential_profile_status,
         _validate_device_policy_rules,
         _decode_device_row,
-        _device_agent_run_public,
         _device_uuid,
         _device_worker_readiness,
         _hunt_device_queue_metadata,
@@ -6675,7 +6658,6 @@ try:
         HuntCapabilityRequest,
         HuntQueryRequest,
         _AGENT_TOOL_MAX_QUERY_ROWS,
-        _agent_tool_query_kb,
         _enqueue_canonical_browser_capability,
         _enqueue_canonical_http_capability,
         _enqueue_canonical_network_capability,
@@ -6715,7 +6697,6 @@ except ModuleNotFoundError:  # package import in host-side tests
         HuntCapabilityRequest,
         HuntQueryRequest,
         _AGENT_TOOL_MAX_QUERY_ROWS,
-        _agent_tool_query_kb,
         _enqueue_canonical_browser_capability,
         _enqueue_canonical_http_capability,
         _enqueue_canonical_network_capability,
@@ -7135,54 +7116,13 @@ try:
         configure_agent_router,
         router as agent_router,
         AGENT_TOOL_WORKER_BUILD_REGISTRY_KEY,
-        _AGENT_AUTO_VERIFY_EXCLUDED_FAMILIES,
-        _AGENT_AUTO_VERIFY_LIMIT,
-        _AGENT_AUTO_VERIFY_SKIP_REPORT_LIMIT,
-        _AGENT_DAST_RETEST_FAMILIES,
-        _AGENT_HUNT_DEFAULT_ITERATIONS,
-        _AGENT_HUNT_MAX_ITERATIONS,
-        _AGENT_HUNT_TRANSCRIPT_SOFT_CAP,
-        _AGENT_MAX_TOOLS_PER_TURN,
-        _AGENT_ROUTE_ONLY_RETEST_FAMILIES,
-        _AGENT_TOOL_HTTP_TIMEOUT_SECONDS,
-        _AGENT_UNVERIFIABLE_FAMILY_REPORT_LIMIT,
-        _AGENT_VERIFY_REQUEST_RESERVATIONS,
-        _AGENT_VERIFY_SECONDS_RESERVATIONS,
-        _agent_apply_reply,
-        _agent_auto_queue_dast_retests,
-        _agent_auto_verify,
         _agent_context_pack_sections,
-        _agent_finalize_and_persist,
-        _agent_finalize_gate,
-        _agent_finding_locus,
-        _agent_hunt_run_or_404,
-        _agent_hunt_run_public,
-        _agent_new_state,
         _agent_pack_compact,
-        _agent_persist_suspected_findings,
-        _agent_planner_reply,
-        _agent_planner_turn_token_reservation,
-        _agent_resolve_ref,
-        _agent_run_summary_receipt,
-        _agent_seed_state,
-        _agent_tool_diff,
-        _agent_tool_http_request,
-        _agent_tool_note,
-        _agent_tool_run_tool,
         _agent_tool_worker_readiness,
-        _agent_trim_transcript,
-        _enqueue_agent_scanner_tool,
-        _execute_agent_tool,
-        _persist_agent_suspected_finding,
         _resolve_agent_target_addresses,
-        _resolve_hunt_origin,
-        _resolve_hunt_tool_url,
-        cancel_agent_hunt_session,
         get_agent_context_pack,
-        get_agent_hunt_session,
         get_agent_tool_readiness,
         get_agent_two_tier_findings,
-        list_agent_hunt_runs,
     )
     from worker_pools import web_dast_heartbeat_summary, worker_pool_summaries
 except ModuleNotFoundError:  # package import in host-side tests
@@ -7190,68 +7130,18 @@ except ModuleNotFoundError:  # package import in host-side tests
         configure_agent_router,
         router as agent_router,
         AGENT_TOOL_WORKER_BUILD_REGISTRY_KEY,
-        _AGENT_AUTO_VERIFY_EXCLUDED_FAMILIES,
-        _AGENT_AUTO_VERIFY_LIMIT,
-        _AGENT_AUTO_VERIFY_SKIP_REPORT_LIMIT,
-        _AGENT_DAST_RETEST_FAMILIES,
-        _AGENT_HUNT_DEFAULT_ITERATIONS,
-        _AGENT_HUNT_MAX_ITERATIONS,
-        _AGENT_HUNT_TRANSCRIPT_SOFT_CAP,
-        _AGENT_MAX_TOOLS_PER_TURN,
-        _AGENT_ROUTE_ONLY_RETEST_FAMILIES,
-        _AGENT_TOOL_HTTP_TIMEOUT_SECONDS,
-        _AGENT_UNVERIFIABLE_FAMILY_REPORT_LIMIT,
-        _AGENT_VERIFY_REQUEST_RESERVATIONS,
-        _AGENT_VERIFY_SECONDS_RESERVATIONS,
-        _agent_apply_reply,
-        _agent_auto_queue_dast_retests,
-        _agent_auto_verify,
         _agent_context_pack_sections,
-        _agent_finalize_and_persist,
-        _agent_finalize_gate,
-        _agent_finding_locus,
-        _agent_hunt_run_or_404,
-        _agent_hunt_run_public,
-        _agent_new_state,
         _agent_pack_compact,
-        _agent_persist_suspected_findings,
-        _agent_planner_reply,
-        _agent_planner_turn_token_reservation,
-        _agent_resolve_ref,
-        _agent_run_summary_receipt,
-        _agent_seed_state,
-        _agent_tool_diff,
-        _agent_tool_http_request,
-        _agent_tool_note,
-        _agent_tool_run_tool,
         _agent_tool_worker_readiness,
-        _agent_trim_transcript,
-        _enqueue_agent_scanner_tool,
-        _execute_agent_tool,
-        _persist_agent_suspected_finding,
         _resolve_agent_target_addresses,
-        _resolve_hunt_origin,
-        _resolve_hunt_tool_url,
-        cancel_agent_hunt_session,
         get_agent_context_pack,
-        get_agent_hunt_session,
         get_agent_tool_readiness,
         get_agent_two_tier_findings,
-        list_agent_hunt_runs,
     )
     from api.worker_pools import web_dast_heartbeat_summary, worker_pool_summaries
 configure_agent_router(
     lambda: db_pool,
-    AGENT_TOOL_QUEUE_NAME=lambda: AGENT_TOOL_QUEUE_NAME,
-    _AGENT_VERIFIABLE_FAMILIES=lambda: _AGENT_VERIFIABLE_FAMILIES,
-    _ai_ops_execute_enabled=lambda: _ai_ops_execute_enabled,
-    _load_effective_ai_settings=lambda: _load_effective_ai_settings,
-    _provision_same_origin_url=lambda: _provision_same_origin_url,
-    _require_approval_receipt_if_policy_enabled=lambda: _require_approval_receipt_if_policy_enabled,
-    _validate_approval_receipt_for_action=lambda: _validate_approval_receipt_for_action,
-    _verify_suspected_finding_workflow=lambda: _verify_suspected_finding_workflow,
     current_scanner_version=lambda: current_scanner_version,
-    enqueue_job=lambda: enqueue_job,
     expected_build_fingerprint=lambda: expected_build_fingerprint,
     get_redis=lambda: get_redis,
     worker_build_current=lambda: worker_build_current,
@@ -7344,7 +7234,6 @@ if _cors_regex:
 # Innermost: weak ETags and 304s on the polled list reads (list_etag.py); route functions still
 # return plain data to their in-process callers.
 app.add_middleware(ListETagMiddleware)
-app.add_middleware(LegacyHuntIsolationMiddleware)
 app.add_middleware(PublicV2IdempotencyMiddleware)
 app.add_middleware(PublicV2BodyLimitMiddleware)
 # In-flight ceiling (503), admission (429), per-class statement timeouts and the response byte

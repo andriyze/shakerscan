@@ -336,59 +336,6 @@ def test_a_skill_cannot_require_one_that_is_not_bindable():
 
 # --- operator-authorized identity headers ------------------------------------------------
 
-def test_identity_headers_are_refused_by_default():
-    """Including the two an origin behind a major edge is most likely to trust.
-
-    CF-Connecting-IP and True-Client-IP were previously absent from the refused set, so a
-    planner could always forge exactly the header Cloudflare-fronted origins read.
-    """
-    import api.agent_tools as agent_tools
-
-    probe = {
-        "X-Forwarded-For": "127.0.0.1",
-        "X-Real-IP": "127.0.0.1",
-        "Forwarded": "for=127.0.0.1",
-        "CF-Connecting-IP": "127.0.0.1",
-        "True-Client-IP": "127.0.0.1",
-        "Client-IP": "127.0.0.1",
-        "X-Forwarded": "for=127.0.0.1",
-        "Fastly-Client-IP": "127.0.0.1",
-        "X-Azure-ClientIP": "127.0.0.1",
-        "X-WAF-Probe": "keep-me",
-    }
-    kept = agent_tools.filter_request_headers(probe)
-    assert set(kept) == {"X-WAF-Probe"}
-
-
-def test_identity_headers_are_permitted_with_explicit_operator_authority():
-    import api.agent_tools as agent_tools
-
-    probe = {"CF-Connecting-IP": "127.0.0.1", "X-Forwarded-For": "127.0.0.1"}
-    kept = agent_tools.filter_request_headers(probe, allow_identity_headers=True)
-    assert set(kept) == {"CF-Connecting-IP", "X-Forwarded-For"}
-
-
-def test_operator_authority_never_unlocks_credential_or_transport_headers():
-    """The operator may authorize identity forgery. Secrets and framing are not theirs to
-    waive: a planner-set credential would sit outside the credential store, and a
-    planner-set framing header is smuggling, which needs its own capability."""
-    import api.agent_tools as agent_tools
-
-    probe = {
-        "Authorization": "Bearer x",
-        "Cookie": "session=x",
-        "Proxy-Authorization": "x",
-        "Host": "evil.example",
-        "Content-Length": "0",
-        "Transfer-Encoding": "chunked",
-        "Connection": "keep-alive",
-        "Upgrade": "websocket",
-        "X-Original-URL": "/admin/users",
-        "X-Rewrite-URL": "/admin/users",
-        "X-HTTP-Method-Override": "DELETE",
-    }
-    assert agent_tools.filter_request_headers(probe, allow_identity_headers=True) == {}
-
 
 def test_forging_identity_requires_active_testing_and_an_approval_receipt():
     from api.hunt.start_contract import HuntStartContractError, normalize_hunt_start_payload

@@ -21,27 +21,6 @@
     "name": "get_agent_two_tier_findings"
   },
   {
-    "path": "/agent/hunt/runs",
-    "methods": [
-      "GET"
-    ],
-    "name": "list_agent_hunt_runs"
-  },
-  {
-    "path": "/agent/hunt/session/{run_id}",
-    "methods": [
-      "GET"
-    ],
-    "name": "get_agent_hunt_session"
-  },
-  {
-    "path": "/agent/hunt/session/{run_id}/cancel",
-    "methods": [
-      "POST"
-    ],
-    "name": "cancel_agent_hunt_session"
-  },
-  {
     "path": "/agent/tools/readiness",
     "methods": [
       "GET"
@@ -803,27 +782,6 @@
       "POST"
     ],
     "name": "preview_record_deletion"
-  },
-  {
-    "path": "/device-agent/runs",
-    "methods": [
-      "GET"
-    ],
-    "name": "list_device_agent_runs"
-  },
-  {
-    "path": "/device-agent/session/{run_id}",
-    "methods": [
-      "GET"
-    ],
-    "name": "get_device_agent_session"
-  },
-  {
-    "path": "/device-agent/session/{run_id}/cancel",
-    "methods": [
-      "POST"
-    ],
-    "name": "cancel_device_agent_session"
   },
   {
     "path": "/device-policies",

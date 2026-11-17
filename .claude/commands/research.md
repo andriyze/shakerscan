@@ -3,7 +3,7 @@
 Use the `research-agent` skill.
 
 `/research` is retained as a compatibility command, but the user-facing workflow is **Hunt**.
-Do not launch the legacy `/research/*` verifier or `/agent/hunt/*` engine for a Hunt request.
+Do not launch the legacy `/research/*` verifier for a Hunt request; the `/agent/hunt/*` engine is removed.
 
 Resolve the authorized target, create a target-bound expiring credential approval, then start:
 

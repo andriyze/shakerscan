@@ -2068,8 +2068,8 @@ for the profile contract, invocation, limits and acceptance gates.
 
 | Surface | Count | Source |
 |---|---|---|
-| Public REST operations | 511 | `api/**/*.py` FastAPI decorators |
-| Unique REST paths | 428 | `api/**/*.py` |
+| Public REST operations | 505 | `api/**/*.py` FastAPI decorators |
+| Unique REST paths | 422 | `api/**/*.py` |
 | Check families | 20 | `api/check_registry.py` |
 | Command Arsenal commands | 85 | `api/command_arsenal.py` |
 | Tool adapters | 0 | `api/command_arsenal.py` |
@@ -2081,7 +2081,7 @@ for the profile contract, invocation, limits and acceptance gates.
 | Release gates | 17 | `scripts/release_gates.py` |
 | Runtime environment keys | 430 | Python sources + Compose manifests |
 | Internal compatibility scanner modules | 139 | `scanner/scanner_tools/` |
-| UI pages | 41 | `ui/src/app/` |
+| UI pages | 40 | `ui/src/app/` |
 | Skills | 9 | `skills/` |
 | Canonical slash commands | 14 | `.claude/commands/` |
 | Deprecated Scan-name slash shims | 0 | `.claude/commands/` |
@@ -2095,9 +2095,6 @@ for the profile contract, invocation, limits and acceptance gates.
 | `GET` | `/` | `root` |
 | `GET` | `/agent/context/{target_id}` | `get_agent_context_pack` |
 | `GET` | `/agent/findings/{target_id}` | `get_agent_two_tier_findings` |
-| `GET` | `/agent/hunt/runs` | `list_agent_hunt_runs` |
-| `GET` | `/agent/hunt/session/{run_id}` | `get_agent_hunt_session` |
-| `POST` | `/agent/hunt/session/{run_id}/cancel` | `cancel_agent_hunt_session` |
 | `GET` | `/agent/tools/readiness` | `get_agent_tool_readiness` |
 | `GET` | `/agents/local` | `local_agents` |
 | `POST` | `/agents/local/plan` | `local_agent_dry_run_plan` |
@@ -2207,9 +2204,6 @@ for the profile contract, invocation, limits and acceptance gates.
 | `GET` | `/dashboard` | `dashboard` |
 | `POST` | `/data-deletion/execute` | `execute_record_deletion` |
 | `POST` | `/data-deletion/preview` | `preview_record_deletion` |
-| `GET` | `/device-agent/runs` | `list_device_agent_runs` |
-| `GET` | `/device-agent/session/{run_id}` | `get_device_agent_session` |
-| `POST` | `/device-agent/session/{run_id}/cancel` | `cancel_device_agent_session` |
 | `GET` | `/device-policies` | `list_device_policies` |
 | `POST` | `/device-policies` | `create_device_policy` |
 | `PATCH` | `/device-policies/{policy_id}` | `update_device_policy` |
@@ -3363,7 +3357,6 @@ Only key names and declaring sources are documented; secret values are never rea
 | `/deep-hunt/operator` | `ui/src/app/deep-hunt/operator/page.tsx` |
 | `/deep-hunt` | `ui/src/app/deep-hunt/page.tsx` |
 | `/deep-hunt/runs/{id}` | `ui/src/app/deep-hunt/runs/[id]/page.tsx` |
-| `/devices/{id}/agent` | `ui/src/app/devices/[id]/agent/page.tsx` |
 | `/devices/{id}` | `ui/src/app/devices/[id]/page.tsx` |
 | `/devices` | `ui/src/app/devices/page.tsx` |
 | `/devices/policies` | `ui/src/app/devices/policies/page.tsx` |

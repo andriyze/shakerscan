@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { readFileSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import path from 'node:path'
 import test from 'node:test'
 import { fileURLToPath } from 'node:url'
@@ -8,27 +8,18 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const hunt = readFileSync(path.join(root, 'src/app/hunt/page.tsx'), 'utf8')
 const runView = ['HuntRunView.tsx', 'HuntTimeline.tsx', 'HuntDetails.tsx']
   .map((file) => readFileSync(path.join(root, 'src/components/hunt', file), 'utf8')).join('\n')
-const legacyDeviceView = readFileSync(
-  path.join(root, 'src/components/history/LegacyDeviceInvestigation.tsx'),
-  'utf8',
-)
 const device = readFileSync(path.join(root, 'src/app/devices/[id]/page.tsx'), 'utf8')
-const redirect = readFileSync(path.join(root, 'src/app/devices/[id]/agent/page.tsx'), 'utf8')
 
-test('legacy device investigation links preserve and load the exact run', () => {
-  assert.match(device, /legacy_run=\$\{encodeURIComponent\(run\.id\)\}/)
-  assert.match(redirect, /query\.set\('legacy_run', run\)/)
-  assert.match(hunt, /searchParams\.get\('legacy_run'\)/)
-  assert.match(hunt, /getDeviceAgentSession\(legacyRunId\)/)
-})
-
-test('legacy history is clearly read-only and links its deterministic scans', () => {
-  // The legacy device view moved out of the live Hunt page into a history-only
-  // component when its engine was deleted; assert it where it now lives.
-  assert.match(device, /Legacy device-agent history/)
-  assert.match(legacyDeviceView, /Legacy device-agent run · read only/)
-  assert.match(legacyDeviceView, /href=\{`\/scans\/\$\{scanId\}`\}/)
-  assert.match(legacyDeviceView, /Open current Hunt launcher/)
+test('nothing of the removed legacy device-agent history remains in the UI', () => {
+  // The legacy engine, its read and cancel routes and the history view built on them are gone.
+  assert.ok(!existsSync(path.join(root, 'src/components/history/LegacyDeviceInvestigation.tsx')))
+  assert.ok(!existsSync(path.join(root, 'src/app/devices/[id]/agent/page.tsx')))
+  const api = readFileSync(path.join(root, 'src/lib/api.ts'), 'utf8')
+  for (const source of [hunt, device, api]) {
+    assert.ok(!source.includes('legacy_run'))
+    assert.ok(!source.includes('/device-agent/'))
+    assert.ok(!source.includes('DeviceAgentSession'))
+  }
 })
 
 test('canonical Hunt history has durable exact-run links and audit details', () => {
@@ -73,30 +64,6 @@ test('open Hunt sessions do not imply background network execution', async () =>
   assert.match(HUNT_SESSION_NON_AUTONOMOUS_NOTICE, /not running background traffic/)
   assert.match(HUNT_SESSION_NON_AUTONOMOUS_NOTICE, /only when your coding agent submits/)
   assert.match(runView, /HUNT_SESSION_NON_AUTONOMOUS_NOTICE/)
-})
-
-test('the legacy device investigation view is history only', async () => {
-  const { readFileSync } = await import('node:fs')
-  const path = await import('node:path')
-  const { fileURLToPath } = await import('node:url')
-  const uiRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
-  const component = readFileSync(
-    path.join(uiRoot, 'src/components/history/LegacyDeviceInvestigation.tsx'),
-    'utf8',
-  )
-  // The engine behind these records is deleted; the view must not offer any
-  // control that would try to reach it.
-  for (const control of ['onClick', '<button', '<form', 'fetch(', 'useToast']) {
-    assert.ok(
-      !component.includes(control),
-      `legacy device history must not render "${control}"`,
-    )
-  }
-  assert.match(component, /predates canonical Hunt/)
-  // It also must not have been left behind inside the live Hunt page.
-  const huntPage = readFileSync(path.join(uiRoot, 'src/app/hunt/page.tsx'), 'utf8')
-  assert.ok(!huntPage.includes('function LegacyDeviceRun'))
-  assert.match(huntPage, /LegacyDeviceInvestigation/)
 })
 
 test('finding investigation starts a canonical Hunt, not a Research episode', async () => {
