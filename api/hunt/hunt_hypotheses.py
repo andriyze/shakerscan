@@ -13,10 +13,13 @@ What a Hunt adds, and what it may not:
   ``promoted`` is unreachable from a Hunt; only proof reconciliation promotes (invariant 7).
 * Writes are fenced to the Hunt's own target: another target's lead is reported as not found.
 * Text a Hunt writes is bounded and screened (``clean_text``), and is stored only where it is
-  attributable to that Hunt: the title and description of a lead it *created*, and its own test
-  record under ``metadata_json.tests["hunt:<id>"]``. Endorsing an existing lead adds a text-free
-  endorsement, and transitions carry a closed reason code, not prose. An operator retracting the
-  Hunt's entries therefore withholds everything it wrote (``retract_hunt_hypotheses``).
+  attributable to that Hunt: a lead it *created* (title, description, family, dimensions and the
+  dedupe key built from them), and its own test record under ``metadata_json.tests["hunt:<id>"]``.
+  Endorsing an existing lead adds a text-free endorsement and never moves that lead's confidence;
+  proposing the same lead again is a no-op. Transitions carry a closed reason code that must fit
+  the move, not prose. An operator retracting the Hunt's entries therefore withholds everything it
+  wrote: its leads are closed and masked in every Hunt read, and give up their dedupe key so the
+  same lead can be raised again by a trusted source (``hypothesis_retraction``).
 * ``supported`` must cite completed testing actions of this Hunt on the target; ``refuted`` still
   needs the deterministic verification the shared gate checks.
 * ``derived_from`` records the lineage of a lead (the action, candidate, finding, hypothesis or
@@ -25,6 +28,7 @@ What a Hunt adds, and what it may not:
 from __future__ import annotations
 
 import json
+import re
 import uuid
 from datetime import datetime, timezone
 from typing import Any, Mapping
@@ -46,7 +50,8 @@ MAX_FRONTIER = 25
 #: is an operator's administrative close and ``promoted`` belongs to proof reconciliation.
 HUNT_TARGET_STATES = ("testing", "supported", "refuted", "blocked", "exhausted", "open")
 
-#: Why a Hunt moved a lead: a closed vocabulary, so a transition stores no free text.
+#: Why a Hunt moved a lead: a closed vocabulary, so a transition stores no free text. Each move
+#: accepts only the reasons that describe it (``REASONS_BY_STATE``).
 REASON_CODES = (
     "testing_started",
     "expected_signal_observed",
@@ -62,6 +67,20 @@ REASON_CODES = (
 DIMENSIONS = ("method", "route", "object_key", "principal_actor", "principal_other", "tenant",
               "parameter_path", "body_path", "proof_surface")
 SEVERITIES = ("critical", "high", "medium", "low", "info")
+#: The reasons that fit each move. ``open`` hands the lead back (nothing found on this angle, out of
+#: budget, or simply released); ``exhausted`` and ``blocked`` park it until an operator reopens it.
+REASONS_BY_STATE: dict[str, tuple[str, ...]] = {
+    "testing": ("testing_started",),
+    "supported": ("expected_signal_observed",),
+    "refuted": ("deterministic_refutation",),
+    "blocked": ("missing_prerequisite", "policy_refused"),
+    "exhausted": ("expected_signal_absent",),
+    "open": ("released", "budget_exhausted", "expected_signal_absent"),
+}
+#: A family is an identifier, not prose: it is shown to every Hunt and kept in the action ledger.
+FAMILY_PATTERN = re.compile(r"[a-z][a-z0-9_]{0,39}")
+CWE_PATTERN = re.compile(r"CWE-[0-9]{1,6}")
+_HUNT_OWNER = re.compile(r"hunt:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
 #: Refutation bases a Hunt may cite. ``human_approved_review`` is a person's decision a Hunt never asserts.
 HUNT_REFUTATION_BASES = ("deterministic_replay", "parser_protocol", "cryptographic")
 
@@ -135,8 +154,22 @@ def _test_record(values: Mapping[str, Any]) -> dict[str, str]:
     return {"falsifier": falsifier, "expected_signal": expected} if falsifier else {}
 
 
+def _holder(owner: Any) -> str | None:
+    """Who holds a lead, as a Hunt may see it: a Hunt's server-built id, or just that someone does.
+
+    Arsenal callers name themselves in free text, which is not shown to a Hunt.
+    """
+    if not owner:
+        return None
+    return str(owner) if _HUNT_OWNER.fullmatch(str(owner)) else "other"
+
+
 def hunt_view(row: Mapping[str, Any], *, owner: str | None = None) -> dict[str, Any]:
-    """What a Hunt sees of a lead: no description, no other caller's test text, withheld text hidden."""
+    """What a Hunt sees of a lead: no description, no other caller's test text, withheld text hidden.
+
+    A withheld lead (its writer's entries were retracted) shows no word its writer chose: not the
+    title, and not the family or dimensions either.
+    """
     metadata = _loads(row.get("metadata_json"), {}) or {}
     endorsements = _loads(row.get("endorsements"), []) or []
     next_action = _loads(row.get("next_test_action"), {}) or {}
@@ -154,9 +187,10 @@ def hunt_view(row: Mapping[str, Any], *, owner: str | None = None) -> dict[str, 
     effective = "open" if status in {"claimed", "testing"} and row.get("claim_owner") and not claim_active else status
     mine = tests.get(owner) if owner and isinstance(tests.get(owner), dict) else None
     derived = metadata.get("derived_from") if isinstance(metadata.get("derived_from"), list) else []
+    dimensions = metadata.get("dedupe_dimensions") if isinstance(metadata.get("dedupe_dimensions"), dict) else {}
     return {
         "id": str(row["id"]),
-        "family": row.get("family"),
+        "family": None if withheld else row.get("family"),
         "title": None if withheld else row.get("title"),
         "text_withheld": withheld,
         "status": status,
@@ -165,13 +199,14 @@ def hunt_view(row: Mapping[str, Any], *, owner: str | None = None) -> dict[str, 
         "confidence": row.get("confidence"),
         "severity_guess": row.get("severity_guess"),
         "source": row.get("source"),
-        "dedupe_dimensions": metadata.get("dedupe_dimensions") if isinstance(metadata.get("dedupe_dimensions"), dict) else {},
+        "dedupe_dimensions": {} if withheld else dimensions,
         "derived_from": [str(item) for item in derived][:20],
         "endorsement_count": len(endorsements) if isinstance(endorsements, list) else 0,
         "has_falsifier": bool((next_action.get("falsifier") and (next_action.get("expected_signal") or next_action.get("expected")))
-                              or (metadata.get("falsifier") and metadata.get("expected_signal")) or mine),
-        "claim": {"owner": row.get("claim_owner"), "active": claim_active,
-                  "lease_expires_at": expires.isoformat() if isinstance(expires, datetime) else None,
+                              or (metadata.get("falsifier") and metadata.get("expected_signal"))
+                              or (mine and mine.get("falsifier") and mine.get("expected_signal"))),
+        "claim": {"owner": _holder(row.get("claim_owner")) if claim_active else None, "active": claim_active,
+                  "lease_expires_at": expires.isoformat() if claim_active else None,
                   "held_by_this_hunt": bool(owner and claim_active and row.get("claim_owner") == owner)},
         "claimable": effective in {"open", "claimed", "testing", "supported"} and not claim_active,
         "this_hunt_test": mine,
@@ -181,27 +216,38 @@ def hunt_view(row: Mapping[str, Any], *, owner: str | None = None) -> dict[str, 
 
 
 def page_row(row: Mapping[str, Any]) -> dict[str, Any]:
-    """A ``kind=hypotheses`` query row for a Hunt: retracted text withheld, metadata projected away."""
+    """A ``kind=hypotheses`` query row for a Hunt: retracted text withheld, metadata projected away.
+
+    The row keeps its id, state and version. Every field a retracted writer chose is blanked: the
+    title, and the family, dimensions and dedupe key that carry its words as well.
+    """
     item = dict(row)
     metadata = _loads(item.pop("metadata_json", None), {}) or {}
     withheld = isinstance(metadata, dict) and "hunt_withheld" in metadata
-    if withheld:
-        item["title"] = None
-    item["text_withheld"] = withheld
     dimensions = metadata.get("dedupe_dimensions") if isinstance(metadata, dict) else None
-    item["dedupe_dimensions"] = dimensions if isinstance(dimensions, dict) else {}
+    item["dedupe_dimensions"] = dimensions if isinstance(dimensions, dict) and not withheld else {}
+    if withheld:
+        for field in ("title", "family", "dedupe_key"):
+            if field in item:
+                item[field] = None
+    item["text_withheld"] = withheld
+    if "claim_owner" in item:
+        item["claim_owner"] = _holder(item["claim_owner"])
     return item
 
 
-#: The lead-board operations this module shares with Arsenal (``_upsert_hypothesis``,
-#: ``claim_hypothesis_row``, ``transition_hypothesis_row``) and the request model they take. The
+#: The lead-board operations this module shares with Arsenal (``_upsert_hypothesis`` and the
+#: canonical dedupe key it derives, ``claim_hypothesis_row``, ``transition_hypothesis_row``) and
+#: the request model they take. The
 #: composition root supplies them (``configure_hunt_hypotheses``); importing them here would make
 #: Hunt and Arsenal import each other.
 _board: dict[str, Any] = {}
 
 
-def configure_hunt_hypotheses(*, upsert: Any, claim: Any, transition: Any, request_model: Any) -> None:
-    _board.update(upsert=upsert, claim=claim, transition=transition, request_model=request_model)
+def configure_hunt_hypotheses(*, upsert: Any, canonical: Any, claim: Any, transition: Any,
+                              request_model: Any) -> None:
+    _board.update(upsert=upsert, canonical=canonical, claim=claim, transition=transition,
+                  request_model=request_model)
 
 
 def _shared(name: str) -> Any:
@@ -212,20 +258,37 @@ def _shared(name: str) -> Any:
     return call
 
 
-async def proposed_count(conn: Any, hunt_run_id: Any) -> int:
+async def proposed_count(conn: Any, target: Any, hunt_run_id: Any) -> int:
+    """Leads on its target this Hunt created or endorsed (a Hunt writes leads nowhere else)."""
     return int(await conn.fetchval(
         """SELECT count(*) FROM hypotheses
-           WHERE endorsements @> jsonb_build_array(jsonb_build_object('hunt_run_id', $1::text))""",
-        str(hunt_run_id)) or 0)
+           WHERE target_id = $1
+             AND endorsements @> jsonb_build_array(jsonb_build_object('hunt_run_id', $2::text))""",
+        target, str(hunt_run_id)) or 0)
+
+
+def _number(value: Any) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return 0.0
 
 
 async def propose(conn: Any, run: Mapping[str, Any], values: Mapping[str, Any]) -> dict[str, Any]:
-    """Record a lead on this Hunt's target, or endorse the identical lead already there."""
+    """Record a lead on this Hunt's target, or endorse the identical lead already there.
+
+    Three outcomes, by the canonical dedupe key the shared upsert derives: this Hunt already
+    endorsed the lead (nothing is written), another source holds it (this Hunt's text-free
+    endorsement is added and the lead's own text and confidence are left alone), or it is new
+    (created in this Hunt's words, with its lineage and planned test).
+    """
     target = _target(run)
     owner = _owner(run)
-    family = str(values.get("family") or "").strip().lower().replace(" ", "_")
-    if not family or len(family) > 80:
-        raise _refused(422, "invalid_family", "family is a vulnerability family of 1-80 characters (e.g. bola, sqli)")
+    family = str(values.get("family") or "").strip().lower().replace(" ", "_").replace("-", "_")
+    if not FAMILY_PATTERN.fullmatch(family):
+        raise _refused(422, "invalid_family",
+                       "family is a short vulnerability family identifier: a letter, then up to 39 letters, "
+                       "digits or underscores (e.g. bola, sqli, mass_assignment)")
     title = _text(values, "title", 200, required=True)
     description = _text(values, "description", 2000)
     raw_dimensions = values.get("dedupe_dimensions") or {}
@@ -244,52 +307,76 @@ async def propose(conn: Any, run: Mapping[str, Any], values: Mapping[str, Any]) 
     confidence = values.get("confidence", 0.0)
     if isinstance(confidence, bool) or not isinstance(confidence, (int, float)) or not 0 <= confidence <= 1:
         raise _refused(422, "invalid_confidence", "confidence is a number from 0 to 1")
-    cwe = _text(values, "cwe", 20)
+    cwe = values.get("cwe")
+    if cwe is not None:
+        cwe = str(cwe).strip().upper()
+        if not CWE_PATTERN.fullmatch(cwe):
+            raise _refused(422, "invalid_cwe", "cwe is a CWE identifier such as CWE-639")
     test = _test_record(values)
     derived_from = _refs(values, "derived_from")
     unknown = await unknown_records(conn, target, derived_from)
     if unknown:
         raise _refused(422, "unknown_derived_from",
                        "derived_from must name records of this target's asset", unknown=unknown)
+    endorsement = {"source": "ai_planner", "created_by": owner, "hunt_run_id": str(run["id"]),
+                   "confidence": float(confidence), "derived_from": derived_from}
+
+    def request(**overrides: Any) -> Any:
+        return _shared("request_model")(**{**dict(
+            source="ai_planner", family=family, dedupe_key=f"hunt:{family}", dedupe_dimensions=dimensions,
+            target_id=str(target), cwe=cwe, title=title, description=description, severity_guess=severity,
+            confidence=float(confidence), endorsement=endorsement, created_by=owner), **overrides})
+
+    canonical = _shared("canonical")(request())
     async with conn.transaction():
         # Serialize one Hunt's proposals so the per-Hunt bound cannot be raced past.
         await conn.execute("SELECT pg_advisory_xact_lock(hashtext($1))", f"hunt-hypotheses:{run['id']}")
-        if await proposed_count(conn, run["id"]) >= MAX_HYPOTHESES_PER_HUNT:
+        existing = await conn.fetchrow(
+            "SELECT * FROM hypotheses WHERE target_id=$1 AND family=$2 AND dedupe_key=$3",
+            target, canonical["family"], canonical["dedupe_key"])
+        if existing is not None and any(
+                isinstance(item, dict) and item.get("hunt_run_id") == str(run["id"])
+                for item in (_loads(existing["endorsements"], []) or [])):
+            return _proposal(existing, owner, created=False, already_endorsed=True)
+        if await proposed_count(conn, target, run["id"]) >= MAX_HYPOTHESES_PER_HUNT:
             raise _refused(409, "hypothesis_limit_reached",
                            f"This Hunt already proposed {MAX_HYPOTHESES_PER_HUNT} leads; claim and settle existing ones")
-        endorsement = {"source": "ai_planner", "created_by": owner, "hunt_run_id": str(run["id"]),
-                       "confidence": float(confidence), "derived_from": derived_from}
-        request = _shared("request_model")(
-            source="ai_planner", family=family, dedupe_key=f"hunt:{family}",
-            dedupe_dimensions=dimensions, target_id=str(target), cwe=cwe, title=title,
-            description=description, severity_guess=severity, confidence=float(confidence),
-            endorsement=endorsement, created_by=owner)
-        result = await _shared("upsert")(conn, request)
-        hypothesis = result["hypothesis"]
-        created = bool(result.get("created"))
-        if created and (derived_from or test):
-            # Only on a lead this Hunt created: the lineage and its planned test become part of it.
-            # An existing lead keeps its own text; this Hunt states its test when it claims and tests.
+        # On another source's lead this Hunt adds an endorsement only: the shared upsert raises a
+        # lead's confidence to the highest stated, so the Hunt's stays in its endorsement entry.
+        result = await _shared("upsert")(conn, request(confidence=0.0) if existing is not None else request())
+        lead_id = uuid.UUID(str(result["hypothesis"]["id"]))
+        row = None
+        if existing is None and (derived_from or test):
+            # Only on a lead this Hunt created (created_by guards the insert losing a race to
+            # another source): the lineage and its planned test become part of the lead.
             row = await conn.fetchrow(
                 """UPDATE hypotheses
                    SET metadata_json = metadata_json || $2::jsonb,
                        next_test_action = CASE WHEN $3::jsonb IS NULL THEN next_test_action ELSE $3::jsonb END,
                        version = version + 1, updated_at = NOW()
-                   WHERE id = $1 RETURNING *""",
-                uuid.UUID(str(hypothesis["id"])),
-                json.dumps({"derived_from": derived_from} if derived_from else {}),
-                json.dumps({**test, "proposed_by": owner}) if test else None)
-        else:
-            row = await conn.fetchrow("SELECT * FROM hypotheses WHERE id=$1", uuid.UUID(str(hypothesis["id"])))
+                   WHERE id = $1 AND created_by = $4 RETURNING *""",
+                lead_id, json.dumps({"derived_from": derived_from} if derived_from else {}),
+                json.dumps({**test, "proposed_by": owner}) if test else None, owner)
+        if row is None:
+            row = await conn.fetchrow("SELECT * FROM hypotheses WHERE id=$1", lead_id)
+    return _proposal(row, owner, created=existing is None and row["created_by"] == owner, already_endorsed=False)
+
+
+def _proposal(row: Mapping[str, Any], owner: str, *, created: bool, already_endorsed: bool) -> dict[str, Any]:
+    view = hunt_view(row, owner=owner)
     return {"ok": True, "created": created, "endorsed_existing": not created,
-            "hypothesis": hunt_view(row, owner=owner),
-            "next": ("hypothesis.claim with this version before testing it" if hunt_view(row)["claimable"]
+            "already_endorsed": already_endorsed, "hypothesis": view,
+            "next": ("hypothesis.claim with this version before testing it" if view["claimable"]
                      else "this lead is not claimable now; read its status"),
             "is_proof": False, "authority_granted": False}
 
 
 async def claim(conn: Any, run: Mapping[str, Any], values: Mapping[str, Any]) -> dict[str, Any]:
-    """Take (or renew) this Hunt's working lease on one lead of its target."""
+    """Take (or renew) this Hunt's working lease on one lead of its target.
+
+    Renewing a lease this Hunt already holds only extends it: a lead it moved to ``testing`` or
+    ``supported`` stays there.
+    """
     lease = values.get("lease_seconds", DEFAULT_CLAIM_LEASE_SECONDS)
     if (isinstance(lease, bool) or not isinstance(lease, int)
             or not MIN_CLAIM_LEASE_SECONDS <= lease <= MAX_CLAIM_LEASE_SECONDS):
@@ -298,7 +385,7 @@ async def claim(conn: Any, run: Mapping[str, Any], values: Mapping[str, Any]) ->
     owner = _owner(run)
     result = await _shared("claim")(
         conn, _hypothesis_id(values), expected_version=_version(values), owner=owner,
-        lease_seconds=lease, target_uuid=_target(run))
+        lease_seconds=lease, target_uuid=_target(run), renewal_keeps_state=True)
     row = await conn.fetchrow("SELECT * FROM hypotheses WHERE id=$1", uuid.UUID(str(result["hypothesis"]["id"])))
     return {"ok": True, "claimed": True, "hypothesis": hunt_view(row, owner=owner),
             "is_proof": False, "authority_granted": False}
@@ -316,11 +403,16 @@ async def transition(conn: Any, run: Mapping[str, Any], values: Mapping[str, Any
     reason_code = values.get("reason_code")
     if reason_code not in REASON_CODES:
         raise _refused(422, "invalid_reason_code", "reason_code is one of " + ", ".join(REASON_CODES))
+    if reason_code not in REASONS_BY_STATE[to_state]:
+        raise _refused(422, "reason_does_not_fit_transition",
+                       f"Moving a lead to {to_state} takes reason_code " + " or ".join(REASONS_BY_STATE[to_state]),
+                       accepted=list(REASONS_BY_STATE[to_state]))
     hypothesis_id = _hypothesis_id(values)
     refuted_by = values.get("refuted_by") if to_state == "refuted" else None
     if refuted_by is not None:
-        if not isinstance(refuted_by, dict) or set(refuted_by) - {"verification_id", "basis", "ref"}:
-            raise _refused(422, "invalid_refuted_by", "refuted_by names verification_id, basis and optionally ref")
+        # No free-text reference: a refutation is the verification it names, nothing a Hunt writes.
+        if not isinstance(refuted_by, dict) or set(refuted_by) - {"verification_id", "basis"}:
+            raise _refused(422, "invalid_refuted_by", "refuted_by names verification_id and basis")
         if refuted_by.get("basis") not in HUNT_REFUTATION_BASES:
             raise _refused(422, "refutation_basis_not_available_to_hunt",
                            "A Hunt refutes on a machine basis: " + ", ".join(HUNT_REFUTATION_BASES))
@@ -344,12 +436,15 @@ async def transition(conn: Any, run: Mapping[str, Any], values: Mapping[str, Any
     record = {key: value for key, value in {**previous, **stated}.items() if key in {"falsifier", "expected_signal"}}
     record["hunt_run_id"] = str(run["id"])
     record["reason_code"] = reason_code
+    # A test that found nothing stays counted after later moves: it ranks the lead for everyone.
+    record["no_signal_count"] = min(99, int(_number(previous.get("no_signal_count")))
+                                    + (1 if reason_code == "expected_signal_absent" else 0))
     record["action_ids"] = sorted(set(previous.get("action_ids") or []) | set(ran))[-50:]
     record["evidence_refs"] = sorted(set(previous.get("evidence_refs") or []) | set(evidence))[-50:]
     result = await _shared("transition")(
         conn, hypothesis_id, to_state=to_state, expected_version=_version(values),
-        reason=reason_code, refuted_by=refuted_by,
-        created_by=owner, target_uuid=target, required_owner=owner, test_record=record)
+        reason=reason_code, refuted_by=refuted_by, created_by=owner, target_uuid=target,
+        required_owner=owner, test_record=record, release_claim=to_state == "open")
     current = await conn.fetchrow("SELECT * FROM hypotheses WHERE id=$1", hypothesis_id)
     return {"ok": True, "transitioned": True, "from": result["from"], "to": result["to"],
             "hypothesis": hunt_view(current, owner=owner), "is_proof": False, "authority_granted": False,

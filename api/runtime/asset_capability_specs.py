@@ -133,9 +133,12 @@ def asset_capability_specs(spec, schema, kinds):
          'and Arsenal also work), or endorse the identical lead already there: family, a one-line title, and '
          'dedupe_dimensions saying exactly where it applies. derived_from cites the records it follows from '
          '(an action, candidate, finding, hypothesis or interpretation of this target). falsifier and '
-         'expected_signal state how you will try to disprove it. Advisory: not proof, sends nothing, grants '
-         f'nothing. At most {MAX_HYPOTHESES_PER_HUNT} per Hunt.'),
-         {'family':{'type':'string','minLength':1,'maxLength':80,'description':'Vulnerability family, e.g. bola, sqli, ssrf.'},
+         'expected_signal state how you will try to disprove it. Proposing a lead you already proposed '
+         'changes nothing; on a lead another source recorded you add your endorsement and its text and '
+         'confidence stay as they were. Advisory: not proof, sends nothing, grants nothing. At most '
+         f'{MAX_HYPOTHESES_PER_HUNT} per Hunt.'),
+         {'family':{'type':'string','minLength':1,'maxLength':40,
+                    'description':'Vulnerability family identifier: a letter, then letters, digits or underscores, e.g. bola, sqli, mass_assignment.'},
           'title':{'type':'string','minLength':1,'maxLength':200},
           'description':{'type':'string','maxLength':2000},
           'dedupe_dimensions':{'type':'object','additionalProperties':False,'minProperties':1,
@@ -144,21 +147,25 @@ def asset_capability_specs(spec, schema, kinds):
           'derived_from':{'type':'array','maxItems':20,'uniqueItems':True,'items':identifier},
           'falsifier':{'type':'string','maxLength':1000},
           'expected_signal':{'type':'string','maxLength':1000},
-          'cwe':{'type':'string','maxLength':20},
+          'cwe':{'type':'string','maxLength':10,'description':'A CWE identifier, e.g. CWE-639.'},
           'severity_guess':{'type':'string','enum':['critical','high','medium','low','info']},
           'confidence':{'type':'number','minimum':0,'maximum':1}},
          ('family','title','dedupe_dimensions')),
         ('hypothesis.claim',('Take (or renew) this Hunt\u2019s working lease on one lead of this target before testing '
          'it, with the version you read. Another holder\u2019s active lease is refused; an expired one is taken over. '
+         'Renewing your own lease only extends it: a lead you moved to testing or supported stays there. '
          'Grants no testing authority.'),
          {'hypothesis_id':identifier,'expected_version':{'type':'integer','minimum':1},
           'lease_seconds':{'type':'integer','minimum':60,'maximum':3600,'default':900}},
          ('hypothesis_id','expected_version')),
-        ('hypothesis.transition',('Move a lead this Hunt holds: testing (needs falsifier and expected_signal, here or '
-         'already on the lead), supported (cite completed testing actions of this Hunt in evidence_refs), '
-         'refuted (refuted_by a completed deterministic verification), blocked, exhausted, or open to release it. '
-         'A closed reason_code, no free text. supported is a lead, never a finding; verification stays with the '
-         'registered verifiers.'),
+        ('hypothesis.transition',('Move a lead this Hunt holds, with the reason_code that fits the move: testing '
+         '(testing_started; needs falsifier and expected_signal, here or already on the lead), supported '
+         '(expected_signal_observed; cite completed testing actions of this Hunt in evidence_refs), refuted '
+         '(deterministic_refutation; refuted_by a completed deterministic verification), open to hand the lead '
+         'back at once (released, budget_exhausted, or expected_signal_absent when this angle found nothing and '
+         'another may), exhausted (expected_signal_absent) or blocked (missing_prerequisite, policy_refused), '
+         'which park the lead until an operator reopens it. No free text. supported is a lead, never a finding; '
+         'verification stays with the registered verifiers.'),
          {'hypothesis_id':identifier,'expected_version':{'type':'integer','minimum':1},
           'to':{'type':'string','enum':['testing','supported','refuted','blocked','exhausted','open']},
           'reason_code':{'type':'string','enum':list(HYPOTHESIS_REASON_CODES)},
@@ -167,8 +174,7 @@ def asset_capability_specs(spec, schema, kinds):
           'expected_signal':{'type':'string','maxLength':1000},
           'refuted_by':{'type':'object','additionalProperties':False,
                         'properties':{'verification_id':identifier,
-                                      'basis':{'type':'string','enum':['deterministic_replay','parser_protocol','cryptographic']},
-                                      'ref':{'type':'string','maxLength':200}}}},
+                                      'basis':{'type':'string','enum':['deterministic_replay','parser_protocol','cryptographic']}}}},
          ('hypothesis_id','expected_version','to','reason_code')),
         ('targets.create','Register a hostname or IP as a canonical target without testing it.',
          {'locator':{'type':'string','minLength':1,'maxLength':253},
@@ -196,7 +202,9 @@ def asset_capability_specs(spec, schema, kinds):
     return (read,action_read) + tuple(spec(name,description,'internal',
         'read_only' if name.startswith(advisory) else 'active',kinds,name,'1',
         None if name.startswith(advisory) else 'active_testing',
-        {'tool_wall_seconds':5},{'control_plane':True,**({} if name.startswith(advisory) else {'user_confirmation':True})},
+        # Lead-board calls are single-row database writes; knowledge and target edits keep their hold.
+        {'tool_wall_seconds':1 if name.startswith('hypothesis.') else 5},
+        {'control_plane':True,**({} if name.startswith(advisory) else {'user_confirmation':True})},
         schema({**properties,**({} if name.startswith(('knowledge.','hypothesis.')) else {'operator_confirmed':confirmed})},required=required),
         'target-management/v1',('target_management_observation','tool_receipt'),hunt_executor='inline')
         for name,description,properties,required in definitions)

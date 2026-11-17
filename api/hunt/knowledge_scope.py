@@ -45,7 +45,7 @@ COUNTED_KINDS = ("endpoints", "findings", "hypotheses", "principals", "graph_nod
                  "scans", "collections", "candidates", "services")
 #: Counts stop here; a capped count is reported as at least this many.
 MAX_COUNT = 1000
-DEVICE_KINDS = frozenset({"scans", "findings", "collections", "candidates", "services", "interpretations"})  # supported by query_knowledge_page
+DEVICE_KINDS = frozenset({"scans", "findings", "collections", "candidates", "services", "interpretations", "hypotheses"})  # supported by query_knowledge_page
 
 
 def _scope_where(kind: str, device: bool, bind: Any) -> list[str]:

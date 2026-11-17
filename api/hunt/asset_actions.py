@@ -55,12 +55,15 @@ async def execute_asset_action(pool, run, name, values):
 #: write of text other Hunts or operators later read, target names included, and collection bindings
 #: (the origins a later Hunt replays a collection against), and hypothesis proposals and transitions
 #: (a lead's text and the Hunt's test record; hunt/hunt_hypotheses.py, withheld again on retraction).
-#: A claim stores no text. A Hunt's only graph writes are the authorization workflow's server-built
-#: nodes (a fixed label and attributes projected by reference allowlist, hunt/graph_projection.py).
+#: A claim stores no text, but a Hunt whose entries were retracted must not hold leads other Hunts
+#: could work, so it is stopped too. A Hunt's only graph writes are the authorization workflow's
+#: server-built nodes (a fixed label and attributes projected by reference allowlist,
+#: hunt/graph_projection.py).
 QUARANTINED_WRITES = frozenset({'knowledge.record', 'targets.skill.create', 'targets.skill.update',
                                 'targets.skill.delete', 'targets.actions.create', 'targets.actions.update',
                                 'targets.actions.delete', 'targets.create', 'targets.update',
-                                'collections.bind', 'hypothesis.propose', 'hypothesis.transition'})
+                                'collections.bind', 'hypothesis.propose', 'hypothesis.claim',
+                                'hypothesis.transition'})
 
 
 async def _perform_asset_action(pool, run, name, values):
@@ -70,7 +73,9 @@ async def _perform_asset_action(pool, run, name, values):
         async with pool.acquire() as conn:
             if await hunt_quarantined(conn, run['id']):
                 raise HTTPException(403, {'error':'hunt_entries_retracted', 'reason_code':'hunt_entries_retracted',
-                    'message':QUARANTINE_MESSAGE})
+                    'message':('An operator retracted this Hunt’s entries; for the rest of its run it can no '
+                               'longer hold leads on the board.') if name == 'hypothesis.claim'
+                              else QUARANTINE_MESSAGE})
     policy = run.get('policy_json') or {}
     if isinstance(policy,str):
         policy = json.loads(policy)

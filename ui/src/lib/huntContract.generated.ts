@@ -921,7 +921,7 @@ export const HUNT_START_CONTRACT = {
         "method": "POST",
         "url_template": "/hunts/{hunt_id}/capabilities/hypothesis.propose"
       },
-      "description": "Propose a lead on this target’s hypothesis frontier (the shared lead board later Hunts and Arsenal also work), or endorse the identical lead already there: family, a one-line title, and dedupe_dimensions saying exactly where it applies. derived_from cites the records it follows from (an action, candidate, finding, hypothesis or interpretation of this target). falsifier and expected_signal state how you will try to disprove it. Advisory: not proof, sends nothing, grants nothing. At most 200 per Hunt.",
+      "description": "Propose a lead on this target’s hypothesis frontier (the shared lead board later Hunts and Arsenal also work), or endorse the identical lead already there: family, a one-line title, and dedupe_dimensions saying exactly where it applies. derived_from cites the records it follows from (an action, candidate, finding, hypothesis or interpretation of this target). falsifier and expected_signal state how you will try to disprove it. Proposing a lead you already proposed changes nothing; on a lead another source recorded you add your endorsement and its text and confidence stay as they were. Advisory: not proof, sends nothing, grants nothing. At most 200 per Hunt.",
       "input": {
         "fields": [
           "family",
@@ -961,7 +961,7 @@ export const HUNT_START_CONTRACT = {
         "method": "POST",
         "url_template": "/hunts/{hunt_id}/capabilities/hypothesis.claim"
       },
-      "description": "Take (or renew) this Hunt’s working lease on one lead of this target before testing it, with the version you read. Another holder’s active lease is refused; an expired one is taken over. Grants no testing authority.",
+      "description": "Take (or renew) this Hunt’s working lease on one lead of this target before testing it, with the version you read. Another holder’s active lease is refused; an expired one is taken over. Renewing your own lease only extends it: a lead you moved to testing or supported stays there. Grants no testing authority.",
       "input": {
         "fields": [
           "hypothesis_id",
@@ -993,7 +993,7 @@ export const HUNT_START_CONTRACT = {
         "method": "POST",
         "url_template": "/hunts/{hunt_id}/capabilities/hypothesis.transition"
       },
-      "description": "Move a lead this Hunt holds: testing (needs falsifier and expected_signal, here or already on the lead), supported (cite completed testing actions of this Hunt in evidence_refs), refuted (refuted_by a completed deterministic verification), blocked, exhausted, or open to release it. A closed reason_code, no free text. supported is a lead, never a finding; verification stays with the registered verifiers.",
+      "description": "Move a lead this Hunt holds, with the reason_code that fits the move: testing (testing_started; needs falsifier and expected_signal, here or already on the lead), supported (expected_signal_observed; cite completed testing actions of this Hunt in evidence_refs), refuted (deterministic_refutation; refuted_by a completed deterministic verification), open to hand the lead back at once (released, budget_exhausted, or expected_signal_absent when this angle found nothing and another may), exhausted (expected_signal_absent) or blocked (missing_prerequisite, policy_refused), which park the lead until an operator reopens it. No free text. supported is a lead, never a finding; verification stays with the registered verifiers.",
       "input": {
         "fields": [
           "hypothesis_id",
