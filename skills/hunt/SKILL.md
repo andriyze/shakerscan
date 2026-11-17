@@ -270,6 +270,11 @@ Choose the next smallest action that can answer or falsify a useful hypothesis:
   any other lead: claim, test within your authority, and verify with a deterministic proof.
   When your own result suggests a next step the table does not cover, record it with
   `hypothesis.propose` and name the records it follows from in `derived_from`.
+- Advisories that match the target's observed services arrive as leads too (source
+  `advisory_intel`, family `known_vulnerability`, known-exploited first). A version match is a
+  candidate, never a finding: run the check the lead names, or confirm the version another
+  way, and report an unconfirmed match as a lead. Query `kind=service_intelligence` with
+  `view=candidates` has the product, version and match detail behind each one.
 - Before spending traffic on a route, read query `kind=attempts` (filter `path_contains`,
   `method`, `capability`, `by=this_hunt|other_hunts`). It lists what any Hunt already ran against
   this target, grouped by capability, method, route template and principal, with how each attempt

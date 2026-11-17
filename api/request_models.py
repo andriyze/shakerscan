@@ -351,7 +351,7 @@ class _ScanRequestBase(BaseModel):
 
 
 class HypothesisRequest(BaseModel):
-    source: str = Field(pattern="^(app_graph|source_ingest|ai_planner|scanner_signal|ai_gate|model_intake|benchmark|invariant|manual|proof_followup)$")
+    source: str = Field(pattern="^(app_graph|source_ingest|ai_planner|scanner_signal|ai_gate|model_intake|benchmark|invariant|manual|proof_followup|advisory_intel)$")
     family: str = Field(min_length=1, max_length=80)
     dedupe_key: str = Field(min_length=1, max_length=500)
     dedupe_dimensions: dict[str, Any] = Field(default_factory=dict)

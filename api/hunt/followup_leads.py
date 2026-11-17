@@ -244,19 +244,58 @@ def configure_followup_leads(*, pool: Callable[[], Any],
     _pool, _seeds = pool, tuple(seeds)
 
 
-async def produce(conn: Any, target_id: Any) -> dict[str, int]:
-    """Record the leads this target's verified findings open and have not opened yet.
+async def record_leads(conn: Any, target: uuid.UUID, *, source: str, proposals: Sequence[Mapping[str, Any]],
+                       mark: Sequence[str]) -> dict[str, int]:
+    """Record a server producer's leads once each, inside the caller's transaction.
 
-    Idempotent: a finding's rule is recorded once, recognised by its endorsement on the lead. A
-    lead another source already holds is endorsed, never rewritten. A lead an operator closed
+    ``mark`` names the endorsement fields that identify one proposal of this source (for example
+    the finding and the rule). A proposal whose mark is already endorsed on a live lead is skipped.
+    A lead another source already holds is endorsed, never rewritten. A lead an operator closed
     stays closed.
     """
     from .hunt_hypotheses import _shared
 
-    target = target_id if isinstance(target_id, uuid.UUID) else uuid.UUID(str(target_id))
     created = endorsed = 0
+    await conn.execute("SELECT pg_advisory_xact_lock(hashtext($1))", f"{source}-leads:{target}")
+    recorded = {
+        tuple(json.loads(row["endorsement"]).get(field) for field in mark) for row in await conn.fetch(
+            """SELECT e::text AS endorsement FROM hypotheses h, jsonb_array_elements(h.endorsements) e
+               WHERE h.target_id=$1 AND e->>'source'=$2 AND NOT (h.metadata_json ? 'hunt_withheld')""",
+            target, source)}
+    for proposal in proposals:
+        endorsement = {"source": source, "created_by": source, "confidence": proposal["confidence"],
+                       **proposal["endorsement"]}
+        if tuple(endorsement.get(field) for field in mark) in recorded:
+            continue
+
+        def request(**overrides: Any) -> Any:
+            return _shared("request_model")(**{**dict(
+                source=source, family=proposal["family"], dedupe_key=f"{source}:{proposal['family']}",
+                dedupe_dimensions=proposal["dimensions"], target_id=str(target),
+                cwe=proposal.get("cwe"), title=proposal["title"], description=proposal["description"],
+                severity_guess=proposal["severity_guess"], confidence=proposal["confidence"],
+                endorsement=endorsement, created_by=source,
+                metadata_json={**proposal["metadata"], "runtime_proof_required": True}), **overrides})
+
+        canonical = _shared("canonical")(request())
+        existing = await conn.fetchval(
+            "SELECT 1 FROM hypotheses WHERE target_id=$1 AND family=$2 AND dedupe_key=$3",
+            target, canonical["family"], canonical["dedupe_key"])
+        if existing:
+            # Another source's lead: add the endorsement, leave its text, lineage and confidence.
+            await _shared("upsert")(conn, request(confidence=0.0, metadata_json={}))
+            endorsed += 1
+        else:
+            await _shared("upsert")(conn, request())
+            created += 1
+        recorded.add(tuple(endorsement.get(field) for field in mark))
+    return {"created": created, "endorsed": endorsed}
+
+
+async def produce(conn: Any, target_id: Any) -> dict[str, int]:
+    """Record the leads this target's verified findings open and have not opened yet. Idempotent."""
+    target = target_id if isinstance(target_id, uuid.UUID) else uuid.UUID(str(target_id))
     async with conn.transaction():
-        await conn.execute("SELECT pg_advisory_xact_lock(hashtext($1))", f"followup-leads:{target}")
         findings = await conn.fetch(
             """SELECT id, cwe, url, evidence FROM findings
                WHERE target_id=$1 AND status='active' AND last_verified_at IS NOT NULL
@@ -264,43 +303,16 @@ async def produce(conn: Any, target_id: Any) -> dict[str, int]:
                ORDER BY last_verified_at DESC, id LIMIT $2""", target, MAX_FINDINGS)
         if not findings:
             return {"considered": 0, "created": 0, "endorsed": 0}
-        recorded = {
-            (row["finding_id"], row["rule"]) for row in await conn.fetch(
-                """SELECT e->>'finding_id' AS finding_id, e->>'rule' AS rule
-                   FROM hypotheses h, jsonb_array_elements(h.endorsements) e
-                   WHERE h.target_id=$1 AND e->>'source'=$2 AND NOT (h.metadata_json ? 'hunt_withheld')""",
-                target, SOURCE)}
-        for finding in findings:
-            for proposal in lead_proposals(dict(finding)):
-                if (proposal["finding_id"], proposal["rule"]) in recorded:
-                    continue
-                endorsement = {"source": SOURCE, "created_by": SOURCE, "rule": proposal["rule"],
-                               "rules_version": RULES_VERSION, "finding_id": proposal["finding_id"],
-                               "confidence": CONFIDENCE, "derived_from": [proposal["finding_id"]]}
-
-                def request(**overrides: Any) -> Any:
-                    return _shared("request_model")(**{**dict(
-                        source=SOURCE, family=proposal["family"], dedupe_key=f"followup:{proposal['rule']}",
-                        dedupe_dimensions=proposal["dimensions"], target_id=str(target),
-                        title=proposal["title"], description=proposal["description"],
-                        severity_guess=proposal["severity_guess"], confidence=CONFIDENCE,
-                        endorsement=endorsement, created_by=SOURCE,
-                        metadata_json={"derived_from": [proposal["finding_id"]], "followup_rule": proposal["rule"],
-                                       "proven_class": proposal["proven_class"], "rules_version": RULES_VERSION,
-                                       "runtime_proof_required": True}), **overrides})
-
-                canonical = _shared("canonical")(request())
-                existing = await conn.fetchval(
-                    "SELECT 1 FROM hypotheses WHERE target_id=$1 AND family=$2 AND dedupe_key=$3",
-                    target, canonical["family"], canonical["dedupe_key"])
-                if existing:
-                    # Another source's lead: add the endorsement, leave its text, lineage and confidence.
-                    await _shared("upsert")(conn, request(confidence=0.0, metadata_json={}))
-                    endorsed += 1
-                else:
-                    await _shared("upsert")(conn, request())
-                    created += 1
-    return {"considered": len(findings), "created": created, "endorsed": endorsed}
+        proposals = [{
+            "family": item["family"], "title": item["title"], "description": item["description"],
+            "severity_guess": item["severity_guess"], "dimensions": item["dimensions"], "confidence": CONFIDENCE,
+            "endorsement": {"rule": item["rule"], "rules_version": RULES_VERSION, "finding_id": item["finding_id"],
+                            "derived_from": [item["finding_id"]]},
+            "metadata": {"derived_from": [item["finding_id"]], "followup_rule": item["rule"],
+                         "proven_class": item["proven_class"], "rules_version": RULES_VERSION},
+        } for finding in findings for item in lead_proposals(dict(finding))]
+        counts = await record_leads(conn, target, source=SOURCE, proposals=proposals, mark=("finding_id", "rule"))
+    return {"considered": len(findings), **counts}
 
 
 async def produce_quietly(conn: Any, target_id: Any) -> dict[str, int] | None:
@@ -315,7 +327,7 @@ async def produce_quietly(conn: Any, target_id: Any) -> dict[str, int] | None:
 
 
 async def seed_started_hunt(hunt_id: Any) -> None:
-    """Bring a started Hunt's target lead board up to date: graph, inventory and proof follow-ups.
+    """Bring a started Hunt's target lead board up to date: graph, inventory, proof follow-ups, advisories.
 
     The graph and inventory producers are the existing target routes. Each runs only when its
     records are newer than the leads it last wrote, so starting Hunts does not re-endorse an
@@ -341,10 +353,11 @@ SEED_FRESHNESS = (
 async def _seed(hunt_id: uuid.UUID) -> None:
     assert _pool is not None
     async with _pool().acquire() as conn:
-        target = await conn.fetchval(
-            "SELECT COALESCE(device_target_id, target_id) FROM hunt_runs WHERE id=$1", hunt_id)
+        run = await conn.fetchrow("SELECT device_target_id, target_id FROM hunt_runs WHERE id=$1", hunt_id)
+        target = (run["device_target_id"] or run["target_id"]) if run else None
         if target is None:
             return
+        device = bool(run["device_target_id"])
         stale = []
         for seed, (source, newest_sql) in zip(_seeds, SEED_FRESHNESS):
             newest = await conn.fetchval(newest_sql, target)
@@ -359,6 +372,9 @@ async def _seed(hunt_id: uuid.UUID) -> None:
         await seed(str(target))
     async with _pool().acquire() as conn:
         await produce(conn, target)
+        # Advisories that match the target's observed services (known exploited first).
+        from .advisory_leads import produce as produce_advisory_leads
+        await produce_advisory_leads(conn, target, device=device)
 
 
 __all__ = [
