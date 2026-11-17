@@ -45,8 +45,7 @@ def test_every_queued_retest_records_what_admitted_it():
     files = {path for path, _columns in inserts}
     # An AI Gate finding replay (POST /ai/findings/{id}/retest) records its verification row and
     # runs as an AI scan, watched by that scan's running authority (the receipt is in its options).
-    assert files == {"api/finding_routes/router.py", "api/worker.py", "api/agent_routes/router.py",
-                     "api/ai_targets/router.py"}, files
+    assert files == {"api/finding_routes/router.py", "api/worker.py", "api/ai_targets/router.py"}, files
     for path, columns in inserts:
         if path != "api/ai_targets/router.py":
             assert "admitted_authority" in columns, path

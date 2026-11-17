@@ -163,7 +163,7 @@ export default function InvestigationCandidatesPage() {
               </h2>
               {group.candidates.map(candidate => {
                 const sourceHref = candidate.plane === 'device'
-                  ? `/devices/${candidate.device_target_id}/agent`
+                  ? `/hunt?target=${encodeURIComponent(candidate.device_target_id || '')}`
                   : `/hunt?target_id=${encodeURIComponent(candidate.target_id || '')}`
                 return (
                   <Card key={candidate.id} className="p-4" data-testid="candidate-card">

@@ -17,14 +17,13 @@ if hasattr(api_module, '__path__'):
 
 
 class FakeLocatorConnection:
-    def __init__(self, *, active_scan: bool = False, active_agent: bool = False):
+    def __init__(self, *, active_scan: bool = False):
         self.device = {
             "id": uuid.uuid4(),
             "primary_locator": "192.168.1.10",
             "metadata_json": {},
         }
         self.active_scan = active_scan
-        self.active_agent = active_agent
         self.executed: list[tuple[str, tuple[object, ...]]] = []
 
     async def fetchrow(self, query, *args):
@@ -47,8 +46,6 @@ class FakeLocatorConnection:
     async def fetchval(self, query, *_args):
         if "FROM scans" in query:
             return 1 if self.active_scan else None
-        if "FROM device_agent_runs" in query:
-            return 1 if self.active_agent else None
         raise AssertionError(query)
 
     async def execute(self, query, *args):
@@ -78,9 +75,8 @@ def test_locator_change_updates_address_without_creating_a_new_device():
     assert not any("INSERT INTO device_targets" in query for query, _ in conn.executed)
 
 
-@pytest.mark.parametrize("active_scan,active_agent", [(True, False), (False, True)])
-def test_locator_change_is_blocked_while_device_work_is_active(active_scan, active_agent):
-    conn = FakeLocatorConnection(active_scan=active_scan, active_agent=active_agent)
+def test_locator_change_is_blocked_while_a_device_scan_is_active():
+    conn = FakeLocatorConnection(active_scan=True)
 
     with pytest.raises(HTTPException) as error:
         asyncio.run(api_module._change_device_primary_locator(
