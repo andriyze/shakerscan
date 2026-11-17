@@ -3392,6 +3392,13 @@
     "name": "post_target_release"
   },
   {
+    "path": "/targets/{target_id}/knowledge/yield",
+    "methods": [
+      "GET"
+    ],
+    "name": "get_target_hunt_yield"
+  },
+  {
     "path": "/targets/{target_id}/liveness",
     "methods": [
       "POST"
