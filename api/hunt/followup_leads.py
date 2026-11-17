@@ -28,6 +28,25 @@ SOURCE = "proof_followup"
 MAX_FINDINGS = 50
 #: A follow-up is a guess that a proof makes worth testing, so it starts below an evidenced lead.
 CONFIDENCE = 0.35
+#: The lead sources the server's own producers write (this module and ``advisory_leads``), added to
+#: the lead board's source constraint. Always-run startup DDL (targets.asset_migration): the frozen
+#: baseline never runs again on a converted database. A catalog check, so a restart takes no lock.
+LEAD_SOURCE_SCHEMA_SQL = """
+DO $lead_sources$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conrelid='hypotheses'::regclass AND conname='hypotheses_source_check'
+          AND pg_get_constraintdef(oid) LIKE '%advisory_intel%'
+    ) THEN
+        ALTER TABLE hypotheses DROP CONSTRAINT IF EXISTS hypotheses_source_check;
+        ALTER TABLE hypotheses ADD CONSTRAINT hypotheses_source_check CHECK (source IN (
+            'app_graph','source_ingest','ai_planner','scanner_signal','ai_gate','model_intake',
+            'benchmark','invariant','manual','proof_followup','advisory_intel'));
+    END IF;
+END
+$lead_sources$
+"""
 HTTP_METHODS = frozenset({"GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"})
 
 
@@ -314,6 +333,6 @@ async def produce_quietly(conn: Any, target_id: Any) -> dict[str, int] | None:
 
 
 __all__ = [
-    "CLASSES", "RULES_VERSION", "SOURCE", "lead_proposals", "produce", "produce_quietly", "proven_class",
+    "CLASSES", "LEAD_SOURCE_SCHEMA_SQL", "RULES_VERSION", "SOURCE", "lead_proposals", "produce", "produce_quietly", "proven_class",
     "record_leads",
 ]
