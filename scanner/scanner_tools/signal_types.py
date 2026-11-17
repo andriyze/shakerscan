@@ -151,10 +151,6 @@ class SignalSet:
         """Return list of active signal names."""
         return [name for name in self._signal_names() if getattr(self, name).active]
 
-    def total_confidence(self) -> float:
-        """Sum of all signal confidences."""
-        return sum(getattr(self, name).confidence for name in self._signal_names())
-
     def to_dict(self) -> dict[str, Any]:
         """Serialize to dictionary for JSON output."""
         result = {}
@@ -229,34 +225,3 @@ def calculate_weighted_score(findings: list[dict]) -> float:
         score += weight * confidence
     return score
 
-
-def should_early_stop_weighted(
-    findings: list[dict],
-    signals: SignalSet | dict,
-    threshold: float = 12.0,
-    min_coverage: float = 0.0,
-    current_coverage: float = 1.0,
-) -> tuple[bool, str]:
-    """
-    Confidence-weighted early stopping decision.
-
-    Args:
-        findings: List of finding dicts
-        signals: SignalSet or legacy dict
-        threshold: Weighted score threshold to trigger stop (default 12.0 ≈ 3 high-conf criticals)
-        min_coverage: Minimum endpoint coverage before stopping allowed (0.0-1.0)
-        current_coverage: Current endpoint coverage ratio
-
-    Returns:
-        Tuple of (should_stop, reason_message)
-    """
-    # Don't stop if coverage is below minimum
-    if current_coverage < min_coverage:
-        return False, ""
-
-    weighted_score = calculate_weighted_score(findings)
-
-    if weighted_score >= threshold:
-        return True, f"Confidence-weighted score {weighted_score:.1f} exceeds threshold {threshold}"
-
-    return False, ""

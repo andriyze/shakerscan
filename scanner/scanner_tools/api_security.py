@@ -5,7 +5,6 @@ Provides HTTP method tampering, Content-Type manipulation, and other API-specifi
 security tests based on modern penetration testing methodologies.
 """
 
-import asyncio
 import json
 import re
 import urllib.parse
@@ -483,94 +482,3 @@ async def test_method_override(
 
     return results
 
-
-async def run_api_security_tests(
-    endpoints: list[dict[str, Any]],
-    auth_session: Any | None = None,
-    test_method_tampering: bool = True,
-    test_content_type: bool = True,
-    test_method_override: bool = True,
-    max_endpoints: int = 50,
-    timeout: float = 10.0,
-) -> dict[str, Any]:
-    """
-    Run comprehensive API security tests on a list of endpoints.
-
-    Args:
-        endpoints: List of endpoint dicts with url, method, content_type keys
-        auth_session: Optional authentication session
-        test_method_tampering: Enable HTTP method tampering tests
-        test_content_type: Enable Content-Type manipulation tests
-        test_method_override: Enable method override tests
-        max_endpoints: Maximum number of endpoints to test
-        timeout: Request timeout in seconds
-
-    Returns:
-        Dict with all findings and test results.
-    """
-    results: dict[str, Any] = {
-        "endpoints_tested": 0,
-        "method_tampering_results": [],
-        "content_type_results": [],
-        "method_override_results": [],
-        "findings": [],
-    }
-
-    # Deduplicate endpoints by URL
-    seen_urls: set[str] = set()
-    unique_endpoints = []
-    for ep in endpoints:
-        url = ep.get("url", "")
-        if url and url not in seen_urls:
-            seen_urls.add(url)
-            unique_endpoints.append(ep)
-
-    # Limit endpoints
-    test_endpoints = unique_endpoints[:max_endpoints]
-    results["endpoints_tested"] = len(test_endpoints)
-
-    # Run tests
-    for endpoint in test_endpoints:
-        url = endpoint.get("url", "")
-        if not url:
-            continue
-
-        expected_methods = endpoint.get("allowed_methods")
-        content_type = endpoint.get("content_type", "application/json")
-
-        tasks = []
-
-        if test_method_tampering:
-            tasks.append(test_http_method_tampering(url, auth_session, expected_methods, timeout))
-
-        if test_content_type and endpoint.get("method", "GET").upper() in ("POST", "PUT", "PATCH"):
-            tasks.append(test_content_type_manipulation(url, content_type, None, auth_session, timeout))
-
-        if test_method_override:
-            tasks.append(test_method_override(url, auth_session, timeout))
-
-        if tasks:
-            task_results = await asyncio.gather(*tasks, return_exceptions=True)
-
-            for i, result in enumerate(task_results):
-                if isinstance(result, Exception):
-                    continue
-
-                if test_method_tampering and i == 0:
-                    results["method_tampering_results"].append(result)
-                    results["findings"].extend(result.get("findings", []))
-                elif test_content_type and endpoint.get("method", "GET").upper() in ("POST", "PUT", "PATCH"):
-                    idx = 1 if test_method_tampering else 0
-                    if i == idx:
-                        results["content_type_results"].append(result)
-                        results["findings"].extend(result.get("findings", []))
-                    elif i == idx + 1 and test_method_override:
-                        results["method_override_results"].append(result)
-                        results["findings"].extend(result.get("findings", []))
-                elif test_method_override:
-                    idx = (1 if test_method_tampering else 0) + (1 if test_content_type and endpoint.get("method", "GET").upper() in ("POST", "PUT", "PATCH") else 0)
-                    if i == idx:
-                        results["method_override_results"].append(result)
-                        results["findings"].extend(result.get("findings", []))
-
-    return results

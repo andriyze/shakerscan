@@ -613,13 +613,6 @@ def _public_device_credential_profile(row: Any) -> dict[str, Any]:
     return payload
 
 
-def _device_credential_secret_value(secret: str, secondary_secret: str | None) -> str:
-    return encrypt_secret(json.dumps({
-        "secret": secret,
-        "secondary_secret": secondary_secret or None,
-    }))
-
-
 def _public_device_request_collection(row: Any, *, include_requests: bool = True) -> dict[str, Any]:
     payload = _decode_device_row(row)
     payload.pop("encrypted_payload", None)

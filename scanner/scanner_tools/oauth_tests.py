@@ -28,15 +28,6 @@ import httpx
 logger = logging.getLogger(__name__)
 
 
-class OAuthFlow(Enum):
-    """OAuth 2.0 grant types"""
-    AUTHORIZATION_CODE = "authorization_code"
-    IMPLICIT = "implicit"  # deprecated but still common
-    CLIENT_CREDENTIALS = "client_credentials"
-    DEVICE_CODE = "device_code"
-    REFRESH_TOKEN = "refresh_token"
-
-
 class PKCEMethod(Enum):
     """PKCE code challenge methods"""
     PLAIN = "plain"

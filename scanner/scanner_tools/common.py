@@ -1176,86 +1176,6 @@ HTML_INDICATORS = [
 ]
 
 
-def validate_content_type(
-    body: str,
-    content_type: str,
-    expected_type: str
-) -> tuple[bool, str]:
-    """
-    Validate that response content matches expected file type.
-
-    Args:
-        body: Response body content
-        content_type: HTTP Content-Type header
-        expected_type: Key from CONTENT_SIGNATURES
-
-    Returns:
-        (is_valid, reason)
-    """
-    if not body:
-        return False, "empty_response"
-
-    body_lower = body.lower()[:5000]  # Only check first 5KB
-
-    # Get signature rules
-    sig = CONTENT_SIGNATURES.get(expected_type, {})
-
-    # Check if content looks like HTML (false positive indicator)
-    if sig.get("reject_html", True):
-        html_matches = sum(1 for ind in HTML_INDICATORS if ind.lower() in body_lower)
-        if html_matches >= 2:
-            return False, "html_content_detected"
-
-    # Check content type if specified
-    expected_content_types = sig.get("content_type", [])
-    if expected_content_types:
-        ct_lower = content_type.lower()
-        if any(ect in ct_lower for ect in expected_content_types):
-            return True, "content_type_match"
-        return False, "content_type_mismatch"
-
-    # Check pattern matches
-    patterns = sig.get("patterns", [])
-    min_matches = sig.get("min_matches", 1)
-
-    if patterns:
-        matches = sum(1 for p in patterns if p.lower() in body_lower)
-        if matches >= min_matches:
-            return True, "pattern_match"
-        return False, "pattern_mismatch"
-
-    # No validation rules - assume valid
-    return True, "no_validation_rules"
-
-
-def is_html_error_page(body: str) -> bool:
-    """
-    Check if response body looks like an HTML error page rather than actual content.
-
-    Returns True if body appears to be an error page.
-    """
-    if not body:
-        return False
-
-    body_lower = body.lower()[:3000]
-
-    # Check for HTML structure
-    has_html = any(ind.lower() in body_lower for ind in HTML_INDICATORS[:5])
-    if not has_html:
-        return False
-
-    # Check for error indicators
-    error_indicators = [
-        "404", "not found", "page not found", "file not found",
-        "does not exist", "cannot be found", "error", "forbidden",
-        "access denied", "unauthorized", "no such", "invalid",
-        "sorry, we couldn't find", "page doesn't exist",
-        "resource not found", "the requested url",
-    ]
-
-    return any(ind in body_lower for ind in error_indicators)
-
-
 # =============================================================================
 # HOMEPAGE COMPARISON - Detect catch-all routing by comparing to homepage
 # =============================================================================
@@ -1392,10 +1312,6 @@ class AdaptiveRateLimiter:
                 self._consecutive_success = 0
                 self._last_adjustment = "speedup"
 
-    def get_current_rps(self) -> int:
-        """Get current requests per second."""
-        return self.rps
-
     def get_stats(self) -> dict[str, Any]:
         """Get rate limiter statistics."""
         return {
@@ -1419,19 +1335,3 @@ class AdaptiveRateLimiter:
 # Global rate limiter instance for shared use across modules
 _global_rate_limiter: AdaptiveRateLimiter | None = None
 
-
-def get_adaptive_rate_limiter(initial_rps: int = 20) -> AdaptiveRateLimiter:
-    """
-    Get the global adaptive rate limiter instance.
-
-    Creates a new instance if one doesn't exist or resets the existing one.
-    """
-    global _global_rate_limiter
-    if _global_rate_limiter is None:
-        _global_rate_limiter = AdaptiveRateLimiter(initial_rps=initial_rps)
-    return _global_rate_limiter
-
-
-def create_rate_limiter(initial_rps: int = 20, **kwargs) -> AdaptiveRateLimiter:
-    """Create a new adaptive rate limiter instance (not shared)."""
-    return AdaptiveRateLimiter(initial_rps=initial_rps, **kwargs)

@@ -81,10 +81,6 @@ def _epoch(value: Any) -> float:
     return moment.timestamp() if moment else 0.0
 
 
-def _writer(value: Any) -> str:
-    return str(value or "").split(":", 1)[0]
-
-
 # --- authority -------------------------------------------------------------------------------------
 
 def _registry() -> Any:

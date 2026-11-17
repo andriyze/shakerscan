@@ -791,11 +791,6 @@ def _ssrf_request_target_kinds(finding: dict[str, Any]) -> set[str]:
     return kinds
 
 
-def _ssrf_request_targets_internal_endpoint(finding: dict[str, Any]) -> bool:
-    """True when the tested request evidence itself names a metadata/internal target."""
-    return bool(_ssrf_request_target_kinds(finding))
-
-
 def validate_ssrf(
     finding: dict[str, Any],
     response_body: str | None = None

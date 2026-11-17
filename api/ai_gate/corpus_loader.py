@@ -208,19 +208,6 @@ def load_probe_corpus(filename: str) -> tuple[Probe, ...]:
     return _load_probe_entries(raw_entries)
 
 
-def load_inline_probe_entries(
-    raw_entries: object,
-    *,
-    source_name: str = "customer_pack",
-    source_reference: str = "metadata_json.custom_probes",
-) -> tuple[Probe, ...]:
-    return _load_probe_entries(
-        raw_entries,
-        source_name=source_name,
-        source_reference=source_reference,
-    )
-
-
 def load_inline_probe_entries_with_diagnostics(
     raw_entries: object,
     *,

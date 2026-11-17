@@ -281,9 +281,6 @@ class CapabilityRegistry:
     def process_tools(self) -> tuple[CapabilitySpec, ...]:
         return tuple(self._by_process_tool.values())
 
-    def required_binaries(self) -> frozenset[str]:
-        return frozenset(spec.binary for spec in self.external_tools() if spec.binary)
-
     def for_hunt_executor(self, executor: HuntExecutor) -> tuple[CapabilitySpec, ...]:
         return tuple(
             spec for spec in self._by_name.values()

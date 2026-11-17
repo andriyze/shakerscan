@@ -129,8 +129,6 @@ try:
     from scanner_tools.request_collections import (
         RequestImportError,
         RequestSelector,
-        page_index as page_request_collection_index,
-        select_requests as select_request_collection_requests,
         validate_and_index as validate_and_index_request_collection,
         validate_request_collection as validate_device_request_collection,
     )
@@ -138,8 +136,6 @@ except ModuleNotFoundError:
     from scanner.scanner_tools.request_collections import (
         RequestImportError,
         RequestSelector,
-        page_index as page_request_collection_index,
-        select_requests as select_request_collection_requests,
         validate_and_index as validate_and_index_request_collection,
         validate_request_collection as validate_device_request_collection,
     )
@@ -226,12 +222,10 @@ except ModuleNotFoundError:
 try:
     from model_intake_control_plane import (
         AdmissionContractError as _ModelAdmissionContractError,
-        LocalPemSigner as _ModelLocalPemSigner,
         build_approval_receipt as _build_model_approval_receipt,
         build_deployment_bundle as _build_model_deployment_bundle,
         evaluate_policy as _evaluate_model_admission_policy,
         freeze_evidence_manifest as _freeze_model_evidence_manifest,
-        issue_admission_v2 as _issue_model_admission_v2,
         policy_bundle_identity as _model_policy_bundle_identity,
         verify_admission_v2 as _verify_model_admission_v2,
     )
@@ -239,12 +233,10 @@ try:
 except ModuleNotFoundError:
     from api.model_intake_control_plane import (
         AdmissionContractError as _ModelAdmissionContractError,
-        LocalPemSigner as _ModelLocalPemSigner,
         build_approval_receipt as _build_model_approval_receipt,
         build_deployment_bundle as _build_model_deployment_bundle,
         evaluate_policy as _evaluate_model_admission_policy,
         freeze_evidence_manifest as _freeze_model_evidence_manifest,
-        issue_admission_v2 as _issue_model_admission_v2,
         policy_bundle_identity as _model_policy_bundle_identity,
         verify_admission_v2 as _verify_model_admission_v2,
     )
@@ -694,7 +686,6 @@ try:
         get_scan_parity_artifact,
         get_scan_public_contract,
         explain_injection_candidates as _explain_injection_candidates,
-        load_public_scan_execution_explanation as _load_public_scan_execution_explanation,
         public_scan_execution_explanation as _public_scan_execution_explanation,
         router as scan_read_router,
     )
@@ -823,7 +814,6 @@ except ModuleNotFoundError:
         get_scan_parity_artifact,
         get_scan_public_contract,
         explain_injection_candidates as _explain_injection_candidates,
-        load_public_scan_execution_explanation as _load_public_scan_execution_explanation,
         public_scan_execution_explanation as _public_scan_execution_explanation,
         router as scan_read_router,
     )
@@ -1017,7 +1007,6 @@ try:
     from runtime.models import ScanPolicy, TargetBinding
     from runtime.reservation_store import PostgresBudgetReservationStore
     from runtime.request_collection_store import (
-        REPLAY_POLICIES as REQUEST_COLLECTION_REPLAY_POLICIES,
         RequestCollectionContractError,
         RequestCollectionSelection,
         canonical_collection_origin,
@@ -1064,7 +1053,6 @@ except ModuleNotFoundError:
     from api.runtime.models import ScanPolicy, TargetBinding
     from api.runtime.reservation_store import PostgresBudgetReservationStore
     from api.runtime.request_collection_store import (
-        REPLAY_POLICIES as REQUEST_COLLECTION_REPLAY_POLICIES,
         RequestCollectionContractError,
         RequestCollectionSelection,
         canonical_collection_origin,
@@ -2118,16 +2106,6 @@ def _apply_auto_sharding_policy(
 
 
 
-
-
-
-
-def _has_primary_auth_context(options: dict[str, Any]) -> bool:
-    return check_registry.has_primary_auth_context(options or {})
-
-
-def _has_second_user_auth_context(options: dict[str, Any]) -> bool:
-    return check_registry.has_second_user_auth_context(options or {})
 
 
 
@@ -7452,47 +7430,6 @@ def _scan_authentication_value_present(value: Any) -> bool:
 
 
 
-def _new_legacy_scan_fields(options: ScanOptions) -> list[str]:
-    """Return caller-supplied legacy identity fields, including explicit false."""
-    return sorted(LEGACY_SCAN_WRITE_FIELDS.intersection(options.model_fields_set))
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 class _BatchRequestBase(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -8500,28 +8437,6 @@ async def root():
 
 
 
-
-
-def _hash_source_files(file_map: dict) -> Optional[str]:
-    """Hash runtime source files keyed by logical name (basename), stable order.
-
-    Immutable build identity that detects drift even when GIT_COMMIT is unset:
-    keyed by basename so the API (hashing the host checkout) and a worker (hashing
-    /app) yield the SAME checksum when the code matches, and differ when it doesn't.
-    """
-    import hashlib
-    h = hashlib.sha256()
-    hashed = 0
-    for name in sorted(file_map):
-        try:
-            with open(file_map[name], "rb") as fh:
-                h.update(name.encode())
-                h.update(b"\0")
-                h.update(fh.read())
-            hashed += 1
-        except OSError:
-            continue
-    return h.hexdigest()[:16] if hashed else None
 
 
 def expected_build_fingerprint() -> Optional[str]:
@@ -19420,20 +19335,6 @@ def _ai_ops_execute_enabled() -> bool:
 
 
 
-
-
-
-
-
-
-async def _asm_active_scan_count(conn, target_id: str) -> int:
-    return int(await conn.fetchval(
-        """
-        SELECT COUNT(*) FROM scans
-        WHERE target_id = $1 AND status IN ('pending', 'queued', 'running')
-        """,
-        uuid.UUID(target_id),
-    ) or 0)
 
 
 

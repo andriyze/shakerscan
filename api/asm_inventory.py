@@ -753,13 +753,6 @@ async def _probe_path_status(base_url: str, path: str, auth_config: str, timeout
         return ("ERR", -1)
 
 
-async def _probe_path_exists(base_url: str, path: str, auth_config: str, timeout: int) -> bool:
-    """True if `path` exists (any status other than a literal 404). Back-compat
-    wrapper over :func:`_probe_path_status`; inconclusive probes keep the path."""
-    code, _size = await _probe_path_status(base_url, path, auth_config, timeout)
-    return code != "404"
-
-
 async def _learn_not_found_signatures(
     base_url: str, prefixes: list[str], auth_config: str, timeout: int, sem: "asyncio.Semaphore"
 ) -> dict[str, list[tuple[str, int]]]:

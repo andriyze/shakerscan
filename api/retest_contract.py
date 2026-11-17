@@ -249,16 +249,6 @@ class VerificationPolicy:
             auto_fp_min_confidence=auto_fp_conf,
         )
 
-    def severity_allows_verification(self, severity: str) -> bool:
-        return SEVERITY_ORDER.get(severity.lower(), 0) >= SEVERITY_ORDER.get(
-            self.verification_min_severity, SEVERITY_ORDER["medium"]
-        )
-
-    def severity_allows_ai(self, severity: str) -> bool:
-        return SEVERITY_ORDER.get(severity.lower(), 0) >= SEVERITY_ORDER.get(
-            self.ai_escalation_min_severity, SEVERITY_ORDER["high"]
-        )
-
 SUPPORTED_RETEST_TYPES: tuple[str, ...] = (
     "xss",
     "sqli",
