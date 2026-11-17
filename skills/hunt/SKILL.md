@@ -286,6 +286,11 @@ Choose the next smallest action that can answer or falsify a useful hypothesis:
   `plane`, `principal_slot`, `by=this_hunt|other_runs`). Rows are references and call
   metadata with the masked origin and path. Use it to cite a response that already exists,
   or to compare what two principals received on a route, before sending the request again.
+- For authorization work, query `kind=coverage_gaps` lists the application graph's auth
+  boundaries (the route that produces an object for one principal, the route another
+  principal could reach it through, and the two principals) that no Hunt has examined yet.
+  It is a worklist: an untested boundary is not a finding. Take one, test it with two
+  distinct principals, and record the angle so the next read shows it examined.
 - When you are waiting (queued actions, a permission decision, another planner on the same
   target), read query `kind=activity` once for a `cursor`, then pass it back as `filter.after`
   with `filter.wait_seconds` (up to 15). The read returns as soon as one of your actions

@@ -306,6 +306,9 @@ class HuntQueryRequest(BaseModel):
         # call metadata (filter: path_contains, method, status_code, status_class, capability,
         # plane, principal_slot, by).
         "traffic",
+        # The application graph's auth boundaries by the state of the authorization coverage on
+        # their route across this target's Hunts, untested first (filter: coverage, path_contains).
+        "coverage_gaps",
         # What changed for this Hunt since filter.after (its settled actions, decided permission
         # requests, moved leads); filter.wait_seconds holds the read until something does.
         "activity",

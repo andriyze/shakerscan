@@ -137,10 +137,12 @@ matches to an observed service and that is worth acting on (known exploited, or 
 a bundled check; not already settled by a verify Scan). All of this writes leads only: it runs no
 traffic, grants no authority and proves nothing.
 
-Three query kinds keep planners from repeating or idling. `attempts` groups what any Hunt already
+Four query kinds keep planners from repeating or idling. `attempts` groups what any Hunt already
 ran against the target by capability, method, route template and principal. `traffic` searches the
 calls archived for the target across its Scans and Hunts and returns references with the masked
-origin and path, never headers or bodies. `activity` reports
+origin and path, never headers or bodies. `coverage_gaps` relates the application graph to the coverage
+ledger: each auth-boundary edge is matched, when read, to the latest authorization coverage on its
+consumer route across the target's Hunts, and the untested ones are listed first. `activity` reports
 what changed for one Hunt since a cursor (its settled actions, decided permission requests and
 moved leads on its target, as ids and states) and can hold the read for up to 15 seconds until
 something does. It is a bounded wait on an existing read route, holds no database connection

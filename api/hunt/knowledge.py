@@ -159,6 +159,14 @@ async def query_knowledge_page(
                                          current_hunt_id=current_hunt_id)
         except AttemptQueryError as exc:
             raise KnowledgeQueryError(str(exc)) from exc
+    if kind == "coverage_gaps":
+        from .coverage_gaps import CoverageGapQueryError, target_coverage_gaps
+        if cursor is not None:
+            raise KnowledgeQueryError("coverage_gaps is one bounded report; it has no cursor")
+        try:
+            return await target_coverage_gaps(conn, target_id, filters=filters, limit=limit)
+        except CoverageGapQueryError as exc:
+            raise KnowledgeQueryError(str(exc)) from exc
     if kind == "traffic":
         from .traffic_search import TrafficQueryError, target_traffic
         if cursor is not None:
