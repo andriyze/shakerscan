@@ -2068,8 +2068,8 @@ for the profile contract, invocation, limits and acceptance gates.
 
 | Surface | Count | Source |
 |---|---|---|
-| Public REST operations | 510 | `api/**/*.py` FastAPI decorators |
-| Unique REST paths | 427 | `api/**/*.py` |
+| Public REST operations | 511 | `api/**/*.py` FastAPI decorators |
+| Unique REST paths | 428 | `api/**/*.py` |
 | Check families | 20 | `api/check_registry.py` |
 | Command Arsenal commands | 85 | `api/command_arsenal.py` |
 | Tool adapters | 0 | `api/command_arsenal.py` |
@@ -2580,6 +2580,7 @@ for the profile contract, invocation, limits and acceptance gates.
 | `POST` | `/targets/{target_id}/knowledge/decisions/{receipt_id}/revert` | `post_revert` |
 | `GET` | `/targets/{target_id}/knowledge/releases` | `get_target_releases` |
 | `POST` | `/targets/{target_id}/knowledge/releases` | `post_target_release` |
+| `GET` | `/targets/{target_id}/knowledge/yield` | `get_target_hunt_yield` |
 | `POST` | `/targets/{target_id}/liveness` | `check_target_liveness` |
 | `GET` | `/targets/{target_id}/negative-results` | `get_target_negative_results` |
 | `POST` | `/targets/{target_id}/network-scans` | `start_target_network_scan` |

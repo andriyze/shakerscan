@@ -229,9 +229,9 @@
     "ValidationRequest": "cb81c65a5c80da74a19c6bd92e9c6a68f5cdb22fafeb94270481d463450f893e",
     "WorkerScaleRequest": "52e7ac017dfa1d92efa8e4071026b9bf24c0cf2a17f5d9e742349df3f08f6c62"
   },
-  "contract_sha256": "362cedde69887958fceb6622a6098c42eaf123ccd6d5245c1e3438f0d60b65b9",
+  "contract_sha256": "82800c691c3c674697d9d3417328c2138fb97d215c1cfd5913736a84ccf0072d",
   "openapi": "3.1.0",
-  "operation_count": 500,
+  "operation_count": 501,
   "operations": {
     "DELETE /ai/scans/{scan_id}/transcript": {
       "deprecated": false,
@@ -3478,6 +3478,21 @@
       "deprecated": false,
       "operation_id": "get_target_releases_targets__target_id__knowledge_releases_get",
       "parameters_sha256": "f1ced4e99fef9eae5f4b20d63e08f9ac8de2da9cf92b39c99b44945f2daaebbf",
+      "request_schema_sha256": null,
+      "response_schema_sha256": {
+        "200": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "422": "e1fe533ef371cc6965d4015e800b2b5ca90e470f4aae3d57c2754a32b61e8c2d"
+      },
+      "security_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "surface": null,
+      "tags": [
+        "targets"
+      ]
+    },
+    "GET /targets/{target_id}/knowledge/yield": {
+      "deprecated": false,
+      "operation_id": "get_target_hunt_yield_targets__target_id__knowledge_yield_get",
+      "parameters_sha256": "6ce9ea17a4c4653142da328d0d9db0459f8ad0e7004fb8664c211f94d4baf6b6",
       "request_schema_sha256": null,
       "response_schema_sha256": {
         "200": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
