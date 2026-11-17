@@ -37,6 +37,11 @@ from fastapi import HTTPException
 
 from .interpretations import _ran_actions, clean_text, unknown_records
 
+try:
+    import hypothesis_scheduler
+except ModuleNotFoundError:  # package import layout
+    from .. import hypothesis_scheduler
+
 #: Leads one Hunt may propose (created or endorsed). Bounds what one run adds to shared knowledge.
 MAX_HYPOTHESES_PER_HUNT = 200
 #: A Hunt claim is a working lease, renewed by claiming again; it lapses if the planner goes away.
@@ -45,6 +50,10 @@ MAX_CLAIM_LEASE_SECONDS = 3600
 MIN_CLAIM_LEASE_SECONDS = 60
 #: Checkpoint and frontier page bound.
 MAX_FRONTIER = 25
+#: Leads the frontier ranks per read (most recently updated first). Bounds one checkpoint's work.
+MAX_RANKED = 200
+#: Settled coverage the novelty term reads per read.
+MAX_COVERAGE_PAIRS = 2000
 
 #: Lifecycle targets a Hunt may request. ``claimed`` is reached through hypothesis.claim; ``dead``
 #: is an operator's administrative close and ``promoted`` belongs to proof reconciliation.
@@ -452,22 +461,119 @@ async def transition(conn: Any, run: Mapping[str, Any], values: Mapping[str, Any
                      if to_state == "supported" else None)}
 
 
+def _route_key(value: Any) -> str:
+    return str(value or "").strip().lower().rstrip("/") or "/"
+
+
+def rank_frontier(
+    rows: list[Mapping[str, Any]],
+    *,
+    owner: str,
+    auth_available: bool,
+    negative_pairs: frozenset[tuple[str, str]] = frozenset(),
+    remaining_requests: int | None = None,
+) -> dict[str, Any]:
+    """Order the open leads with the deterministic hypothesis scheduler, from this Hunt's facts.
+
+    A lead's own family, severity guess and confidence count as its source stated them. Everything
+    else the scheduler weighs comes from server records: ``auth_available`` from this Hunt's own
+    active authentication sessions, novelty from the latest coverage any Hunt on the target
+    recorded for the same family at the same route (lost while that is ``negative``), prior
+    failures from the tests on the lead that found no signal, and the remaining HTTP request budget
+    for cost deferral. No per-read hint is passed. Order: leads this Hunt holds, then claimable
+    leads by priority, then budget-deferred ones, then leads another holder is working.
+    """
+    leads: list[dict[str, Any]] = []
+    views: dict[str, dict[str, Any]] = {}
+    completed: set[str] = set()
+    for row in rows:
+        view = hunt_view(row, owner=owner)
+        views[view["id"]] = view
+        metadata = dict(_loads(row.get("metadata_json"), {}) or {})
+        tests = metadata.get("tests") if isinstance(metadata.get("tests"), dict) else {}
+        # Every holder's count of tests that found nothing (kept across its later moves).
+        failures = sum(int(_number(record.get("no_signal_count"))) for record in tests.values()
+                       if isinstance(record, dict))
+        metadata["prior_failures"] = max(failures, int(_number(metadata.get("prior_failures"))))
+        family = str(row.get("family") or "").strip().lower()
+        route = (view["dedupe_dimensions"] or {}).get("route")
+        if route and (family, _route_key(route)) in negative_pairs:
+            completed.add(str(row.get("dedupe_key") or view["id"]))
+        leads.append({"id": view["id"], "family": family, "severity_guess": row.get("severity_guess"),
+                      "confidence": row.get("confidence"), "status": row.get("status"),
+                      "effective_status": view["effective_status"], "source": row.get("source"),
+                      "dedupe_key": str(row.get("dedupe_key") or view["id"]),
+                      "next_test_action": _loads(row.get("next_test_action"), {}) or {},
+                      "metadata_json": metadata})
+    context: dict[str, Any] = {"auth_available": auth_available, "completed_dimensions": sorted(completed)}
+    if remaining_requests is not None:
+        context["remaining_requests"] = remaining_requests
+    ranked = hypothesis_scheduler.rank_hypotheses(leads, context=context)
+    ordered: list[tuple[tuple[int, float, str], dict[str, Any]]] = []
+    for group, entries in (("scheduled", ranked["scheduled"]), ("deferred", ranked["deferred"])):
+        for entry in entries:
+            view = views[str(entry["hypothesis_id"])]
+            claim = view["claim"]
+            tier = (0 if claim["held_by_this_hunt"] else 3 if claim["active"]
+                    else 1 if group == "scheduled" else 2)
+            view["priority"] = entry["priority"]
+            view["priority_breakdown"] = entry["breakdown"]
+            view["deferred_reason"] = entry.get("deferred_reason")
+            ordered.append(((tier, -float(entry["priority"]), view["id"]), view))
+    ordered.sort(key=lambda item: item[0])
+    return {"hypotheses": [view for _, view in ordered],
+            "ranking": {"version": ranked["version"], "counts": ranked["counts"],
+                        "auth_available": auth_available, "novelty_settled": len(completed),
+                        "remaining_requests": remaining_requests}}
+
+
+def _remaining_requests(run: Mapping[str, Any]) -> int | None:
+    """HTTP requests this Hunt may still send: its ``max_http_requests`` ceiling less what it used."""
+    budget = _loads(run.get("budget_json"), {}) or {}
+    used = _loads(run.get("budget_used_json"), {}) or {}
+    if not isinstance(budget, dict) or budget.get("max_http_requests") is None:
+        return None
+    spent = used.get("http_requests") if isinstance(used, dict) else 0
+    return max(0, int(_number(budget.get("max_http_requests"))) - int(_number(spent)))
+
+
 async def frontier(conn: Any, run: Mapping[str, Any], *, limit: int = MAX_FRONTIER) -> dict[str, Any]:
-    """The open work on this Hunt's target: leads this Hunt holds first, then claimable ones."""
+    """The open work on this Hunt's target, ranked: leads this Hunt holds first, then by priority."""
     owner = _owner(run)
     if not (run.get("device_target_id") or run.get("target_id")):
         return {"hypotheses": [], "total": 0, "truncated": False, "limit": limit, "supported": False}
+    target = _target(run)
     rows = await conn.fetch(
         """SELECT h.*, COUNT(*) OVER() AS total_count FROM hypotheses h
            WHERE h.target_id=$1 AND h.status IN ('open','claimed','testing','supported')
              AND NOT (h.metadata_json ? 'hunt_withheld')
            ORDER BY (h.claim_owner=$2 AND h.claim_lease_expires_at > NOW()) DESC NULLS LAST,
-                    CASE h.status WHEN 'testing' THEN 0 WHEN 'supported' THEN 1 WHEN 'claimed' THEN 2 ELSE 3 END,
-                    h.confidence DESC, h.updated_at DESC, h.id DESC
+                    h.updated_at DESC, h.id DESC
            LIMIT $3""",
-        _target(run), owner, limit)
+        target, owner, MAX_RANKED)
     total = int(rows[0]["total_count"]) if rows else 0
-    return {"hypotheses": [hunt_view(row, owner=owner) for row in rows], "total": total,
-            "truncated": total > len(rows), "limit": limit,
+    auth_available = bool(await conn.fetchval(
+        """SELECT EXISTS(SELECT 1 FROM auth_sessions WHERE owner_kind='hunt' AND owner_id=$1
+                         AND status='active' AND expires_at > NOW())""", uuid.UUID(str(run["id"]))))
+    # The latest event of each coverage angle on this target, across its Hunts (an angle's
+    # fingerprint is the same in every run): a family whose latest word at a route is negative makes
+    # a lead for that family and route no longer novel, until a later Hunt reopens the angle.
+    settled = await conn.fetch(
+        """SELECT family, route FROM (
+               SELECT DISTINCT ON (e.fingerprint) lower(e.family) AS family,
+                      e.locus_json->>'route' AS route, e.status
+               FROM hunt_coverage_angle_events e JOIN hunt_runs r ON r.id = e.hunt_run_id
+               WHERE COALESCE(r.device_target_id, r.target_id) = $1
+               ORDER BY e.fingerprint, e.event_seq DESC) latest
+           WHERE status = 'negative' AND route IS NOT NULL
+           LIMIT $2""",
+        target, MAX_COVERAGE_PAIRS)
+    ranked = rank_frontier(
+        list(rows), owner=owner, auth_available=auth_available,
+        negative_pairs=frozenset((row["family"], _route_key(row["route"])) for row in settled),
+        remaining_requests=_remaining_requests(run))
+    page = ranked["hypotheses"][:limit]
+    return {"hypotheses": page, "total": total, "ranked": len(ranked["hypotheses"]),
+            "truncated": total > len(page), "limit": limit, "ranking": ranked["ranking"],
             "read_with": "POST /hunts/{hunt_id}/query kind=hypotheses",
             "work_with": ["hypothesis.propose", "hypothesis.claim", "hypothesis.transition"]}

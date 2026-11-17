@@ -115,8 +115,16 @@ reached; moving a lead to `open` releases it at once.
 A lead is its writer's words: the title, and also the family, dimensions and dedupe key. When an
 operator retracts a Hunt's entries, every lead that Hunt created is masked in all Hunt reads, each
 one still live is closed and gives up its dedupe key so a trusted source can raise the same lead
-again, its test records are removed, and it can no longer write or hold leads. The checkpoint
-hands over the open frontier, with the leads the Hunt holds listed first.
+again, its test records are removed, and it can no longer write or hold leads.
+
+The checkpoint hands over the open frontier ranked by the deterministic `hypothesis_scheduler`,
+with the leads the Hunt holds listed first. The ordering is computed server-side and each lead
+carries its score breakdown. Beyond what is stored on the lead (its family, severity guess and
+confidence, as its source stated them), the scheduler's inputs come from server records: the
+Hunt's active authentication sessions (reachability), the latest coverage any Hunt on the target
+recorded for the same family and route (novelty is lost while it is `negative`), tests that
+found no signal (prior failures), and the remaining HTTP request budget (deferral). No per-read
+planner hint is accepted, and a Hunt cannot raise the confidence of another source's lead.
 
 ## Coverage angles and planner checkpoints
 
