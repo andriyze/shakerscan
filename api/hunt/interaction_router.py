@@ -302,6 +302,9 @@ class HuntQueryRequest(BaseModel):
         # What any Hunt already ran against this target, grouped by capability, method, route
         # template and principal (filter: path_contains, method, capability, by).
         "attempts",
+        # What changed for this Hunt since filter.after (its settled actions, decided permission
+        # requests, moved leads); filter.wait_seconds holds the read until something does.
+        "activity",
     ] = "summary"
     filter: dict[str, Any] = Field(default_factory=dict)
     limit: int = Field(default=100, ge=1, le=500)
@@ -405,6 +408,8 @@ class HuntCandidateUpdateRequest(BaseModel):
 
 @router.post("/hunts/{hunt_id}/query")
 async def query_hunt(hunt_id: str, request: HuntQueryRequest):
+    if request.kind == "activity":
+        return await _hunt_activity(hunt_id, request)
     async with _pool().acquire() as conn:
         run = await _hunt_run_or_404(conn, hunt_id)
         if request.kind == "summary":
@@ -429,6 +434,28 @@ async def query_hunt(hunt_id: str, request: HuntQueryRequest):
     if request.kind in {"changes", "continue"}:
         result = _arsenal_routes._redact_agent_payload(_json_safe_row(result))
     return {"hunt_id": hunt_id, **result}
+
+
+async def _hunt_activity(hunt_id: str, request: HuntQueryRequest) -> dict[str, Any]:
+    """query kind=activity: one read, or a bounded wait that holds no connection between looks."""
+    from .activity import ActivityQueryError, activity_since, parse_filters
+    from .permission_grants import hunt_finished
+    try:
+        after, wait_seconds = parse_filters(request.filter)
+    except ActivityQueryError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    if request.cursor is not None:
+        raise HTTPException(status_code=422, detail="activity takes its cursor as filter.after")
+    deadline = asyncio.get_running_loop().time() + wait_seconds
+    while True:
+        async with _pool().acquire() as conn:
+            run = await _hunt_run_or_404(conn, hunt_id)
+            report = await activity_since(conn, run, after)
+        # A Hunt that ended has nothing left to wait for.
+        ended = hunt_finished(run)
+        if report["changed"] or ended or asyncio.get_running_loop().time() >= deadline:
+            return {"hunt_id": hunt_id, **report, "waited": wait_seconds > 0, "hunt_status": run.get("status")}
+        await asyncio.sleep(0.5)
 
 
 @router.post("/hunts/{hunt_id}/capabilities/{capability_name:path}")

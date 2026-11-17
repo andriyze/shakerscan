@@ -269,6 +269,12 @@ Choose the next smallest action that can answer or falsify a useful hypothesis:
   ended and whether it was yours. An attempt is what was run, not what it showed: read the
   action's evidence or `knowledge.check_experiment` before treating it as a negative result, and
   prefer an angle nobody has tried over repeating one.
+- When you are waiting (queued actions, a permission decision, another planner on the same
+  target), read query `kind=activity` once for a `cursor`, then pass it back as `filter.after`
+  with `filter.wait_seconds` (up to 15). The read returns as soon as one of your actions
+  settles, a permission request is decided or a lead on the target moves, with ids and states
+  only; fetch the detail you need and continue from the returned `cursor`. `more: true` means
+  read again at once. Do not poll status in a loop instead.
 - Browser capabilities return `browser_surface` observations containing safe CSS selectors,
   visible control structure, a redacted SPA route, and a `state_id`, not page text or secrets.
   `browser.interact` accepts either one `selector` or up to eight `steps` (`click` or non-secret
