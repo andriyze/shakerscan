@@ -431,3 +431,66 @@ def test_device_hunt_reads_the_leads_it_can_write(monkeypatch):
                 page = (await operator.post(f"/hunts/{hunt.id}/query", json={'kind': 'hypotheses'})).json()
                 assert page['supported'] is True and [row['id'] for row in page['rows']] == [lead['id']]
     asyncio.run(run())
+
+
+async def _settle(conn, hunt_id, family, route, status, fingerprint):
+    """Fixture: a coverage angle event as the coverage ledger records it for a Hunt."""
+    await conn.execute("""INSERT INTO hunt_coverage_angle_events(hunt_run_id,fingerprint,family,locus_json,status)
+        VALUES($1,$2,$3,jsonb_build_object('route',$4::text),$5)""", UUID(hunt_id), fingerprint, family, route, status)
+
+
+def test_checkpoint_ranks_the_frontier_from_coverage_settled_on_the_target(monkeypatch):
+    async def run():
+        async with startup_database() as conn:
+            app_module = await _prepared(conn, monkeypatch)
+            target = await _web_target(conn, 'https://app.rank.test')
+            async with AsyncClient(transport=ASGITransport(app_module.app), base_url='http://operator') as operator:
+                earlier = (await _hunt(operator, target)).hunt
+                hunt = (await _hunt(operator, target)).hunt
+                strong = (await hunt.ok('hypothesis.propose', _lead(severity_guess='high')))['result']['hypothesis']
+                weak = (await hunt.ok('hypothesis.propose', {
+                    'family': 'banner', 'title': 'Server banner names its version', 'severity_guess': 'info',
+                    'dedupe_dimensions': {'route': '/api/search'}}))['result']['hypothesis']
+                # Without an active session the BOLA lead is not reachable (reachability 0, blocker
+                # penalty): it still leads here only because the banner lead is worth so little.
+
+                async def ranked():
+                    checkpoint = (await operator.get(f'/hunts/{hunt.id}/checkpoint')).json()
+                    return [item['id'] for item in checkpoint['hypotheses']], checkpoint
+
+                order, checkpoint = await ranked()
+                assert order == [strong['id'], weak['id']]
+                assert checkpoint['hypothesis_ranking']['auth_available'] is False
+                # The Hunt's real request ceiling feeds cost deferral.
+                ceiling = json.loads(await conn.fetchval('SELECT budget_json FROM hunt_runs WHERE id=$1',
+                                                         UUID(hunt.id)))['max_http_requests']
+                assert checkpoint['hypothesis_ranking']['remaining_requests'] == ceiling > 0
+                assert checkpoint['hypotheses'][0]['priority_breakdown']['novelty'] == 2.0
+
+                # Another Hunt on this target already tested BOLA at that route and found nothing.
+                await _settle(conn, earlier.id, 'bola', ROUTE, 'testing', 'fp-orders')
+                await _settle(conn, earlier.id, 'bola', ROUTE, 'negative', 'fp-orders')
+                order, checkpoint = await ranked()
+                assert order == [weak['id'], strong['id']]
+                assert checkpoint['hypotheses'][1]['priority_breakdown']['novelty'] == 0.0
+                assert checkpoint['hypothesis_ranking']['novelty_settled'] == 1
+
+                # The latest event of that angle on the target decides, whichever Hunt recorded it:
+                # this Hunt reopening the angle restores novelty, and settling it again removes it.
+                await _settle(conn, hunt.id, 'bola', ROUTE, 'partial', 'fp-orders')
+                order, _ = await ranked()
+                assert order == [strong['id'], weak['id']]
+                await _settle(conn, earlier.id, 'bola', ROUTE, 'negative', 'fp-orders')
+                order, _ = await ranked()
+                assert order == [weak['id'], strong['id']]
+                await _settle(conn, hunt.id, 'bola', ROUTE, 'testing', 'fp-orders')
+                order, _ = await ranked()
+                assert order == [strong['id'], weak['id']]
+
+                # Coverage on another target says nothing about this one.
+                other = await _web_target(conn, 'https://other.rank.test')
+                elsewhere = (await _hunt(operator, other)).hunt
+                await _settle(conn, elsewhere.id, 'bola', ROUTE, 'negative', 'fp-elsewhere')
+                order, _ = await ranked()
+                assert order == [strong['id'], weak['id']]
+    asyncio.run(run())

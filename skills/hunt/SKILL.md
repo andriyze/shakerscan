@@ -242,7 +242,12 @@ Choose the next smallest action that can answer or falsify a useful hypothesis:
 - Work the target's lead frontier with `hypothesis.propose`, `hypothesis.claim` and
   `hypothesis.transition`. The frontier is the target's shared lead board, so later Hunts see your
   leads and you can work leads others recorded. Read it with query `kind=hypotheses`; the
-  checkpoint's `hypotheses` lists open leads, those you hold first. Propose a lead with its
+  checkpoint's `hypotheses` is the ranked work list: leads you hold first, then claimable leads
+  by the deterministic scheduler's `priority` (its `priority_breakdown` says why), then leads
+  deferred for budget, then leads another holder is working. Take the next lead from the top
+  instead of re-deriving an order; a lead ranks lower when another Hunt already settled its
+  family at its route `negative`, when tests found no signal, or when it needs a session you
+  do not hold. Propose a lead with its
   `family`, a one-line `title`, `dedupe_dimensions` saying exactly where it applies (the same lead
   from another source merges instead of duplicating), `derived_from` citing the action, candidate,
   finding or interpretation it follows from, and a `falsifier` plus `expected_signal`. Proposing

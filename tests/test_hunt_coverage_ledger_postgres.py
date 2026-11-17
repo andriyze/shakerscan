@@ -15,14 +15,17 @@ from api.hunt.coverage_ledger import COVERAGE_LEDGER_SCHEMA_STATEMENTS, Coverage
 from api.hunt.run_service import HuntRunService
 
 DSN = os.environ.get("HUNT_TEST_POSTGRES_DSN")
-# The checkpoint reads the target's open lead frontier (hunt/hunt_hypotheses.py). The startup
-# migrations create this table, not init.sql; these are the columns the frontier reads.
+# The checkpoint ranks the target's open lead frontier (hunt/hunt_hypotheses.py), reading the leads
+# and whether this Hunt holds an active authentication session. The startup migrations create both
+# tables, not init.sql; these are the columns the frontier reads.
 HYPOTHESES_FIXTURE = """CREATE TABLE hypotheses (
     id UUID PRIMARY KEY, target_id UUID, family TEXT, title TEXT, status TEXT,
     version INTEGER DEFAULT 1, confidence DOUBLE PRECISION DEFAULT 0, severity_guess TEXT,
-    source TEXT, metadata_json JSONB DEFAULT '{}'::jsonb, endorsements JSONB DEFAULT '[]'::jsonb,
-    next_test_action JSONB, claim_owner TEXT, claim_lease_expires_at TIMESTAMPTZ,
-    updated_at TIMESTAMPTZ DEFAULT NOW())"""
+    source TEXT, dedupe_key TEXT, metadata_json JSONB DEFAULT '{}'::jsonb,
+    endorsements JSONB DEFAULT '[]'::jsonb, next_test_action JSONB, claim_owner TEXT,
+    claim_lease_expires_at TIMESTAMPTZ, updated_at TIMESTAMPTZ DEFAULT NOW());
+CREATE TABLE auth_sessions (
+    id UUID PRIMARY KEY, owner_kind TEXT, owner_id UUID, status TEXT, expires_at TIMESTAMPTZ)"""
 pytestmark = pytest.mark.skipif(not DSN, reason="disposable PostgreSQL DSN not configured")
 
 

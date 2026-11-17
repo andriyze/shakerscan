@@ -869,6 +869,7 @@ async def build_hunt_checkpoint(
         "hypothesis_count": len(hypotheses["hypotheses"]),
         "hypothesis_total": hypotheses["total"],
         "hypotheses_truncated": hypotheses["truncated"],
+        "hypothesis_ranking": hypotheses.get("ranking"),
         "action_outcomes": {
             str(row["status"]): int(row["count"]) for row in action_rows
         },
