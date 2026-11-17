@@ -226,6 +226,9 @@ RUN python3 -m pip uninstall -y --break-system-packages virtualenv python-discov
 # build when any distribution is still installed twice under /usr/local.
 COPY scanner/requirements.txt /app/requirements.txt
 COPY scanner/requirements.lock /app/requirements.lock
+# The Playwright base image ships its own packaging distribution; installing the locked one over it
+# with --ignore-installed would leave two, which the duplicate check below rejects.
+RUN pip uninstall -y --break-system-packages packaging
 RUN pip install --no-cache-dir --break-system-packages --ignore-installed --require-hashes \
     -r /app/requirements.lock && \
     pip uninstall -y --break-system-packages msgpack setuptools && \
