@@ -299,6 +299,9 @@ class HuntQueryRequest(BaseModel):
         # Continue after the latest release (filter.since, default release): what changed, what is
         # known and needs re-testing, and the next experiments ranked within this Hunt's authority.
         "continue",
+        # What any Hunt already ran against this target, grouped by capability, method, route
+        # template and principal (filter: path_contains, method, capability, by).
+        "attempts",
     ] = "summary"
     filter: dict[str, Any] = Field(default_factory=dict)
     limit: int = Field(default=100, ge=1, le=500)

@@ -150,6 +150,15 @@ async def query_knowledge_page(
             return await query_service_knowledge(conn, target_id=target_id, device=device, filters=filters, limit=limit, cursor=cursor)
         except ValueError as exc:
             raise KnowledgeQueryError(str(exc)) from exc
+    if kind == "attempts":
+        from .attempts import AttemptQueryError, target_attempts
+        if cursor is not None:
+            raise KnowledgeQueryError("attempts is one bounded report; it has no cursor")
+        try:
+            return await target_attempts(conn, target_id, filters=filters, limit=limit,
+                                         current_hunt_id=current_hunt_id)
+        except AttemptQueryError as exc:
+            raise KnowledgeQueryError(str(exc)) from exc
     if kind == "changes":
         from .knowledge_changes import ChangeQueryError, target_changes
         supplied = dict(filters or {})

@@ -263,6 +263,12 @@ Choose the next smallest action that can answer or falsify a useful hypothesis:
   only when nothing more can be tried or a prerequisite is missing. `supported` is still a
   lead: verify it with `candidate.verify` or a registered verifier, because only deterministic
   proof marks a finding verified.
+- Before spending traffic on a route, read query `kind=attempts` (filter `path_contains`,
+  `method`, `capability`, `by=this_hunt|other_hunts`). It lists what any Hunt already ran against
+  this target, grouped by capability, method, route template and principal, with how each attempt
+  ended and whether it was yours. An attempt is what was run, not what it showed: read the
+  action's evidence or `knowledge.check_experiment` before treating it as a negative result, and
+  prefer an angle nobody has tried over repeating one.
 - Browser capabilities return `browser_surface` observations containing safe CSS selectors,
   visible control structure, a redacted SPA route, and a `state_id`, not page text or secrets.
   `browser.interact` accepts either one `selector` or up to eight `steps` (`click` or non-secret
