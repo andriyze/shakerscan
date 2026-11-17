@@ -473,6 +473,24 @@ proposal when useful. A challenge pass is advisory and must never manufacture pr
 a missing prerequisite, contradictory evidence, or a duplicate, update/delete the candidate or
 record the exact coverage gap instead of escalating severity.
 
+A candidate whose family has no registered verifier (business logic, some authorization and
+workflow variants) cannot be verified, so reproduce it before you report it. Run the rows of this
+matrix that apply, with capabilities you already hold, and add each settled action to the
+candidate's evidence references:
+
+| Reproduction | What it rules out |
+|---|---|
+| Negative control: the same request for an object the acting principal owns, and for one that is public | The response is the same for every object, so nothing was crossed (the usual false BOLA) |
+| The same request as a second principal, and with no session | The effect needs no particular identity, or is not tied to the one you assumed |
+| The same request again after a pause or a fresh login | A cached, transient or session-bound response |
+| The same input in another encoding, parameter position or content type the route accepts | An artefact of one parser path or of your own tooling |
+| The same step through the browser when you found it over HTTP, or the reverse | Client-side behaviour mistaken for a server-side effect |
+
+State in the claim which rows you ran and what each showed, and list an alternative explanation
+you could not rule out as a proof gap. A row that contradicts the claim lowers it: correct or
+delete the candidate, and record the angle as `negative` with that evidence. Passing every row
+still leaves an unverified candidate. Reproduction never verifies and never raises severity.
+
 Once breadth is sufficient, prefer evidence-driven deepening over another generic sweep. Start from
 a concrete observation or candidate, identify the next security-boundary edge needed for a useful
 impact chain, and choose the smallest action that can prove or falsify that edge. Do not optimize
