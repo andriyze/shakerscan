@@ -418,6 +418,22 @@ jobs:
           skip-dirs: ""
           skip-files: ""
 
+      # A rejected image fails with only "exit code 1": the findings are in the JSON report, which is
+      # otherwise reachable only by downloading the shard's artifact. Print them where the failure is.
+      # A gate that fails stops the later image scans, so only the reports written so far exist.
+      - name: Show the vulnerabilities an image gate rejected
+        if: failure() && github.event_name == 'pull_request' && steps.changes.outputs.stack == 'true' && matrix.shard == 'images'
+        shell: bash
+        run: |
+          shopt -s nullglob
+          for report in trivy-*.json; do
+            echo "== $report"
+            jq -r '
+              .Results[]? | .Target as $target | .Vulnerabilities[]?
+              | [.Severity, .VulnerabilityID, .PkgName, .InstalledVersion, "fixed in " + (.FixedVersion // "-"), $target]
+              | @tsv' "$report"
+          done
+
       # Exactly one shard runs the UI contracts: `images` when this pull request builds the stack
       # (it has the most slack), otherwise `browser`, which then also runs the mocked contracts.
       - name: Run UI contracts and production build
