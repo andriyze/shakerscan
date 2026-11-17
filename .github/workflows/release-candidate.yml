@@ -310,7 +310,7 @@ jobs:
           scripts/retry-command.sh timeout 300 docker pull \
             golang:1.27.3-bookworm@sha256:dc0963f32053e4bc451d24d87e3892d42d01021b61f093e98eb95c0352bb84b0
           scripts/retry-command.sh timeout 300 docker pull \
-            mcr.microsoft.com/playwright/python:v1.65.2-noble@sha256:38dd67fc654b56b3cba611e4c8eb71cd33750e1cd29eea2a5dc00b484817a75f
+            mcr.microsoft.com/playwright/python:v1.63.0-noble@sha256:72bd171a9ffc2b4b59532aaa6210e21014d07093120dc25528870c0b840da1f0
 
       - name: Build locked scanner image
         if: needs.meta.outputs.prebuilt_run_id == ''
