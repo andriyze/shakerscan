@@ -241,7 +241,9 @@ def test_device_hunt_briefing_counts_read_the_device_asset(monkeypatch):
                 briefing = started.json()['briefing']
             for section in ('knowledge', 'proposals', 'unresolved'):
                 assert briefing[section].get('available') is not False, (section, briefing[section])
-            assert set(briefing['knowledge']['counts']) == {'scans', 'findings', 'collections', 'candidates', 'services'}
+            # A device Hunt reads and writes the lead board, so its briefing counts the leads too.
+            assert set(briefing['knowledge']['counts']) == {'scans', 'findings', 'collections', 'candidates', 'services',
+                                                            'hypotheses'}
             assert briefing['instructions']['present'] is False
     asyncio.run(run())
 
