@@ -135,8 +135,10 @@ the existing graph and inventory lead producers for the target, each only when i
 newer than the leads it last wrote. All of this writes leads only: it runs no traffic, grants no
 authority and proves nothing.
 
-Two query kinds keep planners from repeating or idling. `attempts` groups what any Hunt already
-ran against the target by capability, method, route template and principal. `activity` reports
+Three query kinds keep planners from repeating or idling. `attempts` groups what any Hunt already
+ran against the target by capability, method, route template and principal. `traffic` searches the
+calls archived for the target across its Scans and Hunts and returns references with the masked
+origin and path, never headers or bodies. `activity` reports
 what changed for one Hunt since a cursor (its settled actions, decided permission requests and
 moved leads on its target, as ids and states) and can hold the read for up to 15 seconds until
 something does. It is a bounded wait on an existing read route, holds no database connection

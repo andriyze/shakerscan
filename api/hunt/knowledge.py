@@ -159,6 +159,15 @@ async def query_knowledge_page(
                                          current_hunt_id=current_hunt_id)
         except AttemptQueryError as exc:
             raise KnowledgeQueryError(str(exc)) from exc
+    if kind == "traffic":
+        from .traffic_search import TrafficQueryError, target_traffic
+        if cursor is not None:
+            raise KnowledgeQueryError("traffic is one bounded page; narrow the filters instead of paging")
+        try:
+            return await target_traffic(conn, target_id, filters=filters, limit=limit,
+                                        current_hunt_id=current_hunt_id)
+        except TrafficQueryError as exc:
+            raise KnowledgeQueryError(str(exc)) from exc
     if kind == "changes":
         from .knowledge_changes import ChangeQueryError, target_changes
         supplied = dict(filters or {})

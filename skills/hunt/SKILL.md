@@ -276,6 +276,11 @@ Choose the next smallest action that can answer or falsify a useful hypothesis:
   ended and whether it was yours. An attempt is what was run, not what it showed: read the
   action's evidence or `knowledge.check_experiment` before treating it as a negative result, and
   prefer an angle nobody has tried over repeating one.
+- Query `kind=traffic` searches the HTTP calls already archived for the target by any Scan or
+  Hunt (filter `path_contains`, `method`, `status_code` or `status_class`, `capability`,
+  `plane`, `principal_slot`, `by=this_hunt|other_runs`). Rows are references and call
+  metadata with the masked origin and path. Use it to cite a response that already exists,
+  or to compare what two principals received on a route, before sending the request again.
 - When you are waiting (queued actions, a permission decision, another planner on the same
   target), read query `kind=activity` once for a `cursor`, then pass it back as `filter.after`
   with `filter.wait_seconds` (up to 15). The read returns as soon as one of your actions

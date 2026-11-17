@@ -302,6 +302,10 @@ class HuntQueryRequest(BaseModel):
         # What any Hunt already ran against this target, grouped by capability, method, route
         # template and principal (filter: path_contains, method, capability, by).
         "attempts",
+        # Archived HTTP calls to this target across its Scans and Hunts, as references and masked
+        # call metadata (filter: path_contains, method, status_code, status_class, capability,
+        # plane, principal_slot, by).
+        "traffic",
         # What changed for this Hunt since filter.after (its settled actions, decided permission
         # requests, moved leads); filter.wait_seconds holds the read until something does.
         "activity",
