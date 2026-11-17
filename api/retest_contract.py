@@ -2637,7 +2637,7 @@ async def _run_schema_migrations_once(pool) -> None:
                     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
                     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
                     CONSTRAINT hypotheses_source_check
-                        CHECK (source IN ('app_graph','source_ingest','ai_planner','scanner_signal','ai_gate','model_intake','benchmark','invariant','manual')),
+                        CHECK (source IN ('app_graph','source_ingest','ai_planner','scanner_signal','ai_gate','model_intake','benchmark','invariant','manual','proof_followup')),
                     CONSTRAINT hypotheses_status_check
                         CHECK (status IN ('open','claimed','testing','supported','refuted','blocked','exhausted','promoted','dead')),
                     CONSTRAINT hypotheses_severity_check
@@ -2653,7 +2653,7 @@ async def _run_schema_migrations_once(pool) -> None:
             await conn.execute("""
                 ALTER TABLE hypotheses
                 ADD CONSTRAINT hypotheses_source_check
-                CHECK (source IN ('app_graph','source_ingest','ai_planner','scanner_signal','ai_gate','model_intake','benchmark','invariant','manual'))
+                CHECK (source IN ('app_graph','source_ingest','ai_planner','scanner_signal','ai_gate','model_intake','benchmark','invariant','manual','proof_followup'))
             """)
             # Wave 4: widen the lifecycle to include blocked/exhausted (see hypothesis_lifecycle.py).
             # Widening a CHECK is safe — every existing row already satisfies the superset.

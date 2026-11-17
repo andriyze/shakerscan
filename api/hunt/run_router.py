@@ -381,6 +381,11 @@ async def start_hunt(request: Request, response: Response):
             },
         ) from exc
     response.headers["x-shakerscan-hunt-contract"] = "v2"
+    # The target's lead board, brought up to date for the new Hunt. Never fails or delays a start
+    # beyond its bound.
+    if isinstance(result, Mapping) and result.get("hunt_id"):
+        from .followup_leads import seed_started_hunt
+        await seed_started_hunt(result["hunt_id"])
     # Budget warnings and the verifiable families: advisory, never a refusal.
     return with_start_guidance(result)
 

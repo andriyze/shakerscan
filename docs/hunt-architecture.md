@@ -126,6 +126,15 @@ recorded for the same family and route (novelty is lost while it is `negative`),
 found no signal (prior failures), and the remaining HTTP request budget (deferral). No per-read
 planner hint is accepted, and a Hunt cannot raise the confidence of another source's lead.
 
+Leads also follow from results. `followup_leads` holds a small table keyed by vulnerability class
+(never by application): a deterministically verified finding of a class opens the leads listed
+for it, recorded once with the finding as lineage. A lead another source already holds is endorsed
+and left in its writer's words; a lead an operator closed stays closed. Production runs when a
+Hunt verifies a candidate, when a Hunt reads the board, and when a Hunt starts. A start also runs
+the existing graph and inventory lead producers for the target, each only when its records are
+newer than the leads it last wrote. All of this writes leads only: it runs no traffic, grants no
+authority and proves nothing.
+
 Two query kinds keep planners from repeating or idling. `attempts` groups what any Hunt already
 ran against the target by capability, method, route template and principal. `activity` reports
 what changed for one Hunt since a cursor (its settled actions, decided permission requests and

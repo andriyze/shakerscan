@@ -263,6 +263,13 @@ Choose the next smallest action that can answer or falsify a useful hypothesis:
   only when nothing more can be tried or a prerequisite is missing. `supported` is still a
   lead: verify it with `candidate.verify` or a registered verifier, because only deterministic
   proof marks a finding verified.
+- A verified finding opens follow-up leads on the board (source `proof_followup`, with the
+  finding in `derived_from`): for example a verified SSRF raises a lead on internal services,
+  and a verified read BOLA raises one on the write methods of the same route. They appear in
+  query `kind=hypotheses` and on your checkpoint frontier, ranked with the rest. Treat them as
+  any other lead: claim, test within your authority, and verify with a deterministic proof.
+  When your own result suggests a next step the table does not cover, record it with
+  `hypothesis.propose` and name the records it follows from in `derived_from`.
 - Before spending traffic on a route, read query `kind=attempts` (filter `path_contains`,
   `method`, `capability`, `by=this_hunt|other_hunts`). It lists what any Hunt already ran against
   this target, grouped by capability, method, route template and principal, with how each attempt

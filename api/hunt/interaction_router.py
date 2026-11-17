@@ -419,6 +419,10 @@ async def query_hunt(hunt_id: str, request: HuntQueryRequest):
                     "briefing": public.get("briefing"),
                     "context": public.get("context_pack"),
                     "has_more": False, "next_cursor": None}
+        if request.kind == "hypotheses":
+            # Leads that verified findings opened since the last read (also those a worker proved).
+            from .followup_leads import produce_quietly
+            await produce_quietly(conn, run["device_target_id"] or run["target_id"])
         try:
             result = await query_knowledge_page(
                 conn, target_id=run["device_target_id"] or run["target_id"],
@@ -4868,6 +4872,12 @@ async def _attribute_verified_finding(
             file=sys.stderr, flush=True,
         )
         return None
+    if attribution is not None:
+        from .followup_leads import produce_quietly
+        async with _pool().acquire() as conn:
+            leads = await produce_quietly(conn, run.get("device_target_id") or run.get("target_id"))
+        if leads and leads["created"]:
+            attribution = {**attribution, "followup_leads_created": leads["created"]}
     return attribution
 
 

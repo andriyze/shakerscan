@@ -240,6 +240,9 @@ def page_row(row: Mapping[str, Any]) -> dict[str, Any]:
             if field in item:
                 item[field] = None
     item["text_withheld"] = withheld
+    # Lineage: the records this lead follows from (record ids only).
+    derived = metadata.get("derived_from") if isinstance(metadata, dict) else None
+    item["derived_from"] = [str(ref) for ref in derived][:20] if isinstance(derived, list) and not withheld else []
     if "claim_owner" in item:
         item["claim_owner"] = _holder(item["claim_owner"])
     return item
