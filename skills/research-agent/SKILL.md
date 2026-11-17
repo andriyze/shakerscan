@@ -5,7 +5,7 @@ description: Compatibility entry point for the unified ShakerScan Hunt workflow.
 
 # Deep Hunt compatibility
 
-Deep Hunt is now **Hunt**. The legacy `/agent/hunt/*` engine is removed; do not start the legacy `/research/*` planner.
+Deep Hunt is now **Hunt**. The legacy `/agent/hunt/*` engine and the `/research/*` runtime are removed.
 
 Read and follow [`../hunt/SKILL.md`](../hunt/SKILL.md) in full. Translate older wording as follows:
 

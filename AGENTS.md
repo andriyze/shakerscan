@@ -414,8 +414,8 @@ a false hash mismatch.
 
 - Removed `/interactive`, `/exceptions`, and `/settings/ai-ops-router` UI pages retain APIs only
   because Command Arsenal consumes them; do not present them as primary products.
-- Legacy `/agent/hunt/*` and `/device-agent/*` are removed (rows stay as history). Historical
-  `/research/*` and `/deep-hunt/*` may be readable or redirect. New investigations use `/hunts`.
+- Legacy `/agent/hunt/*`, `/device-agent/*` and the `/research/*` runtime are removed. `/deep-hunt`
+  redirects to `/hunt`; Leads and the Test Builder stay under it. New investigations use `/hunts`.
 - Deprecated writes fail closed and never advertise arbitrary tool execution.
 - Evidence cleanup stays interactive; legacy retention schedules remain disabled.
 - Old scan labels are display history, not new-submission guidance.

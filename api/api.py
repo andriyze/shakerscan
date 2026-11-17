@@ -59,7 +59,6 @@ from scan.detail_bounds import (
     FINDINGS_LIMIT_QUERY, INCLUDE_RESULT_QUERY, PARALLEL_CHILDREN_SQL, detail_params, fetch_scan_detail_row,
     read_detail_findings,
 )
-from research_routes.autopilot_loop import run_research_autopilot
 from operations.metrics_cache import METRICS_CACHE as _METRICS_CACHE
 from list_compat import direct, mark_deprecated, v1_page, wants_list_v1
 from list_contract import CURSOR_MAX_LENGTH
@@ -1109,25 +1108,6 @@ from workflow_experiment import (
     server_corroborated_predicates,
     validate_principal_contexts,
 )
-from research_agent import (
-    GATED_RESEARCH_COMMANDS,
-    READ_ONLY_RESEARCH_COMMANDS,
-    RESEARCH_DECISION_VERSION,
-    RESEARCH_EPISODE_VERSION,
-    RESEARCH_OBSERVATION_VERSION,
-    RISK_TIER_ORDER as RESEARCH_RISK_TIER_ORDER,
-    TARGET_BOUND_COMMANDS,
-    TERMINAL_EPISODE_STATUSES,
-    action_cost as _research_action_cost,
-    apply_cost as _research_apply_cost,
-    budget_violations as _research_budget_violations,
-    canonical_hash as _research_canonical_hash,
-    command_projection as _research_command_projection,
-    normalize_budget_limits as _research_normalize_budget_limits,
-    normalize_budget_used as _research_normalize_budget_used,
-    remaining_budget as _research_remaining_budget,
-    validate_decision as _research_validate_decision,
-)
 from target_dedupe import (
     TargetMergeBlockedError,
     canonical_target_key as _canonical_target_key,
@@ -1813,11 +1793,6 @@ def _default_asm_enabled_setting() -> bool:
 
 
 
-def _normalize_research_planner_mode(value: Any, default: str = "agent") -> str:
-    candidate = str(value or "").strip().lower()
-    if candidate in {"agent", "local_codex", "configured_ai"}:
-        return candidate
-    return default
 
 
 def _load_effective_automation_settings() -> dict[str, Any]:
@@ -1827,9 +1802,6 @@ def _load_effective_automation_settings() -> dict[str, Any]:
         "approval_receipts_required_for_state_changing_actions": _is_truthy(
             os.environ.get("APPROVAL_RECEIPTS_REQUIRED_FOR_STATE_CHANGING_ACTIONS", "false"),
             default=False,
-        ),
-        "default_research_planner_mode": _normalize_research_planner_mode(
-            os.environ.get("DEFAULT_RESEARCH_PLANNER_MODE", "agent"),
         ),
     }
     try:
@@ -1851,11 +1823,6 @@ def _load_effective_automation_settings() -> dict[str, Any]:
         settings["approval_receipts_required_for_state_changing_actions"] = _is_truthy(
             overrides.get("approval_receipts_required_for_state_changing_actions"),
             default=settings["approval_receipts_required_for_state_changing_actions"],
-        )
-    if "default_research_planner_mode" in overrides:
-        settings["default_research_planner_mode"] = _normalize_research_planner_mode(
-            overrides.get("default_research_planner_mode"),
-            default=settings["default_research_planner_mode"],
         )
     return settings
 
@@ -3049,6 +3016,9 @@ async def _stale_scan_tick(pool: asyncpg.Pool) -> None:
     await cleanup_stale_parents(pool)
     await cleanup_stale_device_lifecycle(pool)
     await cleanup_orphaned_scan_queue_handoffs(pool)
+    # Scans whose two-phase queue handoff was never confirmed are failed after the deadline.
+    async with pool.acquire() as conn, conn.transaction():
+        await _reconcile_unconfirmed_queue_handoffs(conn)
     await cleanup_expired_auth_sessions_once(pool)
     await close_idle_captures(pool)
     await queue_health.reconcile_job_hashes(
@@ -3991,7 +3961,6 @@ lifespan = create_api_lifespan(ApiLifecycleDependencies(
         ("stale_scan_checker", lambda pool: stale_scan_checker(pool)),
         ("schedule_runner", lambda pool: schedule_runner(pool)),
         ("asm_dispatcher", lambda pool: asm_dispatcher(pool)),
-        ("research_autopilot_runner", lambda pool: research_autopilot_runner(pool)),
         (
             "scan_artifact_retention_runner",
             lambda pool: scan_artifact_retention_runner(pool),
@@ -4215,17 +4184,12 @@ try:
         APPROVAL_POLICY_SETTING_KEY,
         AUTOMATION_SETTINGS_KEY,
         AUTO_SHARD_MAX_SHARDS,
-        ResearchDecisionRequest,
         SCAN_SETTINGS_KEY,
         _EXPERIMENT_WORKFLOW_TEMPLATES,
-        _MASS_ASSIGNMENT_CREATE_TEMPLATE,
         _automation_settings_with_durable_flags,
-        _bind_research_decision_to_observation,
         _default_scan_execution_settings,
-        _infer_blank_read_only_command,
         _load_effective_scan_execution_settings,
         _load_probe_ai_provider,
-        _load_research_ai_provider,
         _mask_secret,
         _merge_safe_default_asm_config,
         _normalize_auto_shard_count,
@@ -4234,12 +4198,6 @@ try:
         _normalize_parallel_strategy,
         _probe_ai_provider,
         _read_durable_setting,
-        _research_decision_json_schema,
-        _research_intent_tokens,
-        _research_planner_messages,
-        _research_provider_contract_error,
-        _research_requested_input_is_in_observation,
-        _research_selected_experiment_templates,
         _running_scan_worker_container_ids_best_effort,
         _running_scan_worker_count_best_effort,
         _safe_default_asm_config,
@@ -4268,17 +4226,12 @@ except ModuleNotFoundError:  # package import in host-side tests
         APPROVAL_POLICY_SETTING_KEY,
         AUTOMATION_SETTINGS_KEY,
         AUTO_SHARD_MAX_SHARDS,
-        ResearchDecisionRequest,
         SCAN_SETTINGS_KEY,
         _EXPERIMENT_WORKFLOW_TEMPLATES,
-        _MASS_ASSIGNMENT_CREATE_TEMPLATE,
         _automation_settings_with_durable_flags,
-        _bind_research_decision_to_observation,
         _default_scan_execution_settings,
-        _infer_blank_read_only_command,
         _load_effective_scan_execution_settings,
         _load_probe_ai_provider,
-        _load_research_ai_provider,
         _mask_secret,
         _merge_safe_default_asm_config,
         _normalize_auto_shard_count,
@@ -4287,12 +4240,6 @@ except ModuleNotFoundError:  # package import in host-side tests
         _normalize_parallel_strategy,
         _probe_ai_provider,
         _read_durable_setting,
-        _research_decision_json_schema,
-        _research_intent_tokens,
-        _research_planner_messages,
-        _research_provider_contract_error,
-        _research_requested_input_is_in_observation,
-        _research_selected_experiment_templates,
         _running_scan_worker_container_ids_best_effort,
         _running_scan_worker_count_best_effort,
         _safe_default_asm_config,
@@ -4316,8 +4263,6 @@ configure_settings_router(
     normalize_severity=lambda *a, **k: _normalize_severity(*a, **k),
     load_effective_ai_settings=lambda *a, **k: _load_effective_ai_settings(*a, **k),
     load_effective_automation_settings=lambda *a, **k: _load_effective_automation_settings(*a, **k),
-    normalize_research_planner_mode=lambda *a, **k: _normalize_research_planner_mode(*a, **k),
-    bounded_research_payload=lambda *a, **k: _bounded_research_payload(*a, **k),
     is_local_scan_worker_container=lambda *a, **k: _is_local_scan_worker_container(*a, **k),
     local_compose_project_best_effort=lambda *a, **k: _local_compose_project_best_effort(*a, **k),
     docker_socket_request=lambda *a, **k: docker_socket_request(*a, **k),
@@ -5852,13 +5797,6 @@ try:
         REFUTER_FINDING_DELTA_MIN_BASELINE,
         REFUTER_FINDING_DELTA_MULTIPLIER,
         REFUTER_VERDICT_BASES,
-        RESEARCH_EXPERIMENT_OUTCOMES,
-        RESEARCH_PRIMARY_CREDENTIAL_FAMILIES,
-        RESEARCH_RECON_COMMANDS,
-        RESEARCH_SECOND_USER_FAMILIES,
-        RESEARCH_SURFACE_MIN_AUTHENTICATED_ROUTES,
-        RESEARCH_SURFACE_MIN_EXECUTABLE_ROUTES,
-        RESEARCH_SURFACE_MIN_UNIQUE_ROUTES,
         RefuterReviewDeriveVerdictRequest,
         RefuterReviewExecuteRequest,
         RefuterReviewQueueRequest,
@@ -5872,7 +5810,6 @@ try:
         SourceIngestRequest,
         ToolReceiptRequest,
         _ArsenalQueryRequest,
-        _RESEARCH_EXPERIMENT_DEDUPE_COMMANDS,
         _active_commands_for_context,
         _append_hypothesis_signal,
         _apply_refuter_negative_gate,
@@ -6028,14 +5965,7 @@ try:
         _refuter_review_requests_from_summary,
         _refuter_verification_reference_valid,
         _refuter_work_summary,
-        _research_action_dedupe_comparable,
-        _research_action_semantic_dimension,
-        _research_campaign_readiness,
-        _research_campaign_yield_metrics,
         _research_exhausted_families,
-        _research_experiment_failure_detail,
-        _research_experiment_outcome,
-        _research_family_readiness_requirements,
         _research_hypothesis_coverage_key,
         _research_hypothesis_experiment_contract,
         _research_hypothesis_matches_live_surface,
@@ -6044,7 +5974,6 @@ try:
         _research_hypothesis_vulnerability_key,
         _research_known_coverage_keys,
         _research_known_vulnerability_keys,
-        _research_net_new_finding_count,
         _risk_tier_for_hypothesis_action,
         _route_file_hints,
         _savepoint_fetch,
@@ -6150,13 +6079,6 @@ except ModuleNotFoundError:  # package import in host-side tests
         REFUTER_FINDING_DELTA_MIN_BASELINE,
         REFUTER_FINDING_DELTA_MULTIPLIER,
         REFUTER_VERDICT_BASES,
-        RESEARCH_EXPERIMENT_OUTCOMES,
-        RESEARCH_PRIMARY_CREDENTIAL_FAMILIES,
-        RESEARCH_RECON_COMMANDS,
-        RESEARCH_SECOND_USER_FAMILIES,
-        RESEARCH_SURFACE_MIN_AUTHENTICATED_ROUTES,
-        RESEARCH_SURFACE_MIN_EXECUTABLE_ROUTES,
-        RESEARCH_SURFACE_MIN_UNIQUE_ROUTES,
         RefuterReviewDeriveVerdictRequest,
         RefuterReviewExecuteRequest,
         RefuterReviewQueueRequest,
@@ -6170,7 +6092,6 @@ except ModuleNotFoundError:  # package import in host-side tests
         SourceIngestRequest,
         ToolReceiptRequest,
         _ArsenalQueryRequest,
-        _RESEARCH_EXPERIMENT_DEDUPE_COMMANDS,
         _active_commands_for_context,
         _append_hypothesis_signal,
         _apply_refuter_negative_gate,
@@ -6326,14 +6247,7 @@ except ModuleNotFoundError:  # package import in host-side tests
         _refuter_review_requests_from_summary,
         _refuter_verification_reference_valid,
         _refuter_work_summary,
-        _research_action_dedupe_comparable,
-        _research_action_semantic_dimension,
-        _research_campaign_readiness,
-        _research_campaign_yield_metrics,
         _research_exhausted_families,
-        _research_experiment_failure_detail,
-        _research_experiment_outcome,
-        _research_family_readiness_requirements,
         _research_hypothesis_coverage_key,
         _research_hypothesis_experiment_contract,
         _research_hypothesis_matches_live_surface,
@@ -6342,7 +6256,6 @@ except ModuleNotFoundError:  # package import in host-side tests
         _research_hypothesis_vulnerability_key,
         _research_known_coverage_keys,
         _research_known_vulnerability_keys,
-        _research_net_new_finding_count,
         _risk_tier_for_hypothesis_action,
         _route_file_hints,
         _savepoint_fetch,
@@ -6418,9 +6331,6 @@ configure_arsenal_router(
     LocalAgentPlanParseRequest=lambda: LocalAgentPlanParseRequest,
     LocalAgentPlanRequest=lambda: LocalAgentPlanRequest,
     LocalAgentTestRequest=lambda: LocalAgentTestRequest,
-    RESEARCH_LAUNCH_PROFILES=lambda: RESEARCH_LAUNCH_PROFILES,
-    RESEARCH_SEMANTIC_FALSIFICATION_LIMIT=lambda: RESEARCH_SEMANTIC_FALSIFICATION_LIMIT,
-    _active_workflow_cancellations=lambda: _active_workflow_cancellations,
     _ai_ops_execute_enabled=lambda: _ai_ops_execute_enabled,
     _arsenal_action_state=lambda: _arsenal_action_state,
     _bounded_research_payload=lambda: _bounded_research_payload,
@@ -6447,7 +6357,6 @@ configure_arsenal_router(
     _record_tool_receipt=lambda: _record_tool_receipt,
     _redact_agent_payload=lambda: _redact_agent_payload,
     _redact_agent_text=lambda: _redact_agent_text,
-    _research_campaign_budget_snapshot=lambda: _research_campaign_budget_snapshot,
     _research_finding_family=lambda: _research_finding_family,
     _research_vulnerability_dimensions=lambda: _research_vulnerability_dimensions,
     _resolve_workflow_principal_contexts=lambda: _resolve_workflow_principal_contexts,
@@ -6854,263 +6763,9 @@ async def cancel_scan(scan_id: str):
     }
 
 try:
-    from research_routes.router import (
-        cancel_workflow_experiment,
-        configure_research_router,
-        router as research_router,
-        RESEARCH_ASM_FAMILIES,
-        RESEARCH_AUTOPILOT_HEARTBEAT_SECONDS,
-        RESEARCH_AUTOPILOT_LEASE_SECONDS,
-        RESEARCH_BUDGET_KEYS,
-        RESEARCH_CAMPAIGN_FAMILIES,
-        RESEARCH_DEFAULT_CAMPAIGN_FAMILIES,
-        RESEARCH_INCONCLUSIVE_ACTUATOR_LIMIT,
-        RESEARCH_LAUNCH_PROFILES,
-        RESEARCH_MAX_OBSERVATIONS_PER_EPISODE,
-        RESEARCH_MISSION_COMMANDS,
-        RESEARCH_OBSERVATION_MAX_BYTES,
-        RESEARCH_PLANNER_MODES,
-        RESEARCH_PREFLIGHT_CLAIM_TTL_SECONDS,
-        RESEARCH_PREFLIGHT_MAX_ATTEMPTS,
-        RESEARCH_PREFLIGHT_RESERVED_COST,
-        RESEARCH_PREFLIGHT_TRANSIENT_RETRY_SECONDS,
-        RESEARCH_RECON_ACTION_CAP,
-        RESEARCH_SEMANTIC_FALSIFICATION_LIMIT,
-        ResearchAutopilotRequest,
-        ResearchCampaignControlRequest,
-        ResearchCampaignLaunchRequest,
-        ResearchEpisodeRequest,
-        ResearchLaunchRequest,
-        ResearchObservationRequest,
-        ResearchPlannerStepRequest,
-        _RESEARCH_FOCUSED_ENDPOINT_METHODS,
-        _active_workflow_cancellations,
-        _build_research_observation,
-        _compact_research_observation_pack,
-        _mark_research_model_budget_exhausted,
-        _materialize_research_invariant_hypotheses,
-        _plan_research_episode_step,
-        _public_research_decision_row,
-        _public_research_episode_row,
-        _public_research_event_row,
-        _public_research_observation_row,
-        _reconcile_research_gap_recommendations,
-        _record_research_hypothesis_outcome,
-        _record_research_planner_failure,
-        _research_action_contains_secret_material,
-        _research_action_planner_projection,
-        _research_action_vulnerability_keys,
-        _research_async_work,
-        _research_autobind_hypothesis,
-        _research_autonomous_parameter_schema,
-        _research_campaign_budget_limits,
-        _research_campaign_budget_remaining,
-        _research_campaign_budget_violations,
-        _research_campaign_episode_budget_available,
-        _research_campaign_episode_budget_limits,
-        _research_campaign_exhaustion_snapshot,
-        _research_campaign_retest_cap_reached,
-        _research_campaign_self_repair,
-        _research_canonicalize_action_shape,
-        _research_canonicalize_experiment_steps_alias,
-        _research_canonicalize_hypothesis_binding,
-        _research_canonicalize_workflow_wrapper,
-        _research_command_catalog,
-        _research_command_views,
-        _research_configured_planner_ready,
-        _research_decision_action_is_excluded,
-        _research_decision_hypothesis_is_excluded,
-        _research_dispatch_async_ref,
-        _research_episode_detail,
-        _research_episode_or_404,
-        _research_episode_planner_mode,
-        _research_experiment_projection,
-        _research_family_is_allowed,
-        _research_family_scope_keys,
-        _research_finding_is_web,
-        _research_focus_snapshot,
-        _research_forbidden_control_paths,
-        _research_graph_with_preflight_provenance,
-        _research_inferred_planning_contracts,
-        _research_intensity_campaign_families,
-        _research_is_consecutive_duplicate_action,
-        _research_latest_action_result,
-        _research_launch_planner_mode,
-        _research_lease_heartbeat,
-        _research_linked_work_outcome,
-        _research_maybe_auto_provision_principals,
-        _research_mission,
-        _research_normalize_focused_endpoint,
-        _research_normalize_injection_payloads,
-        _research_parameterized_action_cost,
-        _research_planner_kind,
-        _research_preflight_claim_is_stale,
-        _research_preflight_error_is_transient,
-        _research_preflight_scan_options,
-        _research_prepare_action,
-        _research_previous_result_digest,
-        _research_read_result_projection,
-        _research_recent_actions,
-        _research_recommended_actions,
-        _research_selected_hypothesis_contracts,
-        _research_semantic_policy_violations,
-        _research_subtract_cost,
-        _research_workflow_surface_violations,
-        _reuse_research_launch_episode,
-        _savepoint_fetchrow,
-        _settle_research_awaiting_observation,
-        _validate_research_intensity_families,
-        cancel_research_episode,
-        control_research_campaign,
-        create_research_episode,
-        get_research_episode,
-        launch_research_campaign,
-        launch_research_episode,
-        list_research_episodes,
-        refresh_research_observation,
-        research_episode_benchmark,
-        research_readiness,
-        set_research_episode_autopilot,
-        settle_research_episode,
-        submit_research_decision,
-    )
+    from arsenal_routes.router import _active_workflow_cancellations, cancel_workflow_experiment
 except ModuleNotFoundError:  # package import in host-side tests
-    from api.research_routes.router import (
-        cancel_workflow_experiment,
-        configure_research_router,
-        router as research_router,
-        RESEARCH_ASM_FAMILIES,
-        RESEARCH_AUTOPILOT_HEARTBEAT_SECONDS,
-        RESEARCH_AUTOPILOT_LEASE_SECONDS,
-        RESEARCH_BUDGET_KEYS,
-        RESEARCH_CAMPAIGN_FAMILIES,
-        RESEARCH_DEFAULT_CAMPAIGN_FAMILIES,
-        RESEARCH_INCONCLUSIVE_ACTUATOR_LIMIT,
-        RESEARCH_LAUNCH_PROFILES,
-        RESEARCH_MAX_OBSERVATIONS_PER_EPISODE,
-        RESEARCH_MISSION_COMMANDS,
-        RESEARCH_OBSERVATION_MAX_BYTES,
-        RESEARCH_PLANNER_MODES,
-        RESEARCH_PREFLIGHT_CLAIM_TTL_SECONDS,
-        RESEARCH_PREFLIGHT_MAX_ATTEMPTS,
-        RESEARCH_PREFLIGHT_RESERVED_COST,
-        RESEARCH_PREFLIGHT_TRANSIENT_RETRY_SECONDS,
-        RESEARCH_RECON_ACTION_CAP,
-        RESEARCH_SEMANTIC_FALSIFICATION_LIMIT,
-        ResearchAutopilotRequest,
-        ResearchCampaignControlRequest,
-        ResearchCampaignLaunchRequest,
-        ResearchEpisodeRequest,
-        ResearchLaunchRequest,
-        ResearchObservationRequest,
-        ResearchPlannerStepRequest,
-        _RESEARCH_FOCUSED_ENDPOINT_METHODS,
-        _active_workflow_cancellations,
-        _build_research_observation,
-        _compact_research_observation_pack,
-        _mark_research_model_budget_exhausted,
-        _materialize_research_invariant_hypotheses,
-        _plan_research_episode_step,
-        _public_research_decision_row,
-        _public_research_episode_row,
-        _public_research_event_row,
-        _public_research_observation_row,
-        _reconcile_research_gap_recommendations,
-        _record_research_hypothesis_outcome,
-        _record_research_planner_failure,
-        _research_action_contains_secret_material,
-        _research_action_planner_projection,
-        _research_action_vulnerability_keys,
-        _research_async_work,
-        _research_autobind_hypothesis,
-        _research_autonomous_parameter_schema,
-        _research_campaign_budget_limits,
-        _research_campaign_budget_remaining,
-        _research_campaign_budget_violations,
-        _research_campaign_episode_budget_available,
-        _research_campaign_episode_budget_limits,
-        _research_campaign_exhaustion_snapshot,
-        _research_campaign_retest_cap_reached,
-        _research_campaign_self_repair,
-        _research_canonicalize_action_shape,
-        _research_canonicalize_experiment_steps_alias,
-        _research_canonicalize_hypothesis_binding,
-        _research_canonicalize_workflow_wrapper,
-        _research_command_catalog,
-        _research_command_views,
-        _research_configured_planner_ready,
-        _research_decision_action_is_excluded,
-        _research_decision_hypothesis_is_excluded,
-        _research_dispatch_async_ref,
-        _research_episode_detail,
-        _research_episode_or_404,
-        _research_episode_planner_mode,
-        _research_experiment_projection,
-        _research_family_is_allowed,
-        _research_family_scope_keys,
-        _research_finding_is_web,
-        _research_focus_snapshot,
-        _research_forbidden_control_paths,
-        _research_graph_with_preflight_provenance,
-        _research_inferred_planning_contracts,
-        _research_intensity_campaign_families,
-        _research_is_consecutive_duplicate_action,
-        _research_latest_action_result,
-        _research_launch_planner_mode,
-        _research_lease_heartbeat,
-        _research_linked_work_outcome,
-        _research_maybe_auto_provision_principals,
-        _research_mission,
-        _research_normalize_focused_endpoint,
-        _research_normalize_injection_payloads,
-        _research_parameterized_action_cost,
-        _research_planner_kind,
-        _research_preflight_claim_is_stale,
-        _research_preflight_error_is_transient,
-        _research_preflight_scan_options,
-        _research_prepare_action,
-        _research_previous_result_digest,
-        _research_read_result_projection,
-        _research_recent_actions,
-        _research_recommended_actions,
-        _research_selected_hypothesis_contracts,
-        _research_semantic_policy_violations,
-        _research_subtract_cost,
-        _research_workflow_surface_violations,
-        _reuse_research_launch_episode,
-        _savepoint_fetchrow,
-        _settle_research_awaiting_observation,
-        _validate_research_intensity_families,
-        cancel_research_episode,
-        control_research_campaign,
-        create_research_episode,
-        get_research_episode,
-        launch_research_campaign,
-        launch_research_episode,
-        list_research_episodes,
-        refresh_research_observation,
-        research_episode_benchmark,
-        research_readiness,
-        set_research_episode_autopilot,
-        settle_research_episode,
-        submit_research_decision,
-    )
-configure_research_router(
-    lambda: db_pool,
-    cancel_scan=lambda: cancel_scan,
-    FORBIDDEN_AGENT_CONTEXT_KEYS=lambda: FORBIDDEN_AGENT_CONTEXT_KEYS,
-    _ai_ops_execute_enabled=lambda: _ai_ops_execute_enabled,
-    _json_size_bytes=lambda: _json_size_bytes,
-    _load_effective_ai_settings=lambda: _load_effective_ai_settings,
-    _load_effective_automation_settings=lambda: _load_effective_automation_settings,
-    _normalize_research_planner_mode=lambda: _normalize_research_planner_mode,
-    _record_command_result=lambda: _record_command_result,
-    _record_research_event=lambda: _record_research_event,
-    _validate_approval_receipt_for_action=lambda: _validate_approval_receipt_for_action,
-    _validate_bounded_agent_parameters=lambda: _validate_bounded_agent_parameters,
-    get_redis=lambda: get_redis,
-)
-app.include_router(research_router)
+    from api.arsenal_routes.router import _active_workflow_cancellations, cancel_workflow_experiment
 try:
     from agent_routes.router import (
         configure_agent_router,
@@ -12669,26 +12324,6 @@ def _provision_same_origin_url(target_url: str, path: Any) -> str:
 # ============================================================
 
 
-async def _research_campaign_budget_snapshot(conn: Any, campaign: Any) -> dict[str, Any]:
-    payload = row_to_dict(campaign)
-    metadata = _decode_json_value(payload.get("metadata_json")) or {}
-    config = metadata.get("autonomous_research") if isinstance(metadata.get("autonomous_research"), dict) else {}
-    limits = config.get("budget_limits") if isinstance(config.get("budget_limits"), dict) else {}
-    if not limits:
-        limits = _research_campaign_budget_limits(
-            str(config.get("intensity") or "deep_hunt"),
-            int(config.get("max_episodes") or 1),
-        )
-    used = _research_normalize_budget_used(config.get("preflight_budget_used") or {})
-    rows = await conn.fetch(
-        "SELECT budget_used FROM research_episodes WHERE campaign_id=$1",
-        _optional_uuid(payload.get("id")),
-    )
-    for row in rows:
-        episode_used = _research_normalize_budget_used(_decode_json_value(row.get("budget_used")) or {})
-        used = {key: int(used.get(key) or 0) + int(episode_used.get(key) or 0) for key in RESEARCH_BUDGET_KEYS}
-    remaining = _research_campaign_budget_remaining(limits, used)
-    return {"limits": limits, "used": used, "remaining": remaining}
 
 
 def _research_finding_family(finding: Any) -> str | None:
@@ -13091,33 +12726,8 @@ _AGENT_RUN_TOOL_MAX_OUTPUT = 20000
 # traffic and must never be starved by approval, budget, cancellation, or execution skip noise.
 
 
-def _research_episode_uses_agent_loop(episode: Any) -> bool:
-    """True when this episode should be driven by the LLM ReAct hunt loop instead of the menu
-    planner. Opt-in at launch (planner.agent_loop); only set for configured_ai episodes."""
-    payload = row_to_dict(episode) if episode is not None and not isinstance(episode, dict) else dict(episode or {})
-    planner = _decode_json_value(payload.get("planner")) or {}
-    return bool(planner.get("agent_loop"))
 
 
-async def _run_agent_hunt_for_episode(episode_id: str) -> dict[str, Any]:
-    """Fail closed: the legacy Agent Hunt engine this drove has been deleted.
-
-    This was the Research autopilot's bridge into the legacy keyless hunt loop.
-    It called _run_agent_hunt, which no longer exists, and it inserted new
-    agent_hunt_runs rows -- a new write to a quarantined legacy table. Both are
-    retired. The episode is completed with an explicit migration reason instead
-    of crashing the autopilot loop, and the surrounding Research runtime is
-    removed with the rest of its lifecycle (playbook Phase 3).
-    """
-    return {
-        "accepted": False,
-        "agent_loop": True,
-        "status": "failed",
-        "stop_reason": "legacy_hunt_engine_removed",
-        "error": "legacy_hunt_engine_removed",
-        "canonical_replacement": "/hunts",
-        "episode_id": str(episode_id),
-    }
 
 
 async def _start_hunt_v2(contract: HuntStartContract) -> dict[str, Any]:
@@ -17590,36 +17200,6 @@ async def _arsenal_execute(conn, req: ArsenalExecuteRequest) -> dict[str, Any]:
 
 
 
-async def _record_research_event(
-    conn,
-    episode_id: uuid.UUID,
-    *,
-    event_type: str,
-    status: str,
-    summary: str,
-    observation_id: str | uuid.UUID | None = None,
-    decision_id: str | uuid.UUID | None = None,
-    command_result_id: str | uuid.UUID | None = None,
-    details: Optional[dict[str, Any]] = None,
-) -> dict[str, Any]:
-    row = await conn.fetchrow(
-        """
-        INSERT INTO research_events (
-            episode_id, event_type, status, summary, observation_id,
-            decision_id, command_result_id, details
-        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb)
-        RETURNING *
-        """,
-        episode_id,
-        event_type,
-        status,
-        str(summary or "")[:1000],
-        _optional_uuid(observation_id),
-        _optional_uuid(decision_id),
-        _optional_uuid(command_result_id),
-        json.dumps(_bounded_research_payload(details or {})),
-    )
-    return _public_research_event_row(row)
 
 
 
@@ -17661,28 +17241,6 @@ async def _record_research_event(
 
 
 
-def _research_rejection_is_policy_steering(errors: Any) -> bool:
-    """Distinguish safe no-progress steering from planner/runtime failure.
-
-    These errors prove the deterministic policy worked. They should create a new
-    observation and exclude the rejected action, but must not consume the same
-    three-strike breaker reserved for malformed output and controller failures.
-    Model-token budgets still bound a planner that ignores repeated steering.
-    """
-    normalized = {str(error).strip() for error in errors or [] if str(error).strip()}
-    if not normalized:
-        return False
-    fixed = {
-        "known_vulnerability_already_covered",
-        "repeated_action_without_state_change",
-        "campaign_recon_cap_reached",
-        "finding_retest_campaign_cap_reached",
-    }
-    return all(
-        error in fixed
-        or error.startswith(("semantic_dimension_exhausted:", "experiment_actuator_exhausted:"))
-        for error in normalized
-    )
 
 
 
@@ -17819,292 +17377,12 @@ def _research_rejection_is_policy_steering(errors: Any) -> bool:
 
 
 
-_CAMPAIGN_MAX_CONSECUTIVE_BLOCKED = 3
 
 
-async def _record_campaign_blocker(
-    conn,
-    campaign_id: Any,
-    *,
-    kind: str,
-    episode_id: str | None = None,
-    detail: str | None = None,
-) -> None:
-    """Append a durable, bounded blocker to a campaign (escalate-don't-block).
-
-    Blockers are advisory context surfaced in the campaign report so an operator can see why the loop
-    had to skip or terminate work -- without the campaign having to stop and wait for an answer.
-    """
-    row = await conn.fetchrow("SELECT metadata_json FROM campaigns WHERE id=$1", campaign_id)
-    if not row:
-        return
-    metadata = _decode_json_value(row["metadata_json"]) or {}
-    config = metadata.get("autonomous_research") if isinstance(metadata.get("autonomous_research"), dict) else {}
-    existing = config.get("blockers") if isinstance(config.get("blockers"), list) else []
-    blocker = {
-        "kind": str(kind)[:80],
-        "episode_id": str(episode_id) if episode_id else None,
-        "detail": str(detail)[:300] if detail else None,
-        "at": datetime.now(timezone.utc).isoformat(),
-    }
-    blockers = [*existing, blocker][-20:]
-    await conn.execute(
-        """
-        UPDATE campaigns
-        SET metadata_json=jsonb_set(metadata_json, '{autonomous_research,blockers}', $2::jsonb, true),
-            updated_at=NOW()
-        WHERE id=$1
-        """,
-        campaign_id, json.dumps(blockers),
-    )
 
 
-def _research_campaign_terminal_needs_review(
-    config: dict[str, Any], latest_episode_id: Any, latest_status: Any,
-) -> bool:
-    """Return true once per failed/blocked/cancelled terminal episode until operator resume."""
-    episode_id = str(latest_episode_id or "")
-    return bool(
-        episode_id
-        and str(latest_status or "") in {"blocked", "failed"}
-        and str(config.get("last_paused_episode_id") or "") != episode_id
-    )
 
 
-async def _continue_autonomous_research_campaigns() -> int:
-    """Start the next episode for active campaigns with no non-terminal episode."""
-    # D2: reap stuck non-terminal episodes so their campaign becomes visible to the chaining/completion
-    # logic below. An episode waiting on operator input, or left in a planning state after the autopilot
-    # breaker disabled it (3 consecutive failures) with an expired lease, would otherwise count as
-    # "active" forever -- freezing the whole campaign (it never even reaches the deadline/ceiling check).
-    # Force it terminal ('blocked'); the terminal-review branch then records a blocker and chains a fresh
-    # episode (escalate-don't-block). The lease/autopilot guards avoid racing an actively-planning runner.
-    async with db_pool.acquire() as conn:
-        await conn.execute(
-            """
-            UPDATE research_episodes e SET
-                status='blocked',
-                stop_reason=COALESCE(e.stop_reason, CASE WHEN e.status='awaiting_input'
-                    THEN 'operator_input_requested' ELSE 'autopilot_disabled_after_failures' END),
-                autopilot_error=COALESCE(e.autopilot_error, 'reaped_by_campaign_supervisor'),
-                updated_at=NOW()
-            FROM campaigns c
-            WHERE e.campaign_id=c.id
-              AND c.campaign_type='autonomous_research' AND c.status='active'
-              AND e.status NOT IN ('completed','cancelled','failed','budget_exhausted','blocked')
-              AND (
-                  e.status='awaiting_input'
-                  OR (e.status IN ('awaiting_planner','awaiting_observation')
-                      AND e.autopilot_enabled=false
-                      AND COALESCE(c.metadata_json->'autonomous_research'->>'planner_mode',
-                                   e.planner->>'mode', 'configured_ai') = 'configured_ai'
-                      AND (e.lease_expires_at IS NULL OR e.lease_expires_at < NOW()))
-              )
-            """
-        )
-    async with db_pool.acquire() as conn:
-        rows = await conn.fetch(
-            """
-            SELECT c.*, COUNT(re.id)::int AS episode_count,
-                   (ARRAY_AGG(re.id ORDER BY re.created_at DESC)
-                       FILTER (WHERE re.id IS NOT NULL))[1] AS latest_episode_id,
-                   (ARRAY_AGG(re.status ORDER BY re.created_at DESC)
-                       FILTER (WHERE re.id IS NOT NULL))[1] AS latest_episode_status
-            FROM campaigns c
-            LEFT JOIN research_episodes re ON re.campaign_id=c.id
-            WHERE c.campaign_type='autonomous_research' AND c.status='active'
-              AND NOT EXISTS (
-                  SELECT 1 FROM research_episodes active
-                  WHERE active.campaign_id=c.id
-                    AND active.status NOT IN ('completed','cancelled','failed','budget_exhausted','blocked')
-              )
-            GROUP BY c.id ORDER BY c.updated_at ASC LIMIT 5
-            """
-        )
-    started = 0
-    for row in rows:
-        payload = row_to_dict(row)
-        metadata = _decode_json_value(payload.get("metadata_json")) or {}
-        config = metadata.get("autonomous_research") if isinstance(metadata.get("autonomous_research"), dict) else {}
-        try:
-            deadline = datetime.fromisoformat(str(config.get("deadline_at") or "").replace("Z", "+00:00"))
-            if deadline.tzinfo is None:
-                deadline = deadline.replace(tzinfo=timezone.utc)
-        except (TypeError, ValueError):
-            deadline = datetime.now(timezone.utc)
-        count = int(payload.get("episode_count") or 0)
-        try:
-            maximum = max(1, min(100, int(config.get("max_episodes") or 1)))
-        except (TypeError, ValueError):
-            maximum = 1
-        if deadline <= datetime.now(timezone.utc) or count >= maximum:
-            async with db_pool.acquire() as conn:
-                await conn.execute("UPDATE campaigns SET status='completed', updated_at=NOW() WHERE id=$1", row["id"])
-            continue
-        async with db_pool.acquire() as conn:
-            current_campaign = await conn.fetchrow("SELECT * FROM campaigns WHERE id=$1", row["id"])
-            readiness = await _research_campaign_readiness(conn, current_campaign)
-        if not readiness.get("ready"):
-            await _research_campaign_self_repair(row["id"])
-            continue
-        async with db_pool.acquire() as conn:
-            invariant_hypotheses = await _materialize_research_invariant_hypotheses(
-                conn,
-                row["target_id"],
-            )
-            budget = await _research_campaign_budget_snapshot(conn, current_campaign)
-            episode_budget_limits = _research_campaign_episode_budget_limits(
-                str(config.get("intensity") or "deep_hunt"),
-                budget["remaining"],
-            )
-            latest_metadata = _decode_json_value(current_campaign.get("metadata_json")) or {}
-            latest_config = (
-                latest_metadata.get("autonomous_research")
-                if isinstance(latest_metadata.get("autonomous_research"), dict)
-                else {}
-            )
-            latest_config.update({
-                "preflight_state": "completed",
-                "preflight_scan_id": str((readiness.get("preflight_scan") or {}).get("id") or latest_config.get("preflight_scan_id") or "") or None,
-                "readiness": readiness,
-                "surface_after_preflight": readiness.get("surface") or {},
-                "invariant_hypotheses_materialized": invariant_hypotheses,
-                "budget_limits": budget["limits"],
-                "budget_used": budget["used"],
-                "remaining_budget": budget["remaining"],
-                "effective_families": list(
-                    (readiness.get("surface") or {}).get("executable_families") or []
-                ),
-            })
-            latest_metadata["autonomous_research"] = latest_config
-            if not _research_campaign_episode_budget_available(episode_budget_limits):
-                latest_config["last_error"] = "campaign_budget_exhausted"
-                latest_metadata["autonomous_research"] = latest_config
-                await conn.execute(
-                    "UPDATE campaigns SET status='completed', metadata_json=$2::jsonb, updated_at=NOW() WHERE id=$1",
-                    row["id"],
-                    json.dumps(latest_metadata, default=str),
-                )
-                continue
-            await conn.execute(
-                "UPDATE campaigns SET metadata_json=$2::jsonb, updated_at=NOW() WHERE id=$1",
-                row["id"],
-                json.dumps(latest_metadata, default=str),
-            )
-            refreshed_campaign = await conn.fetchrow("SELECT * FROM campaigns WHERE id=$1", row["id"])
-            yield_metrics = await _research_campaign_yield_metrics(conn, refreshed_campaign)
-            if yield_metrics.get("stop_recommended"):
-                latest_config["yield"] = yield_metrics
-                latest_config["last_error"] = yield_metrics.get("stop_reason")
-                latest_metadata["autonomous_research"] = latest_config
-                await conn.execute(
-                    "UPDATE campaigns SET status='paused', metadata_json=$2::jsonb, updated_at=NOW() WHERE id=$1",
-                    row["id"],
-                    json.dumps(latest_metadata, default=str),
-                )
-                continue
-        latest_episode_id = str(payload.get("latest_episode_id") or "")
-        latest_status = str(payload.get("latest_episode_status") or "")
-        # An operator cancelling THIS episode is an explicit stop, not a recoverable planner failure --
-        # do NOT relaunch active testing ~30s later. Pause the campaign; an explicit resume restarts it.
-        if latest_status == "cancelled" and str(config.get("last_paused_episode_id") or "") != latest_episode_id:
-            async with db_pool.acquire() as conn:
-                await conn.execute(
-                    """
-                    UPDATE campaigns SET status='paused',
-                        metadata_json=jsonb_set(
-                            jsonb_set(metadata_json, '{autonomous_research,last_paused_episode_id}', to_jsonb($2::text), true),
-                            '{autonomous_research,last_error}', to_jsonb($3::text), true),
-                        updated_at=NOW() WHERE id=$1
-                    """,
-                    row["id"], latest_episode_id,
-                    "Latest research episode was cancelled by an operator; campaign paused (resume to continue)",
-                )
-            continue
-        # Escalate-don't-block: a blocked/failed episode is recorded as a durable blocker and the campaign
-        # keeps moving (a fresh episode is chained) so it stays autonomous. Only after several consecutive
-        # unrecovered episodes do we pause for real operator review -- a systemic failure, not a dead end.
-        from_review = False
-        if _research_campaign_terminal_needs_review(config, latest_episode_id, latest_status):
-            consecutive_blocked = int(config.get("consecutive_blocked") or 0) + 1
-            async with db_pool.acquire() as conn:
-                await _record_campaign_blocker(
-                    conn, row["id"], kind=f"episode_{latest_status}", episode_id=latest_episode_id,
-                )
-                if consecutive_blocked >= _CAMPAIGN_MAX_CONSECUTIVE_BLOCKED:
-                    await conn.execute(
-                        """
-                        UPDATE campaigns SET status='paused',
-                            metadata_json=jsonb_set(jsonb_set(jsonb_set(metadata_json,
-                                '{autonomous_research,last_paused_episode_id}', to_jsonb($2::text), true),
-                                '{autonomous_research,consecutive_blocked}', to_jsonb($3::int), true),
-                                '{autonomous_research,last_error}', to_jsonb($4::text), true),
-                            updated_at=NOW() WHERE id=$1
-                        """,
-                        row["id"], latest_episode_id, consecutive_blocked,
-                        f"Paused after {consecutive_blocked} consecutive unrecovered episodes (last ended {latest_status})",
-                    )
-                    continue
-                await conn.execute(
-                    """
-                    UPDATE campaigns SET
-                        metadata_json=jsonb_set(jsonb_set(metadata_json,
-                            '{autonomous_research,last_paused_episode_id}', to_jsonb($2::text), true),
-                            '{autonomous_research,consecutive_blocked}', to_jsonb($3::int), true),
-                        updated_at=NOW() WHERE id=$1
-                    """,
-                    row["id"], latest_episode_id, consecutive_blocked,
-                )
-            from_review = True
-        try:
-            effective_families = list(
-                (readiness.get("surface") or {}).get("executable_families") or []
-            )
-            planner_mode = str(config.get("planner_mode") or "configured_ai")
-            await launch_research_episode(ResearchLaunchRequest(
-                subject_type="target", subject_id=str(row["target_id"]), mission_profile="target_hunt",
-                intensity=str(config.get("intensity") or "deep_hunt"),
-                approval_receipt_id=config.get("approval_receipt_id"),
-                planner_mode=planner_mode,
-                autopilot=planner_mode == "configured_ai",
-                force_new=True,
-                created_by="research_campaign_supervisor", campaign_id=str(row["id"]),
-                objective_override=config.get("objective"),
-                allowed_families_override=effective_families,
-                budget_limits_override=episode_budget_limits,
-                agent_loop=bool(config.get("agent_loop")),
-            ))
-        except asyncpg.UniqueViolationError:
-            continue
-        except Exception as exc:
-            async with db_pool.acquire() as conn:
-                await conn.execute(
-                    """
-                    UPDATE campaigns SET status='paused',
-                        metadata_json=jsonb_set(metadata_json, '{autonomous_research,last_error}', to_jsonb($2::text), true),
-                        updated_at=NOW() WHERE id=$1
-                    """,
-                    row["id"], str(exc)[:500],
-                )
-            continue
-        async with db_pool.acquire() as conn:
-            # Reset the consecutive-blocked counter when chaining after a clean (non-review) episode;
-            # keep the just-incremented value when retrying after a recorded blocker.
-            await conn.execute(
-                """
-                UPDATE campaigns SET
-                    metadata_json=jsonb_set(
-                        jsonb_set(
-                            CASE WHEN $3 THEN metadata_json
-                                 ELSE jsonb_set(metadata_json, '{autonomous_research,consecutive_blocked}', '0'::jsonb, true) END,
-                            '{autonomous_research,episodes_started}', to_jsonb($2::int), true),
-                        '{autonomous_research,last_error}', 'null'::jsonb, true),
-                    updated_at=NOW() WHERE id=$1
-                """,
-                row["id"], count + 1, from_review,
-            )
-        started += 1
-    return started
 
 
 
@@ -18628,334 +17906,18 @@ async def _server_materialize_create_ma(
 
 
 
-async def _release_research_autopilot_lease(
-    pool,
-    episode_id: str,
-    owner: str,
-    *,
-    error: str | None = None,
-) -> None:
-    async with pool.acquire() as conn:
-        if error:
-            row = await conn.fetchrow(
-                """
-                UPDATE research_episodes
-                SET autopilot_error=$3,
-                    autopilot_consecutive_failures=autopilot_consecutive_failures+1,
-                    autopilot_enabled=CASE WHEN autopilot_consecutive_failures+1 < 3 THEN autopilot_enabled ELSE false END,
-                    lease_owner=NULL,
-                    lease_expires_at=CASE
-                        WHEN autopilot_consecutive_failures+1 < 3 THEN NOW() + make_interval(secs => LEAST(60, 5 * (autopilot_consecutive_failures+1)))
-                        ELSE NULL
-                    END,
-                    updated_at=NOW()
-                WHERE id=$1 AND lease_owner=$2
-                RETURNING id, autopilot_enabled, autopilot_consecutive_failures
-                """,
-                uuid.UUID(episode_id), owner, error[:1000],
-            )
-            if row:
-                await _record_research_event(
-                    conn,
-                    row["id"],
-                    event_type="autopilot_error",
-                    status="retrying" if row["autopilot_enabled"] else "paused",
-                    summary=("Autopilot planner failed; retry scheduled" if row["autopilot_enabled"] else "Autopilot paused after repeated planner failures"),
-                    details={"error": error[:500], "consecutive_failures": row["autopilot_consecutive_failures"]},
-                )
-            return
-        await conn.execute(
-            """
-            UPDATE research_episodes
-            SET lease_owner=NULL, lease_expires_at=NULL, autopilot_error=NULL,
-                autopilot_consecutive_failures=0,
-                autopilot_enabled=CASE
-                    WHEN status IN ('awaiting_planner','awaiting_observation') THEN autopilot_enabled
-                    ELSE false
-                END,
-                updated_at=NOW()
-            WHERE id=$1 AND lease_owner=$2
-            """,
-            uuid.UUID(episode_id), owner,
-        )
 
 
 
 
-def _research_autopilot_expected_control_race(exc: Exception) -> bool:
-    """Operator pause/cancel racing a model call is control flow, not a planner failure."""
-    if not isinstance(exc, HTTPException) or int(exc.status_code or 0) != 409:
-        return False
-    detail = str(exc.detail or "")
-    return detail in {
-        "Research autopilot was paused before dispatch",
-        "Research episode is terminal or cancelled",
-    }
 
 
-RESEARCH_EPISODE_ABANDON_TTL_HOURS = int(os.getenv("RESEARCH_EPISODE_ABANDON_TTL_HOURS", "6") or 6)
 
 
-async def _reap_abandoned_research_episodes(conn) -> int:
-    """Expire episodes stranded in a waiting state with no activity for the abandon TTL — chiefly
-    agent-mode (session-driven) episodes whose driving coding-agent session never returned. The
-    autopilot runner only advances `autopilot_enabled` episodes, so these never get touched and
-    accumulate indefinitely (16 observed, oldest a week old). Conservative TTL (default 6h) so a
-    legitimately-slow session is safe. Also GCs old terminal keyless `agent_hunt_runs`.
-    (External-audit P2 — stuck episodes / no GC.)"""
-    ttl = max(1, RESEARCH_EPISODE_ABANDON_TTL_HOURS)
-    # Reap ONLY genuinely-stranded work: agent-mode (autopilot_enabled=false) episodes stuck waiting
-    # for a PLANNER/OPERATOR that never returned, whose campaign is not operator-paused. Deliberately
-    # EXCLUDE awaiting_observation (that state is blocked on real linked scan/retest work — the
-    # stale-dispatch reconciler owns it; cancelling it would orphan a live scan) and autopilot
-    # episodes (the runner advances/re-leases them). No hard delete of hunt transcripts — those are
-    # run records under the evidence-retention discipline, not reaper-deletable. (External-audit P1/P2.)
-    # At most 500 per pass (oldest first); the next pass takes the rest.
-    reaped = await conn.fetch(
-        """UPDATE research_episodes re
-           SET status='cancelled', stop_reason='abandoned_reaper_timeout',
-               lease_expires_at=NULL, updated_at=NOW()
-           WHERE re.id IN (
-             SELECT re.id FROM research_episodes re
-             WHERE re.status IN ('awaiting_planner','awaiting_input')
-             AND re.autopilot_enabled=false
-             AND re.cancel_requested=false
-             AND re.updated_at < NOW() - make_interval(hours => $1::int)
-             AND NOT EXISTS (
-                 SELECT 1 FROM campaigns c WHERE c.id=re.campaign_id AND c.status='paused')
-             -- Do NOT reap an OPERATOR-PAUSED episode: autopilot pause sets autopilot_enabled=false
-             -- (the same signal as agent-mode), so distinguish a pause via its event trail — skip any
-             -- episode whose latest autopilot event is a pause (no later resume). (External-audit P1.)
-             AND NOT EXISTS (
-                 SELECT 1 FROM research_events ev
-                 WHERE ev.episode_id=re.id AND ev.event_type='autopilot_paused'
-                   AND ev.created_at > COALESCE(
-                       (SELECT max(ev2.created_at) FROM research_events ev2
-                        WHERE ev2.episode_id=re.id AND ev2.event_type='autopilot_resumed'),
-                       '-infinity'::timestamptz))
-             ORDER BY re.updated_at LIMIT 500 FOR UPDATE SKIP LOCKED)
-           RETURNING id""",
-        ttl,
-    )
-    return len(reaped)
 
 
-async def _reconcile_stale_research_dispatches(conn) -> int:
-    """Fail closed on expired dispatch windows; never replay an uncertain active action."""
-    rows = await conn.fetch(
-        """
-        SELECT re.*, rd.id AS decision_id, rd.command_result_id AS linked_command_result_id,
-               rd.policy_result, rd.action,
-               recovered.id AS recovered_command_result_id,
-               recovered.status AS recovered_command_status,
-               recovered.dry_run AS recovered_command_dry_run,
-               recovered_scan.id AS recovered_scan_id,
-               recovered_scan.status AS recovered_scan_status,
-               recovered_scan.job_id AS recovered_scan_job_id,
-               recovered_scan.campaign_id AS recovered_scan_campaign_id,
-               fv.id AS recovered_retest_id, fv.finding_id AS recovered_finding_id,
-               fv.status AS recovered_retest_status
-        FROM research_episodes re
-        LEFT JOIN research_decisions rd ON rd.id=re.current_decision_id
-        LEFT JOIN LATERAL (
-            SELECT cr.id, cr.status, cr.dry_run
-            FROM command_results cr
-            WHERE rd.command_result_id IS NULL
-              AND cr.created_by=(
-                  'research_episode:' || re.id::text || ':decision:' || rd.id::text
-              )
-            ORDER BY cr.created_at DESC
-            LIMIT 1
-        ) recovered ON true
-        LEFT JOIN LATERAL (
-            SELECT s.id, s.status, s.job_id, s.campaign_id
-            FROM scans s
-            WHERE rd.command_result_id IS NULL
-              AND recovered.id IS NULL
-              AND s.options->>'research_dispatch_correlation'=(
-                  'research_episode:' || re.id::text || ':decision:' || rd.id::text
-              )
-            ORDER BY s.created_at DESC
-            LIMIT 1
-        ) recovered_scan ON true
-        LEFT JOIN LATERAL (
-            SELECT verification.id, verification.finding_id, verification.status
-            FROM finding_verifications verification
-            WHERE rd.command_result_id IS NULL
-              AND recovered.id IS NULL
-              AND recovered_scan.id IS NULL
-              AND verification.requested_by=(
-                  'research_episode:' || re.id::text || ':decision:' || rd.id::text
-              )
-            ORDER BY verification.created_at DESC
-            LIMIT 1
-        ) fv ON true
-        WHERE re.status='dispatching'
-          AND re.updated_at < NOW() - INTERVAL '5 minutes'
-        ORDER BY re.updated_at ASC
-        FOR UPDATE OF re SKIP LOCKED
-        LIMIT 10
-    """
-    )
-    repaired = 0
-    for row in rows:
-        receipt_id = row["linked_command_result_id"] or row["recovered_command_result_id"]
-        recovered_status = str(row["recovered_command_status"] or "")
-        recovered_dry_run = bool(row["recovered_command_dry_run"])
-        correlation = f"research_episode:{row['id']}:decision:{row['decision_id']}"
-        if not receipt_id and row.get("recovered_scan_id"):
-            action = _decode_json_value(row.get("action")) or {}
-            command_name = str(action.get("command") or "asm.improve").strip()
-            command = _research_command_catalog().get(command_name) or {}
-            scan_status = str(row.get("recovered_scan_status") or "unknown")
-            receipt_status = (
-                "queued" if scan_status in {"pending", "queued"}
-                else "running" if scan_status == "running"
-                else scan_status
-            )
-            synthesized = await _record_command_result(
-                conn,
-                command=command_name,
-                status=receipt_status,
-                risk_tier=str(command.get("risk_tier") or "active"),
-                campaign_id=row.get("recovered_scan_campaign_id"),
-                scan_id=row["recovered_scan_id"],
-                operator_message="Recovered ASM scan queued by an interrupted research dispatch",
-                result_json={
-                    "scan_id": str(row["recovered_scan_id"]),
-                    "job_id": str(row.get("recovered_scan_job_id") or ""),
-                    "status": scan_status,
-                    "recovered_from_scan_correlation": True,
-                },
-                next_action=f"/scans/{row['recovered_scan_id']}",
-                created_by=correlation,
-            )
-            receipt_id = synthesized["id"]
-            recovered_status = str(synthesized.get("status") or "")
-            recovered_dry_run = bool(synthesized.get("dry_run"))
-        if not receipt_id and row["recovered_retest_id"]:
-            synthesized = await _record_command_result(
-                conn,
-                command="finding.retest",
-                status=(
-                    "retest_scheduled"
-                    if str(row["recovered_retest_status"] or "") in {"queued", "running"}
-                    else str(row["recovered_retest_status"] or "completed")
-                ),
-                risk_tier="active",
-                finding_ids=[str(row["recovered_finding_id"])],
-                operator_message="Recovered finding retest queued by an interrupted research dispatch",
-                result_json={
-                    "finding_id": str(row["recovered_finding_id"]),
-                    "retest_id": str(row["recovered_retest_id"]),
-                    "status": str(row["recovered_retest_status"] or "unknown"),
-                },
-                next_action=f"/findings/{row['recovered_finding_id']}",
-                created_by=correlation,
-            )
-            receipt_id = synthesized["id"]
-            recovered_status = str(synthesized.get("status") or "")
-            recovered_dry_run = bool(synthesized.get("dry_run"))
-        if receipt_id:
-            if not row["linked_command_result_id"]:
-                policy_result = _decode_json_value(row["policy_result"]) or {}
-                settled_cost = dict(policy_result.get("cost_reserved") or {})
-                if recovered_dry_run or recovered_status in {
-                    "blocked", "approval_required", "failed", "cancelled",
-                }:
-                    settled_cost["active_actions"] = 0
-                    settled_cost["requests"] = 0
-                    settled_cost["seconds"] = 0
-                recovered_decision_status = (
-                    "blocked"
-                    if recovered_dry_run or recovered_status in {
-                        "blocked", "approval_required", "failed", "cancelled",
-                    }
-                    else "dispatching"
-                )
-                used = _research_apply_cost(
-                    _decode_json_value(row["budget_used"]) or {},
-                    settled_cost,
-                )
-                next_step = int(row["step_count"] or 0) + 1
-                max_steps = int((_decode_json_value(row["budget_limits"]) or {}).get("steps") or 1)
-                await conn.execute(
-                    """
-                    UPDATE research_decisions
-                    SET command_result_id=$2, status=$4,
-                        policy_result=$3::jsonb, updated_at=NOW()
-                    WHERE id=$1 AND command_result_id IS NULL
-                    """,
-                    row["decision_id"],
-                    _optional_uuid(receipt_id),
-                    json.dumps({
-                        **policy_result,
-                        "recovered_dispatch": True,
-                        "cost_settled": settled_cost,
-                    }),
-                    recovered_decision_status,
-                )
-                await conn.execute(
-                    """
-                    UPDATE research_episodes
-                    SET status='awaiting_observation', step_count=$2,
-                        budget_used=$3::jsonb,
-                        stop_reason=CASE WHEN $2 >= $4 THEN 'max_steps_reached_without_conclusion' ELSE stop_reason END,
-                        lease_owner=NULL, lease_expires_at=NULL,
-                        autopilot_error='recovered_expired_dispatch_with_receipt',
-                        version=version+1, updated_at=NOW()
-                    WHERE id=$1
-                    """,
-                    row["id"], next_step, json.dumps(used), max_steps,
-                )
-            else:
-                await conn.execute(
-                    """
-                    UPDATE research_episodes
-                    SET status='awaiting_observation', lease_owner=NULL, lease_expires_at=NULL,
-                        autopilot_error='recovered_expired_dispatch_with_receipt', updated_at=NOW()
-                    WHERE id=$1
-                    """,
-                    row["id"],
-                )
-            summary = "Recovered expired dispatch from its durable command receipt"
-            status = "awaiting_observation"
-        else:
-            await conn.execute(
-                """
-                UPDATE research_episodes
-                SET status='blocked', autopilot_enabled=false, lease_owner=NULL,
-                    lease_expires_at=NULL, stop_reason='dispatch_outcome_unknown',
-                    autopilot_error='dispatch_outcome_unknown_no_replay', updated_at=NOW()
-                WHERE id=$1
-                """,
-                row["id"],
-            )
-            await conn.execute(
-                """
-                UPDATE research_decisions
-                SET status='blocked', validation_errors=(validation_errors || '["dispatch_outcome_unknown"]'::jsonb),
-                    updated_at=NOW()
-                WHERE id=$1 AND status='dispatching'
-                """,
-                row["decision_id"],
-            )
-            summary = "Blocked expired dispatch with no durable receipt; action was not replayed"
-            status = "blocked"
-        await _record_research_event(
-            conn,
-            row["id"],
-            event_type="dispatch_reconciled",
-            status=status,
-            summary=summary,
-            decision_id=row["decision_id"],
-            command_result_id=receipt_id,
-        )
-        repaired += 1
-    return repaired
 
 
-RESEARCH_PROCESSING_LEASE_MAX_AGE_SECONDS = 120
 
 
 def _redis_hash_text(payload: Any) -> dict[str, str]:
@@ -18969,56 +17931,8 @@ def _redis_hash_text(payload: Any) -> dict[str, str]:
     return result
 
 
-def _research_fresh_processing_lease(
-    metadata: Any,
-    *,
-    now: datetime | None = None,
-    max_age_seconds: int = RESEARCH_PROCESSING_LEASE_MAX_AGE_SECONDS,
-) -> bool:
-    """Accept only a worker-authored, recent pop/heartbeat marker.
-
-    The API's ordinary ``status=queued`` cache hash is not queue durability: it
-    survives a Stream lease, worker crashes, and queue clearing. Workers stamp
-    ``processing_lease_at`` immediately after leasing; running jobs also maintain
-    ``heartbeat``. Either timestamp is useful only while fresh.
-    """
-    values = _redis_hash_text(metadata)
-    raw_timestamp = values.get("processing_lease_at") or values.get("heartbeat")
-    if not raw_timestamp:
-        return False
-    try:
-        parsed = datetime.fromisoformat(raw_timestamp.replace("Z", "+00:00"))
-    except (TypeError, ValueError):
-        return False
-    if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=timezone.utc)
-    current = now or datetime.now(timezone.utc)
-    age_seconds = (current - parsed.astimezone(timezone.utc)).total_seconds()
-    return -5 <= age_seconds <= max(1, int(max_age_seconds))
 
 
-def _research_queue_presence(
-    redis_client,
-    *,
-    queue_ids: Any,
-    job_id: str,
-    metadata_key: str,
-    now: datetime | None = None,
-) -> bool | None:
-    """Return True for durable/fresh work, False for proven orphan, None if unknown.
-
-    ``queue_ids`` is a set of queued job ids or a bounded read (``scan_queue_job_ids``)."""
-    if not job_id:
-        return False
-    queued = queue_ids.presence(job_id) if hasattr(queue_ids, "presence") else job_id in queue_ids
-    if queued is not False:
-        return queued  # queued (True), or not provably absent from a bounded read (None)
-    try:
-        metadata = redis_client.hgetall(metadata_key)
-    except Exception:
-        # A partial Redis read cannot prove absence; retry on the next sweep.
-        return None
-    return _research_fresh_processing_lease(metadata, now=now)
 
 
 async def _reconcile_unconfirmed_queue_handoffs(conn) -> int:
@@ -19057,138 +17971,8 @@ async def _reconcile_unconfirmed_queue_handoffs(conn) -> int:
     return repaired
 
 
-async def _reconcile_research_orphaned_queue_work(conn) -> int:
-    """Fail closed work committed to Postgres but lost before its Redis enqueue."""
-    scan_rows = await conn.fetch(
-        """
-        SELECT re.id AS episode_id, s.id, s.job_id
-        FROM research_episodes re
-        JOIN research_decisions rd ON rd.episode_id=re.id
-        JOIN command_results cr ON cr.id=rd.command_result_id
-        JOIN scans s ON s.id=cr.scan_id
-        WHERE re.status='awaiting_observation' AND re.cancel_requested=false
-          AND s.status IN ('pending','queued')
-          AND s.created_at < NOW() - INTERVAL '5 minutes'
-        FOR UPDATE OF s SKIP LOCKED
-        LIMIT 25
-        """
-    )
-    retest_rows = await conn.fetch(
-        """
-        SELECT re.id AS episode_id, fv.id, fv.job_id, fv.finding_id
-        FROM research_episodes re
-        JOIN research_decisions rd ON rd.episode_id=re.id
-        JOIN command_results cr ON cr.id=rd.command_result_id
-        JOIN finding_verifications fv ON fv.id=(CASE WHEN cr.result_json->>'retest_id' ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' THEN (cr.result_json->>'retest_id')::uuid END)
-        WHERE re.status='awaiting_observation' AND re.cancel_requested=false
-          AND fv.status='queued'
-          AND fv.created_at < NOW() - INTERVAL '5 minutes'
-        FOR UPDATE OF fv SKIP LOCKED
-        LIMIT 25
-        """
-    )
-    if not scan_rows and not retest_rows:
-        return 0  # nothing to prove: the queues are not read at all
-    try:
-        redis_client = get_redis()
-        redis_client.ping()
-        # Bounded reads for exactly these jobs: a job not seen in an incomplete read is unknown.
-        scan_queue_ids = await asyncio.to_thread(
-            scan_queue_job_ids, redis_client, QUEUE_NAME, wanted={str(row["job_id"] or "") for row in scan_rows})
-        retest_queue_ids = await asyncio.to_thread(
-            scan_queue_job_ids, redis_client, RETEST_QUEUE_NAME,
-            wanted={str(row["job_id"] or "") for row in retest_rows})
-        if scan_queue_ids.error or retest_queue_ids.error:
-            return 0
-    except Exception:
-        # Queue visibility is required to prove a job is orphaned.
-        return 0
-
-    repaired = 0
-    for row in scan_rows:
-        job_id = str(row["job_id"] or "")
-        presence = _research_queue_presence(
-            redis_client,
-            queue_ids=scan_queue_ids,
-            job_id=job_id,
-            metadata_key=f"job:{job_id}",
-        )
-        if presence is not False:
-            continue
-        changed = await conn.fetchval(
-            """
-            UPDATE scans
-            SET status='failed', progress=100, current_phase='terminated', completed_at=NOW(),
-                error_message='Research dispatch queue handoff was not durable; job was never enqueued.'
-            WHERE id=$1 AND status IN ('pending','queued')
-            RETURNING id
-            """,
-            row["id"],
-        )
-        if changed:
-            await _record_research_event(
-                conn,
-                row["episode_id"],
-                event_type="orphaned_queue_work_failed",
-                status="failed",
-                summary="Marked a scan failed because its durable queue handoff was missing",
-                details={"kind": "scan", "scan_id": str(row["id"]), "job_id": job_id},
-            )
-            repaired += 1
-    for row in retest_rows:
-        job_id = str(row["job_id"] or "")
-        presence = _research_queue_presence(
-            redis_client,
-            queue_ids=retest_queue_ids,
-            job_id=job_id,
-            metadata_key=f"retest_job:{job_id}",
-        )
-        if presence is not False:
-            continue
-        changed = await conn.fetchval(
-            """
-            UPDATE finding_verifications
-            SET status='failed', result_status='error', verdict='error',
-                verdict_reason='Research dispatch queue handoff was not durable; job was never enqueued.',
-                error_message='Research dispatch queue handoff missing', completed_at=NOW(), updated_at=NOW()
-            WHERE id=$1 AND status='queued'
-            RETURNING id
-            """,
-            row["id"],
-        )
-        if changed:
-            await conn.execute(
-                """
-                UPDATE findings f
-                SET last_verification_status='error', last_verification_verdict='error',
-                    last_verified_at=NOW(), updated_at=NOW()
-                WHERE f.id=$1
-                  AND NOT EXISTS (
-                      SELECT 1 FROM finding_verifications active
-                      WHERE active.finding_id=f.id AND active.status IN ('queued','running')
-                  )
-                  AND (
-                      SELECT latest.id FROM finding_verifications latest
-                      WHERE latest.finding_id=f.id ORDER BY latest.created_at DESC LIMIT 1
-                  )=$2
-                """,
-                row["finding_id"], row["id"],
-            )
-            await _record_research_event(
-                conn,
-                row["episode_id"],
-                event_type="orphaned_queue_work_failed",
-                status="failed",
-                summary="Marked a finding retest failed because its durable queue handoff was missing",
-                details={"kind": "finding_retest", "retest_id": str(row["id"]), "job_id": job_id},
-            )
-            repaired += 1
-    return repaired
 
 
-async def research_autopilot_runner(pool) -> None:
-    """Durably advance opted-in episodes under one leader (research_routes/autopilot_loop.py)."""
-    await run_research_autopilot(pool, sys.modules[__name__])
 
 
 

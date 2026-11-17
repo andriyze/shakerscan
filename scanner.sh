@@ -1516,7 +1516,7 @@ install_dependencies_macos() {
     fi
 
     if ! command_exists python3; then
-        echo -e "${GREEN}Installing Python 3 for host-side MCP and legacy research adapters...${NC}"
+        echo -e "${GREEN}Installing Python 3 for host-side MCP and the local planner adapter...${NC}"
         brew install python
     fi
 
@@ -1591,7 +1591,7 @@ command_needs_jq() {
 
 command_needs_python() {
     case "$1" in
-        scan|mcp|research|report-rebuild)
+        scan|mcp|report-rebuild)
             return 0
             ;;
         *)
@@ -2498,7 +2498,6 @@ print_help() {
     echo "  version            Print the engine release (and source revision in a checkout)"
     echo "  agent [name]       Start Codex, Claude, OpenCode, or Pi in this runtime dir"
     echo "  mcp                Start MCP: read-only Arsenal inspection plus target-bound Hunt V2"
-    echo "  research <id> [N]  Run up to N bounded Codex decisions for a research episode"
     echo "  gungnir <cmd>      CT monitor: start, stop, status, logs"
     echo "  devices <cmd>      Network worker: start, stop, restart, status, logs"
     echo "  model-intake <cmd> Optional Model Intake module: enable, disable [--remove-images], status"
@@ -2555,7 +2554,6 @@ print_help() {
     echo "  ./scanner.sh start --remote           # VPS access over Tailscale"
     echo "  ./scanner.sh env                      # Show PATH and agent launch commands"
     echo "  ./scanner.sh agent codex              # Start an AI agent with local docs loaded"
-    echo "  ./scanner.sh research <episode-id> 5  # Drive a bounded research episode"
     echo "  ./scanner.sh fleet init --endpoint fleet.example.com:51820 --public-url https://fleet.example.com"
     echo "  ./scanner.sh fleet init --network broker --public-url https://fleet.example.com"
     echo "  ./scanner.sh fleet join-token --ttl 24h"
@@ -4381,10 +4379,8 @@ start_agent() {
                 if command_exists "$agent"; then
                     echo "Starting $agent in $SCRIPT_DIR"
                     echo "This lets the agent read README.md, AGENTS.md, skills/, and .claude/."
-                    echo "Research planner: this agent session (no stored AI provider required)."
                     cd "$SCRIPT_DIR"
                     export SHAKERSCAN_AGENT_NAME="$agent"
-                    export SHAKERSCAN_RESEARCH_PLANNER_MODE="agent"
                     # Remote mode intentionally may not publish loopback. Give
                     # project hooks and commands the host-reachable API plus the
                     # browser-facing UI URL derived from the persisted access
@@ -4688,11 +4684,6 @@ if [ "$COMMAND_HELP_ONLY" -eq 1 ]; then
             echo "Starts MCP with read-only Arsenal inspection and target-bound Hunt V2 tools."
             exit 0
             ;;
-        research)
-            echo "Usage: ./scanner.sh research <episode-id> [max-decisions]"
-            echo "Runs bounded compatibility research decisions for an existing episode."
-            exit 0
-            ;;
         gungnir)
             gungnir_cmd --help
             exit 0
@@ -4884,26 +4875,6 @@ case $COMMAND in
             exit 1
         fi
         exec python3 "$SCRIPT_DIR/scripts/fleet_cli.py" --runtime "$SCRIPT_DIR" join "${ARGS[@]}"
-        ;;
-    research)
-        if [ -z "${ARGS[0]:-}" ]; then
-            echo "Usage: ./scanner.sh research <episode-id> [max-decisions]"
-            exit 1
-        fi
-        for required_file in \
-            "$SCRIPT_DIR/scripts/local_planner_adapter.py" \
-            "$SCRIPT_DIR/scripts/planner_evals.py" \
-            "$SCRIPT_DIR/api/command_arsenal.py"; do
-            if [ ! -f "$required_file" ]; then
-                echo -e "${RED}Error: legacy research adapter runtime files are incomplete.${NC}"
-                echo "Re-run the ShakerScan installer to refresh runtime files."
-                exit 1
-            fi
-        done
-        exec python3 "$SCRIPT_DIR/scripts/local_planner_adapter.py" episode \
-            --api-url "$(api_probe_url)" \
-            --episode-id "${ARGS[0]}" \
-            --max-decisions "${ARGS[1]:-5}"
         ;;
     gungnir)
         gungnir_cmd "${ARGS[0]}"

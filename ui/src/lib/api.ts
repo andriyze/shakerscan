@@ -242,200 +242,6 @@ export interface OperationPlanResponse {
   validated: boolean
 }
 
-export interface ResearchBudget {
-  steps: number
-  actions: number
-  active_actions: number
-  requests: number
-  seconds: number
-  model_tokens: number
-}
-
-export interface ResearchEpisode {
-  id: string
-  target_id: string
-  campaign_id?: string | null
-  objective: string
-  episode_version: string
-  planner: Record<string, unknown>
-  mission_profile?: string
-  subject?: { type?: string; id?: string; title?: string; family?: string }
-  allowed_commands?: string[]
-  execution_mode: 'shadow' | 'read_only' | 'gated'
-  status: string
-  version: number
-  max_risk_tier: string
-  allowed_families: string[]
-  budget_limits: ResearchBudget
-  budget_used: ResearchBudget
-  remaining_budget: ResearchBudget
-  scope_receipt_id?: string | null
-  approval_receipt_id?: string | null
-  current_observation_id?: string | null
-  current_decision_id?: string | null
-  step_count: number
-  cancel_requested: boolean
-  autopilot_enabled: boolean
-  autopilot_error?: string | null
-  autopilot_consecutive_failures: number
-  stop_reason?: string | null
-  requested_input?: string | null
-  terminal: boolean
-  execution_enabled: boolean
-  created_at?: string
-  updated_at?: string
-}
-
-export interface ResearchCommandProjection {
-  name: string
-  status: string
-  risk_tier: string
-  description?: string
-  parameters_schema: Record<string, unknown>
-  required_confirmations: string[]
-  proposable: boolean
-  currently_executable: boolean
-  blocked_by: string[]
-}
-
-export interface ResearchObservation {
-  id: string
-  episode_id: string
-  sequence: number
-  observation_version: string
-  context_hash: string
-  observation_pack: {
-    objective?: string
-    execution_mode?: string
-    mission?: Record<string, unknown>
-    focus?: Record<string, unknown>
-    current_gaps?: Array<Record<string, unknown>>
-    hypotheses_summary?: Array<Record<string, unknown>>
-    findings_summary?: Array<Record<string, unknown>>
-    remaining_budget?: ResearchBudget
-    proposable_commands?: ResearchCommandProjection[]
-    recent_actions?: Array<Record<string, unknown>>
-    previous_observation?: Record<string, unknown>
-  }
-  previous_command_result_id?: string | null
-  created_at?: string
-}
-
-export interface ResearchDecision {
-  id: string
-  sequence: number
-  decision_type: string
-  action: { command?: string; parameters?: Record<string, unknown> }
-  expected_signal?: string | null
-  falsifier?: string | null
-  reason?: string | null
-  confidence: number
-  requested_input?: string | null
-  stop_reason?: string | null
-  status: string
-  validation_errors: string[]
-  validation_warnings: string[]
-  policy_result: Record<string, unknown>
-  planner?: Record<string, unknown>
-  command_result_id?: string | null
-  created_at?: string
-}
-
-export interface ResearchEvent {
-  id: string
-  event_type: string
-  status: string
-  summary: string
-  details: Record<string, unknown>
-  created_at?: string
-}
-
-export interface ResearchEpisodeDetail {
-  episode: ResearchEpisode
-  current_observation: ResearchObservation | null
-  observations: ResearchObservation[]
-  decisions: ResearchDecision[]
-  events: ResearchEvent[]
-  waiting_on?: Array<{
-    kind: 'scan' | 'finding_retest' | string
-    id: string
-    status: string
-    ui_path?: string
-  }>
-  accepted?: boolean
-  dispatched?: boolean
-  decision_id?: string
-  planner_call?: Record<string, unknown>
-}
-
-export interface ResearchEpisodeCreateRequest {
-  target_id: string
-  objective: string
-  execution_mode: 'shadow' | 'read_only' | 'gated'
-  max_risk_tier: string
-  allowed_families?: string[]
-  max_steps: number
-  budget_limits?: Partial<ResearchBudget>
-  scope_receipt_id?: string
-  approval_receipt_id?: string
-  created_by?: string
-  autopilot?: boolean
-}
-
-export interface ResearchEpisodeLaunchRequest {
-  subject_type: 'target' | 'finding' | 'asm'
-  subject_id: string
-  mission_profile: 'target_hunt' | 'verify_finding' | 'close_asm_gaps'
-  intensity: 'analyze' | 'hunt' | 'relentless' | 'deep_hunt'
-  approval_receipt_id?: string
-  planner_mode?: ResearchPlannerMode
-  autopilot?: boolean
-  force_new?: boolean
-  created_by?: string
-}
-
-export interface ResearchEpisodeLaunchResponse extends ResearchEpisodeDetail {
-  ui_path?: string
-  reused: boolean
-}
-
-export type ResearchPlannerMode = 'agent' | 'local_codex' | 'configured_ai'
-
-export interface ResearchCampaignLaunchRequest {
-  target_id: string
-  intensity?: 'analyze' | 'hunt' | 'relentless' | 'deep_hunt'
-  approval_receipt_id?: string
-  planner_mode?: ResearchPlannerMode
-  duration_hours?: number
-  max_episodes?: number
-  objective?: string
-  allowed_families?: string[]
-  created_by?: string
-}
-
-export interface ResearchCampaignLaunchResponse {
-  campaign: Campaign
-  episode: ResearchEpisodeLaunchResponse | null
-  readiness?: Record<string, unknown>
-  preflight?: { action?: string; scan_id?: string | null; status?: string }
-  ui_path?: string
-}
-
-export interface ResearchReadiness {
-  planner_ready: boolean
-  configured_planner_ready?: boolean
-  default_planner_mode?: ResearchPlannerMode
-  planner_modes?: Partial<Record<ResearchPlannerMode, {
-    ready: boolean
-    durable: boolean
-    label: string
-  }>>
-  execution_enabled: boolean
-  campaign_readiness_policy?: Record<string, unknown>
-  model?: string | null
-  fallback_models: string[]
-}
-
 export interface CommandResult {
   id: string
   command: string
@@ -573,37 +379,6 @@ export interface CampaignDetailResponse {
   total_action_count: number
   status_rollup: Record<string, number>
   deployment_impact: CampaignDeploymentImpact
-  research_yield?: {
-    episodes: number
-    decisions: number
-    model_units: number
-    experiments: number
-    falsified_experiments: number
-    experiment_outcomes?: Record<string, number>
-    non_scientific_experiments?: number
-    semantic_dimensions_tested: number
-    exhausted_dimensions: number
-    recon_actions: number
-    novelty_suppressions: number
-    verified_autonomous_findings: number
-    verified_campaign_scan_findings?: number
-    verified_campaign_retest_findings?: number
-    net_new_verified_findings?: number
-    finding_yield_per_experiment: number
-    model_units_per_verified_finding?: number | null
-    surface?: Record<string, number>
-    stop_recommended: boolean
-    stop_reason?: string | null
-  } | null
-  research_readiness?: {
-    ready: boolean
-    state: string
-    blockers?: string[]
-    // surface mixes route counts (number), inventory/graph timestamps (string),
-    // meaningful_preflight_gain (boolean), and executable_families (string[]).
-    surface?: Record<string, unknown>
-    preflight_scan?: Record<string, unknown> | null
-  } | null
   execution_enabled: boolean
 }
 
@@ -2885,22 +2660,17 @@ export interface AutomationSettings {
     planned_high_risk_families_fail_closed: boolean
     approval_receipts_required_for_state_changing_actions: boolean
   }
-  research_agent: {
-    default_planner_mode: ResearchPlannerMode
-    available_planner_modes: ResearchPlannerMode[]
-  }
 }
 
 export interface AutomationSettingsUpdate extends ScanExecutionSettingsUpdate {
   default_asm_enabled?: boolean
   default_asm_config?: Partial<AsmAutomationConfig>
-  default_research_planner_mode?: ResearchPlannerMode
   approval_receipts_required_for_state_changing_actions?: boolean
 }
 
 export interface AIProbeResponse {
   status: 'ok' | 'failed'
-  scope: 'scan' | 'verify' | 'research'
+  scope: 'scan' | 'verify'
   probe: {
     ok: boolean
     error?: string | null
@@ -3941,58 +3711,6 @@ export async function getAgentDecisionTraces(limit: number = 20): Promise<{ deci
   return res.json()
 }
 
-export async function getResearchEpisodes(params?: {
-  target_id?: string
-  campaign_id?: string
-  status?: string
-  limit?: number
-}): Promise<{ episodes: ResearchEpisode[]; count: number }> {
-  const search = new URLSearchParams()
-  if (params?.target_id) search.set('target_id', params.target_id)
-  if (params?.campaign_id) search.set('campaign_id', params.campaign_id)
-  if (params?.status) search.set('status', params.status)
-  search.set('limit', String(params?.limit || 50))
-  const res = await fetch(`${API_URL}/research/episodes?${search}`)
-  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to load research episodes'))
-  return res.json()
-}
-
-export async function getResearchEpisode(episodeId: string): Promise<ResearchEpisodeDetail> {
-  const res = await fetch(`${API_URL}/research/episodes/${pathSegment(episodeId)}`)
-  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to load research episode'))
-  return res.json()
-}
-
-export async function createResearchEpisode(payload: ResearchEpisodeCreateRequest): Promise<ResearchEpisodeDetail> {
-  const res = await fetch(`${API_URL}/research/episodes`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(payload),
-  })
-  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to create research episode'))
-  return res.json()
-}
-
-export async function launchResearchCampaign(payload: ResearchCampaignLaunchRequest): Promise<ResearchCampaignLaunchResponse> {
-  const res = await fetch(`${API_URL}/research/campaigns/launch`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(payload),
-  })
-  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to launch autonomous research campaign'))
-  return res.json()
-}
-
-export async function controlResearchCampaign(campaignId: string, action: 'pause' | 'resume' | 'cancel'): Promise<{ campaign: Campaign; affected_episode_ids: string[]; cancelled_episode_ids: string[] }> {
-  const res = await fetch(`${API_URL}/research/campaigns/${pathSegment(campaignId)}/control`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ action, created_by: 'research_agent_ui' }),
-  })
-  if (!res.ok) throw new Error(await getApiErrorMessage(res, `Failed to ${action} research campaign`))
-  return res.json()
-}
-
 export interface AgentVerifiedFinding {
   id: string
   title: string
@@ -4026,36 +3744,6 @@ export interface AgentTwoTierFindings {
 export async function getAgentTwoTierFindings(targetId: string): Promise<AgentTwoTierFindings> {
   const res = await fetch(`${API_URL}/agent/findings/${pathSegment(targetId)}`)
   if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to load agent findings'))
-  return res.json()
-}
-
-export async function setResearchEpisodeAutopilot(
-  episodeId: string,
-  enabled: boolean,
-  plannerMode?: ResearchPlannerMode,
-): Promise<ResearchEpisodeDetail> {
-  const res = await fetch(`${API_URL}/research/episodes/${pathSegment(episodeId)}/autopilot`, {
-    method: 'PUT',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ enabled, planner_mode: plannerMode, created_by: 'research_agent_ui' }),
-  })
-  if (!res.ok) throw new Error(await getApiErrorMessage(res, enabled ? 'Failed to resume autopilot' : 'Failed to pause autopilot'))
-  return res.json()
-}
-
-export async function refreshResearchObservation(episodeId: string): Promise<ResearchEpisodeDetail> {
-  const res = await fetch(`${API_URL}/research/episodes/${pathSegment(episodeId)}/observe`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ created_by: 'research_agent_ui' }),
-  })
-  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to refresh research observation'))
-  return res.json()
-}
-
-export async function cancelResearchEpisode(episodeId: string): Promise<ResearchEpisodeDetail> {
-  const res = await fetch(`${API_URL}/research/episodes/${pathSegment(episodeId)}/cancel`, { method: 'POST' })
-  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to cancel research episode'))
   return res.json()
 }
 
@@ -6859,7 +6547,7 @@ export async function updateAutomationSettings(data: AutomationSettingsUpdate): 
 }
 
 export async function testAISettings(data: {
-  scope: 'scan' | 'verify' | 'research'
+  scope: 'scan' | 'verify'
   ai_url?: string
   ai_api_key?: string
   ai_model?: string

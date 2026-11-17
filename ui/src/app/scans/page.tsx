@@ -1,15 +1,13 @@
 'use client'
-import { featureEnabled } from '@/lib/workspaceCapabilities'
 
-import { useEffect, useState, useCallback, useMemo, useRef, Suspense } from 'react'
+import { useEffect, useState, useCallback, useRef, Suspense } from 'react'
 import Link from '@/components/WorkspaceLink'
-import { getScans, cancelScan, getCampaigns, getDomains, getGradeColor, formatDate, formatDuration, submitScanV2, type Campaign, type Scan } from '@/lib/api'
+import { getScans, cancelScan, getDomains, getGradeColor, formatDate, formatDuration, submitScanV2, type Scan } from '@/lib/api'
 import { assuranceClass, scanAssurance } from '@/lib/assurance.mjs'
 import { useUrlFilters } from '@/lib/useUrlFilters'
 import { SCAN_STATUSES } from '@/lib/constants'
 import { Plus, Search } from 'lucide-react'
 import { buttonClasses, Card, ConfirmDialog, ErrorState, Input, LastUpdated, PageHeader, ScanStatusBadge, Select, TableSkeleton, useToast } from '@/components/ui'
-import { episodesStarted, findingCount, RunStatusBadge, runState } from '@/components/hunt'
 import { boundedTargetDisplay } from '@/lib/targetChoices'
 import { usePoll } from '@/lib/usePoll'
 import { useCan } from '@/lib/useSessionCapabilities'
@@ -138,27 +136,8 @@ function formatAITargetType(value?: string | null): string | null {
   return labels[value] || value.replace(/_/g, ' ')
 }
 
-function huntTargetUrl(campaign: Campaign): string {
-  const url = campaign.target_scope?.url
-  return typeof url === 'string' && url.trim() ? url : ''
-}
-
-function huntTargetLabel(campaign: Campaign): string {
-  return boundedTargetDisplay({
-    url: huntTargetUrl(campaign) || campaign.name,
-  }) || 'Autonomous run'
-}
-
 function scanTargetLabel(scan: Scan): string {
   return boundedTargetDisplay({ url: scan.target_url }) || 'Unknown target'
-}
-
-function huntMatchesFilters(campaign: Campaign, status: string, domain: string, search: string): boolean {
-  if (status && !['active', 'running', 'pending', 'queued'].includes(status.toLowerCase())) return false
-  const target = huntTargetUrl(campaign).toLowerCase()
-  if (domain && !target.includes(domain.toLowerCase())) return false
-  const query = search.trim().toLowerCase()
-  return !query || `${campaign.name || ''} ${target}`.toLowerCase().includes(query)
 }
 
 interface ScansFilters {
@@ -180,7 +159,6 @@ function ScansContent() {
   const toast = useToast()
 
   const [scans, setScans] = useState<Scan[]>([])
-  const [activeHunts, setActiveHunts] = useState<Campaign[]>([])
   const [loading, setLoading] = useState(true)
   const [loadError, setLoadError] = useState(false)
   const [lastUpdated, setLastUpdated] = useState<Date | null>(null)
@@ -288,36 +266,23 @@ function ScansContent() {
     }
   }, [statusFilter, domainFilter, targetIdFilter, searchQuery, withinFilter, includeInternal, rawPage, setFilter])
 
-  const fetchActiveHunts = useCallback(async (signal?: AbortSignal): Promise<boolean> => {
-    if (!featureEnabled('hunt')) return true
-    try {
-      const data = await getCampaigns({ status: 'active', limit: 50 })
-      if (signal?.aborted) return true
-      setActiveHunts((data.campaigns || []).filter((campaign) => campaign.campaign_type === 'autonomous_research'))
-      return true
-    } catch (err) {
-      console.error('Failed to fetch active autonomous hunts:', err)
-      return false
-    }
-  }, [])
-
-  // Poll every 5 s only while something on the page is live (a pending/running scan or an active
-  // autonomous Hunt); otherwise once a minute to notice new work. Paused in hidden tabs, backed
+  // Poll every 5 s only while something on the page is live (a pending or running scan);
+  // otherwise once a minute to notice new work. Paused in hidden tabs, backed
   // off on errors and 429s (lib/usePoll). A filter or page change restarts the loop with an exact
   // load and aborts the read in flight.
   const exactLoaded = useRef(false)
   // Declared before usePoll so the reset lands before the restarted loop's first tick reads it.
   useEffect(() => { exactLoaded.current = false }, [fetchScans])
-  const live = scans.some((scan) => scan.status === 'pending' || scan.status === 'running') || activeHunts.length > 0
+  const live = scans.some((scan) => scan.status === 'pending' || scan.status === 'running')
   usePoll(async (signal) => {
     const polling = exactLoaded.current
-    const [scansOk] = await Promise.all([fetchScans(polling, signal), fetchActiveHunts(signal)])
+    const scansOk = await fetchScans(polling, signal)
     if (!signal.aborted && scansOk) exactLoaded.current = true
   }, {
     intervalMs: SCANS_LIVE_REFRESH_MS,
     idleIntervalMs: SCANS_IDLE_REFRESH_MS,
     live,
-    deps: [fetchScans, fetchActiveHunts],
+    deps: [fetchScans],
   })
 
   // Keep running scan elapsed durations fresh without per-second churn.
@@ -340,9 +305,9 @@ function ScansContent() {
 
   async function handleManualRefresh() {
     setRefreshing(true)
-    const [scansOk, huntsOk] = await Promise.all([fetchScans(true).catch(() => false), fetchActiveHunts()])
+    const scansOk = await fetchScans(true).catch(() => false)
     setRefreshing(false)
-    if (!scansOk || !huntsOk) {
+    if (!scansOk) {
       toast.error('Some work could not be refreshed')
     }
   }
@@ -386,10 +351,6 @@ function ScansContent() {
 
   const totalPages = Math.ceil(total / PAGE_SIZE)
   const hiddenNote = includeInternal ? null : hiddenRunsNote(hiddenInternal)
-  const visibleHunts = useMemo(
-    () => activeHunts.filter((campaign) => huntMatchesFilters(campaign, statusFilter, domainFilter, searchQuery)),
-    [activeHunts, statusFilter, domainFilter, searchQuery],
-  )
 
   // Clamp page to valid range for display
   const page = Math.min(rawPage, Math.max(1, totalPages))
@@ -529,7 +490,6 @@ function ScansContent() {
         <div className="flex flex-wrap items-center justify-between gap-2">
           <span className="text-sm text-gray-400" data-testid="scans-count">
             {scansShownText(total, page, PAGE_SIZE)}
-            {visibleHunts.length > 0 ? ` · ${visibleHunts.length} active hunt${visibleHunts.length === 1 ? '' : 's'}` : ''}
             {hiddenNote && (
               <>
                 {' · '}
@@ -559,7 +519,7 @@ function ScansContent() {
       <Card>
         {loading ? (
           <TableSkeleton rows={8} cols={6} />
-        ) : scans.length === 0 && visibleHunts.length === 0 ? (
+        ) : scans.length === 0 ? (
           <div className="p-8 text-center">
             <p className="text-gray-500">
               {searchQuery || domainFilter || statusFilter ? 'No scans found matching your filters.' : 'No scans yet.'}
@@ -574,54 +534,6 @@ function ScansContent() {
               the important columns off-screen on a phone, so render each scan as
               a stacked card with everything visible in the first viewport. */}
           <div className="lg:hidden space-y-3 p-3">
-            {visibleHunts.map((campaign) => {
-              const progress = episodesStarted(campaign)
-              const found = findingCount(campaign)
-              const createdAtMs = Date.parse(campaign.created_at)
-              const duration = Number.isNaN(createdAtMs)
-                ? '-'
-                : formatDuration(Math.max(0, Math.floor((durationTickMs - createdAtMs) / 1000)))
-              return (
-                <div key={`hunt-${campaign.id}`} className="rounded-lg border border-blue-500/30 bg-blue-500/4 p-4">
-                  <div className="flex items-start justify-between gap-3">
-                    <Link
-                      href={`/deep-hunt/runs/${campaign.id}`}
-                      className="min-w-0 flex-1 truncate text-sm font-medium text-blue-300 hover:text-blue-200"
-                      title={huntTargetLabel(campaign)}
-                    >
-                      {huntTargetLabel(campaign)}
-                    </Link>
-                    <RunStatusBadge state={runState(campaign)} />
-                  </div>
-                  <div className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-2 text-sm">
-                    <span className="text-gray-400">No score yet</span>
-                    <span className={found > 0 ? 'text-emerald-300' : 'text-gray-400'}>
-                      {found} active finding{found === 1 ? '' : 's'}
-                    </span>
-                  </div>
-                  <div className="mt-2 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-gray-500">
-                    <span className="text-blue-300">Verifier · legacy</span>
-                    {progress.max > 0 ? (
-                      <span className="rounded-sm bg-gray-800 px-1.5 py-0.5 text-gray-400">
-                        Episode {progress.started}/{progress.max}
-                      </span>
-                    ) : null}
-                    <span aria-hidden="true">·</span>
-                    <span>{duration}</span>
-                    <span aria-hidden="true">·</span>
-                    <span>{formatDate(campaign.created_at)}</span>
-                  </div>
-                  <div className="mt-3">
-                    <Link
-                      href={`/deep-hunt/runs/${campaign.id}`}
-                      className="inline-flex rounded-sm bg-blue-600 px-2 py-1 text-xs font-medium text-white hover:bg-blue-700"
-                    >
-                      View hunt
-                    </Link>
-                  </div>
-                </div>
-              )
-            })}
             {scans.map((scan) => {
               const isAIScan = scan.scan_type === 'ai_gate' || scan.run_kind?.startsWith('ai_')
               const authenticated = isAuthenticatedScan(scan)
@@ -723,49 +635,6 @@ function ScansContent() {
               </tr>
             </thead>
             <tbody className="divide-y divide-gray-800">
-              {visibleHunts.map((campaign) => {
-                const progress = episodesStarted(campaign)
-                const found = findingCount(campaign)
-                const createdAtMs = Date.parse(campaign.created_at)
-                const duration = Number.isNaN(createdAtMs)
-                  ? '-'
-                  : formatDuration(Math.max(0, Math.floor((durationTickMs - createdAtMs) / 1000)))
-                return (
-                  <tr key={`hunt-${campaign.id}`} className="bg-blue-500/[0.035] transition-colors hover:bg-blue-500/[0.07]">
-                    <td className="max-w-[20rem] px-4 py-3">
-                      <Link
-                        href={`/deep-hunt/runs/${campaign.id}`}
-                        className="block truncate text-sm text-blue-300 hover:text-blue-200"
-                        title={huntTargetLabel(campaign)}
-                      >
-                        {huntTargetLabel(campaign)}
-                      </Link>
-                    </td>
-                    <td className="hidden px-4 py-3 xl:table-cell">
-                      <span className="text-sm text-blue-300">Verifier · legacy</span>
-                      {progress.max > 0 ? <div className="mt-0.5 text-xs text-gray-500">Episode {progress.started}/{progress.max}</div> : null}
-                    </td>
-                    <td className="hidden px-4 py-3 text-center text-gray-600 2xl:table-cell">—</td>
-                    <td className="px-4 py-3"><RunStatusBadge state={runState(campaign)} /></td>
-                    <td className="px-4 py-3 text-gray-600">—</td>
-                    <td className="px-4 py-3">
-                      {found > 0 && campaign.target_id ? (
-                        <Link href={`/findings?target_id=${campaign.target_id}&status=active&freshness=all`} className="text-sm text-emerald-300 hover:text-emerald-200">{found}</Link>
-                      ) : <span className="text-sm text-gray-400">{found}</span>}
-                    </td>
-                    <td className="hidden px-4 py-3 text-sm text-gray-400 xl:table-cell">{duration}</td>
-                    <td className="hidden px-4 py-3 text-sm text-gray-500 2xl:table-cell">{formatDate(campaign.created_at)}</td>
-                    <td className="px-4 py-3">
-                      <Link
-                        href={`/deep-hunt/runs/${campaign.id}`}
-                        className="inline-flex rounded-sm bg-blue-600 px-2 py-1 text-xs font-medium text-white hover:bg-blue-700"
-                      >
-                        View
-                      </Link>
-                    </td>
-                  </tr>
-                )
-              })}
               {scans.map((scan) => {
                 const isAIScan = scan.scan_type === 'ai_gate' || scan.run_kind?.startsWith('ai_')
                 const authenticated = isAuthenticatedScan(scan)

@@ -25,21 +25,6 @@ def test_no_route_remains_under_the_legacy_hunt_surfaces():
     assert route_is_declared("POST", "/hunts/{hunt_id}/capabilities/{capability_name:path}")
 
 
-def test_the_isolation_middleware_and_the_engine_code_are_gone():
-    source = api_tree_source()
-    assert not (ROOT / "api" / "hunt" / "legacy.py").exists()
-    assert not (ROOT / "api" / "agent_text_toolcalls.py").exists()
-    for symbol in (
-        "LegacyHuntIsolationMiddleware", "async def run_agent_hunt_endpoint",
-        "async def start_agent_hunt_session", "async def submit_agent_hunt_reply",
-        "async def _run_agent_hunt(", "async def _agent_apply_reply", "def _agent_hunt_run_public",
-        "def _device_agent_run_public", "async def _build_device_agent_context_pack",
-        "class AgentHuntRequest", "class AgentHuntReplyRequest", "execute_agent_tool_endpoint",
-        "verify_suspected_agent_finding",
-    ):
-        assert symbol not in source, f"{symbol} survived the legacy Hunt removal"
-    assert "verifySuspectedAgentFinding" not in (ROOT / "ui" / "src" / "lib" / "api.ts").read_text()
-
 
 def test_nothing_reads_or_writes_the_legacy_run_tables_outside_schema_and_retention():
     """The tables are history: only the schema, startup settlement and data lifecycle name them."""
@@ -58,15 +43,6 @@ def test_nothing_reads_or_writes_the_legacy_run_tables_outside_schema_and_retent
                 offenders.append(f"{relative}: {statement}")
     assert offenders == []
 
-
-def test_research_keeps_its_internal_launcher_and_planner_without_their_public_aliases():
-    tree = api_tree_source()
-    assert not route_is_declared("POST", "/research/launch")
-    assert route_is_declared("POST", "/research/campaigns/launch")
-    assert "async def launch_research_episode" in definition_source("launch_research_episode")
-    assert not route_is_declared("POST", "/research/episodes/{episode_id}/plan-step")
-    assert "async def plan_research_episode_step" not in tree
-    assert "await hub._plan_research_episode_step(" in tree
 
 
 def test_startup_drops_the_removed_engines_tables_and_keeps_what_pointed_at_them():

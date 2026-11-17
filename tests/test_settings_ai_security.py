@@ -64,7 +64,7 @@ def test_probe_of_a_new_url_without_a_key_is_refused(client, probe_calls, scope)
     assert probe_calls == []
 
 
-@pytest.mark.parametrize("scope", ["scan", "verify", "research"])
+@pytest.mark.parametrize("scope", ["scan", "verify"])
 def test_probe_of_a_new_url_with_an_empty_key_is_refused(client, probe_calls, scope):
     response = client.post("/settings/ai/test", json={
         "scope": scope, "ai_url": "https://attacker.example/collect", "ai_api_key": "  ",

@@ -107,7 +107,7 @@ function eventHref(event: TimelineEvent): string | null {
   }
   if (event.scan_id) return `/scans/${event.scan_id}`
   const campaignId = event.campaign_id || event.mission_campaign_id
-  if (campaignId) return `/deep-hunt/runs/${campaignId}`
+  if (campaignId) return `/campaigns/${campaignId}`
   return null
 }
 

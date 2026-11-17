@@ -52,7 +52,7 @@ test('scans list polls only while work is live and never opts /scans into cursor
   assert.match(list, /if \(typeof data\.total === 'number'\)/)
   assert.match(list, /!isPolling && rawPage > maxPage/)
   assert.match(list, /intervalMs: SCANS_LIVE_REFRESH_MS,\s*idleIntervalMs: SCANS_IDLE_REFRESH_MS,\s*live,/)
-  assert.match(list, /scan\.status === 'pending' \|\| scan\.status === 'running'\) \|\| activeHunts\.length > 0/)
+  assert.match(list, /const live = scans\.some\(\(scan\) => scan\.status === 'pending' \|\| scan\.status === 'running'\)\n/)
 })
 
 test('scan result reconciles report evidence with durable IDs from the scan payload', () => {

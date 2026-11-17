@@ -278,5 +278,5 @@ _ROUTER_ALIAS_DOMAINS = frozenset({
     "ai_targets", "arsenal_routes", "devices", "evidence_routes", "exposure",
     "finding_exceptions", "finding_routes", "fleet_routes", "interactive",
     "local_agent_routes", "model_intake", "operations", "policy_profiles",
-    "research_routes", "schedules", "settings_routes", "targets",
+    "schedules", "settings_routes", "targets",
 })
