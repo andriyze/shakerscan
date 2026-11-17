@@ -141,10 +141,21 @@ def test_starting_hunts_seeds_inventory_leads_once_until_the_inventory_changes(m
                 await _hunt(operator, target)
                 assert await board() == seeded
 
-                # The inventory moves: the next start refreshes the board.
+                # Re-observing a known route is not a reason to write to the board again.
                 await conn.execute(
-                    "UPDATE target_endpoints SET updated_at = NOW() + interval '1 minute' WHERE target_id=$1",
+                    """UPDATE target_endpoints SET updated_at = NOW() + interval '1 minute',
+                                                   last_seen_at = NOW() + interval '1 minute' WHERE target_id=$1""",
                     UUID(str(target)))
                 await _hunt(operator, target)
-                assert [row['endorsements'] for row in await board()] == [2] * len(seeded)
+                assert await board() == seeded
+
+                # A new route is: the next start refreshes the board and adds its lead.
+                await conn.execute(
+                    """INSERT INTO target_endpoints(target_id, method, path, fingerprint, auth_state, first_seen_at)
+                       VALUES($1,'GET','/api/invoices/9','fp-invoices','authenticated', NOW() + interval '1 minute')""",
+                    UUID(str(target)))
+                await _hunt(operator, target)
+                after = await board()
+                assert len(after) > len(seeded)
+                assert sorted(row['endorsements'] for row in after if row['id'] in {r['id'] for r in seeded}) == [2] * len(seeded)
     asyncio.run(run())

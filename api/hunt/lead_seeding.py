@@ -31,7 +31,7 @@ async def seed_started_hunt(hunt_id: Any) -> None:
     """Bring a started Hunt's target lead board up to date: graph, inventory, proof follow-ups, advisories.
 
     The graph and inventory producers are the existing target routes. Each runs only when its
-    records are newer than the leads it last wrote, so starting Hunts does not re-endorse an
+    records gained a row since the leads it last wrote, so starting Hunts does not re-endorse an
     unchanged board. Bounded, and never the reason a Hunt fails to start.
     """
     if _pool is None:
@@ -42,12 +42,14 @@ async def seed_started_hunt(hunt_id: Any) -> None:
         print(f"[hunt] lead seeding skipped: {type(exc).__name__}", file=sys.stderr, flush=True)
 
 
-#: For each seed, in configured order: the endorsement source it writes and the newest record it reads.
+#: For each seed, in configured order: the endorsement source it writes and when the records it
+#: reads last gained a row. Re-observing known routes moves ``last_seen_at`` on every Scan and Hunt;
+#: seeding on that would re-endorse every lead at every start.
 SEED_FRESHNESS = (
     ("app_graph", """SELECT GREATEST(
-                         (SELECT max(last_seen_at) FROM application_graph_nodes WHERE target_id=$1),
-                         (SELECT max(last_seen_at) FROM application_graph_edges WHERE target_id=$1))"""),
-    ("endpoint_inventory", "SELECT max(updated_at) FROM target_endpoints WHERE target_id=$1"),
+                         (SELECT max(first_seen_at) FROM application_graph_nodes WHERE target_id=$1),
+                         (SELECT max(first_seen_at) FROM application_graph_edges WHERE target_id=$1))"""),
+    ("endpoint_inventory", "SELECT max(first_seen_at) FROM target_endpoints WHERE target_id=$1"),
 )
 
 

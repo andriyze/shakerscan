@@ -131,8 +131,8 @@ Leads also follow from results. `followup_leads` holds a small table keyed by vu
 for it, recorded once with the finding as lineage. A lead another source already holds is endorsed
 and left in its writer's words; a lead an operator closed stays closed. Production runs when a
 Hunt verifies a candidate, when a Hunt reads the board, and when a Hunt starts. A start also runs
-the existing graph and inventory lead producers for the target, each only when its records are
-newer than the leads it last wrote, and records a lead for each advisory that service intelligence
+the existing graph and inventory lead producers for the target, each only when its records gained
+a row since the leads it last wrote, and records a lead for each advisory that service intelligence
 matches to an observed service and that is worth acting on (known exploited, or critical/high with
 a bundled check; not already settled by a verify Scan). All of this writes leads only: it runs no
 traffic, grants no authority and proves nothing.
