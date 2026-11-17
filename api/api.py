@@ -7141,6 +7141,7 @@ except ModuleNotFoundError:  # package import in host-side tests
     from api.worker_pools import web_dast_heartbeat_summary, worker_pool_summaries
 configure_agent_router(
     lambda: db_pool,
+    AGENT_TOOL_QUEUE_NAME=lambda: AGENT_TOOL_QUEUE_NAME,
     current_scanner_version=lambda: current_scanner_version,
     expected_build_fingerprint=lambda: expected_build_fingerprint,
     get_redis=lambda: get_redis,

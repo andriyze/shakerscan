@@ -305,3 +305,66 @@ def test_target_bound_http_never_expands_beyond_the_fallback_limit(monkeypatch):
     assert result["ok"] is False
     assert seen == [f"192.0.2.{index}" for index in range(1, 9)]
 
+
+
+def _bound_target() -> TargetBinding:
+    return TargetBinding(
+        target_id="target-1", target_kind="web", canonical_host="shop.test",
+        allowed_origins=("https://shop.test",), allowed_addresses=("203.0.113.10",),
+        allowed_root_domains=("shop.test",), scope_receipt_id="scope-1",
+    )
+
+
+def _mock_transport(monkeypatch, handler) -> None:
+    class _MockClient(httpx.AsyncClient):
+        def __init__(self, **kwargs):
+            kwargs.pop("transport", None)
+            super().__init__(transport=httpx.MockTransport(handler), **kwargs)
+
+    monkeypatch.setattr(httpx, "AsyncClient", _MockClient)
+
+
+def test_executor_follows_same_origin_chain_and_returns_final_response(monkeypatch):
+    """The bound HTTP capability every Hunt request runs through: a same-origin chain is followed
+    hop by hop, each hop is listed, and the answer is the final response."""
+    seen: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request.url.path)
+        if request.url.path == "/start":
+            return httpx.Response(302, headers={"location": "/middle"})
+        if request.url.path == "/middle":
+            return httpx.Response(302, headers={"location": "https://shop.test/end"})
+        return httpx.Response(200, text="done")
+
+    _mock_transport(monkeypatch, handler)
+    result = asyncio.run(execute_bound_http_request(
+        "https://shop.test", {"method": "GET", "path": "/start", "follow_redirects": True},
+        target=_bound_target()))
+
+    assert result["ok"] is True and result["response"]["status"] == 200
+    assert seen == ["/start", "/middle", "/end"] and result["hops_followed"] == 2
+    assert [hop["status"] for hop in result["redirect_chain"]][:2] == [302, 302]
+    # Not asked to follow: the first redirect is the answer and nothing else is requested.
+    seen.clear()
+    single = asyncio.run(execute_bound_http_request(
+        "https://shop.test", {"method": "GET", "path": "/start"}, target=_bound_target()))
+    assert single["response"]["status"] == 302 and seen == ["/start"]
+
+
+def test_executor_stops_and_records_terminal_status_on_cross_origin_hop(monkeypatch):
+    """A redirect to another origin is never requested: the chain records where it stopped."""
+    seen: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request.headers.get("host", "") + request.url.path)
+        return httpx.Response(302, headers={"location": "https://evil.test/collect"})
+
+    _mock_transport(monkeypatch, handler)
+    result = asyncio.run(execute_bound_http_request(
+        "https://shop.test", {"method": "GET", "path": "/start", "follow_redirects": True},
+        target=_bound_target()))
+
+    assert seen == ["shop.test/start"]  # one request, to the bound host only
+    assert result["hops_followed"] == 0 and result["response"]["status"] == 302
+    assert result["redirect_chain"][0]["stopped"] == "cross_origin"
