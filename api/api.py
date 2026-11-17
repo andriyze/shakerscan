@@ -6518,10 +6518,10 @@ except ModuleNotFoundError:  # package import in host-side tests
     from api.hunt.hunt_hypotheses import configure_hunt_hypotheses
 configure_hunt_hypotheses(upsert=lambda *a, **k: _upsert_hypothesis(*a, **k), canonical=lambda *a, **k: _canonical_hypothesis_request(*a, **k), claim=claim_hypothesis_row, transition=transition_hypothesis_row, request_model=HypothesisRequest)
 try:
-    from hunt.followup_leads import configure_followup_leads
+    from hunt.lead_seeding import configure_lead_seeding
 except ModuleNotFoundError:  # package import in host-side tests
-    from api.hunt.followup_leads import configure_followup_leads
-configure_followup_leads(pool=lambda: db_pool, seeds=(
+    from api.hunt.lead_seeding import configure_lead_seeding
+configure_lead_seeding(pool=lambda: db_pool, seeds=(
     lambda target_id: generate_application_graph_hypotheses(target_id, created_by="hunt_start"),
     lambda target_id: generate_endpoint_inventory_hypotheses(target_id, created_by="hunt_start"),
 ))
