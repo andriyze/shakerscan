@@ -177,6 +177,23 @@ def call(request: urllib.request.Request, *, opener=None, timeout: float = 60.0,
         raise ApiCliError(with_certificate_hint(f"cannot reach {request.full_url}: {reason}", reason)) from exc
 
 
+def detail_text(detail: dict) -> str:
+    """One error object as a reader acts on it: its message, or its code with the violation it
+    names (``{"error": "invalid_workflow", "violation": ...}`` printed only the code), and its
+    next step (a credential refusal's ``attach``)."""
+    def text(key: str) -> str:
+        value = detail.get(key)
+        return value.strip() if isinstance(value, str) else ""
+    said = text("message")
+    if not said:
+        error, violation = text("error"), text("violation")
+        said = f"{error}: {violation}" if error and violation and error not in violation else violation or error
+    attach = text("attach")
+    if attach and attach not in said:
+        said = f"{said} {attach}".strip()
+    return said or json.dumps(detail)
+
+
 def render(status: int, text: str) -> tuple[str, int]:
     """Pretty JSON on success; on an error the instance's own detail, exit 1."""
     try:
@@ -187,7 +204,7 @@ def render(status: int, text: str) -> tuple[str, int]:
         return (json.dumps(parsed, indent=2, sort_keys=False) if parsed is not None else text), 0
     detail = parsed.get("detail") if isinstance(parsed, dict) else None
     if isinstance(detail, dict):
-        detail = detail.get("message") or detail.get("error") or json.dumps(detail)
+        detail = detail_text(detail)
     if isinstance(detail, list):
         detail = "; ".join(validation_error_text(item) for item in detail)
     return f"HTTP {status}: {detail or text.strip() or 'no detail'}", 1
