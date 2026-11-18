@@ -1584,9 +1584,22 @@ class HuntRunService:
                     run_uuid,
                 )
                 if in_flight["actions"] or in_flight["reservations"]:
+                    # Name what is still running and how to wait for it: told only the first
+                    # sentence, an agent slept in a shell and retried the finish blind.
+                    running = await connection.fetch(
+                        """SELECT id, capability_name, status FROM hunt_actions
+                           WHERE hunt_run_id=$1 AND status IN ('reserved','running')
+                           ORDER BY started_at LIMIT 5""",
+                        run_uuid,
+                    )
+                    named = ", ".join(f"{item['capability_name']} {item['id']} ({item['status']})"
+                                      for item in running)
                     raise HTTPException(
                         status_code=409,
-                        detail="Hunt has reserved or running actions",
+                        detail=("Hunt has reserved or running actions"
+                                + (f": {named}" if named else ": a budget reservation is still held")
+                                + ". Wait for them with query kind=activity and filter.wait_seconds "
+                                  "until in_flight_actions is 0, then finish again"),
                     )
                 if self._finish_retainer is not None:
                     debrief["saved_action"] = await self._finish_retainer(connection, dict(row))

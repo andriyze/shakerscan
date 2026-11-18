@@ -837,6 +837,12 @@ def test_hunt_finish_refuses_in_flight_actions_and_reservations(source):
                 return _row(id=uuid.UUID(hunt_id), status="completed")
             raise AssertionError(query)
 
+        async def fetch(self, query, *_args):
+            # What still runs, named in the refusal (a held reservation has no action row).
+            assert "FROM hunt_actions" in query and "status IN ('reserved','running')" in query
+            return [{"id": action_id, "capability_name": "sqli.verify", "status": "running"}] if source == "action" else []
+
+    action_id = uuid.uuid4()
     connection = Connection()
     with pytest.raises(run_router.HTTPException) as exc:
         asyncio.run(HuntRunService(lambda: _Pool(connection)).finish(
@@ -844,7 +850,10 @@ def test_hunt_finish_refuses_in_flight_actions_and_reservations(source):
         ))
 
     assert exc.value.status_code == 409
-    assert "reserved or running" in exc.value.detail
+    assert exc.value.detail.startswith("Hunt has reserved or running actions: ")
+    assert (f"sqli.verify {action_id} (running)" if source == "action"
+            else "a budget reservation is still held") in exc.value.detail
+    assert exc.value.detail.endswith("until in_flight_actions is 0, then finish again")
     assert connection.updated is False
 
 

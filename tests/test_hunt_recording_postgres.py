@@ -336,3 +336,28 @@ def test_a_later_hunt_verifies_an_earlier_candidate_after_recording_its_own_sigh
                 assert owned.status_code != 404, owned.text
                 assert 'not produced or observed' not in owned.text
     asyncio.run(scenario())
+
+
+def test_a_finish_refused_for_running_actions_names_them_and_how_to_wait(monkeypatch):
+    """Told only "Hunt has reserved or running actions", an agent slept in a shell and retried the
+    finish blind; the refusal names what still runs and the read that waits for it."""
+    async def scenario():
+        async with startup_database() as conn:
+            app = await _prepared(conn, monkeypatch)
+            target = await conn.fetchval("INSERT INTO targets(url) VALUES('https://finish.fixture.test') RETURNING id")
+            async with AsyncClient(transport=ASGITransport(app.app), base_url='http://operator') as client:
+                start = await client.post('/hunts', json={'target_id': str(target), 'target_kind': 'web',
+                    'goal': 'Inspect fixture', 'policy': {'active_testing': False}})
+                assert start.status_code in (200, 201), start.text
+                hunt = UUID(start.json()['hunt_id'])
+                running = await conn.fetchval("""INSERT INTO hunt_actions(hunt_run_id,capability_name,status,input_summary)
+                    VALUES($1,'sqli.verify','running','{}'::jsonb) RETURNING id""", hunt)
+                refused = await client.post(f'/hunts/{hunt}/finish', json={'summary': 'Done', 'next_actions': []})
+                assert refused.status_code == 409, refused.text
+                assert refused.json()['detail'] == (
+                    f'Hunt has reserved or running actions: sqli.verify {running} (running). Wait for them '
+                    'with query kind=activity and filter.wait_seconds until in_flight_actions is 0, then finish again')
+                await conn.execute("UPDATE hunt_actions SET status='completed', completed_at=NOW() WHERE id=$1", running)
+                finished = await client.post(f'/hunts/{hunt}/finish', json={'summary': 'Done', 'next_actions': []})
+                assert finished.status_code == 200, finished.text
+    asyncio.run(scenario())
