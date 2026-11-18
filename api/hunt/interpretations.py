@@ -250,7 +250,9 @@ def clean_text(value: Any, *, field: str, maximum: int, required: bool) -> str:
                          "characters other than newline and tab")
     if _looks_secret(text):
         raise ValueError(f"{field} looks like it contains a credential or secret; reference credentials "
-                         "by handle and cite records instead of copying values")
+                         "by handle and cite records instead of copying values. A test value written as "
+                         "key=value or key: value (password=...) reads as a credential: describe it instead "
+                         "(for example: a quote-based OR payload in the password field)")
     return text
 
 

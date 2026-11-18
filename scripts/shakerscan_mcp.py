@@ -2297,16 +2297,19 @@ class ArsenalClient:
     @staticmethod
     def _validate_argument(name: str, value: Any, schema: dict[str, Any]) -> None:
         expected = schema.get("type")
+        # Say what the field holds: told only the type, an agent guessed the shape again.
+        about = schema.get("description")
+        about = f" ({about[:MAX_ACCEPTED_FIELDS_CHARS]})" if isinstance(about, str) and about.strip() else ""
         if expected == "integer" and (not isinstance(value, int) or isinstance(value, bool)):
-            raise MCPError(-32602, f"Tool argument {name} must be an integer")
+            raise MCPError(-32602, f"Tool argument {name} must be an integer{about}")
         if expected == "string" and not isinstance(value, str):
-            raise MCPError(-32602, f"Tool argument {name} must be a string")
+            raise MCPError(-32602, f"Tool argument {name} must be a string{about}")
         if expected == "boolean" and not isinstance(value, bool):
-            raise MCPError(-32602, f"Tool argument {name} must be a boolean")
+            raise MCPError(-32602, f"Tool argument {name} must be a boolean{about}")
         if expected == "object" and not isinstance(value, dict):
-            raise MCPError(-32602, f"Tool argument {name} must be an object")
+            raise MCPError(-32602, f"Tool argument {name} must be an object{about}")
         if expected == "array" and not isinstance(value, list):
-            raise MCPError(-32602, f"Tool argument {name} must be an array")
+            raise MCPError(-32602, f"Tool argument {name} must be an array{about}")
 
         allowed = schema.get("enum")
         if isinstance(allowed, list) and value not in allowed:

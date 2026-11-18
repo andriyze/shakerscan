@@ -410,3 +410,25 @@ def test_withheld_digests_reads_both_shapes():
     assert withheld_digests({"digests": {"a": {"note": "x"}, "b": "bad"}}) == {"a": {"note": "x"}}
     assert withheld_digests({"body_sha256": "c", "note": "y"}) == {"c": {"body_sha256": "c", "note": "y"}}
     assert withheld_digests(None) == {} and withheld_digests("x") == {}
+
+
+def test_a_payload_written_as_key_value_is_refused_with_how_to_describe_it():
+    # A negative result quoting a login payload as password="..." was refused with only "reference
+    # credentials by handle", which does not apply to a test value; the agent gave up recording it.
+    with pytest.raises(ValueError) as raised:
+        interpretations.clean_text("POST /hub/login with username=admin and password=\"' OR '1'='1' -- \" returned 401",
+                                   field="body", maximum=2000, required=True)
+    message = str(raised.value)
+    assert message.startswith("body looks like it contains a credential or secret")
+    assert "describe it instead" in message and "password field" in message
+    # Described instead of quoted, the same result is accepted.
+    assert interpretations.clean_text(
+        "POST /hub/login with a quote-based OR payload in the password field returned 401",
+        field="body", maximum=2000, required=True)
+
+
+def test_the_knowledge_record_inputs_condition_says_what_it_holds():
+    spec = CAPABILITY_REGISTRY.require("knowledge.record")
+    inputs = spec.input_schema["properties"]["conditions"]["properties"]["inputs"]
+    assert inputs["type"] == "object"
+    assert "mapped to what was sent" in inputs["description"]

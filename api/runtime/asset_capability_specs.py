@@ -46,7 +46,8 @@ def asset_capability_specs(spec, schema, kinds):
                       'service':text,'environment':text,'deployment_fingerprint':text,'technique':{**text,'description':
                       'How it was tested; start it with http.request (e.g. "http.request anonymous read") for a result '
                       'of your own cited http.request, or the result can never let the experiment be skipped'},
-                      'tool_version':text,'inputs':{'type':'object'},'application_state':{'type':'object'},
+                      'tool_version':text,'inputs':{'type':'object','description':
+                      'Each input name mapped to what was sent in it, for example {"q": "a single quote"}'},'application_state':{'type':'object'},
                       'budget':{'type':'object'}}}
     reviewed = (' Applied only where the operator saved instruction_changes for this target; otherwise filed as '
                 'a proposal for operator review (the result says applied=false).')

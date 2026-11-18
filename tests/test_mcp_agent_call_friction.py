@@ -32,7 +32,8 @@ SPEC.loader.exec_module(mcp)
 HUNT = "cccccccc-cccc-4ccc-8ccc-cccccccccccc"
 CONDITIONS_SCHEMA = {
     "type": "object", "additionalProperties": False,
-    "properties": {"method": {"type": "string"}, "route": {"type": "string"}, "as_principal": {"type": "string"}},
+    "properties": {"method": {"type": "string"}, "route": {"type": "string"}, "as_principal": {"type": "string"},
+                   "inputs": {"type": "object", "description": "Each input name mapped to what was sent in it"}},
 }
 CAPABILITIES = [
     {"name": "http.request", "input_schema": {"type": "object"}},
@@ -115,7 +116,19 @@ def test_unknown_nested_fields_name_the_accepted_fields():
               {"kind": "negative_result", "title": "t", "conditions": {"path": "/x", "principal": "anonymous"}})
     message = raised.value.message
     assert "Unknown input.conditions fields: path, principal" in message
-    assert "input.conditions accepts: as_principal, method, route" in message
+    assert "input.conditions accepts: as_principal, inputs, method, route" in message
+    assert engine.posts == []
+
+
+def test_a_wrongly_shaped_field_says_what_it_holds():
+    # A list of input names for conditions.inputs: the refusal said only "must be an object" and
+    # the agent sent the same shape again.
+    engine = Engine()
+    with pytest.raises(mcp.MCPError) as raised:
+        _call(_client(engine), "neg-result-0002", "knowledge.record",
+              {"kind": "negative_result", "title": "t", "conditions": {"inputs": ["username", "password"]}})
+    assert raised.value.message.startswith("Tool argument input.conditions.inputs must be an object "
+                                           "(Each input name mapped to what was sent in it).")
     assert engine.posts == []
 
 
