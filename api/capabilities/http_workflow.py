@@ -20,6 +20,18 @@ except ModuleNotFoundError:  # package import layout
 _BOUND_VALUE_MARKER = "[withheld:bound]"
 
 
+# The answer of a request that captures values (a sign-in page's Set-Cookie) shows only its status
+# and cookie names: a value it set may appear anywhere in its body. The page itself is read with
+# a second request that sends the capture back (request_bindings) and captures nothing.
+CAPTURE_BODY_HINT = (
+    "This response's body is hidden because the request captured values. To read the page as this "
+    "session (for a sign-in form's CSRF token), send another http.request that binds this capture "
+    "(request_bindings: source_action_id, capture_name, header Cookie) with no capture: its body is "
+    "shown (when every cookie value is at least 8 characters), with secret-looking values as "
+    "[withheld:N] references (withheld://hunt/<that action>/N) a later request can send."
+)
+
+
 def _scrub_bound_values(value: Any, bound: list[str]) -> Any:
     """Withhold every echo of a bound value in every string of a public response: the body
     sample, ``location``, ``final_url``, redirect locations and selected headers, in any case,
@@ -134,6 +146,10 @@ async def prepare_http_operation(
                         'truncated', 'http_version',
                     ) if key in summary}
                     response['response']['workflow_values_visible'] = False
+                    if inputs.get('capture') and not bindings:
+                        # Agents read a hidden body as "nothing to see" and guessed withheld
+                        # references into it (a sign-in page's CSRF token). Say how to read it.
+                        response['response']['workflow_values_hint'] = CAPTURE_BODY_HINT
                     # Cookie names and security attributes only, never values: a login's answer.
                     if summary.get('set_cookie_metadata'):
                         # A target names its cookies: a name may echo what this login sent.

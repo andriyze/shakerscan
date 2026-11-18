@@ -750,9 +750,23 @@ async def _withheld_value(
                 or private["target_digest"] != _target_digest(target)
                 or expires_at.tzinfo is None or expires_at <= datetime.now(timezone.utc)):
             raise ValueError("binding changed or expired")
-        return str(_scalar(private[WITHHELD_SCHEMA_KEY][str(number)]))
+        recorded = private.get(WITHHELD_SCHEMA_KEY)
+        if not isinstance(recorded, dict) or str(number) not in recorded:
+            # The Hunt's own action, live and bound, simply recorded no such value: say so, rather
+            # than "expired" (an agent guessed /1 into a captured response whose body was hidden).
+            raise _NoSuchWithheldValue
+        return str(_scalar(recorded[str(number)]))
+    except _NoSuchWithheldValue:
+        raise ValueError(
+            f"withheld value reference names no value of action {source_id}: cite only a "
+            "[withheld:N] that action's response showed (a response that captured values shows "
+            "no body and records none)") from None
     except Exception:
         raise ValueError("withheld value reference is expired or no longer bound to this Hunt") from None
+
+
+class _NoSuchWithheldValue(Exception):
+    """A live, bound action of this Hunt recorded no withheld value under that number."""
 
 
 async def _saved_login_value(

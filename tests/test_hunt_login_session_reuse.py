@@ -260,6 +260,10 @@ def test_a_hunt_logs_in_and_reads_signed_in_pages_without_seeing_the_cookie():
             # The login's answer: its status and the cookies' names and attributes, never values.
             assert {cookie["name"] for cookie in answer["set_cookie_metadata"]} >= {"hub_session", "hub_flash"}
             assert next(c for c in answer["set_cookie_metadata"] if c["name"] == "hub_session")["httponly"]
+            # The hidden body says how to read the page as this session (agents guessed withheld
+            # references into it instead).
+            assert answer["workflow_values_visible"] is False
+            assert "binds this capture" in answer["workflow_values_hint"]
 
             orders, _ = await execute(conn, {"method": "GET", "path": "/hub/orders",
                                              "request_bindings": _bound(login)}, "hub-orders")
@@ -269,7 +273,7 @@ def test_a_hunt_logs_in_and_reads_signed_in_pages_without_seeing_the_cookie():
             sent_cookie = re.search(rb"(?im)^cookie: ([^\r\n]*)", sent)[1].decode()
             assert sorted(sent_cookie.split("; ")) == sorted([f"hub_session={SESSION}", f"hub_flash={FLASH}"])
             response = orders["typed_output"]["records"][0]["response"]
-            assert response["status"] == 200
+            assert response["status"] == 200 and "workflow_values_hint" not in response
             # The planner keeps the signed-in page: its links, forms and text.
             assert "/hub/api/orders/1001" in response["html"]["links"]
             assert "Good morning, Ada" in response["html"]["text_sample"]

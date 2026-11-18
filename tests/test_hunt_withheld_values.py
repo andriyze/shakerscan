@@ -449,3 +449,28 @@ def test_withheld_only_workflow_response_scrubs_every_bound_value():
     assert API_KEYS[0] not in json.dumps(scrubbed)
     assert scrubbed["response"]["status"] == 200
     assert "welcome admin" in scrubbed["response"]["body_sample"]
+
+
+@pytest.mark.parametrize("sealed_capture_only", [False, True])
+def test_a_number_its_action_never_recorded_is_named_as_such(monkeypatch, encryption_key, sealed_capture_only):
+    """An agent guessed withheld://hunt/<a capture request>/1 into a response whose body was
+    hidden; "expired or no longer bound" sent it looking for an expiry that never happened."""
+    collector = masking.WithheldValues(ACTION)
+    observation = _inspect(monkeypatch, BACKUP_SQL, collector)["observation"]
+    conn = _ActionRows()
+    asyncio.run(persist_withheld_values(
+        conn, run=RUN, action_id=ACTION, target=TARGET,
+        values=collector.shown_values(json.dumps(observation)), status="success",
+    ))
+    if sealed_capture_only:
+        # A capture request's private result: live and bound, with captures and no withheld values.
+        from runtime import hunt_http_exchange as exchange_module
+        private = json.loads(exchange_module.decrypt_secret(conn.rows[ACTION]["private_http_result"]))
+        private.pop(exchange_module.WITHHELD_SCHEMA_KEY)
+        private["values"] = {"session": "PHPSESSID=0123456789abcdef"}
+        conn.rows[ACTION]["private_http_result"] = exchange_module.encrypt_secret(json.dumps(private))
+    with pytest.raises(ValueError, match=f"names no value of action {ACTION}"):
+        asyncio.run(prepare_http_exchange(
+            conn, run=RUN, action_id=uuid.uuid4(), target=TARGET, context={}, policy=POLICY,
+            values=_bind(f"withheld://hunt/{ACTION}/63", header="X-Admin-Token"), trusted_headers={},
+        ))
