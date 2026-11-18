@@ -448,7 +448,7 @@ async def arsenal_scope_preview(req: ScopePreviewRequest):
 async def _refuse_unbound_record_deletion_approval(
     conn, scope_row, *, risk_tier, action_name, confirmations, action_context, expires_at,
 ) -> None:
-    raw = scope_row["input_scope"]
+    raw = scope_row.get("input_scope")
     scope_input = json.loads(raw) if isinstance(raw, str) else (raw or {})
     if not isinstance(scope_input, dict) or scope_input.get("kind") != "record_deletion":
         return
