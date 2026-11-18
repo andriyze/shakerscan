@@ -1976,7 +1976,7 @@ async def _execute_hunt_capability_lifecycle(
                         if candidate_record is None:
                             raise HTTPException(
                                 status_code=404,
-                                detail="Candidate was not produced or observed by this Hunt",
+                                detail=investigation_candidates.NOT_OBSERVED_BY_THIS_HUNT,
                             )
                         if str(candidate_record["status"] or "") in {
                             "verified", "refuted", "expired",

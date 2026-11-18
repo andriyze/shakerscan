@@ -33,8 +33,10 @@ candidates, and proof. Do not start a second in-server reasoning loop.
    Hunts' leads or candidates on this target (`knowledge.counts.hypotheses` or `candidates` above
    zero, `continue_after_release.top`, `unresolved.open_candidates`), read them first (query
    `kind=hypotheses`, then `kind=candidates`), claim the top claimable lead with
-   `hypothesis.claim`, and test it before exploring elsewhere. Do not re-record a candidate an
-   earlier Hunt recorded; reproduce it in this Hunt only to verify or extend it.
+   `hypothesis.claim`, and test it before exploring elsewhere. A Hunt verifies only candidates it
+   observed: to verify a candidate an earlier Hunt recorded, repeat its request in this Hunt and
+   record it with `shakerscan_hunt_candidate` (same family, locus and claim, citing the new
+   action); it joins the existing candidate instead of adding one, and can then be verified.
 
 These public start examples are checked through standing-authorization resolution before the
 internal contract is validated. Active examples assume the operator has already authorized the
