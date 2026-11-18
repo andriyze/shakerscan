@@ -86,6 +86,16 @@ class ActionLeaseLost(ScanExecutionBackendError):
     """The worker lost exclusive action authority during execution."""
 
 
+class ActionRecoveredAsStale(ActionLeaseLost):
+    """Budget recovery terminalized the action while its worker still held it: the hold went
+    stale (the worker stopped renewing it), so the outcome is unknown and the Scan is re-run."""
+
+
+#: What budget recovery writes on an action whose hold went stale or was settled without it
+#: (reservation_recovery, action_budget_reconciliation): not a capability result, never read as one.
+RECOVERY_ERRORS = frozenset({"stale_reservation_recovered", "terminal_reservation_reconciled"})
+
+
 class ActionAuthorityWithdrawn(ScanExecutionBackendError):
     """The control plane refused a heartbeat because the target's authorization was withdrawn.
 
@@ -1126,9 +1136,18 @@ class PostgresScanExecutionBackend:
                 raise ScanExecutionBackendError("terminal Scan action has no generic result")
             return None
         try:
-            result = CapabilityResultReference.from_dict(_json_object(
-                raw, name="stored action result",
-            ))
+            stored = _json_object(raw, name="stored action result")
+        except ValueError as exc:
+            raise ScanExecutionBackendError("stored Scan action result is invalid") from exc
+        if stored.get("error") in RECOVERY_ERRORS:
+            # Read as a result this crashed the Scan with "stored Scan action result is invalid";
+            # it is a lost lease with an unknown outcome.
+            raise ActionRecoveredAsStale(
+                f"action {action.action_id} stopped renewing its budget hold and was recovered "
+                f"({str(row.get('status') or 'failed')}, {stored.get('error')}); its outcome is unknown. "
+                "The worker host was likely overloaded; re-run the Scan, with fewer at once")
+        try:
+            result = CapabilityResultReference.from_dict(stored)
             placement_from_stored_result(action=action, stored=result)
         except (CapabilityResultError, ValueError) as exc:
             raise ScanExecutionBackendError("stored Scan action result is invalid") from exc
