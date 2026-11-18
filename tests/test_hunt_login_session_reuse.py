@@ -202,7 +202,7 @@ def test_outside_a_hunt_and_for_other_content_there_is_no_outline():
 
 # --- log in, then reuse the session: the worker end to end --------------------------------------
 
-async def hub_server(wire, *, session=SESSION):
+async def hub_server(wire, *, session=SESSION, short_cookie=None):
     async def serve(reader, writer):
         try:
             head = await reader.readuntil(b"\r\n\r\n")
@@ -216,6 +216,8 @@ async def hub_server(wire, *, session=SESSION):
                     response = ("HTTP/1.1 303 See Other\r\nLocation: /hub/\r\n"
                                 f"Set-Cookie: hub_session={session}; HttpOnly; SameSite=Lax; Path=/hub\r\n"
                                 f"Set-Cookie: hub_flash={FLASH}; Path=/hub\r\n"
+                                + (f"Set-Cookie: security={short_cookie}; Path=/hub\r\n" if short_cookie else "")
+                                + 
                                 "Set-Cookie: hub_old=; Max-Age=0; Path=/hub\r\n"
                                 "Content-Length: 0\r\nConnection: close\r\n\r\n").encode()
                 else:
@@ -323,6 +325,44 @@ def test_a_short_session_cookie_is_sent_but_its_answer_is_reduced_to_the_status(
             assert response["status"] == 200 and response["workflow_values_visible"] is False
             assert "html" not in response and "body_sample" not in response
     asyncio.run(scenario())
+
+
+def test_a_short_cookie_beside_the_session_is_named_and_left_out_with_capture_cookies():
+    """A login that also sets a short cookie (DVWA's security=low) hid every signed-in page: the
+    hidden answer now says so, and a capture that keeps only the session cookies reads them."""
+    async def scenario():
+        wire = []
+        server = await hub_server(wire, short_cookie="low")
+        async with server:
+            conn = Connection(f"http://fixture.test:{server.sockets[0].getsockname()[1]}")
+            login, _ = await execute(conn, LOGIN, "hub-login-shortcookie")
+            orders, _ = await execute(conn, {"method": "GET", "path": "/hub/orders",
+                                             "request_bindings": _bound(login)}, "hub-orders-shortcookie")
+            response = orders["typed_output"]["records"][0]["response"]
+            assert response["workflow_values_visible"] is False and "html" not in response
+            assert "Capture only the session cookie" in response["workflow_values_hint"]
+
+            only = {**LOGIN, "capture": [{"name": "session", "header": "Set-Cookie",
+                                          "cookies": ["hub_session", "hub_flash"]}]}
+            login2, _ = await execute(conn, only, "hub-login-only-session")
+            orders2, _ = await execute(conn, {"method": "GET", "path": "/hub/orders",
+                                              "request_bindings": _bound(login2)}, "hub-orders-only-session")
+            sent_cookie = re.search(rb"(?im)^cookie: ([^\r\n]*)", wire[-1][0])[1].decode()
+            assert sorted(sent_cookie.split("; ")) == sorted([f"hub_session={SESSION}", f"hub_flash={FLASH}"])
+            response2 = orders2["typed_output"]["records"][0]["response"]
+            assert response2["status"] == 200 and "Good morning, Ada" in response2["html"]["text_sample"]
+            assert "workflow_values_hint" not in response2
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("capture", [
+    {"name": "s", "json_pointer": "/token", "cookies": ["sid"]},
+    {"name": "s", "header": "Location", "cookies": ["sid"]},
+    {"name": "s", "header": "Set-Cookie", "cookies": []},
+])
+def test_capture_cookies_is_only_a_set_cookie_filter(capture):
+    with pytest.raises(CapabilityInputContractError):
+        CAPABILITY_REGISTRY.validate_hunt_input("http.request", {"method": "GET", "path": "/", "capture": [capture]})
 
 
 # --- artifact.inspect reads a longer signed-in page as the same session -------------------------

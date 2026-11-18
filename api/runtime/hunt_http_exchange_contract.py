@@ -17,6 +17,8 @@ _FORBIDDEN_HEADERS = frozenset({
     "x-original-url", "x-rewrite-url", "x-http-method-override", "x-http-method", "x-method-override",
 })
 POINTER_SCHEMA = {"type": "string", "maxLength": 512}
+# A cookie name (RFC 6265 token).
+COOKIE_NAME_PATTERN = r"^[!#$%&'*+.^_`|~0-9A-Za-z-]{1,128}$"
 # A discovered secret's reference (api/hunt/discovered_secrets.py, SECRET_REF_RE).
 SECRET_REF_PATTERN = r"^secret://[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
 # A withheld value's reference (api/runtime/archive_body_masking.py, WITHHELD_REF_RE).
@@ -29,7 +31,13 @@ HTTP_EXCHANGE_PROPERTIES: Mapping[str, Any] = {
     "capture": {"type": "array", "maxItems": 16, "items": {
         "type": "object", "additionalProperties": False, "required": ["name"],
         "properties": {"name": {"type": "string", "pattern": _NAME},
-            "json_pointer": POINTER_SCHEMA, "header": {"type": "string", "pattern": _HEADER}},
+            "json_pointer": POINTER_SCHEMA, "header": {"type": "string", "pattern": _HEADER},
+            "cookies": {"type": "array", "minItems": 1, "maxItems": 16, "uniqueItems": True,
+                "items": {"type": "string", "pattern": COOKIE_NAME_PATTERN},
+                "description": ("Set-Cookie captures only: keep just these cookies (for example the "
+                    "session cookie, PHPSESSID). A captured cookie shorter than 8 characters (a "
+                    "security level, a flag) cannot be withheld reliably and hides every page sent "
+                    "with the capture; leave such cookies out.")}},
     }},
     "request_bindings": {"type": "array", "maxItems": 16, "items": {
         "type": "object", "additionalProperties": False,
@@ -123,6 +131,8 @@ def validate_exchange_input(values: Mapping[str, Any]) -> None:
         names.add(name)
         if "json_pointer" in capture:
             pointer_parts(capture["json_pointer"])
+        if "cookies" in capture and str(capture.get("header") or "").lower() != "set-cookie":
+            raise ValueError("capture cookies applies to a Set-Cookie header capture only")
     destinations: set[tuple[str, str]] = set()
     for binding in values.get("request_bindings") or ():
         sources = sum(key in binding for key in (

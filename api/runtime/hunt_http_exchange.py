@@ -58,10 +58,13 @@ COOKIE_CAPTURES_KEY = "cookie_captures"
 MIN_SCRUBBED_COOKIE_CHARS = 8
 
 
-def _cookie_pairs(response: Any) -> str:
-    """The cookies a response set, as one ``Cookie`` header value (``a=1; b=2``)."""
+def _cookie_pairs(response: Any, only: Any = None) -> str:
+    """The cookies a response set, as one ``Cookie`` header value (``a=1; b=2``); with ``only``,
+    just the cookies of those names (a capture's ``cookies``)."""
     cookies = response.cookies() if callable(getattr(response, "cookies", None)) else {}
-    pairs = [f"{name}={value}" for name, value in dict(cookies).items() if str(name) and str(value)]
+    wanted = {str(name) for name in only} if only else None
+    pairs = [f"{name}={value}" for name, value in dict(cookies).items()
+             if str(name) and str(value) and (wanted is None or str(name) in wanted)]
     if not pairs:
         raise ValueError("response set no cookie")
     return "; ".join(pairs)
@@ -117,6 +120,9 @@ class HttpWorkflowExchange:
     # capture, a short cookie): the response is reduced to its status. Otherwise every bound
     # value is known exactly and is withheld wherever the target echoes it.
     opaque_binding: bool = False
+    # The opaque binding is a captured session whose cookies include a value too short to withhold:
+    # the answer says to capture only the session cookie (capture ``cookies``).
+    short_cookie_binding: bool = False
     # Withheld values this request sends (worker-private): scrubbed from the planner's view.
     bound_values: list[str] = field(default_factory=list, repr=False)
     # discovered_secret_uses rows this request recorded: their outcome is noted after the answer.
@@ -163,7 +169,7 @@ class HttpWorkflowExchange:
                             raise ValueError("no JSON body")
                         value = pointer_get(document, item["json_pointer"])
                     elif str(item["header"]).lower() == "set-cookie":
-                        value = _cookie_pairs(response)
+                        value = _cookie_pairs(response, item.get("cookies"))
                         cookie_names.append(item["name"])
                     else:
                         value = headers[str(item["header"]).lower()]
@@ -877,6 +883,7 @@ async def prepare_http_exchange(
                 exchange.bound_values.extend([str(value), *secrets])
             else:
                 exchange.opaque_binding = True
+                exchange.short_cookie_binding = exchange.short_cookie_binding or bool(secrets)
         else:
             exchange.opaque_binding = True
             selected = ({"profile_id": binding["profile_id"], "profile_version": binding["profile_version"]}

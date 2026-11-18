@@ -27,8 +27,15 @@ CAPTURE_BODY_HINT = (
     "This response's body is hidden because the request captured values. To read the page as this "
     "session (for a sign-in form's CSRF token), send another http.request that binds this capture "
     "(request_bindings: source_action_id, capture_name, header Cookie) with no capture: its body is "
-    "shown (when every cookie value is at least 8 characters), with secret-looking values as "
-    "[withheld:N] references (withheld://hunt/<that action>/N) a later request can send."
+    "shown, with secret-looking values as [withheld:N] references (withheld://hunt/<that action>/N) "
+    "a later request can send. A captured cookie shorter than 8 characters (a security level) hides "
+    "that page too: capture only the session cookie (capture cookies: [<session cookie name>])."
+)
+SHORT_COOKIE_HINT = (
+    "This response's body is hidden because the session sent with it includes a cookie value shorter "
+    "than 8 characters, which cannot be withheld reliably wherever the page echoes it. Capture only "
+    "the session cookie: capture [{name, header: Set-Cookie, cookies: [<session cookie name>]}] on "
+    "the request that sets it, and bind that capture instead."
 )
 
 
@@ -146,7 +153,11 @@ async def prepare_http_operation(
                         'truncated', 'http_version',
                     ) if key in summary}
                     response['response']['workflow_values_visible'] = False
-                    if inputs.get('capture') and not bindings:
+                    if exchange.short_cookie_binding:
+                        # A captured session with a short cookie (a security level) hid every
+                        # signed-in page; name the way out (capture only the session cookie).
+                        response['response']['workflow_values_hint'] = SHORT_COOKIE_HINT
+                    elif inputs.get('capture') and not bindings:
                         # Agents read a hidden body as "nothing to see" and guessed withheld
                         # references into it (a sign-in page's CSRF token). Say how to read it.
                         response['response']['workflow_values_hint'] = CAPTURE_BODY_HINT
