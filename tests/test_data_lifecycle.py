@@ -179,3 +179,38 @@ def test_blockers_use_the_owning_subsystem_status_set():
     result = asyncio.run(blockers(Connection(),
         {name: {'target_id','status'} for name in ('scans','research_episodes')}, owners, 'target', []))
     assert len(result) == 1 and result[0].startswith('scans: 1 running record(s) (row-1)')
+
+
+@pytest.mark.parametrize('field,value,named', [
+    ('action_name', 'record_delete', "action_name must be 'data.records.delete' (got 'record_delete')"),
+    ('confirmations', ['confirm_authorized', 'confirm_scope_reviewed'], 'confirmations missing confirm_delete_records'),
+    ('action_context', None, 'action_context must be exactly {preview_id, preview_hash} of this preview'),
+    ('expires_at', None, 'expires_at is required, no later than'),
+    ('status', 'revoked', 'approval is revoked, not active'),
+    ('scope_receipt_id', 'other-scope', "approval is for scope receipt 'other-scope'"),
+])
+def test_a_rejected_deletion_approval_names_what_does_not_match(field, value, named):
+    # One message for every mismatch left a client guessing, and each guess left an unused
+    # dangerous approval behind.
+    now, preview, payload, approval = approval_fixture()
+    approval[field] = value
+    if field == 'action_context':
+        approval[field] = {**approval_fixture()[3]['action_context'], 'preview_id': str(preview['id']), 'note': 'x'}
+    with pytest.raises(HTTPException) as exc:
+        validate_approval(approval, preview, payload, approval['id'], now)
+    assert exc.value.status_code == 409
+    assert exc.value.detail.startswith('Approval must be active, dangerous, unexpired, and bound to this exact preview: ')
+    assert named in exc.value.detail
+    if field == 'action_context':
+        assert '(extra keys: note)' in exc.value.detail
+
+
+def test_the_preview_names_the_one_approval_that_executes_it():
+    from api.data_lifecycle.service import CONFIRMATIONS, COMMAND, approval_request
+    request = approval_request('p-1', 'h' * 64, 'record-delete:p-1', '2026-11-18T12:00:00+00:00')
+    assert request == {
+        'endpoint': 'POST /arsenal/approvals', 'scope_receipt_id': 'record-delete:p-1', 'risk_tier': 'dangerous',
+        'action_name': COMMAND, 'confirmations': sorted(CONFIRMATIONS),
+        'action_context': {'preview_id': 'p-1', 'preview_hash': 'h' * 64},
+        'expires_at_latest': '2026-11-18T12:00:00+00:00',
+        'note': 'Add approved_by; expires_at must be in the future and no later than expires_at_latest.'}
