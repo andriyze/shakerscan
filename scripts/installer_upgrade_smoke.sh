@@ -68,10 +68,14 @@ test ! -e "$foreign_home/.shakerscan/scanner.sh"
 # Installing over a source checkout replaces its local marker atomically and keeps the digest lock.
 source_runtime="$SMOKE_ROOT/source-runtime"
 source_bin="$SMOKE_ROOT/source-bin"
-mkdir -p "$source_runtime/scanner" "$source_runtime/ui" "$source_bin"
+# The installer adds its bin directory to the shell profiles under HOME; keep that inside the
+# smoke root so a test run never writes a temporary PATH entry into the developer's real profiles.
+source_home="$SMOKE_ROOT/source-home"
+mkdir -p "$source_runtime/scanner" "$source_runtime/ui" "$source_bin" "$source_home"
 touch "$source_runtime/docker-compose.yml" "$source_runtime/scanner/Dockerfile" \
     "$source_runtime/scanner/Dockerfile.api" "$source_runtime/ui/Dockerfile"
 printf 'local\n' > "$source_runtime/.shakerscan-local-build"
+HOME="$source_home" \
 SHAKERSCAN_HOME="$source_runtime" \
 SHAKERSCAN_BIN_DIR="$source_bin" \
 SHAKERSCAN_RAW_BASE="file://$REPO_ROOT" \
