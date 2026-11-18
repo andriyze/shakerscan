@@ -1180,6 +1180,26 @@ async def arsenal_claim_hypothesis(hypothesis_id: str, req: HypothesisClaimReque
         )
 
 
+_UNCLAIMABLE_STATES = frozenset({"refuted", "promoted", "dead", "blocked", "exhausted"})
+
+
+def _claim_refusal_message(current: Any, *, expected_version: int, owner: str) -> str:
+    """The reason a compare-and-set claim did not apply, in the order the claim checks it."""
+    status, version = current["status"], current["version"]
+    holder, expires = current["claim_owner"], current["claim_lease_expires_at"]
+    if status in _UNCLAIMABLE_STATES:
+        return f"hypothesis_not_claimable: the lead is {status} and can no longer be claimed"
+    live = expires is not None and (not hasattr(expires, "tzinfo") or expires > datetime.now(timezone.utc))
+    if holder and holder != owner and live:
+        until = expires.isoformat() if hasattr(expires, "isoformat") else expires
+        return (f"hypothesis_not_claimable: {holder} holds this lead until {until}; work another lead "
+                "(query kind=hypotheses) and come back after that time")
+    if version != expected_version:
+        return (f"hypothesis_not_claimable: the lead changed since it was read (version {version}, "
+                f"you sent expected_version {expected_version}); claim again with expected_version {version}")
+    return f"hypothesis_not_claimable: the lead is {status} at version {version}"
+
+
 async def claim_hypothesis_row(
     conn,
     hypothesis_uuid: uuid.UUID,
@@ -1261,6 +1281,9 @@ async def claim_hypothesis_row(
         status_code=409,
         detail={
             "error": "hypothesis_not_claimable",
+            # Why, and what to do: told only the code, an agent whose lead had changed since it read
+            # it (a planner re-proposal or another Hunt's test moves the version) gave the lead up.
+            "message": _claim_refusal_message(current, expected_version=expected_version, owner=owner),
             "status": current["status"],
             "version": current["version"],
             "claim_owner": current["claim_owner"],

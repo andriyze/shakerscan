@@ -106,6 +106,7 @@ def test_hunt_proposes_claims_tests_and_supports_a_lead_on_its_own_target(monkey
                 taken = await second.call('hypothesis.claim', {'hypothesis_id': lead['id'],
                                                                'expected_version': current['version']})
                 assert taken.status_code == 409 and _detail(taken)['error'] == 'hypothesis_not_claimable', taken.text
+                assert f"hunt:{hunt.id} holds this lead until" in _detail(taken)['message'], taken.text
                 moved = await second.call('hypothesis.transition', {
                     'hypothesis_id': lead['id'], 'expected_version': current['version'], 'to': 'blocked',
                     'reason_code': 'missing_prerequisite'})
@@ -396,8 +397,16 @@ def test_a_hunt_that_ends_gives_its_leads_back_to_the_next_hunt(monkeypatch):
                     assert (row['status'], row['claim_owner'], row['claim_lease_expires_at']) == (status, None, None)
                     assert json.loads(row['metadata_json'])['released_at_hunt_end']['reason'] == 'hunt_finished'
 
-                # The next Hunt picks the lead up at once, and a cancelled Hunt gives it back too.
+                # The next Hunt picks the lead up at once, and a cancelled Hunt gives it back too. A
+                # claim with the version read before the lead changed says which version to send.
                 second = (await _hunt(operator, target)).hunt
+                stale = await second.call('hypothesis.claim', {
+                    'hypothesis_id': testing['id'], 'expected_version': await version(testing) - 1})
+                assert stale.status_code == 409, stale.text
+                assert _detail(stale)['message'] == (
+                    'hypothesis_not_claimable: the lead changed since it was read (version '
+                    f"{await version(testing)}, you sent expected_version {await version(testing) - 1}); "
+                    f"claim again with expected_version {await version(testing)}")
                 taken = (await second.ok('hypothesis.claim', {
                     'hypothesis_id': testing['id'], 'expected_version': await version(testing)}))['result']
                 assert taken['hypothesis']['claim']['held_by_this_hunt'] is True
