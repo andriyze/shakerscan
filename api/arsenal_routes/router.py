@@ -7506,6 +7506,15 @@ async def _arsenal_dispatch_workflow(
             }
         }
         try:
+            if not workflow_payload.get("steps"):
+                # No planner steps and no server-built proof: "workflow_requires_2_to_12_steps" told
+                # an agent nothing it could act on. Name why the proof could not be built.
+                why = str(materialization.get("reason") or "").strip() or (
+                    "the server builds a proof workflow only for a create-based mass_assignment lead "
+                    "whose collection has a DELETE cleanup route on the discovered surface")
+                raise WorkflowContractError(
+                    f"no proof workflow could be built for this candidate ({why}); it stays "
+                    "unverified with its evidence")
             normalized = normalize_workflow(base_url, workflow_payload)
             used_slots = {
                 *{step["principal"] for step in normalized["steps"]},
