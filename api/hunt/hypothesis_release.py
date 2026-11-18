@@ -12,15 +12,31 @@ Plain SQL over the ``hypotheses`` lead board.
 from __future__ import annotations
 
 import json
+import logging
 from datetime import datetime, timezone
 from typing import Any
 
+logger = logging.getLogger(__name__)
+
 
 async def release_hunt_claims(conn: Any, hunt_id: Any, *, reason: str) -> int:
-    """Give back every claim the ended Hunt holds; return how many leads were released."""
+    """Give back every claim the ended Hunt holds; return how many leads were released.
+
+    Housekeeping never decides whether a Hunt ends: the release runs in a savepoint, and a failure
+    (a store without the lead board) is logged and leaves the claims to expire with their lease."""
     owner = f"hunt:{hunt_id}"
     note = json.dumps({"hunt_id": str(hunt_id), "reason": reason, "at": datetime.now(timezone.utc).isoformat()})
-    rows = await conn.fetch(
+    try:
+        async with conn.transaction():
+            rows = await _release(conn, owner, note)
+    except Exception as exc:  # noqa: BLE001 - the Hunt still ends; the lease frees the claims later
+        logger.warning("Hunt %s ended; its lead claims were not released (%s)", hunt_id, type(exc).__name__)
+        return 0
+    return len(rows)
+
+
+async def _release(conn: Any, owner: str, note: str) -> Any:
+    return await conn.fetch(
         """UPDATE hypotheses
               SET status = CASE WHEN status IN ('claimed','testing') THEN 'open' ELSE status END,
                   claim_owner = NULL, claim_lease_expires_at = NULL,
@@ -30,7 +46,6 @@ async def release_hunt_claims(conn: Any, hunt_id: Any, *, reason: str) -> int:
             WHERE claim_owner = $1
            RETURNING id""",
         owner, note)
-    return len(rows)
 
 
 __all__ = ["release_hunt_claims"]
