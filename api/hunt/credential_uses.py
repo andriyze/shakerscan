@@ -121,8 +121,9 @@ CREDENTIAL_REFUSAL_CODES = frozenset({
     CREDENTIAL_TARGET_MISMATCH,
 })
 _ATTACH_HINT = (
-    "Attach a credential to this target: create one on the target, or share one from another "
-    "target with POST /credential-profiles/{id}/grants."
+    "A person attaches a credential to this target: creates one on the target, or shares one from "
+    "another target with POST /credential-profiles/{id}/grants. Accounts a Hunt registered itself "
+    "do not count. Until then the candidate stays unverified with its evidence; do not retry."
 )
 
 

@@ -152,10 +152,14 @@ def _reason_text(value: Any, depth: int = 0) -> str | None:
         if violation and not any(isinstance(value.get(k), str) and value.get(k) for k in ("message", "detail", "reason")):
             label = code or error
             return f"{label}: {violation}" if label and label not in violation else violation
+        # A refusal's own next step (a credential refusal's "attach"): agents saw only the
+        # message and retried the same verification on every candidate.
+        attach = value.get("attach") if isinstance(value.get("attach"), str) else ""
         for key in ("message", "detail", "reason", "error"):
             said = _reason_text(value.get(key), depth + 1)
             if said:
-                return f"{said} ({code})" if code and code not in said else said
+                said = f"{said} ({code})" if code and code not in said else said
+                return f"{said} {attach}" if attach and attach not in said else said
         return code
     return None
 

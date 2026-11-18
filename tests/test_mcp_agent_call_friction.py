@@ -147,3 +147,12 @@ def test_an_earlier_hunts_action_is_refused_with_how_to_cite_evidence_instead():
             NoRows(), run=run, references=["70ed7ea1-3ba4-5eb2-9393-804fc7872a1d"]))
     assert "repeat that request in this Hunt and cite the new action" in str(raised.value)
     assert raised.value.references == ["70ed7ea1-3ba4-5eb2-9393-804fc7872a1d"]
+
+
+def test_a_credential_refusal_carries_its_next_step():
+    body = json.dumps({"detail": {"error": "hunt_credential_refused", "reason_code": "credential_missing_for_slot",
+                                  "message": "No credential attached to this target fills user1.", "slot": "user1",
+                                  "attach": "A person attaches a credential to this target. Do not retry."}})
+    reason = mcp._refusal_reason(body)
+    assert reason.startswith("No credential attached to this target fills user1.")
+    assert reason.endswith("A person attaches a credential to this target. Do not retry.")
