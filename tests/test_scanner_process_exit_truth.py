@@ -262,10 +262,18 @@ def test_a_running_scanner_checks_for_cancellation_once_a_second_not_every_poll(
 
 
 def test_cancellation_reads_reuse_one_client_per_factory(monkeypatch):
+    from runtime import scanner_cancel
     made = []
-    monkeypatch.setattr(worker, "_CANCEL_REDIS", None)
-    monkeypatch.setattr(worker, "get_redis", lambda: made.append(1) or _CountingRedis())
-    first = worker._cancel_redis()
-    assert worker._cancel_redis() is first and len(made) == 1
-    monkeypatch.setattr(worker, "get_redis", lambda: made.append(2) or _CountingRedis())
-    assert worker._cancel_redis() is not first and made == [1, 2]
+    monkeypatch.setattr(scanner_cancel, "_SHARED", None)
+
+    def first_factory():
+        made.append(1)
+        return _CountingRedis()
+
+    def second_factory():
+        made.append(2)
+        return _CountingRedis()
+
+    first = scanner_cancel.shared_client(first_factory)
+    assert scanner_cancel.shared_client(first_factory) is first and made == [1]
+    assert scanner_cancel.shared_client(second_factory) is not first and made == [1, 2]
