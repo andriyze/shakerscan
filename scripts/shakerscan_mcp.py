@@ -122,6 +122,7 @@ MAX_RESPONSE_BYTES = 2_000_000
 DEFAULT_IDENTIFIER_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,255}$"
 DEFAULT_CAPABILITY_PATTERN = r"^[a-z0-9][a-z0-9_.:-]{0,127}$"
 MAX_REASON_CHARS = 600
+MAX_ACCEPTED_FIELDS_CHARS = 400
 _REASON_NOISE = re.compile(r"(?:\x1b\[[0-9;]*[A-Za-z]|[\x00-\x1f\x7f])+")
 
 
@@ -144,6 +145,13 @@ def _reason_text(value: Any, depth: int = 0) -> str | None:
         return "; ".join(part for part in parts if part) or None
     if isinstance(value, dict):
         code = value.get("code") if isinstance(value.get("code"), str) else None
+        # A workflow refusal is {"error": "invalid_workflow", "violation": "<why>"}: the code alone
+        # ("invalid_workflow") was all an agent saw, with no way to act on it.
+        error = value.get("error") if isinstance(value.get("error"), str) else None
+        violation = _reason_text(value.get("violation"), depth + 1)
+        if violation and not any(isinstance(value.get(k), str) and value.get(k) for k in ("message", "detail", "reason")):
+            label = code or error
+            return f"{label}: {violation}" if label and label not in violation else violation
         for key in ("message", "detail", "reason", "error"):
             said = _reason_text(value.get(key), depth + 1)
             if said:
@@ -653,7 +661,7 @@ HUNT_TOOLS: tuple[HuntMCPTool, ...] = (
             # Exactly the engine's request body (HuntCapabilityRequest: idempotency_key, input).
             # D43: an advertised experiment_key was refused by the engine with 422.
             "idempotency_key": {
-                "type": "string", "minLength": 8, "maxLength": 200,
+                "type": "string", "minLength": 1, "maxLength": 200,
                 "pattern": r"^[A-Za-z0-9][A-Za-z0-9_.:-]*$",
                 "description": "Persist a caller key before submission for process-crash recovery. Reuse it with unchanged input after uncertain responses.",
             },
@@ -1379,8 +1387,24 @@ def _positive_int(value: Any, default: int) -> int:
     return value if isinstance(value, int) and not isinstance(value, bool) and value > 0 else default
 
 
+# The server takes keys of 8 to 200 characters. Agents name their calls with short keys such as
+# "ws-ch0" or "login-a" and every such call was refused before it ran (nine in one evaluation
+# round), so the adapter accepts 1 to 200 and sends a short key in a fixed longer form
+# (server_idempotency_key): the same caller key always reaches the server as the same key.
+SERVER_IDEMPOTENCY_MIN_LENGTH = 8
+SHORT_IDEMPOTENCY_PREFIX = "mcp-key-"
+
+
+def server_idempotency_key(key: str) -> str:
+    """The key the server receives for a caller's key: unchanged when long enough, else prefixed.
+
+    Deterministic and idempotent (a prefixed key is already long enough), so a retry with the
+    caller's own key, or with the returned mcp_idempotency_key, replays the same action."""
+    return key if len(key) >= SERVER_IDEMPOTENCY_MIN_LENGTH else SHORT_IDEMPOTENCY_PREFIX + key
+
+
 START_IDEMPOTENCY_KEY_PROPERTY = {
-    "type": "string", "minLength": 8, "maxLength": 200,
+    "type": "string", "minLength": 1, "maxLength": 200,
     "pattern": r"^[A-Za-z0-9][A-Za-z0-9_.:-]*$",
     "description": (
         "Optional. One key per Hunt you mean to start; generated when omitted and returned as "
@@ -2332,7 +2356,13 @@ class ArsenalClient:
             unknown = sorted(set(value) - set(properties)) if schema.get("additionalProperties") is False else []
             missing = sorted(set(required) - set(value))
             if unknown:
-                raise MCPError(-32602, f"Unknown {name} fields: {', '.join(unknown)}")
+                # Name what is accepted: an agent told only what was wrong guessed again (three
+                # knowledge.record calls in one round gave up on input.conditions this way).
+                accepted = ", ".join(sorted(properties))
+                if len(accepted) > MAX_ACCEPTED_FIELDS_CHARS:
+                    accepted = accepted[: MAX_ACCEPTED_FIELDS_CHARS - 1] + "…"
+                raise MCPError(-32602, f"Unknown {name} fields: {', '.join(unknown)}"
+                               + (f" ({name} accepts: {accepted})" if accepted else f" ({name} accepts no fields)"))
             if missing:
                 raise MCPError(-32602, f"Missing required {name} fields: {', '.join(missing)}")
             maximum = schema.get("maxProperties")
@@ -2541,6 +2571,8 @@ class ArsenalClient:
                 # REST and the CLI take Idempotency-Key on POST /hunts; without one here a retried
                 # start created a second Hunt. The key is a header, never part of the contract body.
                 start_key = str(payload.pop("idempotency_key", "") or "").strip()
+                if start_key:
+                    start_key = server_idempotency_key(start_key)
                 if not start_key:
                     start_key = f"mcp-{uuid.uuid4().hex}"
                     generated_idempotency_key = start_key
@@ -2589,7 +2621,9 @@ class ArsenalClient:
                                 f"No input was sent (input is missing or {{}}). {exc.message}"), exc.data)
                         raise _capability_input_error(exc, hunt_id, capability_name, input_schema) from None
                 idempotency_key = str(payload.get("idempotency_key") or "").strip()
-                if not idempotency_key:
+                if idempotency_key:
+                    idempotency_key = server_idempotency_key(idempotency_key)
+                else:
                     idempotency_key = f"mcp-{uuid.uuid4().hex}"
                     generated_idempotency_key = idempotency_key
                 payload = {"idempotency_key": idempotency_key, "input": capability_input}
