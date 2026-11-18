@@ -223,3 +223,49 @@ def test_proxy_connection_ceiling_keeps_its_failure_reason_after_killing_tool(mo
     assert result["returncode"] == -9
     assert result["network_telemetry"]["connections_attempted"] == 401
     assert result["network_telemetry"]["connections_rejected"] == 1
+
+
+class _CountingRedis:
+    def __init__(self):
+        self.calls = 0
+
+    def exists(self, _key):
+        self.calls += 1
+        return False
+
+
+class _SlowProcess(_Process):
+    async def wait(self):
+        await asyncio.sleep(1.2)
+        return self.returncode
+
+
+def test_a_running_scanner_checks_for_cancellation_once_a_second_not_every_poll(monkeypatch):
+    # Every concurrent action read Redis on the event loop each 50 ms poll; under load that
+    # starved the loop's own heartbeat until the action's budget hold went stale and was failed.
+    redis = _CountingRedis()
+    monkeypatch.setattr(worker, "PinnedSocksProxy", _PinnedProxy)
+    monkeypatch.setattr(worker, "get_redis", lambda: redis)
+
+    async def _exec(*_cmd, **_kwargs):
+        return _SlowProcess(0, _CRAWL_LINE)
+
+    monkeypatch.setattr(worker.asyncio, "create_subprocess_exec", _exec)
+    result = asyncio.run(worker._execute_agent_scanner_process({
+        "job_id": "crawl-job-2", "tool_name": "katana", "registered_target": "https://example.test",
+        "execution_target": "https://example.test/", "scanner_options": {}, "timeout_ms": 30_000,
+        "pinned_address": "203.0.113.7", "authorized_addresses": ["203.0.113.7"],
+        "_reserved_budget": {"http_requests": 20, "tool_wall_seconds": 30},
+    }))
+    assert result["status"] != "cancelled"
+    assert 1 <= redis.calls <= 3  # was ~24 for a 1.2 s run
+
+
+def test_cancellation_reads_reuse_one_client_per_factory(monkeypatch):
+    made = []
+    monkeypatch.setattr(worker, "_CANCEL_REDIS", None)
+    monkeypatch.setattr(worker, "get_redis", lambda: made.append(1) or _CountingRedis())
+    first = worker._cancel_redis()
+    assert worker._cancel_redis() is first and len(made) == 1
+    monkeypatch.setattr(worker, "get_redis", lambda: made.append(2) or _CountingRedis())
+    assert worker._cancel_redis() is not first and made == [1, 2]

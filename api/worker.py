@@ -2428,13 +2428,28 @@ def _scanner_process_kwargs() -> dict[str, Any]:
     return {}
 
 
+#: How often a running scanner process checks for cancellation (off the event loop).
+AGENT_TOOL_CANCEL_CHECK_SECONDS = 1.0
+_CANCEL_REDIS: Any | None = None
+
+
+def _cancel_redis() -> Any:
+    """One client for cancellation reads: a new client and connection pool per read, several
+    times a second per running action, was most of a loaded worker's Redis traffic."""
+    global _CANCEL_REDIS
+    factory = get_redis
+    if _CANCEL_REDIS is None or _CANCEL_REDIS[0] is not factory:
+        _CANCEL_REDIS = (factory, factory())
+    return _CANCEL_REDIS[1]
+
+
 def _scan_cancel_requested(scan_id: str | None, redis_client: Any | None = None) -> bool:
     if not scan_id:
         return False
     if str(os.environ.get("SHAKERSCAN_BROKER_LEASE") or "").strip().lower() in {"1", "true", "yes", "on"}:
         return (RESULTS_DIR / f"{scan_id}_cancel").exists()
     try:
-        client = redis_client or get_redis()
+        client = redis_client or _cancel_redis()
         return bool(client.get(f"scan:{scan_id}:cancel"))
     except Exception:
         return False
@@ -18703,14 +18718,24 @@ async def _execute_agent_scanner_process(
         loop = asyncio.get_running_loop()
         deadline = loop.time() + timeout_ms / 1000.0
         next_heartbeat = loop.time() + 15.0
-        while not wait_process.done():
-            if (
+        next_cancel_check = loop.time()
+
+        def cancel_requested() -> bool:
+            return bool(
                 (cancelled is not None and cancelled())
                 or (redis_client is not None and redis_client.exists(cancel_key))
-            ):
-                status, error = "cancelled", "cancelled"
-                _terminate_agent_tool_process_group(proc)
-                break
+            )
+
+        while not wait_process.done():
+            # Blocking Redis reads every 50 ms on the event loop, in every concurrent action,
+            # starved this loop's own heartbeat under load until the action's budget hold went
+            # stale: check once a second, off the loop.
+            if loop.time() >= next_cancel_check:
+                next_cancel_check = loop.time() + AGENT_TOOL_CANCEL_CHECK_SECONDS
+                if await asyncio.to_thread(cancel_requested):
+                    status, error = "cancelled", "cancelled"
+                    _terminate_agent_tool_process_group(proc)
+                    break
             if overflow.is_set():
                 # The retained records are trustworthy; only what followed is lost.
                 status, error = "success", "output_truncated"
