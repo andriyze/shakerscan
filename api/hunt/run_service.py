@@ -24,6 +24,7 @@ except ModuleNotFoundError:  # pragma: no cover - package import layout
 from .credential_uses import read_credential_uses
 from .start_contract import HANDOFF_ID_RE
 from .discovered_secrets import read_hunt_uses
+from .hypothesis_release import release_hunt_claims
 from .permission_grants import settle_for_ended_hunt
 from .permission_store import pending_summary
 from .finding_verifications import HUNT_FINDINGS_QUERY
@@ -764,6 +765,8 @@ async def cancel_hunt_rows(
         await connection.execute("UPDATE hunt_actions SET private_http_result=NULL WHERE hunt_run_id=$1", run_uuid)
         # Pending permission requests are withdrawn with the cancellation.
         await settle_for_ended_hunt(connection, run_uuid, actor="hunt", source=source)
+        # Leads it still holds go back on the board for the next Hunt.
+        await release_hunt_claims(connection, run_uuid, reason=stop_reason)
     return row
 
 
@@ -1605,6 +1608,7 @@ class HuntRunService:
                 await connection.execute("UPDATE hunt_actions SET private_http_result=NULL WHERE hunt_run_id=$1", run_uuid)
                 # A pending permission request ends with the Hunt, in this transaction.
                 await settle_for_ended_hunt(connection, run_uuid, actor="hunt", source="hunt_finished")
+                await release_hunt_claims(connection, run_uuid, reason="hunt_finished")
         return {**public_hunt_run(row), "already_terminal": False}
 
     async def cancel(self, hunt_id: str) -> dict[str, Any]:

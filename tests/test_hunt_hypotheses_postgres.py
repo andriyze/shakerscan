@@ -358,6 +358,58 @@ def test_renewing_a_lease_keeps_the_state_and_releasing_frees_the_lead(monkeypat
     asyncio.run(run())
 
 
+def test_a_hunt_that_ends_gives_its_leads_back_to_the_next_hunt(monkeypatch):
+    """A finished or cancelled Hunt kept its claims for the rest of the lease: the next Hunt on the
+    target was refused hypothesis_not_claimable, and a lead left in testing was never open again."""
+    async def run():
+        async with startup_database() as conn:
+            app_module = await _prepared(conn, monkeypatch)
+            target = await _web_target(conn, 'https://app.handover.test')
+            async with AsyncClient(transport=ASGITransport(app_module.app), base_url='http://operator') as operator:
+                first = (await _hunt(operator, target)).hunt
+
+                async def version(lead):
+                    return (await _row(conn, lead['id']))['version']
+
+                testing = (await first.ok('hypothesis.propose', _lead()))['result']['hypothesis']
+                claimed = (await first.ok('hypothesis.propose', _lead(
+                    title='Cart read may ignore the owner',
+                    dedupe_dimensions={'method': 'GET', 'route': '/api/carts/{id}'})))['result']['hypothesis']
+                supported = (await first.ok('hypothesis.propose', _lead(
+                    title='Invoice read may ignore the owner',
+                    dedupe_dimensions={'method': 'GET', 'route': '/api/invoices/{id}'})))['result']['hypothesis']
+                for lead in (testing, claimed, supported):
+                    await first.ok('hypothesis.claim', {'hypothesis_id': lead['id'], 'expected_version': await version(lead)})
+                for lead in (testing, supported):
+                    await first.ok('hypothesis.transition', {
+                        'hypothesis_id': lead['id'], 'expected_version': await version(lead), 'to': 'testing',
+                        'reason_code': 'testing_started', 'falsifier': 'Read it as user_b',
+                        'expected_signal': 'user_a data returned'})
+                await first.ok('hypothesis.transition', {
+                    'hypothesis_id': supported['id'], 'expected_version': await version(supported), 'to': 'supported',
+                    'reason_code': 'expected_signal_observed', 'evidence_refs': [await _ran(conn, first)]})
+
+                finished = await operator.post(f'/hunts/{first.id}/finish', json={'summary': 'Done', 'next_actions': []})
+                assert finished.status_code == 200, finished.text
+                for lead, status in ((testing, 'open'), (claimed, 'open'), (supported, 'supported')):
+                    row = await _row(conn, lead['id'])
+                    assert (row['status'], row['claim_owner'], row['claim_lease_expires_at']) == (status, None, None)
+                    assert json.loads(row['metadata_json'])['released_at_hunt_end']['reason'] == 'hunt_finished'
+
+                # The next Hunt picks the lead up at once, and a cancelled Hunt gives it back too.
+                second = (await _hunt(operator, target)).hunt
+                taken = (await second.ok('hypothesis.claim', {
+                    'hypothesis_id': testing['id'], 'expected_version': await version(testing)}))['result']
+                assert taken['hypothesis']['claim']['held_by_this_hunt'] is True
+                cancelled = await operator.post(f'/hunts/{second.id}/cancel')
+                assert cancelled.status_code == 200, cancelled.text
+                row = await _row(conn, testing['id'])
+                assert (row['status'], row['claim_owner']) == ('open', None)
+                third = (await _hunt(operator, target)).hunt
+                await third.ok('hypothesis.claim', {'hypothesis_id': testing['id'], 'expected_version': await version(testing)})
+    asyncio.run(run())
+
+
 def test_a_transition_states_a_reason_that_fits_it_and_no_signal_results_are_remembered(monkeypatch):
     async def run():
         async with startup_database() as conn:
