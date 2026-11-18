@@ -150,3 +150,29 @@ def test_an_error_body_is_read_only_as_far_as_its_message():
     request = api_cli.build_request("GET", "/findings", None, api_url="https://a.example", token=None)
     status, text = api_cli.call(request, opener=FakeOpener(500, b"e" * (api_cli.MAX_ERROR_BYTES + 10)))
     assert status == 500 and len(text) == api_cli.MAX_ERROR_BYTES
+
+
+def test_a_write_can_carry_a_retry_key_so_a_timed_out_batch_is_not_queued_twice():
+    # A 50-target POST /scans/batch outlived a 120 s client timeout and kept running; with no way
+    # to pass Idempotency-Key from the CLI, a retry would queue every Scan again.
+    request = api_cli.build_request("POST", "/scans/batch", '{"targets": ["https://t.example"]}',
+                                    api_url="https://a.example", token=None, idempotency_key="batch-2026-11-18-01")
+    assert request.get_header("Idempotency-key") == "batch-2026-11-18-01"
+    assert api_cli.build_request("POST", "/scans", "{}", api_url="https://a.example", token=None
+                                 ).get_header("Idempotency-key") is None
+    for bad in ("short", "-starts-with-dash", "has space in it", "x" * 201):
+        with pytest.raises(api_cli.ApiCliError, match="8 to 200 characters"):
+            api_cli.build_request("POST", "/scans", "{}", api_url="https://a.example", token=None, idempotency_key=bad)
+    with pytest.raises(api_cli.ApiCliError, match="POST, PUT, PATCH and DELETE"):
+        api_cli.build_request("GET", "/scans", None, api_url="https://a.example", token=None,
+                              idempotency_key="batch-2026-11-18-01")
+
+
+def test_the_cli_retry_key_matches_the_servers_key_rule():
+    from api.public_api_contract import _IDEMPOTENCY_KEY_RE
+    assert api_cli.IDEMPOTENCY_KEY_PATTERN.pattern == _IDEMPOTENCY_KEY_RE.pattern
+
+
+def test_the_scan_batch_route_is_covered_by_the_servers_retry_store():
+    from api.public_api_contract import public_v2_surface
+    assert public_v2_surface("/scans/batch") == "scan"
