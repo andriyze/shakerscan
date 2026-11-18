@@ -277,3 +277,26 @@ def test_cancellation_reads_reuse_one_client_per_factory(monkeypatch):
     first = scanner_cancel.shared_client(first_factory)
     assert scanner_cancel.shared_client(first_factory) is first and made == [1]
     assert scanner_cancel.shared_client(second_factory) is not first and made == [1, 2]
+
+
+def test_a_scanner_process_takes_its_heavy_slot_before_launch_and_frees_it_after(monkeypatch):
+    calls = []
+
+    class _Slot:
+        def __init__(self, redis_client, tool):
+            calls.append(("new", tool))
+
+        async def acquire(self, **kwargs):
+            calls.append(("acquire", sorted(kwargs)))
+            return 0.0
+
+        def release(self):
+            calls.append(("release",))
+
+    monkeypatch.setattr(worker, "HeavyScannerSlot", _Slot)
+    launched: dict = {}
+    _run_katana(monkeypatch, 0, _CRAWL_LINE, launched=launched)
+    assert calls == [("new", "katana"),
+                     ("acquire", ["cancelled", "heartbeat", "max_wait_seconds", "ttl_seconds"]),
+                     ("release",)]
+    assert launched["cmd"], "the process launched after the slot was taken"

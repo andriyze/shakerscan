@@ -69,6 +69,7 @@ from retest_contract import (
 )
 from runtime.json_fields import json_array_field, json_object_field, strip_null_bytes
 from runtime.nuclei_index import ensure_nuclei_template_index
+from runtime.heavy_slots import HeavyScannerSlot, HeavySlotUnavailable
 from runtime.scanner_cancel import ThrottledCancelCheck, shared_client
 from runtime.worker_startup import reject_admission_signer_material
 from runtime.worker_projection import (
@@ -18524,6 +18525,7 @@ async def _execute_agent_scanner_process(
         job_data.get("_cancelled")
         if callable(job_data.get("_cancelled")) else None
     )
+    heavy_slot = HeavyScannerSlot(redis_client, name)
     try:
         if not job_id:
             raise agent_tools.AgentToolError("scanner job requires an identity")
@@ -18650,6 +18652,10 @@ async def _execute_agent_scanner_process(
         argv = list(process_plan.argv)
         process_enforcement = process_plan.enforcement_receipt()
         requested_timeout = int(job_data.get("timeout_ms") or process_plan.timeout_ms)
+        # Queued behind the host's heavy-process slots, heartbeating; the wait is not tool time.
+        monotonic_started += await heavy_slot.acquire(
+            ttl_seconds=process_plan.timeout_ms // 1000 + 120, heartbeat=heartbeat, cancelled=cancelled,
+            max_wait_seconds=int(reserved_budget.get("tool_wall_seconds") or 0))
         elapsed_before_process_ms = max(
             0, int((time.monotonic() - monotonic_started) * 1_000),
         )
@@ -18773,7 +18779,7 @@ async def _execute_agent_scanner_process(
                 status = "success"
     except FileNotFoundError:
         error = "scanner_not_available"
-    except (agent_tools.AgentToolError, KeyError, TypeError, ValueError) as exc:
+    except (agent_tools.AgentToolError, KeyError, TypeError, ValueError, HeavySlotUnavailable) as exc:
         error = f"contract:{str(exc)[:240]}"
     except asyncio.CancelledError:
         if proc is not None and proc.returncode is None:
@@ -18798,6 +18804,7 @@ async def _execute_agent_scanner_process(
         error = f"worker_fault:{type(exc).__name__}"
         execution_uncertain = process_started
     finally:
+        heavy_slot.release()
         if httpx_configuration is not None:
             httpx_configuration.close()
         if pinned_proxy is not None:
