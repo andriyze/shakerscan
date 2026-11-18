@@ -552,7 +552,7 @@ def test_a_candidate_without_a_buildable_proof_says_why(monkeypatch, reason):
             params["_server_materialization"] = {"usable": False, "reason": reason, "request_count": 0}
 
     monkeypatch.setattr(arsenal, "_pool_provider", lambda: Pool())
-    monkeypatch.setitem(arsenal._deps, "_active_workflow_cancellations", lambda: {})
+    monkeypatch.setitem(arsenal._deps, "_active_workflow_cancellations", dict)
     monkeypatch.setitem(arsenal._deps, "_server_materialize_create_ma", lambda: materialize)
     with pytest.raises(HTTPException) as exc:
         asyncio.run(arsenal._arsenal_dispatch_workflow({
