@@ -29,6 +29,12 @@ candidates, and proof. Do not start a second in-server reasoning loop.
 6. Start `POST /hunts`, then read the returned context pack and capability schemas. Starting with
    no `skill_ids` is normal. Methodologies guide investigation; they do not grant or reduce
    authority.
+7. Continue earlier work before starting new work. When the start briefing shows earlier
+   Hunts' leads or candidates on this target (`knowledge.counts.hypotheses` or `candidates` above
+   zero, `continue_after_release.top`, `unresolved.open_candidates`), read them first (query
+   `kind=hypotheses`, then `kind=candidates`), claim the top claimable lead with
+   `hypothesis.claim`, and test it before exploring elsewhere. Do not re-record a candidate an
+   earlier Hunt recorded; reproduce it in this Hunt only to verify or extend it.
 
 These public start examples are checked through standing-authorization resolution before the
 internal contract is validated. Active examples assume the operator has already authorized the
