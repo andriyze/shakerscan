@@ -385,7 +385,10 @@ class ScanAdvancedLimits(BaseModel):
     max_tcp_ports: Optional[int] = Field(default=None, ge=1, le=262_140)
     max_tool_wall_seconds: Optional[int] = Field(default=None, ge=1, le=86_400)
     max_workers: Optional[int] = Field(default=None, ge=1, le=128)
-    include_families: list[str] = Field(default_factory=list, max_length=100)
+    include_families: list[str] = Field(
+        default_factory=list, max_length=100,
+        description=("Families added to the preset (policy.preset; standard_active when active_testing is allowed, passive otherwise). To run exactly these families and nothing else, set policy.preset to \"custom\". The answer lists what the preset added (families_added_by_preset)."),
+    )
     exclude_families: list[str] = Field(default_factory=list, max_length=100)
     force_single_worker: bool = False
 
