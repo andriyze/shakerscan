@@ -56,6 +56,10 @@ COOKIE_CAPTURES_KEY = "cookie_captures"
 # A cookie value shorter than this could match ordinary response text: a request sending one is
 # reduced to its status rather than scrubbed.
 MIN_SCRUBBED_COOKIE_CHARS = 8
+# A captured header or JSON value (a bearer token from a login answer) at least this long is
+# known exactly and withheld wherever a response echoes it, as a withheld_ref value is; a shorter
+# one (a PIN, a pairing code, an id) may appear as ordinary text and keeps the answer status-only.
+MIN_SCRUBBED_CAPTURE_CHARS = 16
 
 
 def _cookie_pairs(response: Any, only: Any = None) -> str:
@@ -881,6 +885,10 @@ async def prepare_http_exchange(
                 # A session cookie this Hunt's own login set: long, random and known exactly, so
                 # the response keeps its content with every echo of it withheld.
                 exchange.bound_values.extend([str(value), *secrets])
+            elif not is_cookie and isinstance(value, str) and len(value) >= MIN_SCRUBBED_CAPTURE_CHARS:
+                # A token the Hunt captured (a JWT from a login's JSON answer): the same value sent
+                # as a withheld_ref kept its answers readable, captured it made every one opaque.
+                exchange.bound_values.append(value)
             else:
                 exchange.opaque_binding = True
                 exchange.short_cookie_binding = exchange.short_cookie_binding or bool(secrets)

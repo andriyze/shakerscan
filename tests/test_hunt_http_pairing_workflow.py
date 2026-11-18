@@ -248,7 +248,12 @@ def test_pairing_worker_challenge_pin_token_then_authenticated_request_and_idemp
                 assert secret not in public
             assert 'body_sha256' not in json.dumps(paired['typed_output'])
             ciphertexts = [a['private_http_result'] for a in conn.actions.values() if a.get('private_http_result')]
-            assert len(ciphertexts) == 2 and all(c.startswith('enc:fernet:') for c in ciphertexts)
+            # Two captures, and the authenticated answer's seal: the long token it echoes is withheld
+            # (as a withheld_ref value is), so that answer is readable; the short challenge and PIN
+            # keep theirs status-only.
+            assert len(ciphertexts) == 3 and all(c.startswith('enc:fernet:') for c in ciphertexts)
+            assert last['typed_output']['records'][0]['response'].get('workflow_values_visible') is not False
+            assert paired['typed_output']['records'][0]['response']['workflow_values_visible'] is False
             assert all(secret not in ''.join(ciphertexts) for secret in (PIN, CHALLENGE, TOKEN))
             assert len(conn.raw_archive) == 3
             assert all(row.record.terminal for row in conn.store.rows.values())
