@@ -30,8 +30,9 @@ RUN --mount=type=bind,source=scanner/apt_install.sh,target=/tmp/apt_install.sh,r
 
 # The scanner runtime's Python tree below is copied over this base, which pip-installs virtualenv
 # and its dependencies. The scanner removes them before its locked install; remove them here too,
-# or the base's older filelock metadata would stay beside the scanner's locked version.
-RUN python3 -m pip uninstall -y --break-system-packages virtualenv python-discovery distlib platformdirs filelock && \
+# or the base's older filelock metadata would stay beside the scanner's locked version. The base
+# also ships its own packaging distribution (the scanner removes it before its locked install too).
+RUN python3 -m pip uninstall -y --break-system-packages virtualenv python-discovery distlib platformdirs filelock packaging && \
     rm -rf /root/.cache/virtualenv /usr/local/bin/virtualenv
 
 # /app includes API modules and the shared policy/evidence code. Small static
