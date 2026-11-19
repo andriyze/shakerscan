@@ -302,7 +302,7 @@ def test_response_route_and_subject_changes_have_explicit_significance(monkeypat
                 about_admin = (await hunt.ok('knowledge.record', {
                     'kind': 'observation', 'title': 'Export needs an admin session', 'evidence_refs': [evidence],
                     'subject': {'type': 'endpoint', 'id': str(admin)}}))['result']['interpretation']
-                plan = (await hunt.ok('knowledge.record', {'kind': 'next_step', 'title': 'Compare roles later'}))
+                plan = (await hunt.ok('knowledge.record', {'kind': 'note', 'title': 'Compare roles later'}))
                 plan = plan['result']['interpretation']
                 assert plan['applicability']['state'] == 'unknown' and plan['dependencies'] == {'tracked': False}
 

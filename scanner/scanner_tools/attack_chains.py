@@ -1106,12 +1106,6 @@ def _identify_attack_chains_internal(findings: list[dict]) -> tuple[list[AttackC
     return chains, partial_chains
 
 
-def identify_attack_chains(findings: list[dict]) -> list[AttackChain]:
-    """Return complete attack chains only (backwards-compatible)."""
-    chains, _ = _identify_attack_chains_internal(findings)
-    return chains
-
-
 def format_chain_report(
     chains: list[AttackChain],
     partial_chains: list[AttackChain] | None = None,

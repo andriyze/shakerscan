@@ -76,17 +76,6 @@ class YieldMetrics:
         """Check if yield is below minimum threshold."""
         return self.findings_per_minute < 0.3
 
-    def should_continue(self, budget: WaveBudget) -> bool:
-        """Determine if wave should continue based on yield."""
-        if self.duration_seconds < budget.min_duration:
-            return True  # Always run minimum duration
-        if self.duration_seconds >= budget.max_duration:
-            return False  # Never exceed max
-        if self.findings_per_minute < budget.yield_threshold:
-            return False  # Yield too low
-        return True
-
-
 def calculate_yield_metrics(findings: list[dict], duration_seconds: float) -> YieldMetrics:
     """Calculate yield metrics from wave results."""
     return YieldMetrics(

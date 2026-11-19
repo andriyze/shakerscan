@@ -1199,6 +1199,3 @@ def extension_lineage(action: Any, plan: Any) -> tuple[str, ...]:
         )
     return tuple(lineage)
 
-
-def base_lane_id(action_id: str) -> str:
-    return _ROUND_SUFFIX.sub("", str(action_id))

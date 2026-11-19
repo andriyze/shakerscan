@@ -377,7 +377,7 @@ through an operator's grant.
 reuse the returned session ID, and `ssh.close` when done; no inventory scan or repeated confirmation.
 Host pins, grants and budgets still apply. See `docs/hunt-ssh.md` for streaming and cancellation.
 Legacy exact-command SSH plans remain available; they are not required for already-delegated commands.
-Device Hunt uses the shared runtime; do not revive retired device-agent writes. Startup supplies one
+Device Hunt uses the shared runtime; the device-agent engine and its routes are removed. Startup supplies one
 dedicated network worker, separate from DAST slots. Opt out with `SHAKERSCAN_NETWORK_WORKER_ENABLED=false`
 or `shakerscan devices stop`; `shakerscan devices start` re-enables it. Use `./scanner.sh` only in source instructions.
 
@@ -414,8 +414,8 @@ a false hash mismatch.
 
 - Removed `/interactive`, `/exceptions`, and `/settings/ai-ops-router` UI pages retain APIs only
   because Command Arsenal consumes them; do not present them as primary products.
-- Historical `/agent/hunt/*`, `/device-agent/*`, `/research/*`, and `/deep-hunt/*` may be readable
-  or redirect. New investigations use `/hunts`.
+- Legacy `/agent/hunt/*`, `/device-agent/*` and the `/research/*` runtime are removed. `/deep-hunt`
+  redirects to `/hunt`; Leads and the Test Builder stay under it. New investigations use `/hunts`.
 - Deprecated writes fail closed and never advertise arbitrary tool execution.
 - Evidence cleanup stays interactive; legacy retention schedules remain disabled.
 - Old scan labels are display history, not new-submission guidance.

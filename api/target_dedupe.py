@@ -146,7 +146,7 @@ MERGE_UNIQUE_TABLES: list[tuple[str, list[str]]] = [
 ]
 # target_id-bearing tables without a target_id unique constraint — plain reassignment.
 MERGE_PLAIN_TABLES: list[str] = [
-    "agent_context_packs", "agent_hunt_runs", "campaign_actions", "campaigns",
+    "agent_context_packs", "campaign_actions", "campaigns",
     "evidence_instances", "evidence_retention_previews", "export_events",
     "finding_exceptions", "finding_verifications", "model_intake_admissions",
     "refuter_reviews", "research_episodes", "scan_campaigns", "scans", "schedules",

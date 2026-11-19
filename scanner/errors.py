@@ -222,10 +222,6 @@ class ErrorCollector:
             result[sev].append(error)
         return result
 
-    def get_tool_errors(self, tool: str) -> list[ToolError]:
-        """Get all errors for a specific tool."""
-        return [e for e in self._errors if e.tool == tool]
-
     def clear(self) -> None:
         """Clear all collected errors."""
         self._errors.clear()
@@ -249,10 +245,6 @@ class ErrorCollector:
             },
             "errors": [e.to_dict() for e in self._errors[:100]],  # Limit for report size
         }
-
-    def to_list(self) -> list[dict[str, Any]]:
-        """Convert all errors to list of dictionaries."""
-        return [e.to_dict() for e in self._errors]
 
     def __len__(self) -> int:
         return len(self._errors)

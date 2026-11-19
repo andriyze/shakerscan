@@ -348,6 +348,15 @@ def normalize_coverage_angle(values: Mapping[str, Any]) -> dict[str, Any]:
                 "coverage_candidate_id_invalid", "candidate_id must be a UUID",
             ) from exc
 
+    hypothesis_id = str(values.get("hypothesis_id") or "").strip()
+    if hypothesis_id:
+        try:
+            hypothesis_id = str(UUID(hypothesis_id))
+        except ValueError as exc:
+            raise CoverageLedgerError(
+                "coverage_hypothesis_id_invalid", "hypothesis_id must be a UUID",
+            ) from exc
+
     blocker = _text(values.get("blocker"), field="blocker")
     proof_gap = _text(values.get("proof_gap"), field="proof_gap")
     if status in {"negative", "partial", "candidate"} and not evidence:
@@ -377,6 +386,7 @@ def normalize_coverage_angle(values: Mapping[str, Any]) -> dict[str, Any]:
         "evidence_action_ids": evidence,
         "contradictory_evidence_action_ids": contradictions,
         "candidate_id": candidate_id or None,
+        "hypothesis_id": hypothesis_id or None,
         "blocker": blocker or None,
         "proof_gap": proof_gap or None,
     }
@@ -449,6 +459,7 @@ def _public_row(row: Mapping[str, Any]) -> dict[str, Any]:
             )
         ],
         "candidate_id": str(item["candidate_id"]) if item.get("candidate_id") else None,
+        "hypothesis_id": str(item["hypothesis_id"]) if item.get("hypothesis_id") else None,
         "candidate_status": (
             str(item["candidate_status"]) if item.get("candidate_status") else None
         ),
@@ -472,8 +483,12 @@ async def record_coverage_angle(
     hunt_run_id: str,
     values: Mapping[str, Any],
     run_status: str = "active",
+    run: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Append one immutable angle event after binding evidence to this Hunt.
+
+    An angle that names a lead (``hypothesis_id``) moves that lead as its state says
+    (``lead_link``); ``run`` is the Hunt row that needs.
 
     The caller holds the Hunt row lock, so every check below and the sequence assigned
     at insert are serialized with every other write to this Hunt.
@@ -537,14 +552,24 @@ async def record_coverage_angle(
     await _require_candidate_binding_preserved(
         conn, hunt_run_id=hunt_run_id, angle=angle,
     )
+    lead_id = None
+    if angle["hypothesis_id"]:
+        # The lead this angle works: one on this Hunt's target that the Hunt may read.
+        from .lead_link import require_lead
+        if run is None:
+            raise CoverageLedgerError("coverage_hypothesis_id_invalid", "hypothesis_id needs the Hunt it belongs to")
+        try:
+            lead_id = await require_lead(conn, run, angle["hypothesis_id"])
+        except ValueError as exc:
+            raise CoverageLedgerError("coverage_hypothesis_unknown", str(exc), status_code=422) from exc
     row = await conn.fetchrow(
         """INSERT INTO hunt_coverage_angle_events (
                hunt_run_id, fingerprint, family, locus_json, mechanism,
                principal_context, hypothesis, status, evidence_action_ids,
-               contradictory_evidence_action_ids, candidate_id, blocker, proof_gap
+               contradictory_evidence_action_ids, candidate_id, blocker, proof_gap, hypothesis_id
            ) VALUES (
                $1::uuid,$2,$3,$4::jsonb,$5,$6::jsonb,$7,$8,$9::jsonb,
-               $10::jsonb,$11::uuid,$12,$13
+               $10::jsonb,$11::uuid,$12,$13,$14::uuid
            )
            RETURNING *""",
         hunt_run_id,
@@ -560,11 +585,17 @@ async def record_coverage_angle(
         angle["candidate_id"],
         angle["blocker"],
         angle["proof_gap"],
+        angle["hypothesis_id"],
     )
-    return {
+    result = {
         "schema_version": COVERAGE_LEDGER_SCHEMA,
         "angle": _public_row(row),
     }
+    if lead_id is not None:
+        # The angle is the one record of this work: its state moves the lead it names.
+        from .lead_link import apply_angle
+        result["lead"] = await apply_angle(conn, run, lead_id, angle)
+    return result
 
 
 _LATEST_ANGLES_CTE = """WITH latest AS (
@@ -838,6 +869,10 @@ async def build_hunt_checkpoint(
         if continuation_rows else 0
     )
 
+    # The open lead frontier on this Hunt's target (shared hypotheses), leads this Hunt holds first.
+    from .hunt_hypotheses import frontier as hypothesis_frontier
+    hypotheses = await hypothesis_frontier(conn, run)
+
     return {
         "schema_version": HUNT_CHECKPOINT_SCHEMA,
         "hunt_id": hunt_run_id,
@@ -861,6 +896,11 @@ async def build_hunt_checkpoint(
         "candidate_count": candidate_total,
         "candidates_truncated": candidate_total > len(candidates),
         "review_queue": review_queue,
+        "hypotheses": hypotheses["hypotheses"],
+        "hypothesis_count": len(hypotheses["hypotheses"]),
+        "hypothesis_total": hypotheses["total"],
+        "hypotheses_truncated": hypotheses["truncated"],
+        "hypothesis_ranking": hypotheses.get("ranking"),
         "action_outcomes": {
             str(row["status"]): int(row["count"]) for row in action_rows
         },
@@ -954,6 +994,8 @@ COVERAGE_LEDGER_SCHEMA_STATEMENTS = (
     CREATE INDEX IF NOT EXISTS idx_hunt_coverage_angle_events_fingerprint_seq
     ON hunt_coverage_angle_events(hunt_run_id, fingerprint, event_seq DESC)
     """,
+    # The lead on the target's lead board this angle works, when it names one.
+    "ALTER TABLE hunt_coverage_angle_events ADD COLUMN IF NOT EXISTS hypothesis_id UUID",
 )
 
 

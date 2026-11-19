@@ -56,12 +56,19 @@ COOKIE_CAPTURES_KEY = "cookie_captures"
 # A cookie value shorter than this could match ordinary response text: a request sending one is
 # reduced to its status rather than scrubbed.
 MIN_SCRUBBED_COOKIE_CHARS = 8
+# A captured header or JSON value (a bearer token from a login answer) at least this long is
+# known exactly and withheld wherever a response echoes it, as a withheld_ref value is; a shorter
+# one (a PIN, a pairing code, an id) may appear as ordinary text and keeps the answer status-only.
+MIN_SCRUBBED_CAPTURE_CHARS = 16
 
 
-def _cookie_pairs(response: Any) -> str:
-    """The cookies a response set, as one ``Cookie`` header value (``a=1; b=2``)."""
+def _cookie_pairs(response: Any, only: Any = None) -> str:
+    """The cookies a response set, as one ``Cookie`` header value (``a=1; b=2``); with ``only``,
+    just the cookies of those names (a capture's ``cookies``)."""
     cookies = response.cookies() if callable(getattr(response, "cookies", None)) else {}
-    pairs = [f"{name}={value}" for name, value in dict(cookies).items() if str(name) and str(value)]
+    wanted = {str(name) for name in only} if only else None
+    pairs = [f"{name}={value}" for name, value in dict(cookies).items()
+             if str(name) and str(value) and (wanted is None or str(name) in wanted)]
     if not pairs:
         raise ValueError("response set no cookie")
     return "; ".join(pairs)
@@ -117,6 +124,9 @@ class HttpWorkflowExchange:
     # capture, a short cookie): the response is reduced to its status. Otherwise every bound
     # value is known exactly and is withheld wherever the target echoes it.
     opaque_binding: bool = False
+    # The opaque binding is a captured session whose cookies include a value too short to withhold:
+    # the answer says to capture only the session cookie (capture ``cookies``).
+    short_cookie_binding: bool = False
     # Withheld values this request sends (worker-private): scrubbed from the planner's view.
     bound_values: list[str] = field(default_factory=list, repr=False)
     # discovered_secret_uses rows this request recorded: their outcome is noted after the answer.
@@ -163,7 +173,7 @@ class HttpWorkflowExchange:
                             raise ValueError("no JSON body")
                         value = pointer_get(document, item["json_pointer"])
                     elif str(item["header"]).lower() == "set-cookie":
-                        value = _cookie_pairs(response)
+                        value = _cookie_pairs(response, item.get("cookies"))
                         cookie_names.append(item["name"])
                     else:
                         value = headers[str(item["header"]).lower()]
@@ -750,9 +760,23 @@ async def _withheld_value(
                 or private["target_digest"] != _target_digest(target)
                 or expires_at.tzinfo is None or expires_at <= datetime.now(timezone.utc)):
             raise ValueError("binding changed or expired")
-        return str(_scalar(private[WITHHELD_SCHEMA_KEY][str(number)]))
+        recorded = private.get(WITHHELD_SCHEMA_KEY)
+        if not isinstance(recorded, dict) or str(number) not in recorded:
+            # The Hunt's own action, live and bound, simply recorded no such value: say so, rather
+            # than "expired" (an agent guessed /1 into a captured response whose body was hidden).
+            raise _NoSuchWithheldValue
+        return str(_scalar(recorded[str(number)]))
+    except _NoSuchWithheldValue:
+        raise ValueError(
+            f"withheld value reference names no value of action {source_id}: cite only a "
+            "[withheld:N] that action's response showed (a response that captured values shows "
+            "no body and records none)") from None
     except Exception:
         raise ValueError("withheld value reference is expired or no longer bound to this Hunt") from None
+
+
+class _NoSuchWithheldValue(Exception):
+    """A live, bound action of this Hunt recorded no withheld value under that number."""
 
 
 async def _saved_login_value(
@@ -861,8 +885,13 @@ async def prepare_http_exchange(
                 # A session cookie this Hunt's own login set: long, random and known exactly, so
                 # the response keeps its content with every echo of it withheld.
                 exchange.bound_values.extend([str(value), *secrets])
+            elif not is_cookie and isinstance(value, str) and len(value) >= MIN_SCRUBBED_CAPTURE_CHARS:
+                # A token the Hunt captured (a JWT from a login's JSON answer): the same value sent
+                # as a withheld_ref kept its answers readable, captured it made every one opaque.
+                exchange.bound_values.append(value)
             else:
                 exchange.opaque_binding = True
+                exchange.short_cookie_binding = exchange.short_cookie_binding or bool(secrets)
         else:
             exchange.opaque_binding = True
             selected = ({"profile_id": binding["profile_id"], "profile_version": binding["profile_version"]}

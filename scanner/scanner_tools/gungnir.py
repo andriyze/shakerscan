@@ -25,7 +25,6 @@ CWE Mapping:
 - CWE-200: Exposure of Sensitive Information (certificate disclosure)
 """
 
-import asyncio
 import os
 import tempfile
 from typing import Any
@@ -144,103 +143,6 @@ async def gungnir_scan(
 
         finally:
             # Clean up temp file
-            try:
-                os.unlink(roots_file)
-            except Exception:
-                pass
-
-    except Exception as e:
-        result["error"] = str(e)
-
-    return result
-
-
-async def gungnir_monitor(
-    domains: list[str],
-    duration: int = 300,
-    callback: callable = None,
-) -> dict[str, Any]:
-    """
-    Monitor CT logs for new certificates for multiple domains.
-
-    This is useful for continuous monitoring of certificate issuance.
-    The callback function is called for each new domain discovered.
-
-    Args:
-        domains: List of root domains to monitor
-        duration: How long to monitor in seconds (default 5 minutes)
-        callback: Optional async callback(domain: str) for each discovery
-
-    Returns:
-        {
-            "domains_monitored": ["example.com", ...],
-            "discoveries": {"example.com": ["api.example.com", ...], ...},
-            "total_discovered": int,
-            "duration": int,
-            "error": str or None
-        }
-    """
-    result: dict[str, Any] = {
-        "domains_monitored": domains,
-        "discoveries": {d: [] for d in domains},
-        "total_discovered": 0,
-        "duration": duration,
-        "error": None,
-    }
-
-    if not os.path.isfile(GUNGNIR_BIN):
-        result["error"] = f"Gungnir binary not found at {GUNGNIR_BIN}"
-        return result
-
-    try:
-        # Create temp file with all root domains
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False) as f:
-            for domain in domains:
-                f.write(domain + "\n")
-            roots_file = f.name
-
-        try:
-            cmd = [GUNGNIR_BIN, "-r", roots_file]
-
-            # Run with streaming output collection
-            proc = await asyncio.create_subprocess_exec(
-                *cmd,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-
-            seen: set[str] = set()
-
-            async def read_output():
-                while True:
-                    line = await proc.stdout.readline()
-                    if not line:
-                        break
-                    raw = line.decode(errors="replace").strip()
-                    if raw and raw not in seen:
-                        seen.add(raw)
-                        # The most specific root this name sits under, on label boundaries.
-                        owners = [
-                            (domain, accepted) for domain in domains
-                            if (accepted := subdomain_of(raw, domain))
-                        ]
-                        if owners:
-                            domain, subdomain = max(owners, key=lambda item: len(item[0]))
-                            result["discoveries"][domain].append(subdomain)
-                            result["total_discovered"] += 1
-                            if callback:
-                                await callback(subdomain)
-
-            # Run for specified duration
-            try:
-                await asyncio.wait_for(read_output(), timeout=duration)
-            except asyncio.TimeoutError:
-                pass  # Expected - we're limiting duration
-
-            proc.kill()
-            await proc.wait()
-
-        finally:
             try:
                 os.unlink(roots_file)
             except Exception:

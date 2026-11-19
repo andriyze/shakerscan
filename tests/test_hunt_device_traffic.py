@@ -53,8 +53,6 @@ class DeviceStore(AdmissionStore):
     async def fetchval(self, sql, *args):
         if "SELECT EXISTS" in sql:
             return self.busy
-        if "FROM device_agent_actions" in sql:
-            return 0
         if "JOIN hunt_runs" in sql:
             return self.daily
         raise AssertionError(sql)

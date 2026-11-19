@@ -160,7 +160,10 @@ async def resolve_candidate_evidence(
             unsettled.append(str(reference)[:120])
     if unresolved:
         raise CandidateEvidenceError(
-            "evidence references do not resolve to records of this Hunt or its target",
+            "evidence references do not resolve to records of this Hunt or its target: cite this "
+            "Hunt's own actions, receipts or transactions, or a finding on this target. An action "
+            "of an earlier Hunt (a candidate or hypothesis read from the target's history) is not "
+            "evidence here; repeat that request in this Hunt and cite the new action",
             unresolved, unsettled=unsettled, code=UNRESOLVED,
         )
     if unsettled:

@@ -421,7 +421,7 @@ async def with_live_briefing(conn: Any, result: dict[str, Any], row: Mapping[str
     return result
 
 
-INTERPRETATION_HEADLINES = ("open_next_steps", "inconclusive_experiments")
+INTERPRETATION_HEADLINES = ("inconclusive_experiments",)
 
 
 def _bounded_interpretations(section: Any, briefing: dict[str, Any]) -> Any:

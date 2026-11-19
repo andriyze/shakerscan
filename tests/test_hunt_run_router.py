@@ -654,6 +654,11 @@ def test_hunt_run_terminal_transitions_are_idempotent_and_state_guarded():
             self.cleared_http_captures = True
 
         async def fetch(self, query, *args):
+            if query.startswith("UPDATE hypotheses"):
+                # The leads the finished Hunt still holds go back on the board, in this transaction.
+                assert "WHERE claim_owner = $1" in query and args[0] == f"hunt:{uuid.UUID(hunt_id)}"
+                self.released_claims = True
+                return []
             # The permission settlement of a finished Hunt: due requests expire (D42), then
             # pending ones are withdrawn.
             assert any(marker in query for marker in (
@@ -669,6 +674,7 @@ def test_hunt_run_terminal_transitions_are_idempotent_and_state_guarded():
     assert finished["status"] == "completed"
     assert finished["already_terminal"] is False
     assert connection.cleared_http_captures is True
+    assert connection.released_claims is True
 
     # A retry of the same finish (its response was lost) answers the record and says so.
     retried = asyncio.run(service.finish(
@@ -773,6 +779,11 @@ def test_budget_exhausted_hunt_accepts_debrief_without_erasing_stop_reason():
             self.cleared_http_captures = True
 
         async def fetch(self, query, *args):
+            if query.startswith("UPDATE hypotheses"):
+                # The leads the finished Hunt still holds go back on the board, in this transaction.
+                assert "WHERE claim_owner = $1" in query and args[0] == f"hunt:{uuid.UUID(hunt_id)}"
+                self.released_claims = True
+                return []
             # The permission settlement of a finished Hunt: due requests expire (D42), then
             # pending ones are withdrawn.
             assert any(marker in query for marker in (
@@ -796,6 +807,7 @@ def test_budget_exhausted_hunt_accepts_debrief_without_erasing_stop_reason():
     assert result["stop_reason"] == "budget_exhausted:http_requests"
     assert result["final_debrief"]["summary"].startswith("Budget ended")
     assert connection.cleared_http_captures is True
+    assert connection.released_claims is True
     assert retained == [uuid.UUID(hunt_id)]
     # Lock order: the target row (KEY SHARE, all a proposal insert needs), then the Hunt row, as
     # operator retractions and decisions take them; the reverse order could deadlock with them.
@@ -825,6 +837,12 @@ def test_hunt_finish_refuses_in_flight_actions_and_reservations(source):
                 return _row(id=uuid.UUID(hunt_id), status="completed")
             raise AssertionError(query)
 
+        async def fetch(self, query, *_args):
+            # What still runs, named in the refusal (a held reservation has no action row).
+            assert "FROM hunt_actions" in query and "status IN ('reserved','running')" in query
+            return [{"id": action_id, "capability_name": "sqli.verify", "status": "running"}] if source == "action" else []
+
+    action_id = uuid.uuid4()
     connection = Connection()
     with pytest.raises(run_router.HTTPException) as exc:
         asyncio.run(HuntRunService(lambda: _Pool(connection)).finish(
@@ -832,7 +850,10 @@ def test_hunt_finish_refuses_in_flight_actions_and_reservations(source):
         ))
 
     assert exc.value.status_code == 409
-    assert "reserved or running" in exc.value.detail
+    assert exc.value.detail.startswith("Hunt has reserved or running actions: ")
+    assert (f"sqli.verify {action_id} (running)" if source == "action"
+            else "a budget reservation is still held") in exc.value.detail
+    assert exc.value.detail.endswith("until in_flight_actions is 0, then finish again")
     assert connection.updated is False
 
 

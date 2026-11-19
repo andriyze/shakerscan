@@ -207,7 +207,7 @@ Keep these intents distinct:
 - `scan` → Scan V2. Choose a resource budget and explicit active-testing permission.
 - legacy scan-type wording → the equivalent V2 budget/policy with a deprecation warning; never Hunt.
 - `hunt`, `deep hunt`, `device hunt`, `autonomous hunt`, `investigate autonomously` → Hunt V2,
-  never Scan and never the legacy `/research/campaigns/launch` path.
+  never Scan. The legacy `/research/*` runtime is removed.
 - `verify this finding` → the bounded deterministic finding verification/retest path.
 - `test manually`, `interactive testing`, `browser session` → Interactive Testing.
 - `investigate/hunt this TV, camera, printer, router, or device` → Hunt with the registered device

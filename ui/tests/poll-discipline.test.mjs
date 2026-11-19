@@ -18,7 +18,6 @@ function sources(dir) {
 // A raw setInterval keeps a poll running in a hidden tab, overlaps a slow answer and ignores
 // Retry-After. Network polls go through usePoll; only these local clocks (no request) remain.
 const CLOCK_TICKERS = new Map([
-  ['src/app/deep-hunt/runs/[id]/page.tsx', /setInterval\(\(\) => setNow\(Date\.now\(\)\), 1000\)/],
   ['src/app/scans/page.tsx', /setInterval\(\(\) => setDurationTickMs\(Date\.now\(\)\), LIVE_DURATION_REFRESH_MS\)/],
   ['src/components/ui/LastUpdated.tsx', /setInterval\(\(\) => setTick\(t => t \+ 1\), 10000\)/],
 ])
@@ -49,11 +48,6 @@ test('converted polls keep their pace and stop when nothing is live', () => {
   assert.match(device, /intervalMs: 5_000, live: selectedScanLive/)
   assert.match(device, /intervalMs: 3_000, live: activityLive/)
   assert.doesNotMatch(device, /setTimeout\(refresh/)
-
-  const deepHunt = read('src/app/deep-hunt/runs/[id]/page.tsx')
-  assert.match(deepHunt, /\{ intervalMs: 2500, live: runLive \}/)
-  assert.match(deepHunt, /intervalMs: 15000, live: runLive, enabled: Boolean\(campaignId\)/)
-  assert.match(deepHunt, /if \(!runLive\) return/)
 
   const schedules = read('src/app/schedules/page.tsx')
   assert.match(schedules, /intervalMs: SCHEDULES_REFRESH_MS, live: anyScheduleEnabled/)

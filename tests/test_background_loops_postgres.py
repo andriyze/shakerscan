@@ -350,26 +350,6 @@ def _sql_between(source: str, start: str, end: str) -> str:
     return source[begin:source.index(end, begin) + len(end)]
 
 
-def test_research_loop_queries_compare_retest_ids_as_uuids_and_plan():
-    source = (ROOT / "api" / "api.py").read_text(encoding="utf-8")
-    # The claim query lives with the autopilot loop (research_routes/autopilot_loop.py).
-    claim_source = (ROOT / "api" / "research_routes" / "autopilot_loop.py").read_text(encoding="utf-8")
-    candidate = _sql_between(claim_source, "WITH candidate AS (", "RETURNING re.*")
-    orphaned = _sql_between(source, "SELECT re.id AS episode_id, fv.id, fv.job_id, fv.finding_id", "LIMIT 25")
-    for query in (candidate, orphaned):
-        assert "fv.id::text" not in query
-        assert re.search(r"fv\.id=\(CASE WHEN", query)
-
-    async def scenario(pool):
-        async with pool.acquire() as conn:
-            await conn.fetch("EXPLAIN " + candidate, "owner", 30, [])
-            await conn.fetch("EXPLAIN " + orphaned)
-            # A non-UUID retest id is not an error: it matches nothing.
-            await conn.fetchval(
-                "SELECT (CASE WHEN $1 ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' "
-                "THEN $1::uuid END) IS NULL", "not-a-uuid")
-    run(scenario)
-
 
 def test_unconfirmed_handoff_index_matches_the_reconciler_query():
     """The partial index predicate must be implied by the query's WHERE, or it is never used."""

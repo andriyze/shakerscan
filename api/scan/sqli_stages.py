@@ -363,14 +363,6 @@ def next_unit(
     ), None)
 
 
-def next_stage(
-    finished: Iterable[str], *, proven: bool = False, fields: Sequence[str] | None = None,
-) -> str | None:
-    """The technique of the first unit without a verdict, or None when finished."""
-    unit = next_unit(finished, fields, proven=proven)
-    return unit[0] if unit is not None else None
-
-
 @dataclass(frozen=True)
 class Resume:
     """What a further attempt on an unfinished candidate needs, and what no round can fund."""
@@ -570,16 +562,6 @@ def prior_resume(
         killed_sent=prior.killed_sent, round_wall_ceiling=round_wall_ceiling,
         scan_wall_share=scan_wall_share,
     )
-
-
-def prior_resume_wall_seconds(
-    prior: PriorStages, *, fields: Sequence[str] | None = None,
-    field_count: int | None = None, round_wall_ceiling: int | None = None,
-) -> int | None:
-    """``prior_resume``'s wall."""
-    return prior_resume(
-        prior, fields=fields, field_count=field_count, round_wall_ceiling=round_wall_ceiling,
-    ).wall_seconds
 
 
 def budget_inconclusive_record(

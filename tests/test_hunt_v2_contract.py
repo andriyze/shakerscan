@@ -152,7 +152,6 @@ def test_hunt_actions_emit_capability_receipts_and_never_accept_raw_argv():
     assert "_enqueue_canonical_network_capability" in api
     assert "hunt_id=str(run[\"id\"])" in api
     assert "reserve_budget_snapshot" in api
-    assert "trusted_collection_headers" in api
     assert 'action_name=f"hunt.capability:{name}"' in api
     assert "require_expiry=True" in api
     assert "require_target_binding=True" in api

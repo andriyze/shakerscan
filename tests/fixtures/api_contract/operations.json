@@ -15,21 +15,6 @@
     "operation_id": "get_agent_two_tier_findings_agent_findings__target_id__get"
   },
   {
-    "path": "/agent/hunt/runs",
-    "method": "get",
-    "operation_id": "list_agent_hunt_runs_agent_hunt_runs_get"
-  },
-  {
-    "path": "/agent/hunt/session/{run_id}",
-    "method": "get",
-    "operation_id": "get_agent_hunt_session_agent_hunt_session__run_id__get"
-  },
-  {
-    "path": "/agent/hunt/session/{run_id}/cancel",
-    "method": "post",
-    "operation_id": "cancel_agent_hunt_session_agent_hunt_session__run_id__cancel_post"
-  },
-  {
     "path": "/agent/tools/readiness",
     "method": "get",
     "operation_id": "get_agent_tool_readiness_agent_tools_readiness_get"
@@ -573,21 +558,6 @@
     "path": "/data-deletion/preview",
     "method": "post",
     "operation_id": "preview_record_deletion_data_deletion_preview_post"
-  },
-  {
-    "path": "/device-agent/runs",
-    "method": "get",
-    "operation_id": "list_device_agent_runs_device_agent_runs_get"
-  },
-  {
-    "path": "/device-agent/session/{run_id}",
-    "method": "get",
-    "operation_id": "get_device_agent_session_device_agent_session__run_id__get"
-  },
-  {
-    "path": "/device-agent/session/{run_id}/cancel",
-    "method": "post",
-    "operation_id": "cancel_device_agent_session_device_agent_session__run_id__cancel_post"
   },
   {
     "path": "/device-policies",
@@ -1700,66 +1670,6 @@
     "operation_id": "deactivate_request_collection_selection_request_collections__collection_id__selections__selection_id__delete"
   },
   {
-    "path": "/research/campaigns/launch",
-    "method": "post",
-    "operation_id": "launch_research_campaign_research_campaigns_launch_post"
-  },
-  {
-    "path": "/research/campaigns/{campaign_id}/control",
-    "method": "post",
-    "operation_id": "control_research_campaign_research_campaigns__campaign_id__control_post"
-  },
-  {
-    "path": "/research/episodes",
-    "method": "get",
-    "operation_id": "list_research_episodes_research_episodes_get"
-  },
-  {
-    "path": "/research/episodes",
-    "method": "post",
-    "operation_id": "create_research_episode_research_episodes_post"
-  },
-  {
-    "path": "/research/episodes/{episode_id}",
-    "method": "get",
-    "operation_id": "get_research_episode_research_episodes__episode_id__get"
-  },
-  {
-    "path": "/research/episodes/{episode_id}/autopilot",
-    "method": "put",
-    "operation_id": "set_research_episode_autopilot_research_episodes__episode_id__autopilot_put"
-  },
-  {
-    "path": "/research/episodes/{episode_id}/benchmark",
-    "method": "get",
-    "operation_id": "research_episode_benchmark_research_episodes__episode_id__benchmark_get"
-  },
-  {
-    "path": "/research/episodes/{episode_id}/cancel",
-    "method": "post",
-    "operation_id": "cancel_research_episode_research_episodes__episode_id__cancel_post"
-  },
-  {
-    "path": "/research/episodes/{episode_id}/decisions",
-    "method": "post",
-    "operation_id": "submit_research_decision_research_episodes__episode_id__decisions_post"
-  },
-  {
-    "path": "/research/episodes/{episode_id}/observe",
-    "method": "post",
-    "operation_id": "refresh_research_observation_research_episodes__episode_id__observe_post"
-  },
-  {
-    "path": "/research/episodes/{episode_id}/settle",
-    "method": "post",
-    "operation_id": "settle_research_episode_research_episodes__episode_id__settle_post"
-  },
-  {
-    "path": "/research/readiness",
-    "method": "get",
-    "operation_id": "research_readiness_research_readiness_get"
-  },
-  {
     "path": "/results",
     "method": "get",
     "operation_id": "list_results_results_get"
@@ -2393,6 +2303,11 @@
     "path": "/targets/{target_id}/knowledge/releases",
     "method": "post",
     "operation_id": "post_target_release_targets__target_id__knowledge_releases_post"
+  },
+  {
+    "path": "/targets/{target_id}/knowledge/yield",
+    "method": "get",
+    "operation_id": "get_target_hunt_yield_targets__target_id__knowledge_yield_get"
   },
   {
     "path": "/targets/{target_id}/liveness",

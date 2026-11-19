@@ -1524,11 +1524,6 @@ def get_remediation_by_key(key: str) -> dict[str, Any] | None:
     return REMEDIATION_DATABASE.get(key, {}).copy() or None
 
 
-def list_available_remediations() -> list[str]:
-    """List all available remediation keys."""
-    return list(REMEDIATION_DATABASE.keys())
-
-
 def get_code_example(
     remediation: dict[str, Any],
     framework: str | None = None

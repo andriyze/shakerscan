@@ -81,7 +81,8 @@ def test_a_verified_candidate_finding_is_attributed_to_the_hunt(monkeypatch):
     assert result["hunt_attributed"] is True
     assert result["hunt_attribution"]["role"] == "owner"
     assert result["hunt_attribution"]["owner_hunt_id"] == str(HUNT)
-    (read, read_args), (claim, claim_args), (record, record_args) = conn.calls
+    # The attribution's three statements; the leads the proof opens are produced after them.
+    (read, read_args), (claim, claim_args), (record, record_args) = conn.calls[:3]
     assert read.startswith("SELECT id, hunt_run_id FROM findings") and read.endswith("FOR UPDATE")
     assert "last_verified_at IS NOT NULL" in read and read_args == (FINDING, TARGET)
     # Only an unowned finding is claimed, so a concurrent claim cannot overwrite an owner.

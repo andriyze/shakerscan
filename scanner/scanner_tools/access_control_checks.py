@@ -628,14 +628,6 @@ PRIVILEGED_PATHS = {
 }
 
 
-def get_all_paths() -> list[str]:
-    """Flatten all privileged paths into a single list."""
-    all_paths = []
-    for category_paths in PRIVILEGED_PATHS.values():
-        all_paths.extend(category_paths)
-    return list(set(all_paths))  # Remove duplicates
-
-
 def categorize_path(path: str) -> str:
     """Return the category for a given path."""
     for category, paths in PRIVILEGED_PATHS.items():

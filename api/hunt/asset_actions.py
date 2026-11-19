@@ -31,7 +31,8 @@ NAMES = frozenset({'targets.create','targets.update','credentials.grant','collec
                    'targets.skill.propose',
                    'targets.actions.read','targets.actions.create','targets.actions.update','targets.actions.delete',
                    'knowledge.record','knowledge.check_experiment','knowledge.changes',
-                   'knowledge.continue'})
+                   'knowledge.continue',
+                   'hypothesis.propose','hypothesis.claim','hypothesis.transition'})
 
 
 async def execute_asset_action(pool, run, name, values):
@@ -52,13 +53,17 @@ async def execute_asset_action(pool, run, name, values):
 
 #: Writes refused once an operator retracted this Hunt's entries (proposals and reads remain): every
 #: write of text other Hunts or operators later read, target names included, and collection bindings
-#: (the origins a later Hunt replays a collection against). Hunts write no hypotheses, and their only
-#: graph writes are the authorization workflow's server-built nodes (a fixed label and attributes
-#: projected by reference allowlist, hunt/graph_projection.py), so neither carries a Hunt's text.
+#: (the origins a later Hunt replays a collection against), and hypothesis proposals and transitions
+#: (a lead's text and the Hunt's test record; hunt/hunt_hypotheses.py, withheld again on retraction).
+#: A claim stores no text, but a Hunt whose entries were retracted must not hold leads other Hunts
+#: could work, so it is stopped too. A Hunt's only graph writes are the authorization workflow's
+#: server-built nodes (a fixed label and attributes projected by reference allowlist,
+#: hunt/graph_projection.py).
 QUARANTINED_WRITES = frozenset({'knowledge.record', 'targets.skill.create', 'targets.skill.update',
                                 'targets.skill.delete', 'targets.actions.create', 'targets.actions.update',
                                 'targets.actions.delete', 'targets.create', 'targets.update',
-                                'collections.bind'})
+                                'collections.bind', 'hypothesis.propose', 'hypothesis.claim',
+                                'hypothesis.transition'})
 
 
 async def _perform_asset_action(pool, run, name, values):
@@ -68,10 +73,18 @@ async def _perform_asset_action(pool, run, name, values):
         async with pool.acquire() as conn:
             if await hunt_quarantined(conn, run['id']):
                 raise HTTPException(403, {'error':'hunt_entries_retracted', 'reason_code':'hunt_entries_retracted',
-                    'message':QUARANTINE_MESSAGE})
+                    'message':('An operator retracted this Hunt’s entries; for the rest of its run it can no '
+                               'longer hold leads on the board.') if name == 'hypothesis.claim'
+                              else QUARANTINE_MESSAGE})
     policy = run.get('policy_json') or {}
     if isinstance(policy,str):
         policy = json.loads(policy)
+    if name.startswith('hypothesis.'):
+        from . import hunt_hypotheses
+        operation = {'hypothesis.propose': hunt_hypotheses.propose, 'hypothesis.claim': hunt_hypotheses.claim,
+                     'hypothesis.transition': hunt_hypotheses.transition}[name]
+        async with pool.acquire() as conn:
+            return await operation(conn, run, values)
     if name.startswith('knowledge.'):
         from .interpretations import InterpretationInput, check_experiment, record_interpretation
         async with pool.acquire() as conn:
@@ -114,8 +127,15 @@ async def _perform_asset_action(pool, run, name, values):
                     for error in exc.errors(include_input=False))[:2000]}) from None
             entry = await record_interpretation(conn, target_id, parsed,
                                                 writer=f"hunt:{run['id']}", hunt_run_id=run['id'])
-            return {'ok':True, 'interpretation':entry, 'is_proof':False, 'authority_granted':False,
-                    'hunt_snapshot_unchanged':True}
+            lead = None
+            if parsed.negative_state == 'hypothesis_refuted':
+                # The lead it names carries this as a test that found against it (hunt/lead_link.py).
+                from .lead_link import count_refutation_claim
+                async with conn.transaction():
+                    lead = await count_refutation_claim(conn, run, parsed.subject.id, entry['id'],
+                                                        list(parsed.evidence_refs))
+            return {'ok':True, 'interpretation':entry, **({'lead':lead} if lead else {}), 'is_proof':False,
+                    'authority_granted':False, 'hunt_snapshot_unchanged':True}
     if name.startswith('targets.actions.'):
         from targets.actions import read_target_actions, write_target_action, TargetActionWrite, resolve_steps
         async with pool.acquire() as conn, conn.transaction():

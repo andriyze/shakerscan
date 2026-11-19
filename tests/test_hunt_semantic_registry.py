@@ -148,10 +148,3 @@ def test_hunt_capability_actions_require_retry_safe_idempotency_keys():
     assert '"idempotent_replay": True' in handler
     assert '"idempotent_replay": False' in handler
 
-
-def test_legacy_loop_never_advertises_or_dispatches_run_tool():
-    assert "run_tool" not in agent_tools.CALLABLE_TOOL_NAMES
-    assert "run_tool" not in {item["name"] for item in agent_tools.tool_schemas()}
-    legacy = (ROOT / "api" / "hunt" / "legacy.py").read_text(encoding="utf-8")
-    assert "LegacyHuntIsolationMiddleware" in legacy
-    assert '"status": 410' in legacy

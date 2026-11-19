@@ -102,6 +102,75 @@ Hypothesis:  authorization may depend only on the order id.
 Evidence:    response.diff(GET /api/orders/4121, principal=A, principal=B)
 ```
 
+A Hunt works this through the target's shared lead board (`hypotheses`) with
+`hypothesis.propose`, `hypothesis.claim` and `hypothesis.transition` (`api/hunt/hunt_hypotheses.py`).
+These capabilities call the same dedupe, compare-and-set claim, lifecycle gate and deterministic
+refutation check as Arsenal; they do not add a second lifecycle. Writes are limited to the Hunt's
+own target. A Hunt cannot promote a lead or close it as `dead`. `supported` must cite completed
+testing actions of that Hunt, and `refuted` needs a completed deterministic verification. Each
+move takes a reason code that fits it. Proposing a lead twice is a no-op, and endorsing another
+source's lead never changes its text or confidence. Renewing a lease keeps the state the Hunt
+reached; moving a lead to `open` releases it at once.
+
+A lead is its writer's words: the title, and also the family, dimensions and dedupe key. When an
+operator retracts a Hunt's entries, every lead that Hunt created is masked in all Hunt reads, each
+one still live is closed and gives up its dedupe key so a trusted source can raise the same lead
+again, its test records are removed, and it can no longer write or hold leads.
+
+The checkpoint hands over the open frontier ranked by the deterministic `hypothesis_scheduler`,
+with the leads the Hunt holds listed first. The ordering is computed server-side and each lead
+carries its score breakdown. Beyond what is stored on the lead (its family, severity guess and
+confidence, as its source stated them), the scheduler's inputs come from server records: the
+Hunt's active authentication sessions (reachability), the latest coverage any Hunt on the target
+recorded for the same family and route (novelty is lost while it is `negative`), tests that
+found no signal (prior failures), and the remaining HTTP request budget (deferral). No per-read
+planner hint is accepted, and a Hunt cannot raise the confidence of another source's lead.
+
+Leads also follow from results. `followup_leads` holds a small table keyed by vulnerability class
+(never by application): a deterministically verified finding of a class opens the leads listed
+for it, recorded once with the finding as lineage. A lead another source already holds is endorsed
+and left in its writer's words; a lead an operator closed stays closed. Production runs when a
+Hunt verifies a candidate, when a Hunt reads the board, and when a Hunt starts. A start also runs
+the existing graph and inventory lead producers for the target, each only when its records gained
+a row since the leads it last wrote, and records a lead for each advisory that service intelligence
+matches to an observed service and that is worth acting on (known exploited, or critical/high with
+a bundled check; not already settled by a verify Scan). All of this writes leads only: it runs no
+traffic, grants no authority and proves nothing.
+
+Four query kinds keep planners from repeating or idling. `attempts` groups what any Hunt already
+ran against the target by capability, method, route template and principal. `traffic` searches the
+calls archived for the target across its Scans and Hunts and returns references with the masked
+origin and path, never headers or bodies. `coverage_gaps` relates the application graph to the coverage
+ledger: each auth-boundary edge is matched, when read, to the latest authorization coverage on its
+consumer route across the target's Hunts, and the untested ones are listed first. `activity` reports
+what changed for one Hunt since a cursor (its settled actions, decided permission requests and
+moved leads on its target, as ids and states) and can hold the read for up to 15 seconds until
+something does. It is a bounded wait on an existing read route, holds no database connection
+between looks, and adds no scheduler: the planner still decides what to do next.
+
+`GET /targets/{id}/knowledge/yield` is the operator's read of how this went: per capability the
+settled actions, the requests and tool seconds they settled and the verified findings attributed to
+them, and per lead source and family how leads ended, with the same for leads that carry a lineage.
+It is measured from the action ledger, verification attributions and the lead board, for comparing
+runs offline. The scheduler's weights are fixed in code: nothing learns from this report online,
+across targets or per application, and planners do not read it.
+
+The lead board is the one place that says something is worth testing. Notes of kind `hypothesis`
+and `next_step` are no longer written (`knowledge.record` refuses them and points at
+`hypothesis.propose`); entries written before stay readable. The other records of a Hunt's work
+refer to the lead instead of restating it:
+
+- A coverage angle may name the lead it works (`hypothesis_id`). Recording the angle then moves the
+  lead through the same claim and transition code a Hunt calls directly: `planned` holds it,
+  `testing` starts it, `negative` counts a test that found nothing and hands it back, `candidate`
+  marks it supported, `blocked` releases it. A move the lifecycle refuses leaves the angle recorded
+  and is reported.
+- A `hypothesis_refuted` interpretation names its lead as subject and is counted against it in every
+  Hunt's ranking. It carries the exact conditions and its own applicability. The lead's state does
+  not change: only a deterministic verification refutes a lead.
+- The continuation report's last tier is the open leads in the scheduler's order, where it used to be
+  next-step notes.
+
 ## Coverage angles and planner checkpoints
 
 A Hunt records **exact coverage angles**, not family-level self-attestations. An angle is keyed by the material dimensions that make the experiment distinct: vulnerability family, operation/locus, mechanism, principal context, and application state. The locus vocabulary is closed and published (`HuntCoverageAngleRequest.locus`, `GET /hunts/contract` → `coverage_ledger.locus_keys`); the server refuses an unknown key or an empty locus rather than dropping it, because a dropped dimension would merge two different experiments into one angle. The ledger is append-only; later events update the current view without erasing what the planner previously believed. `GET /hunts/{hunt_id}/record` exports that full event history (`coverage_ledger.events`, in sequence order, each superseded event marked with the event that replaced it) together with `event_total`, `event_limit` and `events_truncated`; a per-Hunt cap of 5,000 events (409 `coverage_event_limit_reached` beyond it) keeps the history below the export bound. Bytes are bounded too, because the field limits count characters: one event holds at most 32,768 bytes of text and locus values as stored (422 `coverage_event_too_large`) and a Hunt at most 8 MiB (409 `coverage_byte_limit_reached`). The export stops at the per-Hunt byte bound and the coverage page and checkpoint at 4 MiB, each reporting truncation, so rows stored before the bound cannot make them unbounded. Planner-supplied coverage strings and context values pass through the shared secret redactor before they are stored or fingerprinted. Settled claims are bound to same-Hunt actions that actually ran: `negative` may cite only completed actions whose settled budget records target traffic (requests, browser actions, ports, hosts or OOB interactions); `partial`, and `blocked` when it cites actions, need at least one such action; partial or blocked execution remains an explicit gap. Every action a `negative` or `partial` claim cites must also be related to the angle (422 `coverage_evidence_unrelated`, naming each unrelated action and why): where the angle and the action's recorded input both name a route, the action addressed that route (a concrete object path matches its template); where both name a host or port, the same service; `xss.verify`, `sqli.verify` and `authz.verify` support only their own family, and network capabilities (`ports.discover`, `service.*`, `ssh.*`, `tls.inspect`) only an angle without a route. An action that addressed the whole target without a route, such as a crawl or content discovery, is related at the target level. A queue handoff (an action whose result is only `queued`, such as a device posture queue or a confirmed SSH plan) is never evidence, and a policy refusal is a blocker sentence rather than evidence. Events are ordered by a sequence assigned under the Hunt row lock, and an angle's current state is its highest-sequence event. One supersession is refused: an event that cites no new evidence cannot drop the candidate an angle is bound to; it must keep that `candidate_id`. Coverage is writable while the Hunt is unfinished: an unfinished `budget_exhausted` Hunt accepts evidence-bound events so the planner can settle what its last actions examined, and finishing or cancelling (which sets `completed_at` under the same row lock) makes the history read-only. A negative result on one angle never closes a materially different method, route, identity, mechanism, input path, or state.

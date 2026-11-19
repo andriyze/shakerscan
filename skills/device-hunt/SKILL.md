@@ -5,8 +5,8 @@ description: Compatibility entry point for the unified ShakerScan Hunt workflow.
 
 # Device Hunt compatibility
 
-Device Hunt is now the device-target form of **Hunt**. Do not start the legacy
-`/devices/{id}/agent/session` planner.
+Device Hunt is now the device-target form of **Hunt**. The legacy
+`/devices/{id}/agent/session` planner is removed.
 
 Read and follow [`../hunt/SKILL.md`](../hunt/SKILL.md) in full. Start `POST /hunts` with the exact
 registered device target ID. Bind request collections only at creation. Secrets remain worker-only,

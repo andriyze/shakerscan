@@ -444,11 +444,6 @@ def _compared_value(value: Any) -> Any:
     return value
 
 
-def _scrub_sample(value: str) -> str:
-    # Masked before it is cut, so a value is never split by the sample's end.
-    return _masked_body(value)[:MAX_RESPONSE_SAMPLE]
-
-
 def _body_digest(data: bytes) -> str:
     """The public digest of a response body or an extracted value: installation-keyed and
     memory-hard (``keyed_response_digest``), never a plain SHA-256, which would be an offline

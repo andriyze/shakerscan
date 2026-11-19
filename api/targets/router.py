@@ -283,11 +283,6 @@ def _public_hypothesis_row(*a: Any, **k: Any) -> Any:
     return _dep("public_hypothesis_row")(*a, **k)
 
 
-def _model(name: str) -> Any:
-    """Return a request model that still lives in the api module."""
-    return _dep("model")(name)
-
-
 QUEUE_NAME = os.environ.get("SCAN_QUEUE_NAME", "scan_jobs")
 
 
@@ -317,10 +312,15 @@ async def list_targets(
     limit: int = Query(100, ge=1, le=500),
     offset: int = Query(0, ge=0)
 ):
-    """List all targets."""
+    """List web targets (one row per registered web app or API), newest first.
+
+    Host assets (``host://<locator>`` rows: hosts added with ``POST /targets/hosts`` and the hosts
+    web targets belong to) are not listed here; ``GET /targets/inventory`` lists them, with their
+    web targets as services. Each row's ``inventory_kind`` and ``asset_id`` say where it sits
+    there: ``service`` of asset ``asset_id``, or an ``asset`` of its own."""
     async with _pool().acquire() as conn:
         query = f"""
-            SELECT t.id,
+            SELECT t.id, t.asset_owner_id,
                    LEFT(t.url, 2049) AS url,
                    LEFT(t.name, 512) AS name,
                    LEFT(t.root_domain, 253) AS root_domain,
@@ -360,9 +360,22 @@ async def list_targets(
             + ("" if include_inactive else " AND is_active = true")
         )
 
+    targets = []
+    for row in rows:
+        target = _public_target_row(row)
+        owner = target.pop('asset_owner_id', None)
+        target['inventory_kind'] = 'service' if owner else 'asset'
+        target['asset_id'] = str(owner or target['id'])
+        targets.append(target)
     return {
-        'targets': [_public_target_row(r) for r in rows],
-        'total': total
+        'targets': targets,
+        'total': total,
+        'host_assets': {
+            'listed_here': False,
+            'list': '/targets/inventory',
+            'note': 'Host assets (host://<locator>) are listed by GET /targets/inventory, '
+                    'with the web targets that belong to them as services.',
+        },
     }
 
 
@@ -3215,6 +3228,8 @@ def _authorized_for_active_testing_sql(column: str = "t.url") -> str:
 def _public_target_row(row: Any) -> dict[str, Any]:
     """Serialize a target without exposing credentials stored in scan options."""
     target = row_to_dict(row)
+    from .archive import public_target_url
+    target["url"] = public_target_url(target.get("url"))
     for key, limit in (("url", 2049), ("name", 512), ("root_domain", 253)):
         value = target.get(key)
         if isinstance(value, str) and len(value) > limit:

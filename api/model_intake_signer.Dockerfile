@@ -1,4 +1,4 @@
-FROM python:3.14-slim-bookworm@sha256:416f0db2a2b561945630cef9877a7ea0581b27449eb9fd9df42f03e1b74b5b63
+FROM python:3.15-slim-bookworm@sha256:96599df822d0e1c6bb700014a05c7f3c8cabc6e0f7ff3c4f9f69cee033b4b5d9
 
 # Debian publishes security fixes faster than the pinned base image is rebuilt, and the image
 # gate (Trivy, HIGH/CRITICAL with a fix available) fails on any OS package that lags behind.
@@ -27,9 +27,9 @@ RUN pip install --no-cache-dir --require-hashes -r /tmp/requirements.lock \
 # Remove it from the venv, the system interpreter, and the ensurepip bundle, and prove it is gone.
 RUN /opt/venv/bin/python -m pip uninstall -y pip \
     && /usr/local/bin/python3 -m pip uninstall -y --break-system-packages pip \
-    && rm -rf /usr/local/lib/python3.14/ensurepip/_bundled \
-        /usr/local/bin/pip /usr/local/bin/pip3 /usr/local/bin/pip3.14 \
-        /opt/venv/bin/pip /opt/venv/bin/pip3 /opt/venv/bin/pip3.14 \
+    && rm -rf /usr/local/lib/python3.15/ensurepip/_bundled \
+        /usr/local/bin/pip /usr/local/bin/pip3 /usr/local/bin/pip3.15 \
+        /opt/venv/bin/pip /opt/venv/bin/pip3 /opt/venv/bin/pip3.15 \
     && /usr/local/bin/python3 -c 'import importlib.util; assert importlib.util.find_spec("pip") is None' \
     && /opt/venv/bin/python -c 'import importlib.util; assert importlib.util.find_spec("pip") is None'
 

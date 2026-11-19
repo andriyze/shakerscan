@@ -268,25 +268,6 @@ def _host_port(address: str, port: int) -> str:
     return f"[{address}]:{port}" if ":" in address else f"{address}:{port}"
 
 
-def _parse_mx_records(dig_output: str) -> list[dict[str, Any]]:
-    """Parse MX records from dig output."""
-    mx_records = []
-    for line in dig_output.split('\n'):
-        line = line.strip()
-        if not line or line.startswith(';'):
-            continue
-        # Match MX record format: domain. TTL IN MX priority host.
-        match = re.search(r'MX\s+(\d+)\s+(\S+)', line)
-        if match:
-            priority = int(match.group(1))
-            host = match.group(2).rstrip('.')
-            mx_records.append({
-                "priority": priority,
-                "host": host
-            })
-    return sorted(mx_records, key=lambda x: x["priority"])
-
-
 def _analyze_banner(banner: str) -> dict[str, Any]:
     """Analyze SMTP banner for security issues."""
     analysis = {
@@ -362,63 +343,6 @@ def _analyze_banner(banner: str) -> dict[str, Any]:
         )
 
     return analysis
-
-
-def _assess_cipher_strength(ciphers: list[str]) -> dict[str, Any]:
-    """Assess the strength of offered ciphers."""
-    assessment = {
-        "total_ciphers": len(ciphers),
-        "weak_ciphers": [],
-        "strong_ciphers": [],
-        "grade": "A",
-        "issues": []
-    }
-
-    for cipher in ciphers:
-        cipher_upper = cipher.upper()
-
-        # Check for weak ciphers
-        is_weak = False
-        for weak in WEAK_CIPHERS:
-            if weak.upper() in cipher_upper:
-                assessment["weak_ciphers"].append(cipher)
-                is_weak = True
-                break
-
-        # Check for strong ciphers
-        if not is_weak:
-            for strong in STRONG_CIPHERS:
-                if strong.upper() in cipher_upper:
-                    assessment["strong_ciphers"].append(cipher)
-                    break
-
-    # Grade calculation
-    weak_count = len(assessment["weak_ciphers"])
-    strong_count = len(assessment["strong_ciphers"])
-
-    if weak_count > 0:
-        if "NULL" in str(assessment["weak_ciphers"]).upper():
-            assessment["grade"] = "F"
-            assessment["issues"].append("NULL cipher supported - critical vulnerability")
-        elif "EXPORT" in str(assessment["weak_ciphers"]).upper():
-            assessment["grade"] = "F"
-            assessment["issues"].append("EXPORT cipher supported - FREAK vulnerability")
-        elif "RC4" in str(assessment["weak_ciphers"]).upper():
-            assessment["grade"] = "C"
-            assessment["issues"].append("RC4 cipher supported - known weaknesses")
-        elif "3DES" in str(assessment["weak_ciphers"]).upper():
-            assessment["grade"] = "B"
-            assessment["issues"].append("3DES cipher supported - SWEET32 vulnerability")
-        else:
-            assessment["grade"] = "B"
-            assessment["issues"].append(f"{weak_count} weak cipher(s) supported")
-
-    if strong_count == 0 and assessment["total_ciphers"] > 0:
-        if assessment["grade"] == "A":
-            assessment["grade"] = "B"
-        assessment["issues"].append("No modern AEAD ciphers (GCM/CHACHA20) supported")
-
-    return assessment
 
 
 # ============================================================================

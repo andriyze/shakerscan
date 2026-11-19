@@ -68,11 +68,6 @@ class AuthConfig:
             self.login_username
         )
 
-    def has_multi_user(self) -> bool:
-        """Check if multi-user auth is configured for BOLA/IDOR testing."""
-        return bool(self.user2_header or self.user2_cookies)
-
-
 @dataclass
 class TestConfig:
     """Test toggle configuration.
@@ -218,18 +213,6 @@ class ScanConfig:
     scan_id: str | None = None
     project_id: str | None = None
     tags: list[str] = field(default_factory=list)
-
-    def is_smart_scan(self) -> bool:
-        """Check if this is a smart scan."""
-        return self.scan_type == ScanType.SMART
-
-    def is_active_scan(self) -> bool:
-        """Check if active testing is enabled."""
-        return self.tests.active or self.tests.xss or self.tests.sqli
-
-    def requires_permission(self) -> bool:
-        """Check if scan type requires explicit user permission."""
-        return self.scan_type in (ScanType.FULL, ScanType.AGGRESSIVE, ScanType.SMART)
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "ScanConfig":

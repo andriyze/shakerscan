@@ -2690,44 +2690,6 @@ except Exception as e:
     get_code_example = _fallback_get_code_example
 
 
-def _get_validator_type(finding: dict) -> str:
-    """
-    Determine which validator type applies to a finding for stats tracking.
-    """
-    title_lower = finding.get("title", "").lower()
-    tool = finding.get("tool", "").lower()
-
-    if "xss" in title_lower or "cross-site scripting" in title_lower or tool == "dalfox":
-        return "xss"
-    if ("sql" in title_lower and "inject" in title_lower) or tool == "sqlmap":
-        return "sqli"
-    if "ssrf" in title_lower or "server-side request" in title_lower:
-        return "ssrf"
-    if "xxe" in title_lower or "xml external" in title_lower:
-        return "xxe"
-    if any(x in title_lower for x in ["path traversal", "lfi", "local file", "directory traversal", "../"]):
-        return "path_traversal"
-    if "open redirect" in title_lower or "url redirect" in title_lower:
-        return "open_redirect"
-    if any(x in title_lower for x in ["command injection", "rce", "remote code", "os command"]):
-        return "command_injection"
-    if "subdomain takeover" in title_lower or "takeover" in title_lower:
-        return "subdomain_takeover"
-    if "cors" in title_lower:
-        return "cors"
-    if "jwt" in title_lower or "json web token" in title_lower:
-        return "jwt"
-    if "csrf" in title_lower or "cross-site request forgery" in title_lower:
-        return "csrf"
-    if "idor" in title_lower or "insecure direct object" in title_lower or "bola" in title_lower:
-        return "idor"
-    if any(x in title_lower for x in ["file upload", "upload vuln", "unrestricted upload"]):
-        return "file_upload"
-    if any(x in title_lower for x in ["deserialization", "deserialize", "pickle", "unserialize"]):
-        return "deserialization"
-    return "other"
-
-
 try:
     from scanner_tools.report_gating import finding_has_verification_evidence
 except Exception:

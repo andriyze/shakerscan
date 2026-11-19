@@ -49,7 +49,6 @@ COPY --from=scanner-runtime /app/local_agent_routes /app/local_agent_routes
 COPY --from=scanner-runtime /app/agent_routes /app/agent_routes
 COPY --from=scanner-runtime /app/investigation_routes /app/investigation_routes
 COPY --from=scanner-runtime /app/retest_routes /app/retest_routes
-COPY --from=scanner-runtime /app/research_routes /app/research_routes
 COPY --from=scanner-runtime /app/capabilities /app/capabilities
 COPY --from=scanner-runtime /app/capture /app/capture
 COPY --from=scanner-runtime /app/devices /app/devices
