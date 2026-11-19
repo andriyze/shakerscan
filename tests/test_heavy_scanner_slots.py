@@ -99,3 +99,25 @@ def test_a_slot_is_freed_only_by_its_holder_and_other_tools_are_not_limited():
         assert asyncio.run(light.acquire(ttl_seconds=60, max_wait_seconds=0)) == 0.0
         assert not light.held
         light.release()
+
+
+def test_a_process_queues_past_its_own_short_wall_budget_until_a_slot_frees(monkeypatch):
+    # Ten thorough Scans on a 4-CPU host: a passive template attempt reserving 12 s of tool time
+    # gave up after 12 s in the queue ("all 4 heavy scanner slots ... stayed busy for 12 s") and
+    # the batch ended adapter_failed with nothing run. The wait is bounded by MAX_WAIT_SECONDS,
+    # never by the process's own wall budget or timeout.
+    monkeypatch.setattr(heavy_slots, "MAX_WAIT_SECONDS", 5.0)
+    redis = FakeRedis()
+    holder = HeavyScannerSlot(redis, "nuclei", slots=1)
+    asyncio.run(holder.acquire(ttl_seconds=60, max_wait_seconds=1))
+
+    async def scenario():
+        queued = HeavyScannerSlot(redis, "nuclei", slots=1)
+        task = asyncio.create_task(queued.acquire_for_process(process_timeout_ms=50))
+        await asyncio.sleep(0.3)  # far longer than the process's 50 ms timeout
+        assert not task.done()
+        holder.release()
+        waited = await task
+        assert queued.held and waited >= 0.3
+        queued.release()
+    asyncio.run(scenario())

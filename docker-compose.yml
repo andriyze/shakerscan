@@ -429,6 +429,7 @@ services:
         SCANNER_VERSION: ${SCANNER_VERSION:-dev}
         SCANNER_SOURCE_REVISION: ${GIT_COMMIT:-unknown}
     environment:
+      - SHAKERSCAN_HEAVY_SCANNER_SLOTS=${SHAKERSCAN_HEAVY_SCANNER_SLOTS:-}
       - SHAKERSCAN_PRIVATE_NETWORK_TARGETS=${SHAKERSCAN_PRIVATE_NETWORK_TARGETS:-}
       - SHAKERSCAN_NAT64_PREFIXES=${SHAKERSCAN_NAT64_PREFIXES:-}
       - SHAKERSCAN_DNS_DOH_RESOLVERS=${SHAKERSCAN_DNS_DOH_RESOLVERS-https://cloudflare-dns.com/dns-query,https://dns.google/dns-query}
@@ -534,6 +535,7 @@ services:
       - "host.docker.internal:host-gateway"
       - "shakerscan-fixtures.internal:host-gateway"
     environment:
+      - SHAKERSCAN_HEAVY_SCANNER_SLOTS=${SHAKERSCAN_HEAVY_SCANNER_SLOTS:-}
       - SHAKERSCAN_PRIVATE_NETWORK_TARGETS=${SHAKERSCAN_PRIVATE_NETWORK_TARGETS:-}
       - SHAKERSCAN_NAT64_PREFIXES=${SHAKERSCAN_NAT64_PREFIXES:-}
       - SHAKERSCAN_DNS_DOH_RESOLVERS=${SHAKERSCAN_DNS_DOH_RESOLVERS-https://cloudflare-dns.com/dns-query,https://dns.google/dns-query}

@@ -24,6 +24,12 @@ SLOTS_ENV = "SHAKERSCAN_HEAVY_SCANNER_SLOTS"
 SLOT_KEY = "heavy_scanner_slot:{index}"
 WAIT_POLL_SECONDS = 2.0
 HEARTBEAT_SECONDS = 15.0
+#: How long a scanner process may queue for a slot. The wait is not tool time and must not be
+#: bounded by the process's own wall budget: a small attempt (a passive template batch of a few
+#: endpoints) reserves only seconds, so ten Scans on a 4-CPU host gave up after 12 s of queueing
+#: and the batch ended adapter_failed with nothing run. The queued action keeps its heartbeat and
+#: honours cancellation meanwhile; the Scan's own duration limit still applies.
+MAX_WAIT_SECONDS = 1800.0
 # Compare and delete in one step: a slot that expired and was retaken is never freed by its
 # earlier holder.
 _RELEASE_IF_OWNED = "if redis.call('get', KEYS[1]) == ARGV[1] then return redis.call('del', KEYS[1]) end return 0"
@@ -89,6 +95,17 @@ class HeavyScannerSlot:
                 next_heartbeat = now + HEARTBEAT_SECONDS
             await asyncio.sleep(WAIT_POLL_SECONDS)
         return time.monotonic() - started
+
+    async def acquire_for_process(
+        self, *, process_timeout_ms: int,
+        heartbeat: Callable[[], Awaitable[None]] | None = None,
+        cancelled: Callable[[], bool] | None = None,
+    ) -> float:
+        """Take a slot for one scanner process: held for the process's timeout plus a margin,
+        waited for up to ``MAX_WAIT_SECONDS`` whatever the process's own wall budget."""
+        return await self.acquire(
+            ttl_seconds=int(process_timeout_ms) // 1000 + 120, max_wait_seconds=MAX_WAIT_SECONDS,
+            heartbeat=heartbeat, cancelled=cancelled)
 
     def release(self) -> None:
         """Free the slot only while it still holds this token (an expired, retaken slot stays)."""

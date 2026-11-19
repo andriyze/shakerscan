@@ -18653,9 +18653,8 @@ async def _execute_agent_scanner_process(
         process_enforcement = process_plan.enforcement_receipt()
         requested_timeout = int(job_data.get("timeout_ms") or process_plan.timeout_ms)
         # Queued behind the host's heavy-process slots, heartbeating; the wait is not tool time.
-        monotonic_started += await heavy_slot.acquire(
-            ttl_seconds=process_plan.timeout_ms // 1000 + 120, heartbeat=heartbeat, cancelled=cancelled,
-            max_wait_seconds=int(reserved_budget.get("tool_wall_seconds") or 0))
+        monotonic_started += await heavy_slot.acquire_for_process(
+            process_timeout_ms=process_plan.timeout_ms, heartbeat=heartbeat, cancelled=cancelled)
         elapsed_before_process_ms = max(
             0, int((time.monotonic() - monotonic_started) * 1_000),
         )
