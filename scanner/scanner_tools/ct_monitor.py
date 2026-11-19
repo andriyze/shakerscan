@@ -72,7 +72,22 @@ def _crtsh_fetch(url: str, timeout: int) -> list[dict[str, Any]]:
         raise CTQueryError("unexpected non-JSON answer") from exc
     if not isinstance(data, list):
         raise CTQueryError("unexpected answer shape")
-    return [item for item in data if isinstance(item, dict)]
+    return [_text_fields(item) for item in data if isinstance(item, dict)]
+
+
+#: The text fields the analysis reads. crt.sh answers some of them as JSON null for some
+#: certificates (seen on the largest roots); every reader then failed on ``"*." in None`` with
+#: "argument of type 'NoneType' is not iterable" and the whole Certificate Transparency source
+#: contributed nothing. A null or non-text value is read as empty text; the row is kept.
+CRTSH_TEXT_FIELDS = ("common_name", "name_value", "issuer_name", "issuer", "not_before",
+                     "not_after", "entry_timestamp", "serial_number")
+
+
+def _text_fields(item: dict[str, Any]) -> dict[str, Any]:
+    for key in CRTSH_TEXT_FIELDS:
+        if key in item and not isinstance(item[key], str):
+            item[key] = "" if item[key] is None else str(item[key])
+    return item
 
 
 def _retryable(error: CTQueryError) -> bool:

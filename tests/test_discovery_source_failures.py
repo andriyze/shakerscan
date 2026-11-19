@@ -183,3 +183,33 @@ def test_discovery_with_the_real_ct_check_never_crashes(monkeypatch, crtsh):
         assert "crtsh" not in result["sources_answered"]
     else:
         assert result["source_errors"] == {} and "crtsh" in result["sources_answered"]
+
+
+def test_null_fields_in_crtsh_rows_are_read_as_empty_text_not_a_crash(monkeypatch):
+    # crt.sh answers some certificates of the largest roots with JSON null in a text field; every
+    # reader failed on `"*." in None` ("argument of type 'NoneType' is not iterable") and the
+    # whole Certificate Transparency source contributed nothing.
+    import json as _json
+    rows = [
+        {"id": 1, "common_name": "www.root.test", "name_value": "www.root.test\napi.root.test",
+         "issuer_name": "C=US, O=Let's Encrypt", "not_before": "2026-10-01T00:00:00", "not_after": "2026-12-30T00:00:00"},
+        {"id": 2, "common_name": None, "name_value": None, "issuer_name": None,
+         "not_before": None, "not_after": None},
+        {"id": 3, "common_name": "*.root.test", "name_value": "*.root.test\nmail.root.test", "issuer_name": None,
+         "not_before": "2026-09-01T00:00:00", "not_after": None},
+    ]
+
+    class Response:
+        def read(self):
+            return _json.dumps(rows).encode()
+        def __enter__(self):
+            return self
+        def __exit__(self, *exc):
+            return False
+
+    monkeypatch.setattr(ct_monitor, "urlopen", lambda req, timeout: Response())
+    result = asyncio.run(ct_monitor.check_certificate_transparency("root.test", safe_mode=False))
+    assert result["source_status"] == "ok" and "error" not in result
+    assert result["certificates_found"] == 3
+    names = set(result["subdomain_discovery"].get("subdomains") or [])
+    assert {"www.root.test", "api.root.test", "mail.root.test"} <= names
