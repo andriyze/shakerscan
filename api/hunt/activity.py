@@ -63,8 +63,8 @@ def parse_filters(filters: Mapping[str, Any] | None) -> tuple[str | None, int]:
     after = supplied.get("after")
     if after is not None:
         decode_cursor(after)
-    if wait and after is None:
-        raise ActivityQueryError("wait_seconds needs after: read once without it to get a cursor")
+    # A wait without after waits from now (the server takes the baseline read itself): agents kept
+    # asking to wait first and were refused until they read a cursor.
     return after, wait
 
 

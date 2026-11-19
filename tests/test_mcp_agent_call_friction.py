@@ -169,3 +169,18 @@ def test_a_credential_refusal_carries_its_next_step():
     reason = mcp._refusal_reason(body)
     assert reason.startswith("No credential attached to this target fills user1.")
     assert reason.endswith("A person attaches a credential to this target. Do not retry.")
+
+
+def test_a_key_sent_to_a_tool_without_one_names_what_it_takes_and_that_none_is_needed():
+    # Agents sent idempotency_key to shakerscan_hunt_candidate (every other Hunt write takes one)
+    # and got only "Unknown tool arguments: idempotency_key", three times in one session.
+    engine = Engine()
+    with pytest.raises(mcp.MCPError) as raised:
+        _client(engine).call_tool("shakerscan_hunt_candidate", {
+            "hunt_id": HUNT, "family": "xss", "title": "t", "claim": "c", "evidence_refs": ["a-1"],
+            "idempotency_key": "cand-0001"})
+    message = raised.value.message
+    assert message.startswith("Unknown tool arguments: idempotency_key (shakerscan_hunt_candidate accepts: ")
+    assert "family" in message and "evidence_refs" in message
+    assert "needs no idempotency_key: repeating it is safe" in message
+    assert engine.posts == []

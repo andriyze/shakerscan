@@ -32,11 +32,12 @@ def test_a_cursor_round_trips_and_only_the_servers_own_is_accepted():
     for bad in ('', 'not-a-cursor', 'e30', 7, 'x' * 9000):
         with pytest.raises(ActivityQueryError):
             decode_cursor(bad)
-    for filters in ({'since': 'x'}, {'wait_seconds': 16}, {'wait_seconds': True}, {'wait_seconds': 5},
-                    {'after': 'nope'}):
+    for filters in ({'since': 'x'}, {'wait_seconds': 16}, {'wait_seconds': True}, {'after': 'nope'}):
         with pytest.raises(ActivityQueryError):
             parse_filters(filters)
     assert parse_filters({}) == (None, 0)
+    # A wait without after waits from now; agents asked for it first and were refused.
+    assert parse_filters({'wait_seconds': 5}) == (None, 5)
 
 
 def test_a_hunt_waits_for_its_actions_and_its_targets_leads_and_hears_each_change_once(monkeypatch):
@@ -99,7 +100,20 @@ def test_a_hunt_waits_for_its_actions_and_its_targets_leads_and_hears_each_chang
                 # The capability call that claimed it settled too, and is this Hunt's own action.
                 assert [item['capability'] for item in moved['actions']] == ['hypothesis.claim']
 
-                for bad in ({'wait_seconds': 5}, {'after': 'not-a-cursor'}, {'since': 'release'}):
+                # Waiting without a cursor waits from now and hands back a cursor.
+                began = time.monotonic()
+                fresh = await activity(wait_seconds=1)
+                assert fresh['waited'] is True and fresh['changed'] is False and fresh['cursor']
+                assert time.monotonic() - began >= 0.9
+
+                # ...and hears what happens during it: an action settling one second in.
+                async def settle_later():
+                    await asyncio.sleep(1)
+                    return await _settle(conn, hunt, capability='sqli.verify')
+                waited, later = await asyncio.gather(activity(wait_seconds=10), settle_later())
+                assert waited['changed'] is True
+                assert [item['action_id'] for item in waited['actions']] == [later]
+                for bad in ({'after': 'not-a-cursor'}, {'since': 'release'}):
                     refused = await operator.post(f'/hunts/{hunt.id}/query', json={'kind': 'activity', 'filter': bad})
                     assert refused.status_code == 422, (bad, refused.text)
     asyncio.run(run())

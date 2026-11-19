@@ -126,6 +126,19 @@ MAX_ACCEPTED_FIELDS_CHARS = 400
 _REASON_NOISE = re.compile(r"(?:\x1b\[[0-9;]*[A-Za-z]|[\x00-\x1f\x7f])+")
 
 
+def _accepted_arguments_text(tool_name: str, properties: Mapping[str, Any], unknown: Sequence[str]) -> str:
+    """What a Hunt tool takes, after an unknown-argument refusal. Agents sent idempotency_key to
+    shakerscan_hunt_candidate (every other write takes one) and got only the refusal."""
+    accepted = ", ".join(sorted(properties))
+    if len(accepted) > MAX_ACCEPTED_FIELDS_CHARS:
+        accepted = accepted[: MAX_ACCEPTED_FIELDS_CHARS - 1] + "…"
+    text = f" ({tool_name} accepts: {accepted})" if accepted else ""
+    if "idempotency_key" in unknown and "idempotency_key" not in properties:
+        text += ("; this call needs no idempotency_key: repeating it is safe (a repeated candidate "
+                 "joins the one already recorded)")
+    return text
+
+
 def _reason_text(value: Any, depth: int = 0) -> str | None:
     """The human reason in one error ``detail``: a string, a ``{code, message}`` object, or a
     list of validation errors (``loc: msg``; the echoed ``input`` is never used)."""
@@ -2488,7 +2501,8 @@ class ArsenalClient:
             missing = sorted(set(hunt_tool.required) - set(arguments))
             hint = _capability_call_hint(unknown) if name == "shakerscan_hunt_capability" and not streaming_ssh else ""
             if unknown:
-                raise MCPError(-32602, f"Unknown tool arguments: {', '.join(unknown)}{hint}")
+                raise MCPError(-32602, f"Unknown tool arguments: {', '.join(unknown)}{hint}"
+                               + _accepted_arguments_text(name, hunt_tool.properties, unknown))
             if missing:
                 raise MCPError(-32602, f"Missing required tool arguments: {', '.join(missing)}{hint}")
             for key, value in arguments.items():

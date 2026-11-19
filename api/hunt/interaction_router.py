@@ -464,7 +464,9 @@ async def _hunt_activity(hunt_id: str, request: HuntQueryRequest) -> dict[str, A
             report = await activity_since(conn, run, after)
         # A Hunt that ended has nothing left to wait for.
         ended = hunt_finished(run)
-        if report["changed"] or ended or asyncio.get_running_loop().time() >= deadline:
+        if after is None and wait_seconds and not ended:
+            after = report["cursor"]  # waiting without a cursor: the first read was the baseline
+        elif report["changed"] or ended or asyncio.get_running_loop().time() >= deadline:
             return {"hunt_id": hunt_id, **report, "waited": wait_seconds > 0, "hunt_status": run.get("status")}
         await asyncio.sleep(0.5)
 
