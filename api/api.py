@@ -898,6 +898,7 @@ try:
     )
     from hunt.credential_uses import HuntCredentialRefusal
     from hunt.start_permissions import record_start_permissions, validate_start_credentials, validate_start_saved_logins
+    from hunt.idle_expiry import expire_idle_hunts
     from hunt.verification_credentials import (
         current_hunt_credential_scope,
         resolve_hunt_workflow_principal_contexts,
@@ -969,6 +970,7 @@ except ModuleNotFoundError:
     )
     from api.hunt.credential_uses import HuntCredentialRefusal
     from api.hunt.start_permissions import record_start_permissions, validate_start_credentials, validate_start_saved_logins
+    from api.hunt.idle_expiry import expire_idle_hunts
     from api.hunt.verification_credentials import (
         current_hunt_credential_scope,
         resolve_hunt_workflow_principal_contexts,
@@ -3086,6 +3088,7 @@ async def _stale_scan_tick(pool: asyncpg.Pool) -> None:
     await cleanup_orphaned_scan_queue_handoffs(pool)
     await cleanup_expired_auth_sessions_once(pool)
     await close_idle_captures(pool)
+    await expire_idle_hunts(pool, get_redis)
     await queue_health.reconcile_job_hashes(
         pool, get_redis(), state=_JOB_HASH_RECONCILE_CURSOR, now=utc_now(), queue_name=QUEUE_NAME,
         scan_queue_job_ids=scan_queue_job_ids, heartbeat_timeout_minutes=QUEUE_HASH_HEARTBEAT_TIMEOUT_MINUTES,

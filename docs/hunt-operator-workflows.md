@@ -166,6 +166,13 @@ remains until deliberately addressed. After extending without resuming, use the 
 another increase or resetting usage. Completed, failed, cancelled or finalized exhausted runs
 are not reopened. Exhausted unfinished runs remain cancellable, including their owned child jobs.
 
+A Hunt nobody drives does not stay live forever. When its driver ends without finishing or
+cancelling it, a Hunt with no activity (no action started or finished, no write to the Hunt) for
+72 hours is ended as a cancellation ends it, with `stop_reason: idle_expired`; set
+`SHAKERSCAN_HUNT_IDLE_EXPIRY_HOURS` on the API to change the limit. A Hunt with an action still
+reserved or running is not expired until that action ends. What it learned stays in the target's
+candidates, leads and evidence for the next Hunt.
+
 The existing Hunt row lock serializes amendments with admission/settlement/cancellation. Usage and
 outstanding holds never reset; earlier action/reservation objects and the admission snapshot stay
 unchanged. The denormalized current policy budget mirrors the new limits, but its permissions and
