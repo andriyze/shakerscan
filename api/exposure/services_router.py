@@ -42,7 +42,8 @@ async def exposure_services(
     list/v1 (``cursor``/``count``): keyset pages of targets (kind, then id), at most 25 per page.
     """
     # A direct call (not through FastAPI) receives the ``Query(...)`` default: no filter.
-    target_ids = list(dict.fromkeys(target_id)) if isinstance(target_id, list) and target_id else None
+    target_ids = (list(dict.fromkeys(target_id)) if isinstance(target_id, list) and target_id
+                  else [target_id] if isinstance(target_id, uuid.UUID) else None)
     if target_ids and len(target_ids) > 500:
         raise HTTPException(status_code=422, detail="target_id: at most 500 values")
     pool = getattr(request.app.state, "db_pool", None)
