@@ -228,10 +228,21 @@ def _intelligence_fields(snapshot: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _target_ids(value: Any) -> list[uuid.UUID] | None:
+    """One id or several: internal callers (Hunt service evidence) still pass a single UUID."""
+    if value is None:
+        return None
+    if isinstance(value, (uuid.UUID, str)):
+        return [value if isinstance(value, uuid.UUID) else uuid.UUID(value)]
+    ids = list(dict.fromkeys(value))
+    return ids or None
+
+
 async def service_page_v1(conn: Any, page: Page, *, target_kind: str, target_id: list[uuid.UUID] | None,
                           root_domain: str | None, search: str, snapshot: dict[str, Any], matcher: Any,
                           registry: Any) -> dict[str, Any]:
     """One list/v1 page of targets (keyset by kind, then id), each with its service inventory."""
+    target_id = _target_ids(target_id)
     params = (target_kind, target_id, root_domain.lower().rstrip(".") if root_domain else None, search.lower().strip())
     plan = SERVICES_V1.plan(page, filters={"target_kind": target_kind, "target_id": target_id,
                                            "root_domain": params[2], "search": params[3]})
@@ -260,6 +271,7 @@ async def service_page_v1(conn: Any, page: Page, *, target_kind: str, target_id:
 
 async def service_page(conn: Any, *, target_kind: str, target_id: list[uuid.UUID] | None, root_domain: str | None,
                        search: str, limit: int, offset: int, snapshot: dict[str, Any], matcher: Any, registry: Any) -> dict[str, Any]:
+    target_id = _target_ids(target_id)
     params = (target_kind, target_id, root_domain.lower().rstrip(".") if root_domain else None, search.lower().strip())
     total = int(await conn.fetchval(f"SELECT count(*) FROM ({FILTERED_TARGETS_SQL}) filtered", *params) or 0)
     rows = await conn.fetch(
