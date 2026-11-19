@@ -117,7 +117,7 @@ def test_release_images_remove_fixable_runtime_vulnerabilities():
     scanner = (ROOT / "scanner" / "Dockerfile").read_text()
     ui = (ROOT / "ui" / "Dockerfile").read_text()
 
-    assert "golang:1.27.3-bookworm@sha256:" in scanner
+    assert "golang:1.27.4-bookworm@sha256:" in scanner
     assert "github.com/projectdiscovery/nuclei/v3/cmd/nuclei v3.11.1" in scanner
     # The lifts every Go tool is built with (the shared go get list in build_tool, not a per-tool
     # lift): echo/v4 is in dalfox, klauspost/compress in gungnir, httpx, katana, naabu, subfinder
