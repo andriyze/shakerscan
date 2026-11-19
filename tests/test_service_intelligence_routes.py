@@ -129,7 +129,7 @@ async def test_hunt_query_reuses_target_scoped_evidence_and_binds_cursor(monkeyp
     monkeypatch.setattr(service_knowledge, "load_service_intelligence", lambda: ({}, None))
     monkeypatch.setattr(service_knowledge, "canonical_registry", lambda: None)
     async def page(conn, **args):
-        assert args["target_id"] == [uuid.UUID(OWNER)]
+        assert args["target_id"] == uuid.UUID(OWNER)
         assert args["target_kind"] == "web" and args["limit"] == 1
         return {"targets": [{"services": records}], "intelligence": {}, "limitations": []}
     monkeypatch.setattr(service_knowledge, "service_page", page)
