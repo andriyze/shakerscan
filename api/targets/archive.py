@@ -1,11 +1,40 @@
 """Archive inventory without erasing history or cancelling admitted execution."""
 import json
+import re
 from uuid import UUID
+
+import asyncpg
 from fastapi import HTTPException
 
 # Members archived together with their host carry the host's id, so restoring the host brings
 # back exactly what its archive covered and never a service that was archived on its own.
 ARCHIVED_WITH_KEY = 'archived_with'
+
+# An archived host's stored URL carries ``#retired=<its id>`` (targets_set_canonical_key): the URL
+# and the canonical key are unique, and the suffix frees both so the same host can be added again.
+# Readers are shown the host's own URL; ``is_active`` already says it is archived.
+_RETIRED_SUFFIX = re.compile(r'#retired=[0-9a-fA-F-]{36}$')
+
+
+def public_target_url(url):
+    """The URL a person registered, without the archive bookkeeping suffix."""
+    return _RETIRED_SUFFIX.sub('', url) if isinstance(url, str) else url
+
+
+# The host a web app belongs to is archived with it when that app was the host's last active
+# service and the host is one the inventory created for it: archiving the last web app on a host
+# left an active host with no origins, counted in the inventory total. A host a person added
+# (``declared``) or one with other active services stays.
+_ARCHIVE_EMPTIED_HOST_SQL = """UPDATE targets host
+    SET is_active=false, asm_enabled=false, updated_at=NOW(),
+        metadata_json=COALESCE(host.metadata_json,'{}'::jsonb) || $2::jsonb
+    FROM targets app
+    WHERE app.id=$1 AND host.id=app.asset_owner_id AND host.is_active
+      AND host.discovery_source='host'
+      AND host.metadata_json->>'declared' IS DISTINCT FROM 'true'
+      AND NOT EXISTS (SELECT 1 FROM targets other WHERE other.asset_owner_id=host.id
+                      AND other.is_active AND other.id<>$1)
+    RETURNING host.id"""
 
 
 async def archive(pool, target_id: UUID):
@@ -31,8 +60,17 @@ async def archive(pool, target_id: UUID):
                     THEN COALESCE(metadata_json,'{}'::jsonb) || $3::jsonb ELSE metadata_json END
             WHERE id=$1 OR id=ANY($2::uuid[])""",
             target_id, together, json.dumps({ARCHIVED_WITH_KEY: str(target_id)}))
-    return {'id': str(target_id), 'status': 'archived', 'records_deleted': False,
-            'schedules_paused': len(paused), 'targets_archived': len(ids), 'running_work_cancelled': False}
+        host = await conn.fetchval(_ARCHIVE_EMPTIED_HOST_SQL, target_id,
+                                   json.dumps({ARCHIVED_WITH_KEY: str(target_id)}))
+        if host is not None:
+            paused += await conn.fetch("""UPDATE schedules SET is_active=false, next_run_at=NULL, updated_at=NOW()
+                WHERE target_id=$1 AND (is_active=true OR next_run_at IS NOT NULL) RETURNING id""", host)
+    result = {'id': str(target_id), 'status': 'archived', 'records_deleted': False,
+              'schedules_paused': len(paused), 'targets_archived': len(ids) + (host is not None),
+              'running_work_cancelled': False}
+    if host is not None:
+        result['host_archived'] = str(host)
+    return result
 
 
 # Run before the host itself is reactivated: members archived before the stamp existed are
@@ -57,4 +95,17 @@ async def restore_archived_members(conn, target_id: UUID) -> int:
     for the host: an operator resumes automatic work explicitly.
     """
     restored = await conn.fetch(RESTORE_ARCHIVED_MEMBERS_SQL, target_id, ARCHIVED_WITH_KEY)
+    # The host archived with this web app (its last service) comes back with it. A host with the
+    # same locator added since keeps the identity; this one then stays archived.
+    host = await conn.fetchrow("""SELECT host.id FROM targets app JOIN targets host ON host.id=app.asset_owner_id
+        WHERE app.id=$1 AND NOT host.is_active AND host.metadata_json->>$2 = $1::text""",
+        target_id, ARCHIVED_WITH_KEY)
+    if host is not None:
+        try:
+            async with conn.transaction():
+                await conn.execute("""UPDATE targets SET is_active=true, updated_at=NOW(),
+                    metadata_json=COALESCE(metadata_json,'{}'::jsonb) - $2::text WHERE id=$1""",
+                    host['id'], ARCHIVED_WITH_KEY)
+        except asyncpg.UniqueViolationError:
+            pass
     return len(restored)

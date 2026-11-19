@@ -21,7 +21,8 @@ class Connection:
         self.events.append('commit')
     async def fetchval(self, sql, *args):
         self.events.append(sql)
-        return args[0]
+        # The target archived here belongs to no host the inventory created for it.
+        return None if 'host.discovery_source' in sql else args[0]
     async def fetchrow(self, sql, *args):
         self.events.append(sql)
         if 'FOR SHARE OF t' in sql:

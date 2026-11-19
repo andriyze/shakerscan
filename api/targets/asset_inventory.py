@@ -242,7 +242,10 @@ def discoverable(group: str) -> bool:
 
 
 def public_asset(row: Any) -> dict[str, Any]:
+    from .archive import public_target_url
     result = dict(row)
+    if 'url' in result:
+        result['url'] = public_target_url(result['url'])
     metadata = result.pop('metadata_json', None) or {}
     if isinstance(metadata, str):
         metadata = json.loads(metadata)
