@@ -47,6 +47,11 @@ printed by `./scanner.sh status`.
      }'
    ```
 
+   Without `policy.preset`, `include_families` is added to the preset `active_testing` implies
+   (`standard_active` when allowed, `passive` otherwise). For exactly the listed families, set
+   `"preset": "custom"` (recon only: `{"preset": "custom", "include_families": ["recon"]}`); the
+   answer's `families_added_by_preset` shows what a preset added.
+
    Read `GET /scan/contracts` for the server-advertised family vocabulary and advanced ceiling
    bounds. Known endpoints belong in `options.custom_endpoints`; saved traffic and authentication
    are referenced by opaque collection/profile IDs.

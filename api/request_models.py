@@ -327,7 +327,15 @@ class _ScanRequestBase(BaseModel):
     name: Optional[str] = None
     target_kind: Literal["web", "api"] = "web"
     budget_profile: Optional[Literal["fast", "balanced", "thorough", "deep"]] = None
-    policy: Optional[dict[str, Any]] = None
+    policy: Optional[dict[str, Any]] = Field(
+        default=None,
+        description=("active_testing, allow_state_changing_http, network_discovery, subdomain_discovery, "
+                     "preset (passive, standard_active or custom), include_families, exclude_families. "
+                     "Without preset, include_families is added to the preset active_testing implies "
+                     "(standard_active when allowed, passive otherwise); preset \"custom\" makes "
+                     "include_families the exact selection, e.g. {\"preset\": \"custom\", "
+                     "\"include_families\": [\"recon\"]} for recon only."),
+    )
     request_collections: list[dict[str, Any]] = Field(default_factory=list, max_length=16)
     credential_profile_ids: list[str] = Field(default_factory=list, max_length=2)
     browser_login_profile_ids: list[str] = Field(default_factory=list, max_length=2, description="Operator-saved browser login and read-only QA profiles; does not authenticate other Scan actions.")
@@ -387,7 +395,7 @@ class ScanAdvancedLimits(BaseModel):
     max_workers: Optional[int] = Field(default=None, ge=1, le=128)
     include_families: list[str] = Field(
         default_factory=list, max_length=100,
-        description=("Families added to the preset (policy.preset; standard_active when active_testing is allowed, passive otherwise). To run exactly these families and nothing else, set policy.preset to \"custom\". The answer lists what the preset added (families_added_by_preset)."),
+        description=("Families added to the preset (policy.preset; standard_active when active_testing is allowed, passive otherwise). To run exactly these families and nothing else, set policy.preset to \"custom\": a recon-only Scan is {\"policy\": {\"preset\": \"custom\", \"include_families\": [\"recon\"]}}. The answer lists what the preset added (families_added_by_preset)."),
     )
     exclude_families: list[str] = Field(default_factory=list, max_length=100)
     force_single_worker: bool = False
