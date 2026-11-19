@@ -95,8 +95,8 @@
     "FindingExceptionLifecycleSweepRequest": "3a22360cb1d73c27395aed53afe141f698f88fe420cc4169e898a180d5fb0e4a",
     "FindingExceptionRequest": "3a703340dbc9c1da1bcc5c42e92e5c82ce4c3563b6786e2e25acc3e1e835a1f5",
     "FindingRetestRequest": "2cc88671e18d1fe0f59cf97de361755ea2969e4511e4451a6305d16189a639d5",
-    "FindingUpdate": "82e4b56af0f963b9a7425a5e3aae296c3902c77ebdae1cd941a30ddc5ed532f9",
-    "FindingsBulkRetestRequest": "ab25332ed19114b52eb476038e2a344c40fb5ae6f672001effe32f1b47f08493",
+    "FindingUpdate": "9bb7e6d3acc0cb2523ffd04643ee8532b4e5d52a18a1313371d9bcbd24bcc812",
+    "FindingsBulkRetestRequest": "1923a4e55d2d52cfc976d33d6c1ff2dfb8c2ed4541acb213c5e604f9f25406f4",
     "FindingsCleanup": "c7182dc1be98670f7ccbd7096c4799774dc95b337e71b7d78324534fc7a5f843",
     "FleetDesiredStateRequest": "5d252965b9893f918f7e1c384cdf7118ba1bc37487b8e289bd1a327d536dd457",
     "FleetHeartbeatRequest": "9def88395e67925ba5f89d29662bf7712fb3ab57bdb8ffc810e08ebcc01bb582",
@@ -229,7 +229,7 @@
     "ValidationRequest": "cb81c65a5c80da74a19c6bd92e9c6a68f5cdb22fafeb94270481d463450f893e",
     "WorkerScaleRequest": "52e7ac017dfa1d92efa8e4071026b9bf24c0cf2a17f5d9e742349df3f08f6c62"
   },
-  "contract_sha256": "9e66b0eb086538c755df83fb63ec4891bd0e83f88eb95d863acee9ecf59e6b63",
+  "contract_sha256": "990155334ae82e82a4217506e2e7a4ed3a159b6ba845d6309cc677b257b1adf7",
   "openapi": "3.1.0",
   "operation_count": 500,
   "operations": {
@@ -1696,7 +1696,7 @@
     "GET /findings": {
       "deprecated": false,
       "operation_id": "list_findings_findings_get",
-      "parameters_sha256": "79ad98176124fd70b2142396820e41f5a2fcb90f578297153d31accc3c56c61f",
+      "parameters_sha256": "5d7368db27b9feea6e715ee63654cca1ad8398e4ccd740990251b5632bbc76e8",
       "request_schema_sha256": null,
       "response_schema_sha256": {
         "200": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
