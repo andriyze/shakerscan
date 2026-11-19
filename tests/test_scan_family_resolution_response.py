@@ -68,3 +68,15 @@ def test_the_submit_response_spreads_the_resolution():
 
     source = Path(__file__).resolve().parents[1].joinpath("api", "api.py").read_text()
     assert "'budget_profile': scan_contract.budget_profile, **scan_family_resolution(scan_contract)," in source
+
+
+def test_the_schema_says_include_families_adds_to_the_preset_and_custom_is_exact():
+    # A recon-only passive batch (include_families ["recon"]) also ran passive templates and
+    # exposure checks on 45 queued Scans: the field reads as an allow-list and nothing in the
+    # request schema said it adds to the preset.
+    from api.request_models import ScanAdvancedLimits
+    submit = ScanAdvancedLimits.model_json_schema()["properties"]["include_families"]["description"]
+    preview = ScanFamilyPreviewRequest.model_json_schema()["properties"]["include_families"]["description"]
+    assert "added to the preset" in submit and 'set policy.preset to "custom"' in submit
+    assert "families_added_by_preset" in submit
+    assert "added to the preset" in preview and 'set preset to "custom"' in preview

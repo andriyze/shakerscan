@@ -74,8 +74,17 @@ def _parser(prog: str | None = None) -> argparse.ArgumentParser:
         "--include-family", action="append", default=[], metavar="NAME[,NAME]",
         help=(
             "Add server-advertised Scan families to the preset the policy implies "
-            "(the standard active set runs the active templates, nuclei_active, on the "
-            "thorough and deep profiles; add them here for fast or balanced)"
+            "(passive, or the standard active set with --active-testing; the standard active "
+            "set runs the active templates, nuclei_active, on the thorough and deep profiles; "
+            "add them here for fast or balanced). For exactly the listed families, use "
+            "--only-family"
+        ),
+    )
+    parser.add_argument(
+        "--only-family", action="append", default=[], metavar="NAME[,NAME]",
+        help=(
+            "Run exactly these server-advertised Scan families and nothing else (the custom "
+            "preset), e.g. --only-family recon; not with --include-family"
         ),
     )
     parser.add_argument(
@@ -375,10 +384,11 @@ def _validate_against_contract(
     if contract.get("schema_version") != "scan-public-contract/v1":
         raise ScanCliError("server does not expose the required V2 Scan contract")
     families = {str(item.get("name")) for item in contract.get("families", []) if isinstance(item, dict)}
-    unknown = (set(args.include_family) | set(args.exclude_family)) - families
+    only = set(getattr(args, "only_family", None) or ())
+    unknown = (set(args.include_family) | set(args.exclude_family) | only) - families
     if unknown:
         raise ScanCliError("unknown Scan families: " + ", ".join(sorted(unknown)))
-    overlap = set(args.include_family) & set(args.exclude_family)
+    overlap = (set(args.include_family) | only) & set(args.exclude_family)
     if overlap:
         raise ScanCliError("families cannot be both included and excluded: " + ", ".join(sorted(overlap)))
     definitions = {
@@ -488,7 +498,11 @@ def _payload(args: argparse.Namespace) -> dict[str, Any]:
             "allow_state_changing_http": args.allow_state_changing_http,
             "network_discovery": args.network_discovery,
             "subdomain_discovery": args.subdomain_discovery,
-            "include_families": args.include_family,
+            # --only-family is the custom preset: exactly these families. Without a preset the
+            # server adds include_families to the preset active_testing implies.
+            **({"preset": "custom", "include_families": only}
+               if (only := list(getattr(args, "only_family", None) or ())) else
+               {"include_families": args.include_family}),
             "exclude_families": args.exclude_family,
         },
         "credential_profile_ids": args.credential_profile,
@@ -543,6 +557,11 @@ def main(argv: list[str] | None = None, prog: str | None = None) -> int:
         return 0
     args.include_family = _split_names(args.include_family)
     args.exclude_family = _split_names(args.exclude_family)
+    args.only_family = _split_names(args.only_family)
+    if args.only_family and args.include_family:
+        # --include-family adds to a preset and --only-family replaces it: both at once is
+        # ambiguous, so neither is guessed.
+        parser.error("--only-family selects the exact families; do not combine it with --include-family")
     try:
         args.budget_profile = args.budget_profile or "balanced"
         _confirm_active(args)
@@ -600,6 +619,7 @@ def main(argv: list[str] | None = None, prog: str | None = None) -> int:
                 if (
                     args.active_testing and "nuclei_active" not in resolved
                     and "nuclei_active" not in args.exclude_family
+                    and not args.only_family
                 ):
                     # The standard active set (here and in New Scan) runs the active templates on
                     # thorough and deep only; say how to add them rather than leave the operator

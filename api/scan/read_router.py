@@ -56,7 +56,12 @@ class ScanFamilyPreviewRequest(BaseModel):
     # testing is allowed, passive otherwise.
     preset: Literal["passive", "standard_active", "custom"] | None = None
     budget_profile: Literal["fast", "balanced", "thorough", "deep"] = "balanced"
-    include_families: list[str] = Field(default_factory=list, max_length=100)
+    include_families: list[str] = Field(
+        default_factory=list, max_length=100,
+        description=("Families added to the preset (preset; standard_active when active_testing is allowed, "
+                     "passive otherwise). To resolve exactly these families and nothing else, set preset to "
+                     "\"custom\": {\"preset\": \"custom\", \"include_families\": [\"recon\"]} is recon only."),
+    )
     exclude_families: list[str] = Field(default_factory=list, max_length=100)
     active_testing: bool = False
     allow_state_changing_http: bool = False
