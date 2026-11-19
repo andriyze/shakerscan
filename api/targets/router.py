@@ -785,6 +785,25 @@ async def get_target_authorization(target_id: str):
     return {"target_id": str(target_uuid), "authorization": authorization}
 
 
+@router.get("/targets/{target_id}/traffic")
+async def get_target_traffic(target_id: str, since: Optional[datetime] = None):
+    """Which Scans, retests and Hunts sent requests to this target, and when.
+
+    Each run's requests carry ``X-ShakerScan-Run: <run>`` (``scan:<id>`` or ``hunt:<id>``), so a
+    security team can match what it saw to the run listed here: first and last request, request
+    count, how many answers were 5xx, 429 or errors, and the target addresses connected to. Read
+    from the request archive; at most 200 runs, newest first. ``since`` limits it to requests
+    sent from then on.
+    """
+    from .traffic import target_traffic
+    target_uuid = _uuid_or_400(target_id, "target id")
+    async with _pool().acquire() as conn:
+        if not await conn.fetchval("SELECT 1 FROM targets WHERE id=$1", target_uuid):
+            raise HTTPException(status_code=404, detail="Target not found")
+        runs = await target_traffic(conn, target_uuid, since=since)
+    return {"target_id": str(target_uuid), "header": "X-ShakerScan-Run", "runs": runs}
+
+
 @router.post("/targets/{target_id}/authorization")
 async def authorize_target(target_id: str, request: TargetAuthorizationRequest):
     """Authorize a target once: a standing receipt every active scan and Hunt reuses.

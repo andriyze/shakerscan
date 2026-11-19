@@ -177,7 +177,7 @@
     "ScanExecutionSettingsUpdate": "8c4659d76962d531391fe7e9631bc1fe46106aeb0e1b9b39aa05b1bede9ae5a6",
     "ScanFamilyPreviewLimits": "3f7ff16f3929d992308fece08665d5db63bdf6af2df0937adcbf5d879621ba68",
     "ScanFamilyPreviewRequest": "f6d16b3e742ce4f1e7ed9fffdb6c6cf9478f566faeb47c5a52b107088bb1d198",
-    "ScanPublicCompatibilityOptions": "7529119d6bc845fd0f87c41d50f09e24cd74763242d14c7beb09a4b5e92fea30",
+    "ScanPublicCompatibilityOptions": "e0c997a184f9c26074241552e3beb79055861bf858d1009367dc2581844bd536",
     "ScanPublicPlacement": "ffe892bcf7b67ff35dfde48ba80b47c081da4860cf82854371a6ae9b099b23e9",
     "ScheduleCreate": "7230e00073484dc22b21ab387323ec1c8a2f3596134b7712e04e892052d7d731",
     "ScheduleUpdate": "9f5f80c7c72b527f331d60e33ff63dcc73f96dc510d5c97333ce01bb1df704ad",
@@ -223,9 +223,9 @@
     "ValidationRequest": "cb81c65a5c80da74a19c6bd92e9c6a68f5cdb22fafeb94270481d463450f893e",
     "WorkerScaleRequest": "52e7ac017dfa1d92efa8e4071026b9bf24c0cf2a17f5d9e742349df3f08f6c62"
   },
-  "contract_sha256": "352fc510f397d171fc5cb3ff77a1c8022894fb68773d7d107f551454e5139a92",
+  "contract_sha256": "53219e5415f9e70afe1bfaba925c97dd3615a85b1a26eb064e994f95df5be125",
   "openapi": "3.1.0",
-  "operation_count": 483,
+  "operation_count": 484,
   "operations": {
     "DELETE /ai/scans/{scan_id}/transcript": {
       "deprecated": false,
@@ -3464,6 +3464,19 @@
         "targets"
       ]
     },
+    "GET /targets/{target_id}/traffic": {
+      "deprecated": false,
+      "operation_id": "get_target_traffic_targets__target_id__traffic_get",
+      "parameters_sha256": "bf20e11487607145e54d4fbca3a3c66245db952129b96392496388c29fcf1d5f",
+      "request_schema_sha256": null,
+      "response_schema_sha256": {
+        "200": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "422": "e1fe533ef371cc6965d4015e800b2b5ca90e470f4aae3d57c2754a32b61e8c2d"
+      },
+      "security_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "surface": null,
+      "tags": []
+    },
     "GET /timeline": {
       "deprecated": false,
       "operation_id": "mission_timeline_timeline_get",
@@ -5825,7 +5838,7 @@
       "deprecated": false,
       "operation_id": "submit_scan_scans_post",
       "parameters_sha256": "ddaf7d03a5e33d1d0116950a13b7b4a7fd3db89282553bec193c97867ef72115",
-      "request_schema_sha256": "02b118d7b01162aafcd81adb6851b231525c72783482e5f916586d2fbf9fe3a1",
+      "request_schema_sha256": "5e06cc3369548e15555dbc2112e0c01d19c26e91a3249e454d7dd7af836b3b3c",
       "response_schema_sha256": {
         "200": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a"
       },
@@ -5837,7 +5850,7 @@
       "deprecated": false,
       "operation_id": "submit_batch_scans_batch_post",
       "parameters_sha256": "ddaf7d03a5e33d1d0116950a13b7b4a7fd3db89282553bec193c97867ef72115",
-      "request_schema_sha256": "5880f5d76987a1682991d7a5571feb5f1d17e8435584e1527fa056f2462acc0a",
+      "request_schema_sha256": "5760bbf0b7cf3ac85123cf0983d439367dc7b1bb28ad712c0d1ef92657720fa5",
       "response_schema_sha256": {
         "200": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a"
       },

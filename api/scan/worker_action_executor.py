@@ -11,6 +11,10 @@ try:  # Preserve one class identity for host package imports.
     from ..runtime.receipts import CapabilityReceipt
 except (ImportError, ModuleNotFoundError):  # top-level worker imports
     from runtime.receipts import CapabilityReceipt
+try:
+    from scanner_tools import traffic_attribution
+except ModuleNotFoundError:  # package imports in host-side tests
+    from scanner.scanner_tools import traffic_attribution
 
 from .action_plan import ScanAction
 from .capability_result import CapabilityResultReference, CapabilityResultReason
@@ -106,8 +110,11 @@ class ReceiptScanActionExecutor:
         user_cancelled: Callable[[], bool] = lambda: False,
         authority: ActionAuthority | None = None,
         deadline: ScanDeadline | None = None,
+        traffic_attribution: bool = True,
     ) -> None:
         self._scan_id = str(scan_id)
+        # The Scan's own switch for the declared run header (options.traffic_attribution).
+        self._traffic_attribution = traffic_attribution is not False
         self._target_id = str(target_id)
         self._worker_id = str(worker_id)
         self._dispatcher = dispatcher
@@ -119,6 +126,16 @@ class ReceiptScanActionExecutor:
         self._deadline = deadline
 
     async def execute(
+        self,
+        action: ScanAction,
+        lease: ActionLease,
+        heartbeat: ActionHeartbeat,
+    ) -> CapabilityReceipt:
+        # Everything this action sends names its Scan (traffic_attribution).
+        with traffic_attribution.bound_run("scan", self._scan_id, enabled=self._traffic_attribution):
+            return await self._execute(action, lease, heartbeat)
+
+    async def _execute(
         self,
         action: ScanAction,
         lease: ActionLease,

@@ -230,7 +230,9 @@ def test_a_signed_in_sqli_verify_runs_as_its_principal_and_its_proof_becomes_a_f
         assert result["action_result"]["status"] == "success", result
         (process,) = stack.processes
         assert process["trusted_headers"] == {"Authorization": TOKEN}
-        assert process["argv"][process["argv"].index("--headers") + 1] == f"Authorization: {TOKEN}"
+        # The principal's header, then the Hunt's declared identification (traffic_attribution).
+        assert process["argv"][process["argv"].index("--headers") + 1] == (
+            f"Authorization: {TOKEN}\nX-ShakerScan-Run: hunt:{hunt['id']}")
         # The proof replayed the same request, signed in.
         assert len(ErrorOnQuote.sent) == 4
         assert all(("Authorization", TOKEN) in request.headers for request in ErrorOnQuote.sent)
@@ -441,7 +443,8 @@ def test_a_signed_in_sqli_verify_runs_with_the_hunts_captured_login(stack):
         (process,) = stack.processes
         cookie = f"hub_session={HUB_SESSION}"
         assert process["trusted_headers"] == {"Cookie": cookie}
-        assert process["argv"][process["argv"].index("--headers") + 1] == f"Cookie: {cookie}"
+        assert process["argv"][process["argv"].index("--headers") + 1] == (
+            f"Cookie: {cookie}\nX-ShakerScan-Run: hunt:{hunt['id']}")
         assert len(ErrorOnQuote.sent) == 4
         assert all(("Cookie", cookie) in request.headers for request in ErrorOnQuote.sent)
         action = _action_id(hunt, "captured-sqli-0001")

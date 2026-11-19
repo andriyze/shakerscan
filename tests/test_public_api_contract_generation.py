@@ -145,7 +145,7 @@ def test_scan_public_schema_excludes_stale_and_secret_bearing_options():
         fields = set(options["properties"])
         assert fields == {
             "custom_endpoints", "require_current_workers", "placement", "parallel",
-            "shards", "shard_strategy", "auth_state_shards",
+            "shards", "shard_strategy", "auth_state_shards", "traffic_attribution",
         }
         assert not fields.intersection({
             "scan_type", "quick", "thorough", "active", "xss", "sqli",

@@ -606,6 +606,18 @@ async def execute_bound_http_request(
     )
     accepted_header_names = sorted(str(name).strip().lower() for name in headers)
     headers.update(_trusted_headers(trusted_headers))
+    # Declared identification (traffic_attribution): the run header, and the ShakerScan token on
+    # the client's own User-Agent. A User-Agent the request sets itself is left as it is.
+    # The caller's own headers decide whether a redirect may carry identity elsewhere; the
+    # declared identification below is neutral (it names the run, not a principal).
+    identity_headers = dict(headers)
+    present = {str(name).strip().lower() for name in headers}
+    for name, value in agent_tools.traffic_attribution.headers().items():
+        if name.lower() not in present:
+            headers[name] = value
+    if "user-agent" not in present:
+        headers["User-Agent"] = agent_tools.traffic_attribution.with_user_agent(
+            f"python-httpx/{httpx.__version__}")
     query = args.get("query") if isinstance(args.get("query"), dict) else None
     json_body = (
         args.get("json_body")
@@ -800,7 +812,7 @@ async def execute_bound_http_request(
                     })
                     break
                 if _origin_key(next_url) != _origin_key(current_url) and (
-                    trusted_headers or cookies or (allow_identity_headers and headers)
+                    trusted_headers or cookies or (allow_identity_headers and identity_headers)
                     or getattr(client, "cookies", None)
                 ):
                     # Target scope may include several services on one host. It

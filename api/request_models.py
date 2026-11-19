@@ -295,6 +295,14 @@ class ScanPublicCompatibilityOptions(BaseModel):
     ] = None
     shard_strategy: Optional[Literal["auto", "scope", "family", "coverage", "coverage_family"]] = None
     auth_state_shards: bool = False
+    traffic_attribution: bool = Field(
+        default=True,
+        description=(
+            "Send the declared X-ShakerScan-Run header (scan:<id>) on this Scan's requests so the "
+            "target's security team can recognise authorized ShakerScan traffic. false: send "
+            "none, for an authorized engagement that must not announce itself."
+        ),
+    )
 
     @field_validator("custom_endpoints")
     @classmethod

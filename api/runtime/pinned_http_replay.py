@@ -21,8 +21,10 @@ from .request_replay_executor import (
 
 try:
     from scanner_tools.request_replay import ReplayRequest
+    from scanner_tools import traffic_attribution
 except ModuleNotFoundError:  # package import when scanner is installed as a package
     from scanner.scanner_tools.request_replay import ReplayRequest
+    from scanner.scanner_tools import traffic_attribution
 
 
 class _FrozenAddressResolver(aiohttp.abc.AbstractResolver):
@@ -190,10 +192,14 @@ class PinnedAiohttpReplayTransport:
                 auto_decompress=self.auto_decompress,
                 skip_auto_headers={"User-Agent", "Accept", "Accept-Encoding"},
             ) as client:
+                sent_names = {str(name).lower() for name, _value in request.headers}
                 async with client.request(
                     request.method,
                     request.url,
-                    headers=list(request.headers),
+                    # The recorded request as it was, plus the run's declared identification.
+                    headers=[*request.headers, *(
+                        item for item in traffic_attribution.headers().items()
+                        if item[0].lower() not in sent_names)],
                     data=request.body or None,
                     allow_redirects=False,
                 ) as response:

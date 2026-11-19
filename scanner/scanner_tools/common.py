@@ -48,6 +48,11 @@ try:
 except ImportError:  # pragma: no cover - flat-module fallback
     from redaction import redact_text as _shared_redact_text
 
+try:
+    from . import traffic_attribution as _traffic_attribution
+except ImportError:  # pragma: no cover - flat-module fallback
+    import traffic_attribution as _traffic_attribution
+
 try:  # sibling module; tolerate flat (/app) execution
     from .adaptive_throttle import get_throttle as _get_active_throttle
 except ImportError:  # pragma: no cover - flat-module fallback
@@ -358,6 +363,9 @@ async def run(
                 continue
             bounded_cmd.append(value)
         cmd = bounded_cmd
+    if is_http_request and request_url:
+        # Declared identification on the target's side (traffic_attribution).
+        cmd = _traffic_attribution.curl_arguments(cmd)
     if is_http_request and request_url and any(value in {"-L", "--location"} for value in cmd):
         # Read (and cache) the curl release once, off the event loop.
         await asyncio.to_thread(_credential_redirects.curl_version, str(cmd[0]))
