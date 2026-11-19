@@ -32,7 +32,9 @@ A row does not count:
 
 **Defaults.** The `passive` preset runs `recon`, `nuclei_passive` and `sensitive_exposure`.
 `standard_active` adds `xss` and `sqli`, and the open-redirect probe that runs with `xss`. Every
-other family is opt-in (`custom` preset or `include_families`), and every family except `recon`,
+other family is opt-in: `include_families` adds it to the preset (`passive`, or `standard_active`
+when active testing is allowed), and the `custom` preset runs exactly the listed families (recon
+only: `"preset": "custom", "include_families": ["recon"]`). Every family except `recon`,
 `nuclei_passive` and `sensitive_exposure` needs active testing. Some need more:
 
 - a Scan that names `bola` is refused without two distinct credential profiles that both allow

@@ -685,13 +685,23 @@ async def create_target(request: TargetCreate):
                                              THEN targets.metadata_json - 'created_via'
                                              ELSE targets.metadata_json END
                     RETURNING id, url, name, discovery_source, metadata_json,
-                              root_domain, is_root, (xmax = 0) AS created
+                              root_domain, is_root, is_active, (xmax = 0) AS created
                     """, normalized_target, request.name, root_domain, is_root,
                          json.dumps(_attach_target_note(request.scan_options or {}, request.url, target_note, scheme_inferred)),
                          json.dumps({"cohort": requested_cohort}) if requested_cohort else json.dumps({}),
                          _default_asm_enabled_for_new_web_target("manual"),
                          json.dumps(_default_asm_config_for_new_web_target("manual")))
 
+                # Adding a target that was archived restores it, as PATCH is_active=true does
+                # (its services archived with it come back; schedules stay paused). The upsert
+                # returned the archived row unchanged, so a re-added target stayed archived:
+                # authorizing it then answered 200 while every reader saw no authorization.
+                restored_services = None
+                if row.get('is_active') is False:
+                    from .archive import restore_archived_members
+                    restored_services = await restore_archived_members(conn, row['id'])
+                    await conn.execute(
+                        "UPDATE targets SET is_active=true, updated_at=NOW() WHERE id=$1", row['id'])
                 response = {
                     'id': str(row['id']),
                     'url': row['url'],
@@ -706,11 +716,14 @@ async def create_target(request: TargetCreate):
                         discovery_source=row.get('discovery_source'),
                         metadata=_decode_json_value(row.get('metadata_json')) or {},
                     ),
-                    'status': 'created' if row['created'] else 'already_exists',
+                    'status': ('created' if row['created']
+                               else 'restored' if restored_services is not None else 'already_exists'),
                     # The stored name: a reused target with no name of its own takes the one given
                     # here, which a caller only learned by reading the target again.
                     'name': row.get('name'),
                 }
+                if restored_services is not None:
+                    response['services_restored'] = restored_services
                 # Surface warning if path/query was stripped
                 if target_note:
                     response['warning'] = target_note
@@ -792,7 +805,7 @@ async def authorize_target(target_id: str, request: TargetAuthorizationRequest):
                 environment=request.environment, risk_tier=request.risk_tier,
             )
         except target_authorization.TargetAuthorizationError as exc:
-            status = 404 if getattr(exc, "code", None) == "not_found" else 400
+            status = {"not_found": 404, "archived": 409}.get(getattr(exc, "code", None), 400)
             raise HTTPException(status_code=status, detail=str(exc)) from exc
     return {"target_id": str(target_uuid), "authorization": authorization}
 

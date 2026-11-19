@@ -270,7 +270,9 @@ async def evaluate_target_scope(
         target_uuid = uuid.UUID(str(target_id))
     except (TypeError, ValueError) as exc:
         raise TargetAuthorizationError("target id must be a UUID") from exc
-    target = _row(await conn.fetchrow("SELECT id, url, metadata_json FROM targets WHERE id=$1", target_uuid))
+    target = _row(await conn.fetchrow(
+        "SELECT id, url, metadata_json, is_active FROM targets WHERE id=$1", target_uuid))
+    archived = bool(target) and target.get("is_active") is False
     if target:
         metadata = _json(target.get("metadata_json")) or {}
         env = effective_target_environment(metadata, requested=environment)
@@ -297,7 +299,8 @@ async def evaluate_target_scope(
     receipt = receipt_to_dict(evaluate_scope(
         url, allowed_hosts=[host] if host else None, environment=env, target_id=str(target_uuid),
     ))
-    return {"target_uuid": target_uuid, "url": url, "host": host, "environment": env, "receipt": receipt}
+    return {"target_uuid": target_uuid, "url": url, "host": host, "environment": env, "receipt": receipt,
+            "archived": archived}
 
 
 def scope_block_message(receipt: Mapping[str, Any]) -> str:
@@ -387,6 +390,13 @@ async def authorize_target(
         return existing
     evaluated = await evaluate_target_scope(conn, target_uuid, environment=environment)
     receipt, host = evaluated["receipt"], evaluated["host"]
+    if evaluated.get("archived"):
+        # An archived target has no standing authorization: every reader resolves it to none.
+        # Recording one anyway answered 200 with a full grant that GET then reported as null, so
+        # an operator believed a target was cleared for active testing when nothing was.
+        raise TargetAuthorizationError(
+            "target is archived; restore it (PATCH /targets/{id} with is_active true, or add it "
+            "again with POST /targets) before authorizing it", code="archived")
     if receipt["verdict"] == "blocked":
         raise TargetAuthorizationError(scope_block_message(receipt), code="scope_blocked")
     await persist_scope_receipt(conn, receipt, target_uuid)

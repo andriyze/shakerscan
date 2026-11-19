@@ -87,7 +87,8 @@ except ModuleNotFoundError:  # package import in host-side tests
 
 from .hunt_scope import candidate_hunt_predicate
 from .list_filters import (
-    PROOF_STATES, SEVERITIES, host_in_domain_sql, parse_choice_list,
+    PROOF_STATES, SEVERITIES, FindingSourceType, FindingStatus, VerificationVerdict,
+    host_in_domain_sql, parse_choice_list,
 )
 from .list_query import (
     LEGACY_ONLY_PARAMETERS, LIST_V1_PARAMETERS, PROOF_STATE_FILTER_SQL, PROOF_STATE_ROW_SQL,
@@ -235,8 +236,9 @@ def _strip_pagination_for_count(query: str, params: list) -> tuple[str, list]:
 class FindingUpdate(BaseModel):
     # active, resolved, false_positive, accepted_risk. Omitted (or null) keeps the stored status:
     # a verdict-only edit must not write back a status the client saw before a retest or another
-    # session changed it.
-    status: Optional[str] = None
+    # session changed it. Any other value is refused (422): it was stored as sent, and a finding
+    # with an unknown status matched no status filter.
+    status: Optional[FindingStatus] = None
     notes: Optional[str] = None
     # Omitted keeps the recorded verdict, a value records it, and an explicit null clears it
     # (the verdict and its time; its notes stay unless `notes` is sent). The status is always
@@ -277,7 +279,7 @@ class FindingRetestRequest(BaseModel):
 class FindingsBulkRetestRequest(BaseModel):
     finding_ids: Optional[list[str]] = None
     severity: Optional[str] = None
-    status: Optional[str] = None
+    status: Optional[FindingStatus] = None
     target_id: Optional[str] = None
     scan_id: Optional[str] = None
     root_domain: Optional[str] = None
@@ -397,15 +399,15 @@ def _merge_findings_and_candidates(
 async def list_findings(
     request: Request,
     severity: Optional[str] = None,
-    status: Optional[str] = None,
-    source_type: Optional[str] = Query(None, pattern="^(dast|device|ai|ai_gate|ai_session|deep_hunt|autonomous|model_intake|asm|manual)$"),
+    status: Optional[FindingStatus] = None,
+    source_type: Optional[FindingSourceType] = None,
     target_id: Optional[str] = None,
     ai_target_id: Optional[str] = None,
     device_target_id: Optional[str] = None,
     scan_id: Optional[str] = None,
     hunt_id: Optional[str] = None,
     root_domain: Optional[str] = None,
-    verification_verdict: Optional[str] = Query(None, pattern="^(exploited|likely_vulnerable|blocked_by_security|out_of_scope_internal|false_positive|likely_fixed|inconclusive|error)$"),
+    verification_verdict: Optional[VerificationVerdict] = None,
     verification_mode: Optional[str] = Query(None, pattern="^(deterministic|ai_driven)$"),
     verified_only: bool = False,
     proof_state: Optional[str] = None,
@@ -1543,7 +1545,7 @@ async def delete_finding(
 
 class FindingsCleanup(BaseModel):
     older_than_days: int = Field(..., ge=1, le=3650)
-    status: Optional[Literal["active", "resolved", "false_positive", "accepted_risk"]] = None
+    status: Optional[FindingStatus] = None
     root_domain: Optional[str] = Field(default=None, min_length=1, max_length=253)
     dry_run: bool = True
     preview_id: Optional[uuid.UUID] = None
