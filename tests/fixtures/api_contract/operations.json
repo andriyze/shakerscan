@@ -2400,6 +2400,11 @@
     "operation_id": "confirm_target_skill_targets__target_id__skill_confirm_post"
   },
   {
+    "path": "/targets/{target_id}/traffic",
+    "method": "get",
+    "operation_id": "get_target_traffic_targets__target_id__traffic_get"
+  },
+  {
     "path": "/timeline",
     "method": "get",
     "operation_id": "mission_timeline_timeline_get"
