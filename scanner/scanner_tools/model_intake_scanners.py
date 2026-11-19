@@ -1784,10 +1784,6 @@ def _subject_file_inventory(subject_path: Path, *, limit: int | None = None) -> 
     return all_files[:limit], len(all_files), len(all_files) > limit
 
 
-def _subject_files(subject_path: Path, *, limit: int | None = None) -> list[Path]:
-    return _subject_file_inventory(subject_path, limit=limit)[0]
-
-
 def _hash_path(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as handle:

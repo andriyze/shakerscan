@@ -243,7 +243,7 @@ def test_upgrade_smoke_proves_stateful_backup_rollback():
     assert '"active_findings_count": 1 if upgraded else 3' in verifier
 
 
-def test_minimal_installed_research_adapter_has_all_imports(tmp_path):
+def test_minimal_installed_planner_adapter_has_all_imports(tmp_path):
     runtime = tmp_path / "runtime"
     for relative_path in (
         "scripts/local_planner_adapter.py",
@@ -264,7 +264,7 @@ def test_minimal_installed_research_adapter_has_all_imports(tmp_path):
         check=False,
     )
     assert result.returncode == 0, result.stdout + result.stderr
-    assert "{evaluate,plan,episode}" in result.stdout
+    assert "{evaluate,plan}" in result.stdout
 
 
 def _write_fake_scan_commands(tmp_path: Path) -> tuple[Path, Path]:

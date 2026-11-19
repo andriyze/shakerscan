@@ -106,7 +106,6 @@ def test_device_locator_changes_preserve_identity_and_history():
     assert "INSERT INTO device_locator_history" in helper
     assert "confirm_same_device" in endpoint
     assert "active connected-device scan or probe" in helper
-    assert "active AI device investigation" in helper
     assert "INSERT INTO device_targets" not in endpoint
 
 
@@ -210,51 +209,39 @@ def test_device_list_uses_bounded_reachability_summary():
     assert "- 'attempts' - 'nmap_host_discovery'" not in detail
 
 
-def test_device_hunt_compatibility_routes_to_unified_hunt():
+def test_device_hunt_goes_straight_to_unified_hunt():
     detail_ui = (ROOT / "ui" / "src" / "app" / "devices" / "[id]" / "page.tsx").read_text()
-    hunt_ui = (ROOT / "ui" / "src" / "app" / "devices" / "[id]" / "agent" / "page.tsx").read_text()
     skill = (ROOT / "skills" / "device-hunt" / "SKILL.md").read_text()
     skill_index = (ROOT / "skills" / "README.md").read_text()
-    assert "href={`/devices/${device.id}/agent`}" in detail_ui
-    assert "new URLSearchParams({ target: id })" in hunt_ui
-    assert "redirect(`/hunt?${query.toString()}`)" in hunt_ui
+    # The device page opens Hunt for the device directly; the old redirect page is removed.
+    assert "href={`/hunt?target=${encodeURIComponent(device.id)}`}" in detail_ui
+    assert not (ROOT / "ui" / "src" / "app" / "devices" / "[id]" / "agent" / "page.tsx").exists()
     assert "name: device-hunt" in skill and "compatibility" in skill.lower()
     assert "[`device-hunt`](device-hunt/SKILL.md)" in skill_index
     assert "../hunt/SKILL.md" in skill
 
 
-def test_unified_hunt_client_and_device_redirect_are_wired():
+def test_unified_hunt_client_is_wired():
     api_client = (ROOT / "ui" / "src" / "lib" / "api.ts").read_text()
     hunt_client = (ROOT / "ui" / "src" / "lib" / "huntV2.ts").read_text()
-    hunt_ui = (ROOT / "ui" / "src" / "app" / "devices" / "[id]" / "agent" / "page.tsx").read_text()
-
     generic_hunt = (ROOT / "ui" / "src" / "app" / "hunt" / "page.tsx").read_text()
     assert "export async function startHuntV2Native" in hunt_client
     assert "startAgentHuntSession" not in api_client
     assert "startDeviceAgentSession" not in api_client
     assert "export async function getHuntV2" in hunt_client
     assert "export async function getHuntV2" not in api_client
-    assert "new URLSearchParams({ target: id })" in hunt_ui
-    assert "redirect(`/hunt?${query.toString()}`)" in hunt_ui
     assert "startHuntV2Native" in generic_hunt
     assert "target_id" in generic_hunt
 
 
 def test_unified_hunt_history_is_durable_and_target_bound():
     api = api_tree_source()
-    hunt_router = (ROOT / "api" / "hunt" / "run_router.py").read_text()
     hunt_client = (ROOT / "ui" / "src" / "lib" / "huntV2.ts").read_text()
-    hunt_ui = (ROOT / "ui" / "src" / "app" / "devices" / "[id]" / "agent" / "page.tsx").read_text()
-    detail_ui = (ROOT / "ui" / "src" / "app" / "devices" / "[id]" / "page.tsx").read_text()
     assert "CREATE TABLE IF NOT EXISTS hunt_runs" in (ROOT / "api" / "retest_contract.py").read_text()
     assert route_is_declared("GET", "/hunts")
     assert route_is_declared("GET", "/hunts/{hunt_id}")
     assert "app.include_router(hunt_run_router)" in api
     assert "target_id" in hunt_client
-    assert "new URLSearchParams({ target: id })" in hunt_ui
-    assert "query.set('legacy_run', run)" in hunt_ui
-    assert "redirect(`/hunt?${query.toString()}`)" in hunt_ui
-    assert "href={`/devices/${device.id}/agent`}" in detail_ui
 
 
 def test_device_findings_use_atomic_conflict_upsert():
@@ -323,10 +310,8 @@ def test_device_auth_requires_authenticated_safety_and_never_enters_agent_transc
     api = api_tree_source()
     worker = (ROOT / "api" / "worker.py").read_text() + (ROOT / "api" / "devices" / "worker_inputs.py").read_text()
     assert "Credentialed device scans require safety_profile=authenticated_active" in api
-    # The investigation-start copy lived in the deleted legacy session handler.
-    # Canonical device Hunt enforces the same rule in the worker, immediately
-    # before credentials are resolved -- asserted below against worker.py.
-    assert '"credentials_visible_to_planner": False' in api
+    # Canonical device Hunt enforces the rule in the worker, immediately before credentials are
+    # resolved -- asserted below against worker.py.
     assert 'device credentials require safety_profile=authenticated_active' in worker
 
 
@@ -339,7 +324,6 @@ def test_device_request_collections_are_encrypted_pinned_and_agent_bounded():
     web = (ROOT / "scanner" / "scanner_tools" / "device_web.py").read_text()
     formats = (ROOT / "scanner" / "scanner_tools" / "device_request_formats.py").read_text()
     ui = (ROOT / "ui" / "src" / "app" / "devices" / "[id]" / "page.tsx").read_text()
-    hunt = (ROOT / "ui" / "src" / "app" / "devices" / "[id]" / "agent" / "page.tsx").read_text()
 
     assert "CREATE TABLE device_request_collections" in schema
     assert "encrypted_payload TEXT NOT NULL" in schema
@@ -366,11 +350,9 @@ def test_device_request_collections_are_encrypted_pinned_and_agent_bounded():
     assert "external_refs_ignored" in formats
     assert '"inspect_request_collections"' in agent
     assert "include_imported_requests" in agent
-    assert '"request_collection_secrets_visible_to_planner": False' in api
+    assert '"secret_values_visible_to_planner": False' in api
     assert "Import API requests" in ui
     assert "Use real imported API requests" in ui
-    assert "new URLSearchParams({ target: id })" in hunt
-    assert "redirect(`/hunt?${query.toString()}`)" in hunt
     assert "CREATE TABLE request_collections" in schema
     assert route_is_declared("POST", "/request-collections")
     assert "libpcap0.8" in (ROOT / "scanner" / "Dockerfile").read_text()

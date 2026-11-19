@@ -100,35 +100,6 @@ surfaces:
     files: ["api/public_check.py"]
 
   # ------------------------------------------------------------ legacy: delete
-  - id: legacy-agent-hunt
-    owner: compatibility
-    disposition: QUARANTINE_READ_ONLY
-    canonical_replacement: /hunts
-    new_writes_allowed: false
-    historical_reads_required: true
-    cancellation_required: true
-    sunset: 2026-09-30
-    caller_telemetry: required
-    pending_write_removals:
-    routes: ["/agent/hunt", "/agent/hunt/*"]
-    files: ["api/agent_routes/router.py", "api/hunt/legacy.py"]
-
-  - id: legacy-device-agent
-    owner: compatibility
-    disposition: QUARANTINE_READ_ONLY
-    canonical_replacement: /hunts
-    new_writes_allowed: false
-    historical_reads_required: true
-    cancellation_required: true
-    sunset: 2026-09-30
-    caller_telemetry: required
-    pending_write_removals:
-    routes:
-      - /device-agent
-      - /device-agent/*
-      - /devices/{device_id}/agent/session
-    files: ["api/devices/router.py"]
-
   - id: v1-read-compatibility
     owner: compatibility
     disposition: QUARANTINE_READ_ONLY
@@ -142,30 +113,6 @@ surfaces:
     files: ["api/operations/router.py"]
 
   # --------------------------------------------------------- merge then delete
-  - id: research-runtime
-    owner: hunt
-    disposition: MERGE_THEN_DELETE
-    canonical_replacement: /hunts
-    new_writes_allowed: false
-    historical_reads_required: true
-    unique_capabilities:
-      - prioritized security leads
-      - hypothesis score and priority
-      - expected signal and falsifier
-      - analyst decision record
-      - mission yield metrics
-    pending_write_removals:
-      - POST /research/campaigns/launch
-      - POST /research/campaigns/{campaign_id}/control
-      - POST /research/episodes
-      - POST /research/episodes/{episode_id}/cancel
-      - POST /research/episodes/{episode_id}/decisions
-      - POST /research/episodes/{episode_id}/observe
-      - POST /research/episodes/{episode_id}/settle
-      - PUT /research/episodes/{episode_id}/autopilot
-    routes: ["/research", "/research/*"]
-    files: ["api/research_routes/router.py"]
-
   - id: agent-tools-and-context
     owner: operations
     disposition: MERGE_THEN_DELETE
@@ -380,11 +327,10 @@ surfaces:
     canonical_replacement: null
     new_writes_allowed: true
     notes: >-
-      Bounded operator-authored test plans. Retained, but must move with the
-      Test Builder when the Research runtime is retired; it must not remain a
-      Research-owned execution surface.
+      Bounded operator-authored test plans. The Research runtime that hosted the
+      route is removed; the workflow runs and its cancel route live with Arsenal.
     routes: ["/experiments/*"]
-    files: ["api/research_routes/router.py"]
+    files: ["api/arsenal_routes/router.py"]
 
   # ------------------------------------------------- separate host services
   - id: model-intake-runner-service

@@ -97,13 +97,6 @@
       "smokePath": "/deep-hunt/operator"
     },
     {
-      "route": "/deep-hunt/runs/[id]",
-      "source": "src/app/deep-hunt/runs/[id]/page.tsx",
-      "owner": "hunt",
-      "caseId": "HUNT-039",
-      "stateAssertion": "A retained bounded experiment resolves read-only by durable ID."
-    },
-    {
       "route": "/devices",
       "source": "src/app/devices/page.tsx",
       "owner": "devices",
@@ -117,13 +110,6 @@
       "owner": "devices",
       "caseId": "DEV-013",
       "stateAssertion": "Device posture, services, scans, and findings reconcile for one ID."
-    },
-    {
-      "route": "/devices/[id]/agent",
-      "source": "src/app/devices/[id]/agent/page.tsx",
-      "owner": "devices",
-      "caseId": "DEV-015",
-      "stateAssertion": "Device-agent compatibility route preserves context into Hunt."
     },
     {
       "route": "/devices/policies",

@@ -191,7 +191,7 @@ def test_ranking_rules_are_fixed_and_ordered():
     assert [rule["tier"] for rule in RANKING_RULES] == list(range(1, len(RANKING_RULES) + 1))
     assert [rule["rule"] for rule in RANKING_RULES][:3] == ["revalidate_changed", "new_auth_surface",
                                                             "reobserve_since_release"]
-    assert RANKING_RULES[-1]["rule"] == "agent_next_step"
+    assert RANKING_RULES[-1]["rule"] == "open_lead"
 
 
 def test_mcp_query_kind_continue_reaches_the_real_route(monkeypatch):

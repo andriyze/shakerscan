@@ -71,7 +71,7 @@ test('populated timeline lists recent activity and upcoming work with links', as
   const opens = page.getByRole('link', { name: 'Open →' })
   await expect(opens).toHaveCount(2)
   await expect(page.locator('a[href="/scans/11111111-1111-4111-8111-111111111111"]')).toBeVisible()
-  await expect(page.locator('a[href="/deep-hunt/runs/44444444-4444-4444-8444-444444444444"]')).toBeVisible()
+  await expect(page.locator('a[href="/campaigns/44444444-4444-4444-8444-444444444444"]')).toBeVisible()
 
   // A category toggle turned off is sent as include_<kind>=false.
   await page.getByRole('button', { name: 'Scans', exact: true }).click()

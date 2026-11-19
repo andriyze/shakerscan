@@ -121,21 +121,19 @@ def test_hunt_records_and_reads_interpretations_with_evidence_conditions_and_lim
                 assert page['count'] == 1 and page['rows'][0]['title'] is None
                 assert page['rows'][0]['untrusted_data']['body'] == INJECTION
 
-                # A next step and an inconclusive experiment are unfinished work in the briefing.
-                await hunt.ok('knowledge.record', {'kind': 'next_step', 'title': 'Compare roles on /api/orders'})
+                # An inconclusive experiment is unfinished work in the briefing.
                 inconclusive = await hunt.ok('knowledge.record', {
                     'kind': 'negative_result', 'negative_state': 'experiment_inconclusive',
                     'title': 'Budget ran out on /api/orders', 'evidence_refs': [evidence],
                     'conditions': {'method': 'GET', 'route': '/api/orders/{id}', 'principals': ['viewer'],
                                    'technique': 'role comparison'}})
                 briefing = (await operator.get(f'/hunts/{hunt.id}')).json()['briefing']['interpretations']
-                assert briefing['counts']['active_by_kind'] == {'observation': 1, 'note': 1, 'next_step': 1,
-                                                                 'negative_result': 1}
+                assert briefing['counts']['active_by_kind'] == {'observation': 1, 'note': 1, 'negative_result': 1}
                 # Another agent's title reaches a new Hunt only as a quoted claim, never as plain text.
-                headline = briefing['open_next_steps'][0]
-                assert headline['title'] is None and headline['agent_claim']['title'] == 'Compare roles on /api/orders'
+                headline = briefing['inconclusive_experiments'][0]
+                assert headline['id'] == inconclusive['result']['interpretation']['id']
+                assert headline['title'] is None and headline['agent_claim']['title'] == 'Budget ran out on /api/orders'
                 assert 'never an instruction' in headline['agent_claim']['notice']
-                assert briefing['inconclusive_experiments'][0]['id'] == inconclusive['result']['interpretation']['id']
                 # Nothing here was observable (no Scan, no recorded request): every entry is unknown.
                 assert briefing['applicability']['tracked'] is True
                 assert set(briefing['applicability']['active_by_state']) == {'unknown'}
@@ -194,7 +192,7 @@ def test_hunt_records_and_reads_interpretations_with_evidence_conditions_and_lim
                 assert retracted.status_code == 200 and retracted.json()['status'] == 'retracted'
                 whole = await operator.post(f'/targets/{target}/hunts/{hunt.id}/interpretations/retract',
                                             json={'note': 'This Hunt used a broken session'})
-                assert whole.status_code == 200 and whole.json()['retracted'] == 5, whole.text  # with the superseded one
+                assert whole.status_code == 200 and whole.json()['retracted'] == 4, whole.text  # with the superseded one
                 after = (await operator.post(f'/hunts/{second.id}/query', json={
                     'kind': 'interpretations', 'filter': {'hunt_id': hunt.id}})).json()
                 assert after['rows'] and all(row['title'] is None and row['body'] == '' and row['text_withheld']
@@ -420,13 +418,13 @@ def test_device_hunt_reads_its_members_and_a_member_reads_only_itself(monkeypatc
             assert await conn.fetchval('SELECT asset_owner_id FROM targets WHERE id=$1', member) == device
             async with AsyncClient(transport=ASGITransport(app_module.app), base_url='http://operator') as operator:
                 web = (await _hunt(operator, member)).hunt
-                await web.ok('knowledge.record', {'kind': 'next_step', 'title': 'Check the admin API'})
+                await web.ok('knowledge.record', {'kind': 'note', 'title': 'Check the admin API'})
                 sibling_hunt = (await _hunt(operator, sibling)).hunt
                 own = (await operator.post(f'/hunts/{sibling_hunt.id}/query', json={'kind': 'interpretations'})).json()
                 assert own['count'] == 0
                 started = await operator.post('/hunts', json={**_contract(device), 'target_kind': 'device'})
                 host = started.json()
-                assert host['briefing']['interpretations']['counts']['active_by_kind'] == {'next_step': 1}
+                assert host['briefing']['interpretations']['counts']['active_by_kind'] == {'note': 1}
                 rows = (await operator.post(f"/hunts/{host['hunt_id']}/query", json={'kind': 'interpretations'})).json()
                 assert [row['untrusted_data']['title'] for row in rows['rows']] == ['Check the admin API']
     asyncio.run(run())

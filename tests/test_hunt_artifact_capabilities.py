@@ -182,6 +182,29 @@ def test_a_search_inside_a_truncated_window_says_the_resource_was_larger(monkeyp
     assert len(observation["text_sample"]) <= artifact_capability.MAX_PUBLIC_TEXT
 
 
+def test_an_offset_on_a_server_that_ignores_ranges_says_what_still_works(monkeypatch):
+    """Agents asked again and again with other offsets after a bare artifact_range_not_supported."""
+    whole = WorkerPrivateHTTPResponse(
+        status_code=200, final_url="https://app.example.test/ftp/", _body=LISTING[:4096],
+        _headers={"content-type": "text/html"}, _cookies={}, body_truncated=True,
+    )
+
+    async def fake_execute(_target_url, _args, **kwargs):
+        kwargs["private_response_sink"](whole)
+        return {"ok": True, "response": {"status": 200}}
+
+    monkeypatch.setattr(artifact_capability, "execute_bound_http_request", fake_execute)
+    binding = TargetBinding(
+        target_id="target-1", target_kind="web", canonical_host="app.example.test",
+        allowed_origins=("https://app.example.test",), allowed_addresses=("192.0.2.10",),
+    )
+    result = asyncio.run(artifact_capability.inspect_target_artifact(
+        "https://app.example.test", {"path": "/ftp/", "offset": 15000}, target=binding))
+    assert result["ok"] is False and result["status"] == "blocked"
+    assert result["error"].startswith("artifact_range_not_supported: ")
+    assert "only offset 0 can be read" in result["error"] and "search_terms" in result["error"]
+
+
 def test_a_complete_small_resource_is_not_called_truncated(monkeypatch):
     body = b'<li><a href="jwt.pub">jwt.pub</a></li>\n'
     complete = WorkerPrivateHTTPResponse(

@@ -18,7 +18,6 @@ from __future__ import annotations
 
 from contextlib import asynccontextmanager
 import fnmatch
-import secrets
 from urllib.parse import urlparse
 import asyncio
 from collections import Counter
@@ -52,7 +51,6 @@ try:
         validate_command_parameters as _validate_command_parameters,
     )
     from redaction import redact_sensitive
-    from research_agent import canonical_hash as _research_canonical_hash
     from scan.deployment_gate_rows import summarize_for_agent
 except ModuleNotFoundError:  # package import in host-side tests
     from .. import (
@@ -72,7 +70,6 @@ except ModuleNotFoundError:  # package import in host-side tests
         validate_command_parameters as _validate_command_parameters,
     )
     from ..redaction import redact_sensitive
-    from ..research_agent import canonical_hash as _research_canonical_hash
     from ..scan.deployment_gate_rows import summarize_for_agent
 
 
@@ -120,13 +117,16 @@ except ModuleNotFoundError:  # package import in host-side tests
 
 router = APIRouter()
 
+#: Workflows running in this process, by id. The cancel route sets the event; the run checks it
+#: between steps.
+_active_workflow_cancellations: dict[str, asyncio.Event] = {}
+
 _pool_provider: Callable[[], Any] | None = None
 _deps: dict[str, Callable[..., Any]] = {}
 
 
 SOURCE_INGEST_VERSION = "source_ingest_hypothesis_v1"
 REFUTER_FINDING_DELTA_MIN_BASELINE = 2   # need at least this many prior scans for a baseline
-RESEARCH_SURFACE_MIN_EXECUTABLE_ROUTES = 1
 SOURCE_INGEST_DEFAULT_IGNORED_PATHS = (
     ".git/",
     "node_modules/",
@@ -155,14 +155,11 @@ BENCHMARK_PROOF_SURFACE = {
     "deterministic": "runtime_probe",
 }
 REFUTER_VERDICT_BASES = {"deterministic_replay", "cryptographic", "parser_protocol", "human_approved_review"}
-RESEARCH_SURFACE_MIN_UNIQUE_ROUTES = 20
-RESEARCH_SURFACE_MIN_AUTHENTICATED_ROUTES = 5
 REFUTER_FINDING_DELTA_MIN_ABSOLUTE = 5   # latest must exceed baseline median by at least this
 REFUTER_FINDING_DELTA_MULTIPLIER = 2.0   # and (for non-zero baselines) be at least this many x
 REFUTER_BENCHMARK_DELTA_MIN_BASELINE = 2
 REFUTER_BENCHMARK_RECALL_DELTA = 0.25
 REFUTER_BENCHMARK_VERIFIED_DELTA = 2
-_RESEARCH_EXPERIMENT_DEDUPE_COMMANDS = {"experiment.http_diff", "experiment.workflow"}
 
 
 
@@ -288,9 +285,6 @@ def _redact_agent_payload(*a: Any, **k: Any) -> Any:
 
 def _redact_agent_text(*a: Any, **k: Any) -> Any:
     return _get("_redact_agent_text")(*a, **k)
-
-async def _research_campaign_budget_snapshot(*a: Any, **k: Any) -> Any:
-    return await _get("_research_campaign_budget_snapshot")(*a, **k)
 
 def _research_finding_family(*a: Any, **k: Any) -> Any:
     return _get("_research_finding_family")(*a, **k)
@@ -815,29 +809,10 @@ async def arsenal_campaign_detail(campaign_id: str, action_limit: int = Query(50
             """,
             campaign_uuid,
         )
-        research_yield = (
-            await _research_campaign_yield_metrics(conn, row)
-            if str(row.get("campaign_type") or "") == "autonomous_research"
-            else None
-        )
-        research_readiness = (
-            await _research_campaign_readiness(conn, row)
-            if str(row.get("campaign_type") or "") == "autonomous_research"
-            else None
-        )
     status_rollup = {str(item["status"]): int(item["count"]) for item in status_rows}
     deployment_impact = impact_by_campaign.get(campaign_uuid, _campaign_deployment_impact([]))
     campaign = _public_campaign_row(row)
     campaign["deployment_impact"] = deployment_impact
-    if research_readiness is not None:
-        # Readiness stored in campaign metadata is an audit snapshot from the
-        # last supervisor pass.  Overlay the current read-only calculation in
-        # the response so paused runs never advertise stale pre-fix coverage.
-        metadata = dict(campaign.get("metadata_json") or {})
-        research_metadata = dict(metadata.get("autonomous_research") or {})
-        research_metadata["readiness"] = research_readiness
-        metadata["autonomous_research"] = research_metadata
-        campaign["metadata_json"] = metadata
     return {
         "campaign": campaign,
         "actions": actions,
@@ -845,8 +820,6 @@ async def arsenal_campaign_detail(campaign_id: str, action_limit: int = Query(50
         "total_action_count": total_action_count,
         "status_rollup": status_rollup,
         "deployment_impact": deployment_impact,
-        "research_yield": research_yield,
-        "research_readiness": research_readiness,
         "execution_enabled": False,
     }
 
@@ -1200,48 +1173,123 @@ async def arsenal_claim_hypothesis(hypothesis_id: str, req: HypothesisClaimReque
         hypothesis_uuid = uuid.UUID(str(hypothesis_id))
     except ValueError:
         raise HTTPException(status_code=400, detail="hypothesis_id must be a UUID")
-    lease_expires_at = datetime.now(timezone.utc) + timedelta(seconds=req.lease_seconds)
     async with _pool().acquire() as conn:
-        row = await conn.fetchrow(
+        return await claim_hypothesis_row(
+            conn, hypothesis_uuid, expected_version=req.expected_version,
+            owner=req.owner.strip(), lease_seconds=req.lease_seconds,
+        )
+
+
+_UNCLAIMABLE_STATES = frozenset({"refuted", "promoted", "dead", "blocked", "exhausted"})
+
+
+def _claim_refusal_message(current: Any, *, expected_version: int, owner: str) -> str:
+    """The reason a compare-and-set claim did not apply, in the order the claim checks it."""
+    status, version = current["status"], current["version"]
+    holder, expires = current["claim_owner"], current["claim_lease_expires_at"]
+    if status in _UNCLAIMABLE_STATES:
+        return f"hypothesis_not_claimable: the lead is {status} and can no longer be claimed"
+    live = expires is not None and (not hasattr(expires, "tzinfo") or expires > datetime.now(timezone.utc))
+    if holder and holder != owner and live:
+        until = expires.isoformat() if hasattr(expires, "isoformat") else expires
+        return (f"hypothesis_not_claimable: {holder} holds this lead until {until}; work another lead "
+                "(query kind=hypotheses) and come back after that time")
+    if version != expected_version:
+        return (f"hypothesis_not_claimable: the lead changed since it was read (version {version}, "
+                f"you sent expected_version {expected_version}); claim again with expected_version {version}")
+    return f"hypothesis_not_claimable: the lead is {status} at version {version}"
+
+
+async def claim_hypothesis_row(
+    conn,
+    hypothesis_uuid: uuid.UUID,
+    *,
+    expected_version: int,
+    owner: str,
+    lease_seconds: int,
+    target_uuid: uuid.UUID | None = None,
+    renewal_keeps_state: bool = False,
+) -> dict[str, Any]:
+    """The one compare-and-set claim of a hypothesis, shared by Arsenal and Hunt.
+
+    ``target_uuid`` fences the claim to one target's leads: a hypothesis on another target (or on
+    none) is reported as not found, never claimed. Terminal and parked leads are not claimable, an
+    active claim held by another owner is refused, and an expired claim can be taken over.
+    ``renewal_keeps_state`` makes a holder's own renewal a pure lease extension: a lead it already
+    moved to ``testing`` or ``supported`` stays there instead of returning to ``claimed``. A
+    different owner taking over always starts from ``claimed``.
+    """
+    lease_expires_at = datetime.now(timezone.utc) + timedelta(seconds=lease_seconds)
+    if renewal_keeps_state:
+        renewed = await conn.fetchrow(
             """
             UPDATE hypotheses
-            SET status = 'claimed',
-                claim_owner = $3,
-                claim_lease_expires_at = $4,
-                version = version + 1,
-                updated_at = NOW()
-            WHERE id = $1
-              AND version = $2
-              AND status NOT IN ('refuted','promoted','dead','blocked','exhausted')
-              AND (
-                claim_lease_expires_at IS NULL
-                OR claim_lease_expires_at < NOW()
-                OR claim_owner = $3
-              )
+            SET claim_lease_expires_at = $4, version = version + 1, updated_at = NOW()
+            WHERE id = $1 AND version = $2 AND claim_owner = $3
+              AND ($5::uuid IS NULL OR target_id = $5)
+              AND status IN ('testing','supported')
             RETURNING *
             """,
             hypothesis_uuid,
-            req.expected_version,
-            req.owner.strip(),
+            expected_version,
+            owner,
             lease_expires_at,
+            target_uuid,
         )
-        if row:
-            return {
-                "hypothesis": _public_hypothesis_row(row),
-                "claimed": True,
-                "execution_enabled": False,
-            }
-        current = await conn.fetchrow("SELECT id, status, version, claim_owner, claim_lease_expires_at FROM hypotheses WHERE id=$1", hypothesis_uuid)
+        if renewed:
+            return {"hypothesis": _public_hypothesis_row(renewed), "claimed": True, "execution_enabled": False}
+    row = await conn.fetchrow(
+        """
+        UPDATE hypotheses
+        SET status = 'claimed',
+            claim_owner = $3,
+            claim_lease_expires_at = $4,
+            version = version + 1,
+            updated_at = NOW()
+        WHERE id = $1
+          AND version = $2
+          AND ($5::uuid IS NULL OR target_id = $5)
+          AND status NOT IN ('refuted','promoted','dead','blocked','exhausted')
+          AND (
+            claim_lease_expires_at IS NULL
+            OR claim_lease_expires_at < NOW()
+            OR claim_owner = $3
+          )
+        RETURNING *
+        """,
+        hypothesis_uuid,
+        expected_version,
+        owner,
+        lease_expires_at,
+        target_uuid,
+    )
+    if row:
+        return {
+            "hypothesis": _public_hypothesis_row(row),
+            "claimed": True,
+            "execution_enabled": False,
+        }
+    current = await conn.fetchrow(
+        """SELECT id, status, version, claim_owner, claim_lease_expires_at FROM hypotheses
+           WHERE id=$1 AND ($2::uuid IS NULL OR target_id=$2)""",
+        hypothesis_uuid, target_uuid,
+    )
     if not current:
         raise HTTPException(status_code=404, detail="Hypothesis not found")
+    expires = current["claim_lease_expires_at"]
     raise HTTPException(
         status_code=409,
         detail={
             "error": "hypothesis_not_claimable",
+            # Why, and what to do: told only the code, an agent whose lead had changed since it read
+            # it (a planner re-proposal or another Hunt's test moves the version) gave the lead up.
+            "message": _claim_refusal_message(current, expected_version=expected_version, owner=owner),
             "status": current["status"],
             "version": current["version"],
             "claim_owner": current["claim_owner"],
-            "claim_lease_expires_at": current["claim_lease_expires_at"],
+            # ISO text, as the HTTP response always encoded it: a Hunt records the refusal in its
+            # action ledger as JSON, where a datetime cannot be serialized.
+            "claim_lease_expires_at": expires.isoformat() if hasattr(expires, "isoformat") else expires,
         },
     )
 
@@ -1258,114 +1306,168 @@ async def arsenal_transition_hypothesis(hypothesis_id: str, req: HypothesisTrans
         hypothesis_uuid = uuid.UUID(str(hypothesis_id))
     except ValueError:
         raise HTTPException(status_code=400, detail="hypothesis_id must be a UUID")
-    to_state = str(req.to or "").strip().lower()
     async with _pool().acquire() as conn:
-        row = await conn.fetchrow("SELECT * FROM hypotheses WHERE id=$1", hypothesis_uuid)
-        if not row:
-            raise HTTPException(status_code=404, detail="Hypothesis not found")
-        hyp = _public_hypothesis_row(row)
-        # Legality is based on the persisted state. A time-derived effective status must not enable
-        # an edge the versioned row itself cannot take.
-        from_state = hyp.get("status")
-        ok, reason = hypothesis_lifecycle.evaluate_transition(
-            from_state,
-            to_state,
-            next_test_action=hyp.get("next_test_action"),
-            metadata=hyp.get("metadata_json"),
+        return await transition_hypothesis_row(
+            conn, hypothesis_uuid, to_state=req.to, expected_version=req.expected_version,
+            reason=req.reason, refuted_by=req.refuted_by, blockers=req.blockers,
+            created_by=req.created_by,
         )
-        if not ok:
+
+
+async def transition_hypothesis_row(
+    conn,
+    hypothesis_uuid: uuid.UUID,
+    *,
+    to_state: str,
+    expected_version: int,
+    reason: str | None = None,
+    refuted_by: Any = None,
+    blockers: Sequence[str] = (),
+    created_by: str | None = None,
+    target_uuid: uuid.UUID | None = None,
+    required_owner: str | None = None,
+    test_record: dict[str, Any] | None = None,
+    release_claim: bool = False,
+) -> dict[str, Any]:
+    """The one gated lifecycle transition of a hypothesis, shared by Arsenal and Hunt.
+
+    ``target_uuid`` fences the transition to one target's leads (another target's lead is not
+    found). ``required_owner`` additionally requires the caller to hold the lead's active claim.
+    ``test_record`` is the falsifier and expected signal the owner tests with: it satisfies the
+    ``testing`` gate and is kept under ``metadata_json.tests[<owner>]``, so one caller's record
+    never overwrites another's. ``release_claim`` drops the claim with the transition (a holder
+    handing the lead back), as closing transitions always do.
+    """
+    to_state = str(to_state or "").strip().lower()
+    row = await conn.fetchrow(
+        "SELECT * FROM hypotheses WHERE id=$1 AND ($2::uuid IS NULL OR target_id=$2)",
+        hypothesis_uuid, target_uuid,
+    )
+    if not row:
+        raise HTTPException(status_code=404, detail="Hypothesis not found")
+    hyp = _public_hypothesis_row(row)
+    if required_owner is not None:
+        claim = hyp.get("claim_state") or {}
+        if not (claim.get("active") and claim.get("owner") == required_owner):
             raise HTTPException(
                 status_code=409,
-                detail={"error": "illegal_transition", "reason": reason, "from": from_state, "to": to_state},
+                detail={"error": "hypothesis_not_claimed_by_caller", "status": hyp.get("status"),
+                        "version": hyp.get("version"), "claim_owner": claim.get("owner"),
+                        "claim_active": bool(claim.get("active"))},
             )
-        if to_state == "promoted":
+    # Legality is based on the persisted state. A time-derived effective status must not enable
+    # an edge the versioned row itself cannot take.
+    from_state = hyp.get("status")
+    metadata = hyp.get("metadata_json") if isinstance(hyp.get("metadata_json"), dict) else {}
+    if test_record:
+        metadata = {**metadata, **test_record}
+    ok, gate_reason = hypothesis_lifecycle.evaluate_transition(
+        from_state,
+        to_state,
+        next_test_action=hyp.get("next_test_action"),
+        metadata=metadata,
+    )
+    if not ok:
+        raise HTTPException(
+            status_code=409,
+            detail={"error": "illegal_transition", "reason": gate_reason, "from": from_state, "to": to_state},
+        )
+    if to_state == "promoted":
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "error": "promotion_requires_proof_reconciliation",
+                "reason": "use the approval-gated hypothesis proof reconciliation path",
+            },
+        )
+    refuted_by = refuted_by if isinstance(refuted_by, dict) else {}
+    if to_state in hypothesis_lifecycle.REFUTING_TARGETS:
+        gate_ok, refutation_reason = adjudicate.require_deterministic_refutation({
+            "verdict_basis": refuted_by.get("basis") or refuted_by.get("verdict_basis"),
+            "refuted_by": refuted_by,
+        })
+        if not gate_ok:
             raise HTTPException(
                 status_code=422,
-                detail={
-                    "error": "promotion_requires_proof_reconciliation",
-                    "reason": "use the approval-gated hypothesis proof reconciliation path",
-                },
+                detail={"error": "refutation_not_deterministic", "reason": refutation_reason},
             )
-        refuted_by = req.refuted_by if isinstance(req.refuted_by, dict) else {}
-        if to_state in hypothesis_lifecycle.REFUTING_TARGETS:
-            gate_ok, gate_reason = adjudicate.require_deterministic_refutation({
-                "verdict_basis": refuted_by.get("basis") or refuted_by.get("verdict_basis"),
-                "refuted_by": refuted_by,
-            })
-            if not gate_ok:
-                raise HTTPException(
-                    status_code=422,
-                    detail={"error": "refutation_not_deterministic", "reason": gate_reason},
-                )
-            verification_id = str(refuted_by.get("verification_id") or "").strip()
-            if not verification_id:
-                raise HTTPException(
-                    status_code=422,
-                    detail={"error": "refutation_reference_not_verified", "reason": "verification_id_required"},
-                )
-            reference_valid = await _refuter_verification_reference_valid(
-                conn,
-                verification_id=verification_id,
-                finding_uuid=None,
-                target_uuid=_optional_uuid(hyp.get("target_id")),
-                hypothesis=hyp,
-            )
-            if not reference_valid:
-                raise HTTPException(
-                    status_code=422,
-                    detail={"error": "refutation_reference_not_verified", "reason": "verification_not_bound_to_hypothesis_proof"},
-                )
-        meta_patch: dict[str, Any] = {
-            "last_transition": {
-                "from": from_state,
-                "to": to_state,
-                "reason": req.reason or None,
-                "by": req.created_by,
-                "at": datetime.now(timezone.utc).isoformat(),
-            }
-        }
-        if to_state in hypothesis_lifecycle.REFUTING_TARGETS:
-            meta_patch["refuted_by"] = {
-                key: refuted_by.get(key)
-                for key in ("verification_id", "basis", "ref")
-                if refuted_by.get(key)
-            }
-        if req.blockers:
-            meta_patch["blockers"] = _clean_string_list(req.blockers, max_items=20)
-        terminal_reason = (req.reason or f"transition:{to_state}")[:500]
-        updated = await conn.fetchrow(
-            """
-            UPDATE hypotheses
-            SET status = $3,
-                terminal_reason = CASE WHEN $3 IN ('refuted','promoted','dead','exhausted','blocked')
-                    THEN $4 ELSE terminal_reason END,
-                claim_owner = CASE WHEN $3 IN ('refuted','promoted','dead','exhausted')
-                    THEN NULL ELSE claim_owner END,
-                claim_lease_expires_at = CASE WHEN $3 IN ('refuted','promoted','dead','exhausted')
-                    THEN NULL ELSE claim_lease_expires_at END,
-                metadata_json = metadata_json || $5::jsonb,
-                version = version + 1,
-                updated_at = NOW()
-            WHERE id = $1 AND version = $2 AND status = $6
-            RETURNING *
-            """,
-            hypothesis_uuid,
-            req.expected_version,
-            to_state,
-            terminal_reason,
-            json.dumps(meta_patch),
-            from_state,
-        )
-        if not updated:
-            current = await conn.fetchrow("SELECT status, version FROM hypotheses WHERE id=$1", hypothesis_uuid)
+        verification_id = str(refuted_by.get("verification_id") or "").strip()
+        if not verification_id:
             raise HTTPException(
-                status_code=409,
-                detail={
-                    "error": "version_conflict",
-                    "status": current["status"] if current else None,
-                    "version": current["version"] if current else None,
-                },
+                status_code=422,
+                detail={"error": "refutation_reference_not_verified", "reason": "verification_id_required"},
             )
+        reference_valid = await _refuter_verification_reference_valid(
+            conn,
+            verification_id=verification_id,
+            finding_uuid=None,
+            target_uuid=_optional_uuid(hyp.get("target_id")),
+            hypothesis=hyp,
+        )
+        if not reference_valid:
+            raise HTTPException(
+                status_code=422,
+                detail={"error": "refutation_reference_not_verified", "reason": "verification_not_bound_to_hypothesis_proof"},
+            )
+    meta_patch: dict[str, Any] = {
+        "last_transition": {
+            "from": from_state,
+            "to": to_state,
+            "reason": reason or None,
+            "by": created_by,
+            "at": datetime.now(timezone.utc).isoformat(),
+        }
+    }
+    if to_state in hypothesis_lifecycle.REFUTING_TARGETS:
+        meta_patch["refuted_by"] = {
+            key: refuted_by.get(key)
+            for key in ("verification_id", "basis", "ref")
+            if refuted_by.get(key)
+        }
+    if blockers:
+        meta_patch["blockers"] = _clean_string_list(list(blockers), max_items=20)
+    test_patch = None
+    if test_record and required_owner:
+        test_patch = {required_owner: {**test_record, "at": datetime.now(timezone.utc).isoformat()}}
+    terminal_reason = (reason or f"transition:{to_state}")[:500]
+    updated = await conn.fetchrow(
+        """
+        UPDATE hypotheses
+        SET status = $3,
+            terminal_reason = CASE WHEN $3 IN ('refuted','promoted','dead','exhausted','blocked')
+                THEN $4 ELSE terminal_reason END,
+            claim_owner = CASE WHEN $3 IN ('refuted','promoted','dead','exhausted') OR $7::boolean
+                THEN NULL ELSE claim_owner END,
+            claim_lease_expires_at = CASE WHEN $3 IN ('refuted','promoted','dead','exhausted') OR $7::boolean
+                THEN NULL ELSE claim_lease_expires_at END,
+            metadata_json = CASE WHEN $6::jsonb IS NULL THEN metadata_json || $5::jsonb
+                ELSE jsonb_set(metadata_json || $5::jsonb, '{tests}',
+                     COALESCE(CASE WHEN jsonb_typeof(metadata_json->'tests')='object'
+                                   THEN metadata_json->'tests' END, '{}'::jsonb) || $6::jsonb) END,
+            version = version + 1,
+            updated_at = NOW()
+        WHERE id = $1 AND version = $2 AND status = $8
+        RETURNING *
+        """,
+        hypothesis_uuid,
+        expected_version,
+        to_state,
+        terminal_reason,
+        json.dumps(meta_patch),
+        json.dumps(test_patch) if test_patch else None,
+        release_claim,
+        from_state,
+    )
+    if not updated:
+        current = await conn.fetchrow("SELECT status, version FROM hypotheses WHERE id=$1", hypothesis_uuid)
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error": "version_conflict",
+                "status": current["status"] if current else None,
+                "version": current["version"] if current else None,
+            },
+        )
     return {
         "hypothesis": _public_hypothesis_row(updated),
         "transitioned": True,
@@ -4268,619 +4370,6 @@ async def _arsenal_execute_detached(req: ArsenalExecuteRequest) -> dict[str, Any
     }
 
 
-async def _research_campaign_readiness(conn: Any, campaign: Any) -> dict[str, Any]:
-    """Fail-closed launch gate for authenticated autonomous hunting."""
-    payload = row_to_dict(campaign)
-    metadata = _decode_json_value(payload.get("metadata_json")) or {}
-    config = metadata.get("autonomous_research") if isinstance(metadata.get("autonomous_research"), dict) else {}
-    target_id = _optional_uuid(payload.get("target_id"))
-    intensity = str(config.get("intensity") or "deep_hunt")
-    gated = _get("RESEARCH_LAUNCH_PROFILES").get(intensity, {}).get("execution_mode") == "gated"
-    families = {str(item).strip().lower() for item in config.get("allowed_families") or [] if str(item).strip()}
-    requirements = _research_family_readiness_requirements(families, gated=gated)
-    principal_rows = await conn.fetch(
-        """
-        SELECT p.auth_state, p.credential_profile, p.is_active,
-               EXISTS (
-                 SELECT 1 FROM target_credential_profiles cp
-                 WHERE cp.target_id=p.target_id
-                   AND lower(cp.name)=lower(p.credential_profile)
-                   AND cp.is_active=true
-                   AND (cp.expires_at IS NULL OR cp.expires_at > NOW())
-               ) AS credential_configured
-        FROM target_principals p
-        WHERE p.target_id=$1 AND p.is_active=true
-        """,
-        target_id,
-    )
-    principals = [row_to_dict(row) for row in principal_rows]
-    signals = _target_credential_precondition_signals(principals)
-    invariant_counts: dict[str, int] = {}
-    try:
-        invariant_row = await conn.fetchrow(
-            """
-            SELECT COUNT(*) FILTER (WHERE contract_kind='access_control')::int AS access_control,
-                   COUNT(*) FILTER (WHERE contract_kind='field_constraint')::int AS field_constraint,
-                   COUNT(*) FILTER (WHERE contract_kind='workflow_transition')::int AS workflow
-            FROM target_invariant_contracts
-            WHERE target_id=$1 AND status='approved'
-            """,
-            target_id,
-        )
-        invariant_counts = {
-            key: int((invariant_row or {}).get(key) or 0)
-            for key in ("access_control", "field_constraint", "workflow")
-        }
-    except Exception:
-        # Rolling migrations and test doubles fail closed: invariant-only families are unavailable.
-        invariant_counts = {"access_control": 0, "field_constraint": 0, "workflow": 0}
-    surface = await conn.fetchrow(
-        """
-        SELECT COUNT(*)::int AS inventory_rows,
-               COUNT(DISTINCT upper(method) || ' ' || path)::int AS unique_routes,
-               COUNT(DISTINCT upper(method) || ' ' || path)
-                   FILTER (WHERE auth_state IN ('user1','user2'))::int AS authenticated_routes,
-               COUNT(DISTINCT upper(method) || ' ' || path)
-                   FILTER (WHERE auth_state='user2')::int AS second_user_routes,
-               COUNT(DISTINCT upper(method) || ' ' || path)
-                   FILTER (
-                     WHERE auth_state IN ('user1','user2')
-                       AND (
-                         upper(method)='GET'
-                         OR COALESCE(param_shape, '') <> ''
-                         OR COALESCE(replay_spec, '') <> ''
-                       )
-                   )::int AS executable_routes,
-               COUNT(DISTINCT upper(method) || ' ' || path)
-                   FILTER (
-                     WHERE upper(method)='GET'
-                        OR COALESCE(param_shape, '') <> ''
-                        OR COALESCE(replay_spec, '') <> ''
-                   )::int AS all_executable_routes,
-               COUNT(DISTINCT upper(method) || ' ' || path)
-                   FILTER (
-                     WHERE auth_state IN ('user1','user2')
-                       AND path ~ '/(\\{[^/{}]+\\}|:[A-Za-z_][A-Za-z0-9_]*|[0-9]+)(/|$)'
-                   )::int AS object_routes,
-               COUNT(DISTINCT upper(method) || ' ' || path)
-                   FILTER (
-                     WHERE auth_state IN ('user1','user2')
-                       AND upper(method) IN ('POST','PUT','PATCH')
-                       AND (COALESCE(param_shape, '') <> '' OR COALESCE(replay_spec, '') <> '')
-                   )::int AS mutation_routes,
-               COUNT(DISTINCT upper(method) || ' ' || path)
-                   FILTER (
-                     WHERE COALESCE(param_shape, '') <> '' OR COALESCE(replay_spec, '') <> ''
-                   )::int AS parameterized_routes,
-               MAX(last_seen_at) AS latest_inventory_seen_at
-        FROM target_endpoints
-        WHERE target_id=$1 AND COALESCE(test_status, '') <> 'gone'
-        """,
-        target_id,
-    )
-    preflight_scan_id = _optional_uuid(config.get("preflight_scan_id"))
-    preflight = None
-    reused_preflight = False
-    if preflight_scan_id:
-        preflight = await conn.fetchrow(
-            "SELECT id, status, current_phase, error_message, created_at, completed_at FROM scans WHERE id=$1 AND target_id=$2",
-            preflight_scan_id,
-            target_id,
-        )
-    elif gated:
-        # Reuse recent target-bound work only when its durable provenance meets
-        # the selected families' needs. Public injection/data campaigns do not
-        # require a two-principal graph; BOLA still does.
-        preflight = await conn.fetchrow(
-            """
-            SELECT s.id, s.status, s.current_phase, s.error_message, s.created_at, s.completed_at
-            FROM scans s
-            WHERE s.target_id=$1 AND s.status='completed'
-              AND (s.scan_role IS NULL OR s.scan_role <> 'shard')
-              AND s.completed_at >= NOW() - INTERVAL '24 hours'
-              AND EXISTS (
-                SELECT 1 FROM target_endpoints e
-                WHERE e.target_id=$1 AND e.last_seen_scan_id IN (
-                    SELECT family.id FROM scans family
-                    WHERE family.id=s.id OR family.parent_scan_id=s.id
-                )
-                  AND (
-                    $2::boolean=false
-                    OR e.auth_state IN ('user1','user2')
-                  )
-                  AND (
-                    $3::boolean=false
-                    OR e.auth_state='user2'
-                  )
-              )
-              AND (
-                $3::boolean=false
-                OR EXISTS (
-                  SELECT 1 FROM application_graph_edges edge
-                  WHERE edge.target_id=$1 AND edge.scan_id IN (
-                      SELECT family.id FROM scans family
-                      WHERE family.id=s.id OR family.parent_scan_id=s.id
-                  )
-                    AND edge.edge_type='auth_boundary'
-                    AND COALESCE(edge.attributes->>'source_principal','') <> ''
-                    AND COALESCE(edge.attributes->>'excluded_principal','') <> ''
-                    AND edge.attributes->>'source_principal' <> edge.attributes->>'excluded_principal'
-                )
-              )
-            ORDER BY s.completed_at DESC
-            LIMIT 1
-            """,
-            target_id,
-            bool(requirements["primary_credentials"]),
-            bool(requirements["second_user"]),
-        )
-        if preflight:
-            preflight_scan_id = _optional_uuid(preflight.get("id"))
-            reused_preflight = True
-    fresh_surface = await conn.fetchrow(
-        """
-        SELECT COUNT(DISTINCT upper(method) || ' ' || path)::int AS fresh_unique_routes,
-               COUNT(DISTINCT upper(method) || ' ' || path)
-                   FILTER (WHERE auth_state IN ('user1','user2'))::int AS fresh_authenticated_routes,
-               COUNT(DISTINCT upper(method) || ' ' || path)
-                   FILTER (WHERE auth_state='user2')::int AS fresh_second_user_routes,
-               COUNT(DISTINCT upper(method) || ' ' || path)
-                   FILTER (
-                     WHERE auth_state IN ('user1','user2')
-                       AND (
-                         upper(method)='GET'
-                         OR COALESCE(param_shape, '') <> ''
-                         OR COALESCE(replay_spec, '') <> ''
-                       )
-                   )::int AS fresh_executable_routes,
-               COUNT(DISTINCT upper(method) || ' ' || path)
-                   FILTER (
-                     WHERE upper(method)='GET'
-                        OR COALESCE(param_shape, '') <> ''
-                        OR COALESCE(replay_spec, '') <> ''
-                   )::int AS fresh_all_executable_routes,
-               COUNT(DISTINCT upper(method) || ' ' || path)
-                   FILTER (
-                     WHERE auth_state IN ('user1','user2')
-                       AND path ~ '/(\\{[^/{}]+\\}|:[A-Za-z_][A-Za-z0-9_]*|[0-9]+)(/|$)'
-                   )::int AS fresh_object_routes,
-               COUNT(DISTINCT upper(method) || ' ' || path)
-                   FILTER (
-                     WHERE auth_state IN ('user1','user2')
-                       AND upper(method) IN ('POST','PUT','PATCH')
-                       AND (COALESCE(param_shape, '') <> '' OR COALESCE(replay_spec, '') <> '')
-                   )::int AS fresh_mutation_routes,
-               COUNT(DISTINCT upper(method) || ' ' || path)
-                   FILTER (
-                     WHERE COALESCE(param_shape, '') <> '' OR COALESCE(replay_spec, '') <> ''
-                   )::int AS fresh_parameterized_routes
-        FROM target_endpoints
-        WHERE target_id=$1 AND last_seen_scan_id IN (
-            SELECT id FROM scans
-            WHERE id=COALESCE((SELECT parent_scan_id FROM scans WHERE id=$2::uuid), $2::uuid)
-               OR parent_scan_id=COALESCE((SELECT parent_scan_id FROM scans WHERE id=$2::uuid), $2::uuid)
-        )
-        """,
-        target_id,
-        preflight_scan_id,
-    )
-    graph = await conn.fetchrow(
-        """
-        SELECT COUNT(*) FILTER (WHERE node_type='route')::int AS route_nodes,
-               COUNT(*) FILTER (
-                   WHERE node_type='route' AND scan_id IN (
-                       SELECT id FROM scans
-                       WHERE id=COALESCE((SELECT parent_scan_id FROM scans WHERE id=$2::uuid), $2::uuid)
-                          OR parent_scan_id=COALESCE((SELECT parent_scan_id FROM scans WHERE id=$2::uuid), $2::uuid)
-                   )
-               )::int AS fresh_route_nodes,
-               MAX(last_seen_at) AS latest_graph_seen_at,
-               (SELECT COUNT(*)::int FROM application_graph_edges WHERE target_id=$1) AS edge_count,
-               (SELECT COUNT(*)::int FROM application_graph_edges
-                  WHERE target_id=$1 AND scan_id IN (
-                      SELECT id FROM scans
-                      WHERE id=COALESCE((SELECT parent_scan_id FROM scans WHERE id=$2::uuid), $2::uuid)
-                         OR parent_scan_id=COALESCE((SELECT parent_scan_id FROM scans WHERE id=$2::uuid), $2::uuid)
-                  )) AS fresh_edge_count,
-               (SELECT COUNT(*)::int FROM application_graph_edges
-                  WHERE target_id=$1 AND scan_id IN (
-                      SELECT id FROM scans
-                      WHERE id=COALESCE((SELECT parent_scan_id FROM scans WHERE id=$2::uuid), $2::uuid)
-                         OR parent_scan_id=COALESCE((SELECT parent_scan_id FROM scans WHERE id=$2::uuid), $2::uuid)
-                  )
-                    AND edge_type='auth_boundary'
-                    AND COALESCE(attributes->>'source_principal','') <> ''
-                    AND COALESCE(attributes->>'excluded_principal','') <> ''
-                    AND attributes->>'source_principal' <> attributes->>'excluded_principal'
-               ) AS fresh_auth_boundary_edges
-        FROM application_graph_nodes WHERE target_id=$1
-        """,
-        target_id,
-        preflight_scan_id,
-    )
-    surface_payload = {
-        **(row_to_dict(surface) if surface else {}),
-        **(row_to_dict(fresh_surface) if fresh_surface else {}),
-        **(row_to_dict(graph) if graph else {}),
-    }
-    before = config.get("surface_before_preflight") if isinstance(config.get("surface_before_preflight"), dict) else {}
-    executable_routes = int(surface_payload.get("executable_routes") or 0)
-    all_executable_routes = int(surface_payload.get("all_executable_routes") or 0)
-    object_routes = int(surface_payload.get("object_routes") or 0)
-    mutation_routes = int(surface_payload.get("mutation_routes") or 0)
-    parameterized_routes = int(surface_payload.get("parameterized_routes") or 0)
-    fresh_route_nodes = int(surface_payload.get("fresh_route_nodes") or 0)
-    fresh_edge_count = int(surface_payload.get("fresh_edge_count") or 0)
-    # A BOLA-usable graph needs a FRESH cross-principal auth_boundary edge (source_principal !=
-    # excluded_principal), not merely any new edge -- a lone producer/produces edge or a stale
-    # boundary must not open the gate. Counting any edge_type let readiness pass with no real
-    # two-principal surface (the reported fail-open).
-    fresh_auth_boundary_edges = int(surface_payload.get("fresh_auth_boundary_edges") or 0)
-    family_executable_routes = (
-        int(surface_payload.get("fresh_executable_routes") or 0) if gated else executable_routes
-    )
-    family_all_executable_routes = (
-        int(surface_payload.get("fresh_all_executable_routes") or 0) if gated else all_executable_routes
-    )
-    family_object_routes = (
-        int(surface_payload.get("fresh_object_routes") or 0) if gated else object_routes
-    )
-    family_second_user_routes = (
-        int(surface_payload.get("fresh_second_user_routes") or 0)
-        if gated else int(surface_payload.get("second_user_routes") or 0)
-    )
-    family_mutation_routes = (
-        int(surface_payload.get("fresh_mutation_routes") or 0) if gated else mutation_routes
-    )
-    family_parameterized_routes = (
-        int(surface_payload.get("fresh_parameterized_routes") or 0) if gated else parameterized_routes
-    )
-    executable_families: list[str] = []
-    if "auth" in families and family_executable_routes > 0:
-        executable_families.append("auth")
-    if (
-        "bola" in families
-        and family_object_routes > 0
-        and family_second_user_routes > 0
-        and fresh_auth_boundary_edges > 0
-    ):
-        executable_families.append("bola")
-    for injection_family in ("sqli", "xss"):
-        if injection_family in families and family_parameterized_routes > 0:
-            executable_families.append(injection_family)
-    # Mass-assignment leads come from the persistent endpoint inventory (any authenticated write route
-    # with a captured body), NOT from a fresh two-principal preflight like BOLA. A BOLA-focused reused
-    # preflight leaves fresh_mutation_routes=0 even when the inventory holds 100+ writable routes, which
-    # wrongly drops the whole family and lets its many leads flood the pre-truncation board only to be
-    # stripped later, starving executable families. The live-surface filter already discards stale/gone
-    # routes, so gate on the persistent mutation surface (whole-target) instead of the fresh count.
-    if "mass_assignment" in families and (family_mutation_routes > 0 or mutation_routes > 0):
-        executable_families.append("mass_assignment")
-    if (
-        "field_constraint" in families
-        and family_mutation_routes > 0
-        and invariant_counts.get("field_constraint", 0) > 0
-    ):
-        executable_families.append("field_constraint")
-    if (
-        "workflow" in families
-        and family_mutation_routes > 0
-        and invariant_counts.get("workflow", 0) > 0
-    ):
-        executable_families.append("workflow")
-    if "data_exposure" in families and family_executable_routes > 0:
-        executable_families.append("data_exposure")
-    if (
-        "access_control" in families
-        and family_executable_routes > 0
-        and invariant_counts.get("access_control", 0) > 0
-    ):
-        executable_families.append("access_control")
-    fresh_authenticated_routes = int(surface_payload.get("fresh_authenticated_routes") or 0)
-    if gated and requirements["authenticated_preflight"]:
-        # Count authenticated coverage stamped by THIS preflight, not only net-new cardinality. A
-        # successful refresh of 30 existing authenticated routes is useful and fresh; an unrelated
-        # concurrent/public route is not. The scan-id provenance closes both the old fail-open and the
-        # same-count false-negative that repeatedly exhausted otherwise healthy auth preflights.
-        meaningful_preflight_gain = bool(fresh_auth_boundary_edges > 0 or fresh_authenticated_routes > 0)
-    elif gated:
-        meaningful_preflight_gain = bool(
-            int(surface_payload.get("fresh_unique_routes") or 0) > 0
-            and (
-                family_all_executable_routes > 0
-                or family_parameterized_routes > 0
-            )
-        )
-    else:
-        meaningful_preflight_gain = bool(
-            fresh_route_nodes > 0
-            or int(surface_payload.get("unique_routes") or 0) > int(before.get("unique_routes") or 0)
-            or not before
-        )
-    surface_payload.update({
-        "executable_families": sorted(set(executable_families)),
-        "unavailable_families": sorted(families - set(executable_families)),
-        "approved_invariant_counts": invariant_counts,
-        "meaningful_preflight_gain": meaningful_preflight_gain,
-    })
-    blockers: list[str] = []
-    if requirements["primary_credentials"] and signals.get("primary_credentials") != "configured":
-        blockers.append("primary_credentials_required")
-    if gated and not config.get("approval_receipt_id"):
-        blockers.append("approval_receipt_required")
-    if requirements["second_user"] and signals.get("second_user_credentials") != "configured":
-        blockers.append("distinct_second_user_credentials_required")
-    preflight_status = str(preflight.get("status") or "missing") if preflight else "missing"
-    if gated and preflight_status != "completed":
-        blockers.append(
-            (
-                "authenticated_preflight_in_progress"
-                if requirements["authenticated_preflight"] else
-                "focused_preflight_in_progress"
-            )
-            if preflight_status in {"pending", "queued", "running"}
-            else (
-                "authenticated_preflight_required"
-                if requirements["authenticated_preflight"] else
-                "focused_preflight_required"
-            )
-        )
-    if int(surface_payload.get("unique_routes") or 0) < int(requirements["unique_routes"]):
-        blockers.append(
-            "insufficient_unique_route_coverage"
-            if gated else
-            "read_only_campaign_requires_existing_coverage"
-        )
-    if requirements["authenticated_routes"] and int(surface_payload.get("authenticated_routes") or 0) < int(requirements["authenticated_routes"]):
-        blockers.append("insufficient_authenticated_route_coverage")
-    required_executable_count = (
-        family_executable_routes if requirements["primary_credentials"]
-        else family_all_executable_routes
-    )
-    if gated and required_executable_count < RESEARCH_SURFACE_MIN_EXECUTABLE_ROUTES:
-        blockers.append(
-            "no_executable_authenticated_routes"
-            if requirements["primary_credentials"] else
-            "no_executable_routes"
-        )
-    if requirements["second_user"] and int(surface_payload.get("second_user_routes") or 0) <= 0:
-        blockers.append("second_user_surface_not_observed")
-    if requirements["second_user"] and object_routes > 0 and fresh_auth_boundary_edges <= 0:
-        blockers.append("two_principal_graph_not_materialized")
-    if gated and preflight_status == "completed" and not meaningful_preflight_gain:
-        blockers.append(
-            "authenticated_preflight_no_material_gain"
-            if requirements["authenticated_preflight"] else
-            "focused_preflight_no_material_gain"
-        )
-    if gated and families and not executable_families:
-        blockers.append("no_allowed_family_has_executable_surface")
-    if gated and config.get("require_all_requested_families"):
-        blockers.extend(
-            f"family_surface_unavailable:{family}"
-            for family in sorted(families - set(executable_families))
-        )
-    hard_blockers = {
-        "primary_credentials_required",
-        "distinct_second_user_credentials_required",
-        "approval_receipt_required",
-        "read_only_campaign_requires_existing_coverage",
-    }
-    return {
-        "ready": not blockers,
-        "state": "ready" if not blockers else (
-            "blocked" if hard_blockers.intersection(blockers) else
-            "waiting" if {
-                "authenticated_preflight_in_progress", "focused_preflight_in_progress",
-            }.intersection(blockers) else
-            "repairable"
-        ),
-        "blockers": blockers,
-        "credential_signals": signals,
-        "surface": surface_payload,
-        "preflight_scan": row_to_dict(preflight) if preflight else None,
-        "reused_preflight": reused_preflight,
-        "required": {
-            **requirements,
-            "fresh_two_principal_graph": bool(requirements["second_user"] and object_routes > 0),
-        },
-    }
-
-
-async def _research_campaign_yield_metrics(conn: Any, campaign: Any) -> dict[str, Any]:
-    payload = row_to_dict(campaign)
-    campaign_id = _optional_uuid(payload.get("id"))
-    target_id = _optional_uuid(payload.get("target_id"))
-    episode_rows = await conn.fetch(
-        "SELECT id, status, budget_used FROM research_episodes WHERE campaign_id=$1 ORDER BY created_at",
-        campaign_id,
-    )
-    episode_ids = [row["id"] for row in episode_rows]
-    decisions = []
-    if episode_ids:
-        decisions = await conn.fetch(
-            """
-            SELECT rd.action, rd.status, rd.validation_errors,
-                   cr.id AS command_result_id, cr.status AS command_status,
-                   cr.finding_ids, cr.result_json
-            FROM research_decisions rd
-            LEFT JOIN command_results cr ON cr.id=rd.command_result_id
-            WHERE rd.episode_id=ANY($1::uuid[])
-            ORDER BY rd.created_at
-            """,
-            episode_ids,
-        )
-    model_units = sum(
-        int((_decode_json_value(row.get("budget_used")) or {}).get("model_tokens") or 0)
-        for row in episode_rows
-    )
-    experiments = 0
-    falsified = 0
-    recon_actions = 0
-    semantic_dimensions: set[str] = set()
-    exhausted_dimensions: set[str] = set()
-    falsification_counts: dict[str, int] = {}
-    outcome_counts: dict[str, int] = {key: 0 for key in sorted(RESEARCH_EXPERIMENT_OUTCOMES)}
-    novelty_blocks = 0
-    rejected_decisions = 0
-    rejection_reasons: Counter[str] = Counter()
-    for row in decisions:
-        action = _decode_json_value(row.get("action")) or {}
-        command = str(action.get("command") or "")
-        if command in RESEARCH_RECON_COMMANDS and str(row.get("status") or "") in {
-            "accepted", "dispatching", "completed", "blocked",
-        }:
-            recon_actions += 1
-        validation_errors = _decode_json_value(row.get("validation_errors")) or []
-        novelty_blocks += sum(1 for error in validation_errors if str(error) == "known_vulnerability_already_covered")
-        if str(row.get("status") or "") in {"rejected", "blocked", "failed"}:
-            rejected_decisions += 1
-            rejection_reasons.update(str(error) for error in validation_errors if str(error))
-        dimension = _research_action_semantic_dimension(action)
-        if not dimension:
-            continue
-        semantic_dimensions.add(dimension)
-        if row.get("command_result_id") and str(row.get("status") or "") == "completed":
-            experiments += 1
-            outcome = _research_experiment_outcome(action, row)
-            if outcome:
-                outcome_name = str(outcome.get("outcome") or "inconclusive")
-                outcome_counts[outcome_name] = outcome_counts.get(outcome_name, 0) + 1
-            if outcome and outcome.get("deterministic_refutation"):
-                falsified += 1
-                falsification_counts[dimension] = falsification_counts.get(dimension, 0) + 1
-    exhausted_dimensions.update(
-        dimension for dimension, count in falsification_counts.items()
-        if count >= _get("RESEARCH_SEMANTIC_FALSIFICATION_LIMIT")
-    )
-    # The board is offering nothing net-new: the planner keeps proposing already-owned vulnerabilities
-    # (novelty-suppressed at dispatch) and nothing is actually executing. Stop cleanly and early rather
-    # than burning the model budget on a covered-board spin (faster than the generic rejection ceiling).
-    all_leads_already_covered = (
-        novelty_blocks >= 8
-        and experiments == 0
-        and novelty_blocks == rejected_decisions
-        and novelty_blocks >= max(8, int(len(decisions) * 0.75))
-    )
-    verified_findings = int(await conn.fetchval(
-        """
-        SELECT COUNT(*) FROM findings
-        WHERE target_id=$1 AND tool='autonomous_workflow'
-          AND EXISTS (
-              SELECT 1
-              FROM jsonb_array_elements(
-                  COALESCE(evidence->'research_provenance_history', '[]'::jsonb)
-              ) AS provenance
-              WHERE provenance->>'campaign_id'=$2::text
-          )
-          AND last_verification_verdict='exploited'
-        """,
-        target_id,
-        str(campaign_id),
-    ) or 0)
-    verified_scan_findings = int(await conn.fetchval(
-        """
-        SELECT COUNT(DISTINCT f.id)
-        FROM findings f
-        WHERE f.target_id=$1
-          AND f.last_verification_verdict='exploited'
-          AND f.scan_id IN (
-              SELECT cr.scan_id
-              FROM research_decisions rd
-              JOIN research_episodes re ON re.id=rd.episode_id
-              JOIN command_results cr ON cr.id=rd.command_result_id
-              WHERE re.campaign_id=$2 AND cr.scan_id IS NOT NULL
-          )
-        """,
-        target_id,
-        campaign_id,
-    ) or 0)
-    verified_retest_findings = int(await conn.fetchval(
-        """
-        SELECT COUNT(DISTINCT fv.finding_id)
-        FROM finding_verifications fv
-        JOIN command_results cr ON cr.result_json->>'retest_id'=fv.id::text
-        JOIN research_decisions rd ON rd.command_result_id=cr.id
-        JOIN research_episodes re ON re.id=rd.episode_id
-        WHERE re.campaign_id=$1
-          AND fv.status='completed'
-          AND fv.verdict='exploited'
-        """,
-        campaign_id,
-    ) or 0)
-    metadata = _decode_json_value(payload.get("metadata_json")) or {}
-    config = metadata.get("autonomous_research") if isinstance(metadata.get("autonomous_research"), dict) else {}
-    aggregate_budget = await _research_campaign_budget_snapshot(conn, campaign)
-    before = config.get("surface_before_preflight") if isinstance(config.get("surface_before_preflight"), dict) else {}
-    after = config.get("surface_after_preflight") if isinstance(config.get("surface_after_preflight"), dict) else {}
-    # Net-new-over-DAST: campaign-attributed exact vulnerability identities
-    # that no deterministic scanner finding owns.
-    net_new_verified = await _research_net_new_finding_count(
-        conn, target_id, campaign_id=campaign_id,
-    )
-    return {
-        "episodes": len(episode_rows),
-        "decisions": len(decisions),
-        "model_units": model_units,
-        "experiments": experiments,
-        "falsified_experiments": falsified,
-        "experiment_outcomes": outcome_counts,
-        "non_scientific_experiments": outcome_counts.get("inconclusive", 0) + outcome_counts.get("blocked", 0),
-        "semantic_dimensions_tested": len(semantic_dimensions),
-        "exhausted_dimensions": len(exhausted_dimensions),
-        "recon_actions": recon_actions,
-        "novelty_suppressions": novelty_blocks,
-        "rejected_decisions": rejected_decisions,
-        "rejection_reasons": dict(rejection_reasons.most_common(20)),
-        "verified_autonomous_findings": verified_findings,
-        "verified_campaign_scan_findings": verified_scan_findings,
-        "verified_campaign_retest_findings": verified_retest_findings,
-        "net_new_verified_findings": net_new_verified,
-        "finding_yield_per_experiment": round(verified_findings / experiments, 4) if experiments else 0.0,
-        "model_units_per_verified_finding": (model_units // verified_findings) if verified_findings else None,
-        "aggregate_budget": aggregate_budget,
-        "surface": {
-            "unique_routes_before": int(before.get("unique_routes") or 0),
-            "unique_routes_after": int(after.get("unique_routes") or 0),
-            "authenticated_routes_before": int(before.get("authenticated_routes") or 0),
-            "authenticated_routes_after": int(after.get("authenticated_routes") or 0),
-        },
-        "stop_recommended": bool(
-            verified_findings == 0
-            and (
-                all_leads_already_covered
-                or (
-                    experiments >= 12
-                    and falsified >= max(9, int(experiments * 0.75))
-                )
-                or (
-                    experiments >= 8
-                    and outcome_counts.get("inconclusive", 0) + outcome_counts.get("blocked", 0)
-                    >= max(6, int(experiments * 0.75))
-                )
-                or (
-                    rejected_decisions >= 8
-                    and rejected_decisions >= max(8, int(len(decisions) * 0.75))
-                )
-            )
-        ),
-        "stop_reason": (
-            "zero_yield_falsification_ceiling"
-            if experiments >= 12 and verified_findings == 0 and falsified >= max(9, int(experiments * 0.75))
-            else "experiment_harness_failure_ceiling"
-            if experiments >= 8 and verified_findings == 0
-            and outcome_counts.get("inconclusive", 0) + outcome_counts.get("blocked", 0)
-            >= max(6, int(experiments * 0.75))
-            else "all_leads_already_covered"
-            if verified_findings == 0 and all_leads_already_covered
-            else "planner_rejection_ceiling"
-            if rejected_decisions >= 8 and verified_findings == 0
-            and rejected_decisions >= max(8, int(len(decisions) * 0.75))
-            else None
-        ),
-    }
-
-
 def _normalized_web_origins(primary_url: Any, values: Any = None) -> list[str]:
     """Normalize and de-duplicate concrete origins while preserving preference order."""
     candidates = values if isinstance(values, list) else []
@@ -6438,25 +5927,6 @@ async def _arsenal_adapter_pending_response(
 
 
 
-def _research_family_readiness_requirements(families: set[str], *, gated: bool) -> dict[str, Any]:
-    """Derive launch prerequisites from the selected families, not the campaign tier."""
-    primary = bool(gated and families.intersection(RESEARCH_PRIMARY_CREDENTIAL_FAMILIES))
-    second_user = bool(gated and families.intersection(RESEARCH_SECOND_USER_FAMILIES))
-    minimum_routes = (
-        RESEARCH_SURFACE_MIN_UNIQUE_ROUTES if second_user
-        else RESEARCH_SURFACE_MIN_AUTHENTICATED_ROUTES if primary
-        else RESEARCH_SURFACE_MIN_EXECUTABLE_ROUTES
-    )
-    return {
-        "primary_credentials": primary,
-        "second_user": second_user,
-        "authenticated_preflight": primary,
-        "unique_routes": minimum_routes,
-        "authenticated_routes": RESEARCH_SURFACE_MIN_AUTHENTICATED_ROUTES if primary else 0,
-        "executable_routes": RESEARCH_SURFACE_MIN_EXECUTABLE_ROUTES if gated else 0,
-    }
-
-
 def _research_exhausted_families(
     candidates: list[dict[str, Any]], known_vulnerability_keys: set[str] | None,
 ) -> list[str]:
@@ -6480,104 +5950,8 @@ def _research_exhausted_families(
     return sorted(family for family, flags in by_family.items() if flags and all(flags))
 
 
-def _research_action_semantic_dimension(action: dict[str, Any]) -> str | None:
-    """Collapse volatile ids/prose while retaining method, payload, principal, and assertions."""
-    command = str(action.get("command") or "").strip()
-    parameters = action.get("parameters") if isinstance(action.get("parameters"), dict) else {}
-    if command not in {"experiment.workflow", "experiment.http_diff"}:
-        return None
-    routes: set[str] = set()
-    for step in parameters.get("steps") or []:
-        if not isinstance(step, dict):
-            continue
-        route = _canonical_vulnerability_route(step.get("path") or step.get("route"))
-        if route:
-            routes.add(route)
-    direct_route = _canonical_vulnerability_route(parameters.get("route"))
-    if direct_route:
-        routes.add(direct_route)
-    if not routes:
-        return None
-    comparable = _research_action_dedupe_comparable(action)
-    material = {
-        "version": "semantic-experiment-v2",
-        "routes": sorted(routes),
-        "experiment": comparable,
-    }
-    return _research_canonical_hash(material)
 
 
-RESEARCH_RECON_COMMANDS = frozenset({
-    "asm.gaps",
-    "asm.recon",
-    "target.get",
-    "target.graph",
-    "target.principal_matrix",
-    "hypothesis.list",
-    "hypothesis.generate_from_graph",
-})
-
-
-RESEARCH_EXPERIMENT_OUTCOMES = frozenset({
-    "verified", "refuted", "supported_unverified", "inconclusive", "blocked",
-})
-
-
-def _research_experiment_outcome(action: Any, command_result: Any) -> dict[str, Any] | None:
-    """Normalize a completed experiment into a scientific outcome.
-
-    Absence of a finding is not refutation.  Only a deterministic family-proof
-    ``refuted`` verdict counts as falsification; transport/runtime failures and
-    missing proof stay visible as blocked/inconclusive.
-    """
-    action_payload = action if isinstance(action, dict) else _decode_json_value(action) or {}
-    command = str(action_payload.get("command") or "")
-    if command not in {"experiment.http_diff", "experiment.workflow"}:
-        return None
-    result = command_result if isinstance(command_result, dict) else row_to_dict(command_result)
-    result_json = _decode_json_value(result.get("result_json")) or {}
-    proof = result_json.get("family_proof") if isinstance(result_json.get("family_proof"), dict) else {}
-    if not proof:
-        nested = result_json.get("workflow") if isinstance(result_json.get("workflow"), dict) else {}
-        proof = nested.get("family_proof") if isinstance(nested.get("family_proof"), dict) else {}
-    verdict = str(proof.get("verdict") or "").strip().lower()
-    finding_ids = _decode_json_value(result.get("finding_ids")) or []
-    if finding_ids or verdict == "verified":
-        outcome = "verified"
-    elif verdict in RESEARCH_EXPERIMENT_OUTCOMES:
-        outcome = verdict
-    else:
-        status = str(result.get("command_status") or result.get("status") or "").strip().lower()
-        proof_state = str(
-            result_json.get("proof_state")
-            or (result_json.get("experiment") or {}).get("proof_state")
-            or ""
-        ).strip().lower()
-        if status in {"blocked", "approval_required", "failed", "cancelled", "error", "partial"}:
-            outcome = "blocked"
-        elif proof_state in {"supported", "supported_unverified", "likely_vulnerable"}:
-            outcome = "supported_unverified"
-        else:
-            outcome = "inconclusive"
-    failure_class, failed_predicates = _research_experiment_failure_detail(result_json)
-    if outcome == "blocked" and not failure_class:
-        failure_class = "dispatch_or_policy_blocked"
-    elif outcome == "inconclusive" and not failure_class:
-        failure_class = "proof_evidence_missing"
-    return {
-        "outcome": outcome,
-        "reason": str(
-            proof.get("reason")
-            or result_json.get("failure_reason")
-            or result.get("command_status")
-            or result.get("status")
-            or ""
-        )[:500],
-        "family": str(proof.get("family") or (action_payload.get("parameters") or {}).get("proof_family") or "")[:80],
-        "deterministic_refutation": outcome == "refuted" and bool(proof.get("refuted_by")),
-        "failure_class": failure_class,
-        "failed_predicates": failed_predicates[:16],
-    }
 
 
 async def _research_known_vulnerability_keys(conn: Any, target_id: Any) -> set[str]:
@@ -6621,69 +5995,6 @@ async def _research_known_coverage_keys(conn: Any, target_id: Any) -> set[str]:
         for key in (_finding_coverage_key(row) for row in rows)
         if key
     }
-
-
-async def _research_net_new_finding_count(
-    conn: Any,
-    target_id: Any,
-    *,
-    campaign_id: Any = None,
-    tool: str = "autonomous_workflow",
-    verdict: str | None = "exploited",
-) -> int:
-    """Count distinct exact findings from ``tool`` not owned by another tool.
-
-    When a campaign is supplied, only findings carrying that campaign's durable
-    research provenance count. This prevents a new campaign inheriting credit
-    from earlier target hunts.
-    """
-    rows = await conn.fetch(
-        """
-        SELECT tool, cwe, title, url, evidence, request, last_verification_verdict
-        FROM findings
-        WHERE target_id=$1 AND status IN ('active','resolved','accepted_risk')
-        """,
-        _optional_uuid(target_id),
-    )
-    other_keys: set[str] = set()
-    tool_rows: list[dict[str, Any]] = []
-    campaign_text = str(campaign_id or "").strip()
-    for row in rows:
-        finding = row_to_dict(row)
-        if str(finding.get("tool") or "") == tool:
-            if campaign_text:
-                evidence = _decode_json_value(finding.get("evidence")) or {}
-                provenance_items = (
-                    evidence.get("research_provenance_history")
-                    if isinstance(evidence, dict)
-                    and isinstance(evidence.get("research_provenance_history"), list)
-                    else []
-                )
-                if isinstance(evidence, dict) and isinstance(evidence.get("research_provenance"), dict):
-                    provenance_items = [*provenance_items, evidence["research_provenance"]]
-                if not any(
-                    isinstance(item, dict)
-                    and str(item.get("campaign_id") or "") == campaign_text
-                    for item in provenance_items
-                ):
-                    continue
-            tool_rows.append(finding)
-        else:
-            key = _finding_vulnerability_key(finding)
-            if key:
-                other_keys.add(key)
-    net_new_keys: set[str] = set()
-    for finding in tool_rows:
-        if verdict and str(finding.get("last_verification_verdict") or "") != verdict:
-            continue
-        key = _finding_vulnerability_key(finding)
-        if key and key not in other_keys:
-            net_new_keys.add(key)
-    return len(net_new_keys)
-
-
-
-
 
 
 class SourceIngestHint(BaseModel):
@@ -8180,7 +7491,7 @@ async def _arsenal_dispatch_workflow(
     hypothesis_id = str(p.get("_research_hypothesis_id") or "").strip() or None
     workflow_uuid = _uuid_or_400(str(p.get("workflow_id") or ""), "workflow id")
     workflow_id = str(workflow_uuid)
-    if workflow_id in _get("_active_workflow_cancellations"):
+    if workflow_id in _active_workflow_cancellations:
         raise HTTPException(status_code=409, detail="Workflow is already active")
     invariant_contract: dict[str, Any] | None = None
     async with _pool().acquire() as conn:
@@ -8218,6 +7529,15 @@ async def _arsenal_dispatch_workflow(
             }
         }
         try:
+            if not workflow_payload.get("steps"):
+                # No planner steps and no server-built proof: "workflow_requires_2_to_12_steps" told
+                # an agent nothing it could act on. Name why the proof could not be built.
+                why = str(materialization.get("reason") or "").strip() or (
+                    "the server builds a proof workflow only for a create-based mass_assignment lead "
+                    "whose collection has a DELETE cleanup route on the discovered surface")
+                raise WorkflowContractError(
+                    f"no proof workflow could be built for this candidate ({why}); it stays "
+                    "unverified with its evidence")
             normalized = normalize_workflow(base_url, workflow_payload)
             used_slots = {
                 *{step["principal"] for step in normalized["steps"]},
@@ -8310,7 +7630,7 @@ async def _arsenal_dispatch_workflow(
         result["trusted_protected_routes"] = trusted_protected_routes
 
     cancel_event = asyncio.Event()
-    _get("_active_workflow_cancellations")[workflow_id] = cancel_event
+    _active_workflow_cancellations[workflow_id] = cancel_event
     started_at = datetime.now(timezone.utc)
     try:
         _inject_create_mass_assignment_credentials(principal_contexts, normalized)
@@ -8345,7 +7665,7 @@ async def _arsenal_dispatch_workflow(
     except WorkflowContractError as exc:
         raise HTTPException(status_code=422, detail={"error": "workflow_execution_failed", "violation": str(exc)}) from exc
     finally:
-        _get("_active_workflow_cancellations").pop(workflow_id, None)
+        _active_workflow_cancellations.pop(workflow_id, None)
 
     finished_at = datetime.now(timezone.utc)
     safe_result = _redact_agent_payload(executed)
@@ -8551,98 +7871,6 @@ def _research_hypothesis_provability(item: Any) -> tuple[int, list[str]]:
     return score, blockers
 
 
-def _research_action_dedupe_comparable(action: Any) -> dict[str, Any]:
-    """Reduce a planner action to its STABLE dedupe identity.
-
-    For a bounded workflow experiment the planner (and _research_autobind_hypothesis) stamps a
-    fresh workflow_id and re-words objective/falsifier on every attempt, so hashing the raw
-    parameters lets a mechanically identical test slip past the duplicate guard forever -- the
-    observed "same auth_bypass ~43x against one route" spin that burned a 2M-token marathon to 0
-    findings. Collapse an experiment to (family, canonical step routes+methods+principals,
-    assertion predicates); everything ephemeral or merely descriptive is dropped so a genuine
-    re-run of the same test matches. Non-experiment commands keep raw {command, parameters}.
-    """
-    payload = action if isinstance(action, dict) else {}
-    command = str(payload.get("command") or "").strip()
-    params = payload.get("parameters") if isinstance(payload.get("parameters"), dict) else {}
-    if command not in _RESEARCH_EXPERIMENT_DEDUPE_COMMANDS:
-        return {"command": command, "parameters": params}
-    steps = params.get("steps") if isinstance(params.get("steps"), list) else []
-    # Canonical step identity = every semantic field of the step (including checkpoint) with mutable
-    # labels removed and every label reference resolved to the referenced step's content identity.
-    # ``checkpoint`` is execution semantics, not presentation: before/mutation/cleanup/action changes
-    # both what the runtime permits and what proof/restoration means. ``compare_to`` is a label
-    # reference, so retaining its raw text would let a mechanically identical workflow bypass dedupe
-    # merely by renaming its steps.
-    step_base_identity: dict[str, str] = {}
-    base_steps: list[tuple[dict[str, Any], dict[str, Any], str]] = []
-    for step in steps:
-        if not isinstance(step, dict):
-            continue
-        identity = {key: value for key, value in step.items() if key not in {"label", "id", "compare_to"}}
-        identity["route"] = _canonical_vulnerability_route(step.get("path") or step.get("route"))
-        identity.pop("path", None)
-        base_hash = _research_canonical_hash(identity)
-        label = str(step.get("label") or step.get("id") or "").strip()
-        if label:
-            step_base_identity[label] = base_hash
-        base_steps.append((step, identity, label))
-
-    def _resolve_base_step(ref: Any) -> str | None:
-        text = str(ref or "").strip()
-        if not text:
-            return None
-        return step_base_identity.get(text, f"unbound:{text}")
-
-    step_identity: dict[str, str] = {}
-    canonical_steps: list[str] = []
-    for step, identity, label in base_steps:
-        identity = {**identity, "compare_to": _resolve_base_step(step.get("compare_to"))}
-        identity_hash = _research_canonical_hash(identity)
-        if label:
-            step_identity[label] = identity_hash
-        canonical_steps.append(identity_hash)
-
-    def _resolve_step(ref: Any) -> str | None:
-        text = str(ref or "").strip()
-        if not text:
-            return None
-        return step_identity.get(text, f"unbound:{text}")
-
-    assertions = params.get("assertions") if isinstance(params.get("assertions"), list) else []
-    canonical_assertions = sorted(
-        _research_canonical_hash({
-            "type": str(a.get("type") or "").strip(),
-            "predicate": str(a.get("predicate") or "").strip().lower(),
-            "values": sorted(a.get("values")) if isinstance(a.get("values"), list) else a.get("values"),
-            "step": _resolve_step(a.get("step")),
-            "control": _resolve_step(a.get("control")),
-            "candidate": _resolve_step(a.get("candidate")),
-            "steps": sorted(x for x in (_resolve_step(s) for s in a.get("steps")) if x)
-            if isinstance(a.get("steps"), list) else None,
-        })
-        for a in assertions
-        if isinstance(a, dict)
-    )
-    principal_variables = sorted(
-        _research_canonical_hash({
-            "principal": str(item.get("principal") or "").strip().lower(),
-            "ref": str(item.get("ref") or "").strip().lower(),
-        })
-        for item in params.get("principal_variables") or []
-        if isinstance(item, dict)
-    )
-    return {
-        "command": command,
-        "parameters": {
-            "proof_family": str(params.get("proof_family") or params.get("family") or "").strip().lower(),
-            "steps": canonical_steps,
-            "assertions": canonical_assertions,
-            "principal_variables": principal_variables,
-        },
-    }
-
-
 def _finding_vulnerability_key(value: Any) -> str | None:
     finding, family, route, method, dedupe_dimensions, evidence, request = _finding_family_route_method(value)
     computed = _canonical_vulnerability_key(
@@ -8674,13 +7902,8 @@ def _finding_coverage_key(value: Any) -> str | None:
 
 
 
-RESEARCH_PRIMARY_CREDENTIAL_FAMILIES = frozenset({
-    "auth", "bola", "mass_assignment", "workflow", "data_exposure",
-    "access_control", "field_constraint",
-})
 
 
-RESEARCH_SECOND_USER_FAMILIES = frozenset({"bola"})
 
 
 def _research_hypothesis_vulnerability_key(hypothesis: dict[str, Any]) -> str | None:
@@ -8714,51 +7937,6 @@ def _research_hypothesis_coverage_key(hypothesis: dict[str, Any]) -> str | None:
     )
 
 
-def _research_experiment_failure_detail(result_json: Any) -> tuple[str | None, list[str]]:
-    payload = result_json if isinstance(result_json, dict) else {}
-    workflow = payload.get("workflow") if isinstance(payload.get("workflow"), dict) else {}
-    replay = payload.get("replay") if isinstance(payload.get("replay"), dict) else {}
-    observations = [
-        *(workflow.get("observations") or []),
-        *(payload.get("observations") or []),
-        *(replay.get("observations") or []),
-    ]
-    failed_predicates = sorted({
-        str(assertion.get("predicate") or assertion.get("type") or "")[:120]
-        for source in (workflow, payload, replay)
-        for assertion in (source.get("assertion_results") or [])
-        if isinstance(assertion, dict) and assertion.get("passed") is False
-        and (assertion.get("predicate") or assertion.get("type"))
-    })
-    reason = " ".join(str(value or "") for value in (
-        payload.get("failure_reason"),
-        replay.get("replay_blocked_reason"),
-        (payload.get("family_proof") or {}).get("reason")
-        if isinstance(payload.get("family_proof"), dict) else "",
-    )).lower()
-    if "restor" in reason or "before_after_state" in failed_predicates:
-        return "restoration_failed", failed_predicates
-    if "baseline" in reason:
-        return "baseline_failed", failed_predicates
-    if "privileg" in reason or "elevation" in reason:
-        return "no_privilege_elevation", failed_predicates
-    for observation in observations:
-        if not isinstance(observation, dict):
-            continue
-        response = observation.get("response") if isinstance(observation.get("response"), dict) else {}
-        status = response.get("status")
-        if observation.get("error"):
-            return "transport_or_runtime_error", failed_predicates
-        if isinstance(status, int) and status >= 400:
-            checkpoint = str(observation.get("checkpoint") or "")
-            return (
-                "baseline_request_failed" if checkpoint == "before"
-                else "mutation_request_failed" if checkpoint == "mutation"
-                else "workflow_step_failed"
-            ), failed_predicates
-    if failed_predicates:
-        return "proof_predicates_failed", failed_predicates
-    return ("proof_evidence_missing" if reason else None), failed_predicates
 def _refuter_automation_plan_for_finding(
     payload: dict[str, Any],
     evidence: dict[str, Any],
@@ -9409,3 +8587,13 @@ def _refuter_finding_automation_plan(finding: dict[str, Any], review_metadata: d
         trigger_type="finding",
         reasons=[str(finding.get("trigger_reason") or "manual_refuter_execution")],
     )
+
+
+@router.post("/experiments/workflows/{workflow_id}/cancel")
+async def cancel_workflow_experiment(workflow_id: str):
+    workflow_uuid = _uuid_or_400(workflow_id, "workflow id")
+    event = _active_workflow_cancellations.get(str(workflow_uuid))
+    if not event:
+        raise HTTPException(status_code=404, detail="Active workflow not found")
+    event.set()
+    return {"workflow_id": str(workflow_uuid), "cancel_requested": True, "finding_created": False}

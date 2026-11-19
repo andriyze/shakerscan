@@ -100,7 +100,7 @@ def test_a_snapshot_keeps_identities_of_required_retests_and_changed_routes_only
                                                                          "id": "p-1"}},
         {"rule": "new_auth_surface", "required_retest": False, "capability": "http.request",
          "input": {"method": "GET", "path": "/sso/start"}, "basis": {"type": "endpoint", "id": "x"}},
-        {"rule": "agent_next_step", "required_retest": False, "capability": None, "input": None,
+        {"rule": "open_lead", "required_retest": False, "capability": None, "input": None,
          "basis": {"type": "interpretation", "id": "n-1", "notice": "a claim"}},
     ]
     required, routes = snapshot_of(ranked)

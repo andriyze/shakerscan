@@ -68,10 +68,6 @@ async def require_device_admission(conn: Any, run: Mapping[str, Any], *,
     )
     if busy:
         raise ValueError("A device traffic action in this execution lane is already in flight")
-    legacy = int(await conn.fetchval(
-        """SELECT COALESCE(SUM(fragility_cost),0) FROM device_agent_actions
-           WHERE device_target_id=$1 AND outcome <> 'blocked'
-             AND created_at >= date_trunc('day', NOW())""", device_id) or 0)
     # The ledger timestamps the action, so long-lived Hunts do not carry yesterday's
     # usage into today's allowance or escape the allowance by predating midnight.
     daily = int(await conn.fetchval(
@@ -82,7 +78,7 @@ async def require_device_admission(conn: Any, run: Mapping[str, Any], *,
              ON r.owner_kind='hunt' AND r.owner_id=h.id::text
            WHERE h.device_target_id=$1 AND r.updated_at >= date_trunc('day', NOW())""",
         device_id) or 0)
-    if legacy + daily + fragility > device_agent.MAX_FRAGILITY_PER_DEVICE_DAY:
+    if daily + fragility > device_agent.MAX_FRAGILITY_PER_DEVICE_DAY:
         raise ValueError("Daily fragility budget for this device is exhausted")
     action_device_state(run, capability_name).require_admission(
         request_attempts=requests, scan_attempts=scans, fragility_cost=fragility,

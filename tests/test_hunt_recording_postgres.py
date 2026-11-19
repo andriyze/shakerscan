@@ -291,3 +291,73 @@ def test_a_candidate_past_the_byte_bound_is_refused_and_the_hunt_keeps_running(m
                 assert await conn.fetchval('SELECT count(*) FROM investigation_candidates WHERE hunt_run_id=$1', hunt) == 1
                 assert await conn.fetchval(bounds.STORED_CANDIDATE_BYTES_SQL, hunt) == stored
     asyncio.run(scenario())
+
+
+def test_a_later_hunt_verifies_an_earlier_candidate_after_recording_its_own_sighting(monkeypatch):
+    """A Hunt verifies only candidates it observed. Session two of an evaluation read session one's
+    candidates and verified them directly: refused 404 with no way forward, it gave them up."""
+    async def scenario():
+        async with startup_database() as conn:
+            app = await _prepared(conn, monkeypatch)
+            target = await conn.fetchval("INSERT INTO targets(url) VALUES('https://later.fixture.test') RETURNING id")
+            async with AsyncClient(transport=ASGITransport(app.app), base_url='http://operator') as client:
+                async def start():
+                    started = await client.post('/hunts', json={'target_id': str(target), 'target_kind': 'web',
+                        'goal': 'Inspect fixture', 'policy': {'active_testing': False}})
+                    assert started.status_code in (200, 201), started.text
+                    hunt = UUID(started.json()['hunt_id'])
+                    evidence = await conn.fetchval("""INSERT INTO hunt_actions(hunt_run_id,capability_name,status,
+                        input_summary,completed_at) VALUES($1,'http.request','completed','{}'::jsonb,NOW())
+                        RETURNING id""", hunt)
+                    return hunt, str(evidence)
+
+                def body(evidence):
+                    return {'family': 'data_exposure', 'locus': {'path': '/backup.zip'}, 'title': 'Backup served',
+                            'claim': 'A fixture response showed it.', 'evidence_refs': [evidence]}
+                first, first_evidence = await start()
+                recorded = await client.post(f'/hunts/{first}/candidates', json=body(first_evidence))
+                assert recorded.status_code == 200, recorded.text
+                candidate = recorded.json()['candidate']['id']
+                finished = await client.post(f'/hunts/{first}/finish', json={'summary': 'Done', 'next_actions': []})
+                assert finished.status_code == 200, finished.text
+
+                second, second_evidence = await start()
+                direct = await client.post(f'/hunts/{second}/candidates/{candidate}/verify')
+                assert direct.status_code == 404, direct.text
+                said = direct.json()['detail']
+                assert said.startswith('Candidate was not produced or observed by this Hunt. ')
+                assert 'record it with the same family, locus and claim' in said
+
+                again = await client.post(f'/hunts/{second}/candidates', json=body(second_evidence))
+                assert again.status_code == 200, again.text
+                assert again.json()['candidate']['id'] == candidate
+                assert await conn.fetchval('SELECT count(*) FROM investigation_candidates WHERE target_id=$1', target) == 1
+                owned = await client.post(f'/hunts/{second}/candidates/{candidate}/verify')
+                assert owned.status_code != 404, owned.text
+                assert 'not produced or observed' not in owned.text
+    asyncio.run(scenario())
+
+
+def test_a_finish_refused_for_running_actions_names_them_and_how_to_wait(monkeypatch):
+    """Told only "Hunt has reserved or running actions", an agent slept in a shell and retried the
+    finish blind; the refusal names what still runs and the read that waits for it."""
+    async def scenario():
+        async with startup_database() as conn:
+            app = await _prepared(conn, monkeypatch)
+            target = await conn.fetchval("INSERT INTO targets(url) VALUES('https://finish.fixture.test') RETURNING id")
+            async with AsyncClient(transport=ASGITransport(app.app), base_url='http://operator') as client:
+                start = await client.post('/hunts', json={'target_id': str(target), 'target_kind': 'web',
+                    'goal': 'Inspect fixture', 'policy': {'active_testing': False}})
+                assert start.status_code in (200, 201), start.text
+                hunt = UUID(start.json()['hunt_id'])
+                running = await conn.fetchval("""INSERT INTO hunt_actions(hunt_run_id,capability_name,status,input_summary)
+                    VALUES($1,'sqli.verify','running','{}'::jsonb) RETURNING id""", hunt)
+                refused = await client.post(f'/hunts/{hunt}/finish', json={'summary': 'Done', 'next_actions': []})
+                assert refused.status_code == 409, refused.text
+                assert refused.json()['detail'] == (
+                    f'Hunt has reserved or running actions: sqli.verify {running} (running). Wait for them '
+                    'with query kind=activity and filter.wait_seconds until in_flight_actions is 0, then finish again')
+                await conn.execute("UPDATE hunt_actions SET status='completed', completed_at=NOW() WHERE id=$1", running)
+                finished = await client.post(f'/hunts/{hunt}/finish', json={'summary': 'Done', 'next_actions': []})
+                assert finished.status_code == 200, finished.text
+    asyncio.run(scenario())

@@ -53,22 +53,6 @@ def test_scanner_queue_carries_identity_not_target_authority():
         assert forbidden not in enqueue
 
 
-def test_api_routes_scanners_through_worker_owned_durable_settlement():
-    handler = (
-        definition_source("execute_hunt_capability")
-        + definition_source("_execute_hunt_capability_lifecycle")
-    )
-
-    assert 'is_scanner = placement == "worker_scanner"' in handler
-    assert "await _enqueue_canonical_scanner_capability(" in handler
-    scanner_branch = handler[handler.index(
-        "elif is_scanner:"
-    ):handler.index('elif name == "tls.inspect":')]
-    assert "reservation_id=durable_reservation.record.reservation_id" in scanner_branch
-    assert "action_digest=durable_action_digest" in scanner_branch
-    assert "_agent_tool_run_tool" not in scanner_branch
-    assert "elif spec.process_tool_name:" not in handler
-
 
 def test_scanner_worker_rebuilds_authority_and_settles_atomically():
     source = (ROOT / "api" / "worker.py").read_text()

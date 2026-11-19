@@ -112,7 +112,6 @@ offline deterministic finalizer ── findings / coverage / grade reliability
   - `schedule_runner` — fires due recurring schedules and recomputes their next run.
   - `asm_dispatcher` — for each ASM-enabled target, picks **one** safe next action (recon vs. test
     batch vs. wait) within freshness/rate/window budgets.
-  - `research_autopilot_runner` — advances bounded compatibility research episodes.
   - `scan_artifact_retention_runner` — enforces configured scan-artifact retention.
   - `model_intake_automatic_review_runner` — advances durable automatic Model Intake reviews.
 - **Canonical Scan runtime** (`api/scan/`): the action compiler, allocator, durable action store,
@@ -1338,9 +1337,8 @@ non-authoritative investigation candidates outside the findings table. Candidate
 to the server verification record and typed evidence. A finding is materialized only after a
 supported family reaches **Verified** through server-run deterministic proof. Legacy unverified
 `autonomous_agent` rows are migrated into the candidate ledger and retired. The `/research/*`
-controller remains available for specialized guided verification and is not a Hunt launcher. Legacy
-`/agent/hunt/*` and `/device-agent/*` writes return `410 Gone` by default; reads and cancellation remain
-temporarily available with deprecation headers.
+runtime (episodes, campaigns, autopilot) and the legacy `/agent/hunt/*` and `/device-agent/*`
+engines are removed; `/hunts` is the only investigation runtime.
 
 Candidates can be created, corrected with `PATCH`, expired with `DELETE`, and submitted to a
 registered deterministic verifier. A budget-exhausted run still accepts a final debrief without
@@ -1623,52 +1621,20 @@ Hypothesis proof reconciliation is separately approval-gated and can only link a
 `exploited` canonical finding with exact campaign-action, target, family, and route dimensions; it
 never creates or verifies a finding from lead context.
 
-**Bounded Research Agent**: `GET /research/readiness` · `POST|GET /research/episodes` ·
-`GET /research/episodes/{id}` · `POST /research/episodes/{id}/decisions` ·
-`POST /research/episodes/{id}/observe` · `POST /research/episodes/{id}/settle` ·
-`POST /research/episodes/{id}/cancel`. An episode is a target-bound state machine over immutable,
-redacted `ObservationPack` rows and exactly-one-action `DecisionEpisode` rows. Decisions are bound to
-the current observation ID/hash, cannot carry receipts or credentials, must declare an expected
-signal and falsifier, and consume bounded step/action/time/request/model-token budgets. The campaign
-and episode APIs supply server-owned target-hunt, exact-finding, and ASM-gap missions, deduplicate
-concurrent one-click launches, and reserve a final synthesis step. The UI launches these missions from Finding
-Detail, Continuous ASM, and registered web assets in Exposure as well as from the main Autonomous
-Hunt page. Linked scans and finding retests must settle
-before exactly one result-bearing observation is attached. No-progress duplicate actions are rejected
-until a state-changing action occurs, and provider failures meter model usage before retry. Scan/ASM
-request values are conservative reservation units rather than exact HTTP counts. Shadow mode
-records decisions without dispatch. Read-only mode dispatches only the target-scoped inspection
-allowlist. Gated mode can additionally dispatch `asm.improve`, `asm.recon`, `asm.test`,
-`finding.retest`, `scan.focused_family`, `experiment.http_diff`, and `experiment.workflow` through the existing Arsenal gateway when a matching
-scope/approval receipt and the global execution flag are present. Target IDs/URLs and receipts are
-injected by the server. Research campaigns persist one of three planner modes. `agent` is the
-clean-install default: the current Codex/Claude/OpenCode/Pi session reads the immutable observation and
-submits one bounded decision without a stored provider. `configured_ai` uses AI settings and durable
-server autopilot. `local_codex` uses the host-side
-`./scanner.sh research <episode-id> [max-decisions]` with an isolated ephemeral Codex process and
-fails fast when server autopilot is enabled for the episode, preventing two planners from racing the
-same immutable observation. Pause server autopilot before invoking the local runner. The command
-prints a compact decision/episode receipt and UI path instead of the full observation pack. A planner
-cannot mint proof or findings. A trusted server-side workflow replay may create or refresh a finding
-only after deterministic family proof and the promotion gate pass. Cancellation terminates the
-episode, cancels linked queued retests and pending/running scans where possible, and reports
-already-running retests as continuing rather than pretending they stopped.
-
 `experiment.http_diff` is the first typed adaptive experiment actuator. It accepts two to four
 anonymous control/mutation/verification requests using relative same-origin paths, JSON or form
 bodies, bounded query/header mutations, and named scalar extraction from non-sensitive JSON paths
 or response headers. Later steps may reference extracted resource values as `${name}`; every
 rendered request is revalidated before dispatch. It forbids model-supplied credential/host headers
-and redirects. Autonomous planner proposals are limited to `GET`, `HEAD`, and `OPTIONS`;
-`experiment.http_diff` cannot receive cleanup-safe write authority because it has no restoration
-contract. The manual typed-experiment surface retains the broader runtime method contract. Variable
+and redirects. `experiment.http_diff` cannot receive cleanup-safe write authority because it has no
+restoration contract. Variable
 references and extract names are preflighted across the complete experiment,
 so undeclared, forward, duplicate, or over-budget variables fail before any request is sent. Query
 and form values are constrained to bounded scalars. Responses are closed after a capped streaming
 prefix, extracted values are persisted as hash/length metadata, and failed steps are marked
 non-comparable instead of producing synthetic deltas. The result records status/body/JSON-shape,
-selected JSON/header, timing, and before/after comparisons in a tool receipt plus an `unverified` evidence instance. The
-research budget reserves four requests before dispatch. Experiment signals cannot directly create
+selected JSON/header, timing, and before/after comparisons in a tool receipt plus an `unverified` evidence instance.
+Experiment signals cannot directly create
 or verify findings; a family-specific deterministic verifier must establish proof.
 
 `experiment.workflow` extends the actuator with two to twelve typed HTTP/browser steps and
@@ -1980,7 +1946,6 @@ concurrency-limited with per-tool timeouts and a global deadline.
 | `/hunt` | Launch and inspect the canonical target-kind-aware Hunt runtime through `/hunts/*`, with exact-target generic primary, secondary, service, and SSH credential-profile selection |
 | `/deep-hunt` | Compatibility redirect to `/hunt` |
 | `/deep-hunt/experiment` | Create bounded HTTP-differential or managed-principal workflow experiments |
-| `/deep-hunt/runs/{id}` | Inspect a durable experiment run and its proof handoff |
 | `/deep-hunt/leads` | Review durable research leads and route them to the appropriate product workflow |
 | `/deep-hunt/operator`, `/deep-hunt/explorer` | Compatibility redirects to `/deep-hunt` (former split-page URLs) |
 
@@ -2039,9 +2004,9 @@ save, subdomain, worker, status, JS analysis, content discovery, bounded researc
 workflows. Three specialized Claude subagents
 back JS analysis, content discovery, and skill review.
 The product also
-catalogs Codex, Claude Code, OpenCode, and Hermes local-agent capabilities. The Codex research runner
-can submit one schema-constrained decision at a time, but only the API policy controller can dispatch
-an accepted Arsenal action; local-agent output never grants execution or finding authority.
+catalogs Codex, Claude Code, OpenCode, and Hermes local-agent capabilities. Only the API policy
+controller can dispatch an accepted Arsenal action; local-agent output never grants execution or
+finding authority.
 
 ---
 
@@ -2068,20 +2033,20 @@ for the profile contract, invocation, limits and acceptance gates.
 
 | Surface | Count | Source |
 |---|---|---|
-| Public REST operations | 510 | `api/**/*.py` FastAPI decorators |
-| Unique REST paths | 427 | `api/**/*.py` |
+| Public REST operations | 493 | `api/**/*.py` FastAPI decorators |
+| Unique REST paths | 411 | `api/**/*.py` |
 | Check families | 20 | `api/check_registry.py` |
 | Command Arsenal commands | 85 | `api/command_arsenal.py` |
 | Tool adapters | 0 | `api/command_arsenal.py` |
 | Local-agent adapters | 4 | `api/command_arsenal.py` |
 | Internal compatibility scanner flags | 161 | `scanner/scanner.py` |
-| Canonical scanner wrapper commands | 42 | `scanner.sh` |
+| Canonical scanner wrapper commands | 41 | `scanner.sh` |
 | Deprecated wrapper aliases | 0 | `scanner.sh` |
 | Make targets | 20 | `Makefile` |
 | Release gates | 17 | `scripts/release_gates.py` |
-| Runtime environment keys | 430 | Python sources + Compose manifests |
-| Internal compatibility scanner modules | 148 | `scanner/scanner_tools/` |
-| UI pages | 41 | `ui/src/app/` |
+| Runtime environment keys | 428 | Python sources + Compose manifests |
+| Internal compatibility scanner modules | 139 | `scanner/scanner_tools/` |
+| UI pages | 39 | `ui/src/app/` |
 | Skills | 9 | `skills/` |
 | Canonical slash commands | 14 | `.claude/commands/` |
 | Deprecated Scan-name slash shims | 0 | `.claude/commands/` |
@@ -2095,9 +2060,6 @@ for the profile contract, invocation, limits and acceptance gates.
 | `GET` | `/` | `root` |
 | `GET` | `/agent/context/{target_id}` | `get_agent_context_pack` |
 | `GET` | `/agent/findings/{target_id}` | `get_agent_two_tier_findings` |
-| `GET` | `/agent/hunt/runs` | `list_agent_hunt_runs` |
-| `GET` | `/agent/hunt/session/{run_id}` | `get_agent_hunt_session` |
-| `POST` | `/agent/hunt/session/{run_id}/cancel` | `cancel_agent_hunt_session` |
 | `GET` | `/agent/tools/readiness` | `get_agent_tool_readiness` |
 | `GET` | `/agents/local` | `local_agents` |
 | `POST` | `/agents/local/plan` | `local_agent_dry_run_plan` |
@@ -2207,9 +2169,6 @@ for the profile contract, invocation, limits and acceptance gates.
 | `GET` | `/dashboard` | `dashboard` |
 | `POST` | `/data-deletion/execute` | `execute_record_deletion` |
 | `POST` | `/data-deletion/preview` | `preview_record_deletion` |
-| `GET` | `/device-agent/runs` | `list_device_agent_runs` |
-| `GET` | `/device-agent/session/{run_id}` | `get_device_agent_session` |
-| `POST` | `/device-agent/session/{run_id}/cancel` | `cancel_device_agent_session` |
 | `GET` | `/device-policies` | `list_device_policies` |
 | `POST` | `/device-policies` | `create_device_policy` |
 | `PATCH` | `/device-policies/{policy_id}` | `update_device_policy` |
@@ -2441,18 +2400,6 @@ for the profile contract, invocation, limits and acceptance gates.
 | `POST` | `/request-collections/{collection_id}/select` | `select_request_collection_index` |
 | `POST` | `/request-collections/{collection_id}/selections` | `upsert_request_collection_selection` |
 | `DELETE` | `/request-collections/{collection_id}/selections/{selection_id}` | `deactivate_request_collection_selection` |
-| `POST` | `/research/campaigns/launch` | `launch_research_campaign` |
-| `POST` | `/research/campaigns/{campaign_id}/control` | `control_research_campaign` |
-| `GET` | `/research/episodes` | `list_research_episodes` |
-| `POST` | `/research/episodes` | `create_research_episode` |
-| `GET` | `/research/episodes/{episode_id}` | `get_research_episode` |
-| `PUT` | `/research/episodes/{episode_id}/autopilot` | `set_research_episode_autopilot` |
-| `GET` | `/research/episodes/{episode_id}/benchmark` | `research_episode_benchmark` |
-| `POST` | `/research/episodes/{episode_id}/cancel` | `cancel_research_episode` |
-| `POST` | `/research/episodes/{episode_id}/decisions` | `submit_research_decision` |
-| `POST` | `/research/episodes/{episode_id}/observe` | `refresh_research_observation` |
-| `POST` | `/research/episodes/{episode_id}/settle` | `settle_research_episode` |
-| `GET` | `/research/readiness` | `research_readiness` |
 | `GET` | `/results` | `list_results` |
 | `GET` | `/results/{target_folder}/latest` | `get_latest_result` |
 | `GET` | `/retests` | `list_retests` |
@@ -2580,6 +2527,7 @@ for the profile contract, invocation, limits and acceptance gates.
 | `POST` | `/targets/{target_id}/knowledge/decisions/{receipt_id}/revert` | `post_revert` |
 | `GET` | `/targets/{target_id}/knowledge/releases` | `get_target_releases` |
 | `POST` | `/targets/{target_id}/knowledge/releases` | `post_target_release` |
+| `GET` | `/targets/{target_id}/knowledge/yield` | `get_target_hunt_yield` |
 | `POST` | `/targets/{target_id}/liveness` | `check_target_liveness` |
 | `GET` | `/targets/{target_id}/negative-results` | `get_target_negative_results` |
 | `POST` | `/targets/{target_id}/network-scans` | `start_target_network_scan` |
@@ -2905,7 +2853,7 @@ opaque profile, and collection-reference fields.
 
 | Surface | Names |
 |---|---|
-| Canonical `scanner.sh` commands | `agent`, `ai`, `api`, `approve`, `backup`, `build`, `collections`, `credentials`, `deny`, `devices`, `doctor`, `env`, `evidence`, `fleet`, `gungnir`, `help`, `hunt`, `images`, `install-deps`, `intel`, `join`, `knowledge`, `logs`, `mcp`, `model-intake`, `model-intake-runner`, `rebuild`, `record`, `redis`, `reload`, `report-rebuild`, `research`, `reset`, `restart`, `scale`, `scan`, `secrets`, `shell`, `start`, `status`, `stop`, `version` |
+| Canonical `scanner.sh` commands | `agent`, `ai`, `api`, `approve`, `backup`, `build`, `collections`, `credentials`, `deny`, `devices`, `doctor`, `env`, `evidence`, `fleet`, `gungnir`, `help`, `hunt`, `images`, `install-deps`, `intel`, `join`, `knowledge`, `logs`, `mcp`, `model-intake`, `model-intake-runner`, `rebuild`, `record`, `redis`, `reload`, `report-rebuild`, `reset`, `restart`, `scale`, `scan`, `secrets`, `shell`, `start`, `status`, `stop`, `version` |
 | Make targets | `dependency-audit`, `dependency-lock`, `e2e`, `e2e-ai-gate`, `e2e-api-overlay`, `e2e-dast`, `e2e-hunt`, `e2e-hunt-ssh`, `e2e-model-intake`, `e2e-model-intake-fixture`, `e2e-platform`, `e2e-scan-parity`, `e2e-wire`, `fleet-acceptance`, `installed-stack-smoke`, `installer-smoke`, `installer-upgrade-smoke`, `release-gates`, `test`, `upgrade-smoke` |
 | Release gates | `test:evidence-provenance`, `test:fleet-current`, `test:hypothesis-proof-promotion`, `test:mcp-read-only`, `test:no-ai-verified`, `test:no-benchmark-fitting`, `test:no-phantom-tools`, `test:planner-no-shell`, `test:planner-risk`, `test:planner-scope`, `test:scanner-auth-quality`, `test:scanner-bounds`, `test:scanner-proof-truth`, `test:scanner-registry-coverage`, `test:v2-detection-parity`, `test:v2-fault-injection`, `test:v2-security-invariants` |
 
@@ -3000,7 +2948,6 @@ Only key names and declaring sources are documented; secret values are never rea
 | `DATABASE_URL` | `api/api.py`, `api/gungnir_worker.py`, `api/model_intake_signer_service.py`, `api/operations/router.py`, `api/worker.py`, `scanner/gungnir_worker.py`, `scanner/scanner_tools/intel_bundle.py`, `scripts/model_intake_workflow_smoke.py`, `scripts/upgrade_schema_smoke.py` |
 | `DB_STATEMENT_TIMEOUT_MS` | `docker-compose.release.yml`, `docker-compose.yml` |
 | `DEFAULT_ASM_ENABLED` | `api/api.py` |
-| `DEFAULT_RESEARCH_PLANNER_MODE` | `api/api.py` |
 | `DEVICE_INTEL_DB_PATH` | `api/device_agent.py`, `api/devices/router.py`, `api/exposure/service_intel.py`, `api/finding_detail/other.py`, `api/worker.py`, `scanner/scanner_tools/intel_bundle.py` |
 | `DEVICE_INTEL_DB_SHA256` | `api/device_agent.py`, `api/devices/router.py`, `api/exposure/service_intel.py`, `api/finding_detail/other.py`, `api/worker.py`, `scanner/scanner_tools/intel_bundle.py` |
 | `DEVICE_ONLY_WORKER` | `api/worker.py` |
@@ -3146,7 +3093,6 @@ Only key names and declaring sources are documented; secret values are never rea
 | `REDIS_PASSWORD` | `docker-compose.release.yml`, `docker-compose.yml` |
 | `REDIS_PORT` | `docker-compose.release.yml`, `docker-compose.yml` |
 | `REDIS_URL` | `api/api.py`, `api/gungnir_worker.py`, `api/operations/router.py`, `api/worker.py`, `scanner/gungnir_worker.py` |
-| `RESEARCH_EPISODE_ABANDON_TTL_HOURS` | `api/api.py` |
 | `RESULTS_DIR` | `api/api.py`, `api/data_lifecycle/erasure.py`, `api/runtime/archive_blob_secrets.py`, `api/runtime/http_archive_reader.py`, `api/runtime/http_archive_router.py`, `api/secret_store.py`, `api/worker.py`, `scanner/scanner_tools/intel_bundle.py` |
 | `RETEST_AI_BUDGET_SECONDS` | `api/worker.py`, `docker-compose.release.yml`, `docker-compose.yml` |
 | `RETEST_AI_CIRCUIT_COOLDOWN_SECONDS` | `api/worker.py`, `docker-compose.release.yml`, `docker-compose.yml` |
@@ -3361,8 +3307,6 @@ Only key names and declaring sources are documented; secret values are never rea
 | `/deep-hunt/leads` | `ui/src/app/deep-hunt/leads/page.tsx` |
 | `/deep-hunt/operator` | `ui/src/app/deep-hunt/operator/page.tsx` |
 | `/deep-hunt` | `ui/src/app/deep-hunt/page.tsx` |
-| `/deep-hunt/runs/{id}` | `ui/src/app/deep-hunt/runs/[id]/page.tsx` |
-| `/devices/{id}/agent` | `ui/src/app/devices/[id]/agent/page.tsx` |
 | `/devices/{id}` | `ui/src/app/devices/[id]/page.tsx` |
 | `/devices` | `ui/src/app/devices/page.tsx` |
 | `/devices/policies` | `ui/src/app/devices/policies/page.tsx` |
@@ -3435,7 +3379,7 @@ Implementation modules below are inventory only. The immutable action graph and 
 capability registry define execution authority; module presence does not advertise a public
 Scan feature or a second orchestration engine.
 
-`access_control_checks.py`, `active_checks.py`, `active_enrichment_policy.py`, `active_prioritization.py`, `adaptive_throttle.py`, `address_classes.py`, `ai_classifier.py`, `api_auth.py`, `api_security.py`, `approval_checks.py`, `asn_discovery.py`, `attack_chains.py`, `attempt_telemetry.py`, `auth_session.py`, `authz_replay_routing.py`, `benchmark_summary.py`, `bola_comparison.py`, `bounded_exec.py`, `brand_protection.py`, `breach_check.py`, `browser_profile.py`, `build_fingerprint.py`, `cancellation.py`, `cdn_edges.py`, `client_side.py`, `common.py`, `completion_status.py`, `compliance_mapper.py`, `copy_commands.py`, `corporate_identity.py`, `coverage_tracker.py`, `credential_check.py`, `credential_redirects.py`, `critical_checks.py`, `ct_monitor.py`, `data_exposure.py`, `deduplication_engine.py`, `deserialization_tests.py`, `destination_guard.py`, `device_advisories.py`, `device_application.py`, `device_control_plane.py`, `device_evidence.py`, `device_postman.py`, `device_posture.py`, `device_probe.py`, `device_protocols.py`, `device_reachability.py`, `device_request_formats.py`, `device_safety.py`, `device_scan_scope.py`, `device_service_identity.py`, `device_shell.py`, `device_web.py`, `discovered_names.py`, `discovery.py`, `discovery_policy.py`, `dns_enhanced.py`, `dom_xss_analyzer.py`, `domain_intel.py`, `exposure_markers.py`, `file_upload_tests.py`, `finding_correlator.py`, `finding_validator.py`, `focused_scope.py`, `form_login.py`, `frontend_http.py`, `github_recon.py`, `google_dorking.py`, `gopher_payloads.py`, `graphql_schema_recovery.py`, `grpc_discovery.py`, `gungnir.py`, `har_discovery.py`, `hash_routes.py`, `health_check.py`, `host_names.py`, `http_archive_capture.py`, `http_scanner.py`, `hunter_summary.py`, `infrastructure_checks.py`, `injection_extra_checks.py`, `intel_bundle.py`, `ip_reputation.py`, `log_text.py`, `logging_checks.py`, `model_intake.py`, `model_intake_acquisition.py`, `model_intake_adapter_self_test.py`, `model_intake_admission.py`, `model_intake_archives.py`, `model_intake_attestation.py`, `model_intake_evaluation.py`, `model_intake_licenses.py`, `model_intake_providers.py`, `model_intake_registry.py`, `model_intake_retention.py`, `model_intake_runtime.py`, `model_intake_safetensors_runtime.py`, `model_intake_safetensors_selftest.py`, `model_intake_sandbox.py`, `model_intake_scanners.py`, `network_services.py`, `nmap.py`, `nuclei.py`, `oauth_auth.py`, `oauth_tests.py`, `phase4_checks.py`, `process_memory.py`, `proof_of_exploit.py`, `race_condition_tests.py`, `registrable.py`, `remediation_kb.py`, `remediation_kb_devices.py`, `remediation_kb_findings.py`, `remediation_kb_tls.py`, `report_gating.py`, `request_collections.py`, `request_meter.py`, `request_replay.py`, `resource_propagation.py`, `sarif_output.py`, `scan_delta.py`, `service_identity.py`, `service_protocols.py`, `shell_words.py`, `signal_types.py`, `smtp_scanner.py`, `ssh_scanner.py`, `subdomain_discovery.py`, `subfinder.py`, `subfinder_providers.py`, `surface_hints.py`, `tech_discovery.py`, `tls_scanner.py`, `tool_wire_log.py`, `unsafe_actions.py`, `url_redaction.py`, `v2_fingerprint_hardening.py`, `v2_request_replay_hardening.py`, `vendor_risk.py`, `verification_engine.py`, `verification_phase.py`, `wayback_discovery.py`, `web_identity.py`, `webhook_checks.py`, `websocket_security.py`, `xss_evidence.py`
+`access_control_checks.py`, `active_checks.py`, `active_enrichment_policy.py`, `active_prioritization.py`, `adaptive_throttle.py`, `address_classes.py`, `ai_classifier.py`, `api_auth.py`, `api_security.py`, `approval_checks.py`, `asn_discovery.py`, `attack_chains.py`, `attempt_telemetry.py`, `auth_session.py`, `authz_replay_routing.py`, `benchmark_summary.py`, `bola_comparison.py`, `bounded_exec.py`, `brand_protection.py`, `breach_check.py`, `browser_profile.py`, `build_fingerprint.py`, `cancellation.py`, `cdn_edges.py`, `client_side.py`, `common.py`, `completion_status.py`, `compliance_mapper.py`, `copy_commands.py`, `corporate_identity.py`, `coverage_tracker.py`, `credential_check.py`, `credential_redirects.py`, `critical_checks.py`, `ct_monitor.py`, `data_exposure.py`, `deduplication_engine.py`, `destination_guard.py`, `device_advisories.py`, `device_application.py`, `device_control_plane.py`, `device_evidence.py`, `device_postman.py`, `device_posture.py`, `device_probe.py`, `device_protocols.py`, `device_reachability.py`, `device_request_formats.py`, `device_safety.py`, `device_scan_scope.py`, `device_service_identity.py`, `device_shell.py`, `device_web.py`, `discovered_names.py`, `discovery.py`, `discovery_policy.py`, `dns_enhanced.py`, `domain_intel.py`, `exposure_markers.py`, `finding_validator.py`, `focused_scope.py`, `form_login.py`, `frontend_http.py`, `graphql_schema_recovery.py`, `grpc_discovery.py`, `gungnir.py`, `har_discovery.py`, `hash_routes.py`, `health_check.py`, `host_names.py`, `http_archive_capture.py`, `http_scanner.py`, `hunter_summary.py`, `infrastructure_checks.py`, `injection_extra_checks.py`, `intel_bundle.py`, `ip_reputation.py`, `log_text.py`, `model_intake.py`, `model_intake_acquisition.py`, `model_intake_adapter_self_test.py`, `model_intake_admission.py`, `model_intake_archives.py`, `model_intake_attestation.py`, `model_intake_evaluation.py`, `model_intake_licenses.py`, `model_intake_providers.py`, `model_intake_registry.py`, `model_intake_retention.py`, `model_intake_runtime.py`, `model_intake_safetensors_runtime.py`, `model_intake_safetensors_selftest.py`, `model_intake_sandbox.py`, `model_intake_scanners.py`, `network_services.py`, `nmap.py`, `nuclei.py`, `oauth_auth.py`, `oauth_tests.py`, `phase4_checks.py`, `process_memory.py`, `proof_of_exploit.py`, `race_condition_tests.py`, `registrable.py`, `remediation_kb.py`, `remediation_kb_devices.py`, `remediation_kb_findings.py`, `remediation_kb_tls.py`, `report_gating.py`, `request_collections.py`, `request_meter.py`, `request_replay.py`, `resource_propagation.py`, `sarif_output.py`, `scan_delta.py`, `service_identity.py`, `service_protocols.py`, `shell_words.py`, `signal_types.py`, `smtp_scanner.py`, `ssh_scanner.py`, `subdomain_discovery.py`, `subfinder.py`, `subfinder_providers.py`, `surface_hints.py`, `tech_discovery.py`, `tls_scanner.py`, `tool_wire_log.py`, `unsafe_actions.py`, `url_redaction.py`, `v2_fingerprint_hardening.py`, `v2_request_replay_hardening.py`, `vendor_risk.py`, `verification_engine.py`, `verification_phase.py`, `web_identity.py`, `webhook_checks.py`, `websocket_security.py`, `xss_evidence.py`
 
 ### Durable Storage Inventory
 

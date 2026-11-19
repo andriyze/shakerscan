@@ -58,7 +58,6 @@ from .external_process import (
     batch_attempt_floor,
     batch_attempt_capacity,
     batch_row_cost_class,
-    minimum_reservation_scaled_profile,
 )
 
 
@@ -1785,102 +1784,6 @@ class ScanActionPlanCompiler:
                     "tool_wall_seconds": 15 * pair_count,
                 }
             return requested
-
-        def add_manifest_breadth(
-            base_action_id: str,
-            stage: str,
-            capability_name: str,
-            capability_args: Mapping[str, Any],
-            *,
-            manifest_ref: Mapping[str, Any],
-            index_name: str,
-            dependencies: Sequence[str],
-            required: bool,
-            reserve_dependency_slots: int = 0,
-            minimum_count: int = 0,
-        ) -> None:
-            """Compile every exact manifest item affordable by the Scan ceiling."""
-            required = required and require_family_minimums
-            if not manifest_ref:
-                add(
-                    base_action_id,
-                    stage,
-                    capability_name,
-                    capability_args,
-                    dependencies=dependencies,
-                    required=required,
-                )
-                return
-            entry_count = int(manifest_ref.get("entry_count") or 0)
-            if entry_count < 1:
-                if required:
-                    add(
-                        base_action_id,
-                        stage,
-                        capability_name,
-                        {**dict(capability_args), index_name: 0},
-                        dependencies=dependencies,
-                        required=True,
-                    )
-                return
-            specification = self._registry.require(capability_name)
-            per_item_budget = (
-                minimum_reservation_scaled_profile(capability_name)
-                or dict(specification.budget_cost)
-            )
-            limits = (
-                dict(ledger_limits) if ledger_limits is not None
-                else execution_plan.budget.ledger_limits()
-            )
-            reserved = {name: 0 for name in limits}
-            finalizer_budget = dict(action_budgets or {}).get(
-                "finalize.report",
-                self._registry.require("scan.finalize").budget_cost,
-            )
-            for name, amount in finalizer_budget.items():
-                reserved[name] = reserved.get(name, 0) + amount
-            for blueprint in blueprints:
-                if not (
-                    blueprint.required
-                    or blueprint.action_id in {
-                        "baseline.http", "baseline.tls", "discover.web_probe",
-                    }
-                ):
-                    continue
-                for name, amount in blueprint_budget(blueprint).items():
-                    reserved[name] = reserved.get(name, 0) + amount
-            affordable = entry_count
-            for name, amount in per_item_budget.items():
-                if amount > 0:
-                    available = max(0, limits.get(name, 0) - reserved.get(name, 0))
-                    affordable = min(affordable, available // amount)
-            # Preserve an explicit family request as a required admission check
-            # even when its first fixed-profile action cannot fit.
-            count = max(1 if required else 0, int(minimum_count), affordable)
-            available_dependencies = (
-                _MAX_DEPENDENCIES - len(blueprints) - reserve_dependency_slots
-            )
-            count = min(entry_count, count, max(0, available_dependencies))
-            if required and count < 1:
-                raise ScanActionPlanError(
-                    f"required manifest action {base_action_id} exceeds plan graph capacity"
-                )
-            for index in range(count):
-                action_id = (
-                    base_action_id
-                    if index == 0
-                    else f"{base_action_id}.{index:05d}"
-                )
-                add(
-                    action_id,
-                    stage,
-                    capability_name,
-                    {**dict(capability_args), index_name: index},
-                    dependencies=dependencies,
-                    # An explicitly resolved family requires its published
-                    # minimum quota; remaining ranked entries are optional.
-                    required=required and index < max(1, int(minimum_count)),
-                )
 
         def has_manifest_work(
             enabled: bool, reference: Mapping[str, Any],

@@ -531,6 +531,41 @@ def test_the_workflow_dispatch_says_whether_a_credential_refusal_followed_traffi
     assert detail["target_traffic_sent"] is sent
 
 
+@pytest.mark.parametrize("reason", [None, "cleanup_route_not_on_discovered_surface"])
+def test_a_candidate_without_a_buildable_proof_says_why(monkeypatch, reason):
+    """A mass_assignment candidate verified without planner steps, whose server-built proof could
+    not be made, answered "invalid_workflow: workflow_requires_2_to_12_steps": nothing to act on."""
+    from api.arsenal_routes import router as arsenal
+
+    class Conn:
+        async def fetchrow(self, query, *args):
+            assert "FROM targets" in query
+            return {"id": TARGET, "url": ORIGIN, "is_active": True, "discovery_source": "manual"}
+
+    class Pool:
+        @asynccontextmanager
+        async def acquire(self):
+            yield Conn()
+
+    async def materialize(conn, url, target, params, hypothesis, approval):
+        if reason:  # labelled double: the server tried to build the proof and stopped
+            params["_server_materialization"] = {"usable": False, "reason": reason, "request_count": 0}
+
+    monkeypatch.setattr(arsenal, "_pool_provider", lambda: Pool())
+    monkeypatch.setitem(arsenal._deps, "_active_workflow_cancellations", dict)
+    monkeypatch.setitem(arsenal._deps, "_server_materialize_create_ma", lambda: materialize)
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(arsenal._arsenal_dispatch_workflow({
+            "target_id": str(TARGET), "workflow_id": str(uuid.uuid4()), "proof_family": "mass_assignment",
+        }, "approval"))
+    assert exc.value.status_code == 422
+    detail = exc.value.detail
+    assert detail["error"] == "invalid_workflow" and detail["target_traffic_sent"] is False
+    assert detail["violation"].startswith("no proof workflow could be built for this candidate (")
+    assert (reason or "create-based mass_assignment lead") in detail["violation"]
+    assert "stays unverified" in detail["violation"]
+
+
 # --- Network targets: the proof runs on the service the candidate names --------------------------
 #
 # A network target is registered as ``host://H``: it names a host, not an HTTP service. The web

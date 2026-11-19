@@ -123,6 +123,22 @@ def test_host_port_hints_reject_invalid_values(ports):
         HostTargetCreate(locator='tv.test',port_hints=ports)
 
 
+async def _lead_board(conn):
+    """The baseline lead board, which continuation reads. Its two campaign links point at tables
+    this reduced schema does not build, so those columns are created without the reference."""
+    import ast
+    from pathlib import Path
+    source = (Path(__file__).resolve().parents[1] / 'api/retest_contract.py').read_text()
+    [ddl] = [node.value for node in ast.walk(ast.parse(source))
+             if isinstance(node, ast.Constant) and isinstance(node.value, str)
+             and 'CREATE TABLE IF NOT EXISTS hypotheses (' in node.value]
+    for table in ('scan_campaigns', 'campaign_actions'):
+        link = f' REFERENCES {table}(id) ON DELETE SET NULL'
+        assert link in ddl, 'Baseline schema for hypotheses changed'
+        ddl = ddl.replace(link, '')
+    await conn.execute(ddl)
+
+
 def test_registered_hunt_asset_actions_keep_scope_and_share_explicitly(monkeypatch):
     encryption(monkeypatch)
     async def run():
@@ -136,6 +152,7 @@ def test_registered_hunt_asset_actions_keep_scope_and_share_explicitly(monkeypat
         from hunt.interaction_router import _hunt_bound_collection
         async with database() as conn:
             await prepare(conn)
+            await _lead_board(conn)
             home = await conn.fetchval("INSERT INTO device_targets(name,primary_locator) VALUES('Home','source.test') RETURNING id")
             async with conn.transaction():
                 await migrate_target_assets(conn)
@@ -162,7 +179,8 @@ def test_registered_hunt_asset_actions_keep_scope_and_share_explicitly(monkeypat
                     assert result['ok'] is True and result['sends_traffic'] is False
                     continue
                 if name in {'targets.skill.propose', 'targets.actions.create', 'targets.actions.update',
-                            'targets.actions.delete', 'knowledge.record', 'knowledge.check_experiment'}:
+                            'targets.actions.delete', 'knowledge.record', 'knowledge.check_experiment',
+                            'hypothesis.propose', 'hypothesis.claim', 'hypothesis.transition'}:
                     # Advisory and authority-free: an opt-out does not stop it, its own input checks do.
                     # Saved-action writes without instruction_changes become proposals the same way.
                     with pytest.raises(HTTPException) as invalid:

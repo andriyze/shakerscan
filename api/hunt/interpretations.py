@@ -70,6 +70,10 @@ BRIEFING_TITLE_CHARACTERS = 120
 BRIEFING_SECTION_BYTES = 4_000
 
 EXPERIMENT_STATES = frozenset({"experiment_completed_negative", "experiment_inconclusive"})
+#: Kinds that say "this is worth testing". They are leads now (``hypothesis.propose``); entries of
+#: these kinds written before stay readable and are no longer written.
+LEAD_KINDS = frozenset({"hypothesis", "next_step"})
+WRITABLE_KINDS = ("observation", "explanation", "note", "negative_result")
 #: Kinds whose entries must cite at least one existing record.
 EVIDENCE_REQUIRED = frozenset({"observation", "explanation", "negative_result"})
 TERMINAL_ACTION_STATES = frozenset({"completed", "partial", "failed", "blocked", "cancelled"})
@@ -246,7 +250,9 @@ def clean_text(value: Any, *, field: str, maximum: int, required: bool) -> str:
                          "characters other than newline and tab")
     if _looks_secret(text):
         raise ValueError(f"{field} looks like it contains a credential or secret; reference credentials "
-                         "by handle and cite records instead of copying values")
+                         "by handle and cite records instead of copying values. A test value written as "
+                         "key=value or key: value (password=...) reads as a credential: describe it instead "
+                         "(for example: a quote-based OR payload in the password field)")
     return text
 
 
@@ -721,6 +727,13 @@ async def record_interpretation(conn: Any, target_id: Any, entry: Interpretation
                                 hunt_run_id: Any = None) -> dict[str, Any]:
     """Append one entry. Never changes a finding, hypothesis, candidate, guidance or authority."""
     kind = writer_kind(writer)
+    if entry.kind in LEAD_KINDS:
+        # "Worth testing" has one home: the lead board, where it is deduplicated, ranked and claimed.
+        raise _refusal(422, "kind_moved_to_lead_board",
+                       f"A {entry.kind} is a lead: record it with the hypothesis.propose capability (family, "
+                       "title, where it applies, and derived_from citing what it follows from). knowledge.record "
+                       "takes " + ", ".join(WRITABLE_KINDS) + ".", reason_code="kind_moved_to_lead_board",
+                       use="hypothesis.propose", accepted=list(WRITABLE_KINDS))
     if (entry.kind == "negative_result") != (entry.negative_state is not None):
         raise _refusal(422, "negative_state_mismatch",
                        "Set negative_state exactly when kind is negative_result.")
@@ -744,6 +757,11 @@ async def record_interpretation(conn: Any, target_id: Any, entry: Interpretation
         raise _refusal(403, "finding_dismissal_is_human_only",
                        "A Hunt's negative result cannot name a finding as its subject; record an observation or "
                        "explanation about the finding instead.", reason_code="finding_dismissal_is_human_only")
+    if entry.negative_state == "hypothesis_refuted" and (entry.subject is None or entry.subject.type != "hypothesis"):
+        raise _refusal(422, "refutation_names_no_lead",
+                       "hypothesis_refuted says one lead did not hold: name it as subject "
+                       "({type: hypothesis, id: <lead id from query kind=hypotheses>}). A test with no lead is an "
+                       "experiment_completed_negative.", reason_code="refutation_names_no_lead")
     try:
         conditions = validate_conditions(entry.conditions, required=entry.kind == "negative_result",
                                          experiment=entry.negative_state in EXPERIMENT_STATES)
@@ -1051,6 +1069,8 @@ async def retract_run(conn: Any, target_id: Any, hunt_id: Any, *, actor: str, no
             RETURNING *""",
             row["id"], f"hunt:{hunt}", actor, note)
         await _withhold_knowledge(conn, row["id"], rows, actor=actor, note=note)
+        from .hypothesis_retraction import retract_hunt_hypotheses
+        hypotheses = await retract_hunt_hypotheses(conn, row["id"], hunt, actor=actor, note=note)
         # The Hunt is recorded as retracted: for the rest of its run it can no longer write
         # interpretations, knowledge, instructions or saved actions (proposals remain).
         await conn.execute("""UPDATE hunt_runs SET notes = COALESCE(notes,'[]'::jsonb) || $2::jsonb, updated_at=NOW()
@@ -1058,7 +1078,7 @@ async def retract_run(conn: Any, target_id: Any, hunt_id: Any, *, actor: str, no
             hunt, json.dumps([{"kind": RETRACTED_HUNT_NOTE, "by": actor, "note": note, "target_id": str(row["id"]),
                                "at": datetime.now(timezone.utc).isoformat()}]))
         return {"target_id": str(row["id"]), "hunt_id": str(hunt), "retracted": len(rows), "hunt_quarantined": True,
-                "ids": [str(item["id"]) for item in rows]}
+                "ids": [str(item["id"]) for item in rows], "hypotheses": hypotheses}
 
 
 async def _withhold_knowledge(conn: Any, target: Any, rows: list[Any], *, actor: str, note: str) -> None:
@@ -1362,14 +1382,14 @@ async def briefing_section(conn: Any, target_id: Any, *, device: bool) -> dict[s
         "counts": {"active_by_kind": by_kind, "active_negative_by_state": negative,
                    "reopened_dismissals": reopened, "total_entries": min(total, 5000),
                    "at_least": total > 5000},
-        "open_next_steps": await headlines("kind='next_step'"),
         "inconclusive_experiments": await headlines("negative_state='experiment_inconclusive'"),
         "applicability": {"tracked": True, "active_by_state": by_state,
                           "note": ("needs_revalidation: a dependency changed significantly; unknown: a dependency "
                                    "was not observable, never treated as unchanged. Age changes nothing.")},
         "read_with": ("POST /hunts/{hunt_id}/query kind=interpretations (filter kind, status, negative_state, "
                       "provenance, hunt_id, text_contains) or kind=negative_results; record with the "
-                      "knowledge.record capability"),
+                      "knowledge.record capability. What is worth testing next is the lead board: your "
+                      "checkpoint's ranked hypotheses"),
     }
 
 

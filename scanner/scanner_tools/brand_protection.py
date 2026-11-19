@@ -174,19 +174,6 @@ def generate_vowel_swap(name: str) -> set[str]:
     return permutations
 
 
-def generate_dot_variations(name: str, tld: str) -> set[str]:
-    """Add extra dots: example.com -> example.co.m, www.example.com -> wwwexample.com"""
-    permutations = set()
-    # Add dot inside domain
-    for i in range(1, len(name)):
-        permutation = f"{name[:i]}.{name[i:]}.{tld}"
-        permutations.add(permutation)
-    # www prefix variations
-    permutations.add(f"www{name}.{tld}")
-    permutations.add(f"ww.{name}.{tld}")
-    return permutations
-
-
 def generate_tld_variations(name: str, original_tld: str) -> set[str]:
     """Try different TLDs: example.com -> example.net, example.org, etc."""
     permutations = set()

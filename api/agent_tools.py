@@ -1,10 +1,8 @@
-"""Compatibility tool guards for the retired autonomous ReAct loop.
+"""Tool guards kept from the retired autonomous ReAct loop.
 
-Canonical Hunt planners receive semantic capability contracts from the shared registry. The
-helpers in this module remain for read-only legacy-history code and fixed adapter construction;
-they are not a planner-facing capability catalog.
-This module holds the **function-call schemas** (consumed by the text-contract renderer
-in :mod:`agent_text_toolcalls`) and the **pure guards** — target-host origin/path validation,
+Canonical Hunt planners receive semantic capability contracts from the shared registry. What
+remains here serves fixed adapter construction; it is not a planner-facing capability catalog.
+This module holds the **pure guards**: target-host origin/path validation,
 request-header allowlisting (so the model can never inject an auth header — real auth
 comes only from a server-resolved ``as_principal``), method classification, and result
 shaping. The async execution (httpx, DB, tool_receipts, principal resolution) lives in
@@ -129,98 +127,6 @@ CALLABLE_TOOL_NAMES: frozenset[str] = AGENT_TOOL_NAMES
 # Function-call schemas (shape expected by render_tool_contract / native tool APIs).
 # The optional ``risk`` field is used by the server gate, ignored by the renderer.
 # --------------------------------------------------------------------------------------
-
-AGENT_TOOL_SCHEMAS: list[dict[str, Any]] = [
-    {
-        "name": "http_request",
-        "risk": "active",  # elevated to gated when the method is a write
-        "description": (
-            "Issue ONE HTTP request to an origin on the selected target host and get a structured "
-            "response summary (status, headers, body sample, json keys, sha256, timing). "
-            "Set as_principal to a configured principal slot (e.g. 'user1','user2','admin') "
-            "to send it authenticated AS that server-managed identity — you never see the "
-            "credential. Replay the same request as different principals to test access "
-            "control. Reads (GET/HEAD/OPTIONS) run freely; writes (POST/PUT/PATCH/DELETE) "
-            "are approval-gated. Set follow_redirects=true (reads only) to follow up to 3 "
-            "same-origin redirects and receive the final response plus the chain. "
-            "Returns a 'ref' you can pass to diff."
-        ),
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "method": {"type": "string", "description": "GET|HEAD|OPTIONS|POST|PUT|PATCH|DELETE"},
-                "origin": {"type": "string", "description": "optional concrete http(s) origin on the selected target host, including port"},
-                "path": {"type": "string", "description": "absolute path on that origin, must start with / (e.g. /rest/basket/1)"},
-                "query": {"type": "object", "description": "optional query params {k:v}"},
-                "json_body": {"type": "object", "description": "optional JSON request body"},
-                "form_body": {"type": "object", "description": "optional form-encoded body"},
-                "headers": {"type": "object", "description": "optional benign request headers (auth headers are forbidden — use as_principal)"},
-                "as_principal": {"type": "string", "description": "optional principal slot to authenticate as; omit for anonymous"},
-                "follow_redirects": {"type": "boolean", "description": "optional: follow up to 3 STRICT same-origin (scheme+host+port) redirects; read methods (GET/HEAD/OPTIONS) only. The response is the FINAL hop plus a redirect_chain of {status, location} hops"},
-            },
-            "required": ["method", "path"],
-        },
-    },
-    {
-        "name": "query_kb",
-        "risk": "read_only",
-        "description": (
-            "Read the ShakerScan knowledge base for this target (read-only): "
-            f"kind ∈ {sorted(QUERY_KB_KINDS)}. Use 'findings' to see what is ALREADY known "
-            "(so you hunt NET-NEW), 'endpoints' for the live attack surface, 'principals' "
-            "for available auth identities, 'graph_*' for the application graph, 'notes' for "
-            "your own scratchpad."
-        ),
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "kind": {"type": "string", "description": "one of the allowed kinds"},
-                "filter": {"type": "object", "description": "optional {method,path_contains,family,severity,limit}"},
-            },
-            "required": ["kind"],
-        },
-    },
-    {
-        "name": "diff",
-        "risk": "read_only",
-        "description": (
-            "Compare two HTTP response summaries and get a structured differential "
-            "(status/length/body change, json keys added/removed, selected-value and "
-            "header changes, timing delta). Pass refs returned by http_request (e.g. "
-            "'resp_1') or inline summary objects. Use it to prove BOLA (two principals get "
-            "the same protected body -> comparison_equivalent) or a persisted state change."
-        ),
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "left": {"type": "string", "description": "ref (e.g. 'resp_1') or inline response summary"},
-                "right": {"type": "string", "description": "ref (e.g. 'resp_2') or inline response summary"},
-            },
-            "required": ["left", "right"],
-        },
-    },
-    {
-        "name": "note",
-        "risk": "read_only",
-        "description": (
-            "Record a hypothesis, observation, or TODO to your durable scratchpad (a tool "
-            "receipt) so it survives across steps and is visible to the operator. kind ∈ "
-            f"{sorted(NOTE_KINDS)}. (A note is scratchpad only — it does not itself seed the "
-            "lead board or create a finding.)"
-        ),
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "kind": {"type": "string", "description": "hypothesis|observation|todo"},
-                "title": {"type": "string", "description": "short title"},
-                "detail": {"type": "string", "description": "the note body"},
-                "family": {"type": "string", "description": "optional vuln family for a hypothesis (bola,sqli,mass_assignment,...)"},
-                "severity": {"type": "string", "description": "optional guessed severity"},
-            },
-            "required": ["kind", "title"],
-        },
-    },
-]
 
 
 # --------------------------------------------------------------------------------------
@@ -880,52 +786,6 @@ SCANNER_ARG_TEMPLATES: dict[str, dict[str, Any]] = {
     if spec.process_tool_name in _SCANNER_BUILDERS
 }
 RUN_TOOL_NAMES: frozenset[str] = frozenset(SCANNER_ARG_TEMPLATES)
-
-RUN_TOOL_SCHEMA: dict[str, Any] = {
-    "name": "run_tool",
-    "risk": "active",
-    "description": (
-        "Run a bounded external scanner against a URL on the SELECTED TARGET HOST. You pick tool + target "
-        f"only; all flags are fixed. Tools: {sorted(RUN_TOOL_NAMES)} — httpx = passive "
-        "fingerprint; nuclei = bounded focused templates by default (options {severity,tags}; explicit broad tags may return partial evidence at the hard wall); katana = crawl + "
-        "JS endpoint extraction (finds linked/JS-referenced routes); ffuf = content/dir "
-        "discovery over a bundled wordlist (options {wordlist: common|api|admin|corporate} — finds "
-        "UNLINKED paths); dalfox = XSS scan of one URL (options {severity}); sqlmap = "
-        "bounded SQLi test of one URL (boolean/error/union/time-based techniques, level/risk 2); "
-        "nmap = read-only service/version probe of the single port behind a target URL (no "
-        "scripts); naabu = top-100 TCP port sweep of the target host. Use katana/ffuf/naabu to "
-        "expand the surface, then attack params with dalfox/sqlmap or probe hits with "
-        "http_request. Returns the scanner's output (bounded)."
-    ),
-    "parameters": {
-        "type": "object",
-        "properties": {
-            "name": {
-                "type": "string",
-                "enum": sorted(RUN_TOOL_NAMES),
-                "description": "httpx | nuclei | katana | ffuf | dalfox | sqlmap | nmap | naabu",
-            },
-            "target": {"type": "string", "description": "absolute path (/) on the chosen origin or an http(s) URL on the selected target host"},
-            "options": {
-                "type": "object",
-                "description": (
-                    "nuclei: {severity:'high,critical', tags:'cve,exposure'} (omit tags for the focused pack); "
-                    "ffuf: {wordlist:'common'|'api'|'admin'|'corporate'}; "
-                    "dalfox: {severity:'low'|'medium'|'high'}; other tools have no tunable options"
-                ),
-            },
-        },
-        "required": ["name", "target"],
-    },
-}
-
-
-def tool_schemas(*, include_run_tool: bool = False) -> list[dict[str, Any]]:
-    """Return retired-loop schemas; external scanner selection is opt-in test compatibility only."""
-    schemas = [dict(schema) for schema in AGENT_TOOL_SCHEMAS]
-    if include_run_tool:
-        schemas.append(dict(RUN_TOOL_SCHEMA))
-    return schemas
 
 
 def coerce_run_tool(args: dict[str, Any]) -> tuple[str, Any, dict[str, Any]]:
@@ -2117,50 +1977,6 @@ def scanner_wire_log_transactions(
     return wire_log_transactions(scanner, text, origin)
 
 
-def scanner_request_reservation(name: str, options: dict[str, Any] | None = None) -> int:
-    """Return the fail-closed wire-request reservation for one external scanner invocation."""
-    template = SCANNER_ARG_TEMPLATES.get(str(name or "").strip().lower())
-    if not template:
-        raise AgentToolError(f"unknown run_tool:{name}")
-    return max(1, int(template.get("max_wire_requests") or 1))
-
-
-def settle_scanner_wire_reservation(
-    *, charged_total: int, reservation: int, accounting: str,
-    actual: Any, budget_limit: int | None,
-) -> dict[str, Any]:
-    """Replace one reservation with an exact counter without hiding overruns."""
-    before = max(0, int(charged_total))
-    reserved = max(0, int(reservation))
-    exact: int | None = None
-    if str(accounting or "") == "exact" and actual is not None:
-        try:
-            exact = max(0, int(actual))
-        except (TypeError, ValueError):
-            exact = None
-    charged = reserved if exact is None else exact
-    total = max(0, before - reserved + charged)
-    limit = None if budget_limit is None else max(0, int(budget_limit))
-    return {
-        "charged": charged,
-        "charged_total": total,
-        "actual": exact,
-        "reservation_refund": max(0, reserved - charged),
-        "reservation_overrun": max(0, charged - reserved),
-        "budget_overrun": 0 if limit is None else max(0, total - limit),
-        "settled": exact is not None,
-    }
-
-
-def request_budget_units(tool_name: str) -> int:
-    """Return episode request units for one traffic-producing tool invocation.
-
-    A bounded external scanner consumes one episode request unit regardless of how many
-    requests it issues inside its fixed wire ceiling. Wire traffic is settled separately.
-    """
-    return 1 if str(tool_name or "").strip() in {"http_request", "run_tool"} else 0
-
-
 def validate_scanner_execution_target(registered_target: str, execution_target: str) -> str:
     """Revalidate the worker-side scanner destination against the durable web target.
 
@@ -2825,56 +2641,12 @@ def classify_request_headers(
     return out, rejected
 
 
-def filter_request_headers(
-    headers: Any, *, allow_identity_headers: bool = False,
-) -> dict[str, str]:
-    """Compatibility view returning only planner headers safe to send."""
-    accepted, _ = classify_request_headers(
-        headers, allow_identity_headers=allow_identity_headers,
-    )
-    return accepted
-
-
 def normalize_principal_slot(value: Any) -> str:
     """A principal slot the model may request. 'anonymous' (or empty) means no auth."""
     slot = str(value or "").strip().lower()
     if slot in ("", "anonymous", "anon", "none"):
         return "anonymous"
     return slot
-
-
-def coerce_query_kb(args: dict[str, Any]) -> tuple[str, dict[str, Any]]:
-    kind = str(args.get("kind") or "").strip().lower()
-    if kind not in QUERY_KB_KINDS:
-        raise AgentToolError(f"unknown query_kb kind:{kind} (allowed: {sorted(QUERY_KB_KINDS)})")
-    flt = args.get("filter") if isinstance(args.get("filter"), dict) else {}
-    return kind, flt
-
-
-def coerce_note(args: dict[str, Any]) -> dict[str, Any]:
-    kind = str(args.get("kind") or "observation").strip().lower()
-    if kind not in NOTE_KINDS:
-        raise AgentToolError(f"unknown note kind:{kind} (allowed: {sorted(NOTE_KINDS)})")
-    title = str(args.get("title") or "").strip()
-    if not title:
-        raise AgentToolError("note requires a non-empty title")
-    return {
-        "kind": kind,
-        "title": title[:200],
-        "detail": str(args.get("detail") or "")[:4000],
-        "family": (str(args.get("family")).strip().lower()[:80] if args.get("family") else None),
-        "severity": (str(args.get("severity")).strip().lower()[:16] if args.get("severity") else None),
-    }
-
-
-def http_evidence_item(request_view: dict[str, Any], summary: dict[str, Any]) -> dict[str, Any]:
-    """Shape an http_request result as a tool-provenance evidence item for the gate.
-    ``type='response'`` is one of TOOL_EVIDENCE_KINDS, so this carries real provenance."""
-    try:
-        content = json.dumps({"request": request_view, "response": summary}, default=str)[:6000]
-    except Exception:
-        content = str(summary)[:6000]
-    return {"type": "response", "content": content}
 
 
 # --------------------------------------------------------------------------------------

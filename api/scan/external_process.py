@@ -662,9 +662,3 @@ def fit_reservation_scaled_profile(
             return dict(profile)
     return None
 
-
-def minimum_reservation_scaled_profile(
-    capability_name: str,
-) -> dict[str, int] | None:
-    profiles = RESERVATION_SCALED_PROFILES.get(str(capability_name), ())
-    return dict(profiles[-1]) if profiles else None

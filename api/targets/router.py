@@ -283,11 +283,6 @@ def _public_hypothesis_row(*a: Any, **k: Any) -> Any:
     return _dep("public_hypothesis_row")(*a, **k)
 
 
-def _model(name: str) -> Any:
-    """Return a request model that still lives in the api module."""
-    return _dep("model")(name)
-
-
 QUEUE_NAME = os.environ.get("SCAN_QUEUE_NAME", "scan_jobs")
 
 

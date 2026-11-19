@@ -88,7 +88,6 @@ test('every rendered route, nested ones included, resolves to "Page · ShakerSca
   assert.equal(titles.get('/findings/candidates'), 'Investigation candidates · ShakerScan')
   assert.equal(titles.get('/scans/[id]'), 'Scan · ShakerScan')
   assert.equal(titles.get('/scan/new'), 'New scan · ShakerScan')
-  assert.equal(titles.get('/deep-hunt/runs/[id]'), 'Autonomous run · ShakerScan')
   assert.equal(titles.get('/targets/[id]/graph'), 'Application graph · ShakerScan')
   assert.equal(titles.get('/settings/policy-profiles'), 'Policy profiles · ShakerScan')
   assert.equal(titles.get('/docs'), 'Docs · ShakerScan')

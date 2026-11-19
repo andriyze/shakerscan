@@ -34,7 +34,6 @@ const records: MissingRecord[] = [
     title: 'Device not found', message: 'There is no connected device at this address.',
     list: { label: 'Back to connected devices', href: '/devices' },
     extra: {
-      'GET /device-agent/runs': () => ({ runs: [], count: 0 }),
       'GET /devices/readiness': () => ({ enabled: false, status: 'disabled' }),
     },
   },

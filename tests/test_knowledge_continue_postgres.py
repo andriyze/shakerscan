@@ -79,8 +79,9 @@ async def _day_one(conn, operator, target):
     inconclusive = await day1.ok('knowledge.record', _negative(flaky, '/api/reports/{id}', 'report:2',
                                                                state='experiment_inconclusive',
                                                                title='Report read timed out'))
-    step = await day1.ok('knowledge.record', {'kind': 'next_step', 'title': HOSTILE[:40].replace('\x1b', ''),
-                                              'body': 'try the export'})
+    # What is worth testing next is a lead on the board, in its writer's words.
+    step = await day1.ok('hypothesis.propose', {'family': 'bola', 'title': HOSTILE[:40].replace('\x1b', ''),
+                                                'dedupe_dimensions': {'route': '/api/export', 'method': 'GET'}})
     # Fixture: the entries were written on day 1.
     await conn.execute('UPDATE target_interpretations SET created_at=$2 WHERE hunt_run_id=$1', UUID(day1.id),
                        _ago(days=8))
@@ -91,7 +92,7 @@ async def _day_one(conn, operator, target):
     return {'hunt': day1, 'invoices': first['result']['interpretation']['id'],
             'orders': second['result']['interpretation']['id'],
             'inconclusive': inconclusive['result']['interpretation']['id'],
-            'next_step': step['result']['interpretation']['id'], 'finding': finding}
+            'lead': step['result']['hypothesis']['id'], 'finding': finding}
 
 
 def test_walkthrough_day1_release_day8_continue_and_superseding_retest(monkeypatch):
@@ -132,7 +133,10 @@ def test_walkthrough_day1_release_day8_continue_and_superseding_retest(monkeypat
                 assert [item['id'] for item in knowledge['not_reobserved_since_release']] == [day1['orders']]
                 assert knowledge['counts']['still_applicable'] == 0
                 assert [item['id'] for item in knowledge['inconclusive_experiments']] == [day1['inconclusive']]
-                assert [item['id'] for item in knowledge['open_next_steps']] == [day1['next_step']]
+                # The Hunt's own lead, beside the leads the inventory seeded when the Hunt started.
+                assert day1['lead'] in [item['id'] for item in knowledge['open_leads']]
+                assert all(set(item) == {'id', 'family', 'status', 'version', 'source', 'confidence', 'priority',
+                                         'derived_from'} for item in knowledge['open_leads'])
                 assert [item['finding_id'] for item in knowledge['reopened_for_review']] == [str(day1['finding'])]
                 assert report['operator_decisions']['reopened_dismissals'] == 1
                 assert 'title' not in json.dumps(knowledge['needs_revalidation'])  # no agent text in the report
@@ -146,8 +150,12 @@ def test_walkthrough_day1_release_day8_continue_and_superseding_retest(monkeypat
 
                 ranked = report['next_experiments']
                 order = [(item['rule'], item['basis']['id']) for item in ranked['items']]
-                assert [rule for rule, _ in order] == ['revalidate_changed', 'reobserve_since_release', 'new_surface',
-                                                       'unfinished', 'removed_surface', 'agent_next_step']
+                rules = [rule for rule, _ in order]
+                # Open leads come last, after everything the records require or show.
+                assert rules[:5] == ['revalidate_changed', 'reobserve_since_release', 'new_surface',
+                                     'unfinished', 'removed_surface']
+                assert rules[5:] and set(rules[5:]) == {'open_lead'}
+                assert day1['lead'] in [ident for rule, ident in order if rule == 'open_lead']
                 assert order[0][1] == day1['invoices'] and order[1][1] == day1['orders']
                 # The new token route takes a POST: a state-changing route is never a runnable suggestion.
                 token = next(item for item in ranked['outside_authority'] if item['rule'] == 'new_auth_surface')
@@ -505,18 +513,21 @@ def test_independent_review_regressions(monkeypatch):
                 report = (await operator.get(f'/targets/{target}/knowledge/continue')).json()
                 assert day1['invoices'] in [i['id'] for i in report['knowledge']['needs_revalidation']]
 
-                # P1-B: a flood of agent next steps never hides reopened dismissals or inconclusive experiments.
+                # P1-B: a flood of leads never hides reopened dismissals or inconclusive experiments.
+                leads_before = (await operator.get(f'/targets/{target}/knowledge/continue')).json()[
+                    'knowledge']['counts']['open_leads']
                 monkeypatch.setattr(knowledge_continue, 'MAX_OTHER', 3)
                 await conn.execute("UPDATE findings SET severity='high' WHERE id=$1", day1['finding'])
                 for index in range(6):
-                    await day8.ok('knowledge.record', {'kind': 'next_step', 'title': f'flood {index}'})
+                    await day8.ok('hypothesis.propose', {'family': 'bola', 'title': f'flood {index}',
+                                                         'dedupe_dimensions': {'route': f'/api/flood/{index}'}})
                 report = (await operator.get(f'/targets/{target}/knowledge/continue')).json()
                 counts = report['knowledge']['counts']
                 assert counts['reopened_for_review'] == 1 and report['operator_decisions']['reopened_dismissals'] == 1
-                assert counts['inconclusive_experiments'] == 1 and counts['open_next_steps'] == 7
+                assert counts['inconclusive_experiments'] == 1 and counts['open_leads'] == leads_before + 6
                 required = report['next_experiments']['required_retests']
                 assert required['at_least'] is True
-                assert any(reason.startswith('open_next_steps') for reason in required['incomplete_because'])
+                assert any(reason.startswith('open_leads') for reason in required['incomplete_because'])
 
                 # P2-D: a newer Scan-detected deployment change wins over an older declared marker.
                 await _scan(conn, target, tech={'Express': '4.18'}, at=_ago(days=2))

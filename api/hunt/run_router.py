@@ -168,6 +168,14 @@ class HuntCoverageAngleRequest(BaseModel):
     evidence_action_ids: list[str] = Field(default_factory=list, max_length=50)
     contradictory_evidence_action_ids: list[str] = Field(default_factory=list, max_length=50)
     candidate_id: str | None = Field(default=None, max_length=80)
+    hypothesis_id: str | None = Field(
+        default=None, max_length=80,
+        description=(
+            "The lead on the target's lead board this angle works. Recording the angle then moves "
+            "the lead: planned holds it, testing starts it, negative counts a test that found nothing "
+            "and hands it back, candidate marks it supported, blocked releases it."
+        ),
+    )
     blocker: str = Field(default="", max_length=2000)
     proof_gap: str = Field(default="", max_length=4000)
 
@@ -381,6 +389,11 @@ async def start_hunt(request: Request, response: Response):
             },
         ) from exc
     response.headers["x-shakerscan-hunt-contract"] = "v2"
+    # The target's lead board, brought up to date for the new Hunt. Never fails or delays a start
+    # beyond its bound.
+    if isinstance(result, Mapping) and result.get("hunt_id"):
+        from .lead_seeding import seed_started_hunt
+        await seed_started_hunt(result["hunt_id"])
     # Budget warnings and the verifiable families: advisory, never a refusal.
     return with_start_guidance(result)
 

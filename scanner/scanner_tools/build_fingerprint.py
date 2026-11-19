@@ -41,7 +41,6 @@ V2_API_RUNTIME_PACKAGES: tuple[str, ...] = (
     "authenticated_assurance",
     "evidence_routes",
     "local_agent_routes",
-    "research_routes",
     "retest_routes",
     "capabilities",
     "capture",

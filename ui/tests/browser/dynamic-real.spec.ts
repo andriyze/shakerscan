@@ -59,7 +59,6 @@ test('real dynamic detail routes remain usable and accessible', async ({ page, r
   expect(missing, `required dynamic records for UI acceptance are missing: ${missing.join(', ')}`).toEqual([])
   const optional = [
     device?.id && `/devices/${device.id}`,
-    device?.id && `/devices/${device.id}/agent`,
     campaign?.id && `/campaigns/${campaign.id}`,
   ]
   const routes = [...Object.values(required), ...optional].filter((route): route is string => Boolean(route))

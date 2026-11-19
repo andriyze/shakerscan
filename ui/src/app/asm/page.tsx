@@ -1473,10 +1473,10 @@ function ActivityCard({
                   <div className="mt-1 text-xs text-gray-500">{event.detail || 'No detail recorded.'}</div>
                   {event.campaign_id && (
                     <Link
-                      href={`/deep-hunt/runs/${event.campaign_id}`}
+                      href={`/campaigns/${event.campaign_id}`}
                       className="mt-1 inline-flex text-[11px] text-blue-400 hover:text-blue-300"
                     >
-                      Open related hunt
+                      Open related campaign
                     </Link>
                   )}
                 </div>

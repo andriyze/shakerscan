@@ -94,6 +94,21 @@ is labeled as such, not falsely attributed to a verified managed-principal ident
 A captured reference or HTTP 200 alone is not universal proof of successful pairing;
 interpret the protocol's confirmation and the authenticated follow-up together.
 
+### Signing in through a form with a CSRF token
+
+A request that captures values answers with its status and cookie names only, so a sign-in
+page's token is read with a second request that binds the session capture and captures
+nothing (the answer's `workflow_values_hint` says so). That page is shown with every bound
+cookie value withheld; a captured cookie shorter than 8 characters (a security level, a flag)
+cannot be withheld reliably and hides the page, so capture only the session cookie:
+
+```json
+{"capture": [{"name": "session", "header": "Set-Cookie", "cookies": ["PHPSESSID"]}]}
+```
+
+The token appears in the page as `[withheld:N]`; the sign-in POST binds the session and
+`{"body_pointer": "/user_token", "withheld_ref": "withheld://hunt/<that action>/N"}`.
+
 ## Withheld target secrets
 
 Capability outputs a planner reads (`artifact.inspect` text samples and `http.request` body

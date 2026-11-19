@@ -306,15 +306,3 @@ def test_candidate_verification_is_an_approval_bound_canonical_capability():
     assert "execute_hunt_capability(" in verify_handler
     assert "_execute_hunt_candidate_verification(" not in verify_handler
 
-
-def test_deep_hunt_claim_persistence_is_candidate_only_and_legacy_rows_are_migrated():
-    root = os.path.join(os.path.dirname(__file__), "..")
-    persistence_source = definition_source("_persist_agent_suspected_finding")
-    assert "upsert_candidate" in persistence_source
-    assert "INSERT INTO findings" not in persistence_source
-
-    migration_source = open(
-        os.path.join(root, "api", "retest_contract.py"), encoding="utf-8"
-    ).read()
-    assert 'LEGACY_AUTONOMOUS_CANDIDATE_MIGRATION = "legacy_autonomous_candidates_v1"' in migration_source
-    assert "Migrated to Investigation Candidates; this unverified claim is not a finding." in migration_source

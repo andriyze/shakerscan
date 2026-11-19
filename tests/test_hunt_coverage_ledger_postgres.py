@@ -15,6 +15,17 @@ from api.hunt.coverage_ledger import COVERAGE_LEDGER_SCHEMA_STATEMENTS, Coverage
 from api.hunt.run_service import HuntRunService
 
 DSN = os.environ.get("HUNT_TEST_POSTGRES_DSN")
+# The checkpoint ranks the target's open lead frontier (hunt/hunt_hypotheses.py), reading the leads
+# and whether this Hunt holds an active authentication session. The startup migrations create both
+# tables, not init.sql; these are the columns the frontier reads.
+HYPOTHESES_FIXTURE = """CREATE TABLE hypotheses (
+    id UUID PRIMARY KEY, target_id UUID, family TEXT, title TEXT, status TEXT,
+    version INTEGER DEFAULT 1, confidence DOUBLE PRECISION DEFAULT 0, severity_guess TEXT,
+    source TEXT, dedupe_key TEXT, metadata_json JSONB DEFAULT '{}'::jsonb,
+    endorsements JSONB DEFAULT '[]'::jsonb, next_test_action JSONB, claim_owner TEXT,
+    claim_lease_expires_at TIMESTAMPTZ, updated_at TIMESTAMPTZ DEFAULT NOW());
+CREATE TABLE auth_sessions (
+    id UUID PRIMARY KEY, owner_kind TEXT, owner_id UUID, status TEXT, expires_at TIMESTAMPTZ)"""
 pytestmark = pytest.mark.skipif(not DSN, reason="disposable PostgreSQL DSN not configured")
 
 
@@ -45,6 +56,7 @@ async def test_coverage_persists_and_checkpoint_uses_latest_owned_evidence(boots
             last_seen_at TIMESTAMPTZ DEFAULT NOW());
             CREATE TABLE investigation_candidate_observations(candidate_id UUID, hunt_run_id UUID);
         """)
+        await conn.execute(HYPOTHESES_FIXTURE)
         target, hunt, other_hunt, completed, partial, foreign, candidate = [uuid4() for _ in range(7)]
         queued, quiet = uuid4(), uuid4()
         await conn.execute("INSERT INTO targets VALUES($1)", target)
@@ -288,6 +300,7 @@ async def test_coverage_is_bounded_in_bytes_on_write_export_and_checkpoint():
                 fingerprint TEXT, canonical_locus JSONB, verifier_contract_id TEXT,
                 last_seen_at TIMESTAMPTZ DEFAULT NOW());
             CREATE TABLE investigation_candidate_observations(candidate_id UUID, hunt_run_id UUID);""")
+        await conn.execute(HYPOTHESES_FIXTURE)
         for table in ("hunt_runs", "hunt_actions"):
             await conn.execute(re.search(rf"CREATE TABLE {table} \(.*?\n\);", ddl, re.S)[0])
         for statement in COVERAGE_LEDGER_SCHEMA_STATEMENTS:

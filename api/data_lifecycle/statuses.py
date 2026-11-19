@@ -13,9 +13,6 @@ TERMINAL_BY_TABLE = {
     'scans': frozenset({'completed', 'partial', 'degraded', 'failed', 'cancelled'}),
     # hunt/run_service.py; created/active/awaiting_planner remain nonterminal.
     'hunt_runs': frozenset({'completed', 'cancelled', 'failed', 'budget_exhausted'}),
-    # The legacy run CHECK constraints in retest_contract.py.
-    'agent_hunt_runs': frozenset({'completed', 'cancelled', 'failed'}),
-    'device_agent_runs': frozenset({'completed', 'cancelled', 'failed'}),
     'research_episodes': frozenset(TERMINAL_EPISODE_STATUSES),
     # campaigns_status_check: paused is resumable, not terminal.
     'campaigns': frozenset({'completed', 'cancelled'}),
