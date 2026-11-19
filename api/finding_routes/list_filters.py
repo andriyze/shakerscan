@@ -9,7 +9,21 @@ first and joins the clause by id (``list_query.resolved_proof_filter``).
 
 from __future__ import annotations
 
-from typing import Iterable
+from typing import Iterable, Literal
+
+# The finding statuses the API writes (PATCH /findings/{id}, POST /findings/bulk, the scan
+# merge). GET /findings matches its status filter literally, so a value outside this set
+# (status=open) used to answer total 0 instead of an error.
+FindingStatus = Literal["active", "resolved", "false_positive", "accepted_risk"]
+# The filters' accepted values, published as enums in the schema (each answered 422 before by
+# a regular expression, which the schema showed as a free string).
+FindingSourceType = Literal[
+    "dast", "device", "ai", "ai_gate", "ai_session", "deep_hunt", "autonomous", "model_intake", "asm", "manual",
+]
+VerificationVerdict = Literal[
+    "exploited", "likely_vulnerable", "blocked_by_security", "out_of_scope_internal", "false_positive",
+    "likely_fixed", "inconclusive", "error",
+]
 
 SEVERITIES = ("critical", "high", "medium", "low", "info")
 PROOF_STATES = ("verified", "suspected", "unverified")

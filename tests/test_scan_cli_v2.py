@@ -471,3 +471,52 @@ def test_the_help_names_the_command_it_was_started_as(capsys):
     assert capsys.readouterr().out.startswith("usage: shakerscan scan ")
     assert scan_cli.main([*urls, "help"]) == 0
     assert capsys.readouterr().out.startswith("usage: scanner.sh scan ")
+
+
+# A recon-only passive request ran passive templates and exposure checks too: include_families adds
+# to the preset the policy implies, and the terminal had no way to ask for exactly one family.
+# --only-family sends the custom preset; --include-family stays additive.
+def test_only_family_runs_exactly_the_listed_families(monkeypatch):
+    import sys
+    from pathlib import Path
+
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "api"))
+    from scan.contracts import resolve_scan_contract
+
+    _result, calls = _run_recording(monkeypatch, [
+        "https://example.com", "--budget-profile", "fast", "--only-family", "recon", "--json",
+    ])
+    policy = calls[-1][1]["policy"]
+    assert policy["preset"] == "custom" and policy["include_families"] == ["recon"]
+    assert resolve_scan_contract(budget_profile="fast", policy=policy).execution_plan.resolved_families == ("recon",)
+
+    _result, calls = _run_recording(monkeypatch, [
+        "https://example.com", "--budget-profile", "fast", "--include-family", "recon", "--json",
+    ])
+    additive = calls[-1][1]["policy"]
+    assert "preset" not in additive and additive["include_families"] == ["recon"]
+    assert len(resolve_scan_contract(budget_profile="fast", policy=additive).execution_plan.resolved_families) > 1
+
+
+def test_only_family_and_include_family_together_are_refused(monkeypatch, capsys):
+    with pytest.raises(SystemExit) as stopped:
+        _run(monkeypatch, ["https://example.com", "--only-family", "recon", "--include-family", "xss"])
+    assert stopped.value.code == 2
+    assert "--only-family" in capsys.readouterr().err
+
+
+def test_only_family_is_checked_against_the_contract_and_gets_no_template_hint(monkeypatch, capsys):
+    assert _run(monkeypatch, ["https://example.com", "--only-family", "nonsense", "--json"])[0] != 0
+    assert "unknown Scan families: nonsense" in capsys.readouterr().err
+    exact = {"scan_id": "00000000-0000-0000-0000-000000000008", "status": "queued",
+             "resolved_families": ["xss"]}
+    assert _run_with_response(monkeypatch, [
+        "https://example.com", "--active-testing", "--confirm-active", "--only-family", "xss",
+    ], exact) == 0
+    assert "--include-family nuclei_active" not in capsys.readouterr().out
+
+
+def test_the_help_says_include_family_adds_and_only_family_is_exact():
+    help_text = scan_cli._parser().format_help()
+    assert "--only-family" in help_text and "--include-family" in help_text
+    assert "exactly" in help_text
