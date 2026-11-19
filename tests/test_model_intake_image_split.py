@@ -167,6 +167,11 @@ def test_the_base_images_virtualenv_and_its_dependencies_leave_before_the_locked
     api = (ROOT / "scanner" / "Dockerfile.api").read_text(encoding="utf-8")
     assert SCANNER.index(removal) < SCANNER.index("-r /app/requirements.lock")
     assert api.index(removal) < api.index("COPY --from=scanner-runtime /usr/local/lib/python3.12")
+    # The Playwright base also ships its own packaging distribution: both images remove it before
+    # their locked tree lands, or the duplicate check below fails the build (Playwright 1.65 base).
+    assert SCANNER.index("uninstall -y --break-system-packages packaging") < SCANNER.index("-r /app/requirements.lock")
+    api_removal = api[api.index(removal):].split("\n", 1)[0]
+    assert " packaging" in api_removal
     # Both images fail the build when a distribution is installed twice under /usr/local.
     duplicate_check = 'md.distributions(path=["/usr/local/lib/python3.12/dist-packages"])'
     assert SCANNER.index("pip check") < SCANNER.index(duplicate_check) < SCANNER.index("COPY scanner/model_intake_tools")
