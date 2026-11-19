@@ -24,7 +24,9 @@ router = APIRouter()
 async def exposure_services(
     request: Request,
     target_kind: Literal["all", "web", "device"] = "all",
-    target_id: uuid.UUID | None = None,
+    target_id: list[uuid.UUID] | None = Query(
+        None, description="A web target or device id; repeat it for several, at most 500.",
+    ),
     root_domain: str | None = Query(None, max_length=253, pattern=r"^[A-Za-z0-9.-]+$"),
     search: str = Query("", max_length=200),
     limit: int = Query(10, ge=1, le=25),
@@ -39,6 +41,10 @@ async def exposure_services(
     global service list. No request parameter can grant scan/credential authority.
     list/v1 (``cursor``/``count``): keyset pages of targets (kind, then id), at most 25 per page.
     """
+    # A direct call (not through FastAPI) receives the ``Query(...)`` default: no filter.
+    target_ids = list(dict.fromkeys(target_id)) if isinstance(target_id, list) and target_id else None
+    if target_ids and len(target_ids) > 500:
+        raise HTTPException(status_code=422, detail="target_id: at most 500 values")
     pool = getattr(request.app.state, "db_pool", None)
     if pool is None:
         raise HTTPException(status_code=503, detail="Database is not ready")
@@ -51,12 +57,12 @@ async def exposure_services(
                 page = v1_page(limit=limit, cursor=cursor, sort=None, fields=None, count=count, since=None,
                                default_limit=10)
                 return await service_page_v1(
-                    conn, page, target_kind=target_kind, target_id=target_id, root_domain=root_domain,
+                    conn, page, target_kind=target_kind, target_id=target_ids, root_domain=root_domain,
                     search=search, snapshot=snapshot, matcher=matcher, registry=registry,
                 )
             mark_deprecated(response)
             return await service_page(
-                conn, target_kind=target_kind, target_id=target_id, root_domain=root_domain,
+                conn, target_kind=target_kind, target_id=target_ids, root_domain=root_domain,
                 search=search, limit=limit, offset=offset,
                 snapshot=snapshot, matcher=matcher, registry=registry,
             )

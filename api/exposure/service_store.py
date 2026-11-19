@@ -31,7 +31,7 @@ WITH inventory_targets AS (
  FROM device_targets d WHERE d.is_active=true
 )
 SELECT * FROM inventory_targets
-WHERE ($1::text='all' OR kind=$1) AND ($2::uuid IS NULL OR id=$2)
+WHERE ($1::text='all' OR kind=$1) AND ($2::uuid[] IS NULL OR id=ANY($2::uuid[]))
  AND ($3::text IS NULL OR lower(root_domain)=$3 OR
       (kind='device' AND (lower(locator)=$3 OR right(lower(locator),length($3)+1)='.'||$3)))
  AND ($4::text='' OR strpos(lower(label),$4)>0 OR strpos(lower(locator),$4)>0)
@@ -228,7 +228,7 @@ def _intelligence_fields(snapshot: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-async def service_page_v1(conn: Any, page: Page, *, target_kind: str, target_id: uuid.UUID | None,
+async def service_page_v1(conn: Any, page: Page, *, target_kind: str, target_id: list[uuid.UUID] | None,
                           root_domain: str | None, search: str, snapshot: dict[str, Any], matcher: Any,
                           registry: Any) -> dict[str, Any]:
     """One list/v1 page of targets (keyset by kind, then id), each with its service inventory."""
@@ -258,7 +258,7 @@ async def service_page_v1(conn: Any, page: Page, *, target_kind: str, target_id:
     return body
 
 
-async def service_page(conn: Any, *, target_kind: str, target_id: uuid.UUID | None, root_domain: str | None,
+async def service_page(conn: Any, *, target_kind: str, target_id: list[uuid.UUID] | None, root_domain: str | None,
                        search: str, limit: int, offset: int, snapshot: dict[str, Any], matcher: Any, registry: Any) -> dict[str, Any]:
     params = (target_kind, target_id, root_domain.lower().rstrip(".") if root_domain else None, search.lower().strip())
     total = int(await conn.fetchval(f"SELECT count(*) FROM ({FILTERED_TARGETS_SQL}) filtered", *params) or 0)

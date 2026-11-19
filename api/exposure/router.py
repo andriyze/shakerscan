@@ -18,6 +18,7 @@ from datetime import datetime, timedelta, timezone
 import re
 from typing import Any, Callable, Literal, Optional
 import urllib.parse
+import uuid
 
 from fastapi import APIRouter, HTTPException, Query, Response
 
@@ -28,7 +29,7 @@ try:
         _severity_sort_value, _short_url_label,
     )
     from serialization import row_to_dict
-    from finding_routes.list_query import without_jit
+    from finding_routes.list_query import VERIFIED_FILTER_SQL, without_jit
     from finding_routes.retirement import not_retired_sql
     from list_compat import direct, mark_deprecated, v1_page, wants_list_v1
     from list_contract import CURSOR_MAX_LENGTH, EXACT_COUNT_CAP, SqlParams, snapshot_time
@@ -39,7 +40,7 @@ except ModuleNotFoundError:  # package import in host-side tests
         _severity_sort_value, _short_url_label,
     )
     from ..serialization import row_to_dict
-    from ..finding_routes.list_query import without_jit
+    from ..finding_routes.list_query import VERIFIED_FILTER_SQL, without_jit
     from ..finding_routes.retirement import not_retired_sql
     from ..list_compat import direct, mark_deprecated, v1_page, wants_list_v1
     from ..list_contract import CURSOR_MAX_LENGTH, EXACT_COUNT_CAP, SqlParams, snapshot_time
@@ -1060,20 +1061,31 @@ def _cohort_counts(row: Any) -> dict[str, int]:
 
 
 
+#: The most target ids one request may name (a repeated ``target_id``).
+MAX_TARGET_FILTER = 500
+
+
 @router.get("/exposure/changes")
 async def exposure_changes(
     since: Optional[str] = None,
     root_domain: Optional[str] = None,
+    target_id: Optional[list[uuid.UUID]] = Query(
+        None,
+        description=("Only these targets (repeat the parameter for several, at most 500). A web "
+                     "target, an AI target or a connected device id; changes of any other asset "
+                     "are left out."),
+    ),
     days: int = Query(7, ge=1, le=90),
     examples: int = Query(5, ge=0, le=10),
 ):
     """Awareness deltas for the exposure page: what changed since an anchor.
 
     ``since`` (ISO timestamp, e.g. the user's last visit) wins over ``days``.
-    Categories cover new assets, new active critical/high findings, resolved
-    findings, failed scans, and assets whose coverage crossed the 30-day stale
-    threshold inside the window. Each category carries an ``href`` to the
-    exposure/findings view that shows that slice.
+    Categories cover new assets, new services (a connected device's open port first seen, or a
+    web service recorded under a host), new active critical/high findings, active findings
+    proven in the window (first seen proven, or verified later), resolved findings, failed
+    scans, and assets whose coverage crossed the 30-day stale threshold inside the window. Each
+    category carries an ``href`` to the exposure/findings view that shows that slice.
     """
     anchor = _exposure_datetime(since) if since else None
     if since and anchor is None:
@@ -1082,10 +1094,16 @@ async def exposure_changes(
         anchor = datetime.now(timezone.utc) - timedelta(days=days)
 
     # Each category is a COUNT plus its newest ``examples`` rows: the window can hold every finding.
+    # A direct call (not through FastAPI) receives the ``Query(...)`` default: no filter.
+    target_ids = list(dict.fromkeys(target_id)) if isinstance(target_id, list) and target_id else None
+    if target_ids and len(target_ids) > MAX_TARGET_FILTER:
+        raise HTTPException(status_code=422, detail=f"target_id: at most {MAX_TARGET_FILTER} values")
+
+    # $1 anchor, $2 root domain, $3 target ids (NULL: every target), $4 the examples limit.
     async def counted(conn: Any, from_where: str, columns: str, order: str) -> tuple[int, list[Any]]:
-        total = await conn.fetchval(f"SELECT count(*) {from_where}", anchor, root_domain)
+        total = await conn.fetchval(f"SELECT count(*) {from_where}", anchor, root_domain, target_ids)
         rows = await conn.fetch(
-            f"SELECT {columns} {from_where} ORDER BY {order} LIMIT $3", anchor, root_domain, examples,
+            f"SELECT {columns} {from_where} ORDER BY {order} LIMIT $4", anchor, root_domain, target_ids, examples,
         ) if examples else []
         return int(total or 0), list(rows)
 
@@ -1093,7 +1111,9 @@ async def exposure_changes(
               AND ($2::text IS NULL
                    OR f.target_id IN (SELECT id FROM targets WHERE root_domain = $2::text)
                    OR f.ai_target_id IN (SELECT id FROM ai_targets
-                                         WHERE LOWER(endpoint_url) LIKE '%' || LOWER($2::text) || '%'))"""
+                                         WHERE LOWER(endpoint_url) LIKE '%' || LOWER($2::text) || '%'))
+              AND ($3::uuid[] IS NULL OR f.target_id = ANY($3::uuid[]) OR f.ai_target_id = ANY($3::uuid[])
+                   OR f.device_target_id = ANY($3::uuid[]))"""
     finding_columns = """f.title, f.severity, f.first_seen_at, f.resolved_at,
                    COALESCE((SELECT root_domain FROM targets WHERE id = f.target_id),
                             (SELECT name FROM ai_targets WHERE id = f.ai_target_id), f.url) AS subject"""
@@ -1102,14 +1122,16 @@ async def exposure_changes(
             conn,
             """FROM targets
             WHERE is_active = true AND created_at > $1
-              AND ($2::text IS NULL OR root_domain = $2::text)""",
+              AND ($2::text IS NULL OR root_domain = $2::text)
+              AND ($3::uuid[] IS NULL OR id = ANY($3::uuid[]))""",
             "COALESCE(name, url) AS label, url, discovery_source, created_at", "created_at DESC",
         )
         new_ai_count, new_ai = await counted(
             conn,
             """FROM ai_targets
             WHERE is_active = true AND created_at > $1
-              AND ($2::text IS NULL OR LOWER(endpoint_url) LIKE '%' || LOWER($2::text) || '%')""",
+              AND ($2::text IS NULL OR LOWER(endpoint_url) LIKE '%' || LOWER($2::text) || '%')
+              AND ($3::uuid[] IS NULL OR id = ANY($3::uuid[]))""",
             "name AS label, endpoint_url AS url, created_at", "created_at DESC",
         )
         new_critical_count, new_critical = await counted(
@@ -1130,6 +1152,44 @@ async def exposure_changes(
             WHERE f.status = 'resolved' AND f.resolved_at > $1 AND {not_retired_sql("f")}{findings_scope}""",
             finding_columns, "f.resolved_at DESC",
         )
+        # A service: a connected device's open port first seen in the window, or a web service a
+        # host records as its member (``asset_owner_id``) added in the window.
+        new_device_services_count, new_device_services = await counted(
+            conn,
+            """FROM device_services ds JOIN device_targets d ON d.id = ds.device_target_id
+            WHERE d.is_active = true AND ds.state IN ('open', 'open|filtered') AND ds.first_seen_at > $1
+              AND ($2::text IS NULL OR lower(d.primary_locator) = lower($2::text)
+                   OR right(lower(d.primary_locator), length($2::text) + 1) = '.' || lower($2::text))
+              AND ($3::uuid[] IS NULL OR d.id = ANY($3::uuid[]))""",
+            """d.name AS label, ds.transport, ds.port, ds.service_name, ds.product,
+               ds.first_seen_at AS created_at""",
+            "ds.first_seen_at DESC",
+        )
+        # Host membership comes from the asset migration at startup; a schema without it (an
+        # older database mid-upgrade, a bare init.sql) simply has no web services to report.
+        has_asset_owner = bool(await conn.fetchval(
+            """SELECT EXISTS (SELECT 1 FROM information_schema.columns
+                              WHERE table_schema = current_schema() AND table_name = 'targets'
+                                AND column_name = 'asset_owner_id')"""))
+        new_web_services_count, new_web_services = await counted(
+            conn,
+            """FROM targets svc
+            WHERE svc.is_active = true AND svc.asset_owner_id IS NOT NULL AND svc.asset_owner_id <> svc.id
+              AND svc.created_at > $1
+              AND ($2::text IS NULL OR svc.root_domain = $2::text)
+              AND ($3::uuid[] IS NULL OR svc.id = ANY($3::uuid[]) OR svc.asset_owner_id = ANY($3::uuid[]))""",
+            "COALESCE(svc.name, svc.url) AS label, svc.url, svc.created_at", "svc.created_at DESC",
+        ) if has_asset_owner else (0, [])
+        # Proven in the window: verified now, with the proof recorded (or the finding first seen)
+        # after the anchor, whatever its severity.
+        newly_proven_count, newly_proven = await counted(
+            conn,
+            f"""FROM findings f
+            WHERE f.status = 'active' AND {VERIFIED_FILTER_SQL}
+              AND COALESCE(f.last_verified_at, f.first_seen_at) > $1{findings_scope}""",
+            finding_columns + ", COALESCE(f.last_verified_at, f.first_seen_at) AS proven_at",
+            "COALESCE(f.last_verified_at, f.first_seen_at) DESC",
+        )
         failed_scans_count, failed_scans = await counted(
             conn,
             """FROM scans s
@@ -1138,7 +1198,9 @@ async def exposure_changes(
             WHERE s.status = 'failed' AND s.created_at > $1
               AND (s.scan_role IS NULL OR s.scan_role <> 'shard')
               AND ($2::text IS NULL OR t.root_domain = $2::text
-                   OR LOWER(ait.endpoint_url) LIKE '%' || LOWER($2::text) || '%')""",
+                   OR LOWER(ait.endpoint_url) LIKE '%' || LOWER($2::text) || '%')
+              AND ($3::uuid[] IS NULL OR s.target_id = ANY($3::uuid[]) OR s.ai_target_id = ANY($3::uuid[])
+                   OR s.device_target_id = ANY($3::uuid[]))""",
             "s.id, s.target_url AS label, s.scan_type, s.created_at", "s.created_at DESC",
         )
         went_stale_web_count, went_stale_web = await counted(
@@ -1147,7 +1209,8 @@ async def exposure_changes(
             WHERE is_active = true AND total_scans > 0 AND last_scanned_at IS NOT NULL
               AND last_scanned_at <= NOW() - INTERVAL '30 days'
               AND last_scanned_at > $1::timestamptz - INTERVAL '30 days'
-              AND ($2::text IS NULL OR root_domain = $2::text)""",
+              AND ($2::text IS NULL OR root_domain = $2::text)
+              AND ($3::uuid[] IS NULL OR id = ANY($3::uuid[]))""",
             "COALESCE(name, url) AS label, last_scanned_at", "last_scanned_at DESC",
         )
         # AI surfaces go stale too — the destination view's stale-window filter
@@ -1158,7 +1221,8 @@ async def exposure_changes(
             WHERE is_active = true AND last_scanned_at IS NOT NULL
               AND last_scanned_at <= NOW() - INTERVAL '30 days'
               AND last_scanned_at > $1::timestamptz - INTERVAL '30 days'
-              AND ($2::text IS NULL OR LOWER(endpoint_url) LIKE '%' || LOWER($2::text) || '%')""",
+              AND ($2::text IS NULL OR LOWER(endpoint_url) LIKE '%' || LOWER($2::text) || '%')
+              AND ($3::uuid[] IS NULL OR id = ANY($3::uuid[]))""",
             "name AS label, last_scanned_at", "last_scanned_at DESC",
         )
     went_stale = sorted(
@@ -1239,6 +1303,34 @@ async def exposure_changes(
                 first_seen_within=window_days, sort_by="first_seen", sort_order="desc",
             ),
             "examples": finding_examples(new_high, "first_seen_at"),
+        },
+        {
+            "key": "new_services",
+            "label": "New services",
+            "count": new_device_services_count + new_web_services_count,
+            "href": href("/exposure/services"),
+            "examples": sorted(
+                [
+                    {
+                        "label": r["label"],
+                        "detail": " · ".join(filter(None, [
+                            f"{r['transport']}/{r['port']}", r["service_name"], r["product"]])),
+                        "when": fmt_when(r["created_at"]),
+                    }
+                    for r in new_device_services
+                ] + [
+                    {"label": r["label"], "detail": "web service", "when": fmt_when(r["created_at"])}
+                    for r in new_web_services
+                ],
+                key=lambda e: e["when"] or "", reverse=True,
+            )[:examples],
+        },
+        {
+            "key": "newly_proven",
+            "label": "Findings proven",
+            "count": newly_proven_count,
+            "href": href("/findings", status="active", proof_state="verified", sort_by="last_seen", sort_order="desc"),
+            "examples": finding_examples(newly_proven, "proven_at"),
         },
         {
             "key": "resolved",

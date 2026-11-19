@@ -56,6 +56,7 @@ try:
     )
     from operations import dashboard_data
     from list_contract import SqlParams
+    from target_filter import parse_target_ids
     from target_cohort_sql import COHORT_VIEW_PATTERN, cohort_filter_sql, fill_url_classes, row_cohorts, view_cohorts
 except ModuleNotFoundError:  # package import in host-side tests
     from ..ai_control_requirements import AI_CONTROL_REQUIREMENTS
@@ -76,6 +77,7 @@ except ModuleNotFoundError:  # package import in host-side tests
     from ..request_guards import reraise_statement_timeout
     from . import dashboard_data
     from ..list_contract import SqlParams
+    from ..target_filter import parse_target_ids
     from ..target_cohort_sql import COHORT_VIEW_PATTERN, cohort_filter_sql, fill_url_classes, row_cohorts, view_cohorts
     from .discovery import (
         DiscoveryRefused, admit_discovery, discovery_domain, requester,
@@ -173,7 +175,9 @@ TIMELINE_COHORT_MAX_DEPTH = 16
 @router.get("/timeline")
 async def mission_timeline(
     limit: int = Query(50, ge=1, le=200),
-    target_id: Optional[str] = Query(None, description="Filter events to one target."),
+    target_id: Optional[list[str]] = Query(
+        None, description="Only events of this target; repeat it (or separate ids with commas) for several, at most 500.",
+    ),
     include_campaign_actions: bool = Query(True, description="Include campaign/action records not already represented by a command result."),
     include_scans: bool = Query(True, description="Include recent scans not tied to a command result."),
     include_schedules: bool = Query(True, description="Include upcoming recurring schedules."),
@@ -192,10 +196,7 @@ async def mission_timeline(
     one normalized event feed with explicit, API-backed statuses. Read-only: it
     computes nothing the browser would otherwise have to infer from scan JSON.
     """
-    try:
-        target_uuid = _optional_uuid(target_id)
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail="target_id must be a UUID") from exc
+    target_uuid = parse_target_ids(target_id)
     include_campaign_actions = bool(_direct_query_value(include_campaign_actions))
     include_scans = bool(_direct_query_value(include_scans))
     include_schedules = bool(_direct_query_value(include_schedules))
@@ -236,7 +237,7 @@ async def mission_timeline(
                     ORDER BY updated_at DESC NULLS LAST, created_at DESC
                     LIMIT 1
                 ) ca ON true
-                WHERE ($2::uuid IS NULL OR s.target_id = $2)
+                WHERE ($2::uuid[] IS NULL OR s.target_id = ANY($2::uuid[]))
                   AND ($3::uuid[] IS NULL OR s.target_id IS NULL OR s.target_id = ANY($3))
                 ORDER BY cr.created_at DESC
                 LIMIT $1
@@ -257,7 +258,7 @@ async def mission_timeline(
                     FROM campaign_actions ca
                     LEFT JOIN scans s ON ca.scan_id = s.id
                     WHERE ca.command_result_id IS NULL
-                      AND ($2::uuid IS NULL OR ca.target_id = $2 OR s.target_id = $2)
+                      AND ($2::uuid[] IS NULL OR ca.target_id = ANY($2::uuid[]) OR s.target_id = ANY($2::uuid[]))
                       AND ($3::uuid[] IS NULL OR COALESCE(ca.target_id, s.target_id) IS NULL
                            OR COALESCE(ca.target_id, s.target_id) = ANY($3))
                     ORDER BY ca.created_at DESC
@@ -277,7 +278,7 @@ async def mission_timeline(
                     FROM scans s
                     WHERE (s.scan_role IS NULL OR s.scan_role <> ALL($3::text[]))
                       AND NOT EXISTS (SELECT 1 FROM command_results cr WHERE cr.scan_id = s.id)
-                      AND ($2::uuid IS NULL OR s.target_id = $2)
+                      AND ($2::uuid[] IS NULL OR s.target_id = ANY($2::uuid[]))
                       AND ($4::uuid[] IS NULL OR s.target_id IS NULL OR s.target_id = ANY($4))
                     ORDER BY s.created_at DESC
                     LIMIT $1
@@ -301,7 +302,7 @@ async def mission_timeline(
                     LEFT JOIN campaign_actions ca ON ei.campaign_action_id = ca.id
                     LEFT JOIN scans s ON ei.scan_id = s.id
                     LEFT JOIN findings f ON ei.finding_id = f.id
-                    WHERE ($2::uuid IS NULL OR ei.target_id = $2 OR s.target_id = $2 OR f.target_id = $2)
+                    WHERE ($2::uuid[] IS NULL OR ei.target_id = ANY($2::uuid[]) OR s.target_id = ANY($2::uuid[]) OR f.target_id = ANY($2::uuid[]))
                       AND ($3::uuid[] IS NULL OR COALESCE(ei.target_id, s.target_id, f.target_id) IS NULL
                            OR COALESCE(ei.target_id, s.target_id, f.target_id) = ANY($3))
                     ORDER BY ei.created_at DESC
@@ -322,7 +323,7 @@ async def mission_timeline(
                     FROM refuter_reviews rr
                     LEFT JOIN findings f ON rr.finding_id = f.id
                     LEFT JOIN hypotheses h ON rr.hypothesis_id = h.id
-                    WHERE ($2::uuid IS NULL OR rr.target_id = $2 OR f.target_id = $2 OR h.target_id = $2)
+                    WHERE ($2::uuid[] IS NULL OR rr.target_id = ANY($2::uuid[]) OR f.target_id = ANY($2::uuid[]) OR h.target_id = ANY($2::uuid[]))
                       AND ($3::uuid[] IS NULL OR COALESCE(rr.target_id, f.target_id, h.target_id) IS NULL
                            OR COALESCE(rr.target_id, f.target_id, h.target_id) = ANY($3))
                     ORDER BY rr.created_at DESC
@@ -344,7 +345,7 @@ async def mission_timeline(
                     FROM export_events ee
                     LEFT JOIN scans s ON ee.scan_id = s.id
                     LEFT JOIN findings f ON ee.finding_id = f.id
-                    WHERE ($2::uuid IS NULL OR ee.target_id = $2 OR s.target_id = $2 OR f.target_id = $2)
+                    WHERE ($2::uuid[] IS NULL OR ee.target_id = ANY($2::uuid[]) OR s.target_id = ANY($2::uuid[]) OR f.target_id = ANY($2::uuid[]))
                       AND ($3::uuid[] IS NULL OR COALESCE(ee.target_id, s.target_id, f.target_id) IS NULL
                            OR COALESCE(ee.target_id, s.target_id, f.target_id) = ANY($3))
                     ORDER BY ee.created_at DESC
@@ -367,7 +368,7 @@ async def mission_timeline(
                     FROM schedules sc
                     LEFT JOIN targets t ON sc.target_id = t.id
                     WHERE sc.is_active = true AND sc.next_run_at IS NOT NULL
-                      AND ($2::uuid IS NULL OR sc.target_id = $2)
+                      AND ($2::uuid[] IS NULL OR sc.target_id = ANY($2::uuid[]))
                       AND ($3::uuid[] IS NULL OR sc.target_id IS NULL OR sc.target_id = ANY($3))
                     ORDER BY sc.next_run_at ASC
                     LIMIT $1
