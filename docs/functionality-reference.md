@@ -2044,7 +2044,7 @@ for the profile contract, invocation, limits and acceptance gates.
 | Deprecated wrapper aliases | 0 | `scanner.sh` |
 | Make targets | 20 | `Makefile` |
 | Release gates | 17 | `scripts/release_gates.py` |
-| Runtime environment keys | 429 | Python sources + Compose manifests |
+| Runtime environment keys | 432 | Python sources + Compose manifests |
 | Internal compatibility scanner modules | 140 | `scanner/scanner_tools/` |
 | UI pages | 39 | `ui/src/app/` |
 | Skills | 9 | `skills/` |
@@ -3215,6 +3215,7 @@ Only key names and declaring sources are documented; secret values are never rea
 | `SHAKERSCAN_HTTP_ARCHIVE_RAW_HAR` | `api/runtime/http_archive_router.py`, `docker-compose.release.yml`, `docker-compose.yml` |
 | `SHAKERSCAN_HUNT_ACTION_WAIT_SECONDS` | `scripts/v2_cli.py` |
 | `SHAKERSCAN_HUNT_ALLOW` | `scripts/v2_cli.py` |
+| `SHAKERSCAN_HUNT_IDLE_EXPIRY_HOURS` | `docker-compose.release.yml`, `docker-compose.yml` |
 | `SHAKERSCAN_HUNT_INTERACTSH_SERVER` | `api/agent_tools.py` |
 | `SHAKERSCAN_HUNT_INTERACTSH_TOKEN` | `api/agent_tools.py` |
 | `SHAKERSCAN_HUNT_PLANNER_GRANT_FILE` | `api/hunt/planner_gateway.py` |
@@ -3271,6 +3272,8 @@ Only key names and declaring sources are documented; secret values are never rea
 | `SHAKERSCAN_STREAM_SCANNER_LOGS` | `api/worker.py` |
 | `SHAKERSCAN_SUBFINDER_PROVIDERS` | `docker-compose.broker-worker.yml`, `docker-compose.release.yml`, `docker-compose.yml` |
 | `SHAKERSCAN_SUBFINDER_PROVIDER_CONFIG` | `docker-compose.broker-worker.yml`, `docker-compose.release.yml`, `docker-compose.yml` |
+| `SHAKERSCAN_TRAFFIC_ATTRIBUTION` | `docker-compose.release.yml`, `docker-compose.yml` |
+| `SHAKERSCAN_TRAFFIC_USER_AGENT_TOKEN` | `docker-compose.release.yml`, `docker-compose.yml` |
 | `SHAKERSCAN_TRIVY_CACHE_DIR` | `scanner/scanner_tools/model_intake_scanners.py` |
 | `SHAKERSCAN_TRIVY_REFRESH_ON_START` | `scanner/scanner_tools/model_intake_scanners.py` |
 | `SHAKERSCAN_TRIVY_REFRESH_TIMEOUT_SECONDS` | `scanner/scanner_tools/model_intake_scanners.py` |
