@@ -83,13 +83,6 @@ def test_the_device_hunt_site_reads_the_device_rows_environment():
     assert 'environment=str(device["environment"] or "production")' in source
 
 
-def test_hunt_session_seeding_carries_the_stored_environment():
-    seed = definition_source("_agent_seed_state")
-    assert "effective_target_environment(" in seed, (
-        "_agent_seed_state freezes addresses without the target's environment"
-    )
-    assert "target_url, environment=target_environment," in seed
-
 
 def test_the_hunt_wrapper_forwards_the_environment_it_is_given(monkeypatch):
     """Behavioral: the wrapper hands the environment to the fleet resolver unchanged."""

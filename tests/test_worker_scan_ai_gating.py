@@ -5340,29 +5340,15 @@ def test_fingerprint_only_openssl_does_not_promote(monkeypatch):
 
 
 def test_no_unbounded_auto_verification_exists_on_any_path():
-    """Auto-verification must always be bounded, on whichever path performs it.
+    """No loop verifies candidates on its own.
 
-    The legacy device-agent run-completion auto-verifier is deleted with the rest
-    of that engine. Its guarantee is kept here rather than dropped: the agent
-    path's auto-verify is capped, and canonical Hunt verifies a candidate only
-    on an explicit request routed through the deterministic family-proof moat,
-    so there is no loop left that could verify without a ceiling.
+    The legacy web and device engines verified automatically when a run completed. Both are
+    removed with their auto-verifiers. Canonical Hunt verifies a candidate only on an explicit
+    request routed through the deterministic family-proof moat.
     """
-    import re
-
     api = api_tree_source()
-    assert "_device_agent_auto_verify" not in api, (
-        "the legacy device auto-verifier survived the device-agent deletion"
-    )
-    limits = [
-        int(value)
-        for value in re.findall(r"_AGENT_AUTO_VERIFY_LIMIT\s*=\s*(\d+)", api)
-    ]
-    assert limits, "the agent auto-verify path declares no ceiling"
-    assert all(0 < limit <= 32 for limit in limits), f"unbounded ceiling: {limits}"
-    assert "if len(attempts) >= _AGENT_AUTO_VERIFY_LIMIT" in api, (
-        "the declared auto-verify ceiling is not enforced"
-    )
+    for removed in ("_device_agent_auto_verify", "_agent_auto_verify", "_AGENT_AUTO_VERIFY_LIMIT"):
+        assert removed not in api, f"{removed} survived the legacy engine removal"
     # Canonical verification stays explicit and moat-gated.
     assert route_is_declared("POST", "/hunts/{hunt_id}/candidates/{candidate_id}/verify")
     assert "family_proof" in definition_source("verify_hunt_candidate") or (

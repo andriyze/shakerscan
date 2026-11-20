@@ -151,10 +151,6 @@ def action_diagnostic_error_class(
     return diagnostic_error_class(errors)
 
 
-def _diagnostic_error_class(value: Any) -> str:
-    return diagnostic_error_class(value)
-
-
 def scan_action_diagnostic_line(
     *,
     action: ScanAction,

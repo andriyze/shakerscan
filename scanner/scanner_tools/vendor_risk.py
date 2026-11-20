@@ -262,24 +262,6 @@ def is_third_party(resource_url: str, base_domain: str) -> bool:
     return base_root != resource_root
 
 
-def get_resource_type(url: str, context: str = "") -> str:
-    """Determine resource type from URL and context."""
-    url_lower = url.lower()
-
-    if ".js" in url_lower or "javascript" in context.lower():
-        return "script"
-    elif ".css" in url_lower or "stylesheet" in context.lower():
-        return "stylesheet"
-    elif any(ext in url_lower for ext in [".png", ".jpg", ".jpeg", ".gif", ".svg", ".webp", ".ico"]):
-        return "image"
-    elif "iframe" in context.lower():
-        return "iframe"
-    elif ".woff" in url_lower or ".ttf" in url_lower or ".eot" in url_lower:
-        return "font"
-    else:
-        return "other"
-
-
 def extract_third_party_resources(
     html_content: str,
     base_url: str

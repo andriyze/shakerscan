@@ -187,7 +187,8 @@ class FindingFilters:
     severities: Optional[list[str]] = None
     status: Optional[str] = None
     source_type: Optional[str] = None
-    target_id: Optional[str] = None
+    # One id, or several (GET /findings?target_id=a&target_id=b); parsed by the route.
+    target_id: Optional[Any] = None
     ai_target_id: Optional[str] = None
     device_target_id: Optional[str] = None
     scan_id: Optional[str] = None
@@ -219,7 +220,12 @@ class FindingFilters:
         if source:
             where.append(source)
         if self.target_id:
-            where.append(f"f.target_id = {params.add(_uuid(self.target_id, 'target_id'))}")
+            ids = ([_uuid(item, 'target_id') for item in self.target_id]
+                   if isinstance(self.target_id, (list, tuple)) else [_uuid(self.target_id, 'target_id')])
+            if len(ids) == 1:
+                where.append(f"f.target_id = {params.add(ids[0])}")
+            else:
+                where.append(f"f.target_id = ANY({params.add(ids)}::uuid[])")
         if self.ai_target_id:
             where.append(f"f.ai_target_id = {params.add(_uuid(self.ai_target_id, 'ai_target_id'))}")
         if self.device_target_id:

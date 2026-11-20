@@ -90,6 +90,22 @@ def test_post_sends_compact_json_and_errors_show_the_instance_detail():
     assert code == 0 and output == '{\n  "b": 1,\n  "a": [\n    1,\n    2\n  ]\n}'
 
 
+@pytest.mark.parametrize("detail, shown", [
+    # A workflow refusal: the code alone ("invalid_workflow") was all an agent read.
+    ({"error": "invalid_workflow", "violation": "no proof workflow could be built for this candidate"},
+     "invalid_workflow: no proof workflow could be built for this candidate"),
+    ({"error": "hypothesis_not_claimable", "message": "hypothesis_not_claimable: the lead changed"},
+     "hypothesis_not_claimable: the lead changed"),
+    ({"message": "No credential attached to this target.", "attach": "A person attaches one."},
+     "No credential attached to this target. A person attaches one."),
+    ({"error": "kind_moved_to_lead_board"}, "kind_moved_to_lead_board"),
+    ({"status": "claimed"}, '{"status": "claimed"}'),
+])
+def test_an_error_object_shows_its_reason_and_next_step(detail, shown):
+    output, code = api_cli.render(422, json.dumps({"detail": detail}))
+    assert code == 1 and output == f"HTTP 422: {shown}"
+
+
 def test_the_agent_kit_calls_the_api_only_through_the_helper():
     """Every API call the kit teaches an agent goes through `shakerscan api`, so the same
     instructions work against a local engine and a connected remote instance with a token."""

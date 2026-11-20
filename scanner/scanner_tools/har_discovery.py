@@ -16,7 +16,6 @@ Philosophy: "Real traffic reveals real attack surface"
 import copy
 import json
 import re
-import sys
 import urllib.parse
 from dataclasses import dataclass, field
 from typing import Any
@@ -624,62 +623,3 @@ def get_bola_candidates(discovery: HARDiscoveryResult) -> list[dict[str, Any]]:
 
     return candidates
 
-
-async def discover_from_browser(
-    url: str,
-    auth_session: Any | None = None,
-    max_pages: int = 10,
-) -> HARDiscoveryResult:
-    """
-    Primary discovery method: capture real traffic via browser.
-
-    This is the main entry point for HAR-first discovery.
-    Falls back to empty result if browser unavailable.
-
-    Args:
-        url: Target URL
-        auth_session: Optional auth session for authenticated crawl
-        max_pages: Maximum pages to crawl
-
-    Returns:
-        HARDiscoveryResult with discovered endpoints and parameters
-    """
-    from .http_scanner import browser_fetch
-
-    print(f"[har_discovery] Starting browser-based discovery for {url}", file=sys.stderr)
-
-    try:
-        browser_result = await browser_fetch(
-            url=url,
-            auth_session=auth_session,
-            crawl=True,
-            max_pages=max_pages,
-        )
-
-        captured_requests = browser_result.get("captured_requests", [])
-        websocket_endpoints = browser_result.get("websocket_endpoints", [])
-
-        if captured_requests:
-            print(
-                f"[har_discovery] Captured {len(captured_requests)} requests, "
-                f"{len(websocket_endpoints)} WebSocket endpoints",
-                file=sys.stderr
-            )
-
-        result = extract_discovery_from_har(
-            captured_requests=captured_requests,
-            websocket_endpoints=websocket_endpoints,
-            base_url=url,
-        )
-
-        print(
-            f"[har_discovery] Extracted {len(result.endpoints)} endpoints, "
-            f"{len(result.parameters)} parameters",
-            file=sys.stderr
-        )
-
-        return result
-
-    except Exception as e:
-        print(f"[har_discovery] Browser discovery failed: {e}", file=sys.stderr)
-        return HARDiscoveryResult()

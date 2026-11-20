@@ -284,12 +284,12 @@ def test_merge_target_group_reassigns_deep_hunt_credentials_and_evidence_before_
     sql = "\n".join(conn.statements)
 
     for table in (
-        "agent_context_packs", "agent_hunt_runs", "research_episodes", "hypotheses",
+        "agent_context_packs", "research_episodes", "hypotheses",
         "target_credential_profiles", "target_principals", "target_endpoint_expectations",
         "evidence_instances", "export_events", "campaigns", "campaign_actions",
     ):
         assert table in sql
-    assert sql.index("UPDATE agent_hunt_runs") < sql.index("DELETE FROM targets")
+    assert "agent_hunt_runs" not in sql  # the legacy run table is dropped
     assert sql.index("UPDATE evidence_instances") < sql.index("DELETE FROM targets")
     assert sql.index("DELETE FROM evidence_objects evidence") < \
         sql.index("UPDATE evidence_objects child SET finding_id")

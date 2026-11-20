@@ -550,6 +550,15 @@ async def upsert_candidate(
     return result
 
 
+#: A Hunt acts only on candidates it produced or observed; a repeat sighting is how it observes one
+#: an earlier Hunt recorded (agents told only the first sentence gave the candidate up).
+NOT_OBSERVED_BY_THIS_HUNT = (
+    "Candidate was not produced or observed by this Hunt. To verify a candidate an earlier Hunt "
+    "recorded, repeat its request in this Hunt and record it with the same family, locus and claim, "
+    "citing the new action: it joins the existing candidate, which this Hunt can then verify"
+)
+
+
 async def _hunt_owned_candidate(
     conn: Any, *, hunt_run_id: str, candidate_id: str,
 ) -> dict[str, Any]:
@@ -568,7 +577,7 @@ async def _hunt_owned_candidate(
     if row is None:
         raise CandidateLifecycleError(
             "candidate_not_owned",
-            "Candidate was not produced or observed by this Hunt",
+            NOT_OBSERVED_BY_THIS_HUNT,
         )
     return dict(row)
 

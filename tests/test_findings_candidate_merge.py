@@ -211,10 +211,6 @@ def test_merge_sorts_cvss_desc_with_null_scores_last():
     assert {item["id"] for item in page[1:]} == {"f-none", "c"}
 
 
-def test_auto_verify_limit_is_raised_to_eight():
-    assert api_module._AGENT_AUTO_VERIFY_LIMIT == 8
-
-
 def test_findings_endpoint_keeps_candidates_opt_in_and_only_on_the_deep_hunt_surface():
     endpoint = route_source("GET", "/findings")
     # The candidate side of the list lives in its own helper.

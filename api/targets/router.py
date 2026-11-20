@@ -283,11 +283,6 @@ def _public_hypothesis_row(*a: Any, **k: Any) -> Any:
     return _dep("public_hypothesis_row")(*a, **k)
 
 
-def _model(name: str) -> Any:
-    """Return a request model that still lives in the api module."""
-    return _dep("model")(name)
-
-
 QUEUE_NAME = os.environ.get("SCAN_QUEUE_NAME", "scan_jobs")
 
 
@@ -317,10 +312,15 @@ async def list_targets(
     limit: int = Query(100, ge=1, le=500),
     offset: int = Query(0, ge=0)
 ):
-    """List all targets."""
+    """List web targets (one row per registered web app or API), newest first.
+
+    Host assets (``host://<locator>`` rows: hosts added with ``POST /targets/hosts`` and the hosts
+    web targets belong to) are not listed here; ``GET /targets/inventory`` lists them, with their
+    web targets as services. Each row's ``inventory_kind`` and ``asset_id`` say where it sits
+    there: ``service`` of asset ``asset_id``, or an ``asset`` of its own."""
     async with _pool().acquire() as conn:
         query = f"""
-            SELECT t.id,
+            SELECT t.id, t.asset_owner_id,
                    LEFT(t.url, 2049) AS url,
                    LEFT(t.name, 512) AS name,
                    LEFT(t.root_domain, 253) AS root_domain,
@@ -360,9 +360,22 @@ async def list_targets(
             + ("" if include_inactive else " AND is_active = true")
         )
 
+    targets = []
+    for row in rows:
+        target = _public_target_row(row)
+        owner = target.pop('asset_owner_id', None)
+        target['inventory_kind'] = 'service' if owner else 'asset'
+        target['asset_id'] = str(owner or target['id'])
+        targets.append(target)
     return {
-        'targets': [_public_target_row(r) for r in rows],
-        'total': total
+        'targets': targets,
+        'total': total,
+        'host_assets': {
+            'listed_here': False,
+            'list': '/targets/inventory',
+            'note': 'Host assets (host://<locator>) are listed by GET /targets/inventory, '
+                    'with the web targets that belong to them as services.',
+        },
     }
 
 
@@ -667,13 +680,23 @@ async def create_target(request: TargetCreate):
                                              THEN targets.metadata_json - 'created_via'
                                              ELSE targets.metadata_json END
                     RETURNING id, url, name, discovery_source, metadata_json,
-                              root_domain, is_root, (xmax = 0) AS created
+                              root_domain, is_root, is_active, (xmax = 0) AS created
                     """, normalized_target, request.name, root_domain, is_root,
                          json.dumps(_attach_target_note(request.scan_options or {}, request.url, target_note, scheme_inferred)),
                          json.dumps({"cohort": requested_cohort}) if requested_cohort else json.dumps({}),
                          _default_asm_enabled_for_new_web_target("manual"),
                          json.dumps(_default_asm_config_for_new_web_target("manual")))
 
+                # Adding a target that was archived restores it, as PATCH is_active=true does
+                # (its services archived with it come back; schedules stay paused). The upsert
+                # returned the archived row unchanged, so a re-added target stayed archived:
+                # authorizing it then answered 200 while every reader saw no authorization.
+                restored_services = None
+                if row.get('is_active') is False:
+                    from .archive import restore_archived_members
+                    restored_services = await restore_archived_members(conn, row['id'])
+                    await conn.execute(
+                        "UPDATE targets SET is_active=true, updated_at=NOW() WHERE id=$1", row['id'])
                 response = {
                     'id': str(row['id']),
                     'url': row['url'],
@@ -688,11 +711,14 @@ async def create_target(request: TargetCreate):
                         discovery_source=row.get('discovery_source'),
                         metadata=_decode_json_value(row.get('metadata_json')) or {},
                     ),
-                    'status': 'created' if row['created'] else 'already_exists',
+                    'status': ('created' if row['created']
+                               else 'restored' if restored_services is not None else 'already_exists'),
                     # The stored name: a reused target with no name of its own takes the one given
                     # here, which a caller only learned by reading the target again.
                     'name': row.get('name'),
                 }
+                if restored_services is not None:
+                    response['services_restored'] = restored_services
                 # Surface warning if path/query was stripped
                 if target_note:
                     response['warning'] = target_note
@@ -759,6 +785,25 @@ async def get_target_authorization(target_id: str):
     return {"target_id": str(target_uuid), "authorization": authorization}
 
 
+@router.get("/targets/{target_id}/traffic")
+async def get_target_traffic(target_id: str, since: Optional[datetime] = None):
+    """Which Scans, retests and Hunts sent requests to this target, and when.
+
+    Each run's requests carry ``X-ShakerScan-Run: <run>`` (``scan:<id>`` or ``hunt:<id>``), so a
+    security team can match what it saw to the run listed here: first and last request, request
+    count, how many answers were 5xx, 429 or errors, and the target addresses connected to. Read
+    from the request archive; at most 200 runs, newest first. ``since`` limits it to requests
+    sent from then on.
+    """
+    from .traffic import target_traffic
+    target_uuid = _uuid_or_400(target_id, "target id")
+    async with _pool().acquire() as conn:
+        if not await conn.fetchval("SELECT 1 FROM targets WHERE id=$1", target_uuid):
+            raise HTTPException(status_code=404, detail="Target not found")
+        runs = await target_traffic(conn, target_uuid, since=since)
+    return {"target_id": str(target_uuid), "header": "X-ShakerScan-Run", "runs": runs}
+
+
 @router.post("/targets/{target_id}/authorization")
 async def authorize_target(target_id: str, request: TargetAuthorizationRequest):
     """Authorize a target once: a standing receipt every active scan and Hunt reuses.
@@ -774,7 +819,7 @@ async def authorize_target(target_id: str, request: TargetAuthorizationRequest):
                 environment=request.environment, risk_tier=request.risk_tier,
             )
         except target_authorization.TargetAuthorizationError as exc:
-            status = 404 if getattr(exc, "code", None) == "not_found" else 400
+            status = {"not_found": 404, "archived": 409}.get(getattr(exc, "code", None), 400)
             raise HTTPException(status_code=status, detail=str(exc)) from exc
     return {"target_id": str(target_uuid), "authorization": authorization}
 
@@ -3202,6 +3247,8 @@ def _authorized_for_active_testing_sql(column: str = "t.url") -> str:
 def _public_target_row(row: Any) -> dict[str, Any]:
     """Serialize a target without exposing credentials stored in scan options."""
     target = row_to_dict(row)
+    from .archive import public_target_url
+    target["url"] = public_target_url(target.get("url"))
     for key, limit in (("url", 2049), ("name", 512), ("root_domain", 253)):
         value = target.get(key)
         if isinstance(value, str) and len(value) > limit:

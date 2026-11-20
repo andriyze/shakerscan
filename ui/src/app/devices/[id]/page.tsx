@@ -11,7 +11,7 @@ import { DeviceCollectionEnvironments } from '@/components/DeviceCollectionEnvir
 import { Suspense, useCallback, useEffect, useRef, useState } from 'react'
 import { useParams, useSearchParams, useRouter } from 'next/navigation'
 import { Activity, Bot, ChevronDown, ChevronUp, CircleHelp, ExternalLink, FileJson, Globe, KeyRound, MapPin, Pencil, Router, Trash2, Upload, Wifi, WifiOff } from 'lucide-react'
-import { changeDeviceLocator, createDeviceCredential, createDeviceRequestCollection, deactivateDeviceCredential, deactivateDeviceRequestCollection, formatDate, getDevice, getDeviceCredentials, getDeviceReadiness, getDeviceRequestCollection, getDeviceRequestCollections, getDeviceScanActivity, getScan, listDeviceAgentSessions, renameDevice, scanDevice, type DeviceAgentRunSummary, type DeviceCredentialProfile, type DeviceDetailResponse, type DeviceRequestCollection, type DeviceRequestCollectionRequest, type DeviceScanActivity, type DeviceService, type Scan } from '@/lib/api'
+import { changeDeviceLocator, createDeviceCredential, createDeviceRequestCollection, deactivateDeviceCredential, deactivateDeviceRequestCollection, formatDate, getDevice, getDeviceCredentials, getDeviceReadiness, getDeviceRequestCollection, getDeviceRequestCollections, getDeviceScanActivity, getScan, renameDevice, scanDevice, type DeviceCredentialProfile, type DeviceDetailResponse, type DeviceRequestCollection, type DeviceRequestCollectionRequest, type DeviceScanActivity, type DeviceService, type Scan } from '@/lib/api'
 import { Button, Card, EmptyState, ErrorState, Field, Input, Modal, PageHeader, RecordNotFound, ScanStatusBadge, Select, TableSkeleton, Textarea, useToast } from '@/components/ui'
 import { isNotFoundError } from '@/lib/fetchLayer.mjs'
 import { authorizedByPhrase } from '@/lib/assetAuthorization.mjs'
@@ -21,9 +21,9 @@ import { usePoll } from '@/lib/usePoll'
 
 const DEVICE_LIVE_REFRESH_MS = 10_000
 const DEVICE_IDLE_REFRESH_MS = 60_000
-type DevicePagePart = 'credentials' | 'collections' | 'hunts' | 'readiness'
+type DevicePagePart = 'credentials' | 'collections' | 'readiness'
 const DEVICE_PAGE_PART_LABELS: Record<DevicePagePart, string> = {
-  credentials: 'authentication profiles', collections: 'request collections', hunts: 'Hunt history', readiness: 'network scan readiness',
+  credentials: 'authentication profiles', collections: 'request collections', readiness: 'network scan readiness',
 }
 
 const TERMINAL_SCAN_STATUSES: readonly string[] = ['completed', 'failed', 'cancelled']
@@ -104,7 +104,6 @@ function DeviceDetailContent() {
   const [requestCollections, setRequestCollections] = useState<DeviceRequestCollection[]>([])
   const [requestPreviews, setRequestPreviews] = useState<Record<string, { loading: boolean; error: string | null; requests: DeviceRequestCollectionRequest[]; total: number }>>({})
   const requestPreviewInFlight = useRef(new Set<string>())
-  const [deviceHunts, setDeviceHunts] = useState<DeviceAgentRunSummary[]>([])
   const [requestImportSaving, setRequestImportSaving] = useState(false)
   const [requestImport, setRequestImport] = useState<{ name: string; format: 'auto' | 'postman_collection' | 'har' | 'openapi'; document: Record<string, unknown> | null; documentFile: string; environment: Record<string, unknown> | null; environmentFile: string; baseUrl: string }>({ name: '', format: 'auto', document: null, documentFile: '', environment: null, environmentFile: '', baseUrl: '' })
   const [credentialSaving, setCredentialSaving] = useState(false)
@@ -135,12 +134,11 @@ function DeviceDetailContent() {
     // The parts stored under the device are read once the device answered, so an id that is no
     // device costs one refused read, not three.
     const deviceRead = getDevice(deviceId)
-    const [device, credentialData, collectionData, huntData, readinessData] = await Promise.allSettled([deviceRead, deviceRead.then(() => getDeviceCredentials(deviceId)), deviceRead.then(() => getDeviceRequestCollections(deviceId)), listDeviceAgentSessions({ device_target_id: deviceId, limit: 5 }), getDeviceReadiness()])
+    const [device, credentialData, collectionData, readinessData] = await Promise.allSettled([deviceRead, deviceRead.then(() => getDeviceCredentials(deviceId)), deviceRead.then(() => getDeviceRequestCollections(deviceId)), getDeviceReadiness()])
     const unavailable: DevicePagePart[] = []
     if (device.status === 'fulfilled') { setData(device.value); setFailed(false); setMissing(false) } else { setFailed(true); setMissing(isNotFoundError(device.reason)) }
     if (credentialData.status === 'fulfilled') setCredentials(credentialData.value.profiles || []); else unavailable.push('credentials')
     if (collectionData.status === 'fulfilled') setRequestCollections(collectionData.value.collections || []); else unavailable.push('collections')
-    if (huntData.status === 'fulfilled') setDeviceHunts(huntData.value.runs || []); else unavailable.push('hunts')
     if (readinessData.status === 'fulfilled') { const readiness = readinessData.value; setWorkerReady(readiness.enabled && readiness.status === 'ready'); setReadinessState(readiness) } else unavailable.push('readiness')
     setUnavailableParts(unavailable)
     setLoading(false)
@@ -431,7 +429,7 @@ function DeviceDetailContent() {
   return (
     <div className="mx-auto max-w-7xl">
       <PageHeader backHref="/devices" backLabel="Connected devices" title={device.name} description={device.primary_locator} icon={<Router className="h-6 w-6" />} actions={<>        <Link href={`/targets/${deviceId}/asset`}><Button variant="secondary">Asset overview</Button></Link>
-<RetireDeviceButton deviceId={device.id} name={device.name} onRetired={() => router.push('/devices')} /><Button variant="secondary" onClick={() => { setRenameName(device.name); setRenameOpen(true) }}><Pencil className="h-4 w-4" /> Rename</Button><Button variant="secondary" onClick={() => { setLocatorForm({ locator: device.primary_locator, reason: '', confirm_same_device: false }); setLocatorOpen(true) }}><MapPin className="h-4 w-4" /> Change address</Button><Link href={`/devices/${device.id}/agent`} className="inline-flex items-center gap-2 rounded-lg border border-violet-500/30 bg-violet-500/10 px-3 py-2 text-sm text-violet-200 hover:bg-violet-500/20"><Bot className="h-4 w-4" /> Hunt</Link><Link href={`/findings?device_target_id=${device.id}&freshness=all`} className="rounded-lg border border-gray-700 bg-gray-800 px-3 py-2 text-sm text-gray-200 hover:bg-gray-700">View findings</Link><Button disabled={!workerReady} title={workerReady ? 'Scan target' : readinessState?.message || 'Network scanning is unavailable'} onClick={() => { setScan({ profile: 'inventory', safety_profile: 'safe_remote', include_web_dast: true, web_scan_type: 'standard', port_hints: '', ssh_credential_profile_id: '', web_credential_profile_id: '', include_ssh_host_review: false, request_collection_ids: [], confirm_request_replay: false, allow_state_changing_requests: false, allow_untrusted_tls_credentials: false, confirm_authorized: false }); setScanOpen(true) }}>Start network scan</Button></>} />
+<RetireDeviceButton deviceId={device.id} name={device.name} onRetired={() => router.push('/devices')} /><Button variant="secondary" onClick={() => { setRenameName(device.name); setRenameOpen(true) }}><Pencil className="h-4 w-4" /> Rename</Button><Button variant="secondary" onClick={() => { setLocatorForm({ locator: device.primary_locator, reason: '', confirm_same_device: false }); setLocatorOpen(true) }}><MapPin className="h-4 w-4" /> Change address</Button><Link href={`/hunt?target=${encodeURIComponent(device.id)}`} className="inline-flex items-center gap-2 rounded-lg border border-violet-500/30 bg-violet-500/10 px-3 py-2 text-sm text-violet-200 hover:bg-violet-500/20"><Bot className="h-4 w-4" /> Hunt</Link><Link href={`/findings?device_target_id=${device.id}&freshness=all`} className="rounded-lg border border-gray-700 bg-gray-800 px-3 py-2 text-sm text-gray-200 hover:bg-gray-700">View findings</Link><Button disabled={!workerReady} title={workerReady ? 'Scan target' : readinessState?.message || 'Network scanning is unavailable'} onClick={() => { setScan({ profile: 'inventory', safety_profile: 'safe_remote', include_web_dast: true, web_scan_type: 'standard', port_hints: '', ssh_credential_profile_id: '', web_credential_profile_id: '', include_ssh_host_review: false, request_collection_ids: [], confirm_request_replay: false, allow_state_changing_requests: false, allow_untrusted_tls_credentials: false, confirm_authorized: false }); setScanOpen(true) }}>Start network scan</Button></>} />
 
       <NetworkScanReadiness readiness={readinessState} />
 
@@ -439,7 +437,6 @@ function DeviceDetailContent() {
         <span>Could not load {unavailableParts.map(part => DEVICE_PAGE_PART_LABELS[part]).join(', ')}. The rest of the page is current.</span>
         <Button size="sm" variant="secondary" loading={retryingParts} onClick={async () => { setRetryingParts(true); try { await load() } finally { setRetryingParts(false) } }}>Retry</Button>
       </div>}
-      {deviceHunts.length > 0 && <Card className="mb-4 border-violet-500/20 bg-violet-500/4 p-4"><div className="flex flex-wrap items-center justify-between gap-3"><div><p className="text-sm font-medium text-violet-100">Legacy device-agent history</p><p className="mt-1 text-xs text-gray-500">Read-only investigations created before canonical Hunt · {deviceHunts.length} shown</p></div><div className="flex flex-wrap gap-2">{deviceHunts.slice(0, 3).map((run) => <Link key={run.id} href={`/hunt?target=${encodeURIComponent(device.id)}&legacy_run=${encodeURIComponent(run.id)}`} className="rounded-sm border border-violet-500/25 bg-gray-950/50 px-3 py-1.5 text-xs text-violet-200 hover:bg-violet-500/10">{run.status.replace(/_/g, ' ')} · {run.actions_used} actions · {run.scans_queued} scans</Link>)}<Link href={`/hunt?target=${encodeURIComponent(device.id)}`} className="rounded-sm px-3 py-1.5 text-xs text-blue-400 hover:text-blue-300">Open current Hunt</Link></div></div></Card>}
 
       <SharedServicePorts knowledge={data.service_intelligence} targetId={deviceId} />
       <TargetSkillEditor key={deviceId} targetId={deviceId} targetName={device.name} />

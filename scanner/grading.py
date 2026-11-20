@@ -657,32 +657,6 @@ def grade(report: dict[str, Any]) -> dict[str, Any]:
     avg_cvss = round(sum(raw_cvss_scores) / len(raw_cvss_scores), 1) if raw_cvss_scores else 0
     max_cvss = max(raw_cvss_scores) if raw_cvss_scores else 0
 
-    def _confidence_weight(finding: dict[str, Any]) -> float:
-        """Weight grade impact by verification quality."""
-        if is_trusted_ai_false_positive(finding):
-            return 0.0
-        if has_deterministic_exploit_proof(finding):
-            return 1.0
-        if finding.get("suspected") or finding.get("needs_verification"):
-            return 0.25
-        confidence = finding.get("confidence")
-        try:
-            confidence_f = float(confidence)
-        except (TypeError, ValueError):
-            confidence_f = 0.6
-        if confidence_f < 0.5:
-            return 0.25
-        if confidence_f < 0.65:
-            return 0.5
-        if confidence_f < 0.8:
-            return 0.75
-        return 1.0
-
-    def calc_weighted_penalty(findings_list: list, per_finding: int, max_penalty: int) -> int:
-        """Calculate confidence-aware penalty excluding likely false positives."""
-        penalty = sum(per_finding * _confidence_weight(f) for f in findings_list)
-        return min(max_penalty, int(round(penalty)))
-
     # Finding notes use the same proof weighting as the canonical risk scorer. The final
     # score below also comes from that scorer; this function owns narrative only.
     if critical_findings:

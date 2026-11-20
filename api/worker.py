@@ -13,7 +13,6 @@ import json
 import os
 import re
 import shutil
-import signal
 import socket
 import subprocess
 import sys
@@ -68,6 +67,7 @@ from retest_contract import (
     validate_retest_job_payload,
 )
 from runtime.json_fields import json_array_field, json_object_field, strip_null_bytes
+from runtime import target_pacing
 from runtime.nuclei_index import ensure_nuclei_template_index
 from runtime.heavy_slots import HeavyScannerSlot, HeavySlotUnavailable
 from runtime.scanner_cancel import ThrottledCancelCheck, shared_client
@@ -647,27 +647,6 @@ def _scanner_auth_config_from_options(options: dict[str, Any]) -> dict[str, Any]
             continue
         config[key] = value
     return config
-
-
-def _write_scanner_auth_config_file(config: dict[str, Any]) -> str | None:
-    if not config:
-        return None
-    fd, path = tempfile.mkstemp(prefix="shakerscan-auth-", suffix=".json")
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            json.dump(config, f, sort_keys=True, separators=(",", ":"))
-        os.chmod(path, 0o600)
-        return path
-    except Exception:
-        try:
-            os.close(fd)
-        except OSError:
-            pass
-        try:
-            os.unlink(path)
-        except OSError:
-            pass
-        raise
 
 
 def _tool_receipt_hash(payload: dict[str, Any]) -> str:
@@ -2419,17 +2398,6 @@ async def init_db():
         await run_schema_migrations(db_pool, redis_provider=get_redis)
 
 
-def _scanner_process_kwargs() -> dict[str, Any]:
-    """Start scanner subprocesses in their own session on POSIX.
-
-    That lets cancellation terminate the whole scanner process group, including
-    child tools spawned by scanner.py.
-    """
-    if os.name == "posix":
-        return {"start_new_session": True}
-    return {}
-
-
 def _scan_cancel_requested(scan_id: str | None, redis_client: Any | None = None) -> bool:
     if not scan_id:
         return False
@@ -2496,60 +2464,6 @@ def _descendant_process_group_ids(root_pid: int, proc_root: str = "/proc") -> se
             pgids.add(pid_pgid[pid])
         stack.extend(children.get(pid, []))
     return pgids
-
-
-async def _terminate_scanner_process(proc: Any) -> None:
-    """Terminate a scanner subprocess, preferring the process group on POSIX."""
-    if getattr(proc, "returncode", None) is not None:
-        return
-
-    try:
-        pid = getattr(proc, "pid", None)
-        if os.name == "posix" and pid:
-            os.killpg(os.getpgid(pid), signal.SIGTERM)
-        else:
-            proc.terminate()
-    except ProcessLookupError:
-        return
-    except Exception:
-        try:
-            proc.terminate()
-        except Exception:
-            pass
-
-    try:
-        await asyncio.wait_for(proc.wait(), timeout=SCAN_KILL_GRACE_SECONDS)
-        return
-    except asyncio.TimeoutError:
-        pass
-
-    try:
-        pid = getattr(proc, "pid", None)
-        if os.name == "posix" and pid:
-            # Reach tool subprocesses that run in their OWN session (outside scanner.py's group) so a
-            # starved-event-loop cancellation cannot orphan them. Enumerate descendant groups while the
-            # tree is still intact, then SIGKILL them and the scanner's own group. Best-effort: the
-            # descendant sweep is a no-op where /proc is unavailable, leaving prior behavior unchanged.
-            for descendant_pgid in _descendant_process_group_ids(pid):
-                try:
-                    os.killpg(descendant_pgid, signal.SIGKILL)
-                except (ProcessLookupError, PermissionError):
-                    pass
-            os.killpg(os.getpgid(pid), signal.SIGKILL)
-        else:
-            proc.kill()
-    except ProcessLookupError:
-        return
-    except Exception:
-        try:
-            proc.kill()
-        except Exception:
-            pass
-
-    try:
-        await asyncio.wait_for(proc.wait(), timeout=max(1.0, SCAN_KILL_GRACE_SECONDS / 2))
-    except Exception:
-        pass
 
 
 # High-signal scanner stderr lines to mirror to the worker's stdout (so
@@ -2641,13 +2555,6 @@ def _take_scan_slot(r, slot_id: str) -> bool:
                 "fleet active-scan admission is unavailable"
             ) from exc
         return True
-
-
-def _release_scan_slot(r, slot_id: str) -> None:
-    try:
-        r.zrem(ACTIVE_SCAN_SLOTS_KEY, slot_id)
-    except Exception:
-        pass
 
 
 async def _await_scan_slot(job_id: str | None, scan_id: str | None) -> tuple[Any, str | None, bool]:
@@ -9296,55 +9203,6 @@ async def _execute_reserved_scan_capability(
     return persisted, False
 
 
-def _deterministic_scan_reservation_summary(
-    stored: Any,
-    *,
-    idempotent_redelivery: bool,
-) -> dict[str, Any]:
-    receipt = dict(stored.receipt or {})
-    return {
-        "schema_version": "deterministic-scan-execution-receipt/v1",
-        "capability_name": "scan.execute",
-        "status": str(receipt.get("status") or "failed"),
-        "partial": bool(receipt.get("partial")),
-        "timed_out": bool(receipt.get("timed_out")),
-        "budget_consumed": dict(stored.record.actual),
-        "receipt": _scan_capability_receipt_reference(receipt),
-        "durable_budget_settled": bool(stored.record.terminal),
-        "idempotent_redelivery": bool(idempotent_redelivery),
-    }
-
-
-def _deterministic_scan_terminal_failure_result(
-    *,
-    target: str,
-    stored: Any,
-    summary: Mapping[str, Any],
-) -> dict[str, Any]:
-    receipt = dict(stored.receipt or {})
-    errors = [str(item) for item in receipt.get("errors") or [] if str(item)]
-    reason = (
-        errors[0]
-        if errors else stored.record.failure_reason
-        or "deterministic_scan_execution_not_recoverable"
-    )
-    return {
-        "target": target,
-        "error": str(reason)[:1000],
-        "result": {"score": None, "grade": None},
-        "findings": [],
-        "coverage": {
-            "status": "failed",
-            "reasons": ["deterministic_scan_execution_not_replayed"],
-        },
-        "scan_metadata": {
-            "status": "failed",
-            "deterministic_scan_redelivery_blocked": True,
-        },
-        "deterministic_scan_execution": dict(summary),
-    }
-
-
 def _skipped_scan_auth_session_summary(reason: str) -> dict[str, Any]:
     return {
         "schema_version": "canonical-scan-auth-session-execution/v1",
@@ -10843,26 +10701,6 @@ def _scan_authz_verification_summary_from_stored(
     }
 
 
-def _scan_authz_route_inventory(
-    options: Mapping[str, Any],
-    *,
-    crawl_observations: Any = None,
-    content_observations: Any = None,
-) -> list[str]:
-    routes: list[str] = []
-    for item in options.get("custom_endpoints") or []:
-        if isinstance(item, str) and item.strip():
-            routes.append(item.strip())
-    for observations in (crawl_observations, content_observations):
-        for item in observations or []:
-            if not isinstance(item, Mapping) or not item.get("url"):
-                continue
-            method = str(item.get("method") or "GET").upper()
-            if method == "GET":
-                routes.append(str(item["url"]))
-    return list(dict.fromkeys(routes))[:50]
-
-
 async def _execute_scan_authz_verification_capability(
     target_url: str,
     routes: list[str],
@@ -11349,7 +11187,8 @@ async def _execute_reserved_deterministic_scan(
             approval_receipt_id=admission.plan.policy.approval_receipt_id, authority=authority,
             credential_check=build_scan_credential_check(db_pool, options=normalized, target=execution.target_binding,
                 scan_id=scan_id, session_check=dispatcher.authentication_health_status),
-            user_cancelled=lambda: _scan_cancel_requested(scan_id), deadline=deadline)
+            user_cancelled=lambda: _scan_cancel_requested(scan_id), deadline=deadline,
+            traffic_attribution=options.get("traffic_attribution") is not False)
 
     async def cancelled_report() -> dict[str, Any]:
         async def load_allocation() -> Any:
@@ -12015,23 +11854,6 @@ def _empty_scan_request_collection_replay_summary() -> dict[str, Any]:
         "durable_budget_settled": True,
         "network_binding": "runtime_target_binding",
     }
-
-
-def _scan_request_collection_capability_names(
-    options: Mapping[str, Any],
-) -> tuple[str, ...]:
-    names: list[str] = []
-    for item in options.get("request_collections") or ():
-        if not isinstance(item, Mapping):
-            continue
-        replay_policy = str(item.get("replay_policy") or "").strip().lower()
-        name = {
-            "safe_reads": "collections.replay_safe",
-            "confirmed_active": "collections.replay_active",
-        }.get(replay_policy)
-        if name and name not in names:
-            names.append(name)
-    return tuple(names)
 
 
 async def _bind_scan_replay_primary_credential(
@@ -14196,59 +14018,6 @@ async def _record_endpoint_telemetry_attempts(
         'partial_ids': partial_ids,
         'error_ids': error_ids,
     }
-
-
-async def _create_full_coverage_campaign(
-    conn,
-    *,
-    target_id: str,
-    parent_scan_id: str,
-    options: dict[str, Any],
-    shard_count: int,
-    harvested_count: int,
-    coverage_auth_states: list[str],
-    allocation_mode: str,
-    strategy: str = 'coverage',
-    check_families: list[str] | None = None,
-) -> str:
-    custom_budget = options.get('custom_budget') if isinstance(options.get('custom_budget'), dict) else {}
-    normalized_strategy = str(strategy or 'coverage').strip().lower()
-    families = (
-        [asm_inventory.normalize_check_family(f) for f in check_families]
-        if check_families
-        else (['all', 'sqli', 'xss'] if normalized_strategy == 'coverage_family' else ['all'])
-    )
-    return await asm_inventory.create_campaign(
-        conn,
-        target_id,
-        mode=asm_inventory.CAMPAIGN_FULL_COVERAGE,
-        requested_by=str(options.get('requested_by') or options.get('triggered_by') or 'api'),
-        parent_scan_id=parent_scan_id,
-        priority=150,
-        budget_profile=options.get('budget_profile'),
-        wide_budget={
-            'harvested_endpoints': harvested_count,
-            'shard_count': shard_count,
-            'coverage_per_shard_cap': options.get('coverage_per_shard_cap'),
-            'coverage_dynamic_batch_size': options.get('coverage_dynamic_batch_size'),
-            'coverage_dynamic_max_batches': options.get('coverage_dynamic_max_batches'),
-            'coverage_max_shards': options.get('coverage_max_shards'),
-            'active_worklist_max': custom_budget.get('active_worklist_max'),
-            'allocation_mode': allocation_mode,
-            'expected_attempts': harvested_count * max(1, len(coverage_auth_states or ['anonymous'])) * len(families),
-        },
-        deep_budget={
-            'exploit_depth': bool(options.get('exploit_depth')),
-            'custom_budget': custom_budget,
-        },
-        check_families=families,
-        auth_states=coverage_auth_states,
-        metadata_json={
-            'parallel_strategy': normalized_strategy,
-            'coverage_allocation': allocation_mode,
-            'family_aware_attempts': normalized_strategy == 'coverage_family',
-        },
-    )
 
 
 def _canonical_parent_scan_job(value: Any) -> CanonicalScanJob | None:
@@ -18634,6 +18403,8 @@ async def _execute_agent_scanner_process(
             httpx_configuration = HttpxCredentialConfiguration(
                 agent_tools.httpx_credential_config_bytes(job_data["trusted_headers"]))
             runtime_paths["httpx_config_fd"] = httpx_configuration.descriptor
+        options = await target_pacing.pace_scanner_options(db_pool, job_data, options, execution_target, tool=name,
+            wall_seconds=int(reserved_budget.get("tool_wall_seconds") or 0), heartbeat=heartbeat, cancelled=cancelled, error=agent_tools.AgentToolError)
         process_plan = agent_tools.build_enforced_scanner_plan(
             name,
             execution_target,

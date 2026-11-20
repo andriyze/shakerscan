@@ -316,19 +316,6 @@ def validate_action_lease(
         raise ScanExecutionBackendError("action lease differs from the persisted Scan plan")
 
 
-def validate_lease_freshness(
-    *,
-    expires_at: datetime,
-    now: datetime | None = None,
-) -> None:
-    """Common strict lease-time check for local and broker transports."""
-    current = now or datetime.now(timezone.utc)
-    if expires_at.tzinfo is None:
-        raise ScanExecutionBackendError("lease expiry must be timezone-aware")
-    if expires_at <= current:
-        raise ActionLeaseLost("action lease expired")
-
-
 def _json_object(value: Any, *, name: str) -> dict[str, Any]:
     if isinstance(value, str):
         try:

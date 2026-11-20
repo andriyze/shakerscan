@@ -28,7 +28,9 @@ try:
         HuntExecutor,
     )
     from runtime.models import TargetBinding
+    from scanner_tools import traffic_attribution
 except ModuleNotFoundError:  # package imports in host-side tests
+    from scanner.scanner_tools import traffic_attribution
     from .capability_executor import (
         Cancelled,
         CapabilityAdapterResult,
@@ -249,17 +251,19 @@ class HuntActionDispatcher:
     ) -> HuntActionResult:
         spec, _validated = self.validate(request)
         adapter = factory.create(spec, request)
-        execution = await self.executor.execute(
-            CapabilityExecutionContext(
-                specification=spec,
-                target=request.target,
-                requested_budget=request.requested_budget,
-                adapter_managed_cancellation=adapter_managed_cancellation,
-            ),
-            adapter,
-            heartbeat=heartbeat,
-            cancelled=cancelled,
-        )
+        # Everything this action sends names its Hunt (traffic_attribution).
+        with traffic_attribution.bound_run("hunt", request.hunt_id):
+            execution = await self.executor.execute(
+                CapabilityExecutionContext(
+                    specification=spec,
+                    target=request.target,
+                    requested_budget=request.requested_budget,
+                    adapter_managed_cancellation=adapter_managed_cancellation,
+                ),
+                adapter,
+                heartbeat=heartbeat,
+                cancelled=cancelled,
+            )
         return HuntActionResult.from_execution(request, spec, execution)
 
 

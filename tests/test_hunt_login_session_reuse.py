@@ -202,7 +202,7 @@ def test_outside_a_hunt_and_for_other_content_there_is_no_outline():
 
 # --- log in, then reuse the session: the worker end to end --------------------------------------
 
-async def hub_server(wire, *, session=SESSION):
+async def hub_server(wire, *, session=SESSION, short_cookie=None):
     async def serve(reader, writer):
         try:
             head = await reader.readuntil(b"\r\n\r\n")
@@ -216,6 +216,8 @@ async def hub_server(wire, *, session=SESSION):
                     response = ("HTTP/1.1 303 See Other\r\nLocation: /hub/\r\n"
                                 f"Set-Cookie: hub_session={session}; HttpOnly; SameSite=Lax; Path=/hub\r\n"
                                 f"Set-Cookie: hub_flash={FLASH}; Path=/hub\r\n"
+                                + (f"Set-Cookie: security={short_cookie}; Path=/hub\r\n" if short_cookie else "")
+                                + 
                                 "Set-Cookie: hub_old=; Max-Age=0; Path=/hub\r\n"
                                 "Content-Length: 0\r\nConnection: close\r\n\r\n").encode()
                 else:
@@ -260,6 +262,10 @@ def test_a_hunt_logs_in_and_reads_signed_in_pages_without_seeing_the_cookie():
             # The login's answer: its status and the cookies' names and attributes, never values.
             assert {cookie["name"] for cookie in answer["set_cookie_metadata"]} >= {"hub_session", "hub_flash"}
             assert next(c for c in answer["set_cookie_metadata"] if c["name"] == "hub_session")["httponly"]
+            # The hidden body says how to read the page as this session (agents guessed withheld
+            # references into it instead).
+            assert answer["workflow_values_visible"] is False
+            assert "binds this capture" in answer["workflow_values_hint"]
 
             orders, _ = await execute(conn, {"method": "GET", "path": "/hub/orders",
                                              "request_bindings": _bound(login)}, "hub-orders")
@@ -269,7 +275,7 @@ def test_a_hunt_logs_in_and_reads_signed_in_pages_without_seeing_the_cookie():
             sent_cookie = re.search(rb"(?im)^cookie: ([^\r\n]*)", sent)[1].decode()
             assert sorted(sent_cookie.split("; ")) == sorted([f"hub_session={SESSION}", f"hub_flash={FLASH}"])
             response = orders["typed_output"]["records"][0]["response"]
-            assert response["status"] == 200
+            assert response["status"] == 200 and "workflow_values_hint" not in response
             # The planner keeps the signed-in page: its links, forms and text.
             assert "/hub/api/orders/1001" in response["html"]["links"]
             assert "Good morning, Ada" in response["html"]["text_sample"]
@@ -319,6 +325,100 @@ def test_a_short_session_cookie_is_sent_but_its_answer_is_reduced_to_the_status(
             assert response["status"] == 200 and response["workflow_values_visible"] is False
             assert "html" not in response and "body_sample" not in response
     asyncio.run(scenario())
+
+
+def test_a_short_cookie_beside_the_session_is_named_and_left_out_with_capture_cookies():
+    """A login that also sets a short cookie (DVWA's security=low) hid every signed-in page: the
+    hidden answer now says so, and a capture that keeps only the session cookies reads them."""
+    async def scenario():
+        wire = []
+        server = await hub_server(wire, short_cookie="low")
+        async with server:
+            conn = Connection(f"http://fixture.test:{server.sockets[0].getsockname()[1]}")
+            login, _ = await execute(conn, LOGIN, "hub-login-shortcookie")
+            orders, _ = await execute(conn, {"method": "GET", "path": "/hub/orders",
+                                             "request_bindings": _bound(login)}, "hub-orders-shortcookie")
+            response = orders["typed_output"]["records"][0]["response"]
+            assert response["workflow_values_visible"] is False and "html" not in response
+            assert "Capture only the session cookie" in response["workflow_values_hint"]
+
+            only = {**LOGIN, "capture": [{"name": "session", "header": "Set-Cookie",
+                                          "cookies": ["hub_session", "hub_flash"]}]}
+            login2, _ = await execute(conn, only, "hub-login-only-session")
+            orders2, _ = await execute(conn, {"method": "GET", "path": "/hub/orders",
+                                              "request_bindings": _bound(login2)}, "hub-orders-only-session")
+            sent_cookie = re.search(rb"(?im)^cookie: ([^\r\n]*)", wire[-1][0])[1].decode()
+            assert sorted(sent_cookie.split("; ")) == sorted([f"hub_session={SESSION}", f"hub_flash={FLASH}"])
+            response2 = orders2["typed_output"]["records"][0]["response"]
+            assert response2["status"] == 200 and "Good morning, Ada" in response2["html"]["text_sample"]
+            assert "workflow_values_hint" not in response2
+    asyncio.run(scenario())
+
+
+TOKEN = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJhZGEifQ.fixture-signature-0123456789"
+
+
+async def token_server(wire, *, token=TOKEN):
+    """Fixture API: a JSON login answering {"token": ...}; /api/me answers as that bearer and
+    echoes the token back (as some APIs do), so the test sees whether the echo is withheld."""
+    async def serve(reader, writer):
+        try:
+            head = await reader.readuntil(b"\r\n\r\n")
+            length = re.search(rb"(?im)^content-length: (\d+)", head)
+            body = await reader.readexactly(int(length[1])) if length else b""
+            wire.append((head, body))
+            auth = re.search(rb"(?im)^authorization: Bearer ([^\r\n]*)", head)
+            if head.startswith(b"POST /api/login "):
+                content = json.dumps({"token": token}).encode()
+                status = b"200 OK"
+            elif auth and auth[1].decode() == token:
+                content = json.dumps({"name": "Ada", "orders": [1001], "session_token": token}).encode()
+                status = b"200 OK"
+            else:
+                content, status = b'{"error":"unauthorized"}', b"401 Unauthorized"
+            writer.write(b"HTTP/1.1 " + status + b"\r\nContent-Type: application/json\r\nConnection: close\r\n"
+                         b"Content-Length: " + str(len(content)).encode() + b"\r\n\r\n" + content)
+            await writer.drain()
+        finally:
+            writer.close()
+            await writer.wait_closed()
+    return await asyncio.start_server(serve, "127.0.0.1", 0)
+
+
+@pytest.mark.parametrize("token,readable", [(TOKEN, True), ("pin-4821", False)])
+def test_a_captured_bearer_token_keeps_signed_in_answers_readable_and_withheld(token, readable):
+    """A JWT captured from a login's JSON made every signed-in answer status-only, while the same
+    token sent as a withheld_ref kept them readable: agents logged in twice to work around it."""
+    async def scenario():
+        wire = []
+        server = await token_server(wire, token=token)
+        async with server:
+            conn = Connection(f"http://fixture.test:{server.sockets[0].getsockname()[1]}")
+            login, _ = await execute(conn, {"method": "POST", "path": "/api/login", "json_body": {"u": "ada"},
+                                            "capture": [{"name": "jwt", "json_pointer": "/token"}]}, "api-login-" + token[:3])
+            assert login["status"] == "success", login
+            me, _ = await execute(conn, {"method": "GET", "path": "/api/me", "request_bindings": [{
+                **login["captures"][0], "header": "Authorization", "prefix": "Bearer "}]}, "api-me-" + token[:3])
+            assert f"Bearer {token}".encode() in wire[-1][0]
+            response = me["typed_output"]["records"][0]["response"]
+            assert response["status"] == 200
+            public = json.dumps(me)
+            assert token not in public
+            if readable:
+                assert response.get("workflow_values_visible") is not False and "Ada" in public
+            else:
+                assert response["workflow_values_visible"] is False and "Ada" not in public
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("capture", [
+    {"name": "s", "json_pointer": "/token", "cookies": ["sid"]},
+    {"name": "s", "header": "Location", "cookies": ["sid"]},
+    {"name": "s", "header": "Set-Cookie", "cookies": []},
+])
+def test_capture_cookies_is_only_a_set_cookie_filter(capture):
+    with pytest.raises(CapabilityInputContractError):
+        CAPABILITY_REGISTRY.validate_hunt_input("http.request", {"method": "GET", "path": "/", "capture": [capture]})
 
 
 # --- artifact.inspect reads a longer signed-in page as the same session -------------------------

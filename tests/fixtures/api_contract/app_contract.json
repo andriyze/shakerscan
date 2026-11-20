@@ -8,7 +8,6 @@
     "RequestGuardMiddleware",
     "PublicV2BodyLimitMiddleware",
     "PublicV2IdempotencyMiddleware",
-    "LegacyHuntIsolationMiddleware",
     "ListETagMiddleware"
   ],
   "exception_handlers": [
@@ -18,5 +17,5 @@
     "ValueError",
     "WebSocketRequestValidationError"
   ],
-  "route_count": 505
+  "route_count": 489
 }

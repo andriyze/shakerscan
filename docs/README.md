@@ -61,6 +61,7 @@ contracts and release notes describe what ships.
 - [LAN access](lan-access.md)
 - [Clean reinstall](clean-reinstall.md)
 - [Upgrade and rollback](upgrade-and-rollback.md)
+- [Traffic attribution and adaptive pacing](traffic-attribution-and-pacing.md) — how a target's security team recognises ShakerScan traffic (`X-ShakerScan-Run`), `GET /targets/{id}/traffic`, and how a Scan slows down for a degrading target.
 - [Release process](release-process.md)
 - [Release notes](releases/README.md)
 - [SBOM](sbom.md)

@@ -1,9 +1,6 @@
-"""Unit tests for the T3MP3ST-ported autonomous-agent primitives.
+"""Unit tests for the agent primitives that outlived the legacy engine.
 
-Pure-stdlib modules, so this runs on the host with no scanner deps:
-    python3 tests/test_agent_ports.py
-(also importable by pytest). Covers the provenance gate, the text tool-contract shim,
-and the honest context packer.
+Covers the honest context packer and the fixed tool guards and argv builders in ``agent_tools``.
 """
 import os
 import json
@@ -14,8 +11,6 @@ import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "api"))
 
-import agent_provenance as prov
-import agent_text_toolcalls as tc
 import agent_context_pack as cp
 import agent_tools as at
 from runtime.capability_registry import CapabilityInputContractError
@@ -23,205 +18,6 @@ from tests.api_sources import (
     api_tree_source, definition_source, route_is_declared, route_source,
 )
 
-import agent_budget
-import agent_loop as al
-
-
-# ------------------------------------------------------------------ provenance gate ----
-
-def test_tool_evidence_passes():
-    f = {"severity": "high", "evidence": [{"type": "response", "content": "HTTP/1.1 200 ... token=abc"}]}
-    g = prov.gate_live_finding(f)
-    assert g["passed"] is True
-    assert g["provenance"] == "tool"
-    assert g["reasons"] == []
-
-
-def test_prose_only_fails():
-    f = {"severity": "critical", "evidence": []}
-    g = prov.gate_live_finding(f)
-    assert g["passed"] is False
-    assert g["provenance"] == "none"
-    # both RULE 1 (no tool evidence) and RULE 2 (crit + zero evidence) trip
-    assert len(g["reasons"]) == 2
-
-
-def test_context_only_is_not_tool():
-    # a non-tool evidence kind (e.g. a model 'note') counts as context, not tool output
-    f = {"severity": "medium", "evidence": [{"type": "note", "content": "looks suspicious"}]}
-    g = prov.gate_live_finding(f)
-    assert g["passed"] is False
-    assert g["provenance"] == "context"
-    assert len(g["reasons"]) == 1  # only RULE 1; medium severity does not trip overclaim
-
-
-def test_empty_tool_content_does_not_count():
-    f = {"severity": "low", "evidence": [{"type": "output", "content": "   "}]}
-    g = prov.gate_live_finding(f)
-    assert g["passed"] is False
-    assert g["provenance"] == "context"  # evidence present but empty content -> not tool
-
-
-def test_strip_self_verification():
-    payload = {"title": "x", "verified_at": 123, "last_verification_verdict": "exploited", "promotable": True, "evidence": []}
-    out = prov.strip_self_verification(payload)
-    assert "verified_at" not in out
-    assert "last_verification_verdict" not in out
-    assert "promotable" not in out
-    assert out["title"] == "x"  # non-owned fields preserved
-
-
-# ---------------------------------------------------------------- text tool-calls ------
-
-def test_render_tool_contract_marks_required():
-    tools = [{
-        "name": "http_request",
-        "description": "issue an HTTP request",
-        "parameters": {"type": "object", "properties": {"method": {"type": "string"}, "path": {"type": "string"}}, "required": ["path"]},
-    }]
-    out = tc.render_tool_contract(tools)
-    assert "## ARSENAL" in out
-    assert "## ACTION CONTRACT" in out
-    assert "path*: string" in out       # required marked
-    assert "method: string" in out      # optional unmarked
-    assert '{"tool_calls":[' in out
-
-
-def test_parse_fenced_json():
-    text = 'Let me try that.\n```json\n{"tool_calls":[{"name":"http_request","arguments":{"method":"GET","path":"/rest/products/search?q=1"}}]}\n```'
-    calls = tc.parse_text_tool_calls(text)
-    assert calls and len(calls) == 1
-    assert calls[0]["name"] == "http_request"
-    assert calls[0]["arguments"]["path"].startswith("/rest/products/search")
-
-
-def test_parse_balanced_no_fence():
-    text = '{"tool_calls":[{"name":"note","arguments":{"kind":"idea"}}]}'
-    calls = tc.parse_text_tool_calls(text)
-    assert calls and calls[0]["name"] == "note"
-    assert calls[0]["arguments"] == {"kind": "idea"}
-
-
-def test_parse_single_unwrapped():
-    text = '{"name":"query_kb","arguments":{"kind":"endpoints"}}'
-    calls = tc.parse_text_tool_calls(text)
-    assert calls and calls[0]["name"] == "query_kb"
-
-
-def test_parse_trailing_commas_tolerated():
-    text = '```json\n{"tool_calls":[{"name":"note","arguments":{"a":1,},},],}\n```'
-    calls = tc.parse_text_tool_calls(text)
-    assert calls and calls[0]["name"] == "note"
-
-
-def test_parse_multiple_calls():
-    text = '```json\n{"tool_calls":[{"name":"http_request","arguments":{"path":"/a"}},{"name":"http_request","arguments":{"path":"/b"}}]}\n```'
-    calls = tc.parse_text_tool_calls(text)
-    assert calls and len(calls) == 2
-    assert [c["arguments"]["path"] for c in calls] == ["/a", "/b"]
-
-
-def test_unclosed_large_fence_is_bounded_and_not_a_tool_call():
-    text = "```json" + (" " * 200_000) + '{"tool_calls":['
-    assert tc.parse_text_tool_calls(text) is None
-    assert tc.parse_final_findings(text) == []
-    assert tc.has_terminal_json(text) is False
-
-
-def test_prose_is_final_answer():
-    assert tc.parse_text_tool_calls("The surface is exhausted; no exploitable issue found.") is None
-
-
-def test_balanced_spans_ignore_braces_in_strings():
-    text = '{"name":"note","arguments":{"payload":"a { nested } brace and \\" quote"}}'
-    calls = tc.parse_text_tool_calls(text)
-    assert calls and calls[0]["arguments"]["payload"] == 'a { nested } brace and " quote'
-
-
-def test_refusal_detection():
-    assert tc.is_likely_refusal("I can't help with that request.") is True
-    assert tc.is_likely_refusal("I'm not able to assist with this.") is True
-    assert tc.is_likely_refusal("This is against my guidelines.") is True
-    assert tc.is_likely_refusal("I can't find the flag on this endpoint yet.") is False
-    assert tc.is_likely_refusal("x" * 1400) is False   # long substantive output
-    assert tc.is_likely_refusal("", "content_filter") is True
-
-
-def test_history_replay_summarizes():
-    assert tc.render_history_tool_request(["http_request", "note"]) == "[requested tools: http_request, note]"
-
-
-def test_parse_final_findings():
-    text = ('Here is my debrief.\n```json\n{"done":true,"findings":[{"title":"BOLA on basket",'
-            '"severity":"high","family":"BOLA","predicate":"cross_principal_equivalent",'
-            '"route":"/api/baskets/7","method":"GET",'
-            '"details":"user2 read user1 basket","evidence_refs":["resp_2","resp_3"],'
-            '"cwe":"CWE-639"}],"abstained":false}\n```')
-    fs = tc.parse_final_findings(text)
-    assert len(fs) == 1
-    assert fs[0]["title"] == "BOLA on basket" and fs[0]["severity"] == "high"
-    assert fs[0]["predicate"] == "cross_principal_equivalent"
-    assert fs[0]["route"] == "/api/baskets/7" and fs[0]["method"] == "GET"
-    assert fs[0]["evidence_refs"] == ["resp_2", "resp_3"]
-    assert fs[0]["provenance"] == "model"
-
-
-def test_parse_final_findings_preserves_injection_point():
-    # An injection debrief must carry param + payload through so the deterministic DAST prover can
-    # re-execute it; a non-injection finding simply omits them.
-    text = ('```json\n{"done":true,"findings":[{"title":"Reflected XSS in q","severity":"high",'
-            '"family":"xss","route":"/search","method":"GET","details":"payload reflected unescaped",'
-            '"evidence_refs":["resp_1"],"param":"q","payload":"<script>alert(1)</script>"}],'
-            '"abstained":false}\n```')
-    fs = tc.parse_final_findings(text)
-    assert len(fs) == 1
-    assert fs[0]["family"] == "xss"
-    assert fs[0]["param"] == "q"
-    assert fs[0]["payload"] == "<script>alert(1)</script>"
-
-
-def test_interpret_assistant_dict_toolcalls():
-    d = tc.interpret_assistant({"tool_calls": [{"name": "http_request", "arguments": {"path": "/x"}}]})
-    assert d["done"] is False and len(d["tool_calls"]) == 1
-
-
-def test_interpret_assistant_dict_done():
-    d = tc.interpret_assistant({"done": True, "findings": [{"title": "x", "severity": "low"}], "abstained": False})
-    assert d["done"] is True and d["tool_calls"] == [] and len(d["findings"]) == 1
-
-
-def test_interpret_assistant_dict_abstain():
-    d = tc.interpret_assistant({"done": True, "findings": [], "abstained": True})
-    assert d["done"] is True and d["abstained"] is True and d["findings"] == []
-
-
-def test_interpret_assistant_text_toolcalls():
-    d = tc.interpret_assistant('```json\n{"tool_calls":[{"name":"query_kb","arguments":{"kind":"findings"}}]}\n```')
-    assert d["done"] is False and d["tool_calls"][0]["name"] == "query_kb"
-
-
-def test_loop_prompt_builders():
-    contract = tc.render_tool_contract(at.tool_schemas())
-    sysp = al.build_system_prompt(contract, max_iterations=12)
-    assert "RECON" in sysp and "SELF-CRITIQUE" in sysp and "12 tool-using iterations" in sysp
-    assert "## ACTION CONTRACT" in sysp
-    user = al.build_user_message("find BOLA", "endpoints: GET /x")
-    assert "find BOLA" in user and "TARGET CONTEXT" in user
-
-
-def test_loop_format_tool_result_caps():
-    big = {"blob": "Z" * 9000}
-    out = al.format_tool_result(big, max_chars=1000)
-    assert len(out) < 1200 and "truncated" in out
-
-
-def test_loop_dup_and_steer():
-    sig1 = al.dup_signature("http_request", {"path": "/a", "method": "GET"})
-    sig2 = al.dup_signature("http_request", {"method": "GET", "path": "/a"})
-    assert sig1 == sig2  # order-independent
-    assert "Duplicate call" in al.dup_steer_message("http_request", "200 OK")
-    assert "different vector" in al.no_progress_message(4)
-    assert "do not invent" in al.hallucinated_tool_message("frobnicate", ["http_request"]).lower()
 
 
 # ---------------------------------------------------------------- context packer -------
@@ -271,15 +67,6 @@ def test_relevance_ranks_objective_keyword_first():
 
 # ---------------------------------------------------------------- agent tools ---------
 
-def test_tool_schemas_render():
-    assert {s["name"] for s in at.tool_schemas(include_run_tool=False)} == {"http_request", "query_kb", "diff", "note"}
-    schemas = at.tool_schemas()
-    assert {s["name"] for s in schemas} == {"http_request", "query_kb", "diff", "note"}
-    # the schemas must render through the text-contract shim
-    contract = tc.render_tool_contract(schemas)
-    assert "http_request(" in contract
-    assert "path*: string" in contract  # required marked
-
 
 def test_method_classification():
     assert at.coerce_method("get") == "GET"
@@ -301,20 +88,6 @@ def test_same_origin_path_guard():
         except at.AgentToolError:
             pass
 
-
-def test_header_filter_drops_auth():
-    filtered = at.filter_request_headers({
-        "Authorization": "Bearer x", "Cookie": "s=1", "X-Api-Key": "k",
-        "Observed-Access-Key": "ak", "X-Private_Key": "pk",
-        "X-Signing-Key": "sk",
-        "X-Forwarded-For": "1.2.3.4", "Accept": "application/json", "X-Custom": "ok",
-    })
-    assert "Authorization" not in filtered and "Cookie" not in filtered
-    assert "X-Api-Key" not in filtered and "X-Forwarded-For" not in filtered
-    assert "Observed-Access-Key" not in filtered
-    assert "X-Private_Key" not in filtered and "X-Signing-Key" not in filtered
-    assert filtered.get("Accept") == "application/json"
-    assert filtered.get("X-Custom") == "ok"
 
 
 def test_header_filter_explains_decisions_without_echoing_values():
@@ -338,37 +111,6 @@ def test_principal_slot_normalize():
     assert at.normalize_principal_slot("User1") == "user1"
     assert at.normalize_principal_slot(None) == "anonymous"
 
-
-def test_query_kb_and_note_coercion():
-    assert at.coerce_query_kb({"kind": "findings"})[0] == "findings"
-    try:
-        at.coerce_query_kb({"kind": "passwords"})
-        assert False
-    except at.AgentToolError:
-        pass
-    note = at.coerce_note({"kind": "hypothesis", "title": "BOLA on basket", "detail": "x", "family": "BOLA"})
-    assert note["kind"] == "hypothesis" and note["family"] == "bola"
-    try:
-        at.coerce_note({"kind": "observation", "title": ""})
-        assert False
-    except at.AgentToolError:
-        pass
-
-
-def test_run_tool_schema_is_compatibility_only_and_never_callable():
-    schemas = at.tool_schemas(include_run_tool=True)
-    assert any(s["name"] == "run_tool" for s in schemas)
-    assert "run_tool" not in at.CALLABLE_TOOL_NAMES
-    assert "run_tool" not in {item["name"] for item in at.tool_schemas()}
-    assert at.tool_schemas(include_run_tool=False) == [s for s in schemas if s["name"] != "run_tool"]
-    run_tool = next(schema for schema in schemas if schema["name"] == "run_tool")
-    name_schema = run_tool["parameters"]["properties"]["name"]
-    assert set(name_schema["enum"]) == {
-        "httpx", "nuclei", "katana", "katana_headless", "ffuf", "dalfox",
-        "sqlmap", "nmap", "naabu",
-    }
-    assert "dalfox" in name_schema["description"] and "sqlmap" in name_schema["description"]
-    assert "nmap" in name_schema["description"] and "naabu" in name_schema["description"]
 
 
 def test_run_tool_argv_templates_hardcode_flags():
@@ -534,25 +276,6 @@ def test_discovery_scanners_present_as_fixed_read_only_capabilities():
         assert at.SCANNER_ARG_TEMPLATES[name]["risk"] == "read_only"
 
 
-def test_katana_argv_is_bounded_and_same_host():
-    b, argv, timeout = at.build_scanner_argv("katana", "http://t/app", {})
-    assert b == "katana"
-    assert argv[argv.index("-u") + 1] == "http://t/app"
-    assert "-js-crawl" in argv                                   # JS endpoint extraction on
-    assert argv[argv.index("-field-scope") + 1] == "fqdn"        # same host ONLY, never cross-origin
-    assert argv[argv.index("-depth") + 1] == "2"                 # bounded depth
-    assert argv[argv.index("-crawl-duration") + 1] == "30s"      # hard wall cap
-    assert argv[argv.index("-rate-limit") + 1] == "5"
-    assert "-jsonl" in argv                                  # typed method/body shape
-    assert "-omit-raw" in argv and "-omit-body" in argv
-    excluded = argv[argv.index("-exclude-output-fields") + 1].split(",")
-    assert {"headers", "response", "raw"} <= set(excluded)
-    assert at.scanner_request_reservation("katana") == 150
-    assert timeout > 0
-    # no form-submission / cross-scope flags leaked in
-    for unsafe in ("-form-extraction", "-automatic-form-fill", "-aff", "-display-out-scope", "-do"):
-        assert unsafe not in argv
-
 
 def test_katana_preserves_distinct_body_encodings_for_the_same_fields():
     output = at.parse_scanner_output("katana", "\n".join((
@@ -646,58 +369,6 @@ def test_external_scanner_output_is_typed_and_query_values_are_redacted():
     assert "q=%3Credacted%3E" in record["matched_at"]
 
 
-def test_scanner_request_reservations_are_conservative_and_explicit():
-    assert at.scanner_request_reservation("httpx") == 1
-    assert at.scanner_request_reservation("nuclei") == 4000
-    assert at.scanner_request_reservation("ffuf") == 220
-
-
-def test_exact_scanner_wire_settlement_refunds_and_never_clamps_overruns():
-    refund = at.settle_scanner_wire_reservation(
-        charged_total=450, reservation=450, accounting="exact", actual=17,
-        budget_limit=500,
-    )
-    assert refund["charged_total"] == 17
-    assert refund["reservation_refund"] == 433
-    assert refund["budget_overrun"] == 0
-
-    overrun = at.settle_scanner_wire_reservation(
-        charged_total=400, reservation=400, accounting="exact", actual=525,
-        budget_limit=500,
-    )
-    assert overrun["actual"] == 525
-    assert overrun["charged_total"] == 525
-    assert overrun["reservation_overrun"] == 125
-    assert overrun["budget_overrun"] == 25
-
-    unknown = at.settle_scanner_wire_reservation(
-        charged_total=220, reservation=220, accounting="unavailable", actual=None,
-        budget_limit=500,
-    )
-    assert unknown["charged_total"] == 220 and unknown["settled"] is False
-
-
-def test_scanner_rate_and_wall_bounds_fit_their_wire_reservations():
-    _, nuclei, nuclei_ms = at.build_scanner_argv("nuclei", "http://t/", {})
-    assert int(nuclei[nuclei.index("-rate-limit") + 1]) * (nuclei_ms // 1000) <= at.scanner_request_reservation("nuclei")
-    _, ffuf, _ = at.build_scanner_argv("ffuf", "http://t/", {})
-    assert int(ffuf[ffuf.index("-rate") + 1]) * int(ffuf[ffuf.index("-maxtime") + 1]) <= at.scanner_request_reservation("ffuf")
-    _, dalfox, dalfox_ms = at.build_scanner_argv("dalfox", "http://t/?q=x", {})
-    dalfox_ceiling = int(dalfox[dalfox.index("--worker") + 1]) * (dalfox_ms // int(dalfox[dalfox.index("--delay") + 1]))
-    assert dalfox_ceiling <= at.scanner_request_reservation("dalfox")
-    _, sqlmap, sqlmap_ms = at.build_scanner_argv("sqlmap", "http://t/?id=1", {})
-    sqlmap_ceiling = int(sqlmap[sqlmap.index("--threads") + 1]) * (sqlmap_ms // (1000 * int(sqlmap[sqlmap.index("--delay") + 1])))
-    assert sqlmap_ceiling <= at.scanner_request_reservation("sqlmap")
-
-
-def test_episode_request_budget_counts_scanner_invocations_not_internal_wire_ceiling():
-    assert at.request_budget_units("http_request") == 1
-    assert at.request_budget_units("run_tool") == 1
-    assert at.request_budget_units("query_kb") == 0
-    assert at.request_budget_units("note") == 0
-    assert at.request_budget_units("diff") == 0
-    assert at.request_budget_units("nuclei") == 0
-
 
 def test_worker_scanner_target_revalidation_is_same_host_and_http_only():
     assert at.validate_scanner_execution_target(
@@ -765,34 +436,6 @@ def test_all_scanners_preserve_hostname_through_the_pinned_socks_broker():
             pinned_address="203.0.113.7", pinned_proxy_url="socks5://evil.test:1080",
         )
 
-
-def test_short_deep_hunts_can_compose_recon_with_one_attack_scanner():
-    assert agent_budget.keyless_hunt_wire_budget(1) == 4200
-    assert agent_budget.keyless_hunt_wire_budget(4) == 4200
-    assert agent_budget.keyless_hunt_wire_budget(20) == 4200
-    assert agent_budget.keyless_hunt_wire_budget(40) == 8400
-    assert (
-        at.scanner_request_reservation("httpx")
-        + at.scanner_request_reservation("katana")
-        + at.scanner_request_reservation("nuclei")
-    ) <= agent_budget.keyless_hunt_wire_budget(20)
-    with pytest.raises(at.AgentToolError, match="user information"):
-        at.validate_scanner_execution_target("https://example.test", "https://user@example.test/")
-
-
-def test_hunt_dns_authorization_is_frozen_in_session_state():
-    seed = definition_source("_agent_seed_state")
-    http_request = definition_source("_agent_tool_http_request")
-    assert (
-        'state["authorized_target_addresses"] = await _resolve_agent_target_addresses(\n'
-        '        target_url, environment=target_environment,\n'
-        '    )'
-    ) in seed
-    assert "await _resolve_agent_target_addresses" not in http_request
-    assert (
-        'authorized_addresses=state.get("authorized_target_addresses") or []'
-        in api_tree_source()
-    )
 
 
 def test_scanner_request_settlement_distinguishes_exact_from_observed():
@@ -891,38 +534,6 @@ def test_katana_jsonl_retains_only_value_free_request_body_shape():
     assert secret not in repr(output)
 
 
-def test_nuclei_focused_default_and_progress_counter_contract():
-    _, argv, timeout_ms = at.build_scanner_argv("nuclei", "https://example.test/", {})
-    assert argv[argv.index("-tags") + 1] == "exposure,misconfig,auth-bypass,default-login"
-    assert timeout_ms == 300_000
-    assert at.scanner_request_reservation("nuclei") == 4_000
-    settlement = at.scanner_request_settlement(
-        "nuclei",
-        "\n".join([
-            json.dumps({"duration": "0:00:05", "requests": 73}),
-            json.dumps({"duration": "0:00:10", "requests": 149}),
-        ]),
-    )
-    # The progress counter is parsed (both int and v3.11 string forms) but is not wire evidence.
-    assert settlement["mode"] == "unavailable" and settlement["actual"] is None
-    assert settlement["source"] == "progress_counter_is_not_wire_evidence"
-    string_counter = at.scanner_request_settlement(
-        "nuclei",
-        json.dumps({"duration": "0:00:10", "requests": "149", "templates": "1183"}),
-    )
-    assert string_counter == settlement
-    assert at.parse_scanner_output(
-        "nuclei", json.dumps({"duration": "0:00:10", "requests": "149"})
-    )["record_count"] == 0
-
-
-def test_partial_scanner_results_are_labeled_in_agent_surface():
-    run_tool = definition_source("_agent_tool_run_tool")
-    assert '"execution_status": status_label' in run_tool
-    assert '"complete": status_label == "success"' in run_tool
-    assert '"partial_reason": error if status_label != "success" else None' in run_tool
-    assert at.scanner_request_settlement("ffuf", "not-json")["mode"] == "unavailable"
-
 
 def test_ffuf_wordlist_tunable_is_injection_proof():
     # a valid selector maps to a BUNDLED list and FUZZ is appended to the same-origin base
@@ -937,71 +548,8 @@ def test_ffuf_wordlist_tunable_is_injection_proof():
         assert "/etc/passwd" not in argv2
 
 
-def test_http_evidence_is_tool_provenance():
-    ev = at.http_evidence_item({"method": "GET", "path": "/x"}, {"status": 200, "body_sample": "hi"})
-    assert ev["type"] in prov.TOOL_EVIDENCE_KINDS
-    # a finding carrying this evidence passes the provenance gate
-    g = prov.gate_live_finding({"severity": "high", "evidence": [ev]})
-    assert g["passed"] and g["provenance"] == "tool"
-
 
 # ---------------------------------------------------- shared turn-driver classification --
-
-def test_classify_tool_call_execute():
-    kind, sig = al.classify_tool_call("http_request", {"method": "GET", "path": "/a"}, set(), at.CALLABLE_TOOL_NAMES)
-    assert kind == "execute"
-    assert sig == al.dup_signature("http_request", {"method": "GET", "path": "/a"})
-
-
-def test_classify_tool_call_duplicate():
-    seen = {al.dup_signature("query_kb", {"kind": "findings"})}
-    kind, sig = al.classify_tool_call("query_kb", {"kind": "findings"}, seen, at.CALLABLE_TOOL_NAMES)
-    assert kind == "duplicate"
-
-
-def test_classify_tool_call_hallucinated():
-    # an unknown tool is flagged BEFORE the dedup check — the model gets the tool list back
-    kind, _ = al.classify_tool_call("sqlmap", {"x": 1}, set(), at.CALLABLE_TOOL_NAMES)
-    assert kind == "hallucinated"
-
-
-def test_classify_arg_order_is_stable():
-    # dup detection is argument-order-insensitive (dup_signature sorts keys)
-    seen = {al.dup_signature("http_request", {"path": "/a", "method": "GET"})}
-    kind, _ = al.classify_tool_call("http_request", {"method": "GET", "path": "/a"}, seen, at.CALLABLE_TOOL_NAMES)
-    assert kind == "duplicate"
-
-
-def test_forced_debrief_message_shape():
-    msg = al.forced_debrief_message()
-    assert "final" in msg.lower() and '"done":true' in msg
-
-
-def test_terminal_json_is_structural_not_keyword():
-    # a real debrief structure -> terminal
-    assert tc.has_terminal_json('```json\n{"done":true,"findings":[]}\n```')
-    assert tc.has_terminal_json('{"abstained":true}')
-    # prose that merely says "done" is NOT a terminal turn (structural, not keyword)
-    assert not tc.has_terminal_json("Let me check the basket, I'm done thinking about login.")
-    assert not tc.has_terminal_json("I will now probe /api/Cards as user2.")
-    assert not tc.has_terminal_json("")
-
-
-def test_interpret_prose_is_not_terminal():
-    # unparseable prose must NOT be a terminal/abstain turn (audit N1) -> caller re-prompts
-    d = tc.interpret_assistant("Let me now check the basket endpoints. I'm done thinking.")
-    assert d["tool_calls"] == [] and d["findings"] == []
-    assert d["done"] is False and d["abstained"] is False
-
-
-def test_interpret_explicit_abstain_is_terminal():
-    d = tc.interpret_assistant('```json\n{"done":true,"findings":[],"abstained":true}\n```')
-    assert d["done"] is True and d["abstained"] is True and d["findings"] == []
-
-
-def test_interpret_dict_no_toolcalls_is_terminal():
-    d = tc.interpret_assistant({"findings": [], "abstained": True})
-    assert d["done"] is True and d["abstained"] is True
 
 
 # ------------------------------------------------ SUSPECTED->VERIFIED bridge (Gap B) ----
@@ -1046,66 +594,6 @@ def test_bola_targets_bare_collection_route():
     assert t["collection"] == "/rest/basket"
 
 
-def test_attack_scanners_dalfox_sqlmap_present_and_bounded():
-    # dalfox + sqlmap join the fixed-argv arsenal: active (approval-gated), bounded reservations,
-    # GET-based XSS (no headless/blind/mining), widened SQLi (BEUT incl. time-based inside a
-    # 300s wall, level/risk 2, no crawl).
-    assert {"dalfox", "sqlmap"}.issubset(at.RUN_TOOL_NAMES)
-    for name in ("dalfox", "sqlmap"):
-        assert at.SCANNER_ARG_TEMPLATES[name]["risk"] == "active"
-        assert at.scanner_request_reservation(name) >= 200
-
-    b, argv, _ = at.build_scanner_argv("dalfox", "http://t/search?q=1", {"severity": "high"})
-    assert b == "dalfox"
-    assert argv[0] == "url" and argv[argv.index("url") + 1] == "http://t/search?q=1"
-    assert "--skip-headless" in argv and "--skip-bav" in argv and "--skip-mining-all" in argv
-    assert argv[argv.index("--worker") + 1] == "3" and argv[argv.index("--delay") + 1] == "1000"
-    assert argv[argv.index("--only-poc") + 1] == "r,v"  # no browser: preserve reflected candidates
-    assert argv[argv.index("--format") + 1] == "jsonl"
-    assert "--skip-discovery" in argv
-    assert argv[argv.index("-p") + 1] == "q"
-    assert "--only-custom-payload" in argv
-    assert argv[argv.index("--custom-payload") + 1] == "/app/payloads/xss/hunt-verify.txt"
-
-    _, dom_argv, _ = at.build_scanner_argv(
-        "dalfox", "http://t/#/search?q=1",
-        {"severity": "high", "deep_domxss": True},
-    )
-    assert "--skip-headless" not in dom_argv
-    assert "--force-headless-verification" in dom_argv
-    assert dom_argv[dom_argv.index("--only-poc") + 1] == "v"
-    # --deep-domxss never converges inside the capability wall ceiling.
-    assert "--deep-domxss" not in dom_argv
-    assert dom_argv[dom_argv.index("--delay") + 1] == "0"
-    assert dom_argv[dom_argv.index("--worker") + 1] == "10"
-    assert argv[argv.index("--delay") + 1] == "1000"
-    assert argv[argv.index("--worker") + 1] == "3"
-
-    plan = at.build_enforced_scanner_plan(
-        "dalfox", "http://t/#/search?q=1", {"deep_domxss": True},
-        reserved_budget={"http_requests": 400, "tool_wall_seconds": 120},
-        pinned_address="127.0.0.1",
-        pinned_proxy_url="socks5://127.0.0.1:1080",
-    )
-    proof_inputs = plan.budget_proof["inputs"]
-    assert proof_inputs["headless"] is True
-    assert proof_inputs["delay_ms"] == 0
-    assert proof_inputs["workers"] == 10
-    assert plan.argv[plan.argv.index("--delay") + 1] == "0"
-    assert plan.argv[plan.argv.index("--worker") + 1] == "10"
-
-    b, argv, timeout = at.build_scanner_argv("sqlmap", "http://t/item?id=1", {})
-    assert b == "sqlmap"
-    assert argv[argv.index("-u") + 1] == "http://t/item?id=1"
-    assert argv[argv.index("--batch") + 1] == "--technique"  # non-interactive
-    assert argv[argv.index("--technique") + 1] == "BEUT"     # boolean/error/union/time-based
-    assert argv[argv.index("--level") + 1] == "2" and argv[argv.index("--risk") + 1] == "2"
-    assert argv[argv.index("--threads") + 1] == "1" and argv[argv.index("--delay") + 1] == "1"
-    assert argv[argv.index("--retries") + 1] == "0"
-    assert timeout == 300_000                                # wider window for time-based payloads
-    assert at.scanner_request_reservation("sqlmap") == 900
-    assert "--crawl" not in " ".join(argv) and "--os-shell" not in " ".join(argv)
-
 
 def test_attack_scanner_pinning_preserves_host_and_sni():
     _, argv, _ = at.build_scanner_argv("dalfox", "https://t.test:8443/x?a=1", {}, pinned_address="10.0.0.5")
@@ -1116,42 +604,6 @@ def test_attack_scanner_pinning_preserves_host_and_sni():
     assert argv[argv.index("-u") + 1].startswith("https://10.0.0.5:8443/")
     assert argv[argv.index("--host") + 1] == "t.test:8443"
 
-
-def test_posture_scanners_nmap_naabu_present_and_bounded():
-    # nmap + naabu join the fixed-argv arsenal: ACTIVE (they send probe traffic), bounded wall
-    # clocks and wire reservations, connect scans only (never raw SYN), no NSE scripts.
-    assert {"nmap", "naabu"}.issubset(at.RUN_TOOL_NAMES)
-    for name in ("nmap", "naabu"):
-        assert at.SCANNER_ARG_TEMPLATES[name]["risk"] == "active"
-
-    b, argv, timeout = at.build_scanner_argv("nmap", "https://example.test:8443/admin", {})
-    assert b == "nmap"
-    assert argv[argv.index("-p") + 1] == "8443"                 # single port from the URL
-    assert argv[argv.index("-sV") + 1] == "-sT"                 # service detect + connect scan
-    assert "-sS" not in argv                                    # never raw SYN
-    assert not any(str(flag).startswith("--script") for flag in argv)  # no NSE scripts
-    assert argv[argv.index("--host-timeout") + 1] == "60s"      # hard host wall
-    assert argv[argv.index("--max-retries") + 1] == "0"
-    assert argv[argv.index("-oN") + 1] == "-"                   # output on stdout only, no files
-    assert argv[-1] == "example.test"                           # positional host
-    assert timeout == 90_000
-    assert at.scanner_request_reservation("nmap") == 60
-    # scheme-default port when the URL carries none
-    _, argv, _ = at.build_scanner_argv("nmap", "http://example.test/", {})
-    assert argv[argv.index("-p") + 1] == "80"
-
-    b, argv, timeout = at.build_scanner_argv("naabu", "https://example.test:8443/", {})
-    assert b == "naabu"
-    assert argv[argv.index("-host") + 1] == "example.test"
-    assert argv[argv.index("-top-ports") + 1] == "100"          # bounded top-100 sweep
-    assert "-p-" not in argv and "-p" not in argv               # never a full-range sweep
-    assert argv[argv.index("-scan-type") + 1] == "c"            # connect scan
-    assert argv[argv.index("-rate") + 1] == "10"
-    assert argv[argv.index("-c") + 1] == "10"
-    assert timeout == 120_000
-    assert at.scanner_request_reservation("naabu") == 1200
-    # rate 10 x the 120s wall must fit inside the wire reservation
-    assert int(argv[argv.index("-rate") + 1]) * (timeout // 1000) <= at.scanner_request_reservation("naabu")
 
 
 def test_posture_scanner_pinning_replaces_host_with_pinned_ip():
@@ -1534,3 +986,139 @@ def test_method_override_aliases_are_executor_owned_even_with_identity_authority
         "x-http-method": "executor_owned_header",
         "x-method-override": "executor_owned_header",
     }
+
+
+def test_katana_argv_is_bounded_and_same_host():
+    b, argv, timeout = at.build_scanner_argv("katana", "http://t/app", {})
+    assert b == "katana"
+    assert argv[argv.index("-u") + 1] == "http://t/app"
+    assert "-js-crawl" in argv                                   # JS endpoint extraction on
+    assert argv[argv.index("-field-scope") + 1] == "fqdn"        # same host ONLY, never cross-origin
+    assert argv[argv.index("-depth") + 1] == "2"                 # bounded depth
+    assert argv[argv.index("-crawl-duration") + 1] == "30s"      # hard wall cap
+    assert argv[argv.index("-rate-limit") + 1] == "5"
+    assert "-jsonl" in argv                                  # typed method/body shape
+    assert "-omit-raw" in argv and "-omit-body" in argv
+    excluded = argv[argv.index("-exclude-output-fields") + 1].split(",")
+    assert {"headers", "response", "raw"} <= set(excluded)
+    assert timeout > 0
+    # no form-submission / cross-scope flags leaked in
+    for unsafe in ("-form-extraction", "-automatic-form-fill", "-aff", "-display-out-scope", "-do"):
+        assert unsafe not in argv
+
+
+def test_nuclei_focused_default_and_progress_counter_contract():
+    _, argv, timeout_ms = at.build_scanner_argv("nuclei", "https://example.test/", {})
+    assert argv[argv.index("-tags") + 1] == "exposure,misconfig,auth-bypass,default-login"
+    assert timeout_ms == 300_000
+    settlement = at.scanner_request_settlement(
+        "nuclei",
+        "\n".join([
+            json.dumps({"duration": "0:00:05", "requests": 73}),
+            json.dumps({"duration": "0:00:10", "requests": 149}),
+        ]),
+    )
+    # The progress counter is parsed (both int and v3.11 string forms) but is not wire evidence.
+    assert settlement["mode"] == "unavailable" and settlement["actual"] is None
+    assert settlement["source"] == "progress_counter_is_not_wire_evidence"
+    string_counter = at.scanner_request_settlement(
+        "nuclei",
+        json.dumps({"duration": "0:00:10", "requests": "149", "templates": "1183"}),
+    )
+    assert string_counter == settlement
+    assert at.parse_scanner_output(
+        "nuclei", json.dumps({"duration": "0:00:10", "requests": "149"})
+    )["record_count"] == 0
+
+
+def test_attack_scanners_dalfox_sqlmap_present_and_bounded():
+    # dalfox + sqlmap join the fixed-argv arsenal: active (approval-gated), bounded reservations,
+    # GET-based XSS (no headless/blind/mining), widened SQLi (BEUT incl. time-based inside a
+    # 300s wall, level/risk 2, no crawl).
+    assert {"dalfox", "sqlmap"}.issubset(at.RUN_TOOL_NAMES)
+    for name in ("dalfox", "sqlmap"):
+        assert at.SCANNER_ARG_TEMPLATES[name]["risk"] == "active"
+
+    b, argv, _ = at.build_scanner_argv("dalfox", "http://t/search?q=1", {"severity": "high"})
+    assert b == "dalfox"
+    assert argv[0] == "url" and argv[argv.index("url") + 1] == "http://t/search?q=1"
+    assert "--skip-headless" in argv and "--skip-bav" in argv and "--skip-mining-all" in argv
+    assert argv[argv.index("--worker") + 1] == "3" and argv[argv.index("--delay") + 1] == "1000"
+    assert argv[argv.index("--only-poc") + 1] == "r,v"  # no browser: preserve reflected candidates
+    assert argv[argv.index("--format") + 1] == "jsonl"
+    assert "--skip-discovery" in argv
+    assert argv[argv.index("-p") + 1] == "q"
+    assert "--only-custom-payload" in argv
+    assert argv[argv.index("--custom-payload") + 1] == "/app/payloads/xss/hunt-verify.txt"
+
+    _, dom_argv, _ = at.build_scanner_argv(
+        "dalfox", "http://t/#/search?q=1",
+        {"severity": "high", "deep_domxss": True},
+    )
+    assert "--skip-headless" not in dom_argv
+    assert "--force-headless-verification" in dom_argv
+    assert dom_argv[dom_argv.index("--only-poc") + 1] == "v"
+    # --deep-domxss never converges inside the capability wall ceiling.
+    assert "--deep-domxss" not in dom_argv
+    assert dom_argv[dom_argv.index("--delay") + 1] == "0"
+    assert dom_argv[dom_argv.index("--worker") + 1] == "10"
+    assert argv[argv.index("--delay") + 1] == "1000"
+    assert argv[argv.index("--worker") + 1] == "3"
+
+    plan = at.build_enforced_scanner_plan(
+        "dalfox", "http://t/#/search?q=1", {"deep_domxss": True},
+        reserved_budget={"http_requests": 400, "tool_wall_seconds": 120},
+        pinned_address="127.0.0.1",
+        pinned_proxy_url="socks5://127.0.0.1:1080",
+    )
+    proof_inputs = plan.budget_proof["inputs"]
+    assert proof_inputs["headless"] is True
+    assert proof_inputs["delay_ms"] == 0
+    assert proof_inputs["workers"] == 10
+    assert plan.argv[plan.argv.index("--delay") + 1] == "0"
+    assert plan.argv[plan.argv.index("--worker") + 1] == "10"
+
+    b, argv, timeout = at.build_scanner_argv("sqlmap", "http://t/item?id=1", {})
+    assert b == "sqlmap"
+    assert argv[argv.index("-u") + 1] == "http://t/item?id=1"
+    assert argv[argv.index("--batch") + 1] == "--technique"  # non-interactive
+    assert argv[argv.index("--technique") + 1] == "BEUT"     # boolean/error/union/time-based
+    assert argv[argv.index("--level") + 1] == "2" and argv[argv.index("--risk") + 1] == "2"
+    assert argv[argv.index("--threads") + 1] == "1" and argv[argv.index("--delay") + 1] == "1"
+    assert argv[argv.index("--retries") + 1] == "0"
+    assert timeout == 300_000                                # wider window for time-based payloads
+    assert "--crawl" not in " ".join(argv) and "--os-shell" not in " ".join(argv)
+
+
+def test_posture_scanners_nmap_naabu_present_and_bounded():
+    # nmap + naabu join the fixed-argv arsenal: ACTIVE (they send probe traffic), bounded wall
+    # clocks and wire reservations, connect scans only (never raw SYN), no NSE scripts.
+    assert {"nmap", "naabu"}.issubset(at.RUN_TOOL_NAMES)
+    for name in ("nmap", "naabu"):
+        assert at.SCANNER_ARG_TEMPLATES[name]["risk"] == "active"
+
+    b, argv, timeout = at.build_scanner_argv("nmap", "https://example.test:8443/admin", {})
+    assert b == "nmap"
+    assert argv[argv.index("-p") + 1] == "8443"                 # single port from the URL
+    assert argv[argv.index("-sV") + 1] == "-sT"                 # service detect + connect scan
+    assert "-sS" not in argv                                    # never raw SYN
+    assert not any(str(flag).startswith("--script") for flag in argv)  # no NSE scripts
+    assert argv[argv.index("--host-timeout") + 1] == "60s"      # hard host wall
+    assert argv[argv.index("--max-retries") + 1] == "0"
+    assert argv[argv.index("-oN") + 1] == "-"                   # output on stdout only, no files
+    assert argv[-1] == "example.test"                           # positional host
+    assert timeout == 90_000
+    # scheme-default port when the URL carries none
+    _, argv, _ = at.build_scanner_argv("nmap", "http://example.test/", {})
+    assert argv[argv.index("-p") + 1] == "80"
+
+    b, argv, timeout = at.build_scanner_argv("naabu", "https://example.test:8443/", {})
+    assert b == "naabu"
+    assert argv[argv.index("-host") + 1] == "example.test"
+    assert argv[argv.index("-top-ports") + 1] == "100"          # bounded top-100 sweep
+    assert "-p-" not in argv and "-p" not in argv               # never a full-range sweep
+    assert argv[argv.index("-scan-type") + 1] == "c"            # connect scan
+    assert argv[argv.index("-rate") + 1] == "10"
+    assert argv[argv.index("-c") + 1] == "10"
+    assert timeout == 120_000
+    # rate 10 x the 120s wall must fit inside the wire reservation

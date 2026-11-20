@@ -182,7 +182,6 @@ test('BRAND-004 nested routes keep the product name, and a missing page is not t
     '/campaigns/fixture-campaign': 'Campaign · ShakerScan',
     '/deep-hunt/experiment': 'Test plan · ShakerScan',
     '/deep-hunt/leads': 'Leads · ShakerScan',
-    '/deep-hunt/runs/fixture-run': 'Autonomous run · ShakerScan',
     '/ai-gate/boundary': 'Agent boundary verification · ShakerScan',
     '/settings/arsenal': 'Command arsenal · ShakerScan',
     '/settings/policy-profiles': 'Policy profiles · ShakerScan',

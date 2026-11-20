@@ -329,9 +329,11 @@ CHECK_SINCE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 check_args=(--api "$API" --state "$STATE" --report "$LOG_DIR/upgraded-check.json" --expect-version "$EXPECTED_VERSION"
     --baseline-sweep "$LOG_DIR/baseline-sweep.json" ${SKIP_ARGS[@]+"${SKIP_ARGS[@]}"})
 [ -z "$CANDIDATE_SHA" ] || check_args+=(--expect-sha "$CANDIDATE_SHA")
-# This tree is the candidate only in lock mode; then every GET in its committed public contract
-# must be served and swept.
-if [ -n "$CANDIDATE_IMAGE_LOCK" ]; then
+# This tree is the candidate's own only when its exact revision is known (a release candidate);
+# then every GET in its committed public contract must be served and swept. A pull request
+# installs its tree with the newest images built on main, which cannot serve a GET route the pull
+# request adds: its contract is proven by the release candidate that carries it.
+if [ -n "$CANDIDATE_IMAGE_LOCK" ] && [ -n "$CANDIDATE_SHA" ]; then
     check_args+=(--public-manifest "$ROOT/docs/generated/public-openapi-manifest.json")
 fi
 if ! python3 "$PROBE" check "${check_args[@]}"; then

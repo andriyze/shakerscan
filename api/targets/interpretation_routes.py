@@ -163,6 +163,21 @@ async def get_target_continue_measures(target_id: str, request: Request,
             raise HTTPException(422, {'error': 'invalid_since', 'message': str(exc)}) from None
 
 
+@router.get('/targets/{target_id}/knowledge/yield')
+async def get_target_hunt_yield(target_id: str, request: Request, weeks: int = Query(8, ge=1, le=52)):
+    """What this target's Hunts spent and what came of it, from server records: per capability the
+    settled actions, requests and verified findings attributed to them; per lead source and family
+    how leads ended. For comparing runs offline; it changes no ranking."""
+    _operator(request)
+    try:
+        from hunt.yield_measures import target_yield
+    except ModuleNotFoundError:  # package import
+        from ..hunt.yield_measures import target_yield
+    async with pool().acquire() as conn:
+        row = await target_metadata_row(conn, target_id)
+        return await target_yield(conn, row['id'], weeks=weeks)
+
+
 @router.get('/knowledge/continue/usage')
 async def get_continue_usage(request: Request, weeks: int = Query(8, ge=1, le=52)):
     """Continue-report reads per ISO week across the installation (operators, Hunts, targets)."""

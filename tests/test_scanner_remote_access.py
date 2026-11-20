@@ -144,7 +144,6 @@ def test_pi_launcher_starts_without_a_kit(tmp_path):
 def test_wrapper_subcommand_help_is_non_mutating_and_informative():
     for command, expected in (
         ("mcp", "read-only Arsenal inspection and target-bound Hunt V2"),
-        ("research", "existing episode"),
         ("reset", "Usage: ./scanner.sh [command] [options]"),
     ):
         result = subprocess.run(

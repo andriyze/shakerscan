@@ -1185,11 +1185,6 @@ def _structured_oracle_enabled(transcript: dict[str, Any]) -> bool:
     return False
 
 
-def _to_jsonish_payload(response_text: str) -> dict[str, Any] | list[Any] | None:
-    candidates = _jsonish_payload_candidates(response_text)
-    return candidates[0] if candidates else None
-
-
 def _extract_expected_findings_from_payload(payload: Any) -> list[str]:
     found: list[str] = []
     keys = {"expected_findings", "expected_shakerscan_findings", "expected_shakerscan_finding", "expected"}
@@ -6534,6 +6529,3 @@ async def run_ai_target_scan(
         },
     }
 
-
-async def run_ai_api_smoke_scan(target_url: str, raw_options: dict[str, Any] | None) -> dict[str, Any]:
-    return await run_ai_target_scan(target_url, raw_options)

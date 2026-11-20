@@ -1356,7 +1356,7 @@ function FindingDetailContent() {
                   <span className="shrink-0 text-gray-500">Discovered by:</span>
                   <span className="text-indigo-300">Hunt</span>
                   {research.campaign_id && (
-                    <Link href={`/deep-hunt/runs/${research.campaign_id}`} className="text-blue-400 hover:text-blue-300">
+                    <Link href={`/campaigns/${research.campaign_id}`} className="text-blue-400 hover:text-blue-300">
                       run {research.campaign_id.slice(0, 8)}
                     </Link>
                   )}

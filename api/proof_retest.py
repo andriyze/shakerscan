@@ -382,7 +382,3 @@ def proof_retest_request(record: Mapping[str, Any]) -> tuple[ProofRetestRequest 
         return None, "not_admitted"
     return request, gap
 
-
-def proof_retest_gap(record: Mapping[str, Any]) -> str | None:
-    """Why a proven finding's request cannot be sent again, or None."""
-    return proof_retest_request(record)[1]

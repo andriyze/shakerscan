@@ -55,6 +55,7 @@ try:
     from proof_retest import PASSIVE_RETEST_CHECK_TYPES, passive_retest_type, proof_retest_request
     from exposure.finding_link import related_exposures
     from list_contract import DEFAULT_LIMIT, MAX_LIMIT, SqlParams, page_params
+    from target_filter import parse_target_ids
 except ModuleNotFoundError:  # package import in host-side tests
     from ..api_utils import (
         SEVERITY_ORDER, _clean_string_list, _direct_query_value, _int_or_none, _iso_or_none,
@@ -83,11 +84,13 @@ except ModuleNotFoundError:  # package import in host-side tests
     from ..proof_retest import PASSIVE_RETEST_CHECK_TYPES, passive_retest_type, proof_retest_request
     from ..exposure.finding_link import related_exposures
     from ..list_contract import DEFAULT_LIMIT, MAX_LIMIT, SqlParams, page_params
+    from ..target_filter import parse_target_ids
 
 
 from .hunt_scope import candidate_hunt_predicate
 from .list_filters import (
-    PROOF_STATES, SEVERITIES, host_in_domain_sql, parse_choice_list,
+    PROOF_STATES, SEVERITIES, FindingSourceType, FindingStatus, VerificationVerdict,
+    host_in_domain_sql, parse_choice_list,
 )
 from .list_query import (
     LEGACY_ONLY_PARAMETERS, LIST_V1_PARAMETERS, PROOF_STATE_FILTER_SQL, PROOF_STATE_ROW_SQL,
@@ -235,8 +238,9 @@ def _strip_pagination_for_count(query: str, params: list) -> tuple[str, list]:
 class FindingUpdate(BaseModel):
     # active, resolved, false_positive, accepted_risk. Omitted (or null) keeps the stored status:
     # a verdict-only edit must not write back a status the client saw before a retest or another
-    # session changed it.
-    status: Optional[str] = None
+    # session changed it. Any other value is refused (422): it was stored as sent, and a finding
+    # with an unknown status matched no status filter.
+    status: Optional[FindingStatus] = None
     notes: Optional[str] = None
     # Omitted keeps the recorded verdict, a value records it, and an explicit null clears it
     # (the verdict and its time; its notes stay unless `notes` is sent). The status is always
@@ -277,7 +281,7 @@ class FindingRetestRequest(BaseModel):
 class FindingsBulkRetestRequest(BaseModel):
     finding_ids: Optional[list[str]] = None
     severity: Optional[str] = None
-    status: Optional[str] = None
+    status: Optional[FindingStatus] = None
     target_id: Optional[str] = None
     scan_id: Optional[str] = None
     root_domain: Optional[str] = None
@@ -397,15 +401,18 @@ def _merge_findings_and_candidates(
 async def list_findings(
     request: Request,
     severity: Optional[str] = None,
-    status: Optional[str] = None,
-    source_type: Optional[str] = Query(None, pattern="^(dast|device|ai|ai_gate|ai_session|deep_hunt|autonomous|model_intake|asm|manual)$"),
-    target_id: Optional[str] = None,
+    status: Optional[FindingStatus] = None,
+    source_type: Optional[FindingSourceType] = None,
+    target_id: Optional[list[str]] = Query(
+        None, description=("A target id. Repeat the parameter (or separate ids with commas) for "
+                           "the findings of several targets, at most 500."),
+    ),
     ai_target_id: Optional[str] = None,
     device_target_id: Optional[str] = None,
     scan_id: Optional[str] = None,
     hunt_id: Optional[str] = None,
     root_domain: Optional[str] = None,
-    verification_verdict: Optional[str] = Query(None, pattern="^(exploited|likely_vulnerable|blocked_by_security|out_of_scope_internal|false_positive|likely_fixed|inconclusive|error)$"),
+    verification_verdict: Optional[VerificationVerdict] = None,
     verification_mode: Optional[str] = Query(None, pattern="^(deterministic|ai_driven)$"),
     verified_only: bool = False,
     proof_state: Optional[str] = None,
@@ -480,8 +487,9 @@ async def list_findings(
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
+    target_ids = parse_target_ids(target_id)
     filters = FindingFilters(
-        severities=severities, status=status, source_type=source_type, target_id=target_id,
+        severities=severities, status=status, source_type=source_type, target_id=target_ids,
         ai_target_id=ai_target_id, device_target_id=device_target_id, scan_id=scan_id,
         hunt_id=hunt_id, root_domain=root_domain, verification_verdict=verification_verdict,
         verification_mode=verification_mode, verified_only=verified_only, driven_by=driven_by,
@@ -552,7 +560,7 @@ async def list_findings(
         candidate_items: list[dict[str, Any]] = []
         if candidates_included:
             candidate_items, candidates_total = await _open_candidates(
-                conn, hunt_id=hunt_id, severities=severities, target_id=target_id,
+                conn, hunt_id=hunt_id, severities=severities, target_id=target_ids,
                 root_domain=root_domain, search=search, seen_within_days=seen_within_days,
                 first_seen_within_days=first_seen_within_days, sort_by=sort_by,
                 sort_order=sort_order, window=limit + offset,
@@ -599,7 +607,7 @@ async def list_findings(
 
 
 async def _open_candidates(
-    conn: Any, *, hunt_id: Optional[str], severities: Optional[list[str]], target_id: Optional[str],
+    conn: Any, *, hunt_id: Optional[str], severities: Optional[list[str]], target_id: Optional[list[uuid.UUID]],
     root_domain: Optional[str], search: Optional[str], seen_within_days: Optional[int],
     first_seen_within_days: Optional[int], sort_by: Optional[str], sort_order: str, window: int,
 ) -> tuple[list[dict[str, Any]], int]:
@@ -629,8 +637,8 @@ async def _open_candidates(
         candidate_params.append(severities)
         cand_idx += 1
     if target_id:
-        candidate_query += f" AND c.target_id = ${cand_idx}"
-        candidate_params.append(uuid.UUID(target_id))
+        candidate_query += f" AND c.target_id = ANY(${cand_idx}::uuid[])"
+        candidate_params.append(list(target_id))
         cand_idx += 1
     if root_domain:
         candidate_query += f""" AND (
@@ -1543,7 +1551,7 @@ async def delete_finding(
 
 class FindingsCleanup(BaseModel):
     older_than_days: int = Field(..., ge=1, le=3650)
-    status: Optional[Literal["active", "resolved", "false_positive", "accepted_risk"]] = None
+    status: Optional[FindingStatus] = None
     root_domain: Optional[str] = Field(default=None, min_length=1, max_length=253)
     dry_run: bool = True
     preview_id: Optional[uuid.UUID] = None

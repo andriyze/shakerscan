@@ -150,6 +150,32 @@ async def query_knowledge_page(
             return await query_service_knowledge(conn, target_id=target_id, device=device, filters=filters, limit=limit, cursor=cursor)
         except ValueError as exc:
             raise KnowledgeQueryError(str(exc)) from exc
+    if kind == "attempts":
+        from .attempts import AttemptQueryError, target_attempts
+        if cursor is not None:
+            raise KnowledgeQueryError("attempts is one bounded report; it has no cursor")
+        try:
+            return await target_attempts(conn, target_id, filters=filters, limit=limit,
+                                         current_hunt_id=current_hunt_id)
+        except AttemptQueryError as exc:
+            raise KnowledgeQueryError(str(exc)) from exc
+    if kind == "coverage_gaps":
+        from .coverage_gaps import CoverageGapQueryError, target_coverage_gaps
+        if cursor is not None:
+            raise KnowledgeQueryError("coverage_gaps is one bounded report; it has no cursor")
+        try:
+            return await target_coverage_gaps(conn, target_id, filters=filters, limit=limit)
+        except CoverageGapQueryError as exc:
+            raise KnowledgeQueryError(str(exc)) from exc
+    if kind == "traffic":
+        from .traffic_search import TrafficQueryError, target_traffic
+        if cursor is not None:
+            raise KnowledgeQueryError("traffic is one bounded page; narrow the filters instead of paging")
+        try:
+            return await target_traffic(conn, target_id, filters=filters, limit=limit,
+                                        current_hunt_id=current_hunt_id)
+        except TrafficQueryError as exc:
+            raise KnowledgeQueryError(str(exc)) from exc
     if kind == "changes":
         from .knowledge_changes import ChangeQueryError, target_changes
         supplied = dict(filters or {})
@@ -318,6 +344,9 @@ async def query_knowledge_page(
         row.pop("page_timestamp", None)
     if kind == "graph_nodes":
         rows = [project_graph_node(row) for row in rows]
+    if kind == "hypotheses":
+        from .hunt_hypotheses import page_row
+        rows = [page_row(row) for row in rows]
     if kind == "interpretations":
         from .interpretations import KNOWLEDGE_IMPORT_WRITER, public_interpretation, target_withheld_digests
         mirrored = [row["target_id"] for row in rows if row.get("written_by") == KNOWLEDGE_IMPORT_WRITER]

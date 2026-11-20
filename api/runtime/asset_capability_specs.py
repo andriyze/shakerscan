@@ -3,6 +3,12 @@
 MAX_TARGET_SKILL_CHARACTERS = 12_000
 MAX_PROPOSALS_PER_HUNT = 5
 MAX_INTERPRETATIONS_PER_HUNT = 200  # hunt/interpretations.py MAX_PER_HUNT
+MAX_HYPOTHESES_PER_HUNT = 200  # hunt/hunt_hypotheses.py MAX_HYPOTHESES_PER_HUNT
+HYPOTHESIS_DIMENSIONS = ('method','route','object_key','principal_actor','principal_other','tenant',
+                         'parameter_path','body_path','proof_surface')  # hunt/hunt_hypotheses.py DIMENSIONS
+HYPOTHESIS_REASON_CODES = ('testing_started','expected_signal_observed','expected_signal_absent',
+                           'deterministic_refutation','missing_prerequisite','policy_refused',
+                           'budget_exhausted','released')  # hunt/hunt_hypotheses.py REASON_CODES
 
 def asset_capability_specs(spec, schema, kinds):
     confirmed = {'type':'boolean','description':'Deprecated compatibility field; grants no authority. Metadata edits default on but obey operator opt-outs; instruction edits need the operator’s explicit instruction_changes opt-in; sharing needs saved grants.'}
@@ -40,7 +46,8 @@ def asset_capability_specs(spec, schema, kinds):
                       'service':text,'environment':text,'deployment_fingerprint':text,'technique':{**text,'description':
                       'How it was tested; start it with http.request (e.g. "http.request anonymous read") for a result '
                       'of your own cited http.request, or the result can never let the experiment be skipped'},
-                      'tool_version':text,'inputs':{'type':'object'},'application_state':{'type':'object'},
+                      'tool_version':text,'inputs':{'type':'object','description':
+                      'Each input name mapped to what was sent in it, for example {"q": "a single quote"}'},'application_state':{'type':'object'},
                       'budget':{'type':'object'}}}
     reviewed = (' Applied only where the operator saved instruction_changes for this target; otherwise filed as '
                 'a proposal for operator review (the result says applied=false).')
@@ -68,13 +75,14 @@ def asset_capability_specs(spec, schema, kinds):
                            'items':{'type':'string','format':'uuid'},
                            'description':'Ids of Hunt actions or receipts, findings, candidates or scans on this target’s asset.'}},
          ('title','methodology','reason','base_revision')),
-        ('knowledge.record',('Record one attributed interpretation of this target: an observation, hypothesis, '
-         'explanation, next_step or note, or a narrow negative_result (experiment_completed_negative, '
-         'experiment_inconclusive or hypothesis_refuted). Cite existing records in evidence_refs (required for '
+        ('knowledge.record',('Record one attributed interpretation of this target: an observation, '
+         'explanation or note, or a narrow negative_result (experiment_completed_negative, '
+         'experiment_inconclusive or hypothesis_refuted). Something worth testing is a lead: use '
+         'hypothesis.propose. Cite existing records in evidence_refs (required for '
          'observations, explanations and negative results) and the exact conditions a negative result covers; '
-         'never broaden it. Advisory: it is not proof, changes no finding and grants nothing. Only an operator '
+         'never broaden it. hypothesis_refuted names the lead it is about as subject and counts against it. Advisory: it is not proof, changes no finding and grants nothing. Only an operator '
          f'dismisses a finding. At most {MAX_INTERPRETATIONS_PER_HUNT} per Hunt.'),
-         {'kind':{'type':'string','enum':['observation','hypothesis','explanation','next_step','note','negative_result']},
+         {'kind':{'type':'string','enum':['observation','explanation','note','negative_result']},
           'negative_state':{'type':'string','enum':['experiment_completed_negative','experiment_inconclusive','hypothesis_refuted'],
                             'description':'Required exactly when kind is negative_result.'},
           'title':{'type':'string','minLength':1,'maxLength':200},
@@ -123,6 +131,53 @@ def asset_capability_specs(spec, schema, kinds):
                    'description':'Ranked items per page (default 25).'},
           'after':{'type':'string','maxLength':2048,
                    'description':'next_experiments.next_after from the previous page; omit for the first page.'}},()),
+        ('hypothesis.propose',('Propose a lead on this target\u2019s hypothesis frontier (the shared lead board later Hunts '
+         'and Arsenal also work), or endorse the identical lead already there: family, a one-line title, and '
+         'dedupe_dimensions saying exactly where it applies. derived_from cites the records it follows from '
+         '(an action, candidate, finding, hypothesis or interpretation of this target). falsifier and '
+         'expected_signal state how you will try to disprove it. Proposing a lead you already proposed '
+         'changes nothing; on a lead another source recorded you add your endorsement and its text and '
+         'confidence stay as they were. Advisory: not proof, sends nothing, grants nothing. At most '
+         f'{MAX_HYPOTHESES_PER_HUNT} per Hunt.'),
+         {'family':{'type':'string','minLength':1,'maxLength':40,
+                    'description':'Vulnerability family identifier: a letter, then letters, digits or underscores, e.g. bola, sqli, mass_assignment.'},
+          'title':{'type':'string','minLength':1,'maxLength':200},
+          'description':{'type':'string','maxLength':2000},
+          'dedupe_dimensions':{'type':'object','additionalProperties':False,'minProperties':1,
+                               'properties':{key:text for key in HYPOTHESIS_DIMENSIONS},
+                               'description':'Where the lead applies; the same lead from another source merges with it.'},
+          'derived_from':{'type':'array','maxItems':20,'uniqueItems':True,'items':identifier},
+          'falsifier':{'type':'string','maxLength':1000},
+          'expected_signal':{'type':'string','maxLength':1000},
+          'cwe':{'type':'string','maxLength':10,'description':'A CWE identifier, e.g. CWE-639.'},
+          'severity_guess':{'type':'string','enum':['critical','high','medium','low','info']},
+          'confidence':{'type':'number','minimum':0,'maximum':1}},
+         ('family','title','dedupe_dimensions')),
+        ('hypothesis.claim',('Take (or renew) this Hunt\u2019s working lease on one lead of this target before testing '
+         'it, with the version you read. Another holder\u2019s active lease is refused; an expired one is taken over. '
+         'Renewing your own lease only extends it: a lead you moved to testing or supported stays there. '
+         'Grants no testing authority.'),
+         {'hypothesis_id':identifier,'expected_version':{'type':'integer','minimum':1},
+          'lease_seconds':{'type':'integer','minimum':60,'maximum':3600,'default':900}},
+         ('hypothesis_id','expected_version')),
+        ('hypothesis.transition',('Move a lead this Hunt holds, with the reason_code that fits the move: testing '
+         '(testing_started; needs falsifier and expected_signal, here or already on the lead), supported '
+         '(expected_signal_observed; cite completed testing actions of this Hunt in evidence_refs), refuted '
+         '(deterministic_refutation; refuted_by a completed deterministic verification), open to hand the lead '
+         'back at once (released, budget_exhausted, or expected_signal_absent when this angle found nothing and '
+         'another may), exhausted (expected_signal_absent) or blocked (missing_prerequisite, policy_refused), '
+         'which park the lead until an operator reopens it. No free text. supported is a lead, never a finding; '
+         'verification stays with the registered verifiers.'),
+         {'hypothesis_id':identifier,'expected_version':{'type':'integer','minimum':1},
+          'to':{'type':'string','enum':['testing','supported','refuted','blocked','exhausted','open']},
+          'reason_code':{'type':'string','enum':list(HYPOTHESIS_REASON_CODES)},
+          'evidence_refs':{'type':'array','maxItems':20,'uniqueItems':True,'items':identifier},
+          'falsifier':{'type':'string','maxLength':1000},
+          'expected_signal':{'type':'string','maxLength':1000},
+          'refuted_by':{'type':'object','additionalProperties':False,
+                        'properties':{'verification_id':identifier,
+                                      'basis':{'type':'string','enum':['deterministic_replay','parser_protocol','cryptographic']}}}},
+         ('hypothesis_id','expected_version','to','reason_code')),
         ('targets.create','Register a hostname or IP as a canonical target without testing it.',
          {'locator':{'type':'string','minLength':1,'maxLength':253},
           'name':{'type':'string','maxLength':255},
@@ -145,11 +200,13 @@ def asset_capability_specs(spec, schema, kinds):
         {'tool_wall_seconds':5},{'control_plane':True},
         schema({'action_id':identifier,'parameters':{'type':'object','maxProperties':16}}),
         'target-management/v1',('target_management_observation','tool_receipt'),hunt_executor='inline')
-    advisory = ('targets.','knowledge.')
+    advisory = ('targets.','knowledge.','hypothesis.')
     return (read,action_read) + tuple(spec(name,description,'internal',
         'read_only' if name.startswith(advisory) else 'active',kinds,name,'1',
         None if name.startswith(advisory) else 'active_testing',
-        {'tool_wall_seconds':5},{'control_plane':True,**({} if name.startswith(advisory) else {'user_confirmation':True})},
-        schema({**properties,**({} if name.startswith('knowledge.') else {'operator_confirmed':confirmed})},required=required),
+        # Lead-board calls are single-row database writes; knowledge and target edits keep their hold.
+        {'tool_wall_seconds':1 if name.startswith('hypothesis.') else 5},
+        {'control_plane':True,**({} if name.startswith(advisory) else {'user_confirmation':True})},
+        schema({**properties,**({} if name.startswith(('knowledge.','hypothesis.')) else {'operator_confirmed':confirmed})},required=required),
         'target-management/v1',('target_management_observation','tool_receipt'),hunt_executor='inline')
         for name,description,properties,required in definitions)

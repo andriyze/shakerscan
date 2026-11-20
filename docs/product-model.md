@@ -59,9 +59,8 @@ command plan in the UI. Imported Postman, HAR 1.2, OpenAPI 3.x, and Swagger 2.0 
 are encrypted and pinned to the device; Hunt sees only their redacted request inventory and
 can include them in a scan only when the user fixed that authority at session start. Postman scripts,
 HAR responses, and external specification references never execute, and state-changing HTTP
-methods require a separate authenticated-active approval. The old `device-agent` API is migration-only:
-historical reads and cancellation remain available, but new starts, replies, and shell confirmations
-always return `410 Gone` and point to `/hunts`.
+methods require a separate authenticated-active approval. The old `device-agent` API is removed; device
+investigations run through `/hunts`.
 
 ## Hunt
 
@@ -76,8 +75,8 @@ Hunt is one user workflow. The current coding-agent session:
 7. asks the server’s deterministic proof workflows to verify supported claims.
 
 The user does not choose between “Operator” and “Explorer.” Those were implementation concepts.
-The `/research/*` controller remains available only for specialized guided verification and the
-advanced Test Builder. It is not a Hunt launcher. A Hunt request creates one `/hunts` run.
+The `/research/*` controller is removed. A Hunt request creates one `/hunts` run; the advanced
+Test Builder remains.
 
 Active Hunt capabilities require explicit confirmation that the target is owned or authorized and a
 target-bound, expiring approval. Every Hunt retains hard ceilings for capability calls, requests,

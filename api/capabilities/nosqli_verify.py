@@ -64,16 +64,6 @@ def _content_type(request: ReplayRequest) -> str:
     return ""
 
 
-def _query_field_value(request: ReplayRequest, field: str) -> str | None:
-    parsed = urllib.parse.urlsplit(request.url)
-    values = [
-        value for name, value in urllib.parse.parse_qsl(
-            parsed.query, keep_blank_values=True,
-        ) if name == field
-    ]
-    return values[0] if len(values) == 1 else None
-
-
 def _query_literal(request: ReplayRequest, field: str, value: str) -> ReplayRequest:
     parsed = urllib.parse.urlsplit(request.url)
     pairs = urllib.parse.parse_qsl(parsed.query, keep_blank_values=True)

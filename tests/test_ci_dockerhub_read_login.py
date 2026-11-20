@@ -35,7 +35,7 @@ ROOT = Path(__file__).resolve().parents[1]
 WORKFLOWS = ROOT / ".github/workflows"
 MIRROR_ACTION = "./.github/actions/docker-hub-mirror"
 BUILDKIT_MIRROR = '[registry."docker.io"]\n  mirrors = ["mirror.gcr.io"]\n'
-LOGIN_ACTION = "docker/login-action@dbcb813823bdd20940b903addbd779551569679f"
+LOGIN_ACTION = "docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6"
 HAS_DH_READ = "${{ secrets.DOCKERHUB_READ_USERNAME != '' && secrets.DOCKERHUB_READ_TOKEN != '' }}"
 READ_CREDENTIALS = {
     "username": "${{ secrets.DOCKERHUB_READ_USERNAME }}",

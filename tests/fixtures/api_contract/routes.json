@@ -21,27 +21,6 @@
     "name": "get_agent_two_tier_findings"
   },
   {
-    "path": "/agent/hunt/runs",
-    "methods": [
-      "GET"
-    ],
-    "name": "list_agent_hunt_runs"
-  },
-  {
-    "path": "/agent/hunt/session/{run_id}",
-    "methods": [
-      "GET"
-    ],
-    "name": "get_agent_hunt_session"
-  },
-  {
-    "path": "/agent/hunt/session/{run_id}/cancel",
-    "methods": [
-      "POST"
-    ],
-    "name": "cancel_agent_hunt_session"
-  },
-  {
     "path": "/agent/tools/readiness",
     "methods": [
       "GET"
@@ -803,27 +782,6 @@
       "POST"
     ],
     "name": "preview_record_deletion"
-  },
-  {
-    "path": "/device-agent/runs",
-    "methods": [
-      "GET"
-    ],
-    "name": "list_device_agent_runs"
-  },
-  {
-    "path": "/device-agent/session/{run_id}",
-    "methods": [
-      "GET"
-    ],
-    "name": "get_device_agent_session"
-  },
-  {
-    "path": "/device-agent/session/{run_id}/cancel",
-    "methods": [
-      "POST"
-    ],
-    "name": "cancel_device_agent_session"
   },
   {
     "path": "/device-policies",
@@ -2419,90 +2377,6 @@
     "name": "deactivate_request_collection_selection"
   },
   {
-    "path": "/research/campaigns/launch",
-    "methods": [
-      "POST"
-    ],
-    "name": "launch_research_campaign"
-  },
-  {
-    "path": "/research/campaigns/{campaign_id}/control",
-    "methods": [
-      "POST"
-    ],
-    "name": "control_research_campaign"
-  },
-  {
-    "path": "/research/episodes",
-    "methods": [
-      "GET"
-    ],
-    "name": "list_research_episodes"
-  },
-  {
-    "path": "/research/episodes",
-    "methods": [
-      "POST"
-    ],
-    "name": "create_research_episode"
-  },
-  {
-    "path": "/research/episodes/{episode_id}",
-    "methods": [
-      "GET"
-    ],
-    "name": "get_research_episode"
-  },
-  {
-    "path": "/research/episodes/{episode_id}/autopilot",
-    "methods": [
-      "PUT"
-    ],
-    "name": "set_research_episode_autopilot"
-  },
-  {
-    "path": "/research/episodes/{episode_id}/benchmark",
-    "methods": [
-      "GET"
-    ],
-    "name": "research_episode_benchmark"
-  },
-  {
-    "path": "/research/episodes/{episode_id}/cancel",
-    "methods": [
-      "POST"
-    ],
-    "name": "cancel_research_episode"
-  },
-  {
-    "path": "/research/episodes/{episode_id}/decisions",
-    "methods": [
-      "POST"
-    ],
-    "name": "submit_research_decision"
-  },
-  {
-    "path": "/research/episodes/{episode_id}/observe",
-    "methods": [
-      "POST"
-    ],
-    "name": "refresh_research_observation"
-  },
-  {
-    "path": "/research/episodes/{episode_id}/settle",
-    "methods": [
-      "POST"
-    ],
-    "name": "settle_research_episode"
-  },
-  {
-    "path": "/research/readiness",
-    "methods": [
-      "GET"
-    ],
-    "name": "research_readiness"
-  },
-  {
     "path": "/results",
     "methods": [
       "GET"
@@ -3392,6 +3266,13 @@
     "name": "post_target_release"
   },
   {
+    "path": "/targets/{target_id}/knowledge/yield",
+    "methods": [
+      "GET"
+    ],
+    "name": "get_target_hunt_yield"
+  },
+  {
     "path": "/targets/{target_id}/liveness",
     "methods": [
       "POST"
@@ -3516,6 +3397,13 @@
       "POST"
     ],
     "name": "confirm_target_skill"
+  },
+  {
+    "path": "/targets/{target_id}/traffic",
+    "methods": [
+      "GET"
+    ],
+    "name": "get_target_traffic"
   },
   {
     "path": "/timeline",

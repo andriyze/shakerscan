@@ -69,8 +69,19 @@ def test_start_tool_offers_an_idempotency_key():
     tool = mcp._hunt_start_tool(_hunt_contract())
     schema = tool.properties["idempotency_key"]
     assert schema["type"] == "string"
-    assert (schema["minLength"], schema["maxLength"]) == (8, 200)
+    # Short caller keys are accepted and sent in a fixed longer form (the server's minimum is 8).
+    assert (schema["minLength"], schema["maxLength"]) == (1, 200)
     assert "idempotency_key" not in tool.required
+
+
+def test_a_short_start_key_reaches_the_server_as_one_fixed_key():
+    opener = Opener()
+    client = _client(opener)
+    first = client.call_tool("shakerscan_hunt_start", {**START, "idempotency_key": "s1"})["structuredContent"]
+    again = client.call_tool("shakerscan_hunt_start", {**START, "idempotency_key": "s1"})["structuredContent"]
+    assert [start["key"] for start in opener.starts] == ["mcp-key-s1", "mcp-key-s1"]
+    assert first["hunt_id"] == again["hunt_id"] and len(opener.hunts) == 1
+    assert first["mcp_idempotency_key"] == "mcp-key-s1"
 
 
 def test_a_start_without_a_key_sends_and_returns_a_generated_one():

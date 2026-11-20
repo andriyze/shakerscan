@@ -299,6 +299,19 @@ class HuntQueryRequest(BaseModel):
         # Continue after the latest release (filter.since, default release): what changed, what is
         # known and needs re-testing, and the next experiments ranked within this Hunt's authority.
         "continue",
+        # What any Hunt already ran against this target, grouped by capability, method, route
+        # template and principal (filter: path_contains, method, capability, by).
+        "attempts",
+        # Archived HTTP calls to this target across its Scans and Hunts, as references and masked
+        # call metadata (filter: path_contains, method, status_code, status_class, capability,
+        # plane, principal_slot, by).
+        "traffic",
+        # The application graph's auth boundaries by the state of the authorization coverage on
+        # their route across this target's Hunts, untested first (filter: coverage, path_contains).
+        "coverage_gaps",
+        # What changed for this Hunt since filter.after (its settled actions, decided permission
+        # requests, moved leads); filter.wait_seconds holds the read until something does.
+        "activity",
     ] = "summary"
     filter: dict[str, Any] = Field(default_factory=dict)
     limit: int = Field(default=100, ge=1, le=500)
@@ -402,6 +415,8 @@ class HuntCandidateUpdateRequest(BaseModel):
 
 @router.post("/hunts/{hunt_id}/query")
 async def query_hunt(hunt_id: str, request: HuntQueryRequest):
+    if request.kind == "activity":
+        return await _hunt_activity(hunt_id, request)
     async with _pool().acquire() as conn:
         run = await _hunt_run_or_404(conn, hunt_id)
         if request.kind == "summary":
@@ -411,6 +426,10 @@ async def query_hunt(hunt_id: str, request: HuntQueryRequest):
                     "briefing": public.get("briefing"),
                     "context": public.get("context_pack"),
                     "has_more": False, "next_cursor": None}
+        if request.kind == "hypotheses":
+            # Leads that verified findings opened since the last read (also those a worker proved).
+            from .followup_leads import produce_quietly
+            await produce_quietly(conn, run["device_target_id"] or run["target_id"])
         try:
             result = await query_knowledge_page(
                 conn, target_id=run["device_target_id"] or run["target_id"],
@@ -426,6 +445,30 @@ async def query_hunt(hunt_id: str, request: HuntQueryRequest):
     if request.kind in {"changes", "continue"}:
         result = _arsenal_routes._redact_agent_payload(_json_safe_row(result))
     return {"hunt_id": hunt_id, **result}
+
+
+async def _hunt_activity(hunt_id: str, request: HuntQueryRequest) -> dict[str, Any]:
+    """query kind=activity: one read, or a bounded wait that holds no connection between looks."""
+    from .activity import ActivityQueryError, activity_since, parse_filters
+    from .permission_grants import hunt_finished
+    try:
+        after, wait_seconds = parse_filters(request.filter)
+    except ActivityQueryError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    if request.cursor is not None:
+        raise HTTPException(status_code=422, detail="activity takes its cursor as filter.after")
+    deadline = asyncio.get_running_loop().time() + wait_seconds
+    while True:
+        async with _pool().acquire() as conn:
+            run = await _hunt_run_or_404(conn, hunt_id)
+            report = await activity_since(conn, run, after)
+        # A Hunt that ended has nothing left to wait for.
+        ended = hunt_finished(run)
+        if after is None and wait_seconds and not ended:
+            after = report["cursor"]  # waiting without a cursor: the first read was the baseline
+        elif report["changed"] or ended or asyncio.get_running_loop().time() >= deadline:
+            return {"hunt_id": hunt_id, **report, "waited": wait_seconds > 0, "hunt_status": run.get("status")}
+        await asyncio.sleep(0.5)
 
 
 @router.post("/hunts/{hunt_id}/capabilities/{capability_name:path}")
@@ -715,12 +758,6 @@ async def confirm_hunt_shell_plan(
                     or policy.get("scope_receipt_id")
                     or ""
                 ) or None
-                legacy_daily = int(await conn.fetchval(
-                    """SELECT COALESCE(SUM(fragility_cost),0) FROM device_agent_actions
-                       WHERE device_target_id=$1 AND outcome <> 'blocked'
-                         AND created_at >= date_trunc('day', NOW())""",
-                    run["device_target_id"],
-                ) or 0)
                 hunt_daily = int(await conn.fetchval(
                     """SELECT COALESCE(SUM(COALESCE((budget_used_json->>'device_fragility_points')::int,0)),0)
                        FROM hunt_runs WHERE device_target_id=$1
@@ -728,7 +765,7 @@ async def confirm_hunt_shell_plan(
                     run["device_target_id"],
                 ) or 0)
                 if (
-                    legacy_daily + hunt_daily
+                    hunt_daily
                     + charges["device_fragility_points"]
                     > device_agent.MAX_FRAGILITY_PER_DEVICE_DAY
                 ):
@@ -1553,23 +1590,6 @@ async def verify_hunt_candidate(
         "verification": verification,
         "action": action,
     }
-async def _agent_tool_query_kb(target_uuid: uuid.UUID, kind: str, flt: dict[str, Any]) -> dict[str, Any]:
-    """Compatibility entrypoint using the same paged target knowledge as Hunt."""
-    values = dict(flt)
-    limit = values.pop("limit", 25)
-    cursor = values.pop("cursor", None)
-    try:
-        async with _pool().acquire() as conn:
-            result = await query_knowledge_page(
-                conn, target_id=target_uuid, kind=kind,
-                filters=values, limit=limit, cursor=cursor,
-            )
-    except KnowledgeQueryError as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
-    result["rows"] = [
-        _arsenal_routes._redact_agent_payload(_json_safe_row(row)) for row in result["rows"]
-    ]
-    return result
 
 
 class HuntCapabilityRequest(BaseModel):
@@ -1958,7 +1978,7 @@ async def _execute_hunt_capability_lifecycle(
                         if candidate_record is None:
                             raise HTTPException(
                                 status_code=404,
-                                detail="Candidate was not produced or observed by this Hunt",
+                                detail=investigation_candidates.NOT_OBSERVED_BY_THIS_HUNT,
                             )
                         if str(candidate_record["status"] or "") in {
                             "verified", "refuted", "expired",
@@ -4545,6 +4565,16 @@ def _hunt_redacted_capability_input(
                 text = str(values.pop(key))
                 values[key + '_sha256'] = hashlib.sha256(text.encode('utf-8')).hexdigest()
                 values[key + '_characters'] = len(text)
+    if capability_name in {'hypothesis.propose', 'hypothesis.transition'}:
+        # Lead text is stored once on the lead (and withheld on retraction); the ledger keeps digests.
+        for key in ('title', 'description', 'falsifier', 'expected_signal'):
+            if key in values:
+                text = str(values.pop(key))
+                values[key + '_sha256'] = hashlib.sha256(text.encode('utf-8')).hexdigest()
+                values[key + '_characters'] = len(text)
+        if isinstance(values.get('dedupe_dimensions'), dict):
+            values['dedupe_dimensions_sha256'] = hashlib.sha256(json.dumps(
+                values.pop('dedupe_dimensions'), sort_keys=True, default=str).encode()).hexdigest()
     if capability_name in {'knowledge.record', 'knowledge.check_experiment'} and 'conditions' in values:
         values['conditions_sha256'] = hashlib.sha256(json.dumps(
             values.pop('conditions'), sort_keys=True, default=str).encode()).hexdigest()
@@ -4828,6 +4858,12 @@ async def _attribute_verified_finding(
             file=sys.stderr, flush=True,
         )
         return None
+    if attribution is not None:
+        from .followup_leads import produce_quietly
+        async with _pool().acquire() as conn:
+            leads = await produce_quietly(conn, run.get("device_target_id") or run.get("target_id"))
+        if leads and leads["created"]:
+            attribution = {**attribution, "followup_leads_created": leads["created"]}
     return attribution
 
 

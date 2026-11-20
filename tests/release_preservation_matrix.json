@@ -63,7 +63,7 @@
         {"id":"inventory","label":"ASM inventory and campaign ledger","pytest_selector":"tests/test_asm_inventory.py::test_claim_test_batch_writes_campaign_family_lease_attempt"},
         {"id":"dynamic_batch","label":"Dynamic endpoint work is deduplicated and bounded","pytest_selector":"tests/test_asm_inventory.py::test_normalize_worklist_dedupes_by_fingerprint"},
         {"id":"schedule_execution","label":"Successful schedules advance only after enqueue","pytest_selector":"tests/test_api_helpers.py::test_run_due_schedules_advances_schedule_after_successful_enqueue"},
-        {"id":"cancellation","label":"Campaign cancellation propagates to correlated scans","pytest_selector":"tests/test_api_helpers.py::test_campaign_cancel_propagates_to_preflight_scan"},
+        {"id":"cancellation","label":"A cancelled scan settles its campaign once no sibling scan is unfinished","pytest_selector":"tests/test_asm_inventory.py::test_cancelled_scan_settles_its_campaign_only_when_no_sibling_is_unfinished"},
         {"id":"freshness","label":"Freshness decisions reconcile due and skipped work","pytest_selector":"tests/test_asm_inventory.py::test_decide_action_skips"},
         {"id":"merge","label":"Repeated endpoint evidence merges idempotently","pytest_selector":"tests/test_asm_inventory.py::test_record_endpoint_attempts_can_replace_existing_for_idempotent_merge"},
         {"id":"browser","label":"ASM production page renders","playwright":{"title":"/asm renders without an application exception"}}

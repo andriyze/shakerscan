@@ -738,7 +738,10 @@ async def inspect_target_artifact(
         return {
             "ok": False,
             "status": "blocked",
-            "error": "artifact_range_not_supported",
+            # Agents asked again with other offsets: say what still works on this resource.
+            "error": ("artifact_range_not_supported: this server ignores byte ranges, so only offset 0 "
+                      f"can be read (max_bytes up to {MAX_INSPECT_BYTES}); use search_terms on that "
+                      "window, or http.request for the response's own body sample"),
             "budget_consumed": {"http_requests": 1, "tool_wall_seconds": 1},
         }
     if context_start and _range_start(private) != context_start:

@@ -1522,3 +1522,31 @@ def test_the_reachability_filter_says_so_when_it_disables_itself(caplog):
     assert kept == worklist                     # nothing dropped
     assert "max_probe=3" in caplog.text         # and the skip is visible
     assert "6 unique paths" in caplog.text
+
+
+def test_cancelled_scan_settles_its_campaign_only_when_no_sibling_is_unfinished():
+    """A terminal scan settles its active campaign; a campaign with unfinished scans is left alone."""
+
+    class _SettleConn:
+        def __init__(self, answer):
+            self.answer, self.calls = answer, []
+
+        async def execute(self, sql, *args):
+            self.calls.append((" ".join(sql.split()), args))
+            return self.answer
+
+    scan_id = uuid.uuid4()
+    conn = _SettleConn("UPDATE 1")
+    assert asyncio.run(a.settle_campaign_after_scan(conn, scan_id)) == 1
+    [(sql, args)] = conn.calls
+    assert args == (scan_id, "cancelled")
+    assert "UPDATE scan_campaigns campaign SET status = $2" in sql and "campaign.status = 'active'" in sql
+    assert "campaign.id = (SELECT owner.campaign_id FROM scans owner WHERE owner.id = $1)" in sql
+    assert "NOT EXISTS ( SELECT 1 FROM scans other WHERE other.campaign_id = campaign.id" in sql
+    assert "other.status IN ('pending', 'queued', 'running', 'cancelling')" in sql
+
+    # Nothing matched (a sibling is still unfinished, or the scan has no campaign): reported as zero.
+    assert asyncio.run(a.settle_campaign_after_scan(_SettleConn("UPDATE 0"), scan_id, status="failed")) == 0
+    # An identifier that is not a scan id never reaches the database.
+    untouched = _SettleConn("UPDATE 1")
+    assert asyncio.run(a.settle_campaign_after_scan(untouched, "not-a-scan")) == 0 and untouched.calls == []

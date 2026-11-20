@@ -1312,7 +1312,7 @@ def build_parser() -> argparse.ArgumentParser:
             "summary", "endpoints", "endpoint_groups", "findings", "hypotheses", "principals",
             "graph_nodes", "graph_edges", "services", "service_intelligence", "scans", "collections",
             "candidates", "notes", "receipts", "interpretations", "negative_results", "changes",
-            "continue",
+            "continue", "attempts", "activity", "traffic", "coverage_gaps",
         ),
     )
     hunt_query.add_argument("--filter", metavar="FILE", help="JSON object; use - for stdin")
@@ -2246,7 +2246,7 @@ def _print_continue(target_id: str, report: Mapping[str, Any]) -> None:
     counts = (report.get("knowledge") or {}).get("counts") or {}
     print("  knowledge: " + ", ".join(f"{name.replace('_', ' ')} {counts.get(name, 0)}" for name in (
         "still_applicable", "needs_revalidation", "not_reobserved_since_release", "historical",
-        "inconclusive_experiments", "open_next_steps", "reopened_for_review")))
+        "inconclusive_experiments", "open_leads", "reopened_for_review")))
     for item in (report.get("knowledge") or {}).get("reopened_for_review") or []:
         print(_shown(f"    reopened dismissal {item.get('id')} (finding {item.get('finding_id')}): decide with "
                      "shakerscan knowledge dismiss|reopen"))
