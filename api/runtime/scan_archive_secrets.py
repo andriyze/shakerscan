@@ -17,7 +17,7 @@ import json
 import uuid
 from typing import Any, Iterable, Mapping
 
-from .credentials import parse_credential_secret
+from .credentials import credential_secret_values, parse_credential_secret
 
 try:
     from secret_store import decrypt_secret
@@ -25,7 +25,6 @@ except ModuleNotFoundError:  # package import layout
     from api.secret_store import decrypt_secret
 
 MIN_SECRET_CHARS = 6
-SECRET_FIELDS = ("secret", "secondary_secret")
 
 
 def _refs(items: Any) -> list[tuple[uuid.UUID, int | None]]:
@@ -59,16 +58,8 @@ def _profile_refs(options: Any) -> list[tuple[uuid.UUID, int | None]]:
 
 
 def secret_values(material: Mapping[str, Any]) -> list[str]:
-    """The secret strings of one parsed credential envelope (not its user name or header names)."""
-    values = [str(material.get(name) or "") for name in SECRET_FIELDS]
-    headers = material.get("custom_headers")
-    if isinstance(headers, Mapping):
-        values.extend(str(value or "") for value in headers.values())
-    elif isinstance(headers, (list, tuple)):
-        for header in headers:
-            if isinstance(header, Mapping):
-                values.append(str(header.get("value") or ""))
-    return [value for value in values if len(value) >= MIN_SECRET_CHARS]
+    """The envelope's secret strings long enough to withhold (shorter ones match ordinary text)."""
+    return [value for value in credential_secret_values(material) if len(value) >= MIN_SECRET_CHARS]
 
 
 async def profile_secrets(conn: Any, refs: Iterable[tuple[uuid.UUID, int | None]]) -> list[str]:
