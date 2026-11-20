@@ -360,6 +360,12 @@ kit's API calls go through `shakerscan api`, so the same commands work locally a
 scan CLI against the instance; `shakerscan status` reports the instance when no engine is
 installed on this machine.
 
+A write can carry a retry key: `shakerscan api --idempotency-key batch-0001 POST /scans/batch
+'{…}'`. Sending it again with the same key and body returns the first answer, with every accepted
+Scan and per-target error, instead of running it twice; a retry while the first is still running
+answers `idempotency_request_in_progress`. Use one for any write that may outlive your timeout,
+such as a 50-target batch.
+
 ## Hunt from an agent (MCP)
 
 Claude Code, after `shakerscan connect` (or `connect --claude` does this for you):

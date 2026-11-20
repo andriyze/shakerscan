@@ -2143,7 +2143,14 @@ def _runtime_destinations(
     capability_name: str,
     observations: Sequence[Mapping[str, Any]],
 ) -> list[dict[str, Any]]:
-    """Project content-free destination evidence from manifest-bound observations."""
+    """Project content-free destination evidence from manifest-bound observations.
+
+    A destination is where a request went. A redirect's Location the client did not follow
+    (``response.location``; a hop recorded ``followed: false``, stopped cross-origin, at the hop
+    limit or before a credential destination) names a place no request reached: counting it
+    failed whole Scans of live hosts that answer 302 to an identity provider or CDN. A followed
+    hop's Location is where the next request went, so it stays.
+    """
     destinations: list[dict[str, Any]] = []
     seen: set[tuple[str, tuple[str, ...]]] = set()
     for observation_index, raw in enumerate(observations):
@@ -2155,11 +2162,12 @@ def _runtime_destinations(
             item.get("url"), item.get("request_url"), item.get("final_url"),
             item.get("matched_at"), item.get("consumer_url"),
             item.get("producer_url"), response.get("final_url"),
-            response.get("location"),
         ]
         for hop in item.get("redirect_chain") or ():
             if isinstance(hop, Mapping):
-                url_values.extend((hop.get("url"), hop.get("location"), hop.get("final_url")))
+                url_values.extend((hop.get("url"), hop.get("final_url")))
+                if hop.get("followed") is not False:
+                    url_values.append(hop.get("location"))
             else:
                 url_values.append(hop)
         origins = list(dict.fromkeys(

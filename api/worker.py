@@ -69,6 +69,8 @@ from retest_contract import (
 from runtime.json_fields import json_array_field, json_object_field, strip_null_bytes
 from runtime import target_pacing
 from runtime.nuclei_index import ensure_nuclei_template_index
+from runtime.heavy_slots import HeavyScannerSlot, HeavySlotUnavailable
+from runtime.scanner_cancel import ThrottledCancelCheck, shared_client
 from runtime.worker_startup import reject_admission_signer_material
 from runtime.worker_projection import (
     AI_GATE_RUN_KINDS,
@@ -2402,7 +2404,7 @@ def _scan_cancel_requested(scan_id: str | None, redis_client: Any | None = None)
     if str(os.environ.get("SHAKERSCAN_BROKER_LEASE") or "").strip().lower() in {"1", "true", "yes", "on"}:
         return (RESULTS_DIR / f"{scan_id}_cancel").exists()
     try:
-        client = redis_client or get_redis()
+        client = redis_client or shared_client(get_redis)
         return bool(client.get(f"scan:{scan_id}:cancel"))
     except Exception:
         return False
@@ -18292,6 +18294,7 @@ async def _execute_agent_scanner_process(
         job_data.get("_cancelled")
         if callable(job_data.get("_cancelled")) else None
     )
+    heavy_slot = HeavyScannerSlot(redis_client, name)
     try:
         if not job_id:
             raise agent_tools.AgentToolError("scanner job requires an identity")
@@ -18420,6 +18423,9 @@ async def _execute_agent_scanner_process(
         argv = list(process_plan.argv)
         process_enforcement = process_plan.enforcement_receipt()
         requested_timeout = int(job_data.get("timeout_ms") or process_plan.timeout_ms)
+        # Queued behind the host's heavy-process slots, heartbeating; the wait is not tool time.
+        monotonic_started += await heavy_slot.acquire_for_process(
+            process_timeout_ms=process_plan.timeout_ms, heartbeat=heartbeat, cancelled=cancelled)
         elapsed_before_process_ms = max(
             0, int((time.monotonic() - monotonic_started) * 1_000),
         )
@@ -18474,11 +18480,10 @@ async def _execute_agent_scanner_process(
         loop = asyncio.get_running_loop()
         deadline = loop.time() + timeout_ms / 1000.0
         next_heartbeat = loop.time() + 15.0
+        cancel_check = ThrottledCancelCheck(lambda: (cancelled is not None and cancelled()) or (
+            redis_client is not None and redis_client.exists(cancel_key)))
         while not wait_process.done():
-            if (
-                (cancelled is not None and cancelled())
-                or (redis_client is not None and redis_client.exists(cancel_key))
-            ):
+            if await cancel_check.requested(loop.time()):
                 status, error = "cancelled", "cancelled"
                 _terminate_agent_tool_process_group(proc)
                 break
@@ -18544,7 +18549,7 @@ async def _execute_agent_scanner_process(
                 status = "success"
     except FileNotFoundError:
         error = "scanner_not_available"
-    except (agent_tools.AgentToolError, KeyError, TypeError, ValueError) as exc:
+    except (agent_tools.AgentToolError, KeyError, TypeError, ValueError, HeavySlotUnavailable) as exc:
         error = f"contract:{str(exc)[:240]}"
     except asyncio.CancelledError:
         if proc is not None and proc.returncode is None:
@@ -18569,6 +18574,7 @@ async def _execute_agent_scanner_process(
         error = f"worker_fault:{type(exc).__name__}"
         execution_uncertain = process_started
     finally:
+        heavy_slot.release()
         if httpx_configuration is not None:
             httpx_configuration.close()
         if pinned_proxy is not None:

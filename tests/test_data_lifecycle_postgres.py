@@ -1319,3 +1319,46 @@ def test_a_masked_export_reads_bodies_lazily_and_shows_what_a_full_read_shows(tm
             )
             assert list(found) == [str(light[0]["id"])]
     run(scenario)
+
+
+def test_a_deletion_approval_that_cannot_execute_its_preview_is_refused_before_it_is_stored():
+    """Each wrong guess at the approval contract used to store an active, never-usable dangerous
+    approval and fail only at execute with one opaque 409. The preview now names the exact
+    approval, and approval creation refuses anything else, naming each mismatch."""
+    from datetime import timedelta, timezone
+    try:
+        from arsenal_routes.router import _refuse_unbound_record_deletion_approval
+    except ModuleNotFoundError:
+        from api.arsenal_routes.router import _refuse_unbound_record_deletion_approval
+
+    async def scenario(pool):
+        t, s, scan, f, other, e = await seeded(pool)
+        preview = await service.preview(pool, {'kind': 'findings', 'finding_ids': [str(f)], 'scan_id': str(scan)})
+        request = preview['approval_request']
+        assert request['scope_receipt_id'] == preview['scope_receipt_id']
+        assert request['action_context'] == {'preview_id': preview['preview_id'], 'preview_hash': preview['preview_hash']}
+        assert request['confirmations'] == sorted(service.CONFIRMATIONS)
+        expires = datetime.fromisoformat(request['expires_at_latest']) - timedelta(minutes=1)
+        async with pool.acquire() as c:
+            scope_row = await c.fetchrow('SELECT * FROM scope_receipts WHERE id=$1', preview['scope_receipt_id'])
+            with pytest.raises(HTTPException) as refused:
+                await _refuse_unbound_record_deletion_approval(
+                    c, scope_row, risk_tier='dangerous', action_name='record_delete',
+                    confirmations=['confirm_authorized', 'confirm_scope_reviewed'],
+                    action_context={**request['action_context'], 'extra': 1}, expires_at=None)
+            detail = refused.value.detail
+            assert refused.value.status_code == 400 and detail['error'] == 'record_deletion_approval_mismatch'
+            assert detail['mismatches'][:2] == ["action_name must be 'data.records.delete' (got 'record_delete')",
+                                               'confirmations missing confirm_delete_records']
+            assert any('(extra keys: extra)' in item for item in detail['mismatches'])
+            assert any(item.startswith('expires_at is required') for item in detail['mismatches'])
+            assert detail['approval_request'] == request
+            # The exact approval the preview names passes, and executes.
+            await _refuse_unbound_record_deletion_approval(
+                c, scope_row, risk_tier=request['risk_tier'], action_name=request['action_name'],
+                confirmations=request['confirmations'], action_context=request['action_context'],
+                expires_at=expires.astimezone(timezone.utc))
+        receipt = await approve(pool, preview)
+        done = await service.execute(pool, preview['preview_id'], receipt, preview_hash=preview['preview_hash'])
+        assert done['deleted'] == 1
+    run(scenario)

@@ -16,6 +16,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
 import urllib.error
 import urllib.parse
@@ -67,8 +68,13 @@ def bearer_token(environ: dict[str, str] | None = None) -> str | None:
     return token
 
 
+#: The public API's retry key (api/public_api_contract.py): 8-200 safe characters.
+IDEMPOTENCY_KEY_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{7,199}$")
+
+
 def build_request(
-    method: str, path: str, body: str | None, *, api_url: str, token: str | None
+    method: str, path: str, body: str | None, *, api_url: str, token: str | None,
+    idempotency_key: str | None = None,
 ) -> urllib.request.Request:
     method = method.upper()
     if method not in METHODS:
@@ -104,6 +110,16 @@ def build_request(
             raise ApiCliError(f"the request body must be JSON: {exc}") from exc
         data = json.dumps(parsed, separators=(",", ":")).encode("utf-8")
         headers["Content-Type"] = "application/json"
+    if idempotency_key is not None:
+        # A write that timed out on the client side may still have run (a 50-target Scan batch
+        # outlived a 120 s client timeout): the same key replays its stored answer, with every
+        # per-target error, instead of running it again.
+        if method in {"GET", "HEAD", "OPTIONS"}:
+            raise ApiCliError("--idempotency-key applies to POST, PUT, PATCH and DELETE")
+        if not IDEMPOTENCY_KEY_PATTERN.fullmatch(idempotency_key):
+            raise ApiCliError("--idempotency-key must be 8 to 200 characters (letters, digits, _ . : -), "
+                              "starting with a letter or digit")
+        headers["Idempotency-Key"] = idempotency_key
     if token:
         headers["Authorization"] = "Bearer " + token
     return urllib.request.Request(api_url + path, data=data, headers=headers, method=method)
@@ -263,13 +279,17 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--api-url", help=argparse.SUPPRESS)
     parser.add_argument("--timeout", type=float, default=60.0, help="seconds (default 60)")
     parser.add_argument("--stream", action="store_true", help="print SSE events as they arrive; never retry")
+    parser.add_argument("--idempotency-key", metavar="KEY",
+                        help="retry key for a write: sending it again with the same key and body returns the "
+                             "first answer instead of running the request twice (e.g. POST /scans/batch)")
     parser.add_argument("method", help="GET, POST, PUT, PATCH or DELETE")
     parser.add_argument("path", help="the API path, with query string if any, e.g. /findings?limit=20")
     parser.add_argument("body", nargs="?", help="a JSON object for POST, PUT or PATCH, or @FILE to read it from a file")
     args = parser.parse_args(argv)
     try:
         api_url = base_url(args.api_url)
-        request = build_request(args.method, args.path, args.body, api_url=api_url, token=bearer_token())
+        request = build_request(args.method, args.path, args.body, api_url=api_url, token=bearer_token(),
+                                idempotency_key=args.idempotency_key)
         if args.stream:
             from api_stream import stream_response
             try:
