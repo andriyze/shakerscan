@@ -286,8 +286,8 @@ def test_a_scanner_process_takes_its_heavy_slot_before_launch_and_frees_it_after
         def __init__(self, redis_client, tool):
             calls.append(("new", tool))
 
-        async def acquire(self, **kwargs):
-            calls.append(("acquire", sorted(kwargs)))
+        async def acquire_for_process(self, **kwargs):
+            calls.append(("acquire_for_process", sorted(kwargs)))
             return 0.0
 
         def release(self):
@@ -297,6 +297,7 @@ def test_a_scanner_process_takes_its_heavy_slot_before_launch_and_frees_it_after
     launched: dict = {}
     _run_katana(monkeypatch, 0, _CRAWL_LINE, launched=launched)
     assert calls == [("new", "katana"),
-                     ("acquire", ["cancelled", "heartbeat", "max_wait_seconds", "ttl_seconds"]),
+                     # The wait bound is the slot's own, never the process's wall budget.
+                     ("acquire_for_process", ["cancelled", "heartbeat", "process_timeout_ms"]),
                      ("release",)]
     assert launched["cmd"], "the process launched after the slot was taken"
