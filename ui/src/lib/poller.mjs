@@ -6,14 +6,19 @@
  * - Hidden tabs do not poll: a due tick waits until the document is visible again, then runs.
  * - Live or idle: while `isLive()` the loop waits `intervalMs`; otherwise `idleIntervalMs`, and
  *   `null` there means it stops until `trigger()` (or `isLive()` turning true on the next trigger).
- * - Errors back off exponentially (interval x 2^failures, capped at `maxBackoffMs`), and a busy
- *   answer's Retry-After (error.retryAfter, seconds) is a floor on the wait.
+ * - A failed tick is retried soon once (after `FIRST_RETRY_MS`, or the interval when that is
+ *   shorter): one refused or timed-out read must not leave a card "unavailable" for a whole
+ *   backoff period (two minutes for a 60 s poll). Further errors back off exponentially (interval
+ *   x 2^(failures - 1), capped at `maxBackoffMs`). A busy answer's Retry-After
+ *   (error.retryAfter, seconds) is a floor on every wait.
  * - `leading: false` skips the immediate first tick on `start()`: the first one comes after the
  *   live (or idle) wait, for a page that has just loaded the same data itself.
  * - `stop()` aborts the tick in flight (its AbortSignal) and clears every timer and listener.
  */
 
 export const DEFAULT_MAX_BACKOFF_MS = 120_000
+/** The wait before the one quick retry of a failed tick. */
+export const FIRST_RETRY_MS = 5_000
 
 export function documentVisibility(doc = typeof document === 'undefined' ? null : document) {
   return {
@@ -83,7 +88,11 @@ export function createPoller({
 
   function nextDelay(error) {
     if (error !== undefined) {
-      return backoffDelay(intervalMs, failures, { maxBackoffMs, retryAfterSeconds: error?.retryAfter ?? null })
+      const retryAfterSeconds = error?.retryAfter ?? null
+      if (failures === 1) {
+        return backoffDelay(Math.min(intervalMs, FIRST_RETRY_MS), 0, { maxBackoffMs, retryAfterSeconds })
+      }
+      return backoffDelay(intervalMs, failures - 1, { maxBackoffMs, retryAfterSeconds })
     }
     return isLive() ? intervalMs : idleIntervalMs
   }
