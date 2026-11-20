@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 
-import { backoffDelay, createPoller } from './poller.mjs'
+import { FIRST_RETRY_MS, backoffDelay, createPoller } from './poller.mjs'
 
 /** Manual timers and visibility: the test decides when time passes and whether the tab shows. */
 function harness() {
@@ -99,24 +99,61 @@ test('a tab hidden from the start waits for the first view', async () => {
   poller.stop()
 })
 
-test('errors back off exponentially, capped, and a success resets the pace', async () => {
+test('a failed tick is retried soon once, then errors back off exponentially, capped, and a success resets the pace', async () => {
   const h = harness()
   const delays = []
   let fail = true
   const poller = createPoller({
-    intervalMs: 5000, maxBackoffMs: 30_000, timers: h.timers, visibility: h.visibility,
+    intervalMs: 20_000, maxBackoffMs: 60_000, timers: h.timers, visibility: h.visibility,
     run: async () => { if (fail) throw new Error('down') },
     onSchedule: ({ nextDelayMs }) => delays.push(nextDelayMs),
   })
   poller.start()
   await h.flush()
-  await h.advance(10_000)
-  await h.advance(20_000)
-  await h.advance(30_000)
-  assert.deepEqual(delays, [10_000, 20_000, 30_000, 30_000])
+  assert.deepEqual(delays, [FIRST_RETRY_MS])
+  await h.advance(FIRST_RETRY_MS)
+  await h.advance(40_000)
+  await h.advance(60_000)
+  assert.deepEqual(delays, [FIRST_RETRY_MS, 40_000, 60_000, 60_000])
   fail = false
-  await h.advance(30_000)
-  assert.equal(delays.at(-1), 5000)
+  await h.advance(60_000)
+  assert.equal(delays.at(-1), 20_000)
+  poller.stop()
+})
+
+test('one failed read of a slow poll is retried within seconds, not after two intervals', async () => {
+  // The dashboard polls the exposure read every 60 s: one refused or timed-out answer used to
+  // leave its cards "unavailable" for 120 s before the next try.
+  const h = harness()
+  const delays = []
+  let calls = 0
+  const poller = createPoller({
+    intervalMs: 60_000, timers: h.timers, visibility: h.visibility,
+    run: async () => { calls += 1; if (calls === 1) throw new Error('504 statement_timeout') },
+    onSchedule: ({ nextDelayMs }) => delays.push(nextDelayMs),
+  })
+  poller.start()
+  await h.flush()
+  assert.equal(delays[0], FIRST_RETRY_MS)
+  await h.advance(FIRST_RETRY_MS)
+  assert.equal(calls, 2)
+  assert.equal(delays.at(-1), 60_000)
+  poller.stop()
+})
+
+test('the quick retry of a busy answer still waits its Retry-After', async () => {
+  const h = harness()
+  const delays = []
+  const poller = createPoller({
+    intervalMs: 60_000, timers: h.timers, visibility: h.visibility,
+    run: async () => { throw Object.assign(new Error('busy'), { status: 429, retryAfter: 12 }) },
+    onSchedule: ({ nextDelayMs }) => delays.push(nextDelayMs),
+  })
+  poller.start()
+  await h.flush()
+  assert.equal(delays[0], 12_000)
+  await h.advance(12_000)
+  assert.equal(delays[1], 120_000)
   poller.stop()
 })
 

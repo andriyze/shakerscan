@@ -1,4 +1,5 @@
 export const DEFAULT_MAX_BACKOFF_MS: number
+export const FIRST_RETRY_MS: number
 export interface PollVisibility {
   hidden(): boolean
   subscribe(listener: () => void): () => void
