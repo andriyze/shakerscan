@@ -7,6 +7,7 @@ use `../release-process.md` plus `RELEASES.md` at the repository root.
 
 ## 2.14 line
 
+- [`2.14.1.md`](2.14.1.md) — integration candidate on `release/2.14.1`; follows 2.14.0.
 - [`2.14.0.md`](2.14.0.md) — integration candidate on `release/2.14.0`; follows 2.13.0.
 
 ## 2.13 line
