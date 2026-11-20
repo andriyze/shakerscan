@@ -2119,6 +2119,51 @@ def test_broker_worker_placement_labels_include_selectable_node_identity():
     assert "nuclei" in labels["tools"]
 
 
+def test_workers_reads_the_docker_socket_off_the_event_loop(monkeypatch):
+    """GET /workers lists the worker containers over the Docker socket with blocking calls (up to a
+    10 s timeout). They run in a thread: on the event loop they held up every other request,
+    the dashboard's own reads included."""
+    import socket as socket_module
+
+    containers = [{"Id": "aaa111", "Names": ["/shakerscan-worker-1"], "State": "running",
+                   "Image": "worker", "Labels": {}}]
+    body = json.dumps(containers).encode()
+    reply = b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n" + body
+    recv_threads = []
+
+    class _Socket:
+        def __init__(self, *_args, **_kwargs):
+            self._chunks = [reply, b""]
+
+        def settimeout(self, _seconds):
+            pass
+
+        def connect(self, path):
+            assert path == "/var/run/docker.sock"
+
+        def sendall(self, data):
+            assert data.startswith(b"GET /containers/json?all=true")
+
+        def recv(self, _size):
+            recv_threads.append(threading.current_thread())
+            return self._chunks.pop(0)
+
+        def close(self):
+            pass
+
+    async def run():
+        loop_thread = threading.current_thread()
+        # Faked only once the loop runs: its own self-pipe is a real socket pair.
+        with monkeypatch.context() as patch:
+            patch.setattr(socket_module, "socket", _Socket)
+            result = await api_module.get_workers()
+        return loop_thread, result
+
+    loop_thread, result = asyncio.run(run())
+    assert recv_threads and loop_thread not in recv_threads
+    assert isinstance(result, dict)
+
+
 def test_public_fleet_health_omits_build_and_worker_telemetry(monkeypatch):
     async def fake_health():
         return {

@@ -10683,7 +10683,7 @@ async def _submit_scan(
     # Record the eligible build at submit. Ordinary active scans require one
     # compatible current worker; the explicit strict flag still requires the
     # entire locally inventoried fleet to be uniform for release acceptance.
-    _freshness = _worker_freshness_snapshot()
+    _freshness = await asyncio.to_thread(_worker_freshness_snapshot)  # Docker socket + Redis
     require_uniform_current_fleet = bool(
         getattr(execution_options, "require_current_workers", False)
         and scan_contract.policy.active_testing
@@ -18979,7 +18979,7 @@ async def get_workers():
 
     docker_socket = "/var/run/docker.sock"
 
-    try:
+    def read_worker_containers() -> bytes:
         # Connect to Docker socket directly
         sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         sock.settimeout(10)
@@ -19001,6 +19001,12 @@ async def get_workers():
                 break
             response += chunk
         sock.close()
+        return response
+
+    try:
+        # A blocking socket read (up to its 10 s timeout) must not stall the event loop and every
+        # other request with it: the dashboard reads this on every load.
+        response = await asyncio.to_thread(read_worker_containers)
 
         # Parse HTTP response
         response_str = response.decode('utf-8')
