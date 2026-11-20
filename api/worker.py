@@ -67,6 +67,7 @@ from retest_contract import (
     validate_retest_job_payload,
 )
 from runtime.json_fields import json_array_field, json_object_field, strip_null_bytes
+from runtime import target_pacing
 from runtime.nuclei_index import ensure_nuclei_template_index
 from runtime.worker_startup import reject_admission_signer_material
 from runtime.worker_projection import (
@@ -11184,7 +11185,8 @@ async def _execute_reserved_deterministic_scan(
             approval_receipt_id=admission.plan.policy.approval_receipt_id, authority=authority,
             credential_check=build_scan_credential_check(db_pool, options=normalized, target=execution.target_binding,
                 scan_id=scan_id, session_check=dispatcher.authentication_health_status),
-            user_cancelled=lambda: _scan_cancel_requested(scan_id), deadline=deadline)
+            user_cancelled=lambda: _scan_cancel_requested(scan_id), deadline=deadline,
+            traffic_attribution=options.get("traffic_attribution") is not False)
 
     async def cancelled_report() -> dict[str, Any]:
         async def load_allocation() -> Any:
@@ -18398,6 +18400,8 @@ async def _execute_agent_scanner_process(
             httpx_configuration = HttpxCredentialConfiguration(
                 agent_tools.httpx_credential_config_bytes(job_data["trusted_headers"]))
             runtime_paths["httpx_config_fd"] = httpx_configuration.descriptor
+        options = await target_pacing.pace_scanner_options(db_pool, job_data, options, execution_target, tool=name,
+            wall_seconds=int(reserved_budget.get("tool_wall_seconds") or 0), heartbeat=heartbeat, cancelled=cancelled, error=agent_tools.AgentToolError)
         process_plan = agent_tools.build_enforced_scanner_plan(
             name,
             execution_target,

@@ -34,6 +34,9 @@ _NEUTRAL_HEADERS = frozenset({
     "connection", "content-length", "content-type", "dnt", "expect", "host",
     "if-modified-since", "if-none-match", "origin", "pragma", "range", "referer", "te",
     "upgrade-insecure-requests", "user-agent", "x-requested-with",
+    # The engine's declared run identification (traffic_attribution): names the run, carries
+    # no session material, and may follow a redirect anywhere the request may go.
+    "x-shakerscan-run",
 })
 
 _CURL_DATA_OPTIONS = frozenset({
