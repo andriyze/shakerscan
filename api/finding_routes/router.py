@@ -55,6 +55,7 @@ try:
     from proof_retest import PASSIVE_RETEST_CHECK_TYPES, passive_retest_type, proof_retest_request
     from exposure.finding_link import related_exposures
     from list_contract import DEFAULT_LIMIT, MAX_LIMIT, SqlParams, page_params
+    from target_filter import parse_target_ids
 except ModuleNotFoundError:  # package import in host-side tests
     from ..api_utils import (
         SEVERITY_ORDER, _clean_string_list, _direct_query_value, _int_or_none, _iso_or_none,
@@ -83,6 +84,7 @@ except ModuleNotFoundError:  # package import in host-side tests
     from ..proof_retest import PASSIVE_RETEST_CHECK_TYPES, passive_retest_type, proof_retest_request
     from ..exposure.finding_link import related_exposures
     from ..list_contract import DEFAULT_LIMIT, MAX_LIMIT, SqlParams, page_params
+    from ..target_filter import parse_target_ids
 
 
 from .hunt_scope import candidate_hunt_predicate
@@ -401,7 +403,10 @@ async def list_findings(
     severity: Optional[str] = None,
     status: Optional[FindingStatus] = None,
     source_type: Optional[FindingSourceType] = None,
-    target_id: Optional[str] = None,
+    target_id: Optional[list[str]] = Query(
+        None, description=("A target id. Repeat the parameter (or separate ids with commas) for "
+                           "the findings of several targets, at most 500."),
+    ),
     ai_target_id: Optional[str] = None,
     device_target_id: Optional[str] = None,
     scan_id: Optional[str] = None,
@@ -482,8 +487,9 @@ async def list_findings(
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
+    target_ids = parse_target_ids(target_id)
     filters = FindingFilters(
-        severities=severities, status=status, source_type=source_type, target_id=target_id,
+        severities=severities, status=status, source_type=source_type, target_id=target_ids,
         ai_target_id=ai_target_id, device_target_id=device_target_id, scan_id=scan_id,
         hunt_id=hunt_id, root_domain=root_domain, verification_verdict=verification_verdict,
         verification_mode=verification_mode, verified_only=verified_only, driven_by=driven_by,
@@ -554,7 +560,7 @@ async def list_findings(
         candidate_items: list[dict[str, Any]] = []
         if candidates_included:
             candidate_items, candidates_total = await _open_candidates(
-                conn, hunt_id=hunt_id, severities=severities, target_id=target_id,
+                conn, hunt_id=hunt_id, severities=severities, target_id=target_ids,
                 root_domain=root_domain, search=search, seen_within_days=seen_within_days,
                 first_seen_within_days=first_seen_within_days, sort_by=sort_by,
                 sort_order=sort_order, window=limit + offset,
@@ -601,7 +607,7 @@ async def list_findings(
 
 
 async def _open_candidates(
-    conn: Any, *, hunt_id: Optional[str], severities: Optional[list[str]], target_id: Optional[str],
+    conn: Any, *, hunt_id: Optional[str], severities: Optional[list[str]], target_id: Optional[list[uuid.UUID]],
     root_domain: Optional[str], search: Optional[str], seen_within_days: Optional[int],
     first_seen_within_days: Optional[int], sort_by: Optional[str], sort_order: str, window: int,
 ) -> tuple[list[dict[str, Any]], int]:
@@ -631,8 +637,8 @@ async def _open_candidates(
         candidate_params.append(severities)
         cand_idx += 1
     if target_id:
-        candidate_query += f" AND c.target_id = ${cand_idx}"
-        candidate_params.append(uuid.UUID(target_id))
+        candidate_query += f" AND c.target_id = ANY(${cand_idx}::uuid[])"
+        candidate_params.append(list(target_id))
         cand_idx += 1
     if root_domain:
         candidate_query += f""" AND (

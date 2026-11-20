@@ -11308,7 +11308,9 @@ async def _submit_batch(
 async def list_scans(
     response: Response = None,
     status: Optional[str] = None,
-    target_id: Optional[str] = None,
+    target_id: Optional[list[str]] = Query(
+        None, description="A target id; repeat it (or separate ids with commas) for several, at most 500.",
+    ),
     target: Optional[str] = None,
     root_domain: Optional[str] = None,
     created_within_days: Optional[int] = Query(None, ge=1),

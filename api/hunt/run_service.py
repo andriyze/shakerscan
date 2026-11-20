@@ -1443,7 +1443,7 @@ class HuntRunService:
     async def list(
         self,
         *,
-        target_id: str | None = None,
+        target_id: str | list[str] | None = None,
         status: str | None = None,
         limit: int = 50,
         offset: int = 0,
@@ -1464,11 +1464,26 @@ class HuntRunService:
         """
         clauses: list[str] = []
         params: list[Any] = []
+        if target_id and not isinstance(target_id, (str, list, tuple)):
+            target_id = None  # a direct call's ``Query(...)`` default
         if target_id:
-            params.append(_uuid_or_400(target_id, "target id"))
-            clauses.append(
-                f"(h.target_id=${len(params)} OR h.device_target_id=${len(params)})"
-            )
+            # One id, or several (a repeated or comma-separated target_id): a web target or a
+            # connected device.
+            items = [target_id] if isinstance(target_id, str) else list(target_id)
+            ids = list(dict.fromkeys(
+                _uuid_or_400(part.strip(), "target id")
+                for item in items for part in str(item).split(",") if part.strip()
+            ))
+            if len(ids) > 500:
+                raise HTTPException(400, detail="target_id: at most 500 values")
+            if len(ids) == 1:
+                params.append(ids[0])
+                clauses.append(f"(h.target_id=${len(params)} OR h.device_target_id=${len(params)})")
+            elif ids:
+                params.append(ids)
+                clauses.append(
+                    f"(h.target_id=ANY(${len(params)}::uuid[]) OR h.device_target_id=ANY(${len(params)}::uuid[]))"
+                )
         if status:
             if status not in HUNT_RUN_STATUSES:
                 raise HTTPException(status_code=400, detail="invalid Hunt status")

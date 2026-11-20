@@ -54,7 +54,7 @@ async def test_api_is_read_only_paginated_and_uses_application_pool(monkeypatch)
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
         response = await client.get(f"/exposure/services?target_id={OWNER}&target_kind=device&limit=5&offset=10&search=Test")
         assert response.status_code == 200
-        assert captured[0]["target_id"] == uuid.UUID(OWNER)
+        assert captured[0]["target_id"] == [uuid.UUID(OWNER)]
         assert captured[0]["limit"] == 5 and captured[0]["offset"] == 10
         assert app.state.db_pool.conn.transaction_options == {"isolation": "repeatable_read", "readonly": True}
         assert (await client.post('/exposure/services', json={"active_testing": True})).status_code == 405
@@ -112,7 +112,7 @@ async def test_unbound_or_mismatched_action_result_is_rejected():
 async def test_empty_out_of_range_page_keeps_total_and_filters():
     class Conn:
         async def fetchval(self, sql, *args):
-            assert args == ("device", uuid.UUID(OWNER), "example.test", "literal_%")
+            assert args == ("device", [uuid.UUID(OWNER)], "example.test", "literal_%")
             assert "strpos" in sql
             return 3
         async def fetch(self, sql, *args):
