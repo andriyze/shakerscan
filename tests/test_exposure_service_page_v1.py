@@ -100,7 +100,7 @@ async def test_target_id_of_a_device_returns_the_device_and_its_host_target(buil
     conn = Conn([DEVICE_ROW, HOST_ROW])
     body = await service_store.service_page_v1(
         conn, service_store.Page(limit=10), **dict(ARGS, target_id=DEVICE))
-    assert conn.page_params[0][1] == DEVICE  # the filter's $2
+    assert conn.page_params[0][1] == [DEVICE]  # the filter's $2: an array of target ids
     assert _shape(body["items"]) == [DEVICE_ITEM, HOST_ITEM]
 
 

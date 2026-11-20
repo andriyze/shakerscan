@@ -581,7 +581,9 @@ async def export_hunt_record(hunt_id: str, request: Request):
 
 @router.get("/hunts")
 async def list_hunts(
-    target_id: str | None = Query(None),
+    target_id: list[str] | None = Query(
+        None, description="A target or device id; repeat it (or separate ids with commas) for several, at most 500.",
+    ),
     status: str | None = Query(None),
     target_kind: str | None = Query(None),
     budget_profile: str | None = Query(None),
