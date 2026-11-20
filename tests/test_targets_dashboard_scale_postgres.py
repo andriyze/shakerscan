@@ -1063,6 +1063,49 @@ def test_asm_coverage_counts_equal_the_per_attempt_rows():
     _run(check)
 
 
+def test_asm_coverage_probes_only_endpoints_that_have_an_attempt():
+    """Attempts come from continuous-ASM campaigns, so most endpoints have none. The latest-attempt
+    probe (a LIMIT 1 per endpoint) runs only for endpoints with an attempt: over targets whose
+    endpoints were never attempted it does not run at all, and the coverage is unchanged."""
+    from targets.grouped_list import ASM_COVERAGE_SQL, asm_coverage_by_target
+
+    def probe_loops(node):
+        loops = 0
+        if node.get("Relation Name") == "asm_endpoint_attempts" and node.get("Alias") == "aea":
+            loops += int(node.get("Actual Loops") or 0)
+        for child in node.get("Plans") or []:
+            loops += probe_loops(child)
+        return loops
+
+    async def check(conn):
+        async with conn.transaction():
+            fresh = await conn.fetchval(
+                "INSERT INTO targets(url) VALUES ('https://never-attempted.invalid') RETURNING id")
+            for i in range(40):
+                await conn.execute(
+                    "INSERT INTO target_endpoints(target_id, path, fingerprint, test_status) VALUES ($1, $2, $2, $3)",
+                    fresh, f"/never/{i}", "tested" if i % 4 == 0 else "untested")
+            attempted = [r["target_id"] for r in await conn.fetch(
+                "SELECT DISTINCT te.target_id FROM target_endpoints te"
+                " JOIN asm_endpoint_attempts a ON a.endpoint_id = te.id LIMIT 3")]
+            assert attempted, "the fixture has attempted endpoints"
+            plan = json.loads(await conn.fetchval(
+                f"EXPLAIN (ANALYZE, FORMAT JSON) {ASM_COVERAGE_SQL}", [fresh]))[0]["Plan"]
+            assert probe_loops(plan) == 0
+            coverage = await asm_coverage_by_target(conn, [fresh, *attempted])
+            assert coverage[str(fresh)] == {
+                "total": 40, "tested": 10, "untested": 30, "coverage": 0.25,
+                "coverage_basis": "endpoint_status", "attempted": 0,
+            }
+            for target in attempted:
+                rows = await conn.fetch(ref.ASM_LATEST_ATTEMPTS, target)
+                assert coverage[str(target)]["attempted"] == len(rows)
+                assert coverage[str(target)]["coverage_basis"] == "attempt_ledger"
+            raise _Rollback
+    with pytest.raises(_Rollback):
+        _run(check)
+
+
 def test_asm_coverage_normalization_matches_the_python_rules():
     import asm_inventory
     shapes = [

@@ -183,7 +183,11 @@ INVESTIGATOR_SUSPECTED_SQL = """
 
 # Per-target ASM coverage over the targets ``ids_sql`` selects. The latest attempt per live
 # endpoint is read with a per-endpoint LIMIT 1 (idx_asm_endpoint_attempts_latest) rather than
-# DISTINCT ON over every attempt; the result is the legacy one.
+# DISTINCT ON over every attempt; the result is the legacy one. Only endpoints that have an
+# attempt are probed: attempts come from continuous-ASM campaigns, not from Scans, so on most
+# installs few endpoints (often none) have one, and probing every live endpoint of every target
+# was most of the dashboard coverage card's time (about 450 of 540 ms over 290,000 endpoints,
+# none attempted). The semi-join leaves the planner the choice when most endpoints have one.
 def asm_coverage_sql(ids_sql: str) -> str:
     return f"""
     WITH inventory AS (
@@ -212,6 +216,7 @@ def asm_coverage_sql(ids_sql: str) -> str:
             LIMIT 1
         ) la
         WHERE te.target_id IN ({ids_sql}) AND te.test_status <> 'gone'
+          AND te.id IN (SELECT attempted.endpoint_id FROM asm_endpoint_attempts attempted)
     ),
     attempts AS (
         SELECT target_id,
