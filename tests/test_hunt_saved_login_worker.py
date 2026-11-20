@@ -146,9 +146,19 @@ class LoginConnection(ReplayConnection):
             return [dict(self.profile)] if args[0] == str(TARGET) else []
         if "private_http_result IS NOT NULL" in sql:
             return [action for action in self.actions.values() if action.get("private_http_result")]
+        if "FROM hunt_credential_uses" in sql and "auth_sessions" in sql:
+            # The archive export's Hunt credential lookup: the profile versions its actions used.
+            return [{"profile_id": use[2], "profile_version": use[3]}
+                    for use in self.credential_uses if use[0] == args[0]]
+        if "FROM credential_profile_versions" in sql:
+            return ([{"auth_kind": self.profile["auth_kind"], "encrypted_secret": self.profile["encrypted_secret"]}]
+                    if args[0] == PROFILE_ID else [])
         return await super().fetch(sql, *args)
 
     async def fetchval(self, sql, *args):
+        if "context_pack->'credential_refs'" in sql:
+            # The archive export's Hunt credential lookup: this Hunt was started with no profile refs.
+            return None
         if "FROM hunt_credential_uses" in sql:
             return sum(1 for use in self.credential_uses if use[2] == args[1] and use[5] == args[2])
         raise AssertionError(sql)

@@ -333,6 +333,18 @@ def parse_credential_secret(auth_kind: Any, decrypted_value: Any) -> dict[str, A
     return json.loads(encoded)
 
 
+def credential_secret_values(material: Mapping[str, Any]) -> list[str]:
+    """The secret strings of one parsed credential envelope: its secret, its secondary secret and
+    each custom header value (never the user name, header names or endpoint)."""
+    values = [str(material.get("secret") or ""), str(material.get("secondary_secret") or "")]
+    headers = material.get("custom_headers")
+    if isinstance(headers, Mapping):
+        values.extend(str(value or "") for value in headers.values())
+    elif isinstance(headers, (list, tuple)):
+        values.extend(str(header.get("value") or "") for header in headers if isinstance(header, Mapping))
+    return [value for value in values if value]
+
+
 def immediate_http_headers(material: Mapping[str, Any]) -> dict[str, str]:
     """Project non-interactive HTTP profiles into worker-private request headers."""
     kind = str(material.get("auth_kind") or "")
