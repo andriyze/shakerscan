@@ -45,10 +45,10 @@ from scanner.scanner_tools import http_archive_capture
 @pytest.fixture(autouse=True)
 def _no_scan_credential_profiles(monkeypatch):
     """These tests stub the archive reads with bare connections and test bounds and formats; the
-    credential-secret lookup of a Scan export is tested in tests/test_scan_archive_secrets.py."""
+    credential-secret lookups of Scan and Hunt exports are tested in tests/test_scan_archive_secrets.py."""
     import importlib
 
-    async def none(_conn, _scan_ids):
+    async def none(_conn, _ids):
         return []
 
     for name in ("runtime.scan_archive_secrets", "api.runtime.scan_archive_secrets"):
@@ -57,6 +57,7 @@ def _no_scan_credential_profiles(monkeypatch):
         except ImportError:
             continue
         monkeypatch.setattr(module, "scan_credential_secrets", none)
+        monkeypatch.setattr(module, "hunt_credential_secrets", none)
 
 
 def test_a_truncated_body_still_reports_the_whole_body_truthfully():

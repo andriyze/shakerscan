@@ -1,4 +1,4 @@
-"""The credential secrets a signed-in Scan used, for withholding from its archive export.
+"""The credential secrets a signed-in Scan or a Hunt used, for withholding from its archive export.
 
 A Scan given a credential profile signs in with it, and the target may echo the secret later: a
 login page that reflects the submitted password, an account page, a database dump an injection
@@ -28,15 +28,16 @@ MIN_SECRET_CHARS = 6
 SECRET_FIELDS = ("secret", "secondary_secret")
 
 
-def _profile_refs(options: Any) -> list[tuple[uuid.UUID, int | None]]:
-    if isinstance(options, str):
+def _refs(items: Any) -> list[tuple[uuid.UUID, int | None]]:
+    """(profile, version) pairs of credential refs: a Scan's ``credential_profile_refs``, a Hunt's
+    ``credential_refs`` (both carry ``profile_id`` and ``profile_version``)."""
+    if isinstance(items, str):
         try:
-            options = json.loads(options)
+            items = json.loads(items)
         except ValueError:
             return []
-    refs = options.get("credential_profile_refs") if isinstance(options, Mapping) else None
     found: list[tuple[uuid.UUID, int | None]] = []
-    for item in refs or ():
+    for item in items or ():
         if not isinstance(item, Mapping):
             continue
         try:
@@ -46,6 +47,15 @@ def _profile_refs(options: Any) -> list[tuple[uuid.UUID, int | None]]:
         version = item.get("profile_version")
         found.append((profile, version if type(version) is int and version > 0 else None))
     return found
+
+
+def _profile_refs(options: Any) -> list[tuple[uuid.UUID, int | None]]:
+    if isinstance(options, str):
+        try:
+            options = json.loads(options)
+        except ValueError:
+            return []
+    return _refs(options.get("credential_profile_refs")) if isinstance(options, Mapping) else []
 
 
 def secret_values(material: Mapping[str, Any]) -> list[str]:
@@ -61,23 +71,14 @@ def secret_values(material: Mapping[str, Any]) -> list[str]:
     return [value for value in values if len(value) >= MIN_SECRET_CHARS]
 
 
-async def scan_credential_secrets(conn: Any, scan_ids: Iterable[Any]) -> list[str]:
-    """Every credential secret the Scans in ``scan_ids`` were admitted with. API-private."""
-    ids = []
-    for value in scan_ids or ():
-        try:
-            ids.append(uuid.UUID(str(value)))
-        except (TypeError, ValueError):
-            continue
-    if not ids:
-        return []
-    refs: dict[uuid.UUID, set[int | None]] = {}
-    for row in await conn.fetch("SELECT options FROM scans WHERE id = ANY($1::uuid[])", ids):
-        for profile, version in _profile_refs(row["options"]):
-            refs.setdefault(profile, set()).add(version)
+async def profile_secrets(conn: Any, refs: Iterable[tuple[uuid.UUID, int | None]]) -> list[str]:
+    """The secrets of the credential profile versions ``refs`` name; a ref without its version
+    (older records) withholds every version of that profile. API-private."""
+    wanted: dict[uuid.UUID, set[int | None]] = {}
+    for profile, version in refs:
+        wanted.setdefault(profile, set()).add(version)
     found: list[str] = []
-    for profile, versions in refs.items():
-        # A ref without its version (older Scans) withholds every version of that profile.
+    for profile, versions in wanted.items():
         exact = sorted(v for v in versions if v is not None)
         rows = await conn.fetch(
             """SELECT auth_kind, encrypted_secret FROM credential_profile_versions
@@ -91,3 +92,42 @@ async def scan_credential_secrets(conn: Any, scan_ids: Iterable[Any]) -> list[st
                 continue
             found.extend(value for value in secret_values(material) if value not in found)
     return found
+
+
+def _uuids(values: Iterable[Any]) -> list[uuid.UUID]:
+    found = []
+    for value in values or ():
+        try:
+            found.append(uuid.UUID(str(value)))
+        except (TypeError, ValueError):
+            continue
+    return found
+
+
+async def scan_credential_secrets(conn: Any, scan_ids: Iterable[Any]) -> list[str]:
+    """Every credential secret the Scans in ``scan_ids`` were admitted with. API-private."""
+    ids = _uuids(scan_ids)
+    if not ids:
+        return []
+    refs: list[tuple[uuid.UUID, int | None]] = []
+    for row in await conn.fetch("SELECT options FROM scans WHERE id = ANY($1::uuid[])", ids):
+        refs.extend(_profile_refs(row["options"]))
+    return await profile_secrets(conn, refs)
+
+
+async def hunt_credential_secrets(conn: Any, hunt_id: Any) -> list[str]:
+    """Every credential profile secret a Hunt was admitted with (its context's ``credential_refs``)
+    or used (``hunt_credential_uses``, its sign-in sessions). API-private."""
+    ids = _uuids([hunt_id])
+    if not ids:
+        return []
+    hunt = ids[0]
+    refs: list[tuple[uuid.UUID, int | None]] = []
+    context = await conn.fetchval("SELECT context_pack->'credential_refs' FROM hunt_runs WHERE id=$1", hunt)
+    refs.extend(_refs(context))
+    for row in await conn.fetch(
+            """SELECT profile_id, profile_version FROM hunt_credential_uses WHERE hunt_run_id=$1
+               UNION SELECT profile_id, profile_version FROM auth_sessions
+               WHERE owner_kind='hunt' AND owner_id=$1""", hunt):
+        refs.extend(_refs([dict(row)]))
+    return await profile_secrets(conn, refs)

@@ -1,4 +1,4 @@
-"""A signed-in Scan's credential secret never appears in its masked archive export.
+"""A signed-in Scan's or a Hunt's credential secret never appears in its masked archive export.
 
 A Scan signed in with a credential profile, and the target echoed the password back: sqlmap reading
 the accounts table returned it in 38 wire-log rows, and 12 other rows carried it too. The payload
@@ -172,3 +172,95 @@ def test_a_scan_export_withholds_its_profile_secret_and_a_raw_export_is_untouche
     assert PASSWORD not in run("redacted")
     assert seen == [[str(SCAN)]]
     assert PASSWORD in run("raw")  # the raw view is the separate, deployment-gated choice
+
+
+HUNT = uuid.UUID("dddddddd-dddd-4ddd-8ddd-dddddddddddd")
+
+
+class HuntConn(Conn):
+    """A Hunt's context refs, its recorded credential uses and its sign-in sessions."""
+
+    def __init__(self, context, uses, versions):
+        super().__init__([], versions)
+        self.context = context
+        self.uses = uses
+
+    async def fetchval(self, query, *args):
+        assert "context_pack" in query and args == (HUNT,)
+        return json.dumps(self.context)
+
+    async def fetch(self, query, *args):
+        if "hunt_credential_uses" in query:
+            return [{"profile_id": p, "profile_version": v} for p, v in self.uses]
+        return await super().fetch(query, *args)
+
+
+def test_a_hunts_admitted_and_used_profile_secrets_are_read_for_its_export():
+    conn = HuntConn(
+        context=[{"profile_id": str(PROFILE), "profile_version": 2, "source": "credential_profiles"}],
+        uses=[(OTHER, 1)],
+        versions={
+            (PROFILE, 1): ("form_login", envelope("form_login", secret="old-version-pass", username=USER,
+                                                  endpoint_url="http://10.0.0.5/hub/login")),
+            (PROFILE, 2): ("form_login", envelope("form_login", secret=PASSWORD, username=USER,
+                                                  endpoint_url="http://10.0.0.5/hub/login")),
+            (OTHER, 1): ("api_key_header", envelope("api_key_header", secret="hdr-secret-4455", header_name="X-Key")),
+        },
+    )
+    found = asyncio.run(secrets.hunt_credential_secrets(conn, str(HUNT)))
+    assert found == [PASSWORD, "hdr-secret-4455"]
+    assert asyncio.run(secrets.hunt_credential_secrets(conn, "not-a-uuid")) == []
+
+
+def test_a_hunt_export_withholds_its_profile_and_saved_login_secrets(monkeypatch):
+    from runtime import hunt_http_exchange
+
+    body = f"1,{USER},{PASSWORD} saved=login-secret-0099"
+
+    class Pool:
+        def acquire(self):
+            return self
+
+        async def __aenter__(self):
+            return object()
+
+        async def __aexit__(self, *exc):
+            return False
+
+    class Encoded:
+        document = {}
+
+        def render(self):
+            return json.dumps({"transactions": [{"response": {"body": body}}]}).encode()
+
+    async def none(*_a, **_k):
+        return None
+
+    async def zero(*_a, **_k):
+        return 0
+
+    async def rows(*_a, **_k):
+        return []
+
+    async def export(*_a, **_k):
+        return Encoded()
+
+    async def saved(_conn, _hunt):
+        return ["login-secret-0099"]
+
+    async def profiles(_conn, hunt):
+        assert hunt == str(HUNT)
+        return [PASSWORD]
+
+    monkeypatch.setattr(router, "_pool", lambda: Pool())
+    monkeypatch.setattr(router, "count_transactions", zero)
+    monkeypatch.setattr(router, "read_archive_stats", none)
+    monkeypatch.setattr(router, "read_transactions", rows)
+    monkeypatch.setattr(router, "build_export", export)
+    monkeypatch.setattr(hunt_http_exchange, "hunt_saved_login_secrets", saved)
+    monkeypatch.setattr(secrets, "hunt_credential_secrets", profiles)
+    content, _total = asyncio.run(router._build_export_bytes(
+        scan_id=None, hunt_run_id=str(HUNT), export_format="transactions", redaction="redacted",
+        method=None, status_code=None, search=None, limit=10, offset=0, raw_har=False))
+    text = content.decode()
+    assert PASSWORD not in text and "login-secret-0099" not in text
