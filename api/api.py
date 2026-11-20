@@ -108,6 +108,11 @@ except ModuleNotFoundError:
     from scanner.scanner_tools.build_fingerprint import hash_source_files, runtime_file_map, source_file_map
 
 try:
+    from runtime.ttl_memo import TtlMemo
+except ModuleNotFoundError:
+    from api.runtime.ttl_memo import TtlMemo
+
+try:
     from scanner_tools.device_posture import DEVICE_PROFILES, normalize_device_locator
 except ModuleNotFoundError:
     from scanner.scanner_tools.device_posture import DEVICE_PROFILES, normalize_device_locator
@@ -7990,7 +7995,16 @@ async def root():
 def expected_build_fingerprint() -> Optional[str]:
     """Source checksum of the CURRENT checkout (host bind-mount at /workspace),
     falling back to the API's own /app runtime. This is the 'current build' the UI
-    compares each scan's / worker's reported fingerprint against."""
+    compares each scan's / worker's reported fingerprint against.
+
+    Remembered for EXPECTED_FINGERPRINT_TTL_SECONDS: computing it hashes every deployed source
+    file (about 50 ms of CPU, more on a host busy scanning) and /health, /workers, /queue/stats
+    and the dashboard each ask, /health up to three times; the UI reads /health on every page.
+    It only changes when the deployed source does."""
+    return _EXPECTED_BUILD_FINGERPRINT()
+
+
+def _compute_expected_build_fingerprint() -> Optional[str]:
     # Must match (by basename) scanner.SCANNER_FINGERPRINT_FILES and the worker's
     # report set, including worker.py and the output-shaping modules, so a worker
     # running stale orchestration/output code is not reported as build_current.
@@ -7998,6 +8012,10 @@ def expected_build_fingerprint() -> Optional[str]:
     if workspace_fingerprint:
         return release_build_fingerprint(workspace_fingerprint)
     return release_build_fingerprint(hash_source_files(runtime_file_map(), require_all=True))
+
+
+EXPECTED_FINGERPRINT_TTL_SECONDS = 30.0
+_EXPECTED_BUILD_FINGERPRINT = TtlMemo(_compute_expected_build_fingerprint, EXPECTED_FINGERPRINT_TTL_SECONDS)
 
 
 def _git_head(repo: str = "/workspace") -> Optional[str]:

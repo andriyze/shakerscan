@@ -18691,3 +18691,22 @@ def test_device_control_verifier_restores_query_state_before_promotion(monkeypat
     assert result["cleanup_outcome"] == "cleanup_restored_exact_pre_state"
     assert control_paths == ["/api/power?state=on", "/api/power?state=off"]
     assert pool.conn.fetchval_calls == 2
+
+
+def test_expected_build_fingerprint_hashes_the_source_once_per_ttl(monkeypatch):
+    hashed = []
+
+    def fake_hash(file_map, *, require_all=False):
+        hashed.append(len(file_map))
+        return "0123456789abcdef"
+
+    monkeypatch.setattr(api_module, "hash_source_files", fake_hash)
+    api_module._EXPECTED_BUILD_FINGERPRINT.clear()
+    try:
+        first = api_module.expected_build_fingerprint()
+        for _ in range(5):
+            assert api_module.expected_build_fingerprint() == first
+        assert len(hashed) == 1  # the workspace map answered; no fallback, no rehash
+        assert api_module.EXPECTED_FINGERPRINT_TTL_SECONDS <= 60
+    finally:
+        api_module._EXPECTED_BUILD_FINGERPRINT.clear()
