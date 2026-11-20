@@ -1457,7 +1457,8 @@ async def _compute_dashboard() -> dict[str, Any]:
         recent_scans_by_cohort = await dashboard_data.recent_scans_by_cohort(conn, limit=10)
         # Active critical/high findings outside the device plane (COALESCE(source, '') <> 'device').
         recent_findings = await dashboard_data.recent_blocker_findings(conn, limit=10)
-        worker_snapshot = _worker_freshness_snapshot()
+        # Docker socket and Redis reads: off the event loop, so other requests are not held up.
+        worker_snapshot = await asyncio.to_thread(_worker_freshness_snapshot)
         asm_state = await _dashboard_asm_state(conn)
         action_center = await _build_dashboard_action_center(
             conn, worker_snapshot=worker_snapshot, counts=counts, asm_state=asm_state,

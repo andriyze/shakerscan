@@ -485,9 +485,16 @@ def test_dashboard_numbers_equal_the_full_table_queries():
 
 
 def test_dashboard_reads_are_bounded_by_buckets_not_rows(monkeypatch):
+    import threading
     from operations import router as operations
 
-    monkeypatch.setattr(operations, "_worker_freshness_snapshot", lambda *a, **k: {"available": False})
+    snapshot_threads = []
+
+    def snapshot(*_args, **_kwargs):
+        snapshot_threads.append(threading.current_thread())
+        return {"available": False}
+
+    monkeypatch.setattr(operations, "_worker_freshness_snapshot", snapshot)
     monkeypatch.setattr(operations, "_load_refuter_work_summary", _refuter_summary)
     from arsenal_routes import router as arsenal
     monkeypatch.setattr(arsenal, "_load_benchmark_scorecard_artifacts", lambda **_kwargs: [])
@@ -518,6 +525,9 @@ def test_dashboard_reads_are_bounded_by_buckets_not_rows(monkeypatch):
             COALESCE(source, ''), COALESCE(tool = 'model_intake', false), ai_target_id IS NOT NULL FROM findings) b""")
         assert buckets < FINDINGS / 20
         assert spy.most <= max(210, buckets), sorted(spy.rows, key=lambda item: -item[0])[:3]
+        # The worker snapshot reads the Docker socket and Redis with blocking calls: never on the
+        # event loop's thread, where they would hold up every other request.
+        assert snapshot_threads and threading.current_thread() not in snapshot_threads
     _run(check)
 
 
