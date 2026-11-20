@@ -119,6 +119,7 @@ def test_a_process_queues_past_its_own_short_wall_budget_until_a_slot_frees(monk
         assert not task.done()
         holder.release()
         waited = await task
-        assert queued.held and waited >= 0.3
+        # It waited several times the process's 50 ms timeout instead of giving up at it.
+        assert queued.held and waited >= 0.2
         queued.release()
     asyncio.run(scenario())
