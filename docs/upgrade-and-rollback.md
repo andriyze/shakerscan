@@ -185,7 +185,7 @@ starts exactly N. Volumes, `results/`, and `.env` are not touched.
 
 Worker count is sized from memory, so a host can run more workers than it has CPUs. CPU-heavy
 scanner processes (Nuclei template batches) take one of the host's heavy scanner slots before
-they start, one per CPU by default (`SHAKERSCAN_HEAVY_SCANNER_SLOTS=N` in `.env` sets another
+they start, two per CPU by default (`SHAKERSCAN_HEAVY_SCANNER_SLOTS=N` in `.env` sets another
 number). Further batches wait for a slot, up to 30 minutes, keeping their Scans alive while they
 wait; the wait is not charged as tool time and no worker or active Scan is cut.
 

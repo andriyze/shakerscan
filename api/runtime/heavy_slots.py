@@ -3,7 +3,7 @@
 Worker count and active Scans are sized from memory. Twenty-two thorough Scans on an 8-CPU host
 each started a Nuclei template batch at once: the batches starved the workers' event loops, the
 actions missed their budget-hold renewals, and recovery failed 17 of the 22. This limit queues
-heavy processes instead: a worker never starts more than the host's slots at once, and nothing
+heavy processes instead: the host never runs more than its slots (two per CPU by default) at once, and nothing
 cuts workers or active Scans.
 
 Slots live in the workers' shared Redis as self-expiring keys holding one token each, so a worker
@@ -39,12 +39,19 @@ class HeavySlotUnavailable(RuntimeError):
     """No slot became free within the action's time budget."""
 
 
+#: Default heavy processes per CPU. Measured on a 4-CPU host: ten thorough Scans ran about 1.75
+#: Nuclei batches per CPU without starving the workers, while the failures this limit prevents
+#: were seen near 2.75 per CPU. One per CPU queued so much that late proof checks ran into the
+#: Scan's own time limit.
+SLOTS_PER_CPU = 2
+
+
 def host_slots(environ: dict[str, str] | None = None, cpu_count: int | None = None) -> int:
-    """An explicit SHAKERSCAN_HEAVY_SCANNER_SLOTS wins; otherwise one slot per CPU."""
+    """An explicit SHAKERSCAN_HEAVY_SCANNER_SLOTS wins; otherwise two slots per CPU."""
     raw = str((os.environ if environ is None else environ).get(SLOTS_ENV) or "").strip()
     if raw.isdigit() and int(raw) > 0:
         return int(raw)
-    return max(1, int(cpu_count if cpu_count is not None else (os.cpu_count() or 1)))
+    return max(1, SLOTS_PER_CPU * int(cpu_count if cpu_count is not None else (os.cpu_count() or 1)))
 
 
 class HeavyScannerSlot:

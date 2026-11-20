@@ -2,7 +2,7 @@
 
 Twenty-two thorough Scans on an 8-CPU host started their Nuclei batches at once; the workers'
 event loops starved, the actions missed their budget-hold renewals and recovery failed 17 of them.
-Heavy processes now queue behind one slot per CPU, keeping their heartbeat while they wait.
+Heavy processes now queue behind two slots per CPU, keeping their heartbeat while they wait.
 """
 from __future__ import annotations
 
@@ -46,10 +46,11 @@ def fast_poll(monkeypatch):
     monkeypatch.setattr(heavy_slots, "HEARTBEAT_SECONDS", 0.02)
 
 
-def test_slots_are_one_per_cpu_unless_set_explicitly():
-    assert host_slots({}, cpu_count=8) == 8
+def test_slots_are_two_per_cpu_unless_set_explicitly():
+    assert host_slots({}, cpu_count=8) == 16
+    assert host_slots({}, cpu_count=4) == 8
     assert host_slots({heavy_slots.SLOTS_ENV: "3"}, cpu_count=8) == 3
-    assert host_slots({heavy_slots.SLOTS_ENV: "0"}, cpu_count=8) == 8
+    assert host_slots({heavy_slots.SLOTS_ENV: "0"}, cpu_count=8) == 16
     assert host_slots({heavy_slots.SLOTS_ENV: "many"}, cpu_count=None) >= 1
 
 
