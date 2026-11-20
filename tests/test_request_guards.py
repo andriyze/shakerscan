@@ -40,8 +40,11 @@ SETTINGS = rg.GuardSettings(
     ("GET", "/dashboard/", "", "heavy", "dashboard"),
     ("GET", "/exposure/assets", "limit=1000", "heavy", "exposure"),
     ("GET", "/exposure/assets", "", "heavy", "exposure"),
-    ("GET", "/exposure/assets", "count=none&limit=50", "interactive", None),
-    ("GET", "/exposure/assets", "cursor=abc", "interactive", None),
+    # list/v1 pages too: the page is bounded, its summary over every asset and finding is not.
+    ("GET", "/exposure/assets", "count=none&limit=50", "heavy", "exposure"),
+    ("GET", "/exposure/assets", "cursor=abc", "heavy", "exposure"),
+    # The dashboard's posture read (ui/src/lib/exposureAssets.mjs exposureAssetsParams).
+    ("GET", "/exposure/assets", "limit=200&count=none&cohort=operational", "heavy", "exposure"),
     ("GET", "/exposure/services", "", "heavy", "exposure"),
     ("GET", "/exposure/changes", "", "heavy", "exposure"),
     ("GET", "/exposure/graph", "", "heavy", "exposure"),
