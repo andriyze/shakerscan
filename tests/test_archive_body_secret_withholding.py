@@ -182,6 +182,16 @@ def _export_with_rows(monkeypatch, rows, *, export_format, redaction):
     monkeypatch.setattr(archive_router, "count_transactions", _count)
     monkeypatch.setattr(archive_router, "read_archive_stats", _stats)
     monkeypatch.setattr(archive_router, "read_transactions", _rows)
+
+    async def _no_profiles(conn, scan_ids):
+        return []  # these Scans signed in with no credential profile
+
+    import importlib
+    for name in ("runtime.scan_archive_secrets", "api.runtime.scan_archive_secrets"):
+        try:
+            monkeypatch.setattr(importlib.import_module(name), "scan_credential_secrets", _no_profiles)
+        except ImportError:
+            continue
     return asyncio.run(archive_router._export(
         request=object(), scan_id="11111111-1111-4111-8111-111111111111", hunt_run_id=None,
         export_format=export_format, redaction=redaction, method=None, status_code=None,

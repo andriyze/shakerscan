@@ -25,6 +25,24 @@ from api.runtime import http_archive_reader as reader
 from api.runtime import http_archive_router as archive_router
 from api.runtime.archive_body_masking import withhold_body_secrets
 
+
+@pytest.fixture(autouse=True)
+def _no_scan_credential_profiles(monkeypatch):
+    """These tests stub the archive reads with bare connections and test bounds and formats; the
+    credential-secret lookups of Scan and Hunt exports are tested in tests/test_scan_archive_secrets.py."""
+    import importlib
+
+    async def none(_conn, _ids):
+        return []
+
+    for name in ("runtime.scan_archive_secrets", "api.runtime.scan_archive_secrets"):
+        try:
+            module = importlib.import_module(name)
+        except ImportError:
+            continue
+        monkeypatch.setattr(module, "scan_credential_secrets", none)
+        monkeypatch.setattr(module, "hunt_credential_secrets", none)
+
 CANARY = "BoundsCanaryR2x7Kq"
 MIB = 1024 * 1024
 

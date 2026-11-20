@@ -106,11 +106,21 @@ def test_a_hunt_waits_for_its_actions_and_its_targets_leads_and_hears_each_chang
                 assert fresh['waited'] is True and fresh['changed'] is False and fresh['cursor']
                 assert time.monotonic() - began >= 0.9
 
-                # ...and hears what happens during it: an action settling one second in.
+                # ...and hears what happens during it: an action settling one second in. The app runs
+                # on this test's single connection, so the concurrent writer uses its own (as a worker
+                # would): two operations on one asyncpg connection at once fail intermittently.
+                import os
+                import asyncpg
+                writer = await asyncpg.connect(os.environ['TARGET_ASSET_TEST_DATABASE_URL'],
+                                               database=await conn.fetchval('SELECT current_database()'))
+
                 async def settle_later():
                     await asyncio.sleep(1)
-                    return await _settle(conn, hunt, capability='sqli.verify')
-                waited, later = await asyncio.gather(activity(wait_seconds=10), settle_later())
+                    return await _settle(writer, hunt, capability='sqli.verify')
+                try:
+                    waited, later = await asyncio.gather(activity(wait_seconds=10), settle_later())
+                finally:
+                    await writer.close()
                 assert waited['changed'] is True
                 assert [item['action_id'] for item in waited['actions']] == [later]
                 for bad in ({'after': 'not-a-cursor'}, {'since': 'release'}):

@@ -325,17 +325,25 @@ async def _build_export_bytes(
         # will export so the raw option is never offered only to be refused.
         encoded.document["raw_har"] = raw_har
     content = encoded.render()
-    if hunt_run_id and redaction != "raw":
-        # A saved login's secret the target echoed later (a header, a body) is not under a
-        # secret-named key, so the payload redaction keeps it: withhold it in the whole document.
+    if redaction != "raw":
+        # A credential's secret the target echoed later (a header, a body, a dumped table an
+        # injection tool read) is not under a secret-named key, so the payload redaction keeps it:
+        # withhold it in the whole document. A Hunt's saved logins, and a Scan's credential profiles.
         try:
             from runtime.archive_body_masking import withhold_in_document
             from runtime.hunt_http_exchange import hunt_saved_login_secrets
+            from runtime.scan_archive_secrets import hunt_credential_secrets, scan_credential_secrets
         except ModuleNotFoundError:  # package import layout
             from .archive_body_masking import withhold_in_document
             from .hunt_http_exchange import hunt_saved_login_secrets
+            from .scan_archive_secrets import hunt_credential_secrets, scan_credential_secrets
         async with _pool().acquire() as conn:
-            content = withhold_in_document(content, await hunt_saved_login_secrets(conn, hunt_run_id))
+            if hunt_run_id:
+                secrets = [*await hunt_saved_login_secrets(conn, hunt_run_id),
+                           *await hunt_credential_secrets(conn, hunt_run_id)]
+            else:
+                secrets = await scan_credential_secrets(conn, scan_ids or [scan_id])
+        content = withhold_in_document(content, secrets)
     return content, total
 
 
