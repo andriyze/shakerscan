@@ -1816,3 +1816,42 @@ def test_a_url_with_an_unreadable_port_does_not_fail_finalization():
     assert finalizer_module._observed_url_key("http://10.10.10.103:18999/login/") == (
         "http://10.10.10.103:18999/login"
     )
+
+
+def _destinations_of(observation):
+    baseline = _action("baseline.http", 0, capability_name="http.request")
+    final = _action("finalize.report", 1, dependencies=(baseline.action_id,))
+    plan = ScanActionPlan(scan_id=SCAN_ID, execution_plan_digest="b" * 64,
+                          target_binding_digest="a" * 64, actions=(baseline, final))
+    report = finalize_scan_report(
+        plan=plan, target_url="https://app.example.test",
+        action_results={baseline.action_id: _result_with_observation_count(baseline, 1)},
+        observations={baseline.action_id: (observation,)})
+    return sorted(item["url"] for item in report["runtime_destinations"])
+
+
+def test_an_unfollowed_off_host_redirect_is_not_a_destination():
+    # A live host answering 302 to an identity provider failed the whole Scan with
+    # "Runtime destination failed scope re-check: host_out_of_allowed_scope": the Location
+    # the client refused to follow was counted as a place it went.
+    assert _destinations_of({
+        "kind": "http_observation",
+        "request": {"origin": "https://app.example.test", "pinned_address": "192.0.2.10"},
+        "response": {"status": 302, "final_url": "https://app.example.test/",
+                     "location": "https://login.idp.example.net/authorize"},
+        "redirect_chain": [{"status": 302, "location": "https://login.idp.example.net/authorize",
+                            "followed": False, "stopped": "cross_origin"}],
+    }) == ["https://app.example.test"]
+
+
+def test_a_followed_redirect_and_a_hop_record_without_its_state_stay_destinations():
+    # Where a request actually went is still checked (a followed off-origin hop stays, so the
+    # runtime guard still blocks it), and older hop records without "followed" count as before.
+    assert _destinations_of({
+        "kind": "http_observation",
+        "request": {"origin": "https://app.example.test"},
+        "redirect_chain": [
+            {"status": 301, "location": "https://www.app.example.test/", "followed": True},
+            {"location": "https://legacy.example.test/"},
+        ],
+    }) == ["https://app.example.test", "https://legacy.example.test", "https://www.app.example.test"]

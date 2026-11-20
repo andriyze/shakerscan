@@ -439,6 +439,44 @@ async def arsenal_scope_preview(req: ScopePreviewRequest):
     return {"scope_receipt": payload, "persisted": True, "execution_enabled": False}
 
 
+async def _refuse_unbound_record_deletion_approval(
+    conn, scope_row, *, risk_tier, action_name, confirmations, action_context, expires_at,
+) -> None:
+    raw = scope_row.get("input_scope")
+    scope_input = json.loads(raw) if isinstance(raw, str) else (raw or {})
+    if not isinstance(scope_input, dict) or scope_input.get("kind") != "record_deletion":
+        return
+    try:
+        from data_lifecycle import service as deletion
+    except ModuleNotFoundError:  # package import in host-side tests
+        from ..data_lifecycle import service as deletion
+    try:
+        preview_uuid = uuid.UUID(str(scope_input.get("preview_id") or ""))
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail="Record-deletion scope names no preview") from exc
+    preview_row = await conn.fetchrow(
+        "SELECT result_json FROM command_results WHERE id=$1 AND command=$2", preview_uuid, deletion.COMMAND)
+    payload = json.loads(preview_row["result_json"]) if preview_row and isinstance(preview_row["result_json"], str) \
+        else (preview_row["result_json"] if preview_row else None)
+    if not isinstance(payload, dict) or not payload.get("expires_at"):
+        raise HTTPException(status_code=404, detail="Deletion preview not found")
+    expires = expires_at if expires_at is None or expires_at.tzinfo else expires_at.replace(tzinfo=timezone.utc)
+    wrong = deletion.approval_mismatches(
+        risk_tier=risk_tier, action_name=action_name, confirmations=confirmations,
+        action_context=action_context, expires_at=expires, preview_id=preview_uuid,
+        preview_hash=payload.get("preview_hash"), preview_expires=datetime.fromisoformat(payload["expires_at"]),
+        now=datetime.now(timezone.utc))
+    if wrong:
+        raise HTTPException(status_code=400, detail={
+            "error": "record_deletion_approval_mismatch",
+            "message": "This approval cannot execute its deletion preview, so it was not stored: "
+                       + "; ".join(wrong),
+            "mismatches": wrong,
+            "approval_request": deletion.approval_request(
+                preview_uuid, payload.get("preview_hash"), scope_row["id"], payload["expires_at"]),
+        })
+
+
 @router.post("/arsenal/approvals")
 async def arsenal_create_approval(req: ApprovalReceiptRequest):
     """Persist an approval or denial receipt for an existing scope receipt without executing work."""
@@ -463,6 +501,12 @@ async def arsenal_create_approval(req: ApprovalReceiptRequest):
         action_name = str(req.action_name or "").strip() or None
         action_context = dict(req.action_context or {})
         stored_expires_at = req.expires_at
+        if approved_by:
+            # A record-deletion scope accepts only the one approval that can execute its preview;
+            # refusing the rest here leaves no unused dangerous approval behind for each guess.
+            await _refuse_unbound_record_deletion_approval(
+                conn, scope_row, risk_tier=req.risk_tier, action_name=action_name,
+                confirmations=confirmations, action_context=action_context, expires_at=req.expires_at)
         if action_name == "evidence.retention_sweep":
             if not approved_by:
                 raise HTTPException(status_code=400, detail="Retention preview bindings are only valid on approvals")

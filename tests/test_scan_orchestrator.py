@@ -910,6 +910,32 @@ def test_postgres_backend_fails_closed_after_lease_authority_is_lost():
         ))
 
 
+@pytest.mark.parametrize("marker", ["stale_reservation_recovered", "terminal_reservation_reconciled"])
+def test_an_action_budget_recovery_took_over_is_a_lost_lease_not_an_invalid_result(marker):
+    # Under load a running action missed its budget-hold renewals; recovery failed the hold and
+    # stamped the action row with its marker. The worker's settle then read that marker as a
+    # capability result and crashed the Scan: "stored Scan action result is invalid".
+    from api.scan.execution_backend import ActionRecoveredAsStale
+    plan = _plan()
+    conn = FakePostgresConn(plan)
+    backend = PostgresScanExecutionBackend(
+        pool=FakePool(conn), plan=plan, worker_id="local-worker-1",
+        token_factory=lambda: "abcdefghijklmnopqrstuvwxyz012345",
+    )
+    action = plan.actions[0]
+    lease = asyncio.run(backend.acquire_action(action))
+    conn.rows[action.action_id].update(status="failed", result_json={
+        "error": marker, "reservation_id": "r-1", "reservation_status": "failed", "execution_uncertain": True})
+
+    with pytest.raises(ActionRecoveredAsStale) as lost:
+        asyncio.run(backend.settle(lease, _raw_receipt(action, worker_id="local-worker-1")))
+    assert isinstance(lost.value, ActionLeaseLost)
+    assert f"(failed, {marker}); its outcome is unknown" in str(lost.value)
+    assert "invalid" not in str(lost.value)
+    with pytest.raises(ActionRecoveredAsStale):
+        asyncio.run(backend.load_result(action.action_id))
+
+
 def test_postgres_backend_rejects_reexecution_after_expired_action_lease():
     plan = _plan()
     conn = FakePostgresConn(plan)

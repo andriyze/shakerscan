@@ -20,11 +20,50 @@ COMMAND = 'data.records.delete'
 CONFIRMATIONS = {'confirm_authorized', 'confirm_scope_reviewed', 'confirm_delete_records'}
 
 
+def approval_request(preview_id, preview_hash, scope_id, expires_at):
+    """The one approval that executes this preview, as POST /arsenal/approvals takes it: a client
+    no longer finds the action name, confirmations and context one refusal at a time."""
+    return {'endpoint': 'POST /arsenal/approvals', 'scope_receipt_id': scope_id, 'risk_tier': 'dangerous',
+            'action_name': COMMAND, 'confirmations': sorted(CONFIRMATIONS),
+            'action_context': {'preview_id': str(preview_id), 'preview_hash': preview_hash},
+            'expires_at_latest': expires_at,
+            'note': 'Add approved_by; expires_at must be in the future and no later than expires_at_latest.'}
+
+
+def approval_mismatches(*, risk_tier, action_name, confirmations, action_context, expires_at,
+                        preview_id, preview_hash, preview_expires, now):
+    """What in a record-deletion approval does not match its preview, each named with the value
+    it needs (one opaque 409 for all of them left clients guessing, and every guess left an
+    unused dangerous approval behind)."""
+    wrong = []
+    if risk_tier != 'dangerous':
+        wrong.append(f'risk_tier must be dangerous (got {risk_tier!r})')
+    if action_name != COMMAND:
+        wrong.append(f'action_name must be {COMMAND!r} (got {action_name!r})')
+    missing = sorted(CONFIRMATIONS - set(confirmations or ()))
+    if missing:
+        wrong.append('confirmations missing ' + ', '.join(missing))
+    expected = {'preview_id': str(preview_id), 'preview_hash': preview_hash}
+    if (action_context or {}) != expected:
+        wrong.append('action_context must be exactly {preview_id, preview_hash} of this preview'
+                     + (f" (extra keys: {', '.join(sorted(set(action_context) - set(expected)))})"
+                        if isinstance(action_context, dict) and set(action_context) - set(expected) else ''))
+    if not expires_at:
+        wrong.append(f'expires_at is required, no later than {preview_expires.isoformat()}')
+    elif not now < expires_at:
+        wrong.append('expires_at is already past')
+    elif expires_at > preview_expires:
+        wrong.append(f'expires_at must be no later than the preview\'s {preview_expires.isoformat()}')
+    return wrong
+
+
 def public_preview(preview_id, payload, scope_id):
     manifest = payload['manifest']
     return {**manifest, 'preview_id': str(preview_id), 'preview_hash': payload['preview_hash'],
             'scope_receipt_id': scope_id, 'expires_at': payload['expires_at'],
             'would_delete': manifest['records']['delete'].get('findings', {}).get('count', 0),
+            'approval_request': approval_request(preview_id, payload['preview_hash'], scope_id,
+                                                 payload['expires_at']),
             'dry_run': True}
 
 
@@ -64,13 +103,23 @@ def validate_approval(row, preview_row, payload, approval_id, now):
     context = decoded(row['action_context']) or {}
     expires = row['expires_at']
     preview_expires = datetime.fromisoformat(payload['expires_at'])
-    if (row['status'] != 'active' or not row['approved_by'] or row['denial_reason']
-        or row['risk_tier'] != 'dangerous' or row['action_name'] != COMMAND
-        or row['scope_receipt_id'] != preview_row['scope_receipt_id']
-        or not CONFIRMATIONS.issubset(confirmations) or context != expected
-        or not expires or not now < expires <= preview_expires
-        or row['created_at'] < preview_row['created_at']):
-        raise HTTPException(409, 'Approval must be active, dangerous, unexpired, and bound to this exact preview')
+    wrong = []
+    if row['status'] != 'active':
+        wrong.append(f"approval is {row['status']}, not active")
+    if not row['approved_by'] or row['denial_reason']:
+        wrong.append('approval is a denial or names no approver')
+    if row['scope_receipt_id'] != preview_row['scope_receipt_id']:
+        wrong.append(f"approval is for scope receipt {row['scope_receipt_id']!r}, not this preview's "
+                     f"{preview_row['scope_receipt_id']!r}")
+    if row['created_at'] < preview_row['created_at']:
+        wrong.append('approval was created before this preview')
+    wrong += approval_mismatches(
+        risk_tier=row['risk_tier'], action_name=row['action_name'], confirmations=confirmations,
+        action_context=context, expires_at=expires, preview_id=expected['preview_id'],
+        preview_hash=expected['preview_hash'], preview_expires=preview_expires, now=now)
+    if wrong:
+        raise HTTPException(409, 'Approval must be active, dangerous, unexpired, and bound to this exact preview: '
+                            + '; '.join(wrong))
 
 
 def check_expected(payload, kind=None, entity_id=None, selection=None):

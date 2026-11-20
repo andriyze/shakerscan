@@ -223,3 +223,81 @@ def test_proxy_connection_ceiling_keeps_its_failure_reason_after_killing_tool(mo
     assert result["returncode"] == -9
     assert result["network_telemetry"]["connections_attempted"] == 401
     assert result["network_telemetry"]["connections_rejected"] == 1
+
+
+class _CountingRedis:
+    def __init__(self):
+        self.calls = 0
+
+    def exists(self, _key):
+        self.calls += 1
+        return False
+
+
+class _SlowProcess(_Process):
+    async def wait(self):
+        await asyncio.sleep(1.2)
+        return self.returncode
+
+
+def test_a_running_scanner_checks_for_cancellation_once_a_second_not_every_poll(monkeypatch):
+    # Every concurrent action read Redis on the event loop each 50 ms poll; under load that
+    # starved the loop's own heartbeat until the action's budget hold went stale and was failed.
+    redis = _CountingRedis()
+    monkeypatch.setattr(worker, "PinnedSocksProxy", _PinnedProxy)
+    monkeypatch.setattr(worker, "get_redis", lambda: redis)
+
+    async def _exec(*_cmd, **_kwargs):
+        return _SlowProcess(0, _CRAWL_LINE)
+
+    monkeypatch.setattr(worker.asyncio, "create_subprocess_exec", _exec)
+    result = asyncio.run(worker._execute_agent_scanner_process({
+        "job_id": "crawl-job-2", "tool_name": "katana", "registered_target": "https://example.test",
+        "execution_target": "https://example.test/", "scanner_options": {}, "timeout_ms": 30_000,
+        "pinned_address": "203.0.113.7", "authorized_addresses": ["203.0.113.7"],
+        "_reserved_budget": {"http_requests": 20, "tool_wall_seconds": 30},
+    }))
+    assert result["status"] != "cancelled"
+    assert 1 <= redis.calls <= 3  # was ~24 for a 1.2 s run
+
+
+def test_cancellation_reads_reuse_one_client_per_factory(monkeypatch):
+    from runtime import scanner_cancel
+    made = []
+    monkeypatch.setattr(scanner_cancel, "_SHARED", None)
+
+    def first_factory():
+        made.append(1)
+        return _CountingRedis()
+
+    def second_factory():
+        made.append(2)
+        return _CountingRedis()
+
+    first = scanner_cancel.shared_client(first_factory)
+    assert scanner_cancel.shared_client(first_factory) is first and made == [1]
+    assert scanner_cancel.shared_client(second_factory) is not first and made == [1, 2]
+
+
+def test_a_scanner_process_takes_its_heavy_slot_before_launch_and_frees_it_after(monkeypatch):
+    calls = []
+
+    class _Slot:
+        def __init__(self, redis_client, tool):
+            calls.append(("new", tool))
+
+        async def acquire_for_process(self, **kwargs):
+            calls.append(("acquire_for_process", sorted(kwargs)))
+            return 0.0
+
+        def release(self):
+            calls.append(("release",))
+
+    monkeypatch.setattr(worker, "HeavyScannerSlot", _Slot)
+    launched: dict = {}
+    _run_katana(monkeypatch, 0, _CRAWL_LINE, launched=launched)
+    assert calls == [("new", "katana"),
+                     # The wait bound is the slot's own, never the process's wall budget.
+                     ("acquire_for_process", ["cancelled", "heartbeat", "process_timeout_ms"]),
+                     ("release",)]
+    assert launched["cmd"], "the process launched after the slot was taken"
