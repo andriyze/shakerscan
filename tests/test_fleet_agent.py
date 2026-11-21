@@ -432,12 +432,12 @@ def test_control_plane_compose_defines_overlay_tls_edge():
 
 def test_control_plane_compose_defines_pinned_opt_in_fleet_gateway():
     root = Path(__file__).resolve().parents[1]
-    expected_digest = "sha256:f6228111e5fafa1a5238258d0858e103f10599b8d1659a146e7726681a002bb9"
+    expected_digest = "sha256:003a97808e781aa9f7e75cc2f43d34d461099031faf5e20faefb9f61126836f0"
     for filename in ("docker-compose.yml", "docker-compose.release.yml"):
         text = (root / filename).read_text(encoding="utf-8")
         assert "  fleet-gateway:" in text
         assert 'profiles: ["fleet-gateway"]' in text
-        assert f"caddy:2.11.8-alpine@{expected_digest}" in text
+        assert f"caddy:2.11.9-alpine@{expected_digest}" in text
         assert '.shakerscan-fleet/control/Caddyfile:/etc/caddy/Caddyfile:ro' in text
         assert '${FLEET_GATEWAY_BIND_HOST:-0.0.0.0}:80:80' in text
         assert '${FLEET_GATEWAY_BIND_HOST:-0.0.0.0}:443:443' in text
