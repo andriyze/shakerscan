@@ -90,6 +90,11 @@ def with_time_limit_interruption(receipt: CapabilityReceipt, observed_at: str | 
         redacted_execution={**dict(receipt.redacted_execution), "scan_time_limit": stopped})
 
 
+def scan_traffic_attribution(options: Mapping[str, Any]) -> bool:
+    """The Scan's own switch for the declared run header: on unless its options say false."""
+    return options.get("traffic_attribution") is not False
+
+
 class ReceiptScanActionExecutor:
     """Turn canonical capability dispatch into lease-bound receipts.
 
