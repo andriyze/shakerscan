@@ -31,7 +31,7 @@ services:
   # Redis Queue
   # ============================================================
   redis:
-    image: ${REDIS_IMAGE:-redis:8.10.2-alpine3.23@sha256:9f8d2d789b9a1d1e3f283f979aa9cbf393373806472e1ccd460e2f9c869b833b}
+    image: ${REDIS_IMAGE:-redis:8.10.3-alpine3.23@sha256:7958cfbb9d152f87dadfbc89f1b0b15938f0b81ff8982feb327476f4911935c3}
     command: ["redis-server", "--appendonly", "yes", "--requirepass", "${REDIS_PASSWORD:?REDIS_PASSWORD is required; run ./scanner.sh start}"]
     environment:
       REDIS_PASSWORD: ${REDIS_PASSWORD:?REDIS_PASSWORD is required; run ./scanner.sh start}
