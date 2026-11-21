@@ -8,7 +8,7 @@ FROM ${SCANNER_RUNTIME_IMAGE} AS scanner-runtime
 # The posture check engine (posture/) is the same TypeScript code that serves
 # pub.shakerscan.com. It is bundled into one file here; the final image gets
 # only that bundle and this stage's pinned Node runtime, never npm or sources.
-FROM node:26-bookworm-slim@sha256:28147155d47dc31abe0a46e0d12b59b2fb3d0a2dcc5dc65fce76a074180b16fe AS posture-engine
+FROM node:26-bookworm-slim@sha256:5df79989ed685e09f0a98019db4cebfb22fb9df1a53c0161664a011f7ff6b0f1 AS posture-engine
 WORKDIR /src
 COPY posture/package.json posture/package-lock.json ./
 RUN npm ci --ignore-scripts --no-audit --no-fund
