@@ -230,6 +230,9 @@ class ScanOptions(BaseModel):
     exploit_depth: bool = False                      # Raise exploitation caps + no early stop on shards
     require_current_workers: bool = False            # Reject active scans if any worker is build-stale (§2)
     auth_state_shards: bool = False                  # Fan shards out per auth identity (anon/user1/user2)
+    # The Scan's declared run header (X-ShakerScan-Run); the public option of the same name. Without
+    # this field the stored options dropped an explicit false and the Scan announced itself anyway.
+    traffic_attribution: bool = True
     coverage_per_shard_cap: Optional[int] = None     # Endpoints per coverage shard (smaller -> more shards)
     coverage_max_shards: Optional[int] = Field(
         default=None,

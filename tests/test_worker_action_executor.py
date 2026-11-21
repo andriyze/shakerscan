@@ -216,3 +216,48 @@ def test_action_interruption_does_not_leak_across_concurrent_tasks():
         assert not action_interrupted()
 
     asyncio.run(run())
+
+
+# --- the Scan's traffic_attribution option -------------------------------------------------
+
+def _headers_seen_during_dispatch(traffic_attribution_option):
+    from api.scan import worker_action_executor as executor_module
+    from api.scan.worker_action_executor import scan_traffic_attribution
+
+    plan = _plan()
+    action = plan.actions[0]
+    seen = []
+
+    async def dispatch(_action, _lease, heartbeat):
+        seen.append(dict(executor_module.traffic_attribution.headers()))
+        await heartbeat()
+        return _receipt(action).public_dict()
+
+    options = {} if traffic_attribution_option is None else {"traffic_attribution": traffic_attribution_option}
+    executor = ReceiptScanActionExecutor(
+        scan_id=SCAN_ID,
+        target_id="target-1",
+        worker_id="local-worker-1",
+        dispatcher=dispatch,
+        traffic_attribution=scan_traffic_attribution(options),
+    )
+    asyncio.run(executor.execute(action, _lease(plan, action), lambda: _heartbeat([])))
+    return seen, executor_module.traffic_attribution.HEADER
+
+
+def test_a_scan_stored_with_traffic_attribution_false_sends_no_run_header(monkeypatch):
+    from api.request_models import ScanOptions
+
+    stored = ScanOptions(traffic_attribution=False).model_dump()
+    seen, header = _headers_seen_during_dispatch(stored["traffic_attribution"])
+    assert seen and all(header not in h for h in seen)
+
+
+def test_the_run_header_stays_on_by_default(monkeypatch):
+    from api.request_models import ScanOptions
+
+    stored = ScanOptions().model_dump()
+    assert stored["traffic_attribution"] is True
+    for option in (stored["traffic_attribution"], None):
+        seen, header = _headers_seen_during_dispatch(option)
+        assert seen and all(h.get(header) == f"scan:{SCAN_ID}" for h in seen)

@@ -4438,6 +4438,30 @@ def test_public_scan_omitted_parallel_compiles_to_worker_default():
     assert execution_options.require_current_workers is True
 
 
+def test_public_scan_traffic_attribution_false_is_stored_and_survives_a_reload():
+    request = api_module.ScanRequest(
+        target="https://example.test",
+        options={"custom_endpoints": ["GET /health"], "traffic_attribution": False},
+    )
+
+    execution_options = api_module._scan_execution_options(request.options)
+    assert execution_options.traffic_attribution is False
+
+    # What the submit path writes (options.model_dump() as JSON) and a later read rebuilds,
+    # e.g. a rescan of the target from its stored options.
+    stored = json.loads(json.dumps(execution_options.model_dump()))
+    assert stored["traffic_attribution"] is False
+    assert api_module.ScanOptions(**stored).traffic_attribution is False
+
+
+def test_public_scan_traffic_attribution_defaults_on():
+    for options in ({}, {"traffic_attribution": True}):
+        request = api_module.ScanRequest(target="https://example.test", options=options)
+        execution_options = api_module._scan_execution_options(request.options)
+        assert execution_options.traffic_attribution is True
+        assert json.loads(json.dumps(execution_options.model_dump()))["traffic_attribution"] is True
+
+
 def test_run_due_schedules_disables_legacy_retention_schedule(monkeypatch):
     schedule = _due_schedule()
     schedule["schedule_kind"] = "evidence_retention_sweep"

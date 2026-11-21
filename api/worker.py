@@ -318,7 +318,7 @@ from scanner_tools.browser_profile import seed_browser_profile
 from scanner_tools.process_memory import ProcessTreeMemoryCeiling, kill_process_tree
 from scan.finalizer import finalize_scan_report
 from scan.orchestrator import ScanOrchestrator
-from scan.worker_action_executor import ReceiptScanActionExecutor
+from scan.worker_action_executor import ReceiptScanActionExecutor, scan_traffic_attribution
 from scan.action_authority_guard import ScanAuthorityGuard
 from scan.scan_deadline import load_scan_deadline
 from scan.cancelled_report import (
@@ -11188,7 +11188,7 @@ async def _execute_reserved_deterministic_scan(
             credential_check=build_scan_credential_check(db_pool, options=normalized, target=execution.target_binding,
                 scan_id=scan_id, session_check=dispatcher.authentication_health_status),
             user_cancelled=lambda: _scan_cancel_requested(scan_id), deadline=deadline,
-            traffic_attribution=options.get("traffic_attribution") is not False)
+            traffic_attribution=scan_traffic_attribution(options))
 
     async def cancelled_report() -> dict[str, Any]:
         async def load_allocation() -> Any:
