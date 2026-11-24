@@ -2044,14 +2044,14 @@ for the profile contract, invocation, limits and acceptance gates.
 | Deprecated wrapper aliases | 0 | `scanner.sh` |
 | Make targets | 20 | `Makefile` |
 | Release gates | 17 | `scripts/release_gates.py` |
-| Runtime environment keys | 432 | Python sources + Compose manifests |
+| Runtime environment keys | 433 | Python sources + Compose manifests |
 | Internal compatibility scanner modules | 140 | `scanner/scanner_tools/` |
 | UI pages | 39 | `ui/src/app/` |
 | Skills | 9 | `skills/` |
 | Canonical slash commands | 14 | `.claude/commands/` |
 | Deprecated Scan-name slash shims | 0 | `.claude/commands/` |
 | Specialized subagents | 3 | `.claude/agents/` |
-| Durable tables | 120 | `db/init.sql` + migrations |
+| Durable tables | 121 | `db/init.sql` + migrations |
 
 ### Public REST Operations
 
@@ -3215,6 +3215,7 @@ Only key names and declaring sources are documented; secret values are never rea
 | `SHAKERSCAN_HTTP_ARCHIVE_RAW_HAR` | `api/runtime/http_archive_router.py`, `docker-compose.release.yml`, `docker-compose.yml` |
 | `SHAKERSCAN_HUNT_ACTION_WAIT_SECONDS` | `scripts/v2_cli.py` |
 | `SHAKERSCAN_HUNT_ALLOW` | `scripts/v2_cli.py` |
+| `SHAKERSCAN_HUNT_DEFAULT_CREDENTIALS` | `api/hunt/default_credentials.py`, `docker-compose.release.yml`, `docker-compose.yml` |
 | `SHAKERSCAN_HUNT_IDLE_EXPIRY_HOURS` | `docker-compose.release.yml`, `docker-compose.yml` |
 | `SHAKERSCAN_HUNT_INTERACTSH_SERVER` | `api/agent_tools.py` |
 | `SHAKERSCAN_HUNT_INTERACTSH_TOKEN` | `api/agent_tools.py` |
@@ -3444,6 +3445,7 @@ Scan feature or a second orchestration engine.
 | `hunt_cancellable_jobs` | `api/retest_contract.py` |
 | `hunt_coverage_angle_events` | `db/init.sql` |
 | `hunt_credential_uses` | `db/init.sql` |
+| `hunt_default_credential_attempts` | `db/init.sql` |
 | `hunt_permission_baselines` | `db/init.sql` |
 | `hunt_permission_events` | `db/init.sql` |
 | `hunt_permission_grants` | `db/init.sql` |

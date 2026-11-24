@@ -27,6 +27,8 @@ WITHHELD_REF_PATTERN = (
 )
 # A saved login's reference: its credential profile id (api/hunt/saved_logins.py).
 SAVED_LOGIN_PATTERN = r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+# A built-in default credential pair's reference (api/hunt/default_credentials.py, PAIR_ID_PATTERN).
+DEFAULT_CREDENTIAL_PATTERN = r"^dc-[0-9]{2}$"
 HTTP_EXCHANGE_PROPERTIES: Mapping[str, Any] = {
     "capture": {"type": "array", "maxItems": 16, "items": {
         "type": "object", "additionalProperties": False, "required": ["name"],
@@ -56,6 +58,11 @@ HTTP_EXCHANGE_PROPERTIES: Mapping[str, Any] = {
                     "saved_logins). Only in the login's own POST to its login_url, with "
                     "credential_field username or secret and a body_pointer. The worker fills the "
                     "value; it is never shown. An unattached one raises a login.use request.")},
+            "default_credential": {"type": "string", "maxLength": 5, "pattern": DEFAULT_CREDENTIAL_PATTERN,
+                "description": ("A built-in default or common credential pair, by reference (briefing "
+                    "default_credentials). Only in a login POST on the Hunt's own host, with "
+                    "credential_field username or secret and a body_pointer; bounded per login, "
+                    "paced, and stopped at a lockout or rate-limit sign by the server.")},
             "capture_name": {"type": "string", "pattern": _NAME},
             "principal": {"type": "string", "enum": ["primary", "secondary", "service"]},
             "profile_id": {"type": "string", "maxLength": 36},
@@ -136,10 +143,17 @@ def validate_exchange_input(values: Mapping[str, Any]) -> None:
     destinations: set[tuple[str, str]] = set()
     for binding in values.get("request_bindings") or ():
         sources = sum(key in binding for key in (
-            "source_action_id", "principal", "profile_id", "withheld_ref", "secret_ref", "saved_login"))
+            "source_action_id", "principal", "profile_id", "withheld_ref", "secret_ref", "saved_login",
+            "default_credential"))
         if sources != 1 or (("body_pointer" in binding) == ("header" in binding)):
             raise ValueError("request binding requires one source and one body/header destination")
-        if "saved_login" in binding:
+        if "default_credential" in binding:
+            if not re.fullmatch(DEFAULT_CREDENTIAL_PATTERN, str(binding["default_credential"])):
+                raise ValueError("default_credential must be a built-in reference such as dc-01")
+            if binding.get("credential_field") not in {"username", "secret"} or "body_pointer" not in binding \
+                    or any(k in binding for k in ("capture_name", "profile_version", "prefix")):
+                raise ValueError("a default credential binds its username or secret into the request body only")
+        elif "saved_login" in binding:
             if not re.fullmatch(SAVED_LOGIN_PATTERN, str(binding["saved_login"])):
                 raise ValueError("saved_login must be a saved login's profile id")
             if binding.get("credential_field") not in {"username", "secret"} or "body_pointer" not in binding \

@@ -142,6 +142,13 @@ REASON_CODES: Mapping[str, ReasonSpec] = {
     "saved_login_unavailable": ReasonSpec(403),
     "saved_login_invalid": ReasonSpec(422),
     "saved_login_destination": ReasonSpec(422),
+    # The bounded default-credential check (hunt/default_credentials.py): hard limits no grant lifts.
+    "default_credentials_disabled": ReasonSpec(403),
+    "default_credentials_invalid": ReasonSpec(422),
+    "default_credentials_destination": ReasonSpec(422),
+    "default_credentials_exhausted": ReasonSpec(403),
+    "default_credentials_stopped": ReasonSpec(403),
+    "default_credentials_paced": ReasonSpec(429, recorded=False),
     # Same key, other action.
     "idempotency_key_reused": ReasonSpec(409, recorded=False),
     # A parked action whose request was not granted.

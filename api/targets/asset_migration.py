@@ -227,6 +227,11 @@ async def run_unified_startup(pool: Any, baseline: Any, *, redis_provider: Any =
                     from api.hunt.credential_uses import HUNT_CREDENTIAL_USES_SCHEMA_SQL
                 await conn.execute(HUNT_CREDENTIAL_USES_SCHEMA_SQL)
                 try:
+                    from hunt.default_credentials import HUNT_DEFAULT_CREDENTIALS_SCHEMA_SQL
+                except ModuleNotFoundError:
+                    from api.hunt.default_credentials import HUNT_DEFAULT_CREDENTIALS_SCHEMA_SQL
+                await conn.execute(HUNT_DEFAULT_CREDENTIALS_SCHEMA_SQL)
+                try:
                     from hunt.permission_store import HUNT_PERMISSION_SCHEMA_SQL
                 except ModuleNotFoundError:
                     from api.hunt.permission_store import HUNT_PERMISSION_SCHEMA_SQL

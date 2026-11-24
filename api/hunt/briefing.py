@@ -18,6 +18,8 @@ whenever anything inside it was shortened:
   logins left) and the target's other saved logins (reference and label), never a value;
 * principals: the target's signed-in identities by label, role and slot (never a value), which are
   selected for this Hunt, and how to compare roles when two or more are (hunt/principal_roles.py);
+* default credentials: whether the bounded vendor-default login check is on, its references and
+  limits (hunt/default_credentials.py);
 * changed since the last Hunt: counts of endpoint, deployment, response, finding and subdomain
   changes from existing records, and up to five interpretations they affected (ids, states and
   the dependency that changed; no text).
@@ -248,6 +250,12 @@ def bound_briefing(briefing: dict[str, Any], limit: int = MAX_BRIEFING_BYTES) ->
         if _size(result) > limit and interpretations.get(key):
             interpretations[key] = []
             trimmed.append(f"interpretations.{key} removed to fit the size limit; query kind=interpretations")
+    defaults = result.get("default_credentials") if isinstance(result.get("default_credentials"), dict) else {}
+    if _size(result) > limit and defaults.get("pairs"):
+        defaults["pairs"] = []
+        defaults["pairs_trimmed"] = True
+        trimmed.append("default_credentials.pairs removed to fit the size limit; the references are "
+                       "dc-01 to dc-%02d in order" % int(defaults.get("pair_count") or 0))
     principals = result.get("principals") if isinstance(result.get("principals"), dict) else {}
     if _size(result) > limit and len(principals.get("items") or []) > 4:
         principals["items"] = [item for item in principals["items"] if item.get("selected_for_this_hunt")][:4]
@@ -388,6 +396,10 @@ async def live_sections(conn: Any, row: Mapping[str, Any]) -> dict[str, Any]:
         from .principal_roles import briefing_principals
         return await briefing_principals(conn, item)
 
+    async def default_credentials() -> dict[str, Any]:
+        from .default_credentials import briefing_section as default_credential_section
+        return await default_credential_section(conn, item)
+
     async def continuation() -> dict[str, Any]:
         from .knowledge_continue import briefing_continuation
         return await briefing_continuation(conn, item)
@@ -402,6 +414,7 @@ async def live_sections(conn: Any, row: Mapping[str, Any]) -> dict[str, Any]:
     await section("discovered_secrets", discovered_secrets)
     await section("saved_logins", saved_logins)
     await section("principals", principals)
+    await section("default_credentials", default_credentials)
     return sections
 
 
@@ -424,6 +437,7 @@ async def with_live_briefing(conn: Any, result: dict[str, Any], row: Mapping[str
     briefing["discovered_secrets"] = live.get("discovered_secrets")
     briefing["saved_logins"] = live.get("saved_logins")
     briefing["principals"] = live.get("principals")
+    briefing["default_credentials"] = live.get("default_credentials")
     delegation = live.get("delegation")
     if isinstance(delegation, dict) and "available" not in delegation:
         authority = dict(briefing.get("authority") or {})

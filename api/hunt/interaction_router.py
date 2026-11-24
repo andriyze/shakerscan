@@ -1848,6 +1848,7 @@ async def _execute_hunt_capability_lifecycle(
         prepared_network = network_target = network_policy = None
         prepared_browser = browser_target = None
         device_adapter_name = validated_device_input = None
+        default_credential_claim = None
         try:
             async with _pool().acquire() as conn:
                 async with conn.transaction():
@@ -2244,6 +2245,13 @@ async def _execute_hunt_capability_lifecycle(
                         except ModuleNotFoundError:
                             from api.hunt.secret_try import admit_secret_references
                         await admit_secret_references(conn, run=run, values=request.input)
+                        # A built-in default credential pair: bounded, paced and stopped per login.
+                        try:
+                            from hunt.default_credentials import admit_default_credentials
+                        except ModuleNotFoundError:
+                            from api.hunt.default_credentials import admit_default_credentials
+                        default_credential_claim = await admit_default_credentials(
+                            conn, run=run, values=request.input, policy=policy, context=context)
                     used = _hunt_json(run["budget_used_json"], {})
                     budget = _hunt_json(run["budget_json"], {})
                     if name in {"candidate.verify", "authz.verify"}:
@@ -2609,6 +2617,13 @@ async def _execute_hunt_capability_lifecycle(
                         await record_credential_uses(
                             conn, hunt_id=run["id"], action_id=action_id, uses=credential_uses,
                         )
+                        if default_credential_claim is not None:
+                            try:
+                                from hunt.default_credentials import record_attempt
+                            except ModuleNotFoundError:
+                                from api.hunt.default_credentials import record_attempt
+                            await record_attempt(conn, hunt_id=run["id"], action_id=action_id,
+                                                 claim=default_credential_claim)
         except HuntRefusal as refusal:
             if getattr(refusal, "recheck_origin", None) is not None:
                 granted_destination_refusal = await granted_destination_recheck(

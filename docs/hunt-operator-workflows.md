@@ -207,3 +207,16 @@ role and slot (never a value), says which are selected and how to send a request
 (`as_principal`), and, when two or more identities are selected, how to compare them: objects one
 identity owns requested as another (BOLA), and functions of the higher role called as the lower
 one (BFLA), proven with `authz.verify`.
+
+## Default and common credentials
+
+A Hunt may try a small built-in list of vendor-default and common credential pairs (20 pairs) on a
+sign-in form it found on its own host, by reference (`request_bindings` entries with
+`default_credential: dc-NN`). It needs active testing. The server allows at most 20 attempts per
+login and 4 logins per Hunt, 2 seconds apart, at most 20 attempts on one login per hour across
+Hunts, each pair once per login, and stops on a login at the first lockout or rate-limit sign
+(429, 423, `Retry-After`, lockout or rate-limit wording). The logins that never receive a
+discovered secret never receive these either. Every attempt is an ordinary `http.request` action
+with its evidence; the answer carries a verdict (`accepted`, `rejected`, `unclear`, or stopped) and
+the briefing's `default_credentials` section lists the references and what was used. It is on by
+default; set `SHAKERSCAN_HUNT_DEFAULT_CREDENTIALS=false` on the API to switch it off.
