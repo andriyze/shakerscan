@@ -839,11 +839,17 @@ async def revoke_target_authorization(target_id: str, request: TargetAuthorizati
 
 @router.get("/targets/{target_id}")
 async def get_target(target_id: str):
-    """Get target details."""
+    """Get target details.
+
+    Carries the same ``authorized_for_active_testing`` flag as ``GET /targets`` and
+    ``GET /targets/grouped`` (the target's own standing authorization or the one it inherits from
+    its host), plus the full ``authorization`` record (null when there is none) and up to ten
+    ``recent_scans``."""
     target_uuid = _uuid_or_400(target_id, "target id")
     async with _pool().acquire() as conn:
-        target = await conn.fetchrow("""
-            SELECT t.*, fs.*, COALESCE(origins.items, '[]'::jsonb) AS origins
+        target = await conn.fetchrow(f"""
+            SELECT t.*, fs.*, COALESCE(origins.items, '[]'::jsonb) AS origins,
+                   {_authorized_for_active_testing_sql()}
             FROM targets t
             LEFT JOIN findings_summary fs ON t.id = fs.target_id
             LEFT JOIN LATERAL (
@@ -3204,44 +3210,19 @@ async def asm_activity(
         "timeline": timeline,
         "hypothesis_situation": hypothesis_situation,
     }
-# The target's host as current_target_authorization() computes it in Python: scheme stripped,
-# path and port removed, IPv6 brackets dropped, lowercased. Written once so the listings and the
-# canonical reader cannot drift apart on what "the target's host" means.
-_TARGET_HOST_SQL = """lower(trim(both '[]' from
-    CASE WHEN split_part(regexp_replace({col}, '^[a-zA-Z][a-zA-Z0-9+.-]*://', ''), '/', 1) LIKE '[%'
-         THEN split_part(split_part(regexp_replace({col}, '^[a-zA-Z][a-zA-Z0-9+.-]*://', ''), '/', 1), ']', 1)
-         ELSE split_part(split_part(regexp_replace({col}, '^[a-zA-Z][a-zA-Z0-9+.-]*://', ''), '/', 1), ':', 1)
-    END))"""
+def _authorized_for_active_testing_sql(alias: str = "t") -> str:
+    """The ``authorized_for_active_testing`` column every target answer carries.
 
-
-def _authorized_for_active_testing_sql(column: str = "t.url") -> str:
-    """The EXISTS predicate for a standing authorization, matching the canonical reader.
-
-    A listing that only checked status, approver and expiry reported "Authorized" for receipts
-    current_target_authorization() rejects -- a blocked scope, or one naming a host the target no
-    longer has. The page then showed authority that later steps did not honour.
+    One predicate for the flat list, the grouped list and ``GET /targets/{id}``: the inventory's
+    ``authorized_sql``, which applies the canonical reader's rules (standing tiers, a scope that is
+    not blocked and still names the target's current host, the owning host's authority inherited
+    by its web apps, nothing for an archived target). The listings once built their own copy that
+    looked only for a receipt on the row itself, so a web app covered by its host was listed as
+    not authorized while every gate treated it as authorized, and the single-target answer did
+    not carry the field at all.
     """
-    host = _TARGET_HOST_SQL.format(col=column)
-    return f"""EXISTS (
-                    SELECT 1 FROM approval_receipts a
-                    JOIN scope_receipts s ON s.id = a.scope_receipt_id
-                    WHERE s.target_id = t.id AND a.status = 'active'
-                      AND a.approved_by IS NOT NULL
-                      AND a.risk_tier = ANY(ARRAY['active', 'intrusive'])
-                      AND a.action_name = 'target.authorization'
-                      AND (a.expires_at IS NULL OR a.expires_at > NOW())
-                      AND COALESCE(s.verdict, '') <> 'blocked'
-                      AND (
-                          lower(COALESCE(s.normalized_scope->>'host', '')) = {host}
-                          OR EXISTS (
-                              SELECT 1 FROM jsonb_array_elements_text(
-                                  CASE WHEN jsonb_typeof(s.allowed_hosts) = 'array'
-                                       THEN s.allowed_hosts ELSE '[]'::jsonb END
-                              ) AS scope_host
-                              WHERE lower(scope_host) = {host}
-                          )
-                      )
-                ) AS authorized_for_active_testing"""
+    from .asset_inventory import authorized_sql
+    return f"{authorized_sql(alias)} AS authorized_for_active_testing"
 
 
 def _public_target_row(row: Any) -> dict[str, Any]:

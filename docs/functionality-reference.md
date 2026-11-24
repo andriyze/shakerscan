@@ -1680,6 +1680,9 @@ See [`docs/mcp.md`](mcp.md).
 
 **Targets & domains**: `GET /targets` · `GET /targets/grouped` · `GET /domains` · `POST /targets` ·
 `GET /targets/{id}` · `PATCH /targets/{id}` · `DELETE /targets/{id}` · `POST /targets/{id}/scan`
+(`GET /targets`, `GET /targets/grouped` and `GET /targets/{id}` each carry `authorized_for_active_testing`:
+the target's own standing authorization or the one it inherits from its host; `GET /targets/{id}`
+also returns the full `authorization` record)
 
 **Connected devices**: `GET /devices/readiness` · `GET|POST /devices` ·
 `GET|PATCH|DELETE /devices/{id}` · `POST /devices/{id}/scan` ·

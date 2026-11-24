@@ -25,8 +25,10 @@ def _query_after(marker: str) -> str:
 
 def test_both_target_listings_expose_the_authorization_state():
     """Whichever listing a client reads, it can tell an authorized target from an unauthorized
-    one. The page uses the grouped one, which originally omitted the field entirely."""
-    for marker in ('@router.get("/targets")', '@router.get("/targets/grouped")'):
+    one. The page uses the grouped one, which originally omitted the field entirely; the
+    single-target answer omitted it too while the flat list carried it."""
+    for marker in ('@router.get("/targets")', '@router.get("/targets/grouped")',
+                   '@router.get("/targets/{target_id}")'):
         query = _query_after(marker)
         assert "_authorized_for_active_testing_sql()" in query, (
             f"{marker} does not project the authorization state, so a client cannot tell an "
@@ -46,20 +48,17 @@ def test_the_ui_renders_the_authorized_state_from_that_field():
 
 
 def _render_predicate():
-    """The predicate as the router builds it, without importing the router's dependencies."""
-    import ast
+    """The predicate as the router builds it: the router's builder delegates to the inventory's."""
+    import sys
 
-    src = (Path(__file__).resolve().parents[1] / "api" / "targets" / "router.py").read_text()
-    tree = ast.parse(src)
-    wanted = {"_TARGET_HOST_SQL", "_authorized_for_active_testing_sql"}
-    chunks = [
-        ast.get_source_segment(src, node) for node in tree.body
-        if (isinstance(node, ast.Assign) and getattr(node.targets[0], "id", "") in wanted)
-        or (isinstance(node, ast.FunctionDef) and node.name in wanted)
-    ]
-    namespace: dict = {}
-    exec("\n\n".join(chunks), namespace)
-    return namespace["_authorized_for_active_testing_sql"]()
+    api = str(Path(__file__).resolve().parents[1] / "api")
+    if api not in sys.path:
+        sys.path.insert(0, api)
+    from targets.asset_inventory import authorized_sql
+
+    router = (Path(__file__).resolve().parents[1] / "api" / "targets" / "router.py").read_text()
+    assert 'return f"{authorized_sql(alias)} AS authorized_for_active_testing"' in router
+    return authorized_sql("t")
 
 
 def test_the_listing_predicate_applies_the_canonical_reader_conditions():
@@ -79,25 +78,28 @@ def test_the_listing_predicate_applies_the_canonical_reader_conditions():
     tiers = (root / "api" / "runtime" / "approval_policy.py").read_text()
 
     # the conditions the canonical reader applies, each now present in the listing predicate
-    assert "risk_tier = ANY(ARRAY['active', 'intrusive'])" in predicate, "standing tiers"
+    assert "a.risk_tier IN ('active','intrusive')" in predicate, "standing tiers"
     assert "STANDING_RISK_TIERS = (\"active\", \"intrusive\")" in tiers, (
         "the canonical tier list changed; the listing predicate must follow it"
     )
     assert "STANDING_RISK_TIERS" in canonical, (
         "the canonical reader must still apply the shared tier list"
     )
-    assert "COALESCE(s.verdict, '') <> 'blocked'" in predicate, "blocked scope must not count"
+    assert "COALESCE(s.verdict,'') <> 'blocked'" in predicate, "blocked scope must not count"
     assert 'scope_verdict") or "") == "blocked"' in canonical
     assert "normalized_scope->>'host'" in predicate and "allowed_hosts" in predicate, (
         "the listing must require the scope to still name the target's current host"
     )
     assert "if host and host not in hosts:" in canonical
+    # the host's authority, inherited by its web apps, as resolve_target_authorization() applies it
+    assert "target_effective_authorization_target(t.id)" in predicate, "inherited authority"
 
 
 def test_both_listings_use_the_one_predicate_builder():
-    """Two copies drift. The flat and grouped listings are built from the same function."""
+    """Two copies drift. The flat list, the grouped list and the single-target answer are built
+    from the same function."""
     router = (Path(__file__).resolve().parents[1] / "api" / "targets" / "router.py").read_text()
-    assert router.count("_authorized_for_active_testing_sql()") == 2
+    assert router.count("_authorized_for_active_testing_sql()") == 3
     assert router.count("AS authorized_for_active_testing") == 1, (
         "a second hand-written predicate has appeared; build it from the shared function"
     )
