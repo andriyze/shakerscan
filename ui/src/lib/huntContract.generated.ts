@@ -225,9 +225,14 @@ export const HUNT_START_CONTRACT = {
         "bfla": "auth_bypass",
         "broken_object_level_authorization": "bola",
         "business_logic": "workflow",
+        "default_credential": "default_credentials",
+        "default_password": "default_credentials",
         "idor": "bola",
         "information_disclosure": "data_exposure",
-        "sensitive_data_exposure": "data_exposure"
+        "sensitive_data_exposure": "data_exposure",
+        "weak_credential": "default_credentials",
+        "weak_credentials": "default_credentials",
+        "weak_password": "default_credentials"
       },
       "other_families": "Any other family (AI/LLM prompt injection, excessive agency, RAG isolation, injection, CORS...) may be recorded as a candidate with its evidence, but no deterministic verifier proves it: do not call candidate.verify for it; report it as an unverified candidate. Device Hunts verify through their own verifier_contract_id contracts.",
       "state_changing_families": [
@@ -240,6 +245,7 @@ export const HUNT_START_CONTRACT = {
         "auth_bypass",
         "bola",
         "data_exposure",
+        "default_credentials",
         "field_constraint",
         "mass_assignment",
         "workflow"

@@ -218,5 +218,10 @@ Hunts, each pair once per login, and stops on a login at the first lockout or ra
 (429, 423, `Retry-After`, lockout or rate-limit wording). The logins that never receive a
 discovered secret never receive these either. Every attempt is an ordinary `http.request` action
 with its evidence; the answer carries `login_attempt.verdict` (`accepted`, `rejected`, `unclear`, or stopped) and
-the briefing's `default_credentials` section lists the references and what was used. It is on by
+the briefing's `default_credentials` section lists the references and what was used. An accepted
+pair recorded as a candidate of family `default_credentials` (citing the attempt) is proven by
+`candidate.verify`: the server sends the pair again and then a random-password control for the same
+user on the same login, under the same limits and stop; it is verified only when the pair
+authenticates and the control is refused (an accepted control refutes it), and a verified candidate
+becomes a finding (CWE-1392) with no password in it. It is on by
 default; set `SHAKERSCAN_HUNT_DEFAULT_CREDENTIALS=false` on the API to switch it off.

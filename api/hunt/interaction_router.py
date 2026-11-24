@@ -4794,6 +4794,23 @@ async def _execute_hunt_candidate_verification(
             approval_receipt_id=policy["approval_receipt_id"], state=state,
             candidate_id=str(candidate_uuid), reason="Hunt V2 deterministic verification",
         )
+    elif await _is_default_credential_candidate(candidate_uuid):
+        # A default-credential candidate: the server sends the accepted pair again and a
+        # random-password control on the same login, under the attempt bounds
+        # (hunt/default_credential_proof.py). A refusal before anything is sent costs nothing.
+        try:
+            from hunt.default_credential_proof import DefaultCredentialProofRefused, verify_candidate
+        except ModuleNotFoundError:
+            from api.hunt.default_credential_proof import DefaultCredentialProofRefused, verify_candidate
+        try:
+            result = await verify_candidate(
+                _pool(), run=run, context=context, policy=policy,
+                candidate_uuid=candidate_uuid, action_id=action_id,
+            )
+        except DefaultCredentialProofRefused as exc:
+            raise VerificationRefused(status_code=422, detail={
+                "error": exc.reason, "reason_code": exc.reason, "message": exc.message,
+            }) from None
     else:
         # A Hunt verification is requested by its operator or planner inside the Hunt's own
         # authority, budget and proof contract, so it is not autonomous router execution and does
@@ -4829,6 +4846,18 @@ async def _execute_hunt_candidate_verification(
                 # owner: this Hunt owns the finding; additional: another Hunt verified it first.
                 result["hunt_attribution"] = attribution
     return result
+
+
+async def _is_default_credential_candidate(candidate_uuid: uuid.UUID) -> bool:
+    try:
+        from hunt.default_credential_proof import is_default_credential_family
+    except ModuleNotFoundError:
+        from api.hunt.default_credential_proof import is_default_credential_family
+    async with _pool().acquire() as conn:
+        family = await conn.fetchval(
+            "SELECT family FROM investigation_candidates WHERE id=$1", candidate_uuid,
+        )
+    return is_default_credential_family(family)
 
 
 def _candidate_verification_action_result(

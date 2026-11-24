@@ -58,6 +58,13 @@ FAMILY_CONTRACTS: dict[str, dict[str, Any]] = {
         "requires": ["transition_invariant_broken", "before_after_state"],
         "refute_if": ["invariant_held"],
     },
+    # A default or weak credential: the accepted pair authenticates again on the same login and
+    # a random-password control does not (hunt/default_credential_proof.py).
+    "default_credentials": {
+        "cwe": "CWE-1392",
+        "requires": ["pair_authenticated", "control_rejected", "same_login"],
+        "refute_if": ["control_authenticated"],
+    },
     "data_exposure": {
         "cwe": "CWE-200",
         # sensitive VALUE evidence, not name-only classification.
@@ -118,6 +125,11 @@ FAMILY_ALIASES = {
     "information_disclosure": "data_exposure",
     "service_exposure": "device_service_exposure",
     "firmware_advisory": "device_firmware_advisory",
+    "default_credential": "default_credentials",
+    "weak_credentials": "default_credentials",
+    "weak_credential": "default_credentials",
+    "weak_password": "default_credentials",
+    "default_password": "default_credentials",
 }
 
 

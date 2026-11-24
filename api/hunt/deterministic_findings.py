@@ -293,6 +293,18 @@ async def materialize_verified_hunt_findings(
             target_kind=target_kind)
     else:
         return []
+    return await persist_verified_records(
+        conn, records, hunt_id=hunt_id, action_id=action_id, target_id=target_id,
+        target_kind=target_kind, evidence_principals=evidence_principals,
+    )
+
+
+async def persist_verified_records(
+    conn: Any, records: list[dict[str, Any]], *, hunt_id: uuid.UUID, action_id: uuid.UUID,
+    target_id: uuid.UUID, target_kind: str = "web", evidence_principals: tuple[str, ...] = (),
+) -> list[str]:
+    """Write deterministic finding records: the finding, its Hunt verification and its
+    finding_verifications row, and the target's active count. One path for every Hunt proof."""
     target_column = "device_target_id" if target_kind == "device" else "target_id"
     target_table = "device_targets" if target_kind == "device" else "targets"
     findings: list[str] = []
@@ -386,5 +398,5 @@ async def materialize_verified_hunt_findings(
 
 
 __all__ = [
-    "materialize_verified_hunt_findings", "service_identity_suffix", "verified_xss_observations",
+    "materialize_verified_hunt_findings", "persist_verified_records", "service_identity_suffix", "verified_xss_observations",
 ]

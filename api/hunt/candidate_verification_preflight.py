@@ -27,7 +27,7 @@ except ModuleNotFoundError:  # package import in host-side tests
 # Families the server-owned family-proof bridge can re-execute.
 VERIFIABLE_FAMILIES: frozenset[str] = frozenset({
     "bola", "auth_bypass", "data_exposure", "mass_assignment", "access_control",
-    "field_constraint", "workflow",
+    "field_constraint", "workflow", "default_credentials",
 })
 # Families whose verification sends state-changing requests: they need state-changing authority.
 STATE_CHANGING_VERIFY_FAMILIES: frozenset[str] = frozenset({"mass_assignment", "field_constraint", "workflow"})
