@@ -1471,7 +1471,11 @@ CAPABILITY_REGISTRY = CapabilityRegistry(
             "sending a captured session cookie: a signed-in page past what http.request shows). "
             "Reserves two requests: the second is spent only when tab-separated rows need the "
             "resource's head read to tell a database dump from plain text (once per resource; a "
-            "failed read is retried once). Both requests share the 30-second wall-time reservation.",
+            "failed read is retried once). Both requests share the 30-second wall-time reservation. "
+            "A non-2xx answer fails the read, but the error page it carried is still sampled and "
+            "searched (search_scope error_body, http_status); body_searched false with "
+            "search_not_performed_reason says when nothing was searched, so a zero count is never "
+            "mistaken for an unsearched body.",
             "http", "passive", _HTTP_TARGETS, "artifact.inspect", "1", None,
             {"http_requests": 2, "tool_wall_seconds": 30},
             {

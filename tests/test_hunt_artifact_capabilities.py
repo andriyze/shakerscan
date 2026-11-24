@@ -261,3 +261,71 @@ def test_loopback_listing_larger_than_the_window_is_reported_truncated():
     assert observation["window_truncated"] is True
     assert observation["resource_bytes"] == len(LISTING)
     assert observation["search_scope"] == "window"
+
+
+def _inspect_result(monkeypatch, response, args, *, ok=True, error=None):
+    async def fake_execute(_target_url, _args, **kwargs):
+        if response is not None:
+            kwargs["private_response_sink"](response)
+        return {"ok": ok, "error": error, "response": {"status": getattr(response, "status_code", None)}}
+
+    monkeypatch.setattr(artifact_capability, "execute_bound_http_request", fake_execute)
+    binding = TargetBinding(
+        target_id="target-1", target_kind="web", canonical_host="app.example.test",
+        allowed_origins=("https://app.example.test",), allowed_addresses=("192.0.2.10",),
+    )
+    return asyncio.run(artifact_capability.inspect_target_artifact(
+        "https://app.example.test", {"path": "/missing", **args}, target=binding,
+    ))
+
+
+def test_a_404_body_is_searched_and_says_it_was_the_error_page(monkeypatch):
+    """A planner searched a 404 page for a route name and got nothing back it could tell from
+    "searched, no match": the read failed and no count, no sample and no reason came with it."""
+    page = (b"<h1>Page not found</h1><p>Tried these URL patterns: admin/ api/v2/export/ "
+            b"debug-toolbar/</p><p>password=hunter2secret</p>")
+    missing = WorkerPrivateHTTPResponse(
+        status_code=404, final_url="https://app.example.test/missing", _body=page,
+        _headers={"content-type": "text/html"}, _cookies={},
+    )
+    result = _inspect_result(monkeypatch, missing, {"search_terms": ["api/v2/export", "graphql"]})
+    assert result["ok"] is False and result["status"] == "failed"
+    assert result["error"] == "artifact_http_status:404"  # unchanged: the read itself failed
+    observation = result["observation"]
+    assert observation["http_status"] == 404
+    assert observation["search_scope"] == "error_body"
+    assert observation["body_searched"] is True and observation["search_not_performed_reason"] is None
+    assert observation["search_matches"] == [
+        {"term": "api/v2/export", "count": 1}, {"term": "graphql", "count": 0}]
+    assert "hunter2secret" not in json.dumps(observation)
+
+
+def test_an_unsearched_body_says_why_instead_of_an_empty_count(monkeypatch):
+    empty = WorkerPrivateHTTPResponse(
+        status_code=404, final_url="https://app.example.test/missing", _body=b"",
+        _headers={}, _cookies={},
+    )
+    observation = _inspect_result(monkeypatch, empty, {"search_terms": ["admin"]})["observation"]
+    assert observation["body_searched"] is False
+    assert observation["search_not_performed_reason"] == "empty_error_body"
+    assert observation["search_terms_not_searched"] == ["admin"]
+    assert "search_matches" not in observation
+
+    refused = _inspect_result(monkeypatch, None, {"search_terms": ["admin"]}, ok=False,
+                              error="request_error:ConnectError")
+    assert refused["error"] == "request_error:ConnectError"
+    assert refused["observation"]["body_searched"] is False
+    assert refused["observation"]["search_not_performed_reason"] == "no_response"
+    assert "search_matches" not in refused["observation"]
+
+
+def test_a_successful_read_says_whether_it_searched(monkeypatch):
+    found = WorkerPrivateHTTPResponse(
+        status_code=200, final_url="https://app.example.test/missing", _body=b"hello admin",
+        _headers={"content-type": "text/plain"}, _cookies={},
+    )
+    searched = _inspect_result(monkeypatch, found, {"search_terms": ["admin"]})["observation"]
+    assert (searched["http_status"], searched["body_searched"], searched["search_not_performed_reason"]) == (
+        200, True, None)
+    plain = _inspect_result(monkeypatch, found, {})["observation"]
+    assert (plain["body_searched"], plain["search_not_performed_reason"]) == (False, "no_search_terms")

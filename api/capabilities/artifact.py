@@ -686,6 +686,60 @@ async def _fetch_artifact(
     return result, captured[-1] if captured else None
 
 
+def _unsearched(path: str, offset: int, status: int | None, terms: list[str], reason: str) -> dict[str, Any]:
+    """An observation that says the body was not searched, and why, instead of an empty count."""
+    return {
+        "kind": "artifact_observation",
+        "path": path,
+        "offset": offset,
+        "http_status": status,
+        "returned_bytes": 0,
+        "search_scope": "none",
+        "body_searched": False,
+        "search_not_performed_reason": reason,
+        "search_terms_not_searched": terms,
+        "secret_values_visible": False,
+    }
+
+
+def _error_body_observation(
+    path: str, offset: int, length: int, private: WorkerPrivateHTTPResponse, terms: list[str],
+) -> dict[str, Any]:
+    """The masked sample and search counts of the body a non-2xx answer carried.
+
+    The response is not the requested range (an error page ignores it), so its first ``length``
+    bytes are read from its start, masked with no context before them.
+    """
+    body = private.body()[:length]
+    if not body:
+        return _unsearched(path, offset, private.status_code, terms,
+                           "empty_error_body" if terms else "no_search_terms")
+    masked_text = _masked_window_text(body, b"", 0, private.body()[length:length + CUT_LOOKAHEAD_CHARS],
+                                      after_complete=not private.body_truncated and len(private.body()) <= length)
+    lowered = masked_text.lower()
+    observation = {
+        "kind": "artifact_observation",
+        "path": path,
+        "offset": offset,
+        "http_status": private.status_code,
+        "returned_bytes": len(body),
+        "window_truncated": private.body_truncated or len(private.body()) > length,
+        # Counts over the error page the server sent, not over the requested resource.
+        "search_scope": "error_body",
+        "body_searched": bool(terms),
+        "search_not_performed_reason": None if terms else "no_search_terms",
+        "window_sha256": keyed_body_digest(body),
+        "content_type": private.headers().get("content-type"),
+        "text_sample": bounded_masked_text(masked_text, MAX_PUBLIC_TEXT),
+        "search_matches": [{"term": term, "count": lowered.count(term.lower())} for term in terms],
+        "secret_values_visible": False,
+    }
+    withheld = active_withheld_values()
+    if withheld is not None:
+        observation["withheld_values"] = withheld.entries(observation["text_sample"])
+    return observation
+
+
 async def inspect_target_artifact(
     target_url: str,
     args: Mapping[str, Any],
@@ -720,18 +774,26 @@ async def inspect_target_artifact(
     if collector is not None and lead > CONTEXT_BYTES:
         collector.context_bytes_used += lead
         collector.context_bytes += lead
+    terms = [str(term)[:100] for term in args.get("search_terms") or [] if str(term)][:10]
     if not result.get("ok") or private is None:
         return {
             "ok": False,
             "status": "failed",
             "error": str(result.get("error") or "artifact_response_unavailable"),
+            # Said, not implied by a missing list: nothing came back to search.
+            **({"observation": _unsearched(path, offset, None, terms, "no_response")} if terms else {}),
             "budget_consumed": {"http_requests": 1, "tool_wall_seconds": 1},
         }
     if private.status_code not in {200, 206}:
+        # The read failed, but the server answered with a body: a 404 or 500 page often names the
+        # framework, routes or paths. It is searched and sampled under the same masking as a
+        # window, and marked as the error body it is, so a zero count is "not in that page" and
+        # never "the resource does not contain it".
         return {
             "ok": False,
             "status": "failed",
             "error": f"artifact_http_status:{private.status_code}",
+            "observation": _error_body_observation(path, offset, length, private, terms),
             "budget_consumed": {"http_requests": 1, "tool_wall_seconds": 1},
         }
     if offset and private.status_code != 206:
@@ -765,7 +827,6 @@ async def inspect_target_artifact(
         span_start=context_start, deadline=deadline, version=version, identity=identity)
     body = received[:length]
     resource_bytes = _resource_bytes(private)
-    terms = [str(term)[:100] for term in args.get("search_terms") or [] if str(term)][:10]
     # What was read reaches the resource's end (a value the window's end cuts was read whole), or
     # the masking withholds what the cut may have split (a deadline, a value past the lookahead).
     read_to_end = resource_bytes is not None and context_start + len(private.body()) >= resource_bytes
@@ -789,8 +850,11 @@ async def inspect_target_artifact(
             offset + len(body) < resource_bytes if resource_bytes is not None
             else private.body_truncated or len(received) > length or len(body) >= length
         ),
+        "http_status": private.status_code,
         # search_matches counts the returned window only, never the rest of the resource.
         "search_scope": "window",
+        "body_searched": bool(terms),
+        "search_not_performed_reason": None if terms else "no_search_terms",
         # Keyed whatever the masking found: a plain digest is an offline guessing oracle for any
         # secret in the window, recognised or not.
         "window_sha256": keyed_body_digest(body),

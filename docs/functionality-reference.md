@@ -652,6 +652,12 @@ context. `artifact.inspect` returns one target-pinned, redacted byte window (16 
 `javascript.analyze` privately reads at most 256 KiB and returns bounded routes, source-map
 references, client sink signals, Supabase origins, and decoded JWT metadata. JWT values never leave
 the worker result boundary; a classified token remains evidence, not credential authority.
+A non-2xx answer fails the `artifact.inspect` read, but the error page it carried is still sampled
+and searched (`search_scope: error_body`, `http_status`); `body_searched` and
+`search_not_performed_reason` (`no_search_terms`, `empty_error_body`, `no_response`) say when
+nothing was searched, so an unsearched body never reads as a zero count. Hunt
+`query(kind="receipts")` rows carry the `action_id` of the Hunt action that recorded them and,
+for a failed, timed-out or unparsed call, its bounded, redacted `error` (never a response body).
 
 Worker-private form login, OAuth client credentials, and OAuth password exchange are supported.
 Sealed private session checkpoints preserve resumability without plaintext secrets at rest. Session
