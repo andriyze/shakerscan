@@ -6,7 +6,10 @@ Discovered subdomains are automatically added as targets, bounded:
 
 - a root that is a public suffix (``co.uk`` stored by an older engine) is never monitored;
 - a CT name is used only when it is a valid host name on a label boundary under a monitored
-  root; a leading ``*.`` names its parent, any other wildcard is dropped;
+  root and has that root's registrable domain; a leading ``*.`` names its parent, any other
+  wildcard is dropped;
+- roots come from the targets a person or a Scan added, never from this monitor's own targets,
+  so a name it added cannot widen what it watches;
 - each apex (eTLD+1) gains at most ``SHAKERSCAN_CT_MONITOR_DAILY_CAP`` new targets per UTC day
   (default 100, as the scan-path discovery cap); the names over the cap are counted per apex and
   day in Redis ``gungnir:suppressed`` and in the status, not inserted.
@@ -155,9 +158,12 @@ async def get_monitored_domains() -> list[str]:
     recomputed by the startup migration) is replaced by the root each of its targets has now
     (example.co.uk), so monitoring continues for the customer and never covers the suffix."""
     async with db_pool.acquire() as conn:
+        # Never this monitor's own targets: under a root a later list marks as shared hosting
+        # (azurecontainerapps.io), every stranger's name it took would become a root of its own.
         rows = await conn.fetch("""
             SELECT DISTINCT root_domain FROM targets
             WHERE root_domain IS NOT NULL AND is_active = true
+              AND discovery_source IS DISTINCT FROM 'gungnir-monitor'
         """)
         stored = [r['root_domain'] for r in rows if r['root_domain']]
         legacy = [root for root in stored if spans_public_suffix(root)]
@@ -166,6 +172,7 @@ async def get_monitored_domains() -> list[str]:
             for row in await conn.fetch("""
                 SELECT root_domain, url FROM targets
                 WHERE root_domain = ANY($1::text[]) AND is_active = true
+                  AND discovery_source IS DISTINCT FROM 'gungnir-monitor'
             """, legacy):
                 root = monitored_root(row['root_domain'], row['url'])
                 if root:
@@ -285,7 +292,11 @@ async def handle_ct_name(raw: str, domains: list[str], seen: set[str], cap: Apex
     domain = match_root_domain(subdomain, domains)
     if not domain:
         return "out_of_scope"
-    apex = registrable_domain(domain) or domain
+    # The name must belong to the root's registrant: same registrable domain, and a root that
+    # spans none (the root list is filtered once per reload; this holds for every name).
+    apex = registrable_domain(domain)
+    if not apex or spans_public_suffix(domain) or registrable_domain(subdomain) != apex:
+        return "out_of_scope"
     if not await cap.allows(apex, count_today or count_added_today):
         field = cap.record_suppressed(apex)
         stats['suppressed_count'] += 1

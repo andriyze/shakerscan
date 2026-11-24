@@ -374,3 +374,52 @@ def test_a_hunt_agents_target_create_records_created_via_hunt(monkeypatch):
     assert metadata["host://db.agent.test"]["created_via"] == "hunt"
     assert "created_via" not in metadata["host://subject.mine.test"]
     assert (agent, mine) == (403, 200)
+
+
+def test_ct_monitor_targets_of_other_registrants_are_archived_not_deleted(monkeypatch):
+    """A Container Apps target had the root azurecontainerapps.io and the CT monitor took every
+    other customer's names under it. Once the list rules mark the service shared, the startup
+    migration re-roots every row; the monitor's rows outside this install's roots are archived
+    (with their inventory host rows), never deleted; its rows in the person's own environment stay."""
+    encryption(monkeypatch)
+    own = "shop.happyhill-1a2b3c4d.eastus.azurecontainerapps.io"
+    env = "happyhill-1a2b3c4d.eastus.azurecontainerapps.io"
+    sibling = f"api.{env}"
+    stranger = "orders.bluesky-99ffee00.westus2.azurecontainerapps.io"
+
+    async def run():
+        async with database() as conn:
+            await _converted(conn)
+            mine = await conn.fetchval("""INSERT INTO targets(url, name, root_domain, asm_enabled)
+                VALUES ($1, 'mine', 'azurecontainerapps.io', true) RETURNING id""", f"https://{own}")
+            ids = {}
+            for host in (sibling, stranger):
+                ids[host] = await conn.fetchval("""INSERT INTO targets(url, root_domain, is_root,
+                        discovery_source, asm_enabled) VALUES ($1, 'azurecontainerapps.io', false,
+                        'gungnir-monitor', true) RETURNING id""", f"https://{host}")
+            await conn.execute("""INSERT INTO scans(id, target_id, target_url, status)
+                VALUES ($1, $2, $3, 'completed')""", uuid.uuid4(), ids[stranger], f"https://{stranger}")
+            changed = await recompute_spanning_target_roots(conn)
+            rows = {row["url"]: dict(row) for row in await conn.fetch(
+                "SELECT url, root_domain, is_active, asm_enabled, metadata_json FROM targets")}
+            hosts = {name: await conn.fetchval("""SELECT host.is_active FROM targets app
+                         JOIN targets host ON host.id = app.asset_owner_id WHERE app.id = $1""", target)
+                     for name, target in ((own, mine), (stranger, ids[stranger]))}
+            scans = await conn.fetchval("SELECT COUNT(*) FROM scans WHERE target_id=$1", ids[stranger])
+            return mine, changed, rows, hosts, scans, await recompute_spanning_target_roots(conn)
+
+    _mine, changed, rows, hosts, scans, again = asyncio.run(run())
+    assert changed >= 3 and again == 0
+    assert (rows[f"https://{own}"]["root_domain"], rows[f"https://{own}"]["is_active"]) == (env, True)
+    assert rows[f"https://{own}"]["asm_enabled"] is True
+    assert (rows[f"https://{sibling}"]["root_domain"], rows[f"https://{sibling}"]["is_active"]) == (env, True)
+    gone = rows[f"https://{stranger}"]
+    assert (gone["is_active"], gone["asm_enabled"]) == (False, False)
+    meta = gone["metadata_json"] if isinstance(gone["metadata_json"], dict) else json.loads(gone["metadata_json"])
+    assert meta["archived_reason"] == "ct_monitor_other_registrant"
+    assert meta["archived_from_root"] == "azurecontainerapps.io"
+    assert scans == 1  # history kept
+    # The inventory's host row for the stranger goes with it; the person's own stays.
+    assert hosts == {stranger: False, own: True}
+    # Nothing still active carries the shared root or a stranger's root.
+    assert {row["root_domain"] for row in rows.values() if row["is_active"]} == {env}
