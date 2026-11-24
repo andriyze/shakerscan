@@ -196,3 +196,14 @@ This completes budget-only amendments, not adding principals/collections, cleari
 pauses, arbitrary protocol execution, or an autonomous child-result driver. Each remains separate
 unfinished work above. Budget extensions must reflect a real operator request, never an agent's
 silent response to an exhausted allowance.
+
+## Identities and roles
+
+An active Hunt started without `credential_refs` selects the target's registered principals, one
+per slot (primary, secondary, service); a slot without a registered principal takes the target's
+only credential for that slot. Explicit `credential_refs` select exactly what they name, and a
+passive Hunt selects nothing. The briefing's `principals` section lists each identity by label,
+role and slot (never a value), says which are selected and how to send a request as each
+(`as_principal`), and, when two or more identities are selected, how to compare them: objects one
+identity owns requested as another (BOLA), and functions of the higher role called as the lower
+one (BFLA), proven with `authz.verify`.

@@ -16,6 +16,8 @@ whenever anything inside it was shortened:
   (open next steps, inconclusive experiments). Titles quoted from the target are withheld here;
 * saved logins: the logins a person attached to this Hunt (reference, principal label, login URL,
   logins left) and the target's other saved logins (reference and label), never a value;
+* principals: the target's signed-in identities by label, role and slot (never a value), which are
+  selected for this Hunt, and how to compare roles when two or more are (hunt/principal_roles.py);
 * changed since the last Hunt: counts of endpoint, deployment, response, finding and subdomain
   changes from existing records, and up to five interpretations they affected (ids, states and
   the dependency that changed; no text).
@@ -246,6 +248,11 @@ def bound_briefing(briefing: dict[str, Any], limit: int = MAX_BRIEFING_BYTES) ->
         if _size(result) > limit and interpretations.get(key):
             interpretations[key] = []
             trimmed.append(f"interpretations.{key} removed to fit the size limit; query kind=interpretations")
+    principals = result.get("principals") if isinstance(result.get("principals"), dict) else {}
+    if _size(result) > limit and len(principals.get("items") or []) > 4:
+        principals["items"] = [item for item in principals["items"] if item.get("selected_for_this_hunt")][:4]
+        principals["truncated"] = True
+        trimmed.append("principals.items cut to the selected identities to fit the size limit")
     unconfirmed = result.get("unconfirmed_instructions") or {}
     # Advisory text gives way before operator guidance does.
     for key in ("text", "leading_text"):
@@ -377,6 +384,10 @@ async def live_sections(conn: Any, row: Mapping[str, Any]) -> dict[str, Any]:
         from .saved_logins import hunt_view
         return await hunt_view(conn, item)
 
+    async def principals() -> dict[str, Any]:
+        from .principal_roles import briefing_principals
+        return await briefing_principals(conn, item)
+
     async def continuation() -> dict[str, Any]:
         from .knowledge_continue import briefing_continuation
         return await briefing_continuation(conn, item)
@@ -390,6 +401,7 @@ async def live_sections(conn: Any, row: Mapping[str, Any]) -> dict[str, Any]:
     await section("delegation", delegation)
     await section("discovered_secrets", discovered_secrets)
     await section("saved_logins", saved_logins)
+    await section("principals", principals)
     return sections
 
 
@@ -411,6 +423,7 @@ async def with_live_briefing(conn: Any, result: dict[str, Any], row: Mapping[str
     briefing["unresolved"] = live.get("unresolved")
     briefing["discovered_secrets"] = live.get("discovered_secrets")
     briefing["saved_logins"] = live.get("saved_logins")
+    briefing["principals"] = live.get("principals")
     delegation = live.get("delegation")
     if isinstance(delegation, dict) and "available" not in delegation:
         authority = dict(briefing.get("authority") or {})
