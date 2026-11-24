@@ -909,3 +909,29 @@ def test_a_fleet_node_records_the_round_the_control_plane_refused_at_the_time_li
     ))
     assert "finalize_only" not in calls[0][2]
     assert report["scan_metadata"]["time_limit_stop"]["continuation_rounds_not_run"] == 1
+
+
+@pytest.mark.parametrize(("option", "expected"), [(False, False), (True, True), (None, True)])
+def test_a_fleet_node_honors_the_scans_traffic_attribution_switch_in_every_round(
+    monkeypatch, option, expected,
+):
+    """A Scan stored with options.traffic_attribution false sends no run header from a fleet
+    node either: every round's executor (the root plan and each continuation) is built silenced."""
+    job, _lease, parent, final, revision = _broker_continuation_fixture()
+    if option is not None:
+        job["options"]["traffic_attribution"] = option
+    calls, built, executors = [], [], []
+    _fake_broker_runtime(monkeypatch, statuses={}, calls=calls, final=final, revision=revision,
+                         built=built)
+
+    class RecordingExecutor:
+        def __init__(self, **kwargs):
+            executors.append(kwargs.get("traffic_attribution", True))
+
+    monkeypatch.setattr(broker_worker, "ReceiptScanActionExecutor", RecordingExecutor)
+    asyncio.run(broker_worker._execute_broker_action_plan(
+        {"node_id": NODE_ID}, {"lease_id": "lease-1", "lease_token": "token-1"}, job,
+        plan=parent, plan_revision=root_scan_plan_revision(parent),
+        worker_id="broker:node-1:container-a",
+    ))
+    assert len(calls) == 1 and executors == [expected, expected]
