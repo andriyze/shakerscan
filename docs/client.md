@@ -518,6 +518,11 @@ On Enterprise this asks for your step-up once, before the agent starts. `shakers
 --allow …` does the same for one Hunt. Bounds an agent proposes itself become one pending request
 you approve like any other.
 
+`shakerscan hunt start ... --seed-finding <finding-id>` (repeatable, at most 20, findings of the
+Hunt's target) starts the Hunt from those findings: its briefing lists them first, so the agent
+confirms or deepens them before anything else (`docs/hunt-operator-workflows.md`, "Start a Hunt
+from findings").
+
 ## Decisions only a person makes: a security-key touch
 
 Some requests record a decision only a person should make: raising a Hunt's budget, authorizing a

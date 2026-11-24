@@ -115,7 +115,11 @@ action and answers compact, saying to call again for the record. Hunt discovery 
 generates the start schema from the live authority contract. The MCP boundary uses only the
 canonical `goal` name and sends the complete V2 body: schema version, target kind, policy, budgets,
 credential references, capability allowlist, request-collection references, and optional
-`skill_ids`. A run normally starts without one. Adaptive suggestions return at most three compact
+`skill_ids`. A run normally starts without one. An engine that publishes the `seed_findings`
+contract also offers `seed_finding_ids`: up to 20 findings of the target to start from, listed first
+in the reply's `briefing.seed_findings` (quoted finding text inside `untrusted_data`); an id that is
+not a finding of the target is refused as `seed_finding_unavailable`
+(`docs/hunt-operator-workflows.md`, "Start a Hunt from findings"). Adaptive suggestions return at most three compact
 records and no bodies; the planner loads exactly one relevant method through the Hunt-specific read
 tool before binding it. MCP never auto-binds a methodology or changes authority.
 `shakerscan_hunt_start` takes the same optional `idempotency_key` as `POST /hunts`

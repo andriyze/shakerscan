@@ -324,6 +324,7 @@ export const HUNT_START_CONTRACT = {
     "goal_chars": 20000,
     "request_collections": 32,
     "saved_logins": 4,
+    "seed_finding_ids": 20,
     "skill_ids": 12
   },
   "patterns": {
@@ -407,6 +408,7 @@ export const HUNT_START_CONTRACT = {
     "secret_try_destination_denied",
     "secret_try_rate_limited",
     "secret_try_unrelated_target",
+    "seed_finding_unavailable",
     "sqli_injection_point_missing",
     "ssh_exec_not_allowed",
     "ssh_host_key_untrusted",
@@ -471,6 +473,15 @@ export const HUNT_START_CONTRACT = {
       "withheld",
       "agent_may_see"
     ]
+  },
+  "seed_findings": {
+    "briefing_path": "seed_findings",
+    "field": "seed_finding_ids",
+    "grants_authority": false,
+    "item": "finding id (UUID)",
+    "max_items": 20,
+    "must_be": "a finding of the Hunt's target that the Hunt can read (its kind=findings scope)",
+    "refusal_code": "seed_finding_unavailable"
   },
   "skill_catalog": "/hunt/skills",
   "target_actions": {

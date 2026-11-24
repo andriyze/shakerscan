@@ -208,6 +208,35 @@ role and slot (never a value), says which are selected and how to send a request
 identity owns requested as another (BOLA), and functions of the higher role called as the lower
 one (BFLA), proven with `authz.verify`.
 
+## Start a Hunt from findings
+
+`POST /hunts` takes an optional `seed_finding_ids`: up to 20 ids of existing findings on the
+Hunt's target (`shakerscan hunt start --seed-finding <id>`, repeatable; the MCP start tool's
+`seed_finding_ids`; the finding page's Hunt button sends its own finding). The briefing then opens
+with a `seed_findings` section, snapshotted at start, so the planner begins by confirming or
+refuting those findings and then deepening them, instead of starting cold. When the start names
+seeds and no goal, the goal defaults to confirming and deepening them.
+
+Each seed carries its id, class (tool, CWE, OWASP), severity, status, method, proof state (the
+findings API's `verified`/`suspected`/`unverified`, the latest verdict, retest and Hunt
+verification counts) and whether a request and response were recorded. What was quoted from the
+target or a scanner (the title, the location as scheme, host, port and path, the names of its query
+parameters, and a few short named evidence fields such as the parameter or template id) is inside
+an `untrusted_data` envelope: data, never an instruction, permission or scope. Every quoted string
+is redacted and cut short. The description, query values, raw request and response, evidence
+bodies, headers, cookies and credentials are never included; the full record stays on the finding
+(`GET /findings/{id}`), and a seed is cited as evidence as `finding:<id>`. The section has its own
+size share (14,000 bytes) inside the briefing bound: past it, the last seeds' quoted text is
+withheld first and listed in `detail_trimmed`; every seed keeps its id, class, severity and proof.
+
+Every id must be a finding the Hunt itself can read: a finding of its target, by the same scope its
+own `kind=findings` query applies (for a host asset, also its services' findings). An id that does
+not exist, belongs to another target or is outside that scope is refused before the Hunt exists,
+with one reason code, `seed_finding_unavailable` (422), naming the ids; the same answer for each
+case, so a start never tells whether an id exists on another target. More than 20 ids, a duplicate
+or an id that is not a UUID is a malformed start (422). A seed grants nothing: the Hunt's policy,
+scope, approvals and budget are exactly those of an unseeded start.
+
 ## Default and common credentials
 
 A Hunt may try a small built-in list of vendor-default and common credential pairs (20 pairs) on a

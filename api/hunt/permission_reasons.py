@@ -122,6 +122,9 @@ REASON_CODES: Mapping[str, ReasonSpec] = {
     # Start contract.
     "direct_origin_address_required": ReasonSpec(422, recorded=False),
     "preauthorization_bound_invalid": ReasonSpec(422, recorded=False),
+    # A seed finding id that is not a finding of the Hunt's target it can read (missing, another
+    # target's, or outside its scope alike: hunt/seed_findings.py).
+    "seed_finding_unavailable": ReasonSpec(422, recorded=False),
     # Bounds the agent proposed through the MCP start tool: one pending request for a person.
     "preauthorization_proposed": ReasonSpec(409, KIND_PREAUTHORIZATION, recorded=False),
     # Host bounds stored under IDNA 2003 whose IDNA 2008/UTS #46 spelling differs: withheld, and
