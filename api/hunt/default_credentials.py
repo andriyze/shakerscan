@@ -96,7 +96,8 @@ CREATE TABLE IF NOT EXISTS hunt_default_credential_attempts (
     verdict TEXT NOT NULL DEFAULT 'pending' CHECK (verdict IN ({", ".join(f"'{v}'" for v in VERDICTS)})),
     attempted_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     settled_at TIMESTAMPTZ,
-    CONSTRAINT hunt_default_credential_attempts_action_unique UNIQUE (action_id)
+    request_shape JSONB NOT NULL DEFAULT '{{}}'::jsonb,
+    CONSTRAINT hunt_default_credential_attempts_action_unique UNIQUE (action_id, pair_id)
 );
 CREATE INDEX IF NOT EXISTS idx_hunt_default_credential_attempts_login
     ON hunt_default_credential_attempts(login_key, attempted_at DESC);
@@ -191,6 +192,31 @@ class AttemptClaim:
     pair_id: str
     login_key: str
     login_host: str
+    request_shape: Mapping[str, Any] | None = None
+
+
+MAX_SHAPE_BYTES = 8_192
+
+
+def request_shape(values: Mapping[str, Any], login_url: str) -> dict[str, Any]:
+    """What a deterministic proof needs to send this login again: its URL, body kind, the body's
+    literal fields and the two pointers the pair fills. Replayable only when nothing else was bound
+    (a value captured from a page, such as a CSRF token, does not survive to a later request)."""
+    bindings = [item for item in values.get("request_bindings") or () if isinstance(item, Mapping)]
+    pointers = {str(item.get("credential_field")): str(item.get("body_pointer") or "")
+                for item in bindings if BINDING_KEY in item}
+    body_kind = "json" if isinstance(values.get("json_body"), Mapping) else "form"
+    body = values.get("json_body") if body_kind == "json" else values.get("form_body")
+    shape = {
+        "login_url": login_url, "body_kind": body_kind,
+        "body": body if isinstance(body, Mapping) else {},
+        "user_pointer": pointers.get("username") or None,
+        "secret_pointer": pointers.get("secret") or None,
+        "replayable": all(BINDING_KEY in item for item in bindings) and bool(pointers.get("secret")),
+    }
+    if len(json.dumps(shape, default=str)) > MAX_SHAPE_BYTES:
+        shape = {**shape, "body": {}, "replayable": False}
+    return shape
 
 
 def _login_target(values: Mapping[str, Any], default_origin: Any) -> tuple[str, str] | None:
@@ -298,7 +324,8 @@ async def admit_default_credentials(
             f"This login received {WINDOW_MAX} default-credential attempts in the last hour across "
             "Hunts, the most ShakerScan sends. Continue other work. Nothing was sent."),
             headers={"Retry-After": str(int(WINDOW.total_seconds()))})
-    return AttemptClaim(pair_id=pair_id, login_key=key, login_host=host[:260])
+    return AttemptClaim(pair_id=pair_id, login_key=key, login_host=host[:260],
+                        request_shape=request_shape(values, url))
 
 
 async def record_attempt(conn: Any, *, hunt_id: Any, action_id: Any, claim: AttemptClaim | None) -> None:
@@ -306,9 +333,12 @@ async def record_attempt(conn: Any, *, hunt_id: Any, action_id: Any, claim: Atte
     if claim is None:
         return
     await conn.execute(
-        """INSERT INTO hunt_default_credential_attempts (hunt_run_id, action_id, login_key, login_host, pair_id)
-           VALUES ($1,$2,$3,$4,$5) ON CONFLICT ON CONSTRAINT hunt_default_credential_attempts_action_unique DO NOTHING""",
+        """INSERT INTO hunt_default_credential_attempts
+               (hunt_run_id, action_id, login_key, login_host, pair_id, request_shape)
+           VALUES ($1,$2,$3,$4,$5,$6::jsonb)
+           ON CONFLICT ON CONSTRAINT hunt_default_credential_attempts_action_unique DO NOTHING""",
         uuid.UUID(str(hunt_id)), uuid.UUID(str(action_id)), claim.login_key, claim.login_host, claim.pair_id,
+        json.dumps(dict(claim.request_shape or {}), default=str),
     )
 
 
@@ -463,7 +493,9 @@ async def briefing_section(conn: Any, run: Mapping[str, Any]) -> dict[str, Any]:
             "its secret and put the user name in the body. Add capture [{\"name\": \"session\", "
             "\"header\": \"Set-Cookie\"}] to keep an accepted session. The answer's login_attempt.verdict "
             "says accepted, rejected, unclear or stopped. Send one attempt at a time; each "
-            "pair is tried once per login. Record an accepted pair as a candidate citing its action. "
+            "pair is tried once per login. Record an accepted pair as a candidate of family "
+            "default_credentials citing its action, then candidate.verify it: the server sends the "
+            "pair again and a random-password control on the same login. "
             "Never guess passwords outside this list."),
     })
     return section

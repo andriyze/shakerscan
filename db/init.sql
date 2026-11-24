@@ -1108,7 +1108,8 @@ CREATE TABLE hunt_default_credential_attempts (
     verdict TEXT NOT NULL DEFAULT 'pending' CHECK (verdict IN ('pending', 'accepted', 'rejected', 'rate_limited', 'locked', 'unclear', 'not_sent')),
     attempted_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     settled_at TIMESTAMPTZ,
-    CONSTRAINT hunt_default_credential_attempts_action_unique UNIQUE (action_id)
+    request_shape JSONB NOT NULL DEFAULT '{}'::jsonb,
+    CONSTRAINT hunt_default_credential_attempts_action_unique UNIQUE (action_id, pair_id)
 );
 CREATE INDEX idx_hunt_default_credential_attempts_login
     ON hunt_default_credential_attempts(login_key, attempted_at DESC);
