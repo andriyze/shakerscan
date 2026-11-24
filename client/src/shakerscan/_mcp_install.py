@@ -1066,8 +1066,13 @@ def discover_endpoint(base: str, get=None, timeout: float = 20.0) -> str:
     if not cli.same_origin(endpoint, base):
         raise InstallError(f"{url} names an MCP server on another origin ({endpoint}); pass it to --http yourself "
                            "if you trust it. Nothing was written.")
-    if first.get("transport", "streamable-http") != "streamable-http" or first.get("auth", "bearer") != "bearer":
-        raise InstallError(f"{url}: its MCP server uses {first.get('transport')}/{first.get('auth')}, not "
+    auth = first.get("auth", "bearer")
+    # Either the bare scheme ("bearer") or an object naming it ({"type": "bearer", ...}, as an
+    # Enterprise gateway publishes it); the object's other keys only describe which token.
+    scheme = auth.get("type") if isinstance(auth, dict) else auth
+    if first.get("transport", "streamable-http") != "streamable-http" or scheme != "bearer":
+        shown = scheme if isinstance(scheme, str) else type(scheme).__name__
+        raise InstallError(f"{url}: its MCP server uses {first.get('transport')}/{shown}, not "
                            "streamable HTTP with a bearer token. Nothing was written.")
     return endpoint
 
