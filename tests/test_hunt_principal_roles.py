@@ -114,6 +114,8 @@ def test_briefing_names_each_identity_and_how_to_compare_roles():
     assert cross["applies"] is True
     text = " ".join(cross["steps"])
     assert "BOLA" in text and "BFLA" in text and "authz.verify" in text and "as_principal" in text
+    # Which proof fits which comparison: a function of the higher role, or another identity's object.
+    assert "mode function" in text and "access_control" in text and "same role" in text
     assert section["secret_values_visible"] is False
 
 
