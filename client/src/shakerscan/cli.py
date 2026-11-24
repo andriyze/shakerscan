@@ -1636,7 +1636,8 @@ def build_parser() -> argparse.ArgumentParser:
     check.add_argument("--timeout", type=float, help="seconds to wait for the public service (default 20)")
     mcp = commands.add_parser(
         "mcp",
-        help="run MCP against the configured/local ShakerScan instance; with none configured, use the public service",
+        help="run MCP against the configured/local ShakerScan instance; with none configured, use the public service. "
+             "`shakerscan mcp install <agent>` registers it in an agent permanently (also: uninstall, status)",
     )
     connection(mcp)
     hunt = commands.add_parser(
@@ -1704,6 +1705,15 @@ def main(argv: Sequence[str] | None = None) -> int:
             # No engine on this machine but a connected instance: status means the instance.
             return main(["doctor", *argv[1:]])
         return run_engine(argv)
+    if argv[:1] == ["mcp"] and len(argv) > 1 and argv[1] in ("install", "uninstall", "status"):
+        # Registering the server in an agent (_mcp_install); `shakerscan mcp` alone runs it.
+        from . import _mcp_install
+
+        try:
+            return _mcp_install.main(argv[1:])
+        except ClientError as exc:
+            sys.stderr.write(f"shakerscan: {_shown(exc, multiline=True)}\n")
+            return exc.exit_code
     parser = build_parser()
     if argv and argv[0] in FORWARDING_COMMANDS:
         # argparse.REMAINDER rejects a forwarded option in first place, so

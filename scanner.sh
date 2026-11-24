@@ -4826,6 +4826,13 @@ case $COMMAND in
         start_agent "${ARGS[0]}"
         ;;
     mcp)
+        # `mcp install|uninstall|status` belong to the pipx/uv client; without this the adapter
+        # would start and wait on stdin.
+        if [[ " install uninstall status " == *" ${ARGS[0]:-none} "* ]]; then
+            echo "shakerscan mcp ${ARGS[0]} is a command of the ShakerScan client, not of this engine launcher." >&2
+            echo "Install the client (pipx install shakerscan, or uv tool install shakerscan), then run it again." >&2
+            exit 2
+        fi
         if [ ! -f "$SCRIPT_DIR/scripts/shakerscan_mcp.py" ]; then
             echo -e "${RED}Error: the MCP adapter is missing from this runtime.${NC}"
             echo "Re-run the ShakerScan installer to refresh runtime files."
