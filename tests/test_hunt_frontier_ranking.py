@@ -5,20 +5,22 @@ from uuid import uuid4
 from api.hunt.hunt_hypotheses import _remaining_requests, rank_frontier
 
 OWNER = "hunt:11111111-1111-1111-1111-111111111111"
-NOW = datetime.now(timezone.utc)
 
 
 def _row(*, family="bola", severity="high", route="/api/orders/{id}", claim_owner=None, tests=None,
          request_cost=None, confidence=0.5, status="open", **metadata):
     lead_id = str(uuid4())
+    # The clock when the row is built: a module-level time would lapse the claim lease when a full
+    # suite runs this test more than ten minutes after collection.
+    now = datetime.now(timezone.utc)
     return {"id": lead_id, "family": family, "title": f"{family} at {route}", "status": status, "version": 1,
             "confidence": confidence, "severity_guess": severity, "source": "ai_planner",
             "dedupe_key": f"hypothesis:v1|family={family}|route={route}|{lead_id}",
             "metadata_json": {"dedupe_dimensions": {"route": route}, "tests": tests or {}, **metadata},
             "endorsements": [], "next_test_action": {"request_cost": request_cost} if request_cost else {},
             "claim_owner": claim_owner,
-            "claim_lease_expires_at": NOW + timedelta(minutes=10) if claim_owner else None,
-            "updated_at": NOW}
+            "claim_lease_expires_at": now + timedelta(minutes=10) if claim_owner else None,
+            "updated_at": now}
 
 
 def _order(rows, **context):
