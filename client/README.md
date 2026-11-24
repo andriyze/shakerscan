@@ -10,6 +10,7 @@ shakerscan check example.com      # free public posture check, no engine/account
 shakerscan mcp                    # public MCP when no instance is configured
 shakerscan doctor --url https://scanner.example.com --token-file ./token
 shakerscan mcp    --url https://scanner.example.com --token-file ./token
+shakerscan mcp install claude    # register the MCP server in an agent: opencode, claude, codex, cursor, vscode, all
 shakerscan hunt   --url https://scanner.example.com --token-file ./token list
 shakerscan approve <request-id>   # allow what a Hunt asks for, in your own terminal
 shakerscan record https://app.example.com   # browse in a recorded browser (needs shakerscan[record])

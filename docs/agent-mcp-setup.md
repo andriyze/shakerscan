@@ -1,7 +1,8 @@
 # Connect your agent to ShakerScan MCP
 
-**Status:** maintained setup guide for the open-source engine; client formats checked against
-OpenCode 2.4, Claude Code 2.1, Codex CLI 0.171 and each editor's documentation in November 2026.
+**Status:** maintained setup guide for the open-source engine. `shakerscan mcp install` ships in the
+client after 0.14.0; the file formats were checked against OpenCode 2.4, Claude Code 2.1, Codex CLI
+0.171, the Cursor CLI and each editor's documentation in November 2026.
 
 This page registers the ShakerScan MCP server in your coding agent once, permanently, so every
 session you open has the ShakerScan tools: list targets and findings, read evidence, and drive
@@ -10,6 +11,60 @@ target-bound Hunts. What the tools do and the rules they enforce are in [MCP](mc
 `shakerscan agent opencode` (or `claude`, `codex`) is the other way in: it prepares a dedicated
 agent workspace and starts the agent there for one session. How the two differ is at the
 [end of this page](#how-this-differs-from-shakerscan-agent); you can use both.
+
+## Register it with one command
+
+The client writes the entry for you (`pipx install shakerscan`, `uv tool install shakerscan` or
+`brew install andriyze/shakerscan/shakerscan`; see [Client](client.md)):
+
+```bash
+shakerscan mcp install opencode                                  # an engine on this machine
+shakerscan mcp install claude --url http://127.0.0.1:8080        # an engine reached through an SSH tunnel
+shakerscan mcp install all --url http://192.168.1.50:8080 --lan  # an engine on a trusted LAN
+shakerscan mcp status                                            # where it is registered, and what it runs
+shakerscan mcp uninstall cursor
+```
+
+The agent is `opencode`, `claude`, `codex`, `cursor`, `vscode`, or `all` (every one found on this
+machine). By default the entry is for every project of your user; `--project DIR` writes it into
+one project instead, and `--dry-run` shows what would change without writing anything.
+
+| Agent | `--user` (default) | `--project DIR` |
+|---|---|---|
+| OpenCode | `~/.config/opencode/opencode.json` (or `.jsonc`) | `DIR/opencode.json` (or `.jsonc`) |
+| Claude Code | user scope, written with `claude mcp add-json --scope user` | `DIR/.mcp.json` |
+| Codex CLI | `~/.codex/config.toml` | `DIR/.codex/config.toml` |
+| Cursor | `~/.cursor/mcp.json` | `DIR/.cursor/mcp.json` |
+| VS Code (Copilot) | `~/.copilot/mcp-config.json` | `DIR/.vscode/mcp.json` |
+
+What the command does, and refuses:
+
+- **It checks first.** It starts the exact command the entry will run, once, and it must list the
+  engine's tools (`checked: … lists N tools`). It refuses when no engine is configured (the server
+  would offer only the public check), when the engine cannot be reached, and when the URL is plain
+  `http://` on another host unless you pass `--lan` (see [Security](#security-the-open-source-engine-has-no-login)).
+  Nothing is written when a check fails.
+- **It changes only the `shakerscan` entry.** Everything else in the file stays as it was,
+  comments, trailing commas and other MCP servers included, and the file is backed up beside
+  itself (`.shakerscan-<name>-<id>.bak`) before it changes. Running it again changes nothing.
+  A file that is not valid JSON, JSONC or TOML, a symbolic or hard link, or an entry written in a
+  form it does not edit is refused with nothing written; fix or move the file and run it again.
+- **It writes this client's absolute path**, as found on your `PATH`, so editors with a shorter
+  `PATH` still start it. It never writes a token: an entry reads the saved `shakerscan connect`
+  instance, or names a token file (`--token-file`, https only).
+- **It prints each agent's own check** (for example `claude mcp list`, `codex mcp list`, or `/mcps`
+  in OpenCode). Codex gets the longer timeouts described [below](#codex-cli).
+
+For an MCP endpoint that requires a bearer token (an authenticating deployment can serve one),
+register the endpoint instead of this client: `shakerscan mcp install claude --http
+https://scanner.example.com/<endpoint> --token-env SHAKERSCAN_API_TOKEN`. The entry names the
+environment variable, never its value, so set it in the environment the agent starts from; the
+check before writing uses the variable, `--token-file`, or the saved connection of that host.
+
+On a machine that has only the engine installer, `shakerscan` is the engine launcher, which has no
+`mcp install`; install the client as above.
+
+The rest of this page is the reference for writing the entries by hand.
 
 ## What you register
 
@@ -192,7 +247,7 @@ For an engine on this machine, `"args": ["mcp"]`. The Cursor CLI (`cursor-agent`
 files.
 
 Check: the MCP section of Cursor's settings lists `shakerscan` with its tools; connection errors
-are under Output, `MCP Logs`.
+are under Output, `MCP Logs`. The Cursor CLI lists them with `cursor-agent mcp list-tools shakerscan`.
 
 ## VS Code (GitHub Copilot)
 
@@ -278,7 +333,7 @@ terminal, never inside the agent; see [Hunt permission requests](hunt-permission
 | Your own projects and settings | unchanged; ShakerScan sits next to your other MCP servers | the client merges its own entries into the workspace's configuration and reports what else changed between launches |
 | Launch bounds | none: bounds the agent proposes become one permission request you approve | `--allow budget.raise:2x` and similar pre-authorize requests inside the bounds you set |
 | Kept up to date | the tools come from the engine's live contracts on every start | the guide and skills are refreshed on every launch |
-| Agents | any MCP client | Codex, Claude Code, OpenCode and Pi |
+| Agents | any MCP client (`shakerscan mcp install` writes five of them) | Codex, Claude Code, OpenCode and Pi |
 
 Register the server permanently when you want the ShakerScan tools beside your own code and
 agents; start `shakerscan agent` for a security session in which the agent should follow the
