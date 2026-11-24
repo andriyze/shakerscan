@@ -643,6 +643,9 @@ def test_discovery_names_the_endpoint_and_the_endpoint_answers_json(fake_deploym
     ({**DISCOVERY, "mcp_servers": []}, "no MCP server"),
     ({**DISCOVERY, "mcp_servers": [{"url": "https://elsewhere.example/mcp"}]}, "another origin"),
     ({**DISCOVERY, "mcp_servers": [{"url": "/m", "transport": "sse", "auth": "bearer"}]}, "not streamable HTTP"),
+    ({**DISCOVERY, "mcp_servers": [{"url": "/m", "auth": {"type": "basic"}}]}, "not streamable HTTP"),
+    ({**DISCOVERY, "mcp_servers": [{"url": "/m", "auth": {"token": "x"}}]}, "not streamable HTTP"),
+    ({**DISCOVERY, "mcp_servers": [{"url": "/m", "auth": ["bearer"]}]}, "not streamable HTTP"),
 ])
 def test_discovery_refusals(document, match):
     get = lambda url, headers, timeout: (200, {}, json.dumps(document).encode())  # noqa: E731
@@ -650,6 +653,19 @@ def test_discovery_refusals(document, match):
         mi.discover_endpoint("https://scanner.example.com", get=get)
     with pytest.raises(mi.InstallError, match="HTTP 404"):
         mi.discover_endpoint("https://scanner.example.com", get=lambda *a: (404, {}, b""))
+
+
+def test_discovery_accepts_the_enterprise_gateways_document():
+    """The shape an Enterprise gateway publishes: `schema` rather than `format`, and `auth` as an
+    object naming the scheme and which token it takes."""
+    document = {
+        "schema": "shakerscan-discovery/v1",
+        "mcp_servers": [{"name": "shakerscan-enterprise", "url": "/_enterprise/mcp",
+                         "transport": "streamable-http",
+                         "auth": {"type": "bearer", "token": "service-token"}}],
+    }
+    get = lambda url, headers, timeout: (200, {}, json.dumps(document).encode())  # noqa: E731
+    assert mi.discover_endpoint("https://scanner.example.com", get=get) == "https://scanner.example.com/_enterprise/mcp"
 
 
 def _deployment_on_https(monkeypatch, base):
