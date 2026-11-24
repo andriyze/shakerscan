@@ -166,7 +166,8 @@ HTTP = mi.Server(url="https://scanner.example.com/mcp", token_env="MY_TOKEN")
 
 @pytest.mark.parametrize("form, server, expected", [
     ("opencode", STDIO, {"type": "local", "command": ["/opt/bin/shakerscan", "mcp", "--url", "http://127.0.0.1:8080"]}),
-    ("opencode", HTTP, {"type": "remote", "url": HTTP.url, "headers": {"Authorization": "Bearer {env:MY_TOKEN}"}}),
+    ("opencode", HTTP, {"type": "remote", "url": HTTP.url, "oauth": False,
+                        "headers": {"Authorization": "Bearer {env:MY_TOKEN}"}}),
     ("claude", STDIO, {"type": "stdio", "command": "/opt/bin/shakerscan", "args": ["mcp", "--url", "http://127.0.0.1:8080"]}),
     ("claude", HTTP, {"type": "http", "url": HTTP.url, "headers": {"Authorization": "Bearer ${MY_TOKEN}"}}),
     ("cursor", HTTP, {"url": HTTP.url, "headers": {"Authorization": "Bearer ${env:MY_TOKEN}"}}),
@@ -448,7 +449,7 @@ def test_claude_user_scope_goes_through_claude_and_is_idempotent(tmp_path, home,
     assert calls == [["mcp", "add-json", "--scope", "user", "shakerscan",
                       json.dumps({"type": "stdio", "command": client_exe, "args": ["mcp", "--url", "http://127.0.0.1:8080"]})]]
     assert run(*args) == 0 and len(calls) == 1
-    assert "unchanged (Claude Code user scope)" in capsys.readouterr().out
+    assert "unchanged shakerscan (Claude Code user scope)" in capsys.readouterr().out
     assert run("install", "claude", "--url", "http://127.0.0.1:9090", "--server-command", client_exe) == 0
     assert [call[1] for call in calls[1:]] == ["remove", "add-json"]
     assert run("uninstall", "claude") == 0 and calls[-1][1] == "remove"
@@ -563,3 +564,142 @@ def test_the_subcommands_are_dispatched_and_plain_mcp_still_runs_the_server(monk
     with pytest.raises(SystemExit):
         cli.main(["mcp", "install", "nope"])
     assert isinstance(mi.build_parser().parse_args(["status"]), argparse.Namespace)
+
+
+# --- a deployment's discovery document and its HTTP entry ---------------------------------------
+
+DISCOVERY = {
+    "format": "shakerscan-discovery/v1",
+    "api_url": "https://scanner.example.com",
+    "mcp_servers": [{"url": "/mcp-endpoint", "transport": "streamable-http", "auth": "bearer",
+                     "tools": ["shakerscan_targets", "shakerscan_findings"]}],
+}
+
+
+@pytest.fixture
+def fake_deployment():
+    """A local fixture HTTP server: the discovery document and a JSON-only MCP endpoint (no event
+    stream, no session) that requires the bearer token."""
+    import http.server
+    import threading
+
+    seen = []
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def log_message(self, *args):  # quiet
+            pass
+
+        def _send(self, status, body=b"", kind="application/json"):
+            self.send_response(status)
+            self.send_header("Content-Type", kind)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def do_GET(self):
+            seen.append(("GET", self.path, self.headers.get("Authorization")))
+            if self.path == "/.well-known/shakerscan":
+                self._send(200, json.dumps(DISCOVERY).encode())
+            else:
+                self._send(404)
+
+        def do_POST(self):
+            message = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+            seen.append(("POST", message.get("method"), self.headers.get("Mcp-Session-Id")))
+            if self.path != "/mcp-endpoint":
+                return self._send(404)
+            if self.headers.get("Authorization") != f"Bearer {TOKEN}":
+                return self._send(401)
+            if "id" not in message:
+                return self._send(202)
+            if message["method"] == "initialize":
+                assert message["params"]["protocolVersion"] in {"2025-11-25", "2025-06-18", "2025-03-26"}
+                result = {"protocolVersion": message["params"]["protocolVersion"], "capabilities": {}}
+            else:
+                result = {"tools": [{"name": name} for name in DISCOVERY["mcp_servers"][0]["tools"]]}
+            self._send(200, json.dumps({"jsonrpc": "2.0", "id": message["id"], "result": result}).encode())
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    yield f"http://127.0.0.1:{server.server_address[1]}", seen
+    server.shutdown()
+
+
+def test_discovery_names_the_endpoint_and_the_endpoint_answers_json(fake_deployment):
+    base, seen = fake_deployment
+    endpoint = mi.discover_endpoint(base)
+    assert endpoint == base + "/mcp-endpoint"
+    assert seen[0] == ("GET", "/.well-known/shakerscan", None)  # no credentials on discovery
+    assert mi.probe_http(endpoint, TOKEN) == 2
+    with pytest.raises(mi.InstallError, match="refused the token"):
+        mi.probe_http(endpoint, "wrong")
+
+
+@pytest.mark.parametrize("document, match", [
+    ({"format": "other/v1", "mcp_servers": []}, "not a shakerscan-discovery/v1"),
+    ({**DISCOVERY, "mcp_servers": []}, "no MCP server"),
+    ({**DISCOVERY, "mcp_servers": [{"url": "https://elsewhere.example/mcp"}]}, "another origin"),
+    ({**DISCOVERY, "mcp_servers": [{"url": "/m", "transport": "sse", "auth": "bearer"}]}, "not streamable HTTP"),
+])
+def test_discovery_refusals(document, match):
+    get = lambda url, headers, timeout: (200, {}, json.dumps(document).encode())  # noqa: E731
+    with pytest.raises(mi.InstallError, match=match):
+        mi.discover_endpoint("https://scanner.example.com", get=get)
+    with pytest.raises(mi.InstallError, match="HTTP 404"):
+        mi.discover_endpoint("https://scanner.example.com", get=lambda *a: (404, {}, b""))
+
+
+def _deployment_on_https(monkeypatch, base):
+    """Point https://scanner.example.com at the local fixture server."""
+    real_get, real_post = mi.http_get, mi.http_post
+    swap = lambda url: url.replace("https://scanner.example.com", base)  # noqa: E731
+    monkeypatch.setattr(mi, "http_get", lambda url, headers, timeout: real_get(swap(url), headers, timeout))
+    monkeypatch.setattr(mi, "http_post", lambda url, body, headers, timeout: real_post(swap(url), body, headers, timeout))
+
+
+def test_install_from_the_deployment_address(project, home, client_exe, fake_deployment, monkeypatch, capsys):
+    base, _seen = fake_deployment
+    _deployment_on_https(monkeypatch, base)
+    monkeypatch.setenv("SHAKERSCAN_API_TOKEN", TOKEN)
+    monkeypatch.setattr(mi, "_opencode_major", lambda: 2)
+    monkeypatch.setattr(mi, "detected", lambda client, environ: True)
+    # a local stdio entry is already there: the HTTP entry sits beside it as shakerscan-enterprise
+    (project / ".mcp.json").write_text(json.dumps({"mcpServers": {"shakerscan": {"command": client_exe, "args": ["mcp"]}}}))
+    assert run("install", "all", "--project", str(project), "--http", "https://scanner.example.com") == 0
+    out = capsys.readouterr().out
+    assert "https://scanner.example.com/mcp-endpoint lists 2 tools" in out
+    written = files(project)
+    claude = json.loads(written[".mcp.json"])["mcpServers"]
+    assert claude["shakerscan"] == {"command": client_exe, "args": ["mcp"]}
+    assert claude["shakerscan-enterprise"]["url"] == "https://scanner.example.com/mcp-endpoint"
+    opencode = json.loads(written["opencode.json"])["mcp"]["servers"]["shakerscan"]
+    assert opencode["oauth"] is False and opencode["type"] == "remote"
+    assert TOKEN not in "".join(written.values()) and TOKEN not in out
+    # again: nothing changes; uninstall removes both names and nothing else
+    before = {k: v for k, v in files(project).items() if ".bak" not in k}
+    assert run("install", "all", "--project", str(project), "--http", "https://scanner.example.com") == 0
+    assert {k: v for k, v in files(project).items() if ".bak" not in k} == before
+    assert run("uninstall", "claude", "--project", str(project)) == 0
+    assert json.loads((project / ".mcp.json").read_text()) == {"mcpServers": {}}
+
+
+def test_http_entry_keeps_the_shakerscan_name_without_a_local_entry_and_its_remote_name_after():
+    remote = mi.Server(url="https://scanner.example.com/mcp-endpoint", token_env="T")
+    assert mi.entry_name(remote, lambda name: None) == "shakerscan"
+    assert mi.entry_name(remote, lambda name: {"url": "https://x"} if name == "shakerscan" else None) == "shakerscan"
+    assert mi.entry_name(remote, lambda name: {"command": "/bin/x"} if name == "shakerscan" else None) == \
+        "shakerscan-enterprise"
+    assert mi.entry_name(remote, lambda name: {} if name == "shakerscan-enterprise" else None) == "shakerscan-enterprise"
+    assert mi.entry_name(STDIO, lambda name: {"command": "/bin/x"}) == "shakerscan"
+
+
+def test_codex_table_takes_the_remote_name_beside_a_local_one(tmp_path):
+    (tmp_path / ".codex").mkdir()
+    (tmp_path / ".codex" / "config.toml").write_text('[mcp_servers.shakerscan]\ncommand = "/x"\nargs = ["mcp"]\n')
+    plan = mi.plan_install(mi.target("codex", tmp_path, {}), HTTP)
+    assert plan.name == "shakerscan-enterprise"
+    assert '[mcp_servers.shakerscan]\ncommand = "/x"' in plan.text
+    assert '[mcp_servers.shakerscan-enterprise]\nurl = "https://scanner.example.com/mcp"' in plan.text
+    removed = mi.plan_uninstall(mi.Target("codex", "project", tmp_path / ".codex" / "config.toml", "codex"))
+    assert removed.text is not None and "mcp_servers.shakerscan]" not in removed.text
