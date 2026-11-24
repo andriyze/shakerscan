@@ -37,7 +37,8 @@ SHAKERSCAN_MCP_ALLOW_REMOTE_API=true \
 SHAKERSCAN_API_TOKEN=<service token> ./scanner.sh mcp
 ```
 
-Example client configuration:
+Example client configuration (per-client setup for OpenCode, Claude Code, Codex, Cursor and VS Code,
+local or on another host, is in [Connect your agent to ShakerScan MCP](agent-mcp-setup.md)):
 
 ```json
 {

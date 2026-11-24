@@ -396,6 +396,9 @@ Any MCP client that spawns a stdio server:
 }
 ```
 
+Permanent setup for OpenCode, Codex, Cursor and VS Code as well, for an engine on this machine
+or another host, is in [Connect your agent to ShakerScan MCP](agent-mcp-setup.md).
+
 The tools, their trust levels, and the fail-closed rules are those of the runtime adapter, in
 [mcp.md](mcp.md). The agent's own model does the reasoning; the instance's model credentials are
 not involved. The MCP `serverInfo.version` reports `client-X.Y.Z`.
