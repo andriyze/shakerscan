@@ -162,15 +162,7 @@ async def prepare_http_operation(
                 allow_bound_origin_redirects=not (carries_secret or default_pair), private_response_sink=sink,
                 private_response_headers=private_headers,
             )
-            if default_pair:
-                from hunt.default_credentials import public_verdict, settle_attempt
-                verdict = verdicts[0] if verdicts else 'not_sent'
-                try:
-                    await settle_attempt(pool, hunt_id=run['id'], action_id=action_id, verdict=verdict)
-                except Exception:  # noqa: BLE001 - the attempt stands; its row stays pending (counted)
-                    pass
-                if isinstance(response, dict):
-                    response['default_credential'] = public_verdict(default_pair, verdict)
+
             if workflow and scrubbed:
                 response = _scrub_bound_values(response, exchange.bound_values)
             elif workflow:
@@ -197,6 +189,20 @@ async def prepare_http_operation(
                         response['response']['set_cookie_metadata'] = mask_cookie_names(
                             summary['set_cookie_metadata'], sent)
                 response.pop('redirect_chain', None)
+            if default_pair:
+                # After the answer was reduced for the planner, so the verdict is never cut from it.
+                from hunt.default_credentials import public_verdict, settle_attempt
+                verdict = verdicts[0] if verdicts else 'not_sent'
+                try:
+                    await settle_attempt(pool, hunt_id=run['id'], action_id=action_id, verdict=verdict)
+                except Exception:  # noqa: BLE001 - the attempt stands; its row stays pending (counted)
+                    pass
+                if isinstance(response, dict):
+                    public = public_verdict(default_pair, verdict)
+                    # Not under a "credential" key: the shared redactor masks those whole.
+                    response['login_attempt'] = public
+                    if isinstance(response.get('response'), dict):
+                        response['response']['login_attempt'] = public
             if exchange.missing_names and isinstance(response.get('response'), dict):
                 # The request itself stands (a failed login is a result); the capture it asked for
                 # is reported missing rather than failing the action.

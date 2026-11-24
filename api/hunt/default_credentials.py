@@ -461,8 +461,8 @@ async def briefing_section(conn: Any, run: Mapping[str, Any]) -> dict[str, Any]:
             "{\"default_credential\": \"dc-01\", \"credential_field\": \"secret\", \"body_pointer\": "
             "\"/<password field>\"}]; to try a pair's password with a user name you found, bind only "
             "its secret and put the user name in the body. Add capture [{\"name\": \"session\", "
-            "\"header\": \"Set-Cookie\"}] to keep an accepted session. The answer's default_credential."
-            "verdict says accepted, rejected, unclear or stopped. Send one attempt at a time; each "
+            "\"header\": \"Set-Cookie\"}] to keep an accepted session. The answer's login_attempt.verdict "
+            "says accepted, rejected, unclear or stopped. Send one attempt at a time; each "
             "pair is tried once per login. Record an accepted pair as a candidate citing its action. "
             "Never guess passwords outside this list."),
     })

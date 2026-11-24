@@ -144,8 +144,8 @@ def verdict_of(result) -> dict:
 
     def walk(value):
         if isinstance(value, dict):
-            if isinstance(value.get("default_credential"), dict):
-                found.append(value["default_credential"])
+            if isinstance(value.get("login_attempt"), dict):
+                found.append(value["login_attempt"])
             for child in value.values():
                 walk(child)
         elif isinstance(value, list):
