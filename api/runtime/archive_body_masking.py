@@ -932,6 +932,11 @@ def mask_json_text(text: str, *, _depth: int = 0) -> str:
 _YAML_KEY_RE = re.compile(r"""^(["']?)([^\s"':#{}\[\],][^"':#{}\[\]]{0,199}?)\1[ \t]*:(?:[ \t]+(.*))?$""")
 
 
+# An unquoted "key" holding these is a statement or an expression (``const k = a ? b``), not a
+# YAML key.
+_CODE_KEY_RE = re.compile(r"[=;()`?]|&&|\|\||^(?:const|let|var|return|case|default|//)\b")
+
+
 def _yaml_line(line: str) -> tuple[int, bool, str | None, str | None, int]:
     """``(content indent, list item, key, value, value offset)`` of one line."""
     stripped = line.lstrip(" ")
@@ -942,7 +947,7 @@ def _yaml_line(line: str) -> tuple[int, bool, str | None, str | None, int]:
         stripped = stripped[dash.end():]
     offset = len(line) - len(stripped)
     match = _YAML_KEY_RE.match(stripped.rstrip())
-    if match is None:
+    if match is None or (not match.group(1) and _CODE_KEY_RE.search(match.group(2))):
         return indent, bool(dash), None, stripped.rstrip() or None, offset
     value = match.group(3)
     value_offset = offset + match.start(3) if value is not None else len(line)
@@ -1015,10 +1020,15 @@ def _masked_line(line: str, offset: int, key: str | None = None) -> str:
     return line[:offset + start] + replacement + line[offset + end:]
 
 
+# A descriptor names its value (``api_key``, ``X-API-Key``); an expression (``key: props &&
+# normalizeKey(props),`` in a script) names nothing, and once withheld its whole object.
+_EXPRESSION_RE = re.compile(r"[();`{}]|&&|\|\||[ \t][=!]==?[ \t]")
+
+
 def _is_secret_descriptor(key: str | None, value: str | None) -> bool:
     return (
         key is not None and key.lower() in _DESCRIPTOR_NAME_KEYS and value is not None
-        and is_withheld_key(value.strip("\"'"))
+        and not _EXPRESSION_RE.search(value) and is_withheld_key(value.strip("\"'"))
     )
 
 
@@ -1103,6 +1113,7 @@ def mask_yaml_text(text: str) -> str:
     lines = text.split("\n")
     parsed = [_yaml_line(line) for line in lines]
     masked = [False] * len(lines)
+    script = reads_as_script(text)
 
     # Every line below a secret-named key with no inline value (a mapping, a list or a block
     # scalar) is withheld until the indentation returns to that key's level.
@@ -1119,7 +1130,7 @@ def mask_yaml_text(text: str) -> str:
         if key is not None and is_withheld_key(key):
             if value is None or value in {"|", ">", "|-", ">-", "|+", ">+"}:
                 scope = indent
-            else:
+            elif not (script and code_reference(value)):  # ``token: options.token,`` in a script
                 masked[index] = True
 
     # A descriptor (``- name: api_key``) whose name is secret: every non-structural value in
@@ -1519,10 +1530,58 @@ def mask_php_info_superglobals(text: str) -> str:
     return _PHP_INFO_SUPERGLOBAL_RE.sub(replace, text)
 
 
+# A script (a JavaScript window, a page's inline script) shows several of these. In one, an
+# unquoted value is an expression: ``nonce: options && options.nonce``, ``tokenCache =
+# createCache()``. A literal secret in a script is a quoted string, which the quoted passes
+# withhold; reading the expression as the value withheld words such as ``options`` and, once
+# sealed, every later echo of them in the Hunt.
+_SCRIPT_HINT_RE = re.compile(
+    r"\bfunction\b[ \t]*[\w$]*[ \t]*\(|=>|\b(?:const|let|var)[ \t]+[\w${\[]|\breturn\b|!==|===")
+_SCRIPT_HINTS = 3
+# A variable, a member chain or the head of a call or an index: ``options``, ``a.b.c(``, ``x[``.
+_CODE_REFERENCE_RE = re.compile(r"[A-Za-z_$][\w$]{0,63}(?:\??\.[A-Za-z_$][\w$]{0,63}){0,8}")
+# What may follow a reference in an expression: a call, an index, an operator, the expression's
+# end (a window's end may cut a chain at its dot). ``options && ...``, ``createCache(),``,
+# ``tokens[ i ]``, ``key;``.
+_CODE_CONTINUES_RE = re.compile(r"[ \t]*(?:[(\[,;)}\].]|&&|\|\||\?|[=!]==?|[-+*/%<]|$)")
+
+
+def reads_as_script(text: str) -> bool:
+    """Whether ``text`` is (or holds) a script: a few keywords and operators only code uses."""
+    count = 0
+    for _match in _SCRIPT_HINT_RE.finditer(text):
+        count += 1
+        if count >= _SCRIPT_HINTS:
+            return True
+    return False
+
+
+# An expression that opens with no name: a comparison read as an assignment (``key === x``
+# matched ``key =``), an arrow function, ``function``, ``new``, a negation.
+# (The value a label scan looks at stops before ``>``: ``(key) =>`` is seen as ``(key) =``.)
+_CODE_OPENS_RE = re.compile(
+    r"=|(?:async[ \t]+)?\([\w$, \t{}\[\]]*\)[ \t]*=(?:>|$)|(?:async[ \t]+)?function\b|new[ \t]|typeof\b|!")
+
+
+def code_reference(value: str) -> bool:
+    """Whether an unquoted value in a script is an expression (a variable, a member, a call, an
+    index, a comparison or a function), not a literal. A credential-shaped or JWT-shaped token
+    never counts as one."""
+    if _CODE_OPENS_RE.match(value):
+        return True
+    match = _CODE_REFERENCE_RE.match(value)
+    if match is None or not _CODE_CONTINUES_RE.match(value, match.end()):
+        return False
+    head = match.group(0)
+    return not (_BARE_JWT_RE.match(head) or any(
+        _is_credential_shaped(part) for part in re.split(r"\??\.", head) if len(part) >= 16))
+
+
 def mask_text_assignments(text: str) -> str:
     """Withhold the value of every secret-named assignment or labelled value in free text."""
     pieces: list[str] = []
     cursor = 0
+    script = reads_as_script(text)
     for match in _TEXT_ASSIGNMENT_RE.finditer(text):
         # ``Master key`` reads as ``master_key``; a lone neutral ``key`` stays a name.
         label = re.sub(r"[ \t]+", "_", match.group(1))
@@ -1535,6 +1594,8 @@ def mask_text_assignments(text: str) -> str:
         line_start = _at_line_start(text, match.start(1))
         if "=>" in separator and not _php_info_pair(match.group(1), separator, value, line_start):
             continue  # a JS arrow function or a PHP array entry, not ``php -i`` output
+        if script and not separator.strip(" \t:=>") and code_reference(value):
+            continue  # an expression in a script (``tokenCache = createCache()``)
         # ``Server=s;Password=Ab1&Cd2;``: a pair after ``;`` (a connection string, a cookie list)
         # runs to the next ``;``, blanks and ``&`` included.
         listed = _after_list_separator(text, match.start(1))
@@ -2331,6 +2392,12 @@ def _element_content(match: re.Match[str]) -> tuple[str, int, str]:
     return content, match.start("text"), html.unescape(content).strip()
 
 
+# HTML elements that caption a control rather than show a stored value, and the caption shape
+# (words of letters, a space, sentence punctuation) they keep.
+_UI_TEXT_TAGS = frozenset({"a", "button", "label", "legend", "h1", "h2", "h3", "h4", "h5", "h6"})
+_UI_PROSE_RE = re.compile(r"[A-Za-z][A-Za-z'\-]*(?:[ \t]+[A-Za-z][A-Za-z'\-]*)+[ \t]*[?!.:]?")
+
+
 def mask_markup_elements(text: str) -> str:
     """Withhold the text of an element whose tag or name attribute names a secret."""
     def element(match: re.Match[str]) -> str:
@@ -2342,6 +2409,8 @@ def mask_markup_elements(text: str) -> str:
         if not (_names_secret(tag) or any(_names_secret(name) for name in names)):
             return match.group(0)
         content, content_start, value = _element_content(match)
+        if tag.lower() in _UI_TEXT_TAGS and not _names_secret(tag) and _UI_PROSE_RE.fullmatch(value):
+            return match.group(0)  # ``<a id="forgot-password">Forgot password?</a>``: a caption
         if not value or WITHHELD_MARKER_RE.fullmatch(value) or value == MASK:
             return match.group(0)
         if _URL_VALUE_RE.match(value) and is_non_secret_value_shape(value):
@@ -3112,6 +3181,22 @@ def _plain_fragment(value: str) -> bool:
 _SQL_GAP_RE = re.compile(r"(?i)(?:[\s,();.+\-0-9]|null|true|false|_binary|0x[0-9a-f]+)*")
 
 
+def _reads_as_rows(text: str, end: int) -> bool:
+    """Whether the literals before ``end`` sit in a VALUES list: at least two thirds of the gaps
+    between them are punctuation, numbers or NULL. A dump window's rows read so throughout; code
+    and markup only quote a literal here and there (``url('x');``, ``f('a'), g('b');`` with words
+    between), which once made every quoted string of a script or a style sheet a withheld value."""
+    _start, literals = _orphan_literals(text, end)
+    gaps = _literal_gaps(text, _start, literals)
+    rows = sum(1 for gap in gaps if _SQL_GAP_RE.fullmatch(gap))
+    return rows > 0 and 3 * rows >= 2 * len(gaps)
+
+
+def _literal_gaps(text: str, start: int, literals: list[re.Match[str]]) -> list[str]:
+    edges = [start, *(item for literal in literals for item in (literal.start(), literal.end()))]
+    return [text[edges[index]:edges[index + 1]] for index in range(0, len(edges) - 1, 2)]
+
+
 def _orphan_literals(text: str, end: int) -> tuple[int, list[re.Match[str]]]:
     """``(start, literals)`` of a window that may begin inside a literal: of the two quote
     parities, the one whose gaps read as a VALUES list (punctuation and numbers, not words)."""
@@ -3119,8 +3204,7 @@ def _orphan_literals(text: str, end: int) -> tuple[int, list[re.Match[str]]]:
     best: tuple[int, int, list[re.Match[str]]] | None = None
     for start in (0, first_quote + 1) if first_quote >= 0 else (0,):
         literals = list(_SQL_LITERAL_RE.finditer(text, start, end))
-        edges = [start, *(item for literal in literals for item in (literal.start(), literal.end()))]
-        gaps = [text[edges[index]:edges[index + 1]] for index in range(0, len(edges) - 1, 2)]
+        gaps = _literal_gaps(text, start, literals)
         score = sum(1 if _SQL_GAP_RE.fullmatch(gap) else -2 for gap in gaps)
         if best is None or score > best[0]:
             best = (score, start, literals)
@@ -3168,8 +3252,12 @@ def mask_sql_values(text: str) -> str:
     prefix_end = first.start() if first else len(text)
     if prefix_end and "\t" in text[:prefix_end]:
         cursor = _mask_orphan_copy(text, prefix_end, tables, pieces, cursor, block)
+    # Rows before any statement: in a resource known to be a dump, or when they read as rows.
+    # ``first`` alone is no evidence: prose says "copy the file" and a script "insert into".
+    dump_like = carried or (collector is not None and collector.sql_dump_like)
     if prefix_end and _SQL_ORPHAN_ROWS_RE.search(text, 0, prefix_end) and (
-        first or carried or _orphan_row_signals(text, prefix_end) >= 2
+        dump_like or ((first or _orphan_row_signals(text, prefix_end) >= 2)
+                      and _reads_as_rows(text, prefix_end))
     ):
         cursor = _mask_orphan_rows(text, prefix_end, pieces, cursor)
     while True:
@@ -3255,8 +3343,17 @@ _MAX_NESTED_DEPTH = 2
 _NESTED_FORMAT_HINT_RE = re.compile(r"[=:<(\n]")
 
 
+# A JSON object opens with a member's quoted name or closes at once; a script's ``{ nonce:
+# options && options.nonce }`` (a window cut at an object literal) does neither, and its words
+# were withheld as the values of a JSON member.
+_JSON_OBJECT_OPEN_RE = re.compile(r"\s*\{\s*(?:[\"}]|$)")
+
+
 def _is_json_text(text: str) -> bool:
-    return text.lstrip()[:1] in {"{", "["} and not _INI_SECTION_RE.match(text)
+    head = text.lstrip()[:1]
+    if head == "{":
+        return bool(_JSON_OBJECT_OPEN_RE.match(text))
+    return head == "[" and not _INI_SECTION_RE.match(text)
 
 
 _INI_SECTION_AT_RE = re.compile(r"[ \t\r\n]{0,4096}\[[^\[\]\"{}:,\r\n]{1,200}\][ \t]*(?:\r?\n|\Z)")
