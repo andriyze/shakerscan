@@ -122,14 +122,12 @@ def default_principal_refs(
     moment = now or datetime.now(timezone.utc)
     usable = _own_usable(profiles, target_id, moment)
     by_slot: dict[str, set[str]] = {}
-    labelled: dict[str, Mapping[str, Any]] = {}
     for principal in principals:
         profile_id = str(principal.get("profile_id") or "")
         profile = usable.get(profile_id)
         if profile is None:
             continue
         by_slot.setdefault(str(profile.principal_slot), set()).add(profile_id)
-        labelled.setdefault(profile_id, principal)
     skipped: list[dict[str, str]] = []
     chosen: dict[str, str] = {}
     sources: dict[str, str] = {}
@@ -270,9 +268,13 @@ def principals_section(
                 "BFLA: call functions only the higher-privileged role should reach (admin, export, "
                 "user-management and settings routes its pages or API reveal) as the lower-role "
                 "identity; compare with an anonymous request.",
-                "Prove a difference with authz.verify (primary_principal and secondary_principal, "
-                "mode object, selected_object or function) and record the candidate with both "
-                "actions as evidence; an identical answer for both is a negative result.",
+                "Prove it with authz.verify (primary_principal and secondary_principal). A function "
+                "of the higher role reached by the lower one: mode function, or a candidate of family "
+                "access_control on a route an approved access-control contract covers (candidate.verify). "
+                "Another identity's object: mode object or selected_object, which needs two identities "
+                "of the same role or each one's own object ids (a higher role reading a lower one's "
+                "object is usually entitled). Record the candidate with both actions as evidence; an "
+                "identical answer for both is a negative result.",
             ],
         }
     elif len(items) >= 2 and len(active) < 2:
