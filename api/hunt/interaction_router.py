@@ -2844,6 +2844,7 @@ async def _execute_hunt_capability_lifecycle(
                         durable_reservation.record.lease_expires_at,
                         durable_reservation.record.requested,
                     ),
+                    family=str(candidate_record["family"] or ""),
                 )
                 return _candidate_verification_action_result(candidate_uuid, verification)
 
@@ -4753,6 +4754,7 @@ async def _execute_hunt_candidate_verification(
     candidate_uuid: uuid.UUID,
     action_id: uuid.UUID,
     start_by: float | None = None,
+    family: str | None = None,
 ) -> dict[str, Any]:
     """Execute the server-owned verifier after canonical action admission.
 
@@ -4794,7 +4796,7 @@ async def _execute_hunt_candidate_verification(
             approval_receipt_id=policy["approval_receipt_id"], state=state,
             candidate_id=str(candidate_uuid), reason="Hunt V2 deterministic verification",
         )
-    elif await _is_default_credential_candidate(candidate_uuid):
+    elif _is_default_credential_family(family):
         # A default-credential candidate: the server sends the accepted pair again and a
         # random-password control on the same login, under the attempt bounds
         # (hunt/default_credential_proof.py). A refusal before anything is sent costs nothing.
@@ -4848,15 +4850,11 @@ async def _execute_hunt_candidate_verification(
     return result
 
 
-async def _is_default_credential_candidate(candidate_uuid: uuid.UUID) -> bool:
+def _is_default_credential_family(family: Any) -> bool:
     try:
         from hunt.default_credential_proof import is_default_credential_family
     except ModuleNotFoundError:
         from api.hunt.default_credential_proof import is_default_credential_family
-    async with _pool().acquire() as conn:
-        family = await conn.fetchval(
-            "SELECT family FROM investigation_candidates WHERE id=$1", candidate_uuid,
-        )
     return is_default_credential_family(family)
 
 

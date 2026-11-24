@@ -105,6 +105,8 @@ ALLOWED_PLAIN_DIGESTS = {
     # The default-credential ledger's login id: a digest of "POST " and the login URL the request
     # names (method, scheme, host, port, path), counted and stopped per login (default_credentials).
     ("api/hunt/default_credentials.py", "login_key"): "request",
+    # The verified default-credential finding's fingerprint: the Scan's templated finding identity.
+    ("api/hunt/default_credential_proof.py", "finding_record"): "finding",
     # recon_active: the response digest only compares two answers inside one action and is
     # never emitted (leads carry status and length); the list digest is of our own bundled file.
     ("api/scan/recon_active_actions.py", "_signature"): "inprocess",
