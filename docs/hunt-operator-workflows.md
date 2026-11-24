@@ -217,6 +217,6 @@ login and 4 logins per Hunt, 2 seconds apart, at most 20 attempts on one login p
 Hunts, each pair once per login, and stops on a login at the first lockout or rate-limit sign
 (429, 423, `Retry-After`, lockout or rate-limit wording). The logins that never receive a
 discovered secret never receive these either. Every attempt is an ordinary `http.request` action
-with its evidence; the answer carries a verdict (`accepted`, `rejected`, `unclear`, or stopped) and
+with its evidence; the answer carries `login_attempt.verdict` (`accepted`, `rejected`, `unclear`, or stopped) and
 the briefing's `default_credentials` section lists the references and what was used. It is on by
 default; set `SHAKERSCAN_HUNT_DEFAULT_CREDENTIALS=false` on the API to switch it off.
