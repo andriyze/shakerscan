@@ -396,8 +396,11 @@ Any MCP client that spawns a stdio server:
 }
 ```
 
-Permanent setup for OpenCode, Codex, Cursor and VS Code as well, for an engine on this machine
-or another host, is in [Connect your agent to ShakerScan MCP](agent-mcp-setup.md).
+`shakerscan mcp install <agent>` writes this entry for you (`opencode`, `claude`, `codex`,
+`cursor`, `vscode` or `all`; `--project DIR` for one project, `mcp status`, `mcp uninstall`), after
+checking that the command lists the instance's tools, and never writes a token. The command, the
+manual entries for each agent and the security notes are in
+[Connect your agent to ShakerScan MCP](agent-mcp-setup.md).
 
 The tools, their trust levels, and the fail-closed rules are those of the runtime adapter, in
 [mcp.md](mcp.md). The agent's own model does the reasoning; the instance's model credentials are
