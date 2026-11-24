@@ -3,9 +3,10 @@
 import asyncio
 import hashlib
 import json
-import multiprocessing
 import os
 import re
+import subprocess
+import sys
 import uuid
 from pathlib import Path
 from types import SimpleNamespace
@@ -23,6 +24,28 @@ except ModuleNotFoundError:
     from api.public_retry_context import bind_scan_acceptance
 
 SCAN_ID = "d2fbfe98-b5d7-41f9-83f1-5f1e4b8ba657"
+ROOT = Path(__file__).resolve().parents[1]
+DSN_ENV = "SHAKERSCAN_TEST_PUBLIC_RETRY_DSN"
+# The process that dies runs in a fresh interpreter whose import path is only the repository root,
+# so `api` is always the package. A multiprocessing child would inherit this process's sys.path,
+# which other test modules reorder at import (api/ first, where `api` is api/api.py): in a full run
+# the child then failed to import this module and exited 1 before reaching the fixture.
+CHILD = (
+    "import importlib.util, os, sys\n"
+    "spec = importlib.util.spec_from_file_location('public_retry_crash_child', sys.argv[1])\n"
+    "module = importlib.util.module_from_spec(spec)\n"
+    "spec.loader.exec_module(module)\n"
+    f"module.accepted_then_process_exit(os.environ[{DSN_ENV!r}], sys.argv[2], sys.argv[3])\n"
+)
+
+
+def run_child(schema, mode):
+    env = {**os.environ, "PYTHONPATH": str(ROOT)}
+    env.pop("PYTHONSTARTUP", None)
+    return subprocess.run(
+        [sys.executable, "-c", CHILD, str(Path(__file__).resolve()), schema, mode],
+        cwd=ROOT, env=env, capture_output=True, text=True, timeout=120, check=False,
+    )
 
 
 async def exchange(pool, endpoint):
@@ -70,7 +93,7 @@ def accepted_then_process_exit(dsn, schema, mode):
 
 @pytest.mark.parametrize("mode", ["crash", "success", "rejection_after_recording"])
 def test_processing_reservation_survives_process_death_and_age(mode):
-    dsn = os.environ.get("SHAKERSCAN_TEST_PUBLIC_RETRY_DSN")
+    dsn = os.environ.get(DSN_ENV)
     if not dsn:
         pytest.skip("requires an explicitly selected disposable PostgreSQL instance")
     asyncpg = pytest.importorskip("asyncpg")
@@ -81,7 +104,7 @@ def test_processing_reservation_survives_process_death_and_age(mode):
         try:
             await conn.execute(f'CREATE SCHEMA "{schema}"')
             await conn.execute(f'SET search_path TO "{schema}",public')
-            source = (Path(__file__).resolve().parents[1] / "api/retest_contract.py").read_text()
+            source = (ROOT / "api/retest_contract.py").read_text()
             ddl = re.search(r"CREATE TABLE IF NOT EXISTS public_api_idempotency \(.*?\n\s*\)",
                             source, re.DOTALL)
             assert ddl is not None
@@ -137,18 +160,10 @@ def test_processing_reservation_survives_process_death_and_age(mode):
         finally:
             await conn.close()
 
-    child = None
     try:
         asyncio.run(prepare())
-        child = multiprocessing.get_context("spawn").Process(
-            target=accepted_then_process_exit, args=(dsn, schema, mode)
-        )
-        child.start()
-        child.join(20)
-        assert child.exitcode == (17 if mode == "crash" else 0)
+        child = run_child(schema, mode)
+        assert child.returncode == (17 if mode == "crash" else 0), child.stderr[-2000:]
         asyncio.run(verify_and_cleanup())
     finally:
-        if child is not None and child.is_alive():
-            child.terminate()
-            child.join(5)
         asyncio.run(cleanup())
