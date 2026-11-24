@@ -27,7 +27,9 @@ QUERIES = {
     "principals": QuerySpec("target_principals", "label, role, tenant_id, auth_state, is_active, updated_at", "updated_at", ("role", "auth_state")),
     "graph_nodes": QuerySpec("application_graph_nodes", "node_type, node_key, label, attributes, last_seen_at", "last_seen_at", ("node_type", "hunt_id")),
     "graph_edges": QuerySpec("application_graph_edges", "src_key, edge_type, dst_key, last_seen_at", "last_seen_at"),
-    "receipts": QuerySpec("tool_receipts", "tool_name, status, redacted_argv, created_at", "created_at", ("status",)),
+    # metadata_json and hunt_id are read only to resolve the row's action_id and, for a row that
+    # did not succeed, its error; hunt/receipt_rows.py projects the metadata away.
+    "receipts": QuerySpec("tool_receipts", "tool_name, status, redacted_argv, hunt_id, metadata_json, created_at", "created_at", ("status",)),
     "notes": QuerySpec("tool_receipts", "metadata_json, created_at", "created_at"),
     "scans": QuerySpec("scans", "status, progress, current_phase, findings_count, created_at", "created_at", ("status",)),
     "collections": QuerySpec("request_collections", "name, format, request_count, safe_request_count, potentially_mutating_request_count, payload_sha256, updated_at", "updated_at"),

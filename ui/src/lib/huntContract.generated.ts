@@ -1728,7 +1728,7 @@ export const HUNT_START_CONTRACT = {
         "method": "POST",
         "url_template": "/hunts/{hunt_id}/capabilities/artifact.inspect"
       },
-      "description": "Read one small redacted byte window from a target-bound artifact or page, anonymously or as one identity http.request takes (session_ref, as_principal, or request_bindings sending a captured session cookie: a signed-in page past what http.request shows). Reserves two requests: the second is spent only when tab-separated rows need the resource's head read to tell a database dump from plain text (once per resource; a failed read is retried once). Both requests share the 30-second wall-time reservation.",
+      "description": "Read one small redacted byte window from a target-bound artifact or page, anonymously or as one identity http.request takes (session_ref, as_principal, or request_bindings sending a captured session cookie: a signed-in page past what http.request shows). Reserves two requests: the second is spent only when tab-separated rows need the resource's head read to tell a database dump from plain text (once per resource; a failed read is retried once). Both requests share the 30-second wall-time reservation. A non-2xx answer fails the read, but the error page it carried is still sampled and searched (search_scope error_body, http_status); body_searched false with search_not_performed_reason says when nothing was searched, so a zero count is never mistaken for an unsearched body.",
       "input": {
         "fields": [
           "origin",
