@@ -57,9 +57,13 @@ What the command does, and refuses:
 
 For an MCP endpoint that requires a bearer token (an authenticating deployment can serve one),
 register the endpoint instead of this client: `shakerscan mcp install claude --http
-https://scanner.example.com/<endpoint> --token-env SHAKERSCAN_API_TOKEN`. The entry names the
+https://scanner.example.com --token-env SHAKERSCAN_API_TOKEN`. Given the deployment's address, the
+command reads its discovery document (`/.well-known/shakerscan`, fetched without credentials) and
+uses the first MCP server it names; the endpoint's own URL works as well. The entry names the
 environment variable, never its value, so set it in the environment the agent starts from; the
 check before writing uses the variable, `--token-file`, or the saved connection of that host.
+Next to a local `shakerscan` entry, this one is named `shakerscan-enterprise`, so both stay
+available; `mcp uninstall` removes both.
 
 On a machine that has only the engine installer, `shakerscan` is the engine launcher, which has no
 `mcp install`; install the client as above.

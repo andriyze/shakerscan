@@ -41,6 +41,11 @@ from . import __version__, _workspace
 from ._workspace import Root, WorkspaceError
 
 SERVER = "shakerscan"
+# The name an HTTP entry takes when the file already has a local (stdio) shakerscan entry.
+REMOTE_SERVER = "shakerscan-enterprise"
+NAMES = (SERVER, REMOTE_SERVER)
+DISCOVERY_PATH = "/.well-known/shakerscan"
+DISCOVERY_FORMAT = "shakerscan-discovery/v1"
 CLIENTS = ("opencode", "claude", "codex", "cursor", "vscode")
 DEFAULT_TOKEN_ENV = "SHAKERSCAN_API_TOKEN"
 CODEX_STARTUP_SECONDS = 30
@@ -391,39 +396,40 @@ def _toml_value(value: Any) -> str:
     raise TypeError(value)
 
 
-def _toml_render(entry: Mapping[str, Any]) -> str:
-    return "[mcp_servers.shakerscan]\n" + "".join(f"{key} = {_toml_value(value)}\n" for key, value in entry.items())
+def _toml_render(entry: Mapping[str, Any], name: str = SERVER) -> str:
+    return f"[mcp_servers.{name}]\n" + "".join(f"{key} = {_toml_value(value)}\n" for key, value in entry.items())
 
 
-def _toml_owned(text: str) -> tuple[list[str], list[tuple[int, int]]]:
+def _toml_owned(text: str, name: str = SERVER) -> tuple[list[str], list[tuple[int, int]]]:
     if '"""' in text or "'''" in text:
         if _tomllib is None:
             raise JsoncError("it has multi-line strings, which this Python (3.10) cannot check; edit it by hand")
     lines = text.splitlines(keepends=True)
-    owned = [(start, end) for start, end, key in _toml_blocks(lines) if key[:2] == ["mcp_servers", SERVER]]
+    owned = [(start, end) for start, end, key in _toml_blocks(lines) if key[:2] == ["mcp_servers", name]]
     data = _toml_load(text)
-    defined = isinstance(data, dict) and isinstance(data.get("mcp_servers"), dict) and SERVER in data["mcp_servers"]
+    defined = isinstance(data, dict) and isinstance(data.get("mcp_servers"), dict) and name in data["mcp_servers"]
     if data is None:
-        defined = bool(re.search(r"(?m)^\s*(?:mcp_servers\s*\.\s*)?[\"']?shakerscan[\"']?\s*[.=]", text)) or bool(owned)
+        pattern = r"(?m)^\s*(?:mcp_servers\s*\.\s*)?[\"']?" + re.escape(name) + r"[\"']?\s*[.=]"
+        defined = bool(re.search(pattern, text)) or bool(owned)
         if re.search(r"(?m)^\s*mcp_servers\s*=", text):
             defined = True
     if defined and not owned:
-        raise JsoncError("it defines mcp_servers.shakerscan inline; edit that entry by hand or remove it first")
+        raise JsoncError(f"it defines mcp_servers.{name} inline; edit that entry by hand or remove it first")
     return lines, owned
 
 
-def toml_get(text: str) -> Any:
+def toml_get(text: str, name: str = SERVER) -> Any:
     data = _toml_load(text)
     if data is not None:
         servers = data.get("mcp_servers")
-        return servers.get(SERVER) if isinstance(servers, dict) else None
-    lines, owned = _toml_owned(text)
+        return servers.get(name) if isinstance(servers, dict) else None
+    lines, owned = _toml_owned(text, name)
     return "".join(line for start, end in owned for line in lines[start:end]) or None
 
 
-def toml_set(text: str, entry: Mapping[str, Any]) -> str:
-    lines, owned = _toml_owned(text)
-    block = _toml_render(entry)
+def toml_set(text: str, entry: Mapping[str, Any], name: str = SERVER) -> str:
+    lines, owned = _toml_owned(text, name)
+    block = _toml_render(entry, name)
     if owned:
         first = owned[0][0]
         keep_gap = owned[0][1] < len(lines) and not lines[owned[0][1] - 1].strip()
@@ -443,13 +449,13 @@ def toml_set(text: str, entry: Mapping[str, Any]) -> str:
             result += "\n"
         result += block
     check = _toml_load(result)
-    if check is not None and (check.get("mcp_servers") or {}).get(SERVER) != dict(entry):
+    if check is not None and (check.get("mcp_servers") or {}).get(name) != dict(entry):
         raise JsoncError("the edited file did not read back as expected; edit it by hand")
     return result
 
 
-def toml_remove(text: str) -> str:
-    lines, owned = _toml_owned(text)
+def toml_remove(text: str, name: str = SERVER) -> str:
+    lines, owned = _toml_owned(text, name)
     if not owned:
         return text
     out = [line for number, line in enumerate(lines) if not any(s <= number < e for s, e in owned)]
@@ -547,7 +553,8 @@ def entry(form: str, server: Server, *, legacy: bool = False) -> dict[str, Any]:
     variable = server.token_env
     if form == "opencode":
         value: dict[str, Any] = (
-            {"type": "remote", "url": server.url, "headers": {"Authorization": f"Bearer {{env:{variable}}}"}}
+            {"type": "remote", "url": server.url, "oauth": False,
+             "headers": {"Authorization": f"Bearer {{env:{variable}}}"}}
             if server.http else {"type": "local", "command": [server.command, *server.args]})
         return {**value, "enabled": True} if legacy else value
     if form == "codex":
@@ -567,10 +574,25 @@ def entry(form: str, server: Server, *, legacy: bool = False) -> dict[str, Any]:
     return value
 
 
-def _json_path(form: str, legacy: bool = False) -> list[str]:
-    return {"opencode": ["mcp", SERVER] if legacy else ["mcp", "servers", SERVER],
-            "claude": ["mcpServers", SERVER], "cursor": ["mcpServers", SERVER],
-            "copilot": ["mcpServers", SERVER], "vscode": ["servers", SERVER]}[form]
+def _json_path(form: str, legacy: bool = False, name: str = SERVER) -> list[str]:
+    return {"opencode": ["mcp", name] if legacy else ["mcp", "servers", name],
+            "claude": ["mcpServers", name], "cursor": ["mcpServers", name],
+            "copilot": ["mcpServers", name], "vscode": ["servers", name]}[form]
+
+
+def _local(value: Any) -> bool:
+    """Whether an existing entry runs a local command (stdio) rather than an HTTP endpoint."""
+    if isinstance(value, str):  # a Codex table read as text (Python 3.10, no tomllib)
+        return bool(re.search(r"(?m)^\s*command\s*=", value)) and not re.search(r"(?m)^\s*url\s*=", value)
+    return isinstance(value, Mapping) and bool(value.get("command")) and not value.get("url")
+
+
+def entry_name(server: Server, existing: Callable[[str], Any]) -> str:
+    """An HTTP entry is named shakerscan-enterprise beside a local shakerscan entry (and keeps that
+    name once it has it); everything else is shakerscan."""
+    if server.http and (existing(REMOTE_SERVER) is not None or _local(existing(SERVER))):
+        return REMOTE_SERVER
+    return SERVER
 
 
 def _opencode_major() -> int | None:
@@ -662,6 +684,8 @@ class Plan:
     wanted: Any = None
     removing: bool = False
     note: str = ""
+    name: str = SERVER
+    names: list[str] = field(default_factory=list)  # uninstall: the entries found
 
 
 def _refuse_file(path: Path, exc: Exception) -> InstallError:
@@ -673,7 +697,8 @@ def plan_install(target_: Target, server: Server, major: Callable[[], int | None
     environ = os.environ if environ is None else environ
     plan = Plan(target_)
     if target_.form == "claude-cli":
-        plan.current = claude_user_entry(environ)
+        plan.name = entry_name(server, lambda name: claude_user_entry(environ, name))
+        plan.current = claude_user_entry(environ, plan.name)
         plan.wanted = entry("claude-cli", server)
         if plan.current is not None and _same(plan.current, plan.wanted):
             plan.wanted = None
@@ -683,19 +708,24 @@ def plan_install(target_: Target, server: Server, major: Callable[[], int | None
     plan.original, plan.mode = text, mode
     try:
         if target_.form == "codex":
+            plan.name = entry_name(server, lambda name: toml_get(text or "", name))
             plan.wanted = entry("codex", server)
-            plan.current = toml_get(text or "")
+            plan.current = toml_get(text or "", plan.name)
             if plan.current == plan.wanted or (  # without tomllib (3.10) the table is compared as text
-                    isinstance(plan.current, str) and plan.current.strip() == _toml_render(plan.wanted).strip()):
+                    isinstance(plan.current, str)
+                    and plan.current.strip() == _toml_render(plan.wanted, plan.name).strip()):
                 return plan
-            plan.text = toml_set(text or "", plan.wanted)
+            plan.text = toml_set(text or "", plan.wanted, plan.name)
             return plan
-        document = parse_jsonc(text).value if text and text.strip() else {}
+        filled = bool(text and text.strip())
+        document = parse_jsonc(text).value if filled else {}
         legacy = target_.form == "opencode" and opencode_legacy(document, major)
-        path = _json_path(target_.form, legacy)
+        plan.name = entry_name(server, lambda name: jsonc_get(text, _json_path(target_.form, legacy, name))
+                               if filled else None)
+        path = _json_path(target_.form, legacy, plan.name)
         plan.wanted = entry(target_.form, server, legacy=legacy)
-        plan.current = jsonc_get(text, path) if text and text.strip() else None
-        other = _json_path("opencode", not legacy) if target_.form == "opencode" else None
+        plan.current = jsonc_get(text, path) if filled else None
+        other = _json_path("opencode", not legacy, plan.name) if target_.form == "opencode" else None
         stale = other is not None and text and text.strip() and isinstance(jsonc_get(text, other), Mapping)
         if plan.current is not None and _same(plan.current, plan.wanted) and not stale:
             return plan
@@ -716,7 +746,8 @@ def plan_uninstall(target_: Target, environ: Mapping[str, str] | None = None) ->
     environ = os.environ if environ is None else environ
     plan = Plan(target_, removing=True)
     if target_.form == "claude-cli":
-        plan.current = claude_user_entry(environ)
+        plan.names = [name for name in NAMES if claude_user_entry(environ, name) is not None]
+        plan.current = plan.names or None
         return plan
     assert target_.path is not None
     text, mode = read_text(target_.path)
@@ -725,13 +756,17 @@ def plan_uninstall(target_: Target, environ: Mapping[str, str] | None = None) ->
         return plan
     try:
         if target_.form == "codex":
-            plan.current = toml_get(text)
-            if plan.current is not None:
-                plan.text = toml_remove(text)
+            new = text
+            for name in NAMES:
+                if toml_get(new, name) is not None:
+                    plan.current = toml_get(new, name)
+                    new = toml_remove(new, name)
+            if new != text:
+                plan.text = new
             return plan
         new = text
-        paths = ([_json_path("opencode"), _json_path("opencode", True)] if target_.form == "opencode"
-                 else [_json_path(target_.form)])
+        paths = ([_json_path("opencode", legacy, name) for name in NAMES for legacy in (False, True)]
+                 if target_.form == "opencode" else [_json_path(target_.form, False, name) for name in NAMES])
         for path in paths:
             if jsonc_get(new, path) is not None:
                 plan.current = jsonc_get(new, path)
@@ -747,7 +782,7 @@ def plan_uninstall(target_: Target, environ: Mapping[str, str] | None = None) ->
 # --- Claude Code's user scope: its own CLI writes ~/.claude.json ---------------------------------
 
 
-def claude_user_entry(environ: Mapping[str, str]) -> Any:
+def claude_user_entry(environ: Mapping[str, str], name: str = SERVER) -> Any:
     """The user-scoped entry, read (never written) from Claude Code's own file."""
     path = claude_user_file(environ)
     try:
@@ -757,7 +792,7 @@ def claude_user_entry(environ: Mapping[str, str]) -> Any:
     except (OSError, ValueError) as exc:
         raise InstallError(f"cannot read {path}: {exc}. Nothing was written.") from exc
     servers = data.get("mcpServers") if isinstance(data, dict) else None
-    return servers.get(SERVER) if isinstance(servers, dict) else None
+    return servers.get(name) if isinstance(servers, dict) else None
 
 
 def _claude(argv: Sequence[str]) -> None:
@@ -778,22 +813,24 @@ def apply(plan: Plan) -> str:
     if target_.form == "claude-cli":
         where = "Claude Code user scope"
         if plan.removing:
-            if plan.current is None:
+            if not plan.names:
                 return f"{label}not registered ({where})"
-            _claude(["mcp", "remove", "--scope", "user", SERVER])
-            return f"{label}removed from {where}"
+            for name in plan.names:
+                _claude(["mcp", "remove", "--scope", "user", name])
+            return f"{label}removed {', '.join(plan.names)} from {where}"
         if plan.wanted is None:
-            return f"{label}unchanged ({where})"
+            return f"{label}unchanged {plan.name} ({where})"
         if plan.current is not None:
-            _claude(["mcp", "remove", "--scope", "user", SERVER])
-        _claude(["mcp", "add-json", "--scope", "user", SERVER, json.dumps(plan.wanted)])
-        return f"{label}registered in {where} (`claude mcp add-json --scope user`)"
+            _claude(["mcp", "remove", "--scope", "user", plan.name])
+        _claude(["mcp", "add-json", "--scope", "user", plan.name, json.dumps(plan.wanted)])
+        return f"{label}registered {plan.name} in {where} (`claude mcp add-json --scope user`)"
     assert target_.path is not None
     if plan.text is None:
         state = "not registered in" if plan.removing else "unchanged:"
         return f"{label}{state} {target_.path}"
     backup = write_text(target_.path, plan.text, plan.mode, plan.original, target_.scope)
-    verb = "removed from" if plan.removing else ("updated in" if plan.current is not None else "added to")
+    verb = "removed from" if plan.removing else (
+        f"{plan.name} updated in" if plan.current is not None else f"{plan.name} added to")
     return f"{label}{verb} {target_.path}" + (f" (backup {backup})" if backup else "")
 
 
@@ -916,7 +953,16 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
 
 
 def http_post(url: str, body: bytes, headers: Mapping[str, str], timeout: float) -> tuple[int, dict[str, str], bytes]:
-    request = urllib.request.Request(url, data=body, headers=dict(headers), method="POST")
+    return _http("POST", url, body, headers, timeout)
+
+
+def http_get(url: str, headers: Mapping[str, str], timeout: float) -> tuple[int, dict[str, str], bytes]:
+    return _http("GET", url, None, headers, timeout)
+
+
+def _http(method: str, url: str, body: bytes | None, headers: Mapping[str, str],
+          timeout: float) -> tuple[int, dict[str, str], bytes]:
+    request = urllib.request.Request(url, data=body, headers=dict(headers), method=method)
     opener = urllib.request.build_opener(_NoRedirect())
     try:
         with opener.open(request, timeout=timeout) as response:
@@ -990,25 +1036,63 @@ def probe_http(url: str, token: str, timeout: float = 30.0, post=None) -> int:
         raise InstallError(f"cannot reach {url}: {reason}. Nothing was written.") from exc
 
 
+def discover_endpoint(base: str, get=None, timeout: float = 20.0) -> str:
+    """The MCP endpoint a deployment names in its discovery document
+    (``GET <base>/.well-known/shakerscan``, no credentials): the first ``mcp_servers`` entry, which
+    must be streamable HTTP with bearer authentication on the same origin."""
+    from . import cli
+
+    get = get or http_get
+    url = base.rstrip("/") + DISCOVERY_PATH
+    try:
+        status, _headers, body = get(url, {"Accept": "application/json"}, timeout)
+    except (urllib.error.URLError, OSError) as exc:
+        raise InstallError(f"cannot reach {url}: {getattr(exc, 'reason', exc)}. Nothing was written.") from exc
+    if status != 200:
+        raise InstallError(f"{url} answered HTTP {status}: no discovery document there. Pass the MCP endpoint's "
+                           "own URL to --http instead. Nothing was written.")
+    try:
+        document = json.loads(body.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError) as exc:
+        raise InstallError(f"{url} is not a JSON discovery document. Nothing was written.") from exc
+    stated = {document.get(key) for key in ("format", "schema_version", "schema")} if isinstance(document, dict) else set()
+    servers = document.get("mcp_servers") if isinstance(document, dict) else None
+    if DISCOVERY_FORMAT not in stated or not isinstance(servers, list):
+        raise InstallError(f"{url} is not a {DISCOVERY_FORMAT} document. Nothing was written.")
+    first = next((item for item in servers if isinstance(item, dict) and item.get("url")), None)
+    if first is None:
+        raise InstallError(f"{url} lists no MCP server. Nothing was written.")
+    endpoint = urllib.parse.urljoin(base.rstrip("/") + "/", str(first["url"]))
+    if not cli.same_origin(endpoint, base):
+        raise InstallError(f"{url} names an MCP server on another origin ({endpoint}); pass it to --http yourself "
+                           "if you trust it. Nothing was written.")
+    if first.get("transport", "streamable-http") != "streamable-http" or first.get("auth", "bearer") != "bearer":
+        raise InstallError(f"{url}: its MCP server uses {first.get('transport')}/{first.get('auth')}, not "
+                           "streamable HTTP with a bearer token. Nothing was written.")
+    return endpoint
+
+
 def http_server(args: argparse.Namespace, environ: Mapping[str, str]) -> tuple[Server, str | None]:
     """The HTTP entry and the token to check it with (from the variable, a file or the profile)."""
     from . import cli
 
     parts = urllib.parse.urlsplit(args.http)
     if parts.scheme != "https" or not parts.hostname or parts.username or parts.password or parts.fragment:
-        raise InstallError("--http needs an https:// MCP endpoint without credentials in it "
+        raise InstallError("--http needs an https:// address (a deployment, or its MCP endpoint) without credentials in it "
                            "(a bearer token is never sent over plain http). Nothing was written.")
     if args.url or args.lan:
         raise InstallError("--http names the endpoint itself; leave out --url and --lan")
     variable = args.token_env or DEFAULT_TOKEN_ENV
     if not _ENV_NAME.match(variable):
         raise InstallError(f"--token-env {variable!r} is not an environment variable name")
+    # A deployment's base address: its discovery document names the endpoint.
+    endpoint = discover_endpoint(args.http) if parts.path in ("", "/") and not parts.query else args.http
     token = (environ.get(variable) or "").strip() or None
     if token is None:
         saved = cli.profile(environ)
-        bound = saved if saved.get("url") and cli.same_origin(args.http, saved["url"]) else None
+        bound = saved if saved.get("url") and cli.same_origin(endpoint, saved["url"]) else None
         token = cli.read_token(args.token_file, {}, bound)
-    return Server(url=args.http, token_env=variable), token
+    return Server(url=endpoint, token_env=variable), token
 
 
 # --- commands ------------------------------------------------------------------------------------
@@ -1145,7 +1229,9 @@ def build_parser() -> argparse.ArgumentParser:
     install.add_argument("--lan", action="store_true",
                          help="confirm a plain-http engine on another host of a trusted network (no login)")
     install.add_argument("--http", metavar="ENDPOINT",
-                         help="register an MCP endpoint that requires a bearer token (https) instead of this client")
+                         help="register an MCP endpoint that requires a bearer token (https) instead of this client: "
+                              "the endpoint's URL, or the deployment's address when it publishes "
+                              f"{DISCOVERY_PATH}")
     install.add_argument("--token-env", metavar="NAME",
                          help=f"with --http: the environment variable the agent reads the token from "
                               f"(default {DEFAULT_TOKEN_ENV})")
