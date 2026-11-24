@@ -29,6 +29,7 @@ from .coverage_ledger import COVERAGE_LOCUS_KEYS, CoverageLedgerError
 from .skills import HuntSkillError, skill_library
 from .start_guidance import with_start_guidance
 from .permission_bounds import MAX_BOUNDS
+from .seed_findings import MAX_SEED_FINDINGS
 from .start_contract import (
     HUNT_START_SCHEMA,
     MAX_CAPABILITIES,
@@ -117,6 +118,8 @@ class HuntStartV2Request(BaseModel):
     handoff_id: str | None = Field(default=None, max_length=36)
     # Saved logins a person attaches for this Hunt: the planner signs in with them by reference.
     saved_logins: list[HuntSavedLoginRequest] | None = Field(default=None, max_length=4)
+    # Findings of the target this Hunt starts from: the briefing opens with them (seed_findings.py).
+    seed_finding_ids: list[str] | None = Field(default=None, max_length=MAX_SEED_FINDINGS)
 
 
 class HuntStartV2Response(BaseModel):

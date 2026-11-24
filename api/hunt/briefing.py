@@ -20,6 +20,10 @@ whenever anything inside it was shortened:
   selected for this Hunt, and how to compare roles when two or more are (hunt/principal_roles.py);
 * default credentials: whether the bounded vendor-default login check is on, its references and
   limits (hunt/default_credentials.py);
+* seed findings: when the Hunt was started from findings (``seed_finding_ids``), those findings as
+  snapshotted at start, first: class, severity, proof state and, inside an untrusted-data envelope,
+  their title, location and a few short evidence fields; never raw evidence or a secret
+  (hunt/seed_findings.py);
 * changed since the last Hunt: counts of endpoint, deployment, response, finding and subdomain
   changes from existing records, and up to five interpretations they affected (ids, states and
   the dependency that changed; no text).
@@ -39,6 +43,8 @@ try:
     from targets.skill_trust import UNCONFIRMED_HEADING, reproject_snapshot
 except ModuleNotFoundError:  # pragma: no cover - package import layout
     from ..targets.skill_trust import UNCONFIRMED_HEADING, reproject_snapshot
+from .seed_findings import WITHHELD as SEED_WITHHELD, briefing_section as seed_briefing_section
+from .seed_findings import withheld as seed_withheld
 
 BRIEFING_SCHEMA = "hunt-briefing/v1"
 #: Serialized (JSON-escaped) size the instructions may take before the outline replaces them.
@@ -216,6 +222,7 @@ def static_briefing(item: Mapping[str, Any], policy: Mapping[str, Any], context:
         "unconfirmed_instructions": unconfirmed_section(context),
         "objective": {"text": objective[:OBJECTIVE_CHARACTERS],
                       "truncated": len(objective) > OBJECTIVE_CHARACTERS},
+        **({"seed_findings": seeds} if (seeds := seed_briefing_section(context)) else {}),
         "authority": authority_section(item, policy, context),
         "live": {"included": False,
                  "where": "The start response, GET /hunts/{id} and the summary query include current "
@@ -261,6 +268,15 @@ def bound_briefing(briefing: dict[str, Any], limit: int = MAX_BRIEFING_BYTES) ->
         principals["items"] = [item for item in principals["items"] if item.get("selected_for_this_hunt")][:4]
         principals["truncated"] = True
         trimmed.append("principals.items cut to the selected identities to fit the size limit")
+    seeds = result.get("seed_findings") if isinstance(result.get("seed_findings"), dict) else {}
+    for item in reversed(seeds.get("items") or []):
+        if _size(result) <= limit:
+            break
+        if isinstance(item, dict) and not seed_withheld(item):
+            item["untrusted_data"] = dict(SEED_WITHHELD)
+            seeds.setdefault("detail_trimmed", []).insert(0, item.get("finding_id"))
+            if "seed_findings.items[].untrusted_data cut to fit the size limit; read each finding" not in trimmed:
+                trimmed.append("seed_findings.items[].untrusted_data cut to fit the size limit; read each finding")
     unconfirmed = result.get("unconfirmed_instructions") or {}
     # Advisory text gives way before operator guidance does.
     for key in ("text", "leading_text"):

@@ -600,6 +600,8 @@ def _hunt_start_payload(args: argparse.Namespace, contract: Mapping[str, Any]) -
         "skill_ids": list(dict.fromkeys(args.skill_id)),
         **({"saved_logins": _saved_logins(getattr(args, "saved_login", None) or ())}
            if getattr(args, "saved_login", None) else {}),
+        **({"seed_finding_ids": list(dict.fromkeys(args.seed_finding))}
+           if getattr(args, "seed_finding", None) else {}),
     }
 
 
@@ -1259,6 +1261,14 @@ def build_parser() -> argparse.ArgumentParser:
             "attach a saved login (a form or JSON login profile of the target) for this Hunt "
             "(repeatable): the agent signs in with it by reference, never seeing its values, at "
             "most LOGINS times (default 3) and only on its own login URL. Needs --active-testing"
+        ),
+    )
+    hunt_start.add_argument(
+        "--seed-finding", action="append", default=[], metavar="FINDING_ID",
+        help=(
+            "start from an existing finding of this target (repeatable, at most "
+            "the server's limit, 20): the briefing opens with it so the agent confirms or "
+            "deepens it first"
         ),
     )
     hunt_start.add_argument("--capability", action="append", default=[])

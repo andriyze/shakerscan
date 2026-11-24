@@ -39,7 +39,7 @@ _ALLOWED_TOP_LEVEL_KEYS = frozenset({
     "budgets", "policy", "credential_refs", "capabilities", "request_collection_ids",
     "approval_receipt_id", "scope_receipt_id", "schema_version", "skill_ids",
     "direct_origin_addresses", "allow", "proposed_allow", "allow_asserted_by", "secret_visibility",
-    "handoff_id", "saved_logins",
+    "handoff_id", "saved_logins", "seed_finding_ids",
 })
 # A start's handoff id: chosen by whoever sends the start (an agent, the CLI), kept with the Hunt,
 # and listed by (``GET /hunts?handoff_id=``). When a person's decision is needed for the start and
@@ -242,6 +242,7 @@ def hunt_start_public_contract() -> dict[str, Any]:
     from .permission_bounds import CAPABILITY_FLAGS, MAX_BOUNDS
     from .permission_reasons import PERMISSION_KINDS, REASON_CODES
     from .saved_logins import DEFAULT_LOGINS, MAX_LOGINS, MAX_SAVED_LOGINS
+    from .seed_findings import MAX_SEED_FINDINGS, REASON_CODE as SEED_REASON_CODE
     from .coverage_ledger import (
         COVERAGE_ANGLE_STATUSES, COVERAGE_LOCUS_KEYS, MAX_COVERAGE_BYTES_PER_HUNT,
         MAX_COVERAGE_EVENT_BYTES, MAX_COVERAGE_EVENTS_PER_HUNT,
@@ -261,6 +262,7 @@ def hunt_start_public_contract() -> dict[str, Any]:
             "direct_origin_addresses": MAX_DIRECT_ORIGIN_ADDRESSES,
             "allow": MAX_BOUNDS,
             "saved_logins": MAX_SAVED_LOGINS,
+            "seed_finding_ids": MAX_SEED_FINDINGS,
         },
         # Pre-authorization bounds (docs/hunt-permission-requests.md). ``allow`` is a person's
         # (Enterprise: set with allow_asserted_by after step-up); ``proposed_allow`` is the
@@ -294,6 +296,13 @@ def hunt_start_public_contract() -> dict[str, Any]:
             "item": {"profile_id": "a form_login or json_login profile attached to the target",
                      "max_logins": f"1-{MAX_LOGINS} (default {DEFAULT_LOGINS})"},
             "requires": "policy.active_testing",
+        },
+        # Start from findings (hunt/seed_findings.py): the briefing opens with them.
+        "seed_findings": {
+            "field": "seed_finding_ids", "max_items": MAX_SEED_FINDINGS, "item": "finding id (UUID)",
+            "must_be": "a finding of the Hunt's target that the Hunt can read (its kind=findings scope)",
+            "refusal_code": SEED_REASON_CODE, "briefing_path": "seed_findings",
+            "grants_authority": False,
         },
         "permission_reason_codes": sorted(REASON_CODES),
         "permission_kinds": list(PERMISSION_KINDS),
@@ -701,6 +710,8 @@ class HuntStartContract:
     handoff_id: str | None = None
     # Saved logins a person attached at start: ({"profile_id", "max_logins"}, ...).
     saved_logins: Sequence[Mapping[str, Any]] = ()
+    # Findings of the target the Hunt starts from (hunt/seed_findings.py), checked at start.
+    seed_finding_ids: Sequence[str] = ()
 
     @property
     def secret_values_visible(self) -> bool:
@@ -810,6 +821,7 @@ class HuntStartContract:
             **self.secret_visibility_record(),
             **({"handoff_id": self.handoff_id} if self.handoff_id else {}),
             **({"saved_logins": [dict(item) for item in self.saved_logins]} if self.saved_logins else {}),
+            **({"seed_finding_ids": list(self.seed_finding_ids)} if self.seed_finding_ids else {}),
         }
 
 
@@ -896,7 +908,9 @@ def normalize_hunt_start_payload(value: Mapping[str, Any]) -> HuntStartContract:
     if raw_goal not in (None, "") and raw_objective not in (None, ""):
         if str(raw_goal).strip() != str(raw_objective).strip():
             raise HuntStartContractError("goal and objective conflict")
-    goal = str(raw_goal or raw_objective or "Find exploitable vulnerabilities.").strip()
+    seed_finding_ids = _seed_finding_ids(payload)
+    goal = str(raw_goal or raw_objective or (
+        SEEDED_DEFAULT_GOAL if seed_finding_ids else "Find exploitable vulnerabilities.")).strip()
     if not goal or len(goal) > MAX_GOAL_CHARS:
         raise HuntStartContractError(f"goal must contain 1 to {MAX_GOAL_CHARS} characters")
 
@@ -1012,8 +1026,21 @@ def normalize_hunt_start_payload(value: Mapping[str, Any]) -> HuntStartContract:
         secret_visibility=_secret_visibility(payload),
         handoff_id=_handoff_id(payload),
         saved_logins=_saved_logins(payload, policy),
+        seed_finding_ids=seed_finding_ids,
         **_allow_fields(payload),
     )
+
+
+SEEDED_DEFAULT_GOAL = "Confirm or refute the seed findings with evidence, then deepen them."
+
+
+def _seed_finding_ids(payload: Mapping[str, Any]) -> tuple[str, ...]:
+    from .seed_findings import parse_seed_finding_ids
+
+    try:
+        return parse_seed_finding_ids(payload.get("seed_finding_ids"))
+    except ValueError as exc:
+        raise HuntStartContractError(str(exc)) from None
 
 
 def _saved_logins(payload: Mapping[str, Any], policy: HuntStartPolicy) -> tuple[dict[str, Any], ...]:

@@ -884,8 +884,10 @@ try:
     from hunt.start_contract import (
         HUNT_BUDGET_SCHEMA,
         HuntStartContract,
+        HuntStartContractError,
         bind_validated_receipts,
     )
+    from hunt.seed_findings import SeedFindingsRefused, seed_findings_section
     from hunt.credential_uses import HuntCredentialRefusal
     from hunt.start_permissions import (
         record_start_permissions, validate_start_credentials, validate_start_principals, validate_start_saved_logins,
@@ -957,8 +959,10 @@ except ModuleNotFoundError:
     from api.hunt.start_contract import (
         HUNT_BUDGET_SCHEMA,
         HuntStartContract,
+        HuntStartContractError,
         bind_validated_receipts,
     )
+    from api.hunt.seed_findings import SeedFindingsRefused, seed_findings_section
     from api.hunt.credential_uses import HuntCredentialRefusal
     from api.hunt.start_permissions import (
         record_start_permissions, validate_start_credentials, validate_start_principals, validate_start_saved_logins,
@@ -12977,6 +12981,15 @@ async def _start_hunt_v2(contract: HuntStartContract) -> dict[str, Any]:
             )
         context_pack["allowed_capabilities"] = list(allowed_capabilities)
         context_pack = await target_skill.attach_target_skill_snapshot(conn, target_uuid, context_pack, bound.context_section)
+        # Findings the Hunt starts from: each must be one this Hunt can read on its own target.
+        if contract.seed_finding_ids:
+            try:
+                context_pack["seed_findings"] = await seed_findings_section(
+                    conn, target_id=target_uuid, device=contract.target_kind == "device",
+                    finding_ids=contract.seed_finding_ids,
+                )
+            except SeedFindingsRefused as exc:
+                raise HuntStartContractError(str(exc), code=exc.code) from None
 
         # Saved logins attached at start are checked (and their login URLs read) before the Hunt exists.
         await validate_start_saved_logins(conn, contract, {"id": uuid.uuid4(), "target_kind": contract.target_kind, "target_id": db_target_id, "device_target_id": device_target_id, "context_pack": context_pack, "policy_json": policy})
