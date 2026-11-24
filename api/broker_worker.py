@@ -53,7 +53,7 @@ from scan.private_inputs import (
     BrokerPrivateScanInputError,
     BrokerPrivateScanInputs,
 )
-from scan.worker_action_executor import ReceiptScanActionExecutor
+from scan.worker_action_executor import ReceiptScanActionExecutor, scan_traffic_attribution
 from worker import (
     RESULTS_DIR,
     _clear_fleet_busy_marker,
@@ -650,6 +650,7 @@ async def _execute_broker_action_plan(
         approval_receipt_id=dispatcher.policy.approval_receipt_id,
         authority=authority,
         deadline=deadline,
+        traffic_attribution=scan_traffic_attribution(options),
     )
 
     def action_activity_callback(
@@ -834,6 +835,7 @@ async def _execute_broker_action_plan(
             approval_receipt_id=dispatcher.policy.approval_receipt_id,
             authority=authority,
             deadline=deadline,
+            traffic_attribution=scan_traffic_attribution(options),
         )
         terminal = plan.actions[-1].action_id == "finalize.report"
         progress_start, progress_end = (90, 95) if terminal else round_progress_window(plan_revision.revision)
