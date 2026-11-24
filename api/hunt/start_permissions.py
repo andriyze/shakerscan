@@ -114,6 +114,53 @@ async def validate_start_credentials(
     return generic, preauthorized
 
 
+async def _receipt_covers_credentials(conn: Any, receipt_id: Any) -> bool:
+    """Whether the start's approval receipt covers the target's credentials (the standing
+    authorization does). Only a pre-check for the default selection: the start still validates
+    the receipt in full, at the credential tier, before the Hunt exists."""
+    try:
+        from runtime.approval_policy import approval_covers_risk
+    except ModuleNotFoundError:
+        from ..runtime.approval_policy import approval_covers_risk
+    try:
+        receipt_uuid = uuid.UUID(str(receipt_id))
+    except (TypeError, ValueError):
+        return False
+    row = await conn.fetchrow(
+        "SELECT action_name, risk_tier, action_context, status FROM approval_receipts WHERE id=$1",
+        receipt_uuid,
+    )
+    if not row or str(row["status"] or "") == "revoked":
+        return False
+    return approval_covers_risk(dict(row), "credential")
+
+
+async def validate_start_principals(
+    conn: Any, contract: HuntStartContract, target_id: uuid.UUID, store: Any,
+) -> tuple[list[dict[str, Any]], list[Any], dict[str, Any]]:
+    """``validate_start_credentials`` plus the target's registered principals by default.
+
+    A web, API or network Hunt whose start names no ``credential_refs``, asks for active testing
+    and carries an approval that covers the target's credentials selects the target's own
+    principals, one per slot (hunt/principal_roles.py). Returns the credential rows, the
+    pre-authorized foreign profiles and how the principals were selected.
+    """
+    from .principal_roles import default_principal_refs, registered_principals, selection_report_for
+    rows, preauthorized = await validate_start_credentials(conn, contract, target_id, store)
+    if contract.credential_refs:
+        return rows, preauthorized, selection_report_for(True, rows, None)
+    policy = contract.policy
+    if (contract.target_kind not in {"web", "api", "network"} or not policy.active_testing
+            or not await _receipt_covers_credentials(conn, policy.approval_receipt_id)):
+        return rows, preauthorized, selection_report_for(False, rows, None)
+    profiles = list(await store.list_profiles(conn, target_kind=contract.target_kind, target_id=target_id))
+    principals = await registered_principals(conn, target_id)
+    default_rows, report = default_principal_refs(
+        principals, profiles, target_id=target_id, target_kind=contract.target_kind,
+    )
+    return [*rows, *default_rows], preauthorized, report
+
+
 async def validate_start_saved_logins(conn: Any, contract: HuntStartContract, run: Mapping[str, Any]) -> None:
     """Refuse a start whose saved logins cannot be attached, before the Hunt exists (``run`` is
     the Hunt about to be inserted: target, context and the policy it will be governed by)."""
@@ -226,4 +273,7 @@ async def _attach_start_saved_logins(
         )
 
 
-__all__ = ["record_start_permissions", "validate_start_credentials", "validate_start_saved_logins"]
+__all__ = [
+    "record_start_permissions", "validate_start_credentials", "validate_start_principals",
+    "validate_start_saved_logins",
+]

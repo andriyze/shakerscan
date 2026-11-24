@@ -452,6 +452,9 @@ def _schema(
 _HTTP_PRINCIPAL_BINDING_PROPERTIES: Mapping[str, Any] = MappingProxyType({
     "as_principal": {
         "type": "string", "enum": ["primary", "secondary", "service"],
+        "description": ("Send as one of the target's identities selected for this Hunt (briefing "
+                        "principals: label, role and slot); omit to send anonymously. Compare roles "
+                        "by sending the same request as each slot."),
     },
     "principal_binding_digest": {
         "type": "string", "pattern": "^[0-9a-f]{64}$",

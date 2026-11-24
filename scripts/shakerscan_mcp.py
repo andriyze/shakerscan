@@ -1532,6 +1532,11 @@ def _hunt_start_tool(contract: dict[str, Any]) -> HuntMCPTool:
         },
         "credential_refs": {
             "type": "object",
+            "description": (
+                "Usually leave empty: an active Hunt then selects the target's registered principals "
+                "(one per slot), listed by label, role and slot in briefing.principals with how to "
+                "compare roles. Name profile ids here only to select exactly those."
+            ),
             "properties": credential_properties,
             "additionalProperties": False,
             "maxProperties": _positive_int(limits.get("credential_refs"), 16),

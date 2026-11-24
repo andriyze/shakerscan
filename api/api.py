@@ -887,7 +887,9 @@ try:
         bind_validated_receipts,
     )
     from hunt.credential_uses import HuntCredentialRefusal
-    from hunt.start_permissions import record_start_permissions, validate_start_credentials, validate_start_saved_logins
+    from hunt.start_permissions import (
+        record_start_permissions, validate_start_credentials, validate_start_principals, validate_start_saved_logins,
+    )
     from hunt.idle_expiry import expire_idle_hunts
     from hunt.verification_credentials import (
         current_hunt_credential_scope,
@@ -958,7 +960,9 @@ except ModuleNotFoundError:
         bind_validated_receipts,
     )
     from api.hunt.credential_uses import HuntCredentialRefusal
-    from api.hunt.start_permissions import record_start_permissions, validate_start_credentials, validate_start_saved_logins
+    from api.hunt.start_permissions import (
+        record_start_permissions, validate_start_credentials, validate_start_principals, validate_start_saved_logins,
+    )
     from api.hunt.idle_expiry import expire_idle_hunts
     from api.hunt.verification_credentials import (
         current_hunt_credential_scope,
@@ -12778,7 +12782,7 @@ async def _start_hunt_v2(contract: HuntStartContract) -> dict[str, Any]:
                 )
             target_url = str(web["url"])
             db_target_id, device_target_id = target_uuid, None
-            credential_rows, preauthorized_credentials = await validate_start_credentials(
+            credential_rows, preauthorized_credentials, principal_selection = await validate_start_principals(
                 conn, contract, target_uuid, _generic_credential_store,
             )
             origins = await _target_web_origins(conn, target_uuid, target_url)
@@ -12806,6 +12810,7 @@ async def _start_hunt_v2(contract: HuntStartContract) -> dict[str, Any]:
                 },
                 "principal_refs_available": bool(credential_rows),
                 "credential_refs": credential_rows,
+                "principal_selection": principal_selection,
                 "secret_values_visible_to_planner": False,
                 "request_collections": collection_refs,
                 "authorized_target_addresses": await _resolve_agent_target_addresses(
