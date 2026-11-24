@@ -35,6 +35,7 @@ Source-of-truth and safety rules:
 - [AI test workflows](https://raw.githubusercontent.com/andriyze/shakerscan/main/docs/AI_TEST_WORKFLOWS.md): AI Gate and controlled AI-security workflows, APIs, evidence exports, and calibration boundaries.
 - [Scan and Continuous ASM architecture](https://raw.githubusercontent.com/andriyze/shakerscan/main/docs/dast-asm-architecture.md): One deterministic Scan, resource ceilings, explicit permissions, parallel coverage, and Continuous ASM.
 - [MCP trust boundaries](https://raw.githubusercontent.com/andriyze/shakerscan/main/docs/mcp.md): Read-only Arsenal inspection and state-changing, target-bound Hunt tools.
+- [Connect your agent to ShakerScan MCP](https://raw.githubusercontent.com/andriyze/shakerscan/main/docs/agent-mcp-setup.md): Permanent MCP registration for OpenCode, Claude Code, Codex, Cursor and VS Code, local or on another host.
 - [Compatibility boundary](https://raw.githubusercontent.com/andriyze/shakerscan/main/docs/compatibility.md): Legacy input/read mappings that never create another engine or accept new raw secrets.
 - [Agent skill catalog](https://raw.githubusercontent.com/andriyze/shakerscan/main/skills/README.md): Installed agent skills, setup, and maintenance.
 

@@ -66,6 +66,7 @@ contracts and release notes describe what ships.
 - [Release notes](releases/README.md)
 - [SBOM](sbom.md)
 - [MCP](mcp.md)
+- [Connect your agent to ShakerScan MCP](agent-mcp-setup.md) — permanent setup for OpenCode, Claude Code, Codex, Cursor and VS Code.
 - [Multi-node guide](multi-node-guide.md)
 - [Data lifecycle](data-lifecycle-retention-and-portability-plan.md)
 
