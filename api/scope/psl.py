@@ -7,7 +7,8 @@ pattern must sit at or below a registrable domain (eTLD+1). Counting labels is n
 ``*.co.uk``, ``*.github.io`` and ``*.herokuapp.com`` each cover every site under a shared
 suffix. The list includes its PRIVATE section, so ``github.io`` and ``herokuapp.com`` are public
 suffixes here. So are the wildcard-DNS services in ``SHARED_DNS_SUFFIXES`` (``sslip.io``,
-``nip.io``), which the list does not carry.
+``nip.io``), which the list does not carry, and the cloud hosting namespaces in
+``SHARED_HOSTING_RULES`` (``*.azurecontainerapps.io``...), which it does not carry yet.
 
 The snapshot is ``data/public_suffix_list.dat`` (Mozilla Public License 2.0; the file is
 unmodified and keeps its MPL notice; see THIRD_PARTY_NOTICES.md). Its SHA-256 is pinned in
@@ -60,6 +61,22 @@ _LABEL = re.compile(r"^(?!-)[a-z0-9-]{1,63}(?<!-)$")
 # written in it (``10-0-0-5.sslip.io`` is 10.0.0.5) and belongs to whoever uses that address, so
 # each is a public suffix here: a root or wildcard on ``sslip.io`` would cover strangers' hosts.
 SHARED_DNS_SUFFIXES = frozenset({"sslip.io", "nip.io", "xip.io", "traefik.me"})
+
+# Cloud hosting namespaces whose names belong to different customers but that the list does not
+# carry (yet), written as list rules. Without them ``app.env.eastus.azurecontainerapps.io`` had
+# the registrable domain ``azurecontainerapps.io``: a target there became a root (and a monitored
+# CT root) covering every other customer of the service. ``*.azurecontainerapps.io`` is the rule
+# Microsoft proposed upstream; the others follow each service's per-customer host name:
+# ``<label>.<region>.cloudapp.azure.com`` (VM public addresses), ``<registry>.azurecr.io``,
+# ``<vault>.vault.azure.net``, ``<hub>.azure-devices.net``. A rule here only ever makes scope
+# narrower; drop one once the list carries it.
+SHARED_HOSTING_RULES = (
+    "*.azurecontainerapps.io",
+    "*.cloudapp.azure.com",
+    "azurecr.io",
+    "vault.azure.net",
+    "azure-devices.net",
+)
 
 
 class PublicSuffixListError(RuntimeError):
@@ -123,7 +140,7 @@ def _rules() -> _RuleSet:
     exact: set[str] = set()
     wildcard: set[str] = set()
     exception: set[str] = set()
-    for line in raw.decode("utf-8").splitlines():
+    for line in [*raw.decode("utf-8").splitlines(), *SHARED_HOSTING_RULES]:
         rule = line.strip().split(None, 1)[0] if line.strip() else ""
         if not rule or rule.startswith("//"):
             continue
@@ -345,7 +362,7 @@ _rules()  # verify the pinned snapshot at import: a mismatch fails closed, loudl
 
 __all__ = [
     "DomainNameError", "MAX_DOMAIN_LENGTH", "PSL_LICENSE", "PSL_PATH", "PSL_PIN_PATH",
-    "SHARED_DNS_SUFFIXES",
+    "SHARED_DNS_SUFFIXES", "SHARED_HOSTING_RULES",
     "PublicSuffixError", "PublicSuffixListError", "is_public_suffix", "parse_domain",
     "public_suffix", "public_suffix_refusal", "registrable_domain", "require_registrable_or_below",
     "snapshot", "spans_public_suffix", "suffix_below",

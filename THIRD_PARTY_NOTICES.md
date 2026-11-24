@@ -60,7 +60,7 @@ ShakerScan does not bundle Semgrep Registry rules; they are under the separate S
 | Retire.js vulnerability repository (`jsrepository.json`) | Erlend Oftedal and RetireJS contributors | https://github.com/RetireJS/retire.js | Apache-2.0 |
 | OSV vulnerability data, including the PyPA Advisory Database | Google LLC; Python Packaging Authority | https://osv.dev | CC BY 4.0 (PyPA advisories); per-source terms |
 | NVD CPE and CVE data in `scanner/data/device_advisories.json` | NIST National Vulnerability Database | https://nvd.nist.gov | Public domain |
-| Public Suffix List snapshot `api/scope/data/public_suffix_list.dat` (pinned to upstream commit `3929462652695bad04f0a27afb600974014a3c8b`, 2026-10-07; unmodified, with its MPL notice) | Mozilla Foundation and Public Suffix List contributors | https://publicsuffix.org (https://github.com/publicsuffix/list) | MPL-2.0 |
+| Public Suffix List snapshot `api/scope/data/public_suffix_list.dat` (pinned to upstream commit `cb13e39ae72a79e17022b313f510c585751b5334`, 2026-11-24; unmodified, with its MPL notice) | Mozilla Foundation and Public Suffix List contributors | https://publicsuffix.org (https://github.com/publicsuffix/list) | MPL-2.0 |
 | caniuse-lite (UI build dependency) | Ben Briggs, Andrey Sitnik and contributors | https://github.com/browserslist/caniuse-lite | CC BY 4.0 |
 
 This product uses data from the NVD API but is not endorsed or certified by the NVD.

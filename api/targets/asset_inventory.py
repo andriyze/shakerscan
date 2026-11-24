@@ -14,11 +14,13 @@ from fastapi import HTTPException
 
 try:
     from scope.psl import (
-        PSL_PIN_PATH, SHARED_DNS_SUFFIXES, PublicSuffixError, parse_domain, registrable_domain,
+        PSL_PIN_PATH, SHARED_DNS_SUFFIXES, SHARED_HOSTING_RULES, PublicSuffixError, parse_domain,
+        registrable_domain,
     )
 except ModuleNotFoundError:
     from ..scope.psl import (
-        PSL_PIN_PATH, SHARED_DNS_SUFFIXES, PublicSuffixError, parse_domain, registrable_domain,
+        PSL_PIN_PATH, SHARED_DNS_SUFFIXES, SHARED_HOSTING_RULES, PublicSuffixError, parse_domain,
+        registrable_domain,
     )
 from .scale_summary import ACTIVE_FINDINGS_BY_TARGET_SQL
 from .liveness import LIVENESS_COLUMNS, LIVENESS_JOIN, LIVENESS_STATUS, STATUSES as LIVENESS_STATUSES, public_liveness
@@ -529,10 +531,11 @@ GROUPS_V1 = ListSpec(
 
 def psl_version() -> str:
     """Names the rules a cached group was computed under: the list snapshot and the wildcard-DNS
-    services the code adds to it, so a change to either recomputes every group."""
+    services and hosting rules the code adds to it, so a change to any recomputes every group."""
     global _PSL_VERSION
     if _PSL_VERSION is None:
-        rules = PSL_PIN_PATH.read_bytes() + ",".join(sorted(SHARED_DNS_SUFFIXES)).encode()
+        rules = (PSL_PIN_PATH.read_bytes() + ",".join(sorted(SHARED_DNS_SUFFIXES)).encode()
+                 + ";".join(SHARED_HOSTING_RULES).encode())
         _PSL_VERSION = 'group-domain/v1:' + hashlib.sha256(rules).hexdigest()[:32]
     return _PSL_VERSION
 
