@@ -305,7 +305,9 @@ def test_symbolic_and_hard_links_are_refused_and_nothing_written(tmp_path, home,
 
 
 @pytest.mark.parametrize("content", [b'{"mcpServers": {', b"\xff\xfe{}", b"[]"])
-def test_unreadable_files_are_refused_with_nothing_written(tmp_path, home, client_exe, probes, capsys, content):
+def test_unreadable_files_are_refused_with_nothing_written(tmp_path, home, client_exe, probes, capsys, content,
+                                                          monkeypatch):
+    monkeypatch.setattr(mi, "detected", lambda client, environ: True)  # the same on a machine with no agents
     project = tmp_path / "p"
     (project / ".cursor").mkdir(parents=True)
     (project / ".cursor" / "mcp.json").write_bytes(content)
