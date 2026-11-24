@@ -522,8 +522,8 @@ function FindingDetailContent() {
     try {
       setAutonomousLoading(true)
       // Canonical Hunt, not a Research episode: one investigation runtime owns
-      // this. The finding is carried as the run's goal so the agent starts with
-      // the same subject the old episode bound, and the run opens on /hunt.
+      // this. The finding is the Hunt's seed (its briefing opens with it) and is
+      // named in the goal; the run opens on /hunt.
       const approvalReceiptId = await createTargetPolicyApproval(finding.target_id, targetUrl, 30)
       const hunt = await startHuntV2Native({
         targetId: finding.target_id,
@@ -532,6 +532,7 @@ function FindingDetailContent() {
           `Verify finding ${finding.id} on ${targetUrl}: ` +
           `${finding.title || 'untitled finding'}. Confirm or refute it with evidence.`,
         budgetProfile: 'balanced',
+        seedFindingIds: [finding.id],
         policy: {
           activeTesting: true,
           allowStateChangingHttp: false,

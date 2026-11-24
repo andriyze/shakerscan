@@ -193,6 +193,8 @@ export interface HuntStartV2Request {
   credentialRefs?: Record<string, string>
   capabilities?: string[]
   requestCollectionIds?: string[]
+  /** Findings of this target the Hunt starts from: its briefing opens with them. */
+  seedFindingIds?: string[]
 }
 
 export async function startHuntV2Native(request: HuntStartV2Request): Promise<HuntV2> {
@@ -215,6 +217,7 @@ export async function startHuntV2Native(request: HuntStartV2Request): Promise<Hu
     credential_refs: request.credentialRefs || {},
     capabilities: request.capabilities || [],
     request_collection_ids: request.requestCollectionIds || [],
+    ...(request.seedFindingIds?.length ? { seed_finding_ids: request.seedFindingIds } : {}),
   }
   const response = await fetch(`${API_URL}/hunts`, {
     method: 'POST',

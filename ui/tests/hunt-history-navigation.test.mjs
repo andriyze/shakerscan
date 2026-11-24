@@ -94,6 +94,10 @@ test('finding investigation starts a canonical Hunt, not a Research episode', as
   assert.ok(!launchHandler.includes('launchResearch'))
   // The finding stays the subject of the run.
   assert.match(findingPage, /Verify finding \$\{finding\.id\}/)
+  // ...and the Hunt's seed: its briefing opens with this finding.
+  assert.match(launchHandler, /seedFindingIds: \[finding\.id\]/)
+  const huntClient = readFileSync(path.join(uiRoot, 'src/lib/huntV2.ts'), 'utf8')
+  assert.match(huntClient, /seed_finding_ids: request\.seedFindingIds/)
   // The migrated client methods are gone, so nothing can start one by accident.
   assert.ok(!client.includes('export async function launchResearchEpisode'))
   assert.ok(!client.includes('export async function getResearchReadiness'))
