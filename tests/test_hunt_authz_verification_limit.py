@@ -93,13 +93,28 @@ class AdmissionStore:
 
     @asynccontextmanager
     async def transaction(self):
-        async with self.lock:
+        # Nested transactions are savepoints, as in PostgreSQL: the task that holds the lock enters
+        # again without waiting on itself (a worker that records discovered secrets inside its own
+        # transaction used to wait forever here), and a failure rolls back to the savepoint only.
+        task = asyncio.current_task()
+        if getattr(self, "_lock_owner", None) is task:
             before = deepcopy((self.run, self.actions))
             try:
                 yield self
             except BaseException:
                 self.run, self.actions = before
                 raise
+            return
+        async with self.lock:
+            self._lock_owner = task
+            before = deepcopy((self.run, self.actions))
+            try:
+                yield self
+            except BaseException:
+                self.run, self.actions = before
+                raise
+            finally:
+                self._lock_owner = None
 
     async def fetchrow(self, sql, *args):
         self.calls.append(sql)
