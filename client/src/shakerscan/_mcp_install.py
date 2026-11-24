@@ -917,7 +917,7 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
 
 def http_post(url: str, body: bytes, headers: Mapping[str, str], timeout: float) -> tuple[int, dict[str, str], bytes]:
     request = urllib.request.Request(url, data=body, headers=dict(headers), method="POST")
-    opener = urllib.request.build_opener(_NoRedirect)
+    opener = urllib.request.build_opener(_NoRedirect())
     try:
         with opener.open(request, timeout=timeout) as response:
             return response.status, {k.lower(): v for k, v in response.headers.items()}, response.read(4_000_000)
