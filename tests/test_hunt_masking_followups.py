@@ -102,6 +102,9 @@ ALLOWED_PLAIN_DIGESTS = {
     # The sign-in endpoint's id: scheme, host, port, normalized path and the routing pairs'
     # installation-keyed digests, counted across a Scan's attempts (auth_endpoint_probe).
     ("api/scan/auth_endpoint_probe.py", "key"): "canonical",
+    # The default-credential ledger's login id: a digest of "POST " and the login URL the request
+    # names (method, scheme, host, port, path), counted and stopped per login (default_credentials).
+    ("api/hunt/default_credentials.py", "login_key"): "request",
     # recon_active: the response digest only compares two answers inside one action and is
     # never emitted (leads carry status and length); the list digest is of our own bundled file.
     ("api/scan/recon_active_actions.py", "_signature"): "inprocess",
