@@ -1095,6 +1095,26 @@ CREATE TABLE hunt_credential_uses (
 CREATE INDEX idx_hunt_credential_uses_run
     ON hunt_credential_uses(hunt_run_id, used_at, id);
 
+-- Every attempt of the bounded default-credential check (api/hunt/default_credentials.py): the
+-- action, a digest of the login (method and URL), its host, the built-in pair reference and the
+-- verdict. References only; the pairs are public. The startup migration installs this definition.
+CREATE TABLE hunt_default_credential_attempts (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    hunt_run_id UUID NOT NULL REFERENCES hunt_runs(id) ON DELETE CASCADE,
+    action_id UUID NOT NULL REFERENCES hunt_actions(id) ON DELETE CASCADE,
+    login_key TEXT NOT NULL CHECK (login_key ~ '^[0-9a-f]{64}$'),
+    login_host TEXT NOT NULL CHECK (length(login_host) BETWEEN 1 AND 260),
+    pair_id TEXT NOT NULL CHECK (pair_id ~ '^dc-[0-9]{2}$'),
+    verdict TEXT NOT NULL DEFAULT 'pending' CHECK (verdict IN ('pending', 'accepted', 'rejected', 'rate_limited', 'locked', 'unclear', 'not_sent')),
+    attempted_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    settled_at TIMESTAMPTZ,
+    CONSTRAINT hunt_default_credential_attempts_action_unique UNIQUE (action_id)
+);
+CREATE INDEX idx_hunt_default_credential_attempts_login
+    ON hunt_default_credential_attempts(login_key, attempted_at DESC);
+CREATE INDEX idx_hunt_default_credential_attempts_run
+    ON hunt_default_credential_attempts(hunt_run_id, login_key);
+
 -- Hunt permission requests (docs/hunt-permission-requests.md): requests raised only by server
 -- refusals, the grants that answer them, start pre-authorizations, and the append-only audit.
 -- The startup migration (api/hunt/permission_store.py) installs these exact definitions.

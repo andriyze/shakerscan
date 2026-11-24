@@ -868,6 +868,17 @@ async def prepare_http_exchange(
             except DiscoveredSecretError as exc:
                 raise ValueError(f"{exc.reason}: {exc}") from None
             exchange.bound_values.append(str(value))
+        elif "default_credential" in binding:
+            try:
+                from hunt.default_credentials import require_admitted, validate_request_shape, value_of
+            except ModuleNotFoundError:  # package import layout
+                from ..hunt.default_credentials import require_admitted, validate_request_shape, value_of
+            if not _hunt_is_live(run):
+                raise ValueError("default credential belongs to a Hunt that is no longer live")
+            pair_id = validate_request_shape(values)
+            await require_admitted(conn, hunt_id=run_id, action_id=action_id, pair_id=pair_id)
+            # A public, built-in pair: not a secret, so the answer stays readable.
+            value = value_of(binding["default_credential"], binding["credential_field"])
         elif "saved_login" in binding:
             value = await _saved_login_value(
                 conn, run=run, target=target, policy=policy, context=context, values=values, binding=binding,

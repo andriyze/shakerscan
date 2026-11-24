@@ -95,6 +95,10 @@ async def prepare_http_operation(
     # A discovered secret goes to exactly one login: no redirect is followed with it, even on the
     # same origin, where it would reach another path (a denied login among them) unchecked.
     carries_secret = any('secret_ref' in item for item in bindings)
+    # A default-credential attempt (hunt/default_credentials.py): its answer is classified here, in
+    # the worker, from the private response; the verdict (never the answer) settles its ledger row.
+    default_pair = next((str(item['default_credential']) for item in bindings if 'default_credential' in item), None)
+    verdicts: list[str] = []
 
     def record(captured: Mapping[str, Any]) -> None:
         recorder({**captured, "workflow_values_private": True} if workflow else captured)
@@ -129,8 +133,24 @@ async def prepare_http_operation(
             if collector is not None and scrubbed:
                 # Every echo of a value sent by reference is withheld before any sample is cut.
                 collector.bind_known(exchange.bound_values)
-            if carries_secret:
+            sink = exchange.capture_response
+            private_headers = exchange.response_headers
+            if carries_secret or default_pair:
                 wire_input['follow_redirects'] = False
+            if default_pair:
+                from hunt.default_credentials import classify_response
+                private_headers = (*private_headers, 'retry-after')
+
+                def sink(private: Any) -> None:
+                    try:
+                        verdicts.append(classify_response(
+                            status=private.status_code, headers=private.headers(),
+                            cookie_names=sorted(private.cookies()), body=private.body(),
+                            location=private.headers().get('location'),
+                            login_path=str(inputs.get('path') or '/')))
+                    except Exception:  # noqa: BLE001 - target content never fails the attempt
+                        verdicts.append('unclear')
+                    exchange.capture_response(private)
             response = await execute_bound_http_request(
                 target_url, wire_input, target=target,
                 allow_write=inputs['method'] in {'POST', 'PUT', 'PATCH', 'DELETE'},
@@ -139,9 +159,18 @@ async def prepare_http_operation(
                 direct_origin_addresses=tuple(policy.get('direct_origin_addresses') or ()),
                 principal_slot="workflow_binding" if inputs.get("request_bindings") else principal_slot,
                 timeout_seconds=timeout_seconds,
-                allow_bound_origin_redirects=not carries_secret, private_response_sink=exchange.capture_response,
-                private_response_headers=exchange.response_headers,
+                allow_bound_origin_redirects=not (carries_secret or default_pair), private_response_sink=sink,
+                private_response_headers=private_headers,
             )
+            if default_pair:
+                from hunt.default_credentials import public_verdict, settle_attempt
+                verdict = verdicts[0] if verdicts else 'not_sent'
+                try:
+                    await settle_attempt(pool, hunt_id=run['id'], action_id=action_id, verdict=verdict)
+                except Exception:  # noqa: BLE001 - the attempt stands; its row stays pending (counted)
+                    pass
+                if isinstance(response, dict):
+                    response['default_credential'] = public_verdict(default_pair, verdict)
             if workflow and scrubbed:
                 response = _scrub_bound_values(response, exchange.bound_values)
             elif workflow:

@@ -27,6 +27,12 @@ def is_saved_login_request(values: Mapping[str, Any]) -> bool:
                for item in values.get("request_bindings") or ())
 
 
+def is_default_credential_request(values: Mapping[str, Any]) -> bool:
+    """Whether an ``http.request`` binds a built-in default credential pair (a login attempt)."""
+    return any(isinstance(item, Mapping) and "default_credential" in item
+               for item in values.get("request_bindings") or ())
+
+
 def uses_http_workflow(values: Mapping[str, Any]) -> bool:
     return bool(values.get("capture") or values.get("request_bindings"))
 
@@ -78,12 +84,14 @@ def require_http_request_authority(
     """
     validate_http_request_input(values)
     writes = values["method"] in WRITE_METHODS
-    if is_saved_login_request(values):
+    if is_saved_login_request(values) or is_default_credential_request(values):
         # A saved login's POST (hunt/saved_logins.py): the person's login.use grant is its write
         # authority (checked at admission and again in the worker, with its URL and count), not
         # the Hunt's state-changing permission, and it is not charged as a state-changing request.
+        # A default-credential attempt is a login too, bounded per login by its own ledger
+        # (hunt/default_credentials.py), and is admitted and charged the same way.
         if policy.get("active_testing") is not True:
-            raise HttpAuthorityWithdrawn("a saved login needs this Hunt's active_testing permission")
+            raise HttpAuthorityWithdrawn("a login request needs this Hunt's active_testing permission")
         if requested_budget is not None:
             for dimension in ("http_requests", "active_actions"):
                 value = requested_budget.get(dimension)
