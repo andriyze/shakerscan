@@ -52,7 +52,7 @@ def test_artifact_capabilities_are_bounded_worker_http_contracts():
     assert javascript.hunt_executor == "worker_http"
     assert artifact.risk_tier == javascript.risk_tier == "passive"
     assert artifact.input_schema["properties"]["max_bytes"]["maximum"] == 16_384
-    assert javascript.input_schema["properties"]["max_bytes"]["maximum"] == 262_144
+    assert javascript.input_schema["properties"]["max_bytes"]["maximum"] == 4_194_304
     assert artifact.placement_requirements["runtime_target_binding"] is True
     assert javascript.placement_requirements["worker_private_result"] is True
 
@@ -329,3 +329,13 @@ def test_a_successful_read_says_whether_it_searched(monkeypatch):
         200, True, None)
     plain = _inspect_result(monkeypatch, found, {})["observation"]
     assert (plain["body_searched"], plain["search_not_performed_reason"]) == (False, "no_search_terms")
+
+
+def test_a_planner_sees_the_whole_window_it_asked_for_and_far_more_of_a_response():
+    from api import http_experiment
+
+    # A window of up to 16,384 bytes was read and 4,096 characters of it shown.
+    assert artifact_capability.MAX_PUBLIC_TEXT == artifact_capability.MAX_INSPECT_BYTES == 16_384
+    # An http.request answer was shown as its first 2,000 characters.
+    assert http_experiment.MAX_RESPONSE_SAMPLE == 16_000
+    assert artifact_capability.MAX_JAVASCRIPT_BYTES == 4_194_304

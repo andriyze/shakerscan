@@ -37,7 +37,10 @@ FORBIDDEN_HEADERS = {"authorization", "cookie", "host", "proxy-authorization", "
 MAX_STEPS = 4
 MAX_BODY_BYTES = 32_768
 MAX_REQUEST_JSON_BYTES = 16_384
-MAX_RESPONSE_SAMPLE = 2_000
+# What a planner is shown of a response body. It was 2,000 characters of the 32 KiB that was read:
+# a planner looking for a reflected value, an error message or a link in an ordinary page saw
+# its first screen and nothing else.
+MAX_RESPONSE_SAMPLE = 16_000
 MAX_EXTRACTS_PER_STEP = 8
 MAX_VARIABLES = 20
 VARIABLE_PATTERN = re.compile(r"\$\{([A-Za-z][A-Za-z0-9_]{0,63})\}")
@@ -585,6 +588,14 @@ def response_summary(
         if outline:
             summary["html"] = outline
     withheld = active_withheld_values()
+    if withheld is not None and isinstance(summary["body_sample"], str):
+        # A value the page outline withheld by its field's name (a hidden ``csrf_token``) is
+        # withheld in the body sample too, under the same reference: the sample is long enough to
+        # reach the forms of a page, and no view may show what another withholds.
+        for value, number in sorted(withheld._numbers.items(), key=lambda item: -len(item[0])):
+            if len(value) >= 6 and value in summary["body_sample"]:
+                summary["body_sample"] = summary["body_sample"].replace(value, f"[withheld:{number}]")
+        body_sample = summary["body_sample"]
     if withheld is not None:
         # Every marker the summary shows has its entry: the body sample's, the URL fields', the
         # selected values' and the page outline's.
