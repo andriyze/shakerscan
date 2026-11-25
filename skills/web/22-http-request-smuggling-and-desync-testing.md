@@ -21,9 +21,6 @@ missing_capabilities:
 server_enforced:
 - approval.request
 - policy.evaluate
-budget:
-  max_http_requests: 24
-  max_duration_seconds: 600
 routing:
   triggers:
   - reverse_proxy_chain

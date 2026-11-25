@@ -20,8 +20,6 @@ missing_capabilities:
 server_enforced:
 - approval.request
 - policy.evaluate
-budget:
-  max_duration_seconds: 120
 routing:
   triggers:
   - always

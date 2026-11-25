@@ -23,9 +23,6 @@ optional_capabilities: []
 missing_capabilities: []
 server_enforced:
 - policy.evaluate
-budget:
-  max_http_requests: 600
-  max_duration_seconds: 1200
 routing:
   triggers:
   - TLS_endpoint

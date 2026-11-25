@@ -20,10 +20,6 @@ missing_capabilities:
 - http.concurrent_batch
 server_enforced:
 - policy.evaluate
-budget:
-  max_http_requests: 240
-  max_duration_seconds: 1200
-  max_state_changing_requests: 20
 routing:
   triggers:
   - login_or_OTP

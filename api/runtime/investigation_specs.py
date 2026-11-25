@@ -14,7 +14,7 @@ def investigation_specs(spec,schema,kinds):
                     'value':{'type':'string','maxLength':500}},required=('action','selector'))},
                 'timeout_ms':{'type':'integer','minimum':1000,'maximum':30000},
                 'max_requests':{'type':'integer','minimum':1,'maximum':50},
-                'max_state_changing_requests':{'type':'integer','minimum':1,'maximum':20},
+                'max_state_changing_requests':{'type':'integer','minimum':1,'maximum':50},
                 'settle_ms':{'type':'integer','minimum':0,'maximum':2000},
                 'wait_until':{'type':'string','enum':['domcontentloaded','load']}},
                 required=('steps',)),

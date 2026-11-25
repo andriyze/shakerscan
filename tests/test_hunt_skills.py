@@ -83,6 +83,13 @@ def test_declared_budgets_are_real_hunt_dimensions(library):
             assert amount > 0
 
 
+def test_shipped_skills_declare_no_methodology_budget(library):
+    """A methodology figure shown to the planner reads as a limit: a skill that said
+    ``max_state_changing_requests: 12`` or ``max_http_requests: 160`` taught agents to ration work
+    the Hunt's own profile had funded. The Hunt budget is the only budget."""
+    assert {spec.skill_id: dict(spec.budget) for spec in library.list() if spec.budget} == {}
+
+
 def test_the_request_boundary_and_the_library_agree_on_the_cap():
     assert MAX_SKILLS == MAX_SKILLS_PER_HUNT
 

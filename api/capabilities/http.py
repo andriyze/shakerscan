@@ -488,9 +488,10 @@ def request_error_class(exc: BaseException) -> str:
     return f"request_error:{type(exc).__name__}"
 
 
-# The most a caller may read into a worker-private body: an artifact window with the dump
-# context that masks it (artifact.inspect reads up to 1 MiB before a SQL dump window).
-MAX_PRIVATE_BODY_BYTES = 1_114_112
+# The most a caller may read into a worker-private body: a whole JavaScript bundle for
+# javascript.analyze (4 MiB, artifact.MAX_JAVASCRIPT_BYTES), which also covers an artifact window
+# with the dump context that masks it (artifact.inspect reads up to 1 MiB before a SQL dump window).
+MAX_PRIVATE_BODY_BYTES = 4_194_304
 
 
 async def execute_bound_http_request(

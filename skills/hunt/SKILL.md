@@ -70,14 +70,15 @@ one.
 **Budgets: do not starve the Hunt.** Leave `budgets` empty: the profile defaults are sized so that
 calls, approval-gated calls, verifications, browser actions and HTTP requests cannot run out before
 the profile's duration, so never ask for more of them in advance. Only the duration ends a Hunt.
-A used-up safety ceiling (TCP ports, state-changing requests, hosts, UDP ports, out-of-band
-interactions, device fragility) refuses only the actions that need it, and the Hunt keeps running. Never lower `max_http_requests` below what discovery needs: one
+Once the policy allows state-changing requests or out-of-band interactions, their limits fund the
+investigation's work many times over: do not ration writes, send every one the investigation
+needs. A used-up network or device ceiling (TCP ports, hosts, UDP ports, device fragility) refuses
+only the actions that need it, and the Hunt keeps running. Never lower `max_http_requests` below what discovery needs: one
 `web.crawl` and one `web.content_discover` reserve about 370 requests together, and an agent that
 set 300, then 180, skipped content discovery and missed every exposed `/.env`, `/.git` and backup
 file. The start response's `budget_warnings` names each capability the limits leave unable to run
 even once. At a profile's defaults the usual web work (log in, crawl, discover content, verify,
-record) draws none; a default warning names a safety ceiling such as TCP ports or state-changing
-requests. If you lowered a limit and the warning says `restart_fixes_it: true`, start again without
+record) draws none; a default warning names a network ceiling such as TCP ports. If you lowered a limit and the warning says `restart_fixes_it: true`, start again without
 lowering it. Call the capability a warning names only when your plan needs it (for example
 `ports.discover` on `fast`): its refusal raises a `budget.raise` request for the person to approve;
 otherwise carry on. A warning with `restart_fixes_it: false` is above even the profile's start

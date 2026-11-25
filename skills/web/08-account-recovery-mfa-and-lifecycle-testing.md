@@ -24,10 +24,6 @@ missing_capabilities:
 - channel.observe
 server_enforced:
 - policy.evaluate
-budget:
-  max_http_requests: 140
-  max_duration_seconds: 1200
-  max_state_changing_requests: 15
 routing:
   triggers:
   - registration

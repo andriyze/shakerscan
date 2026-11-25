@@ -21,10 +21,6 @@ missing_capabilities:
 - graphql.execute
 server_enforced:
 - policy.evaluate
-budget:
-  max_http_requests: 180
-  max_duration_seconds: 900
-  max_state_changing_requests: 10
 routing:
   triggers:
   - GraphQL_endpoint

@@ -24,10 +24,6 @@ missing_capabilities:
 - log.observe
 server_enforced:
 - policy.evaluate
-budget:
-  max_http_requests: 500
-  max_duration_seconds: 1200
-  max_state_changing_requests: 5
 routing:
   triggers:
   - debug_or_admin_surface

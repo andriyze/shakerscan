@@ -25,9 +25,6 @@ deferred_techniques:
   requires: target-bound OOB allocation and observation capabilities
 server_enforced:
 - policy.evaluate
-budget:
-  max_http_requests: 1000
-  max_duration_seconds: 1200
 routing:
   triggers:
   - sql_injection

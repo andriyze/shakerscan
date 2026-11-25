@@ -6,6 +6,13 @@ baseline. The only change it accepted is the product-recipe action ``discover.id
 OWN_BUDGET_CAPABILITIES``) and therefore moves no other action's id, slice or frozen budget;
 it only enters the plan-chain digests (input bindings, the finalizer's dependencies).
 
+The work-budget change (every profile's state-changing ceiling set to its request ceiling)
+regenerated it from 2.12.0's own plans with two kinds of difference only: every plan-chain digest
+moved, because the budget a plan is bound to changed, and in the fast zero-attempt body scenario
+``verify.xss.r02`` now holds the fast tier (700 requests, 200 s, a 240-write body hold) where the
+former 500-write ceiling left it only the floor (120 requests, 30 s). No action was added, removed
+or given less.
+
 Budget changes (``contracts.budget_sufficiency`` and any later one) must not move a single
 fast or balanced action: not an id, an argument, a frozen budget, a slice shape or an input
 binding. These unit-test fixtures compile the admission plan and continuation rounds 1-3 with

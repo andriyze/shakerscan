@@ -724,9 +724,11 @@ class BrowserWorkflowAdapter(BrowserInteractAdapter):
     @classmethod
     def prepare(cls,*,target,base_url,args):
         from dataclasses import replace
+        # Any request the call sends may be a write: up to its request ceiling (50, as
+        # browser.interact), never a smaller second count that ends a form flow halfway.
         writes=args.get('max_state_changing_requests',4)
-        if type(writes) is not int or not 1<=writes<=20:
-            raise BrowserCapabilityInputError('Workflow mutation ceiling must be from 1 to 20')
+        if type(writes) is not int or not 1<=writes<=50:
+            raise BrowserCapabilityInputError('Workflow mutation ceiling must be from 1 to 50')
         values={key:value for key,value in args.items() if key!='max_state_changing_requests'}
         prepared=super().prepare(target=target,base_url=base_url,args=values)
         return replace(prepared,max_state_changing_requests=writes,

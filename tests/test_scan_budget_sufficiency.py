@@ -103,10 +103,12 @@ def test_a_3600_second_thorough_scan_admits_and_plans_inside_its_wall(shape):
 
 
 def _large_host_round_two():
-    """A thorough large host whose first sweep left 3,833 state-changing requests."""
+    """A thorough large host whose first sweep left 3,833 of an operator-lowered 6,000
+    state-changing requests (the profile's own ceiling is its request ceiling)."""
     fixture = admitted_round_fixture(
         "thorough", endpoints=215, queries=0, body=False,
         families=("recon", "nuclei_passive", "nuclei_active"),
+        advanced={"max_state_changing_requests": 6_000},
     )
     settle_round(fixture)
     compile_round(fixture, 1)
@@ -260,9 +262,11 @@ def test_a_round_admits_a_lanes_first_sweep_before_its_next_one():
     it funds one balanced sweep, not two. The allocator admitted ``active.templates.001.r02``
     before ``active.templates.r02`` (by id), skipped the first, and the round then dropped
     both, because a lane's appended slices must be a contiguous prefix: no sweep ran in round
-    2. A lane's first slice is admitted first, so the round appends it."""
+    2. A lane's first slice is admitted first, so the round appends it. The mutation ceiling is
+    lowered by the operator to 6,000 (the profile's own is its request ceiling)."""
     fixture = admitted_round_fixture(
         "thorough", families=LAB_FAMILIES, endpoints=215, queries=14, body=3,
+        advanced={"max_state_changing_requests": 6_000},
     )
 
     def outcome(action):

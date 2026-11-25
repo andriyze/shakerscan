@@ -33,11 +33,16 @@ from .execution import ScanExecutionPlan
 # These are hard ceilings, not target runtimes. Batch planning and continuation
 # decide how much can be spent, while advanced limits may only lower these values.
 # Tool wall never exceeds total wall, so every advertised dimension is reachable.
+# The state-changing ceiling equals the request ceiling: whether a Scan may send a write at all is
+# the policy's state-changing authority (zero without it, ``_resolve_budget``); once authorized, any
+# request may be a write. Measured: a thorough Scan of a deliberately vulnerable API spent 4,858 of
+# the former 6,000 (0.81 of it), less than twice the headroom every work limit keeps, while its
+# requests used 13% of their ceiling.
 BUDGET_PROFILES: Mapping[str, ScanBudget] = {
-    "fast": ScanBudget(1_800, 5_000, 2_500, 250, 5_000, 1_500, 2, 500, 50),
-    "balanced": ScanBudget(3_600, 20_000, 10_000, 1_000, 20_000, 3_600, 4, 2_000, 200),
-    "thorough": ScanBudget(10_800, 60_000, 30_000, 3_000, 60_000, 10_800, 8, 6_000, 1_000),
-    "deep": ScanBudget(21_600, 150_000, 75_000, 7_500, 150_000, 21_600, 16, 15_000, 2_500),
+    "fast": ScanBudget(1_800, 5_000, 2_500, 250, 5_000, 1_500, 2, 5_000, 50),
+    "balanced": ScanBudget(3_600, 20_000, 10_000, 1_000, 20_000, 3_600, 4, 20_000, 200),
+    "thorough": ScanBudget(10_800, 60_000, 30_000, 3_000, 60_000, 10_800, 8, 60_000, 1_000),
+    "deep": ScanBudget(21_600, 150_000, 75_000, 7_500, 150_000, 21_600, 16, 150_000, 2_500),
 }
 # The profiles whose plans are sized for the work to finish, not only to fit: their tool wall
 # follows a lowered duration, their SQLi extensions hold the wall their remaining techniques
@@ -90,8 +95,8 @@ STANDARD_ACTIVE_TEMPLATE_HEADROOM = 2
 # A lowered mutation ceiling keeps them down to this percentage of the sweep's mutation hold. The
 # sweep is the only mutation the Scan holds at admission, so admission refuses it only below the
 # hold itself (4,000, with sign-ins and collection replays too); twice the hold would be above
-# thorough's own 6,000, so a ceiling lowered from it by one mutation dropped the sweep the profile's
-# own ceiling runs. A quarter above the hold (5,000) stays under every profile that adds them.
+# thorough's former 6,000 ceiling, so a ceiling lowered from it by one mutation dropped the sweep
+# the profile's own ceiling ran. A quarter above the hold (5,000) stays under every profile that adds them.
 STANDARD_ACTIVE_TEMPLATE_MUTATION_PERCENT = 125
 _ACTIVE_TEMPLATE_SWEEP = "templates.active_batch"
 # Families a preset adds when the Scan signs in. A signed-in standard active Scan also reads what
@@ -270,7 +275,7 @@ _BUDGET_CEILINGS = {
     "max_tcp_ports": 262_140,
     "max_tool_wall_seconds": 86_400,
     "max_workers": 128,
-    "max_state_changing_requests": 100_000,
+    "max_state_changing_requests": 1_000_000,
     "max_hosts": 100_000,
 }
 

@@ -23,11 +23,6 @@ missing_capabilities:
 - ai.tool_observe
 server_enforced:
 - policy.evaluate
-budget:
-  max_http_requests: 140
-  max_duration_seconds: 1800
-  max_state_changing_requests: 12
-  max_oob_interactions: 4
 routing:
   triggers:
   - LLM_feature

@@ -27,9 +27,6 @@ optional_capabilities:
 missing_capabilities: []
 server_enforced:
 - policy.evaluate
-budget:
-  max_http_requests: 240
-  max_duration_seconds: 1200
 routing:
   triggers:
   - cdn_or_waf_detected
