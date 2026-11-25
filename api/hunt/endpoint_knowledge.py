@@ -62,7 +62,8 @@ def crawl_worklist(records: list[Mapping], *, origin: str) -> list[str]:
     return sorted(found)
 
 
-def content_discovery_worklist(records: list[Mapping], *, origin: str) -> list[str]:
+def content_discovery_worklist(records: list[Mapping], *, origin: str,
+                               controls_sent: bool = False) -> list[str]:
     """GET hits that differ from a measured absent path and from a blanket origin redirect.
 
     A hit's only evidence is its status, so it is compared with the run's negative-control probes
@@ -78,7 +79,7 @@ def content_discovery_worklist(records: list[Mapping], *, origin: str) -> list[s
         (item.get("status"), item.get("length"))
         for item in rows if is_negative_control_url(item.get("url"))
     ]
-    if not absent:
+    if not absent and not controls_sent:
         return []
     excluded = indistinguishable_from_absent(rows) | wildcard_redirect_urls(rows)
     found = set()
@@ -86,15 +87,29 @@ def content_discovery_worklist(records: list[Mapping], *, origin: str) -> list[s
         url = str(record.get("url") or "")
         if is_negative_control_url(url) or url in excluded:
             continue
-        verdict = asm_inventory.measured_not_found_verdict(
-            record.get("status"), record.get("length"), absent,
-        )
-        if verdict != "reachable":
-            continue
+        if absent:
+            verdict = asm_inventory.measured_not_found_verdict(
+                record.get("status"), record.get("length"), absent,
+            )
+            if verdict != "reachable":
+                continue
+        # Controls were sent but none matched: absent paths answer outside the reported statuses
+        # (most often 404), so every reported hit differs from an absent path.
         path = _same_service_path(url, admitted)
         if path is not None:
             found.add(f"GET {path}")
     return sorted(found)
+
+
+def _controls_sent(capability_input: Mapping[str, Any]) -> bool:
+    try:
+        from scan.negative_control import control_slot_count
+        from runtime.capability_registry import CAPABILITY_REGISTRY
+    except ModuleNotFoundError:  # package import in host-side tests
+        from ..scan.negative_control import control_slot_count
+        from ..runtime.capability_registry import CAPABILITY_REGISTRY
+    reserved = int(CAPABILITY_REGISTRY.require("web.content_discover").budget_cost.get("http_requests") or 0)
+    return control_slot_count(reserved) > 0
 
 
 async def enrich_crawl_endpoints(conn: Any, *, target: Any, origin: str,
@@ -104,7 +119,9 @@ async def enrich_crawl_endpoints(conn: Any, *, target: Any, origin: str,
     if target.target_kind not in {"web", "api"} or capability not in ENDPOINT_CAPABILITIES:
         return 0
     worklist = (
-        content_discovery_worklist(records, origin=origin)
+        # The Hunt worker always spends calibration slots of its reservation on absent paths
+        # (worker ``with_negative_controls``) once it is large enough to hold them.
+        content_discovery_worklist(records, origin=origin, controls_sent=_controls_sent(input))
         if capability == "web.content_discover"
         else crawl_worklist(records, origin=origin)
     )
