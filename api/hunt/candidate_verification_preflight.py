@@ -113,8 +113,8 @@ def public_verification_families() -> dict[str, Any]:
         },
         "other_families": (
             "Any other family (AI/LLM prompt injection, excessive agency, RAG isolation, "
-            "CORS...) has no deterministic verifier: record it as a candidate with its evidence "
-            "and report it unverified. SQL injection, XSS and the other injection families above "
+            "CORS...) has no deterministic verifier: do not call candidate.verify for it; record "
+            "it as a candidate with its evidence and report it unverified. SQL injection, XSS and the other injection families above "
             "do have verifiers. Device Hunts verify through their own verifier_contract_id contracts."
         ),
     }
