@@ -42,6 +42,7 @@ MAX_READS = 800
 MAX_INJECTION_TARGETS = 400
 MAX_FIELDS_PER_BODY = 4
 MAX_AUTHZ_ROUTES = 50
+DEFAULT_CREDENTIAL_PACE_SECONDS = 2.2
 DEFAULT_PAIR_IDS = tuple(f"dc-{index:02d}" for index in range(1, 21))
 _SECRET_TEXT = re.compile(
     r"\[withheld:\d+\]|-----BEGIN [A-Z ]*PRIVATE KEY-----|\bAKIA[0-9A-Z]{16}\b|"
@@ -239,7 +240,10 @@ class Sweep:
 
     async def _default_credentials(self, logins: Sequence[tuple[str, str, str, bool]]) -> None:
         for path, user, secret, json_body in logins:
-            for pair in DEFAULT_PAIR_IDS:
+            for index, pair in enumerate(DEFAULT_PAIR_IDS):
+                if index:
+                    # The default-credential module paces attempts on one login; keep to its pace.
+                    await asyncio.sleep(DEFAULT_CREDENTIAL_PACE_SECONDS)
                 result = await self._safe(
                     "http.request", _default_credential_request(path, user, secret, pair, json_body=json_body),
                     sweep_key("default-credentials", path, pair))

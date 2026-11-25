@@ -6,8 +6,13 @@ import json
 
 import pytest
 
-from api.hunt import auto_discovery
+from api.hunt import auto_discovery, server_sweep
 from api.hunt.server_sweep import Refused, Sweep, concrete, exposure_signal, login_form, sweep_key
+
+@pytest.fixture(autouse=True)
+def _no_pacing(monkeypatch):
+    monkeypatch.setattr(server_sweep, "DEFAULT_CREDENTIAL_PACE_SECONDS", 0)
+
 
 ALL = ["http.request", "candidate.verify", "authz.verify", "sqli.verify", "xss.verify",
        "web.crawl", "web.content_discover"]
