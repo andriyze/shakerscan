@@ -22,9 +22,6 @@ missing_capabilities:
 - dns.resolve
 server_enforced:
 - policy.evaluate
-budget:
-  max_http_requests: 1500
-  max_duration_seconds: 900
 routing:
   triggers:
   - seed_domain

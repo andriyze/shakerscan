@@ -20,8 +20,6 @@ server_enforced:
 - policy.evaluate
 - regression.create
 - report.generate
-budget:
-  max_duration_seconds: 1800
 routing:
   triggers:
   - engagement_plan

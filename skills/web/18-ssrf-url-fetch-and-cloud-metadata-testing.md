@@ -23,10 +23,6 @@ missing_capabilities:
 - oob.observe
 server_enforced:
 - policy.evaluate
-budget:
-  max_http_requests: 100
-  max_duration_seconds: 1200
-  max_oob_interactions: 12
 routing:
   triggers:
   - URL_parameter

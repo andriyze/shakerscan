@@ -22,10 +22,6 @@ missing_capabilities:
 - realtime.exchange
 server_enforced:
 - policy.evaluate
-budget:
-  max_http_requests: 80
-  max_duration_seconds: 600
-  max_state_changing_requests: 6
 routing:
   triggers:
   - WebSocket

@@ -396,7 +396,7 @@ class ScanAdvancedLimits(BaseModel):
     max_duration_seconds: Optional[int] = Field(default=None, ge=1, le=172_800)
     max_http_requests: Optional[int] = Field(default=None, ge=1, le=1_000_000)
     max_state_changing_requests: Optional[int] = Field(
-        default=None, ge=0, le=100_000,
+        default=None, ge=0, le=1_000_000,
     )
     max_endpoints: Optional[int] = Field(default=None, ge=1, le=100_000)
     max_hosts: Optional[int] = Field(default=None, ge=1, le=100_000)

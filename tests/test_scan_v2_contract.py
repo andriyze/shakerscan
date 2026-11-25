@@ -259,7 +259,7 @@ def test_public_scan_contract_generates_ui_vocabulary_from_server_sources():
         if item["name"] == "max_state_changing_requests"
     )
     assert state_limit["minimum"] == 0
-    assert state_limit["profile_ceilings"]["balanced"] == 2_000
+    assert state_limit["profile_ceilings"]["balanced"] == 20_000
 
 
 def test_network_discovery_is_explicitly_authorized_and_unknown_profiles_reject():

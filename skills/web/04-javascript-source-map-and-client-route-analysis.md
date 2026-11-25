@@ -22,9 +22,6 @@ optional_capabilities:
 missing_capabilities: []
 server_enforced:
 - policy.evaluate
-budget:
-  max_http_requests: 500
-  max_duration_seconds: 900
 routing:
   triggers:
   - javascript_bundle

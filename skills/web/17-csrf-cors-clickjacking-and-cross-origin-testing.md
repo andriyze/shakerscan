@@ -22,10 +22,6 @@ optional_capabilities:
 missing_capabilities: []
 server_enforced:
 - policy.evaluate
-budget:
-  max_http_requests: 140
-  max_duration_seconds: 900
-  max_state_changing_requests: 8
 routing:
   triggers:
   - state_changing_browser_request

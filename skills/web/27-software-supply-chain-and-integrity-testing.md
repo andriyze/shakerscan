@@ -21,9 +21,6 @@ missing_capabilities:
 - dependency.analyze
 server_enforced:
 - policy.evaluate
-budget:
-  max_http_requests: 300
-  max_duration_seconds: 1800
 routing:
   triggers:
   - dependency_manifest

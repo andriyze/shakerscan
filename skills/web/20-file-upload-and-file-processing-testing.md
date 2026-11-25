@@ -23,11 +23,6 @@ missing_capabilities:
 - file.upload
 server_enforced:
 - policy.evaluate
-budget:
-  max_http_requests: 160
-  max_duration_seconds: 1500
-  max_state_changing_requests: 15
-  max_oob_interactions: 4
 routing:
   triggers:
   - multipart_upload

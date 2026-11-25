@@ -575,12 +575,12 @@ and every command of this client completes it the same way.
    From then on, run your decisions in your own terminal and touch the key when the command asks.
 
 ```text
-$ shakerscan hunt budget raise 3f2a91c0-… --limit max_state_changing_requests=40
+$ shakerscan hunt budget raise 3f2a91c0-… --limit max_state_changing_requests=2000
 This needs your decision (your administrator requires a security-key touch):
-  Raise state-changing requests 20 -> 40 (safety ceiling) for Hunt 3f2a91c0… on honey.example.com
+  Raise state-changing requests 1000 -> 2000 (safety ceiling) for Hunt 3f2a91c0… on app.example.com
 Touch your security key to approve (Ctrl-C to cancel)...
 touch accepted for alice (security-key touch); sending the request again...
-raised state-changing requests 20 -> 40 (safety ceiling) for Hunt 3f2a91c0-…
+raised state-changing requests 1000 -> 2000 (safety ceiling) for Hunt 3f2a91c0-…
 ```
 
 - **In your own terminal**: stdin and stdout are terminals (the prompt goes to stdout). A

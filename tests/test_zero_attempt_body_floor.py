@@ -99,9 +99,12 @@ def test_a_tier_shaped_xss_slice_already_funds_its_body_candidate():
 def test_a_floor_shaped_lane_stays_at_the_query_floor():
     """Fourteen body candidates behind a required active sweep: the SQLi lane falls to the floor
     tier, whose shape has no room for a body attempt, and its slices keep that shape."""
+    # The operator lowered the mutation ceiling to 6,000 (the profile's own is its request
+    # ceiling), so the required active sweep leaves the SQLi lane only the floor tier.
     fixture = admitted_round_fixture(
         "thorough", endpoints=30, queries=0, body=14,
         families=("recon", "nuclei_passive", "nuclei_active", "xss", "sqli"),
+        advanced={"max_state_changing_requests": 6_000},
     )
     settle_round(fixture)
     parent_count = len(fixture["parent_plan"].actions)
@@ -236,9 +239,12 @@ def test_the_round_compiler_floor_extends_a_body_heavy_api():
     from api.scan.capability_result import CapabilityResultReason, CapabilityResultStatus
     from tests.scan_round_fixtures import settle_lightly
 
+    # The operator lowered the mutation ceiling to 6,000 (the profile's own is its request
+    # ceiling), so the required active sweep leaves the SQLi lane only the floor tier.
     fixture = admitted_round_fixture(
         "thorough", endpoints=30, queries=0, body=14,
         families=("recon", "nuclei_passive", "nuclei_active", "xss", "sqli"),
+        advanced={"max_state_changing_requests": 6_000},
     )
     settle_round(fixture)
     compile_round(fixture, 1)

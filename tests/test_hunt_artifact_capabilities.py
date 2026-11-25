@@ -339,3 +339,13 @@ def test_a_planner_sees_the_whole_window_it_asked_for_and_far_more_of_a_response
     # An http.request answer was shown as its first 2,000 characters.
     assert http_experiment.MAX_RESPONSE_SAMPLE == 16_000
     assert artifact_capability.MAX_JAVASCRIPT_BYTES == 4_194_304
+
+
+def test_a_whole_javascript_bundle_fits_the_private_body_read():
+    """javascript.analyze asks for up to MAX_JAVASCRIPT_BYTES; the HTTP read clamps every body to
+    MAX_PRIVATE_BODY_BYTES, so that clamp must not be the smaller one (a measured 1,207,722-byte
+    application bundle was cut at 1,114,112 bytes)."""
+    from api.capabilities.artifact import MAX_JAVASCRIPT_BYTES
+    from api.capabilities.http import MAX_PRIVATE_BODY_BYTES
+
+    assert MAX_PRIVATE_BODY_BYTES >= MAX_JAVASCRIPT_BYTES >= 2 * 1_207_722

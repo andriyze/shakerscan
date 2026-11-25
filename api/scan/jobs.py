@@ -100,7 +100,7 @@ _BUDGET_CEILINGS: Mapping[str, int] = {
     "max_tcp_ports": 262_140,
     "max_tool_wall_seconds": 86_400,
     "max_workers": 128,
-    "max_state_changing_requests": 100_000,
+    "max_state_changing_requests": 1_000_000,
     "max_hosts": 100_000,
 }
 _OPTIONS_DIGEST_IGNORED_KEYS = frozenset({

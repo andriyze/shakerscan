@@ -158,13 +158,14 @@ _BATCH_WALL_SHARE: Mapping[str, float] = {
 # reference reveals only a count. Every verifier slice therefore carries one
 # conservative body-attempt hold on the state-changing dimension -- the adapter
 # settles zero mutation units for a query entry and the hold for an executed POST
-# entry -- once the profile's mutation ceiling can pay for it beside the other
-# families (fast cannot).
+# entry -- once the profile can pay for it beside the other families (fast cannot).
+# The gate reads the profile's request ceiling: the mutation ceiling it read before (2,000)
+# now equals the request ceiling, and 20,000 requests is where the former gate opened.
 _BATCH_BODY_HOLD: Mapping[str, int] = {
     "xss.verify_batch": 240,
     "sqli.verify_batch": 480,
 }
-_BATCH_BODY_HOLD_MIN_CEILING = 2_000
+_BATCH_BODY_HOLD_MIN_REQUESTS = 20_000
 # A passive-pack attempt the wall killed before the tool reported anything is retried once
 # from what the batch has left (see the template retry in action_adapter). Each attempt is
 # charged the pack's full seven requests -- its TLS traffic has no wire count -- so a slice
@@ -213,7 +214,7 @@ def _profile_batch_shapes(
         size = max(1, min(_BATCH_MAX_SLICE, size))
         budget = {name: int(amount) * size for name, amount in cost.items()}
         hold = _BATCH_BODY_HOLD.get(capability_name)
-        if hold and state_changing >= _BATCH_BODY_HOLD_MIN_CEILING:
+        if hold and state_changing > 0 and requests >= _BATCH_BODY_HOLD_MIN_REQUESTS:
             budget["state_changing_requests"] = max(
                 int(budget.get("state_changing_requests", 0)), hold,
             )
