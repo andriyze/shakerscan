@@ -248,9 +248,13 @@ export const HUNT_START_CONTRACT = {
           "parameter": "the query parameter name",
           "route": "/path of a GET request"
         },
-        "note": "A specific family runs that proof; 'injection' runs every one. XSS is proven in a browser by xss.verify."
+        "note": "A specific family runs that proof; 'injection' runs every one. XSS (family xss) and a request-body parameter are proven by xss.verify and sqli.verify: candidate.verify answers with that call, ready to send (next_call)."
       },
-      "other_families": "Any other family (AI/LLM prompt injection, excessive agency, RAG isolation, CORS...) may be recorded as a candidate with its evidence, but no deterministic verifier proves it: do not call candidate.verify for it; report it as an unverified candidate. Device Hunts verify through their own verifier_contract_id contracts.",
+      "injection_verifiers": {
+        "sqli.verify": "SQL injection in a URL parameter (path with its query) or a body field (method, body_field_names, injection_field)",
+        "xss.verify": "cross-site scripting in a URL parameter or a body field, the same inputs"
+      },
+      "other_families": "Any other family (AI/LLM prompt injection, excessive agency, RAG isolation, CORS...) has no deterministic verifier: record it as a candidate with its evidence and report it unverified. SQL injection, XSS and the other injection families above do have verifiers. Device Hunts verify through their own verifier_contract_id contracts.",
       "state_changing_families": [
         "field_constraint",
         "mass_assignment",
