@@ -1188,9 +1188,9 @@ CAPABILITY_REGISTRY = CapabilityRegistry(
         ),
         CapabilitySpec(
             "injection.verify_batch",
-            "Prove server-side template injection, path traversal, command injection and XML "
-            "external entity injection with repeated differentials against a silent control, "
-            "over query, path and worker-private body candidates.",
+            "Prove server-side template injection, path traversal, command injection, XML "
+            "external entity injection and in-band request forgery with repeated differentials "
+            "against a silent control, over query, path and worker-private body candidates.",
             "internal", "active", _HTTP_TARGETS, "injection.verify_batch", "1",
             "active_testing",
             {

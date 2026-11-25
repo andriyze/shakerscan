@@ -133,9 +133,10 @@ _BATCH_ATTEMPT_COSTS: Mapping[str, Mapping[str, int]] = {
     # that has costs one GET per parameter (open_redirect.MAX_PARAMETERS_PER_ROUTE at most).
     "redirect.verify_batch": {"http_requests": 1, "tool_wall_seconds": 1},
     # The baseline, then per class a handful of probes, the repeat and the control: template
-    # syntaxes (6), traversals (5), command wrappers (7) and their blind screen (7). A hit ends a
-    # class early; 32 requests cover every class on a candidate that has none of them.
-    "injection.verify_batch": {"http_requests": 32, "state_changing_requests": 32, "tool_wall_seconds": 30},
+    # syntaxes (6), traversals (5), command wrappers (7) and their blind screen (7), and for a
+    # read the two reference pages and loopback addresses of the request-forgery check (8). A hit
+    # ends a class early; 40 requests cover every class on a candidate that has none of them.
+    "injection.verify_batch": {"http_requests": 40, "state_changing_requests": 40, "tool_wall_seconds": 40},
 }
 _BATCH_WALL_SHARE: Mapping[str, float] = {
     "xss.verify_batch": 0.12,

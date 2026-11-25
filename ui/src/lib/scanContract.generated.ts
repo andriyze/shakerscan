@@ -351,7 +351,7 @@ export const SCAN_PUBLIC_CONTRACT_SNAPSHOT = {
         "injection.verify_batch"
       ],
       "default_enabled": false,
-      "description": "Deterministic proof of server-side template injection, path traversal, command injection and XML external entity injection over query, path and body candidates.",
+      "description": "Deterministic proof of server-side template injection, path traversal, command injection, XML external entity injection and in-band request forgery over query, path and body candidates.",
       "label": "Server-side Injection",
       "name": "server_injection",
       "requires_active_testing": true,

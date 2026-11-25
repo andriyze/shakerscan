@@ -415,6 +415,11 @@ _INJECTION_FINDINGS: Mapping[str, tuple[str, str, str, str]] = {
         "A traversal returned a well-known file's signature twice; the same traversal to a "
         "file that does not exist did not",
     ),
+    "ssrf": (
+        "Verified server-side request forgery", "high", "CWE-918",
+        "Given its own loopback address, the application returned its front page twice; a "
+        "loopback address of a page that does not exist returned none of it",
+    ),
     "xxe": (
         "Verified XML external entity injection", "high", "CWE-611",
         "An external entity in an injected document type returned a well-known file's "

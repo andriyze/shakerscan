@@ -80,6 +80,7 @@ def test_finalizer_promotes_each_class_only_from_repeated_verified_proof():
         _proof("path_traversal", "injection_path_traversal_differential/v1",
                file_signature="unix_passwd"),
         _proof("xxe", "injection_xxe_differential/v1", file_signature="unix_passwd"),
+        _proof("ssrf", "injection_ssrf_differential/v1"),
         # Not proof: one repetition, an unknown class, a contract of another family, not proven.
         _proof("template_injection", "injection_template_differential/v1", repetitions=1,
                candidate_id="once"),
@@ -96,9 +97,10 @@ def test_finalizer_promotes_each_class_only_from_repeated_verified_proof():
     )
 
     by_cwe = {finding["cwe"]: finding for finding in report["findings"]}
-    assert set(by_cwe) == {"CWE-1336", "CWE-78", "CWE-22", "CWE-611"}
+    assert set(by_cwe) == {"CWE-1336", "CWE-78", "CWE-22", "CWE-611", "CWE-918"}
     assert {cwe: finding["severity"] for cwe, finding in by_cwe.items()} == {
         "CWE-1336": "critical", "CWE-78": "critical", "CWE-22": "high", "CWE-611": "high",
+        "CWE-918": "high",
     }
     for finding in by_cwe.values():
         assert finding["tool"] == "shakerscan_injection_verify"

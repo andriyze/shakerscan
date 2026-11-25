@@ -317,7 +317,7 @@ def test_every_class_runs_on_one_candidate_and_only_the_real_one_is_proven():
     states = {name: item["proof_state"] for name, item in _by_class(result).items()}
     assert states == {
         "template_injection": "verified", "path_traversal": "not_proven",
-        "command_injection": "not_proven",
+        "command_injection": "not_proven", "ssrf": "not_proven",
     }
     assert result.status == "success"
 
@@ -385,3 +385,75 @@ def test_a_candidate_without_a_field_or_with_another_method_is_refused():
             specification=spec, target=_target(), request=request, candidate=_candidate(),
             transport=None, requested_budget={"http_requests": 3},
         )
+
+
+FRONT = ("<html><head><title>Northwind</title></head><body>" + "".join(
+    f"<section id='s{index}'>front page block {index} {index * 7919}</section>" for index in range(40)
+) + "</body></html>").encode()
+
+
+def _site(*, fetches: bool, catch_all: bool = False):
+    """/fetch?q=<url> returns what the URL holds when ``fetches``; / is the front page."""
+    def respond(request, value):
+        path = urllib.parse.urlsplit(request.url).path
+        if path == "/":
+            return _answer(request, FRONT)
+        if path != "/render":
+            return _answer(request, b"<h1>Not found</h1>", status=404)
+        target = urllib.parse.urlsplit(value)
+        if fetches and target.hostname in {"127.0.0.1", "localhost"}:
+            if target.path == "/" or catch_all:
+                return _answer(request, b"<pre>" + FRONT + b"</pre>")
+            return _answer(request, b"<pre><h1>Not found</h1></pre>")
+        return _answer(request, b"<p>preview unavailable</p>")
+    return respond
+
+
+def test_ssrf_is_proven_when_a_loopback_url_returns_the_front_page_and_a_missing_one_does_not():
+    transport = Recorder(_site(fetches=True))
+    result = _run(
+        _request(url="https://app.example.test/render?q=https://example.org/a.png"),
+        _candidate(), transport, classes=("ssrf",),
+    )
+    proof = result.observations[0]
+    assert proof["proof_state"] == "verified"
+    assert proof["proof_contract"] == PROOF_CONTRACTS["ssrf"]
+    assert proof["payload_shape"] == "https://127.0.0.1:<port>/"
+    # Every request went to the target itself: the loopback address is only ever a value.
+    assert b"Northwind" not in json.dumps(proof).encode()
+
+
+def test_an_application_that_fetches_nothing_is_not_ssrf():
+    result = _run(
+        _request(url="https://app.example.test/render?q=https://example.org/a.png"),
+        _candidate(), Recorder(_site(fetches=False)), classes=("ssrf",),
+    )
+    assert result.observations[0]["proof_state"] == "not_proven"
+
+
+def test_a_catch_all_that_answers_any_url_with_the_front_page_is_not_ssrf():
+    result = _run(
+        _request(url="https://app.example.test/render?q=https://example.org/a.png"),
+        _candidate(), Recorder(_site(fetches=True, catch_all=True)), classes=("ssrf",),
+    )
+    assert result.observations[0]["proof_state"] == "not_proven"
+
+
+def test_ssrf_is_not_tried_through_a_request_that_writes():
+    class Body:
+        def __init__(self):
+            self.sent = 0
+
+        async def send(self, request, **_kwargs):
+            self.sent += 1
+            return _answer(request, b"ok")
+
+    transport = Body()
+    result = _run(
+        _request(method="POST", url="https://app.example.test/render",
+                 body=json.dumps({"q": "https://example.org/a.png"}), content_type="application/json"),
+        _candidate(method="POST", field_path="q", request_class="confirmed_mutation"),
+        transport, classes=("ssrf",),
+    )
+    assert result.observations[0]["inconclusive_reason"] == "not_a_read"
+    assert transport.sent == 1  # the baseline only

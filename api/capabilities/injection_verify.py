@@ -10,7 +10,10 @@ response must show:
 * command injection: a shell arithmetic expansion between two markers is echoed evaluated; or a
   one-second delay repeats over three control/payload pairs;
 * XML external entity: an entity declared in an injected document type is expanded into the
-  response, and an external entity returns a well-known file's signature.
+  response, and an external entity returns a well-known file's signature;
+* server-side request forgery: the application, given its own loopback address as a URL, returns
+  content of its own front page that the unchanged request and a loopback URL of a missing page
+  do not return. In-band only: nothing listens for a callback.
 
 Nothing is promoted from one request. Every probe that hits is sent again with different random
 values, and a control that carries the same characters without the syntax must stay silent, so an
@@ -26,6 +29,7 @@ import math
 import re
 import time
 from typing import Any, Awaitable, Callable, Mapping, Sequence
+import urllib.parse
 
 try:
     from capabilities.secret_material import keyed_body_digest
@@ -56,13 +60,16 @@ except ModuleNotFoundError:
 
 
 INJECTION_VERIFY_PARSER_VERSION = "injection-verify/v1"
-INJECTION_CLASSES = ("template_injection", "path_traversal", "command_injection", "xxe")
+INJECTION_CLASSES = (
+    "template_injection", "path_traversal", "command_injection", "xxe", "ssrf",
+)
 PROOF_CONTRACTS = {
     "template_injection": "injection_template_differential/v1",
     "path_traversal": "injection_path_traversal_differential/v1",
     "command_injection": "injection_command_differential/v1",
     "command_injection_time": "injection_command_time_differential/v1",
     "xxe": "injection_xxe_differential/v1",
+    "ssrf": "injection_ssrf_differential/v1",
 }
 # What a class needs before its first stage is worth starting (probes, the repeat, the control).
 MINIMUM_REQUESTS = 4
@@ -106,6 +113,11 @@ _COMMAND_WRAPPERS = (
     ("single_quote_break", "';%s;'"),
 )
 _TIME_SCREEN_MS = 750
+# Loopback spellings of the application's own address. A URL parameter that fetches any of them
+# reaches an interface no outside client can.
+_LOOPBACK_HOSTS = ("127.0.0.1", "localhost", "[::1]")
+_SSRF_CHUNK_BYTES = 32
+_SSRF_MINIMUM_PAGE_BYTES = 256
 _XML_TYPES = ("application/xml", "text/xml", "+xml")
 
 
@@ -450,6 +462,76 @@ class InjectionVerifyAdapter:
         # is not reflected): reported as what was observed, never as the vulnerability.
         return self._observation("xxe", internal_entities_expanded=True)
 
+    async def _ssrf(
+        self, send: Send, baseline: ReplayTransportResult, left: Callable[[], int],
+    ) -> dict[str, Any]:
+        """Does the application fetch its own loopback address when the field names it?
+
+        The front page and a page that does not exist are read directly first. Chunks of the
+        front page that are in neither the missing page nor the unchanged request's answer are
+        the signal: they can only reach a response through a fetch of the front page.
+        """
+        if self.request.method != "GET":
+            # The two reference pages are read with the candidate's own request shape; a write
+            # is not repeated for them.
+            return self._observation("ssrf", inconclusive_reason="not_a_read")
+        if left() < 6:
+            return self._observation("ssrf")
+        parts = urllib.parse.urlsplit(self.request.url)
+        port = parts.port or (443 if parts.scheme == "https" else 80)
+        missing = "/" + _marker(self.seed, "ssrf:missing")
+        front = await send(replace(
+            self.request, url=urllib.parse.urlunsplit((parts.scheme, parts.netloc, "/", "", "")),
+        ))
+        absent = await send(replace(
+            self.request, url=urllib.parse.urlunsplit((parts.scheme, parts.netloc, missing, "", "")),
+        ))
+        if (
+            front.error_code or absent.error_code
+            or len(front.response_body) < _SSRF_MINIMUM_PAGE_BYTES
+        ):
+            return self._observation("ssrf", inconclusive_reason="no_reference_page")
+        page = front.response_body[:200_000]
+        chunks = [
+            page[offset:offset + _SSRF_CHUNK_BYTES]
+            for offset in range(0, len(page) - _SSRF_CHUNK_BYTES + 1, _SSRF_CHUNK_BYTES)
+        ]
+        chunks = [
+            chunk for chunk in chunks
+            if chunk not in absent.response_body and chunk not in baseline.response_body
+        ][:64]
+        if len(chunks) < 3:
+            return self._observation("ssrf", inconclusive_reason="marker_in_baseline")
+
+        def shown(result: ReplayTransportResult) -> int:
+            return sum(chunk in result.response_body for chunk in chunks)
+
+        for host in _LOOPBACK_HOSTS:
+            if left() < 3:
+                break
+            for scheme in dict.fromkeys((parts.scheme, "http")):
+                if left() < 3:
+                    break
+                loopback = f"{scheme}://{host}:{port}"
+                probe = await send(self._with(loopback + "/"))
+                if probe.error_code or shown(probe) < 3:
+                    continue
+                repeat = await send(self._with(loopback + "/"))
+                # The same address, a page that does not exist: an application that answers any
+                # URL with its front page (a catch-all route) is not fetching what was named.
+                control = await send(self._with(loopback + missing))
+                if (
+                    not repeat.error_code and not control.error_code
+                    and shown(repeat) >= 3 and shown(control) == 0
+                ):
+                    return self._observation(
+                        "ssrf", proof_contract=PROOF_CONTRACTS["ssrf"],
+                        technique="loopback_front_page_repeated",
+                        payload_shape=f"{scheme}://{host}:<port>/",
+                        response_pairs=[_pair(control, probe), _pair(control, repeat)],
+                    )
+        return self._observation("ssrf")
+
     # -- execution --------------------------------------------------------------------------
 
     async def execute(self, *, heartbeat: Heartbeat, cancelled: Cancelled) -> CapabilityAdapterResult:
@@ -493,6 +575,7 @@ class InjectionVerifyAdapter:
             "path_traversal": self._path_traversal,
             "command_injection": self._command_injection,
             "xxe": self._xxe,
+            "ssrf": self._ssrf,
         }
         try:
             baseline = await send(self.request)

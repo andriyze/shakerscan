@@ -240,6 +240,14 @@ _SERVER_INJECTION = {
         "fix": ["Resolve the requested name against one base directory and refuse a result that leaves it.",
                 "Prefer an identifier looked up in an allow-list over a file name taken from the request."],
     },
+    "ssrf": {
+        "label": "Server-side request forgery",
+        "summary": "fetches the URL given in {parameter} from the server, including its own loopback address.",
+        "expected": ["A URL that names a loopback, private or link-local address refused before any request is made."],
+        "context": ["The server's network position is the attacker's: internal services, cloud metadata endpoints and administration interfaces that no outside client can reach."],
+        "fix": ["Resolve the host, refuse loopback, private, link-local and metadata addresses, and connect to the address that was checked.",
+                "Prefer an allow-list of destinations over a block-list; do not follow redirects to other hosts."],
+    },
     "xxe": {
         "label": "XML external entity injection",
         "summary": "resolves an external entity declared in the XML document it is sent, and returns the file the entity names.",
