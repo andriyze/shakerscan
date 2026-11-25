@@ -101,11 +101,11 @@ server contracts, or `./scanner.sh help` before declaring an operation unavailab
 
 - Inspect before mutating. Use the API for product operations and the launcher for lifecycle work.
 - Stay within the targets, systems, and people the user placed in scope.
-- Ask for authorization before active, state-changing, network-discovery, device, or otherwise
-  intrusive testing unless explicit target-specific authorization already exists. A target's
-  standing authorization (`POST /targets/{id}/authorization`, once per target, no expiry,
-  revocable, superseded when the target's scope changes) is that authorization; scans and Hunts
-  reuse it without asking again.
+- Ask for authorization before active, state-changing, network-discovery or device testing
+  unless the target's standing authorization (`POST /targets/{id}/authorization`, once,
+  revocable) exists; scans and Hunts reuse it. The person records it (`shakerscan targets
+  authorize`). Never make a person's decision (authorizations, approvals, permission requests,
+  dismissals, reveals, settings): hand over the command `shakerscan api` names.
 - Never infer that a public hostname is authorized merely because it is reachable.
 - Do not turn an audit into a scan, Hunt, cleanup, or external message without authorization.
 - Use current server contracts instead of client-side copies of families or ceilings.
