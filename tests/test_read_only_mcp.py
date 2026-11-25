@@ -300,12 +300,18 @@ def test_mcp_hunt_methodology_progressive_tools_send_bounded_payloads():
     assert client.calls[-1][2]["state"] == "deferred"
 
 
-def test_mcp_catalog_drift_fails_closed():
+def test_mcp_catalog_drift_leaves_out_only_that_tool_and_says_why(capsys):
     client = FakeClient(drift_command="finding.list")
 
-    with pytest.raises(mcp.MCPError) as exc:
-        client.list_tools()
+    names = {item["name"] for item in client.list_tools()}
 
+    assert "shakerscan_findings" not in names
+    assert {"shakerscan_targets", "shakerscan_hunt_start", "shakerscan_hunt_capability"} <= names
+    assert ("shakerscan-mcp: shakerscan_findings left out of tools/list: Arsenal command finding.list is no "
+            "longer read-only") in capsys.readouterr().err
+    # A call of the drifted tool still fails closed.
+    with pytest.raises(mcp.MCPError) as exc:
+        client.call_tool("shakerscan_findings", {})
     assert exc.value.code == -32006
     assert "no longer read-only" in exc.value.message
 
