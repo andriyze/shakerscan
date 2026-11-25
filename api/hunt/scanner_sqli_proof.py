@@ -44,10 +44,12 @@ except ModuleNotFoundError:
     from scanner.scanner_tools.request_replay import ReplayRequest
 
 # The proof's stages: an error pair (4), then a boolean pair (4) or an authentication-bypass pair
-# (4), then three timing pairs (6). It needs at least the error pair.
-PROOF_REQUESTS = 14
+# (4), a numeric boolean pair (4), one delay screen per database engine (3) and three timing pairs
+# (6). It needs at least the error pair. The allowance comes out of the action's own reservation
+# (what sqlmap left of it), so funding every stage costs a Hunt nothing it had not already held.
+PROOF_REQUESTS = 24
 PROOF_MINIMUM_REQUESTS = 4
-PROOF_WALL_SECONDS = 60
+PROOF_WALL_SECONDS = 90
 PROOF_MINIMUM_WALL_SECONDS = 4
 # The value every body field carries (agent_tools._BODY_PLACEHOLDER_VALUE): the request the proof
 # sends is the request sqlmap was given.

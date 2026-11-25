@@ -87,9 +87,28 @@ def test_a_query_candidate_is_proven_within_its_reservation(monkeypatch):
 
 
 def test_a_body_candidate_without_state_changing_authority_is_sent_nothing(monkeypatch):
-    _result, observations, requests = _run(
+    result, observations, requests = _run(
         monkeypatch, _endpoint("POST", "/notes", body=("title",)), allow_state_changing=False)
     assert requests == [] and observations == []
+    # No budget could have tested it: inapplicable with the reason, and the batch is complete,
+    # not a partial one that reads as work the budget cut off.
+    skipped = [item for item in result.observations if item.get("kind") == "candidate_inapplicable"]
+    assert [item["reason"] for item in skipped] == ["state_changing_http_not_allowed"]
+    assert result.status == "success" and result.redacted_execution["unattempted_count"] == 0
+
+
+def test_a_candidate_whose_request_cannot_be_built_fails_alone(monkeypatch):
+    """One candidate must never fail the batch: its own attempt fails, with the reason."""
+    def refuse(**_kwargs):
+        raise ValueError("injection request method differs from candidate")
+
+    monkeypatch.setattr(action_adapter_module, "InjectionVerifyAdapter", refuse)
+    result, observations, requests = _run(
+        monkeypatch, _endpoint("GET", "/render", query=("q",)), allow_state_changing=False)
+    assert requests == []
+    assert [item["status"] for item in observations] == ["failed"]
+    assert result.errors == ("candidate_request_invalid:ValueError",)
+    assert result.redacted_execution["attempted_count"] == 1
 
 
 def test_the_credential_profiles_sign_in_endpoint_is_sent_nothing(monkeypatch):

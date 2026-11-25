@@ -561,3 +561,55 @@ def test_request_forgery_reference_chunks_are_sampled_from_a_bounded_page(monkey
     )
     assert searched and searched[0] <= injection_verify._SSRF_MAXIMUM_CHUNKS
     assert result.observations[0]["proof_state"] == "not_proven"
+
+
+def test_an_endpoint_that_is_slow_for_any_unusual_value_is_not_blind_command_injection():
+    """A name lookup with no shell answers a plain address at once and waits on anything else.
+    The control carries the same payload with no delay, so both are as slow."""
+    def lookup(request, value):
+        return _answer(request, b"lookup done", elapsed_ms=15 if re.fullmatch(r"[0-9.]+", value) else 1400)
+
+    transport = Recorder(lookup)
+    result = _run(
+        _request(url="https://app.example.test/render?q=127.0.0.1"), _candidate(), transport,
+        classes=("command_injection",),
+    )
+    assert result.observations[0]["proof_state"] == "not_proven"
+    assert any(value.endswith(";sleep 0;") for value in transport.values)
+
+
+def test_an_arithmetic_expander_with_no_shell_is_not_command_injection():
+    """Something that expands ``$((a+b))`` in plain text returns the sum for the quoted control
+    too; a shell leaves a single-quoted expansion as written."""
+    def expander(request, value):
+        expanded = re.sub(
+            r"\$\(\((\d+)\+(\d+)\)\)", lambda m: str(int(m.group(1)) + int(m.group(2))), value,
+        )
+        return _answer(request, expanded.encode())
+
+    result = _run(
+        _request(url="https://app.example.test/render?q=hello"), _candidate(), Recorder(expander),
+        classes=("command_injection",),
+    )
+    assert result.observations[0]["proof_state"] == "not_proven"
+
+
+def test_an_application_that_renders_its_own_route_from_a_url_path_is_not_ssrf():
+    """No request is made: the path of whatever URL is given picks the page. A host that does
+    not resolve shows the front page too, which a real fetch never could."""
+    def router(request, value):
+        path = urllib.parse.urlsplit(request.url).path
+        if path == "/":
+            return _answer(request, FRONT)
+        if path != "/render":
+            return _answer(request, b"<h1>Not found</h1>", status=404)
+        inner = urllib.parse.urlsplit(value).path if "://" in value else ""
+        return _answer(request, FRONT if inner == "/" else b"<h1>Not found</h1>" if inner else b"<p>hi</p>")
+
+    transport = Recorder(router)
+    result = _run(
+        _request(url="https://app.example.test/render?q=home"), _candidate(), transport,
+        classes=("ssrf",),
+    )
+    assert result.observations[0]["proof_state"] == "not_proven"
+    assert any("shakerscan-probe.invalid" in value for value in transport.values)

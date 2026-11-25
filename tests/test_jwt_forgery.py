@@ -80,16 +80,23 @@ def test_a_listed_secret_is_found_offline_and_a_random_one_is_not():
     assert jwt_forgery.guessed_secret(_token(alg="RS256")) is None
 
 
-def _check(token, accepts, *, requests=20):
+def _check(token, accepts, *, requests=20, without_bearer=(401, "refused"), accepted_body="page"):
+    """``sent`` holds the forged tokens only; the first request is the one without a bearer."""
     sent: list[str] = []
+    calls: list[str | None] = []
 
     async def send(forged):
+        calls.append(forged)
+        if forged is None:
+            return without_bearer
         sent.append(forged)
-        return 200 if accepts(forged) else 401
+        return (200, accepted_body if accepts(forged) else "error") if accepts(forged) else (401, "refused")
 
     proof = asyncio.run(jwt_forgery.check_token_handling(
-        token, send=send, accepted_status=200, left=lambda: requests - len(sent),
+        token, send=send, accepted_status=200, accepted_digest="page",
+        left=lambda: requests - len(calls),
     ))
+    assert calls[:1] in ([None], [])
     return proof, sent
 
 
@@ -129,13 +136,13 @@ def test_a_route_that_checks_its_tokens_yields_nothing():
 
 
 def test_no_token_is_sent_past_what_is_left():
-    proof, sent = _check(_token("secret"), lambda forged: False, requests=3)
+    proof, sent = _check(_token("secret"), lambda forged: False, requests=4)
     # The match is offline, so it is still reported; acceptance was not shown.
     assert proof["technique"] == "jwt_weak_hmac_secret_reproduced"
     assert proof["forged_token_accepted"] is None and len(sent) <= 3
 
 
-def _run_batch(monkeypatch, accepts, token):
+def _run_batch(monkeypatch, accepts, token, *, principal=None, cookie_authenticates=False):
     scan_id = str(uuid.uuid4())
     manifest = build_endpoint_manifest(
         scan_id=scan_id, target_binding_digest=TARGET.digest,
@@ -154,9 +161,13 @@ def _run_batch(monkeypatch, accepts, token):
         async def send(self, request, **_kwargs):
             bearer = next((value.split(" ", 1)[1] for name, value in request.headers
                            if name.lower() == "authorization"), "")
+            cookie = any(name.lower() == "cookie" for name, _value in request.headers)
             path = urllib.parse.urlsplit(request.url).path
             sent.append((path, bearer))
-            ok = path == "/public" or (bool(bearer) and (bearer == token or accepts(bearer)))
+            ok = (
+                path == "/public" or (cookie_authenticates and cookie)
+                or (bool(bearer) and (bearer == token or accepts(bearer)))
+            )
             return ReplayTransportResult(
                 status_code=200 if ok else 401, connected_address="192.0.2.10",
                 final_url=request.url, response_headers={"Content-Type": "application/json"},
@@ -167,10 +178,10 @@ def _run_batch(monkeypatch, accepts, token):
     monkeypatch.setattr(action_adapter_module, "PinnedAiohttpReplayTransport", Transport)
     monkeypatch.setattr(
         action_adapter_module, "resolve_scan_http_principal",
-        lambda _options, *, lane, capability_name=None: type("Principal", (), {
+        principal or (lambda _options, *, lane, capability_name=None: type("Principal", (), {
             "authenticated": True, "binding_digest": "1" * 64,
             "headers": lambda self: {"Authorization": f"Bearer {token}"},
-        })(),
+        })()),
     )
     action = _action("verify.authz_surface", "authz_surface.verify_batch", 0, capability_args={
         "endpoint_manifest_ref": manifest.reference().canonical_dict(),
@@ -205,7 +216,9 @@ def test_the_batch_checks_the_principals_token_on_a_gated_route_once(monkeypatch
     # Forged tokens go to the gated route only, after both routes were compared.
     forged = [(path, bearer) for path, bearer in sent if bearer and bearer != token]
     assert forged and {path for path, _bearer in forged} == {"/api/profile"}
-    assert sent.index(forged[0]) == 8
+    # After both routes were compared (8 requests) and the request without a bearer (1).
+    assert sent.index(forged[0]) == 9
+    assert sent[8] == ("/api/profile", "")
     assert receipt.budget_consumed["http_requests"] == len(sent)
     # A resumed batch sends nothing and reports the same proof.
     before = len(sent)
@@ -250,3 +263,33 @@ def test_the_finalizer_reports_accepted_forgery_as_a_verified_critical_finding(t
     assert finding["tool"] == "shakerscan_authz_surface" and finding["cwe"] == cwe
     assert finding["severity"] == "critical" and finding["verified"] is True
     assert finding["evidence"]["algorithm"] == "HS256"
+
+
+def test_a_route_that_answers_the_principal_without_the_bearer_is_not_checked():
+    """A session cookie or an API key authenticates there: the token is not what the route reads,
+    so an altered token being "accepted" says nothing about its signature."""
+    proof, sent = _check(_token("secret"), lambda forged: True, without_bearer=(200, "page"))
+    assert proof is None and sent == []
+
+
+def test_a_forged_token_answered_200_with_another_body_was_not_accepted():
+    """An API that answers a bad token 200 with an error document did not accept it."""
+    proof, sent = _check(_token(), lambda forged: True, accepted_body="error document")
+    assert proof is None
+    assert len(sent) == 5
+
+
+def test_the_batch_reports_nothing_for_a_cookie_session_that_ignores_the_bearer(monkeypatch):
+    token = _token()
+
+    def patched_principal(_options, *, lane, capability_name=None):
+        return type("Principal", (), {
+            "authenticated": True, "binding_digest": "1" * 64,
+            "headers": lambda self: {"Authorization": f"Bearer {token}", "Cookie": "session=abc"},
+        })()
+
+    receipt, sent, _ = _run_batch(monkeypatch, lambda bearer: True, token, principal=patched_principal,
+                                  cookie_authenticates=True)
+    assert _token_proofs(receipt) == []
+    # The two comparisons of each route and the one request without a bearer; no forged token.
+    assert all(bearer in {"", token} for _path, bearer in sent)
