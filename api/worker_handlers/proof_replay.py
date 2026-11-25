@@ -5,8 +5,9 @@ browser-executed XSS finding here. The request is rebuilt by ``proof_retest.proo
 when it cannot be rebuilt exactly nothing is sent and the retest is inconclusive with the reason.
 Otherwise the same check runs again:
 
-* SQL and NoSQL injection: the Scan's own adapters (``sqli.prove_batch``, ``nosqli.verify_batch``)
-  over that request, through the retest's HTTP client, so the retest's session headers, request
+* SQL and NoSQL injection, and the server-side injection classes (one class, the one the
+  finding proved): the Scan's own adapters (``sqli.prove_batch``, ``nosqli.verify_batch``,
+  ``injection.verify_batch``) over that request, through the retest's HTTP client, so the retest's session headers, request
   limits and destination guard apply to every request;
 * XSS: the same payload in a headless browser, after one ordinary request shows the page answers,
   judged by the browser proof's own oracle (``capabilities.xss_proof_payload``): the page's root
@@ -76,6 +77,9 @@ except ModuleNotFoundError:  # package import in host-side tests
 _BUDGETS: dict[str, dict[str, int]] = {
     "sqli.prove_batch": {"http_requests": 14, "tool_wall_seconds": 90},
     "nosqli.verify_batch": {"http_requests": 8, "tool_wall_seconds": 60},
+    # One class: the baseline, its probes, the repeat and the control (the blind command screen
+    # and its three pairs are the longest).
+    "injection.verify_batch": {"http_requests": 24, "tool_wall_seconds": 90},
 }
 _REFUSALS = frozenset({"authentication_required", "target_refused"})
 _LIKELY_FIXED = "The check that proved the finding sent the same request again and did not reproduce it."
@@ -182,12 +186,14 @@ class RetestFetchTransport:
 
 def _adapter(request: ProofRetestRequest, target_id: str, transport: Any) -> Any:
     try:
+        from capabilities.injection_verify import INJECTION_CLASSES, InjectionVerifyAdapter
         from capabilities.nosqli_verify import NoSQLiVerifyAdapter
         from capabilities.sqli_proof import SQLiProofAdapter
         from runtime.capability_registry import CAPABILITY_REGISTRY
         from runtime.models import TargetBinding
         from scanner_tools.request_replay import ReplayRequest
     except ModuleNotFoundError:  # package import in host-side tests
+        from ..capabilities.injection_verify import INJECTION_CLASSES, InjectionVerifyAdapter
         from ..capabilities.nosqli_verify import NoSQLiVerifyAdapter
         from ..capabilities.sqli_proof import SQLiProofAdapter
         from ..runtime.capability_registry import CAPABILITY_REGISTRY
@@ -212,6 +218,14 @@ def _adapter(request: ProofRetestRequest, target_id: str, transport: Any) -> Any
         "canonical_path": request.route, "request_class": request.request_class,
         "request_ref_id": None, "body_field_names": [],
     }
+    if request.capability == "injection.verify_batch":
+        if request.expected not in INJECTION_CLASSES:
+            raise ValueError("the finding does not name the injection class its proof tested")
+        return InjectionVerifyAdapter(
+            specification=CAPABILITY_REGISTRY.require(request.capability), target=binding,
+            request=replay, candidate=candidate, transport=transport,
+            requested_budget=_BUDGETS[request.capability], classes=(request.expected,),
+        )
     adapter_type = SQLiProofAdapter if request.capability == "sqli.prove_batch" else NoSQLiVerifyAdapter
     return adapter_type(
         specification=CAPABILITY_REGISTRY.require(request.capability), target=binding,
@@ -238,6 +252,7 @@ async def _differential_check(
         key: shown.get(key) for key in (
             "proof_contract", "technique", "repetitions", "response_pairs",
             "database_error_signatures", "operator", "field_path", "method",
+            "injection_class", "payload_shape", "file_signature",
         ) if shown.get(key) not in (None, [], "")
     }
     proof["errors"] = list(result.errors)

@@ -166,6 +166,7 @@ opened; "open" means not started.
   transport.
 - `server_injection` is in no preset. Adding it to `standard_active` is a default change and
   waits for that scorecard.
-- Findings of `server_injection` have no retest replay yet: a retest reports that the finding
-  type has none.
+- A `server_injection` finding proved through a GET parameter is retested by the same check,
+  one class only. One proved through a request body or a path segment is checked by a new Scan,
+  as SQL injection findings of that shape are.
 - The command-injection probes are for a POSIX shell; there is none for `cmd.exe`.
