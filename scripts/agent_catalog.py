@@ -112,84 +112,54 @@ CLI_COMMANDS: tuple[tuple[str, str, str], ...] = (
     ("version", "agent", "print the client version"),
 )
 
-# Decisions only a person makes. An agent requests them as stated, tells the person the exact
-# command, and reads the outcome; it never makes them, even where (open source) the API would let it.
-PERSON_DECISIONS: tuple[dict[str, str], ...] = (
-    {"decision": "hunt_permission",
-     "routes": "POST /hunts/{hunt_id}/permission-requests/{request_id}/decision",
-     "request": "automatic: a Hunt call answers awaiting_permission with permission_request_id",
-     "person": "shakerscan approve <request_id> | shakerscan deny <request_id> (or the UI)",
-     "outcome": "shakerscan_hunt_permission_wait; shakerscan_hunts action=permissions; shakerscan hunt permissions list"},
-    {"decision": "hunt_budget_raise",
-     "routes": "POST /hunts/{hunt_id}/budget-amendments",
-     "request": "a Hunt call that runs out answers awaiting_permission (kind budget.raise)",
-     "person": "shakerscan approve <request_id>, or shakerscan hunt budget raise <hunt_id> --limit NAME=+N",
-     "outcome": "shakerscan_hunt_permission_wait, then shakerscan_hunt_get"},
-    {"decision": "target_authorization",
-     "routes": "POST /targets/{target_id}/authorization; DELETE /targets/{target_id}/authorization",
-     "request": "in a Hunt: the target.authorize / capability.enable permission request; outside a Hunt: "
-                "shakerscan_target action=request_authorization (an active shakerscan_scans start or a "
-                "shakerscan_finding retest answers the same), which names the person's command",
-     "person": "shakerscan targets authorize <url-or-id> | shakerscan targets unauthorize <url-or-id> --reason R",
-     "outcome": "shakerscan_target action=get (authorized_for_active_testing)"},
-    {"decision": "finding_dismissal",
-     "routes": "PATCH /findings/{finding_id} (status or verdict false_positive / accepted_risk); "
-               "POST /targets/{target_id}/findings/{finding_id}/dismiss|reopen; POST /findings/bulk; "
-               "POST|PATCH|DELETE /finding-exceptions",
-     "request": "shakerscan_finding action=triage with verdict false_positive or accepted_risk answers the "
-                "person's exact command and changes nothing",
-     "person": "shakerscan knowledge dismiss <target_id> <finding_id> --reason false_positive|accepted_risk "
-               "--note N (or the UI)",
-     "outcome": "shakerscan_finding action=get (status, analyst_verdict)"},
-    {"decision": "instruction_proposal",
-     "routes": "POST /targets/{target_id}/instruction-proposals/{proposal_id}/accept|reject",
-     "request": "the targets.skill.propose Hunt capability records a proposal",
-     "person": "shakerscan knowledge review <target_id> --accept ID | --reject ID",
-     "outcome": "shakerscan_knowledge_continue; GET /targets/{target_id}/instruction-proposals"},
-    {"decision": "target_knowledge",
-     "routes": "POST /targets/{target_id}/knowledge/decisions; POST .../decisions/{receipt_id}/revert; "
-               "POST /targets/{target_id}/knowledge/releases",
-     "request": "tell the person what you recommend and why",
-     "person": "shakerscan knowledge dismiss|reopen|release|allow-changes ... (keypress in their terminal)",
-     "outcome": "shakerscan knowledge show|releases <target_id>"},
-    {"decision": "secret_reveal_grant_promote",
-     "routes": "POST /targets/{target_id}/discovered-secrets/{secret_id}/reveal|grants|promote",
-     "request": "in a Hunt: the secret.try permission request for one bounded use",
-     "person": "shakerscan secrets reveal|grant|promote ...",
-     "outcome": "shakerscan secrets list <target_id> (never values)"},
-    {"decision": "access_control_contract",
-     "routes": "POST /targets/{target_id}/invariants (save a draft, with an approval receipt); "
-               "POST /targets/{target_id}/invariants/{contract_id}/approve|retire",
-     "request": "shakerscan_access_control action=draft compiles a rule into draft contracts to show the person",
-     "person": "save, approve or retire it in the UI (target > Access control)",
-     "outcome": "shakerscan_access_control action=contracts (status)"},
-    {"decision": "hunt_authority",
-     "routes": "PUT /targets/{target_id}/hunt-authority",
-     "request": "tell the person what you need and why",
-     "person": "the UI (target > Hunt authority)",
-     "outcome": "GET /targets/{target_id}/hunt-authority"},
-    {"decision": "dangerous_approval",
-     "routes": "POST /arsenal/approvals; DELETE /targets/{target_id}; POST /evidence/retention/sweep; "
-               "POST /data-deletion",
-     "request": "tell the person what would be deleted and why",
-     "person": "the UI, or the person runs the documented command in their own terminal",
-     "outcome": "re-read the object"},
-    {"decision": "settings",
-     "routes": "PUT /settings/*; PUT /targets/{target_id}/asm/policy",
-     "request": "tell the person the setting and value you recommend",
-     "person": "the UI (Settings)",
-     "outcome": "GET /settings/*"},
-    {"decision": "model_intake_approval",
-     "routes": "Model Intake approval, promotion and trust-anchor routes (/model-intake/...)",
-     "request": "tell the person",
-     "person": "the UI (Model Intake)",
-     "outcome": "GET /model-intake/..."},
-    {"decision": "fleet_membership",
-     "routes": "/fleet join tokens, approval and revocation",
-     "request": "tell the person",
-     "person": "the UI, or shakerscan fleet ... on the engine host",
-     "outcome": "GET /fleet/..."},
-)
+# How an agent asks for a decision that is only a person's, by route. The decisions themselves (which
+# routes, the person's command, how to read the outcome) come from scripts/person_decision_routes.py,
+# the same list `shakerscan api` refuses: one source.
+REQUEST_HOW: dict[str, str] = {
+    "/hunts/{hunt_id}/permission-requests/{request_id}/decision":
+        "automatic: a Hunt call answers awaiting_permission with permission_request_id; list them with "
+        "shakerscan_hunts action=permissions",
+    "/hunts/{hunt_id}/budget-amendments": "a Hunt call that runs out answers awaiting_permission (kind budget.raise)",
+    "/targets/{target_id}/authorization":
+        "shakerscan_target action=request_authorization (an active shakerscan_scans start or a shakerscan_finding "
+        "retest answers the same); in a Hunt, the target.authorize / capability.enable permission request",
+    "/findings/{finding_id}":
+        "shakerscan_finding action=triage with verdict false_positive, accepted_risk or duplicate answers the "
+        "person's command and changes nothing",
+    "/targets/{target_id}/findings/{finding_id}/dismiss": "shakerscan_finding action=triage (as above)",
+    "/targets/{target_id}/instruction-proposals/{proposal_id}/accept":
+        "the targets.skill.propose Hunt capability records a proposal",
+    "/targets/{target_id}/invariants/{contract_id}/approve":
+        "shakerscan_access_control action=draft compiles a rule into draft contracts to show the person",
+    "/targets/{target_id}/discovered-secrets/{secret_id}/grants":
+        "in a Hunt: the secret.try permission request for one bounded use",
+}
+DEFAULT_REQUEST_HOW = "tell the person what you recommend and why; they decide in their own terminal or the UI"
+
+
+def _person_routes() -> Any:
+    try:
+        import person_decision_routes  # type: ignore[import-not-found]
+    except ModuleNotFoundError:
+        from scripts import person_decision_routes  # type: ignore[no-redef]
+    return person_decision_routes
+
+
+def person_decisions() -> list[dict[str, str]]:
+    """Every person-only decision, from scripts/person_decision_routes.py."""
+    rows = []
+    for entry in _person_routes().ROUTES:
+        rows.append({
+            "decision": entry.summary,
+            "route": f"{entry.method} {entry.template}" + ("" if entry.when.__name__ == "_always" else
+                                                            " (when its body asks for this)"),
+            "request": REQUEST_HOW.get(entry.template, DEFAULT_REQUEST_HOW),
+            "person": (entry.command.replace("{verb}", "approve|deny") if entry.command
+                       else "the UI, or the exact `shakerscan api` request, run by the person in their own terminal"),
+            "outcome": entry.outcome,
+        })
+    return rows
+
 
 OPEN_SOURCE_AUTHENTICATION = {
     "authenticated": False,
@@ -370,7 +340,7 @@ class Catalog:
                 "rest": f"{len(routes)} REST operations ({source.split(':')[0]}); filter with area and search",
                 "hunt": f"{len(contract.get('tool_calls') or [])} Hunt capabilities and the approval each needs",
                 "permissions": f"{len(contract.get('permission_kinds') or [])} permission kinds a Hunt can request",
-                "person_decisions": f"{len(PERSON_DECISIONS)} decisions only a person makes, and how to request each",
+                "person_decisions": f"{len(person_decisions())} decisions only a person makes, and how to request each",
                 "arsenal": "Arsenal commands by risk tier",
                 "authentication": "whether this install authenticates, and what that means for safety",
             },
@@ -443,7 +413,7 @@ class Catalog:
                         "the call with the same idempotency_key"}
 
     def _person_decisions(self, *, search: str | None, limit: int, cursor: str | None, **_: Any) -> dict[str, Any]:
-        rows = [dict(item) for item in PERSON_DECISIONS if _matches(search, *item.values())]
+        rows = [item for item in person_decisions() if _matches(search, *item.values())]
         page, paging = _page(rows, limit, cursor)
         return {"decisions": page, **paging,
                 "rule": "An agent never makes a person's decision. It requests, the person decides, the agent reads "
@@ -499,7 +469,7 @@ def render_text(answer: Mapping[str, Any]) -> str:
             if key == "routes":
                 lines.append(f"{row['method']:<7}{row['path']}  [{row['area']}]  {row['about']}")
             elif key == "decisions":
-                lines.append(f"{row['decision']}\n  routes:  {row['routes']}\n  request: {row['request']}\n"
+                lines.append(f"{row['decision']}\n  route:   {row['route']}\n  request: {row['request']}\n"
                              f"  person:  {row['person']}\n  outcome: {row['outcome']}")
             elif key == "capabilities":
                 lines.append(f"{row['name']:<34}{row['approval']:<22}{row['about']}")

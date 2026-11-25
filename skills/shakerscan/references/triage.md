@@ -4,12 +4,12 @@ Triage records what a finding is. Some verdicts are yours to record; dismissing 
 person's decision.
 
 With MCP: `shakerscan_finding` actions `get`, `evidence` and `triage` (a `false_positive` or
-`accepted_risk` verdict answers the person's command and changes nothing). The REST steps follow.
+`accepted_risk` or `duplicate` verdict answers the person's command and changes nothing). The REST steps follow.
 
 | Verdict | Who | How |
 |---|---|---|
-| `needs_review`, `true_positive`, `duplicate`, `retest_needed` | you | `shakerscan api PATCH /findings/<finding_id> '{"analyst_verdict":"true_positive","notes":"why"}'` |
-| `false_positive`, `accepted_risk` (and any status change that closes a finding) | the person | tell them: `shakerscan knowledge dismiss <target_id> <finding_id> --reason false_positive --note "why"` (or the UI) |
+| `needs_review`, `true_positive`, `retest_needed` | you | `shakerscan api PATCH /findings/<finding_id> '{"analyst_verdict":"true_positive","notes":"why"}'` |
+| `false_positive`, `accepted_risk`, `duplicate` (and any status change that closes a finding) | the person | tell them: `shakerscan knowledge dismiss <target_id> <finding_id> --reason false_positive|accepted_risk|duplicate --note "why"` (or the UI) |
 
 1. **List** what needs triage: MCP `shakerscan_findings` (`status: active`, by severity), or
    `shakerscan api GET '/findings?status=active&severity=high&limit=50'`.
