@@ -285,6 +285,10 @@ async def materialize_verified_hunt_findings(
     elif capability_name == "sqli.verify":
         records = _sqli_finding_records(hunt_id, action_id, target_url, capability_name,
                                         receipt_id, observations, allowed_origins=allowed_origins)
+    elif capability_name == "request.verify":
+        from .request_verification import finding_records
+        records = finding_records(hunt_id, action_id, target_url, receipt_id, capability_input,
+                                  observations, allowed_origins=allowed_origins)
     elif capability_name == "authz.verify":
         from .authz_findings import authz_finding_records
         records = authz_finding_records(capability_receipt, hunt_id=hunt_id,

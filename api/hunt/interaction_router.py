@@ -100,6 +100,7 @@ from .service_binding import (
 )
 from .target_binding import web_hunt_target
 from .artifact_identity import artifact_read_identity
+from .request_verify_admission import request_verify_admission
 from .capability_reservations import hunt_capability_action_digest, hunt_capability_lease_seconds, terminalize_hunt_capability
 from .capability_executor import CapabilityExecutionContext, CapabilityExecutor
 from .action_service import HUNT_ACTION_SERVICE, HuntActionInputError, HuntActionNotFound
@@ -2087,7 +2088,7 @@ async def _execute_hunt_capability_lifecycle(
                     if name not in allowed:
                         # D31: say what is missing (and raise a request when a person can allow it).
                         raise capability_refusal(run, name)
-                    writes_http = False
+                    writes_http = request_verify_writes = False
                     workflow_http = name == "http.request" and bool(request.input.get("capture") or request.input.get("request_bindings"))
                     if name == "http.request":
                         try:
@@ -2190,10 +2191,12 @@ async def _execute_hunt_capability_lifecycle(
                             )
                         )
                     )
-                    if name == "artifact.inspect":
+                    if name in {"artifact.inspect", "request.verify"}:
                         # A signed-in read takes http.request's identities, admitted as for it.
                         principal_slot, uses_session, workflow_http = artifact_read_identity(
                             request.input, policy)
+                    if name == "request.verify":
+                        request_verify_writes = request_verify_admission(request.input, policy)
                     # Forging a client address is a distinct authority the operator granted, so a
                     # call that uses it is metered and re-approved like any other active action.
                     # Classifying it by the capability's static risk tier alone let anonymous
@@ -2492,6 +2495,9 @@ async def _execute_hunt_capability_lifecycle(
                                 charges[transport_dimension] = 1
                     if writes_http:
                         charges["state_changing_requests"] = 1
+                    if name == "request.verify" and request_verify_writes:
+                        # Its requests are verifier writes, beside the planner's own write ceiling.
+                        charges["verifier_write_requests"] = int(charges.get("http_requests") or 0)
                     if not evidence_recording(name):
                         charges["agent_actions"] = 1
                         if requires_call_approval:
@@ -4681,8 +4687,11 @@ def _hunt_redacted_capability_input(
         for key in ('steps','instructions','parameters'):
             body = json.dumps(values.pop(key, None), sort_keys=True, default=str)
             values[key + '_sha256'] = hashlib.sha256(body.encode()).hexdigest()
-    if capability_name == "http.request":
+    if capability_name in {"http.request", "request.verify"}:
         values = redact_http_request_body(values)
+    if capability_name == "request.verify" and "xml_body" in values:
+        values.pop("xml_body")
+        values.update(body_kind="xml", body_values_visible=False)
     redacted = _arsenal_routes._redact_agent_payload(values)
     if isinstance(redacted, dict) and redacted.get("path"):
         redacted["path"] = _devices._redact_hunt_path_query(redacted["path"])

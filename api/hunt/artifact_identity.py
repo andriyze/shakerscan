@@ -45,9 +45,11 @@ def _origin(value: str) -> str:
 async def resolve_artifact_identity(
     *, pool: Any, run: Mapping[str, Any], hunt_id: Any, context: Any, target: Any, policy: Any,
     hunt_policy: Mapping[str, Any], target_url: str, values: Mapping[str, Any], stack: Any,
-    session_store: Any,
+    session_store: Any, capability: str = "artifact.inspect",
 ) -> tuple[dict[str, str], list[str], str]:
-    """``(headers, bound values, principal slot)`` for one read; worker-private."""
+    """``(headers, bound values, principal slot)`` for one read; worker-private.
+
+    ``request.verify`` sends its requests as the same identities, under the same rules."""
     try:
         from runtime.credential_refs import CredentialReferenceError
         from runtime.credential_resolver import validate_worker_credential_authority
@@ -59,7 +61,7 @@ async def resolve_artifact_identity(
     bindings = list(values.get("request_bindings") or ())
     if sum(bool(item) for item in (session_ref, principal not in _ANONYMOUS, bindings)) > 1:
         raise CredentialReferenceError(
-            "artifact.inspect reads as one identity: session_ref, as_principal or request_bindings")
+            f"{capability} sends as one identity: session_ref, as_principal or request_bindings")
     origin = _origin(str(values.get("origin") or target_url))
     if not session_ref and principal in _ANONYMOUS and not bindings:
         return {}, [], "anonymous"
@@ -86,7 +88,7 @@ async def resolve_artifact_identity(
                     # A read shows the page, so only a value withheld exactly can be sent: a session
                     # cookie this Hunt's login set. A PIN or token capture stays http.request's.
                     raise CredentialReferenceError(
-                        "artifact.inspect sends only a captured session cookie (Set-Cookie capture, "
+                        f"{capability} sends only a captured session cookie (Set-Cookie capture, "
                         "values of at least 8 characters); use http.request for other captures")
                 if any(ord(char) < 32 or ord(char) == 127 for char in text):
                     raise CredentialReferenceError("HTTP workflow header value is invalid")
@@ -100,7 +102,7 @@ async def resolve_artifact_identity(
     authority = await validate_worker_credential_authority(
         conn, owner_kind="hunt", owner_id=str(hunt_id), target=target,
         approval_receipt_id=policy.approval_receipt_id, scope_receipt_id=target.scope_receipt_id,
-        action_name="hunt.capability:artifact.inspect",
+        action_name=f"hunt.capability:{capability}",
     )
     if session_ref:
         session = await session_store.load_for_worker(

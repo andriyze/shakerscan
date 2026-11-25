@@ -616,7 +616,9 @@ CAPABILITY_CALL_EXAMPLE = (
 CAPABILITY_INPUT_DESCRIPTION = (
     "The capability's own arguments, as an object. Do not send {} for a capability that has "
     "required fields. Examples: http.request {\"method\": \"GET\", \"path\": \"/login\"}; "
-    "artifact.inspect {\"path\": \"/.env\"}; candidate.verify {\"candidate_id\": \"<uuid>\"}. "
+    "artifact.inspect {\"path\": \"/.env\"}; candidate.verify {\"candidate_id\": \"<uuid>\"}; "
+    "request.verify {\"check\": \"command_injection\", \"method\": \"GET\", \"path\": \"/ping\", "
+    "\"query\": {\"host\": \"x\"}, \"parameter\": \"host\"}. "
     "Each capability's fields are in shakerscan_hunt_get (capabilities[].input) and its full "
     "schema in shakerscan_hunt_get with capability=<name>."
 )
@@ -1785,7 +1787,8 @@ def _hunt_candidate_tool(contract: Mapping[str, Any]) -> HuntMCPTool:
                 "The weakness family. candidate.verify can prove only: " + ", ".join(families)
                 + (" (aliases: " + ", ".join(f"{a}->{b}" for a, b in sorted(aliases.items())) + ")" if aliases else "")
                 + ". Record any other family with its evidence as an unverified candidate and do not "
-                "call candidate.verify for it."
+                "call candidate.verify for it; injection, traversal, SSRF, redirect, CORS, CSRF, "
+                "upload, GraphQL and JWT are proved with the request.verify capability instead."
             ),
         }
     return replace(tool, properties=properties, description=(
