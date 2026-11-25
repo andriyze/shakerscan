@@ -48,15 +48,21 @@ FINISH_ITEMS = 8
 # Finishing is not held when less than this much of the Hunt's wall remains.
 FINISH_MIN_WALL_SECONDS = 120
 MIN_FORCE_REASON_CHARS = 10
-# A forced finish with many pairs open needs this many of the Hunt's own actions since coverage was
-# first refused (finite: it never holds a Hunt forever).
-FORCE_MIN_ACTIONS = 40
+# A forced finish needs this many open pairs closed since coverage was first refused, or half of
+# them when fewer were open (finite: it never holds a Hunt forever).
+FORCE_MIN_CLOSED = 40
+
+
+def force_threshold(open_pairs: int) -> int:
+    """How many pairs a forced finish needs closed, given the pairs open at the first refusal."""
+    return min(FORCE_MIN_CLOSED, (max(0, int(open_pairs)) + 1) // 2)
 
 # Test classes: the check, and what this engine offers to run it.
 CLASS_GUIDE: Mapping[str, str] = {
     "review": "request it (http.request GET, or artifact.inspect for a file) and read what it returns",
     "exposure": "request it and read it; a secret, credential, key or private document is a "
-                "data_exposure candidate (candidate.verify proves it)",
+                "data_exposure candidate (candidate.verify proves it); nothing sensitive: record a "
+                "coverage angle with status negative citing the request",
     "default_credentials": "try the built-in default pairs on this login (http.request with a "
                            "request_bindings default_credential entry in form_body or json_body), "
                            "then candidate.verify family default_credentials",
@@ -72,7 +78,8 @@ CLASS_GUIDE: Mapping[str, str] = {
                "or answers expose",
     "upload": "upload a harmless file of a disallowed type and see whether it is stored and served",
     "unauthenticated_api": "call it anonymously; data or actions without sign-in are an auth_bypass "
-                           "or data_exposure candidate",
+                           "or data_exposure candidate; a refusal (401/403) closes it, otherwise "
+                           "record a candidate or a negative coverage angle",
 }
 CLASSES = tuple(CLASS_GUIDE)
 # Classes a deterministic verifier can prove: listed first.
@@ -208,7 +215,7 @@ def classify(method: str, path: str, params: Iterable[str] = (), *, content_type
 _VERIFIER_CLASS = {
     "sqli.verify": ("sqli",),
     "xss.verify": ("xss",),
-    "authz.verify": ("object_authz", "function_authz"),
+    "authz.verify": ("object_authz", "function_authz", "unauthenticated_api"),
 }
 _FAMILY_CLASSES: tuple[tuple[re.Pattern[str], tuple[str, ...]], ...] = (
     (re.compile(r"sql", re.I), ("sqli",)),
@@ -226,7 +233,9 @@ _FAMILY_CLASSES: tuple[tuple[re.Pattern[str], tuple[str, ...]], ...] = (
 )
 SETTLED_ANGLE_STATUSES = frozenset({"negative", "partial", "blocked", "candidate"})
 # A candidate or settled angle on a route means the Hunt looked at it.
-_LOOKED_AT = frozenset({"review", "unauthenticated_api"})
+_LOOKED_AT = frozenset({"review", "exposure", "unauthenticated_api"})
+# Answers that serve nothing: a route that only ever answered these exposed nothing to judge.
+_NOTHING_SERVED = frozenset({401, 403, 404, 405, 407, 410})
 # Process-state keys of the discovery runner that are not step outcomes.
 _STATE_KEYS = frozenset({"running", "products", "notes", "probe_hits"})
 
@@ -281,6 +290,9 @@ class _Ledger:
     def __init__(self) -> None:
         self.requested: set[str] = set()
         self.with_params: set[str] = set()
+        # HTTP statuses the Hunt's own requests got per route: a route that only ever refused or
+        # was absent exposed nothing, so its exposure needs no judgement.
+        self.statuses: dict[str, set[int]] = {}
         self.written: set[str] = set()
         self.closed: dict[str, set[str]] = {}
 
@@ -393,6 +405,8 @@ def build_coverage(
         found = _discovered_from_action(row)
         if found is not None and name in {"http.request", "artifact.inspect"}:
             method, path, http_status, content_type = found
+            if not is_probe and http_status is not None:
+                ledger.statuses.setdefault(route, set()).add(http_status)
             # An answer that is not "absent" names a route that exists. The engine's own probes
             # enter the inventory through the runner's negative control, never from here.
             if not is_probe and http_status is not None and http_status != 404 and http_status < 500:
@@ -413,7 +427,10 @@ def build_coverage(
         classes = classify(method, route, entry["params"], content_type=entry["content_type"])
         closed = set(ledger.closed_for(route))
         if route in ledger.requested:
-            closed.update({"review", "exposure", "unauthenticated_api"})
+            closed.add("review")
+            statuses = ledger.statuses.get(route)
+            if statuses and statuses <= _NOTHING_SERVED:
+                closed.update({"exposure", "unauthenticated_api"})
         if route in ledger.with_params:
             closed.add("injection")
         if route in ledger.written:
@@ -553,14 +570,15 @@ def http_budget_left(run: Mapping[str, Any]) -> bool:
 
 def finish_guard(run: Mapping[str, Any], report: Mapping[str, Any] | None, *, force: bool,
                  force_reason: str | None, now: datetime | None = None,
-                 actions_since_refusal: int | None = None) -> str | None:
+                 closed_since_refusal: int | None = None, open_at_refusal: int | None = None) -> str | None:
     """Why this finish is refused, or None.
 
     Never refuses a Hunt whose wall or HTTP budget is spent, a budget-exhausted Hunt, or one with
     nothing open. A forced finish needs a reason and, while many pairs are open, real work on them
-    first: ``FORCE_MIN_ACTIONS`` of the Hunt's own actions since coverage was first refused
-    (``actions_since_refusal``). Measured agents forced the very first refusal with a
-    rationalization; this bound is finite, so a finish is never held forever."""
+    first: ``force_threshold`` open pairs closed since coverage was first refused (a candidate, a
+    settled coverage angle or the check itself closes a pair; a bare request does not close an
+    exposure). Measured agents forced the very first refusal with a rationalization, then met an
+    action count with cheap requests; this bound is finite, so a finish is never held forever."""
     if str(run.get("target_kind") or "") not in COVERAGE_TARGET_KINDS or report is None:
         return None
     if str(run.get("status") or "") == "budget_exhausted":
@@ -579,12 +597,14 @@ def finish_guard(run: Mapping[str, Any], report: Mapping[str, Any] | None, *, fo
         if len(str(force_reason or "").strip()) < MIN_FORCE_REASON_CHARS:
             return ("force=true needs force_reason: say in a sentence why the open coverage is left "
                     "untested; it is recorded in the debrief")
-        done = int(actions_since_refusal or 0)
-        if pending or (pairs > FORCE_MIN_ACTIONS and done < FORCE_MIN_ACTIONS):
+        done = int(closed_since_refusal or 0)
+        needed = force_threshold(open_at_refusal if open_at_refusal is not None else pairs)
+        if pending or done < needed:
             return (f"force is accepted after real work on the open coverage: {pairs} pairs are open"
                     + (f" and discovery is still running ({', '.join(pending)})" if pending else "")
-                    + f"; this Hunt has run {done} of the {FORCE_MIN_ACTIONS} actions needed since "
-                    f"coverage was first refused. Every listed endpoint answered on this target "
+                    + f"; {done} of the {needed} pairs needed have been closed since coverage was "
+                    f"first refused (run the check, or record a candidate or a negative coverage "
+                    f"angle per endpoint after reading it). Every listed endpoint answered on this target "
                     f"differently from a path that cannot exist, so it is part of this target's "
                     f"surface. Next: POST /hunts/{hunt_id}/query kind=coverage and run the checks.")
         return None
@@ -604,22 +624,11 @@ def finish_guard(run: Mapping[str, Any], report: Mapping[str, Any] | None, *, fo
         f"Continue: POST /hunts/{hunt_id}/query kind=coverage lists every open pair with the check "
         "to run (class_guide); a pair closes when you run that check, record a candidate on the "
         "route, or record a coverage angle (status negative/blocked) for it. force=true with "
-        f"force_reason is accepted after {FORCE_MIN_ACTIONS} more actions of real work (or once "
-        "few pairs remain); the reason and the open coverage go into the debrief.")
+        f"force_reason is accepted after {force_threshold(pairs)} pairs are closed; the reason and the open coverage go into the debrief.")
     return " ".join(parts)
 
 
 # --- loading ------------------------------------------------------------------------------------
-
-async def actions_since(conn: Any, run: Mapping[str, Any], since: datetime) -> int:
-    """The Hunt's own actions (not the engine's discovery) started after ``since``."""
-    return int(await conn.fetchval(
-        """SELECT count(*) FROM hunt_actions
-           WHERE hunt_run_id=$1 AND started_at > $2
-             AND NOT (COALESCE(input_summary->>'idempotency_key_sha256', '') = ANY($3::text[]))""",
-        run["id"], since, sorted(probe_key_digests()),
-    ) or 0)
-
 
 async def load_coverage(conn: Any, run: Mapping[str, Any]) -> dict[str, Any] | None:
     """The coverage map of one web Hunt, or None for another target kind."""
@@ -664,7 +673,7 @@ async def load_coverage(conn: Any, run: Mapping[str, Any]) -> dict[str, Any] | N
 
 
 __all__ = [
-    "CLASSES", "CLASS_GUIDE", "COVERAGE_TARGET_KINDS", "FORCE_MIN_ACTIONS", "SCHEMA", "actions_since",
+    "CLASSES", "CLASS_GUIDE", "COVERAGE_TARGET_KINDS", "FORCE_MIN_CLOSED", "SCHEMA", "force_threshold",
     "build_coverage", "classify",
     "compact_open_coverage", "coverage_page", "debrief_coverage", "family_classes", "finish_guard",
     "key_digest", "load_coverage", "normalize_path", "wall_remaining_seconds",

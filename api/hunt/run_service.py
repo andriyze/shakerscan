@@ -31,7 +31,6 @@ from .permission_store import pending_summary
 from .finding_verifications import HUNT_FINDINGS_QUERY
 from .coverage_map import (
     COVERAGE_TARGET_KINDS,
-    actions_since,
     compact_open_coverage,
     coverage_page,
     debrief_coverage,
@@ -56,8 +55,8 @@ from .skills import (
 )
 
 logger = logging.getLogger(__name__)
-# When each Hunt's finish was first refused for open coverage (process state; see finish).
-_FIRST_COVERAGE_REFUSAL: dict[str, datetime] = {}
+# Open pairs when each Hunt's finish was first refused for open coverage (process state; see finish).
+_FIRST_COVERAGE_REFUSAL: dict[str, int] = {}
 
 try:
     from runtime.hunt_http_exchange_contract import public_capture_references
@@ -894,14 +893,6 @@ class HuntRunService:
             logger.warning("hunt finish: coverage unavailable: %s", type(exc).__name__)
             return None
 
-    async def _actions_since(self, connection: Any, row: Mapping[str, Any], since: datetime) -> int:
-        try:
-            async with connection.transaction():
-                return await actions_since(connection, row, since)
-        except Exception as exc:  # noqa: BLE001 - an unreadable count never holds a finish forever
-            logger.warning("hunt finish: action count unavailable: %s", type(exc).__name__)
-            return 1_000_000
-
     async def coverage(self, hunt_id: str, *, limit: int = 50, offset: int = 0,
                        class_filter: str | None = None) -> dict[str, Any]:
         """The open coverage of one web Hunt: discovery, endpoints and untested test classes."""
@@ -1683,18 +1674,18 @@ class HuntRunService:
                                   "until in_flight_actions is 0, then finish again"),
                     )
                 coverage = await self._finish_coverage(connection, dict(row))
-                progress = None
-                refused_at = _FIRST_COVERAGE_REFUSAL.get(str(run_uuid))
-                if force and coverage is not None:
-                    progress = (await self._actions_since(connection, dict(row), refused_at)
-                                if refused_at else 0)
-                refusal = finish_guard(dict(row), coverage, force=force, force_reason=force_reason,
-                                       actions_since_refusal=progress)
+                first = _FIRST_COVERAGE_REFUSAL.get(str(run_uuid))
+                open_now = int((coverage or {}).get("pairs_open") or 0)
+                refusal = finish_guard(
+                    dict(row), coverage, force=force, force_reason=force_reason,
+                    closed_since_refusal=max(0, first - open_now) if first is not None else 0,
+                    open_at_refusal=first,
+                )
                 if refusal:
                     # Process state: a restarted API counts the work from the next refusal.
                     if len(_FIRST_COVERAGE_REFUSAL) > 4096:
                         _FIRST_COVERAGE_REFUSAL.clear()
-                    _FIRST_COVERAGE_REFUSAL.setdefault(str(run_uuid), datetime.now(timezone.utc))
+                    _FIRST_COVERAGE_REFUSAL.setdefault(str(run_uuid), open_now)
                     raise HTTPException(status_code=409, detail=refusal)
                 if coverage is not None:
                     debrief["coverage"] = debrief_coverage(
