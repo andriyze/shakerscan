@@ -4812,6 +4812,7 @@ async def _execute_hunt_candidate_verification(
                 _pool(), run=run, context=context, policy=policy,
                 candidate_uuid=candidate_uuid, action_id=action_id,
                 cancelled=watch.cancelled, heartbeat=watch.refresh,
+                service_origin=verification_service_origin,
             )
         except injection_proof.InjectionProofRefused as exc:
             raise VerificationRefused(status_code=422, detail={

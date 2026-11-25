@@ -140,3 +140,18 @@ def test_only_a_hunt_admits_an_injection_candidate_and_holds_the_proofs_requests
     assert web_candidate_budget("sqli")["http_requests"] == injection_proof.PROOF_REQUESTS
     assert web_candidate_budget("bola")["http_requests"] == 24
     assert web_candidate_budget("business_logic")["state_changing_requests"] == 12
+
+
+def test_a_candidate_on_a_network_target_is_proved_on_the_service_it_names():
+    from api.hunt.candidate_verification_preflight import verification_service_origin
+
+    run = {**RUN, "target_kind": "network"}
+    context = {"target": {"url": "host://app.example.test", "origins": ["http://app.example.test:8080"]}}
+    transport = Transport(_jinja)
+    proof = asyncio.run(injection_proof.run_proof(
+        run=run, context=context, policy={},
+        candidate=_candidate("ssti", origin="http://app.example.test:8080"),
+        action_id="40000000-0000-4000-8000-000000000001", transport=transport,
+        service_origin=verification_service_origin))
+    assert proof["url"] == "http://app.example.test:8080/render"
+    assert proof["promotable"]

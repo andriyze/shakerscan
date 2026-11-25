@@ -190,16 +190,20 @@ def finding_record(
 async def run_proof(
     *, run: Mapping[str, Any], context: Mapping[str, Any], policy: Mapping[str, Any],
     candidate: Mapping[str, Any], action_id: Any, transport: Any = None,
-    cancelled: Any = None, heartbeat: Any = None,
+    cancelled: Any = None, heartbeat: Any = None, service_origin: Any = None,
 ) -> dict[str, Any]:
-    """Run every proof the candidate's family names; the first that verifies is the result."""
+    """Run every proof the candidate's family names; the first that verifies is the result.
+
+    ``service_origin(candidate, target_url)`` names the HTTP service a candidate on a network
+    target is proved on (``candidate_verification_preflight.verification_service_origin``, passed
+    in by the caller: that module admits these candidates, so this one does not import it).
+    """
     try:
         from capabilities.injection_verify import InjectionVerifyAdapter
         from capabilities.nosqli_verify import NoSQLiVerifyAdapter
         from capabilities.sqli_proof import SQLiProofAdapter
         from runtime.capability_registry import CAPABILITY_REGISTRY
         from scanner_tools.request_replay import ReplayRequest
-        from hunt.candidate_verification_preflight import verification_service_origin
         from hunt.target_binding import web_hunt_target
     except ModuleNotFoundError:  # package import layout
         from ..capabilities.injection_verify import InjectionVerifyAdapter
@@ -207,11 +211,12 @@ async def run_proof(
         from ..capabilities.sqli_proof import SQLiProofAdapter
         from ..runtime.capability_registry import CAPABILITY_REGISTRY
         from scanner.scanner_tools.request_replay import ReplayRequest
-        from .candidate_verification_preflight import verification_service_origin
         from .target_binding import web_hunt_target
     proofs = proofs_for(candidate.get("family"))
     target, target_url = web_hunt_target(run, context, policy)
-    named = verification_service_origin(candidate, str(_mapping(context.get("target")).get("url") or target_url))
+    named = service_origin(
+        candidate, str(_mapping(context.get("target")).get("url") or target_url),
+    ) if service_origin is not None else None
     parsed = urllib.parse.urlsplit(named or target_url)
     origin = f"{parsed.scheme}://{parsed.netloc}"
     url, route, parameter = proof_request(candidate, origin=origin)
@@ -295,7 +300,7 @@ async def run_proof(
 async def verify_candidate(
     pool: Any, *, run: Mapping[str, Any], context: Mapping[str, Any], policy: Mapping[str, Any],
     candidate_uuid: Any, action_id: Any, transport: Any = None, cancelled: Any = None,
-    heartbeat: Any = None,
+    heartbeat: Any = None, service_origin: Any = None,
 ) -> dict[str, Any]:
     """candidate.verify for an injection candidate: run the proofs, then record the result."""
     async with pool.acquire() as conn:
@@ -327,7 +332,7 @@ async def verify_candidate(
     try:
         proof = await run_proof(run=run, context=context, policy=policy, candidate=candidate,
                                 action_id=action_id, transport=transport, cancelled=cancelled,
-                                heartbeat=heartbeat)
+                                heartbeat=heartbeat, service_origin=service_origin)
     finally:
         if archived:
             async with pool.acquire() as conn:
