@@ -7,8 +7,9 @@ response must show:
   in the response; the same numbers without template syntax produce no product;
 * path traversal: a traversal to a well-known file returns that file's signature; a traversal to a
   file that does not exist does not;
-* command injection: a shell arithmetic expansion between two markers is echoed evaluated; or a
-  one-second delay repeats over three control/payload pairs;
+* command injection: a shell arithmetic expansion between two markers is echoed evaluated, or a
+  command substitution joins the two halves of a marker; or a one-second delay repeats over three
+  control/payload pairs;
 * XML external entity: an entity declared in an injected document type is expanded into the
   response, and an external entity returns a well-known file's signature;
 * server-side request forgery: the application, given its own loopback address as a URL, returns
@@ -410,6 +411,36 @@ class InjectionVerifyAdapter:
                     payload_shape="<original>" + wrapper % "echo <marker>$((<n>+<n>))<marker>",
                     response_pairs=[_pair(control, probe), _pair(control, repeat)],
                 )
+        # Substitution: a shell that runs the command joins the two halves of a marker that the
+        # request carries apart (``<left>$(echo <right>)``); an endpoint that echoes or reflects
+        # the request never shows them joined. A shell without arithmetic expansion (a restricted
+        # or emulated one) still substitutes. Two separators only, after the arithmetic probes.
+        halves = tuple(
+            (_marker(self.seed, f"command:s{round_}a"), _marker(self.seed, f"command:s{round_}b"))
+            for round_ in (1, 2)
+        )
+        if not any(_contains(baseline, a + b) for a, b in halves):
+            for name, wrapper in _COMMAND_WRAPPERS[:2]:
+                if left() < 3:
+                    break
+                probe = await send(self._with(original + wrapper % "echo {}$(echo {})".format(*halves[0])))
+                if probe.error_code or not _contains(probe, "".join(halves[0])):
+                    continue
+                repeat = await send(self._with(original + wrapper % "echo {}$(echo {})".format(*halves[1])))
+                # The same words with neither the separator nor the substitution syntax.
+                control = await send(self._with(original + " echo {}(echo {})".format(*halves[0])))
+                if (
+                    not repeat.error_code and not control.error_code
+                    and _contains(repeat, "".join(halves[1]))
+                    and not _contains(control, "".join(halves[0]))
+                ):
+                    return self._observation(
+                        "command_injection",
+                        proof_contract=PROOF_CONTRACTS["command_injection"],
+                        technique=f"substitution_echo_{name}_repeated",
+                        payload_shape="<original>" + wrapper % "echo <marker>$(echo <marker>)",
+                        response_pairs=[_pair(control, probe), _pair(control, repeat)],
+                    )
         # Windows: ``set /a`` prints the sum and ``echo`` the marker right after it.
         joined = tuple(f"{pair[0] + pair[1]}{marker}" for pair in (first, second))
 
