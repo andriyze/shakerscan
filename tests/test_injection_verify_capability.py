@@ -237,6 +237,21 @@ def test_command_injection_through_cmd_exe_is_proven_by_set_a_and_the_marker_aft
     assert proof["proof_contract"] == PROOF_CONTRACTS["command_injection"]
 
 
+def test_an_arithmetic_evaluator_without_a_shell_is_not_command_injection():
+    """Evaluates any ``((a+b))`` in the text, with or without ``$`` and shell separators: the
+    control carries the same words without the syntax and must stay silent."""
+    def evaluator(request, value):
+        return _answer(request, re.sub(
+            r"\$?\(\((\d+)\+(\d+)\)\)", lambda m: str(int(m.group(1)) + int(m.group(2))), value,
+        ).encode())
+
+    result = _run(
+        _request(url="https://app.example.test/render?q=127.0.0.1"), _candidate(),
+        Recorder(evaluator), classes=("command_injection",),
+    )
+    assert result.observations[0]["proof_state"] == "not_proven"
+
+
 def test_blind_command_injection_is_proven_by_a_repeated_delay():
     transport = Recorder(lambda request, value: _answer(
         request, b"ok", elapsed_ms=1100 if "|sleep 1" in value else 15,
@@ -316,6 +331,21 @@ def test_expanded_internal_entities_alone_are_not_xxe():
     proof = _by_class(result)["xxe"]
     assert proof["proof_state"] == "not_proven"
     assert proof["internal_entities_expanded"] is True
+
+
+def test_a_parser_that_returns_the_file_for_any_entity_is_not_xxe_proof():
+    """The control names a file that does not exist; an answer that shows the file anyway is not a
+    read of the file that was named."""
+    class Always(XmlTransport):
+        async def send(self, request, **kwargs):
+            body = request.body.decode()
+            if re.search(r'<!ENTITY skx SYSTEM "file:///etc/', body):
+                self.bodies.append(body)
+                return _answer(request, PASSWD)
+            return await super().send(request, **kwargs)
+
+    proof = _by_class(_xml_run(Always(external=True)))["xxe"]
+    assert proof["proof_state"] == "not_proven"
 
 
 def test_xxe_is_not_tried_on_a_request_that_is_not_xml():

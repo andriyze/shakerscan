@@ -88,7 +88,7 @@ def test_finalizer_promotes_each_class_only_from_repeated_verified_proof():
         _proof("ssrf", "injection_ssrf_differential/v1"),
         # Not proof: one repetition, an unknown class, a contract of another family, not proven.
         _proof("template_injection", "injection_template_differential/v1", repetitions=1,
-               candidate_id="once"),
+               candidate_id="once", canonical_path="/once"),
         _proof("made_up", "injection_template_differential/v1", candidate_id="unknown-class"),
         _proof("path_traversal", "nosqli_operator_differential/v1", candidate_id="other-family"),
         _proof("command_injection", None, proof_state="not_proven",
@@ -103,6 +103,9 @@ def test_finalizer_promotes_each_class_only_from_repeated_verified_proof():
 
     by_cwe = {finding["cwe"]: finding for finding in report["findings"]}
     assert set(by_cwe) == {"CWE-1336", "CWE-78", "CWE-22", "CWE-611", "CWE-918"}
+    # One finding per proven class: the single-repetition, unknown, foreign and unproven items
+    # added none.
+    assert len(report["findings"]) == 5
     assert {cwe: finding["severity"] for cwe, finding in by_cwe.items()} == {
         "CWE-1336": "critical", "CWE-78": "critical", "CWE-22": "high", "CWE-611": "high",
         "CWE-918": "high",
