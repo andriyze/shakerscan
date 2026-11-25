@@ -190,7 +190,7 @@ async def prove_hunt_sqli_signal(
             transport=RecordedHuntReplayTransport(
                 PinnedAiohttpReplayTransport(), recorder, principal_slot=principal_slot,
             ),
-            deadline=phase_deadline,
+            deadline=phase_deadline, extended=True,
         )
         try:
             async with asyncio.timeout(max(0.0, phase_deadline - time.monotonic()) + PROOF_DEADLINE_GRACE_SECONDS):

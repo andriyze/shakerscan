@@ -2943,6 +2943,9 @@ class DatabaseNeutralScanActionDispatcher:
                     candidate=proof_candidate,
                     transport=transport,
                     requested_budget=sub_budget,
+                    # Never on the profile's sign-in endpoint, whose pace is sized to the
+                    # original stages.
+                    extended=sign_in is None,
                 )
             except SQLiProofError as exc:
                 attempt = {

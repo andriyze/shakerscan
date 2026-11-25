@@ -211,7 +211,7 @@ class SQLiProofAdapter:
         self, *, specification: CapabilitySpec, target: TargetBinding,
         request: ReplayRequest, candidate: Mapping[str, Any],
         transport: ReplayTransport, requested_budget: Mapping[str, int],
-        deadline: float | None = None,
+        deadline: float | None = None, extended: bool = False,
     ) -> None:
         if specification.name != "sqli.prove_batch":
             raise SQLiProofError("SQLi proof capability is invalid")
@@ -245,6 +245,10 @@ class SQLiProofAdapter:
         # An absolute ``time.monotonic()`` deadline shared with the phase before this one (a Hunt
         # action's scanner): no request starts after it, and none outlives it.
         self.deadline = deadline
+        # The numeric and OR boolean pairs and the per-engine delay screen. Off unless the caller
+        # asks: the credential profile's sign-in endpoint is paced to what the three original
+        # stages send (auth_endpoint_probe), so a proof there stays those fourteen requests.
+        self.extended = bool(extended)
 
     def _wall_spent(self, started: float) -> dict[str, int]:
         """Wall seconds to settle: never a dimension the caller did not reserve, and never more
@@ -402,7 +406,10 @@ class SQLiProofAdapter:
                 # A delay payload the external verifier supplied for this candidate keeps the six
                 # requests its confirmation needs: the pairs below are tried with what is left.
                 held = 6 if self.candidate.get("time_payload") else 0
-                if proof_contract is None and original.isdigit() and budget - attempted >= 4 + held:
+                if (
+                    proof_contract is None and self.extended and original.isdigit()
+                    and budget - attempted >= 4 + held
+                ):
                     # A numeric context has no quote to close: the same TRUE/FALSE contract with
                     # the condition appended to the number.
                     numeric = await self._boolean_pairs(
@@ -415,7 +422,7 @@ class SQLiProofAdapter:
                         proof_pairs = numeric
                         payload_shape = "<original> AND 1=1  vs  <original> AND 1=2"
                 if (
-                    proof_contract is None and budget - attempted >= 6 + held
+                    proof_contract is None and self.extended and budget - attempted >= 6 + held
                     # A read only: OR TRUE widens a statement to every row, which is an answer
                     # on a SELECT and damage on an UPDATE or DELETE.
                     and self.request.method in {"GET", "HEAD", "OPTIONS"}
@@ -442,7 +449,7 @@ class SQLiProofAdapter:
                     supplied = self.candidate.get("time_payload")
                     time_payload = str(supplied or f"{original}{_TIME_PAYLOADS[0][1]}")
                     screened = bool(supplied)
-                    if not supplied and budget - attempted >= 6 + len(_TIME_PAYLOADS):
+                    if not supplied and self.extended and budget - attempted >= 6 + len(_TIME_PAYLOADS):
                         # One request per engine; only a payload that delays is confirmed.
                         quiet_ms = max(control.elapsed_ms for control, _p in pairs)
                         for engine, suffix in _TIME_PAYLOADS:

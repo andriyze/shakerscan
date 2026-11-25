@@ -46,7 +46,7 @@ def _request(*, method: str = "GET", url: str, body: str = "", content_type: str
     ).requests[0]
 
 
-def _run(request, candidate, transport):
+def _run(request, candidate, transport, *, extended=False):
     adapter = SQLiProofAdapter(
         specification=CAPABILITY_REGISTRY.require("sqli.prove_batch"),
         target=_target(),
@@ -58,6 +58,7 @@ def _run(request, candidate, transport):
             "state_changing_requests": 20 if request.method == "POST" else 0,
             "tool_wall_seconds": 20,
         },
+        extended=extended,
     )
     return asyncio.run(adapter.execute(
         heartbeat=lambda: asyncio.sleep(0), cancelled=lambda: False,
@@ -495,7 +496,7 @@ def test_a_numeric_context_is_proven_by_an_unquoted_boolean_pair():
         _request(url="https://app.example.test/item?id=7"),
         {"candidate_id": "c" * 64, "method": "GET", "parameter_name": "id",
          "request_class": "safe_read"},
-        transport,
+        transport, extended=True,
     )
     proof = result.observations[0]
     assert proof["proof_state"] == "verified"
@@ -525,7 +526,7 @@ def test_a_value_that_matches_nothing_is_proven_by_an_or_pair():
         _request(url="https://app.example.test/users?name=nobody"),
         {"candidate_id": "d" * 64, "method": "GET", "parameter_name": "name",
          "request_class": "safe_read"},
-        transport,
+        transport, extended=True,
     )
     proof = result.observations[0]
     assert proof["proof_state"] == "verified"
@@ -540,7 +541,7 @@ def test_an_or_pair_that_changes_nothing_is_not_proof():
         _request(url="https://app.example.test/users?name=nobody"),
         {"candidate_id": "d" * 64, "method": "GET", "parameter_name": "name",
          "request_class": "safe_read"},
-        transport,
+        transport, extended=True,
     )
     assert result.observations[0]["proof_state"] == "not_proven"
     assert len(transport.values) <= 20
@@ -564,7 +565,7 @@ def test_an_or_pair_is_never_sent_in_a_request_that_writes():
         ),
         {"candidate_id": "e" * 64, "method": "POST", "field_path": "name",
          "request_class": "confirmed_mutation"},
-        transport,
+        transport, extended=True,
     )
     assert transport.bodies
     assert not any(" OR " in body for body in transport.bodies)
@@ -600,6 +601,7 @@ def test_a_time_proof_confirms_the_engine_whose_delay_the_screen_saw(marker, sha
         transport=transport,
         requested_budget={"http_requests": 30, "state_changing_requests": 0,
                           "tool_wall_seconds": 60},
+        extended=True,
     )
     result = asyncio.run(adapter.execute(
         heartbeat=lambda: asyncio.sleep(0), cancelled=lambda: False,
@@ -623,6 +625,7 @@ def test_a_time_screen_that_sees_no_delay_sends_no_confirmation():
         transport=transport,
         requested_budget={"http_requests": 30, "state_changing_requests": 0,
                           "tool_wall_seconds": 60},
+        extended=True,
     )
     result = asyncio.run(adapter.execute(
         heartbeat=lambda: asyncio.sleep(0), cancelled=lambda: False,
@@ -630,3 +633,17 @@ def test_a_time_screen_that_sees_no_delay_sends_no_confirmation():
     assert result.observations[0]["proof_state"] == "not_proven"
     # Error pair 4, AND pair 4, the miss and OR pair 6, one screening request per engine 3.
     assert len(transport.values) == 17
+
+
+def test_the_extended_stages_are_off_unless_asked_for():
+    """A proof without them is the error, boolean and timing pairs: fourteen requests."""
+    transport = NumericContextTransport()
+    result = _run(
+        _request(url="https://app.example.test/item?id=7"),
+        {"candidate_id": "c" * 64, "method": "GET", "parameter_name": "id",
+         "request_class": "safe_read"},
+        transport,
+    )
+    assert result.observations[0]["proof_state"] == "not_proven"
+    assert len(transport.values) == 14
+    assert not any(" AND 1=" in value or " OR " in value for value in transport.values)

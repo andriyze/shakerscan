@@ -66,9 +66,7 @@ def test_payload_delimiters_cannot_change_origin_or_escape_the_selected_segment(
     result = _run(_request(url='https://app.example.test/users/v1/name/1*'),
                   candidate(time_payload="1'/../../other?x=1#@evil.test"), transport)
     assert result.observations[0]['proof_state'] == 'not_proven'
-    # The error pairs (4), the quoted boolean pairs (4), the numeric boolean pairs (4), and the
-    # supplied delay payload's three pairs (6), which keep their requests ahead of the OR pair.
-    assert len(transport.requests) == 18
+    assert len(transport.requests) == 14
     for request in transport.requests:
         parsed = urlsplit(request.url)
         assert parsed.scheme == 'https' and parsed.netloc == 'app.example.test'
