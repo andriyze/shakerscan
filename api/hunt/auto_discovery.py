@@ -26,6 +26,10 @@ person for anything. Long steps run one at a time, leaving the planner a long sl
 
 ``SHAKERSCAN_HUNT_AUTO_DISCOVERY=false`` turns it off for the instance. Progress is process state:
 a restarted API reports the steps that never ran as not run, and the planner can run them.
+
+It runs only in a Hunt that holds active testing authority (``testing_authority``: active testing
+with an approval). A passive Hunt keeps its zero authority: the engine adds no traffic to it, and
+its planner maps what it chooses to.
 """
 from __future__ import annotations
 
@@ -228,6 +232,17 @@ def probe_key_digests() -> frozenset[str]:
 
 _STATE: dict[str, dict[str, Any]] = {}
 _TASKS: set[asyncio.Task] = set()
+# The running discovery task per Hunt, so a finish can stop it (``stop``).
+_TASK_BY_HUNT: dict[str, asyncio.Task] = {}
+
+
+def testing_authority(run: Mapping[str, Any] | None) -> bool:
+    """Whether a Hunt's policy lets the engine test on its own: active testing with an approval.
+
+    A passive Hunt (zero authority) gets no engine discovery or sweep, never waits for one at
+    finish, and is never refused a finish for open coverage it has no checks to close."""
+    policy = _json((run or {}).get("policy_json", (run or {}).get("policy")), {})
+    return bool(policy.get("active_testing")) and bool(policy.get("approval_receipt_id"))
 
 
 def discovery_state(hunt_id: str) -> dict[str, Any]:
@@ -420,6 +435,30 @@ def sweep_running(hunt_id: str) -> bool:
     return bool((_STATE.get(str(hunt_id)) or {}).get("running"))
 
 
+def stop(hunt_id: str) -> bool:
+    """Stop a Hunt's discovery and sweep: no further call is made, and the call in flight is
+    cancelled (a worker job is told through its cancel key and settles itself). True when there
+    was something running to stop."""
+    state = _STATE.get(str(hunt_id)) or {}
+    task = _TASK_BY_HUNT.get(str(hunt_id))
+    if not state.get("running") or task is None or task.done():
+        return False
+    state["stopping"] = True
+    state.pop("deferred_finish", None)
+    _note(state, "discovery stopped: the planner finished and the Hunt holds no testing authority")
+    task.cancel()
+    return True
+
+
+async def wait_stopped(hunt_id: str, *, timeout: float) -> bool:
+    """Wait (bounded) for a stopped Hunt's discovery task to end; True when it has."""
+    task = _TASK_BY_HUNT.get(str(hunt_id))
+    if task is None or task.done():
+        return True
+    done, _pending = await asyncio.wait({task}, timeout=max(0.0, timeout))
+    return bool(done)
+
+
 def defer_finish(hunt_id: str, *, summary: str, next_actions: list[str], reason: str | None) -> dict[str, Any]:
     """Record the planner's finish; the Hunt finishes with it when the server sweep ends."""
     state = _STATE.setdefault(str(hunt_id), {})
@@ -472,6 +511,9 @@ class DiscoveryRunner:
     async def run(self) -> dict[str, Any]:
         run = await self._load_run(self.hunt_id)
         if not _live(run) or str(run.get("target_kind")) not in COVERAGE_TARGET_KINDS:
+            return self.state
+        if not testing_authority(run):
+            _note(self.state, "engine discovery runs only in a Hunt with active testing authority")
             return self.state
         steps, skipped = plan_steps(run)
         for reason in skipped:
@@ -734,12 +776,20 @@ def start(hunt_id: str, *, runner: DiscoveryRunner | None = None) -> asyncio.Tas
 
     task = loop.create_task(_run())
     _TASKS.add(task)
-    task.add_done_callback(_TASKS.discard)
+    _TASK_BY_HUNT[str(hunt_id)] = task
+
+    def _done(finished: asyncio.Task) -> None:
+        _TASKS.discard(finished)
+        if _TASK_BY_HUNT.get(str(hunt_id)) is finished:
+            _TASK_BY_HUNT.pop(str(hunt_id), None)
+        worker.state["running"] = False
+
+    task.add_done_callback(_done)
     return task
 
 
 __all__ = [
     "CONTENT_WORDLISTS", "DiscoveryRunner", "configure_auto_discovery", "PRODUCTS", "SETTING", "Step", "answer_of",
     "discovery_state", "enabled", "plan_steps", "present", "probe_key_digests", "probe_paths",
-    "signed_in_slots", "start", "sweep_running", "defer_finish",
+    "signed_in_slots", "start", "stop", "sweep_running", "defer_finish", "testing_authority", "wait_stopped",
 ]

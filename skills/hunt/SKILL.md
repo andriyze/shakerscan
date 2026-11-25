@@ -252,7 +252,8 @@ Choose the next smallest action that can answer or falsify a useful hypothesis:
   Bounds are also in bytes (`max_event_bytes`, `max_bytes_per_hunt` in the contract): one event
   holds at most 32,768 bytes of text and locus values together, and a Hunt 8 MiB, so keep
   hypotheses short and long material in evidence actions.
-- A web Hunt maps and sweeps its target itself: the engine runs the crawl, content discovery, API
+- A web Hunt with active testing authority (active testing and an approval) maps and sweeps its
+  target itself: the engine runs the crawl, content discovery, API
   description and known-product probes, the passive template pack and then its deterministic
   checks as this Hunt's own recorded actions (progress: `discovery.steps.sweep`, `sweep_checks`). Work from what they map: `GET /hunts/{hunt_id}/coverage` (or query `kind=coverage`)
   lists each known endpoint with the test classes nothing in this Hunt has run on it, and
@@ -543,6 +544,8 @@ and the open coverage. After discovery the engine also runs its own sweep (readi
 endpoint, default credentials on sign-ins, function-level authorization, `sqli.verify` and
 `xss.verify` on every parameter); its candidates and findings are this Hunt's. A finish while it
 runs is accepted and kept (`finish_deferred`); the Hunt finishes with your debrief when it ends.
+A passive Hunt gets none of this and is never refused for open coverage; neither is a Hunt
+whose approval was revoked or expired, and its finish stops the engine's work.
 
 Stop when the objective is answered, remaining hypotheses are falsified, authorization fails or
 expires, the target changes or is deactivated, the user cancels, a circuit breaker freezes traffic,

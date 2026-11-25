@@ -208,3 +208,43 @@ def test_probe_catalogue_is_bounded_read_only_and_digested(path):
     assert path in paths and len(paths) == len(set(paths))
     assert all(item.startswith("/") and "://" not in item for item in paths)
     assert key_digest(auto_discovery._probe_key(path)) in probe_key_digests()
+
+
+def test_a_hunt_without_testing_authority_gets_no_engine_traffic():
+    # A passive Hunt (or one without its approval) keeps its zero authority: nothing is sent.
+    for run in (_run(approval=False), {**_run(), "policy_json": json.dumps({"active_testing": False})}):
+        fake = _Fake({})
+        fake.run = run
+        state = asyncio.run(_runner(fake).run())
+        assert fake.calls == [] and not state.get("running")
+        assert any("active testing authority" in note for note in state.get("notes", []))
+        auto_discovery._STATE.clear()
+    assert auto_discovery.testing_authority({"policy": {"active_testing": True, "approval_receipt_id": "a"}})
+    assert not auto_discovery.testing_authority({"policy": {"active_testing": True}})
+    assert not auto_discovery.testing_authority(None)
+
+
+def test_stop_cancels_the_running_discovery_and_drops_a_deferred_finish():
+    async def scenario():
+        fake = _Fake({})
+
+        async def slow(hunt_id, capability, values, key):
+            fake.calls.append(capability)
+            await asyncio.sleep(3600)
+
+        fake.execute = slow
+        hunt = str(HUNT)
+        task = auto_discovery.start(hunt, runner=DiscoveryRunner(
+            HUNT, execute=fake.execute, record=fake.record, load_run=fake.load_run))
+        for _ in range(20):
+            await asyncio.sleep(0)
+        assert auto_discovery.sweep_running(hunt)
+        auto_discovery.defer_finish(hunt, summary="s", next_actions=[], reason=None)
+        assert auto_discovery.stop(hunt) is True
+        assert await auto_discovery.wait_stopped(hunt, timeout=5)
+        assert task.done() and not auto_discovery.sweep_running(hunt)
+        assert "deferred_finish" not in auto_discovery._STATE[hunt]
+        assert auto_discovery.stop(hunt) is False  # nothing left to stop
+        return fake
+
+    assert asyncio.run(scenario()).calls

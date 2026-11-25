@@ -33,6 +33,8 @@ async def test_coverage_is_read_from_the_hunts_records_and_holds_an_early_finish
         await conn.execute("CREATE TABLE targets(id UUID PRIMARY KEY); CREATE TABLE device_targets(id UUID PRIMARY KEY);"
                            "CREATE TABLE scan_campaigns(id UUID PRIMARY KEY);"
                            "CREATE TABLE budget_reservations(owner_kind TEXT, owner_id TEXT, status TEXT);"
+                           "CREATE TABLE approval_receipts(id UUID PRIMARY KEY, status TEXT,"
+                           " revoked_at TIMESTAMPTZ, expires_at TIMESTAMPTZ);"
                            "CREATE TABLE http_transactions(hunt_run_id UUID, hunt_action_id UUID,"
                            " sequence INTEGER, status_code INTEGER)")
         for table in ("hunt_runs", "hunt_actions", "target_endpoints", "hunt_coverage_angle_events"):
@@ -44,13 +46,17 @@ async def test_coverage_is_read_from_the_hunts_records_and_holds_an_early_finish
             fingerprint TEXT, canonical_locus JSONB, verifier_contract_id TEXT,
             last_seen_at TIMESTAMPTZ DEFAULT NOW());
             CREATE TABLE investigation_candidate_observations(candidate_id UUID, hunt_run_id UUID);""")
-        target, hunt, other = uuid4(), uuid4(), uuid4()
+        target, hunt, other, approval = uuid4(), uuid4(), uuid4(), uuid4()
         await conn.execute("INSERT INTO targets VALUES($1)", target)
+        # The guard holds a Hunt that can test: active testing under a current approval.
+        await conn.execute("INSERT INTO approval_receipts VALUES($1,'active',NULL,NULL)", approval)
         await conn.executemany(
             "INSERT INTO hunt_runs(id,target_kind,target_id,objective,status,policy_json,budget_json,budget_used_json) "
             "VALUES($1,'web',$2,'Coverage',$3,$4,'{\"max_http_requests\":1000,\"max_duration_seconds\":5400}',"
             "'{\"http_requests\":20}')",
-            [(hunt, target, "active", json.dumps({"allowed_capabilities": ["web.crawl", "web.content_discover"]})),
+            [(hunt, target, "active", json.dumps({"allowed_capabilities": ["web.crawl", "web.content_discover"],
+                                                  "active_testing": True,
+                                                  "approval_receipt_id": str(approval)})),
              (other, target, "active", "{}")],
         )
         for path, params, source in (("/search", "q", "crawl"), ("/hub/api/users/{id}", "", "crawl"),

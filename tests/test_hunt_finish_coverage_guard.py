@@ -35,10 +35,22 @@ class _Pool:
         return _Acquire(self.connection)
 
 
+APPROVAL = uuid.uuid4()
+ACTIVE_POLICY = {"allowed_capabilities": ["web.crawl"], "active_testing": True,
+                 "approval_receipt_id": str(APPROVAL)}
+PASSIVE_POLICY = {"allowed_capabilities": ["web.crawl"], "active_testing": False}
+
+
 class _Connection:
-    def __init__(self, *, created_minutes_ago=5, status="active", target_kind="web"):
+    """One Hunt row; by default an active web Hunt whose approval is current."""
+
+    def __init__(self, *, created_minutes_ago=5, status="active", target_kind="web",
+                 policy=None, approval_status="active", in_flight=False):
         self.status = status
         self.target_kind = target_kind
+        self.policy = ACTIVE_POLICY if policy is None else policy
+        self.approval_status = approval_status
+        self.in_flight = in_flight
         self.created_at = datetime.now(timezone.utc) - timedelta(minutes=created_minutes_ago)
         self.final_debrief = None
         self.completed_at = None
@@ -48,7 +60,7 @@ class _Connection:
                 "target_kind": self.target_kind, "status": self.status,
                 "completed_at": self.completed_at, "final_debrief": self.final_debrief,
                 "created_at": self.created_at, "objective": "o", "budget_profile": "balanced",
-                "policy_json": json.dumps({"allowed_capabilities": ["web.crawl"]}),
+                "policy_json": json.dumps(self.policy),
                 "budget_json": json.dumps({"max_duration_seconds": 5400, "max_http_requests": 10_000}),
                 "budget_used_json": json.dumps({"http_requests": 50}), "context_pack": "{}",
                 "stop_reason": None, "budget_revision": 0, "updated_at": self.created_at}
@@ -56,14 +68,23 @@ class _Connection:
     async def fetchrow(self, query, *args):
         if query.startswith("SELECT * FROM hunt_runs"):
             return self.row()
+        if "FROM approval_receipts" in query:
+            assert args == (str(APPROVAL),)
+            return {"status": self.approval_status,
+                    "revoked_at": datetime.now(timezone.utc) if self.approval_status == "revoked" else None,
+                    "expires_at": None}
         if "FROM hunt_actions" in query:
-            return {"actions": False, "reservations": False}
+            return {"actions": self.in_flight, "reservations": False}
         if "UPDATE hunt_runs" in query and "final_debrief=$2" in query:
             self.status = "completed"
             self.completed_at = datetime.now(timezone.utc)
             self.final_debrief = args[1]
             return self.row()
         raise AssertionError(query)
+
+    async def fetchval(self, query, *args):
+        assert "FROM hunt_actions" in query
+        return self.in_flight
 
     async def execute(self, query, *args):
         return "UPDATE 0"
@@ -169,4 +190,53 @@ def test_a_finish_while_the_engine_sweep_runs_is_deferred_with_its_reason():
     # An unforced finish is deferred too: the engine's work never ends early.
     unforced = asyncio.run(_service(connection).finish(str(HUNT), summary="Done", next_actions=[]))
     assert unforced["finish_deferred"] is True
+    auto_discovery._STATE.clear()
+
+
+def test_a_hunt_that_cannot_test_is_not_held_by_open_coverage():
+    # Passive (zero authority) or with its approval revoked: it has no checks to close the open
+    # pairs with, so the finish completes and records the coverage.
+    for connection in (_Connection(policy=PASSIVE_POLICY), _Connection(approval_status="revoked")):
+        result = asyncio.run(_service(connection).finish(str(HUNT), summary="Done", next_actions=[]))
+        assert result["status"] == "completed" and connection.status == "completed"
+        assert json.loads(connection.final_debrief)["coverage"]["pairs_open"] == OPEN["pairs_open"]
+
+
+def test_a_finish_after_revocation_stops_the_engine_work_and_completes():
+    from api.hunt import auto_discovery
+    auto_discovery._STATE.clear()
+    connection = _Connection(approval_status="revoked")
+    stopped = []
+
+    async def scenario():
+        async def engine_work():
+            try:
+                await asyncio.sleep(3600)
+            except asyncio.CancelledError:
+                stopped.append(True)
+                raise
+            finally:
+                auto_discovery._STATE[str(HUNT)]["running"] = False
+
+        auto_discovery._STATE[str(HUNT)] = {"running": True}
+        task = asyncio.get_running_loop().create_task(engine_work())
+        auto_discovery._TASK_BY_HUNT[str(HUNT)] = task
+        await asyncio.sleep(0)
+        return await _service(connection).finish(str(HUNT), summary="Done", next_actions=[])
+
+    result = asyncio.run(scenario())
+    assert stopped == [True]
+    assert result["status"] == "completed" and "finish_deferred" not in result
+    assert not auto_discovery.sweep_running(str(HUNT))
+    auto_discovery._STATE.clear()
+    auto_discovery._TASK_BY_HUNT.clear()
+
+
+def test_a_passive_finish_is_never_deferred():
+    from api.hunt import auto_discovery
+    auto_discovery._STATE.clear()
+    auto_discovery._STATE[str(HUNT)] = {"running": True}
+    connection = _Connection(policy=PASSIVE_POLICY)
+    result = asyncio.run(_service(connection).finish(str(HUNT), summary="Done", next_actions=[]))
+    assert result["status"] == "completed" and "finish_deferred" not in result
     auto_discovery._STATE.clear()
