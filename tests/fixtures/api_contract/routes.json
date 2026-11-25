@@ -1605,6 +1605,13 @@
     "name": "get_hunt_checkpoint"
   },
   {
+    "path": "/hunts/{hunt_id}/coverage",
+    "methods": [
+      "GET"
+    ],
+    "name": "get_hunt_coverage"
+  },
+  {
     "path": "/hunts/{hunt_id}/coverage-angles",
     "methods": [
       "GET"
