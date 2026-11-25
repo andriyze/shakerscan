@@ -459,3 +459,174 @@ def test_wall_seconds_are_not_settled_when_the_caller_did_not_reserve_them():
     )
     result = asyncio.run(adapter.execute(heartbeat=lambda: asyncio.sleep(0), cancelled=lambda: False))
     assert result.actual_budget == {"http_requests": 4}
+
+
+def _query_value(request, name="q"):
+    return urllib.parse.parse_qs(
+        urllib.parse.urlsplit(request.url).query, keep_blank_values=True,
+    ).get(name, [""])[0]
+
+
+def _answer(request, body: bytes, *, elapsed_ms: int = 10, status: int = 200):
+    return ReplayTransportResult(
+        status_code=status, connected_address="192.0.2.10", final_url=request.url,
+        response_headers={"Content-Type": "application/json"},
+        response_body=body, elapsed_ms=elapsed_ms,
+    )
+
+
+class NumericContextTransport:
+    """`WHERE id = <value>`: a quote breaks nothing visible, the appended condition decides."""
+
+    def __init__(self):
+        self.values = []
+
+    async def send(self, request, **_kwargs):
+        value = _query_value(request, "id")
+        self.values.append(value)
+        if value in {"7", "7 AND 1=1"}:
+            return _answer(request, b'{"item":{"id":7,"name":"lamp"}}')
+        return _answer(request, b'{"item":null}')
+
+
+def test_a_numeric_context_is_proven_by_an_unquoted_boolean_pair():
+    transport = NumericContextTransport()
+    result = _run(
+        _request(url="https://app.example.test/item?id=7"),
+        {"candidate_id": "c" * 64, "method": "GET", "parameter_name": "id",
+         "request_class": "safe_read"},
+        transport,
+    )
+    proof = result.observations[0]
+    assert proof["proof_state"] == "verified"
+    assert proof["proof_contract"] == "sqli_boolean_differential/v1"
+    assert proof["payload_shape"] == "<original> AND 1=1  vs  <original> AND 1=2"
+    assert "7 AND 1=2" in transport.values
+
+
+class MissingValueTransport:
+    """A lookup whose value matches nothing: AND cannot tell TRUE from FALSE, OR can."""
+
+    def __init__(self, *, vulnerable: bool):
+        self.vulnerable = vulnerable
+        self.values = []
+
+    async def send(self, request, **_kwargs):
+        value = _query_value(request, "name")
+        self.values.append(value)
+        if self.vulnerable and value.endswith("' OR '1'='1"):
+            return _answer(request, b'{"users":[{"name":"ada"},{"name":"bob"}]}')
+        return _answer(request, b'{"users":[]}')
+
+
+def test_a_value_that_matches_nothing_is_proven_by_an_or_pair():
+    transport = MissingValueTransport(vulnerable=True)
+    result = _run(
+        _request(url="https://app.example.test/users?name=nobody"),
+        {"candidate_id": "d" * 64, "method": "GET", "parameter_name": "name",
+         "request_class": "safe_read"},
+        transport,
+    )
+    proof = result.observations[0]
+    assert proof["proof_state"] == "verified"
+    assert proof["proof_contract"] == "sqli_boolean_differential/v1"
+    assert proof["payload_shape"] == "<no match>' OR '1'='1  vs  <no match>' OR '1'='2"
+    assert len(proof["response_pairs"]) == 2
+
+
+def test_an_or_pair_that_changes_nothing_is_not_proof():
+    transport = MissingValueTransport(vulnerable=False)
+    result = _run(
+        _request(url="https://app.example.test/users?name=nobody"),
+        {"candidate_id": "d" * 64, "method": "GET", "parameter_name": "name",
+         "request_class": "safe_read"},
+        transport,
+    )
+    assert result.observations[0]["proof_state"] == "not_proven"
+    assert len(transport.values) <= 20
+
+
+class OrOnWriteTransport:
+    def __init__(self):
+        self.bodies = []
+
+    async def send(self, request, **_kwargs):
+        self.bodies.append(request.body.decode())
+        return _answer(request, b'{"updated":0}')
+
+
+def test_an_or_pair_is_never_sent_in_a_request_that_writes():
+    transport = OrOnWriteTransport()
+    _run(
+        _request(
+            method="POST", url="https://app.example.test/rename",
+            body=json.dumps({"name": "nobody"}), content_type="application/json",
+        ),
+        {"candidate_id": "e" * 64, "method": "POST", "field_path": "name",
+         "request_class": "confirmed_mutation"},
+        transport,
+    )
+    assert transport.bodies
+    assert not any(" OR " in body for body in transport.bodies)
+
+
+class EngineDelayTransport:
+    """Delays only for one database engine's delay function."""
+
+    def __init__(self, marker: str):
+        self.marker = marker
+        self.values = []
+
+    async def send(self, request, **_kwargs):
+        value = _query_value(request)
+        self.values.append(value)
+        return _answer(
+            request, b'{"products":[]}', elapsed_ms=1100 if self.marker in value else 20,
+        )
+
+
+@pytest.mark.parametrize("marker, shape", [
+    ("PG_SLEEP", "<original>' AND 1=(SELECT 1 FROM PG_SLEEP(1))-- "),
+    ("WAITFOR", "<original>'; WAITFOR DELAY '0:0:1'-- "),
+])
+def test_a_time_proof_confirms_the_engine_whose_delay_the_screen_saw(marker, shape):
+    transport = EngineDelayTransport(marker)
+    adapter = SQLiProofAdapter(
+        specification=CAPABILITY_REGISTRY.require("sqli.prove_batch"),
+        target=_target(),
+        request=_request(url="https://app.example.test/search?q=apple"),
+        candidate={"candidate_id": "f" * 64, "method": "GET", "parameter_name": "q",
+                   "request_class": "safe_read"},
+        transport=transport,
+        requested_budget={"http_requests": 30, "state_changing_requests": 0,
+                          "tool_wall_seconds": 60},
+    )
+    result = asyncio.run(adapter.execute(
+        heartbeat=lambda: asyncio.sleep(0), cancelled=lambda: False,
+    ))
+    proof = result.observations[0]
+    assert proof["proof_state"] == "verified"
+    assert proof["proof_contract"] == "sqli_time_differential/v1"
+    assert proof["payload_shape"] == shape
+    # Three confirmations of the engine that delayed, one screening request of each tried.
+    assert sum(marker in value for value in transport.values) == 4
+
+
+def test_a_time_screen_that_sees_no_delay_sends_no_confirmation():
+    transport = EngineDelayTransport("NO_SUCH_FUNCTION")
+    adapter = SQLiProofAdapter(
+        specification=CAPABILITY_REGISTRY.require("sqli.prove_batch"),
+        target=_target(),
+        request=_request(url="https://app.example.test/search?q=apple"),
+        candidate={"candidate_id": "f" * 64, "method": "GET", "parameter_name": "q",
+                   "request_class": "safe_read"},
+        transport=transport,
+        requested_budget={"http_requests": 30, "state_changing_requests": 0,
+                          "tool_wall_seconds": 60},
+    )
+    result = asyncio.run(adapter.execute(
+        heartbeat=lambda: asyncio.sleep(0), cancelled=lambda: False,
+    ))
+    assert result.observations[0]["proof_state"] == "not_proven"
+    # Error pair 4, AND pair 4, the miss and OR pair 6, one screening request per engine 3.
+    assert len(transport.values) == 17

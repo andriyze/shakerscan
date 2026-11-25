@@ -75,6 +75,18 @@ _PAYLOAD_SHAPES = {
 }
 
 
+# Time payloads by database engine, each a one-second delay in a quoted string context. One
+# screening request per engine picks the payload the full three-pair comparison then repeats, so a
+# target is not sent three confirmations for engines it does not run. No payload asks the database
+# for heavy work: a delay function only.
+_TIME_PAYLOADS = (
+    ("mysql", "' AND SLEEP(1)-- "),
+    ("postgresql", "' AND 1=(SELECT 1 FROM PG_SLEEP(1))-- "),
+    ("mssql", "'; WAITFOR DELAY '0:0:1'-- "),
+)
+_TIME_SCREEN_MS = 750
+
+
 class SQLiProofError(ValueError):
     """A SQLi proof request does not match immutable candidate authority."""
 
@@ -242,6 +254,31 @@ class SQLiProofAdapter:
             return {}
         return {"tool_wall_seconds": min(max(1, int(reserved)), max(1, math.ceil(time.monotonic() - started)))}
 
+    async def _boolean_pairs(
+        self, send: Any, same_payload: str, other_payload: str, *,
+        baselines: Sequence[ReplayTransportResult], original: str,
+    ) -> list[tuple[ReplayTransportResult, ReplayTransportResult]] | None:
+        """Two (same, other) pairs when ``same_payload`` reproduces the baselines and
+        ``other_payload`` diverges from them, both stably and with every reflected value removed;
+        None otherwise. Four requests."""
+        same_request = self.mutate(self.request, self.field, same_payload)
+        other_request = self.mutate(self.request, self.field, other_payload)
+        sent = [(await send(same_request), await send(other_request)) for _ in range(2)]
+        variants = _reflection_variants((original, same_payload, other_payload))
+        base = [_reflection_free_key(item, variants) for item in baselines[:2]]
+        same = [_reflection_free_key(left, variants) for left, _r in sent]
+        other = [_reflection_free_key(right, variants) for _l, right in sent]
+        if (
+            len(base) == 2
+            and all(not item.error_code for item in baselines[:2])
+            and all(not left.error_code and not right.error_code for left, right in sent)
+            and same[0] == same[1] and other[0] == other[1]
+            and all(same[index] == base[index] for index in (0, 1))
+            and all(other[index] != base[index] for index in (0, 1))
+        ):
+            return sent
+        return None
+
     async def execute(self, *, heartbeat: Heartbeat, cancelled: Cancelled) -> CapabilityAdapterResult:
         started = time.monotonic()
         attempted = 0
@@ -297,6 +334,7 @@ class SQLiProofAdapter:
             proof_contract = None
             technique = None
             proof_pairs = pairs
+            payload_shape = None
             if repeated_error and all(
                 not control.error_code and not payload.error_code
                 for control, payload in pairs
@@ -361,30 +399,78 @@ class SQLiProofAdapter:
                     proof_contract = "sqli_boolean_differential/v1"
                     technique = "boolean_pair_repeated"
                     proof_pairs = boolean_pairs
-                elif budget - attempted >= 6:
+                if proof_contract is None and original.isdigit() and budget - attempted >= 4:
+                    # A numeric context has no quote to close: the same TRUE/FALSE contract with
+                    # the condition appended to the number.
+                    numeric = await self._boolean_pairs(
+                        send, f"{original} AND 1=1", f"{original} AND 1=2",
+                        baselines=[control for control, _p in pairs], original=original,
+                    )
+                    if numeric is not None:
+                        proof_contract = "sqli_boolean_differential/v1"
+                        technique = "boolean_pair_repeated"
+                        proof_pairs = numeric
+                        payload_shape = "<original> AND 1=1  vs  <original> AND 1=2"
+                if (
+                    proof_contract is None and budget - attempted >= 6
+                    # A read only: OR TRUE widens a statement to every row, which is an answer
+                    # on a SELECT and damage on an UPDATE or DELETE.
+                    and self.request.method in {"GET", "HEAD", "OPTIONS"}
+                ):
+                    # A value that matches nothing (a lookup by a name or an id that does not
+                    # exist) answers the same for AND TRUE and AND FALSE. OR inverts the test:
+                    # against a value known to match nothing, OR TRUE must return something the
+                    # miss does not, and OR FALSE must reproduce the miss.
+                    miss_request = self.mutate(self.request, self.field, invalid)
+                    misses = [await send(miss_request), await send(miss_request)]
+                    either = await self._boolean_pairs(
+                        send, f"{invalid}' OR '1'='2", f"{invalid}' OR '1'='1",
+                        baselines=misses, original=invalid,
+                    )
+                    if either is not None:
+                        proof_contract = "sqli_boolean_differential/v1"
+                        technique = "boolean_pair_repeated"
+                        # (miss-reproducing, diverging), as the AND pairs are (true, false).
+                        proof_pairs = either
+                        payload_shape = "<no match>' OR '1'='1  vs  <no match>' OR '1'='2"
+                if proof_contract is None and budget - attempted >= 6:
                     # Time proof is deliberately last: it is slower, and verification
                     # requires three controls and three payloads rather than one delay.
-                    time_payload = str(
-                        self.candidate.get("time_payload")
-                        or f"{original}' AND SLEEP(1)-- "
-                    )
-                    delay_request = self.mutate(
-                        self.request, self.field, time_payload,
-                    )
-                    timing_pairs = [
-                        (await send(control_request), await send(delay_request))
-                        for _ in range(3)
-                    ]
-                    control_ms = sorted(pair[0].elapsed_ms for pair in timing_pairs)
-                    payload_ms = sorted(pair[1].elapsed_ms for pair in timing_pairs)
-                    if (
-                        all(not left.error_code and not right.error_code for left, right in timing_pairs)
-                        and payload_ms[1] - control_ms[1] >= 750
-                        and payload_ms[0] - control_ms[2] >= 500
-                    ):
-                        proof_contract = "sqli_time_differential/v1"
-                        technique = "time_median_repeated"
-                        proof_pairs = timing_pairs
+                    supplied = self.candidate.get("time_payload")
+                    time_payload = str(supplied or f"{original}{_TIME_PAYLOADS[0][1]}")
+                    screened = bool(supplied)
+                    if not supplied and budget - attempted >= 6 + len(_TIME_PAYLOADS):
+                        # One request per engine; only a payload that delays is confirmed.
+                        quiet_ms = max(control.elapsed_ms for control, _p in pairs)
+                        for engine, suffix in _TIME_PAYLOADS:
+                            probe = await send(self.mutate(
+                                self.request, self.field, f"{original}{suffix}",
+                            ))
+                            if not probe.error_code and probe.elapsed_ms - quiet_ms >= _TIME_SCREEN_MS:
+                                time_payload = f"{original}{suffix}"
+                                payload_shape = f"<original>{suffix}"
+                                screened = True
+                                break
+                    else:
+                        screened = True
+                    if screened:
+                        delay_request = self.mutate(
+                            self.request, self.field, time_payload,
+                        )
+                        timing_pairs = [
+                            (await send(control_request), await send(delay_request))
+                            for _ in range(3)
+                        ]
+                        control_ms = sorted(pair[0].elapsed_ms for pair in timing_pairs)
+                        payload_ms = sorted(pair[1].elapsed_ms for pair in timing_pairs)
+                        if (
+                            all(not left.error_code and not right.error_code for left, right in timing_pairs)
+                            and payload_ms[1] - control_ms[1] >= 750
+                            and payload_ms[0] - control_ms[2] >= 500
+                        ):
+                            proof_contract = "sqli_time_differential/v1"
+                            technique = "time_median_repeated"
+                            proof_pairs = timing_pairs
         except SQLiProofError as exc:
             reason = str(exc)
             timed_out = reason == "deadline"
@@ -443,7 +529,8 @@ class SQLiProofAdapter:
             "database_error_signatures": sorted(repeated_error) if 'repeated_error' in locals() else [],
             "redacted_excerpt": _excerpt(proof_pairs[0][1], PublicSecrecy.for_headers(dict(self.request.headers))) if verified and technique == "error_based_repeated" else None,
             # What was sent, value-free: the target's own value stays ``<original>``.
-            **({"payload_shape": _PAYLOAD_SHAPES.get(technique)} if verified and technique in _PAYLOAD_SHAPES
+            **({"payload_shape": payload_shape or _PAYLOAD_SHAPES.get(technique)}
+               if verified and technique in _PAYLOAD_SHAPES
                and not (technique == "time_median_repeated" and self.candidate.get("time_payload")) else {}),
             **({"timing_ms": {
                 "control_median": sorted(pair[0].elapsed_ms for pair in proof_pairs)[1],
