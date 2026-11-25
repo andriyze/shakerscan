@@ -825,8 +825,8 @@ HUNT_TOOLS: tuple[HuntMCPTool, ...] = (
         "stays budget_exhausted), its pending permission requests end, and its candidates, evidence "
         "and notes stay as recorded. Refused (409) while an action is still reserved or running: wait "
         "with shakerscan_hunt_query kind=activity until in_flight_actions is 0, then finish. A web "
-        "Hunt with open coverage and time left is refused (409) naming it: keep testing, or send "
-        "force with force_reason (both go into the debrief). Sending the same debrief again answers the record (already_terminal); a "
+        "Hunt with open coverage is refused (409) unless force with force_reason; while the "
+        "engine's own sweep runs, a finish is kept and applied when it ends. Sending the same debrief again answers the record (already_terminal); a "
         "different one after the Hunt ended is refused. Nothing can run in the Hunt afterwards.",
         {"hunt_id": {"type": "string", "format": "uuid"},
          "summary": {"type": "string", "description": "The debrief: what was tested, what was found and "

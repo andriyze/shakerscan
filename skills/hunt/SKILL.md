@@ -252,9 +252,9 @@ Choose the next smallest action that can answer or falsify a useful hypothesis:
   Bounds are also in bytes (`max_event_bytes`, `max_bytes_per_hunt` in the contract): one event
   holds at most 32,768 bytes of text and locus values together, and a Hunt 8 MiB, so keep
   hypotheses short and long material in evidence actions.
-- A web Hunt maps its target itself at start: the engine runs the crawl, content discovery, API
-  description and known-product probes and the passive template pack as this Hunt's own recorded
-  actions. Work from what they map: `GET /hunts/{hunt_id}/coverage` (or query `kind=coverage`)
+- A web Hunt maps and sweeps its target itself: the engine runs the crawl, content discovery, API
+  description and known-product probes, the passive template pack and then its deterministic
+  checks as this Hunt's own recorded actions (progress: `discovery.steps.sweep`, `sweep_checks`). Work from what they map: `GET /hunts/{hunt_id}/coverage` (or query `kind=coverage`)
   lists each known endpoint with the test classes nothing in this Hunt has run on it, and
   `class_guide` names the check that closes each (`sqli.verify`/`xss.verify` on parameters,
   default credentials on every login form and JSON login, authorization checks on object and admin
@@ -538,8 +538,11 @@ claim. Never describe a candidate as verified unless the returned proof contract
 Finish with `POST /hunts/{hunt_id}/finish`, providing a concise evidence-based summary and next
 actions. Cancel with `/cancel`; resume only when the server reports an awaiting-planner state.
 A web Hunt with open coverage and wall time and budget left is refused (409) with what is open:
-keep testing it. Finish anyway only with `force: true` and a `force_reason` saying why the rest
-stays untested; the debrief records the reason and the open coverage.
+keep testing it, or finish with `force: true` and a `force_reason`; the debrief records the reason
+and the open coverage. After discovery the engine also runs its own sweep (reading every mapped
+endpoint, default credentials on sign-ins, function-level authorization, `sqli.verify` and
+`xss.verify` on every parameter); its candidates and findings are this Hunt's. A finish while it
+runs is accepted and kept (`finish_deferred`); the Hunt finishes with your debrief when it ends.
 
 Stop when the objective is answered, remaining hypotheses are falsified, authorization fails or
 expires, the target changes or is deactivated, the user cancels, a circuit breaker freezes traffic,

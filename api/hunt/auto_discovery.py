@@ -40,6 +40,8 @@ from typing import Any
 import hashlib
 import uuid
 
+from .server_sweep import Refused, Sweep
+
 # Web and API Hunts map their target; other kinds have no HTTP surface to map.
 COVERAGE_TARGET_KINDS = frozenset({"web", "api"})
 
@@ -50,8 +52,8 @@ MAX_SIGNED_IN_CRAWLS = 2
 MAX_PROBES = 160
 # A probe answer within this share of the control's length (same status) is the control's page.
 CONTROL_LENGTH_TOLERANCE = 0.05
-# The whole discovery never outlives this (the slowest steps are bounded by their own walls).
-MAX_DISCOVERY_SECONDS = 45 * 60
+# Discovery and the sweep never outlive the Hunt's own wall; a Hunt without one gets this.
+MAX_DISCOVERY_SECONDS = 24 * 3600
 
 SPEC_PATHS: tuple[str, ...] = (
     "/openapi.json", "/swagger.json", "/v3/api-docs", "/v2/api-docs", "/api-docs", "/api-docs.json",
@@ -391,9 +393,29 @@ _DEFAULTS: dict[str, Callable[..., Awaitable[Any]]] = {}
 
 
 def configure_auto_discovery(*, execute: Executor, record: Recorder,
-                             load_run: Callable[[str], Awaitable[Mapping[str, Any] | None]]) -> None:
-    """Wire the Hunt capability call, the inventory write and the run read (composition root)."""
+                             load_run: Callable[[str], Awaitable[Mapping[str, Any] | None]],
+                             load_report: Callable[[str], Awaitable[Mapping[str, Any] | None]] | None = None,
+                             create_candidate: Callable[[str, Mapping[str, Any]], Awaitable[Any]] | None = None,
+                             finish: Callable[..., Awaitable[Any]] | None = None) -> None:
+    """Wire the Hunt capability call, the inventory write, the run read, and for the sweep the
+    coverage read, candidate recording and the deferred finish (composition root)."""
     _DEFAULTS.update(execute=execute, record=record, load_run=load_run)
+    for name, value in (("load_report", load_report), ("create_candidate", create_candidate), ("finish", finish)):
+        if value is not None:
+            _DEFAULTS[name] = value
+
+
+def sweep_running(hunt_id: str) -> bool:
+    """Whether this process is still running the Hunt's discovery or sweep."""
+    return bool((_STATE.get(str(hunt_id)) or {}).get("running"))
+
+
+def defer_finish(hunt_id: str, *, summary: str, next_actions: list[str], reason: str | None) -> dict[str, Any]:
+    """Record the planner's finish; the Hunt finishes with it when the server sweep ends."""
+    state = _STATE.setdefault(str(hunt_id), {})
+    state["deferred_finish"] = {"summary": summary, "next_actions": list(next_actions),
+                                "reason": (reason or "").strip() or None}
+    return dict(state["deferred_finish"])
 
 
 async def _not_configured(*_args: Any, **_kwargs: Any) -> Any:
@@ -415,11 +437,18 @@ class DiscoveryRunner:
     """Runs one Hunt's start-of-Hunt discovery through its own capability calls."""
 
     def __init__(self, hunt_id: str, *, execute: Executor | None = None, record: Recorder | None = None,
-                 load_run: Callable[[str], Awaitable[Mapping[str, Any] | None]] | None = None) -> None:
+                 load_run: Callable[[str], Awaitable[Mapping[str, Any] | None]] | None = None,
+                 load_report: Callable[[str], Awaitable[Mapping[str, Any] | None]] | None = None,
+                 create_candidate: Callable[[str, Mapping[str, Any]], Awaitable[Any]] | None = None,
+                 finish: Callable[..., Awaitable[Any]] | None = None) -> None:
         self.hunt_id = str(hunt_id)
         self._execute = execute or _DEFAULTS.get("execute") or _not_configured
         self._record = record or _DEFAULTS.get("record") or _not_configured
         self._load_run = load_run or _DEFAULTS.get("load_run") or _not_configured
+        self._load_report = load_report if load_report is not None else _DEFAULTS.get("load_report")
+        self._create_candidate = (create_candidate if create_candidate is not None
+                                  else _DEFAULTS.get("create_candidate"))
+        self._finish = finish if finish is not None else _DEFAULTS.get("finish")
         self.state = _STATE.setdefault(self.hunt_id, {})
 
     async def _call(self, capability: str, values: Mapping[str, Any], key: str) -> Any:
@@ -446,12 +475,67 @@ class DiscoveryRunner:
             self.state["probes"] = "queued"
         try:
             await asyncio.gather(self._long_steps(steps), self._probe_phase(run) if probes else _nothing())
+            await self._sweep()
         finally:
             self.state["running"] = False
             for step in [*steps, Step("probes", "http.request")]:
                 if self.state.get(step.name) in {"queued", "running"}:
                     self.state[step.name] = "not_run"
+            await self._finish_deferred()
         return self.state
+
+    async def _sweep(self) -> None:
+        """The engine's own checks over what discovery mapped (``server_sweep``)."""
+        if self._load_report is None or self._create_candidate is None:
+            return
+        run = await self._load_run(self.hunt_id)
+        if not _live(run):
+            return
+        report = await self._load_report(self.hunt_id)
+        if not report:
+            return
+
+        async def call(capability: str, values: Mapping[str, Any], key: str) -> Any:
+            try:
+                return await self._call(capability, values, key)
+            except _Refused as exc:
+                raise Refused(str(exc)) from exc
+
+        async def live() -> bool:
+            return _live(await self._load_run(self.hunt_id))
+
+        create = self._create_candidate
+        sweep = Sweep(call=call, create_candidate=lambda values: create(self.hunt_id, values),
+                      state=self.state, live=live)
+        try:
+            await sweep.run(run, report)
+        except asyncio.CancelledError:
+            if self.state.get("sweep") != "stopped":
+                raise
+            _note(self.state, "sweep stopped: the Hunt ended")
+
+    async def _finish_deferred(self) -> None:
+        """Finish the Hunt with the planner's debrief once the engine's own work has ended."""
+        deferred = self.state.get("deferred_finish")
+        if not deferred or self._finish is None:
+            return
+        for _attempt in range(60):  # actions still settling hold a finish; wait for them, bounded
+            run = await self._load_run(self.hunt_id)
+            if not run or run.get("completed_at") or str(run.get("status")) not in {
+                    "active", "awaiting_planner", "budget_exhausted"}:
+                return
+            try:
+                await self._finish(self.hunt_id, summary=deferred["summary"],
+                                   next_actions=deferred["next_actions"], force=True,
+                                   force_reason=deferred.get("reason") or
+                                   "the planner finished; the server sweep has ended")
+                self.state["deferred_finish"] = {**deferred, "finished": True}
+                return
+            except Exception as exc:  # noqa: BLE001 - retried while actions settle
+                if getattr(exc, "status_code", None) != 409:
+                    _note(self.state, f"deferred finish failed: {type(exc).__name__}")
+                    return
+            await asyncio.sleep(10)
 
     async def _long_steps(self, steps: Sequence[Step]) -> None:
         for step in steps:
@@ -596,6 +680,17 @@ def _spec_routes(specs: Sequence[tuple[str, Mapping[str, Any]]], *, origin: str)
     return out
 
 
+def _wall_left(run: Mapping[str, Any] | None) -> float:
+    """Seconds until the Hunt's own wall runs out (``MAX_DISCOVERY_SECONDS`` without one)."""
+    budget = _json((run or {}).get("budget_json"), {})
+    limit = budget.get("max_duration_seconds")
+    created = (run or {}).get("created_at")
+    if isinstance(limit, int) and not isinstance(limit, bool) and limit > 0 and hasattr(created, "timestamp"):
+        import time
+        return max(60.0, min(float(MAX_DISCOVERY_SECONDS), limit - (time.time() - created.timestamp())))
+    return float(MAX_DISCOVERY_SECONDS)
+
+
 def start(hunt_id: str, *, runner: DiscoveryRunner | None = None) -> asyncio.Task | None:
     """Schedule a started Hunt's discovery in the background. Never raises; returns the task."""
     if not enabled() or (runner is None and "execute" not in _DEFAULTS):
@@ -610,7 +705,8 @@ def start(hunt_id: str, *, runner: DiscoveryRunner | None = None) -> asyncio.Tas
 
     async def _run() -> None:
         try:
-            await asyncio.wait_for(worker.run(), MAX_DISCOVERY_SECONDS)
+            run = await worker._load_run(worker.hunt_id)
+            await asyncio.wait_for(worker.run(), _wall_left(run))
         except asyncio.CancelledError:
             raise
         except Exception as exc:  # noqa: BLE001 - discovery never breaks a Hunt
@@ -627,5 +723,5 @@ def start(hunt_id: str, *, runner: DiscoveryRunner | None = None) -> asyncio.Tas
 __all__ = [
     "CONTENT_WORDLISTS", "DiscoveryRunner", "configure_auto_discovery", "PRODUCTS", "SETTING", "Step", "answer_of",
     "discovery_state", "enabled", "plan_steps", "present", "probe_key_digests", "probe_paths",
-    "signed_in_slots", "start",
+    "signed_in_slots", "start", "sweep_running", "defer_finish",
 ]

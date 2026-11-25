@@ -6683,8 +6683,28 @@ async def _auto_discovery_run(hunt_id):
     return dict(row) if row else None
 
 
+async def _auto_discovery_report(hunt_id):
+    try:
+        from hunt.coverage_map import load_coverage
+    except ModuleNotFoundError:  # package import in host-side tests
+        from api.hunt.coverage_map import load_coverage
+    async with db_pool.acquire() as conn:
+        row = await conn.fetchrow("SELECT * FROM hunt_runs WHERE id=$1", uuid.UUID(str(hunt_id)))
+        return await load_coverage(conn, dict(row)) if row else None
+
+
+async def _auto_discovery_candidate(hunt_id, values):
+    return await create_hunt_candidate(hunt_id, HuntCandidateRequest(**dict(values)))
+
+
+async def _auto_discovery_finish(hunt_id, **values):
+    # The run service is composed further down; it exists by the time a sweep ends.
+    return await _hunt_run_service.finish(hunt_id, **values)
+
+
 configure_auto_discovery(execute=_auto_discovery_execute, record=_auto_discovery_record,
-                         load_run=_auto_discovery_run)
+                         load_run=_auto_discovery_run, load_report=_auto_discovery_report,
+                         create_candidate=_auto_discovery_candidate, finish=_auto_discovery_finish)
 
 
 @app.post("/scans/{scan_id}/cancel")

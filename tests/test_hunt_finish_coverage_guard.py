@@ -42,8 +42,6 @@ class _Connection:
         self.created_at = datetime.now(timezone.utc) - timedelta(minutes=created_minutes_ago)
         self.final_debrief = None
         self.completed_at = None
-        self.actions_since = 0
-        self.counted = []
 
     def row(self):
         return {"id": HUNT, "target_id": uuid.uuid4(), "device_target_id": None,
@@ -69,11 +67,6 @@ class _Connection:
 
     async def execute(self, query, *args):
         return "UPDATE 0"
-
-    async def fetchval(self, query, *args):
-        assert "FROM hunt_actions" in query and "started_at > $2" in query
-        self.counted.append(args[1])
-        return self.actions_since
 
     async def fetch(self, query, *args):
         return []
@@ -104,22 +97,13 @@ def test_finish_with_open_coverage_and_time_left_is_refused_and_names_what_is_op
 
 
 def test_forced_finish_records_the_reason_and_the_open_coverage_in_the_debrief():
-    from api.hunt import run_service
-    run_service._FIRST_COVERAGE_REFUSAL.clear()
     connection = _Connection()
     with pytest.raises(run_router.HTTPException) as no_reason:
         asyncio.run(_service(connection).finish(str(HUNT), summary="Done", next_actions=[], force=True))
     assert "force_reason" in no_reason.value.detail
-    with pytest.raises(run_router.HTTPException) as no_work:
-        asyncio.run(_service(connection).finish(
-            str(HUNT), summary="Done", next_actions=[], force=True,
-            force_reason="the remaining routes are out of this objective"))
-    assert "0 of the 2 pairs" in no_work.value.detail
-    run_service._FIRST_COVERAGE_REFUSAL[str(HUNT)] = OPEN["pairs_open"] + 4
     result = asyncio.run(_service(connection).finish(
         str(HUNT), summary="Done", next_actions=[], force=True,
         force_reason="the remaining routes are out of this objective"))
-    run_service._FIRST_COVERAGE_REFUSAL.clear()
     assert result["status"] == "completed"
     debrief = json.loads(connection.final_debrief)
     assert debrief["coverage"]["forced"] is True
@@ -168,23 +152,21 @@ def test_finish_request_accepts_force_fields():
         run_router.HuntFinishRequest(summary="s", force_reason="x" * 2001)
 
 
-def test_a_forced_finish_counts_pairs_closed_since_the_first_refusal():
-    from api.hunt import run_service
-    run_service._FIRST_COVERAGE_REFUSAL.clear()
-    many = build_coverage(actions=[], endpoints=[{"method": "GET", "path": f"/api/v1/item{index}/{index}",
-                                                  "param_shape": "q"} for index in range(20)])
-    fewer = build_coverage(actions=[], endpoints=[{"method": "GET", "path": f"/api/v1/item{index}/{index}",
-                                                   "param_shape": "q"} for index in range(12)])
+def test_a_finish_while_the_engine_sweep_runs_is_deferred_with_its_reason():
+    from api.hunt import auto_discovery
+    auto_discovery._STATE.clear()
+    auto_discovery._STATE[str(HUNT)] = {"running": True}
     connection = _Connection()
-    reason = "the rest is wordlist noise unrelated to the objective"
-    with pytest.raises(run_router.HTTPException) as first:
-        asyncio.run(_service(connection, many).finish(str(HUNT), summary="Done", next_actions=[],
-                                                      force=True, force_reason=reason))
-    assert "0 of the 40 pairs" in first.value.detail
-    assert run_service._FIRST_COVERAGE_REFUSAL[str(HUNT)] == many["pairs_open"]
-    closed = many["pairs_open"] - fewer["pairs_open"]
-    assert closed >= 40
-    result = asyncio.run(_service(connection, fewer).finish(str(HUNT), summary="Done", next_actions=[],
-                                                            force=True, force_reason=reason))
-    assert result["status"] == "completed" and json.loads(connection.final_debrief)["coverage"]["forced"]
-    run_service._FIRST_COVERAGE_REFUSAL.clear()
+    with pytest.raises(run_router.HTTPException) as no_reason:
+        asyncio.run(_service(connection).finish(str(HUNT), summary="Done", next_actions=[], force=True))
+    assert "force_reason" in no_reason.value.detail
+    answer = asyncio.run(_service(connection).finish(
+        str(HUNT), summary="Done", next_actions=["x"], force=True, force_reason="my part is done here"))
+    assert answer["finish_deferred"] is True and answer["status"] == "active"
+    assert connection.status == "active" and connection.final_debrief is None
+    assert auto_discovery._STATE[str(HUNT)]["deferred_finish"] == {
+        "summary": "Done", "next_actions": ["x"], "reason": "my part is done here"}
+    # An unforced finish is deferred too: the engine's work never ends early.
+    unforced = asyncio.run(_service(connection).finish(str(HUNT), summary="Done", next_actions=[]))
+    assert unforced["finish_deferred"] is True
+    auto_discovery._STATE.clear()

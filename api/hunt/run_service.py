@@ -29,8 +29,10 @@ from .hypothesis_release import release_hunt_claims
 from .permission_grants import settle_for_ended_hunt
 from .permission_store import pending_summary
 from .finding_verifications import HUNT_FINDINGS_QUERY
+from .auto_discovery import defer_finish, sweep_running
 from .coverage_map import (
     COVERAGE_TARGET_KINDS,
+    MIN_FORCE_REASON_CHARS,
     compact_open_coverage,
     coverage_page,
     debrief_coverage,
@@ -55,8 +57,6 @@ from .skills import (
 )
 
 logger = logging.getLogger(__name__)
-# Open pairs when each Hunt's finish was first refused for open coverage (process state; see finish).
-_FIRST_COVERAGE_REFUSAL: dict[str, int] = {}
 
 try:
     from runtime.hunt_http_exchange_contract import public_capture_references
@@ -1645,6 +1645,23 @@ class HuntRunService:
                         status_code=409,
                         detail=f"Hunt is already {row['status']}; it was not finished again",
                     )
+                if (str(row.get("target_kind") or "") in COVERAGE_TARGET_KINDS
+                        and sweep_running(str(run_uuid))):
+                    # The engine is still mapping and testing this target itself. The planner's
+                    # finish ends the planner's part: its debrief (and reason) is kept and the Hunt
+                    # finishes with it when the engine's sweep ends, never earlier.
+                    if force and len(str(force_reason or "").strip()) < MIN_FORCE_REASON_CHARS:
+                        raise HTTPException(status_code=409, detail=(
+                            "force=true needs force_reason: say in a sentence why the open coverage is "
+                            "left to the engine; it is recorded in the debrief"))
+                    deferred = defer_finish(str(run_uuid), summary=summary, next_actions=next_actions,
+                                            reason=force_reason)
+                    return {**public_hunt_run(row), "already_terminal": False, "finish_deferred": True,
+                            "deferred_finish": {"reason": deferred.get("reason"), "message": (
+                                "Recorded. The engine is still running its own discovery and checks on "
+                                "this target (GET /hunts/{id}/coverage shows them); the Hunt finishes "
+                                "with this debrief when they end. Nothing else is needed from you."
+                            ).replace("{id}", str(run_uuid))}}
                 in_flight = await connection.fetchrow(
                     """SELECT
                            EXISTS(SELECT 1 FROM hunt_actions
@@ -1674,18 +1691,8 @@ class HuntRunService:
                                   "until in_flight_actions is 0, then finish again"),
                     )
                 coverage = await self._finish_coverage(connection, dict(row))
-                first = _FIRST_COVERAGE_REFUSAL.get(str(run_uuid))
-                open_now = int((coverage or {}).get("pairs_open") or 0)
-                refusal = finish_guard(
-                    dict(row), coverage, force=force, force_reason=force_reason,
-                    closed_since_refusal=max(0, first - open_now) if first is not None else 0,
-                    open_at_refusal=first,
-                )
+                refusal = finish_guard(dict(row), coverage, force=force, force_reason=force_reason)
                 if refusal:
-                    # Process state: a restarted API counts the work from the next refusal.
-                    if len(_FIRST_COVERAGE_REFUSAL) > 4096:
-                        _FIRST_COVERAGE_REFUSAL.clear()
-                    _FIRST_COVERAGE_REFUSAL.setdefault(str(run_uuid), open_now)
                     raise HTTPException(status_code=409, detail=refusal)
                 if coverage is not None:
                     debrief["coverage"] = debrief_coverage(
