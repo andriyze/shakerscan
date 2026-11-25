@@ -108,6 +108,10 @@ ALLOWED_PLAIN_DIGESTS = {
     # The verified default-credential finding's fingerprint: the Scan's templated finding identity.
     ("api/hunt/default_credential_proof.py", "finding_record"): "finding",
     ("api/hunt/injection_proof.py", "finding_record"): "finding",
+    # request.verify: probe markers from the action id, its seed, and the finding identity.
+    ("api/capabilities/request_verify.py", "_marker"): "request",
+    ("api/hunt/request_verification.py", "prepare_operation"): "request",
+    ("api/hunt/request_verification.py", "finding_records"): "finding",
     ("api/hunt/injection_proof.py", "run_proof"): "canonical",
     # recon_active: the response digest only compares two answers inside one action and is
     # never emitted (leads carry status and length); the list digest is of our own bundled file.
