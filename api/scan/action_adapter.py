@@ -5725,8 +5725,11 @@ class DatabaseNeutralScanActionDispatcher:
         # it, so a resumed slice counts the request too.
         reflection_spent: dict[str, dict[str, int]] = {}
 
-        async def reflection_precheck(url: str, body_request: Mapping[str, Any]) -> bool | None:
-            """Whether any input reflects a canary; None when the check got no answer."""
+        async def reflection_precheck(
+            url: str, body_request: Mapping[str, Any],
+        ) -> bool | str | None:
+            """Whether any input reflects a canary; None when the check got no answer;
+            ``xss_reflection.NOT_A_PAGE`` when it reflects into a response no browser renders."""
             nonlocal reflection_transport
             if reflection_transport is None:
                 reflection_transport = self._scan_replay_transport(action, private=True)
@@ -5757,7 +5760,10 @@ class DatabaseNeutralScanActionDispatcher:
                 return None
             if result.error_code:
                 return None
-            return xss_reflection.reflects(result.status_code, result.response_body, canary)
+            reflected = xss_reflection.reflects(result.status_code, result.response_body, canary)
+            if reflected and xss_reflection.not_a_page(result.response_headers):
+                return xss_reflection.NOT_A_PAGE
+            return reflected
 
         try:
             while True:
@@ -5968,7 +5974,7 @@ class DatabaseNeutralScanActionDispatcher:
                         for name, amount in spent.items():
                             consumed[name] = consumed.get(name, 0) + amount
                         reflection_spent[attempt_id] = spent
-                        if verdict is False:
+                        if verdict is False or verdict == xss_reflection.NOT_A_PAGE:
                             attempted += 1
                             attempt_log.append((candidate_id, retry_round, True, False))
                             settled = {
@@ -5976,7 +5982,10 @@ class DatabaseNeutralScanActionDispatcher:
                                 "candidate_id": candidate_id, "family": family,
                                 "status": "success", "proof_state": "not_proven",
                                 "verdict": "negative",
-                                "negative_reason": xss_reflection.NO_REFLECTION,
+                                "negative_reason": (
+                                    xss_reflection.NO_REFLECTION if verdict is False
+                                    else xss_reflection.NOT_A_PAGE
+                                ),
                                 "budget_consumed": spent,
                             }
                             observations.append(settled)
