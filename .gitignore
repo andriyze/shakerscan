@@ -94,4 +94,12 @@ client/src/shakerscan/_hunt_approve.py
 client/src/shakerscan/_person_decision.py
 client/src/shakerscan/_person_decision_routes.py
 client/src/shakerscan/_redirect_hint.py
+client/src/shakerscan/_api_cli.py
+client/src/shakerscan/_scan_cli.py
+client/src/shakerscan/_mcp_stdio.py
+client/src/shakerscan/_mcp_ssh_stream.py
+client/src/shakerscan/_api_stream.py
+client/src/shakerscan/_mcp_agent_tools.py
+client/src/shakerscan/_agent_catalog.py
+client/src/shakerscan/_catalog_routes.py
 client/src/shakerscan/_build.json

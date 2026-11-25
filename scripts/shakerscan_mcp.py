@@ -11,6 +11,8 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import importlib
+import importlib.util
 import ipaddress
 import json
 import math
@@ -3170,11 +3172,32 @@ def _call_posture_check(transport: ArsenalClient, path: str, arguments: dict[str
 
 def _agent_tools():
     """The catalog and the grouped tools beyond Hunt (scripts/mcp_agent_tools.py)."""
+    return _sibling("mcp_agent_tools")
+
+
+def _sibling(name: str) -> Any:
+    """A module that sits beside this file in scripts/: imported by its own name (scanner.sh puts
+    scripts/ on the path; the client registers its vendored copies under these names), else as
+    ``scripts.<name>`` from a checkout, else loaded from the file beside this one (an adapter
+    loaded by path, as the end-to-end harness does)."""
+    for candidate in (name, f"scripts.{name}"):
+        try:
+            return importlib.import_module(candidate)
+        except ModuleNotFoundError as exc:
+            if exc.name not in {name, "scripts", f"scripts.{name}"}:
+                raise
+    path = Path(__file__).resolve().with_name(f"{name}.py")
+    spec = importlib.util.spec_from_file_location(name, path)
+    if spec is None or spec.loader is None or not path.is_file():
+        raise ModuleNotFoundError(f"No module named {name!r}", name=name)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
     try:
-        import mcp_agent_tools
-    except ModuleNotFoundError:
-        from scripts import mcp_agent_tools
-    return mcp_agent_tools
+        spec.loader.exec_module(module)
+    except BaseException:
+        sys.modules.pop(name, None)
+        raise
+    return module
 
 
 class PublicClient:

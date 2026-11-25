@@ -10,6 +10,7 @@ import shutil
 import stat
 import subprocess
 import sys
+import textwrap
 import urllib.error
 from pathlib import Path
 
@@ -107,6 +108,10 @@ def _sibling_imports(script: Path) -> set[str]:
         names = [alias.name for alias in node.names] if isinstance(node, ast.Import) else []
         if isinstance(node, ast.ImportFrom) and node.module and not node.level:
             names = [node.module]
+        # _sibling("name"): the lazy import the MCP adapter, its grouped tools and the catalog use.
+        if (isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "_sibling"
+                and node.args and isinstance(node.args[0], ast.Constant)):
+            names = [str(node.args[0].value)]
         for name in names:
             name = name.removeprefix("scripts.")
             if name in siblings:
@@ -124,6 +129,54 @@ def test_every_helper_a_vendored_script_imports_is_vendored_too():
         assert not missing, f"scripts/{name}.py imports {sorted(missing)}, which the client does not vendor"
     loader = {**_vendored.RUNTIME_SCRIPTS, **_vendored.RUNTIME_HELPERS}
     assert {filename: module + ".py" for module, filename in loader.items()} == hatch_build.VENDORED
+
+
+def test_every_module_the_mcp_adapter_reaches_is_vendored_installed_and_ignored():
+    """The adapter's imports, followed through every scripts/ module they reach: each is vendored
+    into the client, downloaded by the installer (the hosted copy too) and, as a vendored copy in
+    client/src, ignored by git. PR #543 added the catalog and the grouped tools behind lazy imports
+    that only an adapter loaded by path (the end-to-end harness) reached."""
+    scripts = ROOT / "scripts"
+    reached, todo = set(), ["shakerscan_mcp"]
+    while todo:
+        name = todo.pop()
+        if name not in reached:
+            reached.add(name)
+            todo += sorted(_sibling_imports(scripts / f"{name}.py"))
+    assert {"mcp_agent_tools", "agent_catalog", "catalog_routes", "person_decision_routes"} <= reached
+    installer = (ROOT / "install" / "index.sh").read_text(encoding="utf-8")
+    ignored = (ROOT / ".gitignore").read_text(encoding="utf-8").splitlines()
+    assert (ROOT / "install" / "index.html").read_text(encoding="utf-8") == installer
+    for name in sorted(reached):
+        assert f"{name}.py" in hatch_build.VENDORED, f"scripts/{name}.py is not vendored into the client"
+        assert f'download "$REPO_RAW_BASE/scripts/{name}.py"' in installer, f"the installer omits scripts/{name}.py"
+        assert f"client/src/shakerscan/{hatch_build.VENDORED[name + '.py']}" in ignored, f"_{name}.py is not ignored"
+
+
+def test_an_adapter_loaded_by_path_reaches_its_sibling_modules(tmp_path):
+    """The end-to-end harness loads scripts/shakerscan_mcp.py by path, with neither scripts/ nor the
+    repository on sys.path: the catalog and the grouped tools still load from beside it."""
+    copy = tmp_path / "runtime" / "scripts"
+    copy.mkdir(parents=True)
+    for path in (ROOT / "scripts").glob("*.py"):
+        (copy / path.name).write_bytes(path.read_bytes())
+    program = textwrap.dedent(f"""
+        import importlib.util, json, sys
+        spec = importlib.util.spec_from_file_location("adapter_by_path", {str(copy / "shakerscan_mcp.py")!r})
+        mcp = importlib.util.module_from_spec(spec); sys.modules["adapter_by_path"] = mcp
+        spec.loader.exec_module(mcp)
+        client = mcp.ArsenalClient("http://127.0.0.1:8080")
+        client.request_json = lambda method, path, payload=None: {{}}
+        names = [tool["name"] for tool in mcp._agent_tools().descriptors()]
+        answer = client.call_tool("shakerscan_catalog", {{"section": "cli"}})["structuredContent"]
+        print(json.dumps({{"names": names, "commands": answer["total"]}}))
+    """)
+    result = subprocess.run([sys.executable, "-I", "-c", program], cwd=tmp_path, capture_output=True, text=True,
+                            timeout=60, check=False)
+    assert result.returncode == 0, result.stderr
+    loaded = json.loads(result.stdout)
+    assert "shakerscan_catalog" in loaded["names"] and "shakerscan_scans" in loaded["names"]
+    assert loaded["commands"] > 10
 
 
 def test_the_installed_client_layout_starts_mcp_and_resolves_its_helpers(tmp_path):
