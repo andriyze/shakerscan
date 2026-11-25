@@ -29,6 +29,9 @@ def test_the_published_checks_are_exactly_the_ones_the_verifiers_implement():
     assert spec.required_approval == "active_testing" and spec.risk_tier == "active"
     assert spec.input_schema["properties"]["check"]["enum"] == list(CHECKS)
     assert set(spec.input_schema["required"]) == {"check", "path"}
+    # A short action: it never waits for one of the Hunt's two long-action slots.
+    from api.hunt.agent_job_concurrency import long_action
+    assert not long_action(CAPABILITY)
     # Every proof class a request check can produce has a finding.
     from api.capabilities.request_verify import PROOF_CONTRACTS
     assert set(PROOF_CONTRACTS) - {"jwt"} <= set(REQUEST_FINDINGS) | {"jwt"}

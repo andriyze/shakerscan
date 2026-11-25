@@ -1558,7 +1558,7 @@ CAPABILITY_REGISTRY = CapabilityRegistry(
             ), required=("check", "path")),
             "request-proof/v1",
             ("request_proof", "injection_proof", "nosqli_proof", "tool_receipt"),
-            default_timeout_ms=120_000,
+            default_timeout_ms=60_000,
             hunt_executor="worker_http",
             credential_transport="exact_origin", credential_interruption="cooperative",
         ),
