@@ -30,10 +30,10 @@ def test_compiler_emits_a_local_injection_batch_when_the_family_is_named():
     from api.scan.action_plan import ScanActionPlanCompiler
     from tests.test_scan_action_compiler import _execution, _target as _compiler_target
 
-    def capabilities(include):
+    def capabilities(include, exclude=()):
         plan = ScanActionPlanCompiler().compile(
             scan_id="60000000-0000-4000-8000-000000000001",
-            execution_plan=_execution(include=include, active=True),
+            execution_plan=_execution(include=include, exclude=exclude, active=True),
             target_binding=_compiler_target(), action_scope="full",
         )
         return plan, {action.capability_name for action in plan.actions}
@@ -47,6 +47,11 @@ def test_compiler_emits_a_local_injection_batch_when_the_family_is_named():
     assert "state_changing_requests" not in action.requested_budget
     _plan, others = capabilities(("xss", "sqli"))
     assert "injection.verify_batch" not in others
+    # A plan that names no families (a legacy plan without resolved families enables every family
+    # it does not exclude) never runs it: it is opt-in.
+    _plan, unnamed = capabilities((), exclude=("nuclei_passive", "nuclei_active"))
+    assert "injection.verify_batch" not in unnamed
+    assert "nosqli.verify_batch" in unnamed
 
 
 def _proof(injection_class, contract, **changes):
