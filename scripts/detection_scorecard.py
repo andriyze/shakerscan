@@ -7,7 +7,8 @@ expected entries were proven, how many were detected without proof, the verified
 high and critical findings, and the families a Scan attempted.
 
 With ``--baseline`` it compares the same targets in an earlier run and exits 1 when proven recall
-fell on any of them, or a target the baseline scored is missing: a detection or budget change is
+fell on any of them, an entry the baseline proved is no longer proven (even when another took its
+place), or a target the baseline scored is missing: a detection or budget change is
 judged by this number, before and after, on the same targets and profile.
 
 Usage:
@@ -74,12 +75,15 @@ def compare(
         if after["error"] and not before["error"]:
             regressions.append(f"{name}: the run failed ({after['error']})")
             continue
+        lost = sorted(set(after["missed"]) - set(before["missed"]))
         if after["proven"] < before["proven"]:
-            lost = sorted(set(after["missed"]) - set(before["missed"]))
             regressions.append(
                 f"{name}: proven fell from {before['proven']} to {after['proven']} of "
                 f"{after['expected']}" + (f" (now missed: {', '.join(lost)})" if lost else "")
             )
+        elif lost:
+            # The same count can hide a swap: an entry the baseline proved is missed now.
+            regressions.append(f"{name}: no longer proven: {', '.join(lost)}")
     return regressions
 
 
