@@ -124,6 +124,10 @@ _TIME_SCREEN_MS = 750
 _LOOPBACK_HOSTS = ("127.0.0.1", "localhost", "[::1]")
 _SSRF_CHUNK_BYTES = 32
 _SSRF_MINIMUM_PAGE_BYTES = 256
+# The front page is read for at most this many chunks, spread over its first 200 kB, each searched
+# for in two responses of up to 2 MiB: a bounded cost whatever the target serves.
+_SSRF_SAMPLED_CHUNKS = 256
+_SSRF_MAXIMUM_CHUNKS = 64
 _XML_TYPES = ("application/xml", "text/xml", "+xml")
 
 
@@ -177,6 +181,25 @@ def _pair(control: ReplayTransportResult, payload: ReplayTransportResult) -> dic
         "control_response_sha256": keyed_body_digest(control.response_body),
         "payload_response_sha256": keyed_body_digest(payload.response_body),
     }
+
+
+def _ssrf_reference_chunks(page: bytes, *others: bytes) -> list[bytes]:
+    """Chunks of the front page that none of ``others`` contains, at most 64.
+
+    Sampled evenly from the page's first 200 kB rather than every chunk of it: each is searched
+    for in responses of up to 2 MiB, and a target chooses both sizes.
+    """
+    page = page[:200_000]
+    offsets = range(0, len(page) - _SSRF_CHUNK_BYTES + 1, _SSRF_CHUNK_BYTES)
+    step = max(1, math.ceil(len(offsets) / _SSRF_SAMPLED_CHUNKS))
+    chunks: list[bytes] = []
+    for offset in offsets[::step]:
+        chunk = page[offset:offset + _SSRF_CHUNK_BYTES]
+        if all(chunk not in other for other in others):
+            chunks.append(chunk)
+            if len(chunks) >= _SSRF_MAXIMUM_CHUNKS:
+                break
+    return chunks
 
 
 Send = Callable[[ReplayRequest], Awaitable[ReplayTransportResult]]
@@ -313,6 +336,10 @@ class InjectionVerifyAdapter:
     async def _path_traversal(
         self, send: Send, baseline: ReplayTransportResult, left: Callable[[], int],
     ) -> dict[str, Any]:
+        if self.writes or self.candidate.get("request_class") == "confirmed_mutation":
+            # Read-only: a request that writes might write to the file it names (an upload's
+            # name, a save path), and a traversal there would name /etc/passwd.
+            return self._observation("path_traversal", inconclusive_reason="not_a_read")
         if _signature(baseline.response_body) is not None:
             # The page already shows such a file (documentation, a tutorial): no differential.
             return self._observation("path_traversal", inconclusive_reason="marker_in_baseline")
@@ -523,15 +550,9 @@ class InjectionVerifyAdapter:
             or len(front.response_body) < _SSRF_MINIMUM_PAGE_BYTES
         ):
             return self._observation("ssrf", inconclusive_reason="no_reference_page")
-        page = front.response_body[:200_000]
-        chunks = [
-            page[offset:offset + _SSRF_CHUNK_BYTES]
-            for offset in range(0, len(page) - _SSRF_CHUNK_BYTES + 1, _SSRF_CHUNK_BYTES)
-        ]
-        chunks = [
-            chunk for chunk in chunks
-            if chunk not in absent.response_body and chunk not in baseline.response_body
-        ][:64]
+        chunks = _ssrf_reference_chunks(
+            front.response_body, absent.response_body, baseline.response_body,
+        )
         if len(chunks) < 3:
             return self._observation("ssrf", inconclusive_reason="marker_in_baseline")
 

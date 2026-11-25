@@ -476,3 +476,58 @@ def test_ssrf_is_not_tried_through_a_request_that_writes():
     )
     assert result.observations[0]["inconclusive_reason"] == "not_a_read"
     assert transport.sent == 1  # the baseline only
+
+
+@pytest.mark.parametrize("method, request_class", [
+    ("POST", "confirmed_mutation"),
+    # A GET the crawl marked as a mutation (a delete link): its file name is not read either.
+    ("GET", "confirmed_mutation"),
+])
+def test_path_traversal_is_never_sent_through_a_request_that_writes(method, request_class):
+    """An upload's name or a save path given /etc/passwd could write it: traversal reads only."""
+    sent: list[str] = []
+
+    class Writer:
+        async def send(self, request, **_kwargs):
+            sent.append(request.body.decode() + _value(request, "file"))
+            return _answer(request, PASSWD)
+
+    if method == "POST":
+        request = _request(method="POST", url="https://app.example.test/save",
+                           body=json.dumps({"file": "notes.txt"}), content_type="application/json")
+        candidate = _candidate(method="POST", field_path="file", request_class=request_class)
+    else:
+        request = _request(url="https://app.example.test/save?file=notes.txt")
+        candidate = _candidate(parameter_name="file", request_class=request_class)
+    result = _run(request, candidate, Writer(), classes=("path_traversal",))
+    assert result.observations[0]["inconclusive_reason"] == "not_a_read"
+    assert len(sent) == 1  # the baseline only
+    assert not any("passwd" in value or "win.ini" in value for value in sent)
+
+
+def test_request_forgery_reference_chunks_are_sampled_from_a_bounded_page(monkeypatch):
+    """A hostile front page (2 MiB, no chunk in common with its 404) costs a bounded search."""
+    from api.capabilities import injection_verify
+
+    huge = bytes(range(256)) * 8192  # 2 MiB of distinct-looking chunks
+    searched: list[int] = []
+    original = injection_verify._ssrf_reference_chunks
+
+    def counting(page, *others):
+        chunks = original(page, *others)
+        searched.append(len(chunks))
+        return chunks
+
+    monkeypatch.setattr(injection_verify, "_ssrf_reference_chunks", counting)
+
+    def respond(request, value):
+        if urllib.parse.urlsplit(request.url).path == "/":
+            return _answer(request, huge)
+        return _answer(request, b"<p>preview unavailable</p>")
+
+    result = _run(
+        _request(url="https://app.example.test/render?q=https://example.org/a.png"),
+        _candidate(), Recorder(respond), classes=("ssrf",),
+    )
+    assert searched and searched[0] <= injection_verify._SSRF_MAXIMUM_CHUNKS
+    assert result.observations[0]["proof_state"] == "not_proven"
