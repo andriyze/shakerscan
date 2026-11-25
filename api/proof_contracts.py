@@ -19,6 +19,7 @@ CANONICAL_PROOF_CONTRACTS: frozenset[str] = frozenset({
     "injection_command_differential/v1",
     "injection_command_time_differential/v1",
     "injection_path_traversal_differential/v1",
+    "injection_ssrf_differential/v1",
     "injection_template_differential/v1",
     "injection_xxe_differential/v1",
     "nosqli_operator_differential/v1",

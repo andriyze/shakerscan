@@ -461,7 +461,7 @@ CHECK_REGISTRY: tuple[CheckFamilySpec, ...] = (
         # path_traversal and command_injection stay aliases of the planned lfi and rce names.
         aliases=("ssti", "template_injection", "xxe", "server-injection"),
         finding_tools=("injection_verify",),
-        finding_cwes=("CWE-1336", "CWE-22", "CWE-78", "CWE-611"),
+        finding_cwes=("CWE-1336", "CWE-22", "CWE-78", "CWE-611", "CWE-918"),
         finding_title_markers=(
             "template injection", "path traversal", "command injection", "xml external entity",
         ),
@@ -478,7 +478,8 @@ CHECK_REGISTRY: tuple[CheckFamilySpec, ...] = (
         runnable=False,
         description=(
             "Deterministic proof of server-side template injection, path traversal, command "
-            "injection and XML external entity injection over query, path and body candidates."
+            "injection, XML external entity injection and in-band request forgery over query, "
+            "path and body candidates."
         ),
     ),
     CheckFamilySpec(
