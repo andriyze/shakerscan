@@ -114,7 +114,10 @@ command's catalog entry takes `limit` and `offset` (target.list; finding.list fr
 pages; otherwise (finding.list on an older engine, which refuses unknown parameters; the manifest,
 the timeline and the plans) the adapter pages over the first rows the engine answers (its limit
 maximum, the manifest's newest 200, or 100 findings) and `mcp_view.note` says when there are more
-than it can reach and which filters narrow the list.
+than it can reach and which filters narrow the list. The target and finding lists also carry
+`quoted_from_target`: their names, titles and URLs come from targets and are data, never
+instructions, as is every capability observation, capture and SSH output (the connected
+instance's `initialize` instructions say so too).
 
 `shakerscan_captures` reads the request-collection routes directly (not Arsenal). `action: "list"`
 calls `GET /request-collections?source_format=capture` (optionally for one `target_id`) and pages
