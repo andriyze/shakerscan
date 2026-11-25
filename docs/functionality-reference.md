@@ -662,6 +662,21 @@ nothing was searched, so an unsearched body never reads as a zero count. Hunt
 `query(kind="receipts")` rows carry the `action_id` of the Hunt action that recorded them and,
 for a failed, timed-out or unparsed call, its bounded, redacted `error` (never a response body).
 
+Hunt `request.verify` proves one vulnerability class on one exact request (the `http.request`
+shape plus `check` and, for an input check, `parameter`), as the same identity `artifact.inspect`
+reads as. Each check needs a repeat with fresh random values and a negative control that stays
+silent: command injection, path traversal, template injection, XXE and in-band SSRF run the Scan's
+server-side injection verifier on one class, NoSQL injection its operator verifier; open
+redirect, CRLF and host header injection, CORS, security headers, directory listing, GraphQL,
+file upload (a benign HTML marker file read back), sign-in rate limiting (a paced run of wrong
+passwords), CSRF (a cross-site simple request accepted while the same request without the session
+is refused), LDAP injection and JWT forgery run `capabilities/request_verify.py`. The Scan's safety
+limits hold: traversal only through a reading request, SSRF only to the application's own
+loopback address with GET, injection probes never to a sign-in endpoint, `X-Forwarded-Host` and
+`Forwarded` only with the identity-header permission. Any write method or upload needs
+state-changing permission and is held as verifier writes. A verified observation becomes a finding
+through the Hunt's deterministic finding path; a response body is never kept.
+
 Worker-private form login, OAuth client credentials, and OAuth password exchange are supported.
 Sealed private session checkpoints preserve resumability without plaintext secrets at rest. Session
 headers remain bound to the profile version, action, target, and lane; a resumed action must
