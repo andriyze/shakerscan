@@ -14,7 +14,7 @@ def _no_pacing(monkeypatch):
     monkeypatch.setattr(server_sweep, "DEFAULT_CREDENTIAL_PACE_SECONDS", 0)
 
 
-ALL = ["http.request", "candidate.verify", "authz.verify", "sqli.verify", "xss.verify",
+ALL = ["http.request", "javascript.analyze", "candidate.verify", "authz.verify", "sqli.verify", "xss.verify",
        "web.crawl", "web.content_discover"]
 
 
@@ -193,3 +193,61 @@ def test_the_runner_sweeps_after_discovery_and_finishes_with_the_planners_debrie
     sweep_calls = [key for _c, _v, key in engine.calls if key.startswith("auto-sweep:")]
     assert sweep_calls  # the sweep ran after discovery
     auto_discovery._STATE.clear()
+
+
+class _RoundEngine(_Engine):
+    async def call(self, capability, values, key):
+        if capability == "http.request" and values.get("method") == "GET":
+            self.calls.append((capability, dict(values), key))
+            path, who = values["path"], values.get("as_principal")
+            if path == "/":
+                return {"action_id": "root", "action_result": {"observations": [{"response": {
+                    "status": 200, "body_sample": "", "html": {"links": ["/new-page", "//evil.test/x", "/app.js"]}}}]}}
+            if path == "/hub/api/users/1":
+                if who is None:
+                    return _answer(401, '{"error":"Unauthorized"}', action="anon")
+                return _answer(200, '{"id":1,"password_hash":"$2b$12$abcdefghijk"}', action=f"as-{who}")
+            return _answer(404, "Not Found")
+        if capability == "javascript.analyze":
+            self.calls.append((capability, dict(values), key))
+            return {"action_id": "js", "action_result": {"observations": [
+                {"kind": "javascript_analysis", "routes": ["/api/hidden", "https://x.test/y", "/api/[withheld:1]"]}]}}
+        return await super().call(capability, values, key)
+
+
+def test_rounds_record_what_reads_reveal_read_signed_in_and_never_repeat_a_check():
+    engine = _RoundEngine()
+    state = {}
+    recorded = []
+    reports = [
+        {"endpoints": 3, "open": [
+            {"endpoint": "GET /", "untested": ["review"], "params": []},
+            {"endpoint": "GET /app.js", "untested": ["review"], "params": []},
+            {"endpoint": "GET /hub/api/users/{id}", "untested": ["object_authz", "unauthenticated_api", "sqli"],
+             "params": ["fields"]}]},
+    ]
+
+    async def load_report():
+        # The second read lists what the first round recorded, plus everything still open.
+        return {"endpoints": 5, "open": reports[0]["open"] + [
+            {"endpoint": "GET /new-page", "untested": ["review"], "params": []},
+            {"endpoint": "GET /api/hidden", "untested": ["review", "unauthenticated_api"], "params": []}]}
+
+    async def record(worklist):
+        recorded.append(list(worklist))
+
+    asyncio.run(Sweep(call=engine.call, create_candidate=engine.create, state=state, live=engine.live)
+                .run(_run(), reports[0], load_report=load_report, record=record))
+    assert recorded and set(recorded[0]) == {"GET /new-page", "GET /app.js", "GET /api/hidden"}
+    reads = [(v["path"], v.get("as_principal")) for cap, v, _ in engine.calls if cap == "http.request"
+             and v.get("method") == "GET"]
+    assert ("/hub/api/users/1", None) in reads and ("/hub/api/users/1", "primary") in reads
+    assert ("/hub/api/users/1", "secondary") in reads and ("/new-page", None) in reads
+    assert reads.count(("/", None)) == 1  # never repeated across rounds
+    exposure = [c for c in engine.candidates if c["locus"].get("principal") == "primary"]
+    assert exposure and exposure[0]["evidence_refs"] == ["action:as-primary"]
+    sqli = [v for cap, v, _ in engine.calls if cap == "sqli.verify"]
+    assert sqli == [{"path": "/hub/api/users/1?fields=1", "as_principal": "primary"}]
+    stats = state["sweep_stats"]
+    assert stats["rounds"] == 2 and stats["pairs_tested"] >= 5 and stats["endpoints_seen"] == 3
+    assert "seconds" in stats and state["sweep"] == "done"

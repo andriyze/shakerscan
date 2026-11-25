@@ -31,6 +31,7 @@ from collections.abc import Awaitable, Callable, Mapping, Sequence
 import hashlib
 import json
 import re
+import time
 from typing import Any
 
 KEY_PREFIX = "auto-sweep"
@@ -42,6 +43,9 @@ MAX_READS = 800
 MAX_INJECTION_TARGETS = 400
 MAX_FIELDS_PER_BODY = 4
 MAX_AUTHZ_ROUTES = 50
+MAX_SCRIPTS = 40
+# Rounds of read-record-test; each round only tests what earlier rounds did not.
+MAX_ROUNDS = 8
 DEFAULT_CREDENTIAL_PACE_SECONDS = 2.2
 DEFAULT_PAIR_IDS = tuple(f"dc-{index:02d}" for index in range(1, 21))
 _SECRET_TEXT = re.compile(
@@ -141,7 +145,15 @@ def _default_credential_request(path: str, user: str, secret: str, pair: str, *,
 
 
 class Sweep:
-    """One Hunt's sweep. ``call`` runs one capability call; ``create_candidate`` records one."""
+    """One Hunt's sweep. ``call`` runs one capability call; ``create_candidate`` records one.
+
+    The sweep runs in rounds until a round finds nothing new to test: each round reads the
+    coverage report (``load_report``), runs every check no earlier round ran on each endpoint, and
+    records what its reads revealed (same-origin links, routes in JavaScript) into the inventory
+    (``record``), which the next round's report lists. Every pair it tests is remembered, so a
+    round never repeats a check; its wall, rounds, endpoints and pairs are reported in
+    ``sweep_stats``.
+    """
 
     def __init__(self, *, call: Call, create_candidate: CreateCandidate, state: dict[str, Any],
                  live: Callable[[], Awaitable[bool]]) -> None:
@@ -150,10 +162,24 @@ class Sweep:
         self.state = state
         self._live = live
         self.counts: dict[str, int] = {}
+        self.tested: set[tuple[str, str]] = set()  # pairs a sweep check ran on
+        self.considered: set[tuple[str, str]] = set()  # pairs a round has looked at (never repeated)
+        self.logins: dict[str, tuple[str, str, str, bool]] = {}
+        self.logins_tried: set[str] = set()
+        self.signed_in_only: set[str] = set()
+        self.seen: set[str] = set()
+        self.js_done: set[str] = set()
+        self.started = time.monotonic()
 
     def _count(self, name: str) -> None:
         self.counts[name] = self.counts.get(name, 0) + 1
         self.state["sweep_counts"] = dict(self.counts)
+
+    def _stats(self, **extra: Any) -> None:
+        stats = dict(self.state.get("sweep_stats") or {})
+        stats.update(extra, seconds=int(time.monotonic() - self.started), pairs_tested=len(self.tested),
+                     endpoints_seen=len(self.seen))
+        self.state["sweep_stats"] = stats
 
     def _note(self, text: str) -> None:
         notes = self.state.setdefault("notes", [])
@@ -188,30 +214,74 @@ class Sweep:
         await self._safe("candidate.verify", {"candidate_id": candidate_id},
                          sweep_key("verify", candidate_id))
 
-    async def run(self, run: Mapping[str, Any], report: Mapping[str, Any]) -> None:
+    async def run(self, run: Mapping[str, Any], report: Mapping[str, Any] | None = None, *,
+                  load_report: Callable[[], Awaitable[Mapping[str, Any] | None]] | None = None,
+                  record: Callable[[list[str]], Awaitable[Any]] | None = None) -> None:
         policy = _json(run.get("policy_json"))
         allowed = {str(name) for name in policy.get("allowed_capabilities") or ()}
         writes = bool(policy.get("allow_state_changing_http"))
-        items = [item for item in report.get("open") or () if isinstance(item, Mapping)]
+        slots = _signed_in_slots(run)
         self.state["sweep"] = "running"
+        rounds = 0
         try:
-            logins: list[tuple[str, str, str, bool]] = []
-            if "http.request" in allowed:
-                logins = await self._read_all(items)
-            if "http.request" in allowed and writes and logins:
-                await self._default_credentials(logins)
-            if "authz.verify" in allowed and _two_principals(run):
-                await self._function_authz(items)
-            await self._injection(items, allowed=allowed, writes=writes)
+            while rounds < MAX_ROUNDS:
+                current = report if (rounds == 0 and report is not None) else (
+                    await load_report() if load_report is not None else None)
+                if current is None:
+                    break
+                items = [item for item in current.get("open") or () if isinstance(item, Mapping)]
+                fresh = [item for item in items if self._untested(item)]
+                if not fresh:
+                    break
+                rounds += 1
+                self._stats(rounds=rounds, endpoints_known=int(current.get("endpoints") or len(items)))
+                found: list[str] = []
+                if "http.request" in allowed:
+                    found += await self._read_all(fresh, slots=slots)
+                if "javascript.analyze" in allowed:
+                    found += await self._javascript(items)
+                if "http.request" in allowed and writes:
+                    await self._default_credentials()
+                if "authz.verify" in allowed and {"primary", "secondary"} <= set(slots):
+                    await self._function_authz(fresh)
+                await self._injection(fresh, allowed=allowed, writes=writes, slots=slots)
+                handled = {"review", "exposure", "unauthenticated_api", "default_credentials"}
+                if {"primary", "secondary"} <= set(slots):
+                    handled.add("function_authz")
+                handled |= {klass for capability, klass in (("sqli.verify", "sqli"), ("xss.verify", "xss"))
+                            if capability in allowed}
+                for item in fresh:
+                    for klass in item.get("untested") or ():
+                        pair = (str(item.get("endpoint")), str(klass))
+                        self.considered.add(pair)
+                        if klass in handled and (klass not in {"sqli", "xss"} or item.get("params")):
+                            self.tested.add(pair)
+                found = [entry for entry in dict.fromkeys(found) if entry not in self.seen]
+                self.seen.update(found)
+                if found and record is not None:
+                    try:
+                        await record(found)
+                    except Exception as exc:  # noqa: BLE001 - the inventory is a worklist
+                        self._note(f"sweep: discovered routes not recorded: {type(exc).__name__}")
+                self._stats()
+                if load_report is None:
+                    break
             self.state["sweep"] = "done"
         except asyncio.CancelledError:
             self.state["sweep"] = "stopped"
             raise
+        finally:
+            self._stats(rounds=rounds)
 
-    async def _read_all(self, items: Sequence[Mapping[str, Any]]) -> list[tuple[str, str, str, bool]]:
-        """GET every mapped endpoint; record exposures; return the sign-ins found."""
+    def _untested(self, item: Mapping[str, Any]) -> list[str]:
+        endpoint = str(item.get("endpoint") or "")
+        return [str(klass) for klass in item.get("untested") or () if (endpoint, str(klass)) not in self.considered]
+
+    async def _read_all(self, items: Sequence[Mapping[str, Any]], *, slots: Sequence[str]) -> list[str]:
+        """GET every new endpoint (anonymously, then as each principal where anonymous is refused);
+        record exposures; remember sign-ins; return same-origin links the answers carry."""
         gate = asyncio.Semaphore(SHORT_CONCURRENCY)
-        logins: dict[str, tuple[str, str, str, bool]] = {}
+        links: list[str] = []
         targets = []
         for item in items[:MAX_READS]:
             method, _, route = str(item.get("endpoint") or "").partition(" ")
@@ -220,37 +290,72 @@ class Sweep:
             if method == "GET":
                 targets.append(route)
             elif method == "POST" and "default_credentials" in (item.get("untested") or ()) and "/api" in route:
-                logins.setdefault(route, (route, "username", "password", True))
+                self.logins.setdefault(route, (route, "username", "password", True))
 
-        async def read(route: str) -> None:
+        async def look(path: str, principal: str | None) -> Mapping[str, Any]:
+            values = {"method": "GET", "path": path, "follow_redirects": False,
+                      **({"as_principal": principal} if principal else {})}
             async with gate:
-                path = concrete(route)
-                result = await self._safe("http.request", {"method": "GET", "path": path, "follow_redirects": False},
-                                          sweep_key("read", path))
+                result = await self._safe("http.request", values, sweep_key("read", path, principal or ""))
             response = _response(result)
+            for link in (response.get("html") or {}).get("links") or () if isinstance(response.get("html"), Mapping) else ():
+                text = str(link)
+                if text.startswith("/") and not text.startswith("//") and len(text) < 500:
+                    links.append(f"GET {text.split('#', 1)[0]}")
             form = login_form(response)
             if form:
-                logins.setdefault(form[0], (form[0], form[1], form[2], False))
-            elif _LOGIN_PATH.search(route) and response.get("status") in {405, 400} and "/api" in route:
-                logins.setdefault(route, (route, "username", "password", True))
+                self.logins.setdefault(form[0], (form[0], form[1], form[2], False))
             signal = exposure_signal(response)
             action = _action_id(result)
-            if signal and action:
+            if signal and action and not (principal and signal == "account records"):
+                who = f"the {principal} principal" if principal else "an anonymous caller"
                 await self._candidate_and_verify({
                     "family": "data_exposure",
-                    "title": f"{path} serves {signal} without authentication",
-                    "claim": (f"An anonymous GET {path} answered {response.get('status')} with {signal} "
+                    "title": f"{path} serves {signal} to {who}",
+                    "claim": (f"GET {path} as {who} answered {response.get('status')} with {signal} "
                               "(found by the engine's sweep of the mapped surface)."),
                     "severity": "high" if signal != "a directory index" else "medium",
-                    "locus": {"method": "GET", "path": path},
+                    "locus": {"method": "GET", "path": path, **({"principal": principal} if principal else {})},
                     "evidence_refs": [f"action:{action}"],
                 })
+            return response
+
+        async def read(route: str) -> None:
+            path = concrete(route)
+            response = await look(path, None)
+            if _LOGIN_PATH.search(route) and response.get("status") in {405, 400} and "/api" in route:
+                self.logins.setdefault(route, (route, "username", "password", True))
+            if response.get("status") in {401, 403} and slots:
+                self.signed_in_only.add(route)
+                for slot in slots:
+                    await look(path, slot)
 
         await asyncio.gather(*(read(route) for route in targets))
-        return list(logins.values())[:4]
+        return links
 
-    async def _default_credentials(self, logins: Sequence[tuple[str, str, str, bool]]) -> None:
-        for path, user, secret, json_body in logins:
+    async def _javascript(self, items: Sequence[Mapping[str, Any]]) -> list[str]:
+        """Routes the application's own JavaScript names (``javascript.analyze``)."""
+        routes: list[str] = []
+        for item in items:
+            method, _, route = str(item.get("endpoint") or "").partition(" ")
+            if method != "GET" or not route.endswith(".js") or route in self.js_done or len(self.js_done) >= MAX_SCRIPTS:
+                continue
+            self.js_done.add(route)
+            result = await self._safe("javascript.analyze", {"path": route}, sweep_key("javascript", route))
+            action = (result or {}).get("action_result") if isinstance(result, Mapping) else None
+            for observation in (action or {}).get("observations") or ():
+                if isinstance(observation, Mapping) and observation.get("kind") == "javascript_analysis":
+                    for found in observation.get("routes") or ():
+                        text = str(found)
+                        if text.startswith("/") and not text.startswith("//") and "[withheld" not in text:
+                            routes.append(f"GET {text}")
+        return routes
+
+    async def _default_credentials(self) -> None:
+        for path, (_path, user, secret, json_body) in list(self.logins.items())[:4]:
+            if path in self.logins_tried:
+                continue
+            self.logins_tried.add(path)
             for index, pair in enumerate(DEFAULT_PAIR_IDS):
                 if index:
                     # The default-credential module paces attempts on one login; keep to its pace.
@@ -279,7 +384,7 @@ class Sweep:
         routes = []
         for item in items:
             method, _, route = str(item.get("endpoint") or "").partition(" ")
-            if method == "GET" and "function_authz" in (item.get("untested") or ()):
+            if method == "GET" and "function_authz" in self._untested(item):
                 routes.append(concrete(route))
         for start in range(0, len(routes), MAX_AUTHZ_ROUTES):
             chunk = routes[start:start + MAX_AUTHZ_ROUTES]
@@ -287,25 +392,28 @@ class Sweep:
                                               "secondary_principal": "secondary", "routes": chunk},
                              sweep_key("authz-function", *chunk))
 
-    async def _injection(self, items: Sequence[Mapping[str, Any]], *, allowed: set[str], writes: bool) -> None:
+    async def _injection(self, items: Sequence[Mapping[str, Any]], *, allowed: set[str], writes: bool,
+                         slots: Sequence[str] = ()) -> None:
         jobs: list[tuple[str, dict[str, Any], str]] = []
         for item in items[:MAX_INJECTION_TARGETS]:
             method, _, route = str(item.get("endpoint") or "").partition(" ")
             params = [str(name) for name in item.get("params") or () if str(name)]
-            untested = set(item.get("untested") or ())
+            untested = set(self._untested(item))
             if not params or not route.startswith("/"):
                 continue
+            # A route that refuses anonymous callers is tested signed in, as the first principal.
+            identity = {"as_principal": slots[0]} if route in self.signed_in_only and slots else {}
             for capability, klass in (("sqli.verify", "sqli"), ("xss.verify", "xss")):
                 if capability not in allowed or klass not in untested:
                     continue
                 if method == "GET":
                     query = "&".join(f"{name}=1" for name in params[:10])
                     path = f"{concrete(route)}?{query}"
-                    jobs.append((capability, {"path": path}, sweep_key(klass, path)))
+                    jobs.append((capability, {"path": path, **identity}, sweep_key(klass, path)))
                 elif writes and method in {"POST", "PUT", "PATCH"}:
                     for field in params[:MAX_FIELDS_PER_BODY]:
                         values = {"path": concrete(route), "method": method, "body_field_names": params[:20],
-                                  "injection_field": field}
+                                  "injection_field": field, **identity}
                         jobs.append((capability, values, sweep_key(klass, method, route, field)))
         # SQL injection first on every target, then XSS: the slower verifier never starves the other.
         jobs.sort(key=lambda job: 0 if job[0] == "sqli.verify" else 1)
@@ -325,6 +433,21 @@ def _json(value: Any) -> dict[str, Any]:
         except ValueError:
             return {}
     return dict(value) if isinstance(value, Mapping) else {}
+
+
+def _signed_in_slots(run: Mapping[str, Any]) -> list[str]:
+    """The principal slots the Hunt selected, when it may use them (credential access + approval)."""
+    policy = _json(run.get("policy_json"))
+    if not policy.get("credential_access") or not policy.get("approval_receipt_id"):
+        return []
+    context = _json(run.get("context_pack"))
+    slots: list[str] = []
+    for item in context.get("credential_refs") or ():
+        if isinstance(item, Mapping) and item.get("source") == "credential_profiles":
+            slot = str(item.get("principal_slot") or "")
+            if slot in {"primary", "secondary"} and slot not in slots:
+                slots.append(slot)
+    return slots
 
 
 def _two_principals(run: Mapping[str, Any]) -> bool:
