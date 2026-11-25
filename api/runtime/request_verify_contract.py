@@ -16,8 +16,9 @@ CHECKS: tuple[str, ...] = (
 # What one call holds: the longest check (blind command injection: a baseline, seven echo
 # probes, the substitution probes, two Windows probes and a seven-request timing confirmation; a
 # rate-limit run of twelve attempts) with room for the repeat and the control. Settled to what
-# was sent.
-HOLD: Mapping[str, int] = {"http_requests": 48, "tool_wall_seconds": 120}
+# was sent. One minute of wall keeps it a short action (agent_job_concurrency: over a minute is
+# long, and a Hunt runs at most two long actions at once), so it never waits behind a scanner.
+HOLD: Mapping[str, int] = {"http_requests": 48, "tool_wall_seconds": 60}
 
 DESCRIPTION = (
     "Prove one vulnerability class on one exact request with a deterministic differential: a "
