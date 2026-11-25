@@ -54,6 +54,7 @@ except ModuleNotFoundError:  # package import in host-side tests
 PROOF_RETEST_TOOLS: dict[str, str] = {
     "shakerscan_sqli_proof": "sqli.prove_batch",
     "shakerscan_nosqli_verify": "nosqli.verify_batch",
+    "shakerscan_injection_verify": "injection.verify_batch",
     "shakerscan_browser_proof": "xss.browser_prove_batch",
     "request_sqli_differential": "sqli.request_verify_batch",
     "request_xss_differential": "xss.request_verify_batch",
@@ -242,6 +243,11 @@ def _differential_request(
         PROOF_RETEST_TOOLS[tool], url, "GET", field, route=parsed.path,
         request_class=str(evidence.get("request_class") or "safe_read"),
         candidate_id=str(evidence.get("candidate_id") or ""),
+        # The one class of server-side injection the finding proved: a retest runs that class.
+        expected=(
+            str(evidence.get("injection_class") or "")
+            if tool == "shakerscan_injection_verify" else ""
+        ),
     ), None
 
 

@@ -527,6 +527,16 @@ _OTHER_INJECTIONS = (
 )
 
 
+# scan.finalizer._INJECTION_FINDINGS titles, lower-cased -> the retest type of each.
+_INJECTION_VERIFY_RETEST_TYPES = {
+    "verified server-side template injection": "ssti",
+    "verified command injection": "command_injection",
+    "verified path traversal": "path_traversal",
+    "verified xml external entity injection": "xxe",
+    "verified server-side request forgery": "ssrf",
+}
+
+
 def title_inference_allowed(tool: str | None) -> bool:
     """Whether a finding's title may choose its retest: no tool, or an earlier scanner's tool."""
     name = str(tool or "").strip().lower()
@@ -676,6 +686,10 @@ def infer_type_from_title_tool(
         return "nosqli"
     if mapped:
         return mapped
+    if tool == "shakerscan_injection_verify":
+        # One prover for five kinds of check. Its findings carry exactly the titles the finalizer
+        # gives them, so the whole title names the kind: this is a lookup, not a guess.
+        return _INJECTION_VERIFY_RETEST_TYPES.get(title.strip())
     if not guess:
         return None
 
