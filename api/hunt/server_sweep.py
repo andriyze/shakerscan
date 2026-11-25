@@ -489,6 +489,7 @@ _FILE_READ_TAGS = frozenset({"lfi", "pathtraversal", "path-traversal", "traversa
 _DETECTION_TAGS = frozenset({"detect", "tech", "panel"})
 _FINDING_TAGS = frozenset({"exposure", "misconfig", "unauth", "vuln", "cve", "auth-bypass", "disclosure"})
 _SEVERITIES = frozenset({"critical", "high", "medium", "low", "info"})
+_DISCLOSURE_NAME = re.compile(r"disclos|leak|exposed|exposure", re.I)
 
 
 def template_matches(result: Any) -> list[Mapping[str, Any]]:
@@ -521,7 +522,9 @@ def product_candidate(product: str, checks: str, match: Mapping[str, Any],
         family = "command_injection"
     elif tags & _FILE_READ_TAGS:
         family = "path_traversal"
-    elif tags & _EXPOSURE_TAGS and checks == "read_only":
+    elif checks == "read_only" and (tags & _EXPOSURE_TAGS or (
+            "misconfig" not in tags and _DISCLOSURE_NAME.search(name))):
+        # A CVE template is often tagged only by product and year; its name says what it reads.
         family = "data_exposure"
     else:
         family = "security_misconfiguration"

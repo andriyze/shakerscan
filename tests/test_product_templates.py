@@ -254,8 +254,14 @@ def test_a_match_becomes_a_candidate_of_the_class_its_template_names():
         "cve-2023-23752", "http://t/api/index.php/v1/config/application?public=true",
         tags=["joomla", "disclosure"], severity="medium"), "a3")
     assert query["locus"]["path"] == "/api/index.php/v1/config/application?public=true"
+    # tagged only by product and year, named for what it reads
+    named = product_candidate("joomla", "read_only", _match(
+        "cve-2023-23752", "http://t/api/index.php/v1/config/application?public=true",
+        tags=["cve", "joomla"], severity="medium", name="Joomla! Webservice - Password Disclosure"), "a6")
+    assert named["family"] == "data_exposure"
     misconfig = product_candidate("docker_api", "read_only", _match(
-        "misconfigured-docker", "http://t/images/json", tags=["docker", "misconfig"], severity="critical"), "a4")
+        "misconfigured-docker", "http://t/images/json", tags=["docker", "misconfig"], severity="critical",
+        name="Docker Container - Misconfiguration Exposure"), "a4")
     assert misconfig["family"] == "security_misconfiguration"
     # A bare detection is not a weakness; a match without its action cannot be cited.
     assert product_candidate("jenkins", "read_only", _match(
