@@ -47,6 +47,12 @@ DEFAULT_PAIR_IDS = tuple(f"dc-{index:02d}" for index in range(1, 21))
 _SECRET_TEXT = re.compile(
     r"\[withheld:\d+\]|-----BEGIN [A-Z ]*PRIVATE KEY-----|\bAKIA[0-9A-Z]{16}\b|"
     r"<title>\s*index of /|\bindex of /", re.I)
+# A field or setting named like a secret, with a value: "password": "...", DB_PASSWORD=..., token: ...
+_SECRET_FIELD = re.compile(
+    r"""(?ix)["']?\b[\w.-]*(?:pass(?:word|wd)?|secret|api[_-]?key|access[_-]?key|private[_-]?key|
+    token|credential|connection[_-]?string|password_hash)\b["']?\s*[:=]\s*["']?[^\s"',}{\]\[]{3,}""")
+# JSON account records served to an anonymous caller (two or more objects with an email or username).
+_RECORDS = re.compile(r'(?s)"(?:email|username|user_name|login)"\s*:\s*"[^"]+".*?"(?:email|username|user_name|login)"\s*:\s*"[^"]+"')
 _LOGIN_PATH = re.compile(r"(?:^|/)(?:log-?in|sign-?in|auth(?:enticate)?|session|token)(?:/|$|\.)", re.I)
 _USER_FIELDS = ("username", "user", "email", "login", "user_name", "userName")
 _SECRET_FIELDS = ("password", "pass", "passwd", "pwd")
@@ -91,15 +97,20 @@ def exposure_signal(response: Mapping[str, Any]) -> str | None:
     text = str(response.get("body_sample") or "")
     html = response.get("html") if isinstance(response.get("html"), Mapping) else {}
     text += " " + str(html.get("title") or "") + " " + str(html.get("text_sample") or "")
+    keys = " ".join(f'"{key}":' for key in response.get("json_keys") or ())
     match = _SECRET_TEXT.search(text)
-    if not match:
-        return None
-    found = match.group(0).lower()
-    if "index of" in found:
-        return "a directory index"
-    if "private key" in found:
-        return "a private key"
-    return "credential-shaped values"
+    if match:
+        found = match.group(0).lower()
+        if "index of" in found:
+            return "a directory index"
+        if "private key" in found:
+            return "a private key"
+        return "credential-shaped values"
+    if _SECRET_FIELD.search(text) or _SECRET_FIELD.search(keys):
+        return "secret-named fields"
+    if not html and _RECORDS.search(text):
+        return "account records"
+    return None
 
 
 def login_form(response: Mapping[str, Any]) -> tuple[str, str, str] | None:

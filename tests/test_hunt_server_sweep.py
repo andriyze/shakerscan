@@ -87,6 +87,12 @@ def test_helpers():
     assert exposure_signal({"status": 200, "body_sample": "x [withheld:2] y"}) == "credential-shaped values"
     assert exposure_signal({"status": 200, "body_sample": "-----BEGIN RSA PRIVATE KEY-----"}) == "a private key"
     assert exposure_signal({"status": 403, "body_sample": "[withheld:1]"}) is None
+    assert exposure_signal({"status": 200, "body_sample": "DB_PASSWORD=hunter22\nDB_HOST=db"}) == "secret-named fields"
+    assert exposure_signal({"status": 200, "body_sample": '{"api_key": "sk_live_x1y2"}'}) == "secret-named fields"
+    assert exposure_signal({"status": 200, "body_sample": '[{"username":"a","id":1},{"username":"b"}]'}) == "account records"
+    assert exposure_signal({"status": 200, "body_sample": "<p>Forgot your password? Contact IT</p>",
+                            "html": {"title": "Sign in"}}) is None
+    assert exposure_signal({"status": 200, "body_sample": '{"status": "ok", "version": "1.2"}'}) is None
     assert login_form({"html": {"forms": [{"method": "POST", "action": "/login", "fields": [
         {"name": "email", "type": "email"}, {"name": "pw", "type": "password"}]}]}}) == ("/login", "email", "pw")
     assert sweep_key("read", "/a") == sweep_key("read", "/a") != sweep_key("read", "/b")
