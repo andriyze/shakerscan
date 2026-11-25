@@ -1323,7 +1323,7 @@ def build_parser() -> argparse.ArgumentParser:
             "summary", "endpoints", "endpoint_groups", "findings", "hypotheses", "principals",
             "graph_nodes", "graph_edges", "services", "service_intelligence", "scans", "collections",
             "candidates", "notes", "receipts", "interpretations", "negative_results", "changes",
-            "continue", "attempts", "activity", "traffic", "coverage_gaps",
+            "continue", "attempts", "activity", "traffic", "coverage_gaps", "coverage",
         ),
     )
     hunt_query.add_argument("--filter", metavar="FILE", help="JSON object; use - for stdin")

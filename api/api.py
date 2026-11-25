@@ -6661,6 +6661,30 @@ configure_hunt_interaction_router(
     get_redis=lambda: get_redis,
 )
 app.include_router(hunt_interaction_router)
+try:
+    from hunt.auto_discovery import configure_auto_discovery
+except ModuleNotFoundError:  # package import in host-side tests
+    from api.hunt.auto_discovery import configure_auto_discovery
+
+
+async def _auto_discovery_execute(hunt_id, capability, values, key):
+    return await execute_hunt_capability(
+        hunt_id, capability, HuntCapabilityRequest(idempotency_key=key, input=dict(values)))
+
+
+async def _auto_discovery_record(target_id, worklist, source):
+    async with db_pool.acquire() as conn:
+        return await asm_inventory.upsert_endpoints(conn, target_id, worklist, source=source)
+
+
+async def _auto_discovery_run(hunt_id):
+    async with db_pool.acquire() as conn:
+        row = await conn.fetchrow("SELECT * FROM hunt_runs WHERE id=$1", uuid.UUID(str(hunt_id)))
+    return dict(row) if row else None
+
+
+configure_auto_discovery(execute=_auto_discovery_execute, record=_auto_discovery_record,
+                         load_run=_auto_discovery_run)
 
 
 @app.post("/scans/{scan_id}/cancel")

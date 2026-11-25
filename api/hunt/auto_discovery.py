@@ -37,9 +37,11 @@ import os
 import re
 import sys
 from typing import Any
+import hashlib
 import uuid
 
-from .coverage_map import COVERAGE_TARGET_KINDS, key_digest
+# Web and API Hunts map their target; other kinds have no HTTP surface to map.
+COVERAGE_TARGET_KINDS = frozenset({"web", "api"})
 
 SETTING = "SHAKERSCAN_HUNT_AUTO_DISCOVERY"
 KEY_PREFIX = "auto-discovery"
@@ -176,6 +178,11 @@ _ROOT_MARKERS: tuple[tuple[str, re.Pattern[str]], ...] = (
 
 def enabled() -> bool:
     return str(os.environ.get(SETTING, "true")).strip().lower() not in {"0", "false", "no", "off"}
+
+
+def key_digest(key: str) -> str:
+    """sha256 of an idempotency key, as the action record stores it (``idempotency_key_sha256``)."""
+    return hashlib.sha256(str(key).encode("utf-8")).hexdigest()
 
 
 def step_key(name: str) -> str:
@@ -377,28 +384,18 @@ class _Refused(Exception):
     pass
 
 
-async def _default_execute(hunt_id: str, capability: str, values: Mapping[str, Any], key: str) -> Any:
-    from .interaction_router import HuntCapabilityRequest, execute_hunt_capability
-    return await execute_hunt_capability(
-        hunt_id, capability, HuntCapabilityRequest(idempotency_key=key, input=dict(values)),
-    )
+# Wired by the composition root (``configure_auto_discovery``): this module imports no router.
+_DEFAULTS: dict[str, Callable[..., Awaitable[Any]]] = {}
 
 
-async def _default_record(target_id: str, worklist: list[str], source: str) -> int:
-    from .interaction_router import _pool
-    try:
-        import asm_inventory
-    except ModuleNotFoundError:  # package import in host-side tests
-        from .. import asm_inventory
-    async with _pool().acquire() as conn:
-        return await asm_inventory.upsert_endpoints(conn, target_id, worklist, source=source)
+def configure_auto_discovery(*, execute: Executor, record: Recorder,
+                             load_run: Callable[[str], Awaitable[Mapping[str, Any] | None]]) -> None:
+    """Wire the Hunt capability call, the inventory write and the run read (composition root)."""
+    _DEFAULTS.update(execute=execute, record=record, load_run=load_run)
 
 
-async def _load_run(hunt_id: str) -> Mapping[str, Any] | None:
-    from .interaction_router import _pool
-    async with _pool().acquire() as conn:
-        row = await conn.fetchrow("SELECT * FROM hunt_runs WHERE id=$1", uuid.UUID(str(hunt_id)))
-    return dict(row) if row else None
+async def _not_configured(*_args: Any, **_kwargs: Any) -> Any:
+    raise RuntimeError("auto discovery is not configured")
 
 
 def _refusal_text(exc: BaseException) -> str:
@@ -418,9 +415,9 @@ class DiscoveryRunner:
     def __init__(self, hunt_id: str, *, execute: Executor | None = None, record: Recorder | None = None,
                  load_run: Callable[[str], Awaitable[Mapping[str, Any] | None]] | None = None) -> None:
         self.hunt_id = str(hunt_id)
-        self._execute = execute or _default_execute
-        self._record = record or _default_record
-        self._load_run = load_run or _load_run
+        self._execute = execute or _DEFAULTS.get("execute") or _not_configured
+        self._record = record or _DEFAULTS.get("record") or _not_configured
+        self._load_run = load_run or _DEFAULTS.get("load_run") or _not_configured
         self.state = _STATE.setdefault(self.hunt_id, {})
 
     async def _call(self, capability: str, values: Mapping[str, Any], key: str) -> Any:
@@ -599,7 +596,7 @@ def _spec_routes(specs: Sequence[tuple[str, Mapping[str, Any]]], *, origin: str)
 
 def start(hunt_id: str, *, runner: DiscoveryRunner | None = None) -> asyncio.Task | None:
     """Schedule a started Hunt's discovery in the background. Never raises; returns the task."""
-    if not enabled():
+    if not enabled() or (runner is None and "execute" not in _DEFAULTS):
         return None
     try:
         loop = asyncio.get_running_loop()
@@ -626,7 +623,7 @@ def start(hunt_id: str, *, runner: DiscoveryRunner | None = None) -> asyncio.Tas
 
 
 __all__ = [
-    "CONTENT_WORDLISTS", "DiscoveryRunner", "PRODUCTS", "SETTING", "Step", "answer_of",
+    "CONTENT_WORDLISTS", "DiscoveryRunner", "configure_auto_discovery", "PRODUCTS", "SETTING", "Step", "answer_of",
     "discovery_state", "enabled", "plan_steps", "present", "probe_key_digests", "probe_paths",
     "signed_in_slots", "start",
 ]
