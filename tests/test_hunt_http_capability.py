@@ -26,7 +26,7 @@ def test_auth_and_http_routes_derive_from_the_canonical_registry():
         "auth.session.revoke",
     }
     assert http == {
-        "artifact.inspect", "authz.verify", "http.request", "javascript.analyze",
+        "artifact.inspect", "authz.verify", "http.request", "javascript.analyze", "request.verify",
     }
     assert all(
         CAPABILITY_REGISTRY.require(name).hunt_executor == "worker_auth"

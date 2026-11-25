@@ -2220,14 +2220,14 @@ async def _execute_hunt_capability_lifecycle(
                     # HTTP-capable capability that accepts an origin (http.request and
                     # the scanner capabilities), not only http.request.
                     uses_service_origin = False
-                    if name in ARTIFACT_READ_CAPABILITIES and request.input.get("origin") is None:
+                    if (name in ARTIFACT_READ_CAPABILITIES or name == "request.verify") and request.input.get("origin") is None:
                         # A network target names a host, not a service: a read there names one,
                         # refused here at no cost rather than as an out-of-binding read.
                         original, read_base = web_hunt_target(run, context, policy)
                         if service_origin_changed(original, read_base):
                             raise HuntRefusal("artifact_origin_required", artifact_origin_required(name))
                     if request.input.get("origin") is not None and (
-                        name in {"http.request", "tls.inspect", "auth.session.establish", "authz.verify"}
+                        name in {"http.request", "tls.inspect", "auth.session.establish", "authz.verify", "request.verify"}
                         or name in ARTIFACT_READ_CAPABILITIES or is_scanner or is_browser
                     ):
                         original, _ = web_hunt_target(run, context, policy)
