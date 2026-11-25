@@ -658,6 +658,10 @@ token is a local open-source engine: a `y/N` on this terminal, then `POST
 /hunts/{id}/permission-requests/{rid}/decision` with `decided_by: local-operator`,
 `decision_via: local_confirm` and a fresh `local-approve-<hex>` idempotency key. On OSS any local
 process that can reach the API could do the same; the command prints that before asking.
+`shakerscan api` refuses that route, and the other routes that record a person's decision
+(`scripts/person_decision_routes.py`), inside an agent that `shakerscan agent` launched and names
+the person's command instead. That is a guard rail for an agent following its kit, not a security
+boundary on an open-source engine without authentication.
 
 **G1 gateway contract.** All routes take the service token as `Authorization: Bearer`; the token
 alone never approves. Every response from these routes, success or refusal, carries a

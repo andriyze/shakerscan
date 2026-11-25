@@ -366,6 +366,24 @@ Scan and per-target error, instead of running it twice; a retry while the first 
 answers `idempotency_request_in_progress`. Use one for any write that may outlive your timeout,
 such as a 50-target batch.
 
+**A person's decisions are not sent from an agent.** Inside an agent that `shakerscan agent`
+launched (`SHAKERSCAN_AGENT_NAME` is set), `shakerscan api` refuses the requests that record a
+person's decision and sends nothing: allowing or denying a Hunt permission request, authorizing a
+target (or registering one with its authorization), raising a Hunt's budget, dismissing a finding
+or accepting its risk, recording or revoking an approval receipt, executing a deletion, revealing,
+granting or promoting a discovered secret, sharing a saved credential, accepting or rejecting an
+instruction proposal, approving an access-control contract or a Model Intake submission, fleet
+tokens, and operator settings. The full list is `scripts/person_decision_routes.py`. It exits 3
+with one line: the decision, how to read the outcome once the person decided, and last the
+command the person runs in their own terminal (the dedicated one, such as `shakerscan approve
+<request-id>`, `shakerscan targets authorize <target>` or `shakerscan knowledge dismiss`, else the
+same `shakerscan api` request). The agent hands that command to the person and reads the outcome
+afterwards.
+
+On an open-source engine without authentication this is a guard rail for an agent that follows
+its kit, not a security boundary: any process on the host can call the API directly. ShakerScan
+Enterprise enforces person decisions on the server.
+
 ## Hunt from an agent (MCP)
 
 Claude Code, after `shakerscan connect` (or `connect --claude` does this for you):
