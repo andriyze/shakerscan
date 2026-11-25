@@ -1573,6 +1573,10 @@ def _hunt_start_tool(contract: dict[str, Any]) -> HuntMCPTool:
         raise MCPError(-32005, "Hunt start contract is missing required fields")
 
     profile_names = sorted(str(name) for name in profiles if str(name))
+    capability_names = sorted({
+        str(item.get("name")) for item in contract.get("tool_calls") or []
+        if isinstance(item, dict) and isinstance(item.get("name"), str) and item.get("name")
+    })
     profile_ceilings: dict[str, int] = {}
     for raw_profile in profiles.values():
         if not isinstance(raw_profile, dict):
@@ -1664,9 +1668,14 @@ def _hunt_start_tool(contract: dict[str, Any]) -> HuntMCPTool:
             "items": {
                 "type": "string", "minLength": 1, "maxLength": 128,
                 "pattern": capability_pattern,
+                # The capabilities a Hunt can be started with: the contract's tool_calls (the
+                # engine refuses any other name). The catalog's section=hunt says what each needs.
+                **({"enum": capability_names} if capability_names else {}),
             },
             "maxItems": _positive_int(limits.get("capabilities"), 128),
             "uniqueItems": True,
+            "description": "Limit the Hunt to these capabilities (default: every one its target kind, budget "
+                           "and policy allow). shakerscan_catalog section=hunt names the approval each needs.",
         },
         "request_collection_ids": {
             "type": "array",
@@ -2550,6 +2559,7 @@ class ArsenalClient:
             descriptors.append(tool.descriptor())
         descriptors.extend(tool.descriptor() for tool in _hunt_tools(self.hunt_contract()))
         descriptors.append(_captures_descriptor())
+        descriptors.extend(_agent_tools().descriptors())
         if self.serves_route("POST", "/public/check"):
             descriptors.append(_posture_check_descriptor(connected=True))
         return descriptors
@@ -2589,6 +2599,8 @@ class ArsenalClient:
         return isinstance(error, dict) and error.get("code") == "unsupported_media_type"
 
     def call_tool(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+        if _agent_tools().handles(name):
+            return _agent_tools().call(self, name, arguments)
         if name == "shakerscan_public_check":
             return _call_posture_check(self, "/public/check", arguments)
         if name == "shakerscan_captures":
@@ -3154,6 +3166,15 @@ def _call_posture_check(transport: ArsenalClient, path: str, arguments: dict[str
     if result.get("schema_version") != "2" or not isinstance(result.get("observations"), list):
         raise MCPError(-32004, "Check service returned an unsupported response")
     return {"content": [{"type": "text", "text": json.dumps(result, sort_keys=True)}], "structuredContent": result, "isError": False}
+
+
+def _agent_tools():
+    """The catalog and the grouped tools beyond Hunt (scripts/mcp_agent_tools.py)."""
+    try:
+        import mcp_agent_tools
+    except ModuleNotFoundError:
+        from scripts import mcp_agent_tools
+    return mcp_agent_tools
 
 
 class PublicClient:

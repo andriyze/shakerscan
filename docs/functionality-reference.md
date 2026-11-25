@@ -2049,11 +2049,11 @@ for the profile contract, invocation, limits and acceptance gates.
 | Tool adapters | 0 | `api/command_arsenal.py` |
 | Local-agent adapters | 4 | `api/command_arsenal.py` |
 | Internal compatibility scanner flags | 161 | `scanner/scanner.py` |
-| Canonical scanner wrapper commands | 41 | `scanner.sh` |
+| Canonical scanner wrapper commands | 42 | `scanner.sh` |
 | Deprecated wrapper aliases | 0 | `scanner.sh` |
 | Make targets | 20 | `Makefile` |
 | Release gates | 17 | `scripts/release_gates.py` |
-| Runtime environment keys | 433 | Python sources + Compose manifests |
+| Runtime environment keys | 434 | Python sources + Compose manifests |
 | Internal compatibility scanner modules | 140 | `scanner/scanner_tools/` |
 | UI pages | 39 | `ui/src/app/` |
 | Skills | 9 | `skills/` |
@@ -2863,7 +2863,7 @@ opaque profile, and collection-reference fields.
 
 | Surface | Names |
 |---|---|
-| Canonical `scanner.sh` commands | `agent`, `ai`, `api`, `approve`, `backup`, `build`, `collections`, `credentials`, `deny`, `devices`, `doctor`, `env`, `evidence`, `fleet`, `gungnir`, `help`, `hunt`, `images`, `install-deps`, `intel`, `join`, `knowledge`, `logs`, `mcp`, `model-intake`, `model-intake-runner`, `rebuild`, `record`, `redis`, `reload`, `report-rebuild`, `reset`, `restart`, `scale`, `scan`, `secrets`, `shell`, `start`, `status`, `stop`, `version` |
+| Canonical `scanner.sh` commands | `agent`, `ai`, `api`, `approve`, `backup`, `build`, `catalog`, `collections`, `credentials`, `deny`, `devices`, `doctor`, `env`, `evidence`, `fleet`, `gungnir`, `help`, `hunt`, `images`, `install-deps`, `intel`, `join`, `knowledge`, `logs`, `mcp`, `model-intake`, `model-intake-runner`, `rebuild`, `record`, `redis`, `reload`, `report-rebuild`, `reset`, `restart`, `scale`, `scan`, `secrets`, `shell`, `start`, `status`, `stop`, `version` |
 | Make targets | `dependency-audit`, `dependency-lock`, `e2e`, `e2e-ai-gate`, `e2e-api-overlay`, `e2e-dast`, `e2e-hunt`, `e2e-hunt-ssh`, `e2e-model-intake`, `e2e-model-intake-fixture`, `e2e-platform`, `e2e-scan-parity`, `e2e-wire`, `fleet-acceptance`, `installed-stack-smoke`, `installer-smoke`, `installer-upgrade-smoke`, `release-gates`, `test`, `upgrade-smoke` |
 | Release gates | `test:evidence-provenance`, `test:fleet-current`, `test:hypothesis-proof-promotion`, `test:mcp-read-only`, `test:no-ai-verified`, `test:no-benchmark-fitting`, `test:no-phantom-tools`, `test:planner-no-shell`, `test:planner-risk`, `test:planner-scope`, `test:scanner-auth-quality`, `test:scanner-bounds`, `test:scanner-proof-truth`, `test:scanner-registry-coverage`, `test:v2-detection-parity`, `test:v2-fault-injection`, `test:v2-security-invariants` |
 
@@ -3161,6 +3161,7 @@ Only key names and declaring sources are documented; secret values are never rea
 | `SHAKERSCAN_AGENT_TOOL_OUTPUT_BYTES` | `api/worker.py` |
 | `SHAKERSCAN_AGENT_TOOL_RESULT_TTL_SECONDS` | `api/worker.py` |
 | `SHAKERSCAN_ALLOWED_HOSTS` | `docker-compose.release.yml`, `docker-compose.yml` |
+| `SHAKERSCAN_API_BASE` | `scripts/agent_catalog.py` |
 | `SHAKERSCAN_API_EXPORT_RESPONSE_MAX_BYTES` | `docker-compose.release.yml`, `docker-compose.yml` |
 | `SHAKERSCAN_API_EXPORT_STATEMENT_TIMEOUT_MS` | `docker-compose.release.yml`, `docker-compose.yml` |
 | `SHAKERSCAN_API_GID` | `docker-compose.release.yml` |
@@ -3176,9 +3177,9 @@ Only key names and declaring sources are documented; secret values are never rea
 | `SHAKERSCAN_API_RESPONSE_MAX_BYTES` | `docker-compose.release.yml`, `docker-compose.yml` |
 | `SHAKERSCAN_API_SANDBOX_GROUP_GID` | `docker-compose.release.yml` |
 | `SHAKERSCAN_API_TOKEN` | `scripts/scan_cli.py`, `scripts/v2_cli.py` |
-| `SHAKERSCAN_API_TOKEN_FILE` | `scripts/scan_cli.py` |
+| `SHAKERSCAN_API_TOKEN_FILE` | `scripts/agent_catalog.py`, `scripts/scan_cli.py` |
 | `SHAKERSCAN_API_UID` | `docker-compose.release.yml` |
-| `SHAKERSCAN_API_URL` | `api/model_intake_admission_webhook.py`, `scripts/shakerscan_mcp.py` |
+| `SHAKERSCAN_API_URL` | `api/model_intake_admission_webhook.py`, `scripts/agent_catalog.py`, `scripts/shakerscan_mcp.py` |
 | `SHAKERSCAN_ASM_DISPATCH_INTERVAL` | `api/api.py` |
 | `SHAKERSCAN_AUTHENTICATED_ASSURANCE` | `api/authenticated_assurance/router.py`, `docker-compose.release.yml`, `docker-compose.yml` |
 | `SHAKERSCAN_BIND_HOST` | `api/authenticated_assurance/router.py`, `api/fleet_routes/router.py`, `api/hunt/start_contract.py`, `api/operator_auth.py`, `api/runtime/http_archive_router.py`, `docker-compose.release.yml`, `docker-compose.yml` |

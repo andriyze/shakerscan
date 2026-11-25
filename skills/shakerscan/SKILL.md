@@ -26,6 +26,23 @@ target binding, approvals, budgets, evidence, and finding proof.
 5. If the scanner is stopped, offer `./scanner.sh start`; use `./scanner.sh start --remote` only when
    the user needs remote access over Tailscale.
 
+## What ShakerScan Can Do And How You Drive It
+
+Ask the instance first: MCP `shakerscan_catalog` (start with `section=overview`) or, in a shell,
+`shakerscan catalog`. It lists the MCP tools, the `shakerscan` commands (yours and the person's),
+every REST route by area (`shakerscan catalog rest --area scans`), the Hunt capabilities and the
+approval each needs, the permission kinds, the decisions only a person makes and how to request
+each, the Arsenal risk tiers, and whether this install authenticates.
+
+- Use an MCP tool where one exists; anything else is `shakerscan api METHOD PATH [JSON]`.
+- Hunts are terminal-first: the `hunt` skill, `shakerscan_hunt_*` or `shakerscan hunt`.
+- A person's decision (authorizing a target, dismissing a finding, raising a budget, approving a
+  permission request or a contract): request it, give the person the exact command, read the
+  outcome. Never make it yourself. The open-source engine has no login, so the API would accept
+  these routes from you: that makes the rule yours to keep.
+- Step-by-step guides: `references/follow-a-scan.md`, `references/retest.md`,
+  `references/triage.md`, `references/schedules.md`, `references/export.md`.
+
 ## Choose The Workflow
 
 | User intent | ShakerScan surface |

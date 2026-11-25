@@ -693,22 +693,31 @@ def _refuse_file(path: Path, exc: Exception) -> InstallError:
 
 
 def plan_install(target_: Target, server: Server, major: Callable[[], int | None] = _opencode_major,
-                 environ: Mapping[str, str] | None = None) -> Plan:
+                 environ: Mapping[str, str] | None = None, *, name: str | None = None,
+                 after: Plan | None = None) -> Plan:
+    """The change that registers ``server`` (as ``name``, else the usual name) in one agent's file.
+    ``after``: a plan for the same file this one builds on (two servers, one write)."""
     environ = os.environ if environ is None else environ
     plan = Plan(target_)
     if target_.form == "claude-cli":
-        plan.name = entry_name(server, lambda name: claude_user_entry(environ, name))
+        plan.name = name or entry_name(server, lambda name: claude_user_entry(environ, name))
         plan.current = claude_user_entry(environ, plan.name)
         plan.wanted = entry("claude-cli", server)
         if plan.current is not None and _same(plan.current, plan.wanted):
             plan.wanted = None
         return plan
     assert target_.path is not None
-    text, mode = read_text(target_.path)
-    plan.original, plan.mode = text, mode
+    if after is not None:
+        text = after.text if after.text is not None else after.original
+        mode = after.mode
+        plan.original, plan.mode = after.original, mode
+    else:
+        text, mode = read_text(target_.path)
+        plan.original, plan.mode = text, mode
+    chosen = name
     try:
         if target_.form == "codex":
-            plan.name = entry_name(server, lambda name: toml_get(text or "", name))
+            plan.name = chosen or entry_name(server, lambda name: toml_get(text or "", name))
             plan.wanted = entry("codex", server)
             plan.current = toml_get(text or "", plan.name)
             if plan.current == plan.wanted or (  # without tomllib (3.10) the table is compared as text
@@ -720,8 +729,8 @@ def plan_install(target_: Target, server: Server, major: Callable[[], int | None
         filled = bool(text and text.strip())
         document = parse_jsonc(text).value if filled else {}
         legacy = target_.form == "opencode" and opencode_legacy(document, major)
-        plan.name = entry_name(server, lambda name: jsonc_get(text, _json_path(target_.form, legacy, name))
-                               if filled else None)
+        plan.name = chosen or entry_name(server, lambda name: jsonc_get(text, _json_path(target_.form, legacy, name))
+                                         if filled else None)
         path = _json_path(target_.form, legacy, plan.name)
         plan.wanted = entry(target_.form, server, legacy=legacy)
         plan.current = jsonc_get(text, path) if filled else None
@@ -1036,10 +1045,12 @@ def probe_http(url: str, token: str, timeout: float = 30.0, post=None) -> int:
         raise InstallError(f"cannot reach {url}: {reason}. Nothing was written.") from exc
 
 
-def discover_endpoint(base: str, get=None, timeout: float = 20.0) -> str:
-    """The MCP endpoint a deployment names in its discovery document
-    (``GET <base>/.well-known/shakerscan``, no credentials): the first ``mcp_servers`` entry, which
-    must be streamable HTTP with bearer authentication on the same origin."""
+def discover(base: str, get=None, timeout: float = 20.0) -> dict[str, Any]:
+    """What a deployment offers in its discovery document (``GET <base>/.well-known/shakerscan``, no
+    credentials): ``servers``, every MCP server it lists (``name`` as published, or None, and its
+    ``url``), each streamable HTTP with bearer authentication on the same origin; and ``api_url``,
+    the engine API on that origin when the document names one (the engine's own MCP server runs
+    here, as this client's ``shakerscan mcp``, against it)."""
     from . import cli
 
     get = get or http_get
@@ -1059,26 +1070,60 @@ def discover_endpoint(base: str, get=None, timeout: float = 20.0) -> str:
     servers = document.get("mcp_servers") if isinstance(document, dict) else None
     if DISCOVERY_FORMAT not in stated or not isinstance(servers, list):
         raise InstallError(f"{url} is not a {DISCOVERY_FORMAT} document. Nothing was written.")
-    first = next((item for item in servers if isinstance(item, dict) and item.get("url")), None)
-    if first is None:
+    listed = [item for item in servers if isinstance(item, dict) and item.get("url")]
+    if not listed:
         raise InstallError(f"{url} lists no MCP server. Nothing was written.")
-    endpoint = urllib.parse.urljoin(base.rstrip("/") + "/", str(first["url"]))
-    if not cli.same_origin(endpoint, base):
-        raise InstallError(f"{url} names an MCP server on another origin ({endpoint}); pass it to --http yourself "
-                           "if you trust it. Nothing was written.")
-    auth = first.get("auth", "bearer")
-    # Either the bare scheme ("bearer") or an object naming it ({"type": "bearer", ...}, as an
-    # Enterprise gateway publishes it); the object's other keys only describe which token.
-    scheme = auth.get("type") if isinstance(auth, dict) else auth
-    if first.get("transport", "streamable-http") != "streamable-http" or scheme != "bearer":
-        shown = scheme if isinstance(scheme, str) else type(scheme).__name__
-        raise InstallError(f"{url}: its MCP server uses {first.get('transport')}/{shown}, not "
-                           "streamable HTTP with a bearer token. Nothing was written.")
-    return endpoint
+    found = []
+    for item in listed:
+        endpoint = urllib.parse.urljoin(base.rstrip("/") + "/", str(item["url"]))
+        if not cli.same_origin(endpoint, base):
+            raise InstallError(f"{url} names an MCP server on another origin ({endpoint}); pass it to --http "
+                               "yourself if you trust it. Nothing was written.")
+        auth = item.get("auth", "bearer")
+        # Either the bare scheme ("bearer") or an object naming it ({"type": "bearer", ...}, as an
+        # Enterprise gateway publishes it); the object's other keys only describe which token.
+        scheme = auth.get("type") if isinstance(auth, dict) else auth
+        if item.get("transport", "streamable-http") != "streamable-http" or scheme != "bearer":
+            shown = scheme if isinstance(scheme, str) else type(scheme).__name__
+            raise InstallError(f"{url}: its MCP server uses {item.get('transport')}/{shown}, not "
+                               "streamable HTTP with a bearer token. Nothing was written.")
+        name = item.get("name") if isinstance(item.get("name"), str) and item.get("name") in NAMES else None
+        found.append({"name": name, "url": endpoint})
+    api_url = document.get("api_url") if isinstance(document.get("api_url"), str) else None
+    if api_url:
+        api_url = urllib.parse.urljoin(base.rstrip("/") + "/", api_url).rstrip("/")
+        if not cli.same_origin(api_url, base) or urllib.parse.urlsplit(api_url).scheme != "https":
+            api_url = None
+    return {"servers": found, "api_url": api_url}
 
 
-def http_server(args: argparse.Namespace, environ: Mapping[str, str]) -> tuple[Server, str | None]:
-    """The HTTP entry and the token to check it with (from the variable, a file or the profile)."""
+def discover_endpoint(base: str, get=None, timeout: float = 20.0) -> str:
+    """The first MCP endpoint a deployment names in its discovery document."""
+    return discover(base, get=get, timeout=timeout)["servers"][0]["url"]
+
+
+def engine_server_for(api_url: str, args: argparse.Namespace, environ: Mapping[str, str]) -> tuple[Server | None, str]:
+    """The engine's own MCP server for a deployment (this client over stdio against ``api_url``), or
+    None and why not: it needs the token in a file, from ``shakerscan connect`` or ``--token-file``."""
+    from . import cli
+
+    saved = cli.profile(environ)
+    if saved.get("url") and saved.get("token_file") and cli.same_origin(api_url, saved["url"]):
+        return Server(command=server_command(args.server_command), args=("mcp",)), "the saved connection"
+    if args.token_file:
+        path = Path(args.token_file).expanduser().absolute()
+        if not path.is_file():
+            raise InstallError(f"--token-file {path}: no such file")
+        return Server(command=server_command(args.server_command),
+                      args=("mcp", "--url", api_url, "--token-file", str(path))), "--token-file"
+    return None, (f"not registered: the engine's server reads its token from a file; run `shakerscan connect` "
+                  f"for {api_url} first, or pass --token-file")
+
+
+def http_servers(args: argparse.Namespace, environ: Mapping[str, str]) -> dict[str, Any]:
+    """What ``--http`` registers: ``servers`` [(name or None, Server)], the ``token`` to check them
+    with (from the variable, a file or the profile), and for a deployment address whose discovery
+    document names its engine API, the engine's own server (``engine``, or None and ``engine_note``)."""
     from . import cli
 
     parts = urllib.parse.urlsplit(args.http)
@@ -1090,14 +1135,27 @@ def http_server(args: argparse.Namespace, environ: Mapping[str, str]) -> tuple[S
     variable = args.token_env or DEFAULT_TOKEN_ENV
     if not _ENV_NAME.match(variable):
         raise InstallError(f"--token-env {variable!r} is not an environment variable name")
-    # A deployment's base address: its discovery document names the endpoint.
-    endpoint = discover_endpoint(args.http) if parts.path in ("", "/") and not parts.query else args.http
+    engine, engine_note = None, ""
+    if parts.path in ("", "/") and not parts.query:
+        # A deployment's base address: its discovery document names the endpoints.
+        offered = discover(args.http)
+        listed = [(item["name"], Server(url=item["url"], token_env=variable)) for item in offered["servers"]]
+        if offered["api_url"] and not any(name == SERVER for name, _server in listed):
+            engine, engine_note = engine_server_for(offered["api_url"], args, environ)
+    else:
+        listed = [(None, Server(url=args.http, token_env=variable))]
     token = (environ.get(variable) or "").strip() or None
     if token is None:
         saved = cli.profile(environ)
-        bound = saved if saved.get("url") and cli.same_origin(endpoint, saved["url"]) else None
+        bound = saved if saved.get("url") and cli.same_origin(listed[0][1].url, saved["url"]) else None
         token = cli.read_token(args.token_file, {}, bound)
-    return Server(url=endpoint, token_env=variable), token
+    return {"servers": listed, "token": token, "engine": engine, "engine_note": engine_note}
+
+
+def http_server(args: argparse.Namespace, environ: Mapping[str, str]) -> tuple[Server, str | None]:
+    """The first HTTP entry and the token to check it with."""
+    found = http_servers(args, environ)
+    return found["servers"][0][1], found["token"]
 
 
 # --- commands ------------------------------------------------------------------------------------
@@ -1122,39 +1180,75 @@ def _targets(args: argparse.Namespace, environ: Mapping[str, str], notes: list[s
     return chosen
 
 
+def _entries(args: argparse.Namespace, environ: Mapping[str, str]) -> tuple[list[tuple[str | None, Server, str]], str | None, list[str]]:
+    """[(name or None, server, what it reaches)] to register, the token for the HTTP ones, and lines to print."""
+    if not args.http:
+        server, reached = stdio_server(args, environ)
+        return [(None, server, reached)], None, []
+    found = http_servers(args, environ)
+    if found["token"] is None:
+        raise InstallError(f"set {found['servers'][0][1].token_env} (or pass --token-file) so the endpoint can be "
+                           "checked before anything is written. Nothing was written.")
+    entries: list[tuple[str | None, Server, str]] = []
+    if found["engine"] is not None:
+        # Both: the engine's server is `shakerscan` (this client over stdio, its token in a file) and
+        # the deployment's own servers keep the names they publish.
+        entries.append((SERVER, found["engine"], "the engine's server"))
+    for name, server in found["servers"]:
+        entries.append((name or (REMOTE_SERVER if found["engine"] is not None else None), server, server.url))
+    notes = [f"engine:   {found['engine_note']}"] if found["engine"] is None and found["engine_note"] else []
+    return entries, found["token"], notes
+
+
 def cmd_install(args: argparse.Namespace) -> int:
     environ = os.environ
     notes: list[str] = []
     targets = _targets(args, environ, notes)
-    if args.http:
-        server, token = http_server(args, environ)
-        if token is None:
-            raise InstallError(f"set {server.token_env} (or pass --token-file) so the endpoint can be checked "
-                               "before anything is written. Nothing was written.")
-        reached = server.url
-    else:
-        server, reached = stdio_server(args, environ)
-    # Every file is read and checked first, then the server, and only then is anything written.
-    plans = [plan_install(item, server) for item in targets]
-    count = probe_http(server.url, token) if server.http else probe_stdio(server)
-    print(f"server:   {server.describe()}")
-    print(f"checked:  {reached} lists {count} tools")
-    for note in notes:
+    entries, token, server_notes = _entries(args, environ)
+    # Every file is read and checked first, then each server, and only then is anything written. Two
+    # servers in one file are one write: each plan builds on the one before it.
+    plans: list[list[Plan]] = []
+    for item in targets:
+        chain: list[Plan] = []
+        for name, server, _reached in entries:
+            chain.append(plan_install(item, server, name=name, after=chain[-1] if chain and item.path else None))
+        plans.append(chain)
+    for _name, server, reached in entries:
+        count = probe_http(server.url, token or "") if server.http else probe_stdio(server)
+        print(f"server:   {server.describe()}")
+        print(f"checked:  {reached} lists {count} tools")
+    for note in server_notes + notes:
         print(note)
-    for plan in plans:
-        print(describe_plan(plan) if args.dry_run else apply(plan))
+    for chain in plans:
+        for plan in _writes(chain):
+            print(describe_plan(plan) if args.dry_run else apply(plan))
     if args.dry_run:
         print("dry run: nothing was written")
         return 0
-    for plan in plans:
-        check = _CHECKS[plan.target.client]
-        if plan.target.client == "claude" and plan.target.scope == "project":
-            check = f"run `claude` in {plan.target.path.parent} once to approve the project's server, then {check}"
-        print(f"check:    {plan.target.client}: {check}")
-    if server.http and not (environ.get(server.token_env) or "").strip():
-        print(f"note:     {server.token_env} is not set in this shell; the agent reads the token from it when it "
+    for chain in plans:
+        target_ = chain[0].target
+        check = _CHECKS[target_.client]
+        if target_.client == "claude" and target_.scope == "project":
+            check = f"run `claude` in {target_.path.parent} once to approve the project's server, then {check}"
+        print(f"check:    {target_.client}: {check}")
+    http = [server for _name, server, _reached in entries if server.http]
+    if http and not (environ.get(http[0].token_env) or "").strip():
+        print(f"note:     {http[0].token_env} is not set in this shell; the agent reads the token from it when it "
               "connects, so set it in the environment the agent starts from")
     return 0
+
+
+def _writes(chain: list[Plan]) -> list[Plan]:
+    """What to carry out for one agent: each of Claude Code's user-scope commands, or one file write
+    (the last plan that changes the file holds every change before it)."""
+    if not chain or chain[0].target.form == "claude-cli":
+        return chain
+    changed = [plan for plan in chain if plan.text is not None]
+    if not changed:
+        return [chain[-1]]
+    final = changed[-1]
+    final.name = ", ".join(plan.name for plan in changed)
+    return [final]
 
 
 def cmd_uninstall(args: argparse.Namespace) -> int:
