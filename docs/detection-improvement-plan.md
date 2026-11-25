@@ -12,7 +12,7 @@ is reported as verified only with repeatable proof (see [AGENTS.md](../AGENTS.md
 The [OWASP coverage matrix](owasp-coverage-matrix.md) is the maintained statement of what a Scan
 checks. In short, at 2.14.1:
 
-- A Scan has eleven families (`api/scan/contracts.py`): recon, passive and active templates, XSS,
+- A Scan had eleven families (`api/scan/contracts.py`): recon, passive and active templates, XSS,
   SQL injection, NoSQL injection, object- and function-level authorization, sensitive exposure,
   GraphQL posture and active recon.
 - Injection proof exists for SQL injection and XSS only. There is no generic check for command

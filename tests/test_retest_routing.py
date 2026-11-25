@@ -228,7 +228,8 @@ CURRENT_TOOLS = frozenset({
     "dalfox", "dns.inspect", "http_baseline", "nuclei", "playwright",
     "request_sqli_differential", "request_xss_differential",
     "shakerscan_authz_surface", "shakerscan_browser_proof", "shakerscan_exposure_probe",
-    "shakerscan_graphql_probe", "shakerscan_nosqli_verify", "shakerscan_redirect_probe",
+    "shakerscan_graphql_probe", "shakerscan_injection_verify", "shakerscan_nosqli_verify",
+    "shakerscan_redirect_probe",
     "shakerscan_sqli_proof", "smart_authz", "sqlmap", "subdomain_takeover", "tls.inspect",
     "autonomous_workflow", "model_intake",
 })
