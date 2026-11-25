@@ -14,6 +14,7 @@ from fastapi import HTTPException
 from api.hunt.coverage_ledger import COVERAGE_LEDGER_SCHEMA_STATEMENTS
 from api.hunt.coverage_map import load_coverage
 from api.hunt.run_service import HuntRunService
+from tests.receipt_pg_schema import receipt_schema_sql
 
 DSN = os.environ.get("HUNT_TEST_POSTGRES_DSN")
 pytestmark = pytest.mark.skipif(not DSN, reason="disposable PostgreSQL DSN not configured")
@@ -33,14 +34,13 @@ async def test_coverage_is_read_from_the_hunts_records_and_holds_an_early_finish
         await conn.execute("CREATE TABLE targets(id UUID PRIMARY KEY); CREATE TABLE device_targets(id UUID PRIMARY KEY);"
                            "CREATE TABLE scan_campaigns(id UUID PRIMARY KEY);"
                            "CREATE TABLE budget_reservations(owner_kind TEXT, owner_id TEXT, status TEXT);"
-                           "CREATE TABLE approval_receipts(id UUID PRIMARY KEY, status TEXT,"
-                           " revoked_at TIMESTAMPTZ, expires_at TIMESTAMPTZ);"
                            "CREATE TABLE http_transactions(hunt_run_id UUID, hunt_action_id UUID,"
                            " sequence INTEGER, status_code INTEGER)")
         for table in ("hunt_runs", "hunt_actions", "target_endpoints", "hunt_coverage_angle_events"):
             await conn.execute(re.search(rf"CREATE TABLE {table} \(.*?\n\);", ddl, re.S)[0])
         for statement in COVERAGE_LEDGER_SCHEMA_STATEMENTS:
             await conn.execute(statement)
+        await conn.execute(receipt_schema_sql())
         await conn.execute("""CREATE TABLE investigation_candidates (
             id UUID PRIMARY KEY, family TEXT, title TEXT, status TEXT, claimed_severity TEXT,
             fingerprint TEXT, canonical_locus JSONB, verifier_contract_id TEXT,
@@ -49,7 +49,11 @@ async def test_coverage_is_read_from_the_hunts_records_and_holds_an_early_finish
         target, hunt, other, approval = uuid4(), uuid4(), uuid4(), uuid4()
         await conn.execute("INSERT INTO targets VALUES($1)", target)
         # The guard holds a Hunt that can test: active testing under a current approval.
-        await conn.execute("INSERT INTO approval_receipts VALUES($1,'active',NULL,NULL)", approval)
+        await conn.execute("INSERT INTO scope_receipts(id,target_id,verdict) VALUES('scope',$1,'allowed')", target)
+        await conn.execute("""INSERT INTO approval_receipts(
+            id,scope_receipt_id,risk_tier,confirmations,approved_by,action_name,status
+            ) VALUES($1,'scope','active','["confirm_authorized"]','fixture','target.authorization','active')""",
+            approval)
         await conn.executemany(
             "INSERT INTO hunt_runs(id,target_kind,target_id,objective,status,policy_json,budget_json,budget_used_json) "
             "VALUES($1,'web',$2,'Coverage',$3,$4,'{\"max_http_requests\":1000,\"max_duration_seconds\":5400}',"
@@ -107,6 +111,11 @@ async def test_coverage_is_read_from_the_hunts_records_and_holds_an_early_finish
             await service.finish(str(hunt), summary="Done", next_actions=[])
         assert refused.value.status_code == 409 and "GET /.env" in refused.value.detail
         assert await conn.fetchval("SELECT status FROM hunt_runs WHERE id=$1", hunt) == "active"
+        # The guard holds only a Hunt that can still test: a revoked approval releases it.
+        assert await service._can_test(conn, run) is True
+        await conn.execute("UPDATE approval_receipts SET status='revoked', revoked_at=NOW() WHERE id=$1", approval)
+        assert await service._can_test(conn, run) is False
+        assert await service._can_test(conn, {**run, "policy_json": "{}"}) is False
         # Refused before anything changed; the forced finish and its debrief are covered without a
         # database (test_hunt_finish_coverage_guard), as finishing settles tables this fixture lacks.
         checkpoint_free = await load_coverage(conn, {**run, "target_kind": "device"})
