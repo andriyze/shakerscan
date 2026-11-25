@@ -229,6 +229,7 @@ ROUTES: tuple[tuple[str, str, str], ...] = (
     ("POST", "/hunts/{hunt_id}/candidates/{candidate_id}/verify", "Verify Hunt Candidate"),
     ("POST", "/hunts/{hunt_id}/capabilities/{capability_name}", "Execute Hunt Capability"),
     ("GET", "/hunts/{hunt_id}/checkpoint", "Get Hunt Checkpoint"),
+    ("GET", "/hunts/{hunt_id}/coverage", "Get Hunt Coverage"),
     ("GET", "/hunts/{hunt_id}/coverage-angles", "Get Hunt Coverage Angles"),
     ("POST", "/hunts/{hunt_id}/coverage-angles", "Record Hunt Coverage Angle"),
     ("POST", "/hunts/{hunt_id}/finish", "Finish Hunt"),

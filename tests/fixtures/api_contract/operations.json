@@ -1130,6 +1130,11 @@
     "operation_id": "get_hunt_checkpoint_hunts__hunt_id__checkpoint_get"
   },
   {
+    "path": "/hunts/{hunt_id}/coverage",
+    "method": "get",
+    "operation_id": "get_hunt_coverage_hunts__hunt_id__coverage_get"
+  },
+  {
     "path": "/hunts/{hunt_id}/coverage-angles",
     "method": "get",
     "operation_id": "get_hunt_coverage_angles_hunts__hunt_id__coverage_angles_get"

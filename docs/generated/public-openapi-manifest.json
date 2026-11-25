@@ -114,8 +114,8 @@
     "HuntCandidateVerifyRequest": "112cf562326c66072257c087dc2226b394ac6b7379296d3c3e5ad125a59847aa",
     "HuntCapabilityRequest": "0048d34cbebc4635761f66c0b54ca394a513e170ad6b043fc394ed4b4398414b",
     "HuntCoverageAngleRequest": "5eaaf84f357a8edfd4aee9b03494cdcf2d02c594b2bb95fc136f99b7b5f8f45d",
-    "HuntFinishRequest": "a1b31b0b8ab44686e0049d9f83d07ad12fcf749bc9d68f93424a6abaff3fee1b",
-    "HuntQueryRequest": "1a575a0e43aeec593f42028b20b7632b7cf509341497e965c51daaee53f454bc",
+    "HuntFinishRequest": "fa30ec855178d031bdca313c1cadbeaa351d5491693698ad35130f22a38bb766",
+    "HuntQueryRequest": "e3b4d9794c43aa67c7aa43633c227d2438a5f24defd851244615b2505c67da94",
     "HuntSkillBindRequest": "89c12e18f3f55a126cb209590bca6163c97e3300b987c1173fafeff762ed13ac",
     "HuntSkillSuggestionRequest": "12f4bced74b87bcfaa23c429aaa6c8851a80d6325a57706dafb2614952e49487",
     "HuntSkillUsageRequest": "9a1b268fd05dfd816f0295f80103c06e6e6b0f52104085cbacba08ccdb88e5af",
@@ -173,7 +173,7 @@
     "RequestCollectionSelect": "156abc088232440812107d33c50796ffe4d3a92cd5522d6b4107244a9656017c",
     "RequestCollectionSelectionUpsert": "fdb3fc9eb6ce4340877b171bfa3beb10b5cacde2428174ddaa32b031f7bb43bd",
     "RevertInput": "51283dbbd27a2cae5294c64539010427732678fd0cd909e6dfdc22fe21feffa5",
-    "ScanAdvancedLimits": "ea1988dd13e87d35ecd16b0a30bf83db4722f68cffd0b28ab74d7fb451992e38",
+    "ScanAdvancedLimits": "f2705a2122624f9576ddf514cb9577ae6cb83c6ef3aebadf9f66bb524880a907",
     "ScanExecutionSettingsUpdate": "8c4659d76962d531391fe7e9631bc1fe46106aeb0e1b9b39aa05b1bede9ae5a6",
     "ScanFamilyPreviewLimits": "3f7ff16f3929d992308fece08665d5db63bdf6af2df0937adcbf5d879621ba68",
     "ScanFamilyPreviewRequest": "f6d16b3e742ce4f1e7ed9fffdb6c6cf9478f566faeb47c5a52b107088bb1d198",
@@ -223,9 +223,9 @@
     "ValidationRequest": "cb81c65a5c80da74a19c6bd92e9c6a68f5cdb22fafeb94270481d463450f893e",
     "WorkerScaleRequest": "52e7ac017dfa1d92efa8e4071026b9bf24c0cf2a17f5d9e742349df3f08f6c62"
   },
-  "contract_sha256": "d5e1e210ffdbf2c6042aeecd59dce1bb3369121680d51d04fd9103465877cdfd",
+  "contract_sha256": "c9f6beb82c0b27bc5b17ba1b6b371ad1faa3f9df0dc5443be6e0967e848be776",
   "openapi": "3.1.0",
-  "operation_count": 484,
+  "operation_count": 485,
   "operations": {
     "DELETE /ai/scans/{scan_id}/transcript": {
       "deprecated": false,
@@ -1910,6 +1910,21 @@
       "deprecated": false,
       "operation_id": "get_hunt_checkpoint_hunts__hunt_id__checkpoint_get",
       "parameters_sha256": "2e4ac0bf7e01a02d968759249d186dbe624e65e94991e90043c21d9181994b44",
+      "request_schema_sha256": null,
+      "response_schema_sha256": {
+        "200": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "422": "e1fe533ef371cc6965d4015e800b2b5ca90e470f4aae3d57c2754a32b61e8c2d"
+      },
+      "security_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "surface": "hunt",
+      "tags": [
+        "Hunt"
+      ]
+    },
+    "GET /hunts/{hunt_id}/coverage": {
+      "deprecated": false,
+      "operation_id": "get_hunt_coverage_hunts__hunt_id__coverage_get",
+      "parameters_sha256": "505c91c0f146e997408dd4ef866806a0be23b68153be95258e2459f7a6548887",
       "request_schema_sha256": null,
       "response_schema_sha256": {
         "200": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
@@ -5838,7 +5853,7 @@
       "deprecated": false,
       "operation_id": "submit_scan_scans_post",
       "parameters_sha256": "ddaf7d03a5e33d1d0116950a13b7b4a7fd3db89282553bec193c97867ef72115",
-      "request_schema_sha256": "3559ed1383755522c46182be63ba59ff2b63d1204df8033bc170e77b30db28b4",
+      "request_schema_sha256": "5e06cc3369548e15555dbc2112e0c01d19c26e91a3249e454d7dd7af836b3b3c",
       "response_schema_sha256": {
         "200": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a"
       },
@@ -5850,7 +5865,7 @@
       "deprecated": false,
       "operation_id": "submit_batch_scans_batch_post",
       "parameters_sha256": "ddaf7d03a5e33d1d0116950a13b7b4a7fd3db89282553bec193c97867ef72115",
-      "request_schema_sha256": "f38b7a9554e63936a7619e735b884058c3649bf41186bfc9988b29632ce4ea0a",
+      "request_schema_sha256": "5760bbf0b7cf3ac85123cf0983d439367dc7b1bb28ad712c0d1ef92657720fa5",
       "response_schema_sha256": {
         "200": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a"
       },
@@ -6781,6 +6796,7 @@
       "GET /hunts/{hunt_id}/budget-amendments",
       "GET /hunts/{hunt_id}/candidates/{candidate_id}/boundary-context",
       "GET /hunts/{hunt_id}/checkpoint",
+      "GET /hunts/{hunt_id}/coverage",
       "GET /hunts/{hunt_id}/coverage-angles",
       "GET /hunts/{hunt_id}/http-transactions",
       "GET /hunts/{hunt_id}/permission-events",

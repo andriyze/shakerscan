@@ -2045,8 +2045,8 @@ for the profile contract, invocation, limits and acceptance gates.
 
 | Surface | Count | Source |
 |---|---|---|
-| Public REST operations | 494 | `api/**/*.py` FastAPI decorators |
-| Unique REST paths | 412 | `api/**/*.py` |
+| Public REST operations | 495 | `api/**/*.py` FastAPI decorators |
+| Unique REST paths | 413 | `api/**/*.py` |
 | Check families | 21 | `api/check_registry.py` |
 | Command Arsenal commands | 85 | `api/command_arsenal.py` |
 | Tool adapters | 0 | `api/command_arsenal.py` |
@@ -2299,6 +2299,7 @@ for the profile contract, invocation, limits and acceptance gates.
 | `POST` | `/hunts/{hunt_id}/candidates/{candidate_id}/verify` | `verify_hunt_candidate` |
 | `POST` | `/hunts/{hunt_id}/capabilities/{capability_name:path}` | `execute_hunt_capability` |
 | `GET` | `/hunts/{hunt_id}/checkpoint` | `get_hunt_checkpoint` |
+| `GET` | `/hunts/{hunt_id}/coverage` | `get_hunt_coverage` |
 | `GET` | `/hunts/{hunt_id}/coverage-angles` | `get_hunt_coverage_angles` |
 | `POST` | `/hunts/{hunt_id}/coverage-angles` | `record_hunt_coverage_angle` |
 | `POST` | `/hunts/{hunt_id}/finish` | `finish_hunt` |
