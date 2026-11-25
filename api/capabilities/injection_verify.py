@@ -58,11 +58,11 @@ except ModuleNotFoundError:
 INJECTION_VERIFY_PARSER_VERSION = "injection-verify/v1"
 INJECTION_CLASSES = ("template_injection", "path_traversal", "command_injection", "xxe")
 PROOF_CONTRACTS = {
-    "template_injection": "injection_template_arithmetic/v1",
-    "path_traversal": "injection_path_traversal_signature/v1",
-    "command_injection": "injection_command_arithmetic/v1",
+    "template_injection": "injection_template_differential/v1",
+    "path_traversal": "injection_path_traversal_differential/v1",
+    "command_injection": "injection_command_differential/v1",
     "command_injection_time": "injection_command_time_differential/v1",
-    "xxe": "injection_xxe_external_entity/v1",
+    "xxe": "injection_xxe_differential/v1",
 }
 # What a class needs before its first stage is worth starting (probes, the repeat, the control).
 MINIMUM_REQUESTS = 4

@@ -444,6 +444,44 @@ CHECK_REGISTRY: tuple[CheckFamilySpec, ...] = (
         description="Deterministic BFLA proof via anonymous vs authenticated route access differential.",
     ),
     CheckFamilySpec(
+        name="server_injection",
+        phase="active",
+        family="injection",
+        label="Server-side Injection",
+        is_active=True,
+        risk_level="high",
+        telemetry_schema="active_endpoint_attempt_v1",
+        proof_contract=("method", "url_or_request", "field", "injection_class", "response_delta"),
+        severity_rules={
+            "critical_requires": ["command_execution", "template_evaluation"],
+            "high_requires": ["file_signature"],
+        },
+        # V2-native: executed by the ``injection.verify_batch`` capability.
+        dispatch_adapter="injection_verify_batch",
+        # path_traversal and command_injection stay aliases of the planned lfi and rce names.
+        aliases=("ssti", "template_injection", "xxe", "server-injection"),
+        finding_tools=("injection_verify",),
+        finding_cwes=("CWE-1336", "CWE-22", "CWE-78", "CWE-611"),
+        finding_title_markers=(
+            "template injection", "path traversal", "command injection", "xml external entity",
+        ),
+        finding_type_markers=(
+            "server_injection", "template injection", "path traversal", "command injection", "xxe",
+        ),
+        remediation=(
+            "Never build a template, a file path, a shell command or an XML document type from request input.",
+            "Render user input as data in a fixed template; resolve file names against an allow-list in one directory.",
+            "Run programs with an argument vector and no shell; disable document types and external entities in XML parsers.",
+        ),
+        emits_endpoint_telemetry=True,
+        scanner_focus_order=46,
+        runnable=False,
+        description=(
+            "Deterministic proof of server-side template injection, path traversal, command "
+            "injection and XML external entity injection over query, path and body candidates."
+        ),
+    ),
+    CheckFamilySpec(
         name="ssrf",
         phase="active",
         family="server_side",

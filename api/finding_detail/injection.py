@@ -215,6 +215,74 @@ def build_nosqli(finding: Mapping[str, Any], evidence: Mapping[str, Any]) -> dic
     }
 
 
+_SERVER_INJECTION = {
+    "template_injection": {
+        "label": "Server-side template injection",
+        "summary": "evaluates a template expression sent in {parameter}: input is compiled into a server-side template.",
+        "expected": ["The expression returned as the text that was sent, never its result."],
+        "context": ["A template engine that compiles request input runs the attacker's expressions on the server; most engines reach file access or command execution from there."],
+        "fix": ["Render request input as data passed to a fixed template; never build the template source from it.",
+                "Where users must write templates, use a logic-less engine or a sandboxed environment."],
+    },
+    "command_injection": {
+        "label": "OS command injection",
+        "summary": "runs a shell command sent in {parameter}: input reaches a command line.",
+        "expected": ["The characters treated as part of the value; no command run and no delay."],
+        "context": ["The command runs with the application's own operating-system account: its files, its credentials and its network position."],
+        "fix": ["Call the program with an argument vector and no shell (execFile, subprocess with a list, ProcessBuilder).",
+                "Validate the value against the exact format expected (an address, a number) before it is used."],
+    },
+    "path_traversal": {
+        "label": "Path traversal",
+        "summary": "returns a system file when {parameter} names a path outside the intended directory.",
+        "expected": ["A not-found or refused answer for any path outside the directory the feature serves."],
+        "context": ["Any file the application's account can read is exposed: configuration, credentials, source code and keys."],
+        "fix": ["Resolve the requested name against one base directory and refuse a result that leaves it.",
+                "Prefer an identifier looked up in an allow-list over a file name taken from the request."],
+    },
+    "xxe": {
+        "label": "XML external entity injection",
+        "summary": "resolves an external entity declared in the XML document it is sent, and returns the file the entity names.",
+        "expected": ["A document type declaration refused, or the entity left unresolved."],
+        "context": ["An external entity reads files with the application's account and can make the server request internal addresses."],
+        "fix": ["Disable document type declarations and external entities in the XML parser.",
+                "Use a hardened parser configuration (defusedxml, FEATURE_SECURE_PROCESSING, XmlResolver = null)."],
+    },
+}
+
+
+def build_server_injection(finding: Mapping[str, Any], evidence: Mapping[str, Any]) -> dict[str, Any]:
+    url, method, parameter = _location(finding, evidence)
+    kind = text(evidence.get("injection_class"), 40)
+    words = _SERVER_INJECTION.get(kind) or _SERVER_INJECTION["template_injection"]
+    shape = text(evidence.get("payload_shape"), 200)
+    timing = record(evidence.get("timing_ms"))
+    where = parameter or "the request"
+    return {
+        "class": f"injection.{kind or 'server'}",
+        "class_label": words["label"],
+        "summary": f"{method} {url} " + words["summary"].format(parameter=where),
+        "where": facts(fact("Endpoint", f"{method} {url}", mono=True), fact("Parameter", parameter, mono=True)),
+        "observed": facts(
+            fact("Payload shape", shape, mono=True),
+            fact("Technique", text(evidence.get("technique")).replace("_", " ")),
+            fact("File signature", text(evidence.get("file_signature")).replace("_", " ")),
+            fact("Delay", f"{integer(timing.get('payload_median'))} ms against {integer(timing.get('control_median'))} ms"
+                 if timing else ""),
+            fact("Confirmed", f"{integer(evidence.get('repetitions'))} independent repetitions" if integer(evidence.get("repetitions")) else ""),
+        ),
+        "pairs": _pairs(evidence),
+        "expected": words["expected"],
+        "context": words["context"],
+        "reproduce": command(
+            f"curl -sS -X {q(method)} {q(url)}",
+            note=f"Send the payload shape above in {where} and compare with the unchanged request; "
+                 "the scanner used fresh random numbers for each repetition.",
+        ),
+        "fix": words["fix"],
+    }
+
+
 def build_xss(finding: Mapping[str, Any], evidence: Mapping[str, Any]) -> dict[str, Any]:
     url, _method, parameter = _location(finding, evidence)
     verified = finding.get("proof_state") == "verified" or finding.get("verified") is True
@@ -299,4 +367,4 @@ def build_authz(finding: Mapping[str, Any], evidence: Mapping[str, Any]) -> dict
     }
 
 
-__all__ = ["build_authz", "build_nosqli", "build_sqli", "build_xss"]
+__all__ = ["build_authz", "build_nosqli", "build_server_injection", "build_sqli", "build_xss"]

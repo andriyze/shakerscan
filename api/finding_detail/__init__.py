@@ -52,6 +52,8 @@ def _builder(finding: Mapping[str, Any], evidence: Mapping[str, Any]):
         return injection.build_sqli
     if tool == "shakerscan_nosqli_verify":
         return injection.build_nosqli
+    if tool == "shakerscan_injection_verify":
+        return injection.build_server_injection
     if tool in {"dalfox", "shakerscan_browser_proof", "request_xss_differential"} or (
         str(finding.get("cwe") or "") == "CWE-79" and evidence.get("payload_sha256")
     ):

@@ -46,6 +46,7 @@ _LEGACY_CONTINUATION_CAPABILITIES = (
     "authz_surface.verify_batch",
     "exposure.verify_batch",
     "graphql.verify_batch",
+    "injection.verify_batch",
     "nosqli.verify_batch",
     # 2.11: the open-redirect probe joined the XSS family's proof capabilities.
     "redirect.verify_batch",

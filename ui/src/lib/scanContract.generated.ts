@@ -345,6 +345,18 @@ export const SCAN_PUBLIC_CONTRACT_SNAPSHOT = {
       "requires_active_testing": true,
       "requires_credentials": false,
       "risk_level": "medium"
+    },
+    {
+      "capabilities": [
+        "injection.verify_batch"
+      ],
+      "default_enabled": false,
+      "description": "Deterministic proof of server-side template injection, path traversal, command injection and XML external entity injection over query, path and body candidates.",
+      "label": "Server-side Injection",
+      "name": "server_injection",
+      "requires_active_testing": true,
+      "requires_credentials": false,
+      "risk_level": "high"
     }
   ],
   "family_preset_addition_floors": {
