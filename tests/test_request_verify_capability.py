@@ -510,3 +510,39 @@ def test_no_check_can_send_more_than_its_request_budget(monkeypatch):
     result, transport = _run("cors", {"path": "/"}, lambda request: _answer(request, b"{}"), budget=5)
     assert len(transport.requests) == 5 and result.actual_budget["http_requests"] == 5
     assert result.status == "partial" and "budget_exhausted" in result.errors
+
+
+# -- JWT -------------------------------------------------------------------------------------
+
+def _token():
+    import base64
+
+    def part(value):
+        return base64.urlsafe_b64encode(json.dumps(value).encode()).rstrip(b"=").decode()
+    return part({"alg": "HS256", "typ": "JWT"}) + "." + part({"sub": "alice"}) + ".c2lnbmF0dXJl"
+
+
+def _whoami(verifies_signature):
+    good = _token()
+
+    def respond(request):
+        auth = _header(request, "Authorization") or ""
+        token = auth[7:] if auth.startswith("Bearer ") else ""
+        if not token or (verifies_signature and token != good):
+            return _answer(request, b'{"error": "unauthorized"}', status=401, content_type="application/json")
+        return _answer(request, b'{"user": "alice"}', content_type="application/json")
+    return respond
+
+
+def test_jwt_accepted_with_an_altered_signature_twice_and_refused_without_it():
+    result, transport = _run("jwt", {"path": "/api/whoami", "_headers": {"Authorization": "Bearer " + _token()}},
+                             _whoami(verifies_signature=False))
+    proof = _verified(result)[0]
+    assert proof["technique"] == "jwt_signature_not_verified_repeated"
+    assert any(_header(item, "Authorization") is None for item in transport.requests)
+
+
+def test_jwt_whose_signature_is_checked_proves_nothing():
+    result, _ = _run("jwt", {"path": "/api/whoami", "_headers": {"Authorization": "Bearer " + _token()}},
+                     _whoami(verifies_signature=True))
+    assert not _verified(result)
