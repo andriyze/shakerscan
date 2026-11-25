@@ -511,9 +511,9 @@ def product_candidate(product: str, checks: str, match: Mapping[str, Any],
     except ValueError:
         return None
     # A template that joins "{{BaseURL}}/" to a base ending in "/" requests "//x"; the route is "/x".
-    # Query values arrive redacted (scanner output is untrusted), so a redacted query is dropped
-    # rather than replayed as "<redacted>".
-    query = "" if "redacted" in (parsed.query or "").lower() else parsed.query
+    # Scanner output is untrusted, so its query values arrive masked ("<...>"); a masked query is
+    # dropped rather than replayed as the mask.
+    query = "" if "<" in urllib.parse.unquote(parsed.query or "") else parsed.query
     path = "/" + (parsed.path or "/").lstrip("/") + (f"?{query}" if query else "")
     tags = frozenset(str(tag).lower() for tag in match.get("tags") or ())
     severity = str(match.get("severity") or "info").lower()
