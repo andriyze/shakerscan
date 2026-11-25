@@ -202,7 +202,7 @@ dimension whose permission is off is 0 for the Hunt and is refused with
 | TCP ports | 2,000 / 20,000 / 200,000 | `ports.discover`, `service.fingerprint`, `service.nse_check`, `tls.inspect`, `ssh.connect` / `ssh.exec`, `device.service.verify`, a device TCP service verification | keeps running |
 | Hosts | 100 / 500 / 5,000 | `ports.discover`, `service.fingerprint`, `service.nse_check`, `service.snmp.inspect`, `subdomains.discover`, `ssh.connect` / `ssh.exec` | keeps running |
 | UDP ports | 1,000 / 5,000 / 20,000 | `service.snmp.inspect`, `device.service.verify` and a device UDP service verification | keeps running |
-| Out-of-band interactions | 50 / 200 / 1,000 | calls that reserve out-of-band callbacks | keeps running |
+| Out-of-band interactions | 50 / 200 / 1,000 | calls that reserve out-of-band callbacks (a `templates.scan` call holds one when the policy allows them, which is what lets it use the deployment's private OOB server) | keeps running |
 | Device fragility | 2,000 / 8,000 / 40,000 | device probes, scans, service checks and SSH, and on a device Hunt the web and network calls that reserve fragility for their traffic | keeps running |
 | Duration | 3,600 / 14,400 / 86,400 s | every call that runs | `budget_exhausted` |
 

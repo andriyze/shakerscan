@@ -768,6 +768,34 @@ def test_nuclei_interactsh_requires_gate_and_private_server(monkeypatch):
     ) == ("https://oob.corp.example", None)
 
 
+def test_a_hunt_template_call_reserves_out_of_band_only_when_the_policy_allows_it(monkeypatch):
+    """The OOB gate needs a nonzero reservation; nothing reserved one, so no Hunt template call
+    could use the operator's private OOB server whatever the policy allowed."""
+    monkeypatch.setenv("SHAKERSCAN_HUNT_INTERACTSH_SERVER", "oob.corp.example")
+    for policy, reserved in (
+        ({"active_testing": True, "allow_oob_interactions": True}, at.HUNT_TEMPLATE_OOB_HOLD),
+        (json.dumps({"active_testing": True, "allow_oob_interactions": True}), at.HUNT_TEMPLATE_OOB_HOLD),
+        ({"active_testing": True, "allow_oob_interactions": False}, 0),
+        ({"active_testing": False, "allow_oob_interactions": True}, 0),
+        (None, 0),
+    ):
+        run = {"budget_profile": "balanced", "policy_json": policy}
+        context = at.hunt_scanner_budget_context(run, {})
+        hold = at.hunt_scanner_dispatch_budgets("templates.scan", **context)[0]
+        assert int(hold.get("oob_interactions") or 0) == reserved, policy
+        parsed = json.loads(policy) if isinstance(policy, str) else (policy or {})
+        server, _token = at.resolve_hunt_interactsh_config(
+            allow_active=bool(parsed.get("active_testing")),
+            allow_oob=bool(parsed.get("allow_oob_interactions")),
+            reserved_oob_interactions=int(hold.get("oob_interactions") or 0),
+        )
+        assert (server is not None) == bool(reserved), policy
+    # A verifier never reserves it: only the template engine has an OOB client.
+    context = at.hunt_scanner_budget_context(
+        {"budget_profile": "balanced", "policy_json": {"active_testing": True, "allow_oob_interactions": True}}, {})
+    assert "oob_interactions" not in at.hunt_scanner_dispatch_budgets("sqli.verify", **context)[0]
+
+
 def test_hunt_scanner_projection_takes_a_bounded_body_input_and_preserves_scan_input():
     body = {
         "path": "/rest/user/login",
