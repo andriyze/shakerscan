@@ -2498,6 +2498,7 @@ print_help() {
     echo "  version            Print the engine release (and source revision in a checkout)"
     echo "  agent [name]       Start Codex, Claude, OpenCode, or Pi in this runtime dir"
     echo "  mcp                Start MCP: read-only Arsenal inspection plus target-bound Hunt V2"
+    echo "  catalog [section]  What ShakerScan can do and how an agent drives it (tools, routes, decisions)"
     echo "  gungnir <cmd>      CT monitor: start, stop, status, logs"
     echo "  devices <cmd>      Network worker: start, stop, restart, status, logs"
     echo "  model-intake <cmd> Optional Model Intake module: enable, disable [--remove-images], status"
@@ -4676,7 +4677,7 @@ done
 
 if [ "$COMMAND_HELP_ONLY" -eq 1 ]; then
     case "$COMMAND" in
-        scan|hunt|approve|deny|knowledge|secrets|credentials|collections|evidence|agent|ai|fleet|join|model-intake-runner|report-rebuild|record)
+        scan|hunt|approve|deny|knowledge|secrets|credentials|collections|evidence|agent|ai|fleet|join|model-intake-runner|report-rebuild|record|catalog)
             # Forward to the command's own help implementation below.
             ;;
         mcp)
@@ -4796,6 +4797,13 @@ case $COMMAND in
             exit 1
         fi
         exec python3 "$SCRIPT_DIR/scripts/api_cli.py" --api-url "$(api_probe_url)" "${ARGS[@]}"
+        ;;
+    catalog)
+        if [ ! -f "$SCRIPT_DIR/scripts/agent_catalog.py" ]; then
+            echo -e "${RED}Error: the agent catalog is missing from this runtime.${NC}" >&2
+            exit 1
+        fi
+        exec python3 "$SCRIPT_DIR/scripts/agent_catalog.py" --api-url "$(api_probe_url)" "${ARGS[@]}"
         ;;
     credentials)
         run_v2_product_cli "credentials" "${ARGS[@]}"

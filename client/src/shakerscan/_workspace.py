@@ -731,9 +731,12 @@ def _hook_commands(hooks: Any, skip: Mapping[str, Sequence[Any]] | None = None) 
     return lines
 
 
-def merge_opencode_config(existing: Mapping, server: Mapping) -> tuple[dict, list[str]]:
-    """OpenCode's ``opencode.json``: the client owns ``mcp.shakerscan``, the Hunt skill in
-    ``instructions`` and a missing ``$schema``; everything else is kept. Returns (config, kept)."""
+def merge_opencode_config(existing: Mapping, server: Mapping,
+                          extra: Mapping[str, Mapping] | None = None) -> tuple[dict, list[str]]:
+    """OpenCode's ``opencode.json``: the client owns ``mcp.shakerscan`` (and the deployment's own
+    servers in ``extra``), the Hunt skill in ``instructions`` and a missing ``$schema``; everything
+    else is kept. Returns (config, kept)."""
+    extra = dict(extra or {})
     config = dict(existing)
     kept = [str(key) for key in config if key not in {"$schema", "instructions", "mcp"}]
     config.setdefault("$schema", OPENCODE_SCHEMA)
@@ -750,22 +753,25 @@ def merge_opencode_config(existing: Mapping, server: Mapping) -> tuple[dict, lis
         # budget and view rules are in every session that drives a Hunt.
         config["instructions"] = [HUNT_SKILL_INSTRUCTION]
     servers = config.get("mcp") if isinstance(config.get("mcp"), Mapping) else {}
-    others = [str(name) for name in servers if name != "shakerscan"]
+    others = [str(name) for name in servers if name != "shakerscan" and name not in extra]
     if others:
         kept.append("MCP servers " + ", ".join(others))
-    config["mcp"] = {**servers, "shakerscan": dict(server)}
+    config["mcp"] = {**servers, "shakerscan": dict(server), **{name: dict(value) for name, value in extra.items()}}
     return config, kept
 
 
-def merge_mcp_json(existing: Mapping, server: Mapping) -> tuple[dict, list[str]]:
-    """Claude Code's ``.mcp.json``: the client owns ``mcpServers.shakerscan`` only."""
+def merge_mcp_json(existing: Mapping, server: Mapping,
+                   extra: Mapping[str, Mapping] | None = None) -> tuple[dict, list[str]]:
+    """Claude Code's ``.mcp.json``: the client owns ``mcpServers.shakerscan`` (and the deployment's
+    own servers in ``extra``) only."""
+    extra = dict(extra or {})
     config = dict(existing)
     kept = [str(key) for key in config if key != "mcpServers"]
     servers = config.get("mcpServers") if isinstance(config.get("mcpServers"), Mapping) else {}
-    others = [str(name) for name in servers if name != "shakerscan"]
+    others = [str(name) for name in servers if name != "shakerscan" and name not in extra]
     if others:
         kept.append("MCP servers " + ", ".join(others))
-    config["mcpServers"] = {**servers, "shakerscan": dict(server)}
+    config["mcpServers"] = {**servers, "shakerscan": dict(server), **{name: dict(value) for name, value in extra.items()}}
     return config, kept
 
 

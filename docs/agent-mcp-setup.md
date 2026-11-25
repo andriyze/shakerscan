@@ -57,13 +57,40 @@ What the command does, and refuses:
 
 For an MCP endpoint that requires a bearer token (an authenticating deployment can serve one),
 register the endpoint instead of this client: `shakerscan mcp install claude --http
-https://scanner.example.com --token-env SHAKERSCAN_API_TOKEN`. Given the deployment's address, the
-command reads its discovery document (`/.well-known/shakerscan`, fetched without credentials) and
-uses the first MCP server it names; the endpoint's own URL works as well. The entry names the
-environment variable, never its value, so set it in the environment the agent starts from; the
-check before writing uses the variable, `--token-file`, or the saved connection of that host.
-Next to a local `shakerscan` entry, this one is named `shakerscan-enterprise`, so both stay
-available; `mcp uninstall` removes both.
+https://scanner.example.com --token-env SHAKERSCAN_API_TOKEN`. The endpoint's own URL works, and so
+does the deployment's address, whose discovery document (`/.well-known/shakerscan`, fetched without
+credentials) names what to register. The entry names the environment variable, never its value, so
+set it in the environment the agent starts from; the check before writing uses the variable,
+`--token-file`, or the saved connection of that host.
+
+### An Enterprise deployment: both MCP servers
+
+An Enterprise deployment offers two MCP servers, and an agent needs both to control everything:
+
+| Server | Entry name | What it serves | How it runs |
+|---|---|---|---|
+| The engine's | `shakerscan` | Scans, findings, Hunts, targets, schedules, ASM, credentials metadata, the catalog: everything in the open-source engine, through the gateway's authorization | this client over stdio, `shakerscan mcp`, reading the token from its file |
+| The deployment's own | `shakerscan-enterprise` (the name its discovery document publishes) | the paid features (projects, reports, tickets, alerts and the rest) | its streamable HTTP endpoint, bearer token |
+
+Given the deployment's address, `shakerscan mcp install <agent> --http https://scanner.example.com`
+registers both when the discovery document names the engine API (`api_url`) beside its own server:
+the engine's entry uses the saved `shakerscan connect` instance of that host, or `--token-file`; with
+neither, it is left out and the command says so (`engine: not registered: …`). Each is checked
+before anything is written, and the two entries are one write per file. Without `api_url` (an older
+deployment) only the server the document lists is registered, as before. Next to a local
+`shakerscan` entry, the HTTP entry is named `shakerscan-enterprise`, so both stay available;
+`mcp uninstall` removes both.
+
+`shakerscan agent` does the same for its workspace when the saved connection is an Enterprise
+deployment: `.mcp.json`, `opencode.json` and Codex get `shakerscan` (the engine's) and each of the
+deployment's own servers, registered as `shakerscan mcp --remote <endpoint>`. That bridge relays the
+deployment's server over stdio with the connection's token from its file, so no agent configuration
+and no agent environment ever holds the token. An open-source engine publishes no discovery
+document, so its workspace has the one server.
+
+Ask the engine's server what ShakerScan can do: `shakerscan_catalog` lists every tool, command and
+REST route, the Hunt capabilities and the decisions only a person makes; `shakerscan catalog` prints
+the same in a terminal.
 
 On a machine that has only the engine installer, `shakerscan` is the engine launcher, which has no
 `mcp install`; install the client as above.

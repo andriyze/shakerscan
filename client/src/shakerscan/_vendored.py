@@ -30,6 +30,9 @@ RUNTIME_HELPERS = {
     "_person_decision": "person_decision.py",
     "_person_decision_routes": "person_decision_routes.py",
     "_redirect_hint": "redirect_hint.py",
+    "_mcp_agent_tools": "mcp_agent_tools.py",
+    "_agent_catalog": "agent_catalog.py",
+    "_catalog_routes": "catalog_routes.py",
 }
 # The agent kit as packaged (`_kit/claude` stands for the repository's `.claude`).
 # VERSION is the release the kit was built from, shown in the workspace note.

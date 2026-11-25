@@ -39,6 +39,9 @@ VENDORED = {
     "person_decision.py": "_person_decision.py",
     "person_decision_routes.py": "_person_decision_routes.py",
     "redirect_hint.py": "_redirect_hint.py",
+    "mcp_agent_tools.py": "_mcp_agent_tools.py",
+    "agent_catalog.py": "_agent_catalog.py",
+    "catalog_routes.py": "_catalog_routes.py",
 }
 # The agent kit the launcher runs agents inside (`shakerscan agent …`): materialized into a
 # workspace by the client's `agent` command against the connected instance. `.claude` is

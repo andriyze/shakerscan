@@ -124,7 +124,8 @@ def test_no_agent_entry_point_reaches_the_terminal_step_up():
     """The MCP adapter (and the scripts it imports) never call the approval protocol, so an agent
     holding the connection's token can at most begin an approval it cannot finish (the person's
     authenticator code or security key is asked for at their own terminal)."""
-    for name in ("shakerscan_mcp.py", "mcp_stdio.py", "mcp_ssh_stream.py", "api_stream.py"):
+    for name in ("shakerscan_mcp.py", "mcp_stdio.py", "mcp_ssh_stream.py", "api_stream.py", "mcp_agent_tools.py",
+                 "agent_catalog.py"):
         source = (ROOT / "scripts" / name).read_text(encoding="utf-8")
         for marker in ("/_enterprise/approvals", "knowledge_decision", "decide_knowledge", "hunt_approve"):
             assert marker not in source, (name, marker)

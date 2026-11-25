@@ -38,8 +38,8 @@ from ._vendored import helper, kit_sources, load
 
 INSTALL_ONE_LINER = "curl -fsSL https://install.shakerscan.com | sh"
 CLIENT_COMMANDS = (
-    "connect", "disconnect", "agent", "api", "scan", "check", "mcp", "hunt", "approve", "deny", "knowledge",
-    "secrets", "targets", "record", "doctor", "version",
+    "connect", "disconnect", "agent", "catalog", "api", "scan", "check", "mcp", "hunt", "approve", "deny",
+    "knowledge", "secrets", "targets", "record", "doctor", "version",
 )
 AGENTS = ("codex", "claude", "opencode", "pi")
 CONNECT_PATH = "/_enterprise/connect/"
@@ -658,6 +658,7 @@ def prepare_workspace(
     workspace: Path, url: str, who: str, executable: str, *, authenticated: bool = True,
     mcp_env: Mapping[str, str] | None = None, notes: list[str] | None = None,
     state_directory: Path | None = None, start_context: str = "",
+    remote_servers: Mapping[str, str] | None = None,
 ) -> list[str]:
     """Materialize the agent kit against the instance; return what was written.
 
@@ -672,6 +673,9 @@ def prepare_workspace(
     identity). Otherwise the workspace addresses an open-source engine by URL: the MCP
     registrations carry ``--url`` so the agent's own subprocesses reach it without any
     environment, and the note says what that means.
+
+    ``remote_servers`` ({name: endpoint}): the deployment's own MCP servers, from its discovery
+    document, registered beside the engine's as ``shakerscan mcp --remote ENDPOINT``.
     """
     notes = notes if notes is not None else []
     sources = kit_sources()
@@ -721,16 +725,18 @@ def prepare_workspace(
         # `agent --allow`: the launch bounds reach the MCP server even where an agent starts it with
         # a reduced environment. Rewritten on every launch, so a launch without --allow clears them.
         env = dict(mcp_env or {})
+        remote = dict(remote_servers or {})
         config, kept = _workspace.merge_mcp_json(_workspace.read_config(root, ".mcp.json", notes), {
             "command": executable, "args": mcp_args, **({"env": env} if env else {}),
-        })
+        }, {name: {"command": executable, "args": ["mcp", "--remote", endpoint]} for name, endpoint in remote.items()})
         _workspace.write_config(root, ".mcp.json", config)
         notes += filter(None, [_workspace.kept_note(".mcp.json", kept, "mcpServers.shakerscan")])
         written.append(".mcp.json")
         config, kept = _workspace.merge_opencode_config(_workspace.read_config(root, "opencode.json", notes), {
             "type": "local", "command": [executable, *mcp_args], "enabled": True,
             **({"environment": env} if env else {}),
-        })
+        }, {name: {"type": "local", "command": [executable, "mcp", "--remote", endpoint], "enabled": True}
+            for name, endpoint in remote.items()})
         _workspace.write_config(root, "opencode.json", config)
         notes += filter(None, [_workspace.kept_note(
             "opencode.json", kept, f"mcp.shakerscan and the {_workspace.HUNT_SKILL_INSTRUCTION} instruction")])
@@ -873,6 +879,25 @@ def launch_preauthorization(args: argparse.Namespace, url: str, token_file: str 
     return {**env, "SHAKERSCAN_PREAUTHORIZATION_ID": str(granted["id"])}
 
 
+def deployment_servers(url: str, notes: list[str]) -> dict[str, str]:
+    """The deployment's own MCP servers ({name: endpoint}) its discovery document names, to register
+    beside the engine's; none when it publishes no document (an engine, or an older gateway)."""
+    from . import _mcp_install
+
+    try:
+        offered = _mcp_install.discover(url, timeout=10.0)
+    except _mcp_install.InstallError:
+        return {}
+    servers = {}
+    for item in offered["servers"]:
+        name = item["name"] or _mcp_install.REMOTE_SERVER
+        if name != _mcp_install.SERVER and name not in servers:
+            servers[name] = item["url"]
+    if servers:
+        notes.append("mcp:       the engine's server (shakerscan) and the deployment's own: " + ", ".join(servers))
+    return servers
+
+
 def cmd_agent(args: argparse.Namespace) -> int:
     url, token_file, who = resolve_agent_instance(args)
     authenticated = token_file is not None
@@ -905,8 +930,9 @@ def cmd_agent(args: argparse.Namespace) -> int:
         # Before the profile won over XDG, its records were in the session's shared directory.
         notes += _workspace.adopt_shared_record(shared_state / "workspaces", records, workspace)
     executable = client_executable()
+    remote = deployment_servers(url, notes) if authenticated else {}
     written = prepare_workspace(workspace, url, who, executable, authenticated=authenticated, mcp_env=allowed,
-                                notes=notes, start_context=start_context)
+                                notes=notes, start_context=start_context, remote_servers=remote)
     print(f"workspace: {workspace} ({', '.join(written)})\ninstance:  {url} ({who})")
     if start_context:
         print("start:     target " + str(args.target).strip().lower()
@@ -936,6 +962,10 @@ def cmd_agent(args: argparse.Namespace) -> int:
         else:
             detail = (result.stderr or result.stdout).strip().splitlines()[-1:] or ["no output"]
             print(f"codex:     MCP registration skipped ({detail[0]})")
+        for name, endpoint in remote.items():
+            added = subprocess.run(["codex", "mcp", "add", name, "--", executable, "mcp", "--remote", endpoint],
+                                   capture_output=True, text=True, timeout=120, check=False)
+            print(f"codex:     MCP server '{name}' " + ("registered" if added.returncode == 0 else "registration skipped"))
     argv = [agent]
     if agent == "pi":
         argv += pi_arguments(workspace)
@@ -966,6 +996,16 @@ def cmd_api(args: argparse.Namespace) -> int:
     if rest and rest[0] == "--":
         rest = rest[1:]
     return int(load("_api_cli").main(["--api-url", url, *rest]))
+
+
+def cmd_catalog(args: argparse.Namespace) -> int:
+    """What the connected instance can do and how an agent drives it (the MCP shakerscan_catalog)."""
+    url = apply_connection(args)
+    mcp = load("_mcp")
+    rest = list(args.args)
+    if rest and rest[0] == "--":
+        rest = rest[1:]
+    return int(helper("_agent_catalog").main(["--api-url", url, *rest], mcp_module=mcp))
 
 
 def scan_ui_url(api_url: str) -> str:
@@ -1306,6 +1346,8 @@ def apply_default_connection(args: argparse.Namespace) -> str:
 
 
 def cmd_mcp(args: argparse.Namespace) -> int:
+    if getattr(args, "remote", None):
+        return mcp_remote(args)
     url = apply_default_connection(args)
     if urllib.parse.urlsplit(url).hostname == "pub.shakerscan.com":
         os.environ.pop(ENV_TOKEN, None)
@@ -1314,6 +1356,22 @@ def cmd_mcp(args: argparse.Namespace) -> int:
     source = build_source()
     mcp.SERVER_VERSION = f"client-{__version__}" + (f"+{source}" if source else "")
     return int(mcp.main())
+
+
+def mcp_remote(args: argparse.Namespace) -> int:
+    """``mcp --remote ENDPOINT``: a deployment's own MCP server (its discovery document names it), over
+    stdio, with the connection's token from its file. Only an https endpoint on the connected origin."""
+    from ._mcp_bridge import serve
+
+    url = apply_connection(args)
+    endpoint = str(args.remote).strip()
+    parts = urllib.parse.urlsplit(endpoint)
+    if parts.scheme != "https" or not same_origin(endpoint, url) or parts.username or parts.password:
+        raise ClientError(f"--remote {endpoint}: must be an https endpoint on the connected instance ({url})")
+    token = os.environ.get(ENV_TOKEN)
+    if not token:
+        raise ClientError("--remote needs the connection's token: run `shakerscan connect` first, or pass --token-file")
+    return serve(endpoint, token, sys.stdin.buffer, sys.stdout.buffer)
 
 
 HUNT_HELP_NOTE = """\
@@ -1464,13 +1522,14 @@ COMMANDS = {
     "disconnect": cmd_disconnect,
     "agent": cmd_agent,
     "api": cmd_api,
+    "catalog": cmd_catalog,
     "scan": cmd_scan,
     "check": cmd_check,
     "record": cmd_record,
 }
 
 # Commands that forward their arguments to a runtime CLI after the connection options.
-FORWARDING_COMMANDS = ("api", "scan", "hunt", "approve", "deny", "knowledge", "secrets")
+FORWARDING_COMMANDS = ("api", "catalog", "scan", "hunt", "approve", "deny", "knowledge", "secrets")
 _CONNECTION_OPTIONS = ("--url", "--token-file", "--timeout")
 
 
@@ -1616,6 +1675,13 @@ def build_parser() -> argparse.ArgumentParser:
     agent.add_argument("--account", help="Enterprise step-up for --allow: your sign-in name")
     agent.add_argument("--method", choices=("totp", "security_key", "sso"), help="Enterprise step-up method for --allow")
     agent.add_argument("--timeout", type=float, help="seconds per request for the --allow step-up (default 60)")
+    catalog = commands.add_parser(
+        "catalog",
+        help="what the instance can do and how an agent drives it: catalog [overview|mcp_tools|cli|rest|hunt|"
+             "permissions|person_decisions|arsenal|authentication] [--area A] [--search S] [--json]",
+    )
+    connection(catalog)
+    catalog.add_argument("args", nargs=argparse.REMAINDER, help="the section and its options (`catalog --help`)")
     api = commands.add_parser("api", help="call the instance's API: METHOD PATH [JSON] (the agent kit's one way in)")
     connection(api)
     api.add_argument("args", nargs=argparse.REMAINDER, help="METHOD PATH [JSON]")
@@ -1640,6 +1706,9 @@ def build_parser() -> argparse.ArgumentParser:
              "`shakerscan mcp install <agent>` registers it in an agent permanently (also: uninstall, status)",
     )
     connection(mcp)
+    mcp.add_argument("--remote", metavar="ENDPOINT",
+                     help="serve a deployment's own MCP server (as its /.well-known/shakerscan names it) over stdio, "
+                          "with the connection's token from its file; `shakerscan agent` registers it")
     hunt = commands.add_parser(
         "hunt",
         help="scripted Hunt lifecycle: start, get, list, query, call, candidate, verify, finish, cancel, resume",
@@ -1720,13 +1789,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         # `shakerscan scan --budget-profile fast URL` failed unless `--` came first.
         # Only the leading connection options are the client's; the rest is forwarded as is.
         own, forwarded = split_connection_options(argv[1:])
-        if argv[0] in {"scan", "hunt", "approve", "deny", "knowledge", "secrets"}:
+        if argv[0] in {"catalog", "scan", "hunt", "approve", "deny", "knowledge", "secrets"}:
             # The runtime CLI's own options and subcommands are what `scan --help` and
             # `hunt --help` should list; the wrapper's usage named none of them.
             if any(token in ("-h", "--help") for token in own):
                 own = [token for token in own if token not in ("-h", "--help")]
                 forwarded = ["--help", *forwarded]
-        if argv[0] in {"hunt", "approve", "deny", "knowledge", "secrets"}:
+        if argv[0] in {"catalog", "hunt", "approve", "deny", "knowledge", "secrets"}:
             extra, forwarded = extract_connection_options(forwarded)
             own += extra
         args = parser.parse_args([argv[0], *own])
