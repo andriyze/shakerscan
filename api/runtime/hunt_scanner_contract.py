@@ -80,9 +80,9 @@ _FIELD_NAME = r"^[A-Za-z0-9_\-\[\]]{1,64}$"
 HUNT_INJECTION_BODY_PROPERTIES: Mapping[str, Any] = MappingProxyType({
     "method": {
         "type": "string", "enum": ["POST", "PUT", "PATCH"],
-        "description": "Test a request body sent with this method instead of a URL parameter "
-                       "(with body_field_names and injection_field). Needs the Hunt's "
-                       "state-changing permission.",
+        "description": "Leave it out to test the URL parameters in path. Set it to test a request "
+                       "body sent with this method instead (with body_field_names and "
+                       "injection_field); a body test needs the Hunt's state-changing permission.",
     },
     "content_type": {
         "type": "string", "enum": ["application/x-www-form-urlencoded", "application/json"],
@@ -100,6 +100,11 @@ HUNT_INJECTION_BODY_PROPERTIES: Mapping[str, Any] = MappingProxyType({
     },
 })
 _BODY_KEYS = frozenset(HUNT_INJECTION_BODY_PROPERTIES)
+# The path an injection verifier tests: with its query, the URL parameters are what it tests.
+HUNT_VERIFIER_PATH_DESCRIPTION = (
+    "The same-origin request path. With a query (/search?q=1) and no method, its URL parameters "
+    "are tested; with method, the body fields are."
+)
 
 
 class HuntScannerInputError(ValueError):

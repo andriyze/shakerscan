@@ -606,6 +606,34 @@ def public_hunt_action_trace(row: Any) -> dict[str, Any]:
     }
 
 
+# What an agent does first on a web Hunt (2026-11: agents read only the start answer, and a bare
+# "POST /hunts/{id}/query" left them testing single requests before anything was mapped). The calls
+# are ready to send with shakerscan_hunt_capability (or POST /hunts/{id}/capabilities/{name});
+# only the capabilities this Hunt's policy allows are listed.
+FIRST_WEB_ACTION = (
+    "Map first, then verify: send next_calls in order, then request the pages and API routes they "
+    "find (signed in as each principal where a sign-in exists); record a candidate for each "
+    "evidence-backed signal and prove it with the server's verifier (candidate.verify; sqli.verify "
+    "or xss.verify for injection; authz.verify across principals)."
+)
+_FIRST_WEB_CALLS: tuple[tuple[str, dict[str, Any], str], ...] = (
+    ("http.request", {"method": "GET", "path": "/", "follow_redirects": True},
+     "the landing page: its links, forms and sign-in"),
+    ("web.crawl", {}, "same-host pages and the JavaScript's endpoints"),
+    ("web.content_discover", {"wordlist": "common"}, "unlinked paths"),
+    ("web.content_discover", {"wordlist": "api"}, "unlinked API routes"),
+)
+
+
+def first_calls_for(target_kind: Any, policy: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """The ready-to-send first capability calls of a web Hunt, or [] for any other Hunt."""
+    if str(target_kind or "") != "web":
+        return []
+    allowed = {str(name) for name in policy.get("allowed_capabilities") or ()}
+    return [{"capability": name, "input": dict(value), "why": why}
+            for name, value, why in _FIRST_WEB_CALLS if name in allowed]
+
+
 def public_hunt_run(
     row: Any,
     *,
@@ -665,11 +693,14 @@ def public_hunt_run(
         "target_name": item.get("target_name"),
         "root_domain": item.get("root_domain"),
         "next_action": (
-            f"POST /hunts/{item.get('id')}/query"
+            (FIRST_WEB_ACTION if first_calls_for(item.get("target_kind"), policy) else
+             f"POST /hunts/{item.get('id')}/query")
             if item.get("status") in {"active", "awaiting_planner"}
             else None
         ),
     }
+    if item.get("status") in {"active", "awaiting_planner"} and (calls := first_calls_for(item.get("target_kind"), policy)):
+        result["next_calls"] = calls
     if include_capabilities:
         for capability in capabilities:
             capability["call"]["url"] = (

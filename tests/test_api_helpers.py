@@ -18779,3 +18779,21 @@ def test_expected_build_fingerprint_hashes_the_source_once_per_ttl(monkeypatch):
         assert api_module.EXPECTED_FINGERPRINT_TTL_SECONDS <= 60
     finally:
         api_module._EXPECTED_BUILD_FINGERPRINT.clear()
+
+
+def test_a_bola_proof_without_owned_references_names_them_and_the_call_that_establishes_ownership():
+    detail = api_module._bola_references_missing_detail(
+        "/hub/api/orders/1002",
+        {"user1": {"captured_refs": {"order_id": "1001"}}, "user2": {"captured_refs": {}}},
+    )
+    assert detail["error"] == "bola_owned_references_missing" and detail["missing_for"] == ["secondary"]
+    assert "insufficient distinct owned object references" in detail["message"]
+    assert "order_id" in detail["message"] and "missing for secondary" in detail["message"]
+    assert detail["next_call"]["capability"] == "authz.verify"
+    assert detail["next_call"]["input"] == {"mode": "object", "primary_principal": "primary",
+                                            "secondary_principal": "secondary",
+                                            "routes": ["/hub/api/orders", "/hub/api/orders/1002"]}
+    # Equal references: nothing is missing, the two are the same object.
+    same = api_module._bola_references_missing_detail(
+        "/api/orders/7", {"user1": {"captured_refs": {"order_id": "7"}}, "user2": {"captured_refs": {"order_id": "7"}}})
+    assert same["missing_for"] == [] and "the same object" in same["message"]

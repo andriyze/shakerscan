@@ -13381,6 +13381,42 @@ async def _agent_finding_verification_lock(finding_uuid: uuid.UUID):
             )
 
 
+def _bola_references_missing_detail(path: str, contexts: Mapping[str, Any]) -> dict[str, Any]:
+    """Why a BOLA proof cannot be built, what it needs, and the call that proves it instead.
+
+    The two-run proof needs each principal's OWN object of the collection, from a captured
+    reference on its credential profile; nothing else may stand in for ownership (external-audit
+    BUG 1). authz.verify's object mode establishes it on the target instead: it reads the
+    collection as the primary principal and replays the primary's objects as the secondary.
+    It used to end there, with no next step for the agent.
+    """
+    collection, segment = agent_tools._bola_collection_and_segment(path)
+    forms = sorted({form for form in (agent_tools._singularize(segment), str(segment or "").lower()) if form})
+    missing = [name for slot, name in (("user1", "primary"), ("user2", "secondary"))
+               if agent_tools._pick_object_ref((contexts.get(slot) or {}).get("captured_refs"), segment)[1] is None]
+    detail: dict[str, Any] = {
+        "error": "bola_owned_references_missing",
+        "message": (
+            "insufficient distinct owned object references to build a sound BOLA proof (finding stays "
+            "suspected): it needs a captured reference to each principal's own object of "
+            f"{collection or path} ({' or '.join(f'{form}_id' for form in forms) or 'its id'}) on the "
+            f"primary and secondary principals' credentials; missing for "
+            f"{', '.join(missing) or 'neither, but the two are the same object'}."
+        ),
+        "missing_for": missing,
+    }
+    if collection and collection != "/":
+        detail["next_call"] = {
+            "capability": "authz.verify",
+            "input": {"mode": "object", "primary_principal": "primary", "secondary_principal": "secondary",
+                      "routes": [collection, path] if path != collection else [collection]},
+            "note": ("Finds the primary principal's own objects on the collection and replays them as "
+                     "the secondary; needs both principals signed in."),
+        }
+        detail["message"] += " Send next_call: it establishes ownership on the target itself."
+    return detail
+
+
 async def _agent_verification_workflow_for(
     conn: Any, target_uuid: uuid.UUID, family: str, path: str, method: str
 ) -> tuple[dict[str, Any], str, str, dict[str, Any]]:
@@ -13400,9 +13436,7 @@ async def _agent_verification_workflow_for(
             (contexts.get("user2") or {}).get("captured_refs"),
         )
         if not targets:
-            raise HTTPException(
-                status_code=422,
-                detail="insufficient distinct owned object references to build a sound BOLA proof (finding stays suspected)")
+            raise HTTPException(status_code=422, detail=_bola_references_missing_detail(path, contexts))
         workflow = _materialize_bola_verification_workflow(
             targets["collection"], targets["owner_ref_key"], targets["attacker_ref_key"])
         return workflow, targets["collection"].rstrip("/") + "/{id}", "GET", {}

@@ -155,3 +155,49 @@ def test_a_candidate_on_a_network_target_is_proved_on_the_service_it_names():
         service_origin=verification_service_origin))
     assert proof["url"] == "http://app.example.test:8080/render"
     assert proof["promotable"]
+
+
+def test_a_candidate_the_proof_cannot_run_is_answered_with_the_verifier_call_that_proves_it():
+    from api.hunt.candidate_verification_preflight import (
+        CandidateVerificationRefused, web_candidate_preflight,
+    )
+
+    # XSS: xss.verify on the same parameter, the other query parameters kept.
+    with pytest.raises(CandidateVerificationRefused) as refused:
+        web_candidate_preflight(_candidate("xss", route="/search?page=2&q=abc"), injection_proofs=True)
+    assert refused.value.reason_code == "verification_family_unsupported"
+    assert refused.value.next_call == {"capability": "xss.verify", "input": {"path": "/search?page=2&q=abc"}}
+    assert "next_call" in refused.value.detail
+    # A body parameter: sqli.verify with the body fields, signed in as the principal the locus names.
+    with pytest.raises(CandidateVerificationRefused) as refused:
+        web_candidate_preflight(_candidate("sqli", route="/login", method="POST", parameter="username",
+                                           body_field_names=["username", "password"],
+                                           content_type="application/json", as_principal="user2"),
+                                injection_proofs=True)
+    assert refused.value.reason_code == "verification_method_unsupported"
+    call = refused.value.next_call
+    assert call["capability"] == "sqli.verify" and "state-changing" in call["note"]
+    assert call["input"] == {"path": "/login", "method": "POST", "body_field_names": ["username", "password"],
+                             "injection_field": "username", "content_type": "application/json",
+                             "as_principal": "user2"}
+    # Another injection class in a body: sqli.verify, and it says it proves SQL injection only.
+    call = injection_proof.verifier_call(_candidate("ssti", method="PUT"))
+    assert call["capability"] == "sqli.verify" and "SQL injection only" in call["note"]
+    assert call["input"]["body_field_names"] == ["q"]
+    # A locus without a parameter or a usable route names no call; the refusal says what is missing.
+    with pytest.raises(CandidateVerificationRefused) as refused:
+        web_candidate_preflight(_candidate("xss", parameter=""), injection_proofs=True)
+    assert refused.value.next_call is None and refused.value.reason_code == "verification_family_unsupported"
+    assert injection_proof.verifier_call(_candidate("xss", route="//evil.test/x")) is None
+    assert injection_proof.verifier_call(_candidate("bola")) is None
+    # A GET query parameter of an injection family still runs the server's own proof.
+    assert web_candidate_preflight(_candidate("sqli"), injection_proofs=True) == ("injection", "/render", "GET")
+
+
+def test_the_families_told_to_planners_say_injection_has_verifiers():
+    from api.hunt.candidate_verification_preflight import public_verification_families
+
+    told = public_verification_families()
+    assert set(told["injection_verifiers"]) == {"sqli.verify", "xss.verify"}
+    assert "do have verifiers" in told["other_families"]
+    assert "no deterministic verifier proves it" not in told["other_families"]

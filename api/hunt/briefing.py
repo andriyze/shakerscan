@@ -173,6 +173,7 @@ def authority_section(item: Mapping[str, Any], policy: Mapping[str, Any], contex
     origins = [str(value) for value in policy.get("direct_origin_addresses") or []]
     allowed = [str(name) for name in policy.get("allowed_capabilities") or []]
     needing_approval: list[str] = []
+    active_granted = bool(policy.get("active_testing") and policy.get("approval_receipt_id"))
     try:
         from runtime.capability_registry import CAPABILITY_REGISTRY
     except ModuleNotFoundError:  # pragma: no cover - package import layout
@@ -182,7 +183,12 @@ def authority_section(item: Mapping[str, Any], policy: Mapping[str, Any], contex
             spec = CAPABILITY_REGISTRY.require(name)
         except KeyError:
             continue
-        if spec.requires_active_approval or spec.placement_requirements.get("user_confirmation"):
+        # Only what a person still has to allow: an active capability this Hunt's own approval
+        # already covers (active testing with its approval receipt, the rule dispatch enforces)
+        # is not listed (2026-11: agents read sqli.verify and xss.verify here and never called them).
+        if spec.placement_requirements.get("user_confirmation") or (
+            spec.requires_active_approval and not active_granted
+        ):
             needing_approval.append(name)
     return {
         "scope": {

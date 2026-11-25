@@ -40,12 +40,30 @@ IDENTITY_ONLY_LOCATION_KEYS: tuple[str, ...] = ("paths",)
 
 
 class CandidateVerificationRefused(ValueError):
-    """The stored candidate alone shows that the verifier cannot run."""
+    """The stored candidate alone shows that the verifier cannot run.
 
-    def __init__(self, status_code: int, detail: str) -> None:
+    ``next_call``: the ready-to-send capability call that proves the claim instead (an injection
+    candidate candidate.verify cannot run), shown to the agent with the refusal; None for none.
+    ``reason_code``: the closed Hunt refusal code, when the detail text alone does not name one.
+    """
+
+    def __init__(self, status_code: int, detail: str, *, next_call: dict[str, Any] | None = None,
+                 reason_code: str | None = None) -> None:
         super().__init__(detail)
         self.status_code = status_code
         self.detail = detail
+        self.next_call = next_call
+        self.reason_code = reason_code
+
+
+# Why an injection proof refused -> the closed Hunt refusal code that says so.
+_INJECTION_REFUSAL_CODES = {
+    "injection_proof_browser_family": "verification_family_unsupported",
+    "injection_proof_family_unknown": "verification_family_unsupported",
+    "injection_proof_get_only": "verification_method_unsupported",
+    "injection_proof_parameter_missing": "verification_route_unresolved",
+    "injection_proof_route_missing": "verification_route_unresolved",
+}
 
 
 def _mapping(value: Any) -> dict[str, Any]:
@@ -84,14 +102,20 @@ def public_verification_families() -> dict[str, Any]:
             "families": ["command_injection", "injection", "nosqli", "path_traversal", "sqli",
                          "ssrf", "ssti"],
             "locus": {"route": "/path of a GET request", "parameter": "the query parameter name"},
-            "note": ("A specific family runs that proof; 'injection' runs every one. XSS is "
-                     "proven in a browser by xss.verify."),
+            "note": ("A specific family runs that proof; 'injection' runs every one. XSS (family "
+                     "xss) and a request-body parameter are proven by xss.verify and sqli.verify: "
+                     "candidate.verify answers with that call, ready to send (next_call)."),
+        },
+        "injection_verifiers": {
+            "sqli.verify": "SQL injection in a URL parameter (path with its query) or a body field "
+                           "(method, body_field_names, injection_field)",
+            "xss.verify": "cross-site scripting in a URL parameter or a body field, the same inputs",
         },
         "other_families": (
             "Any other family (AI/LLM prompt injection, excessive agency, RAG isolation, "
-            "CORS...) may be recorded as a candidate with its evidence, but no deterministic "
-            "verifier proves it: do not call candidate.verify for it; report it as an unverified "
-            "candidate. Device Hunts verify through their own verifier_contract_id contracts."
+            "CORS...) has no deterministic verifier: record it as a candidate with its evidence "
+            "and report it unverified. SQL injection, XSS and the other injection families above "
+            "do have verifiers. Device Hunts verify through their own verifier_contract_id contracts."
         ),
     }
 
@@ -190,7 +214,13 @@ def web_candidate_preflight(
                     candidate, origin="http://preflight.invalid",
                 )
             except injection_proof.InjectionProofRefused as exc:
-                raise CandidateVerificationRefused(422, f"{exc.reason}: {exc.message}") from None
+                call = injection_proof.verifier_call(candidate)
+                message = f"{exc.reason}: {exc.message}"
+                if call is not None:
+                    message += f" Send next_call ({call['capability']}) to prove it."
+                raise CandidateVerificationRefused(
+                    422, message, next_call=call, reason_code=_INJECTION_REFUSAL_CODES.get(exc.reason),
+                ) from None
             return injection_proof.FAMILY, route, "GET"
     locus = _mapping(candidate.get("canonical_locus"))
     context = _mapping(candidate.get("verification_context"))
