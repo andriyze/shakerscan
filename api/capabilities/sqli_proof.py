@@ -245,7 +245,7 @@ class SQLiProofAdapter:
         # An absolute ``time.monotonic()`` deadline shared with the phase before this one (a Hunt
         # action's scanner): no request starts after it, and none outlives it.
         self.deadline = deadline
-        # The numeric and OR boolean pairs and the per-engine delay screen. Off unless the caller
+        # The numeric boolean pair and the per-engine delay screen. Off unless the caller
         # asks: the credential profile's sign-in endpoint is paced to what the three original
         # stages send (auth_endpoint_probe), so a proof there stays those fourteen requests.
         self.extended = bool(extended)
@@ -421,28 +421,10 @@ class SQLiProofAdapter:
                         technique = "boolean_pair_repeated"
                         proof_pairs = numeric
                         payload_shape = "<original> AND 1=1  vs  <original> AND 1=2"
-                if (
-                    proof_contract is None and self.extended and budget - attempted >= 6 + held
-                    # A read only: OR TRUE widens a statement to every row, which is an answer
-                    # on a SELECT and damage on an UPDATE or DELETE.
-                    and self.request.method in {"GET", "HEAD", "OPTIONS"}
-                ):
-                    # A value that matches nothing (a lookup by a name or an id that does not
-                    # exist) answers the same for AND TRUE and AND FALSE. OR inverts the test:
-                    # against a value known to match nothing, OR TRUE must return something the
-                    # miss does not, and OR FALSE must reproduce the miss.
-                    miss_request = self.mutate(self.request, self.field, invalid)
-                    misses = [await send(miss_request), await send(miss_request)]
-                    either = await self._boolean_pairs(
-                        send, f"{invalid}' OR '1'='2", f"{invalid}' OR '1'='1",
-                        baselines=misses, original=invalid,
-                    )
-                    if either is not None:
-                        proof_contract = "sqli_boolean_differential/v1"
-                        technique = "boolean_pair_repeated"
-                        # (miss-reproducing, diverging), as the AND pairs are (true, false).
-                        proof_pairs = either
-                        payload_shape = "<no match>' OR '1'='1  vs  <no match>' OR '1'='2"
+                # No OR pair: against a value that matches nothing, OR TRUE widens the statement
+                # to every row, an answer on a SELECT and damage on an UPDATE or DELETE that a
+                # careless application runs for a GET. No OR payload is sent outside the
+                # sign-in bypass pair above.
                 if proof_contract is None and budget - attempted >= 6:
                     # Time proof is deliberately last: it is slower, and verification
                     # requires three controls and three payloads rather than one delay.
