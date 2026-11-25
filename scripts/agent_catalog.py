@@ -22,10 +22,13 @@ answer stays small. Nothing here changes anything.
 from __future__ import annotations
 
 import argparse
+import importlib
+import importlib.util
 import json
 import os
 import sys
 from collections.abc import Callable, Mapping, Sequence
+from pathlib import Path
 from typing import Any
 
 SCHEMA = "shakerscan-agent-catalog/v1"
@@ -138,11 +141,7 @@ DEFAULT_REQUEST_HOW = "tell the person what you recommend and why; they decide i
 
 
 def _person_routes() -> Any:
-    try:
-        import person_decision_routes  # type: ignore[import-not-found]
-    except ModuleNotFoundError:
-        from scripts import person_decision_routes  # type: ignore[no-redef]
-    return person_decision_routes
+    return _sibling("person_decision_routes")
 
 
 def person_decisions() -> list[dict[str, str]]:
@@ -192,6 +191,31 @@ class CatalogError(Exception):
     pass
 
 
+def _sibling(name: str) -> Any:
+    """A module that sits beside this file in scripts/: imported by its own name (scanner.sh puts
+    scripts/ on the path; the client registers its vendored copies under these names), else as
+    ``scripts.<name>`` from a checkout, else loaded from the file beside this one (an adapter
+    loaded by path, as the end-to-end harness does)."""
+    for candidate in (name, f"scripts.{name}"):
+        try:
+            return importlib.import_module(candidate)
+        except ModuleNotFoundError as exc:
+            if exc.name not in {name, "scripts", f"scripts.{name}"}:
+                raise
+    path = Path(__file__).resolve().with_name(f"{name}.py")
+    spec = importlib.util.spec_from_file_location(name, path)
+    if spec is None or spec.loader is None or not path.is_file():
+        raise ModuleNotFoundError(f"No module named {name!r}", name=name)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    try:
+        spec.loader.exec_module(module)
+    except BaseException:
+        sys.modules.pop(name, None)
+        raise
+    return module
+
+
 def area_of(path: str) -> str:
     """The REST area a path belongs to (``other`` for anything not listed)."""
     parts = [part for part in str(path).split("/") if part]
@@ -232,14 +256,7 @@ def routes_from_openapi(openapi: Mapping[str, Any]) -> list[tuple[str, str, str]
 
 def shipped_routes() -> list[tuple[str, str, str]]:
     """The route map generated from this release's OpenAPI (``catalog_routes.py``)."""
-    try:
-        from catalog_routes import ROUTES  # type: ignore[import-not-found]
-    except ModuleNotFoundError:
-        try:
-            from scripts.catalog_routes import ROUTES  # type: ignore[import-not-found,no-redef]
-        except ModuleNotFoundError:
-            return []
-    return [tuple(row) for row in ROUTES]  # type: ignore[misc]
+    return [tuple(row) for row in _sibling("catalog_routes").ROUTES]  # type: ignore[misc]
 
 
 def _page(rows: Sequence[Any], limit: int, cursor: str | None) -> tuple[list[Any], dict[str, Any]]:
@@ -445,10 +462,7 @@ class Catalog:
 
 def _client(api_url: str, mcp: Any = None):
     if mcp is None:
-        try:
-            import shakerscan_mcp as mcp  # type: ignore[import-not-found,no-redef]
-        except ModuleNotFoundError:
-            from scripts import shakerscan_mcp as mcp  # type: ignore[no-redef]
+        mcp = _sibling("shakerscan_mcp")
     token = mcp.api_token_from_env(os.environ)
     token_file = (os.environ.get("SHAKERSCAN_API_TOKEN_FILE") or "").strip()
     if token is None and token_file:
