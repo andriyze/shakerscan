@@ -151,6 +151,13 @@ or a 25-request replay on `fast`, a mass-assignment proof (12 writes), a top-100
 on a device target, where every held request is charged as fragility, the crawls and both
 verifiers. The policy switches and approvals that turn the ceilings on are unchanged. Records cost no traffic and no wall and get one per call.
 
+`web.crawl` reserves 3,001 requests / 605 s and `web.browser_crawl` 6,001 requests / 610 s: the
+crawl's whole reviewed time box at its reviewed rate (5 requests a second, and 10 a second of
+browser egress), settled to what it used. They held 150 requests / 75 s and 600 / 150 s, about
+140 requests and a 59-second browser crawl, whatever the profile allowed. When less than that is
+left a crawl steps down to those smaller holds instead of being refused; a device target keeps
+them.
+
 `sqli.verify` reserves 1,800 requests / 1,200 s and `xss.verify` 1,800 requests / 480 s on every
 profile (a device target and a headless `deep_domxss` call keep the registry holds). One sqli.verify
 input with no injection was measured to cost up to 516 requests, about 570 s at sqlmap's pace of

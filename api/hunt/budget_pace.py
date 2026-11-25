@@ -79,9 +79,12 @@ def executor_hold(name: str, *, profile: str, target_kind: str, smallest: bool =
     spec = _registry().require(name)
     if spec.hunt_executor == "worker_scanner":
         try:
-            from agent_tools import canonical_hunt_scanner_budget
+            from agent_tools import HUNT_STEP_DOWN_CAPABILITIES, canonical_hunt_scanner_budget
         except ModuleNotFoundError:
-            from ..agent_tools import canonical_hunt_scanner_budget
+            from ..agent_tools import HUNT_STEP_DOWN_CAPABILITIES, canonical_hunt_scanner_budget
+        if smallest and name in HUNT_STEP_DOWN_CAPABILITIES:
+            # A crawl steps down to its registry hold when less than the profile hold is left.
+            return dict(canonical_hunt_scanner_budget(name))
         return dict(canonical_hunt_scanner_budget(name, budget_profile=profile,
                                                   device_target=target_kind == "device"))
     if spec.hunt_executor == "worker_replay":
