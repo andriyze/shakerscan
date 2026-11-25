@@ -77,6 +77,7 @@ contracts and release notes describe what ships.
 - [Compatibility](compatibility.md)
 - [Hosted connector](hosted-connector.md)
 - [OWASP coverage matrix](owasp-coverage-matrix.md)
+- [Detection improvement plan](detection-improvement-plan.md)
 - [Decisions](decisions/)
 - [Integrity ledgers](ledgers/)
 - [Generated contracts and inventories](generated/)
