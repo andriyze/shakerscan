@@ -20,9 +20,12 @@ except ModuleNotFoundError:
 
 def authz_call_budget(values):
     if values.get('mode','object') == 'function':
-        if not 1<=len(values['routes'])<=10:
-            raise ValueError('Function authorization checks accept 1 to 10 routes')
-        return {'http_requests':6*len(values['routes']),'tool_wall_seconds':60}
+        # As many routes as the capability's schema accepts (it refused more than 10 of the 50).
+        # Six requests a route; the wall grows with them past the first ten.
+        if not 1<=len(values['routes'])<=50:
+            raise ValueError('Function authorization checks accept 1 to 50 routes')
+        return {'http_requests':6*len(values['routes']),
+                'tool_wall_seconds':max(60,6*len(values['routes']))}
     return {'http_requests':4,'tool_wall_seconds':60}
 
 
