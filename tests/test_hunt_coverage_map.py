@@ -193,3 +193,21 @@ def test_finish_guard_lets_the_hunt_finish_when_it_should():
                             allowed=["web.crawl", "web.content_discover"])
     assert finish_guard(_run(), closed, force=False, force_reason=None, now=NOW) is None
     assert finish_guard(_run(), None, force=False, force_reason=None, now=NOW) is None
+
+
+def test_a_forced_finish_with_many_pairs_open_needs_real_work_first():
+    many = build_coverage(actions=[], endpoints=[_endpoint(f"/api/v1/thing{index}/{index}", params="q")
+                                                 for index in range(20)])
+    assert many["pairs_open"] > coverage_map.FORCE_MIN_ACTIONS
+    reason = "the remaining routes are unrelated to the objective"
+    refused = finish_guard(_run(), many, force=True, force_reason=reason, now=NOW, actions_since_refusal=3)
+    assert refused and "3 of the 40 actions" in refused and "kind=coverage" in refused
+    assert finish_guard(_run(), many, force=True, force_reason=reason, now=NOW,
+                        actions_since_refusal=coverage_map.FORCE_MIN_ACTIONS) is None
+    # Spent wall still lets it finish without any work.
+    late = _run(created_at=NOW - timedelta(seconds=5400 - 30))
+    assert finish_guard(late, many, force=True, force_reason=reason, now=NOW, actions_since_refusal=0) is None
+    # Running discovery holds even a forced finish until it settles.
+    running = build_coverage(actions=[_action("web.crawl", status="running")], endpoints=[])
+    assert "discovery is still running" in finish_guard(
+        _run(), running, force=True, force_reason=reason, now=NOW, actions_since_refusal=100)
