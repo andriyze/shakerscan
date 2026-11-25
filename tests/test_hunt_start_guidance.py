@@ -171,13 +171,14 @@ def test_every_profile_funds_mapping_then_both_full_verifiers():
         assert profile.max_active_actions == profile.max_capability_calls
 
 
-def test_a_lowered_limit_names_the_start_maximum_when_a_restart_cannot_fix_it():
+def test_a_lowered_limit_names_the_start_maximum_a_restart_gives_back():
     started = {**_started({"max_tcp_ports": 50}, profile="fast"), "capabilities": _every_capability()}
     warnings = {item["capability"]: item for item in start_budget_warnings(started)
                 if item["limit"] == "max_tcp_ports"}
     ports = warnings["ports.discover"]
-    assert ports["restart_fixes_it"] is False and ports["start_maximum"] == 100
-    assert "Start again without lowering it" not in ports["message"]
-    assert "start maximum, 100, is below that" in ports["message"]
+    # The fast profile funds a top-1000 port scan (it once allowed 100 ports, which no restart
+    # could raise to the 1,200 the scan holds).
+    assert ports["restart_fixes_it"] is True and ports["start_maximum"] == 2_000
+    assert "Start again without lowering it" in ports["message"]
     fits = [item for item in warnings.values() if item["restart_fixes_it"]]
     assert fits and all("Start again without lowering it" in item["message"] for item in fits)

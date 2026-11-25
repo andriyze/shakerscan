@@ -94,9 +94,10 @@ verification; 32 browser actions and 128 requests, a login check's charge):
 
 These are ceilings, not promised traffic: every call stays paced by its executor. Approval-gated
 calls may use the whole call allowance because each one still checks its approval receipt. The
-safety ceilings keep their values: TCP ports (100 / 1,200 / 10,000), state-changing requests
-(4 / 20 / 80), hosts, UDP ports, out-of-band interactions and device fragility, as do the policy
-switches and approvals that turn them on. A used-up ceiling, like any used-up limit but the
+ceilings that are not paced fund the work their authority was granted for: TCP ports
+(2,000 / 20,000 / 200,000), state-changing requests (200 / 1,000 / 5,000), hosts, UDP ports,
+out-of-band interactions and device fragility. The policy switches and approvals that turn
+them on are unchanged. A used-up ceiling, like any used-up limit but the
 duration, refuses only the actions that need it, each waiting for a `budget.raise` request you
 approve, and the Hunt keeps running; only the duration running out stops a Hunt as
 `budget_exhausted`. Ports and hosts are charged once per Hunt where the action names them, so

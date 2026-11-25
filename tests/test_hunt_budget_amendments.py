@@ -28,6 +28,8 @@ NOW = datetime(2026, 9, 24, tzinfo=timezone.utc)
 
 def run_row(kind="network", **overrides):
     budget = asdict(HUNT_BUDGET_PROFILES["thorough"])
+    # The scenario these tests amend: a Hunt that used all of 10,000 TCP ports.
+    budget.update(max_tcp_ports=10_000, max_state_changing_requests=80, max_device_fragility_points=500)
     context = {"hunt_start_contract": {"resolved_budget": deepcopy(budget)}, "skills": {"bound": []}}
     if kind == "device":
         context["device_policy_state"] = DeviceHuntPolicyState.initial(

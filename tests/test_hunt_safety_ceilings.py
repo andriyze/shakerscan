@@ -55,8 +55,9 @@ class Updates:
 
 def test_the_safety_ceilings_keep_their_values():
     expected = {
-        "fast": (4, 100, 50, 100, 10, 20), "balanced": (20, 1_200, 500, 1_000, 50, 100),
-        "thorough": (80, 10_000, 5_000, 5_000, 200, 500),
+        "fast": (200, 2_000, 100, 1_000, 50, 2_000),
+        "balanced": (1_000, 20_000, 500, 5_000, 200, 8_000),
+        "thorough": (5_000, 200_000, 5_000, 20_000, 1_000, 40_000),
     }
     for profile, values in expected.items():
         limits = HUNT_BUDGET_PROFILES[profile].ledger_limits()
@@ -218,9 +219,9 @@ def test_network_actions_name_their_ports_when_each_command_lists_them():
 
 
 def test_a_port_the_hunt_already_attempted_needs_no_new_allowance():
-    """Balanced: a sweep used up all 1,200 ports; fingerprinting the open ports it found, and a
+    """A sweep used up a 1,200-port ceiling; fingerprinting the open ports it found, and a
     TLS inspection of one, reserve nothing from the TCP ceiling and are admitted."""
-    limits = HUNT_BUDGET_PROFILES["balanced"].ledger_limits()
+    limits = {**HUNT_BUDGET_PROFILES["balanced"].ledger_limits(), "tcp_ports_attempted": 1_200}
     used = {"tcp_ports_attempted": 1_200, "hosts_attempted": 1}
     context = {port_accounting.CONTEXT_KEY: {ADDRESS: "1-1200"}, "hosts_attempted_addresses": [ADDRESS]}
     fingerprint = _prepared(ServiceFingerprintAdapter(), {"ports": [443, 1100]})

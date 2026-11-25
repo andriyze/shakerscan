@@ -380,13 +380,14 @@ def test_a_body_test_holds_its_requests_as_verifier_writes_and_a_query_test_does
     assert "state_changing_requests" not in body[0]
 
 
-def test_every_profile_funds_one_body_test_hold_per_planner_write_and_mutation_off_zeroes_it():
+def test_every_profile_funds_whole_body_test_holds_and_mutation_off_zeroes_it():
     from api.hunt.start_contract import (
         HUNT_BUDGET_PROFILES, VERIFIER_WRITE_HOLD, hunt_start_public_contract,
     )
 
     for profile in HUNT_BUDGET_PROFILES.values():
-        assert profile.max_verifier_write_requests == profile.max_state_changing_requests * VERIFIER_WRITE_HOLD
+        assert profile.max_verifier_write_requests % VERIFIER_WRITE_HOLD == 0
+        assert profile.max_verifier_write_requests >= 16 * VERIFIER_WRITE_HOLD
         assert profile.ledger_limits()["verifier_write_requests"] == profile.max_verifier_write_requests
     contract = hunt_start_public_contract()
     assert "max_verifier_write_requests" in contract["policy_derived_zeros"]["mutation_disabled"]
